@@ -1,0 +1,15 @@
+# CodeRabbit Configuration
+language: "en-US"
+
+reviews:
+  profile: "chill"
+
+  # Only review Go source under v2/ and cmdv2/
+  path_filters:
+    - "v2/**/*.go"
+    - "cmdv2/**/*.go"
+    - "!**/testdata/**"
+    - "!**/fixtures/**"
+    - "!**/vendor/**"
+    - "!knot-dns-v3.5.2/**"
+    - "!labconfig/**"

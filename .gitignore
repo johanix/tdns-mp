@@ -1,0 +1,27 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Built binaries
+cmd/mpsigner/tdns-mpsigner
+cmd/mpcli/tdns-mpcli
+
+# Generated version files
+cmd/*/version.go
+
+# Editor backup files
+*~
+*/*~
+*/*/*~
+
+# IDE
+.idea/
+.vscode
+
+# Go workspace
+go.work
