@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	tdns.Globals.App.Type = tdns.AppTypeAuth
+	tdns.Globals.App.Type = tdns.AppTypeMPSigner
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
@@ -27,18 +27,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var conf tdnsmp.Config
-	conf.Config = tdns.Conf
+	conf := tdnsmp.Config{Config: &tdns.Conf}
 
 	// DNS infrastructure + MP additions
 	err := conf.MainInit(ctx, "")
 	if err != nil {
-		tdns.Shutdowner(&conf.Config, fmt.Sprintf("Error initializing: %v", err))
+		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error initializing: %v", err))
 	}
 
 	apirouter, err := conf.Config.SetupAPIRouter(ctx)
 	if err != nil {
-		tdns.Shutdowner(&conf.Config, fmt.Sprintf("Error setting up API router: %v", err))
+		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error setting up API router: %v", err))
 	}
 
 	// SIGHUP reload watcher
@@ -61,7 +60,7 @@ func main() {
 	// DNS engines + MP engines
 	err = conf.StartMPSigner(ctx, apirouter)
 	if err != nil {
-		tdns.Shutdowner(&conf.Config, fmt.Sprintf("Error starting: %v", err))
+		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error starting: %v", err))
 	}
 
 	// Enter main loop

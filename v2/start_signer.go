@@ -10,22 +10,30 @@ import (
 	"context"
 
 	"github.com/gorilla/mux"
+	tdns "github.com/johanix/tdns/v2"
 )
 
 // StartMPSigner starts the MP signer. It delegates DNS engine
-// startup to tdns.StartAuth, then starts MP-specific engines
-// (SignerMsgHandler, KeyStateWorker, signer sync router).
+// startup to tdns.StartAuth (which skips MP engines for
+// AppTypeMPSigner), then starts the MP engines from tdns-mp.
 func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) error {
 	// DNS engines (refresh, signing, query, NOTIFY, etc.)
+	// MP engines are skipped because AppType == AppTypeMPSigner
 	if err := conf.Config.StartAuth(ctx, apirouter); err != nil {
 		return err
 	}
 
-	// MP engines will be started here as signer files
-	// are copied over:
-	// - SignerMsgHandler
-	// - KeyStateWorker
-	// - SignerSyncRouter
+	// MP engines from tdns-mp
+	tm := conf.Config.Internal.TransportManager
+	if tm != nil {
+		tm.StartIncomingMessageRouter(ctx)
+	}
+
+	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
+		func() { SignerMsgHandler(ctx, conf.Config, conf.Config.Internal.MsgQs) })
+
+	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker",
+		func() error { return KeyStateWorker(ctx, conf.Config) })
 
 	return nil
 }
