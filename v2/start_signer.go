@@ -24,7 +24,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	}
 
 	// MP engines from tdns-mp
-	tm := conf.Config.Internal.TransportManager
+	tm := conf.Config.Internal.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 	}

@@ -64,7 +64,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		chunkMode = "edns0"
 	}
 	controlZone := dns.Fqdn(mp.Identity)
-	tm := tdns.NewTransportManager(&tdns.TransportManagerConfig{
+	tm := tdns.NewMPTransportBridge(&tdns.MPTransportBridgeConfig{
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         controlZone,
 		APITimeout:          10 * time.Second,
@@ -85,7 +85,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return peers
 		},
 	})
-	conf.Config.Internal.TransportManager = tm
+	conf.Config.Internal.TransportManager = tm.TransportManager
+	conf.Config.Internal.MPTransport = tm
 
 	// Create SecurePayloadWrapper for decrypting incoming CHUNK payloads
 	var signerSecureWrapper *transport.SecurePayloadWrapper
