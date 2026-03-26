@@ -101,16 +101,16 @@ func SignerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQs)
 
 			switch sigMsg.Signal {
 			case "propagated":
-				if err := tdns.SetPropagationConfirmed(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := SetPropagationConfirmed(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 					continue
 				}
 				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
-				if err := tdns.TransitionMpdistToPublished(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := TransitionMpdistToPublished(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
-				if err := tdns.TransitionMpremoveToRemoved(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := TransitionMpremoveToRemoved(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				triggerResign(conf, sigMsg.Zone)
@@ -183,7 +183,7 @@ func sendKeystateInventoryToAgent(conf *tdns.Config, tm *tdns.MPTransportBridge,
 		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
 	} else {
 		var err error
-		items, err = tdns.GetKeyInventory(kdb, zone)
+		items, err = GetKeyInventory(kdb, zone)
 		if err != nil {
 			return fmt.Errorf("GetKeyInventory failed: %w", err)
 		}

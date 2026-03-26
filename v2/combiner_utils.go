@@ -565,7 +565,7 @@ func replaceCombinerDataByRRtypeLocked(zd *tdns.ZoneData, senderID, owner string
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.
 func InjectSignatureTXT(zd *tdns.ZoneData, conf *tdns.MultiProviderConf) bool {
-	if conf == nil || !conf.CombinerOptions[tdns.CombinerOptAddSignature] || conf.Signature == "" {
+	if conf == nil || !conf.CombinerOptions[CombinerOptAddSignature] || conf.Signature == "" {
 		return false
 	}
 

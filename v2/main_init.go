@@ -179,7 +179,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	// Initialize combiner edit tables
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
-		if err := tdns.InitCombinerEditTables(kdb); err != nil {
+		if err := InitCombinerEditTables(kdb); err != nil {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
 	}

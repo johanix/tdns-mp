@@ -32,6 +32,11 @@ type PendingEditRecord = tdns.PendingEditRecord
 type ApprovedEditRecord = tdns.ApprovedEditRecord
 type RejectedEditRecord = tdns.RejectedEditRecord
 
+// Combiner option types
+type CombinerOption = tdns.CombinerOption
+
+const CombinerOptAddSignature = tdns.CombinerOptAddSignature
+
 // Signer types
 type KeyInventoryItem = tdns.KeyInventoryItem
 type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
