@@ -21,7 +21,7 @@ var lgApi = tdns.Logger("api")
 func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var cp tdns.CombinerPost
+		var cp CombinerPost
 		err := decoder.Decode(&cp)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combiner", "err", err)
@@ -31,7 +31,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 
 		lgApi.Debug("received /combiner request", "cmd", cp.Command, "from", r.RemoteAddr)
 
-		resp := tdns.CombinerResponse{
+		resp := CombinerResponse{
 			Time: time.Now(),
 		}
 
@@ -87,7 +87,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var cp tdns.CombinerEditPost
+		var cp CombinerEditPost
 		err := decoder.Decode(&cp)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combinerEdits", "err", err)
@@ -97,7 +97,7 @@ func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 
 		lgApi.Debug("received /combiner/edits request", "cmd", cp.Command, "from", r.RemoteAddr)
 
-		resp := tdns.CombinerEditResponse{
+		resp := CombinerEditResponse{
 			Time: time.Now(),
 		}
 
@@ -425,7 +425,7 @@ func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 func APIcombinerDebug(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var cp tdns.CombinerDebugPost
+		var cp CombinerDebugPost
 		err := decoder.Decode(&cp)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combinerDebug", "err", err)
@@ -435,7 +435,7 @@ func APIcombinerDebug(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 
 		lgApi.Debug("received /combiner/debug request", "cmd", cp.Command, "from", r.RemoteAddr)
 
-		resp := tdns.CombinerDebugResponse{
+		resp := CombinerDebugResponse{
 			Time: time.Now(),
 		}
 

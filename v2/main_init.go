@@ -179,7 +179,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	// Initialize combiner edit tables
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
-		if err := kdb.InitCombinerEditTables(); err != nil {
+		if err := tdns.InitCombinerEditTables(kdb); err != nil {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
 	}
@@ -196,7 +196,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	var secureWrapper *transport.SecurePayloadWrapper
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
 		var err error
-		secureWrapper, err = tdns.InitCombinerCrypto(conf.Config)
+		secureWrapper, err = InitCombinerCrypto(conf.Config)
 		if err != nil {
 			return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 		}

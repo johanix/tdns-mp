@@ -17,7 +17,7 @@ import (
 func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var req tdns.CombinerDistribPost
+		var req CombinerDistribPost
 		err := decoder.Decode(&req)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combinerDistrib", "err", err)
@@ -27,7 +27,7 @@ func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w htt
 
 		lgApi.Debug("received /combiner/distrib request", "cmd", req.Command, "from", r.RemoteAddr)
 
-		resp := tdns.CombinerDistribResponse{
+		resp := CombinerDistribResponse{
 			Time: time.Now(),
 		}
 
@@ -112,7 +112,7 @@ func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w htt
 			}
 
 			// Add to response using a generic field
-			respMap := tdns.SanitizeForJSON(resp).(tdns.CombinerDistribResponse)
+			respMap := tdns.SanitizeForJSON(resp).(CombinerDistribResponse)
 			w.Header().Set("Content-Type", "application/json")
 
 			// Create response with peers field

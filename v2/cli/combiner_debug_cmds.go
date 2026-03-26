@@ -9,7 +9,6 @@ import (
 	"log"
 	"sort"
 
-	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -27,7 +26,7 @@ Example:
 	Run: func(cmd *cobra.Command, args []string) {
 		zone, _ := cmd.Flags().GetString("zone")
 
-		resp, err := SendCombinerDebugCmd(tdns.CombinerDebugPost{
+		resp, err := SendCombinerDebugCmd(CombinerDebugPost{
 			Command: "show-combiner-data",
 			Zone:    zone,
 		})
@@ -125,7 +124,7 @@ func sortedKeys[T any](m map[string]T) []string {
 	return keys
 }
 
-func SendCombinerDebugCmd(req tdns.CombinerDebugPost) (*tdns.CombinerDebugResponse, error) {
+func SendCombinerDebugCmd(req CombinerDebugPost) (*CombinerDebugResponse, error) {
 	// Always use the combiner API client — this command only talks to the combiner.
 	api, err := tdnscli.GetApiClient("combiner", true)
 	if err != nil {
@@ -146,7 +145,7 @@ func SendCombinerDebugCmd(req tdns.CombinerDebugPost) (*tdns.CombinerDebugRespon
 			api.BaseUrl, status, string(buf))
 	}
 
-	var resp tdns.CombinerDebugResponse
+	var resp CombinerDebugResponse
 	if err := json.Unmarshal(buf, &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse response from %s/combiner/debug: %w",
 			api.BaseUrl, err)

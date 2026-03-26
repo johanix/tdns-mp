@@ -16,10 +16,6 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-type PendingEditRecord = tdns.PendingEditRecord
-type ApprovedEditRecord = tdns.ApprovedEditRecord
-type RejectedEditRecord = tdns.RejectedEditRecord
-
 // NextEditID returns the next available edit ID across all three tables.
 func NextEditID(kdb *tdns.KeyDB) (int, error) {
 	kdb.Lock()

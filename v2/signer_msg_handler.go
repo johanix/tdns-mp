@@ -101,16 +101,16 @@ func SignerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQs)
 
 			switch sigMsg.Signal {
 			case "propagated":
-				if err := kdb.SetPropagationConfirmed(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := tdns.SetPropagationConfirmed(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 					continue
 				}
 				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
-				if err := kdb.TransitionMpdistToPublished(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := tdns.TransitionMpdistToPublished(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
-				if err := kdb.TransitionMpremoveToRemoved(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := tdns.TransitionMpremoveToRemoved(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				triggerResign(conf, sigMsg.Zone)
@@ -178,12 +178,12 @@ func sendKeystateInventoryToAgent(conf *tdns.Config, tm *tdns.MPTransportBridge,
 
 	// Only include keys if we are a signer for this zone.
 	// Non-signers send empty inventory so the agent gets a response.
-	var items []tdns.KeyInventoryItem
+	var items []KeyInventoryItem
 	if zd, ok := tdns.Zones.Get(zone); ok && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner {
 		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
 	} else {
 		var err error
-		items, err = kdb.GetKeyInventory(zone)
+		items, err = tdns.GetKeyInventory(kdb, zone)
 		if err != nil {
 			return fmt.Errorf("GetKeyInventory failed: %w", err)
 		}
@@ -191,7 +191,7 @@ func sendKeystateInventoryToAgent(conf *tdns.Config, tm *tdns.MPTransportBridge,
 
 	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
 
-	// Convert tdns.KeyInventoryItem → transport.KeyInventoryEntry
+	// Convert KeyInventoryItem → transport.KeyInventoryEntry
 	inventory := make([]transport.KeyInventoryEntry, len(items))
 	for i, item := range items {
 		inventory[i] = transport.KeyInventoryEntry{

@@ -60,7 +60,7 @@ func readZoneFile(filename string) (map[string][]string, error) {
 }
 
 // Helper function to execute a combiner API request
-func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*tdns.CombinerResponse, error) {
+func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*CombinerResponse, error) {
 	parent, _ := tdnscli.GetCommandContext(cmdName)
 
 	api, err := tdnscli.GetApiClient(parent, true)
@@ -68,7 +68,7 @@ func executeCombinerRequest(cmdName, zone, command string, data map[string][]str
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
 
-	req := tdns.CombinerPost{
+	req := CombinerPost{
 		Command: command,
 		Zone:    dns.Fqdn(zone),
 		Data:    data,
@@ -79,7 +79,7 @@ func executeCombinerRequest(cmdName, zone, command string, data map[string][]str
 		return nil, fmt.Errorf("API request failed: %w", err)
 	}
 
-	var resp tdns.CombinerResponse
+	var resp CombinerResponse
 	if err := json.Unmarshal(buf, &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}

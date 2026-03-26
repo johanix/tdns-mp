@@ -37,7 +37,7 @@ func initSignerCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
 		}
 		return nil, fmt.Errorf("read signer private key %q: %w", privKeyPath, err)
 	}
-	privKeyData = tdns.StripKeyFileComments(privKeyData)
+	privKeyData = StripKeyFileComments(privKeyData)
 
 	privKey, err := backend.ParsePrivateKey(privKeyData)
 	if err != nil {
@@ -81,7 +81,7 @@ func initSignerCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
 			}
 			continue
 		}
-		agentPubKeyData = tdns.StripKeyFileComments(agentPubKeyData)
+		agentPubKeyData = StripKeyFileComments(agentPubKeyData)
 		agentPubKey, err := backend.ParsePublicKey(agentPubKeyData)
 		if err != nil {
 			lgSigner.Warn("failed to parse agent public key, encryption disabled", "agent_index", i, "err", err)

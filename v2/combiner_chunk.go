@@ -25,11 +25,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-type CombinerSyncRequest = tdns.CombinerSyncRequest
-type CombinerSyncResponse = tdns.CombinerSyncResponse
-type RejectedItem = tdns.RejectedItem
-type CombinerSyncRequestPlus = tdns.CombinerSyncRequestPlus
-
 // detectDelegationChanges inspects a CombinerSyncResponse for changes
 // to NS records or KSK DNSKEYs (flags=257, SEP bit). These changes
 // require parent delegation synchronization.
@@ -153,7 +148,7 @@ func findProviderZoneForRequest(req *CombinerSyncRequest) (string, error) {
 	if best == "" {
 		return "", fmt.Errorf("no zone found on this combiner that contains owner name(s) %v", ownerNames)
 	}
-	if tdns.GetProviderZoneRRtypes(best) == nil {
+	if GetProviderZoneRRtypes(best) == nil {
 		return "", fmt.Errorf("zone %q is known but not configured as a provider zone on this combiner", best)
 	}
 	return best, nil
@@ -576,7 +571,7 @@ func findProviderZoneForOwner(ownerName string) string {
 	if zd == nil {
 		return ""
 	}
-	if tdns.GetProviderZoneRRtypes(zd.ZoneName) == nil {
+	if GetProviderZoneRRtypes(zd.ZoneName) == nil {
 		return ""
 	}
 	return zd.ZoneName
@@ -762,9 +757,9 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 	dataChanged := false
 
 	isProvider := req.ZoneClass == "provider"
-	allowedRRtypes := tdns.AllowedLocalRRtypes
+	allowedRRtypes := AllowedLocalRRtypes
 	if isProvider {
-		if pzt := tdns.GetProviderZoneRRtypes(req.Zone); pzt != nil {
+		if pzt := GetProviderZoneRRtypes(req.Zone); pzt != nil {
 			allowedRRtypes = pzt
 		} else {
 			resp.Status = "error"

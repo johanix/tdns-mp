@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 
-	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/spf13/cobra"
 )
@@ -52,7 +51,7 @@ Example:
 			log.Fatalf("--id flag is required")
 		}
 
-		resp, err := SendCombinerDebugCmd(tdns.CombinerDebugPost{
+		resp, err := SendCombinerDebugCmd(CombinerDebugPost{
 			Command: "agent-ping",
 			AgentID: combinerPeerPingID,
 		})
@@ -85,7 +84,7 @@ Example:
 		zone, _ := cmd.Flags().GetString("zone")
 		agentID, _ := cmd.Flags().GetString("agent")
 
-		resp, err := SendCombinerDebugCmd(tdns.CombinerDebugPost{
+		resp, err := SendCombinerDebugCmd(CombinerDebugPost{
 			Command: "agent-resync",
 			Zone:    zone,
 			AgentID: agentID,

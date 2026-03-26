@@ -118,7 +118,7 @@ var combinerZoneEditsListCmd = &cobra.Command{
 }
 
 func listCurrentContributions(zone string) {
-	resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+	resp, err := SendCombinerEditCmd(CombinerEditPost{
 		Command: "list-current",
 		Zone:    zone,
 	})
@@ -171,7 +171,7 @@ func listCurrentContributions(zone string) {
 }
 
 func listPendingEdits(zone string) {
-	resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+	resp, err := SendCombinerEditCmd(CombinerEditPost{
 		Command: "list",
 		Zone:    zone,
 	})
@@ -203,7 +203,7 @@ func listPendingEdits(zone string) {
 }
 
 func listApprovedEdits(zone string) {
-	resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+	resp, err := SendCombinerEditCmd(CombinerEditPost{
 		Command: "list-approved",
 		Zone:    zone,
 	})
@@ -235,7 +235,7 @@ func listApprovedEdits(zone string) {
 }
 
 func listRejectedEdits(zone string) {
-	resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+	resp, err := SendCombinerEditCmd(CombinerEditPost{
 		Command: "list-rejected",
 		Zone:    zone,
 	})
@@ -281,7 +281,7 @@ var combinerZoneEditsApproveCmd = &cobra.Command{
 			log.Fatalf("--edit is required (positive integer)")
 		}
 
-		resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+		resp, err := SendCombinerEditCmd(CombinerEditPost{
 			Command: "approve",
 			Zone:    zone,
 			EditID:  editID,
@@ -312,7 +312,7 @@ var combinerZoneEditsRejectCmd = &cobra.Command{
 			log.Fatalf("--reason is required for rejection")
 		}
 
-		resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+		resp, err := SendCombinerEditCmd(CombinerEditPost{
 			Command: "reject",
 			Zone:    zone,
 			EditID:  editID,
@@ -351,7 +351,7 @@ var combinerZoneEditsClearCmd = &cobra.Command{
 		}
 		// Empty tables list means "all"
 
-		resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+		resp, err := SendCombinerEditCmd(CombinerEditPost{
 			Command: "clear",
 			Zone:    zone,
 			Tables:  tables,
@@ -365,7 +365,7 @@ var combinerZoneEditsClearCmd = &cobra.Command{
 }
 
 // SendCombinerEditCmd sends a combiner edit management request to the combiner API.
-func SendCombinerEditCmd(req tdns.CombinerEditPost) (*tdns.CombinerEditResponse, error) {
+func SendCombinerEditCmd(req CombinerEditPost) (*CombinerEditResponse, error) {
 	api, err := tdnscli.GetApiClient("combiner", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
@@ -385,7 +385,7 @@ func SendCombinerEditCmd(req tdns.CombinerEditPost) (*tdns.CombinerEditResponse,
 			api.BaseUrl, status, string(buf))
 	}
 
-	var resp tdns.CombinerEditResponse
+	var resp CombinerEditResponse
 	if err := json.Unmarshal(buf, &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse response from %s/combiner/edits: %w",
 			api.BaseUrl, err)
@@ -407,7 +407,7 @@ var combinerZoneEditsReapplyCmd = &cobra.Command{
 			log.Fatalf("--zone is required")
 		}
 
-		resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+		resp, err := SendCombinerEditCmd(CombinerEditPost{
 			Command: "reapply",
 			Zone:    zone,
 		})
