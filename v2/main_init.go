@@ -19,21 +19,32 @@ import (
 	"github.com/miekg/dns"
 )
 
-// MainInit initializes the MP signer. It delegates DNS
-// infrastructure setup to tdns.MainInit, then adds MP
-// components (TransportManager, crypto, CHUNK handler,
-// peer registration).
+// MainInit initializes an MP role (signer or combiner). It delegates
+// DNS infrastructure setup to tdns.MainInit, then adds MP components
+// (TransportManager, crypto, CHUNK handler, peer registration).
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
 
-	// MP signer initialization
 	mp := conf.Config.MultiProvider
 	if mp == nil || !mp.Active {
-		return nil // not an MP signer
+		return nil
 	}
+
+	switch mp.Role {
+	case "signer":
+		return conf.initMPSigner(mp)
+	case "combiner":
+		return conf.initMPCombiner(mp)
+	default:
+		return fmt.Errorf("unsupported multi-provider.role: %q", mp.Role)
+	}
+}
+
+// initMPSigner performs signer-specific MP initialization.
+func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required when multi-provider.active is true")
@@ -152,6 +163,151 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
 		}
 	}
+
+	return nil
+}
+
+// initMPCombiner performs combiner-specific MP initialization.
+func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
+	if mp.Identity == "" {
+		return fmt.Errorf("multi-provider.identity is required in config")
+	}
+
+	// Initialize combiner edit tables
+	kdb := conf.Config.Internal.KeyDB
+	if kdb != nil {
+		if err := kdb.InitCombinerEditTables(); err != nil {
+			return fmt.Errorf("InitCombinerEditTables: %w", err)
+		}
+	}
+
+	chunkMode := strings.TrimSpace(mp.ChunkMode)
+	if chunkMode == "query" {
+		cep := strings.TrimSpace(mp.ChunkQueryEndpoint)
+		if cep != "include" && cep != "none" {
+			return fmt.Errorf("multi-provider.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", cep)
+		}
+	}
+
+	// Initialize combiner crypto for decrypting agent payloads
+	var secureWrapper *transport.SecurePayloadWrapper
+	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+		var err error
+		secureWrapper, err = tdns.InitCombinerCrypto(conf.Config)
+		if err != nil {
+			return fmt.Errorf("failed to initialize combiner crypto: %w", err)
+		}
+	}
+
+	// Register CHUNK handler
+	combinerState, err := RegisterCombinerChunkHandler(dns.Fqdn(mp.Identity), secureWrapper)
+	if err != nil {
+		return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
+	}
+	combinerState.ProtectedNamespaces = mp.ProtectedNamespaces
+	conf.Config.Internal.CombinerState = combinerState
+
+	// Initialize distribution cache
+	if conf.Config.Internal.DistributionCache == nil {
+		conf.Config.Internal.DistributionCache = tdns.NewDistributionCache()
+		tdns.StartDistributionGC(conf.Config.Internal.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
+	}
+
+	// Create TransportManager
+	var combinerPayloadCrypto *transport.PayloadCrypto
+	if secureWrapper != nil {
+		combinerPayloadCrypto = secureWrapper.GetCrypto()
+	}
+	if chunkMode == "" {
+		chunkMode = "edns0"
+	}
+	tm := tdns.NewMPTransportBridge(&tdns.MPTransportBridgeConfig{
+		LocalID:             dns.Fqdn(mp.Identity),
+		ControlZone:         dns.Fqdn(mp.Identity),
+		DNSTimeout:          5 * time.Second,
+		APITimeout:          10 * time.Second,
+		ChunkMode:           chunkMode,
+		ChunkMaxSize:        mp.ChunkMaxSize,
+		PayloadCrypto:       combinerPayloadCrypto,
+		DistributionCache:   conf.Config.Internal.DistributionCache,
+		SupportedMechanisms: []string{"dns"},
+		MsgQs:               conf.Config.Internal.MsgQs,
+		AuthorizedPeers: func() []string {
+			var peers []string
+			for _, a := range mp.Agents {
+				if a != nil && a.Identity != "" {
+					peers = append(peers, dns.Fqdn(a.Identity))
+				}
+			}
+			return peers
+		},
+	})
+	conf.Config.Internal.TransportManager = tm.TransportManager
+	conf.Config.Internal.MPTransport = tm
+
+	// Register agent peers
+	for _, agentConf := range mp.Agents {
+		if agentConf.Identity == "" {
+			return fmt.Errorf("multi-provider.agents: entry missing identity")
+		}
+		peerID := dns.Fqdn(agentConf.Identity)
+		agentPeer := transport.NewPeer(peerID)
+		agentPeer.SetState(transport.PeerStateKnown, "configured")
+		if agentConf.Address != "" {
+			host, portStr, err := net.SplitHostPort(agentConf.Address)
+			if err != nil {
+				return fmt.Errorf("invalid address %q for %s: %w", agentConf.Address, peerID, err)
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				return fmt.Errorf("invalid port in %q for %s: %w", agentConf.Address, peerID, err)
+			}
+			agentPeer.SetDiscoveryAddress(&transport.Address{
+				Host:      host,
+				Port:      uint16(port),
+				Transport: "udp",
+			})
+		}
+		if agentConf.ApiBaseUrl != "" {
+			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
+			agentPeer.PreferredTransport = "API"
+		} else {
+			agentPeer.PreferredTransport = "DNS"
+		}
+		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
+			return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, err)
+		}
+	}
+
+	// Wire GetPeerAddress callback for chunk_mode=query fallback
+	combinerState.SetGetPeerAddress(func(senderID string) (string, bool) {
+		peer, ok := tm.PeerRegistry.Get(senderID)
+		if !ok || peer.CurrentAddress() == nil {
+			return "", false
+		}
+		addr := peer.CurrentAddress()
+		return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
+	})
+
+	// Wire chunk handler into TM
+	tm.ChunkHandler = combinerState.ChunkHandler()
+
+	// Initialize combiner router
+	combinerRouter := transport.NewDNSMessageRouter()
+	combinerRouterCfg := &transport.CombinerRouterConfig{
+		Authorizer:   tm,
+		PeerRegistry: tm.PeerRegistry,
+		HandleUpdate: NewCombinerSyncHandler(),
+		IncomingChan: nil,
+	}
+	if combinerPayloadCrypto != nil {
+		combinerRouterCfg.PayloadCrypto = combinerPayloadCrypto
+	}
+	if err := transport.InitializeCombinerRouter(combinerRouter, combinerRouterCfg); err != nil {
+		return fmt.Errorf("InitializeCombinerRouter: %w", err)
+	}
+	combinerState.SetRouter(combinerRouter)
+	tm.Router = combinerRouter
 
 	return nil
 }
