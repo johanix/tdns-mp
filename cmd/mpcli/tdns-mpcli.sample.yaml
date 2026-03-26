@@ -4,21 +4,21 @@
 # applications (mpsigner, mpcombiner, and agents managed
 # via the agent sub-commands).
 #
-# Each API server entry maps to a daemon. The CLI determines
-# which entry to use based on the command prefix:
-#   mpcli ping           → tdns-mpsigner (default/root)
-#   mpcli combiner ping  → tdns-mpcombiner
-#   mpcli agent ping     → tdns-agent (via tdns-agent API)
+# Each API server entry maps to a daemon. The "name" field
+# must match the internal lookup key for each role:
+#   mpcli signer ping    → tdns-mpsigner
+#   mpcli combiner ping  → tdns-combiner
+#   mpcli agent ping     → tdns-agent
 
 apiservers:
-   # The signer (default target for root-level commands)
+   # The signer (target for "signer" sub-commands)
    - name:         tdns-mpsigner
      baseurl:      https://127.0.0.1:8088/api/v1
      apikey:       change-me-to-something-secret
      authmethod:   X-API-Key
 
    # The combiner (target for "combiner" sub-commands)
-   - name:         tdns-mpcombiner
+   - name:         tdns-combiner
      baseurl:      https://127.0.0.1:8075/api/v1
      apikey:       change-me-to-something-secret
      authmethod:   X-API-Key

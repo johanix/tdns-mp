@@ -2,8 +2,10 @@
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
  * Command registration for tdns-mpcli.
- * Base DNS commands from tdns/v2/cli.
- * Combiner commands from tdns-mp/v2/cli.
+ * All role-specific commands are behind a prefix:
+ *   signer   → mpsigner API
+ *   combiner → mpcombiner API
+ *   agent    → agent API
  */
 package main
 
@@ -13,24 +15,36 @@ import (
 )
 
 func init() {
-	// Base commands (from tdns/v2/cli)
-	rootCmd.AddCommand(cli.PingCmd)
-	rootCmd.AddCommand(cli.StopCmd)
-	rootCmd.AddCommand(cli.DaemonCmd)
+	// Global commands (not role-specific)
 	rootCmd.AddCommand(cli.VersionCmd)
-	rootCmd.AddCommand(cli.DebugCmd)
-	rootCmd.AddCommand(cli.ConfigCmd)
-	rootCmd.AddCommand(cli.ZoneCmd)
-	rootCmd.AddCommand(cli.KeystoreCmd)
-	rootCmd.AddCommand(cli.TruststoreCmd)
-	rootCmd.AddCommand(cli.ReportCmd)
 
-	// Auth/signer commands (from tdns/v2/cli)
-	rootCmd.AddCommand(cli.AuthCmd)
+	// Signer commands (from tdns/v2/cli, under "signer" prefix)
+	rootCmd.AddCommand(mpcli.SignerCmd)
+	mpcli.SignerCmd.AddCommand(cli.PingCmd)
+	mpcli.SignerCmd.AddCommand(cli.StopCmd)
+	mpcli.SignerCmd.AddCommand(cli.DaemonCmd)
+	mpcli.SignerCmd.AddCommand(cli.DebugCmd)
+	mpcli.SignerCmd.AddCommand(cli.ConfigCmd)
+	mpcli.SignerCmd.AddCommand(cli.ZoneCmd)
+	mpcli.SignerCmd.AddCommand(cli.KeystoreCmd)
+	mpcli.SignerCmd.AddCommand(cli.TruststoreCmd)
+	mpcli.SignerCmd.AddCommand(cli.ReportCmd)
+	mpcli.SignerCmd.AddCommand(cli.AuthCmd)
+	mpcli.SignerCmd.AddCommand(cli.RootKeysCmd)
+	mpcli.SignerCmd.AddCommand(cli.JwtCmd)
 
-	// Keys (from tdns/v2/cli)
-	rootCmd.AddCommand(cli.RootKeysCmd)
-	rootCmd.AddCommand(cli.JwtCmd)
+	// Combiner commands (from tdns-mp/v2/cli)
+	// Note: combiner has its own zone management (combiner_edits_cmds.go)
+	// so we don't add cli.ZoneCmd here to avoid duplicate "zone" commands.
+	rootCmd.AddCommand(mpcli.CombinerCmd)
+	mpcli.CombinerCmd.AddCommand(cli.PingCmd)
+	mpcli.CombinerCmd.AddCommand(cli.StopCmd)
+	mpcli.CombinerCmd.AddCommand(cli.DaemonCmd)
+	mpcli.CombinerCmd.AddCommand(cli.DebugCmd)
+	mpcli.CombinerCmd.AddCommand(cli.ConfigCmd)
+	mpcli.CombinerCmd.AddCommand(cli.KeysCmd)
+	mpcli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
+	mpcli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
 
 	// Agent commands (from tdns/v2/cli)
 	rootCmd.AddCommand(cli.AgentCmd)
@@ -42,16 +56,4 @@ func init() {
 	cli.AgentCmd.AddCommand(cli.KeysCmd)
 	cli.AgentCmd.AddCommand(cli.AgentDistribCmd)
 	cli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
-
-	// Combiner commands (from tdns-mp/v2/cli)
-	rootCmd.AddCommand(mpcli.CombinerCmd)
-	mpcli.CombinerCmd.AddCommand(cli.PingCmd)
-	mpcli.CombinerCmd.AddCommand(cli.StopCmd)
-	mpcli.CombinerCmd.AddCommand(cli.DaemonCmd)
-	mpcli.CombinerCmd.AddCommand(cli.DebugCmd)
-	mpcli.CombinerCmd.AddCommand(cli.ConfigCmd)
-	mpcli.CombinerCmd.AddCommand(cli.ZoneCmd)
-	mpcli.CombinerCmd.AddCommand(cli.KeysCmd)
-	mpcli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
-	mpcli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
 }
