@@ -45,6 +45,8 @@ func init() {
 
 	// Combiner commands (from tdns-mp/v2/cli)
 	rootCmd.AddCommand(mpcli.CombinerCmd)
+	mpcli.CombinerCmd.AddCommand(cli.PingCmd)
+	mpcli.CombinerCmd.AddCommand(cli.StopCmd)
 	mpcli.CombinerCmd.AddCommand(cli.DaemonCmd)
 	mpcli.CombinerCmd.AddCommand(cli.DebugCmd)
 	mpcli.CombinerCmd.AddCommand(cli.ConfigCmd)
