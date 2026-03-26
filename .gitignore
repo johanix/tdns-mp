@@ -9,6 +9,7 @@
 
 # Built binaries
 cmd/mpsigner/tdns-mpsigner
+cmd/mpcombiner/tdns-mpcombiner
 cmd/mpcli/tdns-mpcli
 
 # Generated version files
