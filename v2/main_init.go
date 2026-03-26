@@ -29,12 +29,15 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 
 	mp := conf.Config.MultiProvider
-	if mp == nil || !mp.Active {
+	if mp == nil {
 		return nil
 	}
 
 	switch mp.Role {
 	case "signer":
+		if !mp.Active {
+			return nil // signer requires explicit activation
+		}
 		return conf.initMPSigner(mp)
 	case "combiner":
 		return conf.initMPCombiner(mp)
