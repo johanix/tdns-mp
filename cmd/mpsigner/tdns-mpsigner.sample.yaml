@@ -1,0 +1,88 @@
+# TDNS MP Signer Configuration
+#
+# The mpsigner binary provides the multi-provider DNSSEC signing
+# role. It uses tdns for DNS infrastructure (zone serving, refresh,
+# NOTIFY, query handling) and adds MP-specific engines (KEYSTATE
+# signaling, key state management, CHUNK transport).
+#
+# This config is similar to tdns-auth.yaml but with role: signer
+# and multi-provider.active: true.
+
+include:
+   - mpsigner-zones.yaml
+
+service:
+   name:           TDNS-MPSIGNER
+   verbose:        true
+   debug:          false
+   refresh:        true
+   maxrefresh:     1800
+
+dnsengine:
+   addresses:      [ 127.0.0.1:8053 ]
+
+resignerengine:
+   interval:       300
+   keygen:
+      mode:        internal
+      algorithm:   ED25519
+
+apiserver:
+   addresses:      [ 127.0.0.1:8088 ]
+   apikey:         change-me-to-something-secret
+
+# Key and Signing Policy (KASP)
+kasp:
+   propagation_delay:  1h
+   check_interval:     1m
+   standby_zsk_count:  1
+   standby_ksk_count:  0
+
+dnssecpolicies:
+   default:
+      algorithm:  ED25519
+      ksk:
+         lifetime:      forever
+         sigvalidity:   168h
+      zsk:
+         lifetime:      forever
+         sigvalidity:   2h
+
+# Multi-provider DNSSEC configuration
+# The signer signs zones and communicates with the co-located
+# agent via CHUNK transport.
+multi-provider:
+   role:      signer
+   active:    true
+   identity:  signer.provider.example.
+   long_term_jose_priv_key:  /etc/tdns/keys/signer.jose.priv.json
+
+   # chunk_mode: edns0 (default) or query
+   # chunk_mode:           query
+   # chunk_query_endpoint: include
+
+   # Agent peers (typically just the local agent)
+   agents:
+      - identity:               agent.provider.example.
+        address:                127.0.0.1:8055
+        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
+
+   # Sync API for inbound HELLO/BEAT/PING from agent
+   sync_api:
+      addresses:
+         listen:     [ 127.0.0.1:8991 ]
+      cert_file:     /etc/tdns/certs/servers/signer.crt
+      key_file:      /etc/tdns/certs/servers/signer.key
+
+db:
+   file:  /var/lib/tdns/tdns-mpsigner.db
+
+log:
+   file:   /var/log/tdns/tdns-mpsigner.log
+   level:  info
+   # subsystems:
+   #    transport:  debug
+   #    combiner:   debug
+
+common:
+   command:  /usr/local/libexec/tdns-mpsigner

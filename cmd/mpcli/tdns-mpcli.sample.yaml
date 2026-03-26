@@ -1,0 +1,34 @@
+# TDNS MP CLI Configuration
+#
+# The mpcli binary is the management CLI for all tdns-mp
+# applications (mpsigner, mpcombiner, and agents managed
+# via the agent sub-commands).
+#
+# Each API server entry maps to a daemon. The CLI determines
+# which entry to use based on the command prefix:
+#   mpcli ping           → tdns-mpsigner (default/root)
+#   mpcli combiner ping  → tdns-mpcombiner
+#   mpcli agent ping     → tdns-agent (via tdns-agent API)
+
+apiservers:
+   # The signer (default target for root-level commands)
+   - name:         tdns-mpsigner
+     baseurl:      https://127.0.0.1:8088/api/v1
+     apikey:       change-me-to-something-secret
+     authmethod:   X-API-Key
+
+   # The combiner (target for "combiner" sub-commands)
+   - name:         tdns-mpcombiner
+     baseurl:      https://127.0.0.1:8075/api/v1
+     apikey:       change-me-to-something-secret
+     authmethod:   X-API-Key
+
+   # The agent (target for "agent" sub-commands)
+   - name:         tdns-agent
+     baseurl:      https://127.0.0.1:8087/api/v1
+     apikey:       change-me-to-something-secret
+     authmethod:   X-API-Key
+
+log:
+   file:   /var/log/tdns/tdns-mpcli.log
+   level:  info

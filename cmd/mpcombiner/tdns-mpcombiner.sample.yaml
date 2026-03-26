@@ -1,0 +1,85 @@
+# TDNS MP Combiner Configuration
+#
+# The mpcombiner binary provides the multi-provider data
+# combination role. It receives zone contributions from
+# agents, merges them, and serves the combined zone data
+# to downstreams.
+#
+# The combiner does NOT sign zones — it aggregates data
+# from multiple providers (each with their own signer).
+
+include:
+   - mpcombiner-zones.yaml
+
+service:
+   name:           TDNS-MPCOMBINER
+   verbose:        true
+   debug:          false
+   refresh:        true
+   maxrefresh:     1800
+
+dnsengine:
+   addresses:      [ 127.0.0.1:8055 ]
+
+apiserver:
+   addresses:      [ 127.0.0.1:8075 ]
+   apikey:         change-me-to-something-secret
+
+# Multi-provider configuration for combiner role.
+# No "active:" flag needed — the combiner is always active.
+multi-provider:
+   role:      combiner
+   identity:  combiner.provider.example.
+   long_term_jose_priv_key:  /etc/tdns/keys/combiner.jose.priv.json
+
+   # chunk_mode: edns0 (default) or query
+   # chunk_mode:           query
+   # chunk_query_endpoint: include
+
+   # Agent peers: all agents that contribute to this combiner
+   agents:
+      - identity:               agent.alpha.example.
+        address:                10.1.0.4:8055
+        long_term_jose_pub_key: /etc/tdns/keys/agent-alpha.jose.pub.json
+
+      - identity:               agent.echo.example.
+        address:                10.5.0.4:8055
+        long_term_jose_pub_key: /etc/tdns/keys/agent-echo.jose.pub.json
+
+   # Optional: combiner signature TXT record
+   # combiner_options:
+   #    add-signature: true
+   # signature: "combined by {identity}"
+
+   # Optional: protected NS namespaces
+   # Agents cannot add NS records pointing to names under
+   # these suffixes (prevents NS hijacking).
+   # protected_namespaces:
+   #    - example.com.
+   #    - example.net.
+
+   # Provider zones: zones where agents make targeted edits
+   # (e.g. _signal KEY records at NS delegation names).
+   # provider-zones:
+   #    - zone:              provider.example.
+   #      allowed-rrtypes:   [ KEY ]
+
+   # Sync API for inbound HELLO/BEAT/PING from agents
+   sync_api:
+      addresses:
+         listen:     [ 127.0.0.1:8992 ]
+      cert_file:     /etc/tdns/certs/servers/combiner.crt
+      key_file:      /etc/tdns/certs/servers/combiner.key
+
+db:
+   file:  /var/lib/tdns/tdns-mpcombiner.db
+
+log:
+   file:   /var/log/tdns/tdns-mpcombiner.log
+   level:  info
+   # subsystems:
+   #    transport:  debug
+   #    combiner:   debug
+
+common:
+   command:  /usr/local/libexec/tdns-mpcombiner
