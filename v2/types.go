@@ -40,3 +40,62 @@ const CombinerOptAddSignature = tdns.CombinerOptAddSignature
 // Signer types
 type KeyInventoryItem = tdns.KeyInventoryItem
 type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
+
+// Transport bridge types (MP-only, will eventually move here as full definitions)
+// MPTransportBridge and MPTransportBridgeConfig are defined in hsync_transport.go (local copy)
+// AgentDiscoveryResult is defined in agent_discovery.go (local copy)
+// PendingDnskeyPropagation is defined in hsync_transport.go (local copy)
+type AgentRegistry = tdns.AgentRegistry
+type Agent = tdns.Agent
+type AgentDetails = tdns.AgentDetails
+type AgentState = tdns.AgentState
+type AgentId = tdns.AgentId
+type MsgQs = tdns.MsgQs
+type KeystateInventoryMsg = tdns.KeystateInventoryMsg
+type KeystateSignalMsg = tdns.KeystateSignalMsg
+type DistributionCache = tdns.DistributionCache
+type DistributionInfo = tdns.DistributionInfo
+type ChunkPayloadStore = tdns.ChunkPayloadStore
+type ConfirmationDetail = tdns.ConfirmationDetail
+type RemoteConfirmationDetail = tdns.RemoteConfirmationDetail
+type RejectedItemInfo = tdns.RejectedItemInfo
+type AgentMsgPost = tdns.AgentMsgPost
+type AgentMsgPostPlus = tdns.AgentMsgPostPlus
+type AgentMsgReport = tdns.AgentMsgReport
+type EditsResponseMsg = tdns.EditsResponseMsg
+type ConfigResponseMsg = tdns.ConfigResponseMsg
+type AuditResponseMsg = tdns.AuditResponseMsg
+type StatusUpdateMsg = tdns.StatusUpdateMsg
+type GossipMessage = tdns.GossipMessage
+type MessageRetentionConf = tdns.MessageRetentionConf
+type AgentMsg = tdns.AgentMsg
+
+// AgentState constants
+const (
+	AgentStateNeeded      = tdns.AgentStateNeeded
+	AgentStateKnown       = tdns.AgentStateKnown
+	AgentStateIntroduced  = tdns.AgentStateIntroduced
+	AgentStateOperational = tdns.AgentStateOperational
+	AgentStateLegacy      = tdns.AgentStateLegacy
+	AgentStateDegraded    = tdns.AgentStateDegraded
+	AgentStateInterrupted = tdns.AgentStateInterrupted
+	AgentStateError       = tdns.AgentStateError
+)
+
+// AgentStateToString map
+var AgentStateToString = tdns.AgentStateToString
+
+// AgentMsg constants
+const (
+	AgentMsgHello  = tdns.AgentMsgHello
+	AgentMsgBeat   = tdns.AgentMsgBeat
+	AgentMsgNotify = tdns.AgentMsgNotify
+	AgentMsgPing   = tdns.AgentMsgPing
+	AgentMsgStatus = tdns.AgentMsgStatus
+	AgentMsgEdits  = tdns.AgentMsgEdits
+	AgentMsgRfi    = tdns.AgentMsgRfi
+)
+
+// Functions re-exported from tdns (not yet moved)
+var NewDistributionCache = tdns.NewDistributionCache
+var StartDistributionGC = tdns.StartDistributionGC
