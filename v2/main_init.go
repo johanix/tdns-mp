@@ -10,10 +10,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -41,6 +43,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return conf.initMPSigner(mp)
 	case "combiner":
 		return conf.initMPCombiner(mp)
+	case "agent":
+		return conf.initMPAgent(mp)
 	default:
 		return fmt.Errorf("unsupported multi-provider.role: %q", mp.Role)
 	}
@@ -321,4 +325,228 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	tm.Router = combinerRouter
 
 	return nil
+}
+
+// initMPAgent performs agent-specific MP initialization.
+func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
+	if mp.Identity == "" {
+		return fmt.Errorf("multi-provider.identity is required for agent role")
+	}
+
+	// Setup agent identity and publish records
+	all_zones := tdns.Zones.Keys()
+	if err := conf.Config.SetupAgent(all_zones); err != nil {
+		return fmt.Errorf("SetupAgent: %w", err)
+	}
+
+	// Initialize AgentRegistry
+	conf.InternalMp.AgentRegistry = conf.Config.NewAgentRegistry()
+	conf.Config.Internal.AgentRegistry = conf.InternalMp.AgentRegistry // dual-write
+
+	// Initialize CombinerState (agent-side: just an ErrorJournal, no chunk handler)
+	combinerID := "combiner"
+	if mp.Combiner != nil && mp.Combiner.Identity != "" {
+		combinerID = dns.Fqdn(mp.Combiner.Identity)
+		mp.AuthorizedPeers = append(mp.AuthorizedPeers, combinerID)
+	}
+	conf.InternalMp.CombinerState = &tdns.CombinerState{
+		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
+	}
+	conf.Config.Internal.CombinerState = conf.InternalMp.CombinerState // dual-write
+
+	// Initialize HSYNC database tables
+	kdb := conf.Config.Internal.KeyDB
+	if kdb != nil {
+		if err := kdb.InitHsyncTables(); err != nil {
+			return fmt.Errorf("InitHsyncTables: %w", err)
+		}
+	}
+
+	// Create MsgQs locally
+	conf.InternalMp.MsgQs = NewMsgQs()
+	conf.Config.Internal.MsgQs = conf.InternalMp.MsgQs // dual-write
+
+	// Initialize distribution cache
+	conf.InternalMp.DistributionCache = NewDistributionCache()
+	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
+	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
+
+	// Chunk mode configuration
+	controlZone := mp.Dns.ControlZone
+	if controlZone == "" {
+		controlZone = mp.Identity
+	}
+	chunkMode := mp.Dns.ChunkMode
+	if chunkMode == "" {
+		chunkMode = "edns0"
+	}
+
+	var chunkStore tdns.ChunkPayloadStore
+	var chunkQueryEndpoint string
+	var chunkQueryEndpointInNotify bool
+	if chunkMode == "query" {
+		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
+		if cep != "include" && cep != "none" {
+			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
+		}
+		chunkQueryEndpointInNotify = (cep == "include")
+		chunkStore = tdns.NewMemChunkPayloadStore(5 * time.Minute)
+		conf.InternalMp.ChunkPayloadStore = chunkStore
+		if err := tdns.RegisterChunkQueryHandler(chunkStore); err != nil {
+			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
+		}
+		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	}
+
+	// Initialize PayloadCrypto for secure CHUNK transport (optional)
+	var payloadCrypto *transport.PayloadCrypto
+	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+		pc, err := initAgentCrypto(conf.Config)
+		if err != nil {
+			return fmt.Errorf("failed to initialize agent crypto: %w", err)
+		}
+		payloadCrypto = pc
+	}
+
+	// Extract signer peer config for KEYSTATE signaling
+	var signerID, signerAddress string
+	if mp.Signer != nil {
+		signerID = dns.Fqdn(mp.Signer.Identity)
+		signerAddress = mp.Signer.Address
+	}
+
+	// Create MPTransportBridge
+	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		LocalID:                    dns.Fqdn(mp.Identity),
+		ControlZone:                dns.Fqdn(controlZone),
+		APITimeout:                 10 * time.Second,
+		DNSTimeout:                 5 * time.Second,
+		AgentRegistry:              conf.InternalMp.AgentRegistry,
+		MsgQs:                      conf.InternalMp.MsgQs,
+		ChunkMode:                  chunkMode,
+		ChunkPayloadStore:          chunkStore,
+		ChunkQueryEndpoint:         chunkQueryEndpoint,
+		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
+		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
+		PayloadCrypto:              payloadCrypto,
+		DistributionCache:          conf.InternalMp.DistributionCache,
+		SupportedMechanisms:        mp.SupportedMechanisms,
+		CombinerID:                 combinerID,
+		SignerID:                   signerID,
+		SignerAddress:              signerAddress,
+		AuthorizedPeers: func() []string {
+			var peers []string
+			for _, p := range mp.AuthorizedPeers {
+				peers = append(peers, dns.Fqdn(p))
+			}
+			if mp.Combiner != nil && mp.Combiner.Identity != "" {
+				peers = append(peers, dns.Fqdn(mp.Combiner.Identity))
+			}
+			if mp.Signer != nil && mp.Signer.Identity != "" {
+				peers = append(peers, dns.Fqdn(mp.Signer.Identity))
+			}
+			return peers
+		},
+		MessageRetention: func(operation string) int {
+			return mp.Dns.MessageRetention.GetRetentionForMessageType(operation)
+		},
+		GetImrEngine:   func() *tdns.Imr { return conf.Config.Internal.ImrEngine },
+		GetZone:        tdns.Zones.Get,
+		GetZoneNames:   tdns.Zones.Keys,
+		ClientCertFile: mp.Api.CertFile,
+		ClientKeyFile:  mp.Api.KeyFile,
+	})
+	conf.InternalMp.MPTransport = tm
+	conf.InternalMp.TransportManager = tm.TransportManager
+	conf.Config.Internal.TransportManager = tm.TransportManager // dual-write
+	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
+
+	return nil
+}
+
+// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
+func buildAgentChunkQueryEndpoint(mp *tdns.MultiProviderConf) string {
+	if mp == nil {
+		return ""
+	}
+	dnsConf := &mp.Dns
+	port := dnsConf.Port
+	if port == 0 {
+		port = 53
+	}
+	var host string
+	if len(dnsConf.Addresses.Publish) > 0 {
+		host = strings.TrimSpace(dnsConf.Addresses.Publish[0])
+	}
+	if host == "" && len(dnsConf.Addresses.Listen) > 0 {
+		host = strings.TrimSpace(dnsConf.Addresses.Listen[0])
+	}
+	if host == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+}
+
+// initAgentCrypto initializes PayloadCrypto for the agent from MultiProviderConf.
+// Loads the agent's JOSE private key and the combiner's public key (if configured).
+func initAgentCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
+	mp := conf.MultiProvider
+	if mp == nil {
+		return nil, fmt.Errorf("multi-provider config is not set")
+	}
+
+	backend := jose.NewBackend()
+
+	privKeyPath := strings.TrimSpace(mp.LongTermJosePrivKey)
+	privKeyData, err := os.ReadFile(privKeyPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("private key file not found: %q: %w", privKeyPath, err)
+		}
+		return nil, fmt.Errorf("read private key %q: %w", privKeyPath, err)
+	}
+	privKeyData = StripKeyFileComments(privKeyData)
+
+	privKey, err := backend.ParsePrivateKey(privKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+
+	joseBackend, ok := backend.(*jose.Backend)
+	if !ok {
+		return nil, fmt.Errorf("backend is not JOSE")
+	}
+	pubKey, err := joseBackend.PublicFromPrivate(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("derive public key: %w", err)
+	}
+
+	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
+		Backend: backend,
+		Enabled: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create PayloadCrypto: %w", err)
+	}
+
+	pc.SetLocalKeys(privKey, pubKey)
+
+	// Load combiner's public key if configured
+	if mp.Combiner != nil && strings.TrimSpace(mp.Combiner.LongTermJosePubKey) != "" {
+		combinerPubKeyPath := strings.TrimSpace(mp.Combiner.LongTermJosePubKey)
+		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
+		if err == nil {
+			combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
+			combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
+			if err == nil {
+				pc.AddPeerKey("combiner", combinerPubKey)
+				pc.AddPeerVerificationKey("combiner", combinerPubKey)
+			}
+		}
+	}
+
+	return pc, nil
 }
