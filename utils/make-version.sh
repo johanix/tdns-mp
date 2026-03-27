@@ -3,7 +3,7 @@ appversion=$1
 appdate=$2
 prog=$3
 
-versioned_progs="tdns-mpsigner tdns-mpcli tdns-mpcombiner"
+versioned_progs="tdns-mpagent tdns-mpsigner tdns-mpcli tdns-mpcombiner"
 
 # Check if we're on NetBSD
 if [ "$(uname -s)" = "NetBSD" ]; then
