@@ -7,6 +7,7 @@
 package tdnsmp
 
 import (
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -16,5 +17,25 @@ import (
 // Using a pointer ensures that tdns code accessing the global
 // tdns.Conf sees the same state as tdns-mp code.
 type Config struct {
-	*tdns.Config // pointer to shared DNS config
+	*tdns.Config
+	InternalMp InternalMpConf
+}
+
+// InternalMpConf holds multi-provider internal state local to
+// tdns-mp. Mirrors tdns.InternalMpConf field-by-field. During
+// migration, both exist — code in tdns-mp reads from here,
+// code in tdns reads from tdns.Config.Internal.
+type InternalMpConf struct {
+	SyncQ                 chan SyncRequest
+	MsgQs                 *MsgQs
+	SyncStatusQ           chan SyncStatus
+	AgentRegistry         *AgentRegistry
+	ZoneDataRepo          *ZoneDataRepo
+	CombinerState         *CombinerState
+	TransportManager      *transport.TransportManager
+	MPTransport           *MPTransportBridge
+	LeaderElectionManager *LeaderElectionManager
+	ChunkPayloadStore     ChunkPayloadStore
+	MPZoneNames           []string
+	DistributionCache     *DistributionCache
 }

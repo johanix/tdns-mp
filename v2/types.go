@@ -96,6 +96,13 @@ const (
 	AgentMsgRfi    = tdns.AgentMsgRfi
 )
 
+// Internal state types (for InternalMpConf)
+type SyncRequest = tdns.SyncRequest
+type SyncStatus = tdns.SyncStatus
+type ZoneDataRepo = tdns.ZoneDataRepo
+type CombinerState = tdns.CombinerState
+type LeaderElectionManager = tdns.LeaderElectionManager
+
 // Functions re-exported from tdns (not yet moved)
 var NewDistributionCache = tdns.NewDistributionCache
 var StartDistributionGC = tdns.StartDistributionGC
