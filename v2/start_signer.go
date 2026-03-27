@@ -24,16 +24,16 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	}
 
 	// MP engines from tdns-mp
-	tm := conf.Config.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 	}
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
-		func() { SignerMsgHandler(ctx, conf.Config, conf.Config.Internal.MsgQs) })
+		func() { SignerMsgHandler(ctx, conf, conf.InternalMp.MsgQs) })
 
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker",
-		func() error { return KeyStateWorker(ctx, conf.Config) })
+		func() error { return KeyStateWorker(ctx, conf) })
 
 	return nil
 }

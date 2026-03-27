@@ -24,8 +24,8 @@ const (
 
 // KeyStateWorker runs periodic checks on DNSSEC key states and performs
 // automatic transitions and standby key maintenance.
-func KeyStateWorker(ctx context.Context, conf *tdns.Config) error {
-	kasp := &conf.Kasp
+func KeyStateWorker(ctx context.Context, conf *Config) error {
+	kasp := &conf.Config.Kasp
 
 	propagationDelay := defaultPropagationDelay
 	if kasp.PropagationDelay != "" {
@@ -62,7 +62,7 @@ func KeyStateWorker(ctx context.Context, conf *tdns.Config) error {
 		standbyKskCount = kasp.StandbyKskCount
 	}
 
-	kdb := conf.Internal.KeyDB
+	kdb := conf.Config.Internal.KeyDB
 	if kdb == nil {
 		lgSigner.Warn("KeyStateWorker: no KeyDB available, exiting")
 		return nil
@@ -88,7 +88,7 @@ func KeyStateWorker(ctx context.Context, conf *tdns.Config) error {
 // 1. published → standby (time-based)
 // 2. retired → removed (time-based)
 // 3. maintain standby key count (generate new keys as needed)
-func checkAndTransitionKeys(conf *tdns.Config, kdb *tdns.KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
+func checkAndTransitionKeys(conf *Config, kdb *tdns.KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
 
 	// (1) Check published → standby transitions
@@ -103,7 +103,7 @@ func checkAndTransitionKeys(conf *tdns.Config, kdb *tdns.KeyDB, propagationDelay
 
 // transitionPublishedToStandby transitions keys that have been in "published"
 // state long enough for the DNSKEY RRset to propagate through all caches.
-func transitionPublishedToStandby(conf *tdns.Config, kdb *tdns.KeyDB, now time.Time, propagationDelay time.Duration) {
+func transitionPublishedToStandby(conf *Config, kdb *tdns.KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", tdns.DnskeyStatePublished)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting published keys", "err", err)
@@ -147,7 +147,7 @@ func transitionPublishedToStandby(conf *tdns.Config, kdb *tdns.KeyDB, now time.T
 // state long enough for all RRSIGs made with them to expire from caches.
 // For MP zones, keys transition to "mpremove" (awaiting agent confirmation)
 // instead of directly to "removed".
-func transitionRetiredToRemoved(conf *tdns.Config, kdb *tdns.KeyDB, now time.Time, propagationDelay time.Duration) {
+func transitionRetiredToRemoved(conf *Config, kdb *tdns.KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", tdns.DnskeyStateRetired)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting retired keys", "err", err)
@@ -204,7 +204,7 @@ func transitionRetiredToRemoved(conf *tdns.Config, kdb *tdns.KeyDB, now time.Tim
 // standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
 // required and no keys are in the pipeline (published or mpdist), new keys
 // are generated via GenerateAndStageKey.
-func maintainStandbyKeys(conf *tdns.Config, kdb *tdns.KeyDB, standbyZskCount, standbyKskCount int) {
+func maintainStandbyKeys(conf *Config, kdb *tdns.KeyDB, standbyZskCount, standbyKskCount int) {
 	for zoneName, zd := range tdns.Zones.Items() {
 		// Only process zones that do signing
 		if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
@@ -289,8 +289,8 @@ func countKeysByFlags(keys []DnssecKeyWithTimestamps, expectedFlags uint16) int 
 }
 
 // triggerResign sends a zone to the ResignQ to trigger a re-sign after key state changes.
-func triggerResign(conf *tdns.Config, zoneName string) {
-	if conf.Internal.ResignQ == nil {
+func triggerResign(conf *Config, zoneName string) {
+	if conf.Config.Internal.ResignQ == nil {
 		return
 	}
 
@@ -301,7 +301,7 @@ func triggerResign(conf *tdns.Config, zoneName string) {
 	}
 
 	select {
-	case conf.Internal.ResignQ <- zd:
+	case conf.Config.Internal.ResignQ <- zd:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
 	default:
 		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign will happen on next cycle", "zone", zoneName)

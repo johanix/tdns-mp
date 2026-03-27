@@ -62,6 +62,9 @@ type RejectedItemInfo = tdns.RejectedItemInfo
 type AgentMsgPost = tdns.AgentMsgPost
 type AgentMsgPostPlus = tdns.AgentMsgPostPlus
 type AgentMsgReport = tdns.AgentMsgReport
+type AgentMgmtPostPlus = tdns.AgentMgmtPostPlus
+type SynchedDataUpdate = tdns.SynchedDataUpdate
+type SynchedDataCmd = tdns.SynchedDataCmd
 type EditsResponseMsg = tdns.EditsResponseMsg
 type ConfigResponseMsg = tdns.ConfigResponseMsg
 type AuditResponseMsg = tdns.AuditResponseMsg
@@ -106,3 +109,24 @@ type LeaderElectionManager = tdns.LeaderElectionManager
 // Functions re-exported from tdns (not yet moved)
 var NewDistributionCache = tdns.NewDistributionCache
 var StartDistributionGC = tdns.StartDistributionGC
+
+// NewMsgQs creates and returns a *MsgQs with all channels initialized.
+func NewMsgQs() *MsgQs {
+	return &MsgQs{
+		Hello:             make(chan *AgentMsgReport, 100),
+		Beat:              make(chan *AgentMsgReport, 100),
+		Ping:              make(chan *AgentMsgReport, 100),
+		Msg:               make(chan *AgentMsgPostPlus, 100),
+		Command:           make(chan *AgentMgmtPostPlus, 100),
+		DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
+		SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
+		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
+		Confirmation:      make(chan *ConfirmationDetail, 100),
+		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
+		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
+		EditsResponse:     make(chan *EditsResponseMsg, 10),
+		ConfigResponse:    make(chan *ConfigResponseMsg, 10),
+		AuditResponse:     make(chan *AuditResponseMsg, 10),
+		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
+	}
+}

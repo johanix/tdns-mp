@@ -84,7 +84,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 }
 
 // APIcombinerEdits handles /combiner/edits requests for managing pending, approved and rejected edits.
-func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
+func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var cp CombinerEditPost
@@ -109,7 +109,7 @@ func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 			}
 		}()
 
-		kdb := conf.Internal.KeyDB
+		kdb := conf.Config.Internal.KeyDB
 		if kdb == nil {
 			resp.Error = true
 			resp.ErrorMsg = "KeyDB not initialized"
@@ -186,7 +186,7 @@ func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 				}
 			}
 
-			tm := conf.Internal.MPTransport
+			tm := conf.InternalMp.MPTransport
 			apiLocalAgents := make(map[string]bool)
 			if conf.MultiProvider != nil {
 				for _, a := range conf.MultiProvider.Agents {
@@ -263,7 +263,7 @@ func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 			if confirmTarget == "" {
 				confirmTarget = rec.SenderID
 			}
-			tm := conf.Internal.MPTransport
+			tm := conf.InternalMp.MPTransport
 			if tm != nil {
 				combinerSendConfirmation(tm, confirmTarget, syncResp)
 			}
@@ -422,7 +422,7 @@ func APIcombinerEdits(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 	}
 }
 
-func APIcombinerDebug(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
+func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var cp CombinerDebugPost
@@ -521,7 +521,7 @@ func APIcombinerDebug(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
 
 		case "agent-ping":
-			tm := conf.Internal.MPTransport
+			tm := conf.InternalMp.MPTransport
 			if tm == nil {
 				resp.Error = true
 				resp.ErrorMsg = "TransportManager not initialized"
@@ -556,7 +556,7 @@ func APIcombinerDebug(conf *tdns.Config) func(w http.ResponseWriter, r *http.Req
 				pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
 
 		case "agent-resync":
-			tm := conf.Internal.MPTransport
+			tm := conf.InternalMp.MPTransport
 			if tm == nil {
 				resp.Error = true
 				resp.ErrorMsg = "TransportManager not initialized"

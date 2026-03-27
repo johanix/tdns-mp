@@ -26,14 +26,14 @@ var lgCombiner = tdns.Logger("combiner")
 // Updates PeerRegistry liveness on beats and logs hello/ping messages.
 // Processes sync messages asynchronously: applies zone updates via CombinerProcessUpdate
 // and sends detailed confirmation back to the agent via DNSTransport.Confirm().
-func CombinerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQs,
+func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	protectedNamespaces []string, errorJournal *tdns.ErrorJournal) {
 	if msgQs == nil {
 		lgCombiner.Warn("no MsgQs configured, exiting")
 		return
 	}
 
-	tm := conf.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	var peerRegistry *transport.PeerRegistry
 	if tm != nil {
 		peerRegistry = tm.PeerRegistry
@@ -42,8 +42,8 @@ func CombinerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQ
 	// Build set of local agent identities (our own provider's agents).
 	// Protected-namespace checks only apply to remote agents, not our own.
 	localAgents := make(map[string]bool)
-	if conf.MultiProvider != nil {
-		for _, a := range conf.MultiProvider.Agents {
+	if conf.Config.MultiProvider != nil {
+		for _, a := range conf.Config.MultiProvider.Agents {
 			if a != nil && a.Identity != "" {
 				localAgents[a.Identity] = true
 			}
@@ -127,7 +127,7 @@ func CombinerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQ
 
 			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
-			kdb := conf.Internal.KeyDB
+			kdb := conf.Config.Internal.KeyDB
 
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
@@ -279,7 +279,7 @@ func CombinerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQ
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
 // Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
-func combinerSendConfirmation(tm *tdns.MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
+func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
 		return
@@ -350,7 +350,7 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 // sendEditsToAgent looks up the agent's current contributions for the zone and sends
 // them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
 // when an RFI EDITS is received.
-func sendEditsToAgent(ctx context.Context, conf *tdns.Config, tm *tdns.MPTransportBridge, agentID string, zone string) {
+func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
 	zd, exists := tdns.Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)

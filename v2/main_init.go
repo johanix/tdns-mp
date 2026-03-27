@@ -66,11 +66,14 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 		signerPayloadCrypto = pc
 	}
 
+	// Create MsgQs locally
+	conf.InternalMp.MsgQs = NewMsgQs()
+	conf.Config.Internal.MsgQs = conf.InternalMp.MsgQs // dual-write
+
 	// Initialize distribution cache for outbound tracking
-	if conf.Config.Internal.DistributionCache == nil {
-		conf.Config.Internal.DistributionCache = tdns.NewDistributionCache()
-		tdns.StartDistributionGC(conf.Config.Internal.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	}
+	conf.InternalMp.DistributionCache = NewDistributionCache()
+	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
+	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Create TransportManager for signer<->agent communication
 	chunkMode := strings.TrimSpace(mp.ChunkMode)
@@ -78,7 +81,7 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 	controlZone := dns.Fqdn(mp.Identity)
-	tm := tdns.NewMPTransportBridge(&tdns.MPTransportBridgeConfig{
+	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         controlZone,
 		APITimeout:          10 * time.Second,
@@ -86,9 +89,9 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 		ChunkMode:           chunkMode,
 		ChunkMaxSize:        mp.ChunkMaxSize,
 		PayloadCrypto:       signerPayloadCrypto,
-		DistributionCache:   conf.Config.Internal.DistributionCache,
+		DistributionCache:   conf.InternalMp.DistributionCache,
 		SupportedMechanisms: []string{"dns"},
-		MsgQs:               conf.Config.Internal.MsgQs,
+		MsgQs:               conf.InternalMp.MsgQs,
 		AuthorizedPeers: func() []string {
 			var peers []string
 			for _, a := range mp.Agents {
@@ -99,8 +102,8 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 			return peers
 		},
 	})
-	conf.Config.Internal.TransportManager = tm.TransportManager
-	conf.Config.Internal.MPTransport = tm
+	conf.InternalMp.MPTransport = tm
+	conf.InternalMp.TransportManager = tm.TransportManager
 
 	// Create SecurePayloadWrapper for decrypting incoming CHUNK payloads
 	var signerSecureWrapper *transport.SecurePayloadWrapper
@@ -113,7 +116,8 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 	if err != nil {
 		return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
 	}
-	conf.Config.Internal.CombinerState = signerState
+	conf.InternalMp.CombinerState = signerState
+	conf.Config.Internal.CombinerState = signerState // dual-write
 
 	// Wire chunk handler into TM
 	tm.ChunkHandler = signerState.ChunkHandler()
@@ -208,13 +212,17 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 		return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
 	}
 	combinerState.ProtectedNamespaces = mp.ProtectedNamespaces
-	conf.Config.Internal.CombinerState = combinerState
+	conf.InternalMp.CombinerState = combinerState
+	conf.Config.Internal.CombinerState = combinerState // dual-write
+
+	// Create MsgQs locally
+	conf.InternalMp.MsgQs = NewMsgQs()
+	conf.Config.Internal.MsgQs = conf.InternalMp.MsgQs // dual-write
 
 	// Initialize distribution cache
-	if conf.Config.Internal.DistributionCache == nil {
-		conf.Config.Internal.DistributionCache = tdns.NewDistributionCache()
-		tdns.StartDistributionGC(conf.Config.Internal.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	}
+	conf.InternalMp.DistributionCache = NewDistributionCache()
+	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
+	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Create TransportManager
 	var combinerPayloadCrypto *transport.PayloadCrypto
@@ -224,7 +232,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	if chunkMode == "" {
 		chunkMode = "edns0"
 	}
-	tm := tdns.NewMPTransportBridge(&tdns.MPTransportBridgeConfig{
+	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         dns.Fqdn(mp.Identity),
 		DNSTimeout:          5 * time.Second,
@@ -232,9 +240,9 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 		ChunkMode:           chunkMode,
 		ChunkMaxSize:        mp.ChunkMaxSize,
 		PayloadCrypto:       combinerPayloadCrypto,
-		DistributionCache:   conf.Config.Internal.DistributionCache,
+		DistributionCache:   conf.InternalMp.DistributionCache,
 		SupportedMechanisms: []string{"dns"},
-		MsgQs:               conf.Config.Internal.MsgQs,
+		MsgQs:               conf.InternalMp.MsgQs,
 		AuthorizedPeers: func() []string {
 			var peers []string
 			for _, a := range mp.Agents {
@@ -245,8 +253,8 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 			return peers
 		},
 	})
-	conf.Config.Internal.TransportManager = tm.TransportManager
-	conf.Config.Internal.MPTransport = tm
+	conf.InternalMp.MPTransport = tm
+	conf.InternalMp.TransportManager = tm.TransportManager
 
 	// Register agent peers
 	for _, agentConf := range mp.Agents {

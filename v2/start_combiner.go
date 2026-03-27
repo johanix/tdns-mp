@@ -86,7 +86,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	}
 
 	// MP engines from tdns-mp
-	tm := conf.Config.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 		lgCombiner.Info("combiner incoming message router started")
@@ -95,12 +95,12 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	// Start combiner message handler
 	var protectedNS []string
 	var errJournal *tdns.ErrorJournal
-	if conf.Config.Internal.CombinerState != nil {
-		protectedNS = conf.Config.Internal.CombinerState.ProtectedNamespaces
-		errJournal = conf.Config.Internal.CombinerState.ErrorJournal
+	if conf.InternalMp.CombinerState != nil {
+		protectedNS = conf.InternalMp.CombinerState.ProtectedNamespaces
+		errJournal = conf.InternalMp.CombinerState.ErrorJournal
 	}
 	tdns.StartEngineNoError(&tdns.Globals.App, "CombinerMsgHandler",
-		func() { CombinerMsgHandler(ctx, conf.Config, conf.Config.Internal.MsgQs, protectedNS, errJournal) })
+		func() { CombinerMsgHandler(ctx, conf, conf.InternalMp.MsgQs, protectedNS, errJournal) })
 
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
 	mp := conf.Config.MultiProvider
