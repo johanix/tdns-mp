@@ -52,7 +52,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, err := conf.Config.ParseZones(ctx, true); err != nil {
+				if _, err := conf.Config.ReloadZoneConfig(ctx); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}

@@ -79,26 +79,10 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		}
 	}
 
-	// Append tdns-mp PreRefresh/PostRefresh closures to MP zones.
-	// ParseZones already registered the tdns versions; we append ours
-	// on top (duplicate execution is idempotent — see audit 9.1).
-	tm := conf.InternalMp.MPTransport
-	msgQs := conf.InternalMp.MsgQs
-	mp := conf.Config.MultiProvider
-	for _, zoneName := range conf.Config.Internal.MPZoneNames {
-		zd, ok := tdns.Zones.Get(zoneName)
-		if !ok || !zd.Options[tdns.OptMultiProvider] {
-			continue
-		}
-		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
-			func(zd, new_zd *tdns.ZoneData) {
-				MPPreRefresh(zd, new_zd, tm, msgQs, mp)
-			})
-		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
-			func(zd *tdns.ZoneData) {
-				MPPostRefresh(zd, tm, msgQs)
-			})
-	}
+	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
+	// and install hook so new zones added via reload also get them.
+	conf.RegisterMPRefreshCallbacks()
+	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
 
 	// DNS engines (APIdispatcher, RefreshEngine, Notifier, NotifyHandler, DnsEngine)
 	// MP engines are skipped because AppType == AppTypeMPCombiner
@@ -107,7 +91,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	}
 
 	// MP engines from tdns-mp
-	tm = conf.InternalMp.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 		lgCombiner.Info("combiner incoming message router started")
@@ -124,7 +108,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		func() { CombinerMsgHandler(ctx, conf, conf.InternalMp.MsgQs, protectedNS, errJournal) })
 
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
-	mp = conf.Config.MultiProvider
+	mp := conf.Config.MultiProvider
 	if mp != nil && len(mp.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.Config.SetupCombinerSyncRouter(ctx)
 		if err != nil {

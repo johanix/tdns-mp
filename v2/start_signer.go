@@ -17,26 +17,10 @@ import (
 // startup to tdns.StartAuth (which skips MP engines for
 // AppTypeMPSigner), then starts the MP engines from tdns-mp.
 func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) error {
-	// Append tdns-mp PreRefresh/PostRefresh closures to MP zones.
-	// ParseZones already registered the tdns versions; we append ours
-	// on top (duplicate execution is idempotent — see audit 9.1).
-	tm := conf.InternalMp.MPTransport
-	msgQs := conf.InternalMp.MsgQs
-	mp := conf.Config.MultiProvider
-	for _, zoneName := range conf.Config.Internal.MPZoneNames {
-		zd, ok := tdns.Zones.Get(zoneName)
-		if !ok || !zd.Options[tdns.OptMultiProvider] {
-			continue
-		}
-		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
-			func(zd, new_zd *tdns.ZoneData) {
-				MPPreRefresh(zd, new_zd, tm, msgQs, mp)
-			})
-		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
-			func(zd *tdns.ZoneData) {
-				MPPostRefresh(zd, tm, msgQs)
-			})
-	}
+	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
+	// and install hook so new zones added via reload also get them.
+	conf.RegisterMPRefreshCallbacks()
+	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
 
 	// DNS engines (refresh, signing, query, NOTIFY, etc.)
 	// MP engines are skipped because AppType == AppTypeMPSigner
@@ -45,7 +29,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	}
 
 	// MP engines from tdns-mp
-	tm = conf.InternalMp.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 	}

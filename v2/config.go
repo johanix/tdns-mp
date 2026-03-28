@@ -21,6 +21,37 @@ type Config struct {
 	InternalMp InternalMpConf
 }
 
+// RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
+// closures to all MP zones that don't already have them. Called at
+// startup and after every zone reload (SIGHUP / "config reload-zones")
+// via the PostParseZonesHook.
+func (conf *Config) RegisterMPRefreshCallbacks() {
+	tm := conf.InternalMp.MPTransport
+	msgQs := conf.InternalMp.MsgQs
+	mp := conf.Config.MultiProvider
+	if conf.InternalMp.refreshRegistered == nil {
+		conf.InternalMp.refreshRegistered = make(map[string]bool)
+	}
+	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+		if conf.InternalMp.refreshRegistered[zoneName] {
+			continue
+		}
+		zd, ok := tdns.Zones.Get(zoneName)
+		if !ok || !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		conf.InternalMp.refreshRegistered[zoneName] = true
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
+			func(zd, new_zd *tdns.ZoneData) {
+				MPPreRefresh(zd, new_zd, tm, msgQs, mp)
+			})
+		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
+			func(zd *tdns.ZoneData) {
+				MPPostRefresh(zd, tm, msgQs)
+			})
+	}
+}
+
 // InternalMpConf holds multi-provider internal state local to
 // tdns-mp. Mirrors tdns.InternalMpConf field-by-field. During
 // migration, both exist — code in tdns-mp reads from here,
@@ -38,4 +69,5 @@ type InternalMpConf struct {
 	ChunkPayloadStore     ChunkPayloadStore
 	MPZoneNames           []string
 	DistributionCache     *DistributionCache
+	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
 }
