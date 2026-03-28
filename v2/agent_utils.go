@@ -725,7 +725,9 @@ func (ar *AgentRegistry) RemoveRemoteAgent(zonename ZoneName, identity AgentId) 
 
 	// Clean up zone association in agent
 	if agent, exists := ar.S.Get(identity); exists {
+		agent.Mu.Lock()
 		delete(agent.Zones, zonename)
+		agent.Mu.Unlock()
 		ar.S.Set(identity, agent)
 	}
 }
@@ -943,12 +945,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					ar.CleanupZoneRelationships(zonename)
 				} else {
 					lgAgent.Info("agent no longer in HSYNC3 RRset, cleaning up", "zone", zonename, "agent", hsync3.Identity)
-					if agent, exists := ar.S.Get(AgentId(hsync3.Identity)); exists {
-						agent.Mu.Lock()
-						delete(agent.Zones, zonename)
-						agent.Mu.Unlock()
-						ar.RemoveRemoteAgent(zonename, AgentId(hsync3.Identity))
-					}
+					ar.RemoveRemoteAgent(zonename, AgentId(hsync3.Identity))
 				}
 			}
 		}

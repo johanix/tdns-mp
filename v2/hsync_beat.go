@@ -166,9 +166,20 @@ func (ar *AgentRegistry) SendHeartbeats() {
 }
 
 func (agent *Agent) CheckState(ourBeatInterval uint32) {
-	timeSinceLastReceivedBeat := time.Since(agent.ApiDetails.LatestRBeat)
-	timeSinceLastSentBeat := time.Since(agent.ApiDetails.LatestSBeat)
+	// Use best-of-both transports: if either transport has recent beats, agent is healthy.
+	latestRBeat := agent.ApiDetails.LatestRBeat
+	if agent.DnsDetails.LatestRBeat.After(latestRBeat) {
+		latestRBeat = agent.DnsDetails.LatestRBeat
+	}
+	latestSBeat := agent.ApiDetails.LatestSBeat
+	if agent.DnsDetails.LatestSBeat.After(latestSBeat) {
+		latestSBeat = agent.DnsDetails.LatestSBeat
+	}
+
 	remoteBeatInterval := time.Duration(agent.ApiDetails.BeatInterval) * time.Second
+	if dnsInterval := time.Duration(agent.DnsDetails.BeatInterval) * time.Second; dnsInterval > remoteBeatInterval {
+		remoteBeatInterval = dnsInterval
+	}
 	if remoteBeatInterval == 0 {
 		remoteBeatInterval = 30 * time.Second
 	}
@@ -183,6 +194,9 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 	default:
 		return
 	}
+
+	timeSinceLastReceivedBeat := time.Since(latestRBeat)
+	timeSinceLastSentBeat := time.Since(latestSBeat)
 
 	// Check beat health and set DEGRADED/INTERRUPTED when beats are failing
 	// NOTE: OPERATIONAL vs LEGACY is determined by zone count (see RecomputeSharedZonesAndSyncState)

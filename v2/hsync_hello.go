@@ -164,16 +164,15 @@ func (ar *AgentRegistry) agentNeedsHello(agent *Agent) bool {
 
 // sendHelloToAgent sends a single HELLO to an agent using all shared zones.
 func (ar *AgentRegistry) sendHelloToAgent(agent *Agent) {
-	if len(agent.Zones) > 0 {
-		var firstZone ZoneName
-		for zone := range agent.Zones {
-			firstZone = zone
-			break
-		}
-		ar.SingleHello(agent, firstZone)
-	} else {
-		ar.SingleHello(agent, "")
+	agent.Mu.RLock()
+	var firstZone ZoneName
+	for zone := range agent.Zones {
+		firstZone = zone
+		break
 	}
+	agent.Mu.RUnlock()
+
+	ar.SingleHello(agent, firstZone)
 }
 
 // FastBeatAttempts sends up to 3 beats with 5s spacing after HELLO succeeds.

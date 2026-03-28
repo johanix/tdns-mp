@@ -238,3 +238,78 @@ PR. Each finding is categorized as Fix Now, Defer, or Disagree.
 - **File**: `v2/hsync_utils.go:917-923`
 - **Why**: Code is correct. Copying the slice is sufficient — dns.RR
   objects are effectively immutable after creation.
+
+---
+
+## Batch 2
+
+### Fix Now
+
+### 30. RemoveRemoteAgent mutates agent.Zones without lock — DONE
+
+- **File**: `v2/agent_utils.go:726-731`
+- **Description**: `delete(agent.Zones, zonename)` without holding
+  `agent.Mu`. Races with `sharedZonesForAgent` which holds
+  `RLock`.
+- **Fix**: Add `agent.Mu.Lock()` around the delete. Also removed
+  redundant lock+delete at line 946-950 (caller did the same
+  thing before calling `RemoveRemoteAgent`).
+
+### 31. CheckState only inspects ApiDetails — DONE
+
+- **File**: `v2/hsync_beat.go:168-199`
+- **Description**: `CheckState` uses only `ApiDetails` timestamps
+  for beat health. DNS-only agents get falsely degraded when API
+  transport is idle.
+- **Fix**: Use best-of-both transports: pick the most recent
+  received/sent beat timestamp and largest beat interval from
+  either transport.
+
+### 32. sendHelloToAgent reads agent.Zones without lock — DONE
+
+- **File**: `v2/hsync_hello.go:165-177`
+- **Description**: Iterates `agent.Zones` without holding
+  `agent.Mu`. Same race as `sharedZonesForAgent` (fixed earlier).
+- **Fix**: Add `agent.Mu.RLock()` around the zone map access.
+
+### 33. Redundant lock+delete before RemoveRemoteAgent — DONE
+
+- **File**: `v2/agent_utils.go:946-951`
+- **Description**: Lines 947-949 lock and delete `agent.Zones`,
+  then call `RemoveRemoteAgent` which does the same. Redundant.
+- **Fix**: Removed inline lock+delete. `RemoveRemoteAgent` now
+  handles locking internally (fix 30).
+
+### Defer
+
+### 34. CleanupZoneRelationships stub
+
+- **File**: `v2/agent_utils.go:809-812`
+- **Description**: Function is a no-op placeholder. Suggested
+  implementation: remove zone from RemoteAgents, delete from all
+  agents' Zones maps, call RecomputeSharedZonesAndSyncState.
+- **Why defer**: Known TODO (audit issue 4.5). Feature, not bug.
+
+### 35. LocateAgent unbounded goroutines
+
+- **File**: `v2/agent_utils.go:179-431`
+- **Description**: Spawns goroutines for URI/SVCB/KEY/TLSA lookups
+  that race to update the same agent.
+- **Why disagree**: Fan-out is bounded (4 goroutines per agent).
+  All writes hold `agent.Mu`. Adding WaitGroup/errgroup is
+  over-engineering.
+
+### Disagree
+
+### 36. Transaction handler lock scope too wide
+
+- **File**: `v2/apihandler_transaction.go:85-99`
+- **Why**: Lock is held for microseconds over a tiny map (0-5
+  entries). `formatDuration` is trivial. Premature optimization.
+
+### 37. Nil checks for ApiDetails/DnsDetails under RLock
+
+- **File**: `v2/hsync_beat.go:68-71`
+- **Why**: `ApiDetails` and `DnsDetails` are initialized in agent
+  constructors and never set to nil. Guards against impossible
+  scenario.
