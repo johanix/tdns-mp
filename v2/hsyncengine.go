@@ -1012,7 +1012,8 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	// Send the response immediately with a timeout to avoid blocking
 	select {
 	case req.Response <- SyncStatus{
-		Agents:   agents,
+		// Agents field skipped: local *Agent is not compatible with *tdns.Agent
+		// in the aliased SyncStatus. Status queries still get Identity and Error.
 		Identity: AgentId(ar.LocalAgent.Identity),
 		Error:    false,
 	}:

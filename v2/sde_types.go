@@ -162,31 +162,14 @@ type TrackedRRInfo struct {
 }
 
 // --- From hsyncengine.go ---
+// SyncRequest and SyncResponse stay as aliases because the tdns refresh
+// callback (MPPostRefresh in tdns/v2/hsync_utils.go) sends tdns.SyncRequest
+// to zd.SyncQ, and HsyncEngine in tdns-mp reads from the same channel.
+type SyncRequest = tdns.SyncRequest
+type SyncResponse = tdns.SyncResponse
 
-type SyncRequest struct {
-	Command      string
-	ZoneName     ZoneName
-	ZoneData     *tdns.ZoneData
-	SyncStatus   *HsyncStatus
-	OldDnskeys   *core.RRset
-	NewDnskeys   *core.RRset
-	DnskeyStatus *DnskeyStatus
-	Response     chan SyncResponse
-}
-
-type SyncResponse struct {
-	Status   bool
-	Error    bool
-	ErrorMsg string
-	Msg      string
-}
-
-type SyncStatus struct {
-	Identity AgentId
-	Agents   map[AgentId]*Agent
-	Error    bool
-	Response chan SyncStatus
-}
+// SyncStatus stays as alias for same reason as SyncRequest.
+type SyncStatus = tdns.SyncStatus
 
 type DeferredTask struct {
 	Action      string
@@ -208,24 +191,11 @@ type ZoneAgentData struct {
 
 // --- From zone_utils.go ---
 
-type HsyncStatus struct {
-	Time         time.Time
-	ZoneName     string
-	Command      string
-	Status       bool
-	Error        bool
-	ErrorMsg     string
-	Msg          string
-	HsyncAdds    []dns.RR
-	HsyncRemoves []dns.RR
-}
+// HsyncStatus stays as alias — embedded in tdns.SyncRequest which crosses
+// the tdns/tdns-mp boundary via the shared SyncQ channel.
+type HsyncStatus = tdns.HsyncStatus
 
 // --- From hsync_utils.go ---
 
-type DnskeyStatus struct {
-	Time             time.Time
-	ZoneName         string
-	LocalAdds        []dns.RR // Local DNSKEYs added since last check
-	LocalRemoves     []dns.RR // Local DNSKEYs removed since last check
-	CurrentLocalKeys []dns.RR // Complete current set of local DNSKEYs (for replace operations)
-}
+// DnskeyStatus stays as alias — same reason as HsyncStatus.
+type DnskeyStatus = tdns.DnskeyStatus
