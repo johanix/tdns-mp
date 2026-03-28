@@ -1439,6 +1439,9 @@ func checkDNSKEYPolicy(zd *tdns.ZoneData, senderID string) (bool, string) {
 		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
 	}
 
+	// Normalize: HSYNC3.Label may have trailing dot, HSYNCPARAM signers do not
+	senderLabel = strings.TrimSuffix(senderLabel, ".")
+
 	// Check if sender's label is in the signers list
 	if !hp.IsSignerLabel(senderLabel) {
 		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, signers)

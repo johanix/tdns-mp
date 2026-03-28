@@ -646,7 +646,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
 
 		case "refresh-keys":
-			zd.RequestAndWaitForKeyInventory(r.Context())
+			RequestAndWaitForKeyInventory(zd, r.Context(), conf.InternalMp.MPTransport)
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
