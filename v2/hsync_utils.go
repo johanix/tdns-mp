@@ -358,7 +358,7 @@ func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context, tm *M
 // as confirmed data (the combiner already has them).
 //
 // Modeled on RequestAndWaitForKeyInventory.
-func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge, msgQs *MsgQs) {
+func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge, msgQs *MsgQs, zdr *ZoneDataRepo) {
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
 		return
@@ -399,7 +399,7 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 			zd.ZoneName, totalAgents, totalRRs)
 
 		// Apply to SDE with per-agent attribution
-		applyEditsToSDE(zd, resp.AgentRecords)
+		applyEditsToSDE(zd, resp.AgentRecords, zdr)
 
 	case <-ctx.Done():
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: cancelled", zd.ZoneName)
@@ -493,13 +493,12 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 // applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
 // AgentRecords is agentID → owner → []RR strings. Each agent's records are added with
 // proper attribution so the SDE knows which agent contributed what.
-func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string) {
+func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string, zdr *ZoneDataRepo) {
 	if len(agentRecords) == 0 {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no records to apply", zd.ZoneName)
 		return
 	}
 
-	zdr := tdns.Conf.Internal.ZoneDataRepo
 	if zdr == nil {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
 		return

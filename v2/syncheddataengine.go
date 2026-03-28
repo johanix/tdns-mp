@@ -130,7 +130,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			}
 			if hasCombiner {
 				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
-				RequestAndWaitForEdits(zd, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs)
+				RequestAndWaitForEdits(zd, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs, conf.InternalMp.ZoneDataRepo)
 			}
 			weAreSigner := zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.WeAreSigner
 			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner
