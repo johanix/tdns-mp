@@ -455,6 +455,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.Config.Internal.TransportManager = tm.TransportManager // dual-write
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
+	conf.InternalMp.AgentRegistry.MPTransport = tm
 
 	return nil
 }
