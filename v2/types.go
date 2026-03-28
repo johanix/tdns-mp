@@ -48,10 +48,7 @@ type ZoneUpdate = tdns.ZoneUpdate
 type OwnerData = tdns.OwnerData
 
 // Types that stay as aliases until their defining files are copied
-// (Steps 2-4 of the big bang)
-type MsgQs = tdns.MsgQs
-type KeystateInventoryMsg = tdns.KeystateInventoryMsg
-type KeystateSignalMsg = tdns.KeystateSignalMsg
+// (Steps 3-4 of the big bang)
 type DistributionCache = tdns.DistributionCache
 type DistributionInfo = tdns.DistributionInfo
 type ChunkPayloadStore = tdns.ChunkPayloadStore
@@ -61,11 +58,6 @@ type RejectedItemInfo = tdns.RejectedItemInfo
 type SynchedDataUpdate = tdns.SynchedDataUpdate
 type SynchedDataResponse = tdns.SynchedDataResponse
 type SynchedDataCmd = tdns.SynchedDataCmd
-type EditsResponseMsg = tdns.EditsResponseMsg
-type ConfigResponseMsg = tdns.ConfigResponseMsg
-type AuditResponseMsg = tdns.AuditResponseMsg
-type StatusUpdateMsg = tdns.StatusUpdateMsg
-type MessageRetentionConf = tdns.MessageRetentionConf
 
 // Types from gossip/provider/leader files (Step 4)
 type GossipMessage = tdns.GossipMessage
