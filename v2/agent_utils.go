@@ -548,7 +548,11 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename)
 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
-	if imr := tdns.Conf.Internal.ImrEngine; imr != nil {
+	var imr *tdns.Imr
+	if ar.MPTransport != nil && ar.MPTransport.getImrEngine != nil {
+		imr = ar.MPTransport.getImrEngine()
+	}
+	if imr != nil {
 		lgAgent.Debug("triggering immediate discovery", "agent", remoteid)
 		go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
 	} else {

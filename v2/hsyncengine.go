@@ -213,8 +213,11 @@ func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
 // retryPendingDiscoveries attempts discovery for all agents in NEEDED state.
 // Skips the iteration if IMR engine is not yet available (will retry next tick).
 func (ar *AgentRegistry) retryPendingDiscoveries() {
-	// Get IMR engine - skip iteration if not ready yet (will retry next tick)
-	imr := tdns.Conf.Internal.ImrEngine
+	// Get IMR engine via injected closure - skip iteration if not ready yet (will retry next tick)
+	var imr *tdns.Imr
+	if ar.MPTransport != nil && ar.MPTransport.getImrEngine != nil {
+		imr = ar.MPTransport.getImrEngine()
+	}
 	if imr == nil {
 		lgEngine.Debug("IMR engine not ready, will retry next interval")
 		return
