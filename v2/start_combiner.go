@@ -79,6 +79,26 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		}
 	}
 
+	// Append tdns-mp PreRefresh/PostRefresh closures to MP zones.
+	// ParseZones already registered the tdns versions; we append ours
+	// on top (duplicate execution is idempotent — see audit 9.1).
+	tm := conf.InternalMp.MPTransport
+	msgQs := conf.InternalMp.MsgQs
+	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+		zd, ok := tdns.Zones.Get(zoneName)
+		if !ok || !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
+			func(zd, new_zd *tdns.ZoneData) {
+				MPPreRefresh(zd, new_zd, tm, msgQs)
+			})
+		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
+			func(zd *tdns.ZoneData) {
+				MPPostRefresh(zd, tm, msgQs)
+			})
+	}
+
 	// DNS engines (APIdispatcher, RefreshEngine, Notifier, NotifyHandler, DnsEngine)
 	// MP engines are skipped because AppType == AppTypeMPCombiner
 	if err := conf.Config.StartCombiner(ctx, apirouter); err != nil {
@@ -86,7 +106,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	}
 
 	// MP engines from tdns-mp
-	tm := conf.InternalMp.MPTransport
+	tm = conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 		lgCombiner.Info("combiner incoming message router started")

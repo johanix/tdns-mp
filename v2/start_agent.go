@@ -34,6 +34,26 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 	kdb := conf.Config.Internal.KeyDB
 
+	// Append tdns-mp PreRefresh/PostRefresh closures to MP zones.
+	// ParseZones already registered the tdns versions; we append ours
+	// on top (duplicate execution is idempotent — see audit 9.1).
+	tm := conf.InternalMp.MPTransport
+	msgQs := conf.InternalMp.MsgQs
+	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+		zd, ok := tdns.Zones.Get(zoneName)
+		if !ok || !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
+			func(zd, new_zd *tdns.ZoneData) {
+				MPPreRefresh(zd, new_zd, tm, msgQs)
+			})
+		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
+			func(zd *tdns.ZoneData) {
+				MPPostRefresh(zd, tm, msgQs)
+			})
+	}
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
