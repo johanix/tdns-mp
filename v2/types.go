@@ -55,6 +55,18 @@ type ChunkPayloadStore = tdns.ChunkPayloadStore
 // Internal state types that stay as aliases during dual-write period
 type CombinerState = tdns.CombinerState
 
+// Agent distrib API types
+type AgentDistribPost = tdns.AgentDistribPost
+type AgentDistribResponse = tdns.AgentDistribResponse
+type DistributionSummary = tdns.DistributionSummary
+type PeerInfo = tdns.PeerInfo
+
+// Transaction API types
+type TransactionPost = tdns.TransactionPost
+type TransactionResponse = tdns.TransactionResponse
+type TransactionSummary = tdns.TransactionSummary
+type TransactionErrorSummary = tdns.TransactionErrorSummary
+
 // Functions re-exported from tdns (not yet moved)
 var NewDistributionCache = tdns.NewDistributionCache
 var StartDistributionGC = tdns.StartDistributionGC
