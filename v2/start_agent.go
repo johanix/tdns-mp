@@ -51,11 +51,11 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	}
 
 	// Initialize combiner as a virtual peer so HsyncEngine can manage heartbeats
-	if err := conf.InternalMp.AgentRegistry.InitializeCombinerAsPeer(conf.Config); err != nil {
+	if err := conf.InternalMp.AgentRegistry.InitializeCombinerAsPeer(conf); err != nil {
 		lgAgent.Warn("failed to initialize combiner as peer, continuing without combiner heartbeat monitoring", "err", err)
 	}
 	// Initialize signer as a virtual peer so it shows in "agent peer list" and can be pinged
-	if err := conf.InternalMp.AgentRegistry.InitializeSignerAsPeer(conf.Config); err != nil {
+	if err := conf.InternalMp.AgentRegistry.InitializeSignerAsPeer(conf); err != nil {
 		lgAgent.Warn("failed to initialize signer as peer, continuing without signer peer registration", "err", err)
 	}
 
@@ -74,7 +74,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 	// Agent-specific engines
 	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncEngine", func() {
-		tdns.HsyncEngine(ctx, conf.Config, conf.InternalMp.MsgQs)
+		conf.HsyncEngine(ctx, conf.InternalMp.MsgQs)
 	})
 	tdns.StartEngineNoError(&tdns.Globals.App, "InfraBeatLoop", func() {
 		conf.InternalMp.AgentRegistry.StartInfraBeatLoop(ctx)
@@ -83,7 +83,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		conf.InternalMp.AgentRegistry.DiscoveryRetrierNG(ctx)
 	})
 	tdns.StartEngineNoError(&tdns.Globals.App, "SynchedDataEngine", func() {
-		conf.Config.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
+		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
 	})
 
 	syncrtr, err := conf.Config.SetupAgentSyncRouter(ctx)

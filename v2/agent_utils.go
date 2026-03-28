@@ -808,7 +808,7 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 }
 
 // UpdateAgents updates the registry based on the HSYNC3 records in the request.
-func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate) error {
+func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate, msgQs *MsgQs) error {
 
 	var updatedIdentities = map[AgentId]bool{}
 	var affectedIdentities = map[AgentId]bool{}
@@ -883,7 +883,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 									Upstream:    upstreamIdentity,
 								}
 
-								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ)
+								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
 								return true, nil
 							},
 							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync3.Upstream),
@@ -908,7 +908,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 									Downstream:  AgentId(hsync3.Identity),
 								}
 
-								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ)
+								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
 								return true, nil
 							},
 							Desc: fmt.Sprintf("RFI for downstream data from %q", hsync3.Identity),

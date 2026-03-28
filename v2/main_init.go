@@ -72,8 +72,6 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
-	conf.Config.Internal.MsgQs = conf.InternalMp.MsgQs // dual-write
-
 	// Initialize distribution cache for outbound tracking
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
@@ -221,7 +219,6 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
-	conf.Config.Internal.MsgQs = conf.InternalMp.MsgQs // dual-write
 
 	// Initialize distribution cache
 	conf.InternalMp.DistributionCache = NewDistributionCache()
@@ -340,8 +337,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	}
 
 	// Initialize AgentRegistry
-	conf.InternalMp.AgentRegistry = conf.Config.NewAgentRegistry()
-	conf.Config.Internal.AgentRegistry = conf.InternalMp.AgentRegistry // dual-write
+	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
 	// Initialize CombinerState (agent-side: just an ErrorJournal, no chunk handler)
 	combinerID := "combiner"
@@ -364,7 +360,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
-	conf.Config.Internal.MsgQs = conf.InternalMp.MsgQs // dual-write
 
 	// Initialize distribution cache
 	conf.InternalMp.DistributionCache = NewDistributionCache()

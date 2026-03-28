@@ -96,7 +96,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 			HBticker.Stop()
 			return
 		case syncitem = <-syncQ:
-			registry.SyncRequestHandler(ourId, syncitem, synchedDataUpdateQ)
+			registry.SyncRequestHandler(ourId, syncitem, synchedDataUpdateQ, msgQs)
 
 		case msgReport = <-helloQ:
 			registry.HelloHandler(msgReport)
@@ -184,7 +184,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 					LocalRemoves:     ds.LocalRemoves,
 					CurrentLocalKeys: ds.CurrentLocalKeys,
 				},
-			}, synchedDataUpdateQ)
+			}, synchedDataUpdateQ, msgQs)
 		}
 	}
 }
@@ -243,14 +243,14 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 	}
 }
 
-func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, synchedDataUpdateQ chan *SynchedDataUpdate) {
+func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, synchedDataUpdateQ chan *SynchedDataUpdate, msgQs *MsgQs) {
 	lgEngine.Debug("sync request received", "zone", req.ZoneName)
 	switch req.Command {
 	case "HSYNC-UPDATE":
 		lgEngine.Info("HSYNC RRset changed, updating agents", "zone", req.ZoneName)
 		// Run UpdateAgents without waiting for completion
 		go func() {
-			err := ar.UpdateAgents(ourId, req, req.ZoneName, synchedDataUpdateQ)
+			err := ar.UpdateAgents(ourId, req, req.ZoneName, synchedDataUpdateQ, msgQs)
 			if err != nil {
 				lgEngine.Error("error updating agents", "zone", req.ZoneName, "err", err)
 			}
