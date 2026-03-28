@@ -339,10 +339,11 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
-	// Wire SyncQ: tdns creates the channel in MainInit; we share it so that
-	// tdns refresh callbacks (MPPostRefresh) send to the same channel that
-	// HsyncEngine reads from.
+	// Wire shared channels and data from tdns: these are created in tdns
+	// MainInit/ParseZones and must be shared so that tdns refresh callbacks
+	// and HsyncEngine/SDE operate on the same state.
 	conf.InternalMp.SyncQ = conf.Config.Internal.SyncQ
+	conf.InternalMp.MPZoneNames = conf.Config.Internal.MPZoneNames
 
 	// Initialize CombinerState (agent-side: just an ErrorJournal, no chunk handler)
 	combinerID := "combiner"
