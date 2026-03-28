@@ -457,7 +457,7 @@ var combinerZoneBumpCmd = &cobra.Command{
 
 		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
 			Command: "bump",
-			Zone:    tdns.Globals.Zonename,
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		})
 		if err != nil {
 			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())

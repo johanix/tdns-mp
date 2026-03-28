@@ -195,7 +195,7 @@ func (conf *Config) publishDnsTransport(zd *tdns.ZoneData) error {
 	lgAgent.Debug("published KEY record", "agent", identity)
 
 	publishName := "dns." + identity
-	err = AgentJWKKeyPrep(zd, publishName, zd.KeyDB)
+	err = AgentJWKKeyPrep(zd, publishName, zd.KeyDB, conf.Config.MultiProvider)
 	if err != nil {
 		lgAgent.Warn("failed to publish JWK record, continuing without JWK", "err", err)
 	} else {
@@ -371,7 +371,7 @@ func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
 }
 
 // AgentJWKKeyPrep publishes a JWK record for the agent's JOSE/HPKE long-term public keys.
-func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, kdb *tdns.KeyDB) error {
+func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, kdb *tdns.KeyDB, mp *tdns.MultiProviderConf) error {
 	lgAgent.Info("publishing JWK record", "zone", zd.ZoneName, "name", publishname)
 
 	// Check if JWK publication is disabled
@@ -381,7 +381,7 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, kdb *tdns.KeyDB) err
 	}
 
 	// Load JOSE private key from config
-	privKeyPath := strings.TrimSpace(tdns.Conf.MultiProvider.LongTermJosePrivKey)
+	privKeyPath := strings.TrimSpace(mp.LongTermJosePrivKey)
 	if privKeyPath == "" {
 		return fmt.Errorf("AgentJWKKeyPrep: no JOSE key path configured")
 	}

@@ -84,6 +84,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	// on top (duplicate execution is idempotent — see audit 9.1).
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
+	mp := conf.Config.MultiProvider
 	for _, zoneName := range conf.Config.Internal.MPZoneNames {
 		zd, ok := tdns.Zones.Get(zoneName)
 		if !ok || !zd.Options[tdns.OptMultiProvider] {
@@ -91,7 +92,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		}
 		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
 			func(zd, new_zd *tdns.ZoneData) {
-				MPPreRefresh(zd, new_zd, tm, msgQs)
+				MPPreRefresh(zd, new_zd, tm, msgQs, mp)
 			})
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
 			func(zd *tdns.ZoneData) {
@@ -123,7 +124,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		func() { CombinerMsgHandler(ctx, conf, conf.InternalMp.MsgQs, protectedNS, errJournal) })
 
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
-	mp := conf.Config.MultiProvider
+	mp = conf.Config.MultiProvider
 	if mp != nil && len(mp.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.Config.SetupCombinerSyncRouter(ctx)
 		if err != nil {

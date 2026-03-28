@@ -581,17 +581,15 @@ func ValidateHsyncRRset(zd *tdns.ZoneData) (bool, error) {
 // ourHsyncIdentities returns the set of FQDN identities we should match against
 // HSYNC3 records. On agents this is the single Globals.AgentId; on signers/combiners
 // it is all configured agent identities from Conf.MultiProvider.Agents.
-func ourHsyncIdentities() []string {
+func ourHsyncIdentities(mp *tdns.MultiProviderConf) []string {
 	var ids []string
-	if tdns.Conf.MultiProvider != nil {
-		if tdns.Conf.MultiProvider.Role == "agent" {
-			// Agent: our own identity
-			if tdns.Conf.MultiProvider.Identity != "" {
-				ids = append(ids, dns.Fqdn(tdns.Conf.MultiProvider.Identity))
+	if mp != nil {
+		if mp.Role == "agent" {
+			if mp.Identity != "" {
+				ids = append(ids, dns.Fqdn(mp.Identity))
 			}
 		} else {
-			// Signer/Combiner: configured agent identities
-			for _, agent := range tdns.Conf.MultiProvider.Agents {
+			for _, agent := range mp.Agents {
 				if agent != nil && agent.Identity != "" {
 					ids = append(ids, dns.Fqdn(agent.Identity))
 				}
@@ -767,7 +765,7 @@ func analyzeHsyncSigners(zd *tdns.ZoneData, ourIdentities []string, ourLabel str
 //
 // If any guard fails, zd.MP.MPdata is set to nil. The caller can check zd.MP.MPdata to
 // determine whether this zone should be treated as multi-provider.
-func populateMPdata(zd *tdns.ZoneData) {
+func populateMPdata(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) {
 	zd.EnsureMP()
 	// Guard 1: static config must declare this as an MP zone
 	if !zd.Options[tdns.OptMultiProvider] {
@@ -796,7 +794,7 @@ func populateMPdata(zd *tdns.ZoneData) {
 	}
 
 	// Guard 3: we must be a listed provider
-	ourIdentities := ourHsyncIdentities()
+	ourIdentities := ourHsyncIdentities(mp)
 	matched, ourLabel, err := matchHsyncProvider(zd, ourIdentities)
 	if err != nil {
 		zd.Logger.Printf("populateMPdata: zone %s: error matching provider identity: %v", zd.ZoneName, err)
@@ -856,8 +854,8 @@ func populateMPdata(zd *tdns.ZoneData) {
 
 // weAreASigner is a convenience wrapper that checks provider membership first,
 // then signer status.
-func weAreASigner(zd *tdns.ZoneData) (bool, error) {
-	ids := ourHsyncIdentities()
+func weAreASigner(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) (bool, error) {
+	ids := ourHsyncIdentities(mp)
 	matched, label, err := matchHsyncProvider(zd, ids)
 	if err != nil {
 		return false, err
@@ -939,7 +937,7 @@ func snapshotUpstreamData(zd *tdns.ZoneData) {
 // For agents: also performs KEYSTATE RFI to signer (blocking).
 // Stores results in zd.MP.RefreshAnalysis for post-refresh callbacks.
 // For combiners: snapshots upstream data and adds contributions to new_zd.
-func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
+func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *tdns.MultiProviderConf) {
 	zd.EnsureMP()
 	analysis := &tdns.ZoneRefreshAnalysis{}
 
@@ -997,7 +995,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 
 	// Recompute multi-provider membership and signing state on the new zone data.
 	if new_zd.Options[tdns.OptMultiProvider] {
-		populateMPdata(new_zd)
+		populateMPdata(new_zd, mp)
 		// Copy the computed MPdata to zd so it persists across the hard flip
 		// (the flip does not copy the MP field).
 		zd.EnsureMP()
@@ -1032,7 +1030,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 	switch tdns.Globals.App.Type {
 	case tdns.AppTypeCombiner, tdns.AppTypeMPCombiner:
 		if analysis.HsyncChanged {
-			matched, _, _ := matchHsyncProvider(new_zd, ourHsyncIdentities())
+			matched, _, _ := matchHsyncProvider(new_zd, ourHsyncIdentities(mp))
 			if matched && !new_zd.Options[tdns.OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
 				new_zd.Options[tdns.OptAllowEdits] = true
@@ -1054,7 +1052,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 				lg.Info("local changes applied to new zone data", "zone", zd.ZoneName)
 			}
 
-			if tdns.InjectSignatureTXT(new_zd, tdns.Conf.MultiProvider) {
+			if InjectSignatureTXT(new_zd, mp) {
 				lg.Debug("signature TXT injected", "zone", zd.ZoneName)
 			}
 		}

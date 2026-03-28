@@ -22,6 +22,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// on top (duplicate execution is idempotent — see audit 9.1).
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
+	mp := conf.Config.MultiProvider
 	for _, zoneName := range conf.Config.Internal.MPZoneNames {
 		zd, ok := tdns.Zones.Get(zoneName)
 		if !ok || !zd.Options[tdns.OptMultiProvider] {
@@ -29,7 +30,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 		}
 		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
 			func(zd, new_zd *tdns.ZoneData) {
-				MPPreRefresh(zd, new_zd, tm, msgQs)
+				MPPreRefresh(zd, new_zd, tm, msgQs, mp)
 			})
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
 			func(zd *tdns.ZoneData) {
