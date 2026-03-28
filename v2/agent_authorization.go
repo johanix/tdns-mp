@@ -158,6 +158,9 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		return false, ""
 	}
 
+	localFQDN := dns.Fqdn(tm.LocalID)
+	senderFQDN := dns.Fqdn(senderID)
+
 	// Iterate through all zones we know about
 	for _, zoneName := range tm.getZoneNames() {
 		zd, exists := tm.getZone(zoneName)
@@ -174,8 +177,6 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		// Check if both our identity and sender are in HSYNC3 RRset
 		foundMe := false
 		foundSender := false
-		localFQDN := dns.Fqdn(tm.LocalID)
-		senderFQDN := dns.Fqdn(senderID)
 		for _, rr := range hsyncRR.RRs {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
 				if hsync3, ok := prr.Data.(*core.HSYNC3); ok {

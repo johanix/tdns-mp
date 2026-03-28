@@ -349,7 +349,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	combinerID := "combiner"
 	if mp.Combiner != nil && mp.Combiner.Identity != "" {
 		combinerID = dns.Fqdn(mp.Combiner.Identity)
-		mp.AuthorizedPeers = append(mp.AuthorizedPeers, combinerID)
 	}
 	conf.InternalMp.CombinerState = &tdns.CombinerState{
 		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),

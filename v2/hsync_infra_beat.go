@@ -51,8 +51,10 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			continue
 		}
 
+		a.Mu.RLock()
 		dnsState := a.DnsDetails.State
 		apiState := a.ApiDetails.State
+		a.Mu.RUnlock()
 
 		dnsReady := dnsState == AgentStateOperational || dnsState == AgentStateIntroduced ||
 			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
@@ -83,11 +85,13 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			if err != nil {
 				lgAgent.Warn("infra beat failed", "peer", agent.Identity, "err", err)
 				agent.DnsDetails.LatestError = err.Error()
+				agent.DnsDetails.LatestErrorTime = time.Now()
 				return
 			}
 
 			if resp == nil || !resp.Ack {
 				agent.DnsDetails.LatestError = "infra beat not acknowledged"
+				agent.DnsDetails.LatestErrorTime = time.Now()
 				return
 			}
 

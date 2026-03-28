@@ -313,3 +313,71 @@ PR. Each finding is categorized as Fix Now, Defer, or Disagree.
 - **Why**: `ApiDetails` and `DnsDetails` are initialized in agent
   constructors and never set to nil. Guards against impossible
   scenario.
+
+---
+
+## Batch 3
+
+### Fix Now
+
+### 38. MergeGossip shallow copy leaves PeerStates/Zones shared — DONE
+
+- **File**: `v2/gossip.go:56-62`
+- **Description**: `remoteCopy := *remote` copies the struct but
+  `PeerStates` (map) and `Zones` (slice) still share backing
+  data with the incoming message.
+- **Fix**: Added `deepCopyMemberState` helper. Used in both
+  MergeGossip and BuildGossipForPeer export path.
+
+### 39. groupHash[:8] can panic on short hash — DONE
+
+- **File**: `v2/gossip.go:264-274` (and other sites)
+- **Description**: Multiple `groupHash[:8]` calls in log statements
+  panic if hash is shorter than 8 chars.
+- **Fix**: Added `shortHash()` helper. Replaced all occurrences.
+
+### 40. BuildGossipForPeer lock ordering deadlock — DONE
+
+- **File**: `v2/gossip.go:96-108`
+- **Description**: Takes `gst.mu` then `pgm.mu`.
+  `RefreshLocalStates` takes `pgm.mu` then `gst.mu` (via
+  `UpdateLocalState`). Classic AB/BA deadlock.
+- **Fix**: Snapshot pgm data under pgm.mu, release it, then take
+  gst.mu. Consistent ordering: pgm first, gst second.
+
+### 41. BuildGossipForPeer exports internal MemberState pointers — DONE
+
+- **File**: `v2/gossip.go:134-139`
+- **Description**: `msg.Members[id] = state` shares internal
+  pointers in outgoing messages.
+- **Fix**: Deep-copy via `deepCopyMemberState` on export.
+
+### 42. Infra beat error paths missing LatestErrorTime — DONE
+
+- **File**: `v2/hsync_infra_beat.go:83-92`
+- **Description**: `LatestError` set but `LatestErrorTime` not
+  updated, so timestamps are stale.
+- **Fix**: Added `LatestErrorTime = time.Now()` in both error paths.
+
+### 43. Infra beat state read without lock — DONE
+
+- **File**: `v2/hsync_infra_beat.go:54-56`
+- **Description**: Reads `DnsDetails.State` and `ApiDetails.State`
+  without holding `agent.Mu`. Data race.
+- **Fix**: Added `a.Mu.RLock()` / `a.Mu.RUnlock()` around reads.
+
+### 44. initMPAgent mutates shared mp.AuthorizedPeers — DONE
+
+- **File**: `v2/main_init.go:349-353`
+- **Description**: `mp.AuthorizedPeers = append(...)` modifies the
+  viper-parsed config struct. The `AuthorizedPeers` closure
+  already includes combiner/signer dynamically.
+- **Fix**: Removed the `append`. Combiner ID is already included
+  via the closure at line 445.
+
+### 45. FQDN normalization computed inside loop (nitpick) — DONE
+
+- **File**: `v2/agent_authorization.go:153-203`
+- **Description**: `dns.Fqdn(tm.LocalID)` and `dns.Fqdn(senderID)`
+  computed on each loop iteration instead of once.
+- **Fix**: Hoisted above the loop.
