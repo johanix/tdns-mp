@@ -56,7 +56,8 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 	for id, remote := range msg.Members {
 		local, exists := gst.States[groupHash][id]
 		if !exists || remote.Timestamp.After(local.Timestamp) {
-			gst.States[groupHash][id] = remote
+			remoteCopy := *remote
+			gst.States[groupHash][id] = &remoteCopy
 		}
 	}
 

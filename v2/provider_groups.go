@@ -95,6 +95,7 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 		}
 
 		slices.Sort(identities)
+		identities = slices.Compact(identities)
 		key := strings.Join(identities, ",")
 
 		if zg, exists := groupMap[key]; exists {

@@ -412,7 +412,9 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Extract signer peer config for KEYSTATE signaling
 	var signerID, signerAddress string
 	if mp.Signer != nil {
-		signerID = dns.Fqdn(mp.Signer.Identity)
+		if mp.Signer.Identity != "" {
+			signerID = dns.Fqdn(mp.Signer.Identity)
+		}
 		signerAddress = mp.Signer.Address
 	}
 
@@ -540,14 +542,17 @@ func initAgentCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
 	if mp.Combiner != nil && strings.TrimSpace(mp.Combiner.LongTermJosePubKey) != "" {
 		combinerPubKeyPath := strings.TrimSpace(mp.Combiner.LongTermJosePubKey)
 		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
-		if err == nil {
-			combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
-			combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
-			if err == nil {
-				pc.AddPeerKey("combiner", combinerPubKey)
-				pc.AddPeerVerificationKey("combiner", combinerPubKey)
-			}
+		if err != nil {
+			return nil, fmt.Errorf("initAgentCrypto: failed to read combiner public key %q: %w", combinerPubKeyPath, err)
 		}
+		combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
+		combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
+		if err != nil {
+			return nil, fmt.Errorf("initAgentCrypto: failed to parse combiner public key: %w", err)
+		}
+		combinerPeerID := dns.Fqdn(mp.Combiner.Identity)
+		pc.AddPeerKey(combinerPeerID, combinerPubKey)
+		pc.AddPeerVerificationKey(combinerPeerID, combinerPubKey)
 	}
 
 	return pc, nil

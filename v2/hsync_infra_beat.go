@@ -77,19 +77,24 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			agent.Mu.RUnlock()
 
 			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
+			agent.Mu.Lock()
+			defer agent.Mu.Unlock()
+
 			if err != nil {
 				lgAgent.Warn("infra beat failed", "peer", agent.Identity, "err", err)
+				agent.DnsDetails.LatestError = err.Error()
 				return
 			}
 
-			agent.Mu.Lock()
-			if resp != nil && resp.Ack {
-				lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
-				agent.DnsDetails.SentBeats++
-				agent.DnsDetails.LatestSBeat = time.Now()
-				agent.DnsDetails.LatestError = ""
+			if resp == nil || !resp.Ack {
+				agent.DnsDetails.LatestError = "infra beat not acknowledged"
+				return
 			}
-			agent.Mu.Unlock()
+
+			lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
+			agent.DnsDetails.SentBeats++
+			agent.DnsDetails.LatestSBeat = time.Now()
+			agent.DnsDetails.LatestError = ""
 		}(a)
 	}
 }

@@ -442,11 +442,22 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, kdb *tdns.KeyDB, mp 
 		return fmt.Errorf("AgentJWKKeyPrep: failed to decode Y coordinate: %w", err)
 	}
 
-	// Reconstruct the ECDSA public key
+	// Reconstruct the ECDSA public key with the correct curve
+	var curve elliptic.Curve
+	switch jwk.Crv {
+	case "P-256":
+		curve = elliptic.P256()
+	case "P-384":
+		curve = elliptic.P384()
+	case "P-521":
+		curve = elliptic.P521()
+	default:
+		return fmt.Errorf("AgentJWKKeyPrep: unsupported JWK curve %q", jwk.Crv)
+	}
 	x := new(big.Int).SetBytes(xBytes)
 	y := new(big.Int).SetBytes(yBytes)
 	ecdsaPubKey := &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
+		Curve: curve,
 		X:     x,
 		Y:     y,
 	}
@@ -515,8 +526,8 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *tdns.MultiProviderConf) er
 				return fmt.Errorf("failed to parse certificate: %v", err)
 			}
 
-			if cert.Subject.CommonName != string(agent.Identity) {
-				return fmt.Errorf("unexpected certificate common name (should have been %s)", agent.Identity)
+			if dns.Fqdn(cert.Subject.CommonName) != dns.Fqdn(string(agent.Identity)) {
+				return fmt.Errorf("unexpected certificate common name %q (should have been %s)", cert.Subject.CommonName, agent.Identity)
 			}
 
 			err = tdns.VerifyCertAgainstTlsaRR(agent.ApiDetails.TlsaRR, rawCert)

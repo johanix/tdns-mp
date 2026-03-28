@@ -123,13 +123,16 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 	// Check if both our identity and sender are in HSYNC3 RRset
 	foundMe := false
 	foundSender := false
+	localFQDN := dns.Fqdn(tm.LocalID)
+	senderFQDN := dns.Fqdn(senderID)
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				if hsync3.Identity == tm.LocalID {
+				id := dns.Fqdn(hsync3.Identity)
+				if id == localFQDN {
 					foundMe = true
 				}
-				if hsync3.Identity == senderID {
+				if id == senderFQDN {
 					foundSender = true
 				}
 			}
@@ -171,13 +174,16 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		// Check if both our identity and sender are in HSYNC3 RRset
 		foundMe := false
 		foundSender := false
+		localFQDN := dns.Fqdn(tm.LocalID)
+		senderFQDN := dns.Fqdn(senderID)
 		for _, rr := range hsyncRR.RRs {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
 				if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-					if hsync3.Identity == tm.LocalID {
+					id := dns.Fqdn(hsync3.Identity)
+					if id == localFQDN {
 						foundMe = true
 					}
-					if hsync3.Identity == senderID {
+					if id == senderFQDN {
 						foundSender = true
 					}
 				}
