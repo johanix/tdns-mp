@@ -8,6 +8,7 @@
 *.out
 
 # Built binaries
+cmd/mpagent/tdns-mpagent
 cmd/mpsigner/tdns-mpsigner
 cmd/mpcombiner/tdns-mpcombiner
 cmd/mpcli/tdns-mpcli
