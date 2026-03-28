@@ -41,15 +41,14 @@ const CombinerOptAddSignature = tdns.CombinerOptAddSignature
 type KeyInventoryItem = tdns.KeyInventoryItem
 type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
 
-// Transport bridge types (MP-only, will eventually move here as full definitions)
-// MPTransportBridge and MPTransportBridgeConfig are defined in hsync_transport.go (local copy)
-// AgentDiscoveryResult is defined in agent_discovery.go (local copy)
-// PendingDnskeyPropagation is defined in hsync_transport.go (local copy)
-type AgentRegistry = tdns.AgentRegistry
-type Agent = tdns.Agent
-type AgentDetails = tdns.AgentDetails
-type AgentState = tdns.AgentState
+// Pervasive types that stay as aliases (no methods, used everywhere)
 type AgentId = tdns.AgentId
+type ZoneName = tdns.ZoneName
+type ZoneUpdate = tdns.ZoneUpdate
+type OwnerData = tdns.OwnerData
+
+// Types that stay as aliases until their defining files are copied
+// (Steps 2-4 of the big bang)
 type MsgQs = tdns.MsgQs
 type KeystateInventoryMsg = tdns.KeystateInventoryMsg
 type KeystateSignalMsg = tdns.KeystateSignalMsg
@@ -59,52 +58,33 @@ type ChunkPayloadStore = tdns.ChunkPayloadStore
 type ConfirmationDetail = tdns.ConfirmationDetail
 type RemoteConfirmationDetail = tdns.RemoteConfirmationDetail
 type RejectedItemInfo = tdns.RejectedItemInfo
-type AgentMsgPost = tdns.AgentMsgPost
-type AgentMsgPostPlus = tdns.AgentMsgPostPlus
-type AgentMsgReport = tdns.AgentMsgReport
-type AgentMgmtPostPlus = tdns.AgentMgmtPostPlus
 type SynchedDataUpdate = tdns.SynchedDataUpdate
+type SynchedDataResponse = tdns.SynchedDataResponse
 type SynchedDataCmd = tdns.SynchedDataCmd
 type EditsResponseMsg = tdns.EditsResponseMsg
 type ConfigResponseMsg = tdns.ConfigResponseMsg
 type AuditResponseMsg = tdns.AuditResponseMsg
 type StatusUpdateMsg = tdns.StatusUpdateMsg
-type GossipMessage = tdns.GossipMessage
 type MessageRetentionConf = tdns.MessageRetentionConf
-type AgentMsg = tdns.AgentMsg
 
-// AgentState constants
-const (
-	AgentStateNeeded      = tdns.AgentStateNeeded
-	AgentStateKnown       = tdns.AgentStateKnown
-	AgentStateIntroduced  = tdns.AgentStateIntroduced
-	AgentStateOperational = tdns.AgentStateOperational
-	AgentStateLegacy      = tdns.AgentStateLegacy
-	AgentStateDegraded    = tdns.AgentStateDegraded
-	AgentStateInterrupted = tdns.AgentStateInterrupted
-	AgentStateError       = tdns.AgentStateError
-)
+// Types from gossip/provider/leader files (Step 4)
+type GossipMessage = tdns.GossipMessage
+type GossipStateTable = tdns.GossipStateTable
+type ProviderGroupManager = tdns.ProviderGroupManager
+type ProviderGroup = tdns.ProviderGroup
+type LeaderElectionManager = tdns.LeaderElectionManager
 
-// AgentStateToString map
-var AgentStateToString = tdns.AgentStateToString
-
-// AgentMsg constants
-const (
-	AgentMsgHello  = tdns.AgentMsgHello
-	AgentMsgBeat   = tdns.AgentMsgBeat
-	AgentMsgNotify = tdns.AgentMsgNotify
-	AgentMsgPing   = tdns.AgentMsgPing
-	AgentMsgStatus = tdns.AgentMsgStatus
-	AgentMsgEdits  = tdns.AgentMsgEdits
-	AgentMsgRfi    = tdns.AgentMsgRfi
-)
-
-// Internal state types (for InternalMpConf)
+// Types from syncheddataengine.go (Step 3)
+type ZoneDataRepo = tdns.ZoneDataRepo
+type TrackedRRInfo = tdns.TrackedRRInfo
 type SyncRequest = tdns.SyncRequest
 type SyncStatus = tdns.SyncStatus
-type ZoneDataRepo = tdns.ZoneDataRepo
+
+// Types from agent_utils.go (Step 6)
+type ZoneAgentData = tdns.ZoneAgentData
+
+// Internal state types that stay as aliases during dual-write period
 type CombinerState = tdns.CombinerState
-type LeaderElectionManager = tdns.LeaderElectionManager
 
 // Functions re-exported from tdns (not yet moved)
 var NewDistributionCache = tdns.NewDistributionCache
