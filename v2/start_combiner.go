@@ -21,6 +21,17 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	// Attach OnFirstLoad callbacks to zone stubs created by ParseZones.
 	// These use tdns-mp's local combiner functions (not the legacy tdns ones).
 	kdb := conf.Config.Internal.KeyDB
+
+	// Pre-load all contributions once (instead of per-zone in each OnFirstLoad).
+	var allContribs map[string]map[string]map[string]map[uint16]core.RRset
+	if kdb != nil {
+		var err error
+		allContribs, err = LoadAllContributions(kdb)
+		if err != nil {
+			lgCombiner.Error("StartMPCombiner: failed to pre-load contributions snapshot", "err", err)
+		}
+	}
+
 	for _, zoneName := range conf.Config.Internal.AllZones {
 		zd, exists := tdns.Zones.Get(zoneName)
 		if !exists {
@@ -43,13 +54,8 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 					}
 					lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
 				}
-				// Hydrate AgentContributions from persistent storage
-				if zd.MP.AgentContributions == nil && zd.KeyDB != nil {
-					allContribs, err := LoadAllContributions(zd.KeyDB)
-					if err != nil {
-						lgCombiner.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
-						return
-					}
+				// Hydrate AgentContributions from pre-loaded snapshot
+				if zd.MP.AgentContributions == nil && allContribs != nil {
 					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
 						zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 						for senderID, ownerMap := range zoneContribs {
