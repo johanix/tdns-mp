@@ -795,10 +795,27 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			resp.Msg = fmt.Sprintf("Parent says: %s", edns0.KeyStateToString(keyState))
 
 		case "parentsync-bootstrap":
-			// TODO: parentSyncAfterKeyPublication is unexported in tdns — export it
-			// or move the implementation to tdns-mp. For now, return an error.
-			resp.Error = true
-			resp.ErrorMsg = "parentsync-bootstrap not yet available in tdns-mp (requires tdns export of parentSyncAfterKeyPublication)"
+			lem := conf.InternalMp.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			if !lem.IsLeader(amp.Zone) {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
+				return
+			}
+			sak, err := kdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
+			if err != nil || len(sak.Keys) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				return
+			}
+			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			algorithm := sak.Keys[0].KeyRR.Algorithm
+			go conf.Config.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
 			imr := tdns.Globals.ImrEngine
