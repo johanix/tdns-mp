@@ -108,11 +108,11 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 			registry.MsgHandler(msgPost, synchedDataUpdateQ, msgQs.SynchedDataCmd)
 
 		case mgmtPost = <-commandQ:
-			registry.CommandHandler(mgmtPost, synchedDataUpdateQ)
+			registry.CommandHandler(mgmtPost, synchedDataUpdateQ, msgQs)
 
 		// debug stuff arrive on separate channel, but use the same format and handler
 		case mgmtPost = <-debugCommandQ:
-			registry.CommandHandler(mgmtPost, synchedDataUpdateQ)
+			registry.CommandHandler(mgmtPost, synchedDataUpdateQ, msgQs)
 
 		case <-HBticker.C:
 			registry.SendHeartbeats()
@@ -638,7 +638,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 }
 
 // Handler for local commands from CLI or other components in the same organization
-func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate) {
+func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate, msgQs *MsgQs) {
 
 	lgEngine.Info("received mgmt command", "command", msg.Command, "zone", msg.Zone)
 	resp := AgentMgmtResponse{
@@ -779,7 +779,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[agent.EffectiveState()])
 					return
 				}
-				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream")
+				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
 				if configResp == nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.Identity)
@@ -801,7 +801,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[agent.EffectiveState()])}
 						continue
 					}
-					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream")
+					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
 					if configResp == nil {
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
 						continue
@@ -818,7 +818,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()])}
 						continue
 					}
-					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key")
+					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
 					if configResp == nil {
 						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
 						continue
@@ -873,7 +873,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					}
 					continue
 				}
-				auditResp := RequestAndWaitForAudit(ar, agent, string(msg.Zone))
+				auditResp := RequestAndWaitForAudit(ar, agent, string(msg.Zone), msgQs)
 				if auditResp == nil {
 					resp.RfiResponse[agent.Identity] = &RfiData{
 						Error:    true,

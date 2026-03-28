@@ -272,10 +272,9 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 // Sets zd.KeystateOK/KeystateError/KeystateTime to reflect success or failure.
 // KEYSTATE failure is an error condition — the agent depends on KEYSTATE for
 // DNSKEY classification and must not guess when it's unavailable.
-func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context) {
+func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge) {
 	zd.SetKeystateTime(time.Now())
 
-	tm := tdns.Conf.Internal.MPTransport
 	if tm == nil {
 		zd.SetKeystateOK(false)
 		zd.SetKeystateError("no TransportManager available")
@@ -288,7 +287,7 @@ func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context) {
 	// HsyncEngine's proactive-inventory consumer doesn't steal it.
 	// Include the zone name so routeKeystateMessage only routes
 	// matching responses here (prevents cross-zone interference).
-	rfiChan := make(chan *tdns.KeystateInventoryMsg, 1)
+	rfiChan := make(chan *KeystateInventoryMsg, 1)
 	tm.setKeystateRfi(zd.ZoneName, rfiChan)
 	defer tm.deleteKeystateRfi(zd.ZoneName)
 
@@ -359,21 +358,19 @@ func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context) {
 // as confirmed data (the combiner already has them).
 //
 // Modeled on RequestAndWaitForKeyInventory.
-func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context) {
-	tm := tdns.Conf.Internal.MPTransport
+func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge, msgQs *MsgQs) {
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
 		return
 	}
 
-	msgQs := tdns.Conf.Internal.MsgQs
 	if msgQs == nil || msgQs.EditsResponse == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
 		return
 	}
 
 	// Send RFI EDITS to combiner
-	if err := tm.SendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
+	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
 		return
 	}
@@ -414,8 +411,7 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context) {
 
 // RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
 // response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
-func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string) *ConfigResponseMsg {
-	msgQs := tdns.Conf.Internal.MsgQs
+func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) *ConfigResponseMsg {
 	if msgQs == nil || msgQs.ConfigResponse == nil {
 		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
 		return nil
@@ -456,8 +452,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 
 // RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
 // response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
-func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string) *AuditResponseMsg {
-	msgQs := tdns.Conf.Internal.MsgQs
+func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) *AuditResponseMsg {
 	if msgQs == nil || msgQs.AuditResponse == nil {
 		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
 		return nil
@@ -945,7 +940,7 @@ func snapshotUpstreamData(zd *tdns.ZoneData) {
 // For agents: also performs KEYSTATE RFI to signer (blocking).
 // Stores results in zd.MP.RefreshAnalysis for post-refresh callbacks.
 // For combiners: snapshots upstream data and adds contributions to new_zd.
-func MPPreRefresh(zd, new_zd *tdns.ZoneData) {
+func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 	zd.EnsureMP()
 	analysis := &tdns.ZoneRefreshAnalysis{}
 
@@ -977,7 +972,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData) {
 			switch tdns.Globals.App.Type {
 			case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
-				RequestAndWaitForKeyInventory(zd, context.Background())
+				RequestAndWaitForKeyInventory(zd, context.Background(), tm)
 				_, analysis.DnskeyStatus, err = LocalDnskeysFromKeystate(zd)
 				if err != nil {
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
@@ -1073,7 +1068,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData) {
 // MPPostRefresh runs after the hard flip for all MP roles.
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
-func MPPostRefresh(zd *tdns.ZoneData) {
+func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 	if zd.MP == nil || zd.MP.RefreshAnalysis == nil {
 		return
 	}
