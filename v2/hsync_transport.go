@@ -562,6 +562,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
+			agent.Mu.Lock()
 			// Only transition to INTRODUCED if not already OPERATIONAL or better
 			// This prevents Hello messages from downgrading state (e.g., after peer restart)
 			if agent.DnsDetails.State < AgentStateIntroduced {
@@ -570,6 +571,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 			}
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
+			agent.Mu.Unlock()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
 		} else {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
@@ -585,9 +587,11 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 					lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
 					// Update the newly discovered agent's DNS state to INTRODUCED
 					if discoveredAgent, ok := tm.agentRegistry.S.Get(AgentId(peerID)); ok {
+						discoveredAgent.Mu.Lock()
 						discoveredAgent.DnsDetails.State = AgentStateIntroduced
 						discoveredAgent.DnsDetails.HelloTime = time.Now()
 						discoveredAgent.DnsDetails.LastContactTime = time.Now()
+						discoveredAgent.Mu.Unlock()
 						tm.agentRegistry.S.Set(discoveredAgent.Identity, discoveredAgent)
 						lgTransport.Info("updated discovered agent DNS state to INTRODUCED", "agent", peerID)
 					}

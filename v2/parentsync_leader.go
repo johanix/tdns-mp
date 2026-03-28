@@ -180,6 +180,11 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 		}
 	}
 
+	if len(members) == 0 {
+		lgElect.Warn("group election: no members found, skipping", "groupHash", groupHash)
+		return
+	}
+
 	switch rfiType {
 	case "ELECT-CALL":
 		lem.handleGroupCall(le, groupHash, senderID, records, members, zones)

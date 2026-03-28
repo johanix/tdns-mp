@@ -26,6 +26,8 @@ func configureInterval(key string, min, max int) int {
 }
 
 func (ar *AgentRegistry) sharedZonesForAgent(agent *Agent) []string {
+	agent.Mu.RLock()
+	defer agent.Mu.RUnlock()
 	zones := make([]string, 0, len(agent.Zones))
 	for z := range agent.Zones {
 		zones = append(zones, string(z))

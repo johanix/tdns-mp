@@ -82,6 +82,7 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 			now := time.Now()
 
 			var summaries []*TransactionSummary
+			zdr.mu.Lock()
 			if zdr.PendingRemoteConfirms != nil {
 				for combinerDistID, prc := range zdr.PendingRemoteConfirms {
 					summaries = append(summaries, &TransactionSummary{
@@ -95,6 +96,7 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 					})
 				}
 			}
+			zdr.mu.Unlock()
 			resp.Transactions = summaries
 			resp.Msg = fmt.Sprintf("Found %d open incoming transaction(s)", len(summaries))
 

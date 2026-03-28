@@ -817,12 +817,19 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	var updatedIdentities = map[AgentId]bool{}
 	var affectedIdentities = map[AgentId]bool{}
 
-	// Build label->Identity map from HsyncAdds so we can resolve Upstream labels to FQDNs
+	// Build label->Identity map from the full zone HSYNC3 RRset (not just the delta).
+	// Using only HsyncAdds would miss unchanged records and break upstream resolution.
 	labelToIdentity := map[string]string{}
-	for _, rr := range req.SyncStatus.HsyncAdds {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok {
-				labelToIdentity[h3.Label] = h3.Identity
+	if zd, exists := tdns.Zones.Get(string(zonename)); exists {
+		if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
+			if hsync3RRset, ok := apex.RRtypes.Get(core.TypeHSYNC3); ok {
+				for _, rr := range hsync3RRset.RRs {
+					if prr, ok := rr.(*dns.PrivateRR); ok {
+						if h3, ok := prr.Data.(*core.HSYNC3); ok {
+							labelToIdentity[h3.Label] = h3.Identity
+						}
+					}
+				}
 			}
 		}
 	}
@@ -831,14 +838,10 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 
 	// First pass: Check if WE are in this zone's HSYNC3 RRset
 	weAreInHSYNC := false
-	for _, rr := range req.SyncStatus.HsyncAdds {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				if AgentId(hsync3.Identity) == ourId || AgentId(labelToIdentity[hsync3.Upstream]) == ourId {
-					weAreInHSYNC = true
-					break
-				}
-			}
+	for _, id := range labelToIdentity {
+		if AgentId(id) == ourId {
+			weAreInHSYNC = true
+			break
 		}
 	}
 

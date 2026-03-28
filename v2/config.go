@@ -9,6 +9,7 @@ package tdnsmp
 import (
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // Config wraps a pointer to the tdns.Config (typically &tdns.Conf)
@@ -52,6 +53,77 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 	}
 }
 
+// RegisterCombinerOnFirstLoad attaches OnFirstLoad callbacks
+// (PersistContributions, contribution hydration, signal keys) to MP
+// zones that don't already have them. Called at startup and on
+// reload via PostParseZonesHook for mpcombiner.
+func (conf *Config) RegisterCombinerOnFirstLoad() {
+	kdb := conf.Config.Internal.KeyDB
+	if kdb == nil {
+		return
+	}
+	if conf.InternalMp.onFirstLoadRegistered == nil {
+		conf.InternalMp.onFirstLoadRegistered = make(map[string]bool)
+	}
+
+	// Load contributions snapshot once for all new zones
+	allContribs, err := LoadAllContributions(kdb)
+	if err != nil {
+		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load contributions", "err", err)
+		allContribs = nil
+	}
+
+	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
+			continue
+		}
+		zd, exists := tdns.Zones.Get(zoneName)
+		if !exists {
+			continue
+		}
+		conf.InternalMp.onFirstLoadRegistered[zoneName] = true
+
+		zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+			if !zd.Options[tdns.OptMultiProvider] {
+				return
+			}
+			zd.EnsureMP()
+			if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
+				kdb := zd.KeyDB
+				zd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
+					return SaveContributions(kdb, zone, senderID, contribs)
+				}
+				lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
+			}
+			if zd.MP.AgentContributions == nil && allContribs != nil {
+				if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
+					zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+					for senderID, ownerMap := range zoneContribs {
+						zd.MP.AgentContributions[senderID] = ownerMap
+					}
+					RebuildCombinerData(zd)
+					lgCombiner.Info("hydrated AgentContributions from snapshot",
+						"zone", zd.ZoneName, "agents", len(zoneContribs))
+				}
+			}
+			if zd.Options[tdns.OptAllowEdits] {
+				success, err := tdns.ZoneDataCombineWithLocalChanges(zd)
+				if err != nil {
+					lgCombiner.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
+				} else if success {
+					lgCombiner.Info("re-applied local changes after hydration", "zone", zd.ZoneName)
+				}
+			}
+		})
+
+		if GetProviderZoneRRtypes(zoneName) != nil {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				ApplyPendingSignalKeys(zd, kdb)
+			})
+		}
+	}
+}
+
 // InternalMpConf holds multi-provider internal state local to
 // tdns-mp. Mirrors tdns.InternalMpConf field-by-field. During
 // migration, both exist — code in tdns-mp reads from here,
@@ -70,4 +142,5 @@ type InternalMpConf struct {
 	MPZoneNames           []string
 	DistributionCache     *DistributionCache
 	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
+	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
 }

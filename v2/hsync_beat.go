@@ -14,9 +14,16 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 		lgAgent.Debug("received BEAT", "from", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
 			agent.Mu.Lock()
-			agent.ApiDetails.LatestRBeat = time.Now()
-			agent.ApiDetails.ReceivedBeats++
-			agent.ApiDetails.BeatInterval = report.BeatInterval
+			now := time.Now()
+			if report.Transport == "DNS" && agent.DnsDetails != nil {
+				agent.DnsDetails.LatestRBeat = now
+				agent.DnsDetails.ReceivedBeats++
+				agent.DnsDetails.BeatInterval = report.BeatInterval
+			} else if agent.ApiDetails != nil {
+				agent.ApiDetails.LatestRBeat = now
+				agent.ApiDetails.ReceivedBeats++
+				agent.ApiDetails.BeatInterval = report.BeatInterval
+			}
 			agent.Mu.Unlock()
 		}
 
@@ -58,8 +65,10 @@ func (ar *AgentRegistry) SendHeartbeats() {
 		}
 		// DNS-55: Check EITHER transport state (API or DNS)
 		// Send heartbeat if ANY transport is INTRODUCED or better (including LEGACY)
+		a.Mu.RLock()
 		apiState := a.ApiDetails.State
 		dnsState := a.DnsDetails.State
+		a.Mu.RUnlock()
 
 		apiReady := apiState == AgentStateIntroduced || apiState == AgentStateOperational ||
 			apiState == AgentStateLegacy || apiState == AgentStateDegraded || apiState == AgentStateInterrupted
