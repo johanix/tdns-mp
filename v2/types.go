@@ -48,32 +48,9 @@ type ZoneUpdate = tdns.ZoneUpdate
 type OwnerData = tdns.OwnerData
 
 // Types that stay as aliases until their defining files are copied
-// (Steps 3-4 of the big bang)
 type DistributionCache = tdns.DistributionCache
 type DistributionInfo = tdns.DistributionInfo
 type ChunkPayloadStore = tdns.ChunkPayloadStore
-type ConfirmationDetail = tdns.ConfirmationDetail
-type RemoteConfirmationDetail = tdns.RemoteConfirmationDetail
-type RejectedItemInfo = tdns.RejectedItemInfo
-type SynchedDataUpdate = tdns.SynchedDataUpdate
-type SynchedDataResponse = tdns.SynchedDataResponse
-type SynchedDataCmd = tdns.SynchedDataCmd
-
-// Types from gossip/provider/leader files (Step 4)
-type GossipMessage = tdns.GossipMessage
-type GossipStateTable = tdns.GossipStateTable
-type ProviderGroupManager = tdns.ProviderGroupManager
-type ProviderGroup = tdns.ProviderGroup
-type LeaderElectionManager = tdns.LeaderElectionManager
-
-// Types from syncheddataengine.go (Step 3)
-type ZoneDataRepo = tdns.ZoneDataRepo
-type TrackedRRInfo = tdns.TrackedRRInfo
-type SyncRequest = tdns.SyncRequest
-type SyncStatus = tdns.SyncStatus
-
-// Types from agent_utils.go (Step 6)
-type ZoneAgentData = tdns.ZoneAgentData
 
 // Internal state types that stay as aliases during dual-write period
 type CombinerState = tdns.CombinerState
