@@ -162,13 +162,13 @@ type TrackedRRInfo struct {
 }
 
 // --- From hsyncengine.go ---
-// SyncRequest and SyncResponse stay as aliases because the tdns refresh
-// callback (MPPostRefresh in tdns/v2/hsync_utils.go) sends tdns.SyncRequest
-// to zd.SyncQ, and HsyncEngine in tdns-mp reads from the same channel.
+// SyncRequest, SyncResponse, SyncStatus, HsyncStatus, DnskeyStatus MUST
+// remain aliases (not real types). They are used in channels shared between
+// tdns and tdns-mp code (e.g., zd.SyncQ chan SyncRequest). Converting any
+// of these to a real type would break channel operations at compile time.
+// This constraint holds until the shared channels are redesigned.
 type SyncRequest = tdns.SyncRequest
 type SyncResponse = tdns.SyncResponse
-
-// SyncStatus stays as alias for same reason as SyncRequest.
 type SyncStatus = tdns.SyncStatus
 
 type DeferredTask struct {
