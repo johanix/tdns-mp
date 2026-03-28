@@ -638,6 +638,15 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
 					continue
 				}
+				// 0. Pull contributions from combiner (RFI EDITS).
+				// This brings back all agents contributions, including our own,
+				// ensuring the SDE is in sync with the combiner state.
+				zd, zdExists := tdns.Zones.Get(string(sdcmd.Zone))
+				if zdExists && zd != nil {
+					lgEngine.Info("resync: pulling contributions from combiner", "zone", sdcmd.Zone)
+					RequestAndWaitForEdits(zd, ctx, tm, conf.InternalMp.MsgQs, zdr)
+				}
+
 				myAgentId := AgentId(conf.Config.MultiProvider.Identity)
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
 				if !ok {
