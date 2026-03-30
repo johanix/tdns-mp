@@ -108,13 +108,38 @@ func (a *Agent) IsAnyTransportOperational() bool {
 }
 
 func (a *Agent) EffectiveState() AgentState {
-	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
-		return AgentStateOperational
+	// Return the best active transport state. OPERATIONAL is best,
+	// followed by LEGACY, DEGRADED, INTERRUPTED. If neither transport
+	// has reached an active state, fall back to a.State.
+	best := AgentState(0)
+	for _, s := range []AgentState{
+		a.apiState(), a.dnsState(),
+	} {
+		switch s {
+		case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
+			if best == 0 || s < best {
+				best = s // lower numeric = better (OPERATIONAL < DEGRADED)
+			}
+		}
 	}
-	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
-		return AgentStateOperational
+	if best != 0 {
+		return best
 	}
 	return a.State
+}
+
+func (a *Agent) apiState() AgentState {
+	if a.ApiDetails != nil {
+		return a.ApiDetails.State
+	}
+	return 0
+}
+
+func (a *Agent) dnsState() AgentState {
+	if a.DnsDetails != nil {
+		return a.DnsDetails.State
+	}
+	return 0
 }
 
 type DeferredAgentTask struct {
