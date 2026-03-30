@@ -32,31 +32,31 @@ var agentRouterCmd = &cobra.Command{
 var agentRouterListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all registered message handlers",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterList() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterList("agent", args) },
 }
 
 var agentRouterDescribeCmd = &cobra.Command{
 	Use:   "describe",
 	Short: "Show detailed router state",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe("agent", args) },
 }
 
 var agentRouterMetricsCmd = &cobra.Command{
 	Use:   "metrics",
 	Short: "Show router metrics",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("agent", args) },
 }
 
 var agentRouterWalkCmd = &cobra.Command{
 	Use:   "walk",
 	Short: "Walk all handlers with visitor pattern",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterWalk() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterWalk("agent", args) },
 }
 
 var agentRouterResetCmd = &cobra.Command{
 	Use:   "reset",
 	Short: "Reset router metrics",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterReset() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterReset("agent", args) },
 }
 
 // --- Combiner router commands (same implementation, separate instances) ---
@@ -69,38 +69,37 @@ var combinerRouterCmd = &cobra.Command{
 var combinerRouterListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all registered message handlers",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterList() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterList("combiner", args) },
 }
 
 var combinerRouterDescribeCmd = &cobra.Command{
 	Use:   "describe",
 	Short: "Show detailed router state",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe("combiner", args) },
 }
 
 var combinerRouterMetricsCmd = &cobra.Command{
 	Use:   "metrics",
 	Short: "Show router metrics",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("combiner", args) },
 }
 
 var combinerRouterWalkCmd = &cobra.Command{
 	Use:   "walk",
 	Short: "Walk all handlers with visitor pattern",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterWalk() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterWalk("combiner", args) },
 }
 
 var combinerRouterResetCmd = &cobra.Command{
 	Use:   "reset",
 	Short: "Reset router metrics",
-	Run:   func(cmd *cobra.Command, args []string) { runRouterReset() },
+	Run:   func(cmd *cobra.Command, args []string) { runRouterReset("combiner", args) },
 }
 
 // --- Shared implementation functions ---
 
-func runRouterList() {
-	prefixCmd, _ := tdnscli.GetCommandContext("router")
-	api, err := tdnscli.GetApiClient(prefixCmd, true)
+func runRouterList(parent string, args []string) {
+	api, err := tdnscli.GetApiClient(parent, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -172,9 +171,8 @@ func runRouterList() {
 	}
 }
 
-func runRouterDescribe() {
-	prefixCmd, _ := tdnscli.GetCommandContext("router")
-	api, err := tdnscli.GetApiClient(prefixCmd, true)
+func runRouterDescribe(parent string, args []string) {
+	api, err := tdnscli.GetApiClient(parent, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -204,9 +202,8 @@ func runRouterDescribe() {
 	}
 }
 
-func runRouterMetrics() {
-	prefixCmd, _ := tdnscli.GetCommandContext("router")
-	api, err := tdnscli.GetApiClient(prefixCmd, true)
+func runRouterMetrics(parent string, args []string) {
+	api, err := tdnscli.GetApiClient(parent, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -256,9 +253,8 @@ func runRouterMetrics() {
 	}
 }
 
-func runRouterWalk() {
-	prefixCmd, _ := tdnscli.GetCommandContext("router")
-	api, err := tdnscli.GetApiClient(prefixCmd, true)
+func runRouterWalk(parent string, args []string) {
+	api, err := tdnscli.GetApiClient(parent, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -318,9 +314,8 @@ func runRouterWalk() {
 	fmt.Printf("Total handlers: %d\n", len(walkResults))
 }
 
-func runRouterReset() {
-	prefixCmd, _ := tdnscli.GetCommandContext("router")
-	api, err := tdnscli.GetApiClient(prefixCmd, true)
+func runRouterReset(parent string, args []string) {
+	api, err := tdnscli.GetApiClient(parent, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
