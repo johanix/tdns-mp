@@ -343,7 +343,7 @@ func showQueueStatusForZone(zone string) {
 // truncateDNSKEY is defined in combiner_edits_cmds.go (shared by both agent and combiner edit display)
 
 func init() {
-	AgentZoneCmd.AddCommand(agentZoneEditsCmd)
+	tdnscli.AgentZoneCmd.AddCommand(agentZoneEditsCmd)
 	agentZoneEditsCmd.AddCommand(agentZoneEditsListCmd)
 
 	agentZoneEditsListCmd.Flags().String("zone", "", "Show detailed status for a specific zone")

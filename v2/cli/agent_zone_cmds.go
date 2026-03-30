@@ -18,69 +18,31 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// AgentZoneCmd is the agent-specific "zone" command group.
-// It contains only the zone subcommands relevant to the agent,
-// plus the new addrr/delrr commands for managing synced RRs.
-var AgentZoneCmd = &cobra.Command{
-	Use:   "zone",
-	Short: "Agent zone management commands",
-}
-
-// --- Zone subcommands relevant to the agent ---
-
-var showfile, shownotify, showprimary bool
-
-var agentZoneListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List configured zones",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := tdnscli.GetCommandContext("zone")
-		api, err := tdnscli.GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-
-		switch tdns.Globals.Verbose {
-		case true:
-			tdnscli.VerboseListZone(cr)
-		case false:
-			tdnscli.ListZones(cr)
-		}
-	},
-}
+// MP-specific zone subcommands. The standard AgentZoneCmd and
+// agentZoneListCmd come from tdns/v2/cli and are wired in via
+// shared_cmds.go. Only MP-specific commands are defined here.
 
 var agentZoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := tdnscli.GetCommandContext("zone")
-		api, err := tdnscli.GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
+	Run:   func(cmd *cobra.Command, args []string) { runZoneMPList("agent", args) },
+}
 
-		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-mp-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
+func runZoneMPList(parent string, args []string) {
+	api, err := tdnscli.GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
 
-		tdnscli.ListMPZones(cr)
-	},
+	cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
+		Command: "list-mp-zones",
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	tdnscli.ListMPZones(cr)
 }
 
 var agentZoneReloadCmd = &cobra.Command{
@@ -524,15 +486,14 @@ var agentRollaction string
 // --- init ---
 
 func init() {
-	AgentCmd.AddCommand(AgentZoneCmd)
-
-	// Zone subcommands relevant to the agent
-	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneMPListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
-	AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
-	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
-
-	// New addrr/delrr commands
-	AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)
+	// MP-specific zone subcommands added to tdns's AgentZoneCmd.
+	// AgentZoneCmd itself and agentZoneListCmd come from tdns/v2/cli
+	// and are wired into the command tree via shared_cmds.go.
+	tdnscli.AgentZoneCmd.AddCommand(agentZoneMPListCmd)
+	tdnscli.AgentZoneCmd.AddCommand(agentZoneReloadCmd, agentZoneWriteCmd)
+	tdnscli.AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
+	tdnscli.AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
+	tdnscli.AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)
 
 	// Dsync subcommands
 	agentZoneDsyncCmd.AddCommand(agentZoneDsyncStatusCmd, agentZoneDsyncBootstrapCmd,
@@ -543,12 +504,6 @@ func init() {
 	agentZoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 
 	// Flags
-	AgentZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
-
-	agentZoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
-	agentZoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
-	agentZoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
-
 	agentZoneAddRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to add")
 	agentZoneAddRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
 	agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")

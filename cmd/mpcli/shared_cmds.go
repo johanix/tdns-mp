@@ -56,4 +56,8 @@ func init() {
 	mpcli.AgentCmd.AddCommand(cli.KeysCmd)
 	mpcli.AgentCmd.AddCommand(cli.AgentDistribCmd)
 	mpcli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
+	// Standard zone commands from tdns (list, reload, etc.)
+	// MP-specific zone subcommands (mplist, addrr, delrr, edits)
+	// are added to cli.AgentZoneCmd via tdns-mp/v2/cli init()
+	mpcli.AgentCmd.AddCommand(cli.AgentZoneCmd)
 }
