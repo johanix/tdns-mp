@@ -193,10 +193,18 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 		localBeatInterval = 30 * time.Second
 	}
 
+	// Check if either transport is in a state that warrants beat health checking.
+	apiActive := false
+	dnsActive := false
 	switch agent.ApiDetails.State {
 	case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
-		// proceed with beat health checking
-	default:
+		apiActive = true
+	}
+	switch agent.DnsDetails.State {
+	case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
+		dnsActive = true
+	}
+	if !apiActive && !dnsActive {
 		return
 	}
 
