@@ -86,19 +86,21 @@ func handleRouterDescribe(router *transport.DNSMessageRouter) *AgentMgmtResponse
 	return resp
 }
 
-// handleRouterMetrics returns router-level metrics.
-func handleRouterMetrics(router *transport.DNSMessageRouter) *AgentMgmtResponse {
+// handleRouterMetrics returns router-level metrics with per-type sent/received
+// breakdown, aggregated from all peers. If detailed is true, per-peer breakdown
+// is included.
+func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *AgentMgmtResponse {
 	resp := &AgentMgmtResponse{
 		Time: time.Now(),
 	}
 
-	if router == nil {
+	if tm == nil || tm.Router == nil {
 		resp.Error = true
 		resp.ErrorMsg = "Router not initialized"
 		return resp
 	}
 
-	metrics := router.GetMetrics()
+	metrics := tm.Router.GetMetrics()
 
 	// Convert unhandled types map
 	unhandledTypes := make(map[string]uint64)
@@ -106,13 +108,70 @@ func handleRouterMetrics(router *transport.DNSMessageRouter) *AgentMgmtResponse 
 		unhandledTypes[string(msgType)] = count
 	}
 
-	resp.Data = map[string]interface{}{
+	// Aggregate per-type sent/received from all peers
+	var totalSent, totalReceived uint64
+	var helloSent, helloRecv, beatSent, beatRecv uint64
+	var syncSent, syncRecv, pingSent, pingRecv uint64
+
+	var peerMetrics []map[string]interface{}
+
+	if tm.PeerRegistry != nil {
+		for _, peer := range tm.PeerRegistry.All() {
+			lu, hs, hr, bs, br, ss, sr, ps, pr, ts, tr := peer.Stats.GetDetailedStats()
+			totalSent += ts
+			totalReceived += tr
+			helloSent += hs
+			helloRecv += hr
+			beatSent += bs
+			beatRecv += br
+			syncSent += ss
+			syncRecv += sr
+			pingSent += ps
+			pingRecv += pr
+
+			if detailed {
+				peerMetrics = append(peerMetrics, map[string]interface{}{
+					"peer_id":        peer.ID,
+					"state":          string(peer.State),
+					"last_used":      lu.Format(time.RFC3339),
+					"hello_sent":     hs,
+					"hello_received": hr,
+					"beat_sent":      bs,
+					"beat_received":  br,
+					"sync_sent":      ss,
+					"sync_received":  sr,
+					"ping_sent":      ps,
+					"ping_received":  pr,
+					"total_sent":     ts,
+					"total_received": tr,
+				})
+			}
+		}
+	}
+
+	data := map[string]interface{}{
 		"total_messages":    metrics.TotalMessages,
 		"unknown_messages":  metrics.UnknownMessages,
 		"middleware_errors": metrics.MiddlewareErrors,
 		"handler_errors":    metrics.HandlerErrors,
 		"unhandled_types":   unhandledTypes,
+		"total_sent":        totalSent,
+		"total_received":    totalReceived,
+		"hello_sent":        helloSent,
+		"hello_received":    helloRecv,
+		"beat_sent":         beatSent,
+		"beat_received":     beatRecv,
+		"sync_sent":         syncSent,
+		"sync_received":     syncRecv,
+		"ping_sent":         pingSent,
+		"ping_received":     pingRecv,
 	}
+
+	if detailed && len(peerMetrics) > 0 {
+		data["peers"] = peerMetrics
+	}
+
+	resp.Data = data
 	resp.Msg = "Router metrics retrieved"
 
 	return resp

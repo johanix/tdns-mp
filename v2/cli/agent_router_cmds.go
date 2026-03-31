@@ -43,7 +43,7 @@ var agentRouterDescribeCmd = &cobra.Command{
 
 var agentRouterMetricsCmd = &cobra.Command{
 	Use:   "metrics",
-	Short: "Show router metrics",
+	Short: "Show router metrics (use --detailed for per-peer breakdown)",
 	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("agent", args) },
 }
 
@@ -80,7 +80,7 @@ var combinerRouterDescribeCmd = &cobra.Command{
 
 var combinerRouterMetricsCmd = &cobra.Command{
 	Use:   "metrics",
-	Short: "Show router metrics",
+	Short: "Show router metrics (use --detailed for per-peer breakdown)",
 	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("combiner", args) },
 }
 
@@ -202,6 +202,8 @@ func runRouterDescribe(parent string, args []string) {
 	}
 }
 
+var routerMetricsDetailed bool
+
 func runRouterMetrics(parent string, args []string) {
 	api, err := tdnscli.GetApiClient(parent, true)
 	if err != nil {
@@ -210,6 +212,11 @@ func runRouterMetrics(parent string, args []string) {
 
 	req := tdns.AgentMgmtPost{
 		Command: "router-metrics",
+	}
+	if routerMetricsDetailed {
+		req.Data = map[string]interface{}{
+			"detailed": true,
+		}
 	}
 
 	_, buf, err := api.RequestNG("POST", "/agent", req, true)
@@ -236,20 +243,87 @@ func runRouterMetrics(parent string, args []string) {
 		log.Fatalf("Unexpected metrics format")
 	}
 
-	fmt.Println("DNS Message Router - Metrics")
-	fmt.Println("============================")
-	fmt.Println()
-
-	fmt.Printf("Total Messages:      %d\n", int(metrics["total_messages"].(float64)))
-	fmt.Printf("Unknown Messages:    %d\n", int(metrics["unknown_messages"].(float64)))
-	fmt.Printf("Middleware Errors:   %d\n", int(metrics["middleware_errors"].(float64)))
-	fmt.Printf("Handler Errors:      %d\n", int(metrics["handler_errors"].(float64)))
+	printMetricsBlock("DNS Message Router - Metrics (aggregate)", metrics)
 
 	if unhandled, ok := metrics["unhandled_types"].(map[string]interface{}); ok && len(unhandled) > 0 {
 		fmt.Println("\nUnhandled Message Types:")
 		for msgType, count := range unhandled {
-			fmt.Printf("  %s: %d\n", msgType, int(count.(float64)))
+			fmt.Printf("  %-20s %d\n", msgType, int(count.(float64)))
 		}
+	}
+
+	// Per-peer detailed breakdown
+	if routerMetricsDetailed {
+		peers, ok := metrics["peers"].([]interface{})
+		if !ok || len(peers) == 0 {
+			fmt.Println("\nNo per-peer data available.")
+			return
+		}
+
+		for _, p := range peers {
+			peer, ok := p.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			peerID := peer["peer_id"].(string)
+			state := peer["state"].(string)
+			fmt.Printf("\nPeer: %s (%s)\n", peerID, state)
+			fmt.Println(strings.Repeat("-", 40+len(peerID)))
+			printMetricsBlock("", peer)
+		}
+	}
+}
+
+func printMetricsBlock(header string, m map[string]interface{}) {
+	if header != "" {
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("=", len(header)))
+		fmt.Println()
+	}
+
+	totalSent := toInt(m["total_sent"])
+	totalRecv := toInt(m["total_received"])
+	fmt.Printf("Total Messages:      %d  (sent: %d, received: %d)\n", totalSent+totalRecv, totalSent, totalRecv)
+
+	fmt.Println()
+	fmt.Printf("%-20s %8s %8s\n", "Message Type", "Sent", "Received")
+	fmt.Printf("%-20s %8s %8s\n", strings.Repeat("-", 20), strings.Repeat("-", 8), strings.Repeat("-", 8))
+	fmt.Printf("%-20s %8d %8d\n", "hello", toInt(m["hello_sent"]), toInt(m["hello_received"]))
+	fmt.Printf("%-20s %8d %8d\n", "beat", toInt(m["beat_sent"]), toInt(m["beat_received"]))
+	fmt.Printf("%-20s %8d %8d\n", "sync/update", toInt(m["sync_sent"]), toInt(m["sync_received"]))
+	fmt.Printf("%-20s %8d %8d\n", "ping", toInt(m["ping_sent"]), toInt(m["ping_received"]))
+
+	other := (totalSent + totalRecv) -
+		toInt(m["hello_sent"]) - toInt(m["hello_received"]) -
+		toInt(m["beat_sent"]) - toInt(m["beat_received"]) -
+		toInt(m["sync_sent"]) - toInt(m["sync_received"]) -
+		toInt(m["ping_sent"]) - toInt(m["ping_received"])
+	if other > 0 {
+		fmt.Printf("%-20s %8s %8d\n", "other", "", other)
+	}
+
+	// Only print error counters for the aggregate block (they exist there, not per-peer)
+	if _, ok := m["handler_errors"]; ok {
+		fmt.Println()
+		fmt.Printf("Handler Errors:      %d\n", toInt(m["handler_errors"]))
+		fmt.Printf("Middleware Errors:    %d\n", toInt(m["middleware_errors"]))
+		fmt.Printf("Unknown Messages:    %d\n", toInt(m["unknown_messages"]))
+	}
+}
+
+func toInt(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case uint64:
+		return int(n)
+	default:
+		return 0
 	}
 }
 
@@ -360,6 +434,8 @@ func init() {
 	agentRouterCmd.AddCommand(agentRouterWalkCmd)
 	agentRouterCmd.AddCommand(agentRouterResetCmd)
 
+	agentRouterMetricsCmd.Flags().BoolVarP(&routerMetricsDetailed, "detailed", "d", false, "Show per-peer breakdown")
+
 	// Combiner gets its own router command tree (separate instances)
 	CombinerCmd.AddCommand(combinerRouterCmd)
 	combinerRouterCmd.AddCommand(combinerRouterListCmd)
@@ -367,4 +443,6 @@ func init() {
 	combinerRouterCmd.AddCommand(combinerRouterMetricsCmd)
 	combinerRouterCmd.AddCommand(combinerRouterWalkCmd)
 	combinerRouterCmd.AddCommand(combinerRouterResetCmd)
+
+	combinerRouterMetricsCmd.Flags().BoolVarP(&routerMetricsDetailed, "detailed", "d", false, "Show per-peer breakdown")
 }

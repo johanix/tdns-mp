@@ -621,7 +621,13 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = "Router not available (DNS transport not configured)"
 				return
 			}
-			routerResp := handleRouterMetrics(conf.InternalMp.TransportManager.Router)
+			detailed := false
+			if amp.Data != nil {
+				if v, ok := amp.Data["detailed"]; ok {
+					detailed, _ = v.(bool)
+				}
+			}
+			routerResp := handleRouterMetrics(conf.InternalMp.TransportManager, detailed)
 			resp = *routerResp
 			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
 
