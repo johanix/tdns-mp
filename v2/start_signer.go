@@ -22,6 +22,10 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
 
+	// Register MP signer API endpoint
+	sr := apirouter.PathPrefix("/api/v1").Subrouter()
+	sr.HandleFunc("/signer", conf.APImpSigner()).Methods("POST")
+
 	// DNS engines (refresh, signing, query, NOTIFY, etc.)
 	// MP engines are skipped because AppType == AppTypeMPSigner
 	if err := conf.Config.StartAuth(ctx, apirouter); err != nil {

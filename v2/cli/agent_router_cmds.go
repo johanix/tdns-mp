@@ -96,6 +96,19 @@ var combinerRouterResetCmd = &cobra.Command{
 	Run:   func(cmd *cobra.Command, args []string) { runRouterReset("combiner", args) },
 }
 
+// --- Signer router commands ---
+
+var signerRouterCmd = &cobra.Command{
+	Use:   "router",
+	Short: "DNS message router introspection commands",
+}
+
+var signerRouterMetricsCmd = &cobra.Command{
+	Use:   "metrics",
+	Short: "Show router metrics",
+	Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("signer", args) },
+}
+
 // --- Shared implementation functions ---
 
 func runRouterList(parent string, args []string) {
@@ -210,40 +223,80 @@ func runRouterMetrics(parent string, args []string) {
 		log.Fatalf("Error getting API client: %v", err)
 	}
 
-	req := tdns.AgentMgmtPost{
-		Command: "router-metrics",
-	}
-	if routerMetricsDetailed {
-		req.Data = map[string]interface{}{
-			"detailed": true,
+	// Determine endpoint and request format based on parent
+	var metrics map[string]interface{}
+
+	switch parent {
+	case "agent":
+		req := tdns.AgentMgmtPost{
+			Command: "router-metrics",
 		}
+		if routerMetricsDetailed {
+			req.Data = map[string]interface{}{
+				"detailed": true,
+			}
+		}
+		_, buf, err := api.RequestNG("POST", "/agent", req, true)
+		if err != nil {
+			log.Fatalf("API request failed: %v", err)
+		}
+		var amr tdns.AgentMgmtResponse
+		if err := json.Unmarshal(buf, &amr); err != nil {
+			log.Fatalf("Failed to parse response: %v", err)
+		}
+		if amr.Error {
+			log.Fatalf("API error: %s", amr.ErrorMsg)
+		}
+		if amr.Data == nil {
+			fmt.Println("No metrics available")
+			return
+		}
+		var ok bool
+		metrics, ok = amr.Data.(map[string]interface{})
+		if !ok {
+			log.Fatalf("Unexpected metrics format")
+		}
+
+	case "combiner", "signer":
+		endpoint := "/" + parent
+		if parent == "combiner" {
+			endpoint = "/combiner/debug"
+		}
+		req := tdns.CombinerDebugPost{
+			Command: "router-metrics",
+		}
+		if routerMetricsDetailed {
+			req.Data = map[string]interface{}{
+				"detailed": true,
+			}
+		}
+		_, buf, err := api.RequestNG("POST", endpoint, req, true)
+		if err != nil {
+			log.Fatalf("API request failed: %v", err)
+		}
+		var resp tdns.CombinerDebugResponse
+		if err := json.Unmarshal(buf, &resp); err != nil {
+			log.Fatalf("Failed to parse response: %v", err)
+		}
+		if resp.Error {
+			log.Fatalf("API error: %s", resp.ErrorMsg)
+		}
+		if resp.Data == nil {
+			fmt.Println("No metrics available")
+			return
+		}
+		var ok bool
+		metrics, ok = resp.Data.(map[string]interface{})
+		if !ok {
+			log.Fatalf("Unexpected metrics format")
+		}
+
+	default:
+		log.Fatalf("Unknown parent: %s", parent)
 	}
 
-	_, buf, err := api.RequestNG("POST", "/agent", req, true)
-	if err != nil {
-		log.Fatalf("API request failed: %v", err)
-	}
-
-	var amr tdns.AgentMgmtResponse
-	if err := json.Unmarshal(buf, &amr); err != nil {
-		log.Fatalf("Failed to parse response: %v", err)
-	}
-
-	if amr.Error {
-		log.Fatalf("API error: %s", amr.ErrorMsg)
-	}
-
-	if amr.Data == nil {
-		fmt.Println("No metrics available")
-		return
-	}
-
-	metrics, ok := amr.Data.(map[string]interface{})
-	if !ok {
-		log.Fatalf("Unexpected metrics format")
-	}
-
-	printMetricsBlock("DNS Message Router - Metrics (aggregate)", metrics)
+	header := fmt.Sprintf("DNS Message Router - Metrics (%s)", parent)
+	printMetricsBlock(header, metrics)
 
 	if unhandled, ok := metrics["unhandled_types"].(map[string]interface{}); ok && len(unhandled) > 0 {
 		fmt.Println("\nUnhandled Message Types:")
@@ -252,7 +305,7 @@ func runRouterMetrics(parent string, args []string) {
 		}
 	}
 
-	// Per-peer detailed breakdown
+	// Per-peer detailed breakdown (agent only)
 	if routerMetricsDetailed {
 		peers, ok := metrics["peers"].([]interface{})
 		if !ok || len(peers) == 0 {
@@ -445,4 +498,10 @@ func init() {
 	combinerRouterCmd.AddCommand(combinerRouterResetCmd)
 
 	combinerRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
+
+	// Signer gets only the metrics command
+	SignerCmd.AddCommand(signerRouterCmd)
+	signerRouterCmd.AddCommand(signerRouterMetricsCmd)
+
+	signerRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
 }
