@@ -397,22 +397,104 @@ Step 4 (empty REPLACE) — needs agent forwarding to work
 Step 5 (CLI) — needs RRStateIgnored
 ```
 
+## Size Estimate
+
+~130-160 lines added, ~2 deleted, ~35-40 modified
+across 12 files (4 in tdns-transport, 8 in tdns-mp).
+Medium-sized change.
+
+Largest single modifications:
+- syncheddataengine.go: ~50 lines added (RRStateIgnored,
+  ignoredSet in ProcessConfirmation, empty REPLACE in
+  resync, removal of skipCombiner overrides)
+- legacy_combiner_chunk.go: ~40 lines added (editPolicy
+  struct + canApply, per-operation ignored tracking in
+  combinerProcessOperations)
+- Everything else: 1-16 lines per file
+
 ## Key Files Modified
 
-| File                              | Steps | Changes                       |
-|-----------------------------------|-------|-------------------------------|
-| tdns-transport/.../transport.go   | 1     | ConfirmIgnored, IgnoredRecords|
-| tdns-transport/.../handler.go     | 1     | parseConfirmStatus            |
-| tdns-transport/.../dns.go         | 1     | DnsConfirmPayload             |
-| tdns-transport/.../handlers.go    | 1     | Forward IgnoredRecords        |
-| hsync_utils.go                    | 2     | populateMPdata no-wipe        |
-| legacy_combiner_chunk.go          | 2     | checkMPauth, processOps       |
-| legacy_combiner_utils.go          | 2     | CombineWithLocalChanges guard |
-| legacy_combiner_msg_handler.go    | 2     | Map "ignored" status          |
-| syncheddataengine.go              | 1,3,4 | RRStateIgnored, skip, REPLACE |
-| hsync_transport.go                | 1     | RMQ + callback                |
-| apihandler_agent.go               | 3     | Per-RRtype policy             |
-| cli/agent_edits_cmds.go           | 5     | Display IGNORED               |
+| File                            | Steps | +add | ~mod | Changes                |
+|---------------------------------|-------|------|------|------------------------|
+| tdns-transport/.../transport.go | 1     | 4    | 2    | ConfirmIgnored, fields |
+| tdns-transport/.../handler.go   | 1     | 2    | 1    | parseConfirmStatus     |
+| tdns-transport/.../dns.go       | 1     | 4    | 0    | DnsConfirmPayload      |
+| tdns-transport/.../handlers.go  | 1     | 1    | 3    | Callback signature     |
+| hsync_utils.go                  | 2     | 10   | 3    | populateMPdata no-wipe |
+| legacy_combiner_chunk.go        | 2     | 40   | 10   | editPolicy, processOps |
+| legacy_combiner_utils.go        | 2     | 7    | 2    | CombineWithLocalChanges|
+| legacy_combiner_msg_handler.go  | 2     | 6    | 0    | Map "ignored" status   |
+| syncheddataengine.go            | 1,3,4 | 50   | 12   | RRState, skip, REPLACE |
+| hsync_transport.go              | 1     | 1    | 3    | RMQ + callback         |
+| apihandler_agent.go             | 3     | 10   | 3    | Per-RRtype policy      |
+| cli/agent_edits_cmds.go         | 5     | 16   | 0    | Display IGNORED        |
+
+## Risks
+
+**High → downgraded to Low after audit:**
+
+1. **populateMPdata change affects all apps.** Removing
+   `MPdata = nil` + early return for non-signers means
+   agents, combiners, and signers all get MPdata
+   populated where they didn't before.
+
+   **Audit completed:** 17 MPdata access sites checked.
+   11 are safe (guard on field values like WeAreSigner,
+   not on nil). 1 is the planned change itself
+   (hsync_utils.go:837). 2 need minor updates:
+
+   - `checkMPauthorization()` in legacy_combiner_chunk.go
+     (line 252-273) and tdns-mp combiner_chunk.go
+     (line 163-180): diagnostic fallthrough comment says
+     "Must be guard 4" — after change, only guards 1-3
+     can reach this branch. Update comment and final
+     error message.
+
+   Notable safe cases:
+   - signer_msg_handler.go:181 — non-signers get
+     WeAreSigner=false, correctly send empty inventory
+   - syncheddataengine.go:349-350 — startup hydration
+     correctly gates on WeAreSigner field
+   - hsync_utils.go:987 — signer inline-signing setup
+     correctly reads WeAreSigner=false for non-signers
+
+   No panics expected — all field accesses are guarded.
+
+2. **Removing remoteSkipCombiner changes confirmation
+   timing.** Currently agent.echo fabricates an
+   immediate "ok" for remote updates. After the change,
+   echo waits for combiner.echo to respond (IGNORED).
+   If combiner.echo is slow or down, the originating
+   agent waits longer. Correct behavior but a latency
+   change.
+
+**Medium:**
+
+3. **combinerProcessOperations is a 275-line function**
+   getting per-operation branching added. The
+   persist-then-conditionally-apply flow needs to be
+   threaded carefully through the existing
+   replace/add/delete dispatch.
+
+4. **Callback signature change** in
+   OnConfirmationReceived touches tdns-transport and
+   tdns-mp. Both repos must be updated in lockstep —
+   a partial deploy will break.
+
+**Low:**
+
+5. Transport-layer changes (ConfirmIgnored,
+   IgnoredRecords) are purely additive.
+6. CLI display is isolated.
+7. Empty REPLACE relies on existing
+   ReplaceCombinerDataByRRtype which already handles
+   empty sets.
+
+**Mitigation:** Implement in the documented step order.
+Steps 1-2 are the core — get them working and
+lab-tested before Steps 3-4. Step 3 (removing the
+blanket block) is where the most behavioral change
+happens and where risk #1 concentrates.
 
 ## Verification
 
