@@ -434,7 +434,7 @@ func init() {
 	agentRouterCmd.AddCommand(agentRouterWalkCmd)
 	agentRouterCmd.AddCommand(agentRouterResetCmd)
 
-	agentRouterMetricsCmd.Flags().BoolVarP(&routerMetricsDetailed, "detailed", "d", false, "Show per-peer breakdown")
+	agentRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
 
 	// Combiner gets its own router command tree (separate instances)
 	CombinerCmd.AddCommand(combinerRouterCmd)
@@ -444,5 +444,5 @@ func init() {
 	combinerRouterCmd.AddCommand(combinerRouterWalkCmd)
 	combinerRouterCmd.AddCommand(combinerRouterResetCmd)
 
-	combinerRouterMetricsCmd.Flags().BoolVarP(&routerMetricsDetailed, "detailed", "d", false, "Show per-peer breakdown")
+	combinerRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
 }
