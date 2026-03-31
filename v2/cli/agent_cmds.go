@@ -193,7 +193,7 @@ Examples:
 
 		if amr.Error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", amr.ErrorMsg)
-			return
+			os.Exit(1)
 		}
 		fmt.Println(amr.Msg)
 	},

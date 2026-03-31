@@ -809,6 +809,9 @@ func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtR
 			log.Println("JSON parse error: ", err)
 		}
 		fmt.Printf("Agent debug response:\n%s\n", prettyJSON.String())
+		if amr.Error {
+			log.Fatalf("API error: %s", amr.ErrorMsg)
+		}
 		return &amr, nil
 	}
 

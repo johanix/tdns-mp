@@ -142,30 +142,40 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				agent.DnsDetails.LatestSBeat = now
 				agent.DnsDetails.LatestError = ""
 				agent.DnsDetails.SentBeats++
-				if len(agent.DeferredTasks) > 0 {
-					lgAgent.Info("agent has deferred tasks, executing", "agent", agent.Identity, "count", len(agent.DeferredTasks))
-					var remainingTasks []DeferredAgentTask
-					for _, task := range agent.DeferredTasks {
-						if task.Precondition() {
-							ok, err := task.Action()
-							if err != nil {
-								lgAgent.Error("deferred task failed", "task", task.Desc, "err", err)
-								remainingTasks = append(remainingTasks, task)
-							} else if ok {
-								lgAgent.Info("deferred task executed successfully", "task", task.Desc)
-							} else {
-								remainingTasks = append(remainingTasks, task)
-							}
-						} else {
-							remainingTasks = append(remainingTasks, task)
-						}
-					}
-					agent.DeferredTasks = remainingTasks
-				}
+			}
+			var tasks []DeferredAgentTask
+			if len(agent.DeferredTasks) > 0 {
+				tasks = agent.DeferredTasks
+				agent.DeferredTasks = nil
 			}
 			agent.CheckState(ar.LocalAgent.Remote.BeatInterval)
 			ar.S.Set(agent.Identity, agent)
 			agent.Mu.Unlock()
+
+			if len(tasks) > 0 {
+				lgAgent.Info("agent has deferred tasks, executing", "agent", agent.Identity, "count", len(tasks))
+				var remainingTasks []DeferredAgentTask
+				for _, task := range tasks {
+					if task.Precondition() {
+						ok, err := task.Action()
+						if err != nil {
+							lgAgent.Error("deferred task failed", "task", task.Desc, "err", err)
+							remainingTasks = append(remainingTasks, task)
+						} else if ok {
+							lgAgent.Info("deferred task executed successfully", "task", task.Desc)
+						} else {
+							remainingTasks = append(remainingTasks, task)
+						}
+					} else {
+						remainingTasks = append(remainingTasks, task)
+					}
+				}
+				if len(remainingTasks) > 0 {
+					agent.Mu.Lock()
+					agent.DeferredTasks = append(agent.DeferredTasks, remainingTasks...)
+					agent.Mu.Unlock()
+				}
+			}
 		}(a)
 	}
 }

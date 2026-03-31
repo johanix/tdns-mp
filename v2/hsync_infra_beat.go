@@ -26,7 +26,7 @@ func (ar *AgentRegistry) StartInfraBeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Send an initial beat immediately so we don't wait a full interval on startup.
-	ar.sendInfraBeats()
+	ar.sendInfraBeats(ctx)
 
 	for {
 		select {
@@ -34,14 +34,14 @@ func (ar *AgentRegistry) StartInfraBeatLoop(ctx context.Context) {
 			lgAgent.Info("infra beat loop stopped")
 			return
 		case <-ticker.C:
-			ar.sendInfraBeats()
+			ar.sendInfraBeats(ctx)
 		}
 	}
 }
 
 // sendInfraBeats iterates AgentRegistry and sends a beat to every infra peer
 // (combiner, signer) that has at least one transport ready.
-func (ar *AgentRegistry) sendInfraBeats() {
+func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 	if ar.MPTransport == nil {
 		return
 	}
@@ -68,7 +68,7 @@ func (ar *AgentRegistry) sendInfraBeats() {
 		}
 
 		go func(agent *Agent) {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
 			defer cancel()
 
 			agent.Mu.RLock()

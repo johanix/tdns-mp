@@ -353,7 +353,7 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 			zones = append(zones, string(z))
 		}
 
-		lgGossip.Debug("RefreshLocalStates", "group", hash[:8],
+		lgGossip.Debug("RefreshLocalStates", "group", shortHash(hash),
 			"localID", gst.LocalID, "peerStates", peerStates, "zones", zones)
 		gst.UpdateLocalState(hash, peerStates, zones)
 	}

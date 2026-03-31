@@ -45,7 +45,7 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 	// These agents were previously in HSYNC3 but all shared zones have been removed
 	// We still allow beat messages to maintain the relationship
 	if tm.agentRegistry != nil {
-		if agent, exists := tm.agentRegistry.S.Get(AgentId(senderID)); exists {
+		if agent, exists := tm.agentRegistry.S.Get(AgentId(dns.Fqdn(senderID))); exists {
 			if agent.State == AgentStateLegacy {
 				return true, "authorized via LEGACY state (established relationship, zero shared zones)"
 			}
@@ -134,6 +134,9 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 				}
 				if id == senderFQDN {
 					foundSender = true
+				}
+				if foundMe && foundSender {
+					break
 				}
 			}
 		}

@@ -21,7 +21,6 @@ func configureInterval(key string, min, max int) int {
 	if interval < min {
 		interval = min
 	}
-	viper.Set(key, interval)
 	return interval
 }
 
@@ -52,14 +51,9 @@ func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {
 func (ar *AgentRegistry) HelloRetrier() {
 	var known_agents []AgentId
 	for _, agent := range ar.S.Items() {
-		switch agent.ApiDetails.State {
-		case AgentStateKnown:
+		if ar.agentNeedsHello(agent) {
 			known_agents = append(known_agents, agent.Identity)
 			go ar.SingleHello(agent, agent.InitialZone)
-			// log.Printf("HsyncEngine: Retrying HELLO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-		default:
-			// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-			continue
 		}
 	}
 	if len(known_agents) > 0 {
@@ -228,11 +222,18 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.SentBeats++
 				agent.ApiDetails.LatestError = ""
-				// Execute deferred tasks on first successful beat
+				var tasks []DeferredAgentTask
 				if len(agent.DeferredTasks) > 0 {
-					lgAgent.Info("executing deferred tasks after fast beat", "agent", agent.Identity, "count", len(agent.DeferredTasks))
+					tasks = agent.DeferredTasks
+					agent.DeferredTasks = nil
+				}
+				ar.S.Set(agent.Identity, agent)
+				agent.Mu.Unlock()
+
+				if len(tasks) > 0 {
+					lgAgent.Info("executing deferred tasks after fast beat", "agent", agent.Identity, "count", len(tasks))
 					var remaining []DeferredAgentTask
-					for _, task := range agent.DeferredTasks {
+					for _, task := range tasks {
 						if task.Precondition() {
 							ok, taskErr := task.Action()
 							if taskErr != nil {
@@ -247,10 +248,12 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 							remaining = append(remaining, task)
 						}
 					}
-					agent.DeferredTasks = remaining
+					if len(remaining) > 0 {
+						agent.Mu.Lock()
+						agent.DeferredTasks = append(agent.DeferredTasks, remaining...)
+						agent.Mu.Unlock()
+					}
 				}
-				ar.S.Set(agent.Identity, agent)
-				agent.Mu.Unlock()
 				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity)
 				return
 			}
@@ -350,10 +353,10 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				if hsync3.Identity == ar.LocalAgent.Identity {
+				if dns.Fqdn(hsync3.Identity) == dns.Fqdn(string(ar.LocalAgent.Identity)) {
 					foundMe = true
 				}
-				if AgentId(hsync3.Identity) == ahp.MyIdentity {
+				if dns.Fqdn(hsync3.Identity) == dns.Fqdn(string(ahp.MyIdentity)) {
 					foundYou = true
 				}
 			}
