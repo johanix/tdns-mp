@@ -17,6 +17,15 @@ import (
 // startup to tdns.StartAuth (which skips MP engines for
 // AppTypeMPSigner), then starts the MP engines from tdns-mp.
 func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) error {
+	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
+	// and install hook so new zones added via reload also get them.
+	conf.RegisterMPRefreshCallbacks()
+	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
+
+	// Register MP signer API endpoint
+	sr := apirouter.PathPrefix("/api/v1").Subrouter()
+	sr.HandleFunc("/signer", conf.APImpSigner()).Methods("POST")
+
 	// DNS engines (refresh, signing, query, NOTIFY, etc.)
 	// MP engines are skipped because AppType == AppTypeMPSigner
 	if err := conf.Config.StartAuth(ctx, apirouter); err != nil {
@@ -24,16 +33,16 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	}
 
 	// MP engines from tdns-mp
-	tm := conf.Config.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 	}
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
-		func() { SignerMsgHandler(ctx, conf.Config, conf.Config.Internal.MsgQs) })
+		func() { SignerMsgHandler(ctx, conf, conf.InternalMp.MsgQs) })
 
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker",
-		func() error { return KeyStateWorker(ctx, conf.Config) })
+		func() error { return KeyStateWorker(ctx, conf) })
 
 	return nil
 }

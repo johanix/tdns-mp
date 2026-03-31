@@ -14,12 +14,12 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	tdns "github.com/johanix/tdns/v2"
 	tdnsmp "github.com/johanix/tdns-mp/v2"
+	tdns "github.com/johanix/tdns/v2"
 )
 
 func main() {
-	tdns.Globals.App.Type = tdns.AppTypeMPCombiner
+	tdns.Globals.App.Type = tdns.AppTypeMPAgent
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
@@ -40,6 +40,8 @@ func main() {
 		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error setting up API router: %v", err))
 	}
 
+	conf.SetupMPAgentRoutes(apirouter)
+
 	// SIGHUP reload watcher
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -58,7 +60,7 @@ func main() {
 	}()
 
 	// DNS engines + MP engines
-	err = conf.StartMPCombiner(ctx, apirouter)
+	err = conf.StartMPAgent(ctx, apirouter)
 	if err != nil {
 		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error starting: %v", err))
 	}

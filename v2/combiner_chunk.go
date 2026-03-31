@@ -182,7 +182,7 @@ func checkMPauthorization(zd *tdns.ZoneData) error {
 	return nil
 }
 
-func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *tdns.KeyDB, tm *tdns.MPTransportBridge) *CombinerSyncResponse {
+func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *tdns.KeyDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	totalRecords := 0
 	for _, rrs := range req.Records {
 		totalRecords += len(rrs)
@@ -275,7 +275,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 // combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
 // STATUS-UPDATE notification to the local agent that delivered the update.
-func combinerNotifyDelegationChange(tm *tdns.MPTransportBridge, senderID, zonename string, zd *tdns.ZoneData, nsChanged, kskChanged bool) {
+func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, zd *tdns.ZoneData, nsChanged, kskChanged bool) {
 	zoneSigned := false
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err == nil && apex != nil {
@@ -370,7 +370,7 @@ func combinerNotifyDelegationChange(tm *tdns.MPTransportBridge, senderID, zonena
 
 // sendDelegationStatusUpdate sends a STATUS-UPDATE message to the agent
 // via the DNSTransport fire-and-forget NOTIFY(CHUNK) mechanism.
-func sendDelegationStatusUpdate(tm *tdns.MPTransportBridge, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
+func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("sendDelegationStatusUpdate: no DNSTransport, cannot notify agent", "zone", zonename, "subtype", subtype)
 		return
@@ -1438,6 +1438,9 @@ func checkDNSKEYPolicy(zd *tdns.ZoneData, senderID string) (bool, string) {
 	if senderLabel == "" {
 		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
 	}
+
+	// Normalize: HSYNC3.Label may have trailing dot, HSYNCPARAM signers do not
+	senderLabel = strings.TrimSuffix(senderLabel, ".")
 
 	// Check if sender's label is in the signers list
 	if !hp.IsSignerLabel(senderLabel) {

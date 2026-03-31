@@ -23,13 +23,13 @@ var lgSigner = tdns.Logger("signer")
 // SignerMsgHandler consumes beat, hello, ping, and RFI messages from MsgQs.
 // Updates PeerRegistry liveness on beats and logs hello/ping messages.
 // Processes RFI KEYSTATE requests by querying KeyDB and pushing inventory.
-func SignerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQs) {
+func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	if msgQs == nil {
 		lgSigner.Warn("No MsgQs configured, exiting")
 		return
 	}
 
-	tm := conf.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	var peerRegistry *transport.PeerRegistry
 	if tm != nil {
 		peerRegistry = tm.PeerRegistry
@@ -93,7 +93,7 @@ func SignerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQs)
 				continue
 			}
 
-			kdb := conf.Internal.KeyDB
+			kdb := conf.Config.Internal.KeyDB
 			if kdb == nil {
 				lgSigner.Error("KeyDB not available for KEYSTATE signal processing")
 				continue
@@ -149,11 +149,11 @@ func SignerMsgHandler(ctx context.Context, conf *tdns.Config, msgQs *tdns.MsgQs)
 // configured agents. Called after key state changes (rollover, delete, setstate,
 // retired→mpremove, mpdist→published) so agents learn about the change and can
 // distribute it to remote agents.
-func pushKeystateInventoryToAllAgents(conf *tdns.Config, zone string) {
+func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 	if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
 		return
 	}
-	tm := conf.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm == nil {
 		lgSigner.Warn("pushKeystateInventoryToAllAgents: no TransportManager", "zone", zone)
 		return
@@ -170,8 +170,8 @@ func pushKeystateInventoryToAllAgents(conf *tdns.Config, zone string) {
 
 // sendKeystateInventoryToAgent queries KeyDB for all keys in the zone and sends
 // a complete KEYSTATE inventory message back to the requesting agent.
-func sendKeystateInventoryToAgent(conf *tdns.Config, tm *tdns.MPTransportBridge, agentID string, zone string) error {
-	kdb := conf.Internal.KeyDB
+func sendKeystateInventoryToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone string) error {
+	kdb := conf.Config.Internal.KeyDB
 	if kdb == nil {
 		return fmt.Errorf("KeyDB not available")
 	}

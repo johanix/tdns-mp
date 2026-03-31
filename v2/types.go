@@ -40,3 +40,54 @@ const CombinerOptAddSignature = tdns.CombinerOptAddSignature
 // Signer types
 type KeyInventoryItem = tdns.KeyInventoryItem
 type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
+
+// Pervasive types that stay as aliases (no methods, used everywhere)
+type AgentId = tdns.AgentId
+type ZoneName = tdns.ZoneName
+type ZoneUpdate = tdns.ZoneUpdate
+type OwnerData = tdns.OwnerData
+
+// Types that stay as aliases until their defining files are copied
+type DistributionCache = tdns.DistributionCache
+type DistributionInfo = tdns.DistributionInfo
+type ChunkPayloadStore = tdns.ChunkPayloadStore
+
+// Internal state types that stay as aliases during dual-write period
+type CombinerState = tdns.CombinerState
+
+// Agent distrib API types
+type AgentDistribPost = tdns.AgentDistribPost
+type AgentDistribResponse = tdns.AgentDistribResponse
+type DistributionSummary = tdns.DistributionSummary
+type PeerInfo = tdns.PeerInfo
+
+// Transaction API types
+type TransactionPost = tdns.TransactionPost
+type TransactionResponse = tdns.TransactionResponse
+type TransactionSummary = tdns.TransactionSummary
+type TransactionErrorSummary = tdns.TransactionErrorSummary
+
+// Functions re-exported from tdns (not yet moved)
+var NewDistributionCache = tdns.NewDistributionCache
+var StartDistributionGC = tdns.StartDistributionGC
+
+// NewMsgQs creates and returns a *MsgQs with all channels initialized.
+func NewMsgQs() *MsgQs {
+	return &MsgQs{
+		Hello:             make(chan *AgentMsgReport, 100),
+		Beat:              make(chan *AgentMsgReport, 100),
+		Ping:              make(chan *AgentMsgReport, 100),
+		Msg:               make(chan *AgentMsgPostPlus, 100),
+		Command:           make(chan *AgentMgmtPostPlus, 100),
+		DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
+		SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
+		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
+		Confirmation:      make(chan *ConfirmationDetail, 100),
+		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
+		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
+		EditsResponse:     make(chan *EditsResponseMsg, 10),
+		ConfigResponse:    make(chan *ConfigResponseMsg, 10),
+		AuditResponse:     make(chan *AuditResponseMsg, 10),
+		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
+	}
+}

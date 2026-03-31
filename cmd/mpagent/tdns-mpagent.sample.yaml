@@ -1,0 +1,154 @@
+# TDNS MP Agent Configuration
+#
+# The mpagent binary provides the multi-provider DNSSEC agent
+# role. It uses tdns for DNS infrastructure (zone serving, refresh,
+# NOTIFY, query handling, IMR) and adds MP-specific engines
+# (HSYNC sync engine, SDE, heartbeats, discovery, leader election,
+# CHUNK transport, gossip protocol).
+#
+# This config is similar to tdns-agent.yaml but runs as a
+# standalone MP application (AppTypeMPAgent).
+
+include:
+   - mpagent-zones.yaml
+
+multi-provider:
+   role:           agent
+   identity:       agent.provider.example.
+   # Active transport mechanisms: "api" and/or "dns"
+   supported_mechanisms: [ dns ]
+   # Secure CHUNK comms with combiner
+   long_term_jose_priv_key: /etc/tdns/keys/agent.jose.priv.json
+   combiner:
+      identity:                combiner.provider.example.
+      address:                 10.1.0.4:8055
+      long_term_jose_pub_key:  /etc/tdns/keys/combiner.jose.pub.json
+   signer:
+      identity:                signer.provider.example.
+      address:                 127.0.0.1:8053
+      long_term_jose_pub_key:  /etc/tdns/keys/signer.jose.pub.json
+   # Authorized peer agents (discovered via DNS)
+   # authorized_peers:
+   #    - agent.other-provider.example.
+   local:
+      notify:        []
+      # nameservers: [ ns1.example.org., ns2.example.org. ]
+   remote:
+      LocateInterval: 60
+      BeatInterval:   30
+   xfr:
+      outgoing:
+         addresses:  []
+         auth:       []
+      incoming:
+         addresses:  []
+         auth:       []
+   api:
+      addresses:
+         publish:    [ 10.1.0.1 ]
+         listen:     [ 127.0.0.1:8999 ]
+      baseurl:       https://api.{TARGET}:{PORT}/api/v1
+      port:          8999
+      certfile:      /etc/tdns/certs/agent.crt
+      keyfile:       /etc/tdns/certs/agent.key
+   dns:
+      addresses:
+         publish:    [ 10.1.0.1 ]
+         listen:     [ 127.0.0.1:8998 ]
+      baseurl:       dns://dns.{TARGET}:{PORT}/
+      port:          8998
+      # chunk_mode:           edns0
+      # chunk_mode:           query
+      # chunk_query_endpoint: include
+   syncengine:
+      intervals:
+         helloretry: 15
+
+service:
+   name:           TDNS-MPAGENT
+   verbose:        true
+   debug:          false
+   refresh:        true
+   maxrefresh:     1800
+
+dnsengine:
+   addresses:      [ 127.0.0.1:5357 ]
+
+apiserver:
+   addresses:      [ 127.0.0.1:8987 ]
+   apikey:         change-me-to-something-secret
+
+validator:
+   active:         true
+   verbose:        false
+   debug:          false
+   dnskey:
+      trusted:
+         file:     /etc/tdns/trust-anchors.yaml
+   sig0:
+      trusted:
+         file:     /etc/tdns/sig0-keys.yaml
+
+resolver:
+   address:        8.8.8.8:53
+
+delegationsync:
+   leader-election-ttl: 60m
+   parent:
+      schemes:     [ notify, update ]
+      notify:
+         types:    [ CDS, CSYNC ]
+         port:     5357
+         target:   notifications.{ZONENAME}
+         addresses: [ 127.0.0.1 ]
+      update:
+         types:    [ ANY ]
+         port:     5357
+         target:   updates.{ZONENAME}
+         addresses: [ 127.0.0.1 ]
+         keygen:
+            mode:       internal
+            algorithm:  ED25519
+   child:
+      schemes:     [ notify, update ]
+      update:
+         keygen:
+            mode:       internal
+            algorithm:  ED25519
+
+keybootstrap:
+   consistent-lookup:
+      iterations:  3
+      interval:    60
+      nameservers: all
+
+dnssecpolicies:
+   default:
+      algorithm:   ED25519
+      ksk:
+         lifetime:      forever
+         sigvalidity:   168h
+      zsk:
+         lifetime:      forever
+         sigvalidity:   2h
+
+db:
+   file:  /var/lib/tdns/tdns-mpagent.db
+
+imrengine:
+   active:         true
+   root-hints:     /etc/tdns/root.hints
+   addresses:      [ 127.0.0.1:5453 ]
+   transports:     [ do53 ]
+   require_dnssec_validation: true
+
+log:
+   file:   /var/log/tdns/tdns-mpagent.log
+   level:  info
+   # subsystems:
+   #    transport:  debug
+   #    engine:     debug
+   #    agent:      info
+
+common:
+   command:  /usr/local/libexec/tdns-mpagent

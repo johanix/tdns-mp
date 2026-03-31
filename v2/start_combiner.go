@@ -11,7 +11,6 @@ import (
 
 	"github.com/gorilla/mux"
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
 )
 
 // StartMPCombiner starts the MP combiner. It delegates DNS engine
@@ -20,64 +19,19 @@ import (
 func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) error {
 	// Attach OnFirstLoad callbacks to zone stubs created by ParseZones.
 	// These use tdns-mp's local combiner functions (not the legacy tdns ones).
-	kdb := conf.Config.Internal.KeyDB
-	for _, zoneName := range conf.Config.Internal.AllZones {
-		zd, exists := tdns.Zones.Get(zoneName)
-		if !exists {
-			lgCombiner.Error("zone stub not found, skipping callback attachment", "zone", zoneName)
-			continue
-		}
-		if kdb != nil {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if !zd.Options[tdns.OptMultiProvider] {
-					return
-				}
-
-				zd.EnsureMP()
-
-				// Set PersistContributions callback
-				if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
-					kdb := zd.KeyDB
-					zd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
-						return SaveContributions(kdb, zone, senderID, contribs)
-					}
-					lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
-				}
-				// Hydrate AgentContributions from persistent storage
-				if zd.MP.AgentContributions == nil && zd.KeyDB != nil {
-					allContribs, err := LoadAllContributions(zd.KeyDB)
-					if err != nil {
-						lgCombiner.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
-						return
-					}
-					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
-						zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
-						for senderID, ownerMap := range zoneContribs {
-							zd.MP.AgentContributions[senderID] = ownerMap
-						}
-						RebuildCombinerData(zd)
-						lgCombiner.Info("hydrated AgentContributions from snapshot",
-							"zone", zd.ZoneName, "agents", len(zoneContribs))
-					}
-				}
-				// Re-apply combined data now that contributions are loaded
-				if zd.Options[tdns.OptAllowEdits] {
-					success, err := tdns.ZoneDataCombineWithLocalChanges(zd)
-					if err != nil {
-						lgCombiner.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
-					} else if success {
-						lgCombiner.Info("re-applied local changes after hydration", "zone", zd.ZoneName)
-					}
-				}
-			})
-		}
-		// Provider zones: re-apply stored _signal KEY publish instructions on startup.
-		if kdb != nil && GetProviderZoneRRtypes(zoneName) != nil {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				ApplyPendingSignalKeys(zd, kdb)
-			})
-		}
+	// Attach OnFirstLoad callbacks (contributions, signal keys) and
+	// PreRefresh/PostRefresh closures to MP zones. Install hook so
+	// zones added via reload also get both sets of callbacks.
+	conf.RegisterCombinerOnFirstLoad()
+	conf.RegisterMPRefreshCallbacks()
+	conf.Config.Internal.PostParseZonesHook = func() {
+		conf.RegisterCombinerOnFirstLoad()
+		conf.RegisterMPRefreshCallbacks()
 	}
+
+	// Register MP combiner API endpoint
+	sr := apirouter.PathPrefix("/api/v1").Subrouter()
+	sr.HandleFunc("/combiner/mp", conf.APImpCombiner()).Methods("POST")
 
 	// DNS engines (APIdispatcher, RefreshEngine, Notifier, NotifyHandler, DnsEngine)
 	// MP engines are skipped because AppType == AppTypeMPCombiner
@@ -86,7 +40,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	}
 
 	// MP engines from tdns-mp
-	tm := conf.Config.Internal.MPTransport
+	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
 		lgCombiner.Info("combiner incoming message router started")
@@ -95,12 +49,12 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	// Start combiner message handler
 	var protectedNS []string
 	var errJournal *tdns.ErrorJournal
-	if conf.Config.Internal.CombinerState != nil {
-		protectedNS = conf.Config.Internal.CombinerState.ProtectedNamespaces
-		errJournal = conf.Config.Internal.CombinerState.ErrorJournal
+	if conf.InternalMp.CombinerState != nil {
+		protectedNS = conf.InternalMp.CombinerState.ProtectedNamespaces
+		errJournal = conf.InternalMp.CombinerState.ErrorJournal
 	}
 	tdns.StartEngineNoError(&tdns.Globals.App, "CombinerMsgHandler",
-		func() { CombinerMsgHandler(ctx, conf.Config, conf.Config.Internal.MsgQs, protectedNS, errJournal) })
+		func() { CombinerMsgHandler(ctx, conf, conf.InternalMp.MsgQs, protectedNS, errJournal) })
 
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
 	mp := conf.Config.MultiProvider
