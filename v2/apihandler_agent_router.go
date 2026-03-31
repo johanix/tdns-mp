@@ -112,38 +112,47 @@ func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *AgentMg
 	var totalSent, totalReceived uint64
 	var helloSent, helloRecv, beatSent, beatRecv uint64
 	var syncSent, syncRecv, pingSent, pingRecv uint64
+	var confirmSent, confirmRecv, otherSent, otherRecv uint64
 
 	var peerMetrics []map[string]interface{}
 
 	if tm.PeerRegistry != nil {
 		for _, peer := range tm.PeerRegistry.All() {
-			lu, hs, hr, bs, br, ss, sr, ps, pr, ts, tr := peer.Stats.GetDetailedStats()
-			totalSent += ts
-			totalReceived += tr
-			helloSent += hs
-			helloRecv += hr
-			beatSent += bs
-			beatRecv += br
-			syncSent += ss
-			syncRecv += sr
-			pingSent += ps
-			pingRecv += pr
+			s := peer.Stats.GetDetailedStats()
+			totalSent += s.TotalSent
+			totalReceived += s.TotalReceived
+			helloSent += s.HelloSent
+			helloRecv += s.HelloReceived
+			beatSent += s.BeatSent
+			beatRecv += s.BeatReceived
+			syncSent += s.SyncSent
+			syncRecv += s.SyncReceived
+			pingSent += s.PingSent
+			pingRecv += s.PingReceived
+			confirmSent += s.ConfirmSent
+			confirmRecv += s.ConfirmReceived
+			otherSent += s.OtherSent
+			otherRecv += s.OtherReceived
 
 			if detailed {
 				peerMetrics = append(peerMetrics, map[string]interface{}{
-					"peer_id":        peer.ID,
-					"state":          string(peer.State),
-					"last_used":      lu.Format(time.RFC3339),
-					"hello_sent":     hs,
-					"hello_received": hr,
-					"beat_sent":      bs,
-					"beat_received":  br,
-					"sync_sent":      ss,
-					"sync_received":  sr,
-					"ping_sent":      ps,
-					"ping_received":  pr,
-					"total_sent":     ts,
-					"total_received": tr,
+					"peer_id":          peer.ID,
+					"state":            string(peer.State),
+					"last_used":        s.LastUsed.Format(time.RFC3339),
+					"hello_sent":       s.HelloSent,
+					"hello_received":   s.HelloReceived,
+					"beat_sent":        s.BeatSent,
+					"beat_received":    s.BeatReceived,
+					"sync_sent":        s.SyncSent,
+					"sync_received":    s.SyncReceived,
+					"ping_sent":        s.PingSent,
+					"ping_received":    s.PingReceived,
+					"confirm_sent":     s.ConfirmSent,
+					"confirm_received": s.ConfirmReceived,
+					"other_sent":       s.OtherSent,
+					"other_received":   s.OtherReceived,
+					"total_sent":       s.TotalSent,
+					"total_received":   s.TotalReceived,
 				})
 			}
 		}
@@ -165,6 +174,10 @@ func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *AgentMg
 		"sync_received":     syncRecv,
 		"ping_sent":         pingSent,
 		"ping_received":     pingRecv,
+		"confirm_sent":      confirmSent,
+		"confirm_received":  confirmRecv,
+		"other_sent":        otherSent,
+		"other_received":    otherRecv,
 	}
 
 	if detailed && len(peerMetrics) > 0 {

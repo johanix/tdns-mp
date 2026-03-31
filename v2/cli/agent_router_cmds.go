@@ -345,14 +345,11 @@ func printMetricsBlock(header string, m map[string]interface{}) {
 	fmt.Printf("%-20s %8d %8d\n", "beat", toInt(m["beat_sent"]), toInt(m["beat_received"]))
 	fmt.Printf("%-20s %8d %8d\n", "sync/update", toInt(m["sync_sent"]), toInt(m["sync_received"]))
 	fmt.Printf("%-20s %8d %8d\n", "ping", toInt(m["ping_sent"]), toInt(m["ping_received"]))
-
-	other := (totalSent + totalRecv) -
-		toInt(m["hello_sent"]) - toInt(m["hello_received"]) -
-		toInt(m["beat_sent"]) - toInt(m["beat_received"]) -
-		toInt(m["sync_sent"]) - toInt(m["sync_received"]) -
-		toInt(m["ping_sent"]) - toInt(m["ping_received"])
-	if other > 0 {
-		fmt.Printf("%-20s %8s %8d\n", "other", "", other)
+	fmt.Printf("%-20s %8d %8d\n", "confirm", toInt(m["confirm_sent"]), toInt(m["confirm_received"]))
+	otherSent := toInt(m["other_sent"])
+	otherRecv := toInt(m["other_received"])
+	if otherSent+otherRecv > 0 {
+		fmt.Printf("%-20s %8d %8d\n", "other", otherSent, otherRecv)
 	}
 
 	// Only print error counters for the aggregate block (they exist there, not per-peer)
