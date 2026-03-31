@@ -260,7 +260,7 @@ func runRouterMetrics(parent string, args []string) {
 	case "combiner", "signer":
 		endpoint := "/" + parent
 		if parent == "combiner" {
-			endpoint = "/combiner/debug"
+			endpoint = "/combiner/mp"
 		}
 		req := tdns.CombinerDebugPost{
 			Command: "router-metrics",

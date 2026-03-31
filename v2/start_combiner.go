@@ -29,6 +29,10 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		conf.RegisterMPRefreshCallbacks()
 	}
 
+	// Register MP combiner API endpoint
+	sr := apirouter.PathPrefix("/api/v1").Subrouter()
+	sr.HandleFunc("/combiner/mp", conf.APImpCombiner()).Methods("POST")
+
 	// DNS engines (APIdispatcher, RefreshEngine, Notifier, NotifyHandler, DnsEngine)
 	// MP engines are skipped because AppType == AppTypeMPCombiner
 	if err := conf.Config.StartCombiner(ctx, apirouter); err != nil {
