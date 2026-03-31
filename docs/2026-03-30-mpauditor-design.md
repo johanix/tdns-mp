@@ -158,17 +158,35 @@ SyncResponse{
 
 ## Application Architecture
 
+The auditor is implemented entirely in tdns-mp. The agent
+extraction is complete — all MP machinery (MPTransportBridge,
+AgentRegistry, MsgQs, gossip, provider groups, etc.) is
+local to tdns-mp. The only changes to tdns are the
+HSYNCPARAM extension (new SvcParam key) and AppType.
+
 ### Binary: tdns-mpauditor
 
 Lives in `tdns-mp/cmd/mpauditor/`. Uses `AppTypeMPAuditor`.
 
-Startup:
-1. `tdns.MainInit()` — DNS infrastructure (zones, KeyDB,
-   refresh)
-2. `initMPAuditor()` — transport, crypto, chunk handler,
-   peer registration (same as agent, minus SDE/combiner)
-3. `StartMPAuditor()` — DNS engines, incoming message
-   router, auditor message handler
+Startup follows the same pattern as mpagent:
+1. `conf.MainInit()` → `tdns.MainInit()` for DNS infra,
+   then `initMPAuditor()` for MP components
+2. `conf.StartMPAuditor()` for engines
+
+The `initMPAuditor` function in `main_init.go` is modeled
+on `initMPAgent` but omits:
+- SDE initialization (no sync state tracking)
+- HsyncEngine (no outbound sync)
+- Leader election wiring
+
+It keeps:
+- MPTransportBridge (for CHUNK transport)
+- AgentRegistry (peer tracking, heartbeat monitoring)
+- MsgQs (async message routing)
+- Crypto (CHUNK payload decryption)
+- Router (incoming message dispatch)
+- Gossip (state exchange via BEATs)
+- Provider group computation
 
 ### What the Auditor Runs
 
@@ -181,7 +199,9 @@ Startup:
 **From tdns-mp (MP engines):**
 - IncomingMessageRouter (CHUNK → router → handlers)
 - AuditorMsgHandler (consumes MsgQs: Beat, Hello, Ping,
-  Msg/Sync — stores state, never sends data)
+  Msg/Sync — stores state, logs events, never sends data)
+- Gossip engine (state exchange via BEATs)
+- Provider group computation (group membership)
 
 **NOT run:**
 - SynchedDataEngine (no tracking/confirmation state)
@@ -189,6 +209,27 @@ Startup:
 - CombinerMsgHandler (not a combiner)
 - SignerMsgHandler / KeyStateWorker (not a signer)
 - Leader election (excluded by rule 4)
+
+### Relationship to Existing Code
+
+The auditor reuses most of the agent's transport and
+discovery machinery from tdns-mp:
+- `hsync_transport.go` — MPTransportBridge (as-is)
+- `agent_authorization.go` — peer authorization (as-is)
+- `agent_discovery.go` — peer discovery (as-is)
+- `gossip.go` / `gossip_types.go` — gossip protocol (as-is)
+- `provider_groups.go` — group computation (as-is)
+- `hsync_beat.go` — beat processing (as-is)
+- `hsync_hello.go` — hello processing (as-is)
+
+New auditor-specific files:
+- `auditor_msg_handler.go` — simplified message consumer
+  (receives SYNCs/UPDATEs but doesn't send data)
+- `auditor_state.go` — AuditZoneState, AuditProviderState
+- `auditor_eventlog.go` — persistent event log (SQLite)
+- `auditor_observations.go` — anomaly detection
+- `apihandler_auditor.go` — `/audit/*` API endpoints
+- `start_auditor.go` — StartMPAuditor
 
 ### State Maintained by Auditor
 
@@ -332,22 +373,33 @@ Observations the auditor can detect:
 
 ## Implementation Plan
 
-### Phase 1: Protocol Support
+All implementation in tdns-mp except Phase 1 items 1-4
+which touch tdns (RR types and AppType).
+
+### Phase 1: Protocol Support (tdns)
 
 1. Add `HSYNCPARAM_AUDITOR` SvcParam (key 7) to
-   core/rr_hsyncparam.go
+   tdns/v2/core/rr_hsyncparam.go
 2. Add `GetAuditor()` and `IsAuditorLabel()` accessors
-3. Add `AppTypeMPAuditor` to enums.go
+3. Add `AppTypeMPAuditor` to tdns/v2/enums.go
 4. Add AppType guards in tdns (same pattern as
-   MPSigner/MPCombiner)
+   MPSigner/MPCombiner/MPAgent)
 
-### Phase 2: Auditor Binary
+### Phase 2: Auditor Binary (tdns-mp)
 
-5. Create `tdns-mp/v2/start_auditor.go`
-6. Create `tdns-mp/v2/auditor_msg_handler.go`
-7. Add `initMPAuditor` to MainInit
-8. Create `tdns-mp/cmd/mpauditor/`
-9. Add auditor CLI commands to mpcli
+5. Add `case "auditor"` to MainInit role switch
+6. Create `initMPAuditor` in main_init.go (modeled on
+   initMPAgent: transport, crypto, chunk handler, peers,
+   router, gossip — minus SDE and leader election)
+7. Create `start_auditor.go` — StartMPAuditor (modeled
+   on StartMPAgent: DNS engines + incoming message router
+   + auditor msg handler — minus HsyncEngine/SDE)
+8. Create `auditor_msg_handler.go` — simplified consumer
+   that receives all message types, logs events, updates
+   state, but never sends zone data
+9. Create `cmd/mpauditor/` (main.go, Makefile, go.mod,
+   sample config)
+10. Add "auditor" to mpcli shared_cmds.go
 
 ### Phase 3: Event Log and State
 
@@ -386,15 +438,20 @@ Observations the auditor can detect:
 - Message handler is simplified (consume + store, never
   send data)
 
-**Similar to combiner** in terms of:
-- Transport setup (CHUNK handler, router, peers)
-- Incoming message processing (Beat, Hello, Ping, Sync)
-- Persistence (audit state, observations)
+**Heavily reuses agent infrastructure** from tdns-mp:
+- MPTransportBridge, AgentRegistry, MsgQs — as-is
+- Gossip, provider groups — as-is
+- Beat/Hello processing — as-is
+- Crypto, chunk handler, router — as-is
 
 **New work:**
-- HSYNCPARAM auditor SvcParam (small, well-defined)
+- HSYNCPARAM auditor SvcParam (small, in tdns)
+- initMPAuditor + StartMPAuditor (modeled on agent)
+- AuditorMsgHandler (simplified agent handler)
 - Audit state tracking (new data model)
+- Persistent event log (new SQLite table + CRUD)
 - Reporting API (new endpoints)
+- CLI commands (new)
 - Enforcement checks (small additions to existing code)
 
 ## Risk
