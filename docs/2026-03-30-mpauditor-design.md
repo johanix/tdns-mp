@@ -223,14 +223,102 @@ type AuditObservation struct {
 }
 ```
 
+### Persistent Event Log
+
+The auditor keeps a persistent, per-zone changelog of
+all zone data modifications with timestamps and
+originator. Stored in the auditor's SQLite database.
+
+```go
+type AuditEvent struct {
+    ID         int64     // auto-increment
+    Time       time.Time // when the change was received
+    Zone       string    // zone name
+    Originator string    // agent identity that sent the change
+    DeliveredBy string   // transport sender (may differ if forwarded)
+    EventType  string    // "sync", "update", "resync", "confirm"
+    Summary    string    // human-readable summary of change
+    RRsAdded   int       // count of RRs added
+    RRsRemoved int       // count of RRs removed
+    RRtypes    string    // comma-separated list of affected RRtypes
+    Details    string    // JSON: full operation details (optional)
+}
+```
+
+**Database schema:**
+
+```sql
+CREATE TABLE IF NOT EXISTS AuditEventLog (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    time        TEXT NOT NULL,        -- RFC3339
+    zone        TEXT NOT NULL,
+    originator  TEXT NOT NULL,
+    delivered_by TEXT DEFAULT '',
+    event_type  TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    rrs_added   INTEGER DEFAULT 0,
+    rrs_removed INTEGER DEFAULT 0,
+    rrtypes     TEXT DEFAULT '',
+    details     TEXT DEFAULT ''       -- JSON
+);
+CREATE INDEX IF NOT EXISTS idx_audit_zone_time
+    ON AuditEventLog(zone, time);
+CREATE INDEX IF NOT EXISTS idx_audit_time
+    ON AuditEventLog(time);
+```
+
+**When events are logged:**
+- Every inbound SYNC/UPDATE with non-empty data
+- Every confirmation received (ACCEPTED/REJECTED)
+- Every resync (RFI SYNC received or sent)
+- DNSKEY changes (new keys, removed keys)
+- Provider state changes detected via gossip
+
+**Event log management:**
+
+The event log supports:
+- **Retention cap**: configurable max age. Events older
+  than the cap are automatically pruned. Config:
+  ```yaml
+  audit:
+     event_log:
+        retention: 168h   # 1 week
+        prune_interval: 1h
+  ```
+- **Manual purge**: CLI command to drop events:
+  ```
+  mpcli auditor eventlog clear --zone whisky.dnslab.
+  mpcli auditor eventlog clear --older-than 24h
+  mpcli auditor eventlog clear --all
+  ```
+- **Query by zone and time range**:
+  ```
+  mpcli auditor eventlog list --zone whisky.dnslab.
+  mpcli auditor eventlog list --zone whisky.dnslab. \
+      --since 2026-03-30T00:00:00Z
+  mpcli auditor eventlog list --last 100
+  ```
+
+**API endpoints:**
+
+- `POST /audit/eventlog` with JSON body:
+  ```json
+  {"command": "list", "zone": "whisky.dnslab.",
+   "since": "2026-03-30T00:00:00Z", "limit": 100}
+  {"command": "clear", "zone": "whisky.dnslab."}
+  {"command": "clear", "older_than": "168h"}
+  {"command": "clear", "all": true}
+  ```
+
 ### Reporting Capabilities
 
 The auditor exposes state via its management API:
 
-- `GET /audit/zones` — list all audited zones with summary
-- `GET /audit/zone/{zone}` — detailed state for one zone
-- `GET /audit/providers` — all providers across all zones
-- `GET /audit/observations` — recent observations/anomalies
+- `POST /audit/zones` — list all audited zones with summary
+- `POST /audit/zone` — detailed state for one zone
+- `POST /audit/providers` — all providers across all zones
+- `POST /audit/observations` — recent observations/anomalies
+- `POST /audit/eventlog` — event log queries and management
 - `GET /audit/dashboard` — HTML dashboard (optional)
 
 Observations the auditor can detect:
@@ -261,19 +349,32 @@ Observations the auditor can detect:
 8. Create `tdns-mp/cmd/mpauditor/`
 9. Add auditor CLI commands to mpcli
 
-### Phase 3: State and Reporting
+### Phase 3: Event Log and State
 
-10. Implement `AuditZoneState` tracking
-11. Implement observation detection
-12. Add `/audit/*` API endpoints
-13. Add auditor CLI commands to mpcli
+10. Create AuditEventLog DB schema + CRUD functions
+11. Log events from AuditorMsgHandler on every inbound
+    SYNC/UPDATE/confirm/resync
+12. Implement automatic retention pruning (background
+    goroutine, configurable interval + max age)
+13. Implement `AuditZoneState` tracking (in-memory)
+14. Implement observation detection
 
-### Phase 4: Enforcement
+### Phase 4: Reporting and CLI
 
-14. Add auditor rejection in agent SYNC processing
-15. Add auditor rejection in combiner processing
-16. Exclude auditor from leader elections
-17. Implement empty SYNC response for RFI
+15. Add `/audit/*` API endpoints (zones, providers,
+    observations, eventlog)
+16. Add auditor CLI commands to mpcli:
+    - `auditor eventlog list`
+    - `auditor eventlog clear`
+    - `auditor zones`
+    - `auditor observations`
+
+### Phase 5: Enforcement
+
+17. Add auditor rejection in agent SYNC processing
+18. Add auditor rejection in combiner processing
+19. Exclude auditor from leader elections
+20. Implement empty SYNC response for RFI
 
 ## Complexity Assessment
 
