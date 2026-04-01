@@ -970,7 +970,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 			case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				RequestAndWaitForKeyInventory(zd, context.Background(), tm)
-				_, analysis.DnskeyStatus, err = LocalDnskeysFromKeystate(zd)
+				dnskeyschanged, analysis.DnskeyStatus, err = LocalDnskeysFromKeystate(zd)
 				if err != nil {
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
 				}
@@ -978,7 +978,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 					dnskeyschanged = false
 				}
 			default:
-				_, analysis.DnskeyStatus, err = LocalDnskeysChanged(zd, new_zd)
+				dnskeyschanged, analysis.DnskeyStatus, err = LocalDnskeysChanged(zd, new_zd)
 				if err != nil {
 					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
 				}
@@ -1044,6 +1044,14 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 		}
 
 		if new_zd.Options[tdns.OptAllowEdits] {
+			new_zd.EnsureMP()
+			if zd.MP.AgentContributions != nil {
+				new_zd.MP.AgentContributions = zd.MP.AgentContributions
+			}
+			if zd.MP.CombinerData != nil {
+				new_zd.MP.CombinerData = zd.MP.CombinerData
+			}
+
 			lg.Info("combining with local changes", "zone", zd.ZoneName)
 			success, err := new_zd.CombineWithLocalChanges()
 			if err != nil {

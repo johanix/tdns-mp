@@ -135,7 +135,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 			switch rfiType {
 			case "KEYSTATE":
-				if err := sendKeystateInventoryToAgent(conf, tm, senderID, zone); err != nil {
+				if err := sendKeystateInventoryToAgent(ctx, conf, tm, senderID, zone); err != nil {
 					lgSigner.Error("Failed to send KEYSTATE inventory", "agent", senderID, "zone", zone, "err", err)
 				}
 			default:
@@ -162,7 +162,7 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 		if agent.Identity == "" {
 			continue
 		}
-		if err := sendKeystateInventoryToAgent(conf, tm, agent.Identity, zone); err != nil {
+		if err := sendKeystateInventoryToAgent(context.Background(), conf, tm, agent.Identity, zone); err != nil {
 			lgSigner.Error("pushKeystateInventoryToAllAgents: failed", "zone", zone, "agent", agent.Identity, "err", err)
 		}
 	}
@@ -170,7 +170,7 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 
 // sendKeystateInventoryToAgent queries KeyDB for all keys in the zone and sends
 // a complete KEYSTATE inventory message back to the requesting agent.
-func sendKeystateInventoryToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone string) error {
+func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) error {
 	kdb := conf.Config.Internal.KeyDB
 	if kdb == nil {
 		return fmt.Errorf("KeyDB not available")
@@ -225,7 +225,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *MPTransportBridge, agentID s
 		Timestamp:    time.Now(),
 	}
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.DNSTransport.Keystate(sendCtx, peer, req)
