@@ -6,6 +6,55 @@ Related: tdns/docs/2026-03-26-architectural-improvements.md
   (items 1 and 3, plus additional changes identified during
   design discussion)
 
+## Background: Combiner Data Architecture
+
+The combiner maintains four layers of zone data, each
+derived from the one above:
+
+```
+DB (CombinerContributions table)
+  ↕ load on startup / save on every update
+zd.MP.AgentContributions  (per-agent, per-zone)
+  ↓ RebuildCombinerData()
+zd.MP.CombinerData  (merged view, never persisted)
+  ↓ CombineWithLocalChanges()
+zd.Data  (live zone, served to queries)
+```
+
+**Database** (`CombinerContributions` table) — persistent
+storage, one row per RR, keyed by (zone, sender_id,
+owner, rrtype, rr).
+
+**AgentContributions** (`zd.MP.AgentContributions`) —
+in-memory per-zone map: `agent → owner → rrtype → RRset`.
+Each agent's contributions stored separately. Loaded from
+DB on startup via `LoadAllContributions()`, updated on
+each incoming contribution, persisted back via
+`SaveContributions()` callback.
+
+**CombinerData** (`zd.MP.CombinerData`) — in-memory
+merged/deduplicated view across all agents. **Never
+persisted** — always rebuilt from AgentContributions via
+`RebuildCombinerData()`. This merges all agents'
+contributions for the same owner+rrtype into a single
+deduplicated RRset.
+
+**Live zone** (`zd.Data`) — the zone data served to DNS
+queries. Populated from CombinerData via
+`CombineWithLocalChanges()`, which applies RRtype
+filtering and merge semantics (additive for NS, replace
+for DNSKEY/KEY/CDS/CSYNC).
+
+On every incoming contribution, the full chain runs:
+1. Update `AgentContributions[sender]`
+2. `RebuildCombinerData()` — merge all agents
+3. `PersistContributions()` — save to DB
+4. `CombineWithLocalChanges()` — apply to live zone
+
+Steps 1-3 are persistence. Step 4 is editing. This plan
+separates the two: steps 1-3 always run; step 4 is gated
+by per-RRtype edit policy.
+
 ## Problem
 
 Multi-provider DNS zones may have providers that are not
