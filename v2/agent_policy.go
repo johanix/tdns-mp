@@ -89,6 +89,23 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 			len(synchedDataUpdate.Update.RRs), MaxRecordsPerOwner), nil
 	}
 
+	// Defense-in-depth: reject non-empty data from the auditor
+	if synchedDataUpdate.UpdateType == "remote" {
+		zone := synchedDataUpdate.Zone
+		if zd, ok := tdns.Zones.Get(string(zone)); ok {
+			senderID := string(synchedDataUpdate.AgentId)
+			if IsAuditorIdentity(zd, senderID) {
+				hasData := len(synchedDataUpdate.Update.Operations) > 0 ||
+					len(synchedDataUpdate.Update.RRs) > 0 ||
+					len(synchedDataUpdate.Update.RRsets) > 0
+				if hasData {
+					return false, fmt.Sprintf("Update for zone %q from %q: auditor may not contribute data",
+						zone, senderID), nil
+				}
+			}
+		}
+	}
+
 	switch synchedDataUpdate.UpdateType {
 	case "remote":
 		// Validate Operations if present

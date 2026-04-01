@@ -243,6 +243,30 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
+	// Defense-in-depth: reject non-empty contributions from the auditor
+	if IsAuditorIdentity(zd, req.SenderID) {
+		hasData := len(req.Operations) > 0 || len(req.Records) > 0
+		if hasData {
+			lgCombiner.Warn("rejecting contribution from auditor",
+				"zone", req.Zone, "sender", req.SenderID)
+			resp.Status = "error"
+			resp.Message = "auditor may not contribute data"
+			for _, op := range req.Operations {
+				for _, rr := range op.Records {
+					resp.RejectedItems = append(resp.RejectedItems,
+						RejectedItem{Record: rr, Reason: "auditor may not contribute data"})
+				}
+			}
+			for _, rrs := range req.Records {
+				for _, rr := range rrs {
+					resp.RejectedItems = append(resp.RejectedItems,
+						RejectedItem{Record: rr, Reason: "auditor may not contribute data"})
+				}
+			}
+			return resp
+		}
+	}
+
 	if len(req.Operations) > 0 {
 		resp = combinerProcessOperations(req, zd, zonename, protectedNamespaces, localAgents)
 		if resp.Status != "error" {

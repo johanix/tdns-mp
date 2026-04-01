@@ -45,6 +45,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return conf.initMPCombiner(mp)
 	case "agent":
 		return conf.initMPAgent(mp)
+	case "auditor":
+		return conf.initMPAuditor(mp)
 	default:
 		return fmt.Errorf("unsupported multi-provider.role: %q", mp.Role)
 	}
@@ -555,4 +557,110 @@ func initAgentCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
 	}
 
 	return pc, nil
+}
+
+// initMPAuditor performs auditor-specific MP initialization.
+// Modeled on initMPAgent but omits SDE, HsyncEngine, and leader election.
+func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
+	if mp.Identity == "" {
+		return fmt.Errorf("multi-provider.identity is required for auditor role")
+	}
+
+	// Setup agent identity (needed for DNS discovery)
+	all_zones := tdns.Zones.Keys()
+	if err := conf.Config.SetupAgent(all_zones); err != nil {
+		return fmt.Errorf("SetupAgent: %w", err)
+	}
+
+	// Initialize AgentRegistry (peer tracking, heartbeat monitoring)
+	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
+
+	// Wire shared channels from tdns
+	conf.InternalMp.SyncQ = conf.Config.Internal.SyncQ
+	conf.InternalMp.MPZoneNames = conf.Config.Internal.MPZoneNames
+
+	// Create MsgQs locally
+	conf.InternalMp.MsgQs = NewMsgQs()
+
+	// Initialize distribution cache (needed for message dedup)
+	conf.InternalMp.DistributionCache = NewDistributionCache()
+	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
+	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache
+
+	// Chunk mode configuration
+	controlZone := mp.Dns.ControlZone
+	if controlZone == "" {
+		controlZone = mp.Identity
+	}
+	chunkMode := mp.Dns.ChunkMode
+	if chunkMode == "" {
+		chunkMode = "edns0"
+	}
+
+	var chunkStore tdns.ChunkPayloadStore
+	var chunkQueryEndpoint string
+	var chunkQueryEndpointInNotify bool
+	if chunkMode == "query" {
+		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
+		if cep != "include" && cep != "none" {
+			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
+		}
+		chunkQueryEndpointInNotify = (cep == "include")
+		chunkStore = tdns.NewMemChunkPayloadStore(5 * time.Minute)
+		conf.InternalMp.ChunkPayloadStore = chunkStore
+		if err := tdns.RegisterChunkQueryHandler(chunkStore); err != nil {
+			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
+		}
+		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	}
+
+	// Initialize PayloadCrypto for secure CHUNK transport (optional)
+	var payloadCrypto *transport.PayloadCrypto
+	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+		pc, err := initAgentCrypto(conf.Config)
+		if err != nil {
+			return fmt.Errorf("failed to initialize auditor crypto: %w", err)
+		}
+		payloadCrypto = pc
+	}
+
+	// Create MPTransportBridge (same as agent but without combiner/signer specifics)
+	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		LocalID:                    dns.Fqdn(mp.Identity),
+		ControlZone:                dns.Fqdn(controlZone),
+		APITimeout:                 10 * time.Second,
+		DNSTimeout:                 5 * time.Second,
+		AgentRegistry:              conf.InternalMp.AgentRegistry,
+		MsgQs:                      conf.InternalMp.MsgQs,
+		ChunkMode:                  chunkMode,
+		ChunkPayloadStore:          chunkStore,
+		ChunkQueryEndpoint:         chunkQueryEndpoint,
+		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
+		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
+		PayloadCrypto:              payloadCrypto,
+		DistributionCache:          conf.InternalMp.DistributionCache,
+		SupportedMechanisms:        mp.SupportedMechanisms,
+		AuthorizedPeers: func() []string {
+			var peers []string
+			for _, p := range mp.AuthorizedPeers {
+				peers = append(peers, dns.Fqdn(p))
+			}
+			return peers
+		},
+		MessageRetention: func(operation string) int {
+			return mp.Dns.MessageRetention.GetRetentionForMessageType(operation)
+		},
+		GetImrEngine:   func() *tdns.Imr { return conf.Config.Internal.ImrEngine },
+		GetZone:        tdns.Zones.Get,
+		GetZoneNames:   tdns.Zones.Keys,
+		ClientCertFile: mp.Api.CertFile,
+		ClientKeyFile:  mp.Api.KeyFile,
+	})
+	conf.InternalMp.MPTransport = tm
+	conf.InternalMp.TransportManager = tm.TransportManager
+	conf.Config.Internal.TransportManager = tm.TransportManager
+	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
+	conf.InternalMp.AgentRegistry.MPTransport = tm
+
+	return nil
 }

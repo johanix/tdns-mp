@@ -46,6 +46,13 @@ func init() {
 	mpcli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
 	mpcli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
 
+	// Auditor commands (from tdns-mp/v2/cli)
+	rootCmd.AddCommand(mpcli.AuditorCmd)
+	mpcli.AuditorCmd.AddCommand(cli.PingCmd)
+	mpcli.AuditorCmd.AddCommand(cli.StopCmd)
+	mpcli.AuditorCmd.AddCommand(cli.DaemonCmd)
+	mpcli.AuditorCmd.AddCommand(cli.ConfigCmd)
+
 	// Agent commands (from tdns-mp/v2/cli)
 	rootCmd.AddCommand(mpcli.AgentCmd)
 	mpcli.AgentCmd.AddCommand(cli.PingCmd)

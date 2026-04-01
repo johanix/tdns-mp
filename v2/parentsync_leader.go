@@ -64,6 +64,9 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 
 // StartGroupElection initiates a leader election for a provider group.
 func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members []string, zones []ZoneName) {
+	// Exclude auditor from election candidates (Rule 4)
+	members = filterOutAuditor(members, zones)
+
 	expectedPeers := len(members) - 1 // minus self
 
 	lem.mu.Lock()
@@ -1343,6 +1346,56 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	}
 
 	return status
+}
+
+// filterOutAuditor removes the auditor identity from the election
+// members list. Uses HSYNCPARAM from the first available zone.
+func filterOutAuditor(members []string, zones []ZoneName) []string {
+	if len(zones) == 0 {
+		return members
+	}
+	zd, exists := tdns.Zones.Get(string(zones[0]))
+	if !exists || zd == nil {
+		return members
+	}
+	auditorLabel := GetAuditorLabel(zd)
+	if auditorLabel == "" {
+		return members
+	}
+	// Resolve auditor label to identity
+	var auditorIdentity string
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return members
+	}
+	hsync3RRset, ok := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !ok {
+		return members
+	}
+	for _, rr := range hsync3RRset.RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok {
+				if h3.Label == auditorLabel {
+					auditorIdentity = h3.Identity
+					break
+				}
+			}
+		}
+	}
+	if auditorIdentity == "" {
+		return members
+	}
+	filtered := make([]string, 0, len(members))
+	for _, m := range members {
+		if m != auditorIdentity {
+			filtered = append(filtered, m)
+		}
+	}
+	if len(filtered) < len(members) {
+		lgElect.Debug("excluded auditor from election candidates",
+			"auditor", auditorIdentity, "remaining", len(filtered))
+	}
+	return filtered
 }
 
 // PublishKeyToCombiner sends a KEY RR to the combiner as a REPLACE operation.
