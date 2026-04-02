@@ -1,0 +1,114 @@
+# TDNS MP Auditor Configuration
+#
+# The mpauditor binary is a read-only observer in the multi-provider
+# HSYNC protocol. It receives all SYNCs, BEATs, and confirmations,
+# logs them to an event log, and never contributes zone data.
+#
+# Unlike mpagent, there is no SDE, no sync engine, and no leader
+# election. The auditor participates in gossip and peer discovery
+# but only observes.
+
+include:
+   - mpauditor-zones.yaml
+
+multi-provider:
+   role:           auditor
+   identity:       auditor.provider.example.
+   # Active transport mechanisms: "api" and/or "dns"
+   supported_mechanisms: [ dns ]
+   # CHUNK comms — auditor only receives, never sends zone data
+   long_term_jose_priv_key: /etc/tdns/keys/auditor.jose.priv.json
+   combiner:
+      identity:                combiner.provider.example.
+      address:                 10.1.0.4:8055
+      long_term_jose_pub_key:  /etc/tdns/keys/combiner.jose.pub.json
+   # No signer section — auditor does not interact with the signer
+   local:
+      notify:        []
+   remote:
+      LocateInterval: 60
+      BeatInterval:   30
+   xfr:
+      outgoing:
+         addresses:  []
+         auth:       []
+      incoming:
+         addresses:  []
+         auth:       []
+   api:
+      addresses:
+         publish:    [ 10.1.0.5 ]
+         listen:     [ 127.0.0.1:8979 ]
+      baseurl:       https://api.{TARGET}:{PORT}/api/v1
+      port:          8979
+      certfile:      /etc/tdns/certs/auditor.crt
+      keyfile:       /etc/tdns/certs/auditor.key
+   dns:
+      addresses:
+         publish:    [ 10.1.0.5 ]
+         listen:     [ 127.0.0.1:8978 ]
+      baseurl:       dns://dns.{TARGET}:{PORT}/
+      port:          8978
+
+# Audit-specific configuration
+audit:
+   # Event log retention and pruning
+   event_log:
+      retention:       168h   # keep events for 1 week
+      prune_interval:  1h     # how often to run the pruner
+
+   # Built-in web dashboard (read-only, Go templates + HTMX)
+   # Bind to localhost only; for remote access put behind a
+   # reverse proxy with authentication.
+   web:
+      enabled:         true
+      addresses:       [ 127.0.0.1:8099 ]
+
+service:
+   name:           TDNS-MPAUDITOR
+   verbose:        true
+   debug:          false
+   refresh:        true
+   maxrefresh:     1800
+
+dnsengine:
+   addresses:      [ 127.0.0.1:5359 ]
+
+apiserver:
+   addresses:      [ 127.0.0.1:8989 ]
+   apikey:         change-me-to-something-secret
+
+validator:
+   active:         true
+   verbose:        false
+   debug:          false
+   dnskey:
+      trusted:
+         file:     /etc/tdns/trust-anchors.yaml
+   sig0:
+      trusted:
+         file:     /etc/tdns/sig0-keys.yaml
+
+resolver:
+   address:        8.8.8.8:53
+
+db:
+   file:  /var/lib/tdns/tdns-mpauditor.db
+
+imrengine:
+   active:         true
+   root-hints:     /etc/tdns/root.hints
+   addresses:      [ 127.0.0.1:5459 ]
+   transports:     [ do53 ]
+   require_dnssec_validation: true
+
+log:
+   file:   /var/log/tdns/tdns-mpauditor.log
+   level:  info
+   # subsystems:
+   #    transport:  debug
+   #    engine:     debug
+   #    auditor:    info
+
+common:
+   command:  /usr/local/libexec/tdns-mpauditor
