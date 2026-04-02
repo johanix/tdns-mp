@@ -1,0 +1,51 @@
+{{template "layout" .}}
+{{define "content"}}
+<h2>Dashboard</h2>
+
+{{if .Error}}
+<article class="audit-error">{{.Error}}</article>
+{{end}}
+
+{{if not .Zones}}
+<p><em>No zones are being audited yet.</em></p>
+{{else}}
+<table role="grid">
+  <thead>
+    <tr>
+      <th>Zone</th>
+      <th>Providers</th>
+      <th>Serial</th>
+      <th>Last Refresh</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Zones}}
+    <tr>
+      <td><a href="/web/zone/{{.Zone}}">{{.Zone}}</a></td>
+      <td>{{providerCount .Providers}}</td>
+      <td>{{.ZoneSerial}}</td>
+      <td>{{ago .LastRefresh}}</td>
+      <td>
+        <div
+          hx-get="/web/fragment/zone-status?zone={{.Zone}}"
+          hx-trigger="every 10s"
+          hx-swap="outerHTML"
+          class="audit-live">
+          <span class="audit-dot audit-dot-ok"></span>
+        </div>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+
+<h3>Recent Observations</h3>
+<div
+  hx-get="/web/fragment/observation-list"
+  hx-trigger="every 30s"
+  hx-swap="innerHTML">
+  <em>Loading&hellip;</em>
+</div>
+{{end}}

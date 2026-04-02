@@ -1,0 +1,31 @@
+{{define "observation_list.html"}}
+{{define "observation-list-inner"}}
+{{if not .Observations}}
+<p><em>No observations recorded.</em></p>
+{{else}}
+<table role="grid">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Severity</th>
+      <th>Zone</th>
+      <th>Provider</th>
+      <th>Message</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Observations}}
+    <tr>
+      <td><small>{{fmtTime .Time}}</small></td>
+      <td><span class="{{severityClass .Severity}}">{{.Severity}}</span></td>
+      <td>{{.Zone}}</td>
+      <td><small>{{.Provider}}</small></td>
+      <td>{{.Message}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
+{{template "observation-list-inner" .}}
+{{end}}

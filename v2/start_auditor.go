@@ -132,5 +132,10 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// Store state manager for API access
 	conf.InternalMp.AuditStateManager = stateManager
 
+	// Start the web interface if enabled
+	if err := conf.StartAuditorWebServer(ctx); err != nil {
+		lgAuditor.Error("failed to start auditor web server", "err", err)
+	}
+
 	return nil
 }

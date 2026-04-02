@@ -1,0 +1,33 @@
+{{define "provider_detail.html"}}
+{{range .Providers}}
+<article>
+  <header><strong>{{.Identity}}</strong> ({{.Label}})</header>
+  <dl>
+    <dt>Gossip State</dt><dd>{{.GossipState}}</dd>
+    <dt>Signer</dt><dd>{{if .IsSigner}}Yes{{else}}No{{end}}</dd>
+    <dt>Last Beat</dt><dd>{{ago .LastBeat}}</dd>
+    <dt>Last Sync</dt><dd>{{ago .LastSync}}</dd>
+    {{if .KeyInventory}}
+    <dt>DNSKEY Count</dt><dd>{{len .KeyInventory}}</dd>
+    {{end}}
+  </dl>
+  {{if .Contributions}}
+  <details>
+    <summary>Contributions ({{len .Contributions}} owners)</summary>
+    <table>
+      <thead><tr><th>Owner</th><th>RRtype</th><th>Count</th></tr></thead>
+      <tbody>
+        {{range $owner, $types := .Contributions}}
+          {{range $rrtype, $count := $types}}
+          <tr><td>{{$owner}}</td><td>{{$rrtype}}</td><td>{{$count}}</td></tr>
+          {{end}}
+        {{end}}
+      </tbody>
+    </table>
+  </details>
+  {{end}}
+</article>
+{{else}}
+<p><em>Provider not found.</em></p>
+{{end}}
+{{end}}

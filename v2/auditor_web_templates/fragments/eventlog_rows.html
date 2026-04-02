@@ -1,0 +1,35 @@
+{{define "eventlog_rows.html"}}
+{{define "eventlog-rows-inner"}}
+{{if not .Events}}
+<p><em>No events recorded yet.</em></p>
+{{else}}
+<table role="grid">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Zone</th>
+      <th>Type</th>
+      <th>Originator</th>
+      <th>Summary</th>
+      <th>+RRs</th>
+      <th>-RRs</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Events}}
+    <tr>
+      <td><small>{{fmtTime .Time}}</small></td>
+      <td>{{.Zone}}</td>
+      <td><code>{{.EventType}}</code></td>
+      <td><small>{{.Originator}}</small></td>
+      <td>{{.Summary}}</td>
+      <td>{{if .RRsAdded}}+{{.RRsAdded}}{{end}}</td>
+      <td>{{if .RRsRemoved}}-{{.RRsRemoved}}{{end}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
+{{template "eventlog-rows-inner" .}}
+{{end}}
