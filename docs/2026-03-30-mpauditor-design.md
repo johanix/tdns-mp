@@ -353,16 +353,15 @@ The event log supports:
 
 ### Reporting Capabilities
 
-The auditor exposes state via its management API:
+**JSON API** (for CLI and programmatic access):
 
 - `POST /audit/zones` — list all audited zones with summary
 - `POST /audit/zone` — detailed state for one zone
 - `POST /audit/providers` — all providers across all zones
 - `POST /audit/observations` — recent observations/anomalies
 - `POST /audit/eventlog` — event log queries and management
-- `GET /audit/dashboard` — HTML dashboard (optional)
 
-Observations the auditor can detect:
+**Observations** the auditor can detect:
 - Provider went silent (no BEAT for >N seconds)
 - SYNC data inconsistency (provider A and B disagree)
 - Unauthorized DNSKEY contribution (non-signer sent keys)
@@ -370,6 +369,104 @@ Observations the auditor can detect:
 - Serial drift (zone serial mismatch between providers)
 - NS inconsistency (different providers advertise
   different NS sets)
+
+### Web Interface
+
+The auditor provides a built-in web interface for
+inspecting current state. Read-only — no mutations
+from the browser.
+
+**Technology: Go templates + HTMX**
+
+Server-rendered HTML using Go's `html/template` package.
+HTMX (~14KB) for dynamic partial-page updates without a
+JavaScript framework. Pico CSS (~10KB) for clean default
+styling. All assets embedded in the binary via `//go:embed`.
+
+No Node.js, no npm, no build toolchain. The web interface
+is compiled into the auditor binary.
+
+**Pages:**
+
+- `/web/` — dashboard overview: all zones, provider
+  health summary, recent observations
+- `/web/zone/{zone}` — zone detail: providers, current
+  contributions (per-agent, per-RRtype), DNSKEY inventory,
+  NS sets, gossip state
+- `/web/eventlog` — event log browser with zone filter,
+  time range, auto-refresh
+- `/web/providers` — all providers across zones, last
+  beat time, gossip state, operational status
+- `/web/observations` — anomaly feed with severity,
+  time, provider, zone
+
+**Dynamic updates via HTMX:**
+
+Pages use HTMX attributes for live updates without full
+page reloads:
+
+```html
+<!-- Auto-refresh zone status every 10 seconds -->
+<div hx-get="/web/fragment/zone-status?zone=whisky.dnslab."
+     hx-trigger="every 10s"
+     hx-swap="innerHTML">
+  ... current status ...
+</div>
+
+<!-- Click to expand provider detail -->
+<tr hx-get="/web/fragment/provider-detail?zone=whisky.dnslab.&provider=agent.alpha.dnslab."
+    hx-target="#detail-panel"
+    hx-swap="innerHTML">
+  <td>agent.alpha.dnslab.</td>
+  <td>OPERATIONAL</td>
+  <td>2s ago</td>
+</tr>
+```
+
+The server renders HTML fragments for HTMX requests
+(detected via `HX-Request` header) and full pages for
+normal requests.
+
+**File structure in tdns-mp:**
+
+```
+v2/auditor_web.go              — HTTP handlers, template
+                                 rendering, fragment handlers
+v2/auditor_web_templates/      — Go HTML templates (embedded)
+   layout.html                 — base layout (nav, head, CSS)
+   dashboard.html              — overview page
+   zone_detail.html            — per-zone detail
+   eventlog.html               — event log browser
+   providers.html              — provider list
+   observations.html           — anomaly feed
+   fragments/                  — HTMX partial templates
+      zone_status.html
+      provider_detail.html
+      eventlog_rows.html
+      observation_list.html
+v2/auditor_web_static/         — static assets (embedded)
+   htmx.min.js                 — HTMX library (~14KB)
+   pico.min.css                — Pico CSS (~10KB)
+   auditor.css                 — custom styles
+```
+
+**Configuration:**
+
+```yaml
+audit:
+   web:
+      enabled: true
+      addresses: [ 127.0.0.1:8099 ]
+      # No authentication — read-only, bind to localhost.
+      # For remote access, put behind a reverse proxy with
+      # auth (e.g. nginx + basic auth or OAuth).
+```
+
+**Separate listener:** The web interface runs on its own
+HTTP listener, distinct from the management API (which
+uses apikey authentication). The web interface has no
+authentication by default (read-only, localhost only).
+For production, deploy behind a reverse proxy with auth.
 
 ## Implementation Plan
 
@@ -413,7 +510,7 @@ which touch tdns (RR types and AppType).
 
 ### Phase 4: Reporting and CLI
 
-15. Add `/audit/*` API endpoints (zones, providers,
+15. Add `/audit/*` JSON API endpoints (zones, providers,
     observations, eventlog)
 16. Add auditor CLI commands to mpcli:
     - `auditor eventlog list`
@@ -421,12 +518,22 @@ which touch tdns (RR types and AppType).
     - `auditor zones`
     - `auditor observations`
 
-### Phase 5: Enforcement
+### Phase 5: Web Interface
 
-17. Add auditor rejection in agent SYNC processing
-18. Add auditor rejection in combiner processing
-19. Exclude auditor from leader elections
-20. Implement empty SYNC response for RFI
+17. Create `auditor_web.go` — HTTP handlers, template
+    rendering, `//go:embed` for templates and static
+18. Create template files (layout, dashboard, zone detail,
+    eventlog, providers, observations)
+19. Create HTMX fragment handlers for partial updates
+20. Embed HTMX and Pico CSS in static assets
+21. Add web listener config and startup wiring
+
+### Phase 6: Enforcement
+
+22. Add auditor rejection in agent SYNC processing
+23. Add auditor rejection in combiner processing
+24. Exclude auditor from leader elections
+25. Implement empty SYNC response for RFI
 
 ## Complexity Assessment
 
