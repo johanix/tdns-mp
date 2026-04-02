@@ -52,6 +52,7 @@ func init() {
 	mpcli.AuditorCmd.AddCommand(cli.StopCmd)
 	mpcli.AuditorCmd.AddCommand(cli.DaemonCmd)
 	mpcli.AuditorCmd.AddCommand(cli.ConfigCmd)
+	mpcli.AuditorCmd.AddCommand(cli.ZoneCmd)
 
 	// Agent commands (from tdns-mp/v2/cli)
 	rootCmd.AddCommand(mpcli.AgentCmd)

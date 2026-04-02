@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -19,83 +18,6 @@ import (
 var AuditorCmd = &cobra.Command{
 	Use:   "auditor",
 	Short: "TDNS MP Auditor commands",
-}
-
-var auditorZonesCmd = &cobra.Command{
-	Use:   "zones",
-	Short: "List all zones tracked by the auditor",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := executeAuditRequest("zones", AuditPost{Command: "zones"})
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-
-		if len(resp.Zones) == 0 {
-			fmt.Println("No zones being audited")
-			return
-		}
-
-		fmt.Printf("%-40s  %s  %s\n", "Zone", "Providers", "Serial")
-		fmt.Printf("%-40s  %s  %s\n",
-			strings.Repeat("-", 40), strings.Repeat("-", 9), strings.Repeat("-", 10))
-		for _, z := range resp.Zones {
-			fmt.Printf("%-40s  %9d  %10d\n",
-				z.Zone, z.ProviderCount, z.ZoneSerial)
-		}
-	},
-}
-
-var auditorZoneCmd = &cobra.Command{
-	Use:   "zone",
-	Short: "Show detailed state for one zone",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
-		zone := dns.Fqdn(tdns.Globals.Zonename)
-
-		resp, err := executeAuditRequest("zone", AuditPost{
-			Command: "zone",
-			Zone:    zone,
-		})
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-
-		if len(resp.Zones) == 0 {
-			fmt.Printf("Zone %s not being audited\n", zone)
-			return
-		}
-
-		z := resp.Zones[0]
-		fmt.Printf("Zone:      %s\n", z.Zone)
-		fmt.Printf("Serial:    %d\n", z.ZoneSerial)
-		fmt.Printf("Providers: %d\n", z.ProviderCount)
-		if z.Providers != nil {
-			fmt.Printf("\n%-30s  %-10s  %-10s  %-20s  %-20s\n",
-				"Identity", "Label", "Signer", "Last Beat", "Last Sync")
-			fmt.Printf("%-30s  %-10s  %-10s  %-20s  %-20s\n",
-				strings.Repeat("-", 30), strings.Repeat("-", 10),
-				strings.Repeat("-", 10), strings.Repeat("-", 20),
-				strings.Repeat("-", 20))
-			for _, p := range z.Providers {
-				lastBeat := "-"
-				if !p.LastBeat.IsZero() {
-					lastBeat = time.Since(p.LastBeat).Truncate(time.Second).String() + " ago"
-				}
-				lastSync := "-"
-				if !p.LastSync.IsZero() {
-					lastSync = time.Since(p.LastSync).Truncate(time.Second).String() + " ago"
-				}
-				signer := "no"
-				if p.IsSigner {
-					signer = "yes"
-				}
-				fmt.Printf("%-30s  %-10s  %-10s  %-20s  %-20s\n",
-					p.Identity, p.Label, signer, lastBeat, lastSync)
-			}
-		}
-	},
 }
 
 var auditorEventlogCmd = &cobra.Command{
@@ -302,5 +224,5 @@ func init() {
 	auditorObservationsCmd.Flags().StringP("zone", "z", "", "filter by zone")
 
 	auditorEventlogCmd.AddCommand(auditorEventlogListCmd, auditorEventlogClearCmd)
-	AuditorCmd.AddCommand(auditorZonesCmd, auditorZoneCmd, auditorEventlogCmd, auditorObservationsCmd)
+	AuditorCmd.AddCommand(auditorEventlogCmd, auditorObservationsCmd)
 }
