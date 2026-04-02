@@ -29,6 +29,12 @@ apiservers:
      apikey:       change-me-to-something-secret
      authmethod:   X-API-Key
 
+   # The auditor (target for "auditor" sub-commands)
+   - name:         tdns-mpauditor
+     baseurl:      https://127.0.0.1:8989/api/v1
+     apikey:       change-me-to-something-secret
+     authmethod:   X-API-Key
+
 log:
    file:   /var/log/tdns/tdns-mpcli.log
    level:  info
