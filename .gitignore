@@ -12,6 +12,7 @@ cmd/mpagent/tdns-mpagent
 cmd/mpsigner/tdns-mpsigner
 cmd/mpcombiner/tdns-mpcombiner
 cmd/mpcli/tdns-mpcli
+cmd/mpauditor/tdns-mpauditor
 
 # Generated version files
 cmd/*/version.go
