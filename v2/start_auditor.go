@@ -97,6 +97,22 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		tdns.StartEngineNoError(&tdns.Globals.App, "DiscoveryRetrierNG", func() {
 			ar.DiscoveryRetrierNG(ctx)
 		})
+		// Peer heartbeat ticker — sends BEATs to discovered agents.
+		// HsyncEngine does this for agents, but the auditor doesn't
+		// run HsyncEngine (it contains sync/leader-election logic).
+		heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
+		tdns.StartEngineNoError(&tdns.Globals.App, "AuditorHeartbeatLoop", func() {
+			ticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					ar.SendHeartbeats()
+				}
+			}
+		})
 	}
 
 	// Agent-to-agent sync API (for receiving HELLOs/BEATs over HTTPS)
