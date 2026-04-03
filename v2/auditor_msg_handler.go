@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -29,16 +28,11 @@ func AuditorMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 		return
 	}
 
-	tm := conf.InternalMp.MPTransport
-	var peerRegistry *transport.PeerRegistry
-	if tm != nil {
-		peerRegistry = tm.PeerRegistry
-	}
-
+	registry := conf.InternalMp.AgentRegistry
 	kdb := conf.Config.Internal.KeyDB
 
 	lgAuditor.Info("auditor message handler starting",
-		"peerRegistry", peerRegistry != nil, "tm", tm != nil)
+		"registry", registry != nil)
 
 	for {
 		select {
@@ -54,10 +48,9 @@ func AuditorMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			lgAuditor.Debug("beat received", "sender", senderID,
 				"interval", report.BeatInterval)
 
-			if peerRegistry != nil {
-				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
-				peer.SetState(transport.PeerStateOperational, "beat received")
+			// Delegate to registry for gossip processing
+			if registry != nil {
+				registry.HeartbeatHandler(report)
 			}
 
 			// Update audit state for this sender's zone
@@ -73,9 +66,9 @@ func AuditorMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			senderID := string(report.Identity)
 			lgAuditor.Info("hello received", "sender", senderID)
 
-			if peerRegistry != nil {
-				peer := peerRegistry.GetOrCreate(senderID)
-				peer.SetState(transport.PeerStateOperational, "hello received")
+			// Delegate to registry for HELLO processing
+			if registry != nil {
+				registry.HelloHandler(report)
 			}
 
 			if kdb != nil {
