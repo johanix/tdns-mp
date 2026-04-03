@@ -118,6 +118,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		}
 	}
 
+	// Zone updater — processes queued zone updates (URI, JWK, SVCB publication)
+	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
+		return kdb.ZoneUpdaterEngine(ctx)
+	})
+
 	// DNS query engine and notify handler
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuthQueryEngine", func() {
 		tdns.AuthQueryEngine(ctx, conf.Config.Internal.AuthQueryQ)
