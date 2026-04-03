@@ -20,6 +20,23 @@ var AuditorCmd = &cobra.Command{
 	Short: "TDNS MP Auditor commands",
 }
 
+var AuditorZoneCmd = &cobra.Command{
+	Use:   "zone",
+	Short: "Auditor zone commands",
+}
+
+var auditorZoneListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List configured zones",
+	Run:   func(cmd *cobra.Command, args []string) { tdnscli.RunZoneList("auditor", args) },
+}
+
+var auditorZoneMPListCmd = &cobra.Command{
+	Use:   "mplist",
+	Short: "List multi-provider zones with HSYNCPARAM details",
+	Run:   func(cmd *cobra.Command, args []string) { tdnscli.RunZoneMPList("auditor", args) },
+}
+
 var auditorEventlogCmd = &cobra.Command{
 	Use:   "eventlog",
 	Short: "Audit event log commands",
@@ -222,6 +239,8 @@ func init() {
 	auditorEventlogClearCmd.Flags().Bool("all", false, "clear all events")
 
 	auditorObservationsCmd.Flags().StringP("zone", "z", "", "filter by zone")
+
+	AuditorZoneCmd.AddCommand(auditorZoneListCmd, auditorZoneMPListCmd)
 
 	auditorEventlogCmd.AddCommand(auditorEventlogListCmd, auditorEventlogClearCmd)
 	AuditorCmd.AddCommand(auditorEventlogCmd, auditorObservationsCmd)
