@@ -83,7 +83,7 @@ var auditorPeerPingCmd = &cobra.Command{
 		if auditorPeerPingApi {
 			agentCmd = "peer-apiping"
 		}
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := sendAuditorMgmtCmd(&tdns.AgentMgmtPost{
 			Command: agentCmd,
 			AgentId: tdns.AgentId(auditorPeerPingID),
 		}, "peer")
@@ -122,7 +122,7 @@ var auditorGossipGroupListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all provider groups",
 	Run: func(cmd *cobra.Command, args []string) {
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := sendAuditorMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "gossip-group-list",
 		}, "gossip")
 		if err != nil {
@@ -145,7 +145,7 @@ var auditorGossipGroupStateCmd = &cobra.Command{
 		if auditorGossipGroupStateName == "" {
 			log.Fatal("--group flag is required")
 		}
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := sendAuditorMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "gossip-group-state",
 			Data: map[string]interface{}{
 				"group": auditorGossipGroupStateName,
@@ -327,6 +327,24 @@ type AuditObservation struct {
 	Zone     string    `json:"zone"`
 	Provider string    `json:"provider"`
 	Message  string    `json:"message"`
+}
+
+// sendAuditorMgmtCmd sends a management command to the auditor's /auditor/mgmt endpoint.
+func sendAuditorMgmtCmd(req *tdns.AgentMgmtPost, contextCmd string) (*tdns.AgentMgmtResponse, error) {
+	prefixcmd, _ := tdnscli.GetCommandContext(contextCmd)
+	api, err := tdnscli.GetApiClient(prefixcmd, true)
+	if err != nil {
+		return nil, fmt.Errorf("error getting API client: %w", err)
+	}
+	_, buf, err := api.RequestNG("POST", "/auditor/mgmt", req, true)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %v", err)
+	}
+	var amr tdns.AgentMgmtResponse
+	if err := json.Unmarshal(buf, &amr); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+	return &amr, nil
 }
 
 func executeAuditRequest(cmdName string, req AuditPost) (*AuditResponse, error) {
