@@ -37,6 +37,18 @@ var auditorZoneMPListCmd = &cobra.Command{
 	Run:   func(cmd *cobra.Command, args []string) { tdnscli.RunZoneMPList("auditor", args) },
 }
 
+var auditorZoneReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Request re-loading a zone",
+	Run:   func(cmd *cobra.Command, args []string) { tdnscli.RunZoneReload("auditor", args) },
+}
+
+var auditorZoneBumpCmd = &cobra.Command{
+	Use:   "bump",
+	Short: "Bump SOA serial and epoch (if any)",
+	Run:   func(cmd *cobra.Command, args []string) { tdnscli.RunZoneBump("auditor", args) },
+}
+
 var auditorEventlogCmd = &cobra.Command{
 	Use:   "eventlog",
 	Short: "Audit event log commands",
@@ -240,7 +252,7 @@ func init() {
 
 	auditorObservationsCmd.Flags().StringP("zone", "z", "", "filter by zone")
 
-	AuditorZoneCmd.AddCommand(auditorZoneListCmd, auditorZoneMPListCmd)
+	AuditorZoneCmd.AddCommand(auditorZoneListCmd, auditorZoneMPListCmd, auditorZoneReloadCmd, auditorZoneBumpCmd)
 
 	auditorEventlogCmd.AddCommand(auditorEventlogListCmd, auditorEventlogClearCmd)
 	AuditorCmd.AddCommand(auditorEventlogCmd, auditorObservationsCmd)
