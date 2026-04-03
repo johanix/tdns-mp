@@ -301,7 +301,7 @@ func (s *auditorWebServer) fragmentEventLogRows(w http.ResponseWriter, r *http.R
 			data.Events = events
 		}
 	}
-	s.render(w, "eventlog_rows.html", data)
+	s.render(w, "eventlog-rows-inner", data)
 }
 
 func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *http.Request) {
@@ -318,7 +318,7 @@ func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *htt
 			zs.mu.RUnlock()
 		}
 	}
-	s.render(w, "observation_list.html", data)
+	s.render(w, "observation-list-inner", data)
 }
 
 // --- Healthcheck / JSON status endpoint ---

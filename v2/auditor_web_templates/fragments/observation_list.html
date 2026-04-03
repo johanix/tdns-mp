@@ -1,4 +1,3 @@
-{{define "observation_list.html"}}
 {{define "observation-list-inner"}}
 {{if not .Observations}}
 <p><em>No observations recorded.</em></p>
@@ -26,6 +25,4 @@
   </tbody>
 </table>
 {{end}}
-{{end}}
-{{template "observation-list-inner" .}}
 {{end}}
