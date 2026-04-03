@@ -1200,8 +1200,57 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 				ZoneData:   zd,
 				SyncStatus: analysis.HsyncStatus,
 			}
+		case tdns.AppTypeMPAuditor:
+			// Auditor doesn't have HsyncEngine. Associate zones with
+			// peers directly so SharedZones is populated for beats.
+			auditorAssociateZonePeers(zd, tm)
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
 		// is done in MPPreRefresh on new_zd before the flip.
 	}
+}
+
+// auditorAssociateZonePeers reads HSYNC3 records for a zone and
+// ensures each remote identity is registered in the AgentRegistry
+// with this zone as a shared zone. This is the auditor equivalent
+// of the agent's HSYNC-UPDATE flow through HsyncEngine.
+func auditorAssociateZonePeers(zd *tdns.ZoneData, tm *MPTransportBridge) {
+	if tm == nil || tm.agentRegistry == nil {
+		return
+	}
+	ar := tm.agentRegistry
+	ourID := dns.Fqdn(ar.LocalAgent.Identity)
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return
+	}
+	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !exists {
+		return
+	}
+
+	zoneName := ZoneName(zd.ZoneName)
+	for _, rr := range hsync3RRset.RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok {
+			continue
+		}
+		peerID := AgentId(h3.Identity)
+		if h3.Identity == ourID {
+			continue // skip ourselves
+		}
+
+		// Ensure agent exists in registry and has this zone
+		if _, exists := ar.S.Get(peerID); !exists {
+			ar.LocateAgent(peerID, zoneName, nil)
+		} else {
+			ar.AddZoneToAgent(peerID, zoneName)
+		}
+	}
+	lg.Info("auditor: associated zone with peers", "zone", zd.ZoneName)
 }
