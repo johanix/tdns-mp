@@ -579,38 +579,43 @@ func ValidateHsyncRRset(zd *tdns.ZoneData) (bool, error) {
 }
 
 // ourHsyncIdentities returns the set of FQDN identities we should match against
-// HSYNC3 records. On agents this is the single Globals.AgentId; on signers/combiners
-// it is all configured agent identities from Conf.MultiProvider.Agents.
+// HSYNC3 records. For roles with a single identity (agent, auditor) this is
+// mp.Identity. For roles managing multiple agents (combiner, signer) it is the
+// configured agent identities from mp.Agents.
 func ourHsyncIdentities(mp *tdns.MultiProviderConf) []string {
 	var ids []string
-	if mp != nil {
-		if mp.Role == "agent" {
-			if mp.Identity != "" {
-				ids = append(ids, dns.Fqdn(mp.Identity))
-			}
-		} else {
-			for _, agent := range mp.Agents {
-				if agent != nil && agent.Identity != "" {
-					ids = append(ids, dns.Fqdn(agent.Identity))
-				}
+	if mp == nil {
+		return ids
+	}
+	switch mp.Role {
+	case "agent", "auditor":
+		if mp.Identity != "" {
+			ids = append(ids, dns.Fqdn(mp.Identity))
+		}
+	default:
+		// combiner, signer, and any future multi-agent roles
+		for _, agent := range mp.Agents {
+			if agent != nil && agent.Identity != "" {
+				ids = append(ids, dns.Fqdn(agent.Identity))
 			}
 		}
 	}
 	return ids
 }
 
-// matchHsyncProvider checks whether any of our identities appear in the zone's
-// HSYNC3 RRset. This determines whether the zone owner considers us a provider
-// for this zone — independent of signing.
+// matchHsyncIdentity checks whether any of our identities appear in the zone's
+// HSYNC3 RRset. This determines whether the zone owner has listed us as a
+// participant — independent of what role we play (server, signer, auditor).
+// The role is determined separately by checking HSYNCPARAM fields.
 //
 // Returns:
 //   - matched: true if at least one of our identities matches an HSYNC3 Identity
 //   - label: the HSYNC3 Label of the matching record (e.g. "netnod")
 //   - err: non-nil on lookup errors
-func matchHsyncProvider(zd *tdns.ZoneData, ourIdentities []string) (matched bool, label string, err error) {
+func matchHsyncIdentity(zd *tdns.ZoneData, ourIdentities []string) (matched bool, label string, err error) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, "", fmt.Errorf("matchHsyncProvider: cannot get apex for zone %s: %v", zd.ZoneName, err)
+		return false, "", fmt.Errorf("matchHsyncIdentity: cannot get apex for zone %s: %v", zd.ZoneName, err)
 	}
 
 	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
@@ -663,12 +668,59 @@ func matchHsyncProvider(zd *tdns.ZoneData, ourIdentities []string) (matched bool
 	return false, "", nil
 }
 
+// --- Role query functions ---
+// Each checks only its own HSYNCPARAM field. Adding a new role does not
+// affect existing role checks.
+
+// getHSYNCPARAM returns the HSYNCPARAM record for a zone, or nil.
+func getHSYNCPARAM(zd *tdns.ZoneData) *core.HSYNCPARAM {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return nil
+	}
+	rrset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !exists || len(rrset.RRs) == 0 {
+		return nil
+	}
+	return rrset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+}
+
+// isServer checks whether the given HSYNC3 label is listed in
+// HSYNCPARAM servers=.
+func isServer(zd *tdns.ZoneData, label string) bool {
+	hp := getHSYNCPARAM(zd)
+	if hp == nil {
+		return false
+	}
+	return hp.IsServerLabel(label)
+}
+
+// isSigner checks whether the given HSYNC3 label is listed in
+// HSYNCPARAM signers=.
+func isSigner(zd *tdns.ZoneData, label string) bool {
+	hp := getHSYNCPARAM(zd)
+	if hp == nil {
+		return false
+	}
+	return hp.IsSignerLabel(label)
+}
+
+// isAuditor checks whether the given HSYNC3 label is listed in
+// HSYNCPARAM auditors=.
+func isAuditor(zd *tdns.ZoneData, label string) bool {
+	hp := getHSYNCPARAM(zd)
+	if hp == nil {
+		return false
+	}
+	return hp.IsAuditorLabel(label)
+}
+
 // analyzeHsyncSigners determines whether we should sign the zone and how many
 // other signers exist, by examining HSYNC3+HSYNCPARAM (preferred), then falling
 // back to HSYNC or HSYNC2 for backward compatibility with old zones.
 //
-// Requires that matchHsyncProvider() has already confirmed we are a provider.
-// The ourLabel parameter is the label returned by matchHsyncProvider().
+// Requires that matchHsyncIdentity() has already confirmed we are a provider.
+// The ourLabel parameter is the label returned by matchHsyncIdentity().
 //
 // Returns:
 //   - weShouldSign: whether our label is listed as a signer
@@ -755,16 +807,18 @@ func analyzeHsyncSigners(zd *tdns.ZoneData, ourIdentities []string, ourLabel str
 	return false, 0, false, nil
 }
 
-// populateMPdata evaluates the four multi-provider guards for a zone and
+// populateMPdata evaluates the multi-provider guards for a zone and
 // populates zd.MP.MPdata accordingly. Called after every zone refresh/transfer.
 //
 // Guard 1: OptMultiProvider must be set in the zone config.
 // Guard 2: The zone owner must declare the zone as MP (HSYNC3+HSYNCPARAM present).
-// Guard 3: We must be a listed provider (our identity matches an HSYNC3 record).
-// Guard 4: If the zone is signed (HSYNCPARAM signers= non-empty), we must be a signer.
+// Guard 3: Our identity must appear in the zone's HSYNC3 RRset.
+// Guard 4: Our role is determined from HSYNCPARAM (servers=/signers=/auditors=).
 //
-// If any guard fails, zd.MP.MPdata is set to nil. The caller can check zd.MP.MPdata to
-// determine whether this zone should be treated as multi-provider.
+//	Editing rights depend on role: servers may edit (unless zone is
+//	signed and we are not a signer), auditors may not.
+//
+// If guard 1-3 fails, zd.MP.MPdata is set to nil.
 func populateMPdata(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) {
 	zd.EnsureMP()
 	// Guard 1: static config must declare this as an MP zone
@@ -793,40 +847,51 @@ func populateMPdata(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) {
 		return
 	}
 
-	// Guard 3: we must be a listed provider
+	// Guard 3: our identity must appear in HSYNC3
 	ourIdentities := ourHsyncIdentities(mp)
-	matched, ourLabel, err := matchHsyncProvider(zd, ourIdentities)
+	matched, ourLabel, err := matchHsyncIdentity(zd, ourIdentities)
 	if err != nil {
-		zd.Logger.Printf("populateMPdata: zone %s: error matching provider identity: %v", zd.ZoneName, err)
+		zd.Logger.Printf("populateMPdata: zone %s: error matching identity: %v", zd.ZoneName, err)
 		zd.MP.MPdata = nil
 		return
 	}
 	if !matched {
-		zd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 provider in the zone -- we are not a provider for this zone", zd.ZoneName, ourIdentities)
+		zd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 record — we are not a participant for this zone", zd.ZoneName, ourIdentities)
 		zd.Options[tdns.OptMPNotListedErr] = true
 		zd.MP.MPdata = nil
 		return
 	}
-	// Clear warning if we were previously not listed but now are
 	zd.Options[tdns.OptMPNotListedErr] = false
 
-	// Guard 4: if zone is signed, we must be a signer
-	weShouldSign, otherSigners, zoneSigned, err := analyzeHsyncSigners(zd, ourIdentities, ourLabel)
+	// Guard 4: determine our role from HSYNCPARAM and set options accordingly.
+	// Each role check queries only its own HSYNCPARAM field.
+	weAreServer := isServer(zd, ourLabel)
+	weShouldSign := isSigner(zd, ourLabel)
+	weAreAuditor := isAuditor(zd, ourLabel)
+
+	// Analyze signing state via existing path (for legacy compat + otherSigners count)
+	_, otherSigners, zoneSigned, err := analyzeHsyncSigners(zd, ourIdentities, ourLabel)
 	if err != nil {
 		zd.Logger.Printf("populateMPdata: zone %s: error analyzing signers: %v", zd.ZoneName, err)
 		zd.MP.MPdata = nil
 		return
 	}
-	if zoneSigned && !weShouldSign {
-		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer -- zone is signed and we must not modify it", zd.ZoneName, ourLabel)
+
+	// Determine editing rights based on role
+	switch {
+	case weAreAuditor:
+		// Auditors never edit
 		zd.Options[tdns.OptMPDisallowEdits] = true
 		zd.Options[tdns.OptAllowEdits] = false
-		zd.MP.MPdata = nil
-		return
+	case zoneSigned && !weShouldSign:
+		// Server in a signed zone but not a signer — cannot edit
+		zd.Options[tdns.OptMPDisallowEdits] = true
+		zd.Options[tdns.OptAllowEdits] = false
+	default:
+		// Server and/or signer — may edit
+		zd.Options[tdns.OptMPDisallowEdits] = false
+		zd.Options[tdns.OptAllowEdits] = true
 	}
-	// Clear disallow-edits and restore allow-edits if we are (or became) a signer
-	zd.Options[tdns.OptMPDisallowEdits] = false
-	zd.Options[tdns.OptAllowEdits] = true
 
 	// Preserve any existing MPdata.Options (set at parse time),
 	// create the map if needed.
@@ -837,26 +902,26 @@ func populateMPdata(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) {
 		mpOpts = make(map[tdns.ZoneOption]bool)
 	}
 	mpOpts[tdns.OptMultiProvider] = true
-	mpOpts[tdns.OptMPDisallowEdits] = zoneSigned && !weShouldSign
+	mpOpts[tdns.OptMPDisallowEdits] = zd.Options[tdns.OptMPDisallowEdits]
 	mpOpts[tdns.OptMultiSigner] = weShouldSign && otherSigners > 0
 
 	zd.MP.MPdata = &tdns.MPdata{
-		WeAreProvider: true,
+		WeAreProvider: weAreServer || weShouldSign,
 		OurLabel:      ourLabel,
 		WeAreSigner:   weShouldSign,
 		OtherSigners:  otherSigners,
 		ZoneSigned:    zoneSigned,
 		Options:       mpOpts,
 	}
-	zd.Logger.Printf("populateMPdata: zone %s: provider=%q signer=%v otherSigners=%d zoneSigned=%v",
-		zd.ZoneName, ourLabel, weShouldSign, otherSigners, zoneSigned)
+	zd.Logger.Printf("populateMPdata: zone %s: label=%q server=%v signer=%v auditor=%v otherSigners=%d zoneSigned=%v",
+		zd.ZoneName, ourLabel, weAreServer, weShouldSign, weAreAuditor, otherSigners, zoneSigned)
 }
 
 // weAreASigner is a convenience wrapper that checks provider membership first,
 // then signer status.
 func weAreASigner(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) (bool, error) {
 	ids := ourHsyncIdentities(mp)
-	matched, label, err := matchHsyncProvider(zd, ids)
+	matched, label, err := matchHsyncIdentity(zd, ids)
 	if err != nil {
 		return false, err
 	}
@@ -1030,7 +1095,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 	switch tdns.Globals.App.Type {
 	case tdns.AppTypeCombiner, tdns.AppTypeMPCombiner:
 		if analysis.HsyncChanged {
-			matched, _, _ := matchHsyncProvider(new_zd, ourHsyncIdentities(mp))
+			matched, _, _ := matchHsyncIdentity(new_zd, ourHsyncIdentities(mp))
 			if matched && !new_zd.Options[tdns.OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
 				new_zd.Options[tdns.OptAllowEdits] = true
