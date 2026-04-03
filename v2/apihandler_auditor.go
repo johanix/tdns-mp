@@ -173,8 +173,13 @@ func (conf *Config) APIaudit() func(w http.ResponseWriter, r *http.Request) {
 
 // SetupMPAuditorRoutes registers auditor-specific API routes.
 func (conf *Config) SetupMPAuditorRoutes(apirouter *mux.Router) {
+	kdb := conf.Config.Internal.KeyDB
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/audit", conf.APIaudit()).Methods("POST")
+	// Reuse agent management endpoint for peer/gossip/debug commands
+	sr.HandleFunc("/agent", conf.APIagent(conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.InternalMp.DistributionCache)).Methods("POST")
+	sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
 }
 
 func writeAuditJSON(w http.ResponseWriter, resp AuditResponse) {
