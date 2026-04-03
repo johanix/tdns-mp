@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
+	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -47,6 +49,117 @@ var auditorZoneBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any)",
 	Run:   func(cmd *cobra.Command, args []string) { tdnscli.RunZoneBump("auditor", args) },
+}
+
+// --- Peer commands ---
+
+var auditorPeerCmd = &cobra.Command{
+	Use:   "peer",
+	Short: "Peer commands (list, ping, zones)",
+}
+
+var auditorPeerListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all known peers",
+	Run: func(cmd *cobra.Command, args []string) {
+		tdnscli.ListDistribPeers(cmd, "auditor")
+	},
+}
+
+var (
+	auditorPeerPingID  string
+	auditorPeerPingDns bool
+	auditorPeerPingApi bool
+)
+
+var auditorPeerPingCmd = &cobra.Command{
+	Use:   "ping",
+	Short: "Ping a peer via DNS CHUNK or API",
+	Run: func(cmd *cobra.Command, args []string) {
+		if auditorPeerPingID == "" {
+			log.Fatalf("--id flag is required")
+		}
+		agentCmd := "peer-ping"
+		if auditorPeerPingApi {
+			agentCmd = "peer-apiping"
+		}
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: agentCmd,
+			AgentId: tdns.AgentId(auditorPeerPingID),
+		}, "peer")
+		if err != nil {
+			log.Fatalf("Request failed: %v", err)
+		}
+		if amr.Error {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", amr.ErrorMsg)
+			os.Exit(1)
+		}
+		fmt.Println(amr.Msg)
+	},
+}
+
+var auditorPeerZonesCmd = &cobra.Command{
+	Use:   "zones",
+	Short: "List shared zones for each peer",
+	Run: func(cmd *cobra.Command, args []string) {
+		listPeerZones(cmd, "auditor")
+	},
+}
+
+// --- Gossip commands ---
+
+var auditorGossipCmd = &cobra.Command{
+	Use:   "gossip",
+	Short: "Gossip protocol commands",
+}
+
+var auditorGossipGroupCmd = &cobra.Command{
+	Use:   "group",
+	Short: "Provider group commands",
+}
+
+var auditorGossipGroupListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all provider groups",
+	Run: func(cmd *cobra.Command, args []string) {
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "gossip-group-list",
+		}, "gossip")
+		if err != nil {
+			log.Fatalf("Request failed: %v", err)
+		}
+		if amr.Error {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", amr.ErrorMsg)
+			os.Exit(1)
+		}
+		printGossipGroupList(amr)
+	},
+}
+
+var auditorGossipGroupStateName string
+
+var auditorGossipGroupStateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "Show gossip state matrix for a provider group",
+	Run: func(cmd *cobra.Command, args []string) {
+		if auditorGossipGroupStateName == "" {
+			log.Fatal("--group flag is required")
+		}
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "gossip-group-state",
+			Data: map[string]interface{}{
+				"group": auditorGossipGroupStateName,
+			},
+		}, "gossip")
+		if err != nil {
+			log.Fatalf("Request failed: %v", err)
+		}
+		if amr.Error {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", amr.ErrorMsg)
+			os.Exit(1)
+		}
+		printGossipGroupState(amr)
+	},
 }
 
 var auditorEventlogCmd = &cobra.Command{
@@ -254,6 +367,15 @@ func init() {
 
 	AuditorZoneCmd.AddCommand(auditorZoneListCmd, auditorZoneMPListCmd, auditorZoneReloadCmd, auditorZoneBumpCmd)
 
+	auditorPeerPingCmd.Flags().StringVar(&auditorPeerPingID, "id", "", "Peer identity to ping (required)")
+	auditorPeerPingCmd.Flags().BoolVar(&auditorPeerPingDns, "dns", false, "Use DNS CHUNK ping (default)")
+	auditorPeerPingCmd.Flags().BoolVar(&auditorPeerPingApi, "api", false, "Use HTTPS API ping")
+	auditorPeerCmd.AddCommand(auditorPeerListCmd, auditorPeerPingCmd, auditorPeerZonesCmd)
+
+	auditorGossipGroupStateCmd.Flags().StringVar(&auditorGossipGroupStateName, "group", "", "Provider group name or hash (required)")
+	auditorGossipGroupCmd.AddCommand(auditorGossipGroupListCmd, auditorGossipGroupStateCmd)
+	auditorGossipCmd.AddCommand(auditorGossipGroupCmd)
+
 	auditorEventlogCmd.AddCommand(auditorEventlogListCmd, auditorEventlogClearCmd)
-	AuditorCmd.AddCommand(auditorEventlogCmd, auditorObservationsCmd)
+	AuditorCmd.AddCommand(auditorPeerCmd, auditorGossipCmd, auditorEventlogCmd, auditorObservationsCmd)
 }
