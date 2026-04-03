@@ -12,7 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// GetAuditorLabel extracts the auditor label from the HSYNCPARAM RR
+// GetAuditorLabel extracts the first auditor label from the HSYNCPARAM RR
 // in the zone's apex. Returns "" if no auditor is declared.
 func GetAuditorLabel(zd *tdns.ZoneData) string {
 	if zd == nil {
@@ -35,7 +35,11 @@ func GetAuditorLabel(zd *tdns.ZoneData) string {
 		if !ok {
 			continue
 		}
-		return hp.GetAuditor()
+		auditors := hp.GetAuditors()
+		if len(auditors) > 0 {
+			return auditors[0]
+		}
+		return ""
 	}
 	return ""
 }
