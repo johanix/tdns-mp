@@ -1139,6 +1139,13 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
 func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
+	// Auditor zone-peer association runs unconditionally — it does not
+	// depend on RefreshAnalysis (which may have been consumed by the
+	// legacy MPPostRefresh callback that runs before us).
+	if tdns.Globals.App.Type == tdns.AppTypeMPAuditor && zd.Options[tdns.OptMultiProvider] {
+		auditorAssociateZonePeers(zd, tm)
+	}
+
 	if zd.MP == nil || zd.MP.RefreshAnalysis == nil {
 		return
 	}
@@ -1205,13 +1212,6 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 		// is done in MPPreRefresh on new_zd before the flip.
 	}
 
-	// Auditor: associate zones with peers on every refresh. The auditor
-	// doesn't have HsyncEngine so it cannot use the HSYNC-UPDATE flow.
-	// Run unconditionally (not gated on HsyncChanged) because peers may
-	// be discovered after the first refresh where HSYNC was "new".
-	if tdns.Globals.App.Type == tdns.AppTypeMPAuditor && zd.Options[tdns.OptMultiProvider] {
-		auditorAssociateZonePeers(zd, tm)
-	}
 }
 
 // auditorAssociateZonePeers reads HSYNC3 records for a zone and
