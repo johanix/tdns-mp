@@ -33,12 +33,19 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 	if conf.InternalMp.refreshRegistered == nil {
 		conf.InternalMp.refreshRegistered = make(map[string]bool)
 	}
+	lgConfig := tdns.Logger("config")
+	lgConfig.Info("RegisterMPRefreshCallbacks",
+		"mpZoneCount", len(conf.Config.Internal.MPZoneNames),
+		"zones", conf.Config.Internal.MPZoneNames)
 	for _, zoneName := range conf.Config.Internal.MPZoneNames {
 		if conf.InternalMp.refreshRegistered[zoneName] {
 			continue
 		}
 		zd, ok := tdns.Zones.Get(zoneName)
 		if !ok || !zd.Options[tdns.OptMultiProvider] {
+			lgConfig.Info("RegisterMPRefreshCallbacks: skipping zone",
+				"zone", zoneName, "found", ok,
+				"multiProvider", ok && zd.Options[tdns.OptMultiProvider])
 			continue
 		}
 		conf.InternalMp.refreshRegistered[zoneName] = true
