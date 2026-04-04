@@ -1200,13 +1200,17 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 				ZoneData:   zd,
 				SyncStatus: analysis.HsyncStatus,
 			}
-		case tdns.AppTypeMPAuditor:
-			// Auditor doesn't have HsyncEngine. Associate zones with
-			// peers directly so SharedZones is populated for beats.
-			auditorAssociateZonePeers(zd, tm)
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
 		// is done in MPPreRefresh on new_zd before the flip.
+	}
+
+	// Auditor: associate zones with peers on every refresh. The auditor
+	// doesn't have HsyncEngine so it cannot use the HSYNC-UPDATE flow.
+	// Run unconditionally (not gated on HsyncChanged) because peers may
+	// be discovered after the first refresh where HSYNC was "new".
+	if tdns.Globals.App.Type == tdns.AppTypeMPAuditor && zd.Options[tdns.OptMultiProvider] {
+		auditorAssociateZonePeers(zd, tm)
 	}
 }
 
