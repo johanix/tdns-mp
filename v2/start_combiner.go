@@ -1,8 +1,8 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * MP combiner startup: StartMPCombiner calls tdns.StartCombiner
- * for DNS engines, then starts MP-specific engines on top.
+ * MP combiner startup: StartMPCombiner starts DNS infrastructure
+ * engines and MP-specific engines for the combiner role.
  */
 package tdnsmp
 
@@ -13,12 +13,10 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-// StartMPCombiner starts the MP combiner. It delegates DNS engine
-// startup to tdns.StartCombiner (which skips MP engines for
-// AppTypeMPCombiner), then starts the MP engines from tdns-mp.
+// StartMPCombiner starts the MP combiner. It starts DNS infrastructure
+// engines directly (no delegation to tdns), then starts MP-specific
+// engines on top.
 func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) error {
-	// Attach OnFirstLoad callbacks to zone stubs created by ParseZones.
-	// These use tdns-mp's local combiner functions (not the legacy tdns ones).
 	// Attach OnFirstLoad callbacks (contributions, signal keys) and
 	// PreRefresh/PostRefresh closures to MP zones. Install hook so
 	// zones added via reload also get both sets of callbacks.
@@ -33,13 +31,24 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/combiner/mp", conf.APImpCombiner()).Methods("POST")
 
-	// DNS engines (APIdispatcher, RefreshEngine, Notifier, NotifyHandler, DnsEngine)
-	// MP engines are skipped because AppType == AppTypeMPCombiner
-	if err := conf.Config.StartCombiner(ctx, apirouter); err != nil {
-		return err
-	}
+	// DNS infrastructure engines
+	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
+		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
+	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
+		tdns.RefreshEngine(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
+		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
+		return tdns.NotifyHandler(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "DnsEngine", func() error {
+		return tdns.DnsEngine(ctx, conf.Config)
+	})
 
-	// MP engines from tdns-mp
+	// MP engines
 	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
