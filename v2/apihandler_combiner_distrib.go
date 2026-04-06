@@ -93,7 +93,7 @@ func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w htt
 
 		case "peer-list":
 			// List all known peers with working keys
-			peers := tdns.ListKnownPeers(conf.Config)
+			peers := ListKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))
 
 			// Convert to generic map for JSON serialization

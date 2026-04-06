@@ -1275,7 +1275,7 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 		return nil, err
 	}
 
-	tdns.CombinerStateSetChunkHandler(state, handler)
+	state.ChunkNotifyHandler = handler
 
 	return state, nil
 }

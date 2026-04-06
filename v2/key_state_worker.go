@@ -213,7 +213,7 @@ func maintainStandbyKeys(conf *Config, kdb *tdns.KeyDB, standbyZskCount, standby
 
 		// Skip multi-provider zones where we are not a signer
 		if zd.Options[tdns.OptMultiProvider] {
-			shouldSign, _ := tdns.ZoneDataWeAreASigner(zd)
+			shouldSign, _ := weAreASigner(zd, conf.Config.MultiProvider)
 			if !shouldSign {
 				continue
 			}
