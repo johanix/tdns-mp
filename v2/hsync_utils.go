@@ -1200,6 +1200,14 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 				ZoneData:   zd,
 				SyncStatus: analysis.HsyncStatus,
 			}
+			// Detect parentsync=agent dynamically from HSYNCPARAM
+			if !zd.Options[tdns.OptDelSyncChild] {
+				hp := getHSYNCPARAM(zd)
+				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
+					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", zd.ZoneName)
+					zd.Options[tdns.OptDelSyncChild] = true
+				}
+			}
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
 		// is done in MPPreRefresh on new_zd before the flip.

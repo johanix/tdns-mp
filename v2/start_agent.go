@@ -131,12 +131,42 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		lem.SetProviderGroupManager(ar.ProviderGroupManager)
 	}
 
-	// Attach leader election OnFirstLoad callbacks to zone stubs.
+	// Attach OnFirstLoad callbacks to zone stubs.
+	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
 	for _, zoneName := range conf.Config.Internal.AllZones {
 		zd, exists := tdns.Zones.Get(zoneName)
 		if !exists {
 			continue
 		}
+		// Detect parentsync=agent from HSYNCPARAM and enable delegation sync.
+		if zd.Options[tdns.OptMultiProvider] {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				if zd.Options[tdns.OptDelSyncChild] {
+					return // already set via static config
+				}
+				mp := conf.Config.MultiProvider
+				if mp == nil {
+					return
+				}
+				ourIds := ourHsyncIdentities(mp)
+				matched, _, _ := matchHsyncIdentity(zd, ourIds)
+				if !matched {
+					return
+				}
+				hp := getHSYNCPARAM(zd)
+				if hp == nil {
+					return
+				}
+				if hp.GetParentSync() == core.HsyncParentSyncAgent {
+					lgAgent.Info("HSYNCPARAM parentsync=agent, enabling delegation sync", "zone", zd.ZoneName)
+					zd.Options[tdns.OptDelSyncChild] = true
+					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+						lgAgent.Error("SetupZoneSync failed in MP OnFirstLoad", "zone", zd.ZoneName, "err", err)
+					}
+				}
+			})
+		}
+		// Leader election callback (must run after parentsync detection above).
 		if zd.Options[tdns.OptDelSyncChild] || zd.Options[tdns.OptMultiProvider] {
 			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if !zd.Options[tdns.OptDelSyncChild] {

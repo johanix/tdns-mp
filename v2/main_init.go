@@ -190,6 +190,12 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 		}
 	}
 
+	// Register provider zone RR types from config
+	for i := range mp.ProviderZones {
+		mp.ProviderZones[i].Zone = dns.Fqdn(mp.ProviderZones[i].Zone)
+		RegisterProviderZoneRRtypes(mp.ProviderZones[i])
+	}
+
 	chunkMode := strings.TrimSpace(mp.ChunkMode)
 	if chunkMode == "query" {
 		cep := strings.TrimSpace(mp.ChunkQueryEndpoint)
