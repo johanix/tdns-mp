@@ -1017,7 +1017,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 
 	// HSYNC and DNSKEY change detection
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeCombiner, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
+	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(zd, new_zd)
 		if err != nil {
@@ -1054,7 +1054,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 
 	// Combiner: snapshot upstream data before applying contributions to new_zd
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeCombiner, tdns.AppTypeMPCombiner:
+	case tdns.AppTypeMPCombiner:
 		snapshotUpstreamData(new_zd)
 	}
 
@@ -1093,7 +1093,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 
 	// Combiner: HSYNC match check and combine with local changes on new_zd.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeCombiner, tdns.AppTypeMPCombiner:
+	case tdns.AppTypeMPCombiner:
 		if analysis.HsyncChanged {
 			matched, _, _ := matchHsyncIdentity(new_zd, ourHsyncIdentities(mp))
 			if matched && !new_zd.Options[tdns.OptMPDisallowEdits] {
@@ -1184,7 +1184,7 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 					NewDnskeys: oldkeys, // post-flip, old=new; legacy path approximation
 				}
 			}
-		case tdns.AppTypeCombiner, tdns.AppTypeMPCombiner:
+		case tdns.AppTypeMPCombiner:
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
 		}
 	}
