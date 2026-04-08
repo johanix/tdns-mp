@@ -45,27 +45,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return fmt.Errorf("error initializing KeyDB: %v", err)
 	}
 
-	// Initialize DNSSEC policies for MP apps
-	if conf.Config.Internal.DnssecPolicies == nil {
-		conf.Config.Internal.DnssecPolicies = make(map[string]tdns.DnssecPolicy)
-	}
-	for name, dp := range conf.Config.DnssecPolicies {
-		tmp := tdns.DnssecPolicy{
-			Name:      name,
-			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
-			KSK:       tdns.GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-			ZSK:       tdns.GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-			CSK:       tdns.GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
-		}
-		if tmp.Algorithm == 0 {
-			continue
-		}
-		conf.Config.Internal.DnssecPolicies[name] = tmp
-	}
-	if _, exists := conf.Config.Internal.DnssecPolicies["default"]; !exists {
-		conf.Config.Internal.DnssecPolicies["default"] = tdns.BuiltinDefaultDnssecPolicy()
-	}
-
 	mp := conf.Config.MultiProvider
 	if mp == nil {
 		return nil

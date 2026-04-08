@@ -144,16 +144,17 @@ tdns-mp.
 
 **File**: parseconfig.go:268-275
 
-```go
-case AppTypeAuth, AppTypeAgent,
-     AppTypeMPSigner, AppTypeMPAgent, AppTypeMPAuditor:
-    // init DnssecPolicies
-```
-
-**Verdict**: **Remove MP types from gate — but only after
-tdns-mp does its own init.** First add DNSSEC policy
-initialization to tdns-mp startup code, then remove the
-MP types from this switch.
+**Verdict**: **Remove the app-type gate entirely.** The
+DNSSEC policy initialization must run before ParseZones
+(which validates each zone's dnssec_policy reference
+against Internal.DnssecPolicies), and ParseZones runs
+inside MainInit — so MP apps cannot inject this init
+step between ParseConfig and ParseZones. The cleanest
+fix is to make the init unconditional inside ParseConfig:
+tdns-imr and tdns-cli get an empty map plus the built-in
+"default" policy, which is harmless. This is strictly
+more decoupled than the original gate — tdns's
+ParseConfig has zero MP knowledge.
 
 **Implementation**: See Task F in `2026-04-04-implementation-plan.md`.
 

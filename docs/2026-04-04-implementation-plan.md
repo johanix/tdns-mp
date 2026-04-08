@@ -216,46 +216,61 @@ task, since `InitializeKeyDB` references
 
 ---
 
-## Task F: tdns-mp Owns DNSSEC Policy Initialization
+## Task F: Make DNSSEC Policy Initialization Unconditional
 
 **Decoupling item**: 9
-**Risk**: Low — add call before removing gate
-**Repos**: tdns (remove gate), tdns-mp (add call)
+**Risk**: Low — remove app-type gate entirely
+**Repos**: tdns only
 
 ### What to do
 
-The DNSSEC policies init in `parseconfig.go:268-275` is
-gated on app types including MP types. tdns-mp should do
-its own init.
+The DNSSEC policies init in `parseconfig.go:267-294`
+must run before ParseZones, which validates each zone's
+`dnssec_policy` reference against
+`Internal.DnssecPolicies`. Both `ParseConfig` and
+`ParseZones` run inside tdns's `MainInit`, so tdns-mp
+cannot inject a per-app init between them. The fix is
+to remove the app-type gate from the init block
+entirely: it runs for every app that calls `ParseConfig`.
+
+tdns-imr and tdns-cli end up with an empty
+`Internal.DnssecPolicies` map plus the built-in "default"
+policy. This is harmless — they never consult the map.
+
+This is strictly more decoupled than the original gate:
+tdns's `ParseConfig` has zero MP knowledge after this
+change.
+
+### Note on earlier plan
+
+An earlier version of this task had tdns-mp do its own
+DNSSEC policy init in `main_init.go` after
+`conf.Config.MainInit()` returned. That approach was
+incorrect: by the time `MainInit` returns, `ParseZones`
+has already run and logged zone errors for unresolved
+`dnssec_policy` references. The initialization must
+happen before `ParseZones`, which means inside
+`ParseConfig`. The regression was caught on the test
+lab by observing `mpsigner` refusing to sign zones with
+messages like "DNSSEC policy "" does not exist".
 
 ### Steps
 
-1. **tdns-mp** (`v2/main_init.go`): After the call to
-   `conf.Config.MainInit(ctx, defaultcfg)`, add:
-   ```go
-   if conf.Config.Internal.DnssecPolicies == nil {
-       conf.Config.Internal.DnssecPolicies =
-           make(map[string]tdns.DnssecPolicy)
-   }
-   for name, dp := range conf.Config.DnssecPolicies {
-       conf.Config.Internal.DnssecPolicies[name] = dp
-   }
-   ```
-   (Check exact field names against parseconfig.go:268-275.)
-2. **tdns** (`v2/parseconfig.go:268-275`): Remove MP types
-   from the switch, leaving:
-   ```go
-   case AppTypeAuth, AppTypeAgent:
-       ...
-   ```
-3. Build both repos.
-4. Test: start mpsigner (which needs DNSSEC policies),
-   verify signing works.
-
-### Note
-
-Need to verify that `DnssecPolicy` type and
-`DnssecPolicies` field are exported. If not, export them.
+1. **tdns** (`v2/parseconfig.go`): Remove the
+   `switch Globals.App.Type { case AppTypeAuth,
+   AppTypeAgent: ... }` wrapper around the DNSSEC
+   policy init block. The block runs unconditionally.
+2. **tdns**: `BuiltinDefaultDnssecPolicy()` is already
+   exported from Task F (first iteration). Leave it
+   exported — it's used from within the same file and
+   having it exported costs nothing.
+3. **tdns-mp** (`v2/main_init.go`): Remove the DNSSEC
+   policy init block added in Task F's first iteration.
+   It runs too late to be useful and is now dead code.
+4. Build both repos.
+5. Test (on NetBSD test lab): start mpsigner, verify
+   `tdns-mpcli signer zone list` shows no
+   `DNSSEC policy "" does not exist` errors.
 
 ---
 
