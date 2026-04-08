@@ -4,6 +4,10 @@
 package cli
 
 import (
+	"fmt"
+	"log"
+
+	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -11,4 +15,31 @@ import (
 var SignerCmd = &cobra.Command{
 	Use:   "signer",
 	Short: "Interact with the MP signer via API",
+}
+
+// signerZoneMPListCmd adds "mplist" to the signer's zone command tree.
+// The signer uses the standard tdnscli.ZoneCmd (shared with tdns-auth),
+// so we attach via init() rather than defining a custom signerZoneCmd.
+var signerZoneMPListCmd = &cobra.Command{
+	Use:   "mplist",
+	Short: "List multi-provider zones with HSYNCPARAM details",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := tdnscli.GetCommandContext("zone")
+		api, err := tdnscli.GetApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		resp, err := SendMPListCommand(api)
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			log.Fatalf("Error: %v", err)
+		}
+
+		ListMPZones(resp)
+	},
+}
+
+func init() {
+	tdnscli.ZoneCmd.AddCommand(signerZoneMPListCmd)
 }
