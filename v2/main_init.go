@@ -25,9 +25,45 @@ import (
 // DNS infrastructure setup to tdns.MainInit, then adds MP components
 // (TransportManager, crypto, CHUNK handler, peer registration).
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
+	// Register MP zone option handler before ParseZones runs inside MainInit.
+	tdns.RegisterZoneOptionHandler(tdns.OptMultiProvider, func(zname string, options map[tdns.ZoneOption]bool) {
+		conf.Config.Internal.MPZoneNames = append(conf.Config.Internal.MPZoneNames, zname)
+	})
+
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
+	}
+
+	conf.Config.ParseAuthOptions()
+
+	if err := tdns.ValidateDatabaseFile(conf.Config); err != nil {
+		return fmt.Errorf("database validation failed: %v", err)
+	}
+
+	if err := conf.Config.InitializeKeyDB(); err != nil {
+		return fmt.Errorf("error initializing KeyDB: %v", err)
+	}
+
+	// Initialize DNSSEC policies for MP apps
+	if conf.Config.Internal.DnssecPolicies == nil {
+		conf.Config.Internal.DnssecPolicies = make(map[string]tdns.DnssecPolicy)
+	}
+	for name, dp := range conf.Config.DnssecPolicies {
+		tmp := tdns.DnssecPolicy{
+			Name:      name,
+			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
+			KSK:       tdns.GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
+			ZSK:       tdns.GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
+			CSK:       tdns.GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+		}
+		if tmp.Algorithm == 0 {
+			continue
+		}
+		conf.Config.Internal.DnssecPolicies[name] = tmp
+	}
+	if _, exists := conf.Config.Internal.DnssecPolicies["default"]; !exists {
+		conf.Config.Internal.DnssecPolicies["default"] = tdns.BuiltinDefaultDnssecPolicy()
 	}
 
 	mp := conf.Config.MultiProvider

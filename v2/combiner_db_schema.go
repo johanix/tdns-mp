@@ -23,7 +23,6 @@ func InitCombinerEditTables(kdb *tdns.KeyDB) error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
-		"OutgoingSerials",
 	}
 
 	for _, name := range combinerTables {

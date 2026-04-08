@@ -7,6 +7,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,16 +15,22 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
 
 // SetupMPSignerRoutes registers signer-specific API routes on
 // the existing API router. Called from StartMPSigner.
-func (conf *Config) SetupMPSignerRoutes(apirouter *mux.Router) {
+func (conf *Config) SetupMPSignerRoutes(ctx context.Context, apirouter *mux.Router) {
+	kdb := conf.Config.Internal.KeyDB
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/signer", conf.APImpSigner()).Methods("POST")
 	sr.HandleFunc("/signer/peer", conf.APIsingerPeer()).Methods("POST")
 	sr.HandleFunc("/signer/distrib", conf.APIsingerDistrib()).Methods("POST")
+	sr.HandleFunc("/keystore", kdb.APIkeystore(conf.Config)).Methods("POST")
+	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
+	sr.HandleFunc("/zone/dsync", tdns.APIzoneDsync(ctx, &tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/delegation", tdns.APIdelegation(conf.Config.Internal.DelegationSyncQ)).Methods("POST")
 }
 
 // SignerPeerPost is the request body for /signer/peer.

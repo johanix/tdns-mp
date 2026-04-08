@@ -28,7 +28,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	}
 
 	// Register all combiner API routes from tdns-mp
-	conf.SetupMPCombinerRoutes(apirouter)
+	conf.SetupMPCombinerRoutes(ctx, apirouter)
 
 	// DNS infrastructure engines
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {

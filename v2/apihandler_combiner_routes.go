@@ -6,6 +6,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,7 +18,7 @@ import (
 
 // SetupMPCombinerRoutes registers combiner-specific API routes on
 // the existing API router. Called from StartMPCombiner.
-func (conf *Config) SetupMPCombinerRoutes(apirouter *mux.Router) {
+func (conf *Config) SetupMPCombinerRoutes(ctx context.Context, apirouter *mux.Router) {
 	kdb := conf.Config.Internal.KeyDB
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/combiner", APIcombiner(&tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
