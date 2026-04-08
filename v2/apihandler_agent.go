@@ -192,7 +192,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			}
 		}()
 
-		// XXX: hsync cmds should move to its own endpoint, not be mixed with agent
 		var zd *tdns.ZoneData
 		var exist bool
 		noZoneCommands := map[string]bool{
@@ -398,38 +397,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.Status = "timeout"
 			}
 
-		case "hsync-zonestatus":
-			// Get the apex owner object
-			owner, err := zd.GetOwner(zd.ZoneName)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %s error: %v", amp.Zone, err)
-				return
-			}
-
-			// Get the HSYNC RRset from the apex
-			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-			if len(hsyncRRset.RRs) == 0 {
-				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC3 RRset", amp.Zone)
-				return
-			}
-
-			// Convert the RRs to strings for transmission
-			hsyncStrs := make([]string, len(hsyncRRset.RRs))
-			for i, rr := range hsyncRRset.RRs {
-				hsyncStrs[i] = rr.String()
-			}
-			resp.HsyncRRs = hsyncStrs
-
-			// Get the actual agents from the registry
-			resp.ZoneAgentData, err = conf.InternalMp.AgentRegistry.GetZoneAgentData(amp.Zone)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error getting remote agents: %v", err)
-				return
-			}
-			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", amp.Zone)
-
 		case "hsync-agentstatus":
 			// Get the apex owner object
 			agent, err := conf.InternalMp.AgentRegistry.GetAgentInfo(amp.AgentId)
@@ -491,108 +458,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
-
-		// HSYNC debug commands (Phase 5)
-		case "hsync-peer-status":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			state := ""
-			if amp.AgentId != "" {
-				// Filter by specific peer
-				peer, err := kdb.GetPeer(string(amp.AgentId))
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error getting peer: %v", err)
-					return
-				}
-				if peer != nil {
-					resp.HsyncPeers = []*HsyncPeerInfo{tdns.PeerRecordToInfo(peer)}
-				}
-			} else {
-				// List all peers
-				peers, err := kdb.ListPeers(state)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error listing peers: %v", err)
-					return
-				}
-				for _, peer := range peers {
-					resp.HsyncPeers = append(resp.HsyncPeers, tdns.PeerRecordToInfo(peer))
-				}
-			}
-			resp.Msg = fmt.Sprintf("Found %d peers", len(resp.HsyncPeers))
-
-		case "hsync-sync-ops":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			ops, err := kdb.ListSyncOperations(string(amp.Zone), 50)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error listing sync operations: %v", err)
-				return
-			}
-			for _, op := range ops {
-				resp.HsyncSyncOps = append(resp.HsyncSyncOps, tdns.SyncOpRecordToInfo(op))
-			}
-			resp.Msg = fmt.Sprintf("Found %d sync operations", len(resp.HsyncSyncOps))
-
-		case "hsync-confirmations":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			confs, err := kdb.ListSyncConfirmations("", 50)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error listing confirmations: %v", err)
-				return
-			}
-			for _, conf := range confs {
-				resp.HsyncConfirmations = append(resp.HsyncConfirmations, tdns.ConfirmRecordToInfo(conf))
-			}
-			resp.Msg = fmt.Sprintf("Found %d confirmations", len(resp.HsyncConfirmations))
-
-		case "hsync-transport-events":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			events, err := kdb.ListTransportEvents(string(amp.AgentId), 100)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error listing transport events: %v", err)
-				return
-			}
-			resp.HsyncEvents = events
-			resp.Msg = fmt.Sprintf("Found %d transport events", len(resp.HsyncEvents))
-
-		case "hsync-metrics":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			metrics, err := kdb.GetAggregatedMetrics()
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error getting metrics: %v", err)
-				return
-			}
-			resp.HsyncMetrics = metrics
-			resp.Msg = "Aggregated metrics"
 
 		// Router introspection commands
 		case "router-list":
