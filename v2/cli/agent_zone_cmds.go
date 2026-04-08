@@ -34,15 +34,13 @@ func runZoneMPList(parent string, args []string) {
 		log.Fatalf("Error getting API client for %s: %v", parent, err)
 	}
 
-	cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-		Command: "list-mp-zones",
-	})
+	resp, err := SendMPListCommand(api)
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}
 
-	tdnscli.ListMPZones(cr)
+	ListMPZones(resp)
 }
 
 var agentZoneReloadCmd = &cobra.Command{

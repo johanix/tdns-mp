@@ -25,6 +25,7 @@ func (conf *Config) SetupMPSignerRoutes(ctx context.Context, apirouter *mux.Rout
 	kdb := conf.Config.Internal.KeyDB
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/signer", conf.APImpSigner()).Methods("POST")
+	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/signer/peer", conf.APIsingerPeer()).Methods("POST")
 	sr.HandleFunc("/signer/distrib", conf.APIsingerDistrib()).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore(conf.Config)).Methods("POST")

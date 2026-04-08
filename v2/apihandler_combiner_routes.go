@@ -22,6 +22,7 @@ func (conf *Config) SetupMPCombinerRoutes(ctx context.Context, apirouter *mux.Ro
 	kdb := conf.Config.Internal.KeyDB
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/combiner", APIcombiner(&tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/combiner/distrib", conf.APIcombinerDistrib(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/combiner/transaction", conf.APIcombinerTransaction()).Methods("POST")
 	sr.HandleFunc("/combiner/debug", APIcombinerDebug(conf)).Methods("POST")

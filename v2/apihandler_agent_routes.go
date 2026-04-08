@@ -13,6 +13,7 @@ func (conf *Config) SetupMPAgentRoutes(ctx context.Context, apirouter *mux.Route
 	kdb := conf.Config.Internal.KeyDB
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/agent", conf.APIagent(conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/agent/transaction", conf.APIagentTransaction(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
