@@ -367,15 +367,13 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 }
 
 // initMPAgent performs agent-specific MP initialization.
+// Note: SetupAgent (which creates the agent identity zone and publishes
+// transport records) runs from StartMPAgent, after ZoneUpdaterEngine is
+// running — PublishUriRR/PublishAddrRR/etc. send on KeyDB.UpdateQ and
+// require a live consumer.
 func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required for agent role")
-	}
-
-	// Setup agent identity and publish records
-	all_zones := tdns.Zones.Keys()
-	if err := conf.Config.SetupAgent(all_zones); err != nil {
-		return fmt.Errorf("SetupAgent: %w", err)
 	}
 
 	// Initialize AgentRegistry
