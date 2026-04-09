@@ -67,12 +67,16 @@ evidence on every item.
 
 ### Items still open
 
-1, 3, 5, 6, 8, 13, 14, 14b, 16, 17, 18, 22, 23, 24, 25, 26,
-26b (partial), 27 (partial), 29.
+**Closed in Wave A (2026-04-09):** 5, 6, 13, 23.
+**Reclassified out of Phase 2:** 25 (moved to tdns-auth
+key management revisit).
+
+**Remaining open:** 1, 3, 8, 14, 14b, 16, 17, 18, 22, 24,
+26, 26b (partial), 27 (partial), 29.
 
 Items 1 and 8 were "Keep" / "No action" in the original
-plan — no work needed. The remaining 17 items are Phase 2
-scope.
+plan — no work needed. After Wave A, 12 items remain in
+active Phase 2 scope.
 
 ---
 
@@ -80,6 +84,13 @@ scope.
 
 Each item below has verified file:line evidence from the
 current code as of 2026-04-09.
+
+**Tier 1 (Wave A) is complete as of 2026-04-09.** Items
+5, 6, 13, and 23 are DONE in tdns commit 4c95c6a. Item
+25 was investigated and reclassified — the original
+description was incorrect and the actual file is not
+part of Phase 2 scope. See individual items for details.
+Both tdns and tdns-mp build clean after every step.
 
 ### Tier 1 — mechanical cleanup (low risk, small diff)
 
@@ -92,11 +103,35 @@ current code as of 2026-04-09.
   counterpart. Commented-out code is exactly where subtle
   drops happen during a migration — a "looks migrated"
   skim is not sufficient.
+- **Status: DONE (2026-04-09, tdns 4c95c6a).** Entire dead
+  switch statement deleted (421 lines). Coverage verified
+  in tdns-mp: `SetupAgent` in `agent_setup.go:239`,
+  `NewAgentRegistry` in `agent_utils.go:97`,
+  `InitHsyncTables` in `main_init.go:380`, distribution
+  cache in `main_init.go:91,245,389`,
+  `NewMPTransportBridge` in `hsync_transport.go:191`,
+  `initSignerCrypto` in `signer_transport.go:23`,
+  `RegisterSignerChunkHandler` in
+  `signer_chunk_handler.go:23`, `InitCombinerEditTables`
+  in `combiner_db_schema.go:16`, `InitCombinerCrypto` in
+  `combiner_crypto.go:32`, `RegisterCombinerChunkHandler`
+  in `combiner_chunk.go:1251`, `NewCombinerSyncHandler`
+  in `combiner_chunk.go:1218`.
 
 **Item 6 — Commented-out StartCombiner function**
 - Entire function at `tdns/v2/main_initfuncs.go:680-792`
 - Same line-by-line diff against
   `tdns-mp/v2/start_combiner.go` before deletion.
+- **Status: DONE (2026-04-09, tdns 4c95c6a).** Function
+  body (113 lines) deleted. Coverage verified:
+  `LoadAllContributions` in
+  `tdns-mp/v2/db_combiner_contributions.go:63`,
+  `StartIncomingMessageRouter` used from
+  `tdns-mp/v2/start_combiner.go:53`, `CombinerMsgHandler`
+  in `tdns-mp/v2/combiner_msg_handler.go:29`,
+  `SetupCombinerSyncRouter` called from
+  `tdns-mp/v2/start_combiner.go:70`, `APIdispatcherNG`
+  wired from `tdns-mp/v2/start_combiner.go:76`.
 
 **Item 13 — MPPreRefresh/MPPostRefresh registration in
 ParseZones**
@@ -123,32 +158,73 @@ ParseZones**
   registration is removed. Confirm with the user before
   deleting those function bodies, even though the
   unreachability proof is trivial.
+- **Status: DONE (2026-04-09, tdns 4c95c6a).** Diagnosis:
+  **case 1 with a twist.** Both sides register on the
+  same `OnZonePreRefresh`/`OnZonePostRefresh` slices:
+  tdns appends its 2-arg `MPPreRefresh`/`MPPostRefresh`
+  during `ParseZones`, then tdns-mp's
+  `RegisterMPRefreshCallbacks` (called from
+  `StartAgent`/`StartSigner`/`StartCombiner` in
+  `tdns-mp/v2/config.go:29`) appends closures wrapping
+  the 5-arg versions. tdns ran first; its analysis was
+  overwritten on every refresh by tdns-mp's PreRefresh.
+  Worse, tdns's PostRefresh ran first after the flip and
+  used tdns-mp's analysis before clearing it to nil,
+  causing tdns-mp's PostRefresh to see nil and no-op.
+  Removing the tdns-side registration fixes this. The
+  legacy_* function bodies are now unreachable but left
+  in place per the workflow rule — flag for explicit
+  cleanup approval later.
 
 **Item 25 — key_state_worker.go MP state checks**
 - MP checks at `tdns/v2/key_state_worker.go:181, 213, 224`
 - tdns-mp has its own `key_state_worker.go`
-- Two independent sub-actions:
-  1. **Gate startup positively.** `StartAuth`'s
-     KeyStateWorker startup gated on `== AppTypeAuth`
-     (positive allow-list), NOT `!= AppTypeMPSigner`.
-     One-line change.
-  2. **Strip MP branches from the tdns worker body.**
-     The three checks at lines 181/213/224 should be
-     *removed entirely*, not gated. tdns must not branch
-     on `AppTypeMP*` — it should not know or care about
-     the details or capabilities of non-tdns applications,
-     only that they exist. Touches multiple call sites
-     and needs a compile check.
-  - **Before stripping, verify coverage on the tdns-mp
-    side.** Read `tdns-mp/v2/key_state_worker.go` and
-    confirm it already implements the MP-specific logic
-    that the three tdns checks currently guard. This is
-    not "looks like it's handled" — the plan should cite
-    the specific tdns-mp file:line that covers each
-    stripped branch. If tdns-mp does NOT cover one of the
-    branches, that logic must move to tdns-mp first.
-    Tier 1 framing assumes this coverage check comes back
-    clean; if it doesn't, item 25 is not a Wave A task.
+- **Status: ORIGINAL DESCRIPTION WAS WRONG (2026-04-09).**
+  Investigation found both sub-actions in the original
+  plan were based on misreads of the code:
+
+  1. **Sub-action 1 (gate startup positively) is moot.**
+     tdns's `KeyStateWorker` is not registered anywhere
+     in tdns/v2/. There is no startup to gate. The only
+     live registration is tdns-mp's own copy, started
+     from `tdns-mp/v2/start_signer.go:43` for the
+     mpsigner role.
+
+  2. **Sub-action 2 (strip MP branches) does not apply.**
+     The checks at lines 181/213/224 are
+     `zd.Options[OptMultiProvider]` **zone-option**
+     checks, not `AppTypeMP*` **app-type** branches. The
+     guiding principle forbids branching on the external
+     app-type constants; zone options are a separate,
+     legitimate mechanism. The checks guard real MP
+     behavior (`DnskeyStateMpremove` transitions,
+     `pushKeystateInventoryToAllAgents`) that would
+     break MP if stripped.
+
+- **Actual state.** `tdns/v2/key_state_worker.go` is an
+  unreferenced file. tdns-mp has a near-identical live
+  copy at `tdns-mp/v2/key_state_worker.go`. The two
+  files have diverged only superficially.
+
+- **Decision (2026-04-09).** Leave the file in place as
+  the reference implementation for the eventual tdns-auth
+  wiring. A header comment has been added explaining
+  that it is not yet wired and should be picked up when
+  the tdns-auth key management logic is revisited more
+  broadly (tdns commit 56ede5a). When that work lands:
+  - Register `KeyStateWorker` from `StartAuth` gated
+    positively on `AppTypeAuth`.
+  - Decide whether tdns and tdns-mp should share the
+    file or keep separate copies.
+  - Review the `OptMultiProvider` branches —
+    `DnskeyStateMpremove` and
+    `pushKeystateInventoryToAllAgents` are MP concepts
+    that a plain tdns-auth signer can ignore entirely.
+
+- **Reclassification.** This item is **no longer Tier 1**
+  and is not part of Wave A. It belongs with the
+  tdns-auth key management revisit, whenever that lands.
+  Priority table updated to reflect the move.
 
 ### Tier 2 — move MP logic into tdns-mp (low–medium risk)
 
@@ -310,6 +386,18 @@ grouping.
   on the MP side rather than checking `OptMultiProvider`
   at resign time. Low effort if approached this way;
   touches MP startup code.
+- **Status: DONE (2026-04-09, tdns 4c95c6a).** Applied a
+  simpler fix than the original recommendation:
+  replaced the `OptMultiProvider && !weAreASigner()`
+  check with a generic
+  `!OptInlineSigning && !OptOnlineSigning` check. MP
+  zones already toggle `OptInlineSigning` dynamically
+  via `MPPreRefresh` based on HSYNC analysis, so the
+  generic option check is functionally equivalent and
+  removes the resigner's knowledge of MP concepts
+  (`weAreASigner`, `OptMultiProvider`). No changes to
+  MP startup code were needed. `ResignerEngine` is now
+  generic — it treats every zone identically.
 
 **Item 24 — keystore.go DnskeyStateMpremove**
 - Referenced at `tdns/v2/keystore.go:470, 878, 889`
@@ -358,11 +446,11 @@ Wave D alongside 26b)
 
 | Order | Item | Wave | Tier | Difficulty | Blockers |
 |-------|------|------|------|------------|----------|
-| 1 | 5 | A | 1 | Trivial | None |
-| 2 | 6 | A | 1 | Trivial | None |
-| 3 | 13 | A | 1 | Easy | None |
-| 4 | 25 | A | 1 | Easy | tdns-mp coverage check |
-| 5 | 23 | A | (5) | Easy | None — promoted from Tier 5 |
+| 1 | 5 | A | 1 | Trivial | **DONE** (tdns 4c95c6a) |
+| 2 | 6 | A | 1 | Trivial | **DONE** (tdns 4c95c6a) |
+| 3 | 13 | A | 1 | Easy | **DONE** (tdns 4c95c6a) |
+| — | 25 | (deferred) | — | — | **RECLASSIFIED** — moved to tdns-auth key mgmt revisit; see item body |
+| 4 | 23 | A | (5) | Easy | **DONE** (tdns 4c95c6a) — promoted from Tier 5 |
 | 6 | 14b | B | 3 | Medium | **Wave B keystone** — design first; may collapse after OnFirstLoad investigation |
 | 7 | 16 | B | 2 | Easy | 14b (may drop if OnFirstLoad wins) |
 | 8 | 17 | B | 2 | Easy | 14b (may drop if OnFirstLoad wins) |
@@ -384,16 +472,33 @@ Wave D alongside 26b)
 
 ## Natural sequencing recommendation
 
-### Wave A — cleanup (Tier 1 + item 23)
+### Wave A — cleanup (Tier 1 + item 23) — **COMPLETE**
 
-Items 5, 6, 13, 25, 23. Quick mechanical wins. Removes
-dead code and double-registration noise from files that
-will be touched more seriously in later waves. Item 23
-is topically a signing item (Tier 5) but is scheduled
-here because it's genuinely easy and the approach
-(manage `ZonesToKeepSigned` from the MP side) doesn't
-touch the tdns signing engine at all — it just removes
-the `OptMultiProvider` check at `resigner.go:76`.
+Items 5, 6, 13, 23 — **DONE (2026-04-09, tdns 4c95c6a).**
+Item 25 was investigated and reclassified out of Wave A
+(the original description was wrong; see Item 25 above).
+Both tdns and tdns-mp built clean after every step.
+
+Wave A removed:
+- 421 lines of commented-out init blocks from
+  `main_initfuncs.go` (item 5).
+- 113 lines of commented-out `StartCombiner` function
+  from the same file (item 6).
+- Double-registration of `MPPreRefresh`/`MPPostRefresh`
+  from `parseconfig.go` (item 13).
+- MP-specific `weAreASigner()` check from
+  `resigner.go:76`, replaced with a generic
+  `OptInlineSigning`/`OptOnlineSigning` check (item 23).
+
+Follow-up items from Wave A:
+- `MPPreRefresh`/`MPPostRefresh` function bodies in
+  `legacy_hsync_utils.go:907-1116` are now unreachable.
+  Flagged for explicit cleanup approval.
+- `tdns/v2/key_state_worker.go` is not wired anywhere
+  but should eventually be registered from `StartAuth`.
+  A header comment has been added documenting this
+  (tdns commit 56ede5a). Belongs with the tdns-auth key
+  management revisit, not Phase 2.
 
 ### Wave B — ParseZones second pass (Tier 3 + 2)
 
@@ -508,7 +613,7 @@ may need more.
 
 | Wave | Minimum verification |
 |------|----------------------|
-| A | Build clean on all four app types (tdns auth/agent/scanner, tdns-mp all flavors). Item 13 specifically: confirm MPPreRefresh/MPPostRefresh still fire on refresh by inspecting logs. Item 25: full key-state-worker startup on an mpsigner in the NetBSD lab. |
+| A | **COMPLETE 2026-04-09.** Build verified clean on tdns (auth/agent/scanner/cli/imr/dog) and tdns-mp (mpagent/mpsigner/mpcombiner/mpauditor/mpcli) after each item. NetBSD lab verification for item 13 (MPPreRefresh/MPPostRefresh firing on refresh) still pending — to be confirmed by inspecting logs in the test lab. Item 25 lab verification no longer applicable (item reclassified). |
 | B | NetBSD lab: zone first-load on mpagent, mpsigner, mpcombiner, mpauditor. Confirm MPdata is populated at the right point by logging zone state immediately after `initialLoadZone`. If Wave B collapses to OnFirstLoad callbacks, verify callback ordering against any code that consumes MPdata during or after initial load. |
 | C | CLI smoke test every migrated command group on the new endpoints. Specifically: run every command in each slice against a live agent and compare output to pre-migration behavior. Delete the legacy tdns copies *only after* the smoke test passes — not before. Item 3: after the MsgQs ref-audit checklist is clean, confirm `conf.Internal.MsgQs` has zero references in `tdns/v2/` via grep. |
 | D | Delegation sync integration test in the NetBSD lab. Specifically exercise: (a) the path that currently runs `delegation_sync.go:169-179` — confirm the behavior is preserved by the new pluggable handler; (b) LeaderElection gating — confirm non-leaders do not trigger peer notification; (c) the default (non-MP) handler path still works for plain tdns auth. |
