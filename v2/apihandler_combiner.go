@@ -520,41 +520,6 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			resp.AgentContributions = agentContribs
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
 
-		case "agent-ping":
-			tm := conf.InternalMp.MPTransport
-			if tm == nil {
-				resp.Error = true
-				resp.ErrorMsg = "TransportManager not initialized"
-				return
-			}
-			agentID := cp.AgentID
-			if agentID == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for agent-ping"
-				return
-			}
-			agentID = dns.Fqdn(agentID)
-
-			peer, ok := tm.PeerRegistry.Get(agentID)
-			if !ok {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("agent %q not found in peer registry", agentID)
-				return
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			pingResp, err := tm.SendPing(ctx, peer)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("ping to agent %s failed: %v", agentID, err)
-				return
-			}
-
-			resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce %s rtt=%s",
-				pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
-
 		case "agent-resync":
 			tm := conf.InternalMp.MPTransport
 			if tm == nil {

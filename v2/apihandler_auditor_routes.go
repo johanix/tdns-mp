@@ -13,4 +13,5 @@ func (conf *Config) SetupMPAuditorRoutes(ctx context.Context, apirouter *mux.Rou
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/gossip", APIgossip(conf.InternalMp.AgentRegistry, conf.InternalMp.LeaderElectionManager)).Methods("POST")
 	sr.HandleFunc("/router", APIrouter(conf.InternalMp.TransportManager)).Methods("POST")
+	sr.HandleFunc("/peer", APIpeer(conf, conf.InternalMp.TransportManager, conf.InternalMp.AgentRegistry)).Methods("POST")
 }

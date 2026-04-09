@@ -4,15 +4,11 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,148 +18,6 @@ import (
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
-
-// doPeerPing pings any known peer via DNS CHUNK or API.
-// Role-agnostic: works for agent, auth/signer, or any role with a TransportManager.
-// The peer must be in the PeerRegistry or have static config (combiner, signer, multi-provider agent).
-// useAPI true = HTTPS API ping; false = CHUNK-based DNS ping.
-func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
-		Time: time.Now(),
-	}
-	peerID = dns.Fqdn(peerID)
-
-	tm := conf.InternalMp.TransportManager
-	if tm == nil {
-		resp.Error = true
-		resp.ErrorMsg = "TransportManager not configured"
-		return resp
-	}
-	resp.Identity = AgentId(tm.LocalID)
-
-	peer, ok := tm.PeerRegistry.Get(peerID)
-	if !ok {
-		// Peer not in registry — try static config fallbacks for all roles
-		peer = conf.lookupStaticPeer(peerID)
-		if peer == nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %q not found in registry (run discovery first)", peerID)
-			return resp
-		}
-	}
-
-	if useAPI {
-		if peer.APIEndpoint == "" {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %q has no API endpoint configured", peerID)
-			return resp
-		}
-		url := strings.TrimSuffix(peer.APIEndpoint, "/") + "/ping"
-		body := tdns.PingPost{Msg: fmt.Sprintf("peer ping %s", peerID), Pings: 1}
-		data, _ := json.Marshal(body)
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("build request: %v", err)
-			return resp
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-		res, err := client.Do(req)
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("apiping to %s failed: %v", peerID, err)
-			return resp
-		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %s API returned %d", peerID, res.StatusCode)
-			return resp
-		}
-		var pr tdns.PingResponse
-		if err := json.NewDecoder(res.Body).Decode(&pr); err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("decode ping response from %s: %v", peerID, err)
-			return resp
-		}
-		resp.Msg = fmt.Sprintf("ping ok (api transport): %s responded", peerID)
-		return resp
-	}
-
-	// DNS CHUNK ping
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	pingResp, err := tm.SendPing(ctx, peer)
-	if err != nil {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("ping to %s failed: %v", peerID, err)
-		return resp
-	}
-	if !pingResp.OK {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
-		return resp
-	}
-	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s rtt=%s", pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
-	return resp
-}
-
-// lookupStaticPeer checks all static peer configurations (agent-side: combiner, signer;
-// signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
-func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
-	mp := conf.Config.MultiProvider
-	// Agent-side: combiner
-	if mp != nil && mp.Role == "agent" && mp.Combiner != nil &&
-		dns.Fqdn(mp.Combiner.Identity) == peerID && mp.Combiner.Address != "" {
-		if peer := peerFromAddress(peerID, mp.Combiner.Address); peer != nil {
-			if mp.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = mp.Combiner.ApiBaseUrl
-			}
-			return peer
-		}
-	}
-
-	// Agent-side: signer
-	if mp != nil && mp.Role == "agent" && mp.Signer != nil &&
-		dns.Fqdn(mp.Signer.Identity) == peerID && mp.Signer.Address != "" {
-		return peerFromAddress(peerID, mp.Signer.Address)
-	}
-
-	// Signer-side: multi-provider agents
-	if mp != nil {
-		for _, agentConf := range mp.Agents {
-			if agentConf != nil && dns.Fqdn(agentConf.Identity) == peerID && agentConf.Address != "" {
-				return peerFromAddress(peerID, agentConf.Address)
-			}
-		}
-	}
-
-	return nil
-}
-
-// peerFromAddress creates a temporary transport.Peer from a host:port address string.
-func peerFromAddress(peerID string, address string) *transport.Peer {
-	host, portStr, err := net.SplitHostPort(address)
-	if err != nil {
-		lgApi.Warn("invalid address for static peer", "address", address, "peer", peerID, "err", err)
-		return nil
-	}
-	port, _ := strconv.Atoi(portStr)
-	peer := transport.NewPeer(peerID)
-	peer.SetDiscoveryAddress(&transport.Address{
-		Host:      host,
-		Port:      uint16(port),
-		Transport: "udp",
-	})
-	return peer
-}
 
 func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -195,9 +49,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 		var zd *tdns.ZoneData
 		var exist bool
 		noZoneCommands := map[string]bool{
-			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
+			"config": true, "hsync-agentstatus": true,
 			"discover": true, "hsync-locate": true,
-			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
+			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -219,28 +73,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			}
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
-
-		case "peer-ping":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for peer-ping"
-				return
-			}
-			pingResp := doPeerPing(conf, string(amp.AgentId), false)
-			resp.Error = pingResp.Error
-			resp.ErrorMsg = pingResp.ErrorMsg
-			resp.Msg = pingResp.Msg
-
-		case "peer-apiping":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for peer-apiping"
-				return
-			}
-			pingResp := doPeerPing(conf, string(amp.AgentId), true)
-			resp.Error = pingResp.Error
-			resp.ErrorMsg = pingResp.ErrorMsg
-			resp.Msg = pingResp.Msg
 
 		case "update-local-zonedata":
 			lgApi.Debug("update-local-zonedata", "addedRRs", amp.AddedRRs, "removedRRs", amp.RemovedRRs)
@@ -751,58 +583,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			}
 			resp.Data = entries
 			resp.Msg = fmt.Sprintf("Found %d cache entries for identity %s", len(entries), identity)
-
-		case "peer-reset":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id (--id) is required"
-				return
-			}
-			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
-
-			ar := conf.InternalMp.AgentRegistry
-			if ar == nil {
-				resp.Error = true
-				resp.ErrorMsg = "agent registry not available"
-				return
-			}
-
-			// Flush IMR cache for this identity's discovery names
-			imr := tdns.Globals.ImrEngine
-			flushed := 0
-			if imr != nil && imr.Cache != nil {
-				removed, _ := imr.Cache.FlushDomain(string(amp.AgentId), false)
-				flushed = removed
-			}
-
-			// Reset agent to NEEDED state and restart discovery
-			agent, exists := ar.S.Get(amp.AgentId)
-			if !exists {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", amp.AgentId)
-				return
-			}
-
-			agent.Mu.Lock()
-			if agent.ApiDetails != nil {
-				agent.ApiDetails.State = AgentStateNeeded
-				agent.ApiDetails.DiscoveryFailures = 0
-				agent.ApiDetails.LatestError = ""
-			}
-			if agent.DnsDetails != nil {
-				agent.DnsDetails.State = AgentStateNeeded
-				agent.DnsDetails.DiscoveryFailures = 0
-				agent.DnsDetails.LatestError = ""
-			}
-			agent.State = AgentStateNeeded
-			agent.Mu.Unlock()
-
-			// Trigger immediate re-discovery
-			if imr != nil {
-				go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
-			}
-
-			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
