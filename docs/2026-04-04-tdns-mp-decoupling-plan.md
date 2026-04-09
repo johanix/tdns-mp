@@ -16,6 +16,18 @@ it must handle their own setup. Adding a new external app
 should **never** require a pull request to tdns to wire in
 new guards or code paths.
 
+**No `AppTypeMP*` branching in tdns**: tdns code must not
+contain any branch (switch case, if-check, comparison) on
+`AppTypeMPAgent`, `AppTypeMPSigner`, `AppTypeMPCombiner`,
+or `AppTypeMPAuditor`. The constants exist as registered
+enum values but tdns must not inspect them. Where gating
+is needed, use a positive allow-list on tdns's own app
+types (`AppTypeAuth`, `AppTypeAgent`, `AppTypeScanner`) —
+never a negative exclusion like `!= AppTypeMPSigner`.
+tdns should not know or care about the details or
+capabilities of non-tdns applications, only that they
+exist.
+
 **Safety rule**: The MP apps (mpagent, mpsigner, mpcombiner)
 must keep working throughout this migration. For every gate
 removed from tdns, **first** ensure that tdns-mp already has
@@ -57,6 +69,11 @@ tdns's own apps that need a KeyDB should be listed here.
 
 **Implementation**: See Task E in `2026-04-04-implementation-plan.md`.
 
+**Status: DONE** (Task E). tdns switch at
+`main_initfuncs.go:142` now lists only AppTypeAuth,
+AppTypeAgent, AppTypeScanner. tdns-mp calls
+`conf.Config.InitializeKeyDB()` from `main_init.go:44`.
+
 ---
 
 ### 3. MainInit — MsgQs Creation
@@ -71,6 +88,13 @@ Remove from tdns MainInit. Update tdns-mp to use its local
 MsgQs. (If non-legacy tdns code still references
 `conf.Internal.MsgQs`, defer until those references are
 cleaned up.)
+
+**Status: OPEN.** tdns still unconditionally creates
+`conf.Internal.MsgQs` at `main_initfuncs.go:205-222`. 15
+active references remain across `apihandler_agent.go` and
+`main_initfuncs.go`. tdns-mp already uses its own
+`NewMsgQs()` (`main_init.go:89`). Blocked on finishing
+/agent split (item 27).
 
 ---
 
@@ -88,6 +112,9 @@ stays in tdns (it's a general registration mechanism).
 
 **Implementation**: See Task C in `2026-04-04-implementation-plan.md`.
 
+**Status: DONE** (Task C). Registration removed from tdns
+and added in `tdns-mp/v2/main_init.go:28-30`.
+
 ---
 
 ### 5. MainInit — Commented-Out Agent/Signer/Combiner Init
@@ -103,6 +130,10 @@ that every piece of code in them has been migrated to
 tdns-mp's `main_init.go`. Once verified, delete. Do NOT
 delete before verification.
 
+**Status: OPEN.** Comment blocks still present:
+AppTypeAgent block at `main_initfuncs.go:262-394`,
+AppTypeAuth block at `main_initfuncs.go:396-672`.
+
 ---
 
 ### 6. StartCombiner — Commented Out Entirely
@@ -112,6 +143,9 @@ delete before verification.
 Entire `StartCombiner` function inside `/* ... */`.
 
 **Verdict**: **Verify, then delete.** Same as item 5.
+
+**Status: OPEN.** Commented-out function still present at
+`main_initfuncs.go:680-792`.
 
 ---
 
@@ -126,6 +160,8 @@ Commented-out `!= AppTypeMPSigner` block.
 KeyStateWorker. This dead code can go.
 
 **Implementation**: See Task A in `2026-04-04-implementation-plan.md`.
+
+**Status: DONE** (Task A). Block deleted.
 
 ---
 
@@ -158,6 +194,9 @@ ParseConfig has zero MP knowledge.
 
 **Implementation**: See Task F in `2026-04-04-implementation-plan.md`.
 
+**Status: DONE** (Task F). DNSSEC policy init runs
+unconditionally in `parseconfig.go:267-292`.
+
 ---
 
 ### 10. ParseConfig — Auth Options Parsing
@@ -178,6 +217,11 @@ types from this switch.
 
 **Implementation**: See Task D in `2026-04-04-implementation-plan.md`.
 
+**Status: DONE** (Task D). `ParseAuthOptions` exported in
+`parseoptions.go:75`; called from
+`tdns-mp/v2/main_init.go:38`; switch in
+`parseconfig.go:332-335` no longer lists MP types.
+
 ---
 
 ### 11. ParseConfig — KeyDB Init on Config Load
@@ -190,6 +234,10 @@ own KeyDB init, then remove the MP types from this switch.
 Same reasoning as item 2.
 
 **Implementation**: See Task E in `2026-04-04-implementation-plan.md`.
+
+**Status: DONE** (Task E). Switch at
+`parseconfig.go:343-350` now only lists AppTypeAuth,
+AppTypeAgent.
 
 ---
 
@@ -212,6 +260,9 @@ whether to call the function.
 `2026-04-04-implementation-plan.md` (was Task G, now
 part of E).
 
+**Status: DONE** (Task E). `InitializeKeyDB` no longer has
+an internal app-type gate.
+
 **(b)** Lines 438-444: `OutgoingSerials` table creation,
 currently inside `InitHsyncTables()`.
 
@@ -223,6 +274,10 @@ tdns, but `HsyncTables` will migrate to tdns-mp. Move the
 schema location in tdns (e.g. `InitCoreTables` or similar).
 
 **Implementation**: See Task H in `2026-04-04-implementation-plan.md`.
+
+**Status: DONE** (Task H). Schema moved to `DefaultTables`
+in `db_schema.go:89-91`; `parseconfig.go:431` uses
+`DefaultTables["OutgoingSerials"]`.
 
 ---
 
@@ -243,6 +298,12 @@ If `MPPreRefresh`/`MPPostRefresh` are defined in legacy
 files, they'll go when legacy is deleted. Check for double
 registration.
 
+**Status: OPEN.** Block still present at
+`parseconfig.go:714-716`. Functions still defined in tdns
+at `legacy_hsync_utils.go:907, 1047` (legacy-flagged) AND
+in tdns-mp at `hsync_utils.go:1000, 1141`. Double
+registration is likely.
+
 ---
 
 ### 14. ParseZones — MP Inline Signing OnFirstLoad
@@ -255,6 +316,10 @@ Registers signing callback for MP zones on signer-type apps.
 already handles MP zone signing setup. If yes, remove from
 tdns. If no, move to tdns-mp (e.g. in a callback
 registration function).
+
+**Status: OPEN.** Still present at
+`parseconfig.go:739-746`, gated on `options[OptMultiProvider]
+&& (AppTypeAuth || AppTypeMPSigner)`.
 
 ---
 
@@ -269,6 +334,9 @@ handling, and related MP-specific zone parsing logic.
 code must not be forgotten. It should be part of a tdns-mp
 second-pass zone parsing loop (see "ParseZones Strategy"
 section below).
+
+**Status: OPEN.** `zdp.MP.MPdata` population still present
+at `parseconfig.go:689-705`.
 
 ---
 
@@ -285,6 +353,10 @@ MainInit? If nil at that point, this code is dead for MP
 apps. Likely move to tdns-mp's OnFirstLoad callback
 registration.
 
+**Status: DONE.** Block removed from tdns. Comment at
+`parseconfig.go:749-750` says "MP delegation sync
+OnFirstLoad removed — handled by tdns-mp".
+
 ---
 
 ### 16. parseoptions.go — OptMultiProvider Validation
@@ -299,6 +371,9 @@ OptMultiProvider beyond knowing the constant exists.
 Implement a tdns-mp `ParseZoneOptions()` that handles
 MP-specific option validation, and move this logic there.
 
+**Status: OPEN.** Still present at
+`parseoptions.go:256-268`.
+
 ---
 
 ### 17. parseoptions.go — OptMPManualApproval Validation
@@ -309,6 +384,9 @@ Validates that mp-manual-approval is only set on combiner.
 
 **Verdict**: **Move to tdns-mp** as part of implementing the
 tdns-mp `ParseZoneOptions()` (same function as item 16).
+
+**Status: OPEN.** Still present at
+`parseoptions.go:345-357`.
 
 ---
 
@@ -331,6 +409,10 @@ migrate:
 - `ValidateAgentSupportedMechanisms()`
 - `ValidateCryptoFiles()`
 
+**Status: OPEN.** MP types still in validation list at
+`config_validate.go:51`. Functions still in tdns at
+`config_validate.go:218, 245, 283`.
+
 ---
 
 ### 19. config_validate.go — Database File Requirement
@@ -345,6 +427,10 @@ it. tdns apps call it where needed. Ensure that tdns-mp apps
 call it from their own validation.
 
 **Implementation**: See Task I in `2026-04-04-implementation-plan.md`.
+
+**Status: DONE** (Task I). Internal gate removed
+(`config_validate.go:332-341`). tdns-mp calls it from
+`main_init.go:40`.
 
 ---
 
@@ -363,6 +449,12 @@ mechanism. Then remove the MP types from the tdns gate.
 
 **Implementation**: See Task J in `2026-04-04-implementation-plan.md`.
 
+**Status: DONE** (Task J). tdns gate at
+`apirouters.go:104-109` now only covers AppTypeAuth and
+AppTypeAgent. tdns-mp registers the four routes in
+`apihandler_agent_routes.go:24-27` and
+`apihandler_signer_routes.go:32-35`.
+
 ---
 
 ### 21. keys_cmd.go — JOSE Key Path Lookup
@@ -380,6 +472,9 @@ trivial fix: add the missing cases.
 
 **Implementation**: See Task B in `2026-04-04-implementation-plan.md`.
 
+**Status: DONE** (Task B). Switch at `keys_cmd.go:142`
+now covers all four types.
+
 ---
 
 ### 22. sign.go — MP Multi-Signer DNSKEY Handling
@@ -392,6 +487,9 @@ handling modes (modes 2-4).
 **Verdict**: **Leave for now.** Deeply integrated with the
 signing pipeline. Revisit when/if the signing engine gets
 modularized.
+
+**Status: OPEN** (deferred). Gates still at
+`sign.go:243, 363`.
 
 ---
 
@@ -409,6 +507,8 @@ weAreSigner() each time, the MP code should remove
 non-qualifying zones from the ZonesToKeepSigned list (or
 better: never add them). Add a comment noting this.
 
+**Status: OPEN** (deferred). Check still at `resigner.go:76`.
+
 ---
 
 ### 24. keystore.go — DnskeyStateMpremove
@@ -417,6 +517,9 @@ better: never add them). Add a comment noting this.
 
 **Verdict**: **Leave for now.** Complicated DNSSEC engine
 integration.
+
+**Status: OPEN** (deferred). Referenced at
+`keystore.go:470, 878, 889`.
 
 ---
 
@@ -434,6 +537,10 @@ Need a mechanism to ensure the tdns KeyStateWorker does not
 start for MP apps (e.g. gate its startup in StartAuth on
 `!= AppTypeMPSigner`, or have tdns-mp suppress it).
 
+**Status: OPEN.** MP checks still at
+`key_state_worker.go:181, 213, 224`. tdns-mp has its own
+`key_state_worker.go`.
+
 ---
 
 ### 26. delegation_sync.go — MP Zone DNSKEY Sync (line 169)
@@ -443,6 +550,10 @@ start for MP apps (e.g. gate its startup in StartAuth on
 **Verdict**: **Leave for now, needs later analysis.** I don't
 fully understand what this code does yet. Mark for future
 investigation.
+
+**Status: OPEN.** Block at `delegation_sync.go:169-179`
+sends NOTIFY for DNSKEY RRset sync to controller when
+zone is MP.
 
 ---
 
@@ -467,6 +578,13 @@ used for NOTIFY handlers and query handlers. tdns registers
 a default handler for its own delegation sync; tdns-mp
 registers one that includes LeaderElectionManager checks
 and peer notification.
+
+**Status: PARTIAL.** `notifyPeersParentSyncDone` no longer
+found in tdns. `DelegationSyncher` still monolithic at
+`delegation_sync.go:25-194` with MP SYNC-DNSKEY-RRSET
+handling; tdns-mp invokes the same function from
+`start_agent.go:370-371`. Pluggable handler redesign not
+yet done.
 
 ---
 
@@ -497,6 +615,19 @@ and the tdns-mp CLIs (`mpcli agent ...`, `mpcli signer ...`,
 `mpcli combiner ...`) must be updated to use the new
 endpoint paths.
 
+**Status: PARTIAL.** Four slices done:
+- HSYNC commands → `/agent/hsync` (Task L)
+- Router commands → `/router` (Task M)
+- Peer commands → `/peer` (Task N)
+- Gossip commands → `/gossip` (Task O)
+Still on `/agent` (29 active cases remain): parentsync-*
+(status, election, inquire, bootstrap), add-rr, del-rr,
+imr-* (query, flush, reset, show), hsync-locate,
+hsync-chunk-send, hsync-chunk-recv, hsync-init-db,
+hsync-sync-state, hsync-agentstatus, show-combiner-data,
+send-sync-to, and the config/imr commands that belong in
+core tdns.
+
 ---
 
 ### 28. apihandler_zone.go — list-mp-zones
@@ -514,6 +645,11 @@ the handler for `/zone/mplist` from tdns-mp.
 to call `/zone/mplist` instead of `/zone` with the
 `list-mp-zones` sub-command.
 
+**Status: DONE** (Task K). Handler in
+`tdns-mp/v2/apihandler_mplist.go`; CLI helper in
+`tdns-mp/v2/cli/mplist.go`; tdns `api_structs.go` no
+longer has `MPZoneInfo`/`MPZones`.
+
 ---
 
 ### 29. structs.go — ZoneMPExtension & EnsureMP
@@ -529,6 +665,10 @@ definition and all its getters/setters/types to tdns-mp.
 tdns-mp casts `zd.AppData` to `*ZoneMPExtension` when
 needed. Big structural change — do later, but the plan is
 clear.
+
+**Status: OPEN.** `zd.MP *ZoneMPExtension` still at
+`structs.go:134`; `ZoneMPExtension` defined at
+`structs.go:80-111`. No AppData replacement in progress.
 
 ---
 
