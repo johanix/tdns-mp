@@ -197,7 +197,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 		noZoneCommands := map[string]bool{
 			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
 			"discover": true, "hsync-locate": true,
-			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
 			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
 		}
 		if !noZoneCommands[amp.Command] {
@@ -457,63 +456,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
-
-		// Router introspection commands
-		case "router-list":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterList(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-describe":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterDescribe(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-metrics":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			detailed := false
-			if amp.Data != nil {
-				if v, ok := amp.Data["detailed"]; ok {
-					detailed, _ = v.(bool)
-				}
-			}
-			routerResp := handleRouterMetrics(conf.InternalMp.TransportManager, detailed)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-walk":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterWalk(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-reset":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterReset(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
 
 		case "refresh-keys":
 			RequestAndWaitForKeyInventory(zd, r.Context(), conf.InternalMp.MPTransport)

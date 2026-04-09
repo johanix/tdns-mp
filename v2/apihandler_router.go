@@ -1,21 +1,100 @@
 /*
- * Copyright (c) 2025 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * API handlers for DNS message router introspection.
+ * /router endpoint handler — role-agnostic DNS message router
+ * introspection. Any process running a TransportManager can have
+ * its router introspected by posting to this endpoint.
+ * Registered on all MP roles.
  */
-
 package tdnsmp
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	tdns "github.com/johanix/tdns/v2"
 )
 
+// APIrouter returns the /router handler. Role-agnostic: depends only
+// on the TransportManager passed in.
+func APIrouter(tm *transport.TransportManager) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var rp RouterPost
+		if err := decoder.Decode(&rp); err != nil {
+			lgApi.Warn("error decoding router command post", "err", err)
+			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		lgApi.Debug("received /router request", "cmd", rp.Command, "from", r.RemoteAddr)
+
+		resp := RouterResponse{
+			Time: time.Now(),
+		}
+		if tm != nil {
+			resp.Identity = AgentId(tm.LocalID)
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			sanitizedResp := tdns.SanitizeForJSON(resp)
+			err := json.NewEncoder(w).Encode(sanitizedResp)
+			if err != nil {
+				lgApi.Error("json encoder failed", "handler", "router", "err", err)
+			}
+		}()
+
+		if tm == nil || tm.Router == nil {
+			resp.Error = true
+			resp.ErrorMsg = "Router not available (DNS transport not configured)"
+			return
+		}
+
+		switch rp.Command {
+		case "router-list":
+			routerResp := handleRouterList(tm.Router)
+			mergeRouterResponse(&resp, routerResp)
+
+		case "router-describe":
+			routerResp := handleRouterDescribe(tm.Router)
+			mergeRouterResponse(&resp, routerResp)
+
+		case "router-metrics":
+			routerResp := handleRouterMetrics(tm, rp.Detailed)
+			mergeRouterResponse(&resp, routerResp)
+
+		case "router-walk":
+			routerResp := handleRouterWalk(tm.Router)
+			mergeRouterResponse(&resp, routerResp)
+
+		case "router-reset":
+			routerResp := handleRouterReset(tm.Router)
+			mergeRouterResponse(&resp, routerResp)
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown router command: %s", rp.Command)
+		}
+	}
+}
+
+// mergeRouterResponse copies the result fields from a helper-produced
+// response into the outer RouterResponse while preserving its Time
+// and Identity.
+func mergeRouterResponse(dst *RouterResponse, src *RouterResponse) {
+	dst.Error = src.Error
+	dst.ErrorMsg = src.ErrorMsg
+	dst.Msg = src.Msg
+	dst.Data = src.Data
+}
+
 // handleRouterList returns a list of all registered handlers grouped by message type.
-func handleRouterList(router *transport.DNSMessageRouter) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
+func handleRouterList(router *transport.DNSMessageRouter) *RouterResponse {
+	resp := &RouterResponse{
 		Time: time.Now(),
 	}
 
@@ -31,7 +110,6 @@ func handleRouterList(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 		return resp
 	}
 
-	// Convert to a format suitable for JSON serialization
 	handlerData := make(map[string][]map[string]interface{})
 	for msgType, regs := range handlers {
 		handlerList := make([]map[string]interface{}, len(regs))
@@ -68,8 +146,8 @@ func handleRouterList(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 }
 
 // handleRouterDescribe returns a detailed description of the router state.
-func handleRouterDescribe(router *transport.DNSMessageRouter) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
+func handleRouterDescribe(router *transport.DNSMessageRouter) *RouterResponse {
+	resp := &RouterResponse{
 		Time: time.Now(),
 	}
 
@@ -89,8 +167,8 @@ func handleRouterDescribe(router *transport.DNSMessageRouter) *AgentMgmtResponse
 // handleRouterMetrics returns router-level metrics with per-type sent/received
 // breakdown, aggregated from all peers. If detailed is true, per-peer breakdown
 // is included.
-func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
+func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *RouterResponse {
+	resp := &RouterResponse{
 		Time: time.Now(),
 	}
 
@@ -102,13 +180,11 @@ func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *AgentMg
 
 	metrics := tm.Router.GetMetrics()
 
-	// Convert unhandled types map
 	unhandledTypes := make(map[string]uint64)
 	for msgType, count := range metrics.UnhandledTypes {
 		unhandledTypes[string(msgType)] = count
 	}
 
-	// Aggregate per-type sent/received from all peers
 	var totalSent, totalReceived uint64
 	var helloSent, helloRecv, beatSent, beatRecv uint64
 	var syncSent, syncRecv, pingSent, pingRecv uint64
@@ -191,8 +267,8 @@ func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *AgentMg
 }
 
 // handleRouterWalk walks all handlers and returns them in a list.
-func handleRouterWalk(router *transport.DNSMessageRouter) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
+func handleRouterWalk(router *transport.DNSMessageRouter) *RouterResponse {
+	resp := &RouterResponse{
 		Time: time.Now(),
 	}
 
@@ -240,8 +316,8 @@ func handleRouterWalk(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 }
 
 // handleRouterReset resets all router metrics.
-func handleRouterReset(router *transport.DNSMessageRouter) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
+func handleRouterReset(router *transport.DNSMessageRouter) *RouterResponse {
+	resp := &RouterResponse{
 		Time: time.Now(),
 	}
 

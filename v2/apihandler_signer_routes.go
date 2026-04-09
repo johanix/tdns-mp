@@ -26,6 +26,7 @@ func (conf *Config) SetupMPSignerRoutes(ctx context.Context, apirouter *mux.Rout
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/signer", conf.APImpSigner()).Methods("POST")
 	sr.HandleFunc("/gossip", APIgossip(conf.InternalMp.AgentRegistry, conf.InternalMp.LeaderElectionManager)).Methods("POST")
+	sr.HandleFunc("/router", APIrouter(conf.InternalMp.TransportManager)).Methods("POST")
 	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/signer/peer", conf.APIsingerPeer()).Methods("POST")
 	sr.HandleFunc("/signer/distrib", conf.APIsingerDistrib()).Methods("POST")
