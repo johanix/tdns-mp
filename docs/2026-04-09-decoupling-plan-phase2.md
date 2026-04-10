@@ -228,6 +228,16 @@ ParseZones**
 
 ### Tier 2 — move MP logic into tdns-mp (low–medium risk)
 
+> **Tier 2 planning has moved to a dedicated working doc:
+> `2026-04-10-tier2-working-doc.md`.** That doc captures
+> the full item-level details, infrastructure prerequisites
+> (option validator hook, per-zone MP callback attachment,
+> post-validate hook, dnsengine-in-default fix), cross-
+> cutting findings, open questions, and a per-item deletion
+> discipline checklist. The summary below remains here for
+> cross-reference; the working doc is the authoritative
+> source for Tier 2 implementation work.
+
 **Item 16 — OptMultiProvider zone option validation**
 - Still at `tdns/v2/parseoptions.go:256-268`
 - Checks `Globals.App.Type == AppTypeAuth &&
