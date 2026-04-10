@@ -317,9 +317,10 @@ already handles MP zone signing setup. If yes, remove from
 tdns. If no, move to tdns-mp (e.g. in a callback
 registration function).
 
-**Status: OPEN.** Still present at
-`parseconfig.go:739-746`, gated on `options[OptMultiProvider]
-&& (AppTypeAuth || AppTypeMPSigner)`.
+**Status: DONE (2026-04-10).** Block removed from tdns
+`parseconfig.go` (tdns commit `9effbde`). Counterpart
+registered via `ForEachMPZone` second-pass loop in
+`tdns-mp/v2/main_init.go` (tdns-mp commit `dca946e`).
 
 ---
 
@@ -335,8 +336,10 @@ code must not be forgotten. It should be part of a tdns-mp
 second-pass zone parsing loop (see "ParseZones Strategy"
 section below).
 
-**Status: OPEN.** `zdp.MP.MPdata` population still present
-at `parseconfig.go:689-705`.
+**Status: DONE (2026-04-10).** MPdata population removed
+from tdns `parseconfig.go` (tdns commit `2b8c56b`).
+Counterpart in `tdns-mp/v2/main_init.go` ForEachMPZone
+second-pass loop (tdns-mp commit `05da49f`).
 
 ---
 
@@ -371,8 +374,10 @@ OptMultiProvider beyond knowing the constant exists.
 Implement a tdns-mp `ParseZoneOptions()` that handles
 MP-specific option validation, and move this logic there.
 
-**Status: OPEN.** Still present at
-`parseoptions.go:256-268`.
+**Status: DONE (2026-04-10).** Fallback validation removed
+from tdns `parseoptions.go` (tdns commit `d9aa8d7`).
+Validator registered via `RegisterZoneOptionValidator` in
+`tdns-mp/v2/main_init.go` (tdns-mp commit `e83096a`).
 
 ---
 
@@ -385,8 +390,12 @@ Validates that mp-manual-approval is only set on combiner.
 **Verdict**: **Move to tdns-mp** as part of implementing the
 tdns-mp `ParseZoneOptions()` (same function as item 16).
 
-**Status: OPEN.** Still present at
-`parseoptions.go:345-357`.
+**Status: DONE (2026-04-10).** Fallback validation removed
+from tdns `parseoptions.go` (tdns commit `d9aa8d7`). The
+`!= AppTypeMPCombiner` negative exclusion (the exact
+forbidden pattern) is gone. Validator registered via
+`RegisterZoneOptionValidator` in `tdns-mp/v2/main_init.go`
+(tdns-mp commit `e83096a`).
 
 ---
 
@@ -409,9 +418,14 @@ migrate:
 - `ValidateAgentSupportedMechanisms()`
 - `ValidateCryptoFiles()`
 
-**Status: OPEN.** MP types still in validation list at
-`config_validate.go:51`. Functions still in tdns at
-`config_validate.go:218, 245, 283`.
+**Status: DONE (2026-04-10).** MP types removed from
+`config_validate.go` case list (tdns commit `dc33eab`,
+item 18a). Three validator functions moved to
+`tdns-mp/v2/config_validate.go` and registered via
+`PostValidateConfigHook` (tdns commit `35ef049`, tdns-mp
+commit `812ac08`, items 18b/c/d). Also added
+`ValidateMultiProviderBlock` for role/identity validation
+of the `multi-provider:` config block (item 18e).
 
 ---
 

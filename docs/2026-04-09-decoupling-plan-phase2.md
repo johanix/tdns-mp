@@ -68,15 +68,17 @@ evidence on every item.
 ### Items still open
 
 **Closed in Wave A (2026-04-09):** 5, 6, 13, 23.
+**Closed in Wave B (2026-04-10):** 14, 14b, 16, 17, 18
+(all sub-items 18a-e).
 **Reclassified out of Phase 2:** 25 (moved to tdns-auth
 key management revisit).
 
-**Remaining open:** 1, 3, 8, 14, 14b, 16, 17, 18, 22, 24,
-26, 26b (partial), 27 (partial), 29.
+**Remaining open:** 1, 3, 8, 22, 24, 26, 26b (partial),
+27 (partial), 29.
 
 Items 1 and 8 were "Keep" / "No action" in the original
-plan — no work needed. After Wave A, 12 items remain in
-active Phase 2 scope.
+plan — no work needed. After Waves A+B, 7 items remain
+in active Phase 2 scope (Waves C–F).
 
 ---
 
@@ -90,6 +92,13 @@ current code as of 2026-04-09.
 25 was investigated and reclassified — the original
 description was incorrect and the actual file is not
 part of Phase 2 scope. See individual items for details.
+
+**Tiers 2+3 (Wave B) are complete as of 2026-04-10.**
+Items 14, 14b, 16, 17, 18 (all sub-items 18a-e) are
+DONE. Four infrastructure prerequisites (D, A, C, B) were
+landed first, then all items. See Tier 2/3 sections below
+and `2026-04-10-tier2-working-doc.md` for details.
+
 Both tdns and tdns-mp build clean after every step.
 
 ### Tier 1 — mechanical cleanup (low risk, small diff)
@@ -239,80 +248,65 @@ ParseZones**
 > source for Tier 2 implementation work.
 
 **Item 16 — OptMultiProvider zone option validation**
-- Still at `tdns/v2/parseoptions.go:256-268`
-- Checks `Globals.App.Type == AppTypeAuth &&
-  (conf.MultiProvider == nil || !conf.MultiProvider.Active)`
-- Move to a tdns-mp `ParseZoneOptions()` called from
-  tdns-mp's MainInit. Pairs with item 17 and item 14b.
+- **Status: DONE (2026-04-10, tdns `d9aa8d7`, tdns-mp
+  `e83096a`).** Fallback validation removed from tdns
+  `parseoptions.go`. Validator registered via
+  `RegisterZoneOptionValidator` in tdns-mp `main_init.go`.
 
 **Item 17 — OptMPManualApproval validation**
-- Still at `tdns/v2/parseoptions.go:345-357`
-- Gated on `AppTypeMPCombiner` only
-- Same tdns-mp `ParseZoneOptions()` as item 16.
+- **Status: DONE (2026-04-10, tdns `d9aa8d7`, tdns-mp
+  `e83096a`).** The `!= AppTypeMPCombiner` negative
+  exclusion (exact forbidden pattern) removed from tdns.
+  Validator registered in tdns-mp.
 
 **Item 18 — config_validate.go MP section list + MP-only
 validators**
-- MP types at `tdns/v2/config_validate.go:51`
-- `ValidateAgentNameservers` at line 218
-- `ValidateAgentSupportedMechanisms` at line 245
-- `ValidateCryptoFiles` at line 283
-- Move the three validators to tdns-mp. Remove MP types
-  from the line 51 list. Build `multi-provider:` config
-  block validation on the tdns-mp side (currently missing
-  entirely).
+- **Status: DONE (2026-04-10).** Four sub-items:
+  - 18a: MP types removed from case list (tdns `dc33eab`).
+    `dnsengine` added to default case first (prereq D,
+    tdns `c8216b8`) to prevent silent regression.
+  - 18b/c/d: `ValidateAgentNameservers`,
+    `ValidateAgentSupportedMechanisms`, `ValidateCryptoFiles`
+    moved to `tdns-mp/v2/config_validate.go` and registered
+    via `PostValidateConfigHook` (tdns `35ef049`, tdns-mp
+    `812ac08`).
+  - 18e: `ValidateMultiProviderBlock` added for role/identity
+    validation of the `multi-provider:` block (in-scope per
+    decision, same commit `812ac08`).
 
 **Item 14 — MP inline signing OnFirstLoad**
-- Block at `tdns/v2/parseconfig.go:739-746`
-- Gated on `options[OptMultiProvider] && (AppTypeAuth ||
-  AppTypeMPSigner)`
-- Move to tdns-mp's OnFirstLoad callback registration,
-  paired with item 14b's second-pass loop.
+- **Status: DONE (2026-04-10, tdns `9effbde`, tdns-mp
+  `dca946e`).** Block removed from tdns `parseconfig.go`.
+  Counterpart registered via `ForEachMPZone` second-pass
+  loop in tdns-mp `main_init.go`. Investigation confirmed
+  this was load-bearing for mpsigner (Q2).
 
 ### Tier 3 — ParseZones second pass (medium risk, design
 work first)
 
-**Item 14b — MPdata population in ParseZones** (CRITICAL,
-Wave B keystone)
-- `zdp.MP.MPdata` population still at
-  `tdns/v2/parseconfig.go:689-705`
-- Prerequisite for items 14, 16, 17, and 18's validator
-  moves landing cleanly.
-- Design sketched in parent doc's "ParseZones Strategy"
-  section: tdns ParseZones does basic parsing, tdns-mp
-  does a second pass to populate MP-specific zone state.
-- Must avoid breaking zone first-load on
-  mpagent/mpsigner/mpcombiner. Requires NetBSD test lab
-  verification.
+**Item 14b — MPdata population in ParseZones**
+- **Status: DONE (2026-04-10, tdns `2b8c56b`, tdns-mp
+  `05da49f`).** MPdata population removed from tdns
+  `parseconfig.go`. Counterpart in `ForEachMPZone`
+  second-pass loop in tdns-mp `main_init.go`.
 
-Key design questions to resolve *before* writing code
-(see investigation checklist):
+  The original "Wave B keystone" framing turned out to be
+  overstated — the parse-time MPdata population was a
+  near-no-op (nothing later in ParseZones consumed it).
+  The second-pass loop (`ForEachMPZone`) was confirmed
+  safe: `OnFirstLoad` fires in `RefreshEngine.
+  initialLoadZone` (refreshengine.go:101-109), well after
+  the loop runs. Items 14, 16, 17 each needed their own
+  infrastructure (option validator hook for 16/17, second-
+  pass loop for 14) and were not actually blocked on 14b.
 
-- **Is a new loop even needed, or can OnFirstLoad carry
-  this?** The OnFirstLoad mechanism (implemented
-  2026-03-03/04) already fires per-zone after ParseZones
-  completes. If MPdata population can happen at
-  OnFirstLoad time, Wave B collapses from "new second
-  pass infrastructure" to "register more OnFirstLoad
-  callbacks from tdns-mp." This is the single most
-  important question to answer first — the answer
-  dictates whether Wave B is a design project or a
-  callback-registration task.
-- **Timing relative to `initialLoadZone`.** If MPdata is
-  consulted during `initialLoadZone` (e.g., by HSYNC
-  processing, signing setup, or combiner contributions),
-  the second pass must run *before* initial load. If it's
-  only consulted later (refresh, API handlers), OnFirstLoad
-  is probably sufficient. The answer here also determines
-  whether items 14, 16, 17 can ride the same mechanism.
-- **Iteration model.** Per-zone callback (natural fit with
-  OnFirstLoad) vs. a single loop over `Zones.Items()` at
-  a well-defined point in tdns-mp's MainInit. The callback
-  model avoids a separate loop and fits existing patterns.
-- **Interaction with AppData (item 29).** If 14b's design
-  introduces a new `zd.MP`-typed accessor from tdns-mp,
-  that accessor becomes migration work for item 29 later.
-  Prefer designs that can trivially switch to
-  `zd.AppData.(*MPZoneData)` without touching tdns.
+  Investigation answers:
+  - OnFirstLoad fires **after** ParseZones (in
+    RefreshEngine), so the second-pass loop is safe.
+  - Nothing in ParseZones consumes `zdp.MP.MPdata` after
+    the population block.
+  - A simple `ForEachMPZone` loop suffices — no new
+    infrastructure in tdns was needed, only tdns-mp code.
 
 ### Tier 4 — /agent split continuation (medium risk,
 several slices)
@@ -461,11 +455,11 @@ Wave D alongside 26b)
 | 3 | 13 | A | 1 | Easy | **DONE** (tdns 4c95c6a) |
 | — | 25 | (deferred) | — | — | **RECLASSIFIED** — moved to tdns-auth key mgmt revisit; see item body |
 | 4 | 23 | A | (5) | Easy | **DONE** (tdns 4c95c6a) — promoted from Tier 5 |
-| 6 | 14b | B | 3 | Medium | **Wave B keystone** — design first; may collapse after OnFirstLoad investigation |
-| 7 | 16 | B | 2 | Easy | 14b (may drop if OnFirstLoad wins) |
-| 8 | 17 | B | 2 | Easy | 14b (may drop if OnFirstLoad wins) |
-| 9 | 14 | B | 2 | Easy | 14b (may drop if OnFirstLoad wins) |
-| 10 | 18 | B | 2 | Medium | None (independent of 14b) |
+| 5 | 14b | B | 3 | Medium | **DONE** (tdns `2b8c56b`, tdns-mp `05da49f`) |
+| 6 | 16 | B | 2 | Easy | **DONE** (tdns `d9aa8d7`, tdns-mp `e83096a`) |
+| 7 | 17 | B | 2 | Easy | **DONE** (tdns `d9aa8d7`, tdns-mp `e83096a`) |
+| 8 | 14 | B | 2 | Easy | **DONE** (tdns `9effbde`, tdns-mp `dca946e`) |
+| 9 | 18 | B | 2 | Medium | **DONE** (tdns `c8216b8`+`dc33eab`+`35ef049`, tdns-mp `812ac08`) |
 | 11 | 27 (imr) | C | 4 | Easy | None |
 | 12 | 27 (parentsync) | C | 4 | Medium | None |
 | 13 | 27 (discovery) | C | 4 | Medium | None |
@@ -510,31 +504,30 @@ Follow-up items from Wave A:
   (tdns commit 56ede5a). Belongs with the tdns-auth key
   management revisit, not Phase 2.
 
-### Wave B — ParseZones second pass (Tier 3 + 2)
+### Wave B — ParseZones second pass (Tier 3 + 2) — **COMPLETE**
 
-1. Design the tdns-mp ParseZones second-pass loop
-   (item 14b).
-2. Implement it with the MPdata population moved in.
-3. Move items 14, 16, 17 into the new second-pass
-   infrastructure.
-4. Move item 18's three validators + MP section list.
+Items 14, 14b, 16, 17, 18 (all sub-items) — **DONE
+(2026-04-10).** Four infrastructure prerequisites were
+landed first (D, A, C, B), then all items implemented.
 
-This is the biggest single design piece in Phase 2 but
-unblocks a lot of cleanup downstream.
+Key decisions and findings:
+- **14b was NOT a keystone.** The parse-time MPdata
+  population was a near-no-op; nothing in ParseZones
+  consumed it. Items 14/16/17 each needed their own
+  infrastructure (option validator hook for 16/17,
+  second-pass loop for 14/14b) and were independent.
+- **OnFirstLoad fires after ParseZones** (in RefreshEngine
+  `initialLoadZone`), so `ForEachMPZone` second-pass
+  loop is safe.
+- **Items 16/17 used `RegisterZoneOptionValidator`** (new
+  mechanism in `option_handlers.go`), not OnFirstLoad.
+- **Items 18b/c/d used `PostValidateConfigHook`** (new
+  hook on `Config.Internal`).
+- **Item 18e (multi-provider: block validation) was
+  in-scope** — added `ValidateMultiProviderBlock` for
+  role/identity validation.
 
-**Sequencing depends on the OnFirstLoad answer.** If the
-investigation checklist's first question resolves
-positively (OnFirstLoad *can* carry MPdata population),
-Wave B collapses from "new second-pass infrastructure
-followed by four migrations" to "four parallel
-OnFirstLoad callback registrations." In that case items
-14b, 14, 16, 17 are no longer sequenced — they're
-independent callback-registration tasks. Item 18's
-validator moves and MP section list cleanup remain
-independent of the OnFirstLoad question and can proceed
-in parallel either way. Re-check the priority table
-after the investigation step; the "blocked on 14b"
-entries may need to be downgraded to "none."
+See `2026-04-10-tier2-working-doc.md` for full details.
 
 ### Wave C — /agent split continuation (Tier 4)
 

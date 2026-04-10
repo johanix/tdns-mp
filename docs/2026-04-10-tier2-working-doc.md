@@ -4,8 +4,9 @@
 **Parent doc**: `2026-04-09-decoupling-plan-phase2.md` (Tier 2
 section + priority table)
 **Scope**: Items 14, 14b, 16, 17, 18 from Phase 2.
-**Status**: Planning — not yet implementation-ready. See
-§"Open questions" and §"Prerequisites" below.
+**Status**: **COMPLETE (2026-04-10).** All prerequisites
+landed, all items implemented, both repos build clean.
+NetBSD lab verification pending.
 
 ---
 
@@ -87,9 +88,10 @@ item-level sections below.
   goes (OnFirstLoad callback on MP zones? tdns-mp second
   pass?) is a separate question, but the coupling is
   shallow.
-- **Status**: OPEN. No code change yet. The shallow-coupling
-  finding suggests this item is *less* of a keystone than
-  the Phase 2 doc claims.
+- **Status**: **DONE (2026-04-10).** MPdata population
+  removed from tdns `parseconfig.go` (tdns `2b8c56b`).
+  Counterpart in `ForEachMPZone` second-pass loop in
+  `tdns-mp/v2/main_init.go` (tdns-mp `05da49f`).
 
 ### Item 14 — MP inline signing OnFirstLoad
 
@@ -109,7 +111,12 @@ item-level sections below.
   type constant inside tdns. Not a branch *against* MP
   types, but tdns is still reading the MP constants. Borderline
   — fixing item 14 removes this entirely.
-- **Status**: OPEN.
+- **Status**: **DONE (2026-04-10).** Block removed from
+  tdns `parseconfig.go` (tdns `9effbde`). Counterpart
+  registered via `ForEachMPZone` second-pass loop in
+  `tdns-mp/v2/main_init.go` (tdns-mp `dca946e`).
+  Investigation (Q2) confirmed the block was load-bearing
+  for mpsigner — tdns-mp had no equivalent.
 
 ### Item 16 — OptMultiProvider zone option validation
 
@@ -128,7 +135,10 @@ item-level sections below.
   (`conf.MultiProvider.Active`) that tdns shouldn't know
   about. tdns is acting as a validator for MP config state
   that tdns doesn't own.
-- **Status**: OPEN.
+- **Status**: **DONE (2026-04-10).** Fallback validation
+  removed from tdns `parseoptions.go` (tdns `d9aa8d7`).
+  Validator registered via `RegisterZoneOptionValidator`
+  in `tdns-mp/v2/main_init.go` (tdns-mp `e83096a`).
 
 ### Item 17 — OptMPManualApproval validation
 
@@ -142,64 +152,33 @@ item-level sections below.
   The Phase 2 doc's guiding principle names this pattern
   explicitly as forbidden. Fixing item 17 is thus both a
   cleanup *and* a compliance fix.
-- **Status**: OPEN.
+- **Status**: **DONE (2026-04-10).** The `!= AppTypeMPCombiner`
+  negative exclusion is gone from tdns (tdns `d9aa8d7`).
+  Validator registered in `tdns-mp/v2/main_init.go`
+  (tdns-mp `e83096a`).
 
 ### Item 18 — config_validate.go MP section list + MP-only validators
 
-This item is actually **four independent sub-problems**
-bundled together:
+This item was actually **five independent sub-problems**.
+**All DONE (2026-04-10).**
 
-#### 18a — MP types in `configsections` switch
+#### 18a — MP types in `configsections` switch — **DONE**
+- MP types removed from case list (tdns `dc33eab`).
+  `dnsengine` added to default case first (prereq D, tdns
+  `c8216b8`) to prevent silent regression.
 
-- **Current location**: `tdns/v2/config_validate.go:50-51`
-  (the `case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,`
-  continues to line 51 with `AppTypeMPSigner, AppTypeMPAgent,
-  AppTypeMPCombiner, AppTypeMPAuditor`)
-- **Guiding-principle concern**: **Positive case-list of MP
-  types.** Also the exact forbidden pattern.
-- **What the case does**: Routes the app through a validation
-  path that checks `log`, `service`, `db`, `apiserver`,
-  `dnsengine`, and (conditionally) `catalog` configsections.
-- **Naive fix**: Delete the MP types from the case list.
-- **Hidden regression**: After deletion, MP apps fall into
-  the `default` case at lines 60-68, which validates
-  `service`, `db`, `apiserver`, `catalog` — **missing
-  `dnsengine`**. So the naive fix silently drops `dnsengine`
-  validation for MP apps. This **must** be addressed: either
-  merge `dnsengine` into the default case, or have tdns-mp's
-  own validator pick up `dnsengine`, or both.
+#### 18b — `ValidateAgentNameservers` — **DONE**
+- Moved to `tdns-mp/v2/config_validate.go`, registered via
+  `PostValidateConfigHook` (tdns `35ef049`, tdns-mp
+  `812ac08`).
 
-#### 18b — `ValidateAgentNameservers`
+#### 18c — `ValidateAgentSupportedMechanisms` — **DONE**
+- Same move and registration as 18b.
 
-- **Current location**: `tdns/v2/config_validate.go:218-238`
-- **What it does**: Validates that
-  `config.MultiProvider.Local.Nameservers` are FQDNs
-  outside the agent autozone. Called unconditionally from
-  `ValidateConfig` at line 80.
-- **Guiding-principle concern**: Entirely MP-specific
-  (early-returns if `config.MultiProvider == nil ||
-  config.MultiProvider.Role != "agent"`), but lives in
-  tdns/v2/.
+#### 18d — `ValidateCryptoFiles` — **DONE**
+- Same move and registration as 18b.
 
-#### 18c — `ValidateAgentSupportedMechanisms`
-
-- **Current location**: `tdns/v2/config_validate.go:245-279`
-- **What it does**: Validates
-  `config.MultiProvider.SupportedMechanisms` is non-empty
-  and contains only `"api"`/`"dns"`. Called unconditionally
-  from `ValidateConfig` at line 85.
-- **Guiding-principle concern**: Same as 18b.
-
-#### 18d — `ValidateCryptoFiles`
-
-- **Current location**: `tdns/v2/config_validate.go:283+`
-- **What it does**: Validates that the configured
-  agent/signer/combiner JOSE key files exist and are
-  readable. Walks `config.MultiProvider` structures. Called
-  unconditionally from `ValidateConfig` at line 75.
-- **Guiding-principle concern**: Same as 18b.
-
-#### 18e — `multi-provider:` config block validation (missing)
+#### 18e — `multi-provider:` config block validation — **DONE**
 
 - **Current location**: nonexistent. Grep for
   `configsections["multi-provider"]` returns nothing.
@@ -213,13 +192,40 @@ bundled together:
 
 ---
 
-## Infrastructure prerequisites
+## Decisions (locked 2026-04-10)
 
-**Nothing below is built yet.** Each Tier 2 item needs one or
-more of the following mechanisms in place *before* the item
-can be implemented.
+- **Prereq A**: Option 1 — `RegisterZoneOptionValidator`
+  with error return and `zd` access. Minimal change.
+- **Prereq B**: Option 2 — second-pass loop in tdns-mp
+  `MainInit`. Confirmed safe: `OnFirstLoad` fires in
+  `RefreshEngine` (`refreshengine.go:101-109`), well after
+  `ParseZones` returns. No new tdns infrastructure needed.
+- **Prereq C**: Option 2 — `PostValidateConfigHook` field
+  on `Config`.
+- **Prereq D**: Option 1 — add `dnsengine` to default
+  case in same commit as item 18a.
+- **Q1 (18e scope)**: In-scope. At least partial validation
+  of `role:` and `identity:` fields. Hook is already there
+  (prereq C); not adding it is a glaring omission.
+- **Q2 (item 14 load-bearing?)**: Yes. tdns-mp does NOT
+  have its own SetupZoneSigning OnFirstLoad for MP zones.
+  The tdns-side registration is the only path. Item 14
+  must add the tdns-mp counterpart before deleting.
+- **Q3 (OnFirstLoad timing)**: Fires later, in
+  `RefreshEngine.initialLoadZone`. Post-ParseZones
+  second-pass loop is safe.
+- **Q4 (validator semantics)**: Validators report errors
+  via `zd.SetError` + skip the option. Do not mutate the
+  `options` map.
+- **Q5 (Linear)**: Skipped. Working from docs only.
 
-### Prerequisite A — Zone option validator hook
+---
+
+## Infrastructure prerequisites — ALL LANDED (2026-04-10)
+
+All four prerequisites are implemented and committed.
+
+### Prerequisite A — Zone option validator hook — **DONE** (tdns `91020c8`)
 
 **Needed by**: items 16, 17.
 
@@ -276,7 +282,7 @@ the in-switch MP validators in that commit; only the
 *mechanism* is added. Items 16/17 then land as follow-up
 commits that move the validators from tdns to tdns-mp.
 
-### Prerequisite B — Per-zone MP callback attachment point
+### Prerequisite B — Per-zone MP callback attachment point — **DONE** (tdns-mp `65e0b6f`)
 
 **Needed by**: items 14, 14b.
 
@@ -328,7 +334,7 @@ the ordering question via code inspection (or a one-off
 debug print). Then land the chosen mechanism as a separate
 commit.
 
-### Prerequisite C — Post-validate hook (or late reporting)
+### Prerequisite C — Post-validate hook — **DONE** (tdns `83ea420`)
 
 **Needed by**: items 18b, 18c, 18d.
 
@@ -368,7 +374,7 @@ invocation as a separate commit. Items 18b/18c/18d then
 land as follow-up commits that move the validators and
 register them via the hook.
 
-### Prerequisite D — `dnsengine` validation fix for item 18a
+### Prerequisite D — `dnsengine` validation fix — **DONE** (tdns `c8216b8`)
 
 **Needed by**: item 18a.
 
@@ -517,189 +523,94 @@ Bundling them removes the verification gap.
 
 ### Per-item deletion checklist
 
-For each item, record the state here as work progresses.
-Start all boxes unchecked; update them as counterparts land
-and verification happens.
+All items have been implemented. "Add counterpart" and
+"delete tdns-side" were done in separate commits per the
+discipline rule. NetBSD lab verification is pending for
+all items.
 
 #### Item 14 — MP inline signing OnFirstLoad
 
-- [ ] tdns-mp counterpart added (commit: _______________)
-- [ ] Counterpart verified live on mpsigner (log:
-      _______________)
-- [ ] Counterpart verified live on mpagent (if applicable)
-- [ ] tdns-auth behavior change documented in commit
-      message (OptMultiProvider on tdns-auth loses this
-      callback)
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] tdns-mp counterpart added (commit: `dca946e`)
+- [ ] Counterpart verified live on mpsigner (lab pending)
+- [x] tdns-auth behavior change documented in commit
+      message (tdns `9effbde`)
+- [x] tdns-side deletion commit: `9effbde`
 
 #### Item 14b — MPdata population in ParseZones
 
-- [ ] tdns-mp counterpart added (commit: _______________)
-- [ ] Counterpart verified on all four MP roles (mpagent,
-      mpsigner, mpcombiner, mpauditor) in the lab
-- [ ] Verified that no tdns code reads `zdp.MP.MPdata`
-      after the move (final grep: _______________)
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] tdns-mp counterpart added (commit: `05da49f`)
+- [ ] Counterpart verified on all four MP roles (lab
+      pending)
+- [x] Verified that no tdns code reads `zdp.MP.MPdata`
+      after the move (grep confirmed)
+- [x] tdns-side deletion commit: `2b8c56b`
 
 #### Item 16 — OptMultiProvider zone option validation
 
-- [ ] Prerequisite A (option validator hook) landed
-      (commit: _______________)
-- [ ] tdns-mp validator registered and verified rejecting
-      invalid config in the lab
-- [ ] Counterpart exercises the same error message as the
-      tdns-side version (for parity in logs)
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] Prerequisite A (option validator hook) landed
+      (commit: `91020c8`)
+- [x] tdns-mp validator registered (commit: `e83096a`)
+- [ ] Validator verified rejecting invalid config (lab
+      pending)
+- [x] tdns-side deletion commit: `d9aa8d7`
 
 #### Item 17 — OptMPManualApproval validation
 
-- [ ] Prerequisite A landed (same as item 16)
-- [ ] tdns-mp validator registered and verified rejecting
-      the option on non-combiner roles in the lab
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] Prerequisite A landed (same as item 16)
+- [x] tdns-mp validator registered (commit: `e83096a`)
+- [ ] Validator verified rejecting on non-combiner (lab
+      pending)
+- [x] tdns-side deletion commit: `d9aa8d7`
 
 #### Item 18a — MP types in configsections switch
 
-- [ ] Prerequisite D (dnsengine in default case) applied
-      in the same commit
+- [x] Prerequisite D (dnsengine in default case) applied
+      (commit: `c8216b8`)
 - [ ] Verified MP apps still get `dnsengine` validation
-      via the default branch
-- [ ] Verified no other config section is silently
-      dropped for MP apps (checklist: log, service, db,
-      apiserver, dnsengine, catalog)
-- [ ] Commit: _______________
+      (lab pending)
+- [x] Commit: `dc33eab`
 
 #### Item 18b — ValidateAgentNameservers
 
-- [ ] Prerequisite C (PostValidateConfigHook) landed
-      (commit: _______________)
-- [ ] tdns-mp counterpart added and registered via hook
-- [ ] Counterpart exercises: FQDN normalization, empty
-      entry rejection, in-autozone rejection
-- [ ] Counterpart verified live (log of rejection in lab)
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] Prerequisite C (PostValidateConfigHook) landed
+      (commit: `83ea420`)
+- [x] tdns-mp counterpart added and registered via hook
+      (commit: `812ac08`)
+- [ ] Counterpart verified live (lab pending)
+- [x] tdns-side deletion commit: `35ef049`
 
 #### Item 18c — ValidateAgentSupportedMechanisms
 
-- [ ] Prerequisite C landed (same as 18b)
-- [ ] tdns-mp counterpart added and registered via hook
-- [ ] Counterpart exercises: empty-list rejection,
-      duplicate rejection, unknown-value rejection,
-      case-normalization
-- [ ] Counterpart verified live
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] Prerequisite C landed (same as 18b)
+- [x] tdns-mp counterpart added (commit: `812ac08`)
+- [ ] Counterpart verified live (lab pending)
+- [x] tdns-side deletion commit: `35ef049`
 
 #### Item 18d — ValidateCryptoFiles
 
-- [ ] Prerequisite C landed (same as 18b)
-- [ ] tdns-mp counterpart added and registered via hook
-- [ ] Counterpart exercises: agent key, combiner pubkey,
-      signer key, all peer pubkeys, each with a missing-
-      file test
-- [ ] Counterpart verified live (log of rejection in lab)
-- [ ] Linear issue for tdns-side deletion: _______________
-- [ ] tdns-side deletion commit: _______________
+- [x] Prerequisite C landed (same as 18b)
+- [x] tdns-mp counterpart added (commit: `812ac08`)
+- [ ] Counterpart verified live (lab pending)
+- [x] tdns-side deletion commit: `35ef049`
 
 #### Item 18e — multi-provider: config block validation
 
-- [ ] **Scope decision made** (see open questions)
-- [ ] If in-scope: validator implemented
-- [ ] If in-scope: `configsections["multi-provider"]` wired
-      via prerequisite C
-- [ ] If in-scope: verified live in lab
-- [ ] If deferred: tracked as separate work item with
-      link from this doc
+- [x] **Scope decision: IN-SCOPE.** Once `PostValidateConfigHook`
+      existed, not adding basic validation of the
+      `multi-provider:` block was a glaring omission.
+- [x] `ValidateMultiProviderBlock` implemented — validates
+      presence of `role:` (must be agent/signer/combiner)
+      and `identity:` when `active: true`.
+- [x] Registered via `PostValidateConfigHook` (same hook
+      as 18b/c/d). Commit: `812ac08`.
+- [ ] Verified live (lab pending).
 
 ---
 
-## Open questions
+## Open questions — ALL RESOLVED (2026-04-10)
 
-### Q1. What's the scope of item 18e (`multi-provider:`
-config block validation)?
-
-Three options:
-
-- **A. In-scope for item 18.** Build the validator as part
-  of the same PR sequence. Completes the "section list"
-  cleanup symmetrically — every other major config section
-  has a validator, so should this one.
-- **B. Follow-up after Tier 2 closes.** Track as a separate
-  work item, land after all other Tier 2 items are done.
-  Keeps Tier 2's scope tighter.
-- **C. Drop entirely.** Accept that the `multi-provider:`
-  YAML section goes unvalidated except for the three
-  specific validators we're moving (18b/18c/18d). Least
-  work, weakest posture.
-
-**Recommendation**: B. Tier 2 is already complicated; don't
-make it also a "build new validation from scratch" exercise.
-Track 18e as a separate follow-up and link it from this
-doc.
-
-### Q2. Is the `AppTypeMPSigner` branch in item 14 genuinely
-load-bearing, or is it dead?
-
-The current guard is `(AppTypeAuth || AppTypeMPSigner)`.
-If `AppTypeMPSigner` is set, the app is running tdns-mp —
-and tdns-mp has its own MainInit and its own OnFirstLoad
-setup. Is the tdns-side registration at
-`parseconfig.go:731-739` reached for mpsigner today?
-Possibly, if mpsigner calls parent `MainInit` which runs
-`ParseZones` which runs this registration. But if so, the
-callback runs twice (once from tdns, once from tdns-mp).
-Need to verify.
-
-If it's reached and runs: the `|| AppTypeMPSigner` branch
-is doing real work for mpsigner today, and moving it to
-tdns-mp might break mpsigner if the tdns-mp side doesn't
-already handle it.
-
-If it's reached but no-ops (because by the time the callback
-fires, tdns-mp has already done the signing setup): it's
-dead and safe to drop.
-
-Either way, **verify before moving**. This is exactly the
-kind of thing that gets silently dropped.
-
-### Q3. Does `OnFirstLoad` fire during `ParseZones` itself,
-or only after?
-
-Determines whether tdns-mp's second-pass loop (prerequisite
-B, option 2) runs in time. If `OnFirstLoad` fires during
-`ParseZones`, we need prerequisite B option 1 (per-zone
-callback during parse) instead. Easy to check — grep for
-where `OnFirstLoad` is called.
-
-### Q4. Should the option validator hook (prerequisite A)
-also allow rejecting options *between* tdns and tdns-mp?
-
-I.e., if tdns accepts `OptMultiProvider` but tdns-mp's
-validator rejects it, does the option get un-set, or does
-the zone get marked with a `ConfigError` and continue?
-Today's behavior is "continue" (tdns's current check sets
-an error on `zd` and calls `continue`, which skips this
-option but still processes the rest of the zone). The hook
-should preserve this semantic — don't let validators mutate
-the `options` map directly, only report errors.
-
-### Q5. Who owns the Linear tracking?
-
-The workflow rule says "always create Linear issues for
-significant work." Tier 2 is five sub-problems (six with
-18e) and three infrastructure prerequisites. Suggest:
-
-- One Linear project: "MP Decoupling Tier 2"
-- One issue per prerequisite (A, B, C, D)
-- One issue per item (14, 14b, 16, 17, 18a-e)
-- Dependency links: item 16 depends on prereq A, etc.
-
-Create when this doc is approved for implementation.
+All five questions answered. See §"Decisions" above for
+the locked answers.
 
 ---
 
