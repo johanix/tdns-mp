@@ -61,6 +61,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return true
 		})
 
+	// Register MP config validators to run during tdns's ValidateConfig.
+	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
+
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
