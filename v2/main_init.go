@@ -30,6 +30,37 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		conf.Config.Internal.MPZoneNames = append(conf.Config.Internal.MPZoneNames, zname)
 	})
 
+	// Register MP zone option validators before ParseZones runs.
+	// These replace the hardcoded validation in tdns's parseZoneOptions.
+	tdns.RegisterZoneOptionValidator(tdns.OptMPManualApproval,
+		func(c *tdns.Config, zname string, zd *tdns.ZoneData, options map[tdns.ZoneOption]bool) bool {
+			if tdns.Globals.App.Type != tdns.AppTypeMPCombiner {
+				lg.Error("mp-manual-approval is only valid on the combiner, ignoring", "zone", zname)
+				if zd != nil {
+					zd.SetError(tdns.ConfigError, "mp-manual-approval is only valid on combiner zones")
+				}
+				return false
+			}
+			return true
+		})
+
+	tdns.RegisterZoneOptionValidator(tdns.OptMultiProvider,
+		func(c *tdns.Config, zname string, zd *tdns.ZoneData, options map[tdns.ZoneOption]bool) bool {
+			// On the signer (AppTypeAuth), require server-level multi-provider config.
+			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
+			if tdns.Globals.App.Type == tdns.AppTypeAuth && (c.MultiProvider == nil || !c.MultiProvider.Active) {
+				lg.Error("option requires multi-provider.active in server config", "zone", zname,
+					"option", tdns.ZoneOptionToString[tdns.OptMultiProvider])
+				if zd != nil {
+					zd.SetError(tdns.ConfigError,
+						"option %s requires multi-provider.active: true in server config",
+						tdns.ZoneOptionToString[tdns.OptMultiProvider])
+				}
+				return false
+			}
+			return true
+		})
+
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
