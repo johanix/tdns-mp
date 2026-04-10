@@ -69,6 +69,24 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return err
 	}
 
+	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
+	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
+	// not during ParseZones.
+	conf.ForEachMPZone(func(zd *tdns.ZoneData) {
+		zd.EnsureMP()
+		zd.Lock()
+		if zd.MP.MPdata != nil {
+			cp := *zd.MP.MPdata
+			zd.MP.MPdata = &cp
+			zd.MP.MPdata.Options = map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}
+		} else {
+			zd.MP.MPdata = &tdns.MPdata{
+				Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
+			}
+		}
+		zd.Unlock()
+	})
+
 	conf.Config.ParseAuthOptions()
 
 	if err := tdns.ValidateDatabaseFile(conf.Config); err != nil {
