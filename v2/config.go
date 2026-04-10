@@ -53,6 +53,27 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 	}
 }
 
+// ForEachMPZone iterates all zones with OptMultiProvider and calls
+// the supplied function for each. Used as the "second-pass loop"
+// for attaching OnFirstLoad callbacks, populating MPdata, and
+// other MP-specific per-zone setup after ParseZones returns.
+//
+// Caller must ensure ParseZones has completed (i.e. call after
+// conf.Config.MainInit returns). OnFirstLoad callbacks attached
+// here will fire later when RefreshEngine processes initial loads.
+func (conf *Config) ForEachMPZone(fn func(zd *tdns.ZoneData)) {
+	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+		zd, exists := tdns.Zones.Get(zoneName)
+		if !exists {
+			continue
+		}
+		if !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		fn(zd)
+	}
+}
+
 // RegisterCombinerOnFirstLoad attaches OnFirstLoad callbacks
 // (PersistContributions, contribution hydration, signal keys) to MP
 // zones that don't already have them. Called at startup and on
