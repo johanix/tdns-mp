@@ -20,7 +20,7 @@ import (
 // APIagentHsync handles /agent/hsync requests. The 6 supported
 // commands are: hsync-zonestatus, hsync-peer-status, hsync-sync-ops,
 // hsync-confirmations, hsync-transport-events, hsync-metrics.
-func (conf *Config) APIagentHsync(kdb *tdns.KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -85,80 +85,80 @@ func (conf *Config) APIagentHsync(kdb *tdns.KeyDB) func(w http.ResponseWriter, r
 			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", amp.Zone)
 
 		case "hsync-peer-status":
-			if kdb == nil {
+			if hdb == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = "HsyncDB not configured"
 				return
 			}
 
 			state := ""
 			if amp.AgentId != "" {
-				peer, err := kdb.GetPeer(string(amp.AgentId))
+				peer, err := hdb.GetPeer(string(amp.AgentId))
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("error getting peer: %v", err)
 					return
 				}
 				if peer != nil {
-					resp.HsyncPeers = []*HsyncPeerInfo{tdns.PeerRecordToInfo(peer)}
+					resp.HsyncPeers = []*HsyncPeerInfo{PeerRecordToInfo(peer)}
 				}
 			} else {
-				peers, err := kdb.ListPeers(state)
+				peers, err := hdb.ListPeers(state)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("error listing peers: %v", err)
 					return
 				}
 				for _, peer := range peers {
-					resp.HsyncPeers = append(resp.HsyncPeers, tdns.PeerRecordToInfo(peer))
+					resp.HsyncPeers = append(resp.HsyncPeers, PeerRecordToInfo(peer))
 				}
 			}
 			resp.Msg = fmt.Sprintf("Found %d peers", len(resp.HsyncPeers))
 
 		case "hsync-sync-ops":
-			if kdb == nil {
+			if hdb == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = "HsyncDB not configured"
 				return
 			}
 
-			ops, err := kdb.ListSyncOperations(string(amp.Zone), 50)
+			ops, err := hdb.ListSyncOperations(string(amp.Zone), 50)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error listing sync operations: %v", err)
 				return
 			}
 			for _, op := range ops {
-				resp.HsyncSyncOps = append(resp.HsyncSyncOps, tdns.SyncOpRecordToInfo(op))
+				resp.HsyncSyncOps = append(resp.HsyncSyncOps, SyncOpRecordToInfo(op))
 			}
 			resp.Msg = fmt.Sprintf("Found %d sync operations", len(resp.HsyncSyncOps))
 
 		case "hsync-confirmations":
-			if kdb == nil {
+			if hdb == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = "HsyncDB not configured"
 				return
 			}
 
-			confs, err := kdb.ListSyncConfirmations("", 50)
+			confs, err := hdb.ListSyncConfirmations("", 50)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error listing confirmations: %v", err)
 				return
 			}
 			for _, c := range confs {
-				resp.HsyncConfirmations = append(resp.HsyncConfirmations, tdns.ConfirmRecordToInfo(c))
+				resp.HsyncConfirmations = append(resp.HsyncConfirmations, ConfirmRecordToInfo(c))
 			}
 			resp.Msg = fmt.Sprintf("Found %d confirmations", len(resp.HsyncConfirmations))
 
 		case "hsync-transport-events":
-			if kdb == nil {
+			if hdb == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = "HsyncDB not configured"
 				return
 			}
 
-			events, err := kdb.ListTransportEvents(string(amp.AgentId), 100)
+			events, err := hdb.ListTransportEvents(string(amp.AgentId), 100)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error listing transport events: %v", err)
@@ -168,13 +168,13 @@ func (conf *Config) APIagentHsync(kdb *tdns.KeyDB) func(w http.ResponseWriter, r
 			resp.Msg = fmt.Sprintf("Found %d transport events", len(resp.HsyncEvents))
 
 		case "hsync-metrics":
-			if kdb == nil {
+			if hdb == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = "HsyncDB not configured"
 				return
 			}
 
-			metrics, err := kdb.GetAggregatedMetrics()
+			metrics, err := hdb.GetAggregatedMetrics()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error getting metrics: %v", err)

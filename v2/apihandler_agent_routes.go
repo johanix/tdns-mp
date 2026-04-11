@@ -16,7 +16,7 @@ func (conf *Config) SetupMPAgentRoutes(ctx context.Context, apirouter *mux.Route
 	sr.HandleFunc("/gossip", APIgossip(conf.InternalMp.AgentRegistry, conf.InternalMp.LeaderElectionManager)).Methods("POST")
 	sr.HandleFunc("/router", APIrouter(conf.InternalMp.TransportManager)).Methods("POST")
 	sr.HandleFunc("/peer", APIpeer(conf, conf.InternalMp.TransportManager, conf.InternalMp.AgentRegistry)).Methods("POST")
-	sr.HandleFunc("/agent/hsync", conf.APIagentHsync(kdb)).Methods("POST")
+	sr.HandleFunc("/agent/hsync", conf.APIagentHsync(conf.InternalMp.HsyncDB)).Methods("POST")
 	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/agent/transaction", conf.APIagentTransaction(conf.InternalMp.DistributionCache)).Methods("POST")
