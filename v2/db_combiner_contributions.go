@@ -11,18 +11,17 @@ import (
 	"fmt"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
 // SaveContributions replaces all rows for (zone, senderID) with the current
 // contributions. Runs in a transaction: DELETE old rows, INSERT new rows.
-func SaveContributions(kdb *tdns.KeyDB, zone, senderID string, contributions map[string]map[uint16]core.RRset) error {
-	kdb.Lock()
-	defer kdb.Unlock()
+func SaveContributions(hdb *HsyncDB, zone, senderID string, contributions map[string]map[uint16]core.RRset) error {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	tx, err := kdb.DB.Begin()
+	tx, err := hdb.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("SaveContributions: begin tx: %w", err)
 	}
@@ -60,11 +59,11 @@ func SaveContributions(kdb *tdns.KeyDB, zone, senderID string, contributions map
 // LoadAllContributions loads the entire CombinerContributions table and returns
 // it structured as zone -> senderID -> owner -> rrtype -> RRset.
 // Used at startup to hydrate AgentContributions for all combiner zones.
-func LoadAllContributions(kdb *tdns.KeyDB) (map[string]map[string]map[string]map[uint16]core.RRset, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func LoadAllContributions(hdb *HsyncDB) (map[string]map[string]map[string]map[uint16]core.RRset, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	rows, err := kdb.DB.Query(`SELECT zone, sender_id, owner, rrtype, rr FROM CombinerContributions`)
+	rows, err := hdb.DB.Query(`SELECT zone, sender_id, owner, rrtype, rr FROM CombinerContributions`)
 	if err != nil {
 		return nil, fmt.Errorf("LoadAllContributions: query: %w", err)
 	}
@@ -107,11 +106,11 @@ func LoadAllContributions(kdb *tdns.KeyDB) (map[string]map[string]map[string]map
 }
 
 // DeleteContributions removes all rows for a specific agent/zone pair.
-func DeleteContributions(kdb *tdns.KeyDB, zone, senderID string) error {
-	kdb.Lock()
-	defer kdb.Unlock()
+func DeleteContributions(hdb *HsyncDB, zone, senderID string) error {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	_, err := kdb.DB.Exec(`DELETE FROM CombinerContributions WHERE zone = ? AND sender_id = ?`, zone, senderID)
+	_, err := hdb.DB.Exec(`DELETE FROM CombinerContributions WHERE zone = ? AND sender_id = ?`, zone, senderID)
 	if err != nil {
 		return fmt.Errorf("DeleteContributions: %w", err)
 	}

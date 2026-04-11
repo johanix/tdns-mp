@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 )
 
@@ -39,9 +38,9 @@ func (s *StoredPublishInstruction) ToPublishInstruction() *core.PublishInstructi
 }
 
 // SavePublishInstruction upserts a publish instruction for (zone, senderID).
-func SavePublishInstruction(kdb *tdns.KeyDB, zone, senderID string, instr *core.PublishInstruction, publishedNS []string) error {
-	kdb.Lock()
-	defer kdb.Unlock()
+func SavePublishInstruction(hdb *HsyncDB, zone, senderID string, instr *core.PublishInstruction, publishedNS []string) error {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	keyJSON, err := json.Marshal(instr.KEYRRs)
 	if err != nil {
@@ -60,7 +59,7 @@ func SavePublishInstruction(kdb *tdns.KeyDB, zone, senderID string, instr *core.
 		return fmt.Errorf("SavePublishInstruction: marshal publishedNS: %w", err)
 	}
 
-	_, err = kdb.DB.Exec(`
+	_, err = hdb.DB.Exec(`
 		INSERT INTO CombinerPublishInstructions (zone, sender_id, key_rrs_json, cds_rrs_json, locations_json, published_ns_json, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(zone, sender_id) DO UPDATE SET
@@ -77,13 +76,13 @@ func SavePublishInstruction(kdb *tdns.KeyDB, zone, senderID string, instr *core.
 }
 
 // GetPublishInstruction returns the stored instruction for (zone, senderID), or nil.
-func GetPublishInstruction(kdb *tdns.KeyDB, zone, senderID string) (*StoredPublishInstruction, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func GetPublishInstruction(hdb *HsyncDB, zone, senderID string) (*StoredPublishInstruction, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var keyJSON, cdsJSON, locJSON, nsJSON string
 	var updatedAt int64
-	err := kdb.DB.QueryRow(`
+	err := hdb.DB.QueryRow(`
 		SELECT key_rrs_json, cds_rrs_json, locations_json, published_ns_json, updated_at
 		FROM CombinerPublishInstructions WHERE zone = ? AND sender_id = ?`,
 		zone, senderID).Scan(&keyJSON, &cdsJSON, &locJSON, &nsJSON, &updatedAt)
@@ -112,11 +111,11 @@ func GetPublishInstruction(kdb *tdns.KeyDB, zone, senderID string) (*StoredPubli
 }
 
 // DeletePublishInstruction removes the stored instruction for (zone, senderID).
-func DeletePublishInstruction(kdb *tdns.KeyDB, zone, senderID string) error {
-	kdb.Lock()
-	defer kdb.Unlock()
+func DeletePublishInstruction(hdb *HsyncDB, zone, senderID string) error {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	_, err := kdb.DB.Exec(`DELETE FROM CombinerPublishInstructions WHERE zone = ? AND sender_id = ?`, zone, senderID)
+	_, err := hdb.DB.Exec(`DELETE FROM CombinerPublishInstructions WHERE zone = ? AND sender_id = ?`, zone, senderID)
 	if err != nil {
 		return fmt.Errorf("DeletePublishInstruction: %w", err)
 	}
@@ -124,11 +123,11 @@ func DeletePublishInstruction(kdb *tdns.KeyDB, zone, senderID string) error {
 }
 
 // LoadAllPublishInstructions loads all stored instructions, keyed by zone then senderID.
-func LoadAllPublishInstructions(kdb *tdns.KeyDB) (map[string]map[string]*StoredPublishInstruction, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func LoadAllPublishInstructions(hdb *HsyncDB) (map[string]map[string]*StoredPublishInstruction, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	rows, err := kdb.DB.Query(`SELECT zone, sender_id, key_rrs_json, cds_rrs_json, locations_json, published_ns_json, updated_at FROM CombinerPublishInstructions`)
+	rows, err := hdb.DB.Query(`SELECT zone, sender_id, key_rrs_json, cds_rrs_json, locations_json, published_ns_json, updated_at FROM CombinerPublishInstructions`)
 	if err != nil {
 		return nil, fmt.Errorf("LoadAllPublishInstructions: query: %w", err)
 	}

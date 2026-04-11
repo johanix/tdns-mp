@@ -62,8 +62,8 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 		standbyKskCount = kasp.StandbyKskCount
 	}
 
-	kdb := conf.Config.Internal.KeyDB
-	if kdb == nil {
+	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
+	if hdb == nil {
 		lgSigner.Warn("KeyStateWorker: no KeyDB available, exiting")
 		return nil
 	}
@@ -79,7 +79,7 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 			lgSigner.Info("KeyStateWorker stopping")
 			return nil
 		case <-ticker.C:
-			checkAndTransitionKeys(conf, kdb, propagationDelay, standbyZskCount, standbyKskCount)
+			checkAndTransitionKeys(conf, hdb, propagationDelay, standbyZskCount, standbyKskCount)
 		}
 	}
 }
@@ -88,23 +88,23 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 // 1. published → standby (time-based)
 // 2. retired → removed (time-based)
 // 3. maintain standby key count (generate new keys as needed)
-func checkAndTransitionKeys(conf *Config, kdb *tdns.KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
+func checkAndTransitionKeys(conf *Config, hdb *HsyncDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
 
 	// (1) Check published → standby transitions
-	transitionPublishedToStandby(conf, kdb, now, propagationDelay)
+	transitionPublishedToStandby(conf, hdb, now, propagationDelay)
 
 	// (2) Check retired → removed transitions
-	transitionRetiredToRemoved(conf, kdb, now, propagationDelay)
+	transitionRetiredToRemoved(conf, hdb, now, propagationDelay)
 
 	// (3) Maintain standby key count per zone
-	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
+	maintainStandbyKeys(conf, hdb, standbyZskCount, standbyKskCount)
 }
 
 // transitionPublishedToStandby transitions keys that have been in "published"
 // state long enough for the DNSKEY RRset to propagate through all caches.
-func transitionPublishedToStandby(conf *Config, kdb *tdns.KeyDB, now time.Time, propagationDelay time.Duration) {
-	keys, err := GetDnssecKeysByState(kdb, "", tdns.DnskeyStatePublished)
+func transitionPublishedToStandby(conf *Config, hdb *HsyncDB, now time.Time, propagationDelay time.Duration) {
+	keys, err := GetDnssecKeysByState(hdb, "", tdns.DnskeyStatePublished)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting published keys", "err", err)
 		return
@@ -134,7 +134,7 @@ func transitionPublishedToStandby(conf *Config, kdb *tdns.KeyDB, now time.Time, 
 		}
 
 		lgSigner.Info("KeyStateWorker: transitioning published→standby", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
-		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, tdns.DnskeyStateStandby); err != nil {
+		if err := UpdateDnssecKeyState(hdb, key.ZoneName, key.KeyTag, tdns.DnskeyStateStandby); err != nil {
 			lgSigner.Error("KeyStateWorker: published→standby failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}
@@ -147,8 +147,8 @@ func transitionPublishedToStandby(conf *Config, kdb *tdns.KeyDB, now time.Time, 
 // state long enough for all RRSIGs made with them to expire from caches.
 // For MP zones, keys transition to "mpremove" (awaiting agent confirmation)
 // instead of directly to "removed".
-func transitionRetiredToRemoved(conf *Config, kdb *tdns.KeyDB, now time.Time, propagationDelay time.Duration) {
-	keys, err := GetDnssecKeysByState(kdb, "", tdns.DnskeyStateRetired)
+func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propagationDelay time.Duration) {
+	keys, err := GetDnssecKeysByState(hdb, "", tdns.DnskeyStateRetired)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting retired keys", "err", err)
 		return
@@ -185,7 +185,7 @@ func transitionRetiredToRemoved(conf *Config, kdb *tdns.KeyDB, now time.Time, pr
 		}
 
 		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
-		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, targetState); err != nil {
+		if err := UpdateDnssecKeyState(hdb, key.ZoneName, key.KeyTag, targetState); err != nil {
 			lgSigner.Error("KeyStateWorker: retired→"+targetState+" failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}
@@ -204,7 +204,7 @@ func transitionRetiredToRemoved(conf *Config, kdb *tdns.KeyDB, now time.Time, pr
 // standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
 // required and no keys are in the pipeline (published or mpdist), new keys
 // are generated via GenerateAndStageKey.
-func maintainStandbyKeys(conf *Config, kdb *tdns.KeyDB, standbyZskCount, standbyKskCount int) {
+func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKskCount int) {
 	for zoneName, zd := range tdns.Zones.Items() {
 		// Only process zones that do signing
 		if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
@@ -227,20 +227,20 @@ func maintainStandbyKeys(conf *Config, kdb *tdns.KeyDB, standbyZskCount, standby
 		alg := zd.DnssecPolicy.Algorithm
 
 		// Maintain ZSK standby count
-		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)
+		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)
 
 		// Maintain KSK standby count (0 means don't maintain)
 		if standbyKskCount > 0 {
-			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, isMP, standbyKskCount)
+			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, isMP, standbyKskCount)
 		}
 	}
 }
 
 // maintainStandbyKeysForType checks and maintains standby key count for a
 // specific key type (ZSK or KSK) in a zone.
-func maintainStandbyKeysForType(kdb *tdns.KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, isMP bool, standbyKeyCount int) {
+func maintainStandbyKeysForType(hdb *HsyncDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, isMP bool, standbyKeyCount int) {
 	// Count standby keys of this type
-	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, tdns.DnskeyStateStandby)
+	standbyKeys, err := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStateStandby)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
@@ -252,10 +252,10 @@ func maintainStandbyKeysForType(kdb *tdns.KeyDB, zoneName string, alg uint8, key
 	}
 
 	// Check pipeline: don't generate if published or mpdist keys exist for this type
-	publishedKeys, _ := GetDnssecKeysByState(kdb, zoneName, tdns.DnskeyStatePublished)
+	publishedKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStatePublished)
 	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
 
-	mpdistKeys, _ := GetDnssecKeysByState(kdb, zoneName, tdns.DnskeyStateMpdist)
+	mpdistKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStateMpdist)
 	mpdistCount := countKeysByFlags(mpdistKeys, expectedFlags)
 
 	if publishedCount > 0 || mpdistCount > 0 {
@@ -267,7 +267,7 @@ func maintainStandbyKeysForType(kdb *tdns.KeyDB, zoneName string, alg uint8, key
 	lgSigner.Info("KeyStateWorker: generating standby keys", "zone", zoneName, "keytype", keytype, "have", standbyCount, "need", standbyKeyCount, "generating", needed)
 
 	for i := 0; i < needed; i++ {
-		keyid, err := GenerateAndStageKey(kdb, zoneName, "key-state-worker", alg, keytype, isMP)
+		keyid, err := GenerateAndStageKey(hdb, zoneName, "key-state-worker", alg, keytype, isMP)
 		if err != nil {
 			lgSigner.Error("KeyStateWorker: key generation failed", "zone", zoneName, "keytype", keytype, "err", err)
 			break

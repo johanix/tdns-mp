@@ -1094,7 +1094,7 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 // importSig0KeyFromPeer imports a SIG(0) key received from a peer via RFI CONFIG.
 // TODO: This calls unexported tdns functions (PrepareKeyCache, Sig0KeyMgmt).
 // It will need to be reworked when those are exported or moved.
-func importSig0KeyFromPeer(kdb *tdns.KeyDB, keyName string, configData map[string]string) error {
+func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]string) error {
 	algorithm := configData["algorithm"]
 	privatekey := configData["privatekey"]
 	keyrr := configData["keyrr"]
@@ -1118,7 +1118,7 @@ func importSig0KeyFromPeer(kdb *tdns.KeyDB, keyName string, configData map[strin
 		State:           tdns.Sig0StateActive,
 		PrivateKeyCache: pkc,
 	}
-	resp, err := kdb.Sig0KeyMgmt(nil, kp)
+	resp, err := hdb.Sig0KeyMgmt(nil, kp)
 	if err != nil {
 		return fmt.Errorf("Sig0KeyMgmt add failed: %v", err)
 	}
@@ -1187,7 +1187,7 @@ func Sig0KeyOwnerName(zone, nameserver string) string {
 }
 
 // GetParentSyncStatus computes the current parent sync status for a zone on demand.
-func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, kdb *tdns.KeyDB, imr *tdns.Imr, ar *AgentRegistry) ParentSyncStatus {
+func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *tdns.Imr, ar *AgentRegistry) ParentSyncStatus {
 	status := ParentSyncStatus{
 		Zone:        zone,
 		LastChecked: time.Now(),
@@ -1221,7 +1221,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	}
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry)
 
-	if zd == nil || kdb == nil {
+	if zd == nil || hdb == nil {
 		return status
 	}
 
@@ -1230,7 +1230,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	if targetName == "" {
 		targetName = string(zone)
 	}
-	sak, err := kdb.GetSig0Keys(targetName, tdns.Sig0StateActive)
+	sak, err := hdb.GetSig0Keys(targetName, tdns.Sig0StateActive)
 	if err == nil && len(sak.Keys) > 0 {
 		key := sak.Keys[0]
 		status.KeyAlgorithm = dns.AlgorithmToString[key.Algorithm]
@@ -1239,7 +1239,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 
 		// Read parent_state from keystore
 		var parentState int
-		row := kdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
+		row := hdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
 			targetName, key.KeyId)
 		if err := row.Scan(&parentState); err == nil {
 			status.ParentState = uint8(parentState)

@@ -182,7 +182,7 @@ func checkMPauthorization(zd *tdns.ZoneData) error {
 	return nil
 }
 
-func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *tdns.KeyDB, tm *MPTransportBridge) *CombinerSyncResponse {
+func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	totalRecords := 0
 	for _, rrs := range req.Records {
 		totalRecords += len(rrs)
@@ -247,9 +247,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		resp = combinerProcessOperations(req, zd, zonename, protectedNamespaces, localAgents)
 		if resp.Status != "error" {
 			if req.Publish != nil {
-				combinerApplyPublishInstruction(req, zd, kdb)
+				combinerApplyPublishInstruction(req, zd, hdb)
 			}
-			combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+			combinerResyncSignalKeys(req.SenderID, zonename, zd, hdb)
 			if resp.DataChanged {
 				nsChanged, kskChanged := detectDelegationChanges(resp)
 				if nsChanged || kskChanged {
@@ -261,8 +261,8 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	if req.Publish != nil {
-		combinerApplyPublishInstruction(req, zd, kdb)
-		combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+		combinerApplyPublishInstruction(req, zd, hdb)
+		combinerResyncSignalKeys(req.SenderID, zonename, zd, hdb)
 		resp.Status = "ok"
 		resp.Message = fmt.Sprintf("publish instruction applied for zone %q (no data operations)", req.Zone)
 		return resp
@@ -402,7 +402,7 @@ func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtyp
 }
 
 // combinerApplyPublishInstruction processes a PublishInstruction from an agent.
-func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData, kdb *tdns.KeyDB) {
+func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData, hdb *HsyncDB) {
 	if req.Publish == nil {
 		return
 	}
@@ -411,8 +411,8 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 	senderID := req.SenderID
 
 	var storedInstr *StoredPublishInstruction
-	if kdb != nil {
-		storedInstr, _ = GetPublishInstruction(kdb, zone, senderID)
+	if hdb != nil {
+		storedInstr, _ = GetPublishInstruction(hdb, zone, senderID)
 	}
 
 	if len(instr.Locations) == 0 {
@@ -422,8 +422,8 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 				publishSignalKeyToProvider(zone, ns, senderID, nil)
 			}
 		}
-		if kdb != nil {
-			DeletePublishInstruction(kdb, zone, senderID)
+		if hdb != nil {
+			DeletePublishInstruction(hdb, zone, senderID)
 		}
 		lgCombiner.Info("publish instruction retracted", "zone", zone, "sender", senderID)
 		return
@@ -473,8 +473,8 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 		}
 	}
 
-	if kdb != nil {
-		if err := SavePublishInstruction(kdb, zone, senderID, instr, publishedNS); err != nil {
+	if hdb != nil {
+		if err := SavePublishInstruction(hdb, zone, senderID, instr, publishedNS); err != nil {
 			lgCombiner.Error("failed to save publish instruction", "zone", zone, "sender", senderID, "err", err)
 		}
 	}
@@ -483,11 +483,11 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 }
 
 // combinerResyncSignalKeys is called when NS records change for an agent.
-func combinerResyncSignalKeys(senderID, zone string, zd *tdns.ZoneData, kdb *tdns.KeyDB) {
-	if kdb == nil {
+func combinerResyncSignalKeys(senderID, zone string, zd *tdns.ZoneData, hdb *HsyncDB) {
+	if hdb == nil {
 		return
 	}
-	storedInstr, err := GetPublishInstruction(kdb, zone, senderID)
+	storedInstr, err := GetPublishInstruction(hdb, zone, senderID)
 	if err != nil || storedInstr == nil {
 		return
 	}
@@ -515,7 +515,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *tdns.ZoneData, kdb *tdn
 
 	if changed {
 		instr := storedInstr.ToPublishInstruction()
-		if err := SavePublishInstruction(kdb, zone, senderID, instr, currentNS); err != nil {
+		if err := SavePublishInstruction(hdb, zone, senderID, instr, currentNS); err != nil {
 			lgCombiner.Error("failed to update published NS after resync", "zone", zone, "sender", senderID, "err", err)
 		}
 		lgCombiner.Info("signal keys resynced after NS change", "zone", zone, "sender", senderID, "publishedNS", currentNS)
@@ -615,13 +615,13 @@ type pendingSignalKeyMap struct {
 var pendingSignalKeys = &pendingSignalKeyMap{}
 
 // buildPendingSignalKeys is called by the first provider zone's OnFirstLoad.
-func buildPendingSignalKeys(kdb *tdns.KeyDB) {
-	if kdb == nil {
-		lgCombiner.Warn("buildPendingSignalKeys: kdb is nil, skipping")
+func buildPendingSignalKeys(hdb *HsyncDB) {
+	if hdb == nil {
+		lgCombiner.Warn("buildPendingSignalKeys: hdb is nil, skipping")
 		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
 		return
 	}
-	allInstr, err := LoadAllPublishInstructions(kdb)
+	allInstr, err := LoadAllPublishInstructions(hdb)
 	if err != nil {
 		lgCombiner.Error("failed to load publish instructions for startup re-apply", "err", err)
 		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
@@ -654,10 +654,10 @@ func buildPendingSignalKeys(kdb *tdns.KeyDB) {
 }
 
 // ApplyPendingSignalKeys is called by each provider zone's OnFirstLoad.
-func ApplyPendingSignalKeys(zd *tdns.ZoneData, kdb *tdns.KeyDB) {
+func ApplyPendingSignalKeys(zd *tdns.ZoneData, hdb *HsyncDB) {
 	pendingSignalKeys.mu.Lock()
 	if !pendingSignalKeys.built {
-		buildPendingSignalKeys(kdb)
+		buildPendingSignalKeys(hdb)
 		pendingSignalKeys.built = true
 	}
 	myEntries := pendingSignalKeys.entries[zd.ZoneName]

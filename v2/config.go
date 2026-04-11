@@ -79,8 +79,8 @@ func (conf *Config) ForEachMPZone(fn func(zd *tdns.ZoneData)) {
 // zones that don't already have them. Called at startup and on
 // reload via PostParseZonesHook for mpcombiner.
 func (conf *Config) RegisterCombinerOnFirstLoad() {
-	kdb := conf.Config.Internal.KeyDB
-	if kdb == nil {
+	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
+	if hdb == nil {
 		return
 	}
 	if conf.InternalMp.onFirstLoadRegistered == nil {
@@ -88,7 +88,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	}
 
 	// Load contributions snapshot once for all new zones
-	allContribs, err := LoadAllContributions(kdb)
+	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
 		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load contributions", "err", err)
 		allContribs = nil
@@ -110,9 +110,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			}
 			zd.EnsureMP()
 			if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
-				kdb := zd.KeyDB
+				hdb := NewHsyncDB(zd.KeyDB)
 				zd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
-					return SaveContributions(kdb, zone, senderID, contribs)
+					return SaveContributions(hdb, zone, senderID, contribs)
 				}
 				lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
 			}
@@ -139,7 +139,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 
 		if GetProviderZoneRRtypes(zoneName) != nil {
 			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				ApplyPendingSignalKeys(zd, kdb)
+				ApplyPendingSignalKeys(zd, hdb)
 			})
 		}
 	}

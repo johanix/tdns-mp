@@ -17,7 +17,7 @@ import (
 
 // queryParentKeyStateDetailed sends a KeyState EDNS(0) inquiry to the parent
 // and returns the parent's reported state for the key, including extra text.
-func queryParentKeyStateDetailed(kdb *tdns.KeyDB, imr *tdns.Imr, keyName string, keyid uint16) (uint8, string, error) {
+func queryParentKeyStateDetailed(hdb *HsyncDB, imr *tdns.Imr, keyName string, keyid uint16) (uint8, string, error) {
 	ctx := context.Background()
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
@@ -33,7 +33,7 @@ func queryParentKeyStateDetailed(kdb *tdns.KeyDB, imr *tdns.Imr, keyName string,
 		KeyState: edns0.KeyStateInquiryKey,
 	})
 
-	sak, err := kdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
+	sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 	if err != nil || len(sak.Keys) == 0 {
 		return 0, "", fmt.Errorf("no active SIG(0) key for %s", keyName)
 	}

@@ -19,7 +19,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *HsyncDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -374,7 +374,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			status := lem.GetParentSyncStatus(amp.Zone, zd, kdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
+			status := lem.GetParentSyncStatus(amp.Zone, zd, hdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -416,14 +416,14 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = "IMR engine not available"
 				return
 			}
-			sak, err := kdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
+			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
 			if err != nil || len(sak.Keys) == 0 {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
 				return
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, err := queryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
+			keyState, extra, err := queryParentKeyStateDetailed(hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
@@ -450,7 +450,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
 				return
 			}
-			sak, err := kdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
+			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
 			if err != nil || len(sak.Keys) == 0 {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)

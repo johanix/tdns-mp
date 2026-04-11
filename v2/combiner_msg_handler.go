@@ -127,12 +127,12 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
-			kdb := conf.Config.Internal.KeyDB
+			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
-			if kdb != nil {
-				editID, _ = NextEditID(kdb)
+			if hdb != nil {
+				editID, _ = NextEditID(hdb)
 				rec := &PendingEditRecord{
 					EditID:         editID,
 					Zone:           zone,
@@ -142,7 +142,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					Records:        msg.Records,
 					ReceivedAt:     time.Now(),
 				}
-				if err := SavePendingEdit(kdb, rec); err != nil {
+				if err := SavePendingEdit(hdb, rec); err != nil {
 					lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
 				} else {
 					lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
@@ -157,8 +157,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				if noOp {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)
-					if kdb != nil && editID > 0 {
-						if err := ResolvePendingEdit(kdb, editID, msg.Records, nil, ""); err != nil {
+					if hdb != nil && editID > 0 {
+						if err := ResolvePendingEdit(hdb, editID, msg.Records, nil, ""); err != nil {
 							lgCombiner.Error("failed to resolve no-op edit", "editID", editID, "err", err)
 						}
 					}
@@ -219,7 +219,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if localAgents[senderID] {
 				nsGuard = nil
 			}
-			resp := CombinerProcessUpdate(syncReq, nsGuard, localAgents, kdb, tm)
+			resp := CombinerProcessUpdate(syncReq, nsGuard, localAgents, hdb, tm)
 			resp.Nonce = msg.Nonce // Echo nonce for confirmation
 			if resp.Zone != "" {
 				zone = resp.Zone // Update zone from combiner discovery (e.g. provider updates with Zone="")
@@ -230,7 +230,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 
 			// Split results into approved and rejected record maps and persist.
-			if kdb != nil && editID > 0 {
+			if hdb != nil && editID > 0 {
 				approved := rrStringsToOwnerMap(resp.AppliedRecords)
 				// Store removals with ClassNONE so the audit trail preserves ADD/DEL intent
 				for owner, rrs := range rrStringsToClassNONE(resp.RemovedRecords) {
@@ -254,7 +254,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 						reason = fmt.Sprintf("%s (and %d more)", reason, len(reasons)-1)
 					}
 				}
-				if err := ResolvePendingEdit(kdb, editID, approved, rejected, reason); err != nil {
+				if err := ResolvePendingEdit(hdb, editID, approved, rejected, reason); err != nil {
 					lgCombiner.Error("failed to resolve edit", "editID", editID, "err", err)
 				}
 			}

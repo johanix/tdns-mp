@@ -682,7 +682,7 @@ func cleanupRemovedRRtype(zd *tdns.ZoneData, owner string, rrtype uint16) {
 // combinerReapplyContributions reloads contributions from the database and
 // re-applies them to zone data. Works for both MP zones (contributions snapshot)
 // and provider zones (contributions + publish instructions).
-func CombinerReapplyContributions(zone string, kdb *tdns.KeyDB) (string, error) {
+func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	zd, ok := tdns.Zones.Get(zone)
 	if !ok {
 		return "", fmt.Errorf("zone %q not found", zone)
@@ -692,7 +692,7 @@ func CombinerReapplyContributions(zone string, kdb *tdns.KeyDB) (string, error) 
 	var parts []string
 
 	// 1. Reload AgentContributions from the CombinerContributions snapshot.
-	allContribs, err := LoadAllContributions(kdb)
+	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
 		return "", fmt.Errorf("failed to load contributions: %w", err)
 	}
@@ -714,7 +714,7 @@ func CombinerReapplyContributions(zone string, kdb *tdns.KeyDB) (string, error) 
 
 	// 2. For provider zones: re-apply _signal KEY records from publish instructions.
 	if isProvider {
-		allInstr, err := LoadAllPublishInstructions(kdb)
+		allInstr, err := LoadAllPublishInstructions(hdb)
 		if err != nil {
 			zd.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
@@ -756,7 +756,7 @@ func CombinerReapplyContributions(zone string, kdb *tdns.KeyDB) (string, error) 
 
 	// 3. For MP zones: re-apply at-apex KEY from publish instructions.
 	if !isProvider {
-		allInstr, err := LoadAllPublishInstructions(kdb)
+		allInstr, err := LoadAllPublishInstructions(hdb)
 		if err != nil {
 			zd.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
