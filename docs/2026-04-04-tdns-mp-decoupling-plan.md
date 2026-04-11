@@ -607,13 +607,15 @@ yet done.
 **File**: apihandler_agent.go
 
 The `/agent` endpoint handled by `APIagent()` multiplexes
-many sub-commands. ~95% are MP-only, but a few (config, imr)
-are also relevant for the plain tdns agent.
+many sub-commands. Nearly all are MP-only. Only `config`,
+`send-notify`, and `update-local-zonedata` are truly core
+and relevant for the plain tdns agent.
 
 **Verdict**: **Split the /agent endpoint.** The monolithic
 `/agent` handler must be split into multiple endpoints:
 
-- `/agent` — tdns handles core commands (config, imr)
+- `/agent` — tdns handles core commands (config,
+  send-notify, update-local-zonedata)
 - `/agent/hsync` — tdns-mp registers for HSYNC commands
 - `/agent/gossip` — tdns-mp registers for gossip commands
 - `/agent/peer` — tdns-mp registers for peer commands
@@ -634,13 +636,25 @@ endpoint paths.
 - Router commands → `/router` (Task M)
 - Peer commands → `/peer` (Task N)
 - Gossip commands → `/gossip` (Task O)
-Still on `/agent` (29 active cases remain): parentsync-*
-(status, election, inquire, bootstrap), add-rr, del-rr,
-imr-* (query, flush, reset, show), hsync-locate,
-hsync-chunk-send, hsync-chunk-recv, hsync-init-db,
-hsync-sync-state, hsync-agentstatus, show-combiner-data,
-send-sync-to, and the config/imr commands that belong in
-core tdns.
+- `hsync-init-db` migrated to tdns-mp (2026-04-11)
+
+Still on `/agent`: parentsync-* (status, election,
+inquire, bootstrap), add-rr, del-rr, imr-* (query,
+flush, reset, show), hsync-locate, hsync-agentstatus,
+hsync-sync-state, discover, refresh-keys.
+
+**Delete from both tdns and tdns-mp** (no longer needed,
+including corresponding CLI commands):
+`hsync-chunk-send`, `hsync-chunk-recv`,
+`show-combiner-data`, `send-sync-to`.
+
+**Not core — must migrate to tdns-mp** (incorrectly
+assumed to stay in tdns): `resync`, `send-rfi`,
+`dump-agentregistry`, `dump-zonedatarepo`,
+`show-key-inventory`, `queue-status`.
+
+Only `config`, `send-notify`, and
+`update-local-zonedata` are truly core and stay in tdns.
 
 ---
 

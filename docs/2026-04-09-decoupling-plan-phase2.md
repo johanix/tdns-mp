@@ -331,11 +331,22 @@ groups (by estimated effort, smallest first):
 4. **Data modification** (2 commands): `add-rr`, `del-rr`.
    New `/update` endpoint. Touches combiner contribution
    paths. Medium.
-5. **Combiner debug grab-bag** (6 commands):
-   `hsync-chunk-send`, `hsync-chunk-recv`, `hsync-init-db`,
-   `hsync-sync-state`, `show-combiner-data`,
-   `send-sync-to`. Can migrate as a single `/combiner/debug`
-   group or split further.
+5. **Combiner debug grab-bag** (revised):
+   - `hsync-sync-state`: migrate to `/combiner/debug` or
+     similar endpoint.
+   - `hsync-init-db`: already migrated to tdns-mp (Phase 4,
+     2026-04-11 HsyncDB migration). Done.
+   - `hsync-chunk-send`, `hsync-chunk-recv`,
+     `show-combiner-data`, `send-sync-to`: **delete** —
+     no longer needed. Remove corresponding CLI commands
+     from both tdns and tdns-mp.
+6. **MP-only commands currently miscategorized as core**
+   (6 commands): `resync`, `send-rfi`,
+   `dump-agentregistry`, `dump-zonedatarepo`,
+   `show-key-inventory`, `queue-status`. These are NOT
+   core/generic — they depend on MP infrastructure
+   (AgentRegistry, MsgQs, TransportManager). Must
+   migrate to tdns-mp or be deleted from tdns.
 
 Each slice follows the established pattern: new
 `/<group>` route, per-group Post/Response types, CLI
