@@ -765,12 +765,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Status = "ok"
 
 		case "hsync-init-db":
-			if conf.Config.Internal.KeyDB == nil {
+			if conf.InternalMp.HsyncDB == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not available"
+				resp.ErrorMsg = "HsyncDB not available"
 				return
 			}
-			if err := conf.Config.Internal.KeyDB.InitHsyncTables(); err != nil {
+			if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("InitHsyncTables failed: %v", err)
 				return

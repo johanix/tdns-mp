@@ -265,10 +265,11 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 		return fmt.Errorf("multi-provider.identity is required in config")
 	}
 
-	// Initialize combiner edit tables
+	// Initialize HsyncDB and combiner edit tables
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
-		if err := InitCombinerEditTables(kdb); err != nil {
+		conf.InternalMp.HsyncDB = NewHsyncDB(kdb)
+		if err := conf.InternalMp.HsyncDB.InitCombinerEditTables(); err != nil {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
 	}
@@ -442,10 +443,11 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	}
 	conf.Config.Internal.CombinerState = conf.InternalMp.CombinerState // dual-write
 
-	// Initialize HSYNC database tables
+	// Initialize HsyncDB and HSYNC database tables
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
-		if err := kdb.InitHsyncTables(); err != nil {
+		conf.InternalMp.HsyncDB = NewHsyncDB(kdb)
+		if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
 			return fmt.Errorf("InitHsyncTables: %w", err)
 		}
 	}

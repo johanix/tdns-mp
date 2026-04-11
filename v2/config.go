@@ -150,6 +150,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 // migration, both exist — code in tdns-mp reads from here,
 // code in tdns reads from tdns.Config.Internal.
 type InternalMpConf struct {
+	HsyncDB               *HsyncDB
 	SyncQ                 chan SyncRequest
 	MsgQs                 *MsgQs
 	SyncStatusQ           chan SyncStatus

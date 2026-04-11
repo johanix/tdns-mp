@@ -1,6 +1,9 @@
+//go:build ignore
+
 /*
  * Copyright (c) Johan Stenstam, <johani@johani.org>
  *
+ * DEAD CODE — superseded by db_schema_hsync.go (HsyncDB methods).
  * Local copy of InitCombinerEditTables, adapted from tdns/v2/db_schema_hsync.go.
  */
 package tdnsmp
