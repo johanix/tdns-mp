@@ -726,7 +726,7 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 					continue
 				}
 				for _, ns := range stored.PublishedNS {
-					ownerName := tdns.Sig0KeyOwnerName(childZone, ns)
+					ownerName := Sig0KeyOwnerName(childZone, ns)
 					providerZone := findProviderZoneForOwner(ownerName)
 					if providerZone != zone {
 						continue

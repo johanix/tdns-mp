@@ -128,7 +128,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 				}
 			}
 			if zd.Options[tdns.OptAllowEdits] {
-				success, err := tdns.ZoneDataCombineWithLocalChanges(zd)
+				success, err := zd.CombineWithLocalChanges()
 				if err != nil {
 					lgCombiner.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
 				} else if success {

@@ -172,8 +172,8 @@ func checkMPauthorization(zd *tdns.ZoneData) error {
 		if !((h3exists && hpExists) || h1exists || h2exists) {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", zd.ZoneName)
 		}
-		ourIdentities := tdns.OurHsyncIdentities()
-		matched, _, _ := tdns.ZoneDataMatchHsyncProvider(zd, ourIdentities)
+		ourIdentities := ourHsyncIdentities(tdns.Conf.MultiProvider)
+		matched, _, _ := matchHsyncIdentity(zd, ourIdentities)
 		if !matched {
 			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", zd.ZoneName, ourIdentities)
 		}
@@ -316,7 +316,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		}
 	}
 	if kskChanged {
-		cdsRRs, err := tdns.ZoneDataSynthesizeCdsRRs(zd)
+		cdsRRs, err := zd.SynthesizeCdsRRs()
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
@@ -525,7 +525,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *tdns.ZoneData, hdb *Hsy
 // publishSignalKeyToProvider directly applies a _signal KEY record to the
 // provider zone that contains the NS target.
 func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []string) {
-	ownerName := tdns.Sig0KeyOwnerName(childZone, nsTarget)
+	ownerName := Sig0KeyOwnerName(childZone, nsTarget)
 
 	providerZone := findProviderZoneForOwner(ownerName)
 	if providerZone == "" {
@@ -635,7 +635,7 @@ func buildPendingSignalKeys(hdb *HsyncDB) {
 				continue
 			}
 			for _, ns := range stored.PublishedNS {
-				ownerName := tdns.Sig0KeyOwnerName(zone, ns)
+				ownerName := Sig0KeyOwnerName(zone, ns)
 				providerZone := findProviderZoneForOwner(ownerName)
 				if providerZone == "" {
 					lgCombiner.Debug("startup re-apply: no provider zone for NS target", "ns", ns, "childZone", zone)
