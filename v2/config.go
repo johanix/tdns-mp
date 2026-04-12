@@ -37,7 +37,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		if conf.InternalMp.refreshRegistered[zoneName] {
 			continue
 		}
-		zd, ok := tdns.Zones.Get(zoneName)
+		zd, ok := Zones.Get(zoneName)
 		if !ok || !zd.Options[tdns.OptMultiProvider] {
 			continue
 		}
@@ -61,9 +61,9 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 // Caller must ensure ParseZones has completed (i.e. call after
 // conf.Config.MainInit returns). OnFirstLoad callbacks attached
 // here will fire later when RefreshEngine processes initial loads.
-func (conf *Config) ForEachMPZone(fn func(zd *tdns.ZoneData)) {
+func (conf *Config) ForEachMPZone(fn func(zd *MPZoneData)) {
 	for _, zoneName := range conf.Config.Internal.MPZoneNames {
-		zd, exists := tdns.Zones.Get(zoneName)
+		zd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
 		}
@@ -98,7 +98,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
 			continue
 		}
-		zd, exists := tdns.Zones.Get(zoneName)
+		zd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
 		}

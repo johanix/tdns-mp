@@ -44,7 +44,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 		}()
 
 		cp.Zone = dns.Fqdn(cp.Zone)
-		zd, exist := tdns.Zones.Get(cp.Zone)
+		zd, exist := Zones.Get(cp.Zone)
 		if !exist {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
@@ -53,7 +53,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 
 		switch cp.Command {
 		case "add":
-			_, err := AddCombinerDataNG(zd, "", cp.Data)
+			_, err := AddCombinerDataNG(zd.ZoneData, "", cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -67,7 +67,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 				return
 			}
 
-			resp.Data = GetCombinerDataNG(zd)
+			resp.Data = GetCombinerDataNG(zd.ZoneData)
 			resp.Msg = fmt.Sprintf("Local data for zone %s", cp.Zone)
 
 		case "remove":
@@ -128,7 +128,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "zone is required"
 				return
 			}
-			if _, exists := tdns.Zones.Get(zone); !exists {
+			if _, exists := Zones.Get(zone); !exists {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("zone %s is not known to this combiner", zone)
 				return
@@ -211,7 +211,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			// Notify downstream servers about the zone change.
 			if syncResp.Status != "error" {
-				if zd, ok := tdns.Zones.Get(dns.Fqdn(rec.Zone)); ok && len(zd.Downstreams) > 0 {
+				if zd, ok := Zones.Get(dns.Fqdn(rec.Zone)); ok && len(zd.Downstreams) > 0 {
 					go zd.NotifyDownstreams()
 				}
 			}
@@ -294,7 +294,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-current":
 			zone := dns.Fqdn(cp.Zone)
-			zd, ok := tdns.Zones.Get(zone)
+			zd, ok := Zones.Get(zone)
 			if !ok || zd == nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("zone %s not found", zone)
@@ -383,21 +383,21 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					parts = append(parts, fmt.Sprintf("%d contributions", n))
 					// Clear in-memory AgentContributions only on DB success
 					if zone != "" {
-						if zd, ok := tdns.Zones.Get(zone); ok {
+						if zd, ok := Zones.Get(zone); ok {
 							zd.Lock()
 							if zd.MP != nil {
 								zd.MP.AgentContributions = nil
 							}
-							RebuildCombinerData(zd)
+							RebuildCombinerData(zd.ZoneData)
 							zd.Unlock()
 						}
 					} else {
-						for _, zd := range tdns.Zones.Items() {
+						for _, zd := range Zones.Items() {
 							zd.Lock()
 							if zd.MP != nil {
 								zd.MP.AgentContributions = nil
 							}
-							RebuildCombinerData(zd)
+							RebuildCombinerData(zd.ZoneData)
 							zd.Unlock()
 						}
 					}
@@ -452,7 +452,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			combinerData := make(map[string]map[string]map[string][]string)
 			agentContribs := make(map[string]map[string]map[string]map[string][]string)
 
-			collectZone := func(zd *tdns.ZoneData) {
+			collectZone := func(zd *MPZoneData) {
 				// Merged CombinerData
 				if zd.MP != nil && zd.MP.CombinerData != nil {
 					zoneData := make(map[string]map[string][]string)
@@ -503,7 +503,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			if cp.Zone != "" {
 				zone := dns.Fqdn(cp.Zone)
-				zd, exists := tdns.Zones.Get(zone)
+				zd, exists := Zones.Get(zone)
 				if !exists {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
@@ -511,7 +511,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 				collectZone(zd)
 			} else {
-				for _, zd := range tdns.Zones.Items() {
+				for _, zd := range Zones.Items() {
 					collectZone(zd)
 				}
 			}
@@ -547,14 +547,14 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			var zones []string
 			if cp.Zone != "" {
 				zone := dns.Fqdn(cp.Zone)
-				if _, exists := tdns.Zones.Get(zone); !exists {
+				if _, exists := Zones.Get(zone); !exists {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
 					return
 				}
 				zones = append(zones, zone)
 			} else {
-				for _, zd := range tdns.Zones.Items() {
+				for _, zd := range Zones.Items() {
 					zones = append(zones, zd.ZoneName)
 				}
 			}

@@ -683,7 +683,7 @@ func cleanupRemovedRRtype(zd *tdns.ZoneData, owner string, rrtype uint16) {
 // re-applies them to zone data. Works for both MP zones (contributions snapshot)
 // and provider zones (contributions + publish instructions).
 func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
-	zd, ok := tdns.Zones.Get(zone)
+	zd, ok := Zones.Get(zone)
 	if !ok {
 		return "", fmt.Errorf("zone %q not found", zone)
 	}
@@ -704,11 +704,11 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 		for senderID, ownerMap := range zoneContribs {
 			zd.MP.AgentContributions[senderID] = ownerMap
 		}
-		RebuildCombinerData(zd)
+		RebuildCombinerData(zd.ZoneData)
 		parts = append(parts, fmt.Sprintf("loaded contributions from %d agent(s)", len(zoneContribs)))
 	} else {
 		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
-		RebuildCombinerData(zd)
+		RebuildCombinerData(zd.ZoneData)
 		parts = append(parts, "no contributions in snapshot")
 	}
 
@@ -740,7 +740,7 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 						rr.Header().Name = ownerName
 						parsedRRs = append(parsedRRs, rr)
 					}
-					_, _, changed, replErr := replaceCombinerDataByRRtypeLocked(zd, senderID, ownerName, dns.TypeKEY, parsedRRs)
+					_, _, changed, replErr := replaceCombinerDataByRRtypeLocked(zd.ZoneData, senderID, ownerName, dns.TypeKEY, parsedRRs)
 					if replErr != nil {
 						lgCombiner.Warn("reapply: failed to replace _signal KEY", "sender", senderID, "owner", ownerName, "err", replErr)
 					} else if changed {
@@ -774,7 +774,7 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 					}
 					parsedRRs = append(parsedRRs, rr)
 				}
-				_, _, changed, replErr := replaceCombinerDataByRRtypeLocked(zd, senderID, zone, dns.TypeKEY, parsedRRs)
+				_, _, changed, replErr := replaceCombinerDataByRRtypeLocked(zd.ZoneData, senderID, zone, dns.TypeKEY, parsedRRs)
 				if replErr != nil {
 					lgCombiner.Warn("reapply: failed to replace at-apex KEY", "sender", senderID, "err", replErr)
 				} else if changed {

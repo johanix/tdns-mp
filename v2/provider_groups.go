@@ -58,7 +58,7 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 	}
 	groupMap := make(map[string]*zoneGroup)
 
-	for zname, zd := range tdns.Zones.Items() {
+	for zname, zd := range Zones.Items() {
 		if !zd.Ready {
 			continue
 		}

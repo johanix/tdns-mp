@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -330,7 +329,7 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	// Check if we have this zone
-	zd, exists := tdns.Zones.Get(string(ahp.Zone))
+	zd, exists := Zones.Get(string(ahp.Zone))
 	if !exists {
 		lgAgent.Warn("unknown zone in HELLO, may be a timing issue", "zone", ahp.Zone)
 		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil

@@ -179,7 +179,7 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 
 		// Check if this is a multi-provider zone
 		targetState := tdns.DnskeyStateRemoved
-		zd, exists := tdns.Zones.Get(key.ZoneName)
+		zd, exists := Zones.Get(key.ZoneName)
 		if exists && zd.Options[tdns.OptMultiProvider] {
 			targetState = tdns.DnskeyStateMpremove
 		}
@@ -205,7 +205,7 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 // required and no keys are in the pipeline (published or mpdist), new keys
 // are generated via GenerateAndStageKey.
 func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKskCount int) {
-	for zoneName, zd := range tdns.Zones.Items() {
+	for zoneName, zd := range Zones.Items() {
 		// Only process zones that do signing
 		if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
 			continue
@@ -213,7 +213,7 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 
 		// Skip multi-provider zones where we are not a signer
 		if zd.Options[tdns.OptMultiProvider] {
-			shouldSign, _ := weAreASigner(zd, conf.Config.MultiProvider)
+			shouldSign, _ := weAreASigner(zd.ZoneData, conf.Config.MultiProvider)
 			if !shouldSign {
 				continue
 			}
@@ -294,14 +294,14 @@ func triggerResign(conf *Config, zoneName string) {
 		return
 	}
 
-	zd, exists := tdns.Zones.Get(zoneName)
+	zd, exists := Zones.Get(zoneName)
 	if !exists {
 		lgSigner.Warn("KeyStateWorker: zone not found for re-sign trigger", "zone", zoneName)
 		return
 	}
 
 	select {
-	case conf.Config.Internal.ResignQ <- zd:
+	case conf.Config.Internal.ResignQ <- zd.ZoneData:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
 	default:
 		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign will happen on next cycle", "zone", zoneName)

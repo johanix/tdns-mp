@@ -151,9 +151,9 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			// Manual approval gate: if zone has mp-manual-approval, keep the
 			// edit pending for operator review — unless it's a no-op.
-			if zd, exists := tdns.Zones.Get(dns.Fqdn(zone)); exists && zd.Options[tdns.OptMPManualApproval] {
+			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[tdns.OptMPManualApproval] {
 				// Check for no-op
-				noOp := IsNoOpOperations(zd, senderID, msg.Operations)
+				noOp := IsNoOpOperations(zd.ZoneData, senderID, msg.Operations)
 				if noOp {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)
@@ -269,7 +269,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// for the next periodic SOA refresh.
 			// Run async to avoid blocking the message handler on network I/O.
 			if resp.Status != "error" {
-				if zd, ok := tdns.Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
+				if zd, ok := Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
 					go zd.NotifyDownstreams()
 				}
 			}
@@ -351,7 +351,7 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 // them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
 // when an RFI EDITS is received.
 func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
-	zd, exists := tdns.Zones.Get(dns.Fqdn(zone))
+	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
 		return

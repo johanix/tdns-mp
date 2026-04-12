@@ -32,7 +32,7 @@ func (conf *Config) APImplist() func(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		for item := range tdns.Zones.IterBuffered() {
+		for item := range Zones.IterBuffered() {
 			zname := item.Key
 			zd := item.Val
 			if !zd.Options[tdns.OptMultiProvider] {

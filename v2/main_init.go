@@ -73,7 +73,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
 	// not during ParseZones.
 	resignQ := conf.Config.Internal.ResignQ
-	conf.ForEachMPZone(func(zd *tdns.ZoneData) {
+	conf.ForEachMPZone(func(zd *MPZoneData) {
 		zd.EnsureMP()
 		zd.Lock()
 		if zd.MP.MPdata != nil {

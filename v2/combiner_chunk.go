@@ -132,7 +132,7 @@ func findProviderZoneForRequest(req *CombinerSyncRequest) (string, error) {
 
 	best := ""
 	bestLabels := 0
-	tdns.Zones.IterCb(func(zonename string, zd *tdns.ZoneData) {
+	Zones.IterCb(func(zonename string, zd *MPZoneData) {
 		labels := dns.CountLabel(zonename)
 		if labels <= bestLabels {
 			return
@@ -212,7 +212,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		zonename = dns.Fqdn(req.Zone)
 		req.Zone = zonename
 	}
-	zd, exists := tdns.Zones.Get(zonename)
+	zd, exists := Zones.Get(zonename)
 	if !exists {
 		lgCombiner.Error("zone not found", "zone", req.Zone, "sender", req.SenderID)
 		resp.Status = "error"
@@ -221,7 +221,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	if req.ZoneClass != "provider" {
-		if err := checkMPauthorization(zd); err != nil {
+		if err := checkMPauthorization(zd.ZoneData); err != nil {
 			lgCombiner.Warn("rejecting contribution", "zone", req.Zone, "sender", req.SenderID, "reason", err)
 			resp.Status = "error"
 			resp.Message = err.Error()
@@ -244,16 +244,16 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	if len(req.Operations) > 0 {
-		resp = combinerProcessOperations(req, zd, zonename, protectedNamespaces, localAgents)
+		resp = combinerProcessOperations(req, zd.ZoneData, zonename, protectedNamespaces, localAgents)
 		if resp.Status != "error" {
 			if req.Publish != nil {
-				combinerApplyPublishInstruction(req, zd, hdb)
+				combinerApplyPublishInstruction(req, zd.ZoneData, hdb)
 			}
-			combinerResyncSignalKeys(req.SenderID, zonename, zd, hdb)
+			combinerResyncSignalKeys(req.SenderID, zonename, zd.ZoneData, hdb)
 			if resp.DataChanged {
 				nsChanged, kskChanged := detectDelegationChanges(resp)
 				if nsChanged || kskChanged {
-					go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd, nsChanged, kskChanged)
+					go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd.ZoneData, nsChanged, kskChanged)
 				}
 			}
 		}
@@ -261,8 +261,8 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	if req.Publish != nil {
-		combinerApplyPublishInstruction(req, zd, hdb)
-		combinerResyncSignalKeys(req.SenderID, zonename, zd, hdb)
+		combinerApplyPublishInstruction(req, zd.ZoneData, hdb)
+		combinerResyncSignalKeys(req.SenderID, zonename, zd.ZoneData, hdb)
 		resp.Status = "ok"
 		resp.Message = fmt.Sprintf("publish instruction applied for zone %q (no data operations)", req.Zone)
 		return resp
@@ -532,7 +532,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		lgCombiner.Debug("no provider zone found for _signal owner", "owner", ownerName, "childZone", childZone, "ns", nsTarget)
 		return
 	}
-	zd, ok := tdns.Zones.Get(providerZone)
+	zd, ok := Zones.Get(providerZone)
 	if !ok {
 		lgCombiner.Warn("provider zone not loaded", "zone", providerZone, "owner", ownerName)
 		return
@@ -549,7 +549,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		parsedRRs = append(parsedRRs, rr)
 	}
 
-	_, _, changed, err := ReplaceCombinerDataByRRtype(zd, senderID, ownerName, dns.TypeKEY, parsedRRs)
+	_, _, changed, err := ReplaceCombinerDataByRRtype(zd.ZoneData, senderID, ownerName, dns.TypeKEY, parsedRRs)
 	if err != nil {
 		lgCombiner.Error("failed to apply _signal KEY to provider zone", "zone", providerZone, "owner", ownerName, "err", err)
 		return

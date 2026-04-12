@@ -46,7 +46,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			}
 		}()
 
-		var zd *tdns.ZoneData
+		var zd *MPZoneData
 		var exist bool
 		noZoneCommands := map[string]bool{
 			"config": true, "hsync-agentstatus": true,
@@ -55,7 +55,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
-			zd, exist = tdns.Zones.Get(string(amp.Zone))
+			zd, exist = Zones.Get(string(amp.Zone))
 			if !exist {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", amp.Zone)
@@ -290,7 +290,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
 
 		case "refresh-keys":
-			RequestAndWaitForKeyInventory(zd, r.Context(), conf.InternalMp.MPTransport)
+			RequestAndWaitForKeyInventory(zd.ZoneData, r.Context(), conf.InternalMp.MPTransport)
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
@@ -303,7 +303,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 					}
 				}
 				// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
-				changed, dskeyStatus, err := LocalDnskeysFromKeystate(zd)
+				changed, dskeyStatus, err := LocalDnskeysFromKeystate(zd.ZoneData)
 				if err != nil {
 					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
 				}
@@ -311,7 +311,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 					zd.SyncQ <- tdns.SyncRequest{
 						Command:      "SYNC-DNSKEY-RRSET",
 						ZoneName:     tdns.ZoneName(zd.ZoneName),
-						ZoneData:     zd,
+						ZoneData:     zd.ZoneData,
 						DnskeyStatus: dskeyStatus,
 					}
 				}
@@ -374,7 +374,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			status := lem.GetParentSyncStatus(amp.Zone, zd, hdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
+			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -695,7 +695,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				// Include per-zone KEYSTATE health status
 				ksStatus := make(map[ZoneName]KeystateInfo)
 				for zone := range response.ZDR {
-					if zd, exists := tdns.Zones.Get(string(zone)); exists {
+					if zd, exists := Zones.Get(string(zone)); exists {
 						ksStatus[zone] = KeystateInfo{
 							OK:        zd.GetKeystateOK(),
 							Error:     zd.GetKeystateError(),
@@ -715,7 +715,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "zone is required for show-key-inventory"
 				return
 			}
-			zd, exists := tdns.Zones.Get(string(amp.Zone))
+			zd, exists := Zones.Get(string(amp.Zone))
 			if !exists {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("zone %q not found", amp.Zone)
@@ -821,7 +821,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			if zone != "" {
 				// Single zone
-				zd, exists := tdns.Zones.Get(string(zone))
+				zd, exists := Zones.Get(string(zone))
 				if !exists {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
@@ -847,7 +847,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 			} else {
 				// All zones
-				for _, zd := range tdns.Zones.Items() {
+				for _, zd := range Zones.Items() {
 					if zd.MP != nil && zd.MP.CombinerData != nil {
 						zoneData := make(map[string]map[string][]string)
 						for item := range zd.MP.CombinerData.IterBuffered() {

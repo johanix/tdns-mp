@@ -123,22 +123,22 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	if hasCombiner || hasSigner {
 		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.InternalMp.MPZoneNames), "zones", conf.InternalMp.MPZoneNames)
 		for _, zname := range conf.InternalMp.MPZoneNames {
-			zd, ok := tdns.Zones.Get(zname)
+			zd, ok := Zones.Get(zname)
 			if !ok || zd == nil {
 				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
 				continue
 			}
 			if hasCombiner {
 				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
-				RequestAndWaitForEdits(zd, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs, conf.InternalMp.ZoneDataRepo)
+				RequestAndWaitForEdits(zd.ZoneData, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs, conf.InternalMp.ZoneDataRepo)
 			}
 			weAreSigner := zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.WeAreSigner
 			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner
 			if hasSigner && !notASigner {
 				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname, "weAreSigner", weAreSigner)
-				RequestAndWaitForKeyInventory(zd, ctx, conf.InternalMp.MPTransport)
+				RequestAndWaitForKeyInventory(zd.ZoneData, ctx, conf.InternalMp.MPTransport)
 
-				changed, ds, err := LocalDnskeysFromKeystate(zd)
+				changed, ds, err := LocalDnskeysFromKeystate(zd.ZoneData)
 				if err != nil {
 					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
 				} else if changed && ds != nil {
@@ -217,7 +217,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 							skipCombiner := synchedDataUpdate.SkipCombiner
 							if !skipCombiner {
-								if zd, ok := tdns.Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[tdns.OptMPDisallowEdits] {
+								if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[tdns.OptMPDisallowEdits] {
 									lgEngine.Info("zone is signed but we are not a signer, skipping combiner", "zone", synchedDataUpdate.Zone)
 									skipCombiner = true
 								}
@@ -318,7 +318,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					if change {
 						// Check if edits are disallowed for this zone (signed, not a signer)
 						remoteSkipCombiner := false
-						if zd, ok := tdns.Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[tdns.OptMPDisallowEdits] {
+						if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[tdns.OptMPDisallowEdits] {
 							remoteSkipCombiner = true
 						}
 
@@ -585,7 +585,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// buildKeyStates extracts keytag→state from the signer's KEYSTATE inventory.
 				buildKeyStates := func(zone ZoneName) map[uint16]string {
 					ks := make(map[uint16]string)
-					if zd, exists := tdns.Zones.Get(string(zone)); exists {
+					if zd, exists := Zones.Get(string(zone)); exists {
 						if inv := zd.GetLastKeyInventory(); inv != nil {
 							for _, entry := range inv.Inventory {
 								ks[entry.KeyTag] = strings.ToUpper(entry.State)
@@ -641,10 +641,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// 0. Pull contributions from combiner (RFI EDITS).
 				// This brings back all agents contributions, including our own,
 				// ensuring the SDE is in sync with the combiner state.
-				zd, zdExists := tdns.Zones.Get(string(sdcmd.Zone))
+				zd, zdExists := Zones.Get(string(sdcmd.Zone))
 				if zdExists && zd != nil {
 					lgEngine.Info("resync: pulling contributions from combiner", "zone", sdcmd.Zone)
-					RequestAndWaitForEdits(zd, ctx, tm, conf.InternalMp.MsgQs, zdr)
+					RequestAndWaitForEdits(zd.ZoneData, ctx, tm, conf.InternalMp.MsgQs, zdr)
 				}
 
 				myAgentId := AgentId(conf.Config.MultiProvider.Identity)

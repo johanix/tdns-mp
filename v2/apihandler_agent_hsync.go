@@ -50,7 +50,7 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 		switch amp.Command {
 		case "hsync-zonestatus":
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
-			zd, exist := tdns.Zones.Get(string(amp.Zone))
+			zd, exist := Zones.Get(string(amp.Zone))
 			if !exist {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", amp.Zone)

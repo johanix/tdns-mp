@@ -323,7 +323,7 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 	} else {
 		// Config-defined zone — register OnFirstLoad callbacks (zone not loaded yet)
-		zdp, ok := tdns.Zones.Get(conf.Config.MultiProvider.Identity)
+		zdp, ok := Zones.Get(conf.Config.MultiProvider.Identity)
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", conf.Config.MultiProvider.Identity)
 		}

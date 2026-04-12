@@ -107,7 +107,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 	// Wire configured peers counter — elections require ALL configured peers.
 	lem.SetConfiguredPeersFunc(func(zone ZoneName) int {
-		zd, exists := tdns.Zones.Get(string(zone))
+		zd, exists := Zones.Get(string(zone))
 		if !exists || zd == nil {
 			return 0
 		}
@@ -134,7 +134,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// Attach OnFirstLoad callbacks to zone stubs.
 	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
 	for _, zoneName := range conf.Config.Internal.AllZones {
-		zd, exists := tdns.Zones.Get(zoneName)
+		zd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
 		}
@@ -193,7 +193,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// When the local agent wins leader election: ensure we have a SIG(0) key,
 	// then publish KEY to combiner and sync to remote agents.
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
-		zd, ok := tdns.Zones.Get(string(zone))
+		zd, ok := Zones.Get(string(zone))
 		if !ok || zd == nil {
 			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
 		}
