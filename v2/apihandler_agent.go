@@ -495,7 +495,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.Config.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
