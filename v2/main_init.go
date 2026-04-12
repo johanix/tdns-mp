@@ -158,7 +158,6 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 	// Initialize distribution cache for outbound tracking
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Create TransportManager for signer<->agent communication
 	chunkMode := strings.TrimSpace(mp.ChunkMode)
@@ -313,7 +312,6 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	// Initialize distribution cache
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Create TransportManager
 	var combinerPayloadCrypto *transport.PayloadCrypto
@@ -458,7 +456,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Initialize distribution cache
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Chunk mode configuration
 	controlZone := mp.Dns.ControlZone
