@@ -48,7 +48,9 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 			})
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
 			func(zd *tdns.ZoneData) {
-				MPPostRefresh(zd, tm, msgQs)
+				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
+					mpzd.PostRefresh(tm, msgQs)
+				}
 			})
 	}
 }

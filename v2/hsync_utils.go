@@ -1135,10 +1135,11 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 	zd.MP.RefreshAnalysis = analysis
 }
 
-// MPPostRefresh runs after the hard flip for all MP roles.
+// PostRefresh runs after the hard flip for all MP roles.
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
-func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
+func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
+	zd := mpzd.ZoneData
 	if zd.MP == nil || zd.MP.RefreshAnalysis == nil {
 		return
 	}
@@ -1162,7 +1163,7 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 			if zd.Options[tdns.OptMultiProvider] {
 				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", zd.ZoneName)
-				zd.SyncQ <- tdns.SyncRequest{
+				mpzd.SyncQ <- tdns.SyncRequest{
 					Command:      "SYNC-DNSKEY-RRSET",
 					ZoneName:     tdns.ZoneName(zd.ZoneName),
 					ZoneData:     zd,
@@ -1179,7 +1180,7 @@ func MPPostRefresh(zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) {
 		switch tdns.Globals.App.Type {
 		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
-			zd.SyncQ <- tdns.SyncRequest{
+			mpzd.SyncQ <- tdns.SyncRequest{
 				Command:    "HSYNC-UPDATE",
 				ZoneName:   tdns.ZoneName(zd.ZoneName),
 				ZoneData:   zd,

@@ -17,8 +17,12 @@ import (
 // MPZoneData embeds *tdns.ZoneData. All core ZoneData fields and
 // methods are accessible via Go promotion. MP-specific fields
 // (zd.MP.*) work unchanged via the embedded pointer.
+//
+// SyncQ is the MP sync request channel. It lives here (not on
+// tdns.ZoneData) because it is only used by tdns-mp code.
 type MPZoneData struct {
 	*tdns.ZoneData
+	SyncQ chan SyncRequest
 }
 
 // MPZoneTuple is the iteration element returned by IterBuffered.

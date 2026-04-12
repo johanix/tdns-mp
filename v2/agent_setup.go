@@ -51,7 +51,10 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
 	zd.Options[tdns.OptAllowUpdates] = true
-	zd.SyncQ = conf.Config.Internal.SyncQ
+	// Wire SyncQ on the MPZoneData wrapper (SyncQ moved from tdns.ZoneData to MPZoneData)
+	if mpzd, ok := Zones.Get(zonename); ok {
+		mpzd.SyncQ = conf.InternalMp.SyncQ
+	}
 
 	// Check for local notify configuration and set downstream targets
 	if len(conf.Config.MultiProvider.Local.Notify) > 0 {
