@@ -27,7 +27,7 @@ import (
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Register MP zone option handler before ParseZones runs inside MainInit.
 	tdns.RegisterZoneOptionHandler(tdns.OptMultiProvider, func(zname string, options map[tdns.ZoneOption]bool) {
-		conf.Config.Internal.MPZoneNames = append(conf.Config.Internal.MPZoneNames, zname)
+		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, zname)
 	})
 
 	// Register MP zone option validators before ParseZones runs.
@@ -63,6 +63,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	// Register MP config validators to run during tdns's ValidateConfig.
 	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
+
+	// Reset MPZoneNames before ParseZones re-collects them via the callback above
+	conf.InternalMp.MPZoneNames = nil
 
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
@@ -201,7 +204,6 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 		return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
 	}
 	conf.InternalMp.CombinerState = signerState
-	conf.Config.Internal.CombinerState = signerState // dual-write
 
 	// Wire chunk handler into TM
 	tm.ChunkHandler = signerState.ChunkHandler()
@@ -304,7 +306,6 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	}
 	combinerState.ProtectedNamespaces = mp.ProtectedNamespaces
 	conf.InternalMp.CombinerState = combinerState
-	conf.Config.Internal.CombinerState = combinerState // dual-write
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
@@ -425,11 +426,9 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
-	// Wire shared channels and data from tdns: these are created in tdns
-	// MainInit/ParseZones and must be shared so that tdns refresh callbacks
-	// and HsyncEngine/SDE operate on the same state.
-	conf.InternalMp.SyncQ = conf.Config.Internal.SyncQ
-	conf.InternalMp.MPZoneNames = conf.Config.Internal.MPZoneNames
+	// Create SyncQ locally (was previously shared from tdns, now owned by tdns-mp)
+	conf.InternalMp.SyncQ = make(chan SyncRequest, 10)
+	// MPZoneNames is populated directly by the OptMultiProvider callback above
 
 	// Initialize CombinerState (agent-side: just an ErrorJournal, no chunk handler)
 	combinerID := "combiner"
@@ -439,7 +438,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	conf.InternalMp.CombinerState = &tdns.CombinerState{
 		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
 	}
-	conf.Config.Internal.CombinerState = conf.InternalMp.CombinerState // dual-write
 
 	// Initialize HsyncDB and HSYNC database tables
 	kdb := conf.Config.Internal.KeyDB
@@ -546,7 +544,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	})
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
-	conf.Config.Internal.TransportManager = tm.TransportManager // dual-write
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.MPTransport = tm
 

@@ -33,7 +33,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 	if conf.InternalMp.refreshRegistered == nil {
 		conf.InternalMp.refreshRegistered = make(map[string]bool)
 	}
-	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		if conf.InternalMp.refreshRegistered[zoneName] {
 			continue
 		}
@@ -64,7 +64,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 // conf.Config.MainInit returns). OnFirstLoad callbacks attached
 // here will fire later when RefreshEngine processes initial loads.
 func (conf *Config) ForEachMPZone(fn func(zd *MPZoneData)) {
-	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		zd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
@@ -96,7 +96,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		allContribs = nil
 	}
 
-	for _, zoneName := range conf.Config.Internal.MPZoneNames {
+	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
 			continue
 		}
