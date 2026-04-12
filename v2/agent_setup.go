@@ -51,8 +51,7 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
 	zd.Options[tdns.OptAllowUpdates] = true
-	// TODO: zd.SyncQ assignment skipped — tdns.SyncRequest vs local SyncRequest type mismatch.
-	// This will be resolved when SyncRequest becomes an alias or when zd.SyncQ is removed from tdns.
+	zd.SyncQ = conf.Config.Internal.SyncQ
 
 	// Check for local notify configuration and set downstream targets
 	if len(conf.Config.MultiProvider.Local.Notify) > 0 {

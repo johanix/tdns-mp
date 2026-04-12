@@ -380,7 +380,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// Setup agent identity and publish transport records. Must run after
 	// ZoneUpdaterEngine is started, because PublishUriRR/PublishAddrRR/etc.
 	// send on KeyDB.UpdateQ and block until a consumer drains it.
-	if err := conf.Config.SetupAgent(conf.Config.Internal.AllZones); err != nil {
+	if err := conf.SetupAgent(conf.Config.Internal.AllZones); err != nil {
 		return fmt.Errorf("SetupAgent: %w", err)
 	}
 
