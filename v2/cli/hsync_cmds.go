@@ -28,6 +28,8 @@ var (
 	hsyncTransport string
 	hsyncPeerID    string
 	hsyncLimit     int
+	hsyncAgentID   string
+	hsyncResolver  string
 )
 
 // hsyncCmd is the parent for all HSYNC state-reporting subcommands
@@ -342,6 +344,159 @@ var hsyncMetricsCmd = &cobra.Command{
 	},
 }
 
+var hsyncAgentStatusCmd = &cobra.Command{
+	Use:   "agentstatus",
+	Short: "Show HSYNC status for an agent",
+	Run: func(cmd *cobra.Command, args []string) {
+		tdns.Globals.AgentId = tdns.AgentId(hsyncAgentID)
+		tdnscli.PrepArgs("agentid")
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "hsync-agentstatus",
+			AgentId: tdns.AgentId(tdns.Globals.AgentId),
+		}, "hsync")
+		if err != nil {
+			log.Fatalf("Error sending agent management command: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error response from agent %q: %s",
+				tdns.Globals.AgentId, amr.ErrorMsg)
+		}
+
+		if len(amr.Agents) > 0 {
+			for _, agent := range amr.Agents {
+				if err := PrintHsyncAgent(agent, true); err != nil {
+					log.Printf("Error printing agent: %v", err)
+				}
+				fmt.Println()
+			}
+		} else {
+			fmt.Printf("\nNo remote agent with identity %q found in the AgentRegistry\n",
+				tdns.Globals.AgentId)
+		}
+	},
+}
+
+var hsyncLocateCmd = &cobra.Command{
+	Use:   "locate <agent-identity>",
+	Short: "Locate and attempt to contact a remote agent",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		tdnscli.PrepArgs("zonename")
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "hsync-locate",
+			AgentId: tdns.AgentId(dns.Fqdn(args[0])),
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+		}, "hsync")
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("API error: %s", amr.ErrorMsg)
+		}
+
+		if len(amr.Agents) > 0 {
+			agent := amr.Agents[0]
+			fmt.Printf("Located agent: %s\n", agent.Identity)
+			if err := PrintHsyncAgent(agent, false); err != nil {
+				log.Printf("Error printing agent: %v", err)
+			}
+		}
+	},
+}
+
+var hsyncSendHelloCmd = &cobra.Command{
+	Use:   "send-hello",
+	Short: "Send a hello message to a remote agent",
+	Long:  `Send a hello message to a remote agent via the running agent server.`,
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		agentIdentity := tdns.AgentId(dns.Fqdn(args[0]))
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "hsync-send-hello",
+			AgentId: agentIdentity,
+		}, "hsync")
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			fmt.Printf("Error: %s\n", amr.ErrorMsg)
+			return
+		}
+
+		fmt.Printf("HELLO response from %s:\n", agentIdentity)
+		fmt.Printf("  %s\n", amr.Msg)
+	},
+}
+
+var hsyncQueryCmd = &cobra.Command{
+	Use:   "query",
+	Short: "Query HSYNC RRset for a zone via DNS",
+	Run: func(cmd *cobra.Command, args []string) {
+		tdnscli.PrepArgs("zonename")
+
+		zonename := dns.Fqdn(string(tdns.Globals.Zonename))
+
+		resolver := hsyncResolver
+		if resolver == "" {
+			resolver = "8.8.8.8:53"
+		}
+
+		fmt.Printf("Querying HSYNC3 records for zone %s via %s\n\n",
+			zonename, resolver)
+
+		c := new(dns.Client)
+		c.Timeout = 5 * time.Second
+
+		m := new(dns.Msg)
+		m.SetQuestion(zonename, core.TypeHSYNC3)
+		m.SetEdns0(4096, true)
+
+		r, rtt, err := c.Exchange(m, resolver)
+		if err != nil {
+			log.Fatalf("DNS query failed: %v", err)
+		}
+
+		fmt.Printf("Query completed in %v\n", rtt)
+		fmt.Printf("Response code: %s\n", dns.RcodeToString[r.Rcode])
+		fmt.Printf("Answer section (%d records):\n\n", len(r.Answer))
+
+		if len(r.Answer) == 0 {
+			fmt.Println("No HSYNC3 records found")
+			return
+		}
+
+		var lines []string
+		if tdns.Globals.ShowHeaders {
+			lines = append(lines,
+				"Owner|TTL|Class|Type|Label|Identity|Upstream")
+		}
+		for _, rr := range r.Answer {
+			privRR, ok := rr.(*dns.PrivateRR)
+			if !ok {
+				fmt.Printf("  %s (not a PrivateRR)\n", rr.String())
+				continue
+			}
+			hsync3, ok := privRR.Data.(*core.HSYNC3)
+			if !ok {
+				fmt.Printf("  %s (not HSYNC3 data)\n", rr.String())
+				continue
+			}
+			lines = append(lines,
+				fmt.Sprintf("%s|%d|IN|HSYNC3|%s|%s|%s",
+					rr.Header().Name, rr.Header().Ttl,
+					hsync3.Label, hsync3.Identity,
+					hsync3.Upstream))
+		}
+		fmt.Println(columnize.SimpleFormat(lines))
+	},
+}
+
 // PrintHsyncRRs displays HSYNC3 RRs in tabular form, marking the local agent.
 func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
 	fmt.Printf("%s  HSYNC RRset:\n", tdns.Globals.Zonename)
@@ -424,9 +579,15 @@ func init() {
 	hsyncCmd.AddCommand(hsyncConfirmationsCmd)
 	hsyncCmd.AddCommand(hsyncTransportEventsCmd)
 	hsyncCmd.AddCommand(hsyncMetricsCmd)
+	hsyncCmd.AddCommand(hsyncAgentStatusCmd)
+	hsyncCmd.AddCommand(hsyncLocateCmd)
+	hsyncCmd.AddCommand(hsyncSendHelloCmd)
+	hsyncCmd.AddCommand(hsyncQueryCmd)
 
 	hsyncZoneStatusCmd.Flags().StringVarP(&hsyncTransport, "transport", "T", "", "Transport to show, default both api and dns")
 	hsyncPeerStatusCmd.Flags().StringVarP(&hsyncPeerID, "peer", "p", "", "Filter by peer ID")
 	hsyncTransportEventsCmd.Flags().StringVarP(&hsyncPeerID, "peer", "p", "", "Filter by peer ID")
 	hsyncTransportEventsCmd.Flags().IntVarP(&hsyncLimit, "limit", "n", 100, "Maximum number of events to show")
+	hsyncAgentStatusCmd.Flags().StringVarP(&hsyncAgentID, "agentid", "", "", "Remote agent identity to show")
+	hsyncQueryCmd.Flags().StringVarP(&hsyncResolver, "imr", "", "", "Resolver address for DNS query (e.g. 8.8.8.8:53)")
 }

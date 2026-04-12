@@ -50,7 +50,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 		var exist bool
 		noZoneCommands := map[string]bool{
 			"config": true, "hsync-agentstatus": true,
-			"discover": true, "hsync-locate": true,
+			"discover": true, "hsync-locate": true, "hsync-send-hello": true,
 			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true,
 		}
 		if !noZoneCommands[amp.Command] {
@@ -288,6 +288,43 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
+
+		case "hsync-send-hello":
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "No agent identity specified"
+				return
+			}
+
+			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
+
+			agent, exists := conf.InternalMp.AgentRegistry.S.Get(amp.AgentId)
+			if !exists || agent.State < AgentStateKnown {
+				// Try discovery first
+				conf.InternalMp.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("agent %s not yet discovered; discovery started — retry after a few seconds", amp.AgentId)
+				return
+			}
+
+			myIdentity := AgentId(conf.Config.MultiProvider.Identity)
+			helloMsg := &AgentHelloPost{
+				MessageType: AgentMsgHello,
+				MyIdentity:  myIdentity,
+			}
+
+			ahr, err := agent.SendApiHello(helloMsg)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("HELLO to %s failed: %v", amp.AgentId, err)
+				return
+			}
+			if ahr.Error {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("HELLO rejected by %s: %s", amp.AgentId, ahr.ErrorMsg)
+				return
+			}
+			resp.Msg = fmt.Sprintf("HELLO to %s succeeded: %s (time: %s)", amp.AgentId, ahr.Msg, ahr.Time.Format(time.RFC3339))
 
 		case "refresh-keys":
 			RequestAndWaitForKeyInventory(zd.ZoneData, r.Context(), conf.InternalMp.MPTransport)
