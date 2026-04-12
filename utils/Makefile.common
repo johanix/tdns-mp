@@ -1,6 +1,6 @@
 VERSION=`cat ../../VERSION`
-BRANCH:=`git rev-parse --abbrev-ref HEAD`
-COMMIT:=`git describe --dirty=+WiP --always`
+BRANCH:=`git rev-parse --abbrev-ref HEAD 2>/dev/null || echo nogit`
+COMMIT:=`git describe --dirty=+WiP --always 2>/dev/null || echo unknown`
 APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
 GOFLAGS:=-v
@@ -13,15 +13,17 @@ ${PROG}: build
 
 all: $(PROG)
 
-build:
+version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
+
+build:
+	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
 	$(GO) build $(GOFLAGS) -o ${PROG}
 
 netbsd:
-	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
 test:
 	$(GO) test -v -cover
 
-.PHONY: build clean
+.PHONY: build version clean
