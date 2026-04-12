@@ -1,7 +1,8 @@
 # MPZoneData Experiment: Embedded ZoneData Wrapper
 
 **Date**: 2026-04-12
-**Status**: Experiment (separate branch)
+**Status**: Experiment complete — all steps implemented
+**Branch**: `mpzonedata-test-1` (both tdns and tdns-mp repos)
 
 ## Motivation
 
@@ -287,70 +288,65 @@ directly (no `EnsureMP` needed).
 
 ## Experiment Steps
 
-### Step 1: Define types and accessor
+### Step 1: Define types and accessor — DONE
 
-Create `tdns-mp/v2/mpzonedata.go`:
+Created `tdns-mp/v2/mpzonedata.go`:
 - `MPZoneData` struct (embedding `*tdns.ZoneData` only)
 - `MPZones` struct with `Get`, `Items`, `Keys`,
   `IterBuffered`, `IterCb`, `Set`, `Invalidate`
+- `getOrCreate` internal helper (lazy cache population)
+- `MPZoneTuple` for `IterBuffered` return type
 - Package-level `var Zones = &MPZones{...}`
 
-### Step 2: Convert Zones.Get call sites (46)
+Commit: `a80827d` — "Add MPZoneData wrapper type and
+MPZones lazy-caching accessor"
 
-Mechanical: change `tdns.Zones.Get(name)` to
-`Zones.Get(name)`. The return type changes from
-`*tdns.ZoneData` to `*MPZoneData`.
+### Step 2: Convert Zones.Get call sites (46) — DONE
 
-Since `MPZoneData` embeds `*tdns.ZoneData`, all
-existing field and method accesses work unchanged:
-- `zd.ZoneName` → `mpzd.ZoneName` (promoted)
-- `zd.MP.CombinerData` → `mpzd.MP.CombinerData` (promoted)
-- `zd.Options[Opt...]` → `mpzd.Options[Opt...]` (promoted)
-- `zd.EnsureMP()` → `mpzd.EnsureMP()` (promoted)
+### Step 3: Convert Items/Keys/Iter call sites (10) — DONE
 
-The only code change per call site is dropping
-`tdns.` and renaming the variable if desired.
+### Step 4: Update callbacks (2) — DONE (no change needed)
 
-Files and approximate counts:
-- apihandler_agent.go (8)
-- apihandler_combiner.go (8)
-- syncheddataengine.go (5)
-- combiner_utils.go (4)
-- combiner_chunk.go (3)
-- config.go (3)
-- hsyncengine.go (3)
-- hsync_utils.go (3)
-- remaining files (9)
+`TMConfig.GetZone` and `MPTransportBridge.getZone` kept
+as `tdns.Zones.Get` / `tdns.Zones.Keys` — these bridge
+to tdns-transport which expects `*tdns.ZoneData`.
 
-### Step 3: Convert Items/Keys/Iter call sites (10)
+Steps 2-4 committed together:
 
-Change `tdns.Zones.Items()` → `Zones.Items()`, etc.
-Same mechanical transformation, different return types.
+Commit: `afcb411` — "Migrate tdns.Zones.Get/Items/Keys/
+Iter* to local Zones accessor"
 
-### Step 4: Update callbacks (2)
+20 files changed, 87 insertions, 88 deletions.
 
-`TMConfig.GetZone` and `MPTransportBridge.getZone`
-currently have type `func(string) (*tdns.ZoneData, bool)`.
-Keep them returning `*tdns.ZoneData` (these bridge to
-tdns-transport code). Callers wrap if they need
-`*MPZoneData`.
+### Implementation notes
+
+Where `*MPZoneData` is passed to functions that still
+expect `*tdns.ZoneData`, extract `.ZoneData` at the
+call site. Examples:
+- `RebuildCombinerData(zd.ZoneData)`
+- `combinerProcessOperations(req, zd.ZoneData, ...)`
+- `conf.Config.Internal.ResignQ <- zd.ZoneData`
+- `tdns.SyncRequest{ZoneData: zd.ZoneData, ...}`
+
+`ForEachMPZone` signature changed from
+`func(zd *tdns.ZoneData)` to `func(zd *MPZoneData)`.
+
+One import removed: `hsync_hello.go` no longer imports
+`tdns/v2` (the `Zones.Get` call was its only use).
 
 ### What is NOT changed in the experiment
 
 - **No field migration**: `zd.MP.Something` stays as-is.
   `ZoneMPExtension` is untouched.
 - **No function signature changes**: functions still take
-  `*tdns.ZoneData` parameters. Only the `Zones.Get()`
-  call sites change. Functions receiving `mpzd` can
-  pass `mpzd.ZoneData` to functions expecting
-  `*tdns.ZoneData`.
+  `*tdns.ZoneData` parameters. Only `Zones.Get()` call
+  sites change. Functions receiving `mpzd` pass
+  `mpzd.ZoneData` to functions expecting `*tdns.ZoneData`.
 - **No EnsureMP removal**: `mpzd.EnsureMP()` works via
   promotion.
 - **No method conversions**: the 23 exported functions
   stay as functions.
-
-This keeps the experiment small (~56 edits) and fully
-reversible.
+- **tdns repo unchanged**: zero modifications to tdns.
 
 ## Follow-up: Migrate zd.MP from tdns to tdns-mp
 
@@ -484,15 +480,18 @@ the migration mechanical (remove `tdns.` prefix).
 
 ## Scale of Change
 
-### Phase 1: Experiment (this branch)
+### Phase 1: Experiment — DONE (`mpzonedata-test-1`)
 
-| What | Count |
-|------|-------|
-| New files | 1 (`mpzonedata.go`) |
+| What | Actual |
+|------|--------|
+| New files | 1 (`mpzonedata.go`, 146 lines) |
 | `tdns.Zones.Get` → `Zones.Get` | 46 |
 | `tdns.Zones.Items/Keys/Iter*` | 10 |
-| Callback types to review | 2 |
-| **Total edits** | **~58** |
+| `.ZoneData` extractions added | ~20 |
+| Closure/callback signatures updated | 3 |
+| Files modified | 20 |
+| Insertions / deletions | 87 / 88 |
+| tdns changes | 0 |
 
 ### Phase 2: Migrate zd.MP (separate project)
 
