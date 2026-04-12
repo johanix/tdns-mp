@@ -368,7 +368,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return tdns.UpdateHandler(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
-		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf.Config)
+		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
 		return tdns.NotifyHandler(ctx, conf.Config)
