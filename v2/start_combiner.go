@@ -67,7 +67,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
 	mp := conf.Config.MultiProvider
 	if mp != nil && len(mp.SyncApi.Addresses.Listen) > 0 {
-		combinerSyncRtr, err := conf.Config.SetupCombinerSyncRouter(ctx)
+		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
 		if err != nil {
 			lgCombiner.Error("failed to set up combiner sync router", "err", err)
 		} else {

@@ -338,7 +338,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
 	})
 
-	syncrtr, err := conf.Config.SetupAgentSyncRouter(ctx)
+	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 	if err != nil {
 		return fmt.Errorf("error setting up agent-to-agent sync router: %v", err)
 	}
