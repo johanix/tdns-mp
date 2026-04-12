@@ -470,7 +470,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkStore tdns.ChunkPayloadStore
+	var chunkStore ChunkPayloadStore
 	var chunkQueryEndpoint string
 	var chunkQueryEndpointInNotify bool
 	if chunkMode == "query" {
@@ -479,9 +479,9 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
 		}
 		chunkQueryEndpointInNotify = (cep == "include")
-		chunkStore = tdns.NewMemChunkPayloadStore(5 * time.Minute)
+		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
 		conf.InternalMp.ChunkPayloadStore = chunkStore
-		if err := tdns.RegisterChunkQueryHandler(chunkStore); err != nil {
+		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
 			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
 		}
 		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)

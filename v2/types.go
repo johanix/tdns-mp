@@ -50,7 +50,7 @@ type OwnerData = tdns.OwnerData
 // Types that stay as aliases until their defining files are copied
 type DistributionCache = tdns.DistributionCache
 type DistributionInfo = tdns.DistributionInfo
-type ChunkPayloadStore = tdns.ChunkPayloadStore
+// ChunkPayloadStore is now defined locally in chunk_store.go
 
 // Internal state types that stay as aliases during dual-write period
 type CombinerState = tdns.CombinerState
