@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-13
 **Feature branch**: `combiner-persistence-sep-1` (both repos)
-**Target branch**: `mp-migration-final-push-1` (both repos)
+**Target branch**: `combiner-persistence-rebase-1` (both repos)
 **Design doc**: `2026-03-31-combiner-persistence-separation.md`
 
 ## Branch Summary
@@ -34,20 +34,24 @@ SyncQ move to MPZoneData.
 | `combiner_chunk.go` | +162 (editPolicy, IGNORED) | ~70 (wrapper→direct) | Medium |
 | `syncheddataengine.go` | +206 (RRState, skip removal) | ~18 (Zones, HsyncDB) | Medium |
 | `combiner_utils.go` | +107 (edit policy) | ~20 (wrapper calls) | Low |
-| `apihandler_agent.go` | +19 (per-RRtype policy) | -547 (CLI migrated out) | **High** |
+| `apihandler_agent.go` | +19 (per-RRtype policy) | -547 (CLI migrated out) | Low |
 | `hsync_transport.go` | +10 (RMQ + callback) | 0 | None |
 | `hsync_utils.go` | +8 (populateMPdata) | ~40 (PostRefresh, MusicSyncQ) | Low |
 | `combiner_msg_handler.go` | +3 | ~26 | Low |
 | `sde_types.go` | +7 (RRStateIgnored) | 0 | None |
 
-### High-risk file: apihandler\_agent.go
+### apihandler\_agent.go (downgraded from High to Low)
 
-The feature branch adds per-RRtype policy checks at
-line 272 (replacing the blanket `OptMPDisallowEdits`
-block). The target branch removed ~547 lines from this
-file (CLI commands migrated to dedicated endpoint
-files). The policy code needs to be placed in whatever
-location now handles the relevant agent commands.
+The feature branch adds per-RRtype policy checks
+replacing the blanket `OptMPDisallowEdits` block.
+The target branch removed ~547 lines (CLI commands
+migrated to `apihandler_agent_distrib.go`,
+`apihandler_agent_hsync.go`, etc.), but the zone
+edit handling (`add-rr`, `del-rr` cases) stayed in
+`apihandler_agent.go`. The `OptMPDisallowEdits`
+check is at line ~101, right where the feature
+branch targets it. Conflict should be minimal —
+surrounding code was removed, not the edit path.
 
 ### Medium-risk files
 
@@ -101,9 +105,10 @@ in different functions. Low conflict risk.
    - Steps 1, 2: bulk of the work. Resolve signature
      changes mechanically (`*HsyncDB`, `Zones.Get`
      returns `*MPZoneData`, etc.).
-   - Step 3: `apihandler_agent.go` is the tricky one.
-     Find where the relevant command handler moved
-     and apply the per-RRtype policy there.
+   - Step 3: `apihandler_agent.go` — the `add-rr`/
+     `del-rr` handler stayed in place (line ~101).
+     Only surrounding CLI code was migrated out.
+     Should resolve cleanly.
    - Steps 4, 5: should be straightforward.
 
 4. Build-verify after each commit.
@@ -113,7 +118,7 @@ in different functions. Low conflict risk.
 
 ## Estimated Effort
 
-Mechanical rebase resolution: ~1-2 hours.
-The `apihandler_agent.go` conflict needs thought
-(finding the new code location), but the policy
-logic itself is unchanged.
+Mechanical rebase resolution: ~1 hour.
+No high-risk files remain — `apihandler_agent.go`
+edit path stayed in place, and the remaining
+conflicts are signature/type updates.
