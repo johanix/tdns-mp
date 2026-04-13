@@ -302,6 +302,8 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 		status = transport.ConfirmFailed
 	case "pending":
 		status = transport.ConfirmPending
+	case "ignored":
+		status = transport.ConfirmIgnored
 	}
 
 	var rejItems []transport.RejectedItemDTO
@@ -322,6 +324,7 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 		AppliedRecords: resp.AppliedRecords,
 		RemovedRecords: resp.RemovedRecords,
 		RejectedItems:  rejItems,
+		IgnoredRecords: resp.IgnoredRecords,
 		Truncated:      false, // No truncation needed when sending as separate CONFIRM NOTIFY
 		Timestamp:      time.Now(),
 	})

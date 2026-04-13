@@ -25,6 +25,80 @@ import (
 	"github.com/miekg/dns"
 )
 
+// editPolicy captures the four gates that determine whether a combiner
+// should apply a given RRtype to the live zone.
+type editPolicy struct {
+	ZoneSigned  bool
+	WeAreSigner bool
+	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
+	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
+}
+
+// canApply returns true if this RRtype should be applied to the live zone.
+func (p *editPolicy) canApply(rrtype uint16) bool {
+	if !p.ZoneSigned {
+		// Unsigned zone: no signing needed
+		switch rrtype {
+		case dns.TypeNS:
+			return p.NSmgmt == core.HsyncNSmgmtAGENT
+		case dns.TypeKEY:
+			return p.ParentSync == core.HsyncParentSyncAgent
+		case dns.TypeDNSKEY:
+			return false // DNSKEY only meaningful for signed zones
+		case dns.TypeCDS, dns.TypeCSYNC:
+			return false // CDS/CSYNC only meaningful for signed zones
+		}
+		return true
+	}
+	// Signed zone: must be a signer to apply anything
+	if !p.WeAreSigner {
+		return false
+	}
+	switch rrtype {
+	case dns.TypeNS:
+		return p.NSmgmt == core.HsyncNSmgmtAGENT
+	case dns.TypeDNSKEY:
+		return true
+	case dns.TypeCDS, dns.TypeCSYNC:
+		return p.ParentSync == core.HsyncParentSyncAgent
+	case dns.TypeKEY:
+		return p.ParentSync == core.HsyncParentSyncAgent
+	}
+	return true
+}
+
+// getEditPolicy extracts the edit policy from zone data and HSYNCPARAM.
+func getEditPolicy(zd *tdns.ZoneData) *editPolicy {
+	p := &editPolicy{
+		NSmgmt:     core.HsyncNSmgmtOWNER,
+		ParentSync: core.HsyncParentSyncOwner,
+	}
+	if zd.MP != nil && zd.MP.MPdata != nil {
+		p.ZoneSigned = zd.MP.MPdata.ZoneSigned
+		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
+	}
+	// Extract NSmgmt and ParentSync from HSYNCPARAM
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return p
+	}
+	hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !exists || len(hpRRset.RRs) == 0 {
+		return p
+	}
+	privRR, ok := hpRRset.RRs[0].(*dns.PrivateRR)
+	if !ok || privRR.Data == nil {
+		return p
+	}
+	hp, ok := privRR.Data.(*core.HSYNCPARAM)
+	if !ok {
+		return p
+	}
+	p.NSmgmt = hp.GetNSmgmt()
+	p.ParentSync = hp.GetParentSync()
+	return p
+}
+
 // detectDelegationChanges inspects a CombinerSyncResponse for changes
 // to NS records or KSK DNSKEYs (flags=257, SEP bit). These changes
 // require parent delegation synchronization.
@@ -161,6 +235,8 @@ func checkMPauthorization(zd *tdns.ZoneData) error {
 		return fmt.Errorf("zone %q: contributions rejected — zone is not configured as a multi-provider zone (OptMultiProvider not set)", zd.ZoneName)
 	}
 	if zd.MP == nil || zd.MP.MPdata == nil {
+		// MPdata is nil despite OptMultiProvider — guards 1-3 failed in
+		// populateMPdata (no HSYNC records or not a recognized provider).
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err != nil {
 			return fmt.Errorf("zone %q: contributions rejected — cannot inspect zone apex: %v", zd.ZoneName, err)
@@ -177,7 +253,7 @@ func checkMPauthorization(zd *tdns.ZoneData) error {
 		if !matched {
 			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", zd.ZoneName, ourIdentities)
 		}
-		return fmt.Errorf("zone %q: rejected (mp-disallow-edits: zone is signed, we are not a signer)", zd.ZoneName)
+		return fmt.Errorf("zone %q: contributions rejected — MP checks failed (unknown reason, guards 1-3 passed but MPdata still nil)", zd.ZoneName)
 	}
 	return nil
 }
@@ -243,8 +319,10 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
+	policy := getEditPolicy(zd.ZoneData)
+
 	if len(req.Operations) > 0 {
-		resp = combinerProcessOperations(req, zd.ZoneData, zonename, protectedNamespaces, localAgents)
+		resp = combinerProcessOperations(req, zd.ZoneData, zonename, protectedNamespaces, localAgents, policy)
 		if resp.Status != "error" {
 			if req.Publish != nil {
 				combinerApplyPublishInstruction(req, zd.ZoneData, hdb)
@@ -744,7 +822,7 @@ func stringSet(slice []string) map[string]bool {
 
 // combinerProcessOperations handles explicit Operations (add, delete, replace)
 // at the combiner level.
-func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zonename string, protectedNamespaces []string, localAgents map[string]bool) *CombinerSyncResponse {
+func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zonename string, protectedNamespaces []string, localAgents map[string]bool, policy *editPolicy) *CombinerSyncResponse {
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
 		Zone:           req.Zone,
@@ -754,6 +832,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 	var appliedRecords []string
 	var removedRecords []string
 	var rejectedItems []RejectedItem
+	var ignoredRecords []string
 	dataChanged := false
 
 	isProvider := req.ZoneClass == "provider"
@@ -785,8 +864,10 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 			continue
 		}
 
-		// DNSKEY policy: only signers may contribute DNSKEYs
-		if rrtype == dns.TypeDNSKEY && !isProvider {
+		// DNSKEY policy: only signers may contribute DNSKEYs.
+		// This is an editing policy — only enforce when we would apply.
+		// Non-signer combiners persist DNSKEYs without this check.
+		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) {
 			reject, reason := checkDNSKEYPolicy(zd, req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
@@ -887,18 +968,29 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 				})
 				continue
 			}
-			if len(applied) > 0 {
-				appliedRecords = append(appliedRecords, applied...)
-			} else if len(parsedRRs) > 0 {
-				if stored, ok := zd.MP.AgentContributions[req.SenderID][zonename][rrtype]; ok {
-					for _, rr := range stored.RRs {
-						appliedRecords = append(appliedRecords, rr.String())
+			if policy.canApply(rrtype) {
+				if len(applied) > 0 {
+					appliedRecords = append(appliedRecords, applied...)
+				} else if len(parsedRRs) > 0 {
+					if stored, ok := zd.MP.AgentContributions[req.SenderID][zonename][rrtype]; ok {
+						for _, rr := range stored.RRs {
+							appliedRecords = append(appliedRecords, rr.String())
+						}
 					}
 				}
-			}
-			removedRecords = append(removedRecords, removed...)
-			if changed {
-				dataChanged = true
+				removedRecords = append(removedRecords, removed...)
+				if changed {
+					dataChanged = true
+				}
+			} else {
+				// Persisted but not applied — route to ignored
+				if len(applied) > 0 {
+					ignoredRecords = append(ignoredRecords, applied...)
+				} else if len(parsedRRs) > 0 {
+					for _, rr := range parsedRRs {
+						ignoredRecords = append(ignoredRecords, rr.String())
+					}
+				}
 			}
 
 		case "add":
@@ -916,11 +1008,17 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 					})
 					continue
 				}
-				if addChanged {
-					dataChanged = true
-				}
-				for _, rrs := range addRecords {
-					appliedRecords = append(appliedRecords, rrs...)
+				if policy.canApply(rrtype) {
+					if addChanged {
+						dataChanged = true
+					}
+					for _, rrs := range addRecords {
+						appliedRecords = append(appliedRecords, rrs...)
+					}
+				} else {
+					for _, rrs := range addRecords {
+						ignoredRecords = append(ignoredRecords, rrs...)
+					}
 				}
 			}
 
@@ -939,10 +1037,15 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 					})
 					continue
 				}
-				if len(removed) > 0 {
-					dataChanged = true
+				if policy.canApply(rrtype) {
+					if len(removed) > 0 {
+						dataChanged = true
+					}
+					removedRecords = append(removedRecords, removed...)
+				} else {
+					// Deletion from persistence store — track as ignored
+					ignoredRecords = append(ignoredRecords, removed...)
 				}
-				removedRecords = append(removedRecords, removed...)
 			}
 
 		default:
@@ -956,13 +1059,22 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 	resp.AppliedRecords = appliedRecords
 	resp.RemovedRecords = removedRecords
 	resp.RejectedItems = rejectedItems
+	resp.IgnoredRecords = ignoredRecords
 
 	totalActions := len(appliedRecords) + len(removedRecords)
-	if len(rejectedItems) == 0 {
+	totalIgnored := len(ignoredRecords)
+	if len(rejectedItems) == 0 && totalIgnored == 0 {
 		resp.Status = "ok"
 		resp.Message = fmt.Sprintf("applied %d added %d removed for zone %q (via operations)",
 			len(appliedRecords), len(removedRecords), req.Zone)
-	} else if totalActions > 0 {
+	} else if totalActions == 0 && totalIgnored > 0 && len(rejectedItems) == 0 {
+		resp.Status = "ignored"
+		resp.Message = fmt.Sprintf("persisted %d records for zone %q (not applied: edit policy)", totalIgnored, req.Zone)
+	} else if totalActions > 0 && totalIgnored > 0 {
+		resp.Status = "partial"
+		resp.Message = fmt.Sprintf("applied %d removed %d ignored %d for zone %q (via operations)",
+			len(appliedRecords), len(removedRecords), totalIgnored, req.Zone)
+	} else if totalActions > 0 && len(rejectedItems) > 0 {
 		resp.Status = "partial"
 		resp.Message = fmt.Sprintf("applied %d added %d removed %d rejected for zone %q (via operations)",
 			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)

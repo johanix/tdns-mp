@@ -877,14 +877,18 @@ func populateMPdata(zd *tdns.ZoneData, mp *tdns.MultiProviderConf) {
 		return
 	}
 
-	// Determine editing rights based on role
+	// Determine editing rights based on role.
+	// Non-signer servers in signed zones get disallow-edits but MPdata is
+	// still populated (allows persistence without editing — sep-1 behavior).
 	switch {
 	case weAreAuditor:
 		// Auditors never edit
 		zd.Options[tdns.OptMPDisallowEdits] = true
 		zd.Options[tdns.OptAllowEdits] = false
 	case zoneSigned && !weShouldSign:
-		// Server in a signed zone but not a signer — cannot edit
+		// Server in a signed zone but not a signer — contributions are
+		// persisted but not applied
+		zd.Logger.Printf("populateMPdata: zone %s: provider %q is not a signer — contributions will be persisted but not applied", zd.ZoneName, ourLabel)
 		zd.Options[tdns.OptMPDisallowEdits] = true
 		zd.Options[tdns.OptAllowEdits] = false
 	default:

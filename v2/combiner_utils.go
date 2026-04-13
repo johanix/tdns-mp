@@ -13,6 +13,16 @@ import (
 	"github.com/miekg/dns"
 )
 
+// combinerShouldApplyEdits returns true if this combiner is allowed to
+// apply contributions to the live zone. Non-signer combiners on signed
+// zones persist data but do not modify the zone.
+func combinerShouldApplyEdits(zd *tdns.ZoneData) bool {
+	if zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner {
+		return false
+	}
+	return true
+}
+
 // Named presets for allowed RRtypes. Hardcoded for safety.
 // "apex-combiner": manages DNSKEY, CDS, CSYNC, NS, KEY at the zone apex.
 // "delegation-combiner": (future) manages NS, DS, GLUE at delegation points.
@@ -131,17 +141,18 @@ func AddCombinerData(zd *tdns.ZoneData, senderID string, data map[string][]core.
 		}
 	}
 
-	modified, err := zd.CombineWithLocalChanges()
-	if err != nil {
-		return changed, err
-	}
-	if modified {
-		zd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", zd.ZoneName, senderID)
-	}
+	if combinerShouldApplyEdits(zd) {
+		modified, err := zd.CombineWithLocalChanges()
+		if err != nil {
+			return changed, err
+		}
+		if modified {
+			zd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", zd.ZoneName, senderID)
+		}
 
-	// Inject combiner signature TXT if configured
-	if InjectSignatureTXT(zd, tdns.Conf.MultiProvider) {
-		zd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", zd.ZoneName)
+		if InjectSignatureTXT(zd, tdns.Conf.MultiProvider) {
+			zd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", zd.ZoneName)
+		}
 	}
 
 	return true, nil
@@ -347,12 +358,14 @@ func RemoveCombinerDataNG(zd *tdns.ZoneData, senderID string, data map[string][]
 		}
 	}
 
-	modified, err := zd.CombineWithLocalChanges()
-	if err != nil {
-		return removedRecords, err
-	}
-	if modified {
-		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+	if combinerShouldApplyEdits(zd) {
+		modified, err := zd.CombineWithLocalChanges()
+		if err != nil {
+			return removedRecords, err
+		}
+		if modified {
+			zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+		}
 	}
 
 	// Clean up rrtypes with no remaining agent contributions
@@ -423,12 +436,14 @@ func RemoveCombinerDataByRRtype(zd *tdns.ZoneData, senderID string, owner string
 		}
 	}
 
-	modified, err := zd.CombineWithLocalChanges()
-	if err != nil {
-		return removedRecords, err
-	}
-	if modified {
-		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+	if combinerShouldApplyEdits(zd) {
+		modified, err := zd.CombineWithLocalChanges()
+		if err != nil {
+			return removedRecords, err
+		}
+		if modified {
+			zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+		}
 	}
 
 	// Clean up if this rrtype has no remaining contributions from any agent
@@ -542,20 +557,28 @@ func replaceCombinerDataByRRtypeLocked(zd *tdns.ZoneData, senderID, owner string
 		}
 	}
 
-	modified, combErr := zd.CombineWithLocalChanges()
-	if combErr != nil {
-		err = combErr
-		return
-	}
-	if modified {
-		zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Local changes applied after replace (from %s)", zd.ZoneName, senderID)
+	// Apply to live zone only if this combiner is allowed to edit.
+	// Non-signer combiners on signed zones persist but don't apply.
+	shouldApply := combinerShouldApplyEdits(zd)
+
+	if shouldApply {
+		modified, combErr := zd.CombineWithLocalChanges()
+		if combErr != nil {
+			err = combErr
+			return
+		}
+		if modified {
+			zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Local changes applied after replace (from %s)", zd.ZoneName, senderID)
+		}
 	}
 
 	// Clean up if no contributions remain for this rrtype
 	cleanupRemovedRRtype(zd, owner, rrtype)
 
-	if InjectSignatureTXT(zd, tdns.Conf.MultiProvider) {
-		zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
+	if shouldApply {
+		if InjectSignatureTXT(zd, tdns.Conf.MultiProvider) {
+			zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
+		}
 	}
 
 	return
@@ -785,17 +808,19 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	}
 	zd.Unlock()
 
-	// 4. Apply to zone data.
-	modified, err := zd.CombineWithLocalChanges()
-	if err != nil {
-		return "", fmt.Errorf("CombineWithLocalChanges failed: %w", err)
-	}
-	if modified {
-		bumperResp, err := zd.BumpSerialOnly()
+	// 4. Apply to zone data (only if this combiner is allowed to edit).
+	if combinerShouldApplyEdits(zd) {
+		modified, err := zd.CombineWithLocalChanges()
 		if err != nil {
-			parts = append(parts, "serial bump failed")
-		} else {
-			parts = append(parts, fmt.Sprintf("serial %d→%d", bumperResp.OldSerial, bumperResp.NewSerial))
+			return "", fmt.Errorf("CombineWithLocalChanges failed: %w", err)
+		}
+		if modified {
+			bumperResp, err := zd.BumpSerialOnly()
+			if err != nil {
+				parts = append(parts, "serial bump failed")
+			} else {
+				parts = append(parts, fmt.Sprintf("serial %d→%d", bumperResp.OldSerial, bumperResp.NewSerial))
+			}
 		}
 	}
 
