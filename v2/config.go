@@ -104,13 +104,13 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
 			continue
 		}
-		zd, exists := Zones.Get(zoneName)
+		mpzd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
 		}
 		conf.InternalMp.onFirstLoadRegistered[zoneName] = true
 
-		zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 			if !zd.Options[tdns.OptMultiProvider] {
 				return
 			}
@@ -128,7 +128,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 					for senderID, ownerMap := range zoneContribs {
 						zd.MP.AgentContributions[senderID] = ownerMap
 					}
-					RebuildCombinerData(zd)
+					(&MPZoneData{ZoneData: zd}).RebuildCombinerData()
 					lgCombiner.Info("hydrated AgentContributions from snapshot",
 						"zone", zd.ZoneName, "agents", len(zoneContribs))
 				}
@@ -144,8 +144,8 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		})
 
 		if GetProviderZoneRRtypes(zoneName) != nil {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				ApplyPendingSignalKeys(zd, hdb)
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				(&MPZoneData{ZoneData: zd}).ApplyPendingSignalKeys(hdb)
 			})
 		}
 	}

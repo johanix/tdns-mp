@@ -44,7 +44,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 		}()
 
 		cp.Zone = dns.Fqdn(cp.Zone)
-		zd, exist := Zones.Get(cp.Zone)
+		mpzd, exist := Zones.Get(cp.Zone)
 		if !exist {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
@@ -53,7 +53,7 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 
 		switch cp.Command {
 		case "add":
-			_, err := AddCombinerDataNG(zd.ZoneData, "", cp.Data)
+			_, err := mpzd.AddCombinerDataNG("", cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -62,12 +62,12 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 			resp.Msg = fmt.Sprintf("Added local RRsets for zone %s", cp.Zone)
 
 		case "list":
-			if zd.MP == nil || zd.MP.CombinerData == nil {
+			if mpzd.MP == nil || mpzd.MP.CombinerData == nil {
 				resp.Msg = fmt.Sprintf("No local data for zone %s", cp.Zone)
 				return
 			}
 
-			resp.Data = GetCombinerDataNG(zd.ZoneData)
+			resp.Data = mpzd.GetCombinerDataNG()
 			resp.Msg = fmt.Sprintf("Local data for zone %s", cp.Zone)
 
 		case "remove":
@@ -383,22 +383,22 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					parts = append(parts, fmt.Sprintf("%d contributions", n))
 					// Clear in-memory AgentContributions only on DB success
 					if zone != "" {
-						if zd, ok := Zones.Get(zone); ok {
-							zd.Lock()
-							if zd.MP != nil {
-								zd.MP.AgentContributions = nil
+						if mpzd, ok := Zones.Get(zone); ok {
+							mpzd.Lock()
+							if mpzd.MP != nil {
+								mpzd.MP.AgentContributions = nil
 							}
-							RebuildCombinerData(zd.ZoneData)
-							zd.Unlock()
+							mpzd.RebuildCombinerData()
+							mpzd.Unlock()
 						}
 					} else {
-						for _, zd := range Zones.Items() {
-							zd.Lock()
-							if zd.MP != nil {
-								zd.MP.AgentContributions = nil
+						for _, mpzd := range Zones.Items() {
+							mpzd.Lock()
+							if mpzd.MP != nil {
+								mpzd.MP.AgentContributions = nil
 							}
-							RebuildCombinerData(zd.ZoneData)
-							zd.Unlock()
+							mpzd.RebuildCombinerData()
+							mpzd.Unlock()
 						}
 					}
 				}
@@ -452,11 +452,11 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			combinerData := make(map[string]map[string]map[string][]string)
 			agentContribs := make(map[string]map[string]map[string]map[string][]string)
 
-			collectZone := func(zd *MPZoneData) {
+			collectZone := func(mpzd *MPZoneData) {
 				// Merged CombinerData
-				if zd.MP != nil && zd.MP.CombinerData != nil {
+				if mpzd.MP != nil && mpzd.MP.CombinerData != nil {
 					zoneData := make(map[string]map[string][]string)
-					for item := range zd.MP.CombinerData.IterBuffered() {
+					for item := range mpzd.MP.CombinerData.IterBuffered() {
 						ownerName := item.Key
 						ownerData := item.Val
 						rrTypeData := make(map[string][]string)
@@ -471,13 +471,13 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 						zoneData[ownerName] = rrTypeData
 					}
 					if len(zoneData) > 0 {
-						combinerData[zd.ZoneName] = zoneData
+						combinerData[mpzd.ZoneName] = zoneData
 					}
 				}
 
 				// Per-agent AgentContributions
-				if zd.MP != nil && zd.MP.AgentContributions != nil {
-					for agentID, ownerMap := range zd.MP.AgentContributions {
+				if mpzd.MP != nil && mpzd.MP.AgentContributions != nil {
+					for agentID, ownerMap := range mpzd.MP.AgentContributions {
 						for owner, rrtypeMap := range ownerMap {
 							for rrtype, rrset := range rrtypeMap {
 								var rrs []string
@@ -485,16 +485,16 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 									rrs = append(rrs, rr.String())
 								}
 								// Lazily initialize nested maps
-								if agentContribs[zd.ZoneName] == nil {
-									agentContribs[zd.ZoneName] = make(map[string]map[string]map[string][]string)
+								if agentContribs[mpzd.ZoneName] == nil {
+									agentContribs[mpzd.ZoneName] = make(map[string]map[string]map[string][]string)
 								}
-								if agentContribs[zd.ZoneName][agentID] == nil {
-									agentContribs[zd.ZoneName][agentID] = make(map[string]map[string][]string)
+								if agentContribs[mpzd.ZoneName][agentID] == nil {
+									agentContribs[mpzd.ZoneName][agentID] = make(map[string]map[string][]string)
 								}
-								if agentContribs[zd.ZoneName][agentID][owner] == nil {
-									agentContribs[zd.ZoneName][agentID][owner] = make(map[string][]string)
+								if agentContribs[mpzd.ZoneName][agentID][owner] == nil {
+									agentContribs[mpzd.ZoneName][agentID][owner] = make(map[string][]string)
 								}
-								agentContribs[zd.ZoneName][agentID][owner][dns.TypeToString[rrtype]] = rrs
+								agentContribs[mpzd.ZoneName][agentID][owner][dns.TypeToString[rrtype]] = rrs
 							}
 						}
 					}
@@ -503,16 +503,16 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			if cp.Zone != "" {
 				zone := dns.Fqdn(cp.Zone)
-				zd, exists := Zones.Get(zone)
+				mpzd, exists := Zones.Get(zone)
 				if !exists {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
 					return
 				}
-				collectZone(zd)
+				collectZone(mpzd)
 			} else {
-				for _, zd := range Zones.Items() {
-					collectZone(zd)
+				for _, mpzd := range Zones.Items() {
+					collectZone(mpzd)
 				}
 			}
 
@@ -554,8 +554,8 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 				zones = append(zones, zone)
 			} else {
-				for _, zd := range Zones.Items() {
-					zones = append(zones, zd.ZoneName)
+				for _, mpzd := range Zones.Items() {
+					zones = append(zones, mpzd.ZoneName)
 				}
 			}
 

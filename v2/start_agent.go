@@ -134,13 +134,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// Attach OnFirstLoad callbacks to zone stubs.
 	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
 	for _, zoneName := range conf.Config.Internal.AllZones {
-		zd, exists := Zones.Get(zoneName)
+		mpzd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
 		}
 		// Detect parentsync=agent from HSYNCPARAM and enable delegation sync.
-		if zd.Options[tdns.OptMultiProvider] {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+		if mpzd.Options[tdns.OptMultiProvider] {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if zd.Options[tdns.OptDelSyncChild] {
 					return // already set via static config
 				}
@@ -148,12 +148,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				if mp == nil {
 					return
 				}
+				w := &MPZoneData{ZoneData: zd}
 				ourIds := ourHsyncIdentities(mp)
-				matched, _, _ := matchHsyncIdentity(zd, ourIds)
+				matched, _, _ := w.matchHsyncIdentity(ourIds)
 				if !matched {
 					return
 				}
-				hp := getHSYNCPARAM(zd)
+				hp := w.getHSYNCPARAM()
 				if hp == nil {
 					return
 				}
@@ -167,8 +168,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			})
 		}
 		// Leader election callback (must run after parentsync detection above).
-		if zd.Options[tdns.OptDelSyncChild] || zd.Options[tdns.OptMultiProvider] {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+		if mpzd.Options[tdns.OptDelSyncChild] || mpzd.Options[tdns.OptMultiProvider] {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if !zd.Options[tdns.OptDelSyncChild] {
 					return
 				}

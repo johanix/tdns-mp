@@ -151,9 +151,9 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			// Manual approval gate: if zone has mp-manual-approval, keep the
 			// edit pending for operator review — unless it's a no-op.
-			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[tdns.OptMPManualApproval] {
+			if mpzd, exists := Zones.Get(dns.Fqdn(zone)); exists && mpzd.Options[tdns.OptMPManualApproval] {
 				// Check for no-op
-				noOp := IsNoOpOperations(zd.ZoneData, senderID, msg.Operations)
+				noOp := mpzd.IsNoOpOperations(senderID, msg.Operations)
 				if noOp {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)

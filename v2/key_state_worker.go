@@ -205,26 +205,26 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 // required and no keys are in the pipeline (published or mpdist), new keys
 // are generated via GenerateAndStageKey.
 func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKskCount int) {
-	for zoneName, zd := range Zones.Items() {
+	for zoneName, mpzd := range Zones.Items() {
 		// Only process zones that do signing
-		if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
+		if !mpzd.Options[tdns.OptOnlineSigning] && !mpzd.Options[tdns.OptInlineSigning] {
 			continue
 		}
 
 		// Skip multi-provider zones where we are not a signer
-		if zd.Options[tdns.OptMultiProvider] {
-			shouldSign, _ := weAreASigner(zd.ZoneData, conf.Config.MultiProvider)
+		if mpzd.Options[tdns.OptMultiProvider] {
+			shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
 			if !shouldSign {
 				continue
 			}
 		}
 
-		if zd.DnssecPolicy == nil {
+		if mpzd.DnssecPolicy == nil {
 			continue
 		}
 
-		isMP := zd.Options[tdns.OptMultiProvider]
-		alg := zd.DnssecPolicy.Algorithm
+		isMP := mpzd.Options[tdns.OptMultiProvider]
+		alg := mpzd.DnssecPolicy.Algorithm
 
 		// Maintain ZSK standby count
 		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)

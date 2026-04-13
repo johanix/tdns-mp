@@ -101,7 +101,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			// Per-RRtype policy for non-signers on signed zones:
 			// block signing RRtypes, allow NS (if nsmgmt=agent) and KEY (if parentsync=agent).
 			if zd != nil && zd.Options[tdns.OptMPDisallowEdits] {
-				policy := getEditPolicy(zd)
+				policy := zd.getEditPolicy()
 				for _, rrStr := range amp.RRs {
 					parsed, err := dns.NewRR(rrStr)
 					if err != nil {

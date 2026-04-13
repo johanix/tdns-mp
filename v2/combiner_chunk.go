@@ -68,7 +68,7 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 }
 
 // getEditPolicy extracts the edit policy from zone data and HSYNCPARAM.
-func getEditPolicy(zd *tdns.ZoneData) *editPolicy {
+func (zd *MPZoneData) getEditPolicy() *editPolicy {
 	p := &editPolicy{
 		NSmgmt:     core.HsyncNSmgmtOWNER,
 		ParentSync: core.HsyncParentSyncOwner,
@@ -230,30 +230,30 @@ func findProviderZoneForRequest(req *CombinerSyncRequest) (string, error) {
 
 // checkMPauthorization verifies that the combiner is authorized to accept
 // contributions for this zone.
-func checkMPauthorization(zd *tdns.ZoneData) error {
-	if !zd.Options[tdns.OptMultiProvider] {
-		return fmt.Errorf("zone %q: contributions rejected — zone is not configured as a multi-provider zone (OptMultiProvider not set)", zd.ZoneName)
+func (mpzd *MPZoneData) checkMPauthorization() error {
+	if !mpzd.Options[tdns.OptMultiProvider] {
+		return fmt.Errorf("zone %q: contributions rejected — zone is not configured as a multi-provider zone (OptMultiProvider not set)", mpzd.ZoneName)
 	}
-	if zd.MP == nil || zd.MP.MPdata == nil {
+	if mpzd.MP == nil || mpzd.MP.MPdata == nil {
 		// MPdata is nil despite OptMultiProvider — guards 1-3 failed in
 		// populateMPdata (no HSYNC records or not a recognized provider).
-		apex, err := zd.GetOwner(zd.ZoneName)
+		apex, err := mpzd.GetOwner(mpzd.ZoneName)
 		if err != nil {
-			return fmt.Errorf("zone %q: contributions rejected — cannot inspect zone apex: %v", zd.ZoneName, err)
+			return fmt.Errorf("zone %q: contributions rejected — cannot inspect zone apex: %v", mpzd.ZoneName, err)
 		}
 		_, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
 		_, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
 		_, h1exists := apex.RRtypes.Get(core.TypeHSYNC)
 		_, h2exists := apex.RRtypes.Get(core.TypeHSYNC2)
 		if !((h3exists && hpExists) || h1exists || h2exists) {
-			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", zd.ZoneName)
+			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", mpzd.ZoneName)
 		}
 		ourIdentities := ourHsyncIdentities(tdns.Conf.MultiProvider)
-		matched, _, _ := matchHsyncIdentity(zd, ourIdentities)
+		matched, _, _ := mpzd.matchHsyncIdentity(ourIdentities)
 		if !matched {
-			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", zd.ZoneName, ourIdentities)
+			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", mpzd.ZoneName, ourIdentities)
 		}
-		return fmt.Errorf("zone %q: contributions rejected — MP checks failed (unknown reason, guards 1-3 passed but MPdata still nil)", zd.ZoneName)
+		return fmt.Errorf("zone %q: contributions rejected — MP checks failed (unknown reason, guards 1-3 passed but MPdata still nil)", mpzd.ZoneName)
 	}
 	return nil
 }
@@ -288,7 +288,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		zonename = dns.Fqdn(req.Zone)
 		req.Zone = zonename
 	}
-	zd, exists := Zones.Get(zonename)
+	mpzd, exists := Zones.Get(zonename)
 	if !exists {
 		lgCombiner.Error("zone not found", "zone", req.Zone, "sender", req.SenderID)
 		resp.Status = "error"
@@ -297,7 +297,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	if req.ZoneClass != "provider" {
-		if err := checkMPauthorization(zd.ZoneData); err != nil {
+		if err := mpzd.checkMPauthorization(); err != nil {
 			lgCombiner.Warn("rejecting contribution", "zone", req.Zone, "sender", req.SenderID, "reason", err)
 			resp.Status = "error"
 			resp.Message = err.Error()
@@ -319,19 +319,19 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	policy := getEditPolicy(zd.ZoneData)
+	policy := mpzd.getEditPolicy()
 
 	if len(req.Operations) > 0 {
-		resp = combinerProcessOperations(req, zd.ZoneData, zonename, protectedNamespaces, localAgents, policy)
+		resp = mpzd.combinerProcessOperations(req, zonename, protectedNamespaces, localAgents, policy)
 		if resp.Status != "error" {
 			if req.Publish != nil {
-				combinerApplyPublishInstruction(req, zd.ZoneData, hdb)
+				mpzd.combinerApplyPublishInstruction(req, hdb)
 			}
-			combinerResyncSignalKeys(req.SenderID, zonename, zd.ZoneData, hdb)
+			mpzd.combinerResyncSignalKeys(req.SenderID, zonename, hdb)
 			if resp.DataChanged {
 				nsChanged, kskChanged := detectDelegationChanges(resp)
 				if nsChanged || kskChanged {
-					go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd.ZoneData, nsChanged, kskChanged)
+					go mpzd.combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, nsChanged, kskChanged)
 				}
 			}
 		}
@@ -339,8 +339,8 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	if req.Publish != nil {
-		combinerApplyPublishInstruction(req, zd.ZoneData, hdb)
-		combinerResyncSignalKeys(req.SenderID, zonename, zd.ZoneData, hdb)
+		mpzd.combinerApplyPublishInstruction(req, hdb)
+		mpzd.combinerResyncSignalKeys(req.SenderID, zonename, hdb)
 		resp.Status = "ok"
 		resp.Message = fmt.Sprintf("publish instruction applied for zone %q (no data operations)", req.Zone)
 		return resp
@@ -353,9 +353,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 // combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
 // STATUS-UPDATE notification to the local agent that delivered the update.
-func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, zd *tdns.ZoneData, nsChanged, kskChanged bool) {
+func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, nsChanged, kskChanged bool) {
 	zoneSigned := false
-	apex, err := zd.GetOwner(zd.ZoneName)
+	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err == nil && apex != nil {
 		if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
 			hsyncparam := hpRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
@@ -374,17 +374,17 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 			lgCombiner.Debug("combinerNotifyDelegationChange: NS changed but zone is not signed, skipping CSYNC", "zone", zonename)
 		} else {
 			csync := &dns.CSYNC{
-				Serial:     zd.CurrentSerial,
+				Serial:     mpzd.CurrentSerial,
 				Flags:      0,
 				TypeBitMap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA},
 			}
 			csync.Hdr = dns.RR_Header{
-				Name:   zd.ZoneName,
+				Name:   mpzd.ZoneName,
 				Rrtype: dns.TypeCSYNC,
 				Class:  dns.ClassINET,
 				Ttl:    120,
 			}
-			_, _, csyncChanged, err := ReplaceCombinerDataByRRtype(zd, tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
+			_, _, csyncChanged, err := mpzd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
 			} else {
@@ -394,11 +394,11 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		}
 	}
 	if kskChanged {
-		cdsRRs, err := zd.SynthesizeCdsRRs()
+		cdsRRs, err := mpzd.SynthesizeCdsRRs()
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
-			_, _, cdsChanged, err := ReplaceCombinerDataByRRtype(zd, tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
+			_, _, cdsChanged, err := mpzd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CDS replace failed", "zone", zonename, "err", err)
 			} else {
@@ -408,7 +408,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		}
 	}
 	if changed {
-		if bumperResp, err := zd.BumpSerialOnly(); err != nil {
+		if bumperResp, err := mpzd.BumpSerialOnly(); err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: BumpSerialOnly failed", "zone", zonename, "err", err)
 		} else {
 			lgCombiner.Debug("combinerNotifyDelegationChange: serial bumped", "zone", zonename, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
@@ -480,7 +480,7 @@ func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtyp
 }
 
 // combinerApplyPublishInstruction processes a PublishInstruction from an agent.
-func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData, hdb *HsyncDB) {
+func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest, hdb *HsyncDB) {
 	if req.Publish == nil {
 		return
 	}
@@ -494,7 +494,7 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 	}
 
 	if len(instr.Locations) == 0 {
-		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, nil)
+		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
 		if storedInstr != nil {
 			for _, ns := range storedInstr.PublishedNS {
 				publishSignalKeyToProvider(zone, ns, senderID, nil)
@@ -522,14 +522,14 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 			}
 			parsedRRs = append(parsedRRs, rr)
 		}
-		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, parsedRRs)
+		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
-		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, nil)
+		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
 	}
 
 	var publishedNS []string
 	if locSet["at-ns"] {
-		currentNS := getAgentNSTargets(zd, senderID, zone)
+		currentNS := mpzd.getAgentNSTargets(senderID, zone)
 		var prevPublished []string
 		if storedInstr != nil {
 			prevPublished = storedInstr.PublishedNS
@@ -561,7 +561,7 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *tdns.ZoneData
 }
 
 // combinerResyncSignalKeys is called when NS records change for an agent.
-func combinerResyncSignalKeys(senderID, zone string, zd *tdns.ZoneData, hdb *HsyncDB) {
+func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *HsyncDB) {
 	if hdb == nil {
 		return
 	}
@@ -573,7 +573,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *tdns.ZoneData, hdb *Hsy
 		return
 	}
 
-	currentNS := getAgentNSTargets(zd, senderID, zone)
+	currentNS := mpzd.getAgentNSTargets(senderID, zone)
 	prevSet := stringSet(storedInstr.PublishedNS)
 	curSet := stringSet(currentNS)
 
@@ -610,7 +610,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		lgCombiner.Debug("no provider zone found for _signal owner", "owner", ownerName, "childZone", childZone, "ns", nsTarget)
 		return
 	}
-	zd, ok := Zones.Get(providerZone)
+	mpzd, ok := Zones.Get(providerZone)
 	if !ok {
 		lgCombiner.Warn("provider zone not loaded", "zone", providerZone, "owner", ownerName)
 		return
@@ -627,13 +627,13 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		parsedRRs = append(parsedRRs, rr)
 	}
 
-	_, _, changed, err := ReplaceCombinerDataByRRtype(zd.ZoneData, senderID, ownerName, dns.TypeKEY, parsedRRs)
+	_, _, changed, err := mpzd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, parsedRRs)
 	if err != nil {
 		lgCombiner.Error("failed to apply _signal KEY to provider zone", "zone", providerZone, "owner", ownerName, "err", err)
 		return
 	}
 	if changed {
-		if bumperResp, err := zd.BumpSerialOnly(); err != nil {
+		if bumperResp, err := mpzd.BumpSerialOnly(); err != nil {
 			lgCombiner.Error("BumpSerialOnly failed for provider zone", "zone", providerZone, "err", err)
 		} else {
 			lgCombiner.Debug("provider zone serial bumped", "zone", providerZone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
@@ -656,8 +656,8 @@ func findProviderZoneForOwner(ownerName string) string {
 }
 
 // getAgentNSTargets returns the NS target names from an agent's contributions for a zone.
-func getAgentNSTargets(zd *tdns.ZoneData, senderID, zone string) []string {
-	agentData, ok := zd.MP.AgentContributions[senderID]
+func (mpzd *MPZoneData) getAgentNSTargets(senderID, zone string) []string {
+	agentData, ok := mpzd.MP.AgentContributions[senderID]
 	if !ok {
 		return nil
 	}
@@ -732,14 +732,14 @@ func buildPendingSignalKeys(hdb *HsyncDB) {
 }
 
 // ApplyPendingSignalKeys is called by each provider zone's OnFirstLoad.
-func ApplyPendingSignalKeys(zd *tdns.ZoneData, hdb *HsyncDB) {
+func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 	pendingSignalKeys.mu.Lock()
 	if !pendingSignalKeys.built {
 		buildPendingSignalKeys(hdb)
 		pendingSignalKeys.built = true
 	}
-	myEntries := pendingSignalKeys.entries[zd.ZoneName]
-	delete(pendingSignalKeys.entries, zd.ZoneName)
+	myEntries := pendingSignalKeys.entries[mpzd.ZoneName]
+	delete(pendingSignalKeys.entries, mpzd.ZoneName)
 	pendingSignalKeys.mu.Unlock()
 
 	if len(myEntries) == 0 {
@@ -756,21 +756,21 @@ func ApplyPendingSignalKeys(zd *tdns.ZoneData, hdb *HsyncDB) {
 			rr.Header().Name = entry.OwnerName
 			parsedRRs = append(parsedRRs, rr)
 		}
-		_, _, changed, err := ReplaceCombinerDataByRRtype(zd, entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
+		_, _, changed, err := mpzd.ReplaceCombinerDataByRRtype(entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
 		if err != nil {
-			lgCombiner.Error("startup re-apply: failed to apply _signal KEY", "zone", zd.ZoneName, "owner", entry.OwnerName, "err", err)
+			lgCombiner.Error("startup re-apply: failed to apply _signal KEY", "zone", mpzd.ZoneName, "owner", entry.OwnerName, "err", err)
 			continue
 		}
 		if changed {
-			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", zd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
+			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", mpzd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
 		}
 	}
 }
 
 // findExistingContribution checks whether any sender OTHER than excludeSender
 // already has a contribution for the given zone/rrtype.
-func findExistingContribution(zd *tdns.ZoneData, owner string, rrtype uint16, excludeSender string) (string, []dns.RR) {
-	for senderID, zones := range zd.MP.AgentContributions {
+func (mpzd *MPZoneData) findExistingContribution(owner string, rrtype uint16, excludeSender string) (string, []dns.RR) {
+	for senderID, zones := range mpzd.MP.AgentContributions {
 		if senderID == excludeSender {
 			continue
 		}
@@ -822,7 +822,7 @@ func stringSet(slice []string) map[string]bool {
 
 // combinerProcessOperations handles explicit Operations (add, delete, replace)
 // at the combiner level.
-func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zonename string, protectedNamespaces []string, localAgents map[string]bool, policy *editPolicy) *CombinerSyncResponse {
+func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zonename string, protectedNamespaces []string, localAgents map[string]bool, policy *editPolicy) *CombinerSyncResponse {
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
 		Zone:           req.Zone,
@@ -868,7 +868,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 		// This is an editing policy — only enforce when we would apply.
 		// Non-signer combiners persist DNSKEYs without this check.
 		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) {
-			reject, reason := checkDNSKEYPolicy(zd, req.SenderID)
+			reject, reason := mpzd.checkDNSKEYPolicy(req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
 					rejectedItems = append(rejectedItems, RejectedItem{
@@ -927,7 +927,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 				parseOk = false
 				continue
 			}
-			warnNSTargetUnresolvable(rr, zd)
+			mpzd.warnNSTargetUnresolvable(rr)
 			parsedRRs = append(parsedRRs, rr)
 		}
 
@@ -939,7 +939,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 
 			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
 				senderIsLocal := localAgents[req.SenderID]
-				if existingSender, existingRRs := findExistingContribution(zd, zonename, rrtype, req.SenderID); existingSender != "" {
+				if existingSender, existingRRs := mpzd.findExistingContribution(zonename, rrtype, req.SenderID); existingSender != "" {
 					existingIsLocal := localAgents[existingSender]
 					if sameRRData(existingRRs, parsedRRs) {
 						if existingIsLocal && !senderIsLocal {
@@ -953,13 +953,13 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 						if !existingIsLocal && senderIsLocal {
 							lgCombiner.Info("dedup: re-attributing contribution from remote to local",
 								"rrtype", op.RRtype, "zone", zonename, "from", existingSender, "to", req.SenderID)
-							ReplaceCombinerDataByRRtype(zd, existingSender, zonename, rrtype, nil)
+							mpzd.ReplaceCombinerDataByRRtype(existingSender, zonename, rrtype, nil)
 						}
 					}
 				}
 			}
 
-			applied, removed, changed, err := ReplaceCombinerDataByRRtype(zd, req.SenderID, zonename, rrtype, parsedRRs)
+			applied, removed, changed, err := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
 				rejectedItems = append(rejectedItems, RejectedItem{
@@ -972,7 +972,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 				if len(applied) > 0 {
 					appliedRecords = append(appliedRecords, applied...)
 				} else if len(parsedRRs) > 0 {
-					if stored, ok := zd.MP.AgentContributions[req.SenderID][zonename][rrtype]; ok {
+					if stored, ok := mpzd.MP.AgentContributions[req.SenderID][zonename][rrtype]; ok {
 						for _, rr := range stored.RRs {
 							appliedRecords = append(appliedRecords, rr.String())
 						}
@@ -999,7 +999,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 				addRecords[zonename] = append(addRecords[zonename], rr.String())
 			}
 			if len(addRecords) > 0 {
-				addChanged, err := AddCombinerDataNG(zd, req.SenderID, addRecords)
+				addChanged, err := mpzd.AddCombinerDataNG(req.SenderID, addRecords)
 				if err != nil {
 					lgCombiner.Error("ADD operation failed", "err", err)
 					rejectedItems = append(rejectedItems, RejectedItem{
@@ -1028,7 +1028,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 				delRecords[zonename] = append(delRecords[zonename], rr.String())
 			}
 			if len(delRecords) > 0 {
-				removed, err := RemoveCombinerDataNG(zd, req.SenderID, delRecords)
+				removed, err := mpzd.RemoveCombinerDataNG(req.SenderID, delRecords)
 				if err != nil {
 					lgCombiner.Error("DELETE operation failed", "err", err)
 					rejectedItems = append(rejectedItems, RejectedItem{
@@ -1098,7 +1098,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 
 	resp.DataChanged = dataChanged
 	if dataChanged {
-		bumperResp, err := zd.BumpSerialOnly()
+		bumperResp, err := mpzd.BumpSerialOnly()
 		if err != nil {
 			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
 		} else {
@@ -1110,7 +1110,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *tdns.ZoneData, zone
 }
 
 // isNoOpUpdate checks whether an incoming update would cause any actual change.
-func isNoOpUpdate(zd *tdns.ZoneData, senderID string, records map[string][]string) bool {
+func (mpzd *MPZoneData) isNoOpUpdate(senderID string, records map[string][]string) bool {
 	for owner, rrStrings := range records {
 		for _, rrStr := range rrStrings {
 			rr, err := dns.NewRR(rrStr)
@@ -1121,33 +1121,33 @@ func isNoOpUpdate(zd *tdns.ZoneData, senderID string, records map[string][]strin
 			rrtype := rr.Header().Rrtype
 			switch rr.Header().Class {
 			case dns.ClassINET:
-				if !rrExistsInZone(zd, owner, rrtype, rr) {
+				if !mpzd.rrExistsInZone(owner, rrtype, rr) {
 					lgCombiner.Info("legacy isNoOpUpdate: RR not found, update is NOT a no-op",
-						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+						"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
 					return false
 				}
 				lgCombiner.Debug("legacy isNoOpUpdate: RR already present (no-op)",
-					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+					"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
 
 			case dns.ClassNONE:
 				delRR := dns.Copy(rr)
 				delRR.Header().Class = dns.ClassINET
-				if rrExistsInZone(zd, owner, rrtype, delRR) {
+				if mpzd.rrExistsInZone(owner, rrtype, delRR) {
 					lgCombiner.Info("legacy isNoOpUpdate: RR exists, delete is NOT a no-op",
-						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+						"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
 					return false
 				}
 				lgCombiner.Debug("legacy isNoOpUpdate: RR already absent (delete is no-op)",
-					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+					"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
 
 			case dns.ClassANY:
-				if rrTypeExistsInZone(zd, owner, rrtype) {
+				if mpzd.rrTypeExistsInZone(owner, rrtype) {
 					lgCombiner.Info("legacy isNoOpUpdate: RRtype has records, bulk delete is NOT a no-op",
-						"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
+						"sender", senderID, "zone", mpzd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
 					return false
 				}
 				lgCombiner.Debug("legacy isNoOpUpdate: RRtype empty (bulk delete is no-op)",
-					"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
+					"sender", senderID, "zone", mpzd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
 
 			default:
 				return false
@@ -1156,13 +1156,13 @@ func isNoOpUpdate(zd *tdns.ZoneData, senderID string, records map[string][]strin
 	}
 
 	lgCombiner.Info("isNoOpUpdate: all records already present, update is a no-op",
-		"sender", senderID, "zone", zd.ZoneName)
+		"sender", senderID, "zone", mpzd.ZoneName)
 	return true
 }
 
 // IsNoOpOperations checks whether explicit Operations would cause any actual change.
-func IsNoOpOperations(zd *tdns.ZoneData, senderID string, ops []core.RROperation) bool {
-	zonename := zd.ZoneName
+func (mpzd *MPZoneData) IsNoOpOperations(senderID string, ops []core.RROperation) bool {
+	zonename := mpzd.ZoneName
 	for _, op := range ops {
 		rrtype, ok := dns.StringToType[op.RRtype]
 		if !ok {
@@ -1172,8 +1172,8 @@ func IsNoOpOperations(zd *tdns.ZoneData, senderID string, ops []core.RROperation
 		switch op.Operation {
 		case "replace":
 			var existingRRs []dns.RR
-			if zd.MP.AgentContributions != nil {
-				if agentData, ok := zd.MP.AgentContributions[senderID]; ok {
+			if mpzd.MP.AgentContributions != nil {
+				if agentData, ok := mpzd.MP.AgentContributions[senderID]; ok {
 					if ownerMap, ok := agentData[zonename]; ok {
 						if rrset, ok := ownerMap[rrtype]; ok {
 							existingRRs = rrset.RRs
@@ -1216,7 +1216,7 @@ func IsNoOpOperations(zd *tdns.ZoneData, senderID string, ops []core.RROperation
 				if err != nil {
 					return false
 				}
-				if !rrExistsInZone(zd, zonename, rrtype, rr) {
+				if !mpzd.rrExistsInZone(zonename, rrtype, rr) {
 					return false
 				}
 			}
@@ -1229,7 +1229,7 @@ func IsNoOpOperations(zd *tdns.ZoneData, senderID string, ops []core.RROperation
 				}
 				delRR := dns.Copy(rr)
 				delRR.Header().Class = dns.ClassINET
-				if rrExistsInZone(zd, zonename, rrtype, delRR) {
+				if mpzd.rrExistsInZone(zonename, rrtype, delRR) {
 					return false
 				}
 			}
@@ -1240,21 +1240,21 @@ func IsNoOpOperations(zd *tdns.ZoneData, senderID string, ops []core.RROperation
 	}
 
 	lgCombiner.Info("isNoOpOperations: all operations are no-ops",
-		"sender", senderID, "zone", zd.ZoneName)
+		"sender", senderID, "zone", mpzd.ZoneName)
 	return true
 }
 
 // rrExistsInZone checks whether the given RR exists in either the live zone data
 // or CombinerData.
-func rrExistsInZone(zd *tdns.ZoneData, owner string, rrtype uint16, rr dns.RR) bool {
+func (mpzd *MPZoneData) rrExistsInZone(owner string, rrtype uint16, rr dns.RR) bool {
 	rrStr := rr.String()
 	rrtypeStr := dns.TypeToString[rrtype]
 
-	existing, err := zd.GetRRset(owner, rrtype)
+	existing, err := mpzd.GetRRset(owner, rrtype)
 	if err != nil {
 		lgCombiner.Info("rrExistsInZone: GetRRset error", "owner", owner, "rrtype", rrtypeStr, "err", err)
 	} else if existing == nil {
-		lgCombiner.Info("rrExistsInZone: no RRset in live zone", "owner", owner, "rrtype", rrtypeStr, "zoneStore", tdns.ZoneStoreToString[zd.ZoneStore])
+		lgCombiner.Info("rrExistsInZone: no RRset in live zone", "owner", owner, "rrtype", rrtypeStr, "zoneStore", tdns.ZoneStoreToString[mpzd.ZoneStore])
 	} else {
 		for _, existingRR := range existing.RRs {
 			if dns.IsDuplicate(rr, existingRR) {
@@ -1270,13 +1270,13 @@ func rrExistsInZone(zd *tdns.ZoneData, owner string, rrtype uint16, rr dns.RR) b
 			"owner", owner, "rrtype", rrtypeStr, "lookingFor", rrStr, "existing", existingStrs)
 	}
 
-	if zd.MP.CombinerData == nil {
-		lgCombiner.Info("rrExistsInZone: CombinerData is nil", "zone", zd.ZoneName)
+	if mpzd.MP.CombinerData == nil {
+		lgCombiner.Info("rrExistsInZone: CombinerData is nil", "zone", mpzd.ZoneName)
 	} else {
-		ownerData, ownerExists := zd.MP.CombinerData.Get(owner)
+		ownerData, ownerExists := mpzd.MP.CombinerData.Get(owner)
 		if !ownerExists {
 			var cdOwners []string
-			for item := range zd.MP.CombinerData.IterBuffered() {
+			for item := range mpzd.MP.CombinerData.IterBuffered() {
 				cdOwners = append(cdOwners, item.Key)
 			}
 			lgCombiner.Info("rrExistsInZone: owner not in CombinerData",
@@ -1312,13 +1312,13 @@ func rrExistsInZone(zd *tdns.ZoneData, owner string, rrtype uint16, rr dns.RR) b
 }
 
 // rrTypeExistsInZone checks whether the given owner/rrtype has any records.
-func rrTypeExistsInZone(zd *tdns.ZoneData, owner string, rrtype uint16) bool {
-	existing, err := zd.GetRRset(owner, rrtype)
+func (mpzd *MPZoneData) rrTypeExistsInZone(owner string, rrtype uint16) bool {
+	existing, err := mpzd.GetRRset(owner, rrtype)
 	if err == nil && existing != nil && len(existing.RRs) > 0 {
 		return true
 	}
-	if zd.MP.CombinerData != nil {
-		if ownerData, ok := zd.MP.CombinerData.Get(owner); ok {
+	if mpzd.MP.CombinerData != nil {
+		if ownerData, ok := mpzd.MP.CombinerData.Get(owner); ok {
 			if cdRRset, ok := ownerData.RRtypes.Get(rrtype); ok && len(cdRRset.RRs) > 0 {
 				return true
 			}
@@ -1507,8 +1507,8 @@ func determineSyncType(update *tdns.ZoneUpdate) string {
 // - the zone has no HSYNCPARAM (no signer information)
 // - the zone has no signers listed
 // - the sender is not listed as a signer
-func checkDNSKEYPolicy(zd *tdns.ZoneData, senderID string) (bool, string) {
-	apex, err := zd.GetOwner(zd.ZoneName)
+func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
+	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return true, "DNSKEY rejected: cannot inspect zone apex"
 	}
@@ -1572,24 +1572,24 @@ func checkContentPolicy(rr dns.RR, protectedNamespaces []string) string {
 
 // warnNSTargetUnresolvable logs a warning if an in-bailiwick NS target has no
 // address records in the combiner's zone data.
-func warnNSTargetUnresolvable(rr dns.RR, zd *tdns.ZoneData) {
+func (mpzd *MPZoneData) warnNSTargetUnresolvable(rr dns.RR) {
 	nsRR, ok := rr.(*dns.NS)
 	if !ok {
 		return
 	}
 	target := nsRR.Ns
-	if !strings.HasSuffix(target, "."+zd.ZoneName) && target != zd.ZoneName {
+	if !strings.HasSuffix(target, "."+mpzd.ZoneName) && target != mpzd.ZoneName {
 		return
 	}
-	owner, err := zd.GetOwner(target)
+	owner, err := mpzd.GetOwner(target)
 	if err != nil || owner == nil {
-		lgCombiner.Warn("NS target has no address records (owner not found)", "zone", zd.ZoneName, "nsTarget", target)
+		lgCombiner.Warn("NS target has no address records (owner not found)", "zone", mpzd.ZoneName, "nsTarget", target)
 		return
 	}
 	_, hasA := owner.RRtypes.Get(dns.TypeA)
 	_, hasAAAA := owner.RRtypes.Get(dns.TypeAAAA)
 	if !hasA && !hasAAAA {
-		lgCombiner.Warn("NS target has no address records", "zone", zd.ZoneName, "nsTarget", target)
+		lgCombiner.Warn("NS target has no address records", "zone", mpzd.ZoneName, "nsTarget", target)
 	}
 }
 
