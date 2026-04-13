@@ -41,6 +41,10 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		if !ok || !zd.Options[tdns.OptMultiProvider] {
 			continue
 		}
+		// Wire SyncQ on every MP zone so PostRefresh can send without blocking
+		if zd.SyncQ == nil {
+			zd.SyncQ = conf.InternalMp.SyncQ
+		}
 		conf.InternalMp.refreshRegistered[zoneName] = true
 		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
 			func(zd, new_zd *tdns.ZoneData) {
