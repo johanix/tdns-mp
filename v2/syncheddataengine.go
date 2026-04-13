@@ -599,11 +599,13 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// 1. Send local data (excluding DNSKEY) to combiner.
 				//    Local DNSKEYs reach the combiner via the signer, not via UPDATE.
 				//    All RRtypes are sent as Operations (replace) for explicit semantics.
+				//    Empty REPLACEs sent for RRtypes with no data (stale cleanup).
+				zu := &ZoneUpdate{
+					Zone:    sdcmd.Zone,
+					AgentId: myAgentId,
+				}
+				sentRRtypes := make(map[uint16]bool)
 				if nod, ok := agentRepo.Data.Get(myAgentId); ok {
-					zu := &ZoneUpdate{
-						Zone:    sdcmd.Zone,
-						AgentId: myAgentId,
-					}
 					for _, rrtype := range nod.RRtypes.Keys() {
 						if rrtype == dns.TypeDNSKEY {
 							continue // local DNSKEYs go via signer, not UPDATE
@@ -622,23 +624,42 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							RRtype:    dns.TypeToString[rrtype],
 							Records:   records,
 						})
+						sentRRtypes[rrtype] = true
 						totalRRs += len(records)
 					}
-					if len(zu.Operations) > 0 {
-						distID := transport.GenerateDistributionID()
-						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
-							lgEngine.Error("resync: failed to enqueue local data for combiner", "zone", sdcmd.Zone, "err", err)
-						} else {
-							var combinerRecipients []string
-							if tm.combinerID != "" {
-								combinerRecipients = []string{string(tm.combinerID)}
-							}
-							zdr.MarkRRsPending(sdcmd.Zone, myAgentId, zu, distID, combinerRecipients)
-						}
+				}
+				// Send empty REPLACE for AllowedLocalRRtypes not already sent.
+				// This tells the combiner "I have zero records of this type"
+				// and cleans up stale contributions.
+				for rrtype := range AllowedLocalRRtypes {
+					if rrtype == dns.TypeDNSKEY {
+						continue // DNSKEYs go via signer
 					}
+					if sentRRtypes[rrtype] {
+						continue
+					}
+					zu.Operations = append(zu.Operations, core.RROperation{
+						Operation: "replace",
+						RRtype:    dns.TypeToString[rrtype],
+						Records:   []string{},
+					})
+				}
+				if len(zu.Operations) > 0 {
+					distID := transport.GenerateDistributionID()
+					if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
+						lgEngine.Error("resync: failed to enqueue local data for combiner", "zone", sdcmd.Zone, "err", err)
+					} else {
+						var combinerRecipients []string
+						if tm.combinerID != "" {
+							combinerRecipients = []string{string(tm.combinerID)}
+						}
+						zdr.MarkRRsPending(sdcmd.Zone, myAgentId, zu, distID, combinerRecipients)
+					}
+				}
 
-					// Send all local data (including DNSKEY) to remote agents.
-					// Remote agents need our DNSKEYs to converge.
+				// Send all local data (including DNSKEY) to remote agents.
+				// Remote agents need our DNSKEYs to converge.
+				if nod, ok := agentRepo.Data.Get(myAgentId); ok {
 					agentZU := &ZoneUpdate{
 						Zone:    sdcmd.Zone,
 						AgentId: myAgentId,
