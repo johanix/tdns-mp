@@ -1,6 +1,7 @@
 # Combiner Persistence Branch: Rebase Assessment
 
 **Date**: 2026-04-13
+**Status**: **Rebase complete** (2026-04-13)
 **Feature branch**: `combiner-persistence-sep-1` (both repos)
 **Target branch**: `combiner-persistence-rebase-1` (both repos)
 **Design doc**: `2026-03-31-combiner-persistence-separation.md`
@@ -122,3 +123,43 @@ Mechanical rebase resolution: ~1 hour.
 No high-risk files remain — `apihandler_agent.go`
 edit path stayed in place, and the remaining
 conflicts are signature/type updates.
+
+## Outcome
+
+Rebase completed 2026-04-13. All 5 steps applied
+cleanly with build verification after each step.
+No conflicts required manual resolution — all
+changes were mechanical signature/type updates.
+
+### Additional work during rebase
+
+1. **MPZoneData receiver conversion**: ~20 standalone
+   functions converted to receiver methods on
+   `*MPZoneData`, aligned with ongoing migration.
+   9 files, +375/-367 lines.
+
+2. **CombineWithLocalChanges migration**: Moved from
+   `tdns/v2/legacy_combiner_utils.go` to tdns-mp as
+   receiver on `*MPZoneData`. Replaces
+   `AllowedLocalRRtypes` whitelist with per-RRtype
+   `editPolicy.canApply()`, fixing the unsigned-zone
+   corner case where nsmgmt=owner NS records were
+   applied but reported as IGNORED. Also migrated
+   `mergeWithUpstream()`. +107 lines.
+
+3. **Bug fix**: `start_agent.go` OnFirstLoad callback
+   was using outer `mpzd` loop variable instead of
+   callback `zd` parameter, reading stale zone data.
+
+### Final commit log (tdns-mp)
+
+```
+c273c6c Step 1: RRStateIgnored + IGNORED confirmation
+235b6a5 Step 2: editPolicy + persistence/editing split
+1232752 Step 3: Remove agent blanket block
+44c40ed Step 4: Empty REPLACE for stale data cleanup
+471972f Step 5: CLI display of IGNORED state
+6dc1faf Update rebase assessment doc
+68b7dd3 Convert helpers to MPZoneData receivers
+58924ee Migrate CombineWithLocalChanges to tdns-mp
+```
