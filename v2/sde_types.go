@@ -78,6 +78,7 @@ type RemoteConfirmationDetail struct {
 	AppliedRecords    []string
 	RemovedRecords    []string
 	RejectedItems     []RejectedItemInfo
+	IgnoredRecords    []string
 	Truncated         bool
 }
 
@@ -94,6 +95,7 @@ const (
 	RRStateRejected                      // Combiner rejected (see Reason)
 	RRStatePendingRemoval                // Delete sent to combiner, awaiting confirmation
 	RRStateRemoved                       // Combiner confirmed removal (audit trail)
+	RRStateIgnored                       // Combiner persisted but did not apply (role-based filter)
 )
 
 func (s RRState) String() string {
@@ -108,6 +110,8 @@ func (s RRState) String() string {
 		return "pending-removal"
 	case RRStateRemoved:
 		return "removed"
+	case RRStateIgnored:
+		return "ignored"
 	default:
 		return "unknown"
 	}
@@ -137,11 +141,12 @@ type ConfirmationDetail struct {
 	DistributionID string
 	Zone           ZoneName
 	Source         string // Identifies the confirming peer (combiner ID or agent ID)
-	Status         string // "ok", "partial", "error"
+	Status         string // "ok", "partial", "error", "IGNORED"
 	Message        string
 	AppliedRecords []string
 	RemovedRecords []string // RR strings confirmed as removed by combiner
 	RejectedItems  []RejectedItemInfo
+	IgnoredRecords []string // RR strings persisted but not applied (role-based filter)
 	Truncated      bool
 	Timestamp      time.Time
 }

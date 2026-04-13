@@ -1098,6 +1098,19 @@ func allRecipientsConfirmed(tr *TrackedRR) bool {
 	return true
 }
 
+// anyRecipientAccepted returns true if at least one expected recipient has
+// sent an "accepted" confirmation. Used to distinguish RRStateAccepted
+// (at least one combiner applied) from RRStateIgnored (all combiners
+// merely persisted).
+func anyRecipientAccepted(tr *TrackedRR) bool {
+	for _, r := range tr.ExpectedRecipients {
+		if c, ok := tr.Confirmations[r]; ok && c.Status == "accepted" {
+			return true
+		}
+	}
+	return false
+}
+
 // ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
 func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *MsgQs) {
 	now := time.Now()
@@ -1164,6 +1177,12 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		rejectedMap[ri.Record] = ri.Reason
 	}
 
+	// Build a set of ignored RR strings for fast lookup
+	ignoredSet := make(map[string]bool, len(detail.IgnoredRecords))
+	for _, rr := range detail.IgnoredRecords {
+		ignoredSet[rr] = true
+	}
+
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
@@ -1191,6 +1210,20 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						matched++
 						if allRecipientsConfirmed(tr) {
 							tr.State = RRStateAccepted
+							tr.Reason = ""
+						}
+					} else if ignoredSet[rrStr] {
+						setConfirmation(tr, "ignored", "")
+						tr.UpdatedAt = now
+						matched++
+						if allRecipientsConfirmed(tr) {
+							// If ANY recipient accepted, the RR is accepted.
+							// Only if ALL reported ignored does it go to RRStateIgnored.
+							if anyRecipientAccepted(tr) {
+								tr.State = RRStateAccepted
+							} else {
+								tr.State = RRStateIgnored
+							}
 							tr.Reason = ""
 						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
@@ -1249,29 +1282,22 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 	if hasPRC {
 		appliedRecords := detail.AppliedRecords
+		ignoredRecords := detail.IgnoredRecords
 
 		// If the combiner returned SUCCESS but with no AppliedRecords (no-op),
 		// reconstruct from our local repo so the originating agent can match.
-		if len(appliedRecords) == 0 && (detail.Status == "SUCCESS" || detail.Status == "ok") {
-			agentId := AgentId(prc.OriginatingSender)
-			if agentRepo, ok := zdr.Repo.Get(prc.Zone); ok {
-				if nod, ok := agentRepo.Get(agentId); ok {
-					for _, rrtype := range nod.RRtypes.Keys() {
-						rrset, exists := nod.RRtypes.Get(rrtype)
-						if !exists {
-							continue
-						}
-						for _, rr := range rrset.RRs {
-							appliedRecords = append(appliedRecords, rr.String())
-						}
-					}
-					lgEngine.Debug("reconstructed applied records from repo for relay",
-						"zone", prc.Zone, "agent", agentId, "records", len(appliedRecords))
-				}
+		// Same for IGNORED with no IgnoredRecords.
+		if detail.Status == "SUCCESS" || detail.Status == "ok" {
+			if len(appliedRecords) == 0 {
+				appliedRecords = zdr.reconstructRecordsFromRepo(prc)
+			}
+		} else if detail.Status == "IGNORED" {
+			if len(ignoredRecords) == 0 {
+				ignoredRecords = zdr.reconstructRecordsFromRepo(prc)
 			}
 		}
 
-		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords))
+		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
 			OriginatingDistID: prc.OriginatingDistID,
 			OriginatingSender: prc.OriginatingSender,
@@ -1281,6 +1307,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 			AppliedRecords:    appliedRecords,
 			RemovedRecords:    detail.RemovedRecords,
 			RejectedItems:     detail.RejectedItems,
+			IgnoredRecords:    ignoredRecords,
 			Truncated:         detail.Truncated,
 		}
 		if msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
@@ -1290,6 +1317,30 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		delete(zdr.PendingRemoteConfirms, detail.DistributionID)
 		zdr.mu.Unlock()
 	}
+}
+
+// reconstructRecordsFromRepo builds an RR string list from the local repo for
+// a pending remote confirmation. Used when the combiner returned a no-op
+// confirmation (SUCCESS or IGNORED) with no record lists.
+func (zdr *ZoneDataRepo) reconstructRecordsFromRepo(prc *PendingRemoteConfirmation) []string {
+	var records []string
+	agentId := AgentId(prc.OriginatingSender)
+	if agentRepo, ok := zdr.Repo.Get(prc.Zone); ok {
+		if nod, ok := agentRepo.Get(agentId); ok {
+			for _, rrtype := range nod.RRtypes.Keys() {
+				rrset, exists := nod.RRtypes.Get(rrtype)
+				if !exists {
+					continue
+				}
+				for _, rr := range rrset.RRs {
+					records = append(records, rr.String())
+				}
+			}
+			lgEngine.Debug("reconstructed records from repo for relay",
+				"zone", prc.Zone, "agent", agentId, "records", len(records))
+		}
+	}
+	return records
 }
 
 // deleteRRFromRepo deletes a specific RR from the active ZoneDataRepo.

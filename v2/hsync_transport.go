@@ -335,12 +335,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 
 		// Wire confirmation callback for reliable message queue and per-RR tracking
 		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
+			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
 			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
-			// Stop retrying on any definitive answer (success, failure, or rejected).
+			// Stop retrying on any definitive answer (success, failure, rejected, or ignored).
 			// Only keep retrying for transient states (pending, partial).
-			if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected) {
+			if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected || status == transport.ConfirmIgnored) {
 				tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 
@@ -361,6 +361,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 					AppliedRecords: applied,
 					RemovedRecords: removed,
 					RejectedItems:  rejItems,
+					IgnoredRecords: ignored,
 					Truncated:      truncated,
 					Timestamp:      time.Now(),
 				}
@@ -1272,6 +1273,8 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		status = transport.ConfirmFailed
 	case "REJECTED":
 		status = transport.ConfirmRejected
+	case "IGNORED":
+		status = transport.ConfirmIgnored
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1286,6 +1289,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		AppliedRecords: detail.AppliedRecords,
 		RemovedRecords: detail.RemovedRecords,
 		RejectedItems:  rejItems,
+		IgnoredRecords: detail.IgnoredRecords,
 		Truncated:      detail.Truncated,
 		Timestamp:      time.Now(),
 	})
