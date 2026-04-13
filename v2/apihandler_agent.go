@@ -98,10 +98,23 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = "at least one RR is required"
 				return
 			}
+			// Per-RRtype policy for non-signers on signed zones:
+			// block signing RRtypes, allow NS (if nsmgmt=agent) and KEY (if parentsync=agent).
 			if zd != nil && zd.Options[tdns.OptMPDisallowEdits] {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %s is signed but this provider is not a signer; modifications not allowed", amp.Zone)
-				return
+				policy := getEditPolicy(zd)
+				for _, rrStr := range amp.RRs {
+					parsed, err := dns.NewRR(rrStr)
+					if err != nil {
+						continue // will be caught by the parse loop below
+					}
+					if !policy.canApply(parsed.Header().Rrtype) {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("zone %s: %s modifications not allowed (edit policy: signed=%v, signer=%v, nsmgmt=%d, parentsync=%d)",
+							amp.Zone, dns.TypeToString[parsed.Header().Rrtype],
+							policy.ZoneSigned, policy.WeAreSigner, policy.NSmgmt, policy.ParentSync)
+						return
+					}
+				}
 			}
 
 			isAdd := amp.Command == "add-rr"

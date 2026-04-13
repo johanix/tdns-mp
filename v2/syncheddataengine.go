@@ -216,12 +216,6 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
 
 							skipCombiner := synchedDataUpdate.SkipCombiner
-							if !skipCombiner {
-								if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[tdns.OptMPDisallowEdits] {
-									lgEngine.Info("zone is signed but we are not a signer, skipping combiner", "zone", synchedDataUpdate.Zone)
-									skipCombiner = true
-								}
-							}
 							if skipCombiner {
 								lgEngine.Info("update applied, enqueuing for remote agents only", "zone", synchedDataUpdate.Zone)
 							} else {
@@ -316,66 +310,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					}
 					resp.Msg = msg
 					if change {
-						// Check if edits are disallowed for this zone (signed, not a signer)
-						remoteSkipCombiner := false
-						if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[tdns.OptMPDisallowEdits] {
-							remoteSkipCombiner = true
-						}
-
-						if remoteSkipCombiner {
-							lgEngine.Info("remote update accepted locally, not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
-							resp.Msg = "Remote update accepted locally (not forwarded to combiner: zone signed, not a signer)"
-							// Send ACCEPTED confirmation with applied records to
-							// originator. The data is in our SDE; we just don't
-							// forward to our combiner. The sender should not be blocked.
-							if synchedDataUpdate.OriginatingDistID != "" && msgQs.OnRemoteConfirmationReady != nil {
-								var appliedRecords []string
-								var removedRecords []string
-								if synchedDataUpdate.Update != nil {
-									for _, op := range synchedDataUpdate.Update.Operations {
-										if op.Operation == "delete" {
-											removedRecords = append(removedRecords, op.Records...)
-										} else {
-											appliedRecords = append(appliedRecords, op.Records...)
-										}
-									}
-									// Fallback: if Operations was empty, extract from RRsets/RRs
-									if len(appliedRecords) == 0 && len(removedRecords) == 0 {
-										for _, rrset := range synchedDataUpdate.Update.RRsets {
-											for _, rr := range rrset.RRs {
-												appliedRecords = append(appliedRecords, rr.String())
-											}
-										}
-										for _, rr := range synchedDataUpdate.Update.RRs {
-											if rr.Header().Class == dns.ClassNONE {
-												cp := dns.Copy(rr)
-												cp.Header().Class = dns.ClassINET
-												removedRecords = append(removedRecords, cp.String())
-											} else {
-												appliedRecords = append(appliedRecords, rr.String())
-											}
-										}
-									}
-								}
-								lgEngine.Info("sending immediate ACCEPTED for non-signing zone",
-									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId,
-									"records", len(appliedRecords), "removed", len(removedRecords), "originDistID", synchedDataUpdate.OriginatingDistID)
-								msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-									OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-									OriginatingSender: string(synchedDataUpdate.AgentId),
-									Zone:              synchedDataUpdate.Zone,
-									Status:            "ok",
-									Message:           "accepted into SDE (not forwarded to combiner: not a signer)",
-									AppliedRecords:    appliedRecords,
-									RemovedRecords:    removedRecords,
-								})
-							}
-						} else {
-							lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
-						}
+						// Always forward remote updates to the local combiner for persistence.
+						// The combiner applies or ignores based on its edit policy.
+						lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
 
 						tm := conf.InternalMp.MPTransport
-						if !remoteSkipCombiner && tm != nil && synchedDataUpdate.Update != nil {
+						if tm != nil && synchedDataUpdate.Update != nil {
 							// Remote update: only enqueue for combiner (not back to agents).
 							// The combiner deduplicates KEY/CDS contributions: local agent
 							// contributions take precedence over remote-forwarded ones.
