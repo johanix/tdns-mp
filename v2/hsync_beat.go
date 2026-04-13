@@ -55,6 +55,15 @@ func (ar *AgentRegistry) SendHeartbeats() {
 	// Refresh local gossip state before sending beats
 	if ar.GossipStateTable != nil && ar.ProviderGroupManager != nil {
 		ar.GossipStateTable.RefreshLocalStates(ar, ar.ProviderGroupManager)
+
+		// Evaluate group state after refreshing local view — detects
+		// DEGRADED→OPERATIONAL transitions that would otherwise only
+		// be noticed when a peer sends us gossip.
+		ar.ProviderGroupManager.mu.RLock()
+		for _, pg := range ar.ProviderGroupManager.Groups {
+			ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+		}
+		ar.ProviderGroupManager.mu.RUnlock()
 	}
 
 	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
