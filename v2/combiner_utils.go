@@ -69,6 +69,113 @@ func additiveRRtype(rrtype uint16) bool {
 	return rrtype == dns.TypeNS
 }
 
+// mergeWithUpstream merges agent contributions on top of the upstream (zone file)
+// baseline for additive RRtypes like NS. Deduplicates by RR string.
+func (mpzd *MPZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset core.RRset) core.RRset {
+	merged := core.RRset{
+		Name:   agentRRset.Name,
+		RRtype: agentRRset.RRtype,
+	}
+
+	// Start with upstream baseline if available
+	if mpzd.MP.UpstreamData != nil {
+		if upstreamOd, ok := mpzd.MP.UpstreamData.Get(owner); ok {
+			if baselineRRset, exists := upstreamOd.RRtypes.Get(rrtype); exists {
+				merged.RRs = make([]dns.RR, len(baselineRRset.RRs))
+				copy(merged.RRs, baselineRRset.RRs)
+			}
+		}
+	}
+
+	// Append agent contributions, dedup by rr.String()
+	for _, rr := range agentRRset.RRs {
+		rrStr := rr.String()
+		alreadyPresent := false
+		for _, existing := range merged.RRs {
+			if existing.String() == rrStr {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			merged.RRs = append(merged.RRs, rr)
+		}
+	}
+
+	return merged
+}
+
+// CombineWithLocalChanges applies CombinerData (merged agent contributions)
+// to the live zone data. Uses per-RRtype edit policy to determine which
+// RRtypes are applied. This overrides the promoted tdns method to add
+// role-based filtering (the tdns version uses AllowedLocalRRtypes only).
+func (mpzd *MPZoneData) CombineWithLocalChanges() (bool, error) {
+	if mpzd.MP == nil {
+		return false, nil
+	}
+	if mpzd.MP.CombinerData == nil {
+		mpzd.Logger.Printf("CombineWithLocalChanges: Zone %s: No combiner data to apply", mpzd.ZoneName)
+		return false, nil
+	}
+
+	if mpzd.ZoneStore != tdns.MapZone {
+		return false, fmt.Errorf("CombineWithLocalChanges: zone store %s not implemented", tdns.ZoneStoreToString[mpzd.ZoneStore])
+	}
+
+	policy := mpzd.getEditPolicy()
+
+	// Determine RRtype whitelist: provider zones use their own set.
+	isProvider := tdns.GetProviderZoneRRtypes(mpzd.ZoneName) != nil
+	var providerRRtypes map[uint16]bool
+	if isProvider {
+		providerRRtypes = tdns.GetProviderZoneRRtypes(mpzd.ZoneName)
+	}
+
+	modified := false
+	for item := range mpzd.MP.CombinerData.IterBuffered() {
+		ownerName := item.Key
+		newOwnerData := item.Val
+
+		// MP zones: only apex records. Provider zones: any owner within the zone.
+		if !isProvider && ownerName != mpzd.ZoneName {
+			mpzd.Logger.Printf("CombineWithLocalChanges: Zone %s: LocalChanges outside apex (%s). Ignored", mpzd.ZoneName, ownerName)
+			continue
+		}
+
+		existingOwnerData, exists := mpzd.Data.Get(ownerName)
+		if !exists {
+			existingOwnerData = tdns.OwnerData{
+				Name:    ownerName,
+				RRtypes: tdns.NewRRTypeStore(),
+			}
+		}
+
+		for _, rrtype := range newOwnerData.RRtypes.Keys() {
+			// Provider zones use their own whitelist; MP zones use edit policy.
+			if isProvider {
+				if !providerRRtypes[rrtype] {
+					continue
+				}
+			} else if !policy.canApply(rrtype) {
+				continue
+			}
+
+			newRRset, _ := newOwnerData.RRtypes.Get(rrtype)
+			if additiveRRtype(rrtype) && ownerName == mpzd.ZoneName {
+				merged := mpzd.mergeWithUpstream(ownerName, rrtype, newRRset)
+				existingOwnerData.RRtypes.Set(rrtype, merged)
+			} else {
+				existingOwnerData.RRtypes.Set(rrtype, newRRset)
+			}
+			modified = true
+		}
+
+		mpzd.Data.Set(ownerName, existingOwnerData)
+	}
+
+	return modified, nil
+}
+
 // AddCombinerData adds or updates local RRsets for the zone from a specific agent.
 // Contributions are stored per-agent so that updates from different agents are
 // accumulated (not replaced). The merged result is then written to CombinerData.
