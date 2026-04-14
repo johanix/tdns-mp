@@ -1558,9 +1558,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if locally supported, available, has valid endpoint, and OPERATIONAL/LEGACY
+	// Try API transport if locally supported, available, and has valid endpoint.
+	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
 	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
-		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
+		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy || agent.ApiDetails.State == AgentStateDegraded || agent.ApiDetails.State == AgentStateInterrupted {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.Mu.Lock()
 			if apiErr != nil {
@@ -1583,9 +1584,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		}
 	}
 
-	// Try DNS transport if supported and OPERATIONAL/LEGACY
+	// Try DNS transport if supported.
+	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
-		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy {
+		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy || agent.DnsDetails.State == AgentStateDegraded || agent.DnsDetails.State == AgentStateInterrupted {
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
 			agent.Mu.Lock()
 			if dnsErr != nil {
