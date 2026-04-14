@@ -12,17 +12,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	tdns "github.com/johanix/tdns/v2"
 )
 
 // NextEditID returns the next available edit ID across all three tables.
-func NextEditID(kdb *tdns.KeyDB) (int, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func NextEditID(hdb *HsyncDB) (int, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var maxID sql.NullInt64
-	err := kdb.DB.QueryRow(`
+	err := hdb.DB.QueryRow(`
 		SELECT MAX(edit_id) FROM (
 			SELECT edit_id FROM CombinerPendingEdits
 			UNION ALL
@@ -42,16 +40,16 @@ func NextEditID(kdb *tdns.KeyDB) (int, error) {
 }
 
 // SavePendingEdit inserts a new pending edit.
-func SavePendingEdit(kdb *tdns.KeyDB, rec *PendingEditRecord) error {
-	kdb.Lock()
-	defer kdb.Unlock()
+func SavePendingEdit(hdb *HsyncDB, rec *PendingEditRecord) error {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	recordsJSON, err := json.Marshal(rec.Records)
 	if err != nil {
 		return fmt.Errorf("failed to marshal records: %w", err)
 	}
 
-	_, err = kdb.DB.Exec(`
+	_, err = hdb.DB.Exec(`
 		INSERT INTO CombinerPendingEdits (edit_id, zone, sender_id, delivered_by, distribution_id, records_json, received_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, rec.EditID, rec.Zone, rec.SenderID, rec.DeliveredBy, rec.DistributionID, string(recordsJSON), rec.ReceivedAt.Unix())
@@ -59,11 +57,11 @@ func SavePendingEdit(kdb *tdns.KeyDB, rec *PendingEditRecord) error {
 }
 
 // ListPendingEdits returns all pending edits for a zone.
-func ListPendingEdits(kdb *tdns.KeyDB, zone string) ([]*PendingEditRecord, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ListPendingEdits(hdb *HsyncDB, zone string) ([]*PendingEditRecord, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	rows, err := kdb.DB.Query(`
+	rows, err := hdb.DB.Query(`
 		SELECT edit_id, zone, sender_id, delivered_by, distribution_id, records_json, received_at
 		FROM CombinerPendingEdits WHERE zone = ? ORDER BY edit_id
 	`, zone)
@@ -90,15 +88,15 @@ func ListPendingEdits(kdb *tdns.KeyDB, zone string) ([]*PendingEditRecord, error
 }
 
 // GetPendingEdit retrieves a single pending edit by edit_id.
-func GetPendingEdit(kdb *tdns.KeyDB, editID int) (*PendingEditRecord, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func GetPendingEdit(hdb *HsyncDB, editID int) (*PendingEditRecord, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	rec := &PendingEditRecord{}
 	var recordsJSON string
 	var receivedAt int64
 
-	err := kdb.DB.QueryRow(`
+	err := hdb.DB.QueryRow(`
 		SELECT edit_id, zone, sender_id, delivered_by, distribution_id, records_json, received_at
 		FROM CombinerPendingEdits WHERE edit_id = ?
 	`, editID).Scan(&rec.EditID, &rec.Zone, &rec.SenderID, &rec.DeliveredBy, &rec.DistributionID, &recordsJSON, &receivedAt)
@@ -118,11 +116,11 @@ func GetPendingEdit(kdb *tdns.KeyDB, editID int) (*PendingEditRecord, error) {
 
 // ApprovePendingEdit moves a pending edit to the approved table.
 // Returns the original pending edit data for processing.
-func ApprovePendingEdit(kdb *tdns.KeyDB, editID int) (*PendingEditRecord, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ApprovePendingEdit(hdb *HsyncDB, editID int) (*PendingEditRecord, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	tx, err := kdb.DB.Begin()
+	tx, err := hdb.DB.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -174,11 +172,11 @@ func ApprovePendingEdit(kdb *tdns.KeyDB, editID int) (*PendingEditRecord, error)
 
 // RejectPendingEdit moves a pending edit to the rejected table with a reason.
 // Returns the original pending edit data for sending rejection confirmation.
-func RejectPendingEdit(kdb *tdns.KeyDB, editID int, reason string) (*PendingEditRecord, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func RejectPendingEdit(hdb *HsyncDB, editID int, reason string) (*PendingEditRecord, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	tx, err := kdb.DB.Begin()
+	tx, err := hdb.DB.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -235,11 +233,11 @@ func RejectPendingEdit(kdb *tdns.KeyDB, editID int, reason string) (*PendingEdit
 // approvedRecords: owner->[]rrstring for records that were applied or removed
 // rejectedRecords: owner->[]rrstring for records that were rejected
 // reason: rejection reason (used for all rejected records)
-func ResolvePendingEdit(kdb *tdns.KeyDB, editID int, approvedRecords, rejectedRecords map[string][]string, reason string) error {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ResolvePendingEdit(hdb *HsyncDB, editID int, approvedRecords, rejectedRecords map[string][]string, reason string) error {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	tx, err := kdb.DB.Begin()
+	tx, err := hdb.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -320,11 +318,11 @@ func ResolvePendingEdit(kdb *tdns.KeyDB, editID int, approvedRecords, rejectedRe
 }
 
 // ListRejectedEdits returns all rejected edits for a zone.
-func ListRejectedEdits(kdb *tdns.KeyDB, zone string) ([]*RejectedEditRecord, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ListRejectedEdits(hdb *HsyncDB, zone string) ([]*RejectedEditRecord, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
-	rows, err := kdb.DB.Query(`
+	rows, err := hdb.DB.Query(`
 		SELECT edit_id, zone, sender_id, distribution_id, records_json, received_at, rejected_at, reason
 		FROM CombinerRejectedEdits WHERE zone = ? ORDER BY edit_id
 	`, zone)
@@ -353,20 +351,20 @@ func ListRejectedEdits(kdb *tdns.KeyDB, zone string) ([]*RejectedEditRecord, err
 
 // ListApprovedEdits returns all approved edits, optionally filtered by zone.
 // If zone is empty, returns all approved edits across all zones.
-func ListApprovedEdits(kdb *tdns.KeyDB, zone string) ([]*ApprovedEditRecord, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ListApprovedEdits(hdb *HsyncDB, zone string) ([]*ApprovedEditRecord, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var rows *sql.Rows
 	var err error
 
 	if zone != "" {
-		rows, err = kdb.DB.Query(`
+		rows, err = hdb.DB.Query(`
 			SELECT edit_id, zone, sender_id, distribution_id, records_json, received_at, approved_at
 			FROM CombinerApprovedEdits WHERE zone = ? ORDER BY edit_id
 		`, zone)
 	} else {
-		rows, err = kdb.DB.Query(`
+		rows, err = hdb.DB.Query(`
 			SELECT edit_id, zone, sender_id, distribution_id, records_json, received_at, approved_at
 			FROM CombinerApprovedEdits ORDER BY edit_id
 		`)
@@ -396,16 +394,16 @@ func ListApprovedEdits(kdb *tdns.KeyDB, zone string) ([]*ApprovedEditRecord, err
 
 // ClearPendingEdits deletes rows from CombinerPendingEdits.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func ClearPendingEdits(kdb *tdns.KeyDB, zone string) (int64, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ClearPendingEdits(hdb *HsyncDB, zone string) (int64, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var result sql.Result
 	var err error
 	if zone == "" {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerPendingEdits`)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerPendingEdits`)
 	} else {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerPendingEdits WHERE zone=?`, zone)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerPendingEdits WHERE zone=?`, zone)
 	}
 	if err != nil {
 		return 0, err
@@ -415,16 +413,16 @@ func ClearPendingEdits(kdb *tdns.KeyDB, zone string) (int64, error) {
 
 // ClearApprovedEdits deletes rows from CombinerApprovedEdits.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func ClearApprovedEdits(kdb *tdns.KeyDB, zone string) (int64, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ClearApprovedEdits(hdb *HsyncDB, zone string) (int64, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var result sql.Result
 	var err error
 	if zone == "" {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerApprovedEdits`)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerApprovedEdits`)
 	} else {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerApprovedEdits WHERE zone=?`, zone)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerApprovedEdits WHERE zone=?`, zone)
 	}
 	if err != nil {
 		return 0, err
@@ -434,16 +432,16 @@ func ClearApprovedEdits(kdb *tdns.KeyDB, zone string) (int64, error) {
 
 // ClearRejectedEdits deletes rows from CombinerRejectedEdits.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func ClearRejectedEdits(kdb *tdns.KeyDB, zone string) (int64, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ClearRejectedEdits(hdb *HsyncDB, zone string) (int64, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var result sql.Result
 	var err error
 	if zone == "" {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerRejectedEdits`)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerRejectedEdits`)
 	} else {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerRejectedEdits WHERE zone=?`, zone)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerRejectedEdits WHERE zone=?`, zone)
 	}
 	if err != nil {
 		return 0, err
@@ -453,16 +451,16 @@ func ClearRejectedEdits(kdb *tdns.KeyDB, zone string) (int64, error) {
 
 // ClearContributions deletes rows from CombinerContributions.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func ClearContributions(kdb *tdns.KeyDB, zone string) (int64, error) {
-	kdb.Lock()
-	defer kdb.Unlock()
+func ClearContributions(hdb *HsyncDB, zone string) (int64, error) {
+	hdb.Lock()
+	defer hdb.Unlock()
 
 	var result sql.Result
 	var err error
 	if zone == "" {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerContributions`)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerContributions`)
 	} else {
-		result, err = kdb.DB.Exec(`DELETE FROM CombinerContributions WHERE zone=?`, zone)
+		result, err = hdb.DB.Exec(`DELETE FROM CombinerContributions WHERE zone=?`, zone)
 	}
 	if err != nil {
 		return 0, err

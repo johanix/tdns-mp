@@ -42,9 +42,7 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 		return nil, err
 	}
 
-	// TODO: needs tdns wrapper — chunkHandler is unexported
-	// state.chunkHandler = handler
-	tdns.CombinerStateSetChunkHandler(state, handler)
+	state.ChunkNotifyHandler = handler
 
 	return state, nil
 }

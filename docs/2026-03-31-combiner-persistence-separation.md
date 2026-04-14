@@ -1,10 +1,32 @@
 # Combiner Persistence/Editing Separation + IGNORED Status
 
 Date: 2026-03-31
-Status: Design plan, not yet implemented
+Status: **Fully implemented** (2026-04-13)
+Branch: `combiner-persistence-rebase-1` (all three repos)
 Related: tdns/docs/2026-03-26-architectural-improvements.md
   (items 1 and 3, plus additional changes identified during
   design discussion)
+
+## Implementation Notes (2026-04-13)
+
+Originally implemented on `combiner-persistence-sep-1`,
+then rebased onto `combiner-persistence-rebase-1` to
+incorporate 52 commits of MP migration work.
+
+During rebase, ~20 standalone functions were converted to
+receiver methods on `*MPZoneData` (aligned with the
+ongoing migration away from `*tdns.ZoneData`).
+
+**Bonus migration**: `CombineWithLocalChanges()` was
+migrated from `tdns/v2/legacy_combiner_utils.go` to
+`tdns-mp/v2/combiner_utils.go` as a receiver on
+`*MPZoneData`. The new version replaces the
+`AllowedLocalRRtypes` whitelist with per-RRtype
+`editPolicy.canApply()` for MP zones, fixing the
+unsigned-zone corner case (nsmgmt=owner NS records
+were applied to the live zone but reported as IGNORED).
+The tdns version remains for the simpler tdns agent.
+`mergeWithUpstream()` was also migrated.
 
 ## Background: Combiner Data Architecture
 

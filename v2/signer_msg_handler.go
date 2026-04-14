@@ -93,24 +93,24 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
-			kdb := conf.Config.Internal.KeyDB
-			if kdb == nil {
+			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
+			if hdb == nil {
 				lgSigner.Error("KeyDB not available for KEYSTATE signal processing")
 				continue
 			}
 
 			switch sigMsg.Signal {
 			case "propagated":
-				if err := SetPropagationConfirmed(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := SetPropagationConfirmed(hdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 					continue
 				}
 				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
-				if err := TransitionMpdistToPublished(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := TransitionMpdistToPublished(hdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
-				if err := TransitionMpremoveToRemoved(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := TransitionMpremoveToRemoved(hdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				triggerResign(conf, sigMsg.Zone)
@@ -171,19 +171,19 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 // sendKeystateInventoryToAgent queries KeyDB for all keys in the zone and sends
 // a complete KEYSTATE inventory message back to the requesting agent.
 func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) error {
-	kdb := conf.Config.Internal.KeyDB
-	if kdb == nil {
+	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
+	if hdb == nil {
 		return fmt.Errorf("KeyDB not available")
 	}
 
 	// Only include keys if we are a signer for this zone.
 	// Non-signers send empty inventory so the agent gets a response.
 	var items []KeyInventoryItem
-	if zd, ok := tdns.Zones.Get(zone); ok && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner {
+	if zd, ok := Zones.Get(zone); ok && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner {
 		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
 	} else {
 		var err error
-		items, err = GetKeyInventory(kdb, zone)
+		items, err = GetKeyInventory(hdb, zone)
 		if err != nil {
 			return fmt.Errorf("GetKeyInventory failed: %w", err)
 		}

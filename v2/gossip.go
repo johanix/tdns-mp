@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -346,6 +347,8 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 			state := agent.EffectiveState()
 			agent.Mu.RUnlock()
 			peerStates[member] = AgentStateToString[state]
+			lgGossip.Debug("RefreshLocalStates peer", "group", shortHash(hash),
+				"peer", member, "state", AgentStateToString[state], "ptr", fmt.Sprintf("%p", agent))
 		}
 
 		// Zones this member serves

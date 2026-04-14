@@ -40,7 +40,7 @@ func main() {
 		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error setting up API router: %v", err))
 	}
 
-	conf.SetupMPAgentRoutes(apirouter)
+	conf.SetupMPAgentRoutes(ctx, apirouter)
 
 	// SIGHUP reload watcher
 	hup := make(chan os.Signal, 1)

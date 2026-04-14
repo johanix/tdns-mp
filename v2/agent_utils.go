@@ -514,7 +514,8 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 		}
 		lgAgent.Debug("agent already exists", "agent", remoteid,
 			"apiState", AgentStateToString[agent.ApiDetails.State],
-			"dnsState", AgentStateToString[agent.DnsDetails.State])
+			"dnsState", AgentStateToString[agent.DnsDetails.State],
+			"ptr", fmt.Sprintf("%p", agent))
 		return
 	}
 
@@ -545,7 +546,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	}
 
 	ar.S.Set(remoteid, agent)
-	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename)
+	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename, "ptr", fmt.Sprintf("%p", agent))
 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
 	var imr *tdns.Imr
@@ -745,7 +746,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 	defer ar.mu.RUnlock()
 	lgAgent.Debug("getting zone agent data", "zone", zonename, "remoteAgents", len(ar.RemoteAgents[zonename]))
 
-	zd, exists := tdns.Zones.Get(string(zonename))
+	zd, exists := Zones.Get(string(zonename))
 	if !exists {
 		lgAgent.Warn("zone is unknown", "zone", zonename)
 		return nil, fmt.Errorf("zone %q is unknown", zonename)
@@ -822,7 +823,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	// Build label->Identity map from the full zone HSYNC3 RRset (not just the delta).
 	// Using only HsyncAdds would miss unchanged records and break upstream resolution.
 	labelToIdentity := map[string]string{}
-	if zd, exists := tdns.Zones.Get(string(zonename)); exists {
+	if zd, exists := Zones.Get(string(zonename)); exists {
 		if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
 			if hsync3RRset, ok := apex.RRtypes.Get(core.TypeHSYNC3); ok {
 				for _, rr := range hsync3RRset.RRs {

@@ -14,7 +14,7 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var req CombinerDistribPost
@@ -55,11 +55,11 @@ func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w htt
 			// For combiners, we might not have a specific identity, so list all
 			infos := cache.List("")
 
-			summaries := make([]*tdns.DistributionSummary, 0, len(infos))
+			summaries := make([]*DistributionSummary, 0, len(infos))
 			distIDs := make([]string, 0, len(infos))
 
 			for _, info := range infos {
-				summary := &tdns.DistributionSummary{
+				summary := &DistributionSummary{
 					DistributionID: info.DistributionID,
 					SenderID:       info.SenderID,
 					ReceiverID:     info.ReceiverID,
@@ -93,7 +93,7 @@ func (conf *Config) APIcombinerDistrib(cache *tdns.DistributionCache) func(w htt
 
 		case "peer-list":
 			// List all known peers with working keys
-			peers := tdns.ListKnownPeers(conf.Config)
+			peers := ListKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))
 
 			// Convert to generic map for JSON serialization

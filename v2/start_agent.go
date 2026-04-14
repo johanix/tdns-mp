@@ -36,7 +36,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
 	}
 
-	kdb := conf.Config.Internal.KeyDB
+	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 
 	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
 	// and install hook so new zones added via reload also get them.
@@ -107,7 +107,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 	// Wire configured peers counter — elections require ALL configured peers.
 	lem.SetConfiguredPeersFunc(func(zone ZoneName) int {
-		zd, exists := tdns.Zones.Get(string(zone))
+		zd, exists := Zones.Get(string(zone))
 		if !exists || zd == nil {
 			return 0
 		}
@@ -131,14 +131,45 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		lem.SetProviderGroupManager(ar.ProviderGroupManager)
 	}
 
-	// Attach leader election OnFirstLoad callbacks to zone stubs.
+	// Attach OnFirstLoad callbacks to zone stubs.
+	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
 	for _, zoneName := range conf.Config.Internal.AllZones {
-		zd, exists := tdns.Zones.Get(zoneName)
+		mpzd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
 		}
-		if zd.Options[tdns.OptDelSyncChild] || zd.Options[tdns.OptMultiProvider] {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+		// Detect parentsync=agent from HSYNCPARAM and enable delegation sync.
+		if mpzd.Options[tdns.OptMultiProvider] {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				if zd.Options[tdns.OptDelSyncChild] {
+					return // already set via static config
+				}
+				mp := conf.Config.MultiProvider
+				if mp == nil {
+					return
+				}
+				w := &MPZoneData{ZoneData: zd}
+				ourIds := ourHsyncIdentities(mp)
+				matched, _, _ := w.matchHsyncIdentity(ourIds)
+				if !matched {
+					return
+				}
+				hp := w.getHSYNCPARAM()
+				if hp == nil {
+					return
+				}
+				if hp.GetParentSync() == core.HsyncParentSyncAgent {
+					lgAgent.Info("HSYNCPARAM parentsync=agent, enabling delegation sync", "zone", zd.ZoneName)
+					zd.Options[tdns.OptDelSyncChild] = true
+					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+						lgAgent.Error("SetupZoneSync failed in MP OnFirstLoad", "zone", zd.ZoneName, "err", err)
+					}
+				}
+			})
+		}
+		// Leader election callback (must run after parentsync detection above).
+		if mpzd.Options[tdns.OptDelSyncChild] || mpzd.Options[tdns.OptMultiProvider] {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if !zd.Options[tdns.OptDelSyncChild] {
 					return
 				}
@@ -163,7 +194,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// When the local agent wins leader election: ensure we have a SIG(0) key,
 	// then publish KEY to combiner and sync to remote agents.
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
-		zd, ok := tdns.Zones.Get(string(zone))
+		zd, ok := Zones.Get(string(zone))
 		if !ok || zd == nil {
 			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
 		}
@@ -186,7 +217,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 		keyName := string(zone)
 		// Step a: check local keystore
-		sak, err := kdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
+		sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 		if err == nil && len(sak.Keys) > 0 {
 			lgAgent.Info("leader has local SIG(0) key, proceeding to publish",
 				"zone", zone, "keyid", sak.Keys[0].KeyId)
@@ -210,7 +241,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 						continue
 					}
 					if len(configResp.ConfigData) > 0 && configResp.ConfigData["status"] != "no sig0 key for zone" {
-						if err := importSig0KeyFromPeer(kdb, keyName, configResp.ConfigData); err != nil {
+						if err := importSig0KeyFromPeer(hdb, keyName, configResp.ConfigData); err != nil {
 							lgAgent.Error("failed to import SIG(0) key from peer",
 								"zone", zone, "peer", agent.Identity, "err", err)
 							continue
@@ -238,7 +269,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				State:      tdns.Sig0StateActive,
 				Creator:    "leader-election",
 			}
-			resp, err := kdb.Sig0KeyMgmt(nil, kp)
+			resp, err := hdb.Sig0KeyMgmt(nil, kp)
 			if err != nil {
 				return fmt.Errorf("onLeaderElected: failed to generate SIG(0) keypair: %v", err)
 			}
@@ -246,7 +277,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 	publish:
 		// Step d: get the active key and publish to combiner + remote agents
-		sak, err = kdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
+		sak, err = hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 		if err != nil || len(sak.Keys) == 0 {
 			return fmt.Errorf("onLeaderElected: no active SIG(0) key after generation for zone %s", zone)
 		}
@@ -288,7 +319,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		if zd.Options[tdns.OptDelSyncChild] {
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.Config.ParentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
 		}
 
 		return nil
@@ -308,7 +339,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
 	})
 
-	syncrtr, err := conf.Config.SetupAgentSyncRouter(ctx)
+	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 	if err != nil {
 		return fmt.Errorf("error setting up agent-to-agent sync router: %v", err)
 	}
@@ -329,16 +360,16 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return tdns.ScannerEngine(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
-		return kdb.ZoneUpdaterEngine(ctx)
+		return hdb.ZoneUpdaterEngine(ctx)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "DeferredUpdaterEngine", func() error {
-		return kdb.DeferredUpdaterEngine(ctx)
+		return hdb.DeferredUpdaterEngine(ctx)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
 		return tdns.UpdateHandler(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
-		return kdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf.Config)
+		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
 		return tdns.NotifyHandler(ctx, conf.Config)
@@ -346,6 +377,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "DnsEngine", func() error {
 		return tdns.DnsEngine(ctx, conf.Config)
 	})
+
+	// Setup agent identity and publish transport records. Must run after
+	// ZoneUpdaterEngine is started, because PublishUriRR/PublishAddrRR/etc.
+	// send on KeyDB.UpdateQ and block until a consumer drains it.
+	if err := conf.SetupAgent(conf.Config.Internal.AllZones); err != nil {
+		return fmt.Errorf("SetupAgent: %w", err)
+	}
 
 	return nil
 }

@@ -8,6 +8,8 @@
 package tdnsmp
 
 import (
+	"time"
+
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -19,7 +21,16 @@ type CombinerEditResponse = tdns.CombinerEditResponse
 type CombinerDebugPost = tdns.CombinerDebugPost
 type CombinerDebugResponse = tdns.CombinerDebugResponse
 type CombinerDistribPost = tdns.CombinerDistribPost
-type CombinerDistribResponse = tdns.CombinerDistribResponse
+
+// CombinerDistribResponse defined locally (uses local DistributionSummary)
+type CombinerDistribResponse struct {
+	Time          time.Time              `json:"time"`
+	Error         bool                   `json:"error,omitempty"`
+	ErrorMsg      string                 `json:"error_msg,omitempty"`
+	Msg           string                 `json:"msg,omitempty"`
+	Summaries     []*DistributionSummary `json:"summaries,omitempty"`
+	Distributions []string               `json:"distributions,omitempty"`
+}
 
 // Combiner sync types (moved from combiner_chunk.go)
 type CombinerSyncRequest = tdns.CombinerSyncRequest
@@ -47,29 +58,17 @@ type ZoneName = tdns.ZoneName
 type ZoneUpdate = tdns.ZoneUpdate
 type OwnerData = tdns.OwnerData
 
-// Types that stay as aliases until their defining files are copied
-type DistributionCache = tdns.DistributionCache
-type DistributionInfo = tdns.DistributionInfo
-type ChunkPayloadStore = tdns.ChunkPayloadStore
+// Distribution types now defined locally in distribution_cache.go
+// Chunk types now defined locally in chunk_store.go
 
 // Internal state types that stay as aliases during dual-write period
 type CombinerState = tdns.CombinerState
-
-// Agent distrib API types
-type AgentDistribPost = tdns.AgentDistribPost
-type AgentDistribResponse = tdns.AgentDistribResponse
-type DistributionSummary = tdns.DistributionSummary
-type PeerInfo = tdns.PeerInfo
 
 // Transaction API types
 type TransactionPost = tdns.TransactionPost
 type TransactionResponse = tdns.TransactionResponse
 type TransactionSummary = tdns.TransactionSummary
 type TransactionErrorSummary = tdns.TransactionErrorSummary
-
-// Functions re-exported from tdns (not yet moved)
-var NewDistributionCache = tdns.NewDistributionCache
-var StartDistributionGC = tdns.StartDistributionGC
 
 // NewMsgQs creates and returns a *MsgQs with all channels initialized.
 func NewMsgQs() *MsgQs {

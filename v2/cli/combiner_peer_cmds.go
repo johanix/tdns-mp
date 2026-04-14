@@ -37,36 +37,6 @@ Example:
 	},
 }
 
-var combinerPeerPingID string
-
-var combinerPeerPingCmd = &cobra.Command{
-	Use:   "ping",
-	Short: "Ping an agent via DNS CHUNK",
-	Long: `Ask the combiner to send a DNS CHUNK ping to the specified agent and report the result.
-
-Example:
-  tdns-cliv2 combiner peer ping --id agent.alpha.dnslab.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if combinerPeerPingID == "" {
-			log.Fatalf("--id flag is required")
-		}
-
-		resp, err := SendCombinerDebugCmd(CombinerDebugPost{
-			Command: "agent-ping",
-			AgentID: combinerPeerPingID,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if resp.Error {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", resp.ErrorMsg)
-			return
-		}
-		fmt.Println(resp.Msg)
-	},
-}
-
 var combinerPeerResyncCmd = &cobra.Command{
 	Use:   "resync",
 	Short: "Ask agents to re-send all zone data to the combiner",
@@ -103,12 +73,10 @@ Example:
 
 func init() {
 	combinerPeerCmd.AddCommand(combinerPeerListCmd)
-	combinerPeerCmd.AddCommand(combinerPeerPingCmd)
 	combinerPeerCmd.AddCommand(combinerPeerResyncCmd)
 	CombinerCmd.AddCommand(combinerPeerCmd)
 
 	combinerPeerListCmd.Flags().Bool("verbose", false, "Show detailed per-peer statistics")
-	combinerPeerPingCmd.Flags().StringVar(&combinerPeerPingID, "id", "", "Identity of the peer to ping (required)")
 	combinerPeerResyncCmd.Flags().String("zone", "", "Resync only this zone (default: all zones)")
 	combinerPeerResyncCmd.Flags().String("agent", "", "Resync only this agent (default: all agents)")
 }

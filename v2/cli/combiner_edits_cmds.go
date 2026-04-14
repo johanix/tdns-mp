@@ -69,15 +69,13 @@ var combinerZoneMPListCmd = &cobra.Command{
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
 
-		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-mp-zones",
-		})
+		resp, err := SendMPListCommand(api)
 		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 			log.Fatalf("Error: %v", err)
 		}
 
-		tdnscli.ListMPZones(cr)
+		ListMPZones(resp)
 	},
 }
 

@@ -335,12 +335,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 
 		// Wire confirmation callback for reliable message queue and per-RR tracking
 		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
+			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
 			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
-			// Stop retrying on any definitive answer (success, failure, or rejected).
+			// Stop retrying on any definitive answer (success, failure, rejected, or ignored).
 			// Only keep retrying for transient states (pending, partial).
-			if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected) {
+			if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected || status == transport.ConfirmIgnored) {
 				tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 
@@ -361,6 +361,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 					AppliedRecords: applied,
 					RemovedRecords: removed,
 					RejectedItems:  rejItems,
+					IgnoredRecords: ignored,
 					Truncated:      truncated,
 					Timestamp:      time.Now(),
 				}
@@ -1264,14 +1265,18 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	}
 
 	// Map status string back to ConfirmStatus
-	status := transport.ConfirmSuccess
+	status := transport.ConfirmFailed
 	switch detail.Status {
+	case "SUCCESS", "ok":
+		status = transport.ConfirmSuccess
 	case "PARTIAL":
 		status = transport.ConfirmPartial
 	case "FAILED":
 		status = transport.ConfirmFailed
 	case "REJECTED":
 		status = transport.ConfirmRejected
+	case "IGNORED":
+		status = transport.ConfirmIgnored
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1286,6 +1291,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		AppliedRecords: detail.AppliedRecords,
 		RemovedRecords: detail.RemovedRecords,
 		RejectedItems:  rejItems,
+		IgnoredRecords: detail.IgnoredRecords,
 		Truncated:      detail.Truncated,
 		Timestamp:      time.Now(),
 	})
@@ -1554,9 +1560,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if locally supported, available, has valid endpoint, and OPERATIONAL/LEGACY
+	// Try API transport if locally supported, available, and has valid endpoint.
+	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
 	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
-		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
+		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy || agent.ApiDetails.State == AgentStateDegraded || agent.ApiDetails.State == AgentStateInterrupted {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.Mu.Lock()
 			if apiErr != nil {
@@ -1571,7 +1578,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LastContactTime = time.Now()
+				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.LatestRBeat = time.Now()
+				agent.ApiDetails.SentBeats++
 				agent.ApiDetails.ReceivedBeats++
 				agent.ApiDetails.LatestError = ""
 			}
@@ -1579,9 +1588,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		}
 	}
 
-	// Try DNS transport if supported and OPERATIONAL/LEGACY
+	// Try DNS transport if supported.
+	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
-		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy {
+		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy || agent.DnsDetails.State == AgentStateDegraded || agent.DnsDetails.State == AgentStateInterrupted {
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
 			agent.Mu.Lock()
 			if dnsErr != nil {
@@ -1598,7 +1608,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
 				agent.DnsDetails.State = AgentStateOperational
 				agent.DnsDetails.LastContactTime = time.Now()
+				agent.DnsDetails.LatestSBeat = time.Now()
 				agent.DnsDetails.LatestRBeat = time.Now()
+				agent.DnsDetails.SentBeats++
 				agent.DnsDetails.ReceivedBeats++
 				agent.DnsDetails.LatestError = ""
 			}

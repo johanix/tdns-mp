@@ -17,7 +17,7 @@ import (
 
 // GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
 // If zone is empty, returns keys across all zones.
-func GetDnssecKeysByState(kdb *tdns.KeyDB, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
+func GetDnssecKeysByState(hdb *HsyncDB, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
 	var query string
 	var args []interface{}
 
@@ -29,7 +29,7 @@ func GetDnssecKeysByState(kdb *tdns.KeyDB, zone string, state string) ([]DnssecK
 		args = []interface{}{zone, state}
 	}
 
-	rows, err := kdb.Query(query, args...)
+	rows, err := hdb.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("GetDnssecKeysByState: query failed: %w", err)
 	}
@@ -81,8 +81,8 @@ func GetDnssecKeysByState(kdb *tdns.KeyDB, zone string, state string) ([]DnssecK
 // appropriate lifecycle timestamp. When transitioning to "published", sets
 // published_at. When transitioning to "retired", sets retired_at.
 // Invalidates the cache for both old and new states.
-func UpdateDnssecKeyState(kdb *tdns.KeyDB, zonename string, keyid uint16, newstate string) error {
-	tx, err := kdb.Begin("UpdateDnssecKeyState")
+func UpdateDnssecKeyState(hdb *HsyncDB, zonename string, keyid uint16, newstate string) error {
+	tx, err := hdb.Begin("UpdateDnssecKeyState")
 	if err != nil {
 		return fmt.Errorf("error beginning transaction: %v", err)
 	}
@@ -131,8 +131,8 @@ func UpdateDnssecKeyState(kdb *tdns.KeyDB, zonename string, keyid uint16, newsta
 	}
 
 	// Invalidate caches for both old and new states
-	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
-	delete(kdb.KeystoreDnskeyCache, zonename+"+"+newstate)
+	delete(hdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
+	delete(hdb.KeystoreDnskeyCache, zonename+"+"+newstate)
 
 	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
 	return nil
@@ -140,8 +140,8 @@ func UpdateDnssecKeyState(kdb *tdns.KeyDB, zonename string, keyid uint16, newsta
 
 // GenerateAndStageKey generates a new DNSSEC key and transitions it to the
 // appropriate initial state (mpdist for MP zones, published otherwise).
-func GenerateAndStageKey(kdb *tdns.KeyDB, zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
-	pkc, _, err := kdb.GenerateKeypair(zone, creator, tdns.DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
+func GenerateAndStageKey(hdb *HsyncDB, zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
+	pkc, _, err := hdb.GenerateKeypair(zone, creator, tdns.DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
 	if err != nil {
 		return 0, fmt.Errorf("GenerateAndStageKey: key generation failed: %w", err)
 	}
@@ -155,7 +155,7 @@ func GenerateAndStageKey(kdb *tdns.KeyDB, zone, creator string, alg uint8, keyty
 		targetState = tdns.DnskeyStatePublished
 	}
 
-	if err := UpdateDnssecKeyState(kdb, zone, keyid, targetState); err != nil {
+	if err := UpdateDnssecKeyState(hdb, zone, keyid, targetState); err != nil {
 		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", targetState, err)
 	}
 
@@ -164,10 +164,10 @@ func GenerateAndStageKey(kdb *tdns.KeyDB, zone, creator string, alg uint8, keyty
 }
 
 // GetKeyInventory returns the complete DNSKEY inventory for a zone.
-func GetKeyInventory(kdb *tdns.KeyDB, zonename string) ([]KeyInventoryItem, error) {
+func GetKeyInventory(hdb *HsyncDB, zonename string) ([]KeyInventoryItem, error) {
 	const inventorySql = `SELECT keyid, flags, algorithm, state, COALESCE(keyrr, '') FROM DnssecKeyStore WHERE zonename=?`
 
-	rows, err := kdb.Query(inventorySql, zonename)
+	rows, err := hdb.Query(inventorySql, zonename)
 	if err != nil {
 		return nil, fmt.Errorf("GetKeyInventory: query failed for zone %s: %w", zonename, err)
 	}
@@ -202,11 +202,11 @@ func GetKeyInventory(kdb *tdns.KeyDB, zonename string) ([]KeyInventoryItem, erro
 }
 
 // SetPropagationConfirmed marks a DNSKEY as propagation-confirmed in the keystore.
-func SetPropagationConfirmed(kdb *tdns.KeyDB, zonename string, keyid uint16) error {
+func SetPropagationConfirmed(hdb *HsyncDB, zonename string, keyid uint16) error {
 	const updateSql = `UPDATE DnssecKeyStore SET propagation_confirmed=1, propagation_confirmed_at=? WHERE zonename=? AND keyid=?`
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := kdb.Exec(updateSql, now, zonename, keyid)
+	res, err := hdb.Exec(updateSql, now, zonename, keyid)
 	if err != nil {
 		return fmt.Errorf("SetPropagationConfirmed: %w", err)
 	}
@@ -216,16 +216,16 @@ func SetPropagationConfirmed(kdb *tdns.KeyDB, zonename string, keyid uint16) err
 	}
 
 	// Invalidate cache for published state (the key should be in published state)
-	delete(kdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStatePublished)
+	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStatePublished)
 	lgSigner.Info("key marked as propagation confirmed", "keyid", keyid, "zone", zonename)
 	return nil
 }
 
 // TransitionMpdistToPublished transitions a key from mpdist to published state.
 // If the key is not in mpdist state, this is a no-op (returns nil).
-func TransitionMpdistToPublished(kdb *tdns.KeyDB, zonename string, keyid uint16) error {
+func TransitionMpdistToPublished(hdb *HsyncDB, zonename string, keyid uint16) error {
 	var currentState string
-	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	err := hdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -238,7 +238,7 @@ func TransitionMpdistToPublished(kdb *tdns.KeyDB, zonename string, keyid uint16)
 		return nil
 	}
 
-	if err := UpdateDnssecKeyState(kdb, zonename, keyid, tdns.DnskeyStatePublished); err != nil {
+	if err := UpdateDnssecKeyState(hdb, zonename, keyid, tdns.DnskeyStatePublished); err != nil {
 		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
 	}
 
@@ -248,9 +248,9 @@ func TransitionMpdistToPublished(kdb *tdns.KeyDB, zonename string, keyid uint16)
 
 // TransitionMpremoveToRemoved transitions a key from mpremove to removed state.
 // If the key is not in mpremove state, this is a no-op (returns nil).
-func TransitionMpremoveToRemoved(kdb *tdns.KeyDB, zonename string, keyid uint16) error {
+func TransitionMpremoveToRemoved(hdb *HsyncDB, zonename string, keyid uint16) error {
 	var currentState string
-	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	err := hdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -263,7 +263,7 @@ func TransitionMpremoveToRemoved(kdb *tdns.KeyDB, zonename string, keyid uint16)
 		return nil
 	}
 
-	if err := UpdateDnssecKeyState(kdb, zonename, keyid, tdns.DnskeyStateRemoved); err != nil {
+	if err := UpdateDnssecKeyState(hdb, zonename, keyid, tdns.DnskeyStateRemoved); err != nil {
 		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
 	}
 

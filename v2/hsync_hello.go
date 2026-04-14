@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -217,11 +216,12 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 			cancel()
 
 			if err == nil && beatResp != nil && beatResp.Ack {
+				// SendBeatWithFallback already updated per-transport
+				// state individually. Promote the top-level state.
 				agent.Mu.Lock()
-				agent.ApiDetails.State = AgentStateOperational
-				agent.ApiDetails.LatestSBeat = time.Now()
-				agent.ApiDetails.SentBeats++
-				agent.ApiDetails.LatestError = ""
+				if agent.State == AgentStateNeeded || agent.State == AgentStateKnown || agent.State == AgentStateIntroduced {
+					agent.State = AgentStateOperational
+				}
 				var tasks []DeferredAgentTask
 				if len(agent.DeferredTasks) > 0 {
 					tasks = agent.DeferredTasks
@@ -254,7 +254,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 						agent.Mu.Unlock()
 					}
 				}
-				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity)
+				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity, "ptr", fmt.Sprintf("%p", agent))
 				return
 			}
 		}
@@ -282,7 +282,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		if err != nil {
 			lgAgent.Warn("HELLO failed on all transports", "agent", agent.Identity, "err", err)
 		} else {
-			lgAgent.Info("HELLO accepted on at least one transport", "agent", agent.Identity)
+			lgAgent.Info("HELLO accepted on at least one transport", "agent", agent.Identity, "ptr", fmt.Sprintf("%p", agent))
 		}
 		ar.S.Set(agent.Identity, agent)
 		return
@@ -330,7 +330,7 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	// Check if we have this zone
-	zd, exists := tdns.Zones.Get(string(ahp.Zone))
+	zd, exists := Zones.Get(string(ahp.Zone))
 	if !exists {
 		lgAgent.Warn("unknown zone in HELLO, may be a timing issue", "zone", ahp.Zone)
 		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil

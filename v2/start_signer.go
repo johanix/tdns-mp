@@ -22,9 +22,8 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
 
-	// Register MP signer API endpoint
-	sr := apirouter.PathPrefix("/api/v1").Subrouter()
-	sr.HandleFunc("/signer", conf.APImpSigner()).Methods("POST")
+	// Register all signer API routes from tdns-mp
+	conf.SetupMPSignerRoutes(ctx, apirouter)
 
 	// DNS engines (refresh, signing, query, NOTIFY, etc.)
 	// MP engines are skipped because AppType == AppTypeMPSigner

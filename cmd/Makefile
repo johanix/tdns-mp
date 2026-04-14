@@ -1,8 +1,14 @@
-.PHONY: default all clean install mpsigner mpcombiner mpagent mpcli
+.PHONY: default all version clean install mpsigner mpcombiner mpagent mpcli
 
 default: all
 
 all: mpsigner mpcombiner mpagent mpcli
+
+version:
+	$(MAKE) -C ./mpsigner/ version
+	$(MAKE) -C ./mpcombiner/ version
+	$(MAKE) -C ./mpagent/ version
+	$(MAKE) -C ./mpcli/ version
 
 mpsigner:
 	$(MAKE) -C ./mpsigner/

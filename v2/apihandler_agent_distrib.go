@@ -69,7 +69,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			// Get SOA serial for the zone if available
 			var zoneSerial uint32
-			if zd, exists := tdns.Zones.Get(zoneName); exists {
+			if zd, exists := Zones.Get(zoneName); exists {
 				if soa, err := zd.GetSOA(); err == nil {
 					zoneSerial = soa.Serial
 				}
@@ -218,8 +218,8 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			// Zones with OptDelSyncChild (parentsync=agent) — for operator visibility
 			var parentsyncZones []string
-			for _, zn := range tdns.Zones.Keys() {
-				if zd, ok := tdns.Zones.Get(zn); ok && zd.Options[tdns.OptDelSyncChild] {
+			for _, zn := range Zones.Keys() {
+				if zd, ok := Zones.Get(zn); ok && zd.Options[tdns.OptDelSyncChild] {
 					parentsyncZones = append(parentsyncZones, zn)
 				}
 			}
@@ -726,7 +726,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 				"name": string(zoneName),
 			}
 
-			if zd, exists := tdns.Zones.Get(string(zoneName)); exists {
+			if zd, exists := Zones.Get(string(zoneName)); exists {
 				if soa, err := zd.GetSOA(); err == nil {
 					zoneInfo["serial"] = soa.Serial
 				}

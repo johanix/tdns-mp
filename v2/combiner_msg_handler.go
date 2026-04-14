@@ -127,38 +127,45 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
-			kdb := conf.Config.Internal.KeyDB
+			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
-			if kdb != nil {
-				editID, _ = NextEditID(kdb)
-				rec := &PendingEditRecord{
-					EditID:         editID,
-					Zone:           zone,
-					SenderID:       senderID,
-					DeliveredBy:    deliveredBy,
-					DistributionID: msg.DistributionID,
-					Records:        msg.Records,
-					ReceivedAt:     time.Now(),
+			if hdb != nil {
+				var err error
+				editID, err = NextEditID(hdb)
+				if err != nil {
+					lgCombiner.Error("failed to get next edit ID", "zone", zone, "err", err)
+					editID = 0
 				}
-				if err := SavePendingEdit(kdb, rec); err != nil {
-					lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
-				} else {
-					lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
+				if editID != 0 {
+					rec := &PendingEditRecord{
+						EditID:         editID,
+						Zone:           zone,
+						SenderID:       senderID,
+						DeliveredBy:    deliveredBy,
+						DistributionID: msg.DistributionID,
+						Records:        msg.Records,
+						ReceivedAt:     time.Now(),
+					}
+					if err := SavePendingEdit(hdb, rec); err != nil {
+						lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
+					} else {
+						lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
+					}
 				}
 			}
 
 			// Manual approval gate: if zone has mp-manual-approval, keep the
 			// edit pending for operator review — unless it's a no-op.
-			if zd, exists := tdns.Zones.Get(dns.Fqdn(zone)); exists && zd.Options[tdns.OptMPManualApproval] {
+			if mpzd, exists := Zones.Get(dns.Fqdn(zone)); exists && mpzd.Options[tdns.OptMPManualApproval] {
 				// Check for no-op
-				noOp := IsNoOpOperations(zd, senderID, msg.Operations)
+				noOp := mpzd.IsNoOpOperations(senderID, msg.Operations)
 				if noOp {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)
-					if kdb != nil && editID > 0 {
-						if err := ResolvePendingEdit(kdb, editID, msg.Records, nil, ""); err != nil {
+					if hdb != nil && editID > 0 {
+						if err := ResolvePendingEdit(hdb, editID, msg.Records, nil, ""); err != nil {
 							lgCombiner.Error("failed to resolve no-op edit", "editID", editID, "err", err)
 						}
 					}
@@ -219,7 +226,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if localAgents[senderID] {
 				nsGuard = nil
 			}
-			resp := CombinerProcessUpdate(syncReq, nsGuard, localAgents, kdb, tm)
+			resp := CombinerProcessUpdate(syncReq, nsGuard, localAgents, hdb, tm)
 			resp.Nonce = msg.Nonce // Echo nonce for confirmation
 			if resp.Zone != "" {
 				zone = resp.Zone // Update zone from combiner discovery (e.g. provider updates with Zone="")
@@ -230,8 +237,12 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 
 			// Split results into approved and rejected record maps and persist.
-			if kdb != nil && editID > 0 {
+			if hdb != nil && editID > 0 {
 				approved := rrStringsToOwnerMap(resp.AppliedRecords)
+				// Ignored records were persisted — include them in the approved audit trail
+				for owner, rrs := range rrStringsToOwnerMap(resp.IgnoredRecords) {
+					approved[owner] = append(approved[owner], rrs...)
+				}
 				// Store removals with ClassNONE so the audit trail preserves ADD/DEL intent
 				for owner, rrs := range rrStringsToClassNONE(resp.RemovedRecords) {
 					approved[owner] = append(approved[owner], rrs...)
@@ -254,12 +265,12 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 						reason = fmt.Sprintf("%s (and %d more)", reason, len(reasons)-1)
 					}
 				}
-				if err := ResolvePendingEdit(kdb, editID, approved, rejected, reason); err != nil {
+				if err := ResolvePendingEdit(hdb, editID, approved, rejected, reason); err != nil {
 					lgCombiner.Error("failed to resolve edit", "editID", editID, "err", err)
 				}
 			}
 
-			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems))
+			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems), "ignored", len(resp.IgnoredRecords))
 
 			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
 			combinerSendConfirmation(tm, deliveredBy, resp)
@@ -269,7 +280,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// for the next periodic SOA refresh.
 			// Run async to avoid blocking the message handler on network I/O.
 			if resp.Status != "error" {
-				if zd, ok := tdns.Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
+				if zd, ok := Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
 					go zd.NotifyDownstreams()
 				}
 			}
@@ -302,6 +313,8 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 		status = transport.ConfirmFailed
 	case "pending":
 		status = transport.ConfirmPending
+	case "ignored":
+		status = transport.ConfirmIgnored
 	}
 
 	var rejItems []transport.RejectedItemDTO
@@ -322,6 +335,7 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 		AppliedRecords: resp.AppliedRecords,
 		RemovedRecords: resp.RemovedRecords,
 		RejectedItems:  rejItems,
+		IgnoredRecords: resp.IgnoredRecords,
 		Truncated:      false, // No truncation needed when sending as separate CONFIRM NOTIFY
 		Timestamp:      time.Now(),
 	})
@@ -351,7 +365,7 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 // them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
 // when an RFI EDITS is received.
 func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
-	zd, exists := tdns.Zones.Get(dns.Fqdn(zone))
+	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
 		return

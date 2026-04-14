@@ -216,7 +216,7 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 			}
 			fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
 			for _, agent := range amr.AgentRegistry.RegularS {
-				err := tdnscli.PrintAgent(agent, false)
+				err := PrintHsyncAgent(agent, false)
 				if err != nil {
 					log.Printf("Error printing agent: %v", err)
 				}

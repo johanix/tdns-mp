@@ -51,8 +51,10 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
 	zd.Options[tdns.OptAllowUpdates] = true
-	// TODO: zd.SyncQ assignment skipped — tdns.SyncRequest vs local SyncRequest type mismatch.
-	// This will be resolved when SyncRequest becomes an alias or when zd.SyncQ is removed from tdns.
+	// Wire SyncQ on the MPZoneData wrapper (SyncQ moved from tdns.ZoneData to MPZoneData)
+	if mpzd, ok := Zones.Get(zonename); ok {
+		mpzd.SyncQ = conf.InternalMp.SyncQ
+	}
 
 	// Check for local notify configuration and set downstream targets
 	if len(conf.Config.MultiProvider.Local.Notify) > 0 {
@@ -188,14 +190,14 @@ func (conf *Config) publishDnsTransport(zd *tdns.ZoneData) error {
 	}
 	lgAgent.Debug("published address records", "agent", identity)
 
-	err = AgentSig0KeyPrep(zd, host, zd.KeyDB)
+	err = AgentSig0KeyPrep(zd, host, NewHsyncDB(zd.KeyDB))
 	if err != nil {
 		return fmt.Errorf("publishDnsTransport: failed to publish KEY record: %v", err)
 	}
 	lgAgent.Debug("published KEY record", "agent", identity)
 
 	publishName := "dns." + identity
-	err = AgentJWKKeyPrep(zd, publishName, zd.KeyDB, conf.Config.MultiProvider)
+	err = AgentJWKKeyPrep(zd, publishName, NewHsyncDB(zd.KeyDB), conf.Config.MultiProvider)
 	if err != nil {
 		lgAgent.Warn("failed to publish JWK record, continuing without JWK", "err", err)
 	} else {
@@ -324,7 +326,7 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 	} else {
 		// Config-defined zone — register OnFirstLoad callbacks (zone not loaded yet)
-		zdp, ok := tdns.Zones.Get(conf.Config.MultiProvider.Identity)
+		zdp, ok := Zones.Get(conf.Config.MultiProvider.Identity)
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", conf.Config.MultiProvider.Identity)
 		}
@@ -348,14 +350,14 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 	return nil
 }
 
-func AgentSig0KeyPrep(zd *tdns.ZoneData, name string, kdb *tdns.KeyDB) error {
+func AgentSig0KeyPrep(zd *tdns.ZoneData, name string, hdb *HsyncDB) error {
 	alg, err := parseKeygenAlgorithm("agent.update.keygen.algorithm", dns.ED25519)
 	if err != nil {
 		lgAgent.Error("parseKeygenAlgorithm failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
-	return zd.Sig0KeyPreparation(name, alg, kdb)
+	return zd.Sig0KeyPreparation(name, alg, hdb.KeyDB)
 }
 
 // parseKeygenAlgorithm reads a DNS algorithm from a viper config key.
@@ -371,7 +373,7 @@ func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
 }
 
 // AgentJWKKeyPrep publishes a JWK record for the agent's JOSE/HPKE long-term public keys.
-func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, kdb *tdns.KeyDB, mp *tdns.MultiProviderConf) error {
+func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *tdns.MultiProviderConf) error {
 	lgAgent.Info("publishing JWK record", "zone", zd.ZoneName, "name", publishname)
 
 	// Check if JWK publication is disabled

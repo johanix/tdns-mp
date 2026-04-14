@@ -237,6 +237,16 @@ func showDetailedZoneStatus(zone string) {
 								}
 							}
 						}
+
+						// For IGNORED: show who persisted but did not apply
+						if info.State == "ignored" {
+							rows = append(rows, " | | Combiner persisted but did not apply (edit policy)")
+							for recipientID, conf := range info.Confirmations {
+								if conf.Status == "ignored" {
+									rows = append(rows, fmt.Sprintf(" | | Ignored by: %s", recipientID))
+								}
+							}
+						}
 					}
 				}
 

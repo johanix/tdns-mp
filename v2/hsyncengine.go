@@ -133,7 +133,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 					lgEngine.Info("STATUS-UPDATE: not the delegation sync leader, ignoring", "zone", statusMsg.Zone, "subtype", statusMsg.SubType)
 					break
 				}
-				zd, exists := tdns.Zones.Get(statusMsg.Zone)
+				zd, exists := Zones.Get(statusMsg.Zone)
 				if !exists {
 					lgEngine.Warn("STATUS-UPDATE: zone not found", "zone", statusMsg.Zone)
 					break
@@ -142,7 +142,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 				zd.DelegationSyncQ <- tdns.DelegationSyncRequest{
 					Command:  "EXPLICIT-SYNC-DELEGATION",
 					ZoneName: statusMsg.Zone,
-					ZoneData: zd,
+					ZoneData: zd.ZoneData,
 				}
 			case "parentsync-done":
 				lgEngine.Info("STATUS-UPDATE: parent sync completed by leader", "zone", statusMsg.Zone, "result", statusMsg.Result, "msg", statusMsg.Msg)
@@ -153,7 +153,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 		case inventoryMsg := <-msgQs.KeystateInventory:
 			// Proactive KEYSTATE inventory push from signer.
 			// Store the inventory and check for DNSKEY changes.
-			zd, exists := tdns.Zones.Get(inventoryMsg.Zone)
+			zd, exists := Zones.Get(inventoryMsg.Zone)
 			if !exists {
 				lgEngine.Warn("proactive inventory: zone not found", "zone", inventoryMsg.Zone)
 				break
@@ -164,7 +164,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 				Inventory: inventoryMsg.Inventory,
 				Received:  time.Now(),
 			})
-			changed, ds, err := LocalDnskeysFromKeystate(zd)
+			changed, ds, err := LocalDnskeysFromKeystate(zd.ZoneData)
 			if err != nil {
 				lgEngine.Error("proactive inventory: LocalDnskeysFromKeystate failed", "zone", inventoryMsg.Zone, "err", err)
 				break
@@ -236,6 +236,9 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 		}
 
 		neededCount++
+		lgEngine.Info("agent in NEEDED state", "agent", agent.Identity,
+			"apiNeeded", apiNeeded, "dnsNeeded", dnsNeeded,
+			"ptr", fmt.Sprintf("%p", agent))
 		// Spawn async discovery attempt — only discover the transports
 		// that are actually in NEEDED state (non-blocking)
 		go ar.attemptDiscovery(agent, imr, apiNeeded, dnsNeeded)
@@ -277,7 +280,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		lgEngine.Info("DNSKEY RRset changed", "zone", req.ZoneName)
 
 		// Don't distribute DNSKEYs for unsigned zones
-		if zd, exists := tdns.Zones.Get(string(req.ZoneName)); exists && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
+		if zd, exists := Zones.Get(string(req.ZoneName)); exists && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
 			lgEngine.Debug("skipping DNSKEY sync for unsigned zone", "zone", req.ZoneName)
 			break
 		}
@@ -383,7 +386,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 	}()
 
 	// Check if the zone exists (i.e. we have this zone under management)
-	_, exists := tdns.Zones.Get(string(ampp.Zone))
+	_, exists := Zones.Get(string(ampp.Zone))
 	if !exists {
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown zone: %s", ar.LocalAgent.Identity, ampp.Zone)
@@ -583,7 +586,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				}
 				if !isAuthorized {
 					configErr = fmt.Sprintf("%s: CONFIG sig0key request denied — %q is not an authorized peer for zone %s", ar.LocalAgent.Identity, ampp.OriginatorID, ampp.Zone)
-				} else if zd, ok := tdns.Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
+				} else if zd, ok := Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
 					configErr = "zone or KeyDB not available"
 				} else {
 					algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), tdns.Sig0StateActive)

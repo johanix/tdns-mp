@@ -128,21 +128,16 @@ func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members [
 	lgElect.Info("starting group election", "group", groupHash[:8], "term", term, "peers", expectedPeers, "zones", len(zones))
 
 	if len(zones) > 0 {
+		// Include initiator's vote in ELECT-CALL to avoid out-of-order
+		// delivery (separate CALL and VOTE are sent in goroutines and
+		// can arrive in any order on the receiver).
 		records := map[string][]string{
 			"_term":  {strconv.FormatUint(term, 10)},
 			"_group": {groupHash},
+			"_vote":  {strconv.FormatUint(uint64(vote), 10)},
 		}
 		if err := lem.broadcastFunc(zones[0], "ELECT-CALL", records); err != nil {
 			lgElect.Error("failed to broadcast group ELECT-CALL", "group", groupHash[:8], "err", err)
-		}
-
-		voteRecords := map[string][]string{
-			"_vote":  {strconv.FormatUint(uint64(vote), 10)},
-			"_term":  {strconv.FormatUint(term, 10)},
-			"_group": {groupHash},
-		}
-		if err := lem.broadcastFunc(zones[0], "ELECT-VOTE", voteRecords); err != nil {
-			lgElect.Error("failed to broadcast group ELECT-VOTE", "group", groupHash[:8], "err", err)
 		}
 	}
 }
@@ -207,7 +202,12 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	le.Active = true
 	le.Term = term
 	le.MyVote = rand.Uint32()
+	// Record both our own vote and the initiator's vote (included in ELECT-CALL).
 	le.Votes = map[AgentId]uint32{lem.localID: le.MyVote}
+	initiatorVote := uint32(parseUint64(records, "_vote"))
+	if initiatorVote != 0 {
+		le.Votes[senderID] = initiatorVote
+	}
 	le.Confirms = make(map[AgentId]AgentId)
 	le.ExpectedPeers = len(members) - 1
 	vote := le.MyVote
@@ -215,13 +215,20 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	if le.VoteTimer != nil {
 		le.VoteTimer.Stop()
 	}
+
+	// Check if we already have all votes (2-member group: initiator's
+	// vote was in the CALL, plus our own).
+	allVotes := len(le.Votes) >= le.ExpectedPeers+1
+
 	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
 		lem.onGroupVoteTimeout(groupHash, term, members, zones)
 	})
 	le.mu.Unlock()
 
-	lgElect.Info("joining group election", "group", groupHash[:8], "term", term, "from", senderID)
+	lgElect.Info("joining group election", "group", groupHash[:8], "term", term, "from", senderID,
+		"votes", len(le.Votes), "expected", le.ExpectedPeers+1)
 
+	// Broadcast our vote to all peers.
 	if len(zones) > 0 {
 		voteRecords := map[string][]string{
 			"_vote":  {strconv.FormatUint(uint64(vote), 10)},
@@ -231,6 +238,14 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 		if err := lem.broadcastFunc(zones[0], "ELECT-VOTE", voteRecords); err != nil {
 			lgElect.Error("failed to broadcast group ELECT-VOTE", "group", groupHash[:8], "err", err)
 		}
+	}
+
+	// If we already have all votes, proceed to confirm immediately.
+	if allVotes {
+		if le.VoteTimer != nil {
+			le.VoteTimer.Stop()
+		}
+		go lem.determineAndConfirmGroup(groupHash, term, members, zones)
 	}
 }
 
@@ -297,8 +312,11 @@ func (lem *LeaderElectionManager) onGroupVoteTimeout(groupHash string, term uint
 	if collected < expected {
 		le.Active = false
 		le.mu.Unlock()
-		lgElect.Warn("group election aborted: not all members voted",
+		lgElect.Warn("group election aborted: not all members voted, retrying",
 			"group", groupHash[:8], "term", term, "votes", collected, "expected", expected)
+		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+			lem.StartGroupElection(groupHash, members, zones)
+		})
 		return
 	}
 	le.mu.Unlock()
@@ -362,8 +380,11 @@ func (lem *LeaderElectionManager) onGroupConfirmTimeout(groupHash string, term u
 	if collected < expected {
 		le.Active = false
 		le.mu.Unlock()
-		lgElect.Warn("group election aborted: not all members confirmed",
+		lgElect.Warn("group election aborted: not all members confirmed, retrying",
 			"group", groupHash[:8], "term", term, "confirms", collected, "expected", expected)
+		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+			lem.StartGroupElection(groupHash, members, zones)
+		})
 		return
 	}
 	le.mu.Unlock()
@@ -1094,7 +1115,7 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 // importSig0KeyFromPeer imports a SIG(0) key received from a peer via RFI CONFIG.
 // TODO: This calls unexported tdns functions (PrepareKeyCache, Sig0KeyMgmt).
 // It will need to be reworked when those are exported or moved.
-func importSig0KeyFromPeer(kdb *tdns.KeyDB, keyName string, configData map[string]string) error {
+func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]string) error {
 	algorithm := configData["algorithm"]
 	privatekey := configData["privatekey"]
 	keyrr := configData["keyrr"]
@@ -1118,7 +1139,7 @@ func importSig0KeyFromPeer(kdb *tdns.KeyDB, keyName string, configData map[strin
 		State:           tdns.Sig0StateActive,
 		PrivateKeyCache: pkc,
 	}
-	resp, err := kdb.Sig0KeyMgmt(nil, kp)
+	resp, err := hdb.Sig0KeyMgmt(nil, kp)
 	if err != nil {
 		return fmt.Errorf("Sig0KeyMgmt add failed: %v", err)
 	}
@@ -1187,7 +1208,7 @@ func Sig0KeyOwnerName(zone, nameserver string) string {
 }
 
 // GetParentSyncStatus computes the current parent sync status for a zone on demand.
-func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, kdb *tdns.KeyDB, imr *tdns.Imr, ar *AgentRegistry) ParentSyncStatus {
+func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *tdns.Imr, ar *AgentRegistry) ParentSyncStatus {
 	status := ParentSyncStatus{
 		Zone:        zone,
 		LastChecked: time.Now(),
@@ -1221,7 +1242,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	}
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry)
 
-	if zd == nil || kdb == nil {
+	if zd == nil || hdb == nil {
 		return status
 	}
 
@@ -1230,7 +1251,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	if targetName == "" {
 		targetName = string(zone)
 	}
-	sak, err := kdb.GetSig0Keys(targetName, tdns.Sig0StateActive)
+	sak, err := hdb.GetSig0Keys(targetName, tdns.Sig0StateActive)
 	if err == nil && len(sak.Keys) > 0 {
 		key := sak.Keys[0]
 		status.KeyAlgorithm = dns.AlgorithmToString[key.Algorithm]
@@ -1239,7 +1260,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 
 		// Read parent_state from keystore
 		var parentState int
-		row := kdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
+		row := hdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
 			targetName, key.KeyId)
 		if err := row.Scan(&parentState); err == nil {
 			status.ParentState = uint8(parentState)

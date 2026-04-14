@@ -4,15 +4,11 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,149 +19,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// doPeerPing pings any known peer via DNS CHUNK or API.
-// Role-agnostic: works for agent, auth/signer, or any role with a TransportManager.
-// The peer must be in the PeerRegistry or have static config (combiner, signer, multi-provider agent).
-// useAPI true = HTTPS API ping; false = CHUNK-based DNS ping.
-func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
-	resp := &AgentMgmtResponse{
-		Time: time.Now(),
-	}
-	peerID = dns.Fqdn(peerID)
-
-	tm := conf.InternalMp.TransportManager
-	if tm == nil {
-		resp.Error = true
-		resp.ErrorMsg = "TransportManager not configured"
-		return resp
-	}
-	resp.Identity = AgentId(tm.LocalID)
-
-	peer, ok := tm.PeerRegistry.Get(peerID)
-	if !ok {
-		// Peer not in registry — try static config fallbacks for all roles
-		peer = conf.lookupStaticPeer(peerID)
-		if peer == nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %q not found in registry (run discovery first)", peerID)
-			return resp
-		}
-	}
-
-	if useAPI {
-		if peer.APIEndpoint == "" {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %q has no API endpoint configured", peerID)
-			return resp
-		}
-		url := strings.TrimSuffix(peer.APIEndpoint, "/") + "/ping"
-		body := tdns.PingPost{Msg: fmt.Sprintf("peer ping %s", peerID), Pings: 1}
-		data, _ := json.Marshal(body)
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("build request: %v", err)
-			return resp
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-		res, err := client.Do(req)
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("apiping to %s failed: %v", peerID, err)
-			return resp
-		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %s API returned %d", peerID, res.StatusCode)
-			return resp
-		}
-		var pr tdns.PingResponse
-		if err := json.NewDecoder(res.Body).Decode(&pr); err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("decode ping response from %s: %v", peerID, err)
-			return resp
-		}
-		resp.Msg = fmt.Sprintf("ping ok (api transport): %s responded", peerID)
-		return resp
-	}
-
-	// DNS CHUNK ping
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	pingResp, err := tm.SendPing(ctx, peer)
-	if err != nil {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("ping to %s failed: %v", peerID, err)
-		return resp
-	}
-	if !pingResp.OK {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
-		return resp
-	}
-	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s rtt=%s", pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
-	return resp
-}
-
-// lookupStaticPeer checks all static peer configurations (agent-side: combiner, signer;
-// signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
-func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
-	mp := conf.Config.MultiProvider
-	// Agent-side: combiner
-	if mp != nil && mp.Role == "agent" && mp.Combiner != nil &&
-		dns.Fqdn(mp.Combiner.Identity) == peerID && mp.Combiner.Address != "" {
-		if peer := peerFromAddress(peerID, mp.Combiner.Address); peer != nil {
-			if mp.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = mp.Combiner.ApiBaseUrl
-			}
-			return peer
-		}
-	}
-
-	// Agent-side: signer
-	if mp != nil && mp.Role == "agent" && mp.Signer != nil &&
-		dns.Fqdn(mp.Signer.Identity) == peerID && mp.Signer.Address != "" {
-		return peerFromAddress(peerID, mp.Signer.Address)
-	}
-
-	// Signer-side: multi-provider agents
-	if mp != nil {
-		for _, agentConf := range mp.Agents {
-			if agentConf != nil && dns.Fqdn(agentConf.Identity) == peerID && agentConf.Address != "" {
-				return peerFromAddress(peerID, agentConf.Address)
-			}
-		}
-	}
-
-	return nil
-}
-
-// peerFromAddress creates a temporary transport.Peer from a host:port address string.
-func peerFromAddress(peerID string, address string) *transport.Peer {
-	host, portStr, err := net.SplitHostPort(address)
-	if err != nil {
-		lgApi.Warn("invalid address for static peer", "address", address, "peer", peerID, "err", err)
-		return nil
-	}
-	port, _ := strconv.Atoi(portStr)
-	peer := transport.NewPeer(peerID)
-	peer.SetDiscoveryAddress(&transport.Address{
-		Host:      host,
-		Port:      uint16(port),
-		Transport: "udp",
-	})
-	return peer
-}
-
-func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *HsyncDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -192,19 +46,16 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			}
 		}()
 
-		// XXX: hsync cmds should move to its own endpoint, not be mixed with agent
-		var zd *tdns.ZoneData
+		var zd *MPZoneData
 		var exist bool
 		noZoneCommands := map[string]bool{
-			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
-			"discover": true, "hsync-locate": true,
-			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
-			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
-			"gossip-group-list": true, "gossip-group-state": true,
+			"config": true, "hsync-agentstatus": true,
+			"discover": true, "hsync-locate": true, "hsync-send-hello": true,
+			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
-			zd, exist = tdns.Zones.Get(string(amp.Zone))
+			zd, exist = Zones.Get(string(amp.Zone))
 			if !exist {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", amp.Zone)
@@ -222,28 +73,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			}
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
-
-		case "peer-ping":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for peer-ping"
-				return
-			}
-			pingResp := doPeerPing(conf, string(amp.AgentId), false)
-			resp.Error = pingResp.Error
-			resp.ErrorMsg = pingResp.ErrorMsg
-			resp.Msg = pingResp.Msg
-
-		case "peer-apiping":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for peer-apiping"
-				return
-			}
-			pingResp := doPeerPing(conf, string(amp.AgentId), true)
-			resp.Error = pingResp.Error
-			resp.ErrorMsg = pingResp.ErrorMsg
-			resp.Msg = pingResp.Msg
 
 		case "update-local-zonedata":
 			lgApi.Debug("update-local-zonedata", "addedRRs", amp.AddedRRs, "removedRRs", amp.RemovedRRs)
@@ -269,10 +98,23 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = "at least one RR is required"
 				return
 			}
+			// Per-RRtype policy for non-signers on signed zones:
+			// block signing RRtypes, allow NS (if nsmgmt=agent) and KEY (if parentsync=agent).
 			if zd != nil && zd.Options[tdns.OptMPDisallowEdits] {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %s is signed but this provider is not a signer; modifications not allowed", amp.Zone)
-				return
+				policy := zd.getEditPolicy()
+				for _, rrStr := range amp.RRs {
+					parsed, err := dns.NewRR(rrStr)
+					if err != nil {
+						continue // will be caught by the parse loop below
+					}
+					if !policy.canApply(parsed.Header().Rrtype) {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("zone %s: %s modifications not allowed (edit policy: signed=%v, signer=%v, nsmgmt=%d, parentsync=%d)",
+							amp.Zone, dns.TypeToString[parsed.Header().Rrtype],
+							policy.ZoneSigned, policy.WeAreSigner, policy.NSmgmt, policy.ParentSync)
+						return
+					}
+				}
 			}
 
 			isAdd := amp.Command == "add-rr"
@@ -398,38 +240,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.Status = "timeout"
 			}
 
-		case "hsync-zonestatus":
-			// Get the apex owner object
-			owner, err := zd.GetOwner(zd.ZoneName)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %s error: %v", amp.Zone, err)
-				return
-			}
-
-			// Get the HSYNC RRset from the apex
-			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-			if len(hsyncRRset.RRs) == 0 {
-				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC3 RRset", amp.Zone)
-				return
-			}
-
-			// Convert the RRs to strings for transmission
-			hsyncStrs := make([]string, len(hsyncRRset.RRs))
-			for i, rr := range hsyncRRset.RRs {
-				hsyncStrs[i] = rr.String()
-			}
-			resp.HsyncRRs = hsyncStrs
-
-			// Get the actual agents from the registry
-			resp.ZoneAgentData, err = conf.InternalMp.AgentRegistry.GetZoneAgentData(amp.Zone)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error getting remote agents: %v", err)
-				return
-			}
-			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", amp.Zone)
-
 		case "hsync-agentstatus":
 			// Get the apex owner object
 			agent, err := conf.InternalMp.AgentRegistry.GetAgentInfo(amp.AgentId)
@@ -492,167 +302,45 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
 
-		// HSYNC debug commands (Phase 5)
-		case "hsync-peer-status":
-			if kdb == nil {
+		case "hsync-send-hello":
+			if amp.AgentId == "" {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = "No agent identity specified"
 				return
 			}
 
-			state := ""
-			if amp.AgentId != "" {
-				// Filter by specific peer
-				peer, err := kdb.GetPeer(string(amp.AgentId))
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error getting peer: %v", err)
-					return
-				}
-				if peer != nil {
-					resp.HsyncPeers = []*HsyncPeerInfo{tdns.PeerRecordToInfo(peer)}
-				}
-			} else {
-				// List all peers
-				peers, err := kdb.ListPeers(state)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error listing peers: %v", err)
-					return
-				}
-				for _, peer := range peers {
-					resp.HsyncPeers = append(resp.HsyncPeers, tdns.PeerRecordToInfo(peer))
-				}
-			}
-			resp.Msg = fmt.Sprintf("Found %d peers", len(resp.HsyncPeers))
+			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
 
-		case "hsync-sync-ops":
-			if kdb == nil {
+			agent, exists := conf.InternalMp.AgentRegistry.S.Get(amp.AgentId)
+			if !exists || agent.State < AgentStateKnown {
+				// Try discovery first
+				conf.InternalMp.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = fmt.Sprintf("agent %s not yet discovered; discovery started — retry after a few seconds", amp.AgentId)
 				return
 			}
 
-			ops, err := kdb.ListSyncOperations(string(amp.Zone), 50)
+			myIdentity := AgentId(conf.Config.MultiProvider.Identity)
+			helloMsg := &AgentHelloPost{
+				MessageType: AgentMsgHello,
+				MyIdentity:  myIdentity,
+			}
+
+			ahr, err := agent.SendApiHello(helloMsg)
 			if err != nil {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error listing sync operations: %v", err)
+				resp.ErrorMsg = fmt.Sprintf("HELLO to %s failed: %v", amp.AgentId, err)
 				return
 			}
-			for _, op := range ops {
-				resp.HsyncSyncOps = append(resp.HsyncSyncOps, tdns.SyncOpRecordToInfo(op))
-			}
-			resp.Msg = fmt.Sprintf("Found %d sync operations", len(resp.HsyncSyncOps))
-
-		case "hsync-confirmations":
-			if kdb == nil {
+			if ahr.Error {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
+				resp.ErrorMsg = fmt.Sprintf("HELLO rejected by %s: %s", amp.AgentId, ahr.ErrorMsg)
 				return
 			}
-
-			confs, err := kdb.ListSyncConfirmations("", 50)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error listing confirmations: %v", err)
-				return
-			}
-			for _, conf := range confs {
-				resp.HsyncConfirmations = append(resp.HsyncConfirmations, tdns.ConfirmRecordToInfo(conf))
-			}
-			resp.Msg = fmt.Sprintf("Found %d confirmations", len(resp.HsyncConfirmations))
-
-		case "hsync-transport-events":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			events, err := kdb.ListTransportEvents(string(amp.AgentId), 100)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error listing transport events: %v", err)
-				return
-			}
-			resp.HsyncEvents = events
-			resp.Msg = fmt.Sprintf("Found %d transport events", len(resp.HsyncEvents))
-
-		case "hsync-metrics":
-			if kdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not configured"
-				return
-			}
-
-			metrics, err := kdb.GetAggregatedMetrics()
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("error getting metrics: %v", err)
-				return
-			}
-			resp.HsyncMetrics = metrics
-			resp.Msg = "Aggregated metrics"
-
-		// Router introspection commands
-		case "router-list":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterList(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-describe":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterDescribe(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-metrics":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			detailed := false
-			if amp.Data != nil {
-				if v, ok := amp.Data["detailed"]; ok {
-					detailed, _ = v.(bool)
-				}
-			}
-			routerResp := handleRouterMetrics(conf.InternalMp.TransportManager, detailed)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-walk":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterWalk(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
-
-		case "router-reset":
-			if conf.InternalMp.TransportManager == nil || conf.InternalMp.TransportManager.Router == nil {
-				resp.Error = true
-				resp.ErrorMsg = "Router not available (DNS transport not configured)"
-				return
-			}
-			routerResp := handleRouterReset(conf.InternalMp.TransportManager.Router)
-			resp = *routerResp
-			resp.Identity = AgentId(conf.Config.MultiProvider.Identity)
+			resp.Msg = fmt.Sprintf("HELLO to %s succeeded: %s (time: %s)", amp.AgentId, ahr.Msg, ahr.Time.Format(time.RFC3339))
 
 		case "refresh-keys":
-			RequestAndWaitForKeyInventory(zd, r.Context(), conf.InternalMp.MPTransport)
+			RequestAndWaitForKeyInventory(zd.ZoneData, r.Context(), conf.InternalMp.MPTransport)
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
@@ -665,7 +353,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 					}
 				}
 				// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
-				changed, dskeyStatus, err := LocalDnskeysFromKeystate(zd)
+				changed, dskeyStatus, err := LocalDnskeysFromKeystate(zd.ZoneData)
 				if err != nil {
 					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
 				}
@@ -673,7 +361,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 					zd.SyncQ <- tdns.SyncRequest{
 						Command:      "SYNC-DNSKEY-RRSET",
 						ZoneName:     tdns.ZoneName(zd.ZoneName),
-						ZoneData:     zd,
+						ZoneData:     zd.ZoneData,
 						DnskeyStatus: dskeyStatus,
 					}
 				}
@@ -736,7 +424,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			status := lem.GetParentSyncStatus(amp.Zone, zd, kdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
+			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -778,14 +466,14 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = "IMR engine not available"
 				return
 			}
-			sak, err := kdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
+			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
 			if err != nil || len(sak.Keys) == 0 {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
 				return
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, err := queryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
+			keyState, extra, err := queryParentKeyStateDetailed(hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
@@ -812,7 +500,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
 				return
 			}
-			sak, err := kdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
+			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
 			if err != nil || len(sak.Keys) == 0 {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
@@ -820,7 +508,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.Config.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
@@ -946,189 +634,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, kdb *tdns.
 			resp.Data = entries
 			resp.Msg = fmt.Sprintf("Found %d cache entries for identity %s", len(entries), identity)
 
-		case "peer-reset":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id (--id) is required"
-				return
-			}
-			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
-
-			ar := conf.InternalMp.AgentRegistry
-			if ar == nil {
-				resp.Error = true
-				resp.ErrorMsg = "agent registry not available"
-				return
-			}
-
-			// Flush IMR cache for this identity's discovery names
-			imr := tdns.Globals.ImrEngine
-			flushed := 0
-			if imr != nil && imr.Cache != nil {
-				removed, _ := imr.Cache.FlushDomain(string(amp.AgentId), false)
-				flushed = removed
-			}
-
-			// Reset agent to NEEDED state and restart discovery
-			agent, exists := ar.S.Get(amp.AgentId)
-			if !exists {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", amp.AgentId)
-				return
-			}
-
-			agent.Mu.Lock()
-			if agent.ApiDetails != nil {
-				agent.ApiDetails.State = AgentStateNeeded
-				agent.ApiDetails.DiscoveryFailures = 0
-				agent.ApiDetails.LatestError = ""
-			}
-			if agent.DnsDetails != nil {
-				agent.DnsDetails.State = AgentStateNeeded
-				agent.DnsDetails.DiscoveryFailures = 0
-				agent.DnsDetails.LatestError = ""
-			}
-			agent.State = AgentStateNeeded
-			agent.Mu.Unlock()
-
-			// Trigger immediate re-discovery
-			if imr != nil {
-				go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
-			}
-
-			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
-
-		case "gossip-group-state":
-			ar := conf.InternalMp.AgentRegistry
-			if ar == nil || ar.GossipStateTable == nil || ar.ProviderGroupManager == nil {
-				resp.Error = true
-				resp.ErrorMsg = "gossip state table not available"
-				return
-			}
-
-			groupName, _ := amp.Data["group"].(string)
-			if groupName == "" {
-				resp.Error = true
-				resp.ErrorMsg = "group name or hash is required"
-				return
-			}
-
-			// Look up group by name first, then by hash
-			pg := ar.ProviderGroupManager.GetGroupByName(groupName)
-			if pg == nil {
-				pg = ar.ProviderGroupManager.GetGroup(groupName)
-			}
-			if pg == nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("provider group %q not found", groupName)
-				return
-			}
-
-			states, election, nameProposal := ar.GossipStateTable.GetGroupState(pg.GroupHash)
-
-			// Build matrix data
-			var matrix []map[string]interface{}
-			for _, member := range pg.Members {
-				row := map[string]interface{}{
-					"reporter": member,
-				}
-				if ms, ok := states[member]; ok {
-					row["peer_states"] = ms.PeerStates
-					row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
-					row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
-					row["zones"] = len(ms.Zones)
-				} else {
-					row["peer_states"] = map[string]string{}
-					row["age"] = "unknown"
-				}
-				matrix = append(matrix, row)
-			}
-
-			result := map[string]interface{}{
-				"group_hash": pg.GroupHash,
-				"group_name": pg.Name,
-				"members":    pg.Members,
-				"matrix":     matrix,
-			}
-
-			// Always include election block with status.
-			// LEM is authoritative; gossip table is fallback.
-			electionData := map[string]interface{}{}
-			lem := conf.InternalMp.LeaderElectionManager
-			var es GroupElectionState
-			if lem != nil {
-				es = lem.GetGroupElectionState(pg.GroupHash)
-			}
-			if es.Term == 0 && election != nil {
-				es = *election
-			}
-
-			if es.Term == 0 {
-				electionData["status"] = "no_election"
-			} else if es.Leader == "" {
-				electionData["status"] = "invalidated"
-				electionData["term"] = es.Term
-			} else if time.Now().After(es.LeaderExpiry) {
-				electionData["status"] = "expired"
-				electionData["leader"] = es.Leader
-				electionData["term"] = es.Term
-			} else {
-				electionData["status"] = "active"
-				electionData["leader"] = es.Leader
-				electionData["term"] = es.Term
-				electionData["leader_expiry"] = es.LeaderExpiry.Format(time.RFC3339)
-				electionData["expires_in"] = time.Until(es.LeaderExpiry).Truncate(time.Second).String()
-			}
-			result["election"] = electionData
-
-			if nameProposal != nil {
-				result["name_proposal"] = map[string]interface{}{
-					"name":        nameProposal.Name,
-					"proposer":    nameProposal.Proposer,
-					"proposed_at": nameProposal.ProposedAt.Format(time.RFC3339),
-				}
-			}
-
-			resp.Data = result
-			resp.Msg = fmt.Sprintf("Gossip state for group %s (%s)", pg.Name, pg.GroupHash[:8])
-
-		case "gossip-group-list":
-			ar := conf.InternalMp.AgentRegistry
-			if ar == nil || ar.ProviderGroupManager == nil {
-				resp.Error = true
-				resp.ErrorMsg = "agent registry or provider group manager not available"
-				return
-			}
-			groups := ar.ProviderGroupManager.GetGroups()
-			var groupData []map[string]interface{}
-			for _, pg := range groups {
-				// Show first 5 zones as sample
-				sampleZones := make([]string, 0)
-				for i, z := range pg.Zones {
-					if i >= 5 {
-						break
-					}
-					sampleZones = append(sampleZones, string(z))
-				}
-				entry := map[string]interface{}{
-					"group_hash":   pg.GroupHash,
-					"name":         pg.Name,
-					"members":      pg.Members,
-					"zone_count":   len(pg.Zones),
-					"sample_zones": sampleZones,
-				}
-				if pg.NameProposal != nil {
-					entry["name_proposal"] = map[string]interface{}{
-						"name":        pg.NameProposal.Name,
-						"proposer":    pg.NameProposal.Proposer,
-						"proposed_at": pg.NameProposal.ProposedAt.Format(time.RFC3339),
-					}
-				}
-				groupData = append(groupData, entry)
-			}
-			resp.Data = groupData
-			resp.Msg = fmt.Sprintf("Found %d provider groups", len(groups))
-
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
 			resp.Error = true
@@ -1240,7 +745,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				// Include per-zone KEYSTATE health status
 				ksStatus := make(map[ZoneName]KeystateInfo)
 				for zone := range response.ZDR {
-					if zd, exists := tdns.Zones.Get(string(zone)); exists {
+					if zd, exists := Zones.Get(string(zone)); exists {
 						ksStatus[zone] = KeystateInfo{
 							OK:        zd.GetKeystateOK(),
 							Error:     zd.GetKeystateError(),
@@ -1260,7 +765,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "zone is required for show-key-inventory"
 				return
 			}
-			zd, exists := tdns.Zones.Get(string(amp.Zone))
+			zd, exists := Zones.Get(string(amp.Zone))
 			if !exists {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("zone %q not found", amp.Zone)
@@ -1310,12 +815,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Status = "ok"
 
 		case "hsync-init-db":
-			if conf.Config.Internal.KeyDB == nil {
+			if conf.InternalMp.HsyncDB == nil {
 				resp.Error = true
-				resp.ErrorMsg = "KeyDB not available"
+				resp.ErrorMsg = "HsyncDB not available"
 				return
 			}
-			if err := conf.Config.Internal.KeyDB.InitHsyncTables(); err != nil {
+			if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("InitHsyncTables failed: %v", err)
 				return
@@ -1366,7 +871,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			if zone != "" {
 				// Single zone
-				zd, exists := tdns.Zones.Get(string(zone))
+				zd, exists := Zones.Get(string(zone))
 				if !exists {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
@@ -1392,7 +897,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 			} else {
 				// All zones
-				for _, zd := range tdns.Zones.Items() {
+				for _, zd := range Zones.Items() {
 					if zd.MP != nil && zd.MP.CombinerData != nil {
 						zoneData := make(map[string]map[string][]string)
 						for item := range zd.MP.CombinerData.IterBuffered() {

@@ -145,7 +145,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 			}
 		}
 		if hasNS {
-			zd, exists := tdns.Zones.Get(string(synchedDataUpdate.Zone))
+			zd, exists := Zones.Get(string(synchedDataUpdate.Zone))
 			if !exists {
 				return false, "", fmt.Errorf("local update for zone %q: zone not found (system error)", synchedDataUpdate.Zone)
 			}

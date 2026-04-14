@@ -25,9 +25,95 @@ import (
 // DNS infrastructure setup to tdns.MainInit, then adds MP components
 // (TransportManager, crypto, CHUNK handler, peer registration).
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
+	// Register MP zone option handler before ParseZones runs inside MainInit.
+	tdns.RegisterZoneOptionHandler(tdns.OptMultiProvider, func(zname string, options map[tdns.ZoneOption]bool) {
+		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, zname)
+	})
+
+	// Register MP zone option validators before ParseZones runs.
+	// These replace the hardcoded validation in tdns's parseZoneOptions.
+	tdns.RegisterZoneOptionValidator(tdns.OptMPManualApproval,
+		func(c *tdns.Config, zname string, zd *tdns.ZoneData, options map[tdns.ZoneOption]bool) bool {
+			if tdns.Globals.App.Type != tdns.AppTypeMPCombiner {
+				lg.Error("mp-manual-approval is only valid on the combiner, ignoring", "zone", zname)
+				if zd != nil {
+					zd.SetError(tdns.ConfigError, "mp-manual-approval is only valid on combiner zones")
+				}
+				return false
+			}
+			return true
+		})
+
+	tdns.RegisterZoneOptionValidator(tdns.OptMultiProvider,
+		func(c *tdns.Config, zname string, zd *tdns.ZoneData, options map[tdns.ZoneOption]bool) bool {
+			// On the signer (AppTypeAuth), require server-level multi-provider config.
+			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
+			if tdns.Globals.App.Type == tdns.AppTypeAuth && (c.MultiProvider == nil || !c.MultiProvider.Active) {
+				lg.Error("option requires multi-provider.active in server config", "zone", zname,
+					"option", tdns.ZoneOptionToString[tdns.OptMultiProvider])
+				if zd != nil {
+					zd.SetError(tdns.ConfigError,
+						"option %s requires multi-provider.active: true in server config",
+						tdns.ZoneOptionToString[tdns.OptMultiProvider])
+				}
+				return false
+			}
+			return true
+		})
+
+	// Register MP config validators to run during tdns's ValidateConfig.
+	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
+
+	// Reset MPZoneNames before ParseZones re-collects them via the callback above
+	conf.InternalMp.MPZoneNames = nil
+
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
+	}
+
+	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
+	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
+	// not during ParseZones.
+	resignQ := conf.Config.Internal.ResignQ
+	conf.ForEachMPZone(func(zd *MPZoneData) {
+		zd.EnsureMP()
+		zd.Lock()
+		if zd.MP.MPdata != nil {
+			cp := *zd.MP.MPdata
+			zd.MP.MPdata = &cp
+			zd.MP.MPdata.Options = map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}
+		} else {
+			zd.MP.MPdata = &tdns.MPdata{
+				Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
+			}
+		}
+		zd.Unlock()
+
+		// MP signing OnFirstLoad: after zone load, if HSYNC analysis
+		// has dynamically enabled OptInlineSigning, set up signing.
+		// This was previously in tdns ParseZones gated on
+		// (AppTypeAuth || AppTypeMPSigner).
+		if zd.FirstZoneLoad {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				if zd.Options[tdns.OptInlineSigning] {
+					if err := zd.SetupZoneSigning(resignQ); err != nil {
+						lg.Error("SetupZoneSigning failed in MP OnFirstLoad",
+							"zone", zd.ZoneName, "error", err)
+					}
+				}
+			})
+		}
+	})
+
+	conf.Config.ParseAuthOptions()
+
+	if err := tdns.ValidateDatabaseFile(conf.Config); err != nil {
+		return fmt.Errorf("database validation failed: %v", err)
+	}
+
+	if err := conf.Config.InitializeKeyDB(); err != nil {
+		return fmt.Errorf("error initializing KeyDB: %v", err)
 	}
 
 	mp := conf.Config.MultiProvider
@@ -75,7 +161,6 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 	// Initialize distribution cache for outbound tracking
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Create TransportManager for signer<->agent communication
 	chunkMode := strings.TrimSpace(mp.ChunkMode)
@@ -119,7 +204,6 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 		return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
 	}
 	conf.InternalMp.CombinerState = signerState
-	conf.Config.Internal.CombinerState = signerState // dual-write
 
 	// Wire chunk handler into TM
 	tm.ChunkHandler = signerState.ChunkHandler()
@@ -182,12 +266,19 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 		return fmt.Errorf("multi-provider.identity is required in config")
 	}
 
-	// Initialize combiner edit tables
+	// Initialize HsyncDB and combiner edit tables
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
-		if err := InitCombinerEditTables(kdb); err != nil {
+		conf.InternalMp.HsyncDB = NewHsyncDB(kdb)
+		if err := conf.InternalMp.HsyncDB.InitCombinerEditTables(); err != nil {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
+	}
+
+	// Register provider zone RR types from config
+	for i := range mp.ProviderZones {
+		mp.ProviderZones[i].Zone = dns.Fqdn(mp.ProviderZones[i].Zone)
+		RegisterProviderZoneRRtypes(mp.ProviderZones[i])
 	}
 
 	chunkMode := strings.TrimSpace(mp.ChunkMode)
@@ -215,7 +306,6 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	}
 	combinerState.ProtectedNamespaces = mp.ProtectedNamespaces
 	conf.InternalMp.CombinerState = combinerState
-	conf.Config.Internal.CombinerState = combinerState // dual-write
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
@@ -223,7 +313,6 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	// Initialize distribution cache
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Create TransportManager
 	var combinerPayloadCrypto *transport.PayloadCrypto
@@ -325,25 +414,21 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 }
 
 // initMPAgent performs agent-specific MP initialization.
+// Note: SetupAgent (which creates the agent identity zone and publishes
+// transport records) runs from StartMPAgent, after ZoneUpdaterEngine is
+// running — PublishUriRR/PublishAddrRR/etc. send on KeyDB.UpdateQ and
+// require a live consumer.
 func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required for agent role")
 	}
 
-	// Setup agent identity and publish records
-	all_zones := tdns.Zones.Keys()
-	if err := conf.Config.SetupAgent(all_zones); err != nil {
-		return fmt.Errorf("SetupAgent: %w", err)
-	}
-
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
-	// Wire shared channels and data from tdns: these are created in tdns
-	// MainInit/ParseZones and must be shared so that tdns refresh callbacks
-	// and HsyncEngine/SDE operate on the same state.
-	conf.InternalMp.SyncQ = conf.Config.Internal.SyncQ
-	conf.InternalMp.MPZoneNames = conf.Config.Internal.MPZoneNames
+	// Create SyncQ locally (was previously shared from tdns, now owned by tdns-mp)
+	conf.InternalMp.SyncQ = make(chan SyncRequest, 10)
+	// MPZoneNames is populated directly by the OptMultiProvider callback above
 
 	// Initialize CombinerState (agent-side: just an ErrorJournal, no chunk handler)
 	combinerID := "combiner"
@@ -353,12 +438,12 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	conf.InternalMp.CombinerState = &tdns.CombinerState{
 		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
 	}
-	conf.Config.Internal.CombinerState = conf.InternalMp.CombinerState // dual-write
 
-	// Initialize HSYNC database tables
+	// Initialize HsyncDB and HSYNC database tables
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
-		if err := kdb.InitHsyncTables(); err != nil {
+		conf.InternalMp.HsyncDB = NewHsyncDB(kdb)
+		if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
 			return fmt.Errorf("InitHsyncTables: %w", err)
 		}
 	}
@@ -369,7 +454,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Initialize distribution cache
 	conf.InternalMp.DistributionCache = NewDistributionCache()
 	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
-	conf.Config.Internal.DistributionCache = conf.InternalMp.DistributionCache // dual-write
 
 	// Chunk mode configuration
 	controlZone := mp.Dns.ControlZone
@@ -381,7 +465,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkStore tdns.ChunkPayloadStore
+	var chunkStore ChunkPayloadStore
 	var chunkQueryEndpoint string
 	var chunkQueryEndpointInNotify bool
 	if chunkMode == "query" {
@@ -390,9 +474,9 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
 		}
 		chunkQueryEndpointInNotify = (cep == "include")
-		chunkStore = tdns.NewMemChunkPayloadStore(5 * time.Minute)
+		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
 		conf.InternalMp.ChunkPayloadStore = chunkStore
-		if err := tdns.RegisterChunkQueryHandler(chunkStore); err != nil {
+		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
 			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
 		}
 		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
@@ -460,7 +544,6 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	})
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
-	conf.Config.Internal.TransportManager = tm.TransportManager // dual-write
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.MPTransport = tm
 
