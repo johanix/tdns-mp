@@ -144,8 +144,9 @@ func (ar *AgentRegistry) SendHeartbeats() {
 
 			default:
 				// SendBeatWithFallback already updated per-transport
-				// state individually. Just promote the top-level state
-				// so CheckState doesn't drag transports back to NEEDED.
+				// state and timestamps individually. Just promote the
+				// top-level state so CheckState doesn't drag transports
+				// back to NEEDED.
 				if agent.State == AgentStateNeeded || agent.State == AgentStateKnown || agent.State == AgentStateIntroduced {
 					agent.State = AgentStateOperational
 				}

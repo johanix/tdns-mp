@@ -1576,7 +1576,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LastContactTime = time.Now()
+				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.LatestRBeat = time.Now()
+				agent.ApiDetails.SentBeats++
 				agent.ApiDetails.ReceivedBeats++
 				agent.ApiDetails.LatestError = ""
 			}
@@ -1604,7 +1606,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
 				agent.DnsDetails.State = AgentStateOperational
 				agent.DnsDetails.LastContactTime = time.Now()
+				agent.DnsDetails.LatestSBeat = time.Now()
 				agent.DnsDetails.LatestRBeat = time.Now()
+				agent.DnsDetails.SentBeats++
 				agent.DnsDetails.ReceivedBeats++
 				agent.DnsDetails.LatestError = ""
 			}
