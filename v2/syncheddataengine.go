@@ -1252,7 +1252,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 			if len(appliedRecords) == 0 {
 				appliedRecords = zdr.reconstructRecordsFromRepo(prc)
 			}
-		} else if detail.Status == "IGNORED" {
+		} else if detail.Status == "IGNORED" || detail.Status == "ignored" {
 			if len(ignoredRecords) == 0 {
 				ignoredRecords = zdr.reconstructRecordsFromRepo(prc)
 			}

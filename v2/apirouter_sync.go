@@ -81,8 +81,14 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 			}
 
 			agent.Mu.RLock()
-			tlsaRR := agent.ApiDetails.TlsaRR
+			apiDetails := agent.ApiDetails
 			agent.Mu.RUnlock()
+			if apiDetails == nil {
+				lgApi.Warn(apiName+": no API details for client", "clientId", clientId)
+				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			tlsaRR := apiDetails.TlsaRR
 			if tlsaRR == nil {
 				lgApi.Warn(apiName+": no TLSA record for client", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)

@@ -848,7 +848,7 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 	}
 
 	// Guard 3: our identity must appear in HSYNC3
-	ourIdentities := ourHsyncIdentities(tdns.Conf.MultiProvider)
+	ourIdentities := ourHsyncIdentities(mp)
 	matched, ourLabel, err := mpzd.matchHsyncIdentity(ourIdentities)
 	if err != nil {
 		mpzd.Logger.Printf("populateMPdata: zone %s: error matching identity: %v", mpzd.ZoneName, err)

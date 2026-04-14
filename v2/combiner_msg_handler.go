@@ -232,6 +232,10 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Split results into approved and rejected record maps and persist.
 			if hdb != nil && editID > 0 {
 				approved := rrStringsToOwnerMap(resp.AppliedRecords)
+				// Ignored records were persisted — include them in the approved audit trail
+				for owner, rrs := range rrStringsToOwnerMap(resp.IgnoredRecords) {
+					approved[owner] = append(approved[owner], rrs...)
+				}
 				// Store removals with ClassNONE so the audit trail preserves ADD/DEL intent
 				for owner, rrs := range rrStringsToClassNONE(resp.RemovedRecords) {
 					approved[owner] = append(approved[owner], rrs...)
@@ -259,7 +263,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				}
 			}
 
-			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems))
+			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems), "ignored", len(resp.IgnoredRecords))
 
 			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
 			combinerSendConfirmation(tm, deliveredBy, resp)
