@@ -466,13 +466,12 @@ func (mpzd *MPZoneData) RemoveCombinerDataNG(senderID string, data map[string][]
 	}
 
 	if mpzd.combinerShouldApplyEdits() {
-		zd := mpzd.ZoneData
-		modified, err := zd.CombineWithLocalChanges()
+		modified, err := mpzd.CombineWithLocalChanges()
 		if err != nil {
 			return removedRecords, err
 		}
 		if modified {
-			mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+			mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", mpzd.ZoneName, senderID)
 		}
 	}
 
@@ -547,13 +546,12 @@ func (mpzd *MPZoneData) RemoveCombinerDataByRRtype(senderID string, owner string
 	}
 
 	if mpzd.combinerShouldApplyEdits() {
-		zd := mpzd.ZoneData
-		modified, err := zd.CombineWithLocalChanges()
+		modified, err := mpzd.CombineWithLocalChanges()
 		if err != nil {
 			return removedRecords, err
 		}
 		if modified {
-			mpzd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+			mpzd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", mpzd.ZoneName, senderID)
 		}
 	}
 
@@ -921,8 +919,7 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 
 	// 4. Apply to zone data (only if this combiner is allowed to edit).
 	if mpzd.combinerShouldApplyEdits() {
-		zd := mpzd.ZoneData
-		modified, err := zd.CombineWithLocalChanges()
+		modified, err := mpzd.CombineWithLocalChanges()
 		if err != nil {
 			return "", fmt.Errorf("CombineWithLocalChanges failed: %w", err)
 		}
