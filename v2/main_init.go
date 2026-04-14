@@ -75,7 +75,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
 	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
 	// not during ParseZones.
-	resignQ := conf.Config.Internal.ResignQ
+	mpResignQ := make(chan *MPZoneData, 10)
+	go MPResignerEngine(ctx, mpResignQ)
+
 	conf.ForEachMPZone(func(zd *MPZoneData) {
 		zd.EnsureMP()
 		zd.Lock()
@@ -91,14 +93,17 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		zd.Unlock()
 
 		// MP signing OnFirstLoad: after zone load, if HSYNC analysis
-		// has dynamically enabled OptInlineSigning, set up signing.
-		// This was previously in tdns ParseZones gated on
-		// (AppTypeAuth || AppTypeMPSigner).
+		// has dynamically enabled OptInlineSigning, set up signing
+		// via the MP ResignerEngine (not the tdns one).
 		if zd.FirstZoneLoad {
 			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if zd.Options[tdns.OptInlineSigning] {
-					if err := zd.SetupZoneSigning(resignQ); err != nil {
-						lg.Error("SetupZoneSigning failed in MP OnFirstLoad",
+					mpzd, ok := Zones.Get(zd.ZoneName)
+					if !ok {
+						return
+					}
+					if err := mpzd.SetupZoneSigning(mpResignQ); err != nil {
+						lg.Error("MP SetupZoneSigning failed in OnFirstLoad",
 							"zone", zd.ZoneName, "error", err)
 					}
 				}
