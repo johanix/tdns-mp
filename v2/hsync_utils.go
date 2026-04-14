@@ -1118,24 +1118,24 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 
 		if mpzd.MPOptions[tdns.OptAllowEdits] {
-			if mpzd.MP.AgentContributions != nil {
-				new_zd.EnsureMP()
-				new_zd.MP.AgentContributions = mpzd.MP.AgentContributions
-			}
-			if mpzd.MP.CombinerData != nil {
-				new_zd.EnsureMP()
-				new_zd.MP.CombinerData = mpzd.MP.CombinerData
+			// Wrap new_zd with the persistent MP state so that
+			// CombineWithLocalChanges can read AgentContributions
+			// and CombinerData from the real MPState.
+			tmpMpzd := &MPZoneData{
+				ZoneData:  new_zd,
+				MP:        mpzd.MP,
+				MPOptions: mpzd.MPOptions,
 			}
 
 			lg.Info("combining with local changes", "zone", mpzd.ZoneName)
-			success, err := (&MPZoneData{ZoneData: new_zd}).CombineWithLocalChanges()
+			success, err := tmpMpzd.CombineWithLocalChanges()
 			if err != nil {
 				lg.Error("CombineWithLocalChanges failed", "zone", mpzd.ZoneName, "err", err)
 			} else if success {
 				lg.Info("local changes applied to new zone data", "zone", mpzd.ZoneName)
 			}
 
-			if (&MPZoneData{ZoneData: new_zd}).InjectSignatureTXT(mp) {
+			if tmpMpzd.InjectSignatureTXT(mp) {
 				lg.Debug("signature TXT injected", "zone", mpzd.ZoneName)
 			}
 		}
