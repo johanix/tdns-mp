@@ -211,7 +211,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			lgAgent.Debug("onLeaderElected: IMR not available, skipping DSYNC bootstrap", "zone", zone)
 			return nil
 		}
-		_, err := tdns.Globals.ImrEngine.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
+		imr := &Imr{tdns.Globals.ImrEngine}
+		_, err := imr.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
 		if err != nil {
 			lgAgent.Info("onLeaderElected: parent does not advertise DSYNC UPDATE scheme, skipping SIG(0) key setup",
 				"zone", zone, "err", err)

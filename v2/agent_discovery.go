@@ -41,7 +41,7 @@ type AgentDiscoveryResult struct {
 //  1. URI record at _https._tcp.<identity> → get API endpoint URI and port
 //  2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
 //  3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
-func DiscoverAgentAPI(ctx context.Context, imr *tdns.Imr, identity string, result *AgentDiscoveryResult) {
+func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *AgentDiscoveryResult) {
 	identity = dns.Fqdn(identity)
 
 	apiUri, apiHost, apiPort, err := imr.LookupAgentAPIEndpoint(ctx, identity)
@@ -80,7 +80,7 @@ func DiscoverAgentAPI(ctx context.Context, imr *tdns.Imr, identity string, resul
 //  2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
 //  3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
 //  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
-func DiscoverAgentDNS(ctx context.Context, imr *tdns.Imr, identity string, result *AgentDiscoveryResult) {
+func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *AgentDiscoveryResult) {
 	identity = dns.Fqdn(identity)
 
 	dnsUri, dnsHost, dnsPort, err := imr.LookupAgentDNSEndpoint(ctx, identity)
@@ -126,13 +126,13 @@ func DiscoverAgentDNS(ctx context.Context, imr *tdns.Imr, identity string, resul
 
 // DiscoverAgent performs full DNS-based discovery of an agent's contact information
 // for both API and DNS transports. Convenience wrapper around DiscoverAgentAPI + DiscoverAgentDNS.
-func DiscoverAgent(ctx context.Context, imr *tdns.Imr, identity string) *AgentDiscoveryResult {
+func (imr *Imr) DiscoverAgent(ctx context.Context, identity string) *AgentDiscoveryResult {
 	result := &AgentDiscoveryResult{
 		Identity: identity,
 	}
 
-	DiscoverAgentAPI(ctx, imr, identity, result)
-	DiscoverAgentDNS(ctx, imr, identity, result)
+	imr.DiscoverAgentAPI(ctx, identity, result)
+	imr.DiscoverAgentDNS(ctx, identity, result)
 
 	// Check if we have enough information to contact the agent
 	if result.APIUri == "" && result.DNSUri == "" {
@@ -358,7 +358,7 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 		return fmt.Errorf("IMR engine not available for discovery (not yet started)")
 	}
 
-	result := DiscoverAgent(ctx, imr, identity)
+	result := imr.DiscoverAgent(ctx, identity)
 	if result.Error != nil {
 		return fmt.Errorf("discovery failed for %s: %w", identity, result.Error)
 	}

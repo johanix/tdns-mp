@@ -102,9 +102,9 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 			// Flush IMR cache for this identity's discovery names.
 			// Read Globals.ImrEngine lazily: the IMR starts async after
 			// route setup, so a captured reference would be nil.
-			imr := tdns.Globals.ImrEngine
+			imr := &Imr{tdns.Globals.ImrEngine}
 			flushed := 0
-			if imr != nil && imr.Cache != nil {
+			if imr.Imr != nil && imr.Cache != nil {
 				removed, _ := imr.Cache.FlushDomain(string(peerID), false)
 				flushed = removed
 			}
@@ -132,7 +132,7 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 			agent.Mu.Unlock()
 
 			// Trigger immediate re-discovery
-			if imr != nil {
+			if imr.Imr != nil {
 				go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
 			}
 

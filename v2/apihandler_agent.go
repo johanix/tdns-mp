@@ -424,7 +424,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
+			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -460,12 +460,13 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Election started for zone %s with %d peers", amp.Zone, configured)
 
 		case "parentsync-inquire":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil {
+			rawImr := tdns.Globals.ImrEngine
+			if rawImr == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
 			}
+			imr := &Imr{rawImr}
 			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
 			if err != nil || len(sak.Keys) == 0 {
 				resp.Error = true
@@ -512,8 +513,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
@@ -559,8 +560,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Cache entry for %s %s", qname, dns.TypeToString[qtype])
 
 		case "imr-flush":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
@@ -581,8 +582,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
 
 		case "imr-reset":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
@@ -591,8 +592,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("IMR cache reset: flushed %d entries (root NS and glue preserved)", removed)
 
 		case "imr-show":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return

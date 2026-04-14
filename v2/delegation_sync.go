@@ -22,7 +22,7 @@ import (
 func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.DelegationSyncRequest, notifyq chan tdns.NotifyRequest, conf *Config) error {
 
 	lg.Info("DelegationSyncher: starting")
-	imr := func() *tdns.Imr { return conf.Config.Internal.ImrEngine }
+	imr := func() *Imr { return &Imr{conf.Config.Internal.ImrEngine} }
 	var err error
 	for {
 		select {
@@ -54,7 +54,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			case "DELEGATION-STATUS":
 				lg.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr())
+				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -82,14 +82,14 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = imr().ParentZone(zd.ZoneName)
+					zd.Parent, err = imr().Imr.ParentZone(zd.ZoneName)
 					if err != nil {
 						lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
 						continue
 					}
 				}
 
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, ds.SyncStatus, imr())
+				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, ds.SyncStatus, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
@@ -102,7 +102,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			case "EXPLICIT-SYNC-DELEGATION":
 				lg.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr())
+				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -135,7 +135,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr())
+				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true

@@ -74,7 +74,7 @@ type MPTransportBridge struct {
 
 	// getImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
-	getImrEngine func() *tdns.Imr
+	getImrEngine func() *Imr
 
 	// getZone returns zone data by name. Injected to avoid coupling to global Zones.
 	// Used by HSYNC3-based authorization in agent_authorization.go.
@@ -172,7 +172,7 @@ type MPTransportBridgeConfig struct {
 	// GetImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	// Only the agent needs this; combiner/signer/external apps pass nil.
-	GetImrEngine func() *tdns.Imr
+	GetImrEngine func() *Imr
 
 	// GetZone returns zone data by name. Injected to decouple from global Zones.
 	// Only needed by roles that use HSYNC3-based authorization (agent).

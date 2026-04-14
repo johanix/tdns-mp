@@ -1208,7 +1208,7 @@ func Sig0KeyOwnerName(zone, nameserver string) string {
 }
 
 // GetParentSyncStatus computes the current parent sync status for a zone on demand.
-func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *tdns.Imr, ar *AgentRegistry) ParentSyncStatus {
+func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *Imr, ar *AgentRegistry) ParentSyncStatus {
 	status := ParentSyncStatus{
 		Zone:        zone,
 		LastChecked: time.Now(),
@@ -1332,7 +1332,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 					Port:   drr.Port,
 				})
 			}
-			activeScheme, _, err := zd.BestSyncScheme(context.Background(), imr)
+			activeScheme, _, err := zd.BestSyncScheme(context.Background(), imr.Imr)
 			if err == nil {
 				status.ActiveScheme = activeScheme
 			}
