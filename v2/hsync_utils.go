@@ -331,7 +331,7 @@ func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *M
 		}
 
 		// Match foreign key tags against actual DNSKEYs in the zone
-		remoteDNSKEYs := buildRemoteDNSKEYsFromTags(mpzd.ZoneData, foreignKeyTags)
+		remoteDNSKEYs := mpzd.buildRemoteDNSKEYsFromTags(foreignKeyTags)
 		mpzd.SetRemoteDNSKEYs(remoteDNSKEYs)
 
 		mpzd.SetKeystateOK(true)
@@ -523,14 +523,14 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 }
 
 // buildRemoteDNSKEYsFromTags returns DNSKEY RRs from the zone that match the given key tags.
-func buildRemoteDNSKEYsFromTags(zd *tdns.ZoneData, foreignKeyTags map[uint16]bool) []dns.RR {
+func (mpzd *MPZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]bool) []dns.RR {
 	if len(foreignKeyTags) == 0 {
 		return nil
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
+	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil {
-		zd.Logger.Printf("buildRemoteDNSKEYsFromTags: zone %s: cannot get apex: %v", zd.ZoneName, err)
+		mpzd.Logger.Printf("buildRemoteDNSKEYsFromTags: zone %s: cannot get apex: %v", mpzd.ZoneName, err)
 		return nil
 	}
 
