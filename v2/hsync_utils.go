@@ -1008,15 +1008,14 @@ func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
 // For combiners: snapshots upstream data and adds contributions to new_zd.
 func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *tdns.MultiProviderConf) {
 	mpzd.EnsureMP()
-	zd := mpzd.ZoneData
 	analysis := &tdns.ZoneRefreshAnalysis{}
 
 	// Delegation change detection
-	if zd.Options[tdns.OptDelSyncChild] {
+	if mpzd.Options[tdns.OptDelSyncChild] {
 		var err error
-		analysis.DelegationChanged, analysis.DelegationStatus, err = zd.DelegationDataChangedNG(new_zd)
+		analysis.DelegationChanged, analysis.DelegationStatus, err = mpzd.DelegationDataChangedNG(new_zd)
 		if err != nil {
-			lg.Error("DelegationDataChanged failed", "zone", zd.ZoneName, "err", err)
+			lg.Error("DelegationDataChanged failed", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
 
@@ -1024,25 +1023,25 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	switch tdns.Globals.App.Type {
 	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
 		var err error
-		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(zd, new_zd)
+		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(mpzd.ZoneData, new_zd)
 		if err != nil {
-			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
+			lg.Error("HsyncChanged failed", "zone", mpzd.ZoneName, "err", err)
 		}
 
-		dnskeyschanged, err := zd.DnskeysChangedNG(new_zd)
+		dnskeyschanged, err := mpzd.DnskeysChangedNG(new_zd)
 		if err != nil {
-			lg.Error("DnskeysChangedNG failed", "zone", zd.ZoneName, "err", err)
+			lg.Error("DnskeysChangedNG failed", "zone", mpzd.ZoneName, "err", err)
 		}
 
 		// For multi-provider zones, compute local DNSKEY adds/removes
-		if dnskeyschanged && zd.Options[tdns.OptMultiProvider] {
+		if dnskeyschanged && mpzd.Options[tdns.OptMultiProvider] {
 			switch tdns.Globals.App.Type {
 			case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				mpzd.RequestAndWaitForKeyInventory(context.Background(), tm)
 				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate()
 				if err != nil {
-					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
+					lg.Error("LocalDnskeysFromKeystate failed", "zone", mpzd.ZoneName, "err", err)
 				}
 				if analysis.DnskeyStatus == nil {
 					dnskeyschanged = false
@@ -1050,7 +1049,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			default:
 				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysChanged(new_zd)
 				if err != nil {
-					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
+					lg.Error("LocalDnskeysChanged failed", "zone", mpzd.ZoneName, "err", err)
 				}
 			}
 		}
@@ -1084,18 +1083,18 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			shouldSign := mpzd.MP.MPdata.WeAreSigner
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
-				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
+				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
 				new_zd.Options[tdns.OptInlineSigning] = true
 			} else if !shouldSign && new_zd.Options[tdns.OptInlineSigning] {
-				lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
+				lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", mpzd.ZoneName)
 				new_zd.Options[tdns.OptInlineSigning] = false
 			}
 			isMS := shouldSign && otherSigners > 0
 			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {
-				lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
+				lg.Info("multi-signer mode detected", "zone", mpzd.ZoneName, "otherSigners", otherSigners)
 				mpzd.MPOptions[tdns.OptMultiSigner] = true
 			} else if !isMS && mpzd.MPOptions[tdns.OptMultiSigner] {
-				lg.Info("no longer multi-signer", "zone", zd.ZoneName)
+				lg.Info("no longer multi-signer", "zone", mpzd.ZoneName)
 				mpzd.MPOptions[tdns.OptMultiSigner] = false
 			}
 		}
@@ -1107,13 +1106,13 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		if analysis.HsyncChanged {
 			matched, _, _ := (&MPZoneData{ZoneData: new_zd}).matchHsyncIdentity(ourHsyncIdentities(mp))
 			if matched && !mpzd.MPOptions[tdns.OptMPDisallowEdits] {
-				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
+				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", mpzd.ZoneName)
 				mpzd.MPOptions[tdns.OptAllowEdits] = true
 			} else if matched && mpzd.MPOptions[tdns.OptMPDisallowEdits] {
-				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", zd.ZoneName)
+				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", mpzd.ZoneName)
 				mpzd.MPOptions[tdns.OptAllowEdits] = false
 			} else {
-				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", zd.ZoneName)
+				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", mpzd.ZoneName)
 				mpzd.MPOptions[tdns.OptAllowEdits] = false
 			}
 		}
@@ -1128,16 +1127,16 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 				new_zd.MP.CombinerData = mpzd.MP.CombinerData
 			}
 
-			lg.Info("combining with local changes", "zone", zd.ZoneName)
+			lg.Info("combining with local changes", "zone", mpzd.ZoneName)
 			success, err := (&MPZoneData{ZoneData: new_zd}).CombineWithLocalChanges()
 			if err != nil {
-				lg.Error("CombineWithLocalChanges failed", "zone", zd.ZoneName, "err", err)
+				lg.Error("CombineWithLocalChanges failed", "zone", mpzd.ZoneName, "err", err)
 			} else if success {
-				lg.Info("local changes applied to new zone data", "zone", zd.ZoneName)
+				lg.Info("local changes applied to new zone data", "zone", mpzd.ZoneName)
 			}
 
 			if (&MPZoneData{ZoneData: new_zd}).InjectSignatureTXT(mp) {
-				lg.Debug("signature TXT injected", "zone", zd.ZoneName)
+				lg.Debug("signature TXT injected", "zone", mpzd.ZoneName)
 			}
 		}
 	}
