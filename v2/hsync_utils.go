@@ -1150,7 +1150,6 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
 func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
-	zd := mpzd.ZoneData
 	if mpzd.MP == nil || mpzd.MP.RefreshAnalysis == nil {
 		return
 	}
@@ -1158,12 +1157,12 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	mpzd.MP.RefreshAnalysis = nil // clear after use
 
 	// Delegation sync notification
-	if analysis.DelegationChanged && zd.Options[tdns.OptDelSyncChild] {
-		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
-		zd.DelegationSyncQ <- tdns.DelegationSyncRequest{
+	if analysis.DelegationChanged && mpzd.Options[tdns.OptDelSyncChild] {
+		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", mpzd.ZoneName)
+		mpzd.DelegationSyncQ <- tdns.DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
-			ZoneName:   zd.ZoneName,
-			ZoneData:   zd,
+			ZoneName:   mpzd.ZoneName,
+			ZoneData:   mpzd.ZoneData,
 			SyncStatus: analysis.DelegationStatus,
 		}
 	}
@@ -1172,17 +1171,17 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	if analysis.DnskeyChanged {
 		switch tdns.Globals.App.Type {
 		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
-			if zd.Options[tdns.OptMultiProvider] {
-				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", zd.ZoneName)
+			if mpzd.Options[tdns.OptMultiProvider] {
+				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", mpzd.ZoneName)
 				mpzd.SyncQ <- tdns.SyncRequest{
 					Command:      "SYNC-DNSKEY-RRSET",
-					ZoneName:     tdns.ZoneName(zd.ZoneName),
-					ZoneData:     zd,
+					ZoneName:     tdns.ZoneName(mpzd.ZoneName),
+					ZoneData:     mpzd.ZoneData,
 					DnskeyStatus: analysis.DnskeyStatus,
 				}
 			}
 		case tdns.AppTypeMPCombiner:
-			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
+			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", mpzd.ZoneName)
 		}
 	}
 
@@ -1190,15 +1189,15 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
 		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
-			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
+			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
 			mpzd.SyncQ <- tdns.SyncRequest{
 				Command:    "HSYNC-UPDATE",
-				ZoneName:   tdns.ZoneName(zd.ZoneName),
-				ZoneData:   zd,
+				ZoneName:   tdns.ZoneName(mpzd.ZoneName),
+				ZoneData:   mpzd.ZoneData,
 				SyncStatus: analysis.HsyncStatus,
 			}
 			// Detect parentsync=agent dynamically from HSYNCPARAM
-			if !zd.Options[tdns.OptDelSyncChild] {
+			if !mpzd.Options[tdns.OptDelSyncChild] {
 				hp := mpzd.getHSYNCPARAM()
 				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
 					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
