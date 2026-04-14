@@ -8,6 +8,7 @@ package tdnsmp
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gorilla/mux"
 	tdns "github.com/johanix/tdns/v2"
@@ -69,7 +70,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	if mp != nil && len(mp.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
 		if err != nil {
-			lgCombiner.Error("failed to set up combiner sync router", "err", err)
+			return fmt.Errorf("failed to set up combiner sync router: %w", err)
 		} else {
 			tdns.StartEngine(&tdns.Globals.App, "CombinerAPIdispatcherNG", func() error {
 				lgCombiner.Info("starting combiner sync API", "addresses", mp.SyncApi.Addresses.Listen)

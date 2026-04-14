@@ -89,10 +89,25 @@ func runRouterList(role string, args []string) {
 				continue
 			}
 
-			name := handler["name"].(string)
-			priority := int(handler["priority"].(float64))
-			callCount := int(handler["call_count"].(float64))
-			errorCount := int(handler["error_count"].(float64))
+			name, ok := handler["name"].(string)
+			if !ok {
+				continue
+			}
+			priorityF, ok := handler["priority"].(float64)
+			if !ok {
+				continue
+			}
+			priority := int(priorityF)
+			callCountF, ok := handler["call_count"].(float64)
+			if !ok {
+				continue
+			}
+			callCount := int(callCountF)
+			errorCountF, ok := handler["error_count"].(float64)
+			if !ok {
+				continue
+			}
+			errorCount := int(errorCountF)
 
 			fmt.Printf("  %d. %s (priority=%d)\n", i+1, name, priority)
 			fmt.Printf("     Calls: %d, Errors: %d\n", callCount, errorCount)
@@ -259,10 +274,23 @@ func runRouterWalk(role string, args []string) {
 			continue
 		}
 
-		msgType := handler["message_type"].(string)
-		name := handler["name"].(string)
-		priority := int(handler["priority"].(float64))
-		registered := handler["registered"].(string)
+		msgType, ok := handler["message_type"].(string)
+		if !ok {
+			continue
+		}
+		name, ok := handler["name"].(string)
+		if !ok {
+			continue
+		}
+		priorityF, ok := handler["priority"].(float64)
+		if !ok {
+			continue
+		}
+		priority := int(priorityF)
+		registered, ok := handler["registered"].(string)
+		if !ok {
+			continue
+		}
 
 		fmt.Printf("%d. [%s] %s\n", i+1, msgType, name)
 		fmt.Printf("   Priority: %d, Registered: %s\n", priority, registered)

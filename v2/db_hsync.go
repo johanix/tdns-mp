@@ -911,9 +911,11 @@ FROM OperationalMetrics
 		&metrics.AvgLatency, &metrics.MaxLatency,
 		&metrics.APIOperations, &metrics.DNSOperations,
 	)
-	if err != nil {
-		// Table might be empty, return empty metrics
+	if err == sql.ErrNoRows {
 		return metrics, nil
+	}
+	if err != nil {
+		return metrics, err
 	}
 
 	return metrics, nil
@@ -943,6 +945,8 @@ syncs_failed = syncs_failed + excluded.syncs_failed,
 beats_sent = beats_sent + excluded.beats_sent,
 beats_received = beats_received + excluded.beats_received,
 beats_missed = beats_missed + excluded.beats_missed,
+max_latency = MAX(max_latency, excluded.max_latency),
+avg_latency = CASE WHEN (syncs_sent + syncs_received + syncs_confirmed + excluded.syncs_sent + excluded.syncs_received + excluded.syncs_confirmed) > 0 THEN ((avg_latency * (syncs_sent + syncs_received + syncs_confirmed)) + (excluded.avg_latency * (excluded.syncs_sent + excluded.syncs_received + excluded.syncs_confirmed))) / (syncs_sent + syncs_received + syncs_confirmed + excluded.syncs_sent + excluded.syncs_received + excluded.syncs_confirmed) ELSE excluded.avg_latency END,
 api_operations = api_operations + excluded.api_operations,
 dns_operations = dns_operations + excluded.dns_operations
 `,

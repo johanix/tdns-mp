@@ -1265,8 +1265,10 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	}
 
 	// Map status string back to ConfirmStatus
-	status := transport.ConfirmSuccess
+	status := transport.ConfirmFailed
 	switch detail.Status {
+	case "SUCCESS", "ok":
+		status = transport.ConfirmSuccess
 	case "PARTIAL":
 		status = transport.ConfirmPartial
 	case "FAILED":

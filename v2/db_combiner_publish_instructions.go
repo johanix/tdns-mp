@@ -9,8 +9,10 @@
 package tdnsmp
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -86,8 +88,11 @@ func GetPublishInstruction(hdb *HsyncDB, zone, senderID string) (*StoredPublishI
 		SELECT key_rrs_json, cds_rrs_json, locations_json, published_ns_json, updated_at
 		FROM CombinerPublishInstructions WHERE zone = ? AND sender_id = ?`,
 		zone, senderID).Scan(&keyJSON, &cdsJSON, &locJSON, &nsJSON, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, nil // not found is not an error
+		return nil, err
 	}
 
 	s := &StoredPublishInstruction{
@@ -146,10 +151,18 @@ func LoadAllPublishInstructions(hdb *HsyncDB) (map[string]map[string]*StoredPubl
 			SenderID:  senderID,
 			UpdatedAt: time.Unix(updatedAt, 0),
 		}
-		_ = json.Unmarshal([]byte(keyJSON), &s.KEYRRs)
-		_ = json.Unmarshal([]byte(cdsJSON), &s.CDSRRs)
-		_ = json.Unmarshal([]byte(locJSON), &s.Locations)
-		_ = json.Unmarshal([]byte(nsJSON), &s.PublishedNS)
+		if err := json.Unmarshal([]byte(keyJSON), &s.KEYRRs); err != nil {
+			log.Printf("LoadAllPublishInstructions: failed to unmarshal KEYRRs: zone=%s sender=%s err=%v", zone, senderID, err)
+		}
+		if err := json.Unmarshal([]byte(cdsJSON), &s.CDSRRs); err != nil {
+			log.Printf("LoadAllPublishInstructions: failed to unmarshal CDSRRs: zone=%s sender=%s err=%v", zone, senderID, err)
+		}
+		if err := json.Unmarshal([]byte(locJSON), &s.Locations); err != nil {
+			log.Printf("LoadAllPublishInstructions: failed to unmarshal Locations: zone=%s sender=%s err=%v", zone, senderID, err)
+		}
+		if err := json.Unmarshal([]byte(nsJSON), &s.PublishedNS); err != nil {
+			log.Printf("LoadAllPublishInstructions: failed to unmarshal PublishedNS: zone=%s sender=%s err=%v", zone, senderID, err)
+		}
 
 		if result[zone] == nil {
 			result[zone] = make(map[string]*StoredPublishInstruction)

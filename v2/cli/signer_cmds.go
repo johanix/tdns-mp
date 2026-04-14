@@ -4,7 +4,6 @@
 package cli
 
 import (
-	"fmt"
 	"log"
 
 	tdnscli "github.com/johanix/tdns/v2/cli"
@@ -32,7 +31,6 @@ var signerZoneMPListCmd = &cobra.Command{
 
 		resp, err := SendMPListCommand(api)
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
 			log.Fatalf("Error: %v", err)
 		}
 

@@ -1122,7 +1122,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 			}
 
 			lg.Info("combining with local changes", "zone", zd.ZoneName)
-			success, err := new_zd.CombineWithLocalChanges()
+			success, err := (&MPZoneData{ZoneData: new_zd}).CombineWithLocalChanges()
 			if err != nil {
 				lg.Error("CombineWithLocalChanges failed", "zone", zd.ZoneName, "err", err)
 			} else if success {

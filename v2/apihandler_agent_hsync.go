@@ -122,7 +122,7 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 				return
 			}
 
-			ops, err := hdb.ListSyncOperations(string(amp.Zone), 50)
+			ops, err := hdb.ListSyncOperations(dns.Fqdn(string(amp.Zone)), 50)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error listing sync operations: %v", err)
@@ -158,7 +158,13 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 				return
 			}
 
-			events, err := hdb.ListTransportEvents(string(amp.AgentId), 100)
+			limit := 100
+			if v, ok := amp.Data["limit"]; ok {
+				if f, ok := v.(float64); ok {
+					limit = int(f)
+				}
+			}
+			events, err := hdb.ListTransportEvents(string(amp.AgentId), limit)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error listing transport events: %v", err)

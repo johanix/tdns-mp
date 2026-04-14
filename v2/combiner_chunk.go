@@ -770,6 +770,9 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 // findExistingContribution checks whether any sender OTHER than excludeSender
 // already has a contribution for the given zone/rrtype.
 func (mpzd *MPZoneData) findExistingContribution(owner string, rrtype uint16, excludeSender string) (string, []dns.RR) {
+	if mpzd.MP == nil {
+		return "", nil
+	}
 	for senderID, zones := range mpzd.MP.AgentContributions {
 		if senderID == excludeSender {
 			continue

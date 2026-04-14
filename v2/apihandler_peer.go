@@ -278,7 +278,11 @@ func peerFromAddress(peerID string, address string) *transport.Peer {
 		lgApi.Warn("invalid address for static peer", "address", address, "peer", peerID, "err", err)
 		return nil
 	}
-	port, _ := strconv.Atoi(portStr)
+	port, err2 := strconv.Atoi(portStr)
+	if err2 != nil {
+		lgApi.Warn("invalid port in address for static peer", "address", address, "peer", peerID, "err", err2)
+		return nil
+	}
 	peer := transport.NewPeer(peerID)
 	peer.SetDiscoveryAddress(&transport.Address{
 		Host:      host,

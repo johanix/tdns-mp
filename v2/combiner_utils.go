@@ -125,11 +125,8 @@ func (mpzd *MPZoneData) CombineWithLocalChanges() (bool, error) {
 	policy := mpzd.getEditPolicy()
 
 	// Determine RRtype whitelist: provider zones use their own set.
-	isProvider := tdns.GetProviderZoneRRtypes(mpzd.ZoneName) != nil
-	var providerRRtypes map[uint16]bool
-	if isProvider {
-		providerRRtypes = tdns.GetProviderZoneRRtypes(mpzd.ZoneName)
-	}
+	providerRRtypes := GetProviderZoneRRtypes(mpzd.ZoneName)
+	isProvider := providerRRtypes != nil
 
 	modified := false
 	for item := range mpzd.MP.CombinerData.IterBuffered() {
@@ -249,17 +246,16 @@ func (mpzd *MPZoneData) AddCombinerData(senderID string, data map[string][]core.
 	}
 
 	if mpzd.combinerShouldApplyEdits() {
-		zd := mpzd.ZoneData
-		modified, err := zd.CombineWithLocalChanges()
+		modified, err := mpzd.CombineWithLocalChanges()
 		if err != nil {
 			return changed, err
 		}
 		if modified {
-			mpzd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", zd.ZoneName, senderID)
+			mpzd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", mpzd.ZoneName, senderID)
 		}
 
 		if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
-			zd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", zd.ZoneName)
+			mpzd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", mpzd.ZoneName)
 		}
 	}
 
@@ -480,11 +476,13 @@ func (mpzd *MPZoneData) RemoveCombinerDataNG(senderID string, data map[string][]
 		}
 	}
 
-	// Clean up rrtypes with no remaining agent contributions
-	mpzd.cleanupRemovedRRtypes(data)
+	if mpzd.combinerShouldApplyEdits() {
+		// Clean up rrtypes with no remaining agent contributions
+		mpzd.cleanupRemovedRRtypes(data)
 
-	if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
-		mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", mpzd.ZoneName)
+		if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
+			mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", mpzd.ZoneName)
+		}
 	}
 
 	return removedRecords, nil

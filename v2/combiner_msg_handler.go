@@ -132,20 +132,27 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
 			if hdb != nil {
-				editID, _ = NextEditID(hdb)
-				rec := &PendingEditRecord{
-					EditID:         editID,
-					Zone:           zone,
-					SenderID:       senderID,
-					DeliveredBy:    deliveredBy,
-					DistributionID: msg.DistributionID,
-					Records:        msg.Records,
-					ReceivedAt:     time.Now(),
+				var err error
+				editID, err = NextEditID(hdb)
+				if err != nil {
+					lgCombiner.Error("failed to get next edit ID", "zone", zone, "err", err)
+					editID = 0
 				}
-				if err := SavePendingEdit(hdb, rec); err != nil {
-					lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
-				} else {
-					lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
+				if editID != 0 {
+					rec := &PendingEditRecord{
+						EditID:         editID,
+						Zone:           zone,
+						SenderID:       senderID,
+						DeliveredBy:    deliveredBy,
+						DistributionID: msg.DistributionID,
+						Records:        msg.Records,
+						ReceivedAt:     time.Now(),
+					}
+					if err := SavePendingEdit(hdb, rec); err != nil {
+						lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
+					} else {
+						lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
+					}
 				}
 			}
 

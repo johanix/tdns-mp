@@ -82,7 +82,7 @@ var hsyncZoneStatusCmd = &cobra.Command{
 
 		PrintHsyncRRs(tdns.AgentId(resp.Identity), resp.HsyncRRs)
 
-		if tdns.Globals.Verbose {
+		if tdns.Globals.Verbose && resp.ZoneAgentData != nil {
 			fmt.Printf("\nZone Agent Data:\n")
 			fmt.Printf("  My Upstream: %s\n", resp.ZoneAgentData.MyUpstream)
 			fmt.Printf("  My Downstreams: %v\n", resp.ZoneAgentData.MyDownstreams)
@@ -268,6 +268,7 @@ var hsyncTransportEventsCmd = &cobra.Command{
 		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
 			Command: "hsync-transport-events",
 			AgentId: tdns.AgentId(hsyncPeerID),
+			Data:    map[string]interface{}{"limit": hsyncLimit},
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error: %v", err)
@@ -589,5 +590,5 @@ func init() {
 	hsyncTransportEventsCmd.Flags().StringVarP(&hsyncPeerID, "peer", "p", "", "Filter by peer ID")
 	hsyncTransportEventsCmd.Flags().IntVarP(&hsyncLimit, "limit", "n", 100, "Maximum number of events to show")
 	hsyncAgentStatusCmd.Flags().StringVarP(&hsyncAgentID, "agentid", "", "", "Remote agent identity to show")
-	hsyncQueryCmd.Flags().StringVarP(&hsyncResolver, "imr", "", "", "Resolver address for DNS query (e.g. 8.8.8.8:53)")
+	hsyncQueryCmd.Flags().StringVarP(&hsyncResolver, "resolver", "", "", "Resolver address for DNS query (e.g. 8.8.8.8:53)")
 }
