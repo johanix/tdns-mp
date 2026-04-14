@@ -236,6 +236,9 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 		}
 
 		neededCount++
+		lgEngine.Info("agent in NEEDED state", "agent", agent.Identity,
+			"apiNeeded", apiNeeded, "dnsNeeded", dnsNeeded,
+			"ptr", fmt.Sprintf("%p", agent))
 		// Spawn async discovery attempt — only discover the transports
 		// that are actually in NEEDED state (non-blocking)
 		go ar.attemptDiscovery(agent, imr, apiNeeded, dnsNeeded)

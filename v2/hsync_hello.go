@@ -254,7 +254,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 						agent.Mu.Unlock()
 					}
 				}
-				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity)
+				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity, "ptr", fmt.Sprintf("%p", agent))
 				return
 			}
 		}
@@ -282,7 +282,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		if err != nil {
 			lgAgent.Warn("HELLO failed on all transports", "agent", agent.Identity, "err", err)
 		} else {
-			lgAgent.Info("HELLO accepted on at least one transport", "agent", agent.Identity)
+			lgAgent.Info("HELLO accepted on at least one transport", "agent", agent.Identity, "ptr", fmt.Sprintf("%p", agent))
 		}
 		ar.S.Set(agent.Identity, agent)
 		return

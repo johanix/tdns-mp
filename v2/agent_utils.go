@@ -514,7 +514,8 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 		}
 		lgAgent.Debug("agent already exists", "agent", remoteid,
 			"apiState", AgentStateToString[agent.ApiDetails.State],
-			"dnsState", AgentStateToString[agent.DnsDetails.State])
+			"dnsState", AgentStateToString[agent.DnsDetails.State],
+			"ptr", fmt.Sprintf("%p", agent))
 		return
 	}
 
@@ -545,7 +546,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	}
 
 	ar.S.Set(remoteid, agent)
-	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename)
+	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename, "ptr", fmt.Sprintf("%p", agent))
 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
 	var imr *tdns.Imr

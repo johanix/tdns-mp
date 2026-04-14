@@ -90,8 +90,9 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			continue
 		}
 
-		lgAgent.Debug("sending heartbeat",
-			"agent", a.Identity, "apiState", AgentStateToString[apiState], "dnsState", AgentStateToString[dnsState])
+		lgAgent.Info("sending heartbeat",
+			"agent", a.Identity, "apiState", AgentStateToString[apiState], "dnsState", AgentStateToString[dnsState],
+			"topState", AgentStateToString[a.State], "ptr", fmt.Sprintf("%p", a))
 
 		go func(a *Agent) {
 			agent := a
