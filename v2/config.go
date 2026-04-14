@@ -48,7 +48,9 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		conf.InternalMp.refreshRegistered[zoneName] = true
 		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
 			func(zd, new_zd *tdns.ZoneData) {
-				MPPreRefresh(zd, new_zd, tm, msgQs, mp)
+				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
+					mpzd.MPPreRefresh(new_zd, tm, msgQs, mp)
+				}
 			})
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
 			func(zd *tdns.ZoneData) {
@@ -114,27 +116,31 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			if !zd.Options[tdns.OptMultiProvider] {
 				return
 			}
-			zd.EnsureMP()
-			if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
+			w, ok := Zones.Get(zd.ZoneName)
+			if !ok {
+				return
+			}
+			w.EnsureMP()
+			if w.MP.PersistContributions == nil && zd.KeyDB != nil {
 				hdb := NewHsyncDB(zd.KeyDB)
-				zd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
+				w.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
 					return SaveContributions(hdb, zone, senderID, contribs)
 				}
 				lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
 			}
-			if zd.MP.AgentContributions == nil && allContribs != nil {
+			if w.MP.AgentContributions == nil && allContribs != nil {
 				if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
-					zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+					w.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 					for senderID, ownerMap := range zoneContribs {
-						zd.MP.AgentContributions[senderID] = ownerMap
+						w.MP.AgentContributions[senderID] = ownerMap
 					}
-					(&MPZoneData{ZoneData: zd}).RebuildCombinerData()
+					w.RebuildCombinerData()
 					lgCombiner.Info("hydrated AgentContributions from snapshot",
 						"zone", zd.ZoneName, "agents", len(zoneContribs))
 				}
 			}
-			if zd.Options[tdns.OptAllowEdits] {
-				success, err := zd.CombineWithLocalChanges()
+			if w.MPOptions[tdns.OptAllowEdits] {
+				success, err := w.CombineWithLocalChanges()
 				if err != nil {
 					lgCombiner.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
 				} else if success {
@@ -145,7 +151,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 
 		if GetProviderZoneRRtypes(zoneName) != nil {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				(&MPZoneData{ZoneData: zd}).ApplyPendingSignalKeys(hdb)
+				if w, ok := Zones.Get(zd.ZoneName); ok {
+					w.ApplyPendingSignalKeys(hdb)
+				}
 			})
 		}
 	}

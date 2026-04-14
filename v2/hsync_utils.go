@@ -82,17 +82,17 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.HsyncStatus, error) {
 //
 // "Remote" keys are those whose key tag matches zd.RemoteDNSKEYs.
 // Everything else in the DNSKEY RRset is "local" (from our signer).
-func LocalDnskeysChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, error) {
+func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, error) {
 	ds := &tdns.DnskeyStatus{
 		Time:     time.Now(),
-		ZoneName: zd.ZoneName,
+		ZoneName: mpzd.ZoneName,
 	}
 
-	zd.Logger.Printf("LocalDnskeysChanged: enter (zone %q)", zd.ZoneName)
+	mpzd.Logger.Printf("LocalDnskeysChanged: enter (zone %q)", mpzd.ZoneName)
 
 	// Build set of remote key tags for filtering
 	remoteKeyTags := make(map[uint16]bool)
-	for _, rr := range zd.GetRemoteDNSKEYs() {
+	for _, rr := range mpzd.GetRemoteDNSKEYs() {
 		if dnskey, ok := rr.(*dns.DNSKEY); ok {
 			remoteKeyTags[dnskey.KeyTag()] = true
 		}
@@ -102,10 +102,10 @@ func LocalDnskeysChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, er
 	// On initial load, zd may not be ready yet, so GetRRset returns ErrZoneNotReady.
 	// Treat this as oldkeys == nil (no old data) — the existing nil handling below
 	// will correctly classify all new keys as adds.
-	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	oldkeys, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
 		if errors.Is(err, tdns.ErrZoneNotReady) {
-			zd.Logger.Printf("LocalDnskeysChanged: old zone not ready (initial load), treating as no old keys")
+			mpzd.Logger.Printf("LocalDnskeysChanged: old zone not ready (initial load), treating as no old keys")
 			oldkeys = nil
 		} else {
 			return false, nil, fmt.Errorf("LocalDnskeysChanged: old GetRRset: %v", err)
@@ -113,7 +113,7 @@ func LocalDnskeysChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, er
 	}
 
 	// Get new DNSKEY RRset (from incoming zone data)
-	newkeys, err := newzd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	newkeys, err := new_zd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
 		return false, nil, fmt.Errorf("LocalDnskeysChanged: new GetRRset: %v", err)
 	}
@@ -130,21 +130,21 @@ func LocalDnskeysChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, er
 		// First load — all new local keys are "adds"
 		ds.LocalAdds = newLocal
 		if len(ds.LocalAdds) > 0 {
-			zd.Logger.Printf("LocalDnskeysChanged: zone %s: initial load, %d local DNSKEYs",
-				zd.ZoneName, len(ds.LocalAdds))
+			mpzd.Logger.Printf("LocalDnskeysChanged: zone %s: initial load, %d local DNSKEYs",
+				mpzd.ZoneName, len(ds.LocalAdds))
 			return true, ds, nil
 		}
 		return false, ds, nil
 	}
 
-	differ, adds, removes := core.RRsetDiffer(zd.ZoneName, newLocal, oldLocal,
-		dns.TypeDNSKEY, zd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
+	differ, adds, removes := core.RRsetDiffer(mpzd.ZoneName, newLocal, oldLocal,
+		dns.TypeDNSKEY, mpzd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
 
 	ds.LocalAdds = adds
 	ds.LocalRemoves = removes
 
-	zd.Logger.Printf("LocalDnskeysChanged: exit (zone %q, differ: %v, adds: %d, removes: %d)",
-		zd.ZoneName, differ, len(adds), len(removes))
+	mpzd.Logger.Printf("LocalDnskeysChanged: exit (zone %q, differ: %v, adds: %d, removes: %d)",
+		mpzd.ZoneName, differ, len(adds), len(removes))
 	return differ, ds, nil
 }
 
@@ -156,35 +156,35 @@ func LocalDnskeysChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, er
 //
 // Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
 // returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
-func LocalDnskeysFromKeystate(zd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, error) {
+func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *tdns.DnskeyStatus, error) {
 	// Don't process DNSKEYs for unsigned zones, but clean up any
 	// previously published keys on transition to unsigned.
-	if zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
-		if len(zd.MP.LocalDNSKEYs) > 0 {
+	if mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.ZoneSigned {
+		if len(mpzd.MP.LocalDNSKEYs) > 0 {
 			ds := &tdns.DnskeyStatus{
 				Time:         time.Now(),
-				ZoneName:     zd.ZoneName,
-				LocalRemoves: zd.MP.LocalDNSKEYs,
+				ZoneName:     mpzd.ZoneName,
+				LocalRemoves: mpzd.MP.LocalDNSKEYs,
 			}
-			zd.MP.LocalDNSKEYs = nil
+			mpzd.MP.LocalDNSKEYs = nil
 			return true, ds, nil
 		}
 		return false, nil, nil
 	}
 
-	inv := zd.GetLastKeyInventory()
+	inv := mpzd.GetLastKeyInventory()
 	if inv == nil {
-		zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: no KEYSTATE inventory available", zd.ZoneName)
+		mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: no KEYSTATE inventory available", mpzd.ZoneName)
 		return false, nil, nil
 	}
 
 	if time.Since(inv.Received) > 1*time.Hour {
-		lgEngine.Warn("using stale KEYSTATE inventory", "zone", zd.ZoneName, "age", time.Since(inv.Received))
+		lgEngine.Warn("using stale KEYSTATE inventory", "zone", mpzd.ZoneName, "age", time.Since(inv.Received))
 	}
 
 	ds := &tdns.DnskeyStatus{
 		Time:     time.Now(),
-		ZoneName: zd.ZoneName,
+		ZoneName: mpzd.ZoneName,
 	}
 
 	// Extract local keys from the KEYSTATE inventory.
@@ -201,21 +201,21 @@ func LocalDnskeysFromKeystate(zd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, erro
 			continue
 		}
 		if entry.KeyRR == "" {
-			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: skipping key %d with empty KeyRR",
-				zd.ZoneName, entry.KeyTag)
+			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: skipping key %d with empty KeyRR",
+				mpzd.ZoneName, entry.KeyTag)
 			continue
 		}
 		rr, err := dns.NewRR(entry.KeyRR)
 		if err != nil {
-			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: failed to parse KeyRR for key %d: %v",
-				zd.ZoneName, entry.KeyTag, err)
+			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: failed to parse KeyRR for key %d: %v",
+				mpzd.ZoneName, entry.KeyTag, err)
 			continue
 		}
 		newLocalKeys = append(newLocalKeys, rr)
 	}
 
-	zd.EnsureMP()
-	oldLocalKeys := zd.MP.LocalDNSKEYs
+	mpzd.EnsureMP()
+	oldLocalKeys := mpzd.MP.LocalDNSKEYs
 
 	// Handle initial case (no previous local keys)
 	if len(oldLocalKeys) == 0 && len(newLocalKeys) == 0 {
@@ -225,27 +225,27 @@ func LocalDnskeysFromKeystate(zd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, erro
 		// First KEYSTATE — all local keys are adds
 		ds.LocalAdds = newLocalKeys
 		ds.CurrentLocalKeys = newLocalKeys
-		zd.EnsureMP()
-		zd.MP.LocalDNSKEYs = newLocalKeys
+		mpzd.EnsureMP()
+		mpzd.MP.LocalDNSKEYs = newLocalKeys
 		if len(ds.LocalAdds) > 0 {
-			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: initial KEYSTATE, %d local DNSKEYs",
-				zd.ZoneName, len(ds.LocalAdds))
+			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: initial KEYSTATE, %d local DNSKEYs",
+				mpzd.ZoneName, len(ds.LocalAdds))
 			return true, ds, nil
 		}
 		return false, ds, nil
 	}
 
-	differ, adds, removes := core.RRsetDiffer(zd.ZoneName, newLocalKeys, oldLocalKeys,
-		dns.TypeDNSKEY, zd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
+	differ, adds, removes := core.RRsetDiffer(mpzd.ZoneName, newLocalKeys, oldLocalKeys,
+		dns.TypeDNSKEY, mpzd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
 
 	ds.LocalAdds = adds
 	ds.LocalRemoves = removes
 	ds.CurrentLocalKeys = newLocalKeys
-	zd.EnsureMP()
-	zd.MP.LocalDNSKEYs = newLocalKeys
+	mpzd.EnsureMP()
+	mpzd.MP.LocalDNSKEYs = newLocalKeys
 
-	zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",
-		zd.ZoneName, differ, len(adds), len(removes))
+	mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",
+		mpzd.ZoneName, differ, len(adds), len(removes))
 	return differ, ds, nil
 }
 
@@ -272,14 +272,14 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 // Sets zd.KeystateOK/KeystateError/KeystateTime to reflect success or failure.
 // KEYSTATE failure is an error condition — the agent depends on KEYSTATE for
 // DNSKEY classification and must not guess when it's unavailable.
-func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge) {
-	zd.SetKeystateTime(time.Now())
+func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *MPTransportBridge) {
+	mpzd.SetKeystateTime(time.Now())
 
 	if tm == nil {
-		zd.SetKeystateOK(false)
-		zd.SetKeystateError("no TransportManager available")
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.GetKeystateError())
-		zd.SetRemoteDNSKEYs(nil)
+		mpzd.SetKeystateOK(false)
+		mpzd.SetKeystateError("no TransportManager available")
+		mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", mpzd.ZoneName, mpzd.GetKeystateError())
+		mpzd.SetRemoteDNSKEYs(nil)
 		return
 	}
 
@@ -288,15 +288,15 @@ func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context, tm *M
 	// Include the zone name so routeKeystateMessage only routes
 	// matching responses here (prevents cross-zone interference).
 	rfiChan := make(chan *KeystateInventoryMsg, 1)
-	tm.setKeystateRfi(zd.ZoneName, rfiChan)
-	defer tm.deleteKeystateRfi(zd.ZoneName)
+	tm.setKeystateRfi(mpzd.ZoneName, rfiChan)
+	defer tm.deleteKeystateRfi(mpzd.ZoneName)
 
 	// Send RFI KEYSTATE to signer
-	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {
-		zd.SetKeystateOK(false)
-		zd.SetKeystateError(fmt.Sprintf("RFI KEYSTATE send failed: %v", err))
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.GetKeystateError())
-		zd.SetRemoteDNSKEYs(nil)
+	if err := tm.sendRfiToSigner(mpzd.ZoneName, "KEYSTATE"); err != nil {
+		mpzd.SetKeystateOK(false)
+		mpzd.SetKeystateError(fmt.Sprintf("RFI KEYSTATE send failed: %v", err))
+		mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", mpzd.ZoneName, mpzd.GetKeystateError())
+		mpzd.SetRemoteDNSKEYs(nil)
 		return
 	}
 
@@ -306,16 +306,16 @@ func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context, tm *M
 
 	select {
 	case inv := <-rfiChan:
-		if inv == nil || inv.Zone != zd.ZoneName {
-			zd.SetKeystateOK(false)
-			zd.SetKeystateError("received nil or mismatched inventory from signer")
-			zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.GetKeystateError())
-			zd.SetRemoteDNSKEYs(nil)
+		if inv == nil || inv.Zone != mpzd.ZoneName {
+			mpzd.SetKeystateOK(false)
+			mpzd.SetKeystateError("received nil or mismatched inventory from signer")
+			mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", mpzd.ZoneName, mpzd.GetKeystateError())
+			mpzd.SetRemoteDNSKEYs(nil)
 			return
 		}
 
 		// Store the inventory snapshot for diagnostics
-		zd.SetLastKeyInventory(&tdns.KeyInventorySnapshot{
+		mpzd.SetLastKeyInventory(&tdns.KeyInventorySnapshot{
 			SenderID:  inv.SenderID,
 			Zone:      inv.Zone,
 			Inventory: inv.Inventory,
@@ -331,25 +331,25 @@ func RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx context.Context, tm *M
 		}
 
 		// Match foreign key tags against actual DNSKEYs in the zone
-		remoteDNSKEYs := buildRemoteDNSKEYsFromTags(zd, foreignKeyTags)
-		zd.SetRemoteDNSKEYs(remoteDNSKEYs)
+		remoteDNSKEYs := buildRemoteDNSKEYsFromTags(mpzd.ZoneData, foreignKeyTags)
+		mpzd.SetRemoteDNSKEYs(remoteDNSKEYs)
 
-		zd.SetKeystateOK(true)
-		zd.SetKeystateError("")
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
-			zd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(remoteDNSKEYs))
+		mpzd.SetKeystateOK(true)
+		mpzd.SetKeystateError("")
+		mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
+			mpzd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(remoteDNSKEYs))
 
 	case <-ctx.Done():
-		zd.SetKeystateOK(false)
-		zd.SetKeystateError("cancelled")
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: cancelled", zd.ZoneName)
-		zd.SetRemoteDNSKEYs(nil)
+		mpzd.SetKeystateOK(false)
+		mpzd.SetKeystateError("cancelled")
+		mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: cancelled", mpzd.ZoneName)
+		mpzd.SetRemoteDNSKEYs(nil)
 
 	case <-timeout.C:
-		zd.SetKeystateOK(false)
-		zd.SetKeystateError("timeout waiting for signer response (15s)")
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.GetKeystateError())
-		zd.SetRemoteDNSKEYs(nil)
+		mpzd.SetKeystateOK(false)
+		mpzd.SetKeystateError("timeout waiting for signer response (15s)")
+		mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", mpzd.ZoneName, mpzd.GetKeystateError())
+		mpzd.SetRemoteDNSKEYs(nil)
 	}
 }
 
@@ -857,11 +857,11 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 	}
 	if !matched {
 		mpzd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 record — we are not a participant for this zone", mpzd.ZoneName, ourIdentities)
-		mpzd.Options[tdns.OptMPNotListedErr] = true
+		mpzd.MPOptions[tdns.OptMPNotListedErr] = true
 		mpzd.MP.MPdata = nil
 		return
 	}
-	mpzd.Options[tdns.OptMPNotListedErr] = false
+	mpzd.MPOptions[tdns.OptMPNotListedErr] = false
 
 	// Guard 4: determine our role from HSYNCPARAM and set options accordingly.
 	// Each role check queries only its own HSYNCPARAM field.
@@ -883,18 +883,18 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 	switch {
 	case weAreAuditor:
 		// Auditors never edit
-		mpzd.Options[tdns.OptMPDisallowEdits] = true
-		mpzd.Options[tdns.OptAllowEdits] = false
+		mpzd.MPOptions[tdns.OptMPDisallowEdits] = true
+		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	case zoneSigned && !weShouldSign:
 		// Server in a signed zone but not a signer — contributions are
 		// persisted but not applied
 		mpzd.Logger.Printf("populateMPdata: zone %s: provider %q is not a signer — contributions will be persisted but not applied", mpzd.ZoneName, ourLabel)
-		mpzd.Options[tdns.OptMPDisallowEdits] = true
-		mpzd.Options[tdns.OptAllowEdits] = false
+		mpzd.MPOptions[tdns.OptMPDisallowEdits] = true
+		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	default:
 		// Server and/or signer — may edit
-		mpzd.Options[tdns.OptMPDisallowEdits] = false
-		mpzd.Options[tdns.OptAllowEdits] = true
+		mpzd.MPOptions[tdns.OptMPDisallowEdits] = false
+		mpzd.MPOptions[tdns.OptAllowEdits] = true
 	}
 
 	// Preserve any existing MPdata.Options (set at parse time),
@@ -906,7 +906,7 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 		mpOpts = make(map[tdns.ZoneOption]bool)
 	}
 	mpOpts[tdns.OptMultiProvider] = true
-	mpOpts[tdns.OptMPDisallowEdits] = mpzd.Options[tdns.OptMPDisallowEdits]
+	mpOpts[tdns.OptMPDisallowEdits] = mpzd.MPOptions[tdns.OptMPDisallowEdits]
 	mpOpts[tdns.OptMultiSigner] = weShouldSign && otherSigners > 0
 
 	mpzd.MP.MPdata = &tdns.MPdata{
@@ -969,14 +969,14 @@ func (mpzd *MPZoneData) PrintApexRRs() error {
 // CombineWithLocalChanges applies agent contributions.
 //
 // Reimplemented here because the tdns method is unexported.
-func snapshotUpstreamData(zd *tdns.ZoneData) {
-	zd.EnsureMP()
-	zd.MP.UpstreamData = core.NewCmap[tdns.OwnerData]()
+func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
+	mpzd.EnsureMP()
+	mpzd.MP.UpstreamData = core.NewCmap[tdns.OwnerData]()
 
 	// Only snapshot the apex owner (agent contributions only apply at apex)
-	if apexOd, ok := zd.Data.Get(zd.ZoneName); ok {
+	if apexOd, ok := src.Data.Get(src.ZoneName); ok {
 		snapshotOd := tdns.OwnerData{
-			Name:    zd.ZoneName,
+			Name:    src.ZoneName,
 			RRtypes: tdns.NewRRTypeStore(),
 		}
 		for _, rrtype := range apexOd.RRtypes.Keys() {
@@ -992,7 +992,7 @@ func snapshotUpstreamData(zd *tdns.ZoneData) {
 				})
 			}
 		}
-		zd.MP.UpstreamData.Set(zd.ZoneName, snapshotOd)
+		mpzd.MP.UpstreamData.Set(src.ZoneName, snapshotOd)
 	}
 }
 
@@ -1006,8 +1006,9 @@ func snapshotUpstreamData(zd *tdns.ZoneData) {
 // For agents: also performs KEYSTATE RFI to signer (blocking).
 // Stores results in zd.MP.RefreshAnalysis for post-refresh callbacks.
 // For combiners: snapshots upstream data and adds contributions to new_zd.
-func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *tdns.MultiProviderConf) {
-	zd.EnsureMP()
+func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *tdns.MultiProviderConf) {
+	mpzd.EnsureMP()
+	zd := mpzd.ZoneData
 	analysis := &tdns.ZoneRefreshAnalysis{}
 
 	// Delegation change detection
@@ -1038,8 +1039,8 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 			switch tdns.Globals.App.Type {
 			case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
-				RequestAndWaitForKeyInventory(zd, context.Background(), tm)
-				dnskeyschanged, analysis.DnskeyStatus, err = LocalDnskeysFromKeystate(zd)
+				mpzd.RequestAndWaitForKeyInventory(context.Background(), tm)
+				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
 				}
@@ -1047,7 +1048,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 					dnskeyschanged = false
 				}
 			default:
-				dnskeyschanged, analysis.DnskeyStatus, err = LocalDnskeysChanged(zd, new_zd)
+				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysChanged(new_zd)
 				if err != nil {
 					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
 				}
@@ -1059,24 +1060,29 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 	// Combiner: snapshot upstream data before applying contributions to new_zd
 	switch tdns.Globals.App.Type {
 	case tdns.AppTypeMPCombiner:
-		snapshotUpstreamData(new_zd)
+		mpzd.snapshotUpstreamData(new_zd)
 	}
 
 	// Recompute multi-provider membership and signing state on the new zone data.
+	// Use a temporary wrapper around new_zd to run populateMPdata, then
+	// copy computed state to the persistent mpzd.
 	if new_zd.Options[tdns.OptMultiProvider] {
-		(&MPZoneData{ZoneData: new_zd}).populateMPdata(mp)
-		// Copy the computed MPdata to zd so it persists across the hard flip
-		// (the flip does not copy the MP field).
-		zd.EnsureMP()
-		zd.MP.MPdata = new_zd.MP.MPdata
+		newMpzd := &MPZoneData{
+			ZoneData:  new_zd,
+			MP:        &MPState{},
+			MPOptions: make(map[tdns.ZoneOption]bool),
+		}
+		newMpzd.populateMPdata(mp)
+		mpzd.MP.MPdata = newMpzd.MP.MPdata
+		mpzd.MPOptions = newMpzd.MPOptions
 	}
 
 	// Signer: dynamically enable/disable inline-signing based on HSYNC analysis.
-	if new_zd.MP != nil && new_zd.MP.MPdata != nil {
+	if mpzd.MP.MPdata != nil {
 		switch tdns.Globals.App.Type {
 		case tdns.AppTypeAuth, tdns.AppTypeMPSigner:
-			shouldSign := new_zd.MP.MPdata.WeAreSigner
-			otherSigners := new_zd.MP.MPdata.OtherSigners
+			shouldSign := mpzd.MP.MPdata.WeAreSigner
+			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 				new_zd.Options[tdns.OptInlineSigning] = true
@@ -1085,12 +1091,12 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 				new_zd.Options[tdns.OptInlineSigning] = false
 			}
 			isMS := shouldSign && otherSigners > 0
-			if isMS && !new_zd.Options[tdns.OptMultiSigner] {
+			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {
 				lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
-				new_zd.Options[tdns.OptMultiSigner] = true
-			} else if !isMS && new_zd.Options[tdns.OptMultiSigner] {
+				mpzd.MPOptions[tdns.OptMultiSigner] = true
+			} else if !isMS && mpzd.MPOptions[tdns.OptMultiSigner] {
 				lg.Info("no longer multi-signer", "zone", zd.ZoneName)
-				new_zd.Options[tdns.OptMultiSigner] = false
+				mpzd.MPOptions[tdns.OptMultiSigner] = false
 			}
 		}
 	}
@@ -1100,25 +1106,26 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 	case tdns.AppTypeMPCombiner:
 		if analysis.HsyncChanged {
 			matched, _, _ := (&MPZoneData{ZoneData: new_zd}).matchHsyncIdentity(ourHsyncIdentities(mp))
-			if matched && !new_zd.Options[tdns.OptMPDisallowEdits] {
+			if matched && !mpzd.MPOptions[tdns.OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
-				new_zd.Options[tdns.OptAllowEdits] = true
-			} else if matched && new_zd.Options[tdns.OptMPDisallowEdits] {
+				mpzd.MPOptions[tdns.OptAllowEdits] = true
+			} else if matched && mpzd.MPOptions[tdns.OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", zd.ZoneName)
-				new_zd.Options[tdns.OptAllowEdits] = false
+				mpzd.MPOptions[tdns.OptAllowEdits] = false
 			} else {
 				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", zd.ZoneName)
-				new_zd.Options[tdns.OptAllowEdits] = false
+				mpzd.MPOptions[tdns.OptAllowEdits] = false
 			}
 		}
 
-		if new_zd.Options[tdns.OptAllowEdits] {
-			new_zd.EnsureMP()
-			if zd.MP.AgentContributions != nil {
-				new_zd.MP.AgentContributions = zd.MP.AgentContributions
+		if mpzd.MPOptions[tdns.OptAllowEdits] {
+			if mpzd.MP.AgentContributions != nil {
+				new_zd.EnsureMP()
+				new_zd.MP.AgentContributions = mpzd.MP.AgentContributions
 			}
-			if zd.MP.CombinerData != nil {
-				new_zd.MP.CombinerData = zd.MP.CombinerData
+			if mpzd.MP.CombinerData != nil {
+				new_zd.EnsureMP()
+				new_zd.MP.CombinerData = mpzd.MP.CombinerData
 			}
 
 			lg.Info("combining with local changes", "zone", zd.ZoneName)
@@ -1136,7 +1143,7 @@ func MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs
 	}
 
 	// Store analysis for post-refresh callbacks
-	zd.MP.RefreshAnalysis = analysis
+	mpzd.MP.RefreshAnalysis = analysis
 }
 
 // PostRefresh runs after the hard flip for all MP roles.

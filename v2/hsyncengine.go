@@ -164,7 +164,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 				Inventory: inventoryMsg.Inventory,
 				Received:  time.Now(),
 			})
-			changed, ds, err := LocalDnskeysFromKeystate(zd.ZoneData)
+			changed, ds, err := zd.LocalDnskeysFromKeystate()
 			if err != nil {
 				lgEngine.Error("proactive inventory: LocalDnskeysFromKeystate failed", "zone", inventoryMsg.Zone, "err", err)
 				break

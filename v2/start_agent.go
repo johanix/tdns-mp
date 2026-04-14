@@ -148,7 +148,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				if mp == nil {
 					return
 				}
-				w := &MPZoneData{ZoneData: zd}
+				w, ok := Zones.Get(zd.ZoneName)
+				if !ok {
+					return
+				}
 				ourIds := ourHsyncIdentities(mp)
 				matched, _, _ := w.matchHsyncIdentity(ourIds)
 				if !matched {

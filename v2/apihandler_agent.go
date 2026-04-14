@@ -100,7 +100,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			}
 			// Per-RRtype policy for non-signers on signed zones:
 			// block signing RRtypes, allow NS (if nsmgmt=agent) and KEY (if parentsync=agent).
-			if zd != nil && zd.Options[tdns.OptMPDisallowEdits] {
+			if zd != nil && zd.MPOptions[tdns.OptMPDisallowEdits] {
 				policy := zd.getEditPolicy()
 				for _, rrStr := range amp.RRs {
 					parsed, err := dns.NewRR(rrStr)
@@ -340,7 +340,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("HELLO to %s succeeded: %s (time: %s)", amp.AgentId, ahr.Msg, ahr.Time.Format(time.RFC3339))
 
 		case "refresh-keys":
-			RequestAndWaitForKeyInventory(zd.ZoneData, r.Context(), conf.InternalMp.MPTransport)
+			zd.RequestAndWaitForKeyInventory(r.Context(), conf.InternalMp.MPTransport)
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
@@ -353,7 +353,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 					}
 				}
 				// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
-				changed, dskeyStatus, err := LocalDnskeysFromKeystate(zd.ZoneData)
+				changed, dskeyStatus, err := zd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
 				}
