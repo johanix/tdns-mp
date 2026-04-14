@@ -142,15 +142,12 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				agent.ApiDetails.LatestErrorTime = time.Now()
 
 			default:
-				now := time.Now()
-				agent.ApiDetails.State = AgentStateOperational
-				agent.ApiDetails.LatestSBeat = now
-				agent.ApiDetails.LatestError = ""
-				agent.ApiDetails.SentBeats++
-				agent.DnsDetails.State = AgentStateOperational
-				agent.DnsDetails.LatestSBeat = now
-				agent.DnsDetails.LatestError = ""
-				agent.DnsDetails.SentBeats++
+				// SendBeatWithFallback already updated per-transport
+				// state individually. Just promote the top-level state
+				// so CheckState doesn't drag transports back to NEEDED.
+				if agent.State == AgentStateNeeded || agent.State == AgentStateKnown || agent.State == AgentStateIntroduced {
+					agent.State = AgentStateOperational
+				}
 			}
 			var tasks []DeferredAgentTask
 			if len(agent.DeferredTasks) > 0 {
@@ -240,10 +237,11 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 		agent.ApiDetails.State = AgentStateDegraded
 		agent.DnsDetails.State = AgentStateDegraded
 	} else {
-		// Beats healthy - sync transport state to top-level state
-		// Top-level agent.State is managed by RecomputeSharedZonesAndSyncState() based on zone count
-		agent.ApiDetails.State = agent.State
-		agent.DnsDetails.State = agent.State
+		// Beats healthy — promote top-level state if transports are ahead.
+		// Never drag transport states back down to a lower top-level state.
+		if agent.State == AgentStateNeeded || agent.State == AgentStateKnown || agent.State == AgentStateIntroduced {
+			agent.State = AgentStateOperational
+		}
 	}
 }
 

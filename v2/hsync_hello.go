@@ -216,11 +216,12 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 			cancel()
 
 			if err == nil && beatResp != nil && beatResp.Ack {
+				// SendBeatWithFallback already updated per-transport
+				// state individually. Promote the top-level state.
 				agent.Mu.Lock()
-				agent.ApiDetails.State = AgentStateOperational
-				agent.ApiDetails.LatestSBeat = time.Now()
-				agent.ApiDetails.SentBeats++
-				agent.ApiDetails.LatestError = ""
+				if agent.State == AgentStateNeeded || agent.State == AgentStateKnown || agent.State == AgentStateIntroduced {
+					agent.State = AgentStateOperational
+				}
 				var tasks []DeferredAgentTask
 				if len(agent.DeferredTasks) > 0 {
 					tasks = agent.DeferredTasks
