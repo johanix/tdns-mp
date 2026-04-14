@@ -1151,11 +1151,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 // the pre-refresh analysis results.
 func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	zd := mpzd.ZoneData
-	if zd.MP == nil || zd.MP.RefreshAnalysis == nil {
+	if mpzd.MP == nil || mpzd.MP.RefreshAnalysis == nil {
 		return
 	}
-	analysis := zd.MP.RefreshAnalysis
-	zd.MP.RefreshAnalysis = nil // clear after use
+	analysis := mpzd.MP.RefreshAnalysis
+	mpzd.MP.RefreshAnalysis = nil // clear after use
 
 	// Delegation sync notification
 	if analysis.DelegationChanged && zd.Options[tdns.OptDelSyncChild] {
