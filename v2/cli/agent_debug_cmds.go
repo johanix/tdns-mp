@@ -61,7 +61,7 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 			MessageType: AgentMsgNotify,
 			RRType:      rrtype,
 			Zone:        ZoneName(tdns.Globals.Zonename),
-			AgentId:     tdns.Globals.AgentId,
+			AgentId:     AgentId(string(tdns.Globals.AgentId)),
 			RRs:         rrs,
 		}
 
@@ -95,7 +95,7 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 			RfiType:     rfitype,
 			RfiSubtype:  rfisubtype,
 			Zone:        ZoneName(tdns.Globals.Zonename),
-			AgentId:     tdns.Globals.AgentId,
+			AgentId:     AgentId(string(tdns.Globals.AgentId)),
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -545,7 +545,7 @@ Example:
 		if err != nil {
 			log.Fatalf("Failed to marshal inventory data: %v", err)
 		}
-		var snapshot tdns.KeyInventorySnapshot
+		var snapshot tdnsmp.KeyInventorySnapshot
 		if err := json.Unmarshal(dataBytes, &snapshot); err != nil {
 			log.Fatalf("Failed to parse inventory data: %v", err)
 		}

@@ -332,16 +332,16 @@ func (mpzd *MPZoneData) AddCombinerDataNG(senderID string, data map[string][]str
 }
 
 // GetCombinerDataNG returns the combiner data in string format suitable for JSON marshaling
-func (mpzd *MPZoneData) GetCombinerDataNG() map[string][]tdns.RRsetString {
+func (mpzd *MPZoneData) GetCombinerDataNG() map[string][]RRsetString {
 	// zd := mpzd.ZoneData
-	responseData := make(map[string][]tdns.RRsetString)
+	responseData := make(map[string][]RRsetString)
 
 	if mpzd.MP == nil || mpzd.MP.CombinerData == nil {
 		return responseData
 	}
 
 	for owner, ownerData := range mpzd.MP.CombinerData.Items() {
-		var rrsets []tdns.RRsetString
+		var rrsets []RRsetString
 		if ownerData.RRtypes != nil {
 			for _, rrtype := range ownerData.RRtypes.Keys() {
 				rrset, ok := ownerData.RRtypes.Get(rrtype)
@@ -364,7 +364,7 @@ func (mpzd *MPZoneData) GetCombinerDataNG() map[string][]tdns.RRsetString {
 					}
 				}
 
-				rrsets = append(rrsets, tdns.RRsetString{
+				rrsets = append(rrsets, RRsetString{
 					Name:   rrset.Name,
 					RRtype: rrtype,
 					RRs:    rrStrings,
@@ -697,7 +697,7 @@ func (mpzd *MPZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.
 func (mpzd *MPZoneData) InjectSignatureTXT(conf *tdns.MultiProviderConf) bool {
-	if conf == nil || !conf.CombinerOptions[CombinerOptAddSignature] || conf.Signature == "" {
+	if conf == nil || !conf.CombinerOptions[tdns.CombinerOptAddSignature] || conf.Signature == "" {
 		return false
 	}
 

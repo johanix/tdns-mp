@@ -1,8 +1,5 @@
 /*
- * Type aliases for types being migrated from tdns to tdns-mp.
- * These are currently aliases (= tdns.Foo) so both packages
- * use identical types. When the types are removed from tdns,
- * convert these to full struct definitions.
+ * Type definitions migrated from tdns to tdns-mp (wire-compatible copies).
  */
 
 package tdnsmp
@@ -12,16 +9,72 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
+// RRsetString is the string-based RRset shape used in combiner JSON responses.
+type RRsetString struct {
+	Name   string   `json:"name"`
+	RRtype uint16   `json:"rrtype"`
+	RRs    []string `json:"rrs"`
+	RRSIGs []string `json:"rrsigs,omitempty"`
+}
+
 // Combiner API types
-type CombinerPost = tdns.CombinerPost
-type CombinerResponse = tdns.CombinerResponse
-type CombinerEditPost = tdns.CombinerEditPost
-type CombinerEditResponse = tdns.CombinerEditResponse
-type CombinerDebugPost = tdns.CombinerDebugPost
-type CombinerDebugResponse = tdns.CombinerDebugResponse
-type CombinerDistribPost = tdns.CombinerDistribPost
+type CombinerPost struct {
+	Command string              `json:"command"` // add, list, remove
+	Zone    string              `json:"zone"`    // zone name
+	Data    map[string][]string `json:"data"`    // The RRs as strings, indexed by owner name
+}
+
+type CombinerResponse struct {
+	Time     time.Time                `json:"time"`
+	Error    bool                     `json:"error"`
+	ErrorMsg string                   `json:"error_msg,omitempty"`
+	Msg      string                   `json:"msg,omitempty"`
+	Data     map[string][]RRsetString `json:"data,omitempty"`
+}
+
+type CombinerEditPost struct {
+	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear"
+	Zone    string   `json:"zone"`
+	EditID  int      `json:"edit_id,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
+	Tables  []string `json:"tables,omitempty"` // for "clear": which tables to clear; empty = all
+}
+
+type CombinerEditResponse struct {
+	Time     time.Time                      `json:"time"`
+	Error    bool                           `json:"error"`
+	ErrorMsg string                         `json:"error_msg,omitempty"`
+	Msg      string                         `json:"msg,omitempty"`
+	Pending  []*PendingEditRecord           `json:"pending,omitempty"`
+	Approved []*ApprovedEditRecord          `json:"approved,omitempty"`
+	Rejected []*RejectedEditRecord          `json:"rejected,omitempty"`
+	Current  map[string]map[string][]string `json:"current,omitempty"` // agent → rrtype → []rr
+}
+
+type CombinerDebugPost struct {
+	Command string                 `json:"command"`
+	Zone    string                 `json:"zone,omitempty"`
+	AgentID string                 `json:"agent_id,omitempty"`
+	Data    map[string]interface{} `json:"data,omitempty"`
+}
+
+type CombinerDebugResponse struct {
+	Time               time.Time                                            `json:"time"`
+	Error              bool                                                 `json:"error"`
+	ErrorMsg           string                                               `json:"error_msg,omitempty"`
+	Msg                string                                               `json:"msg,omitempty"`
+	Data               interface{}                                          `json:"data,omitempty"`
+	CombinerData       map[string]map[string]map[string][]string            `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
+	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
+}
+
+type CombinerDistribPost struct {
+	Command string `json:"command"` // "list", "purge"
+	Force   bool   `json:"force,omitempty"`
+}
 
 // CombinerDistribResponse defined locally (uses local DistributionSummary)
 type CombinerDistribResponse struct {
@@ -68,30 +121,132 @@ type RejectedItem struct {
 }
 
 // Combiner edit record types (moved from db_combiner_edits.go)
-type PendingEditRecord = tdns.PendingEditRecord
-type ApprovedEditRecord = tdns.ApprovedEditRecord
-type RejectedEditRecord = tdns.RejectedEditRecord
+type PendingEditRecord struct {
+	EditID         int                 `json:"edit_id"`
+	Zone           string              `json:"zone"`
+	SenderID       string              `json:"sender_id"`
+	DeliveredBy    string              `json:"delivered_by"`
+	DistributionID string              `json:"distribution_id"`
+	Records        map[string][]string `json:"records"`
+	ReceivedAt     time.Time           `json:"received_at"`
+}
 
-const CombinerOptAddSignature = tdns.CombinerOptAddSignature
+type ApprovedEditRecord struct {
+	EditID         int                 `json:"edit_id"`
+	Zone           string              `json:"zone"`
+	SenderID       string              `json:"sender_id"`
+	DistributionID string              `json:"distribution_id"`
+	Records        map[string][]string `json:"records"`
+	ReceivedAt     time.Time           `json:"received_at"`
+	ApprovedAt     time.Time           `json:"approved_at"`
+}
 
-// Signer types
-type KeyInventoryItem = tdns.KeyInventoryItem
-type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
+type RejectedEditRecord struct {
+	EditID         int                 `json:"edit_id"`
+	Zone           string              `json:"zone"`
+	SenderID       string              `json:"sender_id"`
+	DistributionID string              `json:"distribution_id"`
+	Records        map[string][]string `json:"records"`
+	ReceivedAt     time.Time           `json:"received_at"`
+	RejectedAt     time.Time           `json:"rejected_at"`
+	Reason         string              `json:"reason"`
+}
 
-// Pervasive types that stay as aliases (no methods, used everywhere)
-type AgentId = tdns.AgentId
-type ZoneName = tdns.ZoneName
-type ZoneUpdate = tdns.ZoneUpdate
+// Signer / keystore inventory types
+type KeyInventoryItem struct {
+	KeyTag    uint16
+	Algorithm uint8
+	Flags     uint16
+	State     string // "created","mpdist","published","standby","active","retired","removed","foreign"
+	KeyRR     string // Full DNSKEY RR string (public key data, no private key)
+}
+
+type DnssecKeyWithTimestamps struct {
+	ZoneName    string
+	KeyTag      uint16
+	Algorithm   uint8
+	Flags       uint16
+	State       string
+	KeyRR       string
+	PublishedAt *time.Time
+	RetiredAt   *time.Time
+}
+
+// KeyInventorySnapshot stores a complete key inventory received from the signer.
+type KeyInventorySnapshot struct {
+	SenderID  string
+	Zone      string
+	Inventory []KeyInventoryItem
+	Received  time.Time
+}
+
+type AgentId string
+
+func (id AgentId) String() string { return string(id) }
+
+type ZoneName string
+
+func (zn ZoneName) String() string { return string(zn) }
+
+type ZoneUpdate struct {
+	Zone       ZoneName
+	AgentId    AgentId
+	ZoneClass  string                   // "mp" (default) or "provider"
+	RRsets     map[uint16]core.RRset    // remote updates are only per RRset (i.e. full replace)
+	RRs        []dns.RR                 // local updates can be per RR
+	Operations []core.RROperation       // explicit operations (takes precedence over RRsets/RRs)
+	Publish    *core.PublishInstruction // KEY/CDS publication instruction for combiner
+}
+
+// OwnerData matches tdns.OwnerData; alias keeps *tdns.ZoneData.Data map types aligned.
 type OwnerData = tdns.OwnerData
 
-// Distribution types now defined locally in distribution_cache.go
-// Chunk types now defined locally in chunk_store.go
+// ZoneRefreshAnalysis carries pre-refresh results for PostRefresh (mirrors tdns.ZoneRefreshAnalysis).
+type ZoneRefreshAnalysis struct {
+	DelegationChanged bool
+	DelegationStatus  tdns.DelegationSyncStatus
+	HsyncChanged      bool
+	HsyncStatus       *HsyncStatus
+	DnskeyChanged     bool
+	DnskeyStatus      *DnskeyStatus
+}
 
 // Transaction API types
-type TransactionPost = tdns.TransactionPost
-type TransactionResponse = tdns.TransactionResponse
-type TransactionSummary = tdns.TransactionSummary
-type TransactionErrorSummary = tdns.TransactionErrorSummary
+type TransactionPost struct {
+	Command string `json:"command"`           // "open-outgoing", "open-incoming", "errors", "error-details"
+	Last    string `json:"last,omitempty"`    // Duration filter for errors (e.g. "30m", "2h")
+	DistID  string `json:"dist_id,omitempty"` // For error-details: specific distribution ID
+}
+
+type TransactionSummary struct {
+	DistributionID string `json:"distribution_id"`
+	Peer           string `json:"peer"` // Receiver (outgoing) or Sender (incoming)
+	Operation      string `json:"operation"`
+	Zone           string `json:"zone,omitempty"`
+	Age            string `json:"age"`
+	CreatedAt      string `json:"created_at"`
+	State          string `json:"state,omitempty"`
+}
+
+type TransactionErrorSummary struct {
+	DistributionID string `json:"distribution_id"`
+	Age            string `json:"age"`
+	Sender         string `json:"sender"`
+	MessageType    string `json:"message_type"`
+	ErrorMsg       string `json:"error_msg"`
+	QNAME          string `json:"qname"`
+	Timestamp      string `json:"timestamp"`
+}
+
+type TransactionResponse struct {
+	Time         time.Time                  `json:"time"`
+	Error        bool                       `json:"error,omitempty"`
+	ErrorMsg     string                     `json:"error_msg,omitempty"`
+	Msg          string                     `json:"msg,omitempty"`
+	Transactions []*TransactionSummary      `json:"transactions,omitempty"`
+	Errors       []*TransactionErrorSummary `json:"errors,omitempty"`
+	ErrorDetail  *TransactionErrorSummary   `json:"error_detail,omitempty"`
+}
 
 // NewMsgQs creates and returns a *MsgQs with all channels initialized.
 func NewMsgQs() *MsgQs {

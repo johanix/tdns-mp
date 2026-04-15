@@ -32,13 +32,13 @@ type MPState struct {
 	MPdata               *tdns.MPdata
 	AgentContributions   map[string]map[string]map[uint16]core.RRset
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
-	LastKeyInventory     *tdns.KeyInventorySnapshot
+	LastKeyInventory     *KeyInventorySnapshot
 	LocalDNSKEYs         []dns.RR
 	RemoteDNSKEYs        []dns.RR
 	KeystateOK           bool
 	KeystateError        string
 	KeystateTime         time.Time
-	RefreshAnalysis      *tdns.ZoneRefreshAnalysis
+	RefreshAnalysis      *ZoneRefreshAnalysis
 }
 
 // EnsureMP initializes the MP extension if nil.
@@ -53,7 +53,7 @@ func (mpzd *MPZoneData) EnsureMP() {
 
 // --- Migrated accessors (shadow promoted tdns versions) ---
 
-func (mpzd *MPZoneData) GetLastKeyInventory() *tdns.KeyInventorySnapshot {
+func (mpzd *MPZoneData) GetLastKeyInventory() *KeyInventorySnapshot {
 	mpzd.Lock()
 	defer mpzd.Unlock()
 	if mpzd.MP == nil {
@@ -62,7 +62,7 @@ func (mpzd *MPZoneData) GetLastKeyInventory() *tdns.KeyInventorySnapshot {
 	return mpzd.MP.LastKeyInventory
 }
 
-func (mpzd *MPZoneData) SetLastKeyInventory(inv *tdns.KeyInventorySnapshot) {
+func (mpzd *MPZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
 	mpzd.Lock()
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()

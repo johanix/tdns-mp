@@ -349,12 +349,12 @@ var hsyncAgentStatusCmd = &cobra.Command{
 	Use:   "agentstatus",
 	Short: "Show HSYNC status for an agent",
 	Run: func(cmd *cobra.Command, args []string) {
-		tdns.Globals.AgentId = AgentId(hsyncAgentID)
+		tdns.Globals.AgentId = tdns.AgentId(hsyncAgentID)
 		tdnscli.PrepArgs("agentid")
 
 		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-agentstatus",
-			AgentId: AgentId(tdns.Globals.AgentId),
+			AgentId: AgentId(string(tdns.Globals.AgentId)),
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error sending agent management command: %v", err)

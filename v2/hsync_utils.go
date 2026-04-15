@@ -315,7 +315,7 @@ func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *M
 		}
 
 		// Store the inventory snapshot for diagnostics
-		mpzd.SetLastKeyInventory(&tdns.KeyInventorySnapshot{
+		mpzd.SetLastKeyInventory(&KeyInventorySnapshot{
 			SenderID:  inv.SenderID,
 			Zone:      inv.Zone,
 			Inventory: inv.Inventory,
@@ -1008,7 +1008,7 @@ func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
 // For combiners: snapshots upstream data and adds contributions to new_zd.
 func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *tdns.MultiProviderConf) {
 	mpzd.EnsureMP()
-	analysis := &tdns.ZoneRefreshAnalysis{}
+	analysis := &ZoneRefreshAnalysis{}
 
 	// Delegation change detection
 	if mpzd.Options[tdns.OptDelSyncChild] {

@@ -3,6 +3,8 @@
  */
 package tdnsmp
 
+import tdns "github.com/johanix/tdns/v2"
+
 // ParentSyncAfterKeyPublication is the MP-enhanced version that adds
 // leader election gating. Only the elected leader bootstraps keys
 // with the parent. The base version in tdns has no leader checks.
@@ -21,5 +23,5 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 
 	// Delegate to the base version which handles IMR wait,
 	// HSYNCPARAM check, KeyState inquiry, and bootstrap.
-	conf.Config.ParentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
+	conf.Config.ParentSyncAfterKeyPublication(tdns.ZoneName(zone), keyName, keyid, algorithm)
 }

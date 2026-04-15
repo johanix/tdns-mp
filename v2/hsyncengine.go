@@ -158,7 +158,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 				lgEngine.Warn("proactive inventory: zone not found", "zone", inventoryMsg.Zone)
 				break
 			}
-			zd.SetLastKeyInventory(&tdns.KeyInventorySnapshot{
+			zd.SetLastKeyInventory(&KeyInventorySnapshot{
 				SenderID:  inventoryMsg.SenderID,
 				Zone:      inventoryMsg.Zone,
 				Inventory: inventoryMsg.Inventory,
@@ -1018,8 +1018,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	// Send the response immediately with a timeout to avoid blocking
 	select {
 	case req.Response <- SyncStatus{
-		// Agents field skipped: local *Agent is not compatible with *tdns.Agent
-		// in the aliased SyncStatus. Status queries still get Identity and Error.
+		// Agents field skipped: SanitizeForJSON returns *tdns.Agent, not *tdnsmp.Agent.
 		Identity: AgentId(ar.LocalAgent.Identity),
 		Error:    false,
 	}:
