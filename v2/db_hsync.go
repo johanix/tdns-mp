@@ -631,8 +631,8 @@ func peerStateToString(state transport.PeerState) string {
 // Conversion functions for CLI display
 
 // PeerRecordToInfo converts a PeerRecord to HsyncPeerInfo for CLI display.
-func PeerRecordToInfo(peer *PeerRecord) *tdns.HsyncPeerInfo {
-	return &tdns.HsyncPeerInfo{
+func PeerRecordToInfo(peer *PeerRecord) *HsyncPeerInfo {
+	return &HsyncPeerInfo{
 		PeerID:             peer.PeerID,
 		State:              peer.State,
 		StateReason:        peer.StateReason,
@@ -656,8 +656,8 @@ func PeerRecordToInfo(peer *PeerRecord) *tdns.HsyncPeerInfo {
 }
 
 // SyncOpRecordToInfo converts a SyncOperationRecord to HsyncSyncOpInfo for CLI display.
-func SyncOpRecordToInfo(op *SyncOperationRecord) *tdns.HsyncSyncOpInfo {
-	return &tdns.HsyncSyncOpInfo{
+func SyncOpRecordToInfo(op *SyncOperationRecord) *HsyncSyncOpInfo {
+	return &HsyncSyncOpInfo{
 		DistributionID: op.DistributionID,
 		ZoneName:       op.ZoneName,
 		SyncType:       op.SyncType,
@@ -676,8 +676,8 @@ func SyncOpRecordToInfo(op *SyncOperationRecord) *tdns.HsyncSyncOpInfo {
 }
 
 // ConfirmRecordToInfo converts a SyncConfirmationRecord to HsyncConfirmationInfo for CLI display.
-func ConfirmRecordToInfo(c *SyncConfirmationRecord) *tdns.HsyncConfirmationInfo {
-	return &tdns.HsyncConfirmationInfo{
+func ConfirmRecordToInfo(c *SyncConfirmationRecord) *HsyncConfirmationInfo {
+	return &HsyncConfirmationInfo{
 		DistributionID: c.DistributionID,
 		ConfirmerID:    c.ConfirmerID,
 		Status:         c.Status,
@@ -826,7 +826,7 @@ FROM SyncConfirmations
 }
 
 // ListTransportEvents retrieves transport events, optionally filtered by peer.
-func (hdb *HsyncDB) ListTransportEvents(peerID string, limit int) ([]*tdns.HsyncTransportEvent, error) {
+func (hdb *HsyncDB) ListTransportEvents(peerID string, limit int) ([]*HsyncTransportEvent, error) {
 	hdb.Lock()
 	defer hdb.Unlock()
 
@@ -858,9 +858,9 @@ FROM TransportEvents
 	}
 	defer rows.Close()
 
-	var events []*tdns.HsyncTransportEvent
+	var events []*HsyncTransportEvent
 	for rows.Next() {
-		evt := &tdns.HsyncTransportEvent{}
+		evt := &HsyncTransportEvent{}
 		var eventTime sql.NullInt64
 		var success int
 
@@ -882,11 +882,11 @@ FROM TransportEvents
 }
 
 // GetAggregatedMetrics retrieves aggregated operational metrics.
-func (hdb *HsyncDB) GetAggregatedMetrics() (*tdns.HsyncMetricsInfo, error) {
+func (hdb *HsyncDB) GetAggregatedMetrics() (*HsyncMetricsInfo, error) {
 	hdb.Lock()
 	defer hdb.Unlock()
 
-	metrics := &tdns.HsyncMetricsInfo{}
+	metrics := &HsyncMetricsInfo{}
 
 	// Get totals from OperationalMetrics table
 	row := hdb.DB.QueryRow(`
@@ -922,7 +922,7 @@ FROM OperationalMetrics
 }
 
 // RecordMetrics records operational metrics for a time period.
-func (hdb *HsyncDB) RecordMetrics(peerID, zoneName string, metrics *tdns.HsyncMetricsInfo) error {
+func (hdb *HsyncDB) RecordMetrics(peerID, zoneName string, metrics *HsyncMetricsInfo) error {
 	hdb.Lock()
 	defer hdb.Unlock()
 

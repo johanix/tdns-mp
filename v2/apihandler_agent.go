@@ -358,7 +358,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
 				}
 				if changed && dskeyStatus != nil {
-					zd.SyncQ <- tdns.SyncRequest{
+					zd.SyncQ <- SyncRequest{
 						Command:      "SYNC-DNSKEY-RRSET",
 						ZoneName:     tdns.ZoneName(zd.ZoneName),
 						ZoneData:     zd.ZoneData,

@@ -19,8 +19,8 @@ import (
 var lgEngine = tdns.Logger("engine")
 var lg = tdns.Logger("zones")
 
-func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.HsyncStatus, error) {
-	var hss = tdns.HsyncStatus{
+func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
+	var hss = HsyncStatus{
 		Time:     time.Now(),
 		ZoneName: zd.ZoneName,
 		Msg:      "No change",
@@ -82,8 +82,8 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *tdns.HsyncStatus, error) {
 //
 // "Remote" keys are those whose key tag matches zd.RemoteDNSKEYs.
 // Everything else in the DNSKEY RRset is "local" (from our signer).
-func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *tdns.DnskeyStatus, error) {
-	ds := &tdns.DnskeyStatus{
+func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *DnskeyStatus, error) {
+	ds := &DnskeyStatus{
 		Time:     time.Now(),
 		ZoneName: mpzd.ZoneName,
 	}
@@ -156,12 +156,12 @@ func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *tdns.
 //
 // Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
 // returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
-func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *tdns.DnskeyStatus, error) {
+func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	// Don't process DNSKEYs for unsigned zones, but clean up any
 	// previously published keys on transition to unsigned.
 	if mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.ZoneSigned {
 		if len(mpzd.MP.LocalDNSKEYs) > 0 {
-			ds := &tdns.DnskeyStatus{
+			ds := &DnskeyStatus{
 				Time:         time.Now(),
 				ZoneName:     mpzd.ZoneName,
 				LocalRemoves: mpzd.MP.LocalDNSKEYs,
@@ -182,7 +182,7 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *tdns.DnskeyStatus, er
 		lgEngine.Warn("using stale KEYSTATE inventory", "zone", mpzd.ZoneName, "age", time.Since(inv.Received))
 	}
 
-	ds := &tdns.DnskeyStatus{
+	ds := &DnskeyStatus{
 		Time:     time.Now(),
 		ZoneName: mpzd.ZoneName,
 	}
@@ -1172,7 +1172,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 			if mpzd.Options[tdns.OptMultiProvider] {
 				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", mpzd.ZoneName)
-				mpzd.SyncQ <- tdns.SyncRequest{
+				mpzd.SyncQ <- SyncRequest{
 					Command:      "SYNC-DNSKEY-RRSET",
 					ZoneName:     tdns.ZoneName(mpzd.ZoneName),
 					ZoneData:     mpzd.ZoneData,
@@ -1189,7 +1189,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 		switch tdns.Globals.App.Type {
 		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
 			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
-			mpzd.SyncQ <- tdns.SyncRequest{
+			mpzd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
 				ZoneName:   tdns.ZoneName(mpzd.ZoneName),
 				ZoneData:   mpzd.ZoneData,

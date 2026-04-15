@@ -11,14 +11,12 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
-	tdns "github.com/johanix/tdns/v2"
 )
 
 func (conf *Config) APImpCombiner() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var req tdns.CombinerDebugPost
+		var req CombinerDebugPost
 		err := decoder.Decode(&req)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "mpCombiner", "err", err)
@@ -28,7 +26,7 @@ func (conf *Config) APImpCombiner() func(w http.ResponseWriter, r *http.Request)
 
 		lgApi.Debug("received /combiner/mp request", "cmd", req.Command, "from", r.RemoteAddr)
 
-		resp := tdns.CombinerDebugResponse{
+		resp := CombinerDebugResponse{
 			Time: time.Now(),
 		}
 
