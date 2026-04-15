@@ -57,7 +57,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 
 	// Start combiner message handler
 	var protectedNS []string
-	var errJournal *tdns.ErrorJournal
+	var errJournal *ErrorJournal
 	if conf.InternalMp.CombinerState != nil {
 		protectedNS = conf.InternalMp.CombinerState.ProtectedNamespaces
 		errJournal = conf.InternalMp.CombinerState.ErrorJournal

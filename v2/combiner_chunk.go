@@ -5,7 +5,7 @@
  * Receives sync updates from agents and applies them to zones.
  *
  * Extracted from tdns/v2/combiner_chunk.go into tdns-mp package.
- * CombinerState type remains in tdns (shared with signer).
+ * CombinerState and ErrorJournal are defined in this module.
  * RegisterSignerChunkHandler is in signer_chunk_handler.go.
  */
 
@@ -24,6 +24,54 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+// CombinerState holds combiner-specific state that outlives individual CHUNK messages.
+// Used by CLI error-journal queries and CombinerProcessUpdate wiring.
+// Transport routing is handled by the unified ChunkNotifyHandler.
+type CombinerState struct {
+	// ErrorJournal records errors during CHUNK NOTIFY processing for operational diagnostics.
+	// Queried via "transaction errors" CLI commands. If nil, errors are only logged.
+	ErrorJournal *ErrorJournal
+
+	// ProtectedNamespaces: domain suffixes belonging to this provider.
+	// NS records from remote agents whose targets fall within these namespaces are rejected.
+	ProtectedNamespaces []string
+
+	// ChunkNotifyHandler is the underlying transport wiring.
+	// Access via SetRouter / SetGetPeerAddress / SetSecureWrapper.
+	ChunkNotifyHandler *transport.ChunkNotifyHandler
+}
+
+// ChunkHandler returns the underlying ChunkNotifyHandler for wiring into TransportManager.
+func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
+	return cs.ChunkNotifyHandler
+}
+
+// ProcessUpdate delegates to the standalone CombinerProcessUpdate.
+func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
+	return CombinerProcessUpdate(req, cs.ProtectedNamespaces, localAgents, hdb, tm)
+}
+
+// SetRouter sets the router on the underlying ChunkNotifyHandler.
+func (cs *CombinerState) SetRouter(router *transport.DNSMessageRouter) {
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.Router = router
+	}
+}
+
+// SetSecureWrapper sets the secure wrapper on the underlying ChunkNotifyHandler.
+func (cs *CombinerState) SetSecureWrapper(sw *transport.SecurePayloadWrapper) {
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.SecureWrapper = sw
+	}
+}
+
+// SetGetPeerAddress sets the GetPeerAddress callback on the underlying ChunkNotifyHandler.
+func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address string, ok bool)) {
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.GetPeerAddress = fn
+	}
+}
 
 // editPolicy captures the four gates that determine whether a combiner
 // should apply a given RRtype to the live zone.
@@ -125,11 +173,11 @@ func detectDelegationChanges(resp *CombinerSyncResponse) (nsChanged, kskChanged 
 // --- Standalone business logic functions ---
 
 // RecordCombinerError records an error in the ErrorJournal if available.
-func RecordCombinerError(journal *tdns.ErrorJournal, distID, sender, messageType, errMsg, qname string) {
+func RecordCombinerError(journal *ErrorJournal, distID, sender, messageType, errMsg, qname string) {
 	if journal == nil {
 		return
 	}
-	journal.Record(tdns.ErrorJournalEntry{
+	journal.Record(ErrorJournalEntry{
 		DistributionID: distID,
 		Sender:         sender,
 		MessageType:    messageType,
@@ -1363,9 +1411,9 @@ func NewCombinerSyncHandler() transport.MessageHandlerFunc {
 // --- Registration functions ---
 
 // RegisterCombinerChunkHandler registers the combiner's CHUNK handler.
-func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) (*tdns.CombinerState, error) {
-	state := &tdns.CombinerState{
-		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
+func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) (*CombinerState, error) {
+	state := &CombinerState{
+		ErrorJournal: NewErrorJournal(1000, 24*time.Hour),
 	}
 
 	handler := &transport.ChunkNotifyHandler{

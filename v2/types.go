@@ -61,9 +61,6 @@ type OwnerData = tdns.OwnerData
 // Distribution types now defined locally in distribution_cache.go
 // Chunk types now defined locally in chunk_store.go
 
-// Internal state types that stay as aliases during dual-write period
-type CombinerState = tdns.CombinerState
-
 // Transaction API types
 type TransactionPost = tdns.TransactionPost
 type TransactionResponse = tdns.TransactionResponse

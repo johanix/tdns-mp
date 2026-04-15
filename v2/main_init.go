@@ -440,8 +440,8 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	if mp.Combiner != nil && mp.Combiner.Identity != "" {
 		combinerID = dns.Fqdn(mp.Combiner.Identity)
 	}
-	conf.InternalMp.CombinerState = &tdns.CombinerState{
-		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
+	conf.InternalMp.CombinerState = &CombinerState{
+		ErrorJournal: NewErrorJournal(1000, 24*time.Hour),
 	}
 
 	// Initialize HsyncDB and HSYNC database tables

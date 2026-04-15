@@ -20,9 +20,9 @@ import (
 
 // RegisterSignerChunkHandler creates a ChunkNotifyHandler for the signer role
 // and registers it to handle incoming CHUNK NOTIFY messages.
-func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) (*tdns.CombinerState, error) {
-	state := &tdns.CombinerState{
-		ErrorJournal: tdns.NewErrorJournal(100, 24*time.Hour),
+func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) (*CombinerState, error) {
+	state := &CombinerState{
+		ErrorJournal: NewErrorJournal(100, 24*time.Hour),
 	}
 
 	handler := &transport.ChunkNotifyHandler{
