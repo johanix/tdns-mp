@@ -83,7 +83,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 	conf.InternalMp.SyncStatusQ = make(chan SyncStatus, 10)
 
 	// Configure intervals
-	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
+	heartbeatInterval := configureInterval("multi-provider.syncengine.intervals.beatinterval", 15, 1800)
 
 	lgEngine.Info("starting", "heartbeat_interval", heartbeatInterval)
 
@@ -193,7 +193,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 // It runs in its own goroutine with a configurable retry interval and only
 // attempts discovery when the IMR engine is available.
 func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
-	discoveryRetryInterval := configureInterval("agent.syncengine.intervals.discoveryretry", 15, 1800)
+	discoveryRetryInterval := configureInterval("multi-provider.syncengine.intervals.discoveryretry", 15, 1800)
 	lgEngine.Info("discovery retrier starting", "interval", discoveryRetryInterval)
 
 	ticker := time.NewTicker(time.Duration(discoveryRetryInterval) * time.Second)

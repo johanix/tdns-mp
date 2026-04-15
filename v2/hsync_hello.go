@@ -70,9 +70,9 @@ func (ar *AgentRegistry) HelloRetrier() {
 // If all fail, falls back to the normal helloretry ticker.
 // On HELLO success (INTRODUCED), triggers fast beat attempts.
 func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
-	helloRetryInterval := configureInterval("agent.syncengine.intervals.helloretry", 15, 1800)
-	fastAttempts := configureInterval("agent.syncengine.intervals.hello_fast_attempts", 3, 20)
-	fastIntervalSec := configureInterval("agent.syncengine.intervals.hello_fast_interval", 1, 30)
+	helloRetryInterval := configureInterval("multi-provider.syncengine.intervals.helloretry", 15, 1800)
+	fastAttempts := configureInterval("multi-provider.syncengine.intervals.hello_fast_attempts", 3, 20)
+	fastIntervalSec := configureInterval("multi-provider.syncengine.intervals.hello_fast_interval", 1, 30)
 	go func(agent *Agent) {
 		// Check if ANY transport needs Hello retries
 		if !ar.agentNeedsHello(agent) {

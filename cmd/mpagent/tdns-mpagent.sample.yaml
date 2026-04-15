@@ -35,7 +35,6 @@ multi-provider:
       # nameservers: [ ns1.example.org., ns2.example.org. ]
    remote:
       LocateInterval: 60
-      BeatInterval:   30
    xfr:
       outgoing:
          addresses:  []
@@ -62,7 +61,11 @@ multi-provider:
       # chunk_query_endpoint: include
    syncengine:
       intervals:
-         helloretry: 15
+         beatinterval:       30
+         helloretry:         15
+         discoveryretry:     15
+         hello_fast_attempts: 3
+         hello_fast_interval: 2
 
 service:
    name:           TDNS-MPAGENT
