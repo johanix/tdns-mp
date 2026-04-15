@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // Combiner API types
@@ -32,11 +33,44 @@ type CombinerDistribResponse struct {
 	Distributions []string               `json:"distributions,omitempty"`
 }
 
-// Combiner sync types (moved from combiner_chunk.go)
-type CombinerSyncRequest = tdns.CombinerSyncRequest
-type CombinerSyncResponse = tdns.CombinerSyncResponse
-type RejectedItem = tdns.RejectedItem
-type CombinerSyncRequestPlus = tdns.CombinerSyncRequestPlus
+// Combiner sync types (local definitions; wire format matches tdns types)
+type CombinerSyncRequest struct {
+	SenderID       string
+	DeliveredBy    string
+	Zone           string
+	ZoneClass      string
+	SyncType       string
+	Records        map[string][]string
+	Operations     []core.RROperation
+	Publish        *core.PublishInstruction
+	Serial         uint32
+	DistributionID string
+	Timestamp      time.Time
+}
+
+type CombinerSyncResponse struct {
+	DistributionID string
+	Zone           string
+	Nonce          string
+	Status         string
+	Message        string
+	AppliedRecords []string
+	RemovedRecords []string
+	RejectedItems  []RejectedItem
+	IgnoredRecords []string
+	Timestamp      time.Time
+	DataChanged    bool
+}
+
+type RejectedItem struct {
+	Record string
+	Reason string
+}
+
+type CombinerSyncRequestPlus struct {
+	Request  *CombinerSyncRequest
+	Response chan *CombinerSyncResponse
+}
 
 // Combiner edit record types (moved from db_combiner_edits.go)
 type PendingEditRecord = tdns.PendingEditRecord
