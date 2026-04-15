@@ -22,7 +22,6 @@ import (
 	"os"
 
 	tdnsmp "github.com/johanix/tdns-mp/v2"
-	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/spf13/cobra"
 )
@@ -57,7 +56,7 @@ func runPeerPing(role, peerID string) {
 
 	resp, err := SendPeerCommand(role, tdnsmp.PeerPost{
 		Command: "peer-ping",
-		PeerID:  tdns.AgentId(peerID),
+		PeerID:  AgentId(peerID),
 	})
 	if err != nil {
 		log.Fatalf("Request failed: %v", err)
@@ -76,7 +75,7 @@ func runPeerApiPing(role, peerID string) {
 
 	resp, err := SendPeerCommand(role, tdnsmp.PeerPost{
 		Command: "peer-apiping",
-		PeerID:  tdns.AgentId(peerID),
+		PeerID:  AgentId(peerID),
 	})
 	if err != nil {
 		log.Fatalf("Request failed: %v", err)
@@ -103,7 +102,7 @@ func runPeerReset(role, peerID string) {
 
 	resp, err := SendPeerCommand(role, tdnsmp.PeerPost{
 		Command: "peer-reset",
-		PeerID:  tdns.AgentId(peerID),
+		PeerID:  AgentId(peerID),
 	})
 	if err != nil {
 		log.Fatalf("Request failed: %v", err)

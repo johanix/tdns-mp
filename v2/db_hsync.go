@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
-	tdns "github.com/johanix/tdns/v2"
 )
 
 // PeerRecord represents a row in the PeerRegistry table.
@@ -477,7 +476,7 @@ success, error_code, error_message, context, expires_at
 }
 
 // PeerRecordFromAgent creates a PeerRecord from an Agent.
-func PeerRecordFromAgent(agent *tdns.Agent) *PeerRecord {
+func PeerRecordFromAgent(agent *Agent) *PeerRecord {
 	record := &PeerRecord{
 		PeerID:          string(agent.Identity),
 		DiscoveryTime:   time.Now(),
@@ -584,21 +583,21 @@ func unixToTime(n sql.NullInt64) time.Time {
 	return time.Unix(n.Int64, 0)
 }
 
-func agentStateToString(state tdns.AgentState) string {
+func agentStateToString(state AgentState) string {
 	switch state {
-	case tdns.AgentStateNeeded:
+	case AgentStateNeeded:
 		return "needed"
-	case tdns.AgentStateKnown:
+	case AgentStateKnown:
 		return "known"
-	case tdns.AgentStateIntroduced:
+	case AgentStateIntroduced:
 		return "introduced"
-	case tdns.AgentStateOperational:
+	case AgentStateOperational:
 		return "operational"
-	case tdns.AgentStateDegraded:
+	case AgentStateDegraded:
 		return "degraded"
-	case tdns.AgentStateInterrupted:
+	case AgentStateInterrupted:
 		return "interrupted"
-	case tdns.AgentStateError:
+	case AgentStateError:
 		return "error"
 	default:
 		return "unknown"

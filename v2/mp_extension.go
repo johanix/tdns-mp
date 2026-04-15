@@ -18,12 +18,17 @@ import (
 	"github.com/miekg/dns"
 )
 
+// wiredMultiProvider is set once from MainInit after config parse; EnsureMP
+// copies it onto each *MPState so lazy-created MPZoneData wrappers see it.
+var wiredMultiProvider *tdns.MultiProviderConf
+
 // MPState holds all multi-provider runtime state for a zone.
 // Same fields as tdns.ZoneMPExtension plus RemoteDNSKEYs
 // (migrated from tdns.ZoneData).
 type MPState struct {
-	CombinerData         *core.ConcurrentMap[string, tdns.OwnerData]
-	UpstreamData         *core.ConcurrentMap[string, tdns.OwnerData]
+	CombinerData         *core.ConcurrentMap[string, OwnerData]
+	UpstreamData         *core.ConcurrentMap[string, OwnerData]
+	MultiProvider        *tdns.MultiProviderConf
 	MPdata               *tdns.MPdata
 	AgentContributions   map[string]map[string]map[uint16]core.RRset
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
@@ -40,6 +45,9 @@ type MPState struct {
 func (mpzd *MPZoneData) EnsureMP() {
 	if mpzd.MP == nil {
 		mpzd.MP = &MPState{}
+	}
+	if mpzd.MP.MultiProvider == nil {
+		mpzd.MP.MultiProvider = wiredMultiProvider
 	}
 }
 

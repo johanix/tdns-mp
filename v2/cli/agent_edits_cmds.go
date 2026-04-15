@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -50,7 +49,7 @@ Example:
 
 // showSyncedDataSummary displays a zone→agent→rrtype hierarchy.
 func showSyncedDataSummary() {
-	req := tdns.AgentMgmtPost{
+	req := AgentMgmtPost{
 		Command: "dump-zonedatarepo",
 	}
 
@@ -135,9 +134,9 @@ func showSyncedDataSummary() {
 // and outbound queue status for a single zone.
 func showDetailedZoneStatus(zone string) {
 	// 1. Get per-RR tracking data
-	req := tdns.AgentMgmtPost{
+	req := AgentMgmtPost{
 		Command: "dump-zonedatarepo",
-		Zone:    tdns.ZoneName(zone),
+		Zone:    ZoneName(zone),
 	}
 
 	amr, err := SendAgentDebugCmd(req, false)
@@ -165,7 +164,7 @@ func showDetailedZoneStatus(zone string) {
 				}
 
 				// Flag KEYSTATE failure
-				if ksInfo, ok := amr.KeystateStatus[tdns.ZoneName(zone)]; ok && !ksInfo.OK {
+				if ksInfo, ok := amr.KeystateStatus[ZoneName(zone)]; ok && !ksInfo.OK {
 					fmt.Printf("  WARNING: KEYSTATE exchange FAILED: %s\n\n", ksInfo.Error)
 				}
 
@@ -266,7 +265,7 @@ func showDetailedZoneStatus(zone string) {
 // showQueueStatusForZone fetches the reliable message queue status
 // and displays only messages pertaining to the specified zone.
 func showQueueStatusForZone(zone string) {
-	queueReq := tdns.AgentMgmtPost{
+	queueReq := AgentMgmtPost{
 		Command: "queue-status",
 	}
 

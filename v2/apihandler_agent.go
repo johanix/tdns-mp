@@ -360,7 +360,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				if changed && dskeyStatus != nil {
 					zd.SyncQ <- SyncRequest{
 						Command:      "SYNC-DNSKEY-RRSET",
-						ZoneName:     tdns.ZoneName(zd.ZoneName),
+						ZoneName:     ZoneName(zd.ZoneName),
 						ZoneData:     zd.ZoneData,
 						DnskeyStatus: dskeyStatus,
 					}

@@ -71,6 +71,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
+	wiredMultiProvider = conf.MultiProvider
 
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
 	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,

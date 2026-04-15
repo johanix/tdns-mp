@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gookit/goutil/dump"
+	tdnsmp "github.com/johanix/tdns-mp/v2"
 	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
@@ -55,11 +56,11 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 			log.Fatalf("Error: Invalid RR type: %s", notifyRRtype)
 		}
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command:     "send-notify",
-			MessageType: tdns.AgentMsgNotify,
+			MessageType: AgentMsgNotify,
 			RRType:      rrtype,
-			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:        ZoneName(tdns.Globals.Zonename),
 			AgentId:     tdns.Globals.AgentId,
 			RRs:         rrs,
 		}
@@ -88,12 +89,12 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		}
 		rfisubtype = strings.ToLower(rfisubtype)
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command:     "send-rfi",
-			MessageType: tdns.AgentMsgRfi,
+			MessageType: AgentMsgRfi,
 			RfiType:     rfitype,
 			RfiSubtype:  rfisubtype,
-			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:        ZoneName(tdns.Globals.Zonename),
 			AgentId:     tdns.Globals.AgentId,
 		}
 
@@ -190,7 +191,7 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 	Use:   "dump-agentregistry",
 	Short: "Dump the agent registry",
 	Run: func(cmd *cobra.Command, args []string) {
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "dump-agentregistry",
 		}
 
@@ -210,7 +211,7 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 		}
 
 		if len(amr.AgentRegistry.RegularS) > 0 {
-			var agentNames []tdns.AgentId
+			var agentNames []AgentId
 			for _, agent := range amr.AgentRegistry.RegularS {
 				agentNames = append(agentNames, agent.Identity)
 			}
@@ -249,29 +250,30 @@ var DebugAgentRegistryCmd = &cobra.Command{
 	Use:   "agentregistry",
 	Short: "Test the agent registry",
 	Run: func(cmd *cobra.Command, args []string) {
-		conf := tdns.Config{
+		base := &tdns.Config{
 			MultiProvider: &tdns.MultiProviderConf{
 				Identity: "local",
 			},
 		}
+		conf := &tdnsmp.Config{Config: base}
 		ar := conf.NewAgentRegistry()
 		ar.LocateInterval = 10
-		ar.S.Set("local", &tdns.Agent{
+		ar.S.Set("local", &Agent{
 			Identity: "local",
 		})
 
-		ar.AddRemoteAgent("agent.example.com", &tdns.Agent{
+		ar.AddRemoteAgent("agent.example.com", &Agent{
 			Identity: "agent.example.com",
 		})
 
-		ar.AddRemoteAgent("agent.example.org", &tdns.Agent{
+		ar.AddRemoteAgent("agent.example.org", &Agent{
 			Identity: "agent.example.org",
 		})
 
 		fmt.Printf("Agent registry:\ntype=%T\n", ar.S)
 		fmt.Printf("Agent registry:\n%d shards\n", ar.S.NumShards())
 		for item := range ar.S.IterBuffered() {
-			// agent, _ := item.Val.(*tdns.Agent)
+			// agent, _ := item.Val.(*Agent)
 			fmt.Printf("Agent registry:\n%s\n", item.Key)
 			fmt.Printf("Agent registry:\n%+v\n", item.Val)
 		}
@@ -288,9 +290,9 @@ Example:
 	Run: func(cmd *cobra.Command, args []string) {
 		tdnscli.PrepArgs("zonename")
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "hsync-sync-state",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -327,11 +329,11 @@ Example:
 	Run: func(cmd *cobra.Command, args []string) {
 		zone, _ := cmd.Flags().GetString("zone")
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "show-combiner-data",
 		}
 		if zone != "" {
-			req.Zone = tdns.ZoneName(zone)
+			req.Zone = ZoneName(zone)
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -436,10 +438,10 @@ Example:
 			validRRs = append(validRRs, rr.String())
 		}
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "send-sync-to",
-			Zone:    tdns.ZoneName(zone),
-			AgentId: tdns.AgentId(toAgent),
+			Zone:    ZoneName(zone),
+			AgentId: AgentId(toAgent),
 			RRs:     validRRs,
 		}
 
@@ -484,9 +486,9 @@ Example:
 	Run: func(cmd *cobra.Command, args []string) {
 		tdnscli.PrepArgs("zonename")
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "resync",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -519,9 +521,9 @@ Example:
 	Run: func(cmd *cobra.Command, args []string) {
 		tdnscli.PrepArgs("zonename")
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "show-key-inventory",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -583,11 +585,11 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 	Use:   "queue-status",
 	Short: "Show reliable message queue status and pending messages",
 	Run: func(cmd *cobra.Command, args []string) {
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "queue-status",
 		}
 
-		_, buf, err := func() (*tdns.AgentMgmtResponse, []byte, error) {
+		_, buf, err := func() (*AgentMgmtResponse, []byte, error) {
 			prefixcmd, _ := tdnscli.GetCommandContext("debug")
 			api, err := tdnscli.GetApiClient(prefixcmd, true)
 			if err != nil {
@@ -784,7 +786,7 @@ func truncatePubKey(keyrr string) string {
 	return pub[:10] + "..." + pub[len(pub)-5:]
 }
 
-func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtResponse, error) {
+func SendAgentDebugCmd(req AgentMgmtPost, printJson bool) (*AgentMgmtResponse, error) {
 	api, err := tdnscli.GetApiClient("agent", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
@@ -797,7 +799,7 @@ func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtR
 		log.Fatalf("API request failed: %v", err)
 	}
 
-	var amr tdns.AgentMgmtResponse
+	var amr AgentMgmtResponse
 	if err := json.Unmarshal(buf, &amr); err != nil {
 		log.Fatalf("Failed to parse response: %v", err)
 	}

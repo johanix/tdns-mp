@@ -141,7 +141,7 @@ func (mpzd *MPZoneData) CombineWithLocalChanges() (bool, error) {
 
 		existingOwnerData, exists := mpzd.Data.Get(ownerName)
 		if !exists {
-			existingOwnerData = tdns.OwnerData{
+			existingOwnerData = OwnerData{
 				Name:    ownerName,
 				RRtypes: tdns.NewRRTypeStore(),
 			}
@@ -183,7 +183,7 @@ func (mpzd *MPZoneData) AddCombinerData(senderID string, data map[string][]core.
 
 	mpzd.EnsureMP()
 	if mpzd.MP.CombinerData == nil {
-		mpzd.MP.CombinerData = core.NewCmap[tdns.OwnerData]()
+		mpzd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
 	if mpzd.MP.AgentContributions == nil {
 		mpzd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
@@ -254,7 +254,7 @@ func (mpzd *MPZoneData) AddCombinerData(senderID string, data map[string][]core.
 			mpzd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", mpzd.ZoneName, senderID)
 		}
 
-		if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
+		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
 			mpzd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", mpzd.ZoneName)
 		}
 	}
@@ -479,7 +479,7 @@ func (mpzd *MPZoneData) RemoveCombinerDataNG(senderID string, data map[string][]
 		// Clean up rrtypes with no remaining agent contributions
 		mpzd.cleanupRemovedRRtypes(data)
 
-		if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
+		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
 			mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", mpzd.ZoneName)
 		}
 	}
@@ -558,7 +558,7 @@ func (mpzd *MPZoneData) RemoveCombinerDataByRRtype(senderID string, owner string
 	// Clean up if this rrtype has no remaining contributions from any agent
 	mpzd.cleanupRemovedRRtype(owner, rrtype)
 
-	if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
+	if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
 		mpzd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Signature TXT injected", mpzd.ZoneName)
 	}
 
@@ -656,7 +656,7 @@ func (mpzd *MPZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string
 
 	// Rebuild merged CombinerData and apply to zone
 	if mpzd.MP.CombinerData == nil {
-		mpzd.MP.CombinerData = core.NewCmap[tdns.OwnerData]()
+		mpzd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
 	mpzd.RebuildCombinerData()
 
@@ -685,7 +685,7 @@ func (mpzd *MPZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string
 	mpzd.cleanupRemovedRRtype(owner, rrtype)
 
 	if shouldApply {
-		if mpzd.InjectSignatureTXT(tdns.Conf.MultiProvider) {
+		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
 			mpzd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", mpzd.ZoneName)
 		}
 	}
@@ -717,7 +717,7 @@ func (mpzd *MPZoneData) InjectSignatureTXT(conf *tdns.MultiProviderConf) bool {
 	// Insert directly into zone data (bypasses CombinerData/apex-only filters)
 	ownerData, exists := mpzd.Data.Get(ownerName)
 	if !exists {
-		ownerData = tdns.OwnerData{
+		ownerData = OwnerData{
 			Name:    ownerName,
 			RRtypes: tdns.NewRRTypeStore(),
 		}
@@ -941,7 +941,7 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 		return
 	}
 	if mpzd.MP.CombinerData == nil {
-		mpzd.MP.CombinerData = core.NewCmap[tdns.OwnerData]()
+		mpzd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
 
 	// Collect all RRs per owner per rrtype from all agents
@@ -966,10 +966,10 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 
 	// Build deduplicated CombinerData from merged contributions
 	// Clear existing CombinerData
-	mpzd.MP.CombinerData = core.NewCmap[tdns.OwnerData]()
+	mpzd.MP.CombinerData = core.NewCmap[OwnerData]()
 
 	for owner, rrtypeRRs := range merged {
-		ownerData := tdns.OwnerData{
+		ownerData := OwnerData{
 			Name:    owner,
 			RRtypes: tdns.NewRRTypeStore(),
 		}

@@ -354,9 +354,9 @@ Examples:
 		}
 
 		agentZoneForce, _ := cmd.Flags().GetBool("force")
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "add-rr",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 			RRs:     []string{rr.String()},
 		}
 		if agentZoneForce {
@@ -373,7 +373,7 @@ Examples:
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
-		var amr tdns.AgentMgmtResponse
+		var amr AgentMgmtResponse
 		if err := json.Unmarshal(buf, &amr); err != nil {
 			log.Fatalf("Failed to parse response: %v", err)
 		}
@@ -428,9 +428,9 @@ Examples:
 		}
 
 		agentZoneForce, _ := cmd.Flags().GetBool("force")
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "del-rr",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 			RRs:     []string{rr.String()},
 		}
 		if agentZoneForce {
@@ -447,7 +447,7 @@ Examples:
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
-		var amr tdns.AgentMgmtResponse
+		var amr AgentMgmtResponse
 		if err := json.Unmarshal(buf, &amr); err != nil {
 			log.Fatalf("Failed to parse response: %v", err)
 		}

@@ -67,18 +67,10 @@ type RejectedItem struct {
 	Reason string
 }
 
-type CombinerSyncRequestPlus struct {
-	Request  *CombinerSyncRequest
-	Response chan *CombinerSyncResponse
-}
-
 // Combiner edit record types (moved from db_combiner_edits.go)
 type PendingEditRecord = tdns.PendingEditRecord
 type ApprovedEditRecord = tdns.ApprovedEditRecord
 type RejectedEditRecord = tdns.RejectedEditRecord
-
-// Combiner option types
-type CombinerOption = tdns.CombinerOption
 
 const CombinerOptAddSignature = tdns.CombinerOptAddSignature
 

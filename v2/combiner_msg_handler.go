@@ -114,7 +114,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 
 			// Handle RFI messages (e.g. RFI EDITS) — dispatch and continue
-			if msg.MessageType == tdns.AgentMsgRfi {
+			if msg.MessageType == AgentMsgRfi {
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
 				switch msg.RfiType {
 				case "EDITS":

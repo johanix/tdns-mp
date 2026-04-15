@@ -296,7 +296,11 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 		if !((h3exists && hpExists) || h1exists || h2exists) {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", mpzd.ZoneName)
 		}
-		ourIdentities := ourHsyncIdentities(tdns.Conf.MultiProvider)
+		var mpConf *tdns.MultiProviderConf
+		if mpzd.MP != nil {
+			mpConf = mpzd.MP.MultiProvider
+		}
+		ourIdentities := ourHsyncIdentities(mpConf)
 		matched, _, _ := mpzd.matchHsyncIdentity(ourIdentities)
 		if !matched {
 			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", mpzd.ZoneName, ourIdentities)

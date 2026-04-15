@@ -76,7 +76,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				// Only the elected leader sends DDNS to the parent
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
-					if !lem.IsLeader(tdns.ZoneName(ds.ZoneName)) {
+					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						continue
 					}
@@ -117,7 +117,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				// Only the elected leader sends DDNS to the parent
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
-					if !lem.IsLeader(tdns.ZoneName(ds.ZoneName)) {
+					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
 						if ds.Response != nil {
@@ -194,7 +194,7 @@ func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg
 		return
 	}
 
-	agents, err := tm.getAllAgentsForZone(tdns.ZoneName(zonename))
+	agents, err := tm.getAllAgentsForZone(ZoneName(zonename))
 	if err != nil {
 		lg.Warn("notifyPeersParentSyncDone: failed to get agents for zone", "zone", zonename, "err", err)
 		return

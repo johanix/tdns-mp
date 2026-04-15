@@ -971,11 +971,11 @@ func (mpzd *MPZoneData) PrintApexRRs() error {
 // Reimplemented here because the tdns method is unexported.
 func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
 	mpzd.EnsureMP()
-	mpzd.MP.UpstreamData = core.NewCmap[tdns.OwnerData]()
+	mpzd.MP.UpstreamData = core.NewCmap[OwnerData]()
 
 	// Only snapshot the apex owner (agent contributions only apply at apex)
 	if apexOd, ok := src.Data.Get(src.ZoneName); ok {
-		snapshotOd := tdns.OwnerData{
+		snapshotOd := OwnerData{
 			Name:    src.ZoneName,
 			RRtypes: tdns.NewRRTypeStore(),
 		}
@@ -1174,7 +1174,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", mpzd.ZoneName)
 				mpzd.SyncQ <- SyncRequest{
 					Command:      "SYNC-DNSKEY-RRSET",
-					ZoneName:     tdns.ZoneName(mpzd.ZoneName),
+					ZoneName:     ZoneName(mpzd.ZoneName),
 					ZoneData:     mpzd.ZoneData,
 					DnskeyStatus: analysis.DnskeyStatus,
 				}
@@ -1191,7 +1191,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
 			mpzd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
-				ZoneName:   tdns.ZoneName(mpzd.ZoneName),
+				ZoneName:   ZoneName(mpzd.ZoneName),
 				ZoneData:   mpzd.ZoneData,
 				SyncStatus: analysis.HsyncStatus,
 			}

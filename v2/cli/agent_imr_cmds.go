@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 
-	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
@@ -27,7 +26,7 @@ var agentImrQueryCmd = &cobra.Command{
 		qname := dns.Fqdn(args[0])
 		qtype := args[1]
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "imr-query",
 			Data: map[string]interface{}{
 				"qname": qname,
@@ -70,7 +69,7 @@ var agentImrFlushCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		qname := dns.Fqdn(args[0])
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "imr-flush",
 			Data: map[string]interface{}{
 				"qname": qname,
@@ -91,7 +90,7 @@ var agentImrResetCmd = &cobra.Command{
 	Use:   "reset",
 	Short: "Flush entire IMR cache and re-prime (preserves root NS)",
 	Run: func(cmd *cobra.Command, args []string) {
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "imr-reset",
 		}, "imr")
 		if err != nil {
@@ -115,9 +114,9 @@ var agentImrShowCmd = &cobra.Command{
 			log.Fatal("--id flag is required")
 		}
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "imr-show",
-			AgentId: tdns.AgentId(imrShowID),
+			AgentId: AgentId(imrShowID),
 		}, "imr")
 		if err != nil {
 			log.Fatalf("Request failed: %v", err)

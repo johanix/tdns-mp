@@ -73,7 +73,7 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 			clientCert := r.TLS.PeerCertificates[0]
 
 			clientId := clientCert.Subject.CommonName
-			agent, ok := conf.InternalMp.AgentRegistry.S.Get(tdns.AgentId(clientId))
+			agent, ok := conf.InternalMp.AgentRegistry.S.Get(AgentId(clientId))
 			if !ok {
 				lgApi.Warn(apiName+": unknown remote agent identity", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)

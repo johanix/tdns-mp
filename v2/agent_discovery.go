@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
-	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
 
@@ -282,7 +281,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 				Identity:   AgentId(result.Identity),
 				ApiDetails: &AgentDetails{},
 				DnsDetails: &AgentDetails{},
-				Zones:      make(map[tdns.ZoneName]bool),
+				Zones:      make(map[ZoneName]bool),
 				State:      AgentStateKnown,
 				LastState:  time.Now(),
 			}

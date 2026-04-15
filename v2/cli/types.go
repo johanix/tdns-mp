@@ -8,6 +8,7 @@
 package cli
 
 import (
+	tdnsmp "github.com/johanix/tdns-mp/v2"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -18,3 +19,18 @@ type CombinerEditPost = tdns.CombinerEditPost
 type CombinerEditResponse = tdns.CombinerEditResponse
 type CombinerDebugPost = tdns.CombinerDebugPost
 type CombinerDebugResponse = tdns.CombinerDebugResponse
+
+type AgentId = tdns.AgentId
+type ZoneName = tdns.ZoneName
+
+type AgentMgmtPost = tdnsmp.AgentMgmtPost
+type AgentMgmtResponse = tdnsmp.AgentMgmtResponse
+type Agent = tdnsmp.Agent
+type AgentDetails = tdnsmp.AgentDetails
+
+var AgentStateToString = tdnsmp.AgentStateToString
+
+const (
+	AgentMsgNotify = tdnsmp.AgentMsgNotify
+	AgentMsgRfi    = tdnsmp.AgentMsgRfi
+)

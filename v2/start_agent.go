@@ -294,7 +294,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		keyRR := &sak.Keys[0].KeyRR
 		lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", sak.Keys[0].KeyId)
 
-		zu := &tdns.ZoneUpdate{
+		zu := &ZoneUpdate{
 			Zone: zone,
 			Operations: []core.RROperation{{
 				Operation: "replace",
@@ -313,7 +313,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
 
-		agentUpdate := &tdns.ZoneUpdate{
+		agentUpdate := &ZoneUpdate{
 			Zone: zone,
 			Operations: []core.RROperation{{
 				Operation: "replace",
