@@ -22,7 +22,9 @@ import (
 func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.DelegationSyncRequest, notifyq chan tdns.NotifyRequest, conf *Config) error {
 
 	lg.Info("DelegationSyncher: starting")
-	imr := func() *Imr { return &Imr{conf.Config.Internal.ImrEngine} }
+	imr := func() *Imr {
+		return &Imr{conf.Config.Internal.ImrEngine}
+	}
 	var err error
 	for {
 		select {

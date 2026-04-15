@@ -1294,7 +1294,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	}
 
 	// 5. Check _signal KEY publication for each child NS via IMR.
-	if imr != nil && len(status.ChildNS) > 0 && status.KeyAlgorithm != "" {
+	if imr != nil && imr.Imr != nil && len(status.ChildNS) > 0 && status.KeyAlgorithm != "" {
 		status.KeyPublication = make(map[string]bool)
 		for _, ns := range status.ChildNS {
 			ownerName := Sig0KeyOwnerName(string(zone), ns)
@@ -1305,7 +1305,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	}
 
 	// 6. DSYNC discovery — find what sync schemes the parent supports
-	if imr != nil {
+	if imr != nil && imr.Imr != nil {
 		dsyncRes, err := imr.DsyncDiscovery(context.Background(), string(zone), false)
 		if err == nil {
 			status.ParentZone = dsyncRes.Parent

@@ -541,7 +541,9 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 		MessageRetention: func(operation string) int {
 			return mp.Dns.MessageRetention.GetRetentionForMessageType(operation)
 		},
-		GetImrEngine:   func() *Imr { return &Imr{conf.Config.Internal.ImrEngine} },
+		GetImrEngine: func() *Imr {
+			return &Imr{conf.Config.Internal.ImrEngine}
+		},
 		GetZone:        tdns.Zones.Get,
 		GetZoneNames:   tdns.Zones.Keys,
 		ClientCertFile: mp.Api.CertFile,

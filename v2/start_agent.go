@@ -10,6 +10,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -25,9 +26,14 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
 
-	// In tdns-agent, IMR is active by default unless explicitly set to false
+	// Initialize IMR synchronously so it's available before transport bridges
+	// and agent registries are created. The agent requires a working IMR; if
+	// initialization fails, crash early rather than get nil panics later.
 	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
 	if imrActive {
+		if err := conf.Config.InitImrEngine(true); err != nil {
+			log.Fatalf("IMR initialization failed: %v", err)
+		}
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
