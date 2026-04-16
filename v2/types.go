@@ -274,3 +274,19 @@ func NewMsgQs() *MsgQs {
 		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
 	}
 }
+
+// MPdata caches multi-provider membership and signing state for a zone.
+// nil means the zone is not confirmed as a multi-provider zone (either OptMultiProvider
+// is not set, or the zone owner hasn't declared it via HSYNC3+HSYNCPARAM, or we are
+// not a listed provider). Populated during zone refresh by populateMPdata().
+//
+// NOTE: This is an MP type that lives in tdns (not tdns-mp) because it is
+// a field of ZoneMPExtension, which is a field of ZoneData.
+type MPdata struct {
+	WeAreProvider bool                     // At least one of our agent identities matches an HSYNC3 Identity
+	OurLabel      string                   // Our provider label from the matching HSYNC3 record
+	WeAreSigner   bool                     // Our label appears in HSYNCPARAM signers (or zone is unsigned)
+	OtherSigners  int                      // Count of other signers in HSYNCPARAM
+	ZoneSigned    bool                     // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
+	Options       map[tdns.ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
+}

@@ -343,7 +343,7 @@ Examples:
 			log.Fatalf("Error: Invalid DNS record: %v", err)
 		}
 
-		if !tdns.AllowedLocalRRtypes[rr.Header().Rrtype] {
+		if !allowedLocalRRtypes[rr.Header().Rrtype] {
 			allowed := allowedRRtypeNames()
 			log.Fatalf("Error: RR type %s is not allowed (must be one of: %s)",
 				dns.TypeToString[rr.Header().Rrtype], strings.Join(allowed, ", "))
@@ -417,7 +417,7 @@ Examples:
 			log.Fatalf("Error: Invalid DNS record: %v", err)
 		}
 
-		if !tdns.AllowedLocalRRtypes[rr.Header().Rrtype] {
+		if !allowedLocalRRtypes[rr.Header().Rrtype] {
 			allowed := allowedRRtypeNames()
 			log.Fatalf("Error: RR type %s is not allowed (must be one of: %s)",
 				dns.TypeToString[rr.Header().Rrtype], strings.Join(allowed, ", "))
@@ -467,9 +467,20 @@ Examples:
 
 // --- Helper ---
 
+// allowedLocalRRtypes mirrors the "apex-combiner" preset from
+// tdns-mp/v2/combiner_utils.go. Defined locally to avoid a
+// circular import (cli → tdnsmp).
+var allowedLocalRRtypes = map[uint16]bool{
+	dns.TypeDNSKEY: true,
+	dns.TypeCDS:    true,
+	dns.TypeCSYNC:  true,
+	dns.TypeNS:     true,
+	dns.TypeKEY:    true,
+}
+
 func allowedRRtypeNames() []string {
-	names := make([]string, 0, len(tdns.AllowedLocalRRtypes))
-	for rrtype := range tdns.AllowedLocalRRtypes {
+	names := make([]string, 0, len(allowedLocalRRtypes))
+	for rrtype := range allowedLocalRRtypes {
 		names = append(names, dns.TypeToString[rrtype])
 	}
 	sort.Strings(names)

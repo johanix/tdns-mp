@@ -29,7 +29,7 @@ type MPState struct {
 	CombinerData         *core.ConcurrentMap[string, OwnerData]
 	UpstreamData         *core.ConcurrentMap[string, OwnerData]
 	MultiProvider        *tdns.MultiProviderConf
-	MPdata               *tdns.MPdata
+	MPdata               *MPdata
 	AgentContributions   map[string]map[string]map[uint16]core.RRset
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
 	LastKeyInventory     *KeyInventorySnapshot

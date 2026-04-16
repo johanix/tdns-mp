@@ -909,7 +909,7 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 	mpOpts[tdns.OptMPDisallowEdits] = mpzd.MPOptions[tdns.OptMPDisallowEdits]
 	mpOpts[tdns.OptMultiSigner] = weShouldSign && otherSigners > 0
 
-	mpzd.MP.MPdata = &tdns.MPdata{
+	mpzd.MP.MPdata = &MPdata{
 		WeAreProvider: weAreServer || weShouldSign,
 		OurLabel:      ourLabel,
 		WeAreSigner:   weShouldSign,
@@ -980,7 +980,7 @@ func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
 			RRtypes: tdns.NewRRTypeStore(),
 		}
 		for _, rrtype := range apexOd.RRtypes.Keys() {
-			if tdns.AllowedLocalRRtypes[rrtype] {
+			if AllowedLocalRRtypes[rrtype] {
 				rrset, _ := apexOd.RRtypes.Get(rrtype)
 				// Deep copy the RR slice to avoid sharing references
 				copiedRRs := make([]dns.RR, len(rrset.RRs))

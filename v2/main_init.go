@@ -87,7 +87,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			zd.MP.MPdata = &cp
 			zd.MP.MPdata.Options = map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}
 		} else {
-			zd.MP.MPdata = &tdns.MPdata{
+			zd.MP.MPdata = &MPdata{
 				Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
 			}
 		}
