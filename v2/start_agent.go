@@ -55,6 +55,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
 		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
 	})
+	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
+		return tdns.KeyStateWorker(ctx, conf.Config)
+	})
 
 	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
 	if conf.InternalMp.TransportManager != nil {

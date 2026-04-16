@@ -79,12 +79,38 @@ func (hdb *HsyncDB) APIkeystoreMP(conf *Config) func(w http.ResponseWriter, r *h
 			}
 
 		case "dnssec-mgmt":
-			resp, err = hdb.MPDnssecKeyMgmt(tx, kp)
-			if err != nil {
-				lgApi.Error("MPDnssecKeyMgmt failed", "err", err)
-				resp = &tdns.KeystoreResponse{
-					Error:    true,
-					ErrorMsg: err.Error(),
+			// Route based on zone type: MP zones use MPDnssecKeyStore,
+			// non-MP zones use the regular tdns DnssecKeyStore.
+			// Special case: "list" without a zone queries both tables.
+			if kp.SubCommand == "list" && kp.Zone == "" {
+				resp, err = hdb.listAllDnssecKeys(tx)
+				if err != nil {
+					lgApi.Error("listAllDnssecKeys failed", "err", err)
+					resp = &tdns.KeystoreResponse{
+						Error:    true,
+						ErrorMsg: err.Error(),
+					}
+				}
+			} else {
+				zd, exists := tdns.Zones.Get(kp.Zone)
+				if exists && zd.Options[tdns.OptMultiProvider] {
+					resp, err = hdb.MPDnssecKeyMgmt(tx, kp)
+					if err != nil {
+						lgApi.Error("MPDnssecKeyMgmt failed", "err", err)
+						resp = &tdns.KeystoreResponse{
+							Error:    true,
+							ErrorMsg: err.Error(),
+						}
+					}
+				} else {
+					resp, err = hdb.KeyDB.DnssecKeyMgmt(tx, kp)
+					if err != nil {
+						lgApi.Error("DnssecKeyMgmt failed", "err", err)
+						resp = &tdns.KeystoreResponse{
+							Error:    true,
+							ErrorMsg: err.Error(),
+						}
+					}
 				}
 			}
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear") {
@@ -326,4 +352,75 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	}
 
 	return &resp, nil
+}
+
+// listAllDnssecKeys queries both DnssecKeyStore and MPDnssecKeyStore
+// and returns a merged result. Keys from the MP table get a "[mp]"
+// suffix on the map key to distinguish them in the CLI output.
+func (hdb *HsyncDB) listAllDnssecKeys(tx *tdns.Tx) (*tdns.KeystoreResponse, error) {
+	resp := &tdns.KeystoreResponse{Time: time.Now()}
+	allKeys := map[string]tdns.DnssecKey{}
+
+	// 1. Non-MP keys from DnssecKeyStore
+	const nonMPSql = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore`
+	rows, err := tx.Query(nonMPSql)
+	if err != nil {
+		return nil, fmt.Errorf("listAllDnssecKeys: DnssecKeyStore query: %v", err)
+	}
+	for rows.Next() {
+		var keyname, state, algorithm, creator, privatekey, keyrrstr string
+		var keyid, flags int
+		if err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("listAllDnssecKeys: DnssecKeyStore scan: %v", err)
+		}
+		mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
+		allKeys[mapkey] = tdns.DnssecKey{
+			Name:       keyname,
+			State:      state,
+			Flags:      uint16(flags),
+			Algorithm:  algorithm,
+			Creator:    creator,
+			PrivateKey: "-***-",
+			Keystr:     keyrrstr,
+		}
+	}
+	rows.Close()
+
+	// 2. MP keys from MPDnssecKeyStore
+	const mpSql = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, propagation_confirmed, propagation_confirmed_at FROM MPDnssecKeyStore`
+	rows, err = tx.Query(mpSql)
+	if err != nil {
+		return nil, fmt.Errorf("listAllDnssecKeys: MPDnssecKeyStore query: %v", err)
+	}
+	for rows.Next() {
+		var keyname, state, algorithm, creator, privatekey, keyrrstr string
+		var keyid, flags int
+		var propConfirmed int
+		var propConfirmedAt string
+		if err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr, &propConfirmed, &propConfirmedAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("listAllDnssecKeys: MPDnssecKeyStore scan: %v", err)
+		}
+		mapkey := fmt.Sprintf("%s::%d[mp]", keyname, keyid)
+		dk := tdns.DnssecKey{
+			Name:                 keyname,
+			State:                state,
+			Flags:                uint16(flags),
+			Algorithm:            algorithm,
+			Creator:              creator,
+			PrivateKey:           "-***-",
+			Keystr:               keyrrstr,
+			PropagationConfirmed: propConfirmed != 0,
+		}
+		if propConfirmedAt != "" {
+			dk.PropagationConfirmedAt, _ = time.Parse(time.RFC3339, propConfirmedAt)
+		}
+		allKeys[mapkey] = dk
+	}
+	rows.Close()
+
+	resp.Dnskeys = allKeys
+	resp.Msg = "DNSSEC keys from both DnssecKeyStore and MPDnssecKeyStore"
+	return resp, nil
 }
