@@ -429,10 +429,12 @@ cd tdns-mp/cmd && GOROOT=/opt/local/lib/go make
 
 ## Key Design Decisions
 
-1. **Same DB file, different tables**: `DnssecKeyStore` (tdns)
-   and `MPDnssecKeyStore` (tdns-mp). A process is either
-   tdns-auth or tdns-mp-signer, never both, so no runtime
-   contention.
+1. **Same DB file, different tables**: `DnssecKeyStore` for
+   non-MP zones, `MPDnssecKeyStore` for MP zones. Both tables
+   may be active in the same process (the mpsigner handles
+   both zone types). The table boundary is per-zone-type,
+   not per-binary. Non-MP zones use the full tdns code path
+   regardless of which binary they run in.
 
 2. **MP state constants move to tdns-mp**: `mpdist`, `mpremove`,
    `foreign` become local to `package tdnsmp`. tdns no longer
@@ -444,7 +446,10 @@ cd tdns-mp/cmd && GOROOT=/opt/local/lib/go make
    at an existing boundary in the code (line 275).
 
 4. **No migration of existing data**: No installed base, so no
-   need to copy rows between tables.
+   need to copy rows between tables. The initial migration
+   function (`migrateMPDnssecKeysFromLegacy`) was a mistake —
+   it copied non-MP zone keys into `MPDnssecKeyStore`. Remove
+   it (Phase 5, Step 5.1).
 
 ## Deferred: EnsureActiveDnssecKeys auto-generation
 
@@ -460,6 +465,199 @@ these cases, but the design conflates "ensure keys exist"
 **Not in scope for this work** — the goal here is tdns/tdns-mp
 separation, not improving the tdns signer. Track as a separate
 Linear issue.
+
+---
+
+## Phase 5: Post-implementation corrections
+
+**Added 2026-04-16 after reviewing the initial implementation.**
+
+### Design clarification: MPDnssecKeyStore is for MP zones ONLY
+
+The original plan implicitly assumed clean product boundaries:
+"a process is either tdns-auth or tdns-mp-signer." But the
+mpsigner handles **both** MP and non-MP zones. The initial
+implementation routed all keystore operations to
+`MPDnssecKeyStore` regardless of zone type, which is wrong.
+
+**Corrected principle**: Non-MP zones must behave identically
+regardless of which binary they run in. A non-MP zone in the
+mpsigner uses `DnssecKeyStore`, `SignZone`, `DnssecKeyMgmt`,
+`RolloverKey`, and the tdns `KeyStateWorker` — the full tdns
+code path. The MP layer only activates for zones that are
+actually MP.
+
+**Why not "mpsigner owns all keys in MPDnssecKeyStore"?**
+Two reasons:
+
+1. **Improvements flow automatically.** The tdns signer is not
+   polished; it will get bug fixes and improvements over time.
+   If non-MP zones in the mpsigner use the regular tdns code
+   path, they automatically benefit. Otherwise, every tdns
+   signer fix requires asking "does this also need to change
+   in the MP version?" — and over time the two diverge.
+
+2. **No AppType gates in tdns.** We never want tdns code to
+   ask "is this an MP binary?" A non-MP zone is a non-MP zone.
+   If it's in `DnssecKeyStore` and uses the normal signing
+   path, tdns code handles it correctly with zero awareness
+   of the MP world.
+
+### Step 5.1 — Remove or filter the migration
+
+**File**: `tdns-mp/v2/db_schema_hsync.go`
+(`migrateMPDnssecKeysFromLegacy`)
+
+The current migration copies ALL keys from `DnssecKeyStore` to
+`MPDnssecKeyStore`. This puts non-MP zone keys in the wrong
+table.
+
+**Option A** (preferred): Remove the migration entirely. There
+is no installed base, so no data needs to be preserved across
+the schema change.
+
+**Option B**: Filter the migration to only copy keys for zones
+that have `OptMultiProvider` set. This requires zone config
+access at migration time, which may not be available during
+`InitHsyncTables`. If config isn't loaded yet, Option A is
+the only clean choice.
+
+### Step 5.2 — Zone-type-aware API routing
+
+**File**: `tdns-mp/v2/apihandler_keystore.go` (`APIkeystoreMP`)
+
+Currently, `APIkeystoreMP` routes all `"dnssec-mgmt"` requests
+to `MPDnssecKeyMgmt`. Change it to check the zone's
+`OptMultiProvider` flag:
+
+```go
+case "dnssec-mgmt":
+    zd, exists := tdns.Zones.Get(kp.Zone)
+    if exists && zd.Options[tdns.OptMultiProvider] {
+        resp, err = hdb.MPDnssecKeyMgmt(tx, kp)
+    } else {
+        resp, err = hdb.KeyDB.DnssecKeyMgmt(tx, kp)
+    }
+```
+
+Note: `OptMultiProvider` lives in `zd.Options` (the regular
+tdns zone options map), not in `MPOptions`. It's a zone config
+flag parsed by tdns. `MPOptions` are runtime flags set by
+tdns-mp after HSYNC analysis (`OptMultiSigner`,
+`OptMPDisallowEdits`, etc.).
+
+This is one gate at the API entry point — not gates scattered
+throughout the code. Non-MP zones go through the regular tdns
+handler, which operates on `DnssecKeyStore`.
+
+**Note**: The `list` subcommand is a special case. In the
+mpsigner, keys live in two tables. Default behavior: query
+both tables and display results in two sections (non-MP keys
+from `DnssecKeyStore`, then MP keys from `MPDnssecKeyStore`).
+Add a `--mp-only` / `--non-mp-only` flag to list either
+subset. If a zone argument is given, the routing check
+determines which table to query (single section).
+
+### Step 5.3 — Verify agent keystore routing
+
+**File**: `tdns-mp/v2/apihandler_agent_routes.go`
+
+The mpagent also routes `/keystore` to `APIkeystoreMP`. The
+agent typically only has its auto-generated agent zone, which
+is NOT an MP zone. After Step 5.2, the API routing check will
+correctly dispatch to `DnssecKeyMgmt` for non-MP zones.
+
+Verify that the agent's auto-zone keys stay in
+`DnssecKeyStore` and are not duplicated into
+`MPDnssecKeyStore`.
+
+### Step 5.4 — Key state worker scope
+
+The tdns-mp key state worker (`key_state_worker.go`) calls
+`GetDnssecKeysByState(hdb, "", state)` which scans ALL keys
+in `MPDnssecKeyStore`. After Step 5.1 removes the migration,
+only MP zone keys are in `MPDnssecKeyStore`, so this is
+correct — the MP worker only processes MP keys.
+
+The tdns `KeyStateWorker` (started via `StartAuth` in Phase 4)
+handles non-MP zones via `DnssecKeyStore`. Both workers run
+in the mpsigner, each operating on its own table. No conflict.
+
+**Mpsigner**: `StartAuth` starts the tdns worker;
+`StartMPSigner` starts the MP worker. Both already run.
+
+**Mpagent**: `StartMPAgent` does NOT call `StartAuth` — it has
+its own startup sequence. But the agent DNSSEC-signs its
+identity zone (a non-MP zone), so it needs the tdns
+`KeyStateWorker` for key lifecycle management. Add:
+
+```go
+tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker",
+   func() error { return tdns.KeyStateWorker(ctx, conf.Config) })
+```
+
+to `StartMPAgent`. The agent does NOT need the MP
+`KeyStateWorker` (it has no MP zones).
+
+### Step 5.5 — Clean up any migrated data in dev DBs
+
+Since the migration already ran on dev databases, existing
+`MPDnssecKeyStore` tables may contain non-MP zone keys.
+Manual DB cleanup — no migration code. Johan handles this
+directly on the dev/test machines.
+
+### Step 5.6 — Decouple StartMPSigner from tdns.StartAuth
+
+**File**: `tdns-mp/v2/start_signer.go`
+
+Replace the `conf.Config.StartAuth(ctx, apirouter)` call with
+explicit `StartEngine` calls for only the engines the mpsigner
+actually needs. This matches the pattern already established
+by `StartMPAgent` and `StartMPCombiner`, which both manage
+their own startup without calling tdns startup functions.
+
+**Engines to start** (from current `StartAuth`):
+
+- `APIdispatcher` — yes (API)
+- `RefreshEngine` — yes (zone refresh)
+- `Notifier` — yes (outbound NOTIFYs)
+- `AuthQueryEngine` — yes (DNS queries)
+- `ZoneUpdaterEngine` — yes (zone data updates)
+- `UpdateHandler` — yes (DNS UPDATE processing)
+- `NotifyHandler` — yes (inbound NOTIFYs)
+- `DnsEngine` — yes (DNS listener)
+- `ResignerEngine` — yes (re-signing)
+- `KeyStateWorker` (tdns) — yes (non-MP zone key lifecycle)
+
+**Engines to DROP**:
+
+- `ValidatorEngine` — not needed by mpsigner
+- `ImrEngine` — not needed by mpsigner
+- `ScannerEngine` — not needed by mpsigner
+- `DeferredUpdaterEngine` — superseded by OnFirstLoad callbacks
+- `DelegationSyncher` — not needed by mpsigner
+- `KeyBootstrapper` — not needed by mpsigner
+
+**Why**: `StartAuth` is a grab bag that will change over time.
+The `KeyStateWorker` addition (Phase 4) silently started
+running in the mpsigner — we got lucky that it was correct.
+The next addition might not be. Explicit startup means the
+mpsigner's behavior only changes when someone intentionally
+changes it.
+
+### Step 5.7 — Build and smoke test
+
+```bash
+cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make
+cd tdns-mp/cmd && GOROOT=/opt/local/lib/go make
+```
+
+Verify:
+- `mpcli signer keystore dnssec list` for an MP zone shows
+  keys from `MPDnssecKeyStore`
+- `mpcli signer keystore dnssec list` for a non-MP zone shows
+  keys from `DnssecKeyStore`
+- Agent auto-zone keys are in `DnssecKeyStore` only
 
 ---
 
@@ -550,6 +748,45 @@ propagation delay, 1 standby ZSK, 1m check interval).
 - ~30 lines of comments replaced in key_state_worker.go
 - **Total: ~32 lines changed**
 
+### Phase 5: Post-implementation corrections
+
+**Risk: MEDIUM.** Three distinct sub-tasks with different risk
+profiles.
+
+**Step 5.1 (remove migration)**: LOW risk. Deleting code that
+shouldn't have existed. No functional change for fresh DBs.
+
+**Step 5.2 (zone-type-aware API routing)**: MEDIUM risk. The
+`if` at the API entry point is simple, but the `list`
+subcommand (query both tables, merge, display in sections,
+support `--mp-only`/`--non-mp-only` flags) adds CLI complexity.
+Risk of showing stale or incomplete data if the zone-type
+lookup fails (zone not yet loaded at query time).
+
+**Step 5.4 (agent KeyStateWorker)**: LOW risk. Adding one
+`StartEngine` call to `StartMPAgent`. The worker already
+exists and handles non-MP zones correctly.
+
+**Step 5.6 (decouple StartMPSigner from StartAuth)**: MEDIUM
+risk. Replacing one function call with 10 explicit
+`StartEngine` calls is mechanical, but getting the list wrong
+means a missing engine at runtime — which may not be caught
+by `go build`. Dropping 6 engines is a net simplification,
+but each drop should be verified: confirm no transitive
+dependency from the mpsigner's code paths into the dropped
+engine. The `ImrEngine` drop is the one to double-check —
+if any MP transport code uses IMR indirectly, removing it
+breaks discovery.
+
+**Estimated scope**:
+- ~10 lines removed (migration function)
+- ~15 lines changed in APIkeystoreMP (zone-type routing)
+- ~30 lines for CLI list dual-table display + flags
+- ~2 lines added to StartMPAgent (KeyStateWorker)
+- ~25 lines in StartMPSigner (replace StartAuth call with
+  explicit engine list)
+- **Total: ~80 lines changed across ~4 files**
+
 ### Overall
 
 | Phase | Risk | Lines changed | Files touched |
@@ -558,11 +795,13 @@ propagation delay, 1 standby ZSK, 1m check interval).
 | 2     | Med  | ~180 (mostly deletions) | ~8  |
 | 3     | Med-High | ~320 (mostly new) | ~4    |
 | 4     | Low  | ~32           | 2             |
-| **Total** | | **~600** | **~15 unique files** |
+| 5     | Med  | ~80           | ~4            |
+| **Total** | | **~680** | **~18 unique files** |
 
 Phase 3 is the largest and riskiest. Phase 2 has the most files
 but is mostly mechanical deletion. Phases 1 and 4 are
-straightforward.
+straightforward. Phase 5 is moderate — the startup decoupling
+(5.6) and CLI list changes (5.2) need the most care.
 
 ---
 
