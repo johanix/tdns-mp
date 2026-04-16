@@ -181,7 +181,7 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 		targetState := tdns.DnskeyStateRemoved
 		zd, exists := Zones.Get(key.ZoneName)
 		if exists && zd.Options[tdns.OptMultiProvider] {
-			targetState = tdns.DnskeyStateMpremove
+			targetState = DnskeyStateMpremove
 		}
 
 		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
@@ -194,7 +194,7 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 
 		// For MP zones, push updated inventory to all agents so they
 		// learn about the key removal and distribute it to remote agents.
-		if targetState == tdns.DnskeyStateMpremove {
+		if targetState == DnskeyStateMpremove {
 			pushKeystateInventoryToAllAgents(conf, key.ZoneName)
 		}
 	}
@@ -255,7 +255,7 @@ func maintainStandbyKeysForType(hdb *HsyncDB, zoneName string, alg uint8, keytyp
 	publishedKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStatePublished)
 	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
 
-	mpdistKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStateMpdist)
+	mpdistKeys, _ := GetDnssecKeysByState(hdb, zoneName, DnskeyStateMpdist)
 	mpdistCount := countKeysByFlags(mpdistKeys, expectedFlags)
 
 	if publishedCount > 0 || mpdistCount > 0 {

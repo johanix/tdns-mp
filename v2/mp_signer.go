@@ -24,7 +24,7 @@ import (
 //
 // Mode 3 (non-signer) is gated by not enabling OptInlineSigning
 // in HSYNC analysis, so SetupZoneSigning never fires for mode 3.
-func (mpzd *MPZoneData) SignZone(kdb *tdns.KeyDB, force bool) (int, error) {
+func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	zd := mpzd.ZoneData
 
 	if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
@@ -35,7 +35,7 @@ func (mpzd *MPZoneData) SignZone(kdb *tdns.KeyDB, force bool) (int, error) {
 	if mpzd.MPOptions[tdns.OptMultiSigner] {
 		// Mode 4: extract remote DNSKEYs before PublishDnskeyRRs
 		// overwrites the DNSKEY RRset with local keys only.
-		if err := mpzd.extractRemoteDNSKEYs(kdb); err != nil {
+		if err := mpzd.extractRemoteDNSKEYs(hdb); err != nil {
 			lgSigner.Warn("error extracting remote DNSKEYs, proceeding without", "zone", zd.ZoneName, "err", err)
 		}
 		lgSigner.Info("multi-signer mode (mode 4)", "zone", zd.ZoneName, "remote_dnskeys", len(mpzd.GetRemoteDNSKEYs()))
@@ -45,8 +45,7 @@ func (mpzd *MPZoneData) SignZone(kdb *tdns.KeyDB, force bool) (int, error) {
 		lgSigner.Info("single-signer multi-provider mode (mode 2)", "zone", zd.ZoneName)
 	}
 
-	// Ensure active DNSSEC keys exist
-	dak, err := zd.EnsureActiveDnssecKeys(kdb)
+	dak, err := EnsureActiveDnssecKeysMP(mpzd, hdb)
 	if err != nil {
 		lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 		return 0, err
@@ -55,7 +54,7 @@ func (mpzd *MPZoneData) SignZone(kdb *tdns.KeyDB, force bool) (int, error) {
 	newrrsigs := 0
 
 	if !zd.Options[tdns.OptBlackLies] {
-		err = zd.GenerateNsecChain(kdb)
+		err = zd.GenerateNsecChainWithDak(dak)
 		if err != nil {
 			return 0, err
 		}
@@ -78,7 +77,7 @@ func (mpzd *MPZoneData) SignZone(kdb *tdns.KeyDB, force bool) (int, error) {
 	}
 	sort.Strings(names)
 
-	err = mpzd.PublishDnskeyRRs(dak)
+	err = mpzd.PublishDnskeyRRs(hdb, dak)
 	if err != nil {
 		return 0, err
 	}
@@ -157,7 +156,7 @@ func (mpzd *MPZoneData) SignZone(kdb *tdns.KeyDB, force bool) (int, error) {
 // comparing against local keys in the KeyDB. Foreign keys are stored
 // on mpzd.MP.RemoteDNSKEYs and persisted to the KeyDB with state='foreign'.
 // Only called in mode 4 (multi-signer).
-func (mpzd *MPZoneData) extractRemoteDNSKEYs(kdb *tdns.KeyDB) error {
+func (mpzd *MPZoneData) extractRemoteDNSKEYs(hdb *HsyncDB) error {
 	zd := mpzd.ZoneData
 
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -174,8 +173,8 @@ func (mpzd *MPZoneData) extractRemoteDNSKEYs(kdb *tdns.KeyDB) error {
 
 	// Get all local keys to identify what's ours
 	localKeyTags := make(map[uint16]bool)
-	for _, state := range []string{tdns.DnskeyStateCreated, tdns.DnskeyStateMpdist, tdns.DnskeyStateMpremove, tdns.DnskeyStatePublished, tdns.DnskeyStateStandby, tdns.DnskeyStateActive, tdns.DnskeyStateRetired, tdns.DnskeyStateRemoved} {
-		dak, err := kdb.GetDnssecKeys(zd.ZoneName, state)
+	for _, state := range []string{tdns.DnskeyStateCreated, DnskeyStateMpdist, DnskeyStateMpremove, tdns.DnskeyStatePublished, tdns.DnskeyStateStandby, tdns.DnskeyStateActive, tdns.DnskeyStateRetired, tdns.DnskeyStateRemoved} {
+		dak, err := GetDnssecKeysMP(hdb, zd.ZoneName, state)
 		if err != nil {
 			continue
 		}
@@ -188,8 +187,8 @@ func (mpzd *MPZoneData) extractRemoteDNSKEYs(kdb *tdns.KeyDB) error {
 	}
 
 	// Get existing foreign keys from the DB (to detect removals)
-	const fetchForeignSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state='foreign'`
-	rows, err := kdb.Query(fetchForeignSql, zd.ZoneName)
+	const fetchForeignSql = `SELECT keyid FROM MPDnssecKeyStore WHERE zonename=? AND state='foreign'`
+	rows, err := hdb.Query(fetchForeignSql, zd.ZoneName)
 	if err != nil {
 		return fmt.Errorf("extractRemoteDNSKEYs: zone %s: error querying foreign keys: %v", zd.ZoneName, err)
 	}
@@ -219,9 +218,9 @@ func (mpzd *MPZoneData) extractRemoteDNSKEYs(kdb *tdns.KeyDB) error {
 	}
 
 	// Persist new foreign keys to KeyDB
-	const insertForeignSql = `INSERT OR IGNORE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	const insertForeignSql = `INSERT OR IGNORE INTO MPDnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	for kt, dnskey := range currentForeign {
-		res, err := kdb.Exec(insertForeignSql, zd.ZoneName, tdns.DnskeyStateForeign, kt, dnskey.Flags,
+		res, err := hdb.Exec(insertForeignSql, zd.ZoneName, DnskeyStateForeign, kt, dnskey.Flags,
 			dns.AlgorithmToString[dnskey.Algorithm], "foreign", "", dnskey.String())
 		if err != nil {
 			lgSigner.Error("failed to persist foreign DNSKEY", "zone", zd.ZoneName, "keytag", kt, "err", err)
@@ -231,11 +230,11 @@ func (mpzd *MPZoneData) extractRemoteDNSKEYs(kdb *tdns.KeyDB) error {
 	}
 
 	// Remove stale foreign keys from DB
-	const deleteForeignSql = `DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=? AND state='foreign'`
+	const deleteForeignSql = `DELETE FROM MPDnssecKeyStore WHERE zonename=? AND keyid=? AND state='foreign'`
 	for kt := range existingForeign {
 		if _, stillPresent := currentForeign[kt]; !stillPresent {
 			lgSigner.Info("removing stale foreign DNSKEY from KeyDB", "zone", zd.ZoneName, "keytag", kt)
-			_, err := kdb.Exec(deleteForeignSql, zd.ZoneName, kt)
+			_, err := hdb.Exec(deleteForeignSql, zd.ZoneName, kt)
 			if err != nil {
 				lgSigner.Error("failed to delete stale foreign DNSKEY", "zone", zd.ZoneName, "keytag", kt, "err", err)
 			}
@@ -253,7 +252,7 @@ func (mpzd *MPZoneData) extractRemoteDNSKEYs(kdb *tdns.KeyDB) error {
 // PublishDnskeyRRs publishes local + remote DNSKEYs into the zone's
 // DNSKEY RRset. Shadows the tdns version by adding the remote DNSKEY
 // merge for multi-signer mode 4.
-func (mpzd *MPZoneData) PublishDnskeyRRs(dak *tdns.DnssecKeys) error {
+func (mpzd *MPZoneData) PublishDnskeyRRs(hdb *HsyncDB, dak *tdns.DnssecKeys) error {
 	zd := mpzd.ZoneData
 
 	if !zd.Options[tdns.OptAllowUpdates] && !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
@@ -284,9 +283,9 @@ func (mpzd *MPZoneData) PublishDnskeyRRs(dak *tdns.DnssecKeys) error {
 	zd.Logger.Printf("PublishDnskeyRRs: there are %d active KSKs and %d active ZSKs", len(dak.KSKs), len(dak.ZSKs))
 
 	const fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='mpdist' OR state='published' OR state='standby' OR state='retired' OR state='foreign')`
+SELECT keyid, flags, algorithm, keyrr FROM MPDnssecKeyStore WHERE zonename=? AND (state='mpdist' OR state='published' OR state='standby' OR state='retired' OR state='foreign')`
 
-	rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
+	rows, err := hdb.Query(fetchZoneDnskeysSql, zd.ZoneName)
 	if err != nil {
 		lgSigner.Error("PublishDnskeyRRs: error querying DNSKEY store", "zone", zd.ZoneName, "err", err)
 		return err

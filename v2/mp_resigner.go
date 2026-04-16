@@ -74,7 +74,7 @@ func MPResignerEngine(ctx context.Context, resignch chan *MPZoneData) {
 					continue
 				}
 				lgSigner.Debug("MPResignerEngine: re-signing zone", "zone", mpzd.ZoneName)
-				newrrsigs, err := mpzd.SignZone(mpzd.ZoneData.KeyDB, false)
+				newrrsigs, err := mpzd.SignZone(NewHsyncDB(mpzd.ZoneData.KeyDB), false)
 				if err != nil {
 					lgSigner.Error("MPResignerEngine: failed to re-sign zone", "zone", mpzd.ZoneName, "err", err)
 				}
@@ -98,7 +98,7 @@ func (mpzd *MPZoneData) SetupZoneSigning(resignq chan<- *MPZoneData) error {
 	}
 
 	kdb := zd.KeyDB
-	newrrsigs, err := mpzd.SignZone(kdb, false)
+	newrrsigs, err := mpzd.SignZone(NewHsyncDB(kdb), false)
 	if err != nil {
 		lg.Error("MP SetupZoneSigning: SignZone failed", "zone", zd.ZoneName, "err", err)
 		return err

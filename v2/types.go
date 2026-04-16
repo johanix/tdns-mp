@@ -12,6 +12,12 @@ import (
 	"github.com/miekg/dns"
 )
 
+const (
+	DnskeyStateMpdist   = "mpdist"
+	DnskeyStateMpremove = "mpremove"
+	DnskeyStateForeign  = "foreign"
+)
+
 // RRsetString is the string-based RRset shape used in combiner JSON responses.
 type RRsetString struct {
 	Name   string   `json:"name"`

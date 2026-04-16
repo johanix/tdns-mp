@@ -348,7 +348,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				inv := zd.GetLastKeyInventory()
 				nForeign := 0
 				for _, entry := range inv.Inventory {
-					if entry.State == tdns.DnskeyStateForeign {
+					if entry.State == DnskeyStateForeign {
 						nForeign++
 					}
 				}

@@ -197,7 +197,7 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) 
 	var newLocalKeys []dns.RR
 	for _, entry := range inv.Inventory {
 		switch entry.State {
-		case tdns.DnskeyStateForeign, tdns.DnskeyStateCreated, tdns.DnskeyStateMpremove, tdns.DnskeyStateRemoved:
+		case DnskeyStateForeign, tdns.DnskeyStateCreated, DnskeyStateMpremove, tdns.DnskeyStateRemoved:
 			continue
 		}
 		if entry.KeyRR == "" {
@@ -325,7 +325,7 @@ func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *M
 		// Build set of foreign key tags from the inventory
 		foreignKeyTags := make(map[uint16]bool)
 		for _, entry := range inv.Inventory {
-			if entry.State == tdns.DnskeyStateForeign {
+			if entry.State == DnskeyStateForeign {
 				foreignKeyTags[entry.KeyTag] = true
 			}
 		}
