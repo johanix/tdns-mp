@@ -211,27 +211,29 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 			continue
 		}
 
-		// Skip multi-provider zones where we are not a signer
-		if mpzd.Options[tdns.OptMultiProvider] {
-			shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
-			if !shouldSign {
-				continue
-			}
+		// Non-MP zones have their own key state worker and their own
+		// keystore table (DnssecKeyStore). Skip them here.
+		if !mpzd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+
+		// Skip MP zones where we are not a signer
+		shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
+		if !shouldSign {
+			continue
 		}
 
 		if mpzd.DnssecPolicy == nil {
 			continue
 		}
-
-		isMP := mpzd.Options[tdns.OptMultiProvider]
 		alg := mpzd.DnssecPolicy.Algorithm
 
-		// Maintain ZSK standby count
-		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)
+		// Maintain ZSK standby count (always MP — non-MP zones skipped above)
+		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, true, standbyZskCount)
 
 		// Maintain KSK standby count (0 means don't maintain)
 		if standbyKskCount > 0 {
-			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, isMP, standbyKskCount)
+			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, true, standbyKskCount)
 		}
 	}
 }
