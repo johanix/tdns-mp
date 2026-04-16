@@ -644,3 +644,94 @@ func EnsureActiveDnssecKeysMP(mpzd *MPZoneData, hdb *HsyncDB) (*tdns.DnssecKeys,
 
 	return dak, nil
 }
+
+// RolloverKeyMP performs manual rollover using MPDnssecKeyStore.
+func RolloverKeyMP(hdb *HsyncDB, zonename string, keytype string, tx *tdns.Tx) (uint16, uint16, error) {
+	var expectedFlags uint16
+	switch keytype {
+	case "ZSK":
+		expectedFlags = 256
+	case "KSK", "CSK":
+		expectedFlags = 257
+	default:
+		return 0, 0, fmt.Errorf("invalid keytype %q, must be ZSK or KSK", keytype)
+	}
+
+	activeKeys, err := GetDnssecKeysByState(hdb, zonename, tdns.DnskeyStateActive)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
+	}
+
+	var activeKey *DnssecKeyWithTimestamps
+	for i, k := range activeKeys {
+		if k.Flags == expectedFlags {
+			activeKey = &activeKeys[i]
+			break
+		}
+	}
+	if activeKey == nil {
+		return 0, 0, fmt.Errorf("no active %s found for zone %s", keytype, zonename)
+	}
+
+	standbyKeys, err := GetDnssecKeysByState(hdb, zonename, tdns.DnskeyStateStandby)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting standby keys: %w", err)
+	}
+
+	var standbyKey *DnssecKeyWithTimestamps
+	for i, k := range standbyKeys {
+		if k.Flags == expectedFlags {
+			standbyKey = &standbyKeys[i]
+			break
+		}
+	}
+	if standbyKey == nil {
+		return 0, 0, fmt.Errorf("no standby %s available for rollover in zone %s", keytype, zonename)
+	}
+
+	localtx := false
+	if tx == nil {
+		tx, err = hdb.Begin("RolloverKeyMP")
+		if err != nil {
+			return 0, 0, fmt.Errorf("error beginning transaction: %w", err)
+		}
+		localtx = true
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	var txErr error
+
+	defer func() {
+		if localtx {
+			if txErr != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
+		}
+	}()
+
+	_, txErr = tx.Exec(`UPDATE MPDnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+		tdns.DnskeyStateActive, zonename, standbyKey.KeyTag)
+	if txErr != nil {
+		return 0, 0, fmt.Errorf("standby→active transition failed: %w", txErr)
+	}
+
+	_, txErr = tx.Exec(`UPDATE MPDnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+		tdns.DnskeyStateRetired, now, zonename, activeKey.KeyTag)
+	if txErr != nil {
+		return 0, 0, fmt.Errorf("active→retired transition failed: %w", txErr)
+	}
+
+	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStateActive)
+	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStateStandby)
+	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStateRetired)
+	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStateActive))
+	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStateStandby))
+	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStateRetired))
+
+	lgSigner.Info("key rollover completed (MP)", "zone", zonename, "keytype", keytype,
+		"old_active", activeKey.KeyTag, "new_active", standbyKey.KeyTag)
+
+	return activeKey.KeyTag, standbyKey.KeyTag, nil
+}
