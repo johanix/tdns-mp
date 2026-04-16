@@ -33,6 +33,17 @@ func (hdb *HsyncDB) APIkeystoreMP(conf *Config) func(w http.ResponseWriter, r *h
 
 		var resp *tdns.KeystoreResponse
 
+		if hdb == nil || hdb.DB == nil {
+			w.Header().Set("Content-Type", "application/json")
+			resp = &tdns.KeystoreResponse{
+				Error:    true,
+				ErrorMsg: "HSYNC keystore database is not initialized",
+				Time:     time.Now(),
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		tx, err := hdb.Begin("APIkeystoreMP")
 
 		defer func() {

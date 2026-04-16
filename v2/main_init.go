@@ -152,6 +152,15 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 		return fmt.Errorf("multi-provider.agents is required when multi-provider.active is true")
 	}
 
+	kdb := conf.Config.Internal.KeyDB
+	if kdb == nil {
+		return fmt.Errorf("KeyDB is required for MP signer")
+	}
+	conf.InternalMp.HsyncDB = NewHsyncDB(kdb)
+	if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
+		return fmt.Errorf("InitHsyncTables: %w", err)
+	}
+
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var signerPayloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {

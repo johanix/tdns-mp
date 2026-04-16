@@ -420,6 +420,26 @@ func (hdb *HsyncDB) migrateHsyncSchema() {
 	}
 }
 
+// migrateMPDnssecKeysFromLegacy copies rows from tdns DnssecKeyStore into
+// MPDnssecKeyStore when upgrading an existing signer/agent database.
+func (hdb *HsyncDB) migrateMPDnssecKeysFromLegacy() {
+	if hdb.DB == nil {
+		return
+	}
+	var n int
+	if err := hdb.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='DnssecKeyStore'`).Scan(&n); err != nil || n == 0 {
+		return
+	}
+	_, err := hdb.DB.Exec(`
+INSERT OR IGNORE INTO MPDnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, comment, propagation_confirmed, propagation_confirmed_at, published_at, retired_at)
+SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, COALESCE(comment, ''), 0, '',
+       COALESCE(published_at, ''), COALESCE(retired_at, '')
+FROM DnssecKeyStore`)
+	if err != nil {
+		log.Printf("migrate MPDnssecKeyStore from DnssecKeyStore: %v", err)
+	}
+}
+
 // InitHsyncTables initializes the HSYNC tables in the KeyDB.
 // Call this during application startup after KeyDB is created.
 func (hdb *HsyncDB) InitHsyncTables() error {
@@ -436,6 +456,8 @@ func (hdb *HsyncDB) InitHsyncTables() error {
 			return fmt.Errorf("failed to create table %s: %w", name, err)
 		}
 	}
+
+	hdb.migrateMPDnssecKeysFromLegacy()
 
 	// Create indexes
 	for _, indexSQL := range HsyncIndexes {
