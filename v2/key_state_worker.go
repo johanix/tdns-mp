@@ -177,11 +177,17 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 			continue
 		}
 
-		// Check if this is a multi-provider zone
+		// Check if this is a multi-provider zone. Missing from the
+		// in-memory registry means the zone was removed from config
+		// since the key was persisted — treat as non-MP removal and
+		// warn so operators notice the orphan.
 		targetState := tdns.DnskeyStateRemoved
 		zd, exists := Zones.Get(key.ZoneName)
-		if exists && zd.Options[tdns.OptMultiProvider] {
+		switch {
+		case exists && zd.Options[tdns.OptMultiProvider]:
 			targetState = DnskeyStateMpremove
+		case !exists:
+			lgSigner.Warn("KeyStateWorker: zone not found in config, defaulting to removed", "zone", key.ZoneName, "keyid", key.KeyTag)
 		}
 
 		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))

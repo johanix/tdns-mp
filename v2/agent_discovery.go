@@ -353,7 +353,7 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 		return fmt.Errorf("IMR engine not configured for this TransportManager")
 	}
 	imr := tm.getImrEngine()
-	if imr == nil {
+	if imr == nil || imr.Imr == nil || imr.Cache == nil {
 		return fmt.Errorf("IMR engine not available for discovery (not yet started)")
 	}
 

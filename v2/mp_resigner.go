@@ -10,6 +10,7 @@ package tdnsmp
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -113,6 +114,7 @@ func (mpzd *MPZoneData) SetupZoneSigning(resignq chan<- *MPZoneData) error {
 	case resignq <- mpzd:
 	case <-ctx.Done():
 		lg.Error("MP SetupZoneSigning: timeout sending zone to resign queue", "zone", zd.ZoneName)
+		return fmt.Errorf("MP SetupZoneSigning: timeout enqueuing zone %q for periodic re-signing", zd.ZoneName)
 	}
 
 	return nil

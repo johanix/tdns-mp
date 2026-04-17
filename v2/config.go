@@ -116,10 +116,10 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			if !zd.Options[tdns.OptMultiProvider] {
 				return
 			}
-			w, ok := Zones.Get(zd.ZoneName)
-			if !ok {
-				return
-			}
+			// mpzd is the captured outer loop variable and is the
+			// authoritative wrapper for this zone; no need to re-lookup.
+			w := mpzd
+			w.Lock()
 			w.EnsureMP()
 			if w.MP.PersistContributions == nil && zd.KeyDB != nil {
 				hdb := NewHsyncDB(zd.KeyDB)
@@ -128,18 +128,26 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 				}
 				lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
 			}
+			var doRebuild bool
 			if w.MP.AgentContributions == nil && allContribs != nil {
 				if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
 					w.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 					for senderID, ownerMap := range zoneContribs {
 						w.MP.AgentContributions[senderID] = ownerMap
 					}
-					w.RebuildCombinerData()
+					doRebuild = true
 					lgCombiner.Info("hydrated AgentContributions from snapshot",
 						"zone", zd.ZoneName, "agents", len(zoneContribs))
 				}
 			}
-			if w.MPOptions[tdns.OptAllowEdits] {
+			doCombine := w.MPOptions[tdns.OptAllowEdits]
+			w.Unlock()
+			// RebuildCombinerData and CombineWithLocalChanges acquire
+			// their own locks; call them outside our lock window.
+			if doRebuild {
+				w.RebuildCombinerData()
+			}
+			if doCombine {
 				success, err := w.CombineWithLocalChanges()
 				if err != nil {
 					lgCombiner.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)

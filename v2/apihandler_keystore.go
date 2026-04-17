@@ -237,6 +237,14 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		}
 
 	case "setstate":
+		// Capture the old state before the update so we can invalidate
+		// both cache entries; otherwise GetDnssecKeysMP can serve a
+		// stale key from the old-state slot.
+		var oldState string
+		row := tx.QueryRow(`SELECT state FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`, kp.Keyname, kp.Keyid)
+		if scanErr := row.Scan(&oldState); scanErr != nil && scanErr != sql.ErrNoRows {
+			return &resp, scanErr
+		}
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			return &resp, err
@@ -246,6 +254,10 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		} else {
 			resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
+		}
+		if oldState != "" && oldState != kp.State {
+			delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+oldState)
+			delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, oldState))
 		}
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
 		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, kp.State))

@@ -358,11 +358,21 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
 				}
 				if changed && dskeyStatus != nil {
-					zd.SyncQ <- SyncRequest{
+					select {
+					case zd.SyncQ <- SyncRequest{
 						Command:      "SYNC-DNSKEY-RRSET",
 						ZoneName:     ZoneName(zd.ZoneName),
 						ZoneData:     zd.ZoneData,
 						DnskeyStatus: dskeyStatus,
+					}:
+					case <-r.Context().Done():
+						resp.Error = true
+						resp.ErrorMsg = "request cancelled while enqueuing SYNC-DNSKEY-RRSET"
+						return
+					case <-time.After(2 * time.Second):
+						resp.Error = true
+						resp.ErrorMsg = "SyncQ full, SYNC-DNSKEY-RRSET not enqueued"
+						return
 					}
 				}
 				resp.Msg = fmt.Sprintf("Key inventory refreshed for zone %s: %d keys (%d local, %d foreign)",

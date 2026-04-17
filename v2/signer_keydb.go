@@ -307,7 +307,7 @@ INSERT OR REPLACE INTO MPDnssecKeyStore (zonename, state, keyid, algorithm, flag
 	}()
 
 	if state == "" {
-		state = "active"
+		state = tdns.DnskeyStateActive
 	}
 
 	switch rrtype {
@@ -398,9 +398,9 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM MPDnssecKeyStore WHERE zo
 		return &dk, nil
 	}
 
-	if len(dk.ZSKs) == 0 {
-		dk.ZSKs = append(dk.ZSKs, dk.KSKs[0])
-	}
+	// Note: dk.ZSKs may legitimately be empty for a zone that has
+	// only KSKs. EnsureActiveDnssecKeysMP + PublishDnskeyRRs are
+	// responsible for generating any required ZSKs.
 
 	lgSigner.Debug("GetDnssecKeysMP returned keys", "zone", zonename, "state", state, "keys", logmsg)
 

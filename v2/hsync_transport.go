@@ -1718,7 +1718,7 @@ func (tm *MPTransportBridge) StartReliableQueue(ctx context.Context) {
 func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *transport.OutgoingMessage) error {
 	update, ok := msg.Payload.(*ZoneUpdate)
 	if !ok {
-		lgTransport.Warn("deliverGenericMessage: payload is not *ZoneUpdate", "recipient", msg.RecipientID, "payloadType", fmt.Sprintf("%T", msg.Payload))
+		return fmt.Errorf("deliverGenericMessage: payload is not *ZoneUpdate (recipient=%q, payloadType=%T)", msg.RecipientID, msg.Payload)
 	}
 
 	if tm.agentRegistry == nil {

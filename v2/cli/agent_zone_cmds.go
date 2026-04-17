@@ -320,7 +320,7 @@ var agentZoneDsyncUnpublishCmd = &cobra.Command{
 var agentZoneAddRRCmd = &cobra.Command{
 	Use:   "addrr",
 	Short: "Add a resource record to a zone and sync with peers and combiner",
-	Long: `Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC.
+	Long: `Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
 The RR type is inferred from the --rr argument.
 
 This will:
@@ -394,7 +394,7 @@ Examples:
 var agentZoneDelRRCmd = &cobra.Command{
 	Use:   "delrr",
 	Short: "Delete a resource record from a zone and sync with peers and combiner",
-	Long: `Delete a resource record from the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC.
+	Long: `Delete a resource record from the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
 The RR type is inferred from the --rr argument.
 
 This will:

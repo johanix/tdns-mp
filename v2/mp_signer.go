@@ -63,7 +63,13 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
 		resigned, err := zd.SignRRset(&rrset, zone, dak, force)
 		if err != nil {
-			lgSigner.Error("failed to sign RRset", "name", rrset.RRs[0].Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], "zone", zd.ZoneName)
+			name, rrtype := "<empty>", "<empty>"
+			if len(rrset.RRs) > 0 {
+				h := rrset.RRs[0].Header()
+				name = h.Name
+				rrtype = dns.TypeToString[uint16(h.Rrtype)]
+			}
+			lgSigner.Error("failed to sign RRset", "name", name, "rrtype", rrtype, "zone", zd.ZoneName, "err", err)
 		}
 		if resigned {
 			newrrsigs++
@@ -186,21 +192,28 @@ func (mpzd *MPZoneData) extractRemoteDNSKEYs(hdb *HsyncDB) error {
 		}
 	}
 
-	// Get existing foreign keys from the DB (to detect removals)
+	// Get existing foreign keys from the DB (to detect removals).
+	// Close the iterator immediately after scanning so the subsequent
+	// Exec writes don't contend with the open SQLite read cursor.
 	const fetchForeignSql = `SELECT keyid FROM MPDnssecKeyStore WHERE zonename=? AND state='foreign'`
 	rows, err := hdb.Query(fetchForeignSql, zd.ZoneName)
 	if err != nil {
 		return fmt.Errorf("extractRemoteDNSKEYs: zone %s: error querying foreign keys: %v", zd.ZoneName, err)
 	}
-	defer rows.Close()
 	existingForeign := make(map[uint16]bool)
 	for rows.Next() {
 		var keyid int
 		if err := rows.Scan(&keyid); err != nil {
+			rows.Close()
 			return fmt.Errorf("extractRemoteDNSKEYs: zone %s: error scanning foreign key row: %v", zd.ZoneName, err)
 		}
 		existingForeign[uint16(keyid)] = true
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("extractRemoteDNSKEYs: zone %s: row iteration error: %v", zd.ZoneName, err)
+	}
+	rows.Close()
 
 	// Identify foreign keys: any DNSKEY not in our local set
 	var remote []dns.RR
@@ -336,7 +349,9 @@ SELECT keyid, flags, algorithm, keyrr FROM MPDnssecKeyStore WHERE zonename=? AND
 	}
 
 	dnskeys := core.RRset{
-		RRs: publishkeys,
+		Name:   zd.ZoneName,
+		RRtype: dns.TypeDNSKEY,
+		RRs:    publishkeys,
 	}
 	apex.RRtypes.Set(dns.TypeDNSKEY, dnskeys)
 

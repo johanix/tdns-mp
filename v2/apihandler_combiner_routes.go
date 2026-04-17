@@ -70,6 +70,9 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 
 		switch req.Command {
 		case "errors":
+			if req.Last == "" {
+				req.Last = "24h"
+			}
 			duration, err := time.ParseDuration(req.Last)
 			if err != nil {
 				resp.Error = true

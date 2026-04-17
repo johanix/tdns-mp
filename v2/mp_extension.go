@@ -41,13 +41,18 @@ type MPState struct {
 	RefreshAnalysis      *ZoneRefreshAnalysis
 }
 
-// EnsureMP initializes the MP extension if nil.
+// EnsureMP initializes the MP extension if nil. Callers that hold
+// mpzd's lock can use this directly; callers that do not should take
+// the lock themselves around the full read-modify-write sequence.
 func (mpzd *MPZoneData) EnsureMP() {
 	if mpzd.MP == nil {
 		mpzd.MP = &MPState{}
 	}
 	if mpzd.MP.MultiProvider == nil {
 		mpzd.MP.MultiProvider = wiredMultiProvider
+	}
+	if mpzd.MPOptions == nil {
+		mpzd.MPOptions = make(map[tdns.ZoneOption]bool)
 	}
 }
 

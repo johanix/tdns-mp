@@ -358,6 +358,11 @@ var HsyncIndexes = []string{
 	// CombinerContributions indexes
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
+
+	// MPDnssecKeyStore indexes (state filter is hot path for
+	// GetDnssecKeysByState / foreign-key fetches).
+	`CREATE INDEX IF NOT EXISTS idx_mp_dnskey_state ON MPDnssecKeyStore(state)`,
+	`CREATE INDEX IF NOT EXISTS idx_mp_dnskey_zone_state ON MPDnssecKeyStore(zonename, state)`,
 }
 
 // validTableName checks that a table name contains only safe characters.
