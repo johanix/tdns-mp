@@ -27,6 +27,14 @@ func (hdb *HsyncDB) APIkeystoreMP(conf *Config) func(w http.ResponseWriter, r *h
 		err := decoder.Decode(&kp)
 		if err != nil {
 			lgApi.Warn("error decoding keystore post", "err", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(&tdns.KeystoreResponse{
+				Error:    true,
+				ErrorMsg: fmt.Sprintf("invalid JSON body: %v", err),
+				Time:     time.Now(),
+			})
+			return
 		}
 
 		lgApi.Debug("received /keystore request (MP)", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
@@ -212,13 +220,20 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
-		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
+		ownerName := pkc.DnskeyRR.Header().Name
+		res, err = tx.Exec(addDnskeySql, ownerName, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.DnskeyRR.String())
 		if err != nil {
 			return &resp, err
 		}
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("Updated %d rows", rows)
+		// Invalidate under the DB-stored owner name (the INSERT used
+		// ownerName, not kp.Keyname) so stale cache entries cannot hide
+		// the fresh DB row. Keep kp.Keyname deletes too in case callers
+		// primed the cache with that form.
+		delete(kdb.KeystoreDnskeyCache, ownerName+"+"+kp.State)
+		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(ownerName, kp.State))
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
 		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, kp.State))
 
@@ -329,6 +344,18 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		for _, key := range keysToDelete {
 			delete(kdb.KeystoreDnskeyCache, key)
 		}
+		// Purge MP-cache entries for this zone as well. The MP cache
+		// key format is produced by mpDnssecCacheKey; its zone prefix
+		// ends at the second "+".
+		var hdbKeysToDelete []string
+		for key := range hdb.KeystoreDnskeyCache {
+			if strings.HasPrefix(key, kp.Zone+"+mpdnssec+") {
+				hdbKeysToDelete = append(hdbKeysToDelete, key)
+			}
+		}
+		for _, key := range hdbKeysToDelete {
+			delete(hdb.KeystoreDnskeyCache, key)
+		}
 		lgSigner.Info("all MP DNSSEC keys cleared", "zone", kp.Zone, "count", count)
 
 		zd, zoneExists := tdns.Zones.Get(kp.Zone)
@@ -397,6 +424,10 @@ func (hdb *HsyncDB) listAllDnssecKeys(tx *tdns.Tx) (*tdns.KeystoreResponse, erro
 			Keystr:     keyrrstr,
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("listAllDnssecKeys: DnssecKeyStore rows iteration: %v", err)
+	}
 	rows.Close()
 
 	// 2. MP keys from MPDnssecKeyStore
@@ -429,6 +460,10 @@ func (hdb *HsyncDB) listAllDnssecKeys(tx *tdns.Tx) (*tdns.KeystoreResponse, erro
 			dk.PropagationConfirmedAt, _ = time.Parse(time.RFC3339, propConfirmedAt)
 		}
 		allKeys[mapkey] = dk
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("listAllDnssecKeys: MPDnssecKeyStore rows iteration: %v", err)
 	}
 	rows.Close()
 

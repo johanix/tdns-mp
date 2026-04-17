@@ -346,6 +346,11 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
 			} else {
 				inv := zd.GetLastKeyInventory()
+				if inv == nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange returned no inventory for zone %s", amp.Zone)
+					return
+				}
 				nForeign := 0
 				for _, entry := range inv.Inventory {
 					if entry.State == DnskeyStateForeign {
@@ -477,6 +482,11 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				return
 			}
 			imr := &Imr{rawImr}
+			if imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR cache not available"
+				return
+			}
 			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
 			if err != nil || len(sak.Keys) == 0 {
 				resp.Error = true

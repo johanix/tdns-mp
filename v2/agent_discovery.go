@@ -41,6 +41,11 @@ type AgentDiscoveryResult struct {
 //  2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
 //  3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
 func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *AgentDiscoveryResult) {
+	if imr == nil || imr.Imr == nil {
+		result.Error = fmt.Errorf("IMR engine not initialized")
+		result.Partial = true
+		return
+	}
 	identity = dns.Fqdn(identity)
 
 	apiUri, apiHost, apiPort, err := imr.LookupAgentAPIEndpoint(ctx, identity)
@@ -80,6 +85,11 @@ func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *A
 //  3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
 //  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
 func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *AgentDiscoveryResult) {
+	if imr == nil || imr.Imr == nil {
+		result.Error = fmt.Errorf("IMR engine not initialized")
+		result.Partial = true
+		return
+	}
 	identity = dns.Fqdn(identity)
 
 	dnsUri, dnsHost, dnsPort, err := imr.LookupAgentDNSEndpoint(ctx, identity)
@@ -128,6 +138,11 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *A
 func (imr *Imr) DiscoverAgent(ctx context.Context, identity string) *AgentDiscoveryResult {
 	result := &AgentDiscoveryResult{
 		Identity: identity,
+	}
+
+	if imr == nil || imr.Imr == nil {
+		result.Error = fmt.Errorf("IMR engine not initialized")
+		return result
 	}
 
 	imr.DiscoverAgentAPI(ctx, identity, result)

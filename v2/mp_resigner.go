@@ -28,9 +28,6 @@ func MPResignerEngine(ctx context.Context, resignch chan *MPZoneData) {
 		interval = 3600
 	}
 
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-
 	if !viper.GetBool("service.resign") {
 		lgSigner.Info("MPResignerEngine is NOT active, MP zones updated only on Notifies")
 		for {
@@ -45,9 +42,11 @@ func MPResignerEngine(ctx context.Context, resignch chan *MPZoneData) {
 				continue
 			}
 		}
-	} else {
-		lgSigner.Info("MPResignerEngine starting", "interval_sec", interval)
 	}
+	lgSigner.Info("MPResignerEngine starting", "interval_sec", interval)
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
 
 	ZonesToKeepSigned := make(map[string]*MPZoneData)
 
@@ -70,14 +69,34 @@ func MPResignerEngine(ctx context.Context, resignch chan *MPZoneData) {
 			ZonesToKeepSigned[mpzd.ZoneName] = mpzd
 
 		case <-ticker.C:
-			for _, mpzd := range ZonesToKeepSigned {
-				if !mpzd.Options[tdns.OptInlineSigning] && !mpzd.Options[tdns.OptOnlineSigning] {
+			for name, mpzd := range ZonesToKeepSigned {
+				// Drop zones that have been removed from the
+				// in-memory registry or that no longer opt into
+				// signing — keeps the map bounded and releases
+				// stale *MPZoneData references.
+				current, exists := Zones.Get(name)
+				if !exists || current == nil {
+					lgSigner.Info("MPResignerEngine: dropping removed zone from re-sign list", "zone", name)
+					delete(ZonesToKeepSigned, name)
 					continue
+				}
+				if !current.Options[tdns.OptInlineSigning] && !current.Options[tdns.OptOnlineSigning] {
+					lgSigner.Info("MPResignerEngine: dropping zone with signing disabled", "zone", name)
+					delete(ZonesToKeepSigned, name)
+					continue
+				}
+				// Use the fresh wrapper from the registry in case
+				// the zone was refreshed; falls back to mpzd if
+				// the two are the same object.
+				if current != mpzd {
+					mpzd = current
+					ZonesToKeepSigned[name] = current
 				}
 				lgSigner.Debug("MPResignerEngine: re-signing zone", "zone", mpzd.ZoneName)
 				newrrsigs, err := mpzd.SignZone(NewHsyncDB(mpzd.ZoneData.KeyDB), false)
 				if err != nil {
 					lgSigner.Error("MPResignerEngine: failed to re-sign zone", "zone", mpzd.ZoneName, "err", err)
+					continue
 				}
 				lgSigner.Info("MPResignerEngine: zone re-signed", "zone", mpzd.ZoneName, "new_rrsigs", newrrsigs)
 			}

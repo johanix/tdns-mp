@@ -14,7 +14,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -1506,10 +1507,18 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	}
 
 	// Both failed or skipped with nothing established
+	apiState := "<nil>"
+	if agent.ApiDetails != nil {
+		apiState = AgentStateToString[agent.ApiDetails.State]
+	}
+	dnsState := "<nil>"
+	if agent.DnsDetails != nil {
+		dnsState = AgentStateToString[agent.DnsDetails.State]
+	}
 	if apiResp == nil && dnsResp == nil && apiErr == nil && dnsErr == nil {
 		// No transport was in KNOWN state — nothing to do
 		return nil, fmt.Errorf("no transports in KNOWN state for Hello to peer %s (API: %s, DNS: %s)",
-			peer.ID, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+			peer.ID, apiState, dnsState)
 	}
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
@@ -2121,17 +2130,21 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint1
 	}
 }
 
-// parseHostPort splits an address into host and port, defaulting to defaultPort.
+// parseHostPort splits an address into host and port, defaulting to
+// defaultPort. Uses net.SplitHostPort so bracketed IPv6 literals
+// ("[::1]:53") parse correctly; bare IPv6 literals without a port
+// ("::1") fall back to defaultPort.
 func parseHostPort(addr string, defaultPort uint16) (string, uint16) {
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		host := addr[:idx]
-		portStr := addr[idx+1:]
-		var port uint16
-		if _, err := fmt.Sscanf(portStr, "%d", &port); err == nil {
-			return host, port
-		}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port supplied (or bare IPv6): treat the whole string
+		// as a host and apply the default port.
+		return addr, defaultPort
 	}
-	return addr, defaultPort
+	if port, convErr := strconv.ParseUint(portStr, 10, 16); convErr == nil {
+		return host, uint16(port)
+	}
+	return host, defaultPort
 }
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).

@@ -80,8 +80,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	go MPResignerEngine(ctx, mpResignQ)
 
 	conf.ForEachMPZone(func(zd *MPZoneData) {
-		zd.EnsureMP()
 		zd.Lock()
+		zd.EnsureMP()
 		if zd.MP.MPdata != nil {
 			cp := *zd.MP.MPdata
 			zd.MP.MPdata = &cp
