@@ -22,7 +22,9 @@ import (
 func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.DelegationSyncRequest, notifyq chan tdns.NotifyRequest, conf *Config) error {
 
 	lg.Info("DelegationSyncher: starting")
-	imr := func() *tdns.Imr { return conf.Config.Internal.ImrEngine }
+	imr := func() *Imr {
+		return &Imr{conf.Config.Internal.ImrEngine}
+	}
 	var err error
 	for {
 		select {
@@ -54,7 +56,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			case "DELEGATION-STATUS":
 				lg.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr())
+				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -74,7 +76,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				// Only the elected leader sends DDNS to the parent
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
-					if !lem.IsLeader(tdns.ZoneName(ds.ZoneName)) {
+					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						continue
 					}
@@ -82,14 +84,14 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = imr().ParentZone(zd.ZoneName)
+					zd.Parent, err = imr().Imr.ParentZone(zd.ZoneName)
 					if err != nil {
 						lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
 						continue
 					}
 				}
 
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, ds.SyncStatus, imr())
+				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, ds.SyncStatus, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
@@ -102,7 +104,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			case "EXPLICIT-SYNC-DELEGATION":
 				lg.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr())
+				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -115,7 +117,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				// Only the elected leader sends DDNS to the parent
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
-					if !lem.IsLeader(tdns.ZoneName(ds.ZoneName)) {
+					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
 						if ds.Response != nil {
@@ -135,7 +137,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr())
+				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -192,7 +194,7 @@ func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg
 		return
 	}
 
-	agents, err := tm.getAllAgentsForZone(tdns.ZoneName(zonename))
+	agents, err := tm.getAllAgentsForZone(ZoneName(zonename))
 	if err != nil {
 		lg.Warn("notifyPeersParentSyncDone: failed to get agents for zone", "zone", zonename, "err", err)
 		return

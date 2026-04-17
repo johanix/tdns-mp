@@ -136,9 +136,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner
 			if hasSigner && !notASigner {
 				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname, "weAreSigner", weAreSigner)
-				RequestAndWaitForKeyInventory(zd.ZoneData, ctx, conf.InternalMp.MPTransport)
+				zd.RequestAndWaitForKeyInventory(ctx, conf.InternalMp.MPTransport)
 
-				changed, ds, err := LocalDnskeysFromKeystate(zd.ZoneData)
+				changed, ds, err := zd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
 				} else if changed && ds != nil {

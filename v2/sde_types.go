@@ -167,14 +167,31 @@ type TrackedRRInfo struct {
 }
 
 // --- From hsyncengine.go ---
-// SyncRequest, SyncResponse, SyncStatus, HsyncStatus, DnskeyStatus MUST
-// remain aliases (not real types). They are used in channels shared between
-// tdns and tdns-mp code (e.g., zd.SyncQ chan SyncRequest). Converting any
-// of these to a real type would break channel operations at compile time.
-// This constraint holds until the shared channels are redesigned.
-type SyncRequest = tdns.SyncRequest
-type SyncResponse = tdns.SyncResponse
-type SyncStatus = tdns.SyncStatus
+// SyncQ is owned by tdns-mp; SyncRequest uses *tdns.ZoneData for the embedded zone blob.
+type SyncRequest struct {
+	Command      string
+	ZoneName     ZoneName
+	ZoneData     *tdns.ZoneData
+	SyncStatus   *HsyncStatus
+	OldDnskeys   *core.RRset
+	NewDnskeys   *core.RRset
+	DnskeyStatus *DnskeyStatus
+	Response     chan SyncResponse
+}
+
+type SyncResponse struct {
+	Status   bool
+	Error    bool
+	ErrorMsg string
+	Msg      string
+}
+
+type SyncStatus struct {
+	Identity AgentId
+	Agents   map[AgentId]*Agent
+	Error    bool
+	Response chan SyncStatus
+}
 
 type DeferredTask struct {
 	Action      string
@@ -196,11 +213,24 @@ type ZoneAgentData struct {
 
 // --- From zone_utils.go ---
 
-// HsyncStatus stays as alias — embedded in tdns.SyncRequest which crosses
-// the tdns/tdns-mp boundary via the shared SyncQ channel.
-type HsyncStatus = tdns.HsyncStatus
+type HsyncStatus struct {
+	Time         time.Time
+	ZoneName     string
+	Command      string
+	Status       bool
+	Error        bool
+	ErrorMsg     string
+	Msg          string
+	HsyncAdds    []dns.RR
+	HsyncRemoves []dns.RR
+}
 
 // --- From hsync_utils.go ---
 
-// DnskeyStatus stays as alias — same reason as HsyncStatus.
-type DnskeyStatus = tdns.DnskeyStatus
+type DnskeyStatus struct {
+	Time             time.Time
+	ZoneName         string
+	LocalAdds        []dns.RR
+	LocalRemoves     []dns.RR
+	CurrentLocalKeys []dns.RR
+}

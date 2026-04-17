@@ -291,6 +291,25 @@ var HsyncTables = map[string]string{
 		updated_at  INTEGER NOT NULL,
 		UNIQUE(zone, sender_id, owner, rrtype, rr)
 	)`,
+
+	// MPDnssecKeyStore holds DNSSEC keys for tdns-mp signer/agent (MP states and propagation columns).
+	"MPDnssecKeyStore": `CREATE TABLE IF NOT EXISTS 'MPDnssecKeyStore' (
+		id                        INTEGER PRIMARY KEY,
+		zonename                  TEXT,
+		state                     TEXT,
+		keyid                     INTEGER,
+		flags                     INTEGER,
+		algorithm                 TEXT,
+		creator                   TEXT,
+		privatekey                TEXT,
+		keyrr                     TEXT,
+		comment                   TEXT,
+		propagation_confirmed     INTEGER DEFAULT 0,
+		propagation_confirmed_at  TEXT DEFAULT '',
+		published_at              TEXT DEFAULT '',
+		retired_at                TEXT DEFAULT '',
+		UNIQUE (zonename, keyid)
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.
@@ -339,6 +358,11 @@ var HsyncIndexes = []string{
 	// CombinerContributions indexes
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
+
+	// MPDnssecKeyStore indexes (state filter is hot path for
+	// GetDnssecKeysByState / foreign-key fetches).
+	`CREATE INDEX IF NOT EXISTS idx_mp_dnskey_state ON MPDnssecKeyStore(state)`,
+	`CREATE INDEX IF NOT EXISTS idx_mp_dnskey_zone_state ON MPDnssecKeyStore(zonename, state)`,
 }
 
 // validTableName checks that a table name contains only safe characters.

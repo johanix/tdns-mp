@@ -17,7 +17,7 @@ import (
 
 // queryParentKeyStateDetailed sends a KeyState EDNS(0) inquiry to the parent
 // and returns the parent's reported state for the key, including extra text.
-func queryParentKeyStateDetailed(hdb *HsyncDB, imr *tdns.Imr, keyName string, keyid uint16) (uint8, string, error) {
+func queryParentKeyStateDetailed(hdb *HsyncDB, imr *Imr, keyName string, keyid uint16) (uint8, string, error) {
 	ctx := context.Background()
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)

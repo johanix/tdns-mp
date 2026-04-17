@@ -21,7 +21,7 @@ func (conf *Config) SetupMPAgentRoutes(ctx context.Context, apirouter *mux.Route
 	sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/agent/transaction", conf.APIagentTransaction(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
-	sr.HandleFunc("/keystore", kdb.APIkeystore(conf.Config)).Methods("POST")
+	sr.HandleFunc("/keystore", conf.InternalMp.HsyncDB.APIkeystoreMP(conf)).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	sr.HandleFunc("/zone/dsync", tdns.APIzoneDsync(ctx, &tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/delegation", tdns.APIdelegation(conf.Config.Internal.DelegationSyncQ)).Methods("POST")

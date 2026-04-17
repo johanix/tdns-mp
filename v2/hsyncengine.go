@@ -83,7 +83,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 	conf.InternalMp.SyncStatusQ = make(chan SyncStatus, 10)
 
 	// Configure intervals
-	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
+	heartbeatInterval := configureInterval("multi-provider.syncengine.intervals.beatinterval", 15, 1800)
 
 	lgEngine.Info("starting", "heartbeat_interval", heartbeatInterval)
 
@@ -158,13 +158,13 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 				lgEngine.Warn("proactive inventory: zone not found", "zone", inventoryMsg.Zone)
 				break
 			}
-			zd.SetLastKeyInventory(&tdns.KeyInventorySnapshot{
+			zd.SetLastKeyInventory(&KeyInventorySnapshot{
 				SenderID:  inventoryMsg.SenderID,
 				Zone:      inventoryMsg.Zone,
 				Inventory: inventoryMsg.Inventory,
 				Received:  time.Now(),
 			})
-			changed, ds, err := LocalDnskeysFromKeystate(zd.ZoneData)
+			changed, ds, err := zd.LocalDnskeysFromKeystate()
 			if err != nil {
 				lgEngine.Error("proactive inventory: LocalDnskeysFromKeystate failed", "zone", inventoryMsg.Zone, "err", err)
 				break
@@ -193,7 +193,7 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 // It runs in its own goroutine with a configurable retry interval and only
 // attempts discovery when the IMR engine is available.
 func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
-	discoveryRetryInterval := configureInterval("agent.syncengine.intervals.discoveryretry", 15, 1800)
+	discoveryRetryInterval := configureInterval("multi-provider.syncengine.intervals.discoveryretry", 15, 1800)
 	lgEngine.Info("discovery retrier starting", "interval", discoveryRetryInterval)
 
 	ticker := time.NewTicker(time.Duration(discoveryRetryInterval) * time.Second)
@@ -214,7 +214,7 @@ func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
 // Skips the iteration if IMR engine is not yet available (will retry next tick).
 func (ar *AgentRegistry) retryPendingDiscoveries() {
 	// Get IMR engine via injected closure - skip iteration if not ready yet (will retry next tick)
-	var imr *tdns.Imr
+	var imr *Imr
 	if ar.MPTransport != nil && ar.MPTransport.getImrEngine != nil {
 		imr = ar.MPTransport.getImrEngine()
 	}
@@ -1018,8 +1018,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	// Send the response immediately with a timeout to avoid blocking
 	select {
 	case req.Response <- SyncStatus{
-		// Agents field skipped: local *Agent is not compatible with *tdns.Agent
-		// in the aliased SyncStatus. Status queries still get Identity and Error.
+		// Agents field skipped: SanitizeForJSON returns *tdns.Agent, not *tdnsmp.Agent.
 		Identity: AgentId(ar.LocalAgent.Identity),
 		Error:    false,
 	}:

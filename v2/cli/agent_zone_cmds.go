@@ -320,7 +320,7 @@ var agentZoneDsyncUnpublishCmd = &cobra.Command{
 var agentZoneAddRRCmd = &cobra.Command{
 	Use:   "addrr",
 	Short: "Add a resource record to a zone and sync with peers and combiner",
-	Long: `Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC.
+	Long: `Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
 The RR type is inferred from the --rr argument.
 
 This will:
@@ -343,7 +343,7 @@ Examples:
 			log.Fatalf("Error: Invalid DNS record: %v", err)
 		}
 
-		if !tdns.AllowedLocalRRtypes[rr.Header().Rrtype] {
+		if !allowedLocalRRtypes[rr.Header().Rrtype] {
 			allowed := allowedRRtypeNames()
 			log.Fatalf("Error: RR type %s is not allowed (must be one of: %s)",
 				dns.TypeToString[rr.Header().Rrtype], strings.Join(allowed, ", "))
@@ -354,9 +354,9 @@ Examples:
 		}
 
 		agentZoneForce, _ := cmd.Flags().GetBool("force")
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "add-rr",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 			RRs:     []string{rr.String()},
 		}
 		if agentZoneForce {
@@ -373,7 +373,7 @@ Examples:
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
-		var amr tdns.AgentMgmtResponse
+		var amr AgentMgmtResponse
 		if err := json.Unmarshal(buf, &amr); err != nil {
 			log.Fatalf("Failed to parse response: %v", err)
 		}
@@ -394,7 +394,7 @@ Examples:
 var agentZoneDelRRCmd = &cobra.Command{
 	Use:   "delrr",
 	Short: "Delete a resource record from a zone and sync with peers and combiner",
-	Long: `Delete a resource record from the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC.
+	Long: `Delete a resource record from the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
 The RR type is inferred from the --rr argument.
 
 This will:
@@ -417,7 +417,7 @@ Examples:
 			log.Fatalf("Error: Invalid DNS record: %v", err)
 		}
 
-		if !tdns.AllowedLocalRRtypes[rr.Header().Rrtype] {
+		if !allowedLocalRRtypes[rr.Header().Rrtype] {
 			allowed := allowedRRtypeNames()
 			log.Fatalf("Error: RR type %s is not allowed (must be one of: %s)",
 				dns.TypeToString[rr.Header().Rrtype], strings.Join(allowed, ", "))
@@ -428,9 +428,9 @@ Examples:
 		}
 
 		agentZoneForce, _ := cmd.Flags().GetBool("force")
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "del-rr",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 			RRs:     []string{rr.String()},
 		}
 		if agentZoneForce {
@@ -447,7 +447,7 @@ Examples:
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
-		var amr tdns.AgentMgmtResponse
+		var amr AgentMgmtResponse
 		if err := json.Unmarshal(buf, &amr); err != nil {
 			log.Fatalf("Failed to parse response: %v", err)
 		}
@@ -467,9 +467,20 @@ Examples:
 
 // --- Helper ---
 
+// allowedLocalRRtypes mirrors the "apex-combiner" preset from
+// tdns-mp/v2/combiner_utils.go. Defined locally to avoid a
+// circular import (cli → tdnsmp).
+var allowedLocalRRtypes = map[uint16]bool{
+	dns.TypeDNSKEY: true,
+	dns.TypeCDS:    true,
+	dns.TypeCSYNC:  true,
+	dns.TypeNS:     true,
+	dns.TypeKEY:    true,
+}
+
 func allowedRRtypeNames() []string {
-	names := make([]string, 0, len(tdns.AllowedLocalRRtypes))
-	for rrtype := range tdns.AllowedLocalRRtypes {
+	names := make([]string, 0, len(allowedLocalRRtypes))
+	for rrtype := range allowedLocalRRtypes {
 		names = append(names, dns.TypeToString[rrtype])
 	}
 	sort.Strings(names)

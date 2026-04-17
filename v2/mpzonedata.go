@@ -15,14 +15,23 @@ import (
 )
 
 // MPZoneData embeds *tdns.ZoneData. All core ZoneData fields and
-// methods are accessible via Go promotion. MP-specific fields
-// (zd.MP.*) work unchanged via the embedded pointer.
+// methods are accessible via Go promotion.
+//
+// MP *MPState shadows the promoted tdns.ZoneData.MP field, so all
+// .MP accesses in tdns-mp resolve to the local MPState copy.
+//
+// MPOptions holds MP-dynamic options (set by HSYNC analysis) that
+// are only read by tdns-mp code. Options read by tdns core
+// infrastructure (OptInlineSigning, OptMultiProvider, etc.) stay
+// on zd.Options.
 //
 // SyncQ is the MP sync request channel. It lives here (not on
 // tdns.ZoneData) because it is only used by tdns-mp code.
 type MPZoneData struct {
 	*tdns.ZoneData
-	SyncQ chan SyncRequest
+	MP        *MPState
+	MPOptions map[tdns.ZoneOption]bool
+	SyncQ     chan SyncRequest
 }
 
 // MPZoneTuple is the iteration element returned by IterBuffered.
@@ -69,7 +78,11 @@ func (mz *MPZones) Get(name string) (*MPZoneData, bool) {
 	if mpzd, ok := mz.cache[name]; ok {
 		return mpzd, true
 	}
-	mpzd := &MPZoneData{ZoneData: zd}
+	mpzd := &MPZoneData{
+		ZoneData:  zd,
+		MP:        &MPState{},
+		MPOptions: make(map[tdns.ZoneOption]bool),
+	}
 	mz.cache[name] = mpzd
 	return mpzd, true
 }
@@ -144,7 +157,11 @@ func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 	if mpzd, ok := mz.cache[name]; ok {
 		return mpzd
 	}
-	mpzd := &MPZoneData{ZoneData: zd}
+	mpzd := &MPZoneData{
+		ZoneData:  zd,
+		MP:        &MPState{},
+		MPOptions: make(map[tdns.ZoneOption]bool),
+	}
 	mz.cache[name] = mpzd
 	return mpzd
 }

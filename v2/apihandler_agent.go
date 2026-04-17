@@ -100,7 +100,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			}
 			// Per-RRtype policy for non-signers on signed zones:
 			// block signing RRtypes, allow NS (if nsmgmt=agent) and KEY (if parentsync=agent).
-			if zd != nil && zd.Options[tdns.OptMPDisallowEdits] {
+			if zd != nil && zd.MPOptions[tdns.OptMPDisallowEdits] {
 				policy := zd.getEditPolicy()
 				for _, rrStr := range amp.RRs {
 					parsed, err := dns.NewRR(rrStr)
@@ -340,29 +340,44 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("HELLO to %s succeeded: %s (time: %s)", amp.AgentId, ahr.Msg, ahr.Time.Format(time.RFC3339))
 
 		case "refresh-keys":
-			RequestAndWaitForKeyInventory(zd.ZoneData, r.Context(), conf.InternalMp.MPTransport)
+			zd.RequestAndWaitForKeyInventory(r.Context(), conf.InternalMp.MPTransport)
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
 			} else {
 				inv := zd.GetLastKeyInventory()
+				if inv == nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange returned no inventory for zone %s", amp.Zone)
+					return
+				}
 				nForeign := 0
 				for _, entry := range inv.Inventory {
-					if entry.State == tdns.DnskeyStateForeign {
+					if entry.State == DnskeyStateForeign {
 						nForeign++
 					}
 				}
 				// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
-				changed, dskeyStatus, err := LocalDnskeysFromKeystate(zd.ZoneData)
+				changed, dskeyStatus, err := zd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
 				}
 				if changed && dskeyStatus != nil {
-					zd.SyncQ <- tdns.SyncRequest{
+					select {
+					case zd.SyncQ <- SyncRequest{
 						Command:      "SYNC-DNSKEY-RRSET",
-						ZoneName:     tdns.ZoneName(zd.ZoneName),
+						ZoneName:     ZoneName(zd.ZoneName),
 						ZoneData:     zd.ZoneData,
 						DnskeyStatus: dskeyStatus,
+					}:
+					case <-r.Context().Done():
+						resp.Error = true
+						resp.ErrorMsg = "request cancelled while enqueuing SYNC-DNSKEY-RRSET"
+						return
+					case <-time.After(2 * time.Second):
+						resp.Error = true
+						resp.ErrorMsg = "SyncQ full, SYNC-DNSKEY-RRSET not enqueued"
+						return
 					}
 				}
 				resp.Msg = fmt.Sprintf("Key inventory refreshed for zone %s: %d keys (%d local, %d foreign)",
@@ -424,7 +439,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, conf.Config.Internal.ImrEngine, conf.InternalMp.AgentRegistry)
+			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -460,10 +475,16 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Election started for zone %s with %d peers", amp.Zone, configured)
 
 		case "parentsync-inquire":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil {
+			rawImr := tdns.Globals.ImrEngine
+			if rawImr == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			imr := &Imr{rawImr}
+			if imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR cache not available"
 				return
 			}
 			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
@@ -512,8 +533,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
@@ -559,8 +580,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Cache entry for %s %s", qname, dns.TypeToString[qtype])
 
 		case "imr-flush":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
@@ -581,8 +602,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
 
 		case "imr-reset":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return
@@ -591,8 +612,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			resp.Msg = fmt.Sprintf("IMR cache reset: flushed %d entries (root NS and glue preserved)", removed)
 
 		case "imr-show":
-			imr := tdns.Globals.ImrEngine
-			if imr == nil || imr.Cache == nil {
+			imr := &Imr{tdns.Globals.ImrEngine}
+			if imr.Imr == nil || imr.Cache == nil {
 				resp.Error = true
 				resp.ErrorMsg = "IMR engine not available"
 				return

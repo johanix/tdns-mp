@@ -10,6 +10,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -25,9 +26,14 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
 
-	// In tdns-agent, IMR is active by default unless explicitly set to false
+	// Initialize IMR synchronously so it's available before transport bridges
+	// and agent registries are created. The agent requires a working IMR; if
+	// initialization fails, crash early rather than get nil panics later.
 	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
 	if imrActive {
+		if err := conf.Config.InitImrEngine(true); err != nil {
+			log.Fatalf("IMR initialization failed: %v", err)
+		}
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
@@ -48,6 +54,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
 		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
+		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
 
 	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
@@ -148,7 +157,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				if mp == nil {
 					return
 				}
-				w := &MPZoneData{ZoneData: zd}
+				w, ok := Zones.Get(zd.ZoneName)
+				if !ok {
+					return
+				}
 				ourIds := ourHsyncIdentities(mp)
 				matched, _, _ := w.matchHsyncIdentity(ourIds)
 				if !matched {
@@ -208,7 +220,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			lgAgent.Debug("onLeaderElected: IMR not available, skipping DSYNC bootstrap", "zone", zone)
 			return nil
 		}
-		_, err := tdns.Globals.ImrEngine.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
+		imr := &Imr{tdns.Globals.ImrEngine}
+		_, err := imr.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
 		if err != nil {
 			lgAgent.Info("onLeaderElected: parent does not advertise DSYNC UPDATE scheme, skipping SIG(0) key setup",
 				"zone", zone, "err", err)
@@ -284,7 +297,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		keyRR := &sak.Keys[0].KeyRR
 		lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", sak.Keys[0].KeyId)
 
-		zu := &tdns.ZoneUpdate{
+		zu := &ZoneUpdate{
 			Zone: zone,
 			Operations: []core.RROperation{{
 				Operation: "replace",
@@ -303,7 +316,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
 
-		agentUpdate := &tdns.ZoneUpdate{
+		agentUpdate := &ZoneUpdate{
 			Zone: zone,
 			Operations: []core.RROperation{{
 				Operation: "replace",

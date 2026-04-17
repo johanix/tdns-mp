@@ -177,11 +177,17 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 			continue
 		}
 
-		// Check if this is a multi-provider zone
+		// Check if this is a multi-provider zone. Missing from the
+		// in-memory registry means the zone was removed from config
+		// since the key was persisted — treat as non-MP removal and
+		// warn so operators notice the orphan.
 		targetState := tdns.DnskeyStateRemoved
 		zd, exists := Zones.Get(key.ZoneName)
-		if exists && zd.Options[tdns.OptMultiProvider] {
-			targetState = tdns.DnskeyStateMpremove
+		switch {
+		case exists && zd.Options[tdns.OptMultiProvider]:
+			targetState = DnskeyStateMpremove
+		case !exists:
+			lgSigner.Warn("KeyStateWorker: zone not found in config, defaulting to removed", "zone", key.ZoneName, "keyid", key.KeyTag)
 		}
 
 		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
@@ -194,7 +200,7 @@ func transitionRetiredToRemoved(conf *Config, hdb *HsyncDB, now time.Time, propa
 
 		// For MP zones, push updated inventory to all agents so they
 		// learn about the key removal and distribute it to remote agents.
-		if targetState == tdns.DnskeyStateMpremove {
+		if targetState == DnskeyStateMpremove {
 			pushKeystateInventoryToAllAgents(conf, key.ZoneName)
 		}
 	}
@@ -211,27 +217,29 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 			continue
 		}
 
-		// Skip multi-provider zones where we are not a signer
-		if mpzd.Options[tdns.OptMultiProvider] {
-			shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
-			if !shouldSign {
-				continue
-			}
+		// Non-MP zones have their own key state worker and their own
+		// keystore table (DnssecKeyStore). Skip them here.
+		if !mpzd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+
+		// Skip MP zones where we are not a signer
+		shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
+		if !shouldSign {
+			continue
 		}
 
 		if mpzd.DnssecPolicy == nil {
 			continue
 		}
-
-		isMP := mpzd.Options[tdns.OptMultiProvider]
 		alg := mpzd.DnssecPolicy.Algorithm
 
-		// Maintain ZSK standby count
-		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)
+		// Maintain ZSK standby count (always MP — non-MP zones skipped above)
+		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, true, standbyZskCount)
 
 		// Maintain KSK standby count (0 means don't maintain)
 		if standbyKskCount > 0 {
-			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, isMP, standbyKskCount)
+			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, true, standbyKskCount)
 		}
 	}
 }
@@ -255,7 +263,7 @@ func maintainStandbyKeysForType(hdb *HsyncDB, zoneName string, alg uint8, keytyp
 	publishedKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStatePublished)
 	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
 
-	mpdistKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStateMpdist)
+	mpdistKeys, _ := GetDnssecKeysByState(hdb, zoneName, DnskeyStateMpdist)
 	mpdistCount := countKeysByFlags(mpdistKeys, expectedFlags)
 
 	if publishedCount > 0 || mpdistCount > 0 {

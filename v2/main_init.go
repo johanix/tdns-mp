@@ -71,34 +71,40 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
+	wiredMultiProvider = conf.MultiProvider
 
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
 	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
 	// not during ParseZones.
-	resignQ := conf.Config.Internal.ResignQ
+	mpResignQ := make(chan *MPZoneData, 10)
+	go MPResignerEngine(ctx, mpResignQ)
+
 	conf.ForEachMPZone(func(zd *MPZoneData) {
-		zd.EnsureMP()
 		zd.Lock()
+		zd.EnsureMP()
 		if zd.MP.MPdata != nil {
 			cp := *zd.MP.MPdata
 			zd.MP.MPdata = &cp
 			zd.MP.MPdata.Options = map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}
 		} else {
-			zd.MP.MPdata = &tdns.MPdata{
+			zd.MP.MPdata = &MPdata{
 				Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
 			}
 		}
 		zd.Unlock()
 
 		// MP signing OnFirstLoad: after zone load, if HSYNC analysis
-		// has dynamically enabled OptInlineSigning, set up signing.
-		// This was previously in tdns ParseZones gated on
-		// (AppTypeAuth || AppTypeMPSigner).
+		// has dynamically enabled OptInlineSigning, set up signing
+		// via the MP ResignerEngine (not the tdns one).
 		if zd.FirstZoneLoad {
 			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if zd.Options[tdns.OptInlineSigning] {
-					if err := zd.SetupZoneSigning(resignQ); err != nil {
-						lg.Error("SetupZoneSigning failed in MP OnFirstLoad",
+					mpzd, ok := Zones.Get(zd.ZoneName)
+					if !ok {
+						return
+					}
+					if err := mpzd.SetupZoneSigning(mpResignQ); err != nil {
+						lg.Error("MP SetupZoneSigning failed in OnFirstLoad",
 							"zone", zd.ZoneName, "error", err)
 					}
 				}
@@ -144,6 +150,15 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 	}
 	if len(mp.Agents) == 0 {
 		return fmt.Errorf("multi-provider.agents is required when multi-provider.active is true")
+	}
+
+	kdb := conf.Config.Internal.KeyDB
+	if kdb == nil {
+		return fmt.Errorf("KeyDB is required for MP signer")
+	}
+	conf.InternalMp.HsyncDB = NewHsyncDB(kdb)
+	if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
+		return fmt.Errorf("InitHsyncTables: %w", err)
 	}
 
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
@@ -435,8 +450,8 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	if mp.Combiner != nil && mp.Combiner.Identity != "" {
 		combinerID = dns.Fqdn(mp.Combiner.Identity)
 	}
-	conf.InternalMp.CombinerState = &tdns.CombinerState{
-		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
+	conf.InternalMp.CombinerState = &CombinerState{
+		ErrorJournal: NewErrorJournal(1000, 24*time.Hour),
 	}
 
 	// Initialize HsyncDB and HSYNC database tables
@@ -536,7 +551,9 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 		MessageRetention: func(operation string) int {
 			return mp.Dns.MessageRetention.GetRetentionForMessageType(operation)
 		},
-		GetImrEngine:   func() *tdns.Imr { return conf.Config.Internal.ImrEngine },
+		GetImrEngine: func() *Imr {
+			return &Imr{conf.Config.Internal.ImrEngine}
+		},
 		GetZone:        tdns.Zones.Get,
 		GetZoneNames:   tdns.Zones.Keys,
 		ClientCertFile: mp.Api.CertFile,

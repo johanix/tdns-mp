@@ -549,7 +549,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename, "ptr", fmt.Sprintf("%p", agent))
 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
-	var imr *tdns.Imr
+	var imr *Imr
 	if ar.MPTransport != nil && ar.MPTransport.getImrEngine != nil {
 		imr = ar.MPTransport.getImrEngine()
 	}
@@ -563,7 +563,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 
 // attemptDiscovery performs a single discovery attempt for an agent.
 // Called by DiscoveryRetrierNG for agents in NEEDED state.
-func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *tdns.Imr, discoverAPI, discoverDNS bool) {
+func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, discoverDNS bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -572,10 +572,10 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *tdns.Imr, discoverA
 	result := &AgentDiscoveryResult{Identity: string(agent.Identity)}
 
 	if discoverAPI {
-		DiscoverAgentAPI(ctx, imr, string(agent.Identity), result)
+		imr.DiscoverAgentAPI(ctx, string(agent.Identity), result)
 	}
 	if discoverDNS {
-		DiscoverAgentDNS(ctx, imr, string(agent.Identity), result)
+		imr.DiscoverAgentDNS(ctx, string(agent.Identity), result)
 	}
 
 	// Check if we got anything useful from the transports we discovered

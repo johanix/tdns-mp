@@ -38,7 +38,7 @@ func (conf *Config) SetupMPCombinerRoutes(ctx context.Context, apirouter *mux.Ro
 func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var req tdns.TransactionPost
+		var req TransactionPost
 		err := decoder.Decode(&req)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combinerTransaction", "err", err)
@@ -48,7 +48,7 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 
 		lgApi.Debug("received /combiner/transaction request", "cmd", req.Command, "from", r.RemoteAddr)
 
-		resp := tdns.TransactionResponse{
+		resp := TransactionResponse{
 			Time: time.Now(),
 		}
 
@@ -70,6 +70,9 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 
 		switch req.Command {
 		case "errors":
+			if req.Last == "" {
+				req.Last = "24h"
+			}
 			duration, err := time.ParseDuration(req.Last)
 			if err != nil {
 				resp.Error = true
@@ -80,9 +83,9 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 			entries := combinerState.ErrorJournal.ListSince(duration)
 			now := time.Now()
 
-			var errors []*tdns.TransactionErrorSummary
+			var errors []*TransactionErrorSummary
 			for _, e := range entries {
-				errors = append(errors, &tdns.TransactionErrorSummary{
+				errors = append(errors, &TransactionErrorSummary{
 					DistributionID: e.DistributionID,
 					Age:            formatDuration(now.Sub(e.Timestamp)),
 					Sender:         e.Sender,
@@ -108,7 +111,7 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 				return
 			}
 			now := time.Now()
-			resp.ErrorDetail = &tdns.TransactionErrorSummary{
+			resp.ErrorDetail = &TransactionErrorSummary{
 				DistributionID: entry.DistributionID,
 				Age:            formatDuration(now.Sub(entry.Timestamp)),
 				Sender:         entry.Sender,

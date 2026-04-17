@@ -45,7 +45,7 @@ var agentLocalConfigCmd = &cobra.Command{
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		req := tdns.AgentMgmtPost{
+		req := AgentMgmtPost{
 			Command: "config",
 		}
 
@@ -54,7 +54,7 @@ var agentLocalConfigCmd = &cobra.Command{
 			log.Fatalf("API request failed: %v", err)
 		}
 
-		var amr tdns.AgentMgmtResponse
+		var amr AgentMgmtResponse
 		if err := json.Unmarshal(buf, &amr); err != nil {
 			log.Fatalf("Failed to parse response: %v", err)
 		}
@@ -116,9 +116,9 @@ Example:
 	Run: func(cmd *cobra.Command, args []string) {
 		agentIdentity := args[0]
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "discover",
-			AgentId: tdns.AgentId(agentIdentity),
+			AgentId: AgentId(agentIdentity),
 		}, "discover")
 
 		if err != nil {
@@ -197,11 +197,11 @@ Modes:
 			resyncFull = true
 		}
 
-		zone := tdns.ZoneName(tdns.Globals.Zonename)
+		zone := ZoneName(tdns.Globals.Zonename)
 
 		// Refresh key inventory from signer before resync
 		fmt.Printf("Refreshing key inventory for zone %s...\n", zone)
-		keyReq := &tdns.AgentMgmtPost{Command: "refresh-keys", Zone: zone}
+		keyReq := &AgentMgmtPost{Command: "refresh-keys", Zone: zone}
 		keyResp, err := SendAgentMgmtCmd(keyReq, "peer")
 		if err != nil {
 			fmt.Printf("Warning: failed to refresh key inventory: %v\n", err)
@@ -214,9 +214,9 @@ Modes:
 		// Pull first: fetch remote data so we have the complete picture
 		if resyncPull || resyncFull {
 			fmt.Printf("Resync pull: requesting peers to re-send data for zone %s...\n", zone)
-			req := &tdns.AgentMgmtPost{
+			req := &AgentMgmtPost{
 				Command:     "send-rfi",
-				MessageType: tdns.AgentMsgRfi,
+				MessageType: AgentMsgRfi,
 				RfiType:     "SYNC",
 				Zone:        zone,
 			}
@@ -242,7 +242,7 @@ Modes:
 		// Push second: re-send local data to combiner and remote agents
 		if resyncPush || resyncFull {
 			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
-			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
+			req := &AgentMgmtPost{Command: "resync", Zone: zone}
 			amr, err := SendAgentMgmtCmd(req, "peer")
 			if err != nil {
 				fmt.Printf("Error sending resync push: %v\n", err)
@@ -284,7 +284,7 @@ func init() {
 	agentPeerResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
 }
 
-func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
+func SendAgentMgmtCmd(req *AgentMgmtPost, prefix string) (*AgentMgmtResponse, error) {
 	prefixcmd, _ := tdnscli.GetCommandContext(prefix)
 	api, err := tdnscli.GetApiClient(prefixcmd, true)
 	if err != nil {
@@ -298,7 +298,7 @@ func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtRe
 		return nil, fmt.Errorf("API request failed: %v", err)
 	}
 
-	var amr tdns.AgentMgmtResponse
+	var amr AgentMgmtResponse
 	if err := json.Unmarshal(buf, &amr); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %v", err)
 	}
@@ -332,9 +332,9 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 		return fmt.Errorf("invalid command: %s", cmd)
 	}
 
-	amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+	amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 		Command: apiCmd,
-		Zone:    tdns.ZoneName(dns.Fqdn(zonename)),
+		Zone:    ZoneName(dns.Fqdn(zonename)),
 		RRs:     []string{rr.String()},
 	}, "local")
 

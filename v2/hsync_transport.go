@@ -14,7 +14,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -74,7 +75,7 @@ type MPTransportBridge struct {
 
 	// getImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
-	getImrEngine func() *tdns.Imr
+	getImrEngine func() *Imr
 
 	// getZone returns zone data by name. Injected to avoid coupling to global Zones.
 	// Used by HSYNC3-based authorization in agent_authorization.go.
@@ -172,7 +173,7 @@ type MPTransportBridgeConfig struct {
 	// GetImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	// Only the agent needs this; combiner/signer/external apps pass nil.
-	GetImrEngine func() *tdns.Imr
+	GetImrEngine func() *Imr
 
 	// GetZone returns zone data by name. Injected to decouple from global Zones.
 	// Only needed by roles that use HSYNC3-based authorization (agent).
@@ -355,7 +356,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
 				detail := &ConfirmationDetail{
 					DistributionID: distributionID,
-					Zone:           tdns.ZoneName(zone),
+					Zone:           ZoneName(zone),
 					Source:         senderID,
 					Status:         status.String(),
 					AppliedRecords: applied,
@@ -821,7 +822,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			MessageType:    messageType,
 			OriginatorID:   AgentId(senderID),
 			DeliveredBy:    AgentId(deliveredBy),
-			Zone:           tdns.ZoneName(zone),
+			Zone:           ZoneName(zone),
 			Records:        records,
 			Operations:     payload.GetOperations(),
 			Time:           time.Unix(payload.Timestamp, 0),
@@ -1506,10 +1507,18 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	}
 
 	// Both failed or skipped with nothing established
+	apiState := "<nil>"
+	if agent.ApiDetails != nil {
+		apiState = AgentStateToString[agent.ApiDetails.State]
+	}
+	dnsState := "<nil>"
+	if agent.DnsDetails != nil {
+		dnsState = AgentStateToString[agent.DnsDetails.State]
+	}
 	if apiResp == nil && dnsResp == nil && apiErr == nil && dnsErr == nil {
 		// No transport was in KNOWN state — nothing to do
 		return nil, fmt.Errorf("no transports in KNOWN state for Hello to peer %s (API: %s, DNS: %s)",
-			peer.ID, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+			peer.ID, apiState, dnsState)
 	}
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
@@ -1716,9 +1725,9 @@ func (tm *MPTransportBridge) StartReliableQueue(ctx context.Context) {
 // deliverGenericMessage is the sendFunc for the generic RMQ.
 // It adapts a transport.OutgoingMessage to the existing MP delivery logic.
 func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *transport.OutgoingMessage) error {
-	update, ok := msg.Payload.(*tdns.ZoneUpdate)
+	update, ok := msg.Payload.(*ZoneUpdate)
 	if !ok {
-		lgTransport.Warn("deliverGenericMessage: payload is not *ZoneUpdate", "recipient", msg.RecipientID, "payloadType", fmt.Sprintf("%T", msg.Payload))
+		return fmt.Errorf("deliverGenericMessage: payload is not *ZoneUpdate (recipient=%q, payloadType=%T)", msg.RecipientID, msg.Payload)
 	}
 
 	if tm.agentRegistry == nil {
@@ -1771,7 +1780,7 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		}
 		detail := &ConfirmationDetail{
 			DistributionID: msg.DistributionID,
-			Zone:           tdns.ZoneName(msg.Zone),
+			Zone:           ZoneName(msg.Zone),
 			Source:         msg.RecipientID,
 			Status:         syncResp.Status.String(),
 			Message:        syncResp.Message,
@@ -1795,7 +1804,7 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 // Called by SynchedDataEngine when a zone update needs to reach the combiner.
 // If distID is non-empty, it is used as the distribution ID; otherwise a new one is generated.
 // Returns the distributionID for tracking and any error.
-func (tm *MPTransportBridge) EnqueueForCombiner(zone tdns.ZoneName, update *tdns.ZoneUpdate, distID string) (string, error) {
+func (tm *MPTransportBridge) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
 		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
@@ -1820,7 +1829,7 @@ func (tm *MPTransportBridge) EnqueueForCombiner(zone tdns.ZoneName, update *tdns
 // Called by SynchedDataEngine when a locally-originated update needs to
 // reach all peer agents. Uses the same distID for all agents so the
 // originating agent can correlate confirmations from combiner and agents.
-func (tm *MPTransportBridge) EnqueueForZoneAgents(zone tdns.ZoneName, update *tdns.ZoneUpdate, distID string) error {
+func (tm *MPTransportBridge) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpdate, distID string) error {
 	agents, err := tm.getAllAgentsForZone(zone)
 	if err != nil {
 		return fmt.Errorf("EnqueueForZoneAgents: %w", err)
@@ -1856,7 +1865,7 @@ func (tm *MPTransportBridge) EnqueueForZoneAgents(zone tdns.ZoneName, update *td
 
 // EnqueueForSpecificAgent enqueues a zone update for a single agent.
 // Used by "resync-targeted" to respond only to the requesting agent.
-func (tm *MPTransportBridge) EnqueueForSpecificAgent(zone tdns.ZoneName, agentID AgentId, update *tdns.ZoneUpdate, distID string) error {
+func (tm *MPTransportBridge) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
 	if tm.ReliableQueue == nil {
 		return fmt.Errorf("EnqueueForSpecificAgent: reliable queue not configured")
 	}
@@ -1914,7 +1923,7 @@ func (tm *MPTransportBridge) getCombinerID() (AgentId, error) {
 
 // getAllAgentsForZone returns the AgentIds of all remote agents for a zone.
 // Uses AgentRegistry.GetZoneAgentData() which reads the HSYNC RRset.
-func (tm *MPTransportBridge) getAllAgentsForZone(zone tdns.ZoneName) ([]AgentId, error) {
+func (tm *MPTransportBridge) getAllAgentsForZone(zone ZoneName) ([]AgentId, error) {
 	if tm.agentRegistry == nil {
 		return nil, fmt.Errorf("no agent registry")
 	}
@@ -1937,7 +1946,7 @@ func (tm *MPTransportBridge) getAllAgentsForZone(zone tdns.ZoneName) ([]AgentId,
 // populate TrackedRR.ExpectedRecipients so that ProcessConfirmation knows who
 // must confirm before transitioning Pending → Accepted.
 // If skipCombiner is true, the combiner is excluded from the list.
-func (tm *MPTransportBridge) GetDistributionRecipients(zone tdns.ZoneName, skipCombiner bool) []string {
+func (tm *MPTransportBridge) GetDistributionRecipients(zone ZoneName, skipCombiner bool) []string {
 	var recipients []string
 
 	// Add combiner unless skipped
@@ -1979,7 +1988,7 @@ func groupRRStringsByOwner(rrStrings []string) map[string][]string {
 
 // PendingDnskeyPropagation tracks a DNSKEY distribution awaiting confirmation from all remote agents.
 type PendingDnskeyPropagation struct {
-	Zone           tdns.ZoneName
+	Zone           ZoneName
 	DistributionID string
 	KeyTags        []uint16         // DNSKEY key tags being propagated
 	ExpectedAgents map[AgentId]bool // Agents we're waiting for (true = confirmed)
@@ -1990,7 +1999,7 @@ type PendingDnskeyPropagation struct {
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
 // Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
-func (tm *MPTransportBridge) TrackDnskeyPropagation(zone tdns.ZoneName, distID string, keyTags []uint16, agents []AgentId) {
+func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2076,7 +2085,7 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.
 // signal is "propagated", "rejected", or "removed".
-func (tm *MPTransportBridge) sendKeystateToSigner(zone tdns.ZoneName, keyTags []uint16, signal string, message string) {
+func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint16, signal string, message string) {
 	if tm.signerID == "" || tm.signerAddress == "" {
 		lgTransport.Warn("no signer configured, cannot send KEYSTATE", "zone", zone, "signerID", tm.signerID, "signerAddress", tm.signerAddress, "signal", signal)
 		return
@@ -2121,17 +2130,21 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone tdns.ZoneName, keyTags []
 	}
 }
 
-// parseHostPort splits an address into host and port, defaulting to defaultPort.
+// parseHostPort splits an address into host and port, defaulting to
+// defaultPort. Uses net.SplitHostPort so bracketed IPv6 literals
+// ("[::1]:53") parse correctly; bare IPv6 literals without a port
+// ("::1") fall back to defaultPort.
 func parseHostPort(addr string, defaultPort uint16) (string, uint16) {
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		host := addr[:idx]
-		portStr := addr[idx+1:]
-		var port uint16
-		if _, err := fmt.Sscanf(portStr, "%d", &port); err == nil {
-			return host, port
-		}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port supplied (or bare IPv6): treat the whole string
+		// as a host and apply the default port.
+		return addr, defaultPort
 	}
-	return addr, defaultPort
+	if port, convErr := strconv.ParseUint(portStr, 10, 16); convErr == nil {
+		return host, uint16(port)
+	}
+	return host, defaultPort
 }
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).

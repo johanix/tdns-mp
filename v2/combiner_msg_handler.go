@@ -27,7 +27,7 @@ var lgCombiner = tdns.Logger("combiner")
 // Processes sync messages asynchronously: applies zone updates via CombinerProcessUpdate
 // and sends detailed confirmation back to the agent via DNSTransport.Confirm().
 func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
-	protectedNamespaces []string, errorJournal *tdns.ErrorJournal) {
+	protectedNamespaces []string, errorJournal *ErrorJournal) {
 	if msgQs == nil {
 		lgCombiner.Warn("no MsgQs configured, exiting")
 		return
@@ -114,7 +114,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 
 			// Handle RFI messages (e.g. RFI EDITS) — dispatch and continue
-			if msg.MessageType == tdns.AgentMsgRfi {
+			if msg.MessageType == AgentMsgRfi {
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
 				switch msg.RfiType {
 				case "EDITS":

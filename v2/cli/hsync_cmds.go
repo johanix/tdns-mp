@@ -42,7 +42,7 @@ var hsyncCmd = &cobra.Command{
 
 // SendAgentHsyncCommand posts an AgentMgmtPost to /agent/hsync and
 // returns the parsed AgentMgmtResponse.
-func SendAgentHsyncCommand(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
+func SendAgentHsyncCommand(req *AgentMgmtPost, prefix string) (*AgentMgmtResponse, error) {
 	prefixcmd, _ := tdnscli.GetCommandContext(prefix)
 	api, err := tdnscli.GetApiClient(prefixcmd, true)
 	if err != nil {
@@ -54,7 +54,7 @@ func SendAgentHsyncCommand(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentM
 		return nil, fmt.Errorf("API request failed: %v", err)
 	}
 
-	var amr tdns.AgentMgmtResponse
+	var amr AgentMgmtResponse
 	if err := json.Unmarshal(buf, &amr); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %v", err)
 	}
@@ -72,15 +72,15 @@ var hsyncZoneStatusCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		tdnscli.PrepArgs("zonename")
 
-		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
+		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-zonestatus",
-			Zone:    tdns.ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
+			Zone:    ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 
-		PrintHsyncRRs(tdns.AgentId(resp.Identity), resp.HsyncRRs)
+		PrintHsyncRRs(AgentId(resp.Identity), resp.HsyncRRs)
 
 		if tdns.Globals.Verbose && resp.ZoneAgentData != nil {
 			fmt.Printf("\nZone Agent Data:\n")
@@ -111,9 +111,9 @@ var hsyncPeerStatusCmd = &cobra.Command{
 	Long: `Display the status of HSYNC peers stored in the database.
 Shows peer state, transport details, and heartbeat statistics.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
+		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-peer-status",
-			AgentId: tdns.AgentId(hsyncPeerID),
+			AgentId: AgentId(hsyncPeerID),
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error: %v", err)
@@ -179,9 +179,9 @@ var hsyncSyncOpsCmd = &cobra.Command{
 	Long: `Display sync operations tracked in the database.
 Shows operation details, status, and timestamps.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
+		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-sync-ops",
-			Zone:    tdns.ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
+			Zone:    ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error: %v", err)
@@ -222,7 +222,7 @@ var hsyncConfirmationsCmd = &cobra.Command{
 	Short: "Query HSYNC confirmations",
 	Long:  `Display confirmation records for sync operations.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
+		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-confirmations",
 		}, "hsync")
 		if err != nil {
@@ -265,9 +265,9 @@ var hsyncTransportEventsCmd = &cobra.Command{
 	Short: "Show HSYNC transport events",
 	Long:  `Display recent transport events for debugging connectivity issues.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
+		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-transport-events",
-			AgentId: tdns.AgentId(hsyncPeerID),
+			AgentId: AgentId(hsyncPeerID),
 			Data:    map[string]interface{}{"limit": hsyncLimit},
 		}, "hsync")
 		if err != nil {
@@ -312,7 +312,7 @@ var hsyncMetricsCmd = &cobra.Command{
 	Short: "Show HSYNC operational metrics",
 	Long:  `Display aggregated operational metrics for HSYNC operations.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendAgentHsyncCommand(&tdns.AgentMgmtPost{
+		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-metrics",
 		}, "hsync")
 		if err != nil {
@@ -352,9 +352,9 @@ var hsyncAgentStatusCmd = &cobra.Command{
 		tdns.Globals.AgentId = tdns.AgentId(hsyncAgentID)
 		tdnscli.PrepArgs("agentid")
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-agentstatus",
-			AgentId: tdns.AgentId(tdns.Globals.AgentId),
+			AgentId: AgentId(string(tdns.Globals.AgentId)),
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error sending agent management command: %v", err)
@@ -386,10 +386,10 @@ var hsyncLocateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		tdnscli.PrepArgs("zonename")
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-locate",
-			AgentId: tdns.AgentId(dns.Fqdn(args[0])),
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			AgentId: AgentId(dns.Fqdn(args[0])),
+			Zone:    ZoneName(tdns.Globals.Zonename),
 		}, "hsync")
 		if err != nil {
 			log.Fatalf("Error: %v", err)
@@ -415,9 +415,9 @@ var hsyncSendHelloCmd = &cobra.Command{
 	Long:  `Send a hello message to a remote agent via the running agent server.`,
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		agentIdentity := tdns.AgentId(dns.Fqdn(args[0]))
+		agentIdentity := AgentId(dns.Fqdn(args[0]))
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-send-hello",
 			AgentId: agentIdentity,
 		}, "hsync")
@@ -499,7 +499,7 @@ var hsyncQueryCmd = &cobra.Command{
 }
 
 // PrintHsyncRRs displays HSYNC3 RRs in tabular form, marking the local agent.
-func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
+func PrintHsyncRRs(agentid AgentId, rrs []string) {
 	fmt.Printf("%s  HSYNC RRset:\n", tdns.Globals.Zonename)
 	var lines []string
 	for _, rrstr := range rrs {
@@ -519,7 +519,7 @@ func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
 			continue
 		}
 		fields := strings.Fields(rrstr)
-		if tdns.AgentId(hsync3RR.Identity) == agentid {
+		if AgentId(hsync3RR.Identity) == agentid {
 			fields = append(fields, "(local agent)")
 		}
 		lines = append(lines, strings.Join(fields, "|"))
@@ -529,8 +529,8 @@ func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
 
 // PrintHsyncAgent prints a remote agent's transports and key material.
 // Modeled on the older PrintAgent helper that lived in tdns/v2/cli.
-func PrintHsyncAgent(agent *tdns.Agent, showZones bool) error {
-	fmt.Printf("Remote agent %q: state: %s\n", agent.Identity, tdns.AgentStateToString[agent.State])
+func PrintHsyncAgent(agent *Agent, showZones bool) error {
+	fmt.Printf("Remote agent %q: state: %s\n", agent.Identity, AgentStateToString[agent.State])
 
 	if showZones {
 		var zones []string
@@ -540,7 +540,7 @@ func PrintHsyncAgent(agent *tdns.Agent, showZones bool) error {
 		fmt.Printf(" * Zones shared with this agent: %v\n", zones)
 	}
 
-	for transport, details := range map[string]*tdns.AgentDetails{
+	for transport, details := range map[string]*AgentDetails{
 		"API": agent.ApiDetails,
 		"DNS": agent.DnsDetails,
 	} {
@@ -551,7 +551,7 @@ func PrintHsyncAgent(agent *tdns.Agent, showZones bool) error {
 			continue
 		}
 		fmt.Printf("\n * Transport: %s, State: %s\n",
-			transport, tdns.AgentStateToString[details.State])
+			transport, AgentStateToString[details.State])
 		if details.LatestError != "" {
 			fmt.Printf(" - Latest Error: %s\n", details.LatestError)
 			fmt.Printf(" - Time of error: %s (duration of outage: %v)\n",

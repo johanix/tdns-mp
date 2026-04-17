@@ -13,9 +13,12 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-// StartMPSigner starts the MP signer. It delegates DNS engine
-// startup to tdns.StartAuth (which skips MP engines for
-// AppTypeMPSigner), then starts the MP engines from tdns-mp.
+// StartMPSigner starts the MP signer. It starts only the tdns
+// engines the mpsigner actually needs, then starts MP-specific
+// engines on top. This mirrors the pattern used by StartMPAgent
+// and StartMPCombiner: each MP app manages its own startup
+// explicitly rather than delegating to a tdns Start* function
+// that may change over time.
 func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) error {
 	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
 	// and install hook so new zones added via reload also get them.
@@ -25,13 +28,42 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// Register all signer API routes from tdns-mp
 	conf.SetupMPSignerRoutes(ctx, apirouter)
 
-	// DNS engines (refresh, signing, query, NOTIFY, etc.)
-	// MP engines are skipped because AppType == AppTypeMPSigner
-	if err := conf.Config.StartAuth(ctx, apirouter); err != nil {
-		return err
-	}
+	kdb := conf.Config.Internal.KeyDB
 
-	// MP engines from tdns-mp
+	// --- tdns engines needed by the mpsigner ---
+	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
+		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
+	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
+		tdns.RefreshEngine(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
+		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "AuthQueryEngine", func() {
+		tdns.AuthQueryEngine(ctx, conf.Config.Internal.AuthQueryQ)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
+		return kdb.ZoneUpdaterEngine(ctx)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
+		return tdns.UpdateHandler(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
+		return tdns.NotifyHandler(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "DnsEngine", func() error {
+		return tdns.DnsEngine(ctx, conf.Config)
+	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
+		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
+	})
+	// tdns KeyStateWorker for non-MP zone key lifecycle
+	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
+		return tdns.KeyStateWorker(ctx, conf.Config)
+	})
+
+	// --- MP engines from tdns-mp ---
 	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.StartIncomingMessageRouter(ctx)
@@ -40,7 +72,8 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
 		func() { SignerMsgHandler(ctx, conf, conf.InternalMp.MsgQs) })
 
-	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker",
+	// MP KeyStateWorker for MP zone key lifecycle
+	tdns.StartEngine(&tdns.Globals.App, "MPKeyStateWorker",
 		func() error { return KeyStateWorker(ctx, conf) })
 
 	return nil

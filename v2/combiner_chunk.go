@@ -5,7 +5,7 @@
  * Receives sync updates from agents and applies them to zones.
  *
  * Extracted from tdns/v2/combiner_chunk.go into tdns-mp package.
- * CombinerState type remains in tdns (shared with signer).
+ * CombinerState and ErrorJournal are defined in this module.
  * RegisterSignerChunkHandler is in signer_chunk_handler.go.
  */
 
@@ -24,6 +24,54 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+// CombinerState holds combiner-specific state that outlives individual CHUNK messages.
+// Used by CLI error-journal queries and CombinerProcessUpdate wiring.
+// Transport routing is handled by the unified ChunkNotifyHandler.
+type CombinerState struct {
+	// ErrorJournal records errors during CHUNK NOTIFY processing for operational diagnostics.
+	// Queried via "transaction errors" CLI commands. If nil, errors are only logged.
+	ErrorJournal *ErrorJournal
+
+	// ProtectedNamespaces: domain suffixes belonging to this provider.
+	// NS records from remote agents whose targets fall within these namespaces are rejected.
+	ProtectedNamespaces []string
+
+	// ChunkNotifyHandler is the underlying transport wiring.
+	// Access via SetRouter / SetGetPeerAddress / SetSecureWrapper.
+	ChunkNotifyHandler *transport.ChunkNotifyHandler
+}
+
+// ChunkHandler returns the underlying ChunkNotifyHandler for wiring into TransportManager.
+func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
+	return cs.ChunkNotifyHandler
+}
+
+// ProcessUpdate delegates to the standalone CombinerProcessUpdate.
+func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
+	return CombinerProcessUpdate(req, cs.ProtectedNamespaces, localAgents, hdb, tm)
+}
+
+// SetRouter sets the router on the underlying ChunkNotifyHandler.
+func (cs *CombinerState) SetRouter(router *transport.DNSMessageRouter) {
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.Router = router
+	}
+}
+
+// SetSecureWrapper sets the secure wrapper on the underlying ChunkNotifyHandler.
+func (cs *CombinerState) SetSecureWrapper(sw *transport.SecurePayloadWrapper) {
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.SecureWrapper = sw
+	}
+}
+
+// SetGetPeerAddress sets the GetPeerAddress callback on the underlying ChunkNotifyHandler.
+func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address string, ok bool)) {
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.GetPeerAddress = fn
+	}
+}
 
 // editPolicy captures the four gates that determine whether a combiner
 // should apply a given RRtype to the live zone.
@@ -125,11 +173,11 @@ func detectDelegationChanges(resp *CombinerSyncResponse) (nsChanged, kskChanged 
 // --- Standalone business logic functions ---
 
 // RecordCombinerError records an error in the ErrorJournal if available.
-func RecordCombinerError(journal *tdns.ErrorJournal, distID, sender, messageType, errMsg, qname string) {
+func RecordCombinerError(journal *ErrorJournal, distID, sender, messageType, errMsg, qname string) {
 	if journal == nil {
 		return
 	}
-	journal.Record(tdns.ErrorJournalEntry{
+	journal.Record(ErrorJournalEntry{
 		DistributionID: distID,
 		Sender:         sender,
 		MessageType:    messageType,
@@ -248,7 +296,11 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 		if !((h3exists && hpExists) || h1exists || h2exists) {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", mpzd.ZoneName)
 		}
-		ourIdentities := ourHsyncIdentities(tdns.Conf.MultiProvider)
+		var mpConf *tdns.MultiProviderConf
+		if mpzd.MP != nil {
+			mpConf = mpzd.MP.MultiProvider
+		}
+		ourIdentities := ourHsyncIdentities(mpConf)
 		matched, _, _ := mpzd.matchHsyncIdentity(ourIdentities)
 		if !matched {
 			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", mpzd.ZoneName, ourIdentities)
@@ -1363,9 +1415,9 @@ func NewCombinerSyncHandler() transport.MessageHandlerFunc {
 // --- Registration functions ---
 
 // RegisterCombinerChunkHandler registers the combiner's CHUNK handler.
-func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) (*tdns.CombinerState, error) {
-	state := &tdns.CombinerState{
-		ErrorJournal: tdns.NewErrorJournal(1000, 24*time.Hour),
+func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) (*CombinerState, error) {
+	state := &CombinerState{
+		ErrorJournal: NewErrorJournal(1000, 24*time.Hour),
 	}
 
 	handler := &transport.ChunkNotifyHandler{
@@ -1393,114 +1445,6 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	state.ChunkNotifyHandler = handler
 
 	return state, nil
-}
-
-// --- Helper functions ---
-
-// SendToCombiner sends a sync request to the combiner and waits for a response.
-func SendToCombiner(state *tdns.CombinerState, req *CombinerSyncRequest) *CombinerSyncResponse {
-	if state == nil {
-		lgCombiner.Error("state is nil, cannot send update")
-		return &CombinerSyncResponse{
-			DistributionID: req.DistributionID,
-			Zone:           req.Zone,
-			Status:         "error",
-			Message:        "combiner state not initialized",
-			Timestamp:      time.Now(),
-		}
-	}
-
-	// Convert local CombinerSyncRequest to tdns.CombinerSyncRequest for state.ProcessUpdate
-	tdnsReq := &tdns.CombinerSyncRequest{
-		SenderID:       req.SenderID,
-		DeliveredBy:    req.DeliveredBy,
-		Zone:           req.Zone,
-		ZoneClass:      req.ZoneClass,
-		SyncType:       req.SyncType,
-		Records:        req.Records,
-		Operations:     req.Operations,
-		Publish:        req.Publish,
-		Serial:         req.Serial,
-		DistributionID: req.DistributionID,
-		Timestamp:      req.Timestamp,
-	}
-
-	tdnsResp := state.ProcessUpdate(tdnsReq, nil, nil, nil)
-
-	// Convert tdns.CombinerSyncResponse back to local type
-	resp := &CombinerSyncResponse{
-		DistributionID: tdnsResp.DistributionID,
-		Zone:           tdnsResp.Zone,
-		Nonce:          tdnsResp.Nonce,
-		Status:         tdnsResp.Status,
-		Message:        tdnsResp.Message,
-		AppliedRecords: tdnsResp.AppliedRecords,
-		RemovedRecords: tdnsResp.RemovedRecords,
-		Timestamp:      tdnsResp.Timestamp,
-		DataChanged:    tdnsResp.DataChanged,
-	}
-	for _, ri := range tdnsResp.RejectedItems {
-		resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: ri.Record, Reason: ri.Reason})
-	}
-	return resp
-}
-
-// ConvertZoneUpdateToSyncRequest converts a ZoneUpdate to a CombinerSyncRequest.
-func ConvertZoneUpdateToSyncRequest(update *tdns.ZoneUpdate, senderID string, distributionID string) *CombinerSyncRequest {
-	records := make(map[string][]string)
-
-	for _, rr := range update.RRs {
-		owner := rr.Header().Name
-		records[owner] = append(records[owner], rr.String())
-	}
-
-	for _, rrset := range update.RRsets {
-		for _, rr := range rrset.RRs {
-			owner := rr.Header().Name
-			records[owner] = append(records[owner], rr.String())
-		}
-	}
-
-	syncType := determineSyncType(update)
-
-	req := &CombinerSyncRequest{
-		SenderID:       senderID,
-		Zone:           string(update.Zone),
-		ZoneClass:      update.ZoneClass,
-		SyncType:       syncType,
-		Records:        records,
-		DistributionID: distributionID,
-		Timestamp:      time.Now(),
-	}
-	if len(update.Operations) > 0 {
-		req.Operations = update.Operations
-	}
-	if update.Publish != nil {
-		req.Publish = update.Publish
-	}
-	return req
-}
-
-// determineSyncType examines the update and returns an appropriate sync type string.
-func determineSyncType(update *tdns.ZoneUpdate) string {
-	types := make(map[uint16]bool)
-
-	for _, rr := range update.RRs {
-		types[rr.Header().Rrtype] = true
-	}
-	for rrtype := range update.RRsets {
-		types[rrtype] = true
-	}
-
-	if len(types) == 1 {
-		for rrtype := range types {
-			return dns.TypeToString[rrtype]
-		}
-	}
-	if len(types) > 1 {
-		return "MIXED"
-	}
-	return "UNKNOWN"
 }
 
 // --- Policy check functions ---
