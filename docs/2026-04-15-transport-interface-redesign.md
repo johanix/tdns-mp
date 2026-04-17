@@ -1,16 +1,28 @@
 # Transport Interface Redesign: Clean Separation of
 # Transport and Application Layers
 
-Date: 2026-04-15
-Status: PLAN — **NOT READY FOR IMPLEMENTATION** in full
-        (see Status Update section below for decisions
-         made, open issues, and required pre-work)
+Date: 2026-04-15 (revised 2026-04-16)
+Status: PLAN — ready to begin with **Phase 0** (integration
+        tests). Phases 1+ still require pre-work items
+        I, L, M, N (see Status Update).
 
-**But:** three bite-size isolated parts would improve the
-world at a low up-front cost in time required. See the
-**"Quick Wins"** section below for details — each can land
-in a single focused session without committing to the full
-refactor.
+**Revision 2026-04-16 summary** (see "Re-evaluation" section
+below for details):
+- Zero progress on A/B/C items since 2026-04-15; plan
+  diagnosis remains accurate.
+- Gossip placement **deferred** — keep in MP, rename wire
+  field to `AppData`, revisit Tier 2 placement later when
+  a second application materializes. Closes OQ1 and item G.
+- Integration tests (formerly "Bite 2") promoted to
+  **mandatory Phase 0**. The rest of the plan does not
+  begin until the harness exists.
+- Bite 1 scope expanded to include dual-write plumbing
+  (otherwise `Peer.Mechanisms` lands as dead code).
+- Method count in `hsync_transport.go` is now **54**, not
+  48. Phase 7 re-decomposed into 8 substeps.
+- `Agent.PeerID` added as explicit Phase 7 step 1.
+- tdns-mp post-migration cleanup is ~98% done and is
+  **not** a prerequisite for this refactor.
 
 Builds on: 2026-03-24-transport-manager-redesign.md,
            2026-03-23-transport-extraction-implementation-plan.md,
@@ -75,27 +87,81 @@ types and assumptions.
    application-provided authorization function. The
    application decides the policy.
 
-## Status Update (2026-04-15) — NOT READY FOR IMPLEMENTATION
+## Re-evaluation (2026-04-16)
 
-This plan has been reviewed in detail. It is structurally
-sound but is **not yet ready to begin implementation**.
-Several open questions are now resolved (below), but several
-phases remain underspecified in ways that would cause
-mid-refactor surprises. Pre-work items must be completed
-before Phase 1 begins.
+The original 2026-04-15 review flagged the plan as "not
+ready". A day-later re-check against the current code
+confirms **no progress has been made on A, B, or C items**;
+the diagnosis remains correct to the letter. What has
+changed is context:
+
+**Migration is done.** The tdns → tdns-mp/tdns-transport
+migration completed. Legacy cleanup of tdns-mp itself is
+~98% done (see `2026-04-15-legacy-cleanup-implementation-plan.md`)
+and the remainder (Phase 10 of that plan) is safe to defer.
+tdns-mp is clean enough to begin the transport interface
+work directly. No pre-cleanup pass is needed.
+
+**Gossip placement can be deferred.** `BeatRequest.Gossip`
+is already `json.RawMessage`; transport never interprets
+it. Gossip code is fully contained in tdns-mp (`gossip.go`,
+`gossip_types.go`, `provider_groups.go`, and assembly in
+`hsync_transport.go`). Renaming the field to `AppData` in
+Phase 2 is wire-compatible regardless of final placement.
+Shipping transport as a reusable library without gossip is
+a legitimate, useful state. See revised OQ1 / item G below.
+
+**Integration tests are a hard prerequisite.** Zero
+transport-boundary tests exist. The original "Bite 2" is
+promoted to a mandatory **Phase 0** — nothing else begins
+until the harness is in place.
+
+**Drift in numbers.** `hsync_transport.go` is 54 methods
+(not 48) and 2210 lines. `Dns*Payload` is 13 exported types
+(not 18). Phase 7 load grew accordingly.
+
+**What this revision does not change:** the 9-phase
+structure, the target public API, the design principles,
+the migration direction, the tiered API model, or any of
+the other three resolved OQs (scope, QNAME, hello content).
+
+## Status Update (2026-04-15, revised 2026-04-16)
+
+The plan is structurally sound. Phase 0 (integration test
+harness) can start now. Phases 1+ require the pre-work
+items listed below.
 
 ### Decisions Made
 
-**OQ1 (gossip placement) — RESOLVED: transport, Tier 2.**
-Gossip is a transport feature offered as a tiered service.
-Apps opt in or ignore. Rationale: more than one application
-will need gossip; re-implementing it per-app would
-significantly reduce the value of tdns-transport as a
-reusable library. Constraint: transport owns the mechanics
-(state storage, merge, beat piggyback assembly); app owns
-cell content (opaque `json.RawMessage`) and the merge
-function. Provider groups, leader elections, OPERATIONAL
-detection stay in MP.
+**OQ1 (gossip placement) — REVISED 2026-04-16: DEFERRED.**
+Original resolution was "transport, Tier 2". On
+re-examination, the decision can and should be deferred
+until after the main refactor lands. Rationale:
+
+- `BeatRequest.Gossip` is already `json.RawMessage`;
+  transport has zero typed dependency on gossip.
+- Gossip code is fully contained in tdns-mp today
+  (`gossip.go`, `gossip_types.go`, `provider_groups.go`,
+  assembly at `hsync_transport.go`).
+- Phase 2 renames the wire field `Gossip` → `AppData`.
+  This rename is wire-compatible (same bytes; `json.RawMessage`
+  either way) and correct for both placements.
+- Tier 2 gossip in transport is a valid future state;
+  moving later costs: extract types, register merge
+  callback, move piggyback assembly. No wire break, no
+  deployed-agent impact.
+- The plan's own Risks section already commits to this
+  property (lines ~1146–1150).
+
+**New default:** gossip stays in MP indefinitely. Phase 2
+introduces `AppData json.RawMessage` as the generic hook.
+If a second application emerges that needs gossip, the
+Tier 2 extraction becomes a focused follow-up project;
+otherwise the status quo is not tech debt, it is the
+Tier 2 opt-in model working as designed.
+
+Provider groups, leader elections, OPERATIONAL detection
+stay in MP (unchanged).
 
 **OQ2 (scope) — RESOLVED: first-class but minimal.**
 Scope is an opaque string with exactly two transport
@@ -198,23 +264,15 @@ construction.
 
 ### Open Issues (must be resolved before Phase 1)
 
-**G. Gossip details — DEFERRED to a dedicated discussion.**
-Cell identity is settled (set-derived). The full design
-needs its own session to resolve:
-- Membership change semantics: fresh-start every time, or
-  explicit `MigrateGroup(oldHandle, newMembers)` that
-  forwards portable state?
-- Cell size limits: per-cell or per-beat byte cap; drop or
-  chunk on overflow?
-- Discovery interaction: does `GetOrCreateGossipGroup`
-  implicitly mark unknown members as NEEDED?
-- Beat piggyback assembly rules: include all groups, or
-  only groups containing the recipient?
-- Per-(group, peer) state for things like leader-election
-  state — confirm the model holds end-to-end.
-- Whether transport ships a default merge helper
-  (last-writer-wins by embedded timestamp) or apps always
-  bring their own.
+**G. Gossip details — CLOSED 2026-04-16 (deferred with OQ1).**
+All six subquestions (membership change semantics, cell
+size limits, discovery interaction, beat assembly rules,
+per-(group, peer) state, default merge helper) become
+implementation details of a future Tier 2 gossip extraction
+*if and when* that work happens. They do not block any
+phase of this refactor. The `GetOrCreateGossipGroup` API
+sketch is parked for that future session; current MP code
+remains authoritative. No further resolution required here.
 
 **H. Phase 2 type migration map.** Every JSON field in
 every moved type must be enumerated with destination
@@ -271,11 +329,27 @@ Decide: new `mp/messages` subpackage, extend an existing
 explicit "if X breaks, revert and reconsider" criteria.
 For a refactor of this scope, define abort gates.
 
+**O. Disposition table walk-through (added 2026-04-16).**
+`hsync_transport.go` has grown from 48 to 54
+methods/functions since the table was written. Before
+Phase 1 begins, walk the current file and place the 6+ new
+methods into the disposition table with a phase
+assignment. Spot-check that phase dependencies are still
+correct (Phase 1 → 3 → 5 → 7 chain).
+
 ### MPTransportBridge Disposition Table
 
-Categorization of all 48 methods/functions in
-`hsync_transport.go` and their migration targets. New
-MP-side homes introduced by this refactor:
+Categorization of the methods/functions in
+`hsync_transport.go` and their migration targets.
+
+**2026-04-16 count update:** current grep shows **54**
+methods/functions (up from 48 in the original table).
+The 6-method delta likely reflects helpers added during
+HSYNC3, SIG(0) publication, and gossip work since the
+table was first written. A walk-through to place the new
+methods is a pre-Phase-1 task (see open item **O** below).
+
+New MP-side homes introduced by this refactor:
 
 - **`MPMessageDispatcher`** — owns the `route*Message`
   family, registered with TM as default handler + per-type
@@ -349,39 +423,60 @@ MP-side homes introduced by this refactor:
 | 47 | `parseHostPort` | MP utility | 7 |
 | 48 | `groupRRStringsByOwner` | **DELETED** (unused — verify first) | 7 |
 
-**Phase load:**
+**Phase load** (2026-04-16: expect +6 methods once item O
+walk-through completes; load per phase may shift slightly):
+- Phase 0: 0 methods (pure test harness)
 - Phase 1: 2 methods (per-mechanism state on Peer)
 - Phase 3: 14 methods (route* family + confirmation senders)
 - Phase 5: 13 methods (send/fallback, queue lifecycle, middleware)
 - Phase 6: 1 method (discovery callback)
-- Phase 7: 18 methods (bridge deletion, state-sync removal,
+- Phase 7: 18+ methods (bridge deletion, state-sync removal,
   helpers, DNSKEY, RFI, MP-side rehoming)
 
-Phase 7 carries the largest load and decomposes into ~6
-substeps:
-1. Introduce `Agent.PeerID`; rewrite `SyncPeerFromAgent`
-   call sites (#9, #10, #11)
-2. Migrate the `route*` family (most landed in Phase 3;
-   #27 finalized here)
-3. Create `DnskeyPropagationTracker` (#29–31)
-4. Create `RFITracker` (#32, #33)
-5. Move enqueue helpers into `SynchedDataEngine` (#42–44)
-6. Delete `NewMPTransportBridge`; rewire startup (#45)
+Phase 7 carries the largest load and decomposes into 8
+substeps (revised 2026-04-16; Agent.PeerID is now its own
+explicit gate step):
+
+1. **Add `Agent.PeerID string` field.** Pure addition. No
+   call-site changes yet. Set it from existing identity
+   on Agent construction.
+2. **Migrate the 11 `SyncPeerFromAgent` call sites** to
+   read transport state via `peerRegistry.Get(agent.PeerID)`.
+   Leave the function defined but unused.
+3. **Delete `SyncPeerFromAgent` and
+   `agentStateToTransportState`** (#9, #10). Both must be
+   uncalled by this point.
+4. Migrate the remaining `route*` family finalization
+   (#27). Most landed in Phase 3.
+5. Create `DnskeyPropagationTracker` (#29–31).
+6. Create `RFITracker` (#32, #33).
+7. Move enqueue helpers into `SynchedDataEngine` (#42–44).
+8. Delete `NewMPTransportBridge`; rewire startup (#45);
+   update MP config to hold `*transport.TransportManager`
+   directly.
+
+Each substep leaves the tree building. Substeps 1–3 are
+the dependency unlock for the rest — they eliminate the
+AgentRegistry/PeerRegistry state coupling.
 
 ## Quick Wins (bite-size isolated parts)
 
-Three parts of the refactor can be landed now without
-committing to the rest of the plan. Each is sized for a
-single focused session, each leaves the tree in a
-known-good state, and none paint corners for the bigger
-refactor that follows. They are listed in recommended
-order — Bite 2 first if you only do one.
+**2026-04-16 revision:** former "Bite 2" (integration
+tests) is now **Phase 0** — mandatory pre-work, not
+optional. The remaining two (Bite 1 and Bite 3) are still
+bite-sized and can land independently. They appear below
+in recommended order.
 
 ### Bite 1: Additive Peer enhancements (Phase 1 subset)
 
 **What:** The additive parts of Phase 1 only. Add the new
 per-mechanism state to `Peer` alongside the existing
 fields, without removing anything yet.
+
+**Revision 2026-04-16:** Bite 1 must include the dual-write
+plumbing in handlers.go (step 4 below). Landing the struct
+alone would leave `Peer.Mechanisms` as dead code until
+Phase 7. Either do Bite 1 fully or defer it.
 
 **Concrete steps:**
 
@@ -457,11 +552,17 @@ canonical state.
 "remove the old fields" step becomes a pure deletion —
 all the replacement plumbing is already in place.
 
-**Estimated cost:** ~1 day.
+**Estimated cost:** 1–2 days (includes dual-write plumbing
+in handlers.go).
 
 ---
 
-### Bite 2: Transport-boundary integration tests
+### Bite 2 → Phase 0: Transport-boundary integration tests
+
+**Status 2026-04-16: PROMOTED to mandatory Phase 0.** See
+the Implementation Plan section below. The content below
+is retained for historical context; the authoritative
+version is Phase 0.
 
 **What:** Integration test coverage for the transport
 boundary in tdns-mp. Currently zero. This is the single
@@ -598,20 +699,19 @@ health; if not, it uses the existing logic.
 
 ---
 
-### Recommended order
+### Recommended order (revised 2026-04-16)
 
-1. **Bite 2 first** — the safety net. Do this even if
-   you never do the rest. It's pure upside and enables
-   confident execution of everything that follows.
-2. **Bite 1** — additive Peer enhancements. Small,
-   clean, sets up the future.
-3. **Bite 3** — unified send. Optional; only if you
-   want the ergonomic improvement and have time.
+1. **Phase 0** (formerly Bite 2) — integration test
+   harness. Mandatory. Nothing else begins until this
+   lands.
+2. **Bite 1** — additive Peer enhancements with
+   dual-write. Small, clean, sets up Phase 1.
+3. **Bite 3** — unified send. Optional ergonomic
+   improvement; can land before or after Phase 1
+   begins.
 
-Each bite is independent. Doing Bite 2 alone is a valid
-outcome. Doing Bites 1+2 leaves the world meaningfully
-better than it is today even if the full refactor waits
-another quarter.
+Phase 0 is now a gate. Bites 1 and 3 remain independent
+opportunistic improvements.
 
 ## Current State: What's Wrong
 
@@ -698,10 +798,12 @@ hello, beat, ping, confirm. All other handlers are
 application-provided.
 
 #### A7. DNS payload types (dns.go)
-18 exported `Dns*Payload` types are DNS wire format helpers
-that should be internal (unexported) or moved to the
-application. Most contain MP-specific fields (OriginatorID,
-MessageType, Zone, Nonce).
+13 exported `Dns*Payload` types (count corrected
+2026-04-16 — down from 18 originally, some consolidated
+during migration) are DNS wire format helpers that should
+be internal (unexported) or moved to the application. Most
+contain MP-specific fields (OriginatorID, MessageType,
+Zone, Nonce).
 
 #### A8. chunk_notify_handler.go — MP protocol handler
 This file does far more than CHUNK reassembly:
@@ -877,6 +979,48 @@ Peer-level `GetState()` returns the best of all mechanisms
 
 ## Implementation Plan
 
+### Phase 0: Transport-boundary integration test harness
+
+**Added 2026-04-16.** Mandatory pre-work. Phases 1+ do not
+begin until this lands.
+
+**Goal**: establish a regression safety net before touching
+any production code. The original "Bite 2" was listed as
+optional; re-evaluation flagged that as a mistake — a
+9-phase refactor across three repos without integration
+tests is a gamble.
+
+**Test scenarios (minimum viable):**
+1. CHUNK NOTIFY round trip (two in-process TMs, sync
+   delivered to `msgQs.Msg`)
+2. SYNC with API→DNS fallback (kill API mid-test, assert
+   receiver gets it via DNS, observable in peer stats)
+3. Confirmation routing, inline path
+4. Confirmation routing, async NOTIFY path
+5. LEGACY-agent rejection in hello (empty `SharedZones`
+   intersection)
+6. Discovery completion path (NEEDED → KNOWN transition,
+   `OnAgentDiscoveryComplete` fires)
+
+**Deliverables:**
+- Test harness spinning up two in-process
+  TransportManagers with shared in-memory DNS (or loopback
+  UDP on random ports)
+- Fake `AgentRegistry` + `MsgQs` for the receiving side
+- Helper to construct a minimal `MPTransportBridge` for
+  each agent
+- Assertions helper for reading from `msgQs.*` channels
+  with timeout
+- Location: `tdns-mp/v2/transport_integration_test.go` or
+  `tdns-mp/v2/integration/` subdirectory
+
+**Estimated cost:** 2–3 days, most of which is harness
+construction. Surfaced bugs in current code are a feature,
+not a regression.
+
+**Exit gate:** all 6 scenarios passing on CI. Phase 1 is
+unblocked.
+
 ### Phase 1: Enhance PeerRegistry (transport-only changes)
 
 **Goal**: Make PeerRegistry capable of replacing
@@ -909,7 +1053,11 @@ Steps:
 3. Remove MP fields from `SyncRequest` (Publish, RfiType,
    RfiSubtype, MessageType)
 4. Replace `BeatRequest.Gossip` with generic `AppData
-   json.RawMessage`
+   json.RawMessage`. This rename is wire-compatible (same
+   bytes in the field either way) and correct regardless
+   of whether gossip later moves to transport Tier 2 or
+   stays in MP indefinitely. MP continues to serialize its
+   existing gossip messages into `AppData`.
 5. Remove `RejectedItemDTO`
 6. Redesign `SyncRequest`/`SyncResponse` as generic payload
    containers:
@@ -1172,11 +1320,20 @@ add it as a Tier 2 feature without changing the field name.
 
 ## Open Questions
 
-All four original open questions (gossip, scope, QNAME,
-hello content) are now **RESOLVED**. See the Status Update
-section above for decisions.
+**2026-04-16 status:**
+- **OQ1 (gossip placement)** — REVISED to DEFERRED. Gossip
+  stays in MP; `BeatRequest.Gossip` renames to `AppData`
+  in Phase 2. Tier 2 extraction is a future opt-in, not a
+  blocker.
+- **OQ2 (scope)**, **OQ3 (QNAME)**, **OQ4 (hello content)**
+  — RESOLVED unchanged. See Status Update section.
 
-Remaining open issues blocking implementation are tracked
-as items **G–N** in the Status Update section. The
-gossip-details discussion (item G) is deferred to its own
-session; the rest are concrete pre-work tasks.
+Remaining open items tracked as **G–O** in the Status
+Update section. Item G (gossip details) is closed along
+with OQ1. Items H, I, J, K, L, M, N, O remain as concrete
+pre-work:
+- **K** (integration tests) → now **Phase 0**, mandatory
+- **L** (PeerRegistry shim spec) → pre-Phase-1 task
+- **I** (chunk_notify_handler split) → pre-Phase-4 task
+- **J** (IMR dependency audit) → pre-Phase-6 task
+- **H, M, N, O** → pre-Phase-2 / throughout as noted
