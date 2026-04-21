@@ -1,24 +1,23 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * mpcli configure: interview flow.
+ * mpcli configure subpackage: interview flow.
  *
- * Uses the prompt primitives from tdns/v2/cli/configure. Six
- * prompts total:
+ * Six prompts total:
  *   global:  keys dir, certs dir, public IP
  *   roles:   identity per agent/signer/combiner
  *
  * Port assignment is deterministic (see constants below) and
- * shown to the user as a table. The user accepts or proceeds and
- * edits afterwards — there is no "tweak each port" loop.
+ * shown as a table. The user accepts or proceeds and edits
+ * afterwards — there is no per-port prompt loop.
  */
-package main
+package configure
 
 import (
 	"fmt"
 	"io"
 
-	"github.com/johanix/tdns/v2/cli/configure"
+	cfg "github.com/johanix/tdns/v2/cli/configure"
 )
 
 // Defaults used when a prompt has no seed value (first run).
@@ -43,13 +42,13 @@ const (
 
 // runInterview walks the minimum prompt set. `current` seeds
 // defaults; on first run pass a zero CoordinatedValues.
-func runInterview(p *configure.Prompter, current CoordinatedValues) CoordinatedValues {
+func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues {
 	out := current
 
 	fmt.Fprintln(p.Out, "\n=== Global ===")
-	out.Global.KeysDir = p.Ask("keys directory", configure.OrDefault(current.Global.KeysDir, defaultKeysDir), configure.AbsDir)
-	out.Global.CertsDir = p.Ask("certs directory", configure.OrDefault(current.Global.CertsDir, defaultCertsDir), configure.AbsDir)
-	out.Global.PublicIP = p.Ask("public IP (shared by all three roles)", configure.OrDefault(current.Global.PublicIP, defaultPublicIP), configure.NonEmpty("public IP"))
+	out.Global.KeysDir = p.Ask("keys directory", cfg.OrDefault(current.Global.KeysDir, defaultKeysDir), cfg.AbsDir)
+	out.Global.CertsDir = p.Ask("certs directory", cfg.OrDefault(current.Global.CertsDir, defaultCertsDir), cfg.AbsDir)
+	out.Global.PublicIP = p.Ask("public IP (shared by all three roles)", cfg.OrDefault(current.Global.PublicIP, defaultPublicIP), cfg.NonEmpty("public IP"))
 
 	fmt.Fprintln(p.Out, "\n=== Identities ===")
 	out.Agent.Identity = p.AskIdentity("agent identity", current.Agent.Identity)

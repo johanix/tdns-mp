@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * Configurator: targeted YAML parsers.
+ * mpcli configure subpackage: targeted YAML parsers.
  *
  * On re-run, we parse each existing config file into a tiny
  * typed shape that captures only the coordinated knobs. Unknown
@@ -9,18 +9,17 @@
  * the configurator does not claim authority over the full config
  * surface.
  *
- * Directories for keys/certs and the public IP are
- * back-derived from the agent's existing paths/addresses if
- * present.
+ * Directories for keys/certs and the public IP are back-derived
+ * from the agent's existing paths/addresses if present.
  */
-package main
+package configure
 
 import (
 	"fmt"
 	"path/filepath"
 	"strings"
 
-	"github.com/johanix/tdns/v2/cli/configure"
+	cfg "github.com/johanix/tdns/v2/cli/configure"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,8 +61,6 @@ type mpcombinerYAML struct {
 	} `yaml:"apiserver"`
 }
 
-// --- Parsing ---
-
 // readExistingCoordinated populates CoordinatedValues from any
 // existing YAML files on disk. Missing files contribute zero
 // values. Returns an error only for I/O problems or malformed
@@ -94,8 +91,7 @@ func readExistingCoordinated() (CoordinatedValues, error) {
 	return cv, nil
 }
 
-// hostOnly returns just the host portion of a host:port string,
-// or the full string if no colon is present.
+// hostOnly returns just the host portion of a host:port string.
 func hostOnly(hostPort string) string {
 	if i := strings.LastIndex(hostPort, ":"); i > 0 {
 		return hostPort[:i]
@@ -104,7 +100,7 @@ func hostOnly(hostPort string) string {
 }
 
 func parseAgentFile(path string, out *AgentValues, jose, cert, apiAddr *string) error {
-	content, err := configure.ReadFileIfExists(path)
+	content, err := cfg.ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}
@@ -126,7 +122,7 @@ func parseAgentFile(path string, out *AgentValues, jose, cert, apiAddr *string) 
 }
 
 func parseSignerFile(path string, out *SignerValues) error {
-	content, err := configure.ReadFileIfExists(path)
+	content, err := cfg.ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}
@@ -143,7 +139,7 @@ func parseSignerFile(path string, out *SignerValues) error {
 }
 
 func parseCombinerFile(path string, out *CombinerValues) error {
-	content, err := configure.ReadFileIfExists(path)
+	content, err := cfg.ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}

@@ -1,29 +1,26 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * `tdns-mpcli configure` — mpcli-specific wiring of the generic
- * bootstrap-configurator library (tdns/v2/cli/configure).
+ * mpcli configure subpackage: cobra command + wiring.
  *
- * The library owns prompt/diff/atomic-write/live-ping/generate
- * plumbing. This file provides:
- *
- *   - ordered list of the four mp configs
- *   - ReadExisting: parse existing YAMLs into CoordinatedValues
- *   - RunInterview: prompt the six coordinated knobs
- *   - RenderAll: template rendering
- *   - LiveTargets: per-role API probe inputs
- *   - GenerateMaterial: JOSE keys + TLS certs per role
+ * Cmd is exported for registration from cmd/mpcli/shared_cmds.go.
+ * All role-specific logic (types, YAML parsers, interview flow,
+ * templates) lives here; generic plumbing (prompts, diff, atomic
+ * write, live-ping, generation of JOSE/TLS/apikey) comes from
+ * tdns/v2/cli/configure.
  */
-package main
+package configure
 
 import (
 	"fmt"
 
-	"github.com/johanix/tdns/v2/cli/configure"
 	"github.com/spf13/cobra"
+
+	cfg "github.com/johanix/tdns/v2/cli/configure"
 )
 
-var configureCmd = &cobra.Command{
+// Cmd is the `tdns-mpcli configure` cobra command.
+var Cmd = &cobra.Command{
 	Use:   "configure",
 	Short: "Interactive bootstrap for tdns-mp config files",
 	Long: `Interview the user and emit coordinated configs for
@@ -33,24 +30,19 @@ under /etc/tdns/.
 Safe to re-run: existing values become the prompt defaults.
 Live servers must be explicitly confirmed before their
 config is replaced.`,
-	RunE: runConfigure,
+	RunE: run,
 }
 
-func init() {
-	rootCmd.AddCommand(configureCmd)
-}
-
-func runConfigure(cmd *cobra.Command, args []string) error {
-	return configure.Run(configure.Spec{
+func run(cmd *cobra.Command, args []string) error {
+	return cfg.Run(cfg.Spec{
 		Paths: allConfigPaths(),
 
 		ReadExisting: func() (any, error) {
 			return readExistingCoordinated()
 		},
 
-		RunInterview: func(p *configure.Prompter, seed any) (any, error) {
-			cv := seed.(CoordinatedValues)
-			return runInterview(p, cv), nil
+		RunInterview: func(p *cfg.Prompter, seed any) (any, error) {
+			return runInterview(p, seed.(CoordinatedValues)), nil
 		},
 
 		RenderAll: func(state any) (map[string]string, error) {
@@ -61,9 +53,8 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 			return renderAll(cv)
 		},
 
-		LiveTargets: func(state any) []configure.LiveTarget {
-			cv := state.(CoordinatedValues)
-			return liveTargetsFor(cv)
+		LiveTargets: func(state any) []cfg.LiveTarget {
+			return liveTargetsFor(state.(CoordinatedValues))
 		},
 
 		GenerateMaterial: func(state any) error {
@@ -72,17 +63,17 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	})
 }
 
-// materialiseApiKeys fills in any missing API keys on the state
-// so the template render has something to interpolate.
+// materialiseApiKeys fills in any missing API keys so the
+// template render has something to interpolate.
 func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
 	var err error
-	if cv.Agent.ApiKey, err = configure.EnsureApiKey(cv.Agent.ApiKey); err != nil {
+	if cv.Agent.ApiKey, err = cfg.EnsureApiKey(cv.Agent.ApiKey); err != nil {
 		return cv, err
 	}
-	if cv.Signer.ApiKey, err = configure.EnsureApiKey(cv.Signer.ApiKey); err != nil {
+	if cv.Signer.ApiKey, err = cfg.EnsureApiKey(cv.Signer.ApiKey); err != nil {
 		return cv, err
 	}
-	if cv.Combiner.ApiKey, err = configure.EnsureApiKey(cv.Combiner.ApiKey); err != nil {
+	if cv.Combiner.ApiKey, err = cfg.EnsureApiKey(cv.Combiner.ApiKey); err != nil {
 		return cv, err
 	}
 	return cv, nil
@@ -90,14 +81,14 @@ func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
 
 // liveTargetsFor builds the LiveTarget list for the three
 // running-daemon roles. mpcli itself is not a server.
-func liveTargetsFor(cv CoordinatedValues) []configure.LiveTarget {
+func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
 	ip := cv.Global.PublicIP
-	mk := func(role, path string, port int, apiKey string) configure.LiveTarget {
+	mk := func(role, path string, port int, apiKey string) cfg.LiveTarget {
 		url := ""
 		if ip != "" {
 			url = fmt.Sprintf("https://%s:%d/api/v1", ip, port)
 		}
-		return configure.LiveTarget{
+		return cfg.LiveTarget{
 			Role:      role,
 			Path:      path,
 			BaseURL:   url,
@@ -105,16 +96,15 @@ func liveTargetsFor(cv CoordinatedValues) []configure.LiveTarget {
 			HasConfig: apiKey != "",
 		}
 	}
-	return []configure.LiveTarget{
+	return []cfg.LiveTarget{
 		mk("mpagent", pathMpagent, agentApiPort, cv.Agent.ApiKey),
 		mk("mpsigner", pathMpsigner, signerApiPort, cv.Signer.ApiKey),
 		mk("mpcombiner", pathMpcombiner, combinerApiPort, cv.Combiner.ApiKey),
 	}
 }
 
-// generateMissingMaterial walks the derived per-role paths and
-// generates any missing JOSE keypairs and TLS certs using the
-// library helpers. Existing files are left untouched.
+// generateMissingMaterial generates any missing JOSE keypairs and
+// TLS certs. Existing files are left untouched.
 func generateMissingMaterial(cv CoordinatedValues) error {
 	paths := makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir)
 
@@ -131,7 +121,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 	}
 
 	for _, role := range roles {
-		pub, keyID, gen, err := configure.EnsureJoseKeypair(role.privKey)
+		pub, keyID, gen, err := cfg.EnsureJoseKeypair(role.privKey)
 		if err != nil {
 			return fmt.Errorf("%s jose: %w", role.label, err)
 		}
@@ -139,8 +129,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 			fmt.Printf("  generated %s JOSE keypair (KeyID %s)\n    priv: %s\n    pub:  %s\n",
 				role.label, keyID, role.privKey, pub)
 		}
-
-		certGen, err := configure.EnsureTLSCert(role.certFile, role.keyFile, role.identity, cv.Global.PublicIP+":0")
+		certGen, err := cfg.EnsureTLSCert(role.certFile, role.keyFile, role.identity, cv.Global.PublicIP+":0")
 		if err != nil {
 			return fmt.Errorf("%s tls: %w", role.label, err)
 		}

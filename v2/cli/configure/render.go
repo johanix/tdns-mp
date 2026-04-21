@@ -1,14 +1,16 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * Configurator: template rendering.
+ * mpcli configure subpackage: template rendering.
  *
- * Templates live under cmd/mpcli/templates/ and are embedded at
- * build time. The render context exposes the coordinated role
- * values plus a derived block of per-role file paths computed
- * from the global keys/certs directories.
+ * Templates live under templates/ and are embedded at build
+ * time. The render context exposes the coordinated role values
+ * plus a derived block of per-role file paths and listen
+ * addresses computed from Global.KeysDir / CertsDir / PublicIP
+ * + built-in ports, so templates never have to do string
+ * manipulation.
  */
-package main
+package configure
 
 import (
 	"bytes"
@@ -21,10 +23,6 @@ import (
 //go:embed templates/*.tmpl
 var templateFS embed.FS
 
-// renderCtx is the struct templates see. Fields are organised by
-// role + a Paths block with all derived file paths and explicit
-// listen-address fields computed from Global.PublicIP + built-in
-// ports, so templates never have to do string manipulation.
 type renderCtx struct {
 	Global   GlobalValues
 	Agent    AgentValues
@@ -33,19 +31,16 @@ type renderCtx struct {
 
 	Paths rolePaths
 
-	// Derived listen addresses (all on Global.PublicIP).
-	AgentDnsListen    string // {ip}:8054
-	AgentApiListen    string // {ip}:7054
-	SignerDnsListen   string // {ip}:8053
-	SignerDnsListen53 string // {ip}:53
-	SignerApiListen   string // {ip}:7053
-	CombinerDnsListen string // {ip}:8055
-	CombinerApiListen string // {ip}:7055
+	AgentDnsListen    string
+	AgentApiListen    string
+	SignerDnsListen   string
+	SignerDnsListen53 string
+	SignerApiListen   string
+	CombinerDnsListen string
+	CombinerApiListen string
 }
 
-// rolePaths is the per-role set of derived file paths. Filenames
-// are deterministic: {role}.jose.priv.json / {role}.jose.pub.json
-// under KeysDir, and {role}.crt / {role}.key under CertsDir.
+// rolePaths collects the deterministic per-role filenames.
 type rolePaths struct {
 	AgentJosePriv string
 	AgentJosePub  string
@@ -102,8 +97,8 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 	}
 }
 
-// renderAll produces the rendered YAML for each of the four
-// config files, keyed by final filesystem path.
+// renderAll produces the rendered YAML for each config file,
+// keyed by its filesystem path.
 func renderAll(cv CoordinatedValues) (map[string]string, error) {
 	ctx := makeRenderCtx(cv)
 

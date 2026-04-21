@@ -19,7 +19,6 @@ require (
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -70,6 +69,7 @@ require (
 	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	zgo.at/acidtab v1.1.0 // indirect
 	zgo.at/runewidth v0.1.0 // indirect
 	zgo.at/termtext v1.5.0 // indirect

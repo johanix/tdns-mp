@@ -10,6 +10,7 @@
 package main
 
 import (
+	mpconfigure "github.com/johanix/tdns-mp/v2/cli/configure"
 	cli "github.com/johanix/tdns/v2/cli"
 	mpcli "github.com/johanix/tdns-mp/v2/cli"
 )
@@ -17,6 +18,7 @@ import (
 func init() {
 	// Global commands (not role-specific)
 	rootCmd.AddCommand(cli.VersionCmd)
+	rootCmd.AddCommand(mpconfigure.Cmd)
 
 	// Signer commands (from tdns/v2/cli, under "signer" prefix)
 	rootCmd.AddCommand(mpcli.SignerCmd)
