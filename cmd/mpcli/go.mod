@@ -14,11 +14,9 @@ replace (
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260325085802-b9335832becb
-	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cli v0.0.0-20260325110920-e5c0ba0d816b
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
-	github.com/miekg/dns v1.1.72
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -38,6 +36,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
@@ -47,6 +46,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
+	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect

@@ -1,30 +1,25 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * Configurator: cobra command.
+ * `tdns-mpcli configure` — mpcli-specific wiring of the generic
+ * bootstrap-configurator library (tdns/v2/cli/configure).
  *
- * `tdns-mpcli configure` is a bootstrap tool that interviews
- * the user and emits coordinated configs for mpagent, mpsigner,
- * mpcombiner and mpcli. It runs *before* any config exists (first
- * run) and may be re-run safely later (re-run seeds prompts with
- * current values).
+ * The library owns prompt/diff/atomic-write/live-ping/generate
+ * plumbing. This file provides:
  *
- * Safeguards (see tdns-mp/docs/2026-04-21-mpcli-configure-plan.md):
- *   - Unconditional timestamped backup of any replaced file.
- *   - Diff preview with single top-level confirmation.
- *   - Atomic write + YAML re-parse.
- *   - Live-server gate (typed confirmation per live server).
- *
- * This command intentionally does NOT go through the normal
- * PersistentPreRun config/API bootstrap; it must work when no
- * mpcli.yaml exists yet.
+ *   - ordered list of the four mp configs
+ *   - ReadExisting: parse existing YAMLs into CoordinatedValues
+ *   - RunInterview: prompt the six coordinated knobs
+ *   - RenderAll: template rendering
+ *   - LiveTargets: per-role API probe inputs
+ *   - GenerateMaterial: JOSE keys + TLS certs per role
  */
 package main
 
 import (
 	"fmt"
-	"os"
 
+	"github.com/johanix/tdns/v2/cli/configure"
 	"github.com/spf13/cobra"
 )
 
@@ -46,87 +41,80 @@ func init() {
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
-	fmt.Println("Reading any existing configuration…")
-	existing := make(map[string]string, 4)
-	for _, p := range allConfigPaths() {
-		content, err := readFileIfExists(p)
-		if err != nil {
-			return err
+	return configure.Run(configure.Spec{
+		Paths: allConfigPaths(),
+
+		ReadExisting: func() (any, error) {
+			return readExistingCoordinated()
+		},
+
+		RunInterview: func(p *configure.Prompter, seed any) (any, error) {
+			cv := seed.(CoordinatedValues)
+			return runInterview(p, cv), nil
+		},
+
+		RenderAll: func(state any) (map[string]string, error) {
+			cv, err := materialiseApiKeys(state.(CoordinatedValues))
+			if err != nil {
+				return nil, err
+			}
+			return renderAll(cv)
+		},
+
+		LiveTargets: func(state any) []configure.LiveTarget {
+			cv := state.(CoordinatedValues)
+			return liveTargetsFor(cv)
+		},
+
+		GenerateMaterial: func(state any) error {
+			return generateMissingMaterial(state.(CoordinatedValues))
+		},
+	})
+}
+
+// materialiseApiKeys fills in any missing API keys on the state
+// so the template render has something to interpolate.
+func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
+	var err error
+	if cv.Agent.ApiKey, err = configure.EnsureApiKey(cv.Agent.ApiKey); err != nil {
+		return cv, err
+	}
+	if cv.Signer.ApiKey, err = configure.EnsureApiKey(cv.Signer.ApiKey); err != nil {
+		return cv, err
+	}
+	if cv.Combiner.ApiKey, err = configure.EnsureApiKey(cv.Combiner.ApiKey); err != nil {
+		return cv, err
+	}
+	return cv, nil
+}
+
+// liveTargetsFor builds the LiveTarget list for the three
+// running-daemon roles. mpcli itself is not a server.
+func liveTargetsFor(cv CoordinatedValues) []configure.LiveTarget {
+	ip := cv.Global.PublicIP
+	mk := func(role, path string, port int, apiKey string) configure.LiveTarget {
+		url := ""
+		if ip != "" {
+			url = fmt.Sprintf("https://%s:%d/api/v1", ip, port)
 		}
-		existing[p] = content
-		if content == "" {
-			fmt.Printf("  %s: (not present)\n", p)
-		} else {
-			fmt.Printf("  %s: %d bytes\n", p, len(content))
+		return configure.LiveTarget{
+			Role:      role,
+			Path:      path,
+			BaseURL:   url,
+			APIKey:    apiKey,
+			HasConfig: apiKey != "",
 		}
 	}
-
-	current, err := readExistingCoordinated()
-	if err != nil {
-		return fmt.Errorf("parse existing configs: %w", err)
+	return []configure.LiveTarget{
+		mk("mpagent", pathMpagent, agentApiPort, cv.Agent.ApiKey),
+		mk("mpsigner", pathMpsigner, signerApiPort, cv.Signer.ApiKey),
+		mk("mpcombiner", pathMpcombiner, combinerApiPort, cv.Combiner.ApiKey),
 	}
-
-	next := runInterview(current)
-
-	// API keys are substituted into the rendered YAML, so they
-	// must exist before rendering. Generation is in-memory only
-	// at this stage — nothing lands on disk until after the user
-	// confirms the diff.
-	if next.Agent.ApiKey, err = ensureApiKey(next.Agent.ApiKey); err != nil {
-		return err
-	}
-	if next.Signer.ApiKey, err = ensureApiKey(next.Signer.ApiKey); err != nil {
-		return err
-	}
-	if next.Combiner.ApiKey, err = ensureApiKey(next.Combiner.ApiKey); err != nil {
-		return err
-	}
-
-	rendered, err := renderAll(next)
-	if err != nil {
-		return fmt.Errorf("render templates: %w", err)
-	}
-
-	changes := make([]fileChange, 0, len(rendered))
-	for _, p := range allConfigPaths() {
-		changes = append(changes, fileChange{
-			path:   p,
-			oldTxt: existing[p],
-			newTxt: rendered[p],
-		})
-	}
-
-	in := stdinReader()
-	if !confirmApply(os.Stdout, in, changes) {
-		fmt.Println("\nAborted. No files changed.")
-		return nil
-	}
-
-	// Live-server gate: any still-running daemon whose config
-	// is about to change must be confirmed explicitly, using
-	// the current (pre-change) apikey to probe.
-	if err := gateLiveServers(os.Stdout, in, current, existing, changes); err != nil {
-		fmt.Println("\n" + err.Error())
-		return nil
-	}
-
-	// Generate missing key/cert material now — only after the
-	// user has committed to the write. Existing files are
-	// preserved (no rotation).
-	if err := generateMissingMaterial(next); err != nil {
-		return fmt.Errorf("generate material: %w", err)
-	}
-
-	if _, err := applyChanges(os.Stdout, changes); err != nil {
-		return fmt.Errorf("apply changes: %w", err)
-	}
-	fmt.Println("\nDone.")
-	return nil
 }
 
 // generateMissingMaterial walks the derived per-role paths and
-// generates any missing JOSE keypairs and TLS certs. Existing
-// files are left untouched (reuse-not-rotate).
+// generates any missing JOSE keypairs and TLS certs using the
+// library helpers. Existing files are left untouched.
 func generateMissingMaterial(cv CoordinatedValues) error {
 	paths := makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir)
 
@@ -143,7 +131,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 	}
 
 	for _, role := range roles {
-		pub, keyID, gen, err := ensureJoseKeypair(role.privKey)
+		pub, keyID, gen, err := configure.EnsureJoseKeypair(role.privKey)
 		if err != nil {
 			return fmt.Errorf("%s jose: %w", role.label, err)
 		}
@@ -152,9 +140,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 				role.label, keyID, role.privKey, pub)
 		}
 
-		// Cert SANs include the shared public IP so the cert
-		// validates for traffic coming in on that address.
-		certGen, err := ensureTLSCert(role.certFile, role.keyFile, role.identity, cv.Global.PublicIP+":0")
+		certGen, err := configure.EnsureTLSCert(role.certFile, role.keyFile, role.identity, cv.Global.PublicIP+":0")
 		if err != nil {
 			return fmt.Errorf("%s tls: %w", role.label, err)
 		}
