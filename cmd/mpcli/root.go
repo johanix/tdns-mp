@@ -27,7 +27,7 @@ var rootCmd = &cobra.Command{
 	Short: "tdns-mpcli is the CLI tool for tdns multi-provider applications",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		tdns.SetupCliLogging()
-		if isRootKeysCommand(cmd) {
+		if isRootKeysCommand(cmd) || isConfigureCommand(cmd) {
 			return
 		}
 		initConfig()
@@ -46,6 +46,16 @@ func ExecuteContext(ctx context.Context) {
 func isRootKeysCommand(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		if c.Name() == "keys" {
+			p := c.Parent()
+			return p != nil && p.Name() == "tdns-mpcli"
+		}
+	}
+	return false
+}
+
+func isConfigureCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() == "configure" {
 			p := c.Parent()
 			return p != nil && p.Name() == "tdns-mpcli"
 		}
