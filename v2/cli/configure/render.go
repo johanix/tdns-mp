@@ -16,7 +16,9 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"net"
 	"path/filepath"
+	"strconv"
 	"text/template"
 )
 
@@ -81,19 +83,22 @@ func makeRolePaths(keysDir, certsDir string) rolePaths {
 
 func makeRenderCtx(cv CoordinatedValues) renderCtx {
 	ip := cv.Global.PublicIP
+	hp := func(port int) string {
+		return net.JoinHostPort(ip, strconv.Itoa(port))
+	}
 	return renderCtx{
 		Global:            cv.Global,
 		Agent:             cv.Agent,
 		Signer:            cv.Signer,
 		Combiner:          cv.Combiner,
 		Paths:             makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir),
-		AgentDnsListen:    fmt.Sprintf("%s:%d", ip, agentDnsPort),
-		AgentApiListen:    fmt.Sprintf("%s:%d", ip, agentApiPort),
-		SignerDnsListen:   fmt.Sprintf("%s:%d", ip, signerDnsPort),
-		SignerDnsListen53: fmt.Sprintf("%s:%d", ip, signerDns53Port),
-		SignerApiListen:   fmt.Sprintf("%s:%d", ip, signerApiPort),
-		CombinerDnsListen: fmt.Sprintf("%s:%d", ip, combinerDnsPort),
-		CombinerApiListen: fmt.Sprintf("%s:%d", ip, combinerApiPort),
+		AgentDnsListen:    hp(agentDnsPort),
+		AgentApiListen:    hp(agentApiPort),
+		SignerDnsListen:   hp(signerDnsPort),
+		SignerDnsListen53: hp(signerDns53Port),
+		SignerApiListen:   hp(signerApiPort),
+		CombinerDnsListen: hp(combinerDnsPort),
+		CombinerApiListen: hp(combinerApiPort),
 	}
 }
 

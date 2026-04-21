@@ -16,6 +16,7 @@ package configure
 import (
 	"fmt"
 	"io"
+	"net"
 
 	cfg "github.com/johanix/tdns/v2/cli/configure"
 )
@@ -48,7 +49,7 @@ func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues 
 	fmt.Fprintln(p.Out, "\n=== Global ===")
 	out.Global.KeysDir = p.Ask("keys directory", cfg.OrDefault(current.Global.KeysDir, defaultKeysDir), cfg.AbsDir)
 	out.Global.CertsDir = p.Ask("certs directory", cfg.OrDefault(current.Global.CertsDir, defaultCertsDir), cfg.AbsDir)
-	out.Global.PublicIP = p.Ask("public IP (shared by all three roles)", cfg.OrDefault(current.Global.PublicIP, defaultPublicIP), cfg.NonEmpty("public IP"))
+	out.Global.PublicIP = p.Ask("public IP (shared by all three roles)", cfg.OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
 
 	fmt.Fprintln(p.Out, "\n=== Identities ===")
 	out.Agent.Identity = p.AskIdentity("agent identity", current.Agent.Identity)
@@ -60,6 +61,21 @@ func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues 
 		fmt.Fprintln(p.Out, "OK — these defaults will be used now; edit the generated configs afterwards to change them.")
 	}
 	return out
+}
+
+// ipLiteral rejects non-IP input. The prompt label promises a
+// "public IP"; accepting hostnames here would silently produce
+// invalid entries in fields that expect IPs (cert SANs, listen
+// addresses for binds). Users who want a hostname can edit the
+// generated configs afterwards.
+func ipLiteral(s string) error {
+	if err := cfg.NonEmpty("public IP")(s); err != nil {
+		return err
+	}
+	if net.ParseIP(s) == nil {
+		return fmt.Errorf("%q is not an IP literal (hostnames not accepted here)", s)
+	}
+	return nil
 }
 
 // showPortTable prints the fixed port layout so the user knows

@@ -13,6 +13,8 @@ package configure
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -86,7 +88,7 @@ func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
 	mk := func(role, path string, port int, apiKey string) cfg.LiveTarget {
 		url := ""
 		if ip != "" {
-			url = fmt.Sprintf("https://%s:%d/api/v1", ip, port)
+			url = "https://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/api/v1"
 		}
 		return cfg.LiveTarget{
 			Role:      role,
@@ -129,7 +131,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 			fmt.Printf("  generated %s JOSE keypair (KeyID %s)\n    priv: %s\n    pub:  %s\n",
 				role.label, keyID, role.privKey, pub)
 		}
-		certGen, err := cfg.EnsureTLSCert(role.certFile, role.keyFile, role.identity, cv.Global.PublicIP+":0")
+		certGen, err := cfg.EnsureTLSCert(role.certFile, role.keyFile, role.identity, net.JoinHostPort(cv.Global.PublicIP, "0"))
 		if err != nil {
 			return fmt.Errorf("%s tls: %w", role.label, err)
 		}

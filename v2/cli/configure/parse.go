@@ -16,8 +16,8 @@ package configure
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
-	"strings"
 
 	cfg "github.com/johanix/tdns/v2/cli/configure"
 	"gopkg.in/yaml.v3"
@@ -92,9 +92,12 @@ func readExistingCoordinated() (CoordinatedValues, error) {
 }
 
 // hostOnly returns just the host portion of a host:port string.
+// Uses net.SplitHostPort so bracketed IPv6 ("[::1]:8053") is
+// handled correctly and yields the unbracketed host literal
+// ("::1"). Bare hosts with no port are returned as-is.
 func hostOnly(hostPort string) string {
-	if i := strings.LastIndex(hostPort, ":"); i > 0 {
-		return hostPort[:i]
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		return h
 	}
 	return hostPort
 }
