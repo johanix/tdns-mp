@@ -32,10 +32,10 @@ var combinerZoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured zones",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := tdnscli.GetCommandContext("zone")
-		api, err := tdnscli.GetApiClient(prefixcmd, true)
+		// combinerZoneCmd is only attached under CombinerCmd → role "combiner".
+		api, err := tdnscli.GetApiClient("combiner", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
@@ -63,10 +63,10 @@ var combinerZoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := tdnscli.GetCommandContext("zone")
-		api, err := tdnscli.GetApiClient(prefixcmd, true)
+		// combinerZoneCmd is only attached under CombinerCmd → role "combiner".
+		api, err := tdnscli.GetApiClient("combiner", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendMPListCommand(api)
