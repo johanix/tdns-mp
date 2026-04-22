@@ -27,7 +27,7 @@ func init() {
 	mpcli.SignerCmd.AddCommand(cli.DaemonCmd)
 	mpcli.SignerCmd.AddCommand(cli.DebugCmd)
 	mpcli.SignerCmd.AddCommand(cli.ConfigCmd)
-	mpcli.SignerCmd.AddCommand(cli.ZoneCmd)
+	mpcli.SignerCmd.AddCommand(cli.NewZoneCmd("signer", mpcli.SignerZoneMPListCmd))
 	mpcli.SignerCmd.AddCommand(cli.KeystoreCmd)
 	mpcli.SignerCmd.AddCommand(cli.TruststoreCmd)
 	mpcli.SignerCmd.AddCommand(cli.ReportCmd)
