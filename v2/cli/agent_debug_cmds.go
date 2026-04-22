@@ -590,8 +590,9 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 		}
 
 		_, buf, err := func() (*AgentMgmtResponse, []byte, error) {
-			prefixcmd, _ := tdnscli.GetCommandContext("debug")
-			api, err := tdnscli.GetApiClient(prefixcmd, true)
+			// The /agent/debug endpoint is served only by the agent daemon
+			// regardless of which debug tree this is invoked from.
+			api, err := tdnscli.GetApiClient("agent", true)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error getting API client: %w", err)
 			}

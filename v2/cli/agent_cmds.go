@@ -39,8 +39,8 @@ var agentLocalConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Show details of the local agent config",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := tdnscli.GetCommandContext("local")
-		api, err := tdnscli.GetApiClient(prefixcmd, true)
+		// agentLocalConfigCmd is only under mpcli.AgentCmd → role "agent".
+		api, err := tdnscli.GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -354,8 +354,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 // listPeerZones shows shared zones for each peer agent
 func listPeerZones(cmd *cobra.Command, component string) {
-	prefixcmd, _ := tdnscli.GetCommandContext("peer")
-	api, err := tdnscli.GetApiClient(prefixcmd, true)
+	api, err := tdnscli.GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -419,8 +418,7 @@ func listPeerZones(cmd *cobra.Command, component string) {
 
 // listAgentsForZone shows which peer agents share a specific zone
 func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
-	prefixcmd, _ := tdnscli.GetCommandContext("peer")
-	api, err := tdnscli.GetApiClient(prefixcmd, true)
+	api, err := tdnscli.GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
