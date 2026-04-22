@@ -150,7 +150,7 @@ Displays both API and DNS transports independently with their current state.
 This shows all peers regardless of transport type - both API (TLS) and DNS (JOSE) transports
 are displayed as separate entries to show their independent states.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.ListDistribPeers(cmd, "agent")
+		ListDistribPeers(cmd, "agent")
 	},
 }
 

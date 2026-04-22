@@ -824,12 +824,4 @@ func SendAgentDebugCmd(req AgentMgmtPost, printJson bool) (*AgentMgmtResponse, e
 	return &amr, nil
 }
 
-// getStringValue extracts a string value from a map, trying multiple keys.
-func getStringValue(m map[string]interface{}, keys ...string) string {
-	for _, key := range keys {
-		if v, ok := m[key]; ok && v != nil {
-			return fmt.Sprintf("%v", v)
-		}
-	}
-	return ""
-}
+// getStringValue is defined in distrib_cmds.go.
