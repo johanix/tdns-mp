@@ -10,9 +10,9 @@
 package main
 
 import (
+	mpcli "github.com/johanix/tdns-mp/v2/cli"
 	mpconfigure "github.com/johanix/tdns-mp/v2/cli/configure"
 	cli "github.com/johanix/tdns/v2/cli"
-	mpcli "github.com/johanix/tdns-mp/v2/cli"
 )
 
 func init() {
@@ -22,7 +22,7 @@ func init() {
 
 	// Signer commands (from tdns/v2/cli, under "signer" prefix)
 	rootCmd.AddCommand(mpcli.SignerCmd)
-	mpcli.SignerCmd.AddCommand(cli.PingCmd)
+	mpcli.SignerCmd.AddCommand(cli.NewPingCmd("signer"))
 	mpcli.SignerCmd.AddCommand(cli.StopCmd)
 	mpcli.SignerCmd.AddCommand(cli.DaemonCmd)
 	mpcli.SignerCmd.AddCommand(cli.DebugCmd)
@@ -39,7 +39,7 @@ func init() {
 	// Note: combiner has its own zone management (combiner_edits_cmds.go)
 	// so we don't add cli.ZoneCmd here to avoid duplicate "zone" commands.
 	rootCmd.AddCommand(mpcli.CombinerCmd)
-	mpcli.CombinerCmd.AddCommand(cli.PingCmd)
+	mpcli.CombinerCmd.AddCommand(cli.NewPingCmd("combiner"))
 	mpcli.CombinerCmd.AddCommand(cli.StopCmd)
 	mpcli.CombinerCmd.AddCommand(cli.DaemonCmd)
 	mpcli.CombinerCmd.AddCommand(cli.DebugCmd)
@@ -50,7 +50,7 @@ func init() {
 
 	// Agent commands (from tdns-mp/v2/cli)
 	rootCmd.AddCommand(mpcli.AgentCmd)
-	mpcli.AgentCmd.AddCommand(cli.PingCmd)
+	mpcli.AgentCmd.AddCommand(cli.NewPingCmd("agent"))
 	mpcli.AgentCmd.AddCommand(cli.StopCmd)
 	mpcli.AgentCmd.AddCommand(cli.DaemonCmd)
 	mpcli.AgentCmd.AddCommand(cli.DebugCmd)
