@@ -355,7 +355,7 @@ var hsyncAgentStatusCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-agentstatus",
 			AgentId: AgentId(string(tdns.Globals.AgentId)),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error sending agent management command: %v", err)
 		}
@@ -390,7 +390,7 @@ var hsyncLocateCmd = &cobra.Command{
 			Command: "hsync-locate",
 			AgentId: AgentId(dns.Fqdn(args[0])),
 			Zone:    ZoneName(tdns.Globals.Zonename),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -420,7 +420,7 @@ var hsyncSendHelloCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-send-hello",
 			AgentId: agentIdentity,
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
