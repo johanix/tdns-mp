@@ -59,11 +59,11 @@ func readZoneFile(filename string) (map[string][]string, error) {
 	return data, nil
 }
 
-// Helper function to execute a combiner API request
-func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*CombinerResponse, error) {
-	parent, _ := tdnscli.GetCommandContext(cmdName)
-
-	api, err := tdnscli.GetApiClient(parent, true)
+// executeCombinerRequest POSTs a CombinerPost to /combiner. All callers
+// sit under CombinerCmd, which is only attached under mpcli's root, so
+// the role is fixed.
+func executeCombinerRequest(zone, command string, data map[string][]string) (*CombinerResponse, error) {
+	api, err := tdnscli.GetApiClient("combiner", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
@@ -99,7 +99,7 @@ var combinerListDataCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		tdnscli.PrepArgs("zonename")
 
-		resp, err := executeCombinerRequest("list-data", tdns.Globals.Zonename, "list", nil)
+		resp, err := executeCombinerRequest(tdns.Globals.Zonename, "list", nil)
 		if err != nil {
 			log.Fatalf("%v", err)
 		}
@@ -164,7 +164,7 @@ Example contents (for a zone named "example.com"):
 			log.Fatalf("Error reading zone file: %v", err)
 		}
 
-		resp, err := executeCombinerRequest("add-data", tdns.Globals.Zonename, "add", data)
+		resp, err := executeCombinerRequest(tdns.Globals.Zonename, "add", data)
 		if err != nil {
 			log.Fatalf("%v", err)
 		}
@@ -195,7 +195,7 @@ Example contents (for a zone named "example.com"):
 			log.Fatalf("Error reading zone file: %v", err)
 		}
 
-		resp, err := executeCombinerRequest("remove-data", tdns.Globals.Zonename, "remove", data)
+		resp, err := executeCombinerRequest(tdns.Globals.Zonename, "remove", data)
 		if err != nil {
 			log.Fatalf("%v", err)
 		}
