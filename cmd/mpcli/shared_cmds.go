@@ -44,7 +44,7 @@ func init() {
 	mpcli.CombinerCmd.AddCommand(cli.DaemonCmd)
 	mpcli.CombinerCmd.AddCommand(cli.DebugCmd)
 	mpcli.CombinerCmd.AddCommand(cli.ConfigCmd)
-	mpcli.CombinerCmd.AddCommand(cli.KeysCmd)
+	mpcli.CombinerCmd.AddCommand(cli.NewKeysCmd("combiner"))
 	mpcli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
 	mpcli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
 
@@ -57,7 +57,7 @@ func init() {
 	mpcli.AgentCmd.AddCommand(cli.ConfigCmd)
 	mpcli.AgentCmd.AddCommand(cli.KeystoreCmd)
 	mpcli.AgentCmd.AddCommand(cli.TruststoreCmd)
-	mpcli.AgentCmd.AddCommand(cli.KeysCmd)
+	mpcli.AgentCmd.AddCommand(cli.NewKeysCmd("agent"))
 	mpcli.AgentCmd.AddCommand(cli.AgentDistribCmd)
 	mpcli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
 	// Standard zone commands from tdns (list, reload, etc.)
