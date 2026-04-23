@@ -111,59 +111,15 @@ func initConfig() {
 	}
 
 	cli.ValidateConfig(nil, cfgFileUsed)
-	err := viper.Unmarshal(&cconf)
-	if err != nil {
+	if err := viper.Unmarshal(&cconf); err != nil {
 		log.Fatalf("FATAL: viper.Unmarshal failed: %v", err)
 	}
 }
 
-var cconf CliConf
-
-type CliConf struct {
-	ApiServers []ApiDetails
-	Keys       tdns.KeyConf
-}
-
-type ApiDetails struct {
-	Name       string `validate:"required" yaml:"name"`
-	BaseURL    string `validate:"required" yaml:"baseurl"`
-	ApiKey     string `validate:"required" yaml:"apikey"`
-	AuthMethod string `validate:"required" yaml:"authmethod"`
-	RootCA     string `yaml:"rootca"`
-	Command    string `yaml:"command,omitempty"`
-	ConfigFile string `yaml:"config_file,omitempty"`
-}
+var cconf cli.CliConf
 
 func initApi() {
-	if tdns.Globals.Debug {
-		fmt.Printf("initApi: setting up API clients for:")
-	}
-	for _, val := range cconf.ApiServers {
-		rootCA := val.RootCA
-		if rootCA == "" {
-			rootCA = "insecure"
-		}
-		tmp := tdns.NewClient(val.Name, val.BaseURL, val.ApiKey, val.AuthMethod, rootCA)
-		if tmp == nil {
-			log.Fatalf("initApi: Failed to setup API client for %q", val.Name)
-		}
-		tdns.Globals.ApiClients[val.Name] = tmp
-		if tdns.Globals.Debug {
-			fmt.Printf(" %s ", val.Name)
-		}
-	}
-	if tdns.Globals.Debug {
-		fmt.Printf("\n")
-	}
-
-	authClient, exists := tdns.Globals.ApiClients["tdns-auth"]
-	if !exists || authClient == nil {
-		log.Fatalf("FATAL: No API server named 'tdns-auth' found in config")
-	}
-	tdns.Globals.Api = authClient
-
-	numtsigs, _ := tdns.ParseTsigKeys(&cconf.Keys)
-	if tdns.Globals.Debug {
-		fmt.Printf("Parsed %d TSIG keys\n", numtsigs)
+	if err := cli.InitApiClients(&cconf); err != nil {
+		log.Fatalf("FATAL: %v", err)
 	}
 }
