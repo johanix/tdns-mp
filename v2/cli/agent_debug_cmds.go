@@ -590,8 +590,9 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 		}
 
 		_, buf, err := func() (*AgentMgmtResponse, []byte, error) {
-			prefixcmd, _ := tdnscli.GetCommandContext("debug")
-			api, err := tdnscli.GetApiClient(prefixcmd, true)
+			// The /agent/debug endpoint is served only by the agent daemon
+			// regardless of which debug tree this is invoked from.
+			api, err := tdnscli.GetApiClient("agent", true)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error getting API client: %w", err)
 			}
@@ -730,8 +731,9 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 	},
 }
 
+// DebugAgentCmd and its children are attached to the agent debug tree
+// by mpcli/shared_cmds.go via cli.NewDebugCmd("agent", DebugAgentCmd).
 func init() {
-	tdnscli.DebugCmd.AddCommand(DebugAgentCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendRfiCmd)
 	DebugAgentCmd.AddCommand(DebugAgentDumpAgentRegistryCmd)
@@ -824,12 +826,4 @@ func SendAgentDebugCmd(req AgentMgmtPost, printJson bool) (*AgentMgmtResponse, e
 	return &amr, nil
 }
 
-// getStringValue extracts a string value from a map, trying multiple keys.
-func getStringValue(m map[string]interface{}, keys ...string) string {
-	for _, key := range keys {
-		if v, ok := m[key]; ok && v != nil {
-			return fmt.Sprintf("%v", v)
-		}
-	}
-	return ""
-}
+// getStringValue is defined in distrib_cmds.go.

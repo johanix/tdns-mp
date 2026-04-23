@@ -41,10 +41,10 @@ var hsyncCmd = &cobra.Command{
 }
 
 // SendAgentHsyncCommand posts an AgentMgmtPost to /agent/hsync and
-// returns the parsed AgentMgmtResponse.
-func SendAgentHsyncCommand(req *AgentMgmtPost, prefix string) (*AgentMgmtResponse, error) {
-	prefixcmd, _ := tdnscli.GetCommandContext(prefix)
-	api, err := tdnscli.GetApiClient(prefixcmd, true)
+// returns the parsed AgentMgmtResponse. All callers sit under
+// hsyncCmd → mpcli.AgentCmd, so the role is fixed.
+func SendAgentHsyncCommand(req *AgentMgmtPost) (*AgentMgmtResponse, error) {
+	api, err := tdnscli.GetApiClient("agent", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %v", err)
 	}
@@ -75,7 +75,7 @@ var hsyncZoneStatusCmd = &cobra.Command{
 		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-zonestatus",
 			Zone:    ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -114,7 +114,7 @@ Shows peer state, transport details, and heartbeat statistics.`,
 		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-peer-status",
 			AgentId: AgentId(hsyncPeerID),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -182,7 +182,7 @@ Shows operation details, status, and timestamps.`,
 		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-sync-ops",
 			Zone:    ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -224,7 +224,7 @@ var hsyncConfirmationsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-confirmations",
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -269,7 +269,7 @@ var hsyncTransportEventsCmd = &cobra.Command{
 			Command: "hsync-transport-events",
 			AgentId: AgentId(hsyncPeerID),
 			Data:    map[string]interface{}{"limit": hsyncLimit},
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -314,7 +314,7 @@ var hsyncMetricsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		resp, err := SendAgentHsyncCommand(&AgentMgmtPost{
 			Command: "hsync-metrics",
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -355,7 +355,7 @@ var hsyncAgentStatusCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-agentstatus",
 			AgentId: AgentId(string(tdns.Globals.AgentId)),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error sending agent management command: %v", err)
 		}
@@ -390,7 +390,7 @@ var hsyncLocateCmd = &cobra.Command{
 			Command: "hsync-locate",
 			AgentId: AgentId(dns.Fqdn(args[0])),
 			Zone:    ZoneName(tdns.Globals.Zonename),
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -420,7 +420,7 @@ var hsyncSendHelloCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "hsync-send-hello",
 			AgentId: agentIdentity,
-		}, "hsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}

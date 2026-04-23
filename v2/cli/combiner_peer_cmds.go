@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 
-	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +32,7 @@ Example:
   tdns-cliv2 combiner peer list
   tdns-cliv2 combiner peer list --verbose`,
 	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.ListDistribPeers(cmd, "combiner")
+		ListDistribPeers(cmd, "combiner")
 	},
 }
 

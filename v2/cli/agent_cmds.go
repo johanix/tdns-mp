@@ -39,8 +39,8 @@ var agentLocalConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Show details of the local agent config",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := tdnscli.GetCommandContext("local")
-		api, err := tdnscli.GetApiClient(prefixcmd, true)
+		// agentLocalConfigCmd is only under mpcli.AgentCmd → role "agent".
+		api, err := tdnscli.GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -119,7 +119,7 @@ Example:
 		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
 			Command: "discover",
 			AgentId: AgentId(agentIdentity),
-		}, "discover")
+		})
 
 		if err != nil {
 			fmt.Printf("Error sending discover command: %v\n", err)
@@ -150,7 +150,7 @@ Displays both API and DNS transports independently with their current state.
 This shows all peers regardless of transport type - both API (TLS) and DNS (JOSE) transports
 are displayed as separate entries to show their independent states.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.ListDistribPeers(cmd, "agent")
+		ListDistribPeers(cmd, "agent")
 	},
 }
 
@@ -202,7 +202,7 @@ Modes:
 		// Refresh key inventory from signer before resync
 		fmt.Printf("Refreshing key inventory for zone %s...\n", zone)
 		keyReq := &AgentMgmtPost{Command: "refresh-keys", Zone: zone}
-		keyResp, err := SendAgentMgmtCmd(keyReq, "peer")
+		keyResp, err := SendAgentMgmtCmd(keyReq)
 		if err != nil {
 			fmt.Printf("Warning: failed to refresh key inventory: %v\n", err)
 		} else if keyResp.Error {
@@ -220,7 +220,7 @@ Modes:
 				RfiType:     "SYNC",
 				Zone:        zone,
 			}
-			amr, err := SendAgentMgmtCmd(req, "peer")
+			amr, err := SendAgentMgmtCmd(req)
 			if err != nil {
 				fmt.Printf("Error sending resync pull: %v\n", err)
 				os.Exit(1)
@@ -243,7 +243,7 @@ Modes:
 		if resyncPush || resyncFull {
 			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
 			req := &AgentMgmtPost{Command: "resync", Zone: zone}
-			amr, err := SendAgentMgmtCmd(req, "peer")
+			amr, err := SendAgentMgmtCmd(req)
 			if err != nil {
 				fmt.Printf("Error sending resync push: %v\n", err)
 				os.Exit(1)
@@ -284,14 +284,14 @@ func init() {
 	agentPeerResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
 }
 
-func SendAgentMgmtCmd(req *AgentMgmtPost, prefix string) (*AgentMgmtResponse, error) {
-	prefixcmd, _ := tdnscli.GetCommandContext(prefix)
-	api, err := tdnscli.GetApiClient(prefixcmd, true)
+// SendAgentMgmtCmd POSTs an AgentMgmtPost to the agent daemon's /agent
+// endpoint. Every caller in this package sits under mpcli.AgentCmd, so
+// the role is fixed rather than inferred from the Cobra tree.
+func SendAgentMgmtCmd(req *AgentMgmtPost) (*AgentMgmtResponse, error) {
+	api, err := tdnscli.GetApiClient("agent", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
-
-	// api.Debug = true
 
 	_, buf, err := api.RequestNG("POST", "/agent", req, true)
 	if err != nil {
@@ -336,7 +336,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 		Command: apiCmd,
 		Zone:    ZoneName(dns.Fqdn(zonename)),
 		RRs:     []string{rr.String()},
-	}, "local")
+	})
 
 	if err != nil {
 		fmt.Printf("Error sending agent management command: %v\n", err)
@@ -354,8 +354,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 // listPeerZones shows shared zones for each peer agent
 func listPeerZones(cmd *cobra.Command, component string) {
-	prefixcmd, _ := tdnscli.GetCommandContext("peer")
-	api, err := tdnscli.GetApiClient(prefixcmd, true)
+	api, err := tdnscli.GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -419,8 +418,7 @@ func listPeerZones(cmd *cobra.Command, component string) {
 
 // listAgentsForZone shows which peer agents share a specific zone
 func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
-	prefixcmd, _ := tdnscli.GetCommandContext("peer")
-	api, err := tdnscli.GetApiClient(prefixcmd, true)
+	api, err := tdnscli.GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
