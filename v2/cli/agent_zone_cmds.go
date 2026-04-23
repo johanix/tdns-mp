@@ -511,6 +511,7 @@ func init() {
 	// Update subcommands
 	agentZoneUpdateCmd.AddCommand(agentZoneUpdateCreateCmd)
 	agentZoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	tdnscli.AttachUpdateCreateFlags(agentZoneUpdateCreateCmd)
 
 	// Flags
 	agentZoneAddRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to add")
