@@ -731,8 +731,9 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 	},
 }
 
+// DebugAgentCmd and its children are attached to the agent debug tree
+// by mpcli/shared_cmds.go via cli.NewDebugCmd("agent", DebugAgentCmd).
 func init() {
-	tdnscli.DebugCmd.AddCommand(DebugAgentCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendRfiCmd)
 	DebugAgentCmd.AddCommand(DebugAgentDumpAgentRegistryCmd)
