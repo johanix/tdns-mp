@@ -607,6 +607,21 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 					ownerData.RRtypes.Set(rrtype, rrset)
 				}
 			}
+
+			// If the agent now has no rrtypes at all, drop the empty
+			// OwnerData entry so the agent disappears from the SDE
+			// rather than lingering as a "(no RRsets)" placeholder.
+			if ownerData.RRtypes.Count() == 0 {
+				agentRepo.Data.Remove(agentID)
+				// Tracking for an agent with no terminal-state data
+				// also has no reason to live; clear the per-agent
+				// rrtype map. (Pending entries that were preserved
+				// above keep their data on the RRsets path, so this
+				// branch only fires when the agent is truly empty.)
+				if zdr.Tracking[zone] != nil {
+					delete(zdr.Tracking[zone], agentID)
+				}
+			}
 		}
 	}
 

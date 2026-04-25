@@ -542,12 +542,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					return ks
 				}
 
+				// Defensive: skip agents whose OwnerData has no rrtypes
+				// left. Such empty placeholders can otherwise render as
+				// "Source: X / (no RRsets)" rows in the CLI output —
+				// confusing to operators. applyEditsToSDE removes empty
+				// owner entries on its own; this guard catches cases
+				// from any other code path that might leave one behind.
 				if sdcmd.Zone != "" {
 					zone := sdcmd.Zone
 					ks := buildKeyStates(zone)
 					if agentRepo, ok := zdr.Repo.Get(zone); ok {
 						agentData := make(map[AgentId]map[uint16][]TrackedRRInfo)
 						for agentId, ownerData := range agentRepo.Data.Items() {
+							if ownerData == nil || ownerData.RRtypes.Count() == 0 {
+								continue
+							}
 							agentData[agentId] = dumpZoneAgent(zone, agentId, ownerData, ks)
 						}
 						dumpData[zone] = agentData
@@ -557,6 +566,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						ks := buildKeyStates(zone)
 						agentData := make(map[AgentId]map[uint16][]TrackedRRInfo)
 						for agentId, ownerData := range agentRepo.Data.Items() {
+							if ownerData == nil || ownerData.RRtypes.Count() == 0 {
+								continue
+							}
 							agentData[agentId] = dumpZoneAgent(zone, agentId, ownerData, ks)
 						}
 						dumpData[zone] = agentData
