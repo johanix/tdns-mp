@@ -49,16 +49,6 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
 
-	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
-		tdns.RefreshEngine(ctx, conf.Config)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
-		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
-		return tdns.KeyStateWorker(ctx, conf.Config)
-	})
-
 	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
 	if conf.InternalMp.TransportManager != nil {
 		if err := conf.InternalMp.MPTransport.RegisterChunkNotifyHandler(); err != nil {
@@ -68,14 +58,33 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 	}
 
-	// Initialize combiner as a virtual peer so HsyncEngine can manage heartbeats
+	// Initialize the combiner and signer as virtual peers BEFORE RefreshEngine
+	// starts. RefreshEngine processes zones in a goroutine and the very first
+	// MP zone load triggers HsyncChanged → DnskeysChanged → RequestAndWaitForKeyInventory,
+	// which encrypts to the signer. Without the signer's JOSE key registered
+	// in PayloadCrypto first, that send fails (no encryption key for peer ...);
+	// tm.Send then falls back to API which constructs a nonsense URL from the
+	// signer's DNS DiscoveryAddress (udp://host:53/sync) and fails with
+	// "unsupported protocol scheme". The combiner has the same shape of race
+	// for the same reason. Registering both peers (which loads their public
+	// keys) before any engine that could initiate outbound traffic eliminates
+	// the race deterministically.
 	if err := conf.InternalMp.AgentRegistry.InitializeCombinerAsPeer(conf); err != nil {
 		lgAgent.Warn("failed to initialize combiner as peer, continuing without combiner heartbeat monitoring", "err", err)
 	}
-	// Initialize signer as a virtual peer so it shows in "agent peer list" and can be pinged
 	if err := conf.InternalMp.AgentRegistry.InitializeSignerAsPeer(conf); err != nil {
 		lgAgent.Warn("failed to initialize signer as peer, continuing without signer peer registration", "err", err)
 	}
+
+	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
+		tdns.RefreshEngine(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
+		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
+		return tdns.KeyStateWorker(ctx, conf.Config)
+	})
 
 	// Start the reliable message queue (must be after combiner peer initialization)
 	if conf.InternalMp.TransportManager != nil {
