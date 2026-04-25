@@ -74,12 +74,12 @@ repo with its own merge cycle):
 | 8 | `OnPeerDiscovered` callback seam | tdns-mp + tdns-transport | 2 hours | ✅ DONE | Phase 6 part 2 |
 | 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | ✅ DONE | Phase 1 deletion |
 | 6 | Add IMR lookup helpers to transport (parallel embedding) | tdns-transport only | 0.5 day | ✅ DONE | Phase 6 part 1 |
-| 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | ⏳ pending | Phase 1+ exit gate |
+| 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | 🟡 deferred (no time budget) | Phase 1+ exit gate |
 | 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | ✅ DONE | Phase 7 deletion of `SyncPeerFromAgent` |
-| 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | ⏳ pending | Phase 7 |
-| 3 | Unified `tm.Send` shim | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 5 deletion |
+| 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | ✅ DONE (no-op) | Phase 7 |
+| 3 | `tm.Send` shim (Sync only — Hello/Beat deferred) | tdns-mp + tdns-transport | 0.5 day | ✅ DONE | Phase 5 partial |
 
-**Progress (2026-04-25):** Bites 0, 4, 8, 1, 6, 7 complete.
+**Progress (2026-04-25):** Bites 0, 4, 8, 1, 6, 7, 3 complete. Bite 5 closed as no-op. Bite 2 (test harness) deferred — lacks time budget for the 2–3 day investment. The main-refactor entry conditions are satisfied for everything except the test harness gate.
 Bite 0 merged to `tdns/main` via PR #204 and
 cherry-picked onto the in-flight `fast-roller-1`
 feature branch. Bites 4, 8, 1 landed on
@@ -547,88 +547,101 @@ cleaner to assert.
 
 ---
 
-## Bite 3: Unified `tm.Send` shim
+## Bite 3: `tm.Send` shim (Sync only — Hello/Beat deferred)
 
 **Source:** Quick Wins § "Bite 3" in the main plan.
-Re-stated here verbatim in intent.
+Scope refined during execution (2026-04-25).
 
-### What
+### Scope refinement (2026-04-25)
 
-Introduce a single generic send method on
-`TransportManager` that subsumes the three
-`SendXWithFallback` variants. Existing methods become
-thin deprecation shims; call-site migration is
-opportunistic.
+The original spec assumed all three `SendXWithFallback`
+wrappers shared the same primary-then-fallback shape.
+On execution, the audit found that this is true only
+for `SendSyncWithFallback`. Both `SendHelloWithFallback`
+and `SendBeatWithFallback` send on **all configured
+transports in parallel** (not primary-then-fallback) and
+mix in extensive MP-side state mutation (per-mechanism
+agent state updates, error capture, conditional state
+transitions, gossip plumbing). Wrapping those under a
+generic `tm.Send` would change semantics.
 
-### Concrete steps
+Bite 3 therefore lands `tm.Send` for the sync case only.
+Hello and Beat are explicitly out of scope; the
+parallel-send-with-MP-state-tracking pattern they use is
+properly addressed in Phase 5 of the main refactor.
+
+`SendPing` is also not migrated in this bite — it has
+its own MP-side concerns and its caller surface is small.
+
+### Concrete steps (as executed)
 
 1. In
    [tdns-transport/v2/transport/manager.go](../../tdns-transport/v2/transport/manager.go),
    add:
    ```go
-   // Send delivers a message to peerID using the best
-   // available mechanism, falling back to alternatives
-   // on failure. Message type is determined by the
-   // payload concrete type (or an explicit type field).
    func (tm *TransportManager) Send(
        ctx context.Context,
-       peerID string,
-       msg interface{},
+       peer *Peer,
+       req interface{},
    ) (interface{}, error)
    ```
-   Implementation: look up peer, call `SelectTransport`
-   internally, invoke the right method on the chosen
-   transport, fall back to the other on error.
-2. Rewrite `MPTransportBridge.SendSyncWithFallback` body
-   to delegate to `tm.Send`. Keep the signature
-   identical — it's now a thin adapter.
-3. Same for `SendHelloWithFallback` and
-   `SendBeatWithFallback`.
-4. Delete the duplicate `SendPing` implementation in
-   `MPTransportBridge`; callers use `tm.Send` or
-   `tm.Ping` directly.
-5. Optional: migrate 2–3 call sites to use `tm.Send`
-   directly as a pilot. Leave the rest for later.
+   Implementation: type-switch on `req` to dispatch to
+   the right `Transport` method, with primary-then-
+   fallback selection via `tm.SelectTransport(peer)`.
+   Supported request types: `*SyncRequest`,
+   `*PingRequest`, `*RelocateRequest`. Hello and Beat
+   are explicitly NOT supported (they return an error
+   if passed in) so accidental misuse fails fast.
+2. Rewrite `MPTransportBridge.SendSyncWithFallback`
+   body to delegate to `tm.TransportManager.Send` and
+   type-assert the response to `*transport.SyncResponse`.
+   Signature unchanged.
+3. **Not done**: Hello/Beat/Ping wrapper migrations.
+   Phase 5 of the main refactor.
 
 ### Do NOT
 
+- Migrate `SendHelloWithFallback` or
+  `SendBeatWithFallback` — different semantics; Phase 5
+  work.
+- Migrate `SendPing` in this bite — small caller surface
+  and modest MP-specific concerns; not worth the
+  per-bite churn.
 - Change any method signatures on the bridge wrappers.
 - Touch wire format or message structs.
-- Delete the wrapper methods — they stay as shims so
-  existing call sites don't break.
-- Move any types between packages.
 
 ### Files touched
 
 - [tdns-transport/v2/transport/manager.go](../../tdns-transport/v2/transport/manager.go)
-  (new `Send` method)
+  (new `Send` method, ~70 lines including doc comment)
 - [tdns-mp/v2/hsync_transport.go](../../tdns-mp/v2/hsync_transport.go)
-  (rewrite 4 method bodies as delegations)
+  (rewrite `SendSyncWithFallback` body as a
+  one-paragraph delegation; ~25 lines deleted, ~12 added)
 
 ### Why it's safe
 
-Pure internal refactor. All public APIs unchanged. All
-call sites continue to work. Fallback behaviour preserved
-(the new `Send` does the same thing the wrappers did,
-just in one place).
+Pure internal refactor for the sync path. The semantics
+of `tm.Send` for `*SyncRequest` are byte-equivalent to
+the previous `SendSyncWithFallback` body. All public
+APIs unchanged. All call sites continue to work.
 
 ### Value delivered
 
-One place for fallback logic instead of three. Phase 5 of
-the main refactor becomes much smaller. Sets up the
-eventual per-mechanism fallback routing (with Bite 1
-landed, `Send` can consult `MechanismState` for smarter
-selection).
+The genuine primary-then-fallback logic now lives in
+transport, not duplicated in MP. A non-MP application
+using transport gets the same fallback semantics for
+sync (and ping/relocate when those land). Phase 5 of
+the main refactor is smaller — at least for the sync
+path — by exactly the body of `SendSyncWithFallback`.
 
 ### Estimated cost
 
-~1 day.
+Half a day actual (vs. original ~1-day estimate). The
+audit consumed the saved time.
 
 ### Dependencies
 
-None required. Optional synergy with Bite 1 (per-mechanism
-health for selection); without Bite 1, `Send` uses
-existing logic.
+None.
 
 ---
 
@@ -728,85 +741,64 @@ for inspection, not to write through the agent state.
 Migrate just those to read from `peerRegistry.Get(agent.PeerID)`
 directly.
 
-### Identified call sites
+### Resolution (2026-04-25): no-op after audit
 
-From the survey conducted 2026-04-25:
+A second-pass audit conducted after Bite 7 landed found
+that **none of the 9 `SyncPeerFromAgent` call sites are
+read-shaped**. Every one acquires a peer and immediately
+uses it to send via the transport. The earlier Bite 5
+spec mis-identified `apihandler_agent.go:988` as a debug
+status export; reading the surrounding code shows it is
+in fact a debug *send*-sync command (it constructs a
+`SyncRequest` and calls `SendSyncWithFallback`
+immediately after getting the peer).
 
 | Site | Purpose | Shape |
 |---|---|---|
-| `hsync_transport.go:1422` (SendHelloWithFallback) | Get peer to send | **write** (sync-then-send) |
-| `hsync_transport.go:1547` (SendBeatWithFallback) | Get peer to send | **write** |
-| `hsync_transport.go:1666` (SendSyncWithFallback) | Get peer to send | **write** |
-| `hsync_transport.go:1742` (SendConfirmWithFallback) | Get peer to send | **write** |
-| `hsync_transport.go:2203` (SendInfraBeat) | Get peer to send | **write** |
-| `hsyncengine.go:711` (HelloHandler callback) | Update peer post-hello | **write** |
-| `hsyncengine.go:964` (HeartbeatHandler callback) | Update peer post-beat | **write** |
-| `apihandler_agent.go:988` (debugGetAgentStatus) | Export status | **read** ✓ |
-| `agent_utils.go` (OnAgentDiscoveryComplete) | Initial sync after discovery | **write** (legitimate first sync) |
+| `hsync_transport.go:1460` (SendHelloWithFallback) | Get peer to send | write |
+| `hsync_transport.go:1585` (SendBeatWithFallback) | Get peer to send | write |
+| `hsync_transport.go:1704` (SendSyncWithFallback) | Get peer to send | write |
+| `hsync_transport.go:1814` (SendConfirmWithFallback) | Get peer to send | write |
+| `hsync_transport.go:2275` (SendInfraBeat) | Get peer to send | write |
+| `hsyncengine.go:711` (HelloHandler callback) | Get peer to send sync | write |
+| `hsyncengine.go:964` (sendRfiToAgent) | Get peer to send RFI | write |
+| `apihandler_agent.go:988` (debug send-sync command) | Get peer to send debug sync | **write** (correction) |
+| `agent_utils.go` (OnAgentDiscoveryComplete) | Initial sync after discovery | write |
 
-Bite 5 covers only the **read** sites. The 7 write sites
-remain on the old code path until Bite 7 + Phase 7.
+All 9 are write-shaped. Bite 5 therefore has no migration
+work and is closed as a no-op.
 
-### Concrete steps
+### Why this isn't wasted
 
-1. For `apihandler_agent.go:988`: replace
-   ```go
-   peer := tm.SyncPeerFromAgent(agent)
-   ```
-   with
-   ```go
-   peer := tm.PeerRegistry().Get(agent.PeerID)
-   if peer == nil {
-       // fall back to old path — peer not yet
-       // registered (e.g. discovery in flight)
-       peer = tm.SyncPeerFromAgent(agent)
-   }
-   ```
-2. Audit other read-shaped sites surfaced during the
-   audit conducted as part of Bite 5 (the table above is
-   the starting point; grep may surface more).
-3. Add a comment at each migrated site:
-   `// Bite 5 migration; old code: tm.SyncPeerFromAgent(agent)`
-   so the reverse direction stays cheap.
-
-### Do NOT
-
-- Migrate any write-shaped site. The old path keeps the
-  AgentRegistry → PeerRegistry sync running.
-- Add new `Peer.Get`-style accessors on Agent yet — that
-  is a sub-step of Bite 7 / Phase 7.
+The audit itself was the value: it surfaces that the
+real shape of the work is broader than "migrate read
+sites". The 9 call sites are all hot paths that
+re-mutate a lot of state on every single send via the
+heavy `SyncPeerFromAgent` body. After Bite 7,
+`PopulateFromAgent` is doing most of that mutation
+inside `SyncPeerFromAgent`, so the redundancy is
+amplified. A future Phase 7 sub-step that splits
+"get-or-create peer" from "sync-state-from-agent" is now
+the clean way forward; that is bigger than a bite and
+properly belongs in Phase 7.
 
 ### Files touched
 
-- `tdns-mp/v2/apihandler_agent.go` (one site)
-- Possibly 1–2 other read-shaped paths surfaced by audit
-
-### Why it's safe
-
-The read path returns the same `*Peer` either way. The
-fallback branch ensures we never return nil even if the
-peer isn't yet registered. Wire format unchanged.
-
-### Value delivered
-
-- Proves the loose-coupling pattern in production code
-  paths.
-- Demonstrates that `peerRegistry.Get(agent.PeerID)` is
-  sufficient for read consumers.
-- Reduces the count `SyncPeerFromAgent` call sites,
-  shrinking Phase 7 sub-step 2.
+None.
 
 ### Estimated cost
 
-Half a day (mostly the audit; the edits themselves are
-minutes).
+About 30 minutes (the audit). Originally estimated as
+half a day for migration + audit; the migration turned
+out unnecessary.
 
 ### Dependencies
 
-- **Bite 4** (`Agent.PeerID` field) — required.
-- **Bite 2** (test harness) — strongly recommended; this
-  bite touches state-coupling code paths and benefits
-  from coverage.
+- **Bite 4** (`Agent.PeerID` field) — would have been
+  required if migration had been needed.
+- **Bite 7** (`PopulateFromAgent`) — surfacing the
+  redundancy issue depended on having Bite 7's behaviour
+  in scope.
 
 ---
 
@@ -1207,40 +1199,50 @@ falls back to the old path. Wire format unchanged.
 
 ## Cumulative effect
 
-If all nine bites (0–8) land, the entry conditions for
-the main refactor become substantially more favourable:
+Status as of 2026-04-25: 8 of 9 bites complete (Bite 2
+deferred for time-budget reasons). The entry conditions
+for the main refactor are substantially more favourable:
 
-- **IMR initialisation** is genuinely idempotent (Bite 0).
-  The fragility-by-construction comment in
-  `tdns/v2/imrengine.go` becomes a property
+- **IMR initialisation** is genuinely idempotent (Bite 0,
+  merged to `tdns/main`). The fragility-by-construction
+  comment in `tdns/v2/imrengine.go` is now a property
   guaranteed by code rather than by caller discipline.
-
-- **Phase 0** is satisfied (Bite 2).
-- **Phase 1**: per-mechanism state on Peer is already
-  there with dual-write (Bites 1, 7). The phase
-  collapses to "delete the old single-state fields and
-  remove dual-write" — pure deletion.
-- **Phase 5**: `tm.Send` already exists (Bite 3); the
-  `SendXWithFallback` wrappers are already shims. The
-  phase collapses to "delete the shims and migrate call
-  sites".
+- **Phase 0** is **NOT** satisfied — Bite 2 (the
+  integration test harness) is deferred. This is the
+  one remaining hard prerequisite before main-refactor
+  Phase 1 can begin.
+- **Phase 1**: per-mechanism state on Peer is in place
+  with dual-write (Bites 1, 7). The phase collapses to
+  "delete the old single-state fields and remove
+  dual-write" — pure deletion.
+- **Phase 5**: `tm.Send` exists for the sync path (Bite
+  3); `SendSyncWithFallback` is now a thin shim. Hello
+  and Beat were intentionally not migrated because their
+  send-on-all-transports semantics differ from
+  primary-then-fallback; Phase 5 will need to address
+  that separately. Smaller phase, but not collapsed.
 - **Phase 6 part 1**: IMR lookup helpers already in
-  transport (Bite 6). The phase loses its largest single
-  chunk of code-motion.
+  transport (Bite 6, parallel embedding). The phase
+  loses its largest single chunk of code-motion.
 - **Phase 6 part 2**: discovery-completion seam already
   installed (Bite 8). When discovery moves, the
   callback wiring is in place.
 - **Phase 7 sub-step 1** (`Agent.PeerID`): already done
   (Bite 4).
-- **Phase 7 sub-steps 2–3**: read-shaped
-  `SyncPeerFromAgent` sites already migrated (Bite 5);
-  the canonical Peer-from-Agent path is documented in
-  code (Bite 7). Sub-steps 2–3 become a much smaller
-  migration of the remaining write sites.
+- **Phase 7 sub-steps 2–3**: the canonical Peer-from-
+  Agent path is implemented (`PopulateFromAgent`,
+  Bite 7) and the three disposition-table wrappers are
+  switched. Bite 5 found that all 9 `SyncPeerFromAgent`
+  call sites are write-shaped (the original spec
+  mis-identified one as read-shaped); the genuine
+  decoupling work — split "get-or-create peer" from
+  "sync state from agent" on hot send paths — is bigger
+  than a bite and is properly Phase 7 territory.
 
 The eventual main refactor turns from "9 phases of
-restructure" into "9 phases mostly deleting things that
-no longer have any consumers". That is the right shape
+restructure" into "9 phases of mostly deleting and
+finishing things that no longer have any consumers,
+plus build the test harness." That is the right shape
 for a refactor of this scope.
 
 ## Risks and mitigations

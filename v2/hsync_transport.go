@@ -1364,30 +1364,20 @@ func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Tra
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
 func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
-	// Try primary transport
-	primary := tm.SelectTransport(peer)
-	if primary != nil {
-		resp, err := primary.Sync(ctx, peer, req)
-		if err == nil {
-			return resp, nil
-		}
-		lgConnRetry.Warn("primary transport failed", "transport", primary.Name(), "peer", peer.ID, "err", err)
+	// Bite 3: delegate to the generic primary-then-fallback path on
+	// transport.TransportManager. Hello and Beat are NOT migrated to
+	// tm.Send because their wrappers send on all transports in
+	// parallel rather than primary-then-fallback, with extensive
+	// MP-side state mutation; that is Phase 5 of the main refactor.
+	resp, err := tm.TransportManager.Send(ctx, peer, req)
+	if err != nil {
+		return nil, err
 	}
-
-	// Try fallback transport
-	var fallback transport.Transport
-	if primary == tm.APITransport && tm.DNSTransport != nil {
-		fallback = tm.DNSTransport
-	} else if primary == tm.DNSTransport && tm.APITransport != nil {
-		fallback = tm.APITransport
+	syncResp, ok := resp.(*transport.SyncResponse)
+	if !ok {
+		return nil, fmt.Errorf("SendSyncWithFallback: unexpected response type %T", resp)
 	}
-
-	if fallback != nil {
-		lgTransport.Debug("trying fallback transport", "transport", fallback.Name(), "peer", peer.ID)
-		return fallback.Sync(ctx, peer, req)
-	}
-
-	return nil, fmt.Errorf("all transports failed for peer %s", peer.ID)
+	return syncResp, nil
 }
 
 // SyncPeerFromAgent creates or updates a transport.Peer from an existing Agent.
