@@ -75,11 +75,11 @@ repo with its own merge cycle):
 | 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | ✅ DONE | Phase 1 deletion |
 | 6 | Add IMR lookup helpers to transport (parallel embedding) | tdns-transport only | 0.5 day | ✅ DONE | Phase 6 part 1 |
 | 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | ⏳ pending | Phase 1+ exit gate |
-| 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 7 deletion of `SyncPeerFromAgent` |
+| 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | ✅ DONE | Phase 7 deletion of `SyncPeerFromAgent` |
 | 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | ⏳ pending | Phase 7 |
 | 3 | Unified `tm.Send` shim | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 5 deletion |
 
-**Progress (2026-04-25):** Bites 0, 4, 8, 1, 6 complete.
+**Progress (2026-04-25):** Bites 0, 4, 8, 1, 6, 7 complete.
 Bite 0 merged to `tdns/main` via PR #204 and
 cherry-picked onto the in-flight `fast-roller-1`
 feature branch. Bites 4, 8, 1 landed on
@@ -95,10 +95,33 @@ rather than movement: `tdnsmp.Imr` stays put (still has
 non-discovery users), and a separate `transport.Imr`
 wrapper is added with its own copy of the lookup
 helpers. Both wrap the same singleton `*tdns.Imr`,
-guaranteed by Bite 0's idempotency guard. Build of all
-four mp binaries (`tdns-mpagent`, `tdns-mpcombiner`,
-`tdns-mpsigner`, `tdns-mpcli`) verified clean after each
-bite.
+guaranteed by Bite 0's idempotency guard. Bite 7
+landed `transport.AgentMechanismSnapshot`,
+`transport.AgentLike`, and `Peer.PopulateFromAgent`
+with four passing unit tests; in tdns-mp, `*Agent` now
+implements `AgentLike` via two new methods, and the
+three disposition-table wrappers (`HasDNSTransport`,
+`HasAPITransport`, `GetPreferredTransportName`) now
+delegate to `peer.HasMechanism()` /
+`peer.PreferredMechanism()` with a fallback to the
+agent flags for peers not yet synced. Bite 7 also
+absorbed Bite 1's deferred wrapper-body switch, closing
+that loose end. As a side effect, `tdns-transport`'s
+`go.mod` now requires `github.com/johanix/tdns/v2` and
+`tdns/v2/cache` (added via `replace` directives) —
+needed because `transport.Imr` embeds `*tdns.Imr`.
+
+Build of all four mp binaries (`tdns-mpagent`,
+`tdns-mpcombiner`, `tdns-mpsigner`, `tdns-mpcli`)
+verified clean after each bite.
+
+**Pre-existing test failure noted:**
+`TestNewDNSMessageRouter` in
+`tdns-transport/v2/transport/dns_message_router_test.go`
+asserts `router.middleware != nil` but
+`NewDNSMessageRouter()` does not initialise that slice.
+Pre-dates this work; not introduced by Bite 7. Tracked
+for a separate fix.
 
 Bite 2 (the test harness) is non-negotiable as the gate
 for the main refactor's Phase 1 — but the additive bites

@@ -1412,7 +1412,7 @@ func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 		})
 	}
 
-	// Sync state
+	// Sync state (legacy single-state field)
 	if agent.ApiDetails != nil {
 		peer.SetState(tm.agentStateToTransportState(agent.ApiDetails.State), "")
 	}
@@ -1421,6 +1421,12 @@ func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 	for zone := range agent.Zones {
 		peer.AddSharedZone(string(zone), "", "")
 	}
+
+	// Bite 7: also populate per-mechanism state on the Peer. Both the
+	// legacy single-state writes above and the new per-mechanism map
+	// are updated; Phase 7 of the main refactor will delete the
+	// legacy block once the per-mechanism path has full coverage.
+	peer.PopulateFromAgent(agent)
 
 	return peer
 }
@@ -1717,9 +1723,22 @@ func (tm *MPTransportBridge) OnAgentDiscoveryComplete(agent *Agent) {
 }
 
 // GetPreferredTransportName returns the preferred transport name for an agent.
+//
+// Bite 7 (inherited from Bite 1 step 5): delegates to
+// peer.PreferredMechanism() when the peer is in the registry, with a
+// fallback to the agent.ApiMethod / agent.DnsMethod flags for peers
+// not yet synced (e.g. during early startup before the first
+// SyncPeerFromAgent runs). Returns "none" for the no-mechanism case
+// to preserve the original contract.
 func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
+	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+		if pref := peer.PreferredMechanism(); pref != "" {
+			return pref
+		}
+	}
+	// Fallback for peers not yet in the registry.
 	if agent.ApiMethod && agent.DnsMethod {
-		return "API" // Prefer API when both available
+		return "API"
 	} else if agent.ApiMethod {
 		return "API"
 	} else if agent.DnsMethod {
@@ -1729,13 +1748,34 @@ func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
 }
 
 // HasDNSTransport returns true if DNS transport is available for an agent.
+//
+// Bite 7: delegates to peer.HasMechanism("DNS") when the peer is in
+// the registry; falls back to the agent flag for peers not yet
+// synced. The local-side check (tm.DNSTransport != nil) is preserved
+// — both ends must be configured for the transport to be usable.
 func (tm *MPTransportBridge) HasDNSTransport(agent *Agent) bool {
-	return tm.DNSTransport != nil && agent.DnsMethod
+	if tm.DNSTransport == nil {
+		return false
+	}
+	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+		return peer.HasMechanism("DNS")
+	}
+	return agent.DnsMethod
 }
 
 // HasAPITransport returns true if API transport is available for an agent.
+//
+// Bite 7: delegates to peer.HasMechanism("API") when the peer is in
+// the registry; falls back to the agent flag for peers not yet
+// synced.
 func (tm *MPTransportBridge) HasAPITransport(agent *Agent) bool {
-	return tm.APITransport != nil && agent.ApiMethod
+	if tm.APITransport == nil {
+		return false
+	}
+	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+		return peer.HasMechanism("API")
+	}
+	return agent.ApiMethod
 }
 
 // --- Reliable message queue integration ---

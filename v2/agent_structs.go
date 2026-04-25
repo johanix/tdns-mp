@@ -149,6 +149,76 @@ func (a *Agent) dnsState() AgentState {
 	return 0
 }
 
+// APIMechanismState satisfies transport.AgentLike. Returns a snapshot
+// of this agent's API-mechanism state for use by
+// transport.Peer.PopulateFromAgent. Bite 7 of the early-bites plan.
+func (a *Agent) APIMechanismState() transport.AgentMechanismSnapshot {
+	d := a.ApiDetails
+	if d == nil {
+		return transport.AgentMechanismSnapshot{}
+	}
+	// API has no host/port-shaped Address; reachability is carried by
+	// peer.APIEndpoint (a URL string), populated by SyncPeerFromAgent
+	// from agent.ApiDetails.BaseUri. Leave Address nil here.
+	return transport.AgentMechanismSnapshot{
+		State:            agentStateToTransportStateFn(d.State),
+		LastHelloRecv:    d.HelloTime,
+		LastBeatSent:     d.LatestSBeat,
+		LastBeatRecv:     d.LatestRBeat,
+		ConsecutiveFails: int(d.DiscoveryFailures),
+	}
+}
+
+// DNSMechanismState satisfies transport.AgentLike. Returns a snapshot
+// of this agent's DNS-mechanism state. Bite 7.
+func (a *Agent) DNSMechanismState() transport.AgentMechanismSnapshot {
+	d := a.DnsDetails
+	if d == nil {
+		return transport.AgentMechanismSnapshot{}
+	}
+	var addr *transport.Address
+	if len(d.Addrs) > 0 {
+		addr = &transport.Address{
+			Host:      d.Addrs[0],
+			Port:      d.Port,
+			Transport: "udp",
+		}
+	}
+	return transport.AgentMechanismSnapshot{
+		State:            agentStateToTransportStateFn(d.State),
+		Address:          addr,
+		LastHelloRecv:    d.HelloTime,
+		LastBeatSent:     d.LatestSBeat,
+		LastBeatRecv:     d.LatestRBeat,
+		ConsecutiveFails: int(d.DiscoveryFailures),
+	}
+}
+
+// agentStateToTransportStateFn is a free-function variant of the
+// MPTransportBridge method, usable from contexts that don't have a
+// bridge in scope (e.g. *Agent receiver methods that don't import
+// the bridge type to avoid a cycle).
+func agentStateToTransportStateFn(s AgentState) transport.PeerState {
+	switch s {
+	case AgentStateNeeded:
+		return transport.PeerStateNeeded
+	case AgentStateKnown:
+		return transport.PeerStateKnown
+	case AgentStateIntroduced:
+		return transport.PeerStateIntroducing
+	case AgentStateOperational:
+		return transport.PeerStateOperational
+	case AgentStateDegraded:
+		return transport.PeerStateDegraded
+	case AgentStateInterrupted:
+		return transport.PeerStateInterrupted
+	case AgentStateError:
+		return transport.PeerStateError
+	default:
+		return transport.PeerStateNeeded
+	}
+}
+
 type DeferredAgentTask struct {
 	Precondition func() bool
 	Action       func() (bool, error)
