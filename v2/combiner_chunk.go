@@ -82,7 +82,18 @@ type editPolicy struct {
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
 }
 
-// canApply returns true if this RRtype should be applied to the live zone.
+// canApply returns true if this combiner should apply the contribution
+// to its live zone. This is the COMBINER-SIDE gate: it answers
+// "given my role, do I publish this in the served zone?". A non-signer
+// combiner answers "no" for every signing-relevant RRtype on a signed
+// zone — the contribution is still persisted (per the
+// combiner-persistence design), it just isn't applied locally.
+//
+// For the AGENT-SIDE gate ("may this agent submit a contribution of
+// this RRtype to the network?") use canSubmit instead. The two are
+// distinct: a non-signer agent on a signed zone with nsmgmt=agent
+// MUST be allowed to submit NS contributions even though its local
+// combiner won't apply them — other (signing) combiners will.
 func (p *editPolicy) canApply(rrtype uint16) bool {
 	if !p.ZoneSigned {
 		// Unsigned zone: no signing needed
@@ -111,6 +122,38 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 		return p.ParentSync == core.HsyncParentSyncAgent
 	case dns.TypeKEY:
 		return p.ParentSync == core.HsyncParentSyncAgent
+	}
+	return true
+}
+
+// canSubmit returns true if this agent should be allowed to submit a
+// contribution of this RRtype to the network. AGENT-SIDE gate, paired
+// with canApply for the combiner side.
+//
+// Per 2026-03-31-combiner-persistence-separation.md "Step 3: Remove
+// Agent Blanket Block":
+//
+//   - NS:     nsmgmt == agent   (no signer requirement — non-signers
+//     contribute NS so signing combiners can apply)
+//   - KEY:    parentsync == agent (no signer requirement)
+//   - DNSKEY: only signers may submit
+//   - CDS/CSYNC: only signers AND parentsync == agent
+//
+// Whether the local combiner applies the contribution is a separate
+// question (canApply). A submission may be persisted-but-not-applied
+// (IGNORED) by the local combiner while still being applied by a
+// remote signing combiner — that is the whole point of the
+// combiner-persistence design.
+func (p *editPolicy) canSubmit(rrtype uint16) bool {
+	switch rrtype {
+	case dns.TypeNS:
+		return p.NSmgmt == core.HsyncNSmgmtAGENT
+	case dns.TypeKEY:
+		return p.ParentSync == core.HsyncParentSyncAgent
+	case dns.TypeDNSKEY:
+		return p.WeAreSigner
+	case dns.TypeCDS, dns.TypeCSYNC:
+		return p.WeAreSigner && p.ParentSync == core.HsyncParentSyncAgent
 	}
 	return true
 }
