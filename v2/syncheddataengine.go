@@ -445,9 +445,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						for _, rr := range rrset.RRs {
 							rrStr := rr.String()
 							activeRRs[rrStr] = true
+							// Default state for an RR present in the live repo
+							// without any tracking entry. Under the eviction
+							// policy (only Removed entries evicted, only after
+							// the RR is gone) this should rarely fire — it
+							// indicates an RR added without going through the
+							// tracking path (e.g. some hydration paths).
+							// "no-tracking" is more honest than "unknown".
 							info := TrackedRRInfo{
 								RR:    rrStr,
-								State: "unknown",
+								State: "no-tracking",
 							}
 							// Populate DNSKEY state from signer inventory
 							if rrtype == dns.TypeDNSKEY {
@@ -997,16 +1004,44 @@ func (zdr *ZoneDataRepo) markAllDeletePending(tracked *TrackedRRset, distID stri
 	}
 }
 
-// evictStaleTracking removes TrackedRR entries in terminal states (accepted, rejected,
-// removed) that have not been updated within maxAge.
+// evictStaleTracking removes TrackedRR entries that meet ALL of these
+// criteria:
+//
+//  1. State is Removed. Accepted, Rejected, and Ignored are durable
+//     per-RR outcomes (who confirmed, who rejected, who persisted-but-
+//     did-not-apply) and are kept for as long as the RR exists in the
+//     live data repo. Pending and PendingRemoval are never evicted
+//     here; they have their own transition logic.
+//
+//  2. The RR is no longer present in the live data repo for this
+//     (zone, agent, rrtype). When the RR is gone, retaining its
+//     tracking metadata serves no display or operational purpose.
+//
+//  3. Age > maxAge — guard against evicting entries from a very
+//     recent removal that an operator might still want to inspect.
+//
+// All three conditions must hold; the previous policy (any terminal
+// state, age-only) discarded reasons and per-recipient confirmations
+// for live RRs after one hour, leaving the display showing "unknown"
+// for RRs whose Accepted/Rejected/Ignored history was simply garbage-
+// collected.
 func (zdr *ZoneDataRepo) evictStaleTracking(maxAge time.Duration) {
 	evicted := 0
 	for zone, agentMap := range zdr.Tracking {
+		agentRepo, hasRepo := zdr.Repo.Get(zone)
 		for agent, rrtypeMap := range agentMap {
+			var ownerData *OwnerData
+			if hasRepo {
+				ownerData, _ = agentRepo.Data.Get(agent)
+			}
 			for rrtype, trackedRRset := range rrtypeMap {
+				liveRRs := liveRRStrings(ownerData, rrtype)
 				remaining := trackedRRset.Tracked[:0]
 				for _, tr := range trackedRRset.Tracked {
-					if (tr.State == RRStateAccepted || tr.State == RRStateRejected || tr.State == RRStateRemoved) && time.Since(tr.UpdatedAt) > maxAge {
+					rrPresent := liveRRs[tr.RR.String()]
+					if tr.State == RRStateRemoved &&
+						!rrPresent &&
+						time.Since(tr.UpdatedAt) > maxAge {
 						evicted++
 						continue
 					}
@@ -1028,6 +1063,25 @@ func (zdr *ZoneDataRepo) evictStaleTracking(maxAge time.Duration) {
 	if evicted > 0 {
 		lgEngine.Info("evicted stale tracking entries", "count", evicted)
 	}
+}
+
+// liveRRStrings returns the set of RR string forms currently present
+// in the live data repo for the given owner/rrtype. Returns nil when
+// the owner or rrset is absent. Used by evictStaleTracking to gate on
+// "is this RR still alive?".
+func liveRRStrings(ownerData *OwnerData, rrtype uint16) map[string]bool {
+	if ownerData == nil {
+		return nil
+	}
+	rrset, ok := ownerData.RRtypes.Get(rrtype)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]bool, len(rrset.RRs))
+	for _, rr := range rrset.RRs {
+		out[rr.String()] = true
+	}
+	return out
 }
 
 // setExpectedRecipients sets the ExpectedRecipients on all TrackedRRs matching a given distID.
