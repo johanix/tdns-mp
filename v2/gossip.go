@@ -21,8 +21,9 @@ func shortHash(h string) string {
 // deepCopyMemberState returns an independent copy of a MemberState.
 func deepCopyMemberState(src *MemberState) *MemberState {
 	dst := &MemberState{
-		Identity:  src.Identity,
-		Timestamp: src.Timestamp,
+		Identity:     src.Identity,
+		Timestamp:    src.Timestamp,
+		BeatInterval: src.BeatInterval,
 	}
 	if src.PeerStates != nil {
 		dst.PeerStates = make(map[string]string, len(src.PeerStates))
@@ -50,7 +51,12 @@ func NewGossipStateTable(localID string) *GossipStateTable {
 
 // UpdateLocalState updates our own state entry for a group.
 // This sets the Timestamp to now — only we update our own state.
-func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[string]string, zones []string) {
+// beatInterval is this agent's configured local heartbeat interval in
+// seconds (multi-provider.syncengine.intervals.beatinterval). It rides
+// in gossip so peers can display "Ns beats" alongside the AGE column
+// and understand why a particular reporter detects degradation faster
+// or slower than another.
+func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[string]string, zones []string, beatInterval uint32) {
 	gst.mu.Lock()
 	defer gst.mu.Unlock()
 
@@ -59,10 +65,11 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 	}
 
 	gst.States[groupHash][gst.LocalID] = &MemberState{
-		Identity:   gst.LocalID,
-		PeerStates: peerStates,
-		Zones:      zones,
-		Timestamp:  time.Now(),
+		Identity:     gst.LocalID,
+		PeerStates:   peerStates,
+		Zones:        zones,
+		Timestamp:    time.Now(),
+		BeatInterval: beatInterval,
 	}
 }
 
@@ -356,8 +363,13 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 			zones = append(zones, string(z))
 		}
 
+		// Our local heartbeat interval — included in the gossiped
+		// MemberState so other agents can display per-reporter beat
+		// frequency alongside the AGE column.
+		beatInterval := ar.LocalAgent.Remote.BeatInterval
+
 		lgGossip.Debug("RefreshLocalStates", "group", shortHash(hash),
-			"localID", gst.LocalID, "peerStates", peerStates, "zones", zones)
-		gst.UpdateLocalState(hash, peerStates, zones)
+			"localID", gst.LocalID, "peerStates", peerStates, "zones", zones, "beatInterval", beatInterval)
+		gst.UpdateLocalState(hash, peerStates, zones, beatInterval)
 	}
 }

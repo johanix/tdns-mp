@@ -226,6 +226,14 @@ func runGossipGroupState(role, groupName string) {
 		reporter, _ := r["reporter"].(string)
 		age, _ := r["age"].(string)
 		peerStates, _ := r["peer_states"].(map[string]interface{})
+		// beat_interval is the reporter's own configured local
+		// heartbeat interval in seconds. Zero or missing for old
+		// agents that don't gossip the field; in that case we show
+		// nothing rather than "(0s beats)".
+		beatInterval := 0
+		if v, ok := r["beat_interval"].(float64); ok {
+			beatInterval = int(v)
+		}
 
 		fmt.Printf("%-20s", shortNames[reporter])
 		for _, m := range members {
@@ -237,7 +245,11 @@ func runGossipGroupState(role, groupName string) {
 				fmt.Printf("%-*s", colWidth, "?")
 			}
 		}
-		fmt.Printf("%-6s\n", age)
+		if beatInterval > 0 {
+			fmt.Printf("%-6s  (%ds beats)\n", age, beatInterval)
+		} else {
+			fmt.Printf("%-6s\n", age)
+		}
 	}
 }
 

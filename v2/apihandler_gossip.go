@@ -84,6 +84,7 @@ func APIgossip(ar *AgentRegistry, lem *LeaderElectionManager) func(w http.Respon
 					row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
 					row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
 					row["zones"] = len(ms.Zones)
+					row["beat_interval"] = ms.BeatInterval
 				} else {
 					row["peer_states"] = map[string]string{}
 					row["age"] = "unknown"
