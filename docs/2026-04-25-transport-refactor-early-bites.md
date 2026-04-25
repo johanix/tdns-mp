@@ -72,19 +72,24 @@ repo with its own merge cycle):
 | 0 | Idempotent `InitImrEngine` | **tdns** | 30 min | ✅ DONE | Bite 6; safe shared IMR for non-MP apps |
 | 4 | `Agent.PeerID` field | tdns-mp | 30 min | ✅ DONE | Bites 5, 7, 8; Phase 7 sub-step 1 |
 | 8 | `OnPeerDiscovered` callback seam | tdns-mp + tdns-transport | 2 hours | ✅ DONE | Phase 6 part 2 |
-| 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | ⏳ pending | Phase 1 deletion |
+| 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | ✅ DONE | Phase 1 deletion |
 | 6 | Move IMR lookup helpers into transport | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 6 part 1 |
 | 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | ⏳ pending | Phase 1+ exit gate |
 | 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 7 deletion of `SyncPeerFromAgent` |
 | 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | ⏳ pending | Phase 7 |
 | 3 | Unified `tm.Send` shim | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 5 deletion |
 
-**Progress (2026-04-25):** Bites 0, 4, 8 complete. Bite 0
-merged to `tdns/main` via PR #204 and cherry-picked onto
-the in-flight `fast-roller-1` feature branch. Bites 4
-and 8 landed on `transport-early-bites-1` in tdns-mp;
-Bite 8's transport-side change landed on
-`transport-early-bites-1` in tdns-transport. Build of
+**Progress (2026-04-25):** Bites 0, 4, 8, 1 complete.
+Bite 0 merged to `tdns/main` via PR #204 and
+cherry-picked onto the in-flight `fast-roller-1`
+feature branch. Bites 4, 8, 1 landed on
+`transport-early-bites-1` in tdns-mp; Bite 8's and
+Bite 1's transport-side changes landed on
+`transport-early-bites-1` in tdns-transport. Bite 1's
+scope was refined during execution: the wrapper-body
+switch (originally step 5) deferred to Bite 7, where
+`Peer.PopulateFromAgent` populates the per-mechanism
+`Address` field that the wrapper bodies need. Build of
 all four mp binaries (`tdns-mpagent`, `tdns-mpcombiner`,
 `tdns-mpsigner`, `tdns-mpcli`) verified clean after each
 bite.
@@ -337,18 +342,23 @@ that update the old ones.
    fields (hello/beat receipt, discovery completion,
    etc.), *also* update the corresponding
    `MechanismState`. Dual-write for now.
-5. In tdns-mp, rewrite three disposition-table wrappers
-   to read from the new fields — they collapse to
-   one-liners:
-   - `HasDNSTransport(agent)` →
-     `agent.peer().HasMechanism("DNS")`
-   - `HasAPITransport(agent)` →
-     `agent.peer().HasMechanism("API")`
-   - `GetPreferredTransportName(agent)` →
-     `agent.peer().PreferredMechanism()`
+5. **Deferred to Bite 7.** Originally Bite 1 also rewrote
+   three disposition-table wrappers (`HasDNSTransport`,
+   `HasAPITransport`, `GetPreferredTransportName`) to
+   read from `peer.Mechanisms`. On execution
+   (2026-04-25) we found the wrappers can't switch yet:
+   `peer.HasMechanism("DNS")` returns true only when
+   `Mechanisms["DNS"].Address` is set, but Bite 1's
+   dual-write only populates state and timestamps — not
+   the per-mechanism `Address`. The address comes from
+   the Agent's `DnsDetails.Addrs` and is mirrored onto
+   the Peer by `Peer.PopulateFromAgent`, which is
+   Bite 7. Switching the wrapper bodies before that
+   would silently regress every caller.
 
-   (Keep the wrapper functions in place; just switch
-   their bodies. Call-site migration comes later.)
+   The wrapper-body switch therefore moves to Bite 7,
+   right after `PopulateFromAgent` lands. Bite 1 keeps
+   the wrappers untouched.
 
 ### Do NOT
 
@@ -363,11 +373,20 @@ that update the old ones.
 ### Files touched
 
 - [tdns-transport/v2/transport/peer.go](../../tdns-transport/v2/transport/peer.go)
-  (primary)
-- [tdns-transport/v2/transport/handlers.go](../../tdns-transport/v2/transport/handlers.go)
-  (dual-write on hello/beat receipt — small edits)
+  (struct + methods + `NewPeer` initialisation)
 - [tdns-mp/v2/hsync_transport.go](../../tdns-mp/v2/hsync_transport.go)
-  (three wrapper bodies; signatures unchanged)
+  (dual-write at three DNS receipt sites: hello, beat,
+  ping)
+- [tdns-mp/v2/combiner_msg_handler.go](../../tdns-mp/v2/combiner_msg_handler.go)
+  (dual-write at downstream beat consumer)
+- [tdns-mp/v2/signer_msg_handler.go](../../tdns-mp/v2/signer_msg_handler.go)
+  (dual-write at downstream beat consumer)
+
+The transport `handlers.go` mentioned in the original
+plan does not contain hello/beat receipt logic in this
+code base — those live in tdns-mp. Bite 1 follows the
+actual code; the original plan's reference was based on
+a different code organisation.
 
 ### Why it's safe
 
@@ -378,10 +397,22 @@ wrong, the old fields still carry canonical state.
 
 ### Value delivered
 
-Three disposition-table items land (#3, #39 × 2). More
-importantly, the future Phase 1 "remove the old fields"
-step becomes a pure deletion — all the replacement
-plumbing is already in place.
+The `MechanismState` struct, the `Mechanisms` map on
+`Peer`, and the four accessor methods
+(`EffectiveState`, `HasMechanism`, `PreferredMechanism`,
+`SetMechanismState`) are now in place. Per-mechanism
+state and per-mechanism timestamps are populated on
+every DNS hello/beat/ping receipt across all three
+roles (agent, combiner, signer).
+
+The three disposition-table wrapper items (#3, #39 × 2)
+land in Bite 7, once `Peer.PopulateFromAgent`
+populates the per-mechanism `Address` field — see
+the deferral note in step 5 above.
+
+The future Phase 1 "remove the old fields" step still
+becomes a pure deletion: every receipt site already
+writes both old and new state.
 
 ### Estimated cost
 
@@ -944,6 +975,21 @@ step becomes a pure deletion.
    `ApiDetails`/`DnsDetails`, calls
    `peer.PopulateFromAgent(agent)`, and asserts the
    resulting Peer state matches.
+6. **Inherited from Bite 1.** Now that
+   `Mechanisms["API"].APIEndpoint` (via
+   `peer.APIEndpoint`) and `Mechanisms["DNS"].Address`
+   are populated by `PopulateFromAgent`, switch the
+   three disposition-table wrappers in
+   `tdns-mp/v2/hsync_transport.go` to the one-line
+   delegations originally planned for Bite 1:
+   - `HasDNSTransport(agent)` →
+     `tm.DNSTransport != nil && tm.PeerRegistry.peer(agent).HasMechanism("DNS")`
+   - `HasAPITransport(agent)` →
+     `tm.APITransport != nil && tm.PeerRegistry.peer(agent).HasMechanism("API")`
+   - `GetPreferredTransportName(agent)` →
+     `tm.PeerRegistry.peer(agent).PreferredMechanism()`
+     (return `"none"` for empty result to preserve the
+     current contract)
 
 ### Do NOT
 

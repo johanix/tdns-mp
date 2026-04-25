@@ -70,6 +70,11 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				peer := peerRegistry.GetOrCreate(senderID)
 				peer.LastBeatReceived = time.Now()
 				peer.SetState(transport.PeerStateOperational, "beat received")
+				// Bite 1 dual-write: also update per-mechanism state (DNS path).
+				peer.SetMechanismState("DNS", transport.PeerStateOperational, "beat received")
+				if m := peer.Mechanisms["DNS"]; m != nil {
+					m.LastBeatRecv = peer.LastBeatReceived
+				}
 			}
 
 		case report := <-msgQs.Hello:
