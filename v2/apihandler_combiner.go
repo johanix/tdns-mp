@@ -416,8 +416,11 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("Cleared %s (%s)", strings.Join(parts, ", "), scope)
 
 		case "purge":
+			// dns.Fqdn("") returns ".", so zone == "." catches both
+			// empty input and the literal root domain (which we don't
+			// allow purging on).
 			zone := dns.Fqdn(cp.Zone)
-			if zone == "." || cp.Zone == "" {
+			if zone == "." {
 				resp.Error = true
 				resp.ErrorMsg = "purge requires a zone"
 				return
@@ -437,10 +440,12 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			removed, err := mpzd.PurgeContributionsForOrigin(cp.Origin, hdb)
 			if err != nil {
+				lgApi.Warn("purge failed", "zone", zone, "origin", cp.Origin, "from", r.RemoteAddr, "err", err)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("purge failed: %v", err)
 				return
 			}
+			lgApi.Info("purged contributions", "zone", zone, "origin", cp.Origin, "removed", removed, "from", r.RemoteAddr)
 			if removed == 0 {
 				resp.Msg = fmt.Sprintf("Origin %q had no contributions in zone %s — nothing to purge", cp.Origin, zone)
 			} else {

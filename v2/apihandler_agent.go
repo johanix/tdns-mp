@@ -104,7 +104,14 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			// agent-side gate; whether the local combiner applies vs
 			// persists-but-ignores is a separate (combiner-side)
 			// decision driven by canApply.
-			if zd != nil && zd.MPOptions[tdns.OptMPDisallowEdits] {
+			//
+			// The gate must apply to ALL multi-provider zones, not just
+			// those with OptMPDisallowEdits set. A signer on a zone
+			// with nsmgmt=owner (i.e. local edits otherwise allowed)
+			// must still be blocked from submitting NS — submission
+			// rules are derived from HSYNCPARAM, independent of the
+			// disallow-edits flag.
+			if zd != nil && zd.Options[tdns.OptMultiProvider] {
 				policy := zd.getEditPolicy()
 				for _, rrStr := range amp.RRs {
 					parsed, err := dns.NewRR(rrStr)

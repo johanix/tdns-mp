@@ -661,6 +661,11 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 // (e.g. a hydration-added RR that bypassed tracking) — those are
 // treated as terminal too, since they don't represent in-flight
 // transactions. Pending and PendingRemoval entries return false.
+//
+// Walks the tracking slice in reverse so we evaluate the *latest*
+// matching entry rather than the oldest. With multiple tracking
+// rows for the same RR (legitimate during retry/transition cycles),
+// the most-recent state is the operationally meaningful one.
 func rrIsTerminalInTracking(zdr *ZoneDataRepo, zone ZoneName, agent AgentId, rrtype uint16, rrStr string) bool {
 	if zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
 		return true
@@ -669,20 +674,19 @@ func rrIsTerminalInTracking(zdr *ZoneDataRepo, zone ZoneName, agent AgentId, rrt
 	if tracked == nil {
 		return true
 	}
-	hasMatch := false
-	for _, tr := range tracked.Tracked {
+	for i := len(tracked.Tracked) - 1; i >= 0; i-- {
+		tr := tracked.Tracked[i]
 		if tr.RR.String() != rrStr {
 			continue
 		}
-		hasMatch = true
 		switch tr.State {
 		case RRStatePending, RRStatePendingRemoval:
 			return false
+		default:
+			return true
 		}
 	}
-	// Found at least one tracking entry but none was Pending —
-	// terminal. Or no tracking entry at all — also terminal.
-	_ = hasMatch
+	// No tracking entry for this RR — treat as terminal.
 	return true
 }
 

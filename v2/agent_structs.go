@@ -208,6 +208,13 @@ func agentStateToTransportStateFn(s AgentState) transport.PeerState {
 		return transport.PeerStateIntroducing
 	case AgentStateOperational:
 		return transport.PeerStateOperational
+	case AgentStateLegacy:
+		// Legacy = established relationship but no shared zones.
+		// Treated as active by Agent.EffectiveState() and the Peer
+		// EffectiveState() peer-side mirror. Map to Operational so
+		// PopulateFromAgent doesn't regress legacy peers in
+		// transport snapshots.
+		return transport.PeerStateOperational
 	case AgentStateDegraded:
 		return transport.PeerStateDegraded
 	case AgentStateInterrupted:

@@ -1432,6 +1432,11 @@ func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transp
 		return transport.PeerStateIntroducing
 	case AgentStateOperational:
 		return transport.PeerStateOperational
+	case AgentStateLegacy:
+		// Legacy = established relationship but no shared zones.
+		// Treated as active; map to Operational so legacy peers
+		// don't regress in transport snapshots.
+		return transport.PeerStateOperational
 	case AgentStateDegraded:
 		return transport.PeerStateDegraded
 	case AgentStateInterrupted:
@@ -1726,12 +1731,12 @@ func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
 			return pref
 		}
 	}
-	// Fallback for peers not yet in the registry.
-	if agent.ApiMethod && agent.DnsMethod {
+	// Fallback for peers not yet in the registry. API is preferred
+	// when both are available, otherwise pick whichever is set.
+	if agent.ApiMethod {
 		return "API"
-	} else if agent.ApiMethod {
-		return "API"
-	} else if agent.DnsMethod {
+	}
+	if agent.DnsMethod {
 		return "DNS"
 	}
 	return "none"

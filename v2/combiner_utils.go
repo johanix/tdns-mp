@@ -1036,11 +1036,25 @@ func (mpzd *MPZoneData) PurgeContributionsForOrigin(origin string, hdb *HsyncDB)
 		return 0, nil
 	}
 
-	// Count RRs being purged for the response message.
+	// Count RRs being purged for the response message AND capture the
+	// (owner, rrtype) tuples that were attributed to this origin.
+	// After dropping the per-origin sub-map, those tuples may have no
+	// remaining contributor across any agent, in which case the
+	// previously-applied RRset must be cleaned up from mpzd.Data
+	// (CombineWithLocalChanges only adds/overrides; it never deletes
+	// owner/rrtype combinations that have disappeared from
+	// CombinerData). Mirrors the cleanupRemovedRRtype follow-up that
+	// RemoveCombinerDataNG and ReplaceCombinerDataByRRtype already do.
 	removed := 0
-	for _, ownerMap := range agentData {
-		for _, rrset := range ownerMap {
+	type ownerRRtype struct {
+		owner  string
+		rrtype uint16
+	}
+	var purged []ownerRRtype
+	for owner, ownerMap := range agentData {
+		for rrtype, rrset := range ownerMap {
 			removed += len(rrset.RRs)
+			purged = append(purged, ownerRRtype{owner: owner, rrtype: rrtype})
 		}
 	}
 
@@ -1052,6 +1066,11 @@ func (mpzd *MPZoneData) PurgeContributionsForOrigin(origin string, hdb *HsyncDB)
 
 	if hdb != nil {
 		if err := DeleteContributions(hdb, mpzd.ZoneName, origin); err != nil {
+			// In-memory state is already past the deletion; flag the
+			// divergence so an operator can re-issue the purge or run
+			// reapply to bring the DB back in sync.
+			mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: WARNING — in-memory state purged for origin %q but DB delete failed: %v. Re-issue the purge or run \"combiner zone edits reapply\" to reconcile.",
+				mpzd.ZoneName, origin, err)
 			return removed, fmt.Errorf("DB delete failed: %w", err)
 		}
 	}
@@ -1063,6 +1082,14 @@ func (mpzd *MPZoneData) PurgeContributionsForOrigin(origin string, hdb *HsyncDB)
 		}
 		if modified {
 			mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: live zone updated after purging origin %q", mpzd.ZoneName, origin)
+		}
+
+		// Drop any (owner, rrtype) tuples that no longer have any
+		// contributor anywhere in AgentContributions. Without this,
+		// the served zone (mpzd.Data) keeps answering with the old
+		// RRsets attributed to the purged origin.
+		for _, t := range purged {
+			mpzd.cleanupRemovedRRtype(t.owner, t.rrtype)
 		}
 
 		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {

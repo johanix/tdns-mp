@@ -84,7 +84,14 @@ func APIgossip(ar *AgentRegistry, lem *LeaderElectionManager) func(w http.Respon
 					row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
 					row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
 					row["zones"] = len(ms.Zones)
-					row["beat_interval"] = ms.BeatInterval
+					// Only emit beat_interval when actually known.
+					// Old agents that don't gossip the field send 0;
+					// emitting 0 in the JSON would let consumers treat
+					// it as a reported value of zero seconds rather
+					// than "not provided".
+					if ms.BeatInterval > 0 {
+						row["beat_interval"] = ms.BeatInterval
+					}
 				} else {
 					row["peer_states"] = map[string]string{}
 					row["age"] = "unknown"
