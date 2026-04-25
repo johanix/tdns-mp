@@ -294,6 +294,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		if !exists {
 			agent = &Agent{
 				Identity:   AgentId(result.Identity),
+				PeerID:     result.Identity,
 				ApiDetails: &AgentDetails{},
 				DnsDetails: &AgentDetails{},
 				Zones:      make(map[ZoneName]bool),

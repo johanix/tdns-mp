@@ -53,6 +53,7 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	// Create an agent entry for the combiner
 	combinerAgent := &Agent{
 		Identity:    combinerID,
+		PeerID:      string(combinerID),
 		DnsMethod:   true,  // Combiner supports DNS transport (CHUNK)
 		ApiMethod:   false, // API transport added when combiner.api is configured
 		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats

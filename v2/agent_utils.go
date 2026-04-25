@@ -157,6 +157,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 	// Initialize agent if needed
 	agent = &Agent{
 		Identity: remoteid,
+		PeerID:   string(remoteid),
 		// Details:   map[string]AgentDetails{},
 		ApiDetails: &AgentDetails{},
 		DnsDetails: &AgentDetails{},
@@ -522,6 +523,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	// Create placeholder agent in NEEDED state
 	agent = &Agent{
 		Identity:   remoteid,
+		PeerID:     string(remoteid),
 		ApiDetails: &AgentDetails{State: AgentStateNeeded},
 		DnsDetails: &AgentDetails{State: AgentStateNeeded},
 		Zones:      make(map[ZoneName]bool),
@@ -795,6 +797,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				if err != nil {
 					agent = &Agent{
 						Identity:  AgentId(hsync3.Identity),
+						PeerID:    hsync3.Identity,
 						State:     AgentStateError,
 						ErrorMsg:  fmt.Sprintf("error getting agent info: %v", err),
 						LastState: time.Now(),

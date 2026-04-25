@@ -56,6 +56,7 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	// Create an agent entry for the signer
 	signerAgent := &Agent{
 		Identity:    signerID,
+		PeerID:      string(signerID),
 		DnsMethod:   true,  // Signer uses DNS transport (CHUNK)
 		ApiMethod:   false, // No API transport for signer
 		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats

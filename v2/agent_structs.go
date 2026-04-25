@@ -56,7 +56,14 @@ const (
 var AgentMsgToString = core.AgentMsgToString
 
 type Agent struct {
-	Identity      AgentId
+	Identity AgentId
+	// PeerID is the transport-layer identifier for this agent, used as
+	// the key into the transport PeerRegistry. Currently identical to
+	// Identity but kept as a separate field so future identity schemes
+	// (e.g. UUID-based peer IDs) can decouple transport identity from
+	// MP agent identity without touching every consumer. See Bite 4 in
+	// docs/2026-04-25-transport-refactor-early-bites.md.
+	PeerID        string
 	Mu            sync.RWMutex
 	InitialZone   ZoneName
 	ApiDetails    *AgentDetails
