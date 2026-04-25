@@ -28,6 +28,30 @@ Builds on: 2026-03-24-transport-manager-redesign.md,
            2026-03-23-transport-extraction-implementation-plan.md,
            2026-03-21-transport-extraction-analysis.md
 
+> **STRONG RECOMMENDATION (added 2026-04-25): complete
+> the early bites in
+> [2026-04-25-transport-refactor-early-bites.md](./2026-04-25-transport-refactor-early-bites.md)
+> before initiating any phase of this refactor.**
+>
+> The early-bites doc collects eight small, additive,
+> independently revertible changes — the three original
+> Quick Wins from this plan (Bites 1–3) plus five new
+> bites (4–8) targeting the dual-registry / discovery
+> problem specifically. Each is wire-compatible, leaves
+> all three repos building, and can be reverted with a
+> single `git revert`.
+>
+> Cumulative cost: roughly 1–2 working weeks.
+> Cumulative effect: Phase 1 collapses to a deletion,
+> Phase 5 collapses to a deletion, Phase 6 part 1 is
+> already done, Phase 7 sub-step 1 is already done, the
+> Phase 6 discovery-completion seam is already installed,
+> and the Phase 0 test harness exit gate is satisfied.
+>
+> Do not skip the early bites. The 9-phase refactor
+> below is meaningfully de-risked by them, and a chunk
+> of its work is eliminated outright.
+
 ## Problem Statement
 
 The extraction of tdns-transport into a standalone repo is
@@ -291,23 +315,61 @@ chunks, (5) decrypt, (6) callback to app with raw payload.
 Decide where post-crypto/scope authz happens (transport or
 app callback).
 
-**J. Phase 6 IMR dependency audit.** "Embed IMR the same
-way tdns-mp embeds it today" is too vague. IMR may have
-its own dependencies on `tdns/v2/core` that would drag
-MP-coupling back into transport — exactly the coupling
-Phase 8 is trying to eliminate. Run a focused exploration
-of IMR's dependency surface and decide between: (a) IMR
-moves into transport entirely, (b) IMR stays in tdns and
-transport calls it via a small interface, (c) IMR is
-split.
+**J. Phase 6 IMR dependency audit — CLOSED 2026-04-23.**
+The premise that IMR might drag MP coupling into transport
+was wrong. IMR is a pure `tdns/v2` component; verified
+imports are `tdns/v2/cache`, `tdns/v2/core`, `tdns/v2/edns0`
+and external libs only. Zero references to tdns-mp or
+tdns-transport.
 
-**K. Tests for the transport boundary.** Currently zero in
-tdns-mp. Add integration coverage for at least:
+The `tdns/v2/core` imports are not a coupling problem.
+Custom RRtypes registered there (CHUNK, JWK, etc.) are
+opaque payload to IMR; it does no type-specific
+processing. The types are just DNS records.
+
+**Decision: alternative (b) via struct embedding, not
+interface.** IMR stays in `tdns/v2`. Transport defines:
+
+```go
+// tdns-transport/v2/transport/imr.go
+type Imr struct {
+    *tdns.Imr  // embedded, not composed through an interface
+}
+```
+
+Rationale for embedding over interface:
+- Embedded types allow adding new receiver functions on
+  `transport.Imr` later without touching `tdns.Imr`
+- All current IMR methods promote through the embed with
+  zero boilerplate
+- If transport ever needs an IMR method that tdns doesn't
+  have, define it on `transport.Imr` directly
+- An interface would fix the method set at the boundary
+  and require updates in lockstep
+
+Phase 6 work under this resolution: instantiate a
+`transport.Imr` wrapper, use it for discovery lookups.
+Nothing moves out of `tdns/v2`; nothing changes in IMR.
+
+**K. Tests for the transport boundary.** **Prerequisite
+before Phases 1–9:** implement the harness and **all exit-gate
+scenarios** in
+[2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md)
+and keep them passing on CI. Do not begin transport
+interface redesign work (Phase 1 onward) until that
+document’s exit gate is satisfied. Minimum coverage
+includes:
 - CHUNK NOTIFY → handler → MsgQs round trip
 - SYNC with API/DNS fallback
 - Discovery completion path
 - Confirmation routing (both inline and async)
-- LEGACY-agent rejection in hello
+- LEGACY-agent / zero–shared-zone **sync** rejection
+  (`HandleSync` in transport)
+- **Hello** policy rejection (`EvaluateHello` / HSYNC3 —
+  see harness doc scenario 6)
+
+Authoritative enumeration and acceptance criteria: harness
+doc §4.
 
 Without this safety net, a 9-phase refactor of this scope
 is a serious gamble.
@@ -320,10 +382,9 @@ break simultaneously without a deliberate compatibility
 shim. Specify which old fields stay as deprecated
 accessors, for how long, and the deletion phase.
 
-**M. Destination package for moved MP types.** Phase 2
-says "move to tdns-mp" but does not specify the package.
-Decide: new `mp/messages` subpackage, extend an existing
-`core`-like package, or inline in `v2/`?
+**M. Destination package for moved MP types — CLOSED
+2026-04-23.** Inline in `tdns-mp/v2/`. No subpackage. See
+Appendix H.
 
 **N. Rollback / abort criteria per phase.** No phase has
 explicit "if X breaks, revert and reconsider" criteria.
@@ -467,6 +528,14 @@ optional. The remaining two (Bite 1 and Bite 3) are still
 bite-sized and can land independently. They appear below
 in recommended order.
 
+> **2026-04-25:** The three Quick Wins below have been
+> superseded by the full early-bites plan in
+> [2026-04-25-transport-refactor-early-bites.md](./2026-04-25-transport-refactor-early-bites.md),
+> which adds five further bites (4–8) targeting the
+> dual-registry / discovery problem. Treat that doc as
+> authoritative for execution; the text below remains for
+> historical context only.
+
 ### Bite 1: Additive Peer enhancements (Phase 1 subset)
 
 **What:** The additive parts of Phase 1 only. Add the new
@@ -570,7 +639,9 @@ highest-ROI item — it catches regressions in the meantime
 AND becomes the safety net when the bigger refactor
 resumes.
 
-**Test scenarios to cover (minimum viable):**
+**Test scenarios to cover (minimum viable):** (seven;
+implementation detail:
+[2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md))
 
 1. **CHUNK NOTIFY round trip.** Two agents, one sends a
    sync, the other receives it. Assert the message
@@ -588,10 +659,15 @@ resumes.
    sync that produces a pending response. Receiver sends
    a separate NOTIFY confirmation later. Assert the same
    confirmation arrives via `msgQs.Confirmation`.
-5. **LEGACY-agent rejection.** Peer with empty
+5. **LEGACY / zero-scope sync rejection.** Peer with empty
    `SharedZones` attempts to send a sync. Assert
    `HandleSync` rejects it with the expected error.
-6. **Discovery completion path.** Register an agent in
+6. **Hello rejection (HSYNC / zone policy).** Exercise
+   `EvaluateHello` (or equivalent HTTP surface) with a
+   hello that must be refused (e.g. remote identity absent
+   from HSYNC3 RRset). Assert rejection with stable reason.
+   See harness doc scenario 6.
+7. **Discovery completion path.** Register an agent in
    NEEDED state. Simulate discovery completion. Assert
    the peer transitions to KNOWN and
    `OnAgentDiscoveryComplete` fires.
@@ -990,19 +1066,23 @@ optional; re-evaluation flagged that as a mistake — a
 9-phase refactor across three repos without integration
 tests is a gamble.
 
-**Test scenarios (minimum viable):**
+**Test scenarios (minimum viable):** seven; see
+[2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md).
 1. CHUNK NOTIFY round trip (two in-process TMs, sync
    delivered to `msgQs.Msg`)
 2. SYNC with API→DNS fallback (kill API mid-test, assert
    receiver gets it via DNS, observable in peer stats)
 3. Confirmation routing, inline path
 4. Confirmation routing, async NOTIFY path
-5. LEGACY-agent rejection in hello (empty `SharedZones`
-   intersection)
-6. Discovery completion path (NEEDED → KNOWN transition,
+5. LEGACY / zero-scope sync rejection (`HandleSync`, empty
+   `SharedZones`)
+6. Hello rejection (`EvaluateHello` / HSYNC3 policy)
+7. Discovery completion path (NEEDED → KNOWN transition,
    `OnAgentDiscoveryComplete` fires)
 
 **Deliverables:**
+- Implementation specification and per-scenario detail:
+  [2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md)
 - Test harness spinning up two in-process
   TransportManagers with shared in-memory DNS (or loopback
   UDP on random ports)
@@ -1018,7 +1098,10 @@ tests is a gamble.
 construction. Surfaced bugs in current code are a feature,
 not a regression.
 
-**Exit gate:** all 6 scenarios passing on CI. Phase 1 is
+**Exit gate:** all **7** scenarios passing on CI (harness
+spec:
+[2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md)).
+Open item **K** is satisfied at this gate. Phase 1 is
 unblocked.
 
 ### Phase 1: Enhance PeerRegistry (transport-only changes)
@@ -1147,10 +1230,12 @@ application can resolve a peer identity to validated
 contact information without implementing its own discovery.
 
 Steps:
-1. Embed the IMR (Iterative Mode Resolver) from tdns into
-   tdns-transport, the same way tdns-mp embeds it today.
-   IMR itself stays in tdns — transport just imports and
-   uses it for discovery lookups.
+1. Define `transport.Imr` as a struct that embeds
+   `*tdns.Imr` (struct embedding, not an interface — see
+   item J resolution). IMR itself stays in `tdns/v2`.
+   Transport uses the wrapper for discovery lookups and
+   can grow its own receiver methods later without
+   touching tdns.
 2. Create `DiscoveryService` in transport that:
    - Watches PeerRegistry for peers in NEEDED state
    - Runs DNS lookups: URI, SVCB, TLSA, JWK records
@@ -1329,11 +1414,527 @@ add it as a Tier 2 feature without changing the field name.
   — RESOLVED unchanged. See Status Update section.
 
 Remaining open items tracked as **G–O** in the Status
-Update section. Item G (gossip details) is closed along
-with OQ1. Items H, I, J, K, L, M, N, O remain as concrete
-pre-work:
-- **K** (integration tests) → now **Phase 0**, mandatory
+Update section. Closed: **G** (gossip, with OQ1), **H**
+(type migration map, appendix below), **J** (IMR audit —
+embed `*tdns.Imr` in `transport.Imr`), **M** (destination
+package — inline in `tdns-mp/v2/`, appendix H). Items I,
+K, L, N, O remain as concrete pre-work:
+- **K** (integration tests) → **Phase 0** per
+  [2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md);
+  **prerequisite before Phase 1** — exit gate (7
+  scenarios on CI) must pass first
 - **L** (PeerRegistry shim spec) → pre-Phase-1 task
 - **I** (chunk_notify_handler split) → pre-Phase-4 task
-- **J** (IMR dependency audit) → pre-Phase-6 task
-- **H, M, N, O** → pre-Phase-2 / throughout as noted
+- **N, O** → pre-Phase-2 / throughout as noted
+
+## Appendix H: Phase 2 Type Migration Map
+
+Closes open issue **H**. Enumerates every exported type
+that Phase 2 moves out of `tdns-transport/v2/transport/`,
+with every field and JSON tag recorded as it exists today.
+
+**Destination package — closes item M.** All moved types
+land inline in `tdns-mp/v2/` (no subpackage). Labels below
+read `→ tdns-mp/v2/`.
+
+**Wire compat — deliberate break.** Deployed agent base is
+nil. Phase 2 takes the opportunity to normalize tags
+rather than preserve quirks. The enumeration below records
+**current state** (source of truth for what moves); §H.7
+specifies the **target state** after normalization.
+Wire-break decisions: Gossip → AppData (tag + field),
+snake_case / CamelCase mix → CamelCase, legacy+standard
+duals → standard only.
+
+**Verbatim enumeration, not verbatim migration.** Tags in
+§H.1–H.4 below are byte-exact current state for the record.
+The migration itself drops/renames per §H.7.
+
+**Custom JSON.** Grep confirmed zero `MarshalJSON`/
+`UnmarshalJSON` methods on any of these types. Standard
+encoding/json semantics apply throughout.
+
+### H.1 Application-level message types (transport.go)
+
+All 11 types below move to `mp/<pkg>`. They have no JSON
+tags — they are Go-level request/response containers used
+inside the app; the Dns\*Payload types (H.2) are the
+wire-format mirrors. They can be renamed freely during the
+move; only the Dns\*Payload tags are wire-critical.
+
+#### SyncType enum (transport.go:20) → `tdns-mp/v2/`
+```go
+type SyncType uint8
+const (
+    SyncTypeNS     SyncType = iota + 1
+    SyncTypeDNSKEY
+    SyncTypeGLUE
+    SyncTypeCDS
+    SyncTypeCSYNC
+)
+// method: String() string
+```
+
+#### SyncRequest (transport.go:153) → `tdns-mp/v2/`
+Fields: `SenderID string`, `Zone string`, `SyncType SyncType`,
+`Records map[string][]string`, `Operations []core.RROperation`,
+`Timestamp time.Time`, `Serial uint32`,
+`DistributionID string`, `Nonce string`, `Signature []byte`,
+`MessageType string`, `RfiType string`, `RfiSubtype string`,
+`ZoneClass string`, `Publish *core.PublishInstruction`.
+
+`MessageType`, `RfiType`, `RfiSubtype`, `Publish` are the
+MP-leak fields the plan's §A3 calls out. They move as part
+of the whole type; no field-level split needed here.
+
+#### SyncResponse (transport.go:172) → `tdns-mp/v2/`
+Fields: `ResponderID string`, `Zone string`,
+`DistributionID string`, `Status ConfirmStatus`,
+`Message string`, `Timestamp time.Time`,
+`AppliedRecords []string`, `RemovedRecords []string`,
+`RejectedItems []RejectedItemDTO`, `Truncated bool`.
+
+Note: `ConfirmStatus` stays in transport; MP imports it.
+
+#### KeystateRequest (transport.go:233) → `tdns-mp/v2/`
+Fields: `SenderID string`, `Zone string`, `KeyTag uint16`,
+`Algorithm uint8`, `Signal string`, `Message string`,
+`KeyInventory []KeyInventoryEntry`, `Timestamp time.Time`.
+
+#### KeystateResponse (transport.go:245) → `tdns-mp/v2/`
+Fields: `ResponderID string`, `Zone string`, `KeyTag uint16`,
+`Signal string`, `Accepted bool`, `Message string`,
+`Timestamp time.Time`.
+
+#### EditsRequest (transport.go:257) → `tdns-mp/v2/`
+Fields: `SenderID string`, `Zone string`,
+`AgentRecords map[string]map[string][]string`,
+`Message string`, `Timestamp time.Time`.
+
+#### EditsResponse (transport.go:266) → `tdns-mp/v2/`
+Fields: `ResponderID string`, `Zone string`, `Accepted bool`,
+`Message string`, `Timestamp time.Time`.
+
+#### ConfigRequest (transport.go:276) → `tdns-mp/v2/`
+Fields: `SenderID string`, `Zone string`, `Subtype string`,
+`ConfigData map[string]string`, `Message string`,
+`Timestamp time.Time`.
+
+#### ConfigResponse (transport.go:286) → `tdns-mp/v2/`
+Fields: `ResponderID string`, `Zone string`, `Accepted bool`,
+`Message string`, `Timestamp time.Time`.
+
+#### AuditRequest (transport.go:296) → `tdns-mp/v2/`
+Fields: `SenderID string`, `Zone string`,
+`AuditData interface{}`, `Message string`,
+`Timestamp time.Time`.
+
+`AuditData` is `interface{}` today — flagged as a
+placeholder. Typing it is MP's problem post-move.
+
+#### AuditResponse (transport.go:305) → `tdns-mp/v2/`
+Fields: `ResponderID string`, `Zone string`, `Accepted bool`,
+`Message string`, `Timestamp time.Time`.
+
+#### KeyInventoryEntry (transport.go:222) → `tdns-mp/v2/` — HAS TAGS
+```go
+type KeyInventoryEntry struct {
+    KeyTag    uint16 `json:"key_tag"`
+    Algorithm uint8  `json:"algorithm"`
+    Flags     uint16 `json:"flags"`
+    State     string `json:"state"`
+    KeyRR     string `json:"keyrr"`
+}
+```
+
+#### RejectedItemDTO (dns.go:1305) → `tdns-mp/v2/` — HAS TAGS
+```go
+type RejectedItemDTO struct {
+    Record string `json:"record"`
+    Reason string `json:"reason"`
+}
+```
+Embedded in `DnsConfirmPayload.RejectedItems` and
+`SyncResponse.RejectedItems`. Both moved types and the
+embedding types land inline in `tdns-mp/v2/`.
+
+### H.2 Wire-format payload types (dns.go) — CURRENT STATE
+
+All 13 `Dns*Payload` types move to `tdns-mp/v2/`. Tags
+below record current state byte-exact. Post-move
+normalization (§H.7) drops legacy duals and aligns tag
+casing; treat §H.2 as the inventory, not the target.
+
+#### DnsHelloPayload (dns.go:1203)
+```go
+Type         string   `json:"type"`
+SenderID     string   `json:"sender_id"`
+Capabilities []string `json:"capabilities,omitempty"`
+SharedZones  []string `json:"shared_zones,omitempty"`
+Timestamp    int64    `json:"timestamp"`
+Nonce        string   `json:"nonce,omitempty"`
+MessageType  string   `json:"MessageType"`
+MyIdentity   string   `json:"MyIdentity"`
+YourIdentity string   `json:"YourIdentity"`
+Zone         string   `json:"Zone"`
+Time         string   `json:"Time"`
+// methods: GetSenderID(), GetSharedZones()
+```
+
+#### DnsBeatPayload (dns.go:1238)
+```go
+Type           string          `json:"type"`
+SenderID       string          `json:"sender_id"`
+Timestamp      int64           `json:"timestamp"`
+Sequence       uint64          `json:"sequence"`
+State          string          `json:"state,omitempty"`
+MessageType    string          `json:"MessageType"`
+MyIdentity     string          `json:"MyIdentity"`
+YourIdentity   string          `json:"YourIdentity"`
+MyBeatInterval uint32          `json:"MyBeatInterval"`
+Zones          []string        `json:"Zones"`
+Time           string          `json:"Time"`
+Gossip         json.RawMessage `json:"Gossip,omitempty"`
+// methods: GetSenderID()
+```
+Phase 2: `Gossip` → `AppData` (both field and tag). Wire
+break accepted. Legacy fields dropped per §H.7.
+
+#### DnsSyncPayload (dns.go:1265)
+```go
+MessageType    string                   `json:"MessageType"`
+OriginatorID   string                   `json:"OriginatorID"`
+YourIdentity   string                   `json:"YourIdentity"`
+Zone           string                   `json:"Zone"`
+Nonce          string                   `json:"nonce,omitempty"`
+Records        map[string][]string      `json:"Records"`
+Operations     []core.RROperation       `json:"Operations,omitempty"`
+Time           string                   `json:"Time"`
+RfiType        string                   `json:"RfiType"`
+RfiSubtype     string                   `json:"rfi_subtype,omitempty"`
+Timestamp      int64                    `json:"timestamp"`
+DistributionID string                   `json:"distribution_id"`
+ZoneClass      string                   `json:"zone_class,omitempty"`
+Publish        *core.PublishInstruction `json:"publish,omitempty"`
+// methods: GetPublish(), GetSenderID(), GetRecords(), GetOperations()
+```
+Note the mixed-case tags: `RfiType` (CamelCase) vs
+`rfi_subtype` (snake_case). Normalized to CamelCase per
+§H.7.
+
+#### DnsRelocatePayload (dns.go:1296)
+```go
+Type       string     `json:"type"`
+SenderID   string     `json:"sender_id"`
+NewAddress DnsAddress `json:"new_address"`
+Reason     string     `json:"reason"`
+ValidUntil int64      `json:"valid_until"`
+```
+Embedded type `DnsAddress` — verify whether it's transport
+or MP; if transport, MP needs to import it. (Pre-Phase-2
+item; not a blocker for the map itself.)
+
+#### DnsConfirmPayload (dns.go:1311)
+```go
+Type           string            `json:"type"`
+SenderID       string            `json:"sender_id"`
+Zone           string            `json:"zone"`
+DistributionID string            `json:"distribution_id"`
+Nonce          string            `json:"nonce,omitempty"`
+Status         string            `json:"status"`
+Message        string            `json:"message,omitempty"`
+AppliedCount   int               `json:"applied_count,omitempty"`
+RemovedCount   int               `json:"removed_count,omitempty"`
+RejectedCount  int               `json:"rejected_count,omitempty"`
+AppliedRecords []string          `json:"applied_records,omitempty"`
+RemovedRecords []string          `json:"removed_records,omitempty"`
+RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
+IgnoredCount   int               `json:"ignored_count,omitempty"`
+IgnoredRecords []string          `json:"ignored_records,omitempty"`
+Truncated      bool              `json:"truncated,omitempty"`
+Timestamp      int64             `json:"timestamp"`
+```
+
+#### DnsPingPayload (dns.go:1348)
+```go
+Type         string `json:"type"`
+SenderID     string `json:"sender_id"`
+Nonce        string `json:"nonce"`
+Timestamp    int64  `json:"timestamp"`
+MessageType  string `json:"MessageType"`
+MyIdentity   string `json:"MyIdentity"`
+YourIdentity string `json:"YourIdentity"`
+Time         string `json:"Time"`
+// methods: GetSenderID()
+```
+
+#### DnsKeystatePayload (dns.go:1372)
+```go
+MessageType  string              `json:"MessageType"`
+MyIdentity   string              `json:"MyIdentity"`
+YourIdentity string              `json:"YourIdentity"`
+Zone         string              `json:"Zone"`
+KeyTag       uint16              `json:"KeyTag"`
+Algorithm    uint8               `json:"Algorithm"`
+Signal       string              `json:"Signal"`
+Message      string              `json:"Message,omitempty"`
+KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"`
+Timestamp    int64               `json:"timestamp"`
+Type         string              `json:"type"`
+SenderID     string              `json:"sender_id"`
+// methods: GetSenderID()
+```
+
+#### DnsKeystateConfirmPayload (dns.go:1401)
+```go
+Type      string `json:"type"`
+SenderID  string `json:"sender_id"`
+Zone      string `json:"zone"`
+KeyTag    uint16 `json:"key_tag"`
+Signal    string `json:"signal"`
+Status    string `json:"status"`
+Message   string `json:"message,omitempty"`
+Timestamp int64  `json:"timestamp"`
+```
+
+#### DnsEditsPayload (dns.go:1415)
+```go
+MessageType  string                         `json:"MessageType"`
+MyIdentity   string                         `json:"MyIdentity"`
+YourIdentity string                         `json:"YourIdentity"`
+Zone         string                         `json:"Zone"`
+AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"`
+Message      string                         `json:"Message,omitempty"`
+Timestamp    int64                          `json:"timestamp"`
+Type         string                         `json:"type"`
+SenderID     string                         `json:"sender_id"`
+// methods: GetSenderID()
+```
+
+#### DnsConfigPayload (dns.go:1443)
+```go
+MessageType  string            `json:"MessageType"`
+MyIdentity   string            `json:"MyIdentity"`
+YourIdentity string            `json:"YourIdentity"`
+Zone         string            `json:"Zone"`
+Subtype      string            `json:"Subtype"`
+ConfigData   map[string]string `json:"ConfigData,omitempty"`
+Message      string            `json:"Message,omitempty"`
+Timestamp    int64             `json:"timestamp"`
+Type         string            `json:"type"`
+SenderID     string            `json:"sender_id"`
+// methods: GetSenderID()
+```
+
+#### DnsAuditPayload (dns.go:1466)
+```go
+MessageType  string      `json:"MessageType"`
+MyIdentity   string      `json:"MyIdentity"`
+YourIdentity string      `json:"YourIdentity"`
+Zone         string      `json:"Zone"`
+AuditData    interface{} `json:"AuditData,omitempty"`
+Message      string      `json:"Message,omitempty"`
+Timestamp    int64       `json:"timestamp"`
+Type         string      `json:"type"`
+SenderID     string      `json:"sender_id"`
+// methods: GetSenderID()
+```
+
+#### DnsStatusUpdatePayload (dns.go:1489)
+```go
+MessageType  string   `json:"MessageType"`
+MyIdentity   string   `json:"MyIdentity"`
+YourIdentity string   `json:"YourIdentity"`
+Zone         string   `json:"Zone"`
+SubType      string   `json:"SubType"`
+NSRecords    []string `json:"NSRecords,omitempty"`
+DSRecords    []string `json:"DSRecords,omitempty"`
+Result       string   `json:"Result,omitempty"`
+Msg          string   `json:"Msg,omitempty"`
+Timestamp    int64    `json:"timestamp"`
+Type         string   `json:"type"`
+SenderID     string   `json:"sender_id"`
+// methods: GetSenderID()
+```
+
+#### DnsPingConfirmPayload (dns.go:1513)
+```go
+Type           string `json:"type"`
+SenderID       string `json:"sender_id"`
+Nonce          string `json:"nonce"`
+DistributionID string `json:"distribution_id"`
+Status         string `json:"status"`
+Message        string `json:"message,omitempty"`
+Timestamp      int64  `json:"timestamp"`
+```
+
+### H.3 Peer struct field removal (peer.go)
+
+`Peer` stays in transport; only these fields/types move
+out:
+
+- **`SharedZones map[string]*ZoneRelation`** — delete from
+  `Peer`. No JSON tag (Peer has no tags). Replace with
+  scope tracking on the MP side per plan §C1.
+- **`ZoneRelation` struct** (peer.go:126) — move to
+  `mp/<pkg>`. No JSON tags on the type. Fields:
+  `Zone string`, `Role string`, `PeerRole string`,
+  `LastSync time.Time`, `SyncSerial uint32`,
+  `SyncPending bool`.
+
+### H.4 BeatRequest field rename (transport.go:132)
+
+Stays in transport; field renames:
+
+```go
+// Before
+Gossip json.RawMessage `json:"gossip,omitempty"`
+// After
+AppData json.RawMessage `json:"AppData,omitempty"`
+```
+
+Wire break accepted. `DnsBeatPayload.Gossip` (§H.2) gets
+the same rename and casing. Plan text earlier in this doc
+calling the rename "wire-compatible" is superseded: it is
+a deliberate wire break, justified by nil deployed base.
+
+### H.5 Field-count check (current state)
+
+Plan text: "~25 wire-format-critical fields". Actual count
+across the 13 Dns\*Payload types + 2 tagged struct types
+(KeyInventoryEntry, RejectedItemDTO):
+
+- DnsHelloPayload: 11
+- DnsBeatPayload: 12
+- DnsSyncPayload: 14
+- DnsRelocatePayload: 5
+- DnsConfirmPayload: 17
+- DnsPingPayload: 8
+- DnsKeystatePayload: 12
+- DnsKeystateConfirmPayload: 8
+- DnsEditsPayload: 9
+- DnsConfigPayload: 10
+- DnsAuditPayload: 9
+- DnsStatusUpdatePayload: 12
+- DnsPingConfirmPayload: 7
+- KeyInventoryEntry: 5
+- RejectedItemDTO: 2
+
+**Total: 141 fields current state.** Normalization (§H.7)
+drops the legacy duals — see recomputed count there.
+
+### H.6 Normalization target (post-move state)
+
+**Legacy fields dropped.** Every Dns\*Payload carries a
+"Legacy" block (some combination of `Type`, `SenderID`,
+`Timestamp` with snake_case tags) alongside "Standard"
+fields that duplicate the same information in CamelCase
+(`MessageType`, `MyIdentity`, `Time`). The legacy block
+was fallback for pre-standard agents. With nil deployed
+base, drop legacy fields entirely. Any getter method that
+reads them (`GetSenderID`, `GetSharedZones`) reads the
+standard field instead.
+
+**Tag casing normalized to CamelCase.** Pick one
+convention and apply uniformly. The majority of new fields
+already use CamelCase (`MessageType`, `MyIdentity`, `Zone`,
+`KeyTag`, `Signal`, `AppData`). Align everything — fields
+currently using snake_case tags (`nonce`, `rfi_subtype`,
+`distribution_id`, `zone_class`, `publish`,
+`applied_count`, etc.) move to CamelCase
+(`Nonce`, `RfiSubtype`, `DistributionID`, `ZoneClass`,
+`Publish`, `AppliedCount`, ...). The Go field name already
+matches; only the tag string changes.
+
+**`omitempty` policy.** Keep as-is — it's about JSON size,
+not casing. Any field currently `omitempty` stays
+`omitempty`.
+
+**Concrete target per type** (fields that survive after
+legacy removal; tag strings CamelCase-normalized):
+
+| Type | Surviving fields |
+|---|---|
+| DnsHelloPayload | MessageType, MyIdentity, YourIdentity, Zone, Time, Capabilities, SharedZones, Nonce |
+| DnsBeatPayload | MessageType, MyIdentity, YourIdentity, MyBeatInterval, Zones, Time, State, Sequence, AppData |
+| DnsSyncPayload | MessageType, OriginatorID, YourIdentity, Zone, Nonce, Records, Operations, Time, RfiType, RfiSubtype, DistributionID, ZoneClass, Publish |
+| DnsRelocatePayload | MessageType, MyIdentity, NewAddress, Reason, ValidUntil |
+| DnsConfirmPayload | MessageType, MyIdentity, Zone, DistributionID, Nonce, Status, Message, AppliedCount, RemovedCount, RejectedCount, AppliedRecords, RemovedRecords, RejectedItems, IgnoredCount, IgnoredRecords, Truncated, Time |
+| DnsPingPayload | MessageType, MyIdentity, YourIdentity, Nonce, Time |
+| DnsKeystatePayload | MessageType, MyIdentity, YourIdentity, Zone, KeyTag, Algorithm, Signal, Message, KeyInventory, Time |
+| DnsKeystateConfirmPayload | MessageType, MyIdentity, Zone, KeyTag, Signal, Status, Message, Time |
+| DnsEditsPayload | MessageType, MyIdentity, YourIdentity, Zone, AgentRecords, Message, Time |
+| DnsConfigPayload | MessageType, MyIdentity, YourIdentity, Zone, Subtype, ConfigData, Message, Time |
+| DnsAuditPayload | MessageType, MyIdentity, YourIdentity, Zone, AuditData, Message, Time |
+| DnsStatusUpdatePayload | MessageType, MyIdentity, YourIdentity, Zone, SubType, NSRecords, DSRecords, Result, Msg, Time |
+| DnsPingConfirmPayload | MessageType, MyIdentity, Nonce, DistributionID, Status, Message, Time |
+| KeyInventoryEntry | KeyTag, Algorithm, Flags, State, KeyRR |
+| RejectedItemDTO | Record, Reason |
+
+**Per-type notes:**
+
+- `Timestamp int64` (unix) fields collapse into the
+  existing `Time string` (RFC3339) field where both are
+  present. For payloads that only had `Timestamp` (e.g.
+  `DnsConfirmPayload`, `DnsRelocatePayload`,
+  `DnsPingConfirmPayload`), rename it to `Time` with RFC3339
+  content — consistency win. One field, one format.
+- `Type string` (legacy discriminator like `"keystate"`)
+  drops entirely; `MessageType` is the discriminator.
+- `SenderID string` drops; `MyIdentity` is the sender.
+- `DnsPingPayload`'s legacy `Nonce` tag `json:"nonce"` was
+  shared between legacy and standard. Retain as
+  `json:"Nonce"` (CamelCase).
+- `DnsConfirmPayload` has no Standard-block equivalents
+  for all fields today. When normalizing, add
+  `MessageType` and `MyIdentity` (currently only has
+  legacy `Type`/`SenderID`). This is a genuine schema
+  addition, not just renaming.
+- `DnsRelocatePayload` is entirely legacy-style today.
+  Convert fully: `type` → `MessageType`, `sender_id` →
+  `MyIdentity`, `new_address` → `NewAddress`, `reason` →
+  `Reason`, `valid_until` → `ValidUntil`.
+- `DnsPingConfirmPayload` same: entirely legacy.
+  Normalize all six fields.
+
+**Recomputed field count (post-normalization):**
+
+- DnsHelloPayload: 8 (−3)
+- DnsBeatPayload: 9 (−3)
+- DnsSyncPayload: 13 (−1; Timestamp collapsed into Time)
+- DnsRelocatePayload: 5 (unchanged count; all renamed)
+- DnsConfirmPayload: 17 (unchanged; MessageType/MyIdentity added, Type/SenderID/Timestamp removed)
+- DnsPingPayload: 5 (−3)
+- DnsKeystatePayload: 10 (−2)
+- DnsKeystateConfirmPayload: 8 (unchanged count; all renamed)
+- DnsEditsPayload: 7 (−2)
+- DnsConfigPayload: 8 (−2)
+- DnsAuditPayload: 7 (−2)
+- DnsStatusUpdatePayload: 10 (−2)
+- DnsPingConfirmPayload: 7 (unchanged count; all renamed)
+- KeyInventoryEntry: 5 (unchanged; already CamelCase-worthy, currently snake; tags re-cased)
+- RejectedItemDTO: 2 (unchanged; tags re-cased)
+
+**Total: 121 fields.** Net −20 from dropping legacy duals.
+Per-type field count stabilizes; tag strings are
+CamelCase across the board; one timestamp format (RFC3339
+string `Time`) instead of two.
+
+### H.7 What stays in transport
+
+For completeness, types the plan keeps in transport that
+were verified present during enumeration:
+
+- `ConfirmStatus` (enum) — imported by moved SyncResponse
+- `RouterConfig`, `InitializeRouter` — generic only; role
+  variants move per Phase 3
+- `Peer`, `PeerRegistry`, `PeerState` — stay; field
+  surgery per H.3
+- `BeatRequest`, `HelloRequest`, `PingRequest` — stay;
+  field-level changes only
+- `ChunkNotifyHandler`, `IncomingMessage`, `MessageContext`
+  — stay (split per item I, not H)
+
+Post-move, the 13 Dns\*Payload types become unexported on
+the MP side per Phase 9 — subsequent cleanup, not a Phase 2
+requirement.
