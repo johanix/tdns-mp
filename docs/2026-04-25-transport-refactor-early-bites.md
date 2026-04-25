@@ -73,13 +73,13 @@ repo with its own merge cycle):
 | 4 | `Agent.PeerID` field | tdns-mp | 30 min | ✅ DONE | Bites 5, 7, 8; Phase 7 sub-step 1 |
 | 8 | `OnPeerDiscovered` callback seam | tdns-mp + tdns-transport | 2 hours | ✅ DONE | Phase 6 part 2 |
 | 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | ✅ DONE | Phase 1 deletion |
-| 6 | Move IMR lookup helpers into transport | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 6 part 1 |
+| 6 | Add IMR lookup helpers to transport (parallel embedding) | tdns-transport only | 0.5 day | ✅ DONE | Phase 6 part 1 |
 | 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | ⏳ pending | Phase 1+ exit gate |
 | 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 7 deletion of `SyncPeerFromAgent` |
 | 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | ⏳ pending | Phase 7 |
 | 3 | Unified `tm.Send` shim | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 5 deletion |
 
-**Progress (2026-04-25):** Bites 0, 4, 8, 1 complete.
+**Progress (2026-04-25):** Bites 0, 4, 8, 1, 6 complete.
 Bite 0 merged to `tdns/main` via PR #204 and
 cherry-picked onto the in-flight `fast-roller-1`
 feature branch. Bites 4, 8, 1 landed on
@@ -89,8 +89,14 @@ Bite 1's transport-side changes landed on
 scope was refined during execution: the wrapper-body
 switch (originally step 5) deferred to Bite 7, where
 `Peer.PopulateFromAgent` populates the per-mechanism
-`Address` field that the wrapper bodies need. Build of
-all four mp binaries (`tdns-mpagent`, `tdns-mpcombiner`,
+`Address` field that the wrapper bodies need. Bite 6's
+shape resolved on execution to **parallel embedding**
+rather than movement: `tdnsmp.Imr` stays put (still has
+non-discovery users), and a separate `transport.Imr`
+wrapper is added with its own copy of the lookup
+helpers. Both wrap the same singleton `*tdns.Imr`,
+guaranteed by Bite 0's idempotency guard. Build of all
+four mp binaries (`tdns-mpagent`, `tdns-mpcombiner`,
 `tdns-mpsigner`, `tdns-mpcli`) verified clean after each
 bite.
 
@@ -808,50 +814,60 @@ The methods are:
 
 Total: ~297 lines, single file.
 
+### Decision (2026-04-25): Option B (parallel embedding,
+not move)
+
+After discussion: **Option B**, with one important
+clarification — this is **parallel embedding**, not
+movement. `tdnsmp.Imr` stays put because there are
+existing MP-side users of it that are independent of
+discovery lookups (e.g. `delegation_sync.go`,
+`apihandler_agent.go`, `main_init.go`). The transport
+side gets its own `transport.Imr` wrapper that embeds
+the same singleton `*tdns.Imr` from
+`conf.Internal.ImrEngine` and `Globals.ImrEngine`.
+
+This is the structural reason Bite 0 (idempotent
+`InitImrEngine`) had to land first: with two embedding
+wrappers in different packages, both must point to the
+same underlying `*tdns.Imr`, which the Bite 0 guard
+makes hold by construction.
+
+The Lookup\* helpers exist as methods on both wrappers.
+This is intentional duplication. It will be resolved
+later when MP migrates its lookup-helper callers to
+use `*transport.Imr` (or when the helpers move to a
+shared location). For now, two parallel implementations
+of the same logic, both reading from the same shared
+singleton.
+
 ### Concrete steps
 
-1. Create
-   `tdns-transport/v2/transport/discovery_lookups.go`.
-2. Move the six functions there. The receiver is
-   currently `*Imr` where `Imr` is defined in MP. Two
-   options:
-
-   **Option A (recommended): free functions taking `*tdns.Imr`.**
+1. Create `tdns-transport/v2/transport/imr.go` with:
    ```go
-   func LookupAgentJWK(
-       ctx context.Context,
-       imr *tdns.Imr,
-       identity string,
-   ) (string, crypto.PublicKey, string, error) { ... }
-   ```
-   Add thin shims in MP that preserve the existing
-   method API:
-   ```go
-   func (imr *Imr) LookupAgentJWK(...) (...) {
-       return transport.LookupAgentJWK(ctx, imr.Imr, identity)
+   type Imr struct {
+       *tdns.Imr
    }
    ```
-   This keeps every existing call site working
-   unchanged.
-
-   **Option B: move methods onto a `transport.Imr`
-   wrapper now.** Per the main plan's item J, the
-   target is `type transport.Imr struct { *tdns.Imr }`.
-   Land the wrapper as part of this bite. More
-   ambitious; requires updating call sites.
-3. Move the relevant constants and shared types
-   (`core.TypeJWK`, `core.JWK`, `core.ValidateJWK`) — or
-   leave them as imports from `tdns/v2/core`, which is
-   acceptable per the main plan's resolution of item J
-   (custom RR types in `tdns/v2/core` are opaque to
-   transport).
-4. Update tdns-mp imports to pick up the new home
-   (transparent if Option A; swap calls if Option B).
-5. Verify the build: `cd tdns-mp/cmd && ... make` plus
-   the MP build per CLAUDE.md.
+   Mirror of `tdnsmp.Imr` in
+   [tdns-mp/v2/imr.go](../../tdns-mp/v2/imr.go), in the
+   transport package.
+2. Copy the six lookup helpers from
+   [tdns-mp/v2/agent_discovery_common.go](../../tdns-mp/v2/agent_discovery_common.go)
+   into the new `imr.go`, attached as receivers on
+   `*transport.Imr`. Adapt logging from MP's
+   `lgAgent` to transport's `lgTransport()`.
+3. Leave MP's copies untouched. Both wrappers continue
+   to exist with the same method set.
+4. Verify the build:
+   `cd tdns-mp/cmd && GOROOT=... make` (transitively
+   builds transport).
 
 ### Do NOT
 
+- **Move** any of the existing MP-side lookup helpers.
+  This is parallel addition, not relocation —
+  `tdnsmp.Imr` and its method set remain.
 - Move `DiscoverAndRegisterAgent`. That orchestration
   function lives in
   [tdns-mp/v2/agent_discovery.go:362](../../tdns-mp/v2/agent_discovery.go#L362)
@@ -861,24 +877,35 @@ Total: ~297 lines, single file.
   ([tdns-mp/v2/agent_utils.go:566](../../tdns-mp/v2/agent_utils.go#L566)).
   Same reason.
 - Move `DiscoveryRetrierNG`. Same reason.
-- Refactor the lookup methods themselves. Move first,
+- Refactor the lookup methods themselves. Copy first,
   refactor later.
+- Migrate any MP call site to use `*transport.Imr`.
+  Call-site migration is a follow-up; for now the two
+  wrappers coexist.
 
 ### Files touched
 
-- New: `tdns-transport/v2/transport/discovery_lookups.go`
-  (~300 lines moved in)
-- Modified:
+- New: [tdns-transport/v2/transport/imr.go](../../tdns-transport/v2/transport/imr.go)
+  (~300 lines: `transport.Imr` wrapper struct +
+  six Lookup\* receiver methods)
+- Unchanged:
   [tdns-mp/v2/agent_discovery_common.go](../../tdns-mp/v2/agent_discovery_common.go)
-  (becomes 6 thin shims under Option A, or empty under
-  Option B)
+  and [tdns-mp/v2/imr.go](../../tdns-mp/v2/imr.go) —
+  parallel embedding, not movement.
 
 ### Why it's safe
 
-Pure code motion. No semantic change. Wire format
-unchanged. Under Option A, every existing call site
-keeps working without modification. Under Option B, call
-sites change but in a mechanical 1:1 way.
+Pure parallel addition. No code is moved out of MP. No
+existing call site changes. No semantic change. Wire
+format unchanged. The new transport-side helpers are
+not yet called by anything; they are infrastructure for
+future bites and external consumers.
+
+The structural correctness of two wrappers around the
+same `*tdns.Imr` rests on Bite 0's idempotency guard:
+both `tdnsmp.Imr` and `transport.Imr` end up holding
+the same singleton pointer regardless of who initialises
+it first.
 
 ### Value delivered
 
@@ -891,13 +918,16 @@ sites change but in a mechanical 1:1 way.
 
 ### Estimated cost
 
-1 day for Option A. 1.5 days for Option B (the wrapper
-type and call-site updates).
+Half a day under the parallel-embedding approach
+chosen — the helpers are mechanical copy-and-adapt;
+no call-site changes.
 
 ### Dependencies
 
-None. Item J (IMR embed) in the main plan does not need
-to be fully resolved for Option A.
+- **Bite 0** (idempotent `InitImrEngine`) — required.
+  Without it, the parallel embedding could in
+  principle wrap two different `*tdns.Imr` instances
+  if init were ever invoked twice.
 
 ---
 
