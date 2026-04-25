@@ -1003,3 +1003,74 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 		}
 	}
 }
+
+// PurgeContributionsForOrigin removes ALL contributions attributed to a
+// given origin (sender ID) from this zone. Used to clean up ghost or
+// stale state — for example, contributions left over from an earlier
+// code version that used a different naming convention for the sender
+// ID (e.g. bare "combiner" instead of the FQDN
+// "combiner.echo.dnslab.").
+//
+// In-memory state, the persisted CombinerContributions table, and the
+// rebuilt CombinerData are all updated. CombineWithLocalChanges runs
+// after the rebuild so the served zone reflects the change. Returns
+// the count of RRs removed.
+//
+// Note: this is a destructive admin operation. There is no per-RR
+// undo; the caller is expected to know that the origin is genuinely
+// stale and not a currently-active contributor.
+func (mpzd *MPZoneData) PurgeContributionsForOrigin(origin string, hdb *HsyncDB) (int, error) {
+	if origin == "" {
+		return 0, fmt.Errorf("PurgeContributionsForOrigin: origin must be non-empty")
+	}
+
+	mpzd.Lock()
+	defer mpzd.Unlock()
+
+	if mpzd.MP == nil || mpzd.MP.AgentContributions == nil {
+		return 0, nil
+	}
+
+	agentData, ok := mpzd.MP.AgentContributions[origin]
+	if !ok {
+		return 0, nil
+	}
+
+	// Count RRs being purged for the response message.
+	removed := 0
+	for _, ownerMap := range agentData {
+		for _, rrset := range ownerMap {
+			removed += len(rrset.RRs)
+		}
+	}
+
+	// Drop the entire per-origin sub-map.
+	delete(mpzd.MP.AgentContributions, origin)
+
+	// Rebuild merged CombinerData and persist the deletion.
+	mpzd.RebuildCombinerData()
+
+	if hdb != nil {
+		if err := DeleteContributions(hdb, mpzd.ZoneName, origin); err != nil {
+			return removed, fmt.Errorf("DB delete failed: %w", err)
+		}
+	}
+
+	if mpzd.combinerShouldApplyEdits() {
+		modified, err := mpzd.CombineWithLocalChanges()
+		if err != nil {
+			return removed, err
+		}
+		if modified {
+			mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: live zone updated after purging origin %q", mpzd.ZoneName, origin)
+		}
+
+		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
+			mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: Signature TXT injected", mpzd.ZoneName)
+		}
+	}
+
+	mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: purged %d RR(s) attributed to origin %q",
+		mpzd.ZoneName, removed, origin)
+	return removed, nil
+}

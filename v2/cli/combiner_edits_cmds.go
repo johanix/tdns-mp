@@ -417,6 +417,43 @@ var combinerZoneEditsReapplyCmd = &cobra.Command{
 	},
 }
 
+var combinerZoneEditsPurgeCmd = &cobra.Command{
+	Use:   "purge",
+	Short: "Remove all contributions attributed to a specific origin from a zone",
+	Long: `Remove all contributions for a given origin (sender ID) from
+the combiner's view of a zone. Used to clean up ghost or stale
+contributions left over from earlier code versions or
+mis-configured peers — e.g. an entry attributed to a bare
+"combiner" string instead of the FQDN "combiner.X.dnslab.".
+
+This is destructive: there is no per-RR undo. The combiner's
+in-memory AgentContributions map, the persisted
+CombinerContributions DB rows, and the rebuilt CombinerData are
+all updated. CombineWithLocalChanges runs after the rebuild so
+the served zone reflects the change.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		zone, _ := cmd.Flags().GetString("zone")
+		origin, _ := cmd.Flags().GetString("origin")
+		if zone == "" {
+			log.Fatalf("--zone is required")
+		}
+		if origin == "" {
+			log.Fatalf("--origin is required")
+		}
+
+		resp, err := SendCombinerEditCmd(CombinerEditPost{
+			Command: "purge",
+			Zone:    zone,
+			Origin:  origin,
+		})
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		fmt.Println(resp.Msg)
+	},
+}
+
 var combinerZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone on the combiner",
@@ -500,9 +537,14 @@ func init() {
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsRejectCmd)
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsClearCmd)
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsReapplyCmd)
+	combinerZoneEditsCmd.AddCommand(combinerZoneEditsPurgeCmd)
 
 	// Flags for reapply
 	combinerZoneEditsReapplyCmd.Flags().String("zone", "", "Zone to reapply contributions for (required)")
+
+	// Flags for purge
+	combinerZoneEditsPurgeCmd.Flags().String("zone", "", "Zone to purge contributions from (required)")
+	combinerZoneEditsPurgeCmd.Flags().String("origin", "", "Origin (sender ID) whose contributions to remove (required)")
 
 	// Flags for list
 	combinerZoneEditsListCmd.Flags().String("zone", "", "Zone to list edits for")
