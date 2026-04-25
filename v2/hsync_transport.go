@@ -449,6 +449,23 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Info("DNS transport disabled by configuration")
 	}
 
+	// Register the discovery-completion callback on the embedded TM. The
+	// callback is invoked by MP's discovery loop once an agent transitions
+	// to KNOWN. After Phase 6 of the transport interface redesign, transport
+	// itself will own the discovery loop and invoke this callback directly;
+	// installing the seam now lets the call-site already use it. See Bite 8
+	// in tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+	tm.TransportManager.OnPeerDiscovered = func(peerID string) {
+		if tm.agentRegistry == nil {
+			return
+		}
+		agent, ok := tm.agentRegistry.S.Get(AgentId(peerID))
+		if !ok {
+			return
+		}
+		tm.OnAgentDiscoveryComplete(agent)
+	}
+
 	return tm
 }
 

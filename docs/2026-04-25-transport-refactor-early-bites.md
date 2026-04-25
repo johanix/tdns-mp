@@ -67,17 +67,27 @@ plan to interleave the new bites; Bite 0 first because
 it is a prerequisite for Bite 6 and lands in a different
 repo with its own merge cycle):
 
-| # | Bite | Repo | Cost | Unlocks |
-|---|---|---|---|---|
-| 0 | Idempotent `InitImrEngine` | **tdns** | 30 min | Bite 6; safe shared IMR for non-MP apps |
-| 4 | `Agent.PeerID` field | tdns-mp | 30 min | Bites 5, 7, 8; Phase 7 sub-step 1 |
-| 8 | `OnPeerDiscovered` callback seam | tdns-mp + tdns-transport | 2 hours | Phase 6 part 2 |
-| 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | Phase 1 deletion |
-| 6 | Move IMR lookup helpers into transport | tdns-mp + tdns-transport | 1 day | Phase 6 part 1 |
-| 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | Phase 1+ exit gate |
-| 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | Phase 7 deletion of `SyncPeerFromAgent` |
-| 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | Phase 7 |
-| 3 | Unified `tm.Send` shim | tdns-mp + tdns-transport | 1 day | Phase 5 deletion |
+| # | Bite | Repo | Cost | Status | Unlocks |
+|---|---|---|---|---|---|
+| 0 | Idempotent `InitImrEngine` | **tdns** | 30 min | ✅ DONE | Bite 6; safe shared IMR for non-MP apps |
+| 4 | `Agent.PeerID` field | tdns-mp | 30 min | ✅ DONE | Bites 5, 7, 8; Phase 7 sub-step 1 |
+| 8 | `OnPeerDiscovered` callback seam | tdns-mp + tdns-transport | 2 hours | ✅ DONE | Phase 6 part 2 |
+| 1 | Additive `MechanismState` on Peer with dual-write | tdns-mp + tdns-transport | 1–2 days | ⏳ pending | Phase 1 deletion |
+| 6 | Move IMR lookup helpers into transport | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 6 part 1 |
+| 2 | Phase 0 — integration test harness | tdns-mp | 2–3 days | ⏳ pending | Phase 1+ exit gate |
+| 7 | `Peer.PopulateFromAgent` from Agent's per-mechanism state | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 7 deletion of `SyncPeerFromAgent` |
+| 5 | Migrate read-shaped `SyncPeerFromAgent` call sites | tdns-mp | 0.5 day | ⏳ pending | Phase 7 |
+| 3 | Unified `tm.Send` shim | tdns-mp + tdns-transport | 1 day | ⏳ pending | Phase 5 deletion |
+
+**Progress (2026-04-25):** Bites 0, 4, 8 complete. Bite 0
+merged to `tdns/main` via PR #204 and cherry-picked onto
+the in-flight `fast-roller-1` feature branch. Bites 4
+and 8 landed on `transport-early-bites-1` in tdns-mp;
+Bite 8's transport-side change landed on
+`transport-early-bites-1` in tdns-transport. Build of
+all four mp binaries (`tdns-mpagent`, `tdns-mpcombiner`,
+`tdns-mpsigner`, `tdns-mpcli`) verified clean after each
+bite.
 
 Bite 2 (the test harness) is non-negotiable as the gate
 for the main refactor's Phase 1 — but the additive bites

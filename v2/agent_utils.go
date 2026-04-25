@@ -396,7 +396,15 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
 
 				if ar.TransportManager != nil {
-					ar.MPTransport.OnAgentDiscoveryComplete(agent)
+					// Bite 8: prefer the OnPeerDiscovered seam on TM if
+					// registered (production path); fall back to the direct
+					// bridge call for setups that don't go through
+					// NewMPTransportBridge (some test fixtures).
+					if ar.TransportManager.OnPeerDiscovered != nil {
+						ar.TransportManager.OnPeerDiscovered(agent.PeerID)
+					} else {
+						ar.MPTransport.OnAgentDiscoveryComplete(agent)
+					}
 				}
 
 				// If we're in known state and have a zone, try to send hello
