@@ -61,7 +61,7 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	}
 
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
-		resigned, err := zd.SignRRset(&rrset, zone, dak, force)
+		resigned, err := zd.SignRRset(&rrset, zone, dak, force, nil)
 		if err != nil {
 			name, rrtype := "<empty>", "<empty>"
 			if len(rrset.RRs) > 0 {
