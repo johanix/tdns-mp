@@ -578,9 +578,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	peer.LastHelloReceived = time.Now()
 	// Bite 1 dual-write: also update per-mechanism state (DNS path).
 	peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted and authorized")
-	if m := peer.Mechanisms["DNS"]; m != nil {
-		m.LastHelloRecv = peer.LastHelloReceived
-	}
+	peer.SetMechanismLastHelloRecv("DNS", peer.LastHelloReceived)
 
 	// Also update AgentRegistry if available (for backward compatibility)
 	if tm.agentRegistry != nil {
@@ -666,9 +664,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	peer.SetState(transport.PeerStateOperational, "Beat received from operational peer")
 	// Bite 1 dual-write: also update per-mechanism state (DNS path).
 	peer.SetMechanismState("DNS", transport.PeerStateOperational, "Beat received from operational peer")
-	if m := peer.Mechanisms["DNS"]; m != nil {
-		m.LastBeatRecv = peer.LastBeatReceived
-	}
+	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
 	// Also update AgentRegistry if available
 	if tm.agentRegistry != nil {
@@ -752,9 +748,7 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	peer.SetState(transport.PeerStateOperational, "ping received")
 	// Bite 1 dual-write: also update per-mechanism state (DNS path).
 	peer.SetMechanismState("DNS", transport.PeerStateOperational, "ping received")
-	if m := peer.Mechanisms["DNS"]; m != nil {
-		m.LastBeatRecv = peer.LastBeatReceived
-	}
+	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
 	report := &AgentMsgReport{
 		MessageType:    AgentMsgPing,

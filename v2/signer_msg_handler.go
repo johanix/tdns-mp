@@ -57,9 +57,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				peer.SetState(transport.PeerStateOperational, "beat received")
 				// Bite 1 dual-write: also update per-mechanism state (DNS path).
 				peer.SetMechanismState("DNS", transport.PeerStateOperational, "beat received")
-				if m := peer.Mechanisms["DNS"]; m != nil {
-					m.LastBeatRecv = peer.LastBeatReceived
-				}
+				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 			}
 
 		case report := <-msgQs.Hello:
