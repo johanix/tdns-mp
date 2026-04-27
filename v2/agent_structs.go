@@ -152,7 +152,14 @@ func (a *Agent) dnsState() AgentState {
 // APIMechanismState satisfies transport.AgentLike. Returns a snapshot
 // of this agent's API-mechanism state for use by
 // transport.Peer.PopulateFromAgent. Bite 7 of the early-bites plan.
+//
+// Acquires a.Mu.RLock for the duration of the read. The hello/beat
+// receipt sites that mutate ApiDetails fields all hold a.Mu.Lock,
+// so taking the read lock here closes the race CodeRabbit flagged
+// on PR #8 (discussion r3142505250).
 func (a *Agent) APIMechanismState() transport.AgentMechanismSnapshot {
+	a.Mu.RLock()
+	defer a.Mu.RUnlock()
 	d := a.ApiDetails
 	if d == nil {
 		return transport.AgentMechanismSnapshot{}
@@ -171,7 +178,11 @@ func (a *Agent) APIMechanismState() transport.AgentMechanismSnapshot {
 
 // DNSMechanismState satisfies transport.AgentLike. Returns a snapshot
 // of this agent's DNS-mechanism state. Bite 7.
+//
+// Same locking contract as APIMechanismState — acquires a.Mu.RLock.
 func (a *Agent) DNSMechanismState() transport.AgentMechanismSnapshot {
+	a.Mu.RLock()
+	defer a.Mu.RUnlock()
 	d := a.DnsDetails
 	if d == nil {
 		return transport.AgentMechanismSnapshot{}
