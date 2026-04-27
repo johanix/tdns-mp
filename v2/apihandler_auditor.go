@@ -44,6 +44,8 @@ type AuditResponse struct {
 	Providers    []AuditProviderSummary `json:"providers,omitempty"`
 	Gossip       []GossipMatrixDTO      `json:"gossip,omitempty"`
 	Deleted      int64                  `json:"deleted,omitempty"`
+	UsersFile    string                 `json:"users_file,omitempty"`
+	UsersCount   int                    `json:"users_count,omitempty"`
 }
 
 // APIauditor returns the HTTP handler for /api/v1/auditor.
@@ -96,6 +98,31 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 			resp := AuditResponse{Status: "ok"}
 			resp.Gossip = SnapshotGossip(conf.InternalMp.AgentRegistry)
 			writeAuditJSON(w, resp)
+
+		case "userdb-path":
+			writeAuditJSON(w, AuditResponse{
+				Status:    "ok",
+				UsersFile: auditWebUsersFile(),
+			})
+
+		case "userdb-reload":
+			auth := conf.InternalMp.AuditWebAuth
+			if auth == nil {
+				writeAuditError(w, "web auth is not configured (audit.web.auth.mode != \"basic\")")
+				return
+			}
+			path := auditWebUsersFile()
+			n, err := auth.ReloadFromFile(path)
+			if err != nil {
+				writeAuditError(w, "reload failed: "+err.Error())
+				return
+			}
+			writeAuditJSON(w, AuditResponse{
+				Status:     "ok",
+				Msg:        fmt.Sprintf("reloaded %d users", n),
+				UsersFile:  path,
+				UsersCount: n,
+			})
 
 		case "eventlog-list":
 			if kdb == nil {

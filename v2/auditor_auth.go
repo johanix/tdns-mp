@@ -20,11 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -35,8 +38,8 @@ const (
 
 // AuditWebUser is one configured user.
 type AuditWebUser struct {
-	Name         string
-	PasswordHash string // bcrypt
+	Name         string `yaml:"name" json:"name"`
+	PasswordHash string `yaml:"password_hash" json:"password_hash"` // bcrypt
 }
 
 // AuditWebSession is an active session.
@@ -75,13 +78,133 @@ func NewAuditWebAuth(users []AuditWebUser, idleTTL time.Duration) (*AuditWebAuth
 		signKey:  signKey,
 		idleTTL:  idleTTL,
 	}
-	for _, u := range users {
-		if u.Name == "" || u.PasswordHash == "" {
-			return nil, fmt.Errorf("user %q has empty name or password_hash", u.Name)
-		}
-		a.users[u.Name] = u.PasswordHash
+	if err := a.replaceUsers(users); err != nil {
+		return nil, err
 	}
 	return a, nil
+}
+
+// replaceUsers atomically swaps the in-memory user map under the
+// lock. Caller validates count > 0.
+func (a *AuditWebAuth) replaceUsers(users []AuditWebUser) error {
+	next := make(map[string]string, len(users))
+	for _, u := range users {
+		if u.Name == "" || u.PasswordHash == "" {
+			return fmt.Errorf("user %q has empty name or password_hash", u.Name)
+		}
+		next[u.Name] = u.PasswordHash
+	}
+	a.mu.Lock()
+	a.users = next
+	a.mu.Unlock()
+	return nil
+}
+
+// ReloadFromFile re-reads the users file at path and atomically
+// swaps the in-memory user map. Existing sessions are not affected.
+func (a *AuditWebAuth) ReloadFromFile(path string) (int, error) {
+	users, err := ReadAuditWebUsersFile(path)
+	if err != nil {
+		return 0, err
+	}
+	if len(users) == 0 {
+		return 0, errors.New("user file has no users; refusing to reload to empty set")
+	}
+	if err := a.replaceUsers(users); err != nil {
+		return 0, err
+	}
+	return len(users), nil
+}
+
+// auditWebUsersFileFormat is the on-disk schema for the user file.
+type auditWebUsersFileFormat struct {
+	Users []AuditWebUser `yaml:"users"`
+}
+
+// ReadAuditWebUsersFile parses the YAML file at path. Returns an
+// empty slice (not an error) if the file does not exist.
+func ReadAuditWebUsersFile(path string) ([]AuditWebUser, error) {
+	if path == "" {
+		return nil, errors.New("users file path is empty")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var f auditWebUsersFileFormat
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	for i, u := range f.Users {
+		if u.Name == "" || u.PasswordHash == "" {
+			return nil, fmt.Errorf("%s: user %d has empty name or password_hash", path, i)
+		}
+	}
+	return f.Users, nil
+}
+
+// WriteAuditWebUsersFile atomically writes users to path. If the
+// file does not exist it is created with mode 0600; if it does, the
+// existing mode is preserved. Writes go to a sibling tempfile and
+// are renamed into place to avoid a partial-write window.
+func WriteAuditWebUsersFile(path string, users []AuditWebUser) error {
+	if path == "" {
+		return errors.New("users file path is empty")
+	}
+	for i, u := range users {
+		if u.Name == "" || u.PasswordHash == "" {
+			return fmt.Errorf("user %d has empty name or password_hash", i)
+		}
+	}
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	out, err := yaml.Marshal(auditWebUsersFileFormat{Users: users})
+	if err != nil {
+		return fmt.Errorf("marshal users: %w", err)
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tdns-auditor-users-*.yaml")
+	if err != nil {
+		return fmt.Errorf("create temp file in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
+	}
+	return nil
+}
+
+// HashPassword returns a bcrypt hash at cost 12.
+func HashPassword(password string) (string, error) {
+	if password == "" {
+		return "", errors.New("empty password")
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
 }
 
 // Verify checks user/password against the bcrypt hash. Returns nil on success.

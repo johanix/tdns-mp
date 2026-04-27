@@ -441,14 +441,22 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 		if idleTTL <= 0 {
 			idleTTL = defaultIdleTTL
 		}
-		users, err := loadAuditWebUsers()
+		usersFile := auditWebUsersFile()
+		if usersFile == "" {
+			return errors.New("audit.web.auth.users_file is required when audit.web.auth.mode=\"basic\"")
+		}
+		users, err := ReadAuditWebUsersFile(usersFile)
 		if err != nil {
-			return fmt.Errorf("audit.web.auth.users: %w", err)
+			return fmt.Errorf("audit.web.auth.users_file %s: %w", usersFile, err)
+		}
+		if len(users) == 0 {
+			return fmt.Errorf("audit.web.auth.users_file %s has no users (use 'mpcli auditor web user create' to add one)", usersFile)
 		}
 		auth, err = NewAuditWebAuth(users, idleTTL)
 		if err != nil {
 			return fmt.Errorf("audit.web auth init: %w", err)
 		}
+		conf.InternalMp.AuditWebAuth = auth
 		// Background pruning of expired sessions.
 		go func() {
 			t := time.NewTicker(5 * time.Minute)
@@ -540,31 +548,9 @@ func noAuthMux(s *auditorWebServer) *http.ServeMux {
 	return mux
 }
 
-// loadAuditWebUsers reads audit.web.auth.users from viper as a list
-// of {name, password_hash} entries.
-func loadAuditWebUsers() ([]AuditWebUser, error) {
-	raw := viper.Get("audit.web.auth.users")
-	if raw == nil {
-		return nil, errors.New("no users configured")
-	}
-	list, ok := raw.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("expected list, got %T", raw)
-	}
-	out := make([]AuditWebUser, 0, len(list))
-	for i, item := range list {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("user %d: expected map, got %T", i, item)
-		}
-		name, _ := m["name"].(string)
-		hash, _ := m["password_hash"].(string)
-		if name == "" || hash == "" {
-			return nil, fmt.Errorf("user %d: name and password_hash are required", i)
-		}
-		out = append(out, AuditWebUser{Name: name, PasswordHash: hash})
-	}
-	return out, nil
+// auditWebUsersFile reads audit.web.auth.users_file from viper.
+func auditWebUsersFile() string {
+	return viper.GetString("audit.web.auth.users_file")
 }
 
 // isLoopbackAddr returns true if addr (host:port form) binds to a

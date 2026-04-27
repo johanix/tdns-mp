@@ -599,7 +599,8 @@ CSS templates ported from `mpauditor-1`.
     `/web/status` (unauthenticated healthcheck), data
     pages and HTMX fragments behind `requireAuth`. ✓
 
-**Auth**: multi-user, bcrypt-hashed passwords in YAML,
+**Auth**: multi-user, bcrypt-hashed passwords stored in a
+separate YAML user file (`audit.web.auth.users_file`),
 in-memory sessions with HMAC-signed cookies (`HttpOnly` +
 `Secure` + `SameSite=Strict`). CSRF defended by
 `SameSite=Strict` plus the dashboard being entirely
@@ -607,6 +608,18 @@ read-only (the only POST is `/web/login`).
 `audit.web.auth.mode="none"` is permitted only when all
 bind addresses are loopback — non-loopback no-auth refuses
 to start.
+
+**User management**: `mpcli auditor web user
+{list,create,delete,reload}` operates the user file
+directly (atomic write via tempfile + rename, mode 0600
+on first creation, existing mode preserved on rewrite).
+The CLI asks the running auditor for the configured
+file path via `command: "userdb-path"` rather than
+parsing the auditor's own config — same pattern as the
+other CLI/daemon path-discovery flows. After mutation,
+`reload` hits `command: "userdb-reload"` so the running
+auditor swaps its in-memory user map under the lock;
+existing sessions are not invalidated.
 
 **Gossip view (extension to mpauditor-1)**: per-group
 N×N member×peer state matrix at `/web/gossip` and via

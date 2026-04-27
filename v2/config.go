@@ -186,6 +186,7 @@ type InternalMpConf struct {
 	MPZoneNames           []string
 	DistributionCache     *DistributionCache
 	AuditStateManager     *AuditStateManager
+	AuditWebAuth          *AuditWebAuth
 	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
 }

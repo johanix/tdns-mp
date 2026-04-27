@@ -122,6 +122,9 @@ audit:
       auth:
          mode:          basic           # "basic" or "none" (none requires loopback bind)
          idle_timeout:  30m             # session expires after this much inactivity
-         users:
-            # Generate hashes with: htpasswd -nbBC 12 user pass
-            #   - { name: "admin", password_hash: "$2y$12$..." }
+         users_file:    /etc/tdns/tdns-auditor-users.yaml
+         #   Manage with:
+         #     mpcli auditor web user create --name <name>
+         #     mpcli auditor web user list
+         #     mpcli auditor web user delete --name <name>
+         #     mpcli auditor web user reload   # apply changes to running auditor
