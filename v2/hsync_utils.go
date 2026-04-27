@@ -690,6 +690,33 @@ func rrIsTerminalInTracking(zdr *ZoneDataRepo, zone ZoneName, agent AgentId, rrt
 	return true
 }
 
+// rrIsPendingRemovalInTracking reports whether the most-recent tracking
+// entry for the given (zone, agent, rrtype, rrStr) is RRStatePendingRemoval.
+// Used by apihandler_agent.go when constructing REPLACE-shaped operations:
+// an RR that the agent already asked the combiner to delete should not be
+// re-included in a subsequent REPLACE built from the live SDE snapshot,
+// because the data repo still holds the RR until allRecipientsConfirmed.
+//
+// Walks the tracking slice in reverse so the *latest* matching entry wins,
+// matching rrIsTerminalInTracking's discipline.
+func rrIsPendingRemovalInTracking(zdr *ZoneDataRepo, zone ZoneName, agent AgentId, rrtype uint16, rrStr string) bool {
+	if zdr == nil || zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
+		return false
+	}
+	tracked := zdr.Tracking[zone][agent][rrtype]
+	if tracked == nil {
+		return false
+	}
+	for i := len(tracked.Tracked) - 1; i >= 0; i-- {
+		tr := tracked.Tracked[i]
+		if tr.RR.String() != rrStr {
+			continue
+		}
+		return tr.State == RRStatePendingRemoval
+	}
+	return false
+}
+
 // rrsetContains returns true if the RRset already contains an RR
 // that matches the given RR by content (using miekg/dns
 // IsDuplicate). Used to avoid double-adding a snapshot RR that's

@@ -180,6 +180,13 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			// The post-mutation full set per RRtype is computed from
 			// the agent's own SDE entry (its current contribution) plus
 			// the in-flight add/delete delta.
+			// Build currentByType from the agent's intended state, not
+			// the raw SDE snapshot. The data repo retains RRs whose
+			// latest tracking state is PendingRemoval until the
+			// combiner confirms the delete, so a naive snapshot read
+			// would re-include them in a REPLACE and fight the
+			// in-flight delete. Filter those out here so the REPLACE
+			// reflects what we actually want the combiner to hold.
 			selfID := AgentId(conf.Config.MultiProvider.Identity)
 			zdr := conf.InternalMp.ZoneDataRepo
 			currentByType := make(map[uint16][]dns.RR)
@@ -191,7 +198,12 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 							if !ok {
 								continue
 							}
-							currentByType[rrtype] = append([]dns.RR{}, rrset.RRs...)
+							for _, rr := range rrset.RRs {
+								if rrIsPendingRemovalInTracking(zdr, amp.Zone, selfID, rrtype, rr.String()) {
+									continue
+								}
+								currentByType[rrtype] = append(currentByType[rrtype], rr)
+							}
 						}
 					}
 				}
