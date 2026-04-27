@@ -119,6 +119,17 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		StartAuditEventPruner(ctx, kdb, retention, pruneInterval)
 	}
 
+	// Anomaly detectors: provider-silent + missing-provider.
+	silenceThreshold := viper.GetDuration("audit.silence_threshold")
+	if silenceThreshold == 0 {
+		silenceThreshold = 90 * time.Second
+	}
+	detectorInterval := viper.GetDuration("audit.detector_interval")
+	if detectorInterval == 0 {
+		detectorInterval = 30 * time.Second
+	}
+	StartAuditDetectors(ctx, stateManager, silenceThreshold, detectorInterval)
+
 	// Auditor message handler.
 	msgQs := conf.InternalMp.MsgQs
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorMsgHandler", func() {

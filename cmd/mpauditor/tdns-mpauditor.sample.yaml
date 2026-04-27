@@ -112,3 +112,5 @@ audit:
    event_log:
       retention:        168h   # how long events are kept (default: 1 week)
       prune_interval:   1h     # how often the pruner runs (default: 1h)
+   silence_threshold:   90s    # provider silent if no BEAT within this (default: 90s)
+   detector_interval:   30s    # how often detectors run (default: 30s)
