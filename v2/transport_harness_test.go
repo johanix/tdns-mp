@@ -67,12 +67,21 @@ type integEnv struct {
 // and default to "scenario 1 / scenario 6 friendly" if zero.
 type integEnvConfig struct {
 	// ChunkMode selects the bridge's outbound chunk mode. Empty defaults
-	// to "query" for PR-1; "edns0" is exercised by PR-2.
+	// to "query"; "edns0" is exercised by the EDNS(0) variant of
+	// scenario 1.
 	ChunkMode string
 
 	// SkipBridge, when true, builds Registry+MsgQs but no MPTransportBridge.
 	// Used by scenario 6, which only needs EvaluateHello on the registry.
 	SkipBridge bool
+
+	// AuthorizeAllPeers, when true, configures the bridge's
+	// AuthorizedPeers callback to authorize every identity it sees.
+	// Required for scenarios that drive Router.Route directly through
+	// authorization middleware (scenarios 3, 4, 5). Scenario 1 calls
+	// routeIncomingMessage directly and bypasses the middleware
+	// chain, so the default (no authorized peers) is fine there.
+	AuthorizeAllPeers bool
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -98,8 +107,8 @@ func newIntegEnv(t *testing.T, cfg *integEnvConfig) *integEnv {
 		cancel: cancel,
 	}
 
-	env.Alice = newPeer(t, "alice.agent.example.", chunkMode, cfg.SkipBridge)
-	env.Bob = newPeer(t, "bob.agent.example.", chunkMode, cfg.SkipBridge)
+	env.Alice = newPeer(t, "alice.agent.example.", chunkMode, cfg)
+	env.Bob = newPeer(t, "bob.agent.example.", chunkMode, cfg)
 
 	t.Cleanup(func() {
 		cancel()
@@ -109,11 +118,12 @@ func newIntegEnv(t *testing.T, cfg *integEnvConfig) *integEnv {
 }
 
 // newPeer constructs a single peer's Registry, MsgQs and (optionally)
-// MPTransportBridge. The bridge is configured for "scenario 1" needs:
+// MPTransportBridge. The bridge is configured for the common scenarios:
 // dns transport on, control zone set, no payload crypto, no chunk
-// payload store (scenario 1 calls routeIncomingMessage directly so
-// the chunk fetch path is not exercised).
-func newPeer(t *testing.T, identity, chunkMode string, skipBridge bool) *peerEnv {
+// payload store. Scenarios that bypass the wire (1, 4, 5, 7) drive the
+// post-decryption callbacks directly; scenarios that need wire fall
+// back to httptest / loopback DNS in their own setup.
+func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *peerEnv {
 	t.Helper()
 
 	mp := &tdns.MultiProviderConf{Identity: identity}
@@ -142,11 +152,25 @@ func newPeer(t *testing.T, identity, chunkMode string, skipBridge bool) *peerEnv
 		Registry: registry,
 		MsgQs:    msgQs,
 	}
-	if skipBridge {
+	if cfg != nil && cfg.SkipBridge {
 		return pe
 	}
 
-	cfg := &MPTransportBridgeConfig{
+	authorizedPeers := func() []string { return nil }
+	if cfg != nil && cfg.AuthorizeAllPeers {
+		// Match the FQDN of the *other* peer. The harness has only two
+		// peers, so authorizing the local identity itself is harmless
+		// and lets each peer accept messages claiming to be the other.
+		// We can't know the other identity here without threading more
+		// state; instead, return a sentinel that isAuthorizedPeer
+		// special-cases? No — the existing isAuthorizedPeer does an
+		// exact-FQDN match, so we return both peer FQDNs.
+		alice := dns.Fqdn("alice.agent.example.")
+		bob := dns.Fqdn("bob.agent.example.")
+		authorizedPeers = func() []string { return []string{alice, bob} }
+	}
+
+	bridgeCfg := &MPTransportBridgeConfig{
 		LocalID:             identity,
 		ControlZone:         integControlZone,
 		APITimeout:          2 * time.Second,
@@ -155,13 +179,9 @@ func newPeer(t *testing.T, identity, chunkMode string, skipBridge bool) *peerEnv
 		MsgQs:               msgQs,
 		ChunkMode:           chunkMode,
 		SupportedMechanisms: []string{"api", "dns"},
-		// AuthorizedPeers is consulted at chunk-handler entry. Tests
-		// drive routeIncomingMessage directly, so authorization is
-		// not exercised; a permissive callback keeps any indirect
-		// path happy without coupling tests to authorization rules.
-		AuthorizedPeers: func() []string { return nil },
+		AuthorizedPeers:     authorizedPeers,
 	}
-	pe.Bridge = NewMPTransportBridge(cfg)
+	pe.Bridge = NewMPTransportBridge(bridgeCfg)
 	registry.MPTransport = pe.Bridge
 	registry.TransportManager = pe.Bridge.TransportManager
 
@@ -303,4 +323,106 @@ func nextDistributionID() string {
 	defer nonceCounter.mu.Unlock()
 	nonceCounter.n++
 	return fmt.Sprintf("d%d-%d", time.Now().UnixNano(), nonceCounter.n)
+}
+
+// recvConfirmWithin reads one *ConfirmationDetail from ch with a
+// timeout. Mirrors recvMsgWithin but for the Confirmation channel.
+func recvConfirmWithin(t *testing.T, ch <-chan *ConfirmationDetail, d time.Duration) (*ConfirmationDetail, bool) {
+	t.Helper()
+	select {
+	case c := <-ch:
+		return c, true
+	case <-time.After(d):
+		return nil, false
+	}
+}
+
+// buildSyncMessageContext constructs a *transport.MessageContext that
+// looks like what RouteViaRouter would hand to the router after
+// decryption: ChunkPayload populated with a sync payload, PeerID set
+// to the sender, Data prepopulated with the keys handlers expect
+// (incoming_message, zone, transport, on_confirmation_received,
+// local_id). Used by scenarios 3 and 5 that drive Router.Route("sync").
+func buildSyncMessageContext(t *testing.T, tm *MPTransportBridge, senderID, receiverID, zone, distributionID string, records map[string][]string) *transport.MessageContext {
+	t.Helper()
+	payload := transport.DnsSyncPayload{
+		MessageType:    "sync",
+		OriginatorID:   senderID,
+		YourIdentity:   receiverID,
+		Zone:           zone,
+		Records:        records,
+		Time:           time.Now().Format(time.RFC3339),
+		Timestamp:      time.Now().Unix(),
+		DistributionID: distributionID,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal sync payload: %v", err)
+	}
+	im := &transport.IncomingMessage{
+		Type:            "sync",
+		DistributionID:  distributionID,
+		SenderID:        senderID,
+		TransportSender: senderID,
+		Zone:            zone,
+		Payload:         body,
+		ReceivedAt:      time.Now(),
+		SourceAddr:      "127.0.0.1:0",
+	}
+	ctx := transport.NewMessageContext(new(dns.Msg), "127.0.0.1:0")
+	ctx.PeerID = senderID
+	ctx.DistributionID = distributionID
+	ctx.ChunkPayload = body
+	ctx.Data["incoming_message"] = im
+	ctx.Data["zone"] = zone
+	ctx.Data["local_id"] = tm.LocalID
+	if tm.DNSTransport != nil {
+		ctx.Data["transport"] = tm.DNSTransport
+	}
+	return ctx
+}
+
+// buildConfirmMessageContext builds a *transport.MessageContext for a
+// "confirm" message routed inbound (scenario 4). Populates
+// ChunkPayload with a DnsConfirmPayload and the Data keys
+// HandleConfirmation reads (transport + on_confirmation_received).
+//
+// To wire the confirmation back to the bridge's MsgQs.Confirmation
+// channel, the bridge's OnConfirmationReceived callback must be set
+// in ctx.Data["on_confirmation_received"]. NewMPTransportBridge sets
+// this on the ChunkHandler (line 338 of hsync_transport.go) but the
+// router-driven path needs the same callback in ctx.Data — we copy
+// it across via ChunkHandler.OnConfirmationReceived.
+func buildConfirmMessageContext(t *testing.T, tm *MPTransportBridge, senderID, zone, distributionID, status string, applied, removed []string) *transport.MessageContext {
+	t.Helper()
+	payload := transport.DnsConfirmPayload{
+		Type:           "confirm",
+		SenderID:       senderID,
+		Zone:           zone,
+		DistributionID: distributionID,
+		Status:         status,
+		Timestamp:      time.Now().Unix(),
+		AppliedRecords: applied,
+		RemovedRecords: removed,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal confirm payload: %v", err)
+	}
+	ctx := transport.NewMessageContext(new(dns.Msg), "127.0.0.1:0")
+	ctx.PeerID = senderID
+	ctx.DistributionID = distributionID
+	ctx.ChunkPayload = body
+	if tm.DNSTransport != nil {
+		ctx.Data["transport"] = tm.DNSTransport
+	}
+	if tm.ChunkHandler != nil && tm.ChunkHandler.OnConfirmationReceived != nil {
+		// Repackage as the type alias HandleConfirmation expects.
+		cb := tm.ChunkHandler.OnConfirmationReceived
+		ctx.Data["on_confirmation_received"] = func(distributionID string, senderID string, status transport.ConfirmStatus,
+			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
+			cb(distributionID, senderID, status, zone, applied, removed, rejected, ignored, truncated, nonce)
+		}
+	}
+	return ctx
 }
