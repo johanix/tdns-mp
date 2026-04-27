@@ -27,10 +27,11 @@ type GossipMessage struct {
 // Only the member itself updates its own MemberState (sets Timestamp).
 // Other agents propagate it via gossip without modification.
 type MemberState struct {
-	Identity   string            `json:"identity"`
-	PeerStates map[string]string `json:"peer_states"` // key: peer identity, value: state string
-	Zones      []string          `json:"zones"`       // zones this member serves in this group
-	Timestamp  time.Time         `json:"timestamp"`   // set by the member itself
+	Identity     string            `json:"identity"`
+	PeerStates   map[string]string `json:"peer_states"`             // key: peer identity, value: state string
+	Zones        []string          `json:"zones"`                   // zones this member serves in this group
+	Timestamp    time.Time         `json:"timestamp"`               // set by the member itself
+	BeatInterval uint32            `json:"beat_interval,omitempty"` // member's configured local beatinterval in seconds; zero from old agents that don't report it
 }
 
 // GroupElectionState carries election state for a provider group.

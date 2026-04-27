@@ -157,6 +157,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 	// Initialize agent if needed
 	agent = &Agent{
 		Identity: remoteid,
+		PeerID:   string(remoteid),
 		// Details:   map[string]AgentDetails{},
 		ApiDetails: &AgentDetails{},
 		DnsDetails: &AgentDetails{},
@@ -395,7 +396,15 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
 
 				if ar.TransportManager != nil {
-					ar.MPTransport.OnAgentDiscoveryComplete(agent)
+					// Bite 8: prefer the OnPeerDiscovered seam on TM if
+					// registered (production path); fall back to the direct
+					// bridge call for setups that don't go through
+					// NewMPTransportBridge (some test fixtures).
+					if ar.TransportManager.OnPeerDiscovered != nil {
+						ar.TransportManager.OnPeerDiscovered(agent.PeerID)
+					} else {
+						ar.MPTransport.OnAgentDiscoveryComplete(agent)
+					}
 				}
 
 				// If we're in known state and have a zone, try to send hello
@@ -522,6 +531,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	// Create placeholder agent in NEEDED state
 	agent = &Agent{
 		Identity:   remoteid,
+		PeerID:     string(remoteid),
 		ApiDetails: &AgentDetails{State: AgentStateNeeded},
 		DnsDetails: &AgentDetails{State: AgentStateNeeded},
 		Zones:      make(map[ZoneName]bool),
@@ -795,6 +805,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				if err != nil {
 					agent = &Agent{
 						Identity:  AgentId(hsync3.Identity),
+						PeerID:    hsync3.Identity,
 						State:     AgentStateError,
 						ErrorMsg:  fmt.Sprintf("error getting agent info: %v", err),
 						LastState: time.Now(),

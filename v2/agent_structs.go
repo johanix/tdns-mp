@@ -56,7 +56,14 @@ const (
 var AgentMsgToString = core.AgentMsgToString
 
 type Agent struct {
-	Identity      AgentId
+	Identity AgentId
+	// PeerID is the transport-layer identifier for this agent, used as
+	// the key into the transport PeerRegistry. Currently identical to
+	// Identity but kept as a separate field so future identity schemes
+	// (e.g. UUID-based peer IDs) can decouple transport identity from
+	// MP agent identity without touching every consumer. See Bite 4 in
+	// docs/2026-04-25-transport-refactor-early-bites.md.
+	PeerID        string
 	Mu            sync.RWMutex
 	InitialZone   ZoneName
 	ApiDetails    *AgentDetails
@@ -140,6 +147,94 @@ func (a *Agent) dnsState() AgentState {
 		return a.DnsDetails.State
 	}
 	return 0
+}
+
+// APIMechanismState satisfies transport.AgentLike. Returns a snapshot
+// of this agent's API-mechanism state for use by
+// transport.Peer.PopulateFromAgent. Bite 7 of the early-bites plan.
+//
+// Acquires a.Mu.RLock for the duration of the read. The hello/beat
+// receipt sites that mutate ApiDetails fields all hold a.Mu.Lock,
+// so taking the read lock here closes the race CodeRabbit flagged
+// on PR #8 (discussion r3142505250).
+func (a *Agent) APIMechanismState() transport.AgentMechanismSnapshot {
+	a.Mu.RLock()
+	defer a.Mu.RUnlock()
+	d := a.ApiDetails
+	if d == nil {
+		return transport.AgentMechanismSnapshot{}
+	}
+	// API has no host/port-shaped Address; reachability is carried by
+	// peer.APIEndpoint (a URL string), populated by SyncPeerFromAgent
+	// from agent.ApiDetails.BaseUri. Leave Address nil here.
+	return transport.AgentMechanismSnapshot{
+		State:            agentStateToTransportStateFn(d.State),
+		LastHelloRecv:    d.HelloTime,
+		LastBeatSent:     d.LatestSBeat,
+		LastBeatRecv:     d.LatestRBeat,
+		ConsecutiveFails: int(d.DiscoveryFailures),
+	}
+}
+
+// DNSMechanismState satisfies transport.AgentLike. Returns a snapshot
+// of this agent's DNS-mechanism state. Bite 7.
+//
+// Same locking contract as APIMechanismState — acquires a.Mu.RLock.
+func (a *Agent) DNSMechanismState() transport.AgentMechanismSnapshot {
+	a.Mu.RLock()
+	defer a.Mu.RUnlock()
+	d := a.DnsDetails
+	if d == nil {
+		return transport.AgentMechanismSnapshot{}
+	}
+	var addr *transport.Address
+	if len(d.Addrs) > 0 {
+		addr = &transport.Address{
+			Host:      d.Addrs[0],
+			Port:      d.Port,
+			Transport: "udp",
+		}
+	}
+	return transport.AgentMechanismSnapshot{
+		State:            agentStateToTransportStateFn(d.State),
+		Address:          addr,
+		LastHelloRecv:    d.HelloTime,
+		LastBeatSent:     d.LatestSBeat,
+		LastBeatRecv:     d.LatestRBeat,
+		ConsecutiveFails: int(d.DiscoveryFailures),
+	}
+}
+
+// agentStateToTransportStateFn is a free-function variant of the
+// MPTransportBridge method, usable from contexts that don't have a
+// bridge in scope (e.g. *Agent receiver methods that don't import
+// the bridge type to avoid a cycle).
+func agentStateToTransportStateFn(s AgentState) transport.PeerState {
+	switch s {
+	case AgentStateNeeded:
+		return transport.PeerStateNeeded
+	case AgentStateKnown:
+		return transport.PeerStateKnown
+	case AgentStateIntroduced:
+		return transport.PeerStateIntroducing
+	case AgentStateOperational:
+		return transport.PeerStateOperational
+	case AgentStateLegacy:
+		// Legacy = established relationship but no shared zones.
+		// Treated as active by Agent.EffectiveState() and the Peer
+		// EffectiveState() peer-side mirror. Map to Operational so
+		// PopulateFromAgent doesn't regress legacy peers in
+		// transport snapshots.
+		return transport.PeerStateOperational
+	case AgentStateDegraded:
+		return transport.PeerStateDegraded
+	case AgentStateInterrupted:
+		return transport.PeerStateInterrupted
+	case AgentStateError:
+		return transport.PeerStateError
+	default:
+		return transport.PeerStateNeeded
+	}
 }
 
 type DeferredAgentTask struct {

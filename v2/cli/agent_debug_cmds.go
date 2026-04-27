@@ -260,14 +260,17 @@ var DebugAgentRegistryCmd = &cobra.Command{
 		ar.LocateInterval = 10
 		ar.S.Set("local", &Agent{
 			Identity: "local",
+			PeerID:   "local",
 		})
 
 		ar.AddRemoteAgent("agent.example.com", &Agent{
 			Identity: "agent.example.com",
+			PeerID:   "agent.example.com",
 		})
 
 		ar.AddRemoteAgent("agent.example.org", &Agent{
 			Identity: "agent.example.org",
+			PeerID:   "agent.example.org",
 		})
 
 		fmt.Printf("Agent registry:\ntype=%T\n", ar.S)

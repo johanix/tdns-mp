@@ -449,6 +449,23 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Info("DNS transport disabled by configuration")
 	}
 
+	// Register the discovery-completion callback on the embedded TM. The
+	// callback is invoked by MP's discovery loop once an agent transitions
+	// to KNOWN. After Phase 6 of the transport interface redesign, transport
+	// itself will own the discovery loop and invoke this callback directly;
+	// installing the seam now lets the call-site already use it. See Bite 8
+	// in tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+	tm.TransportManager.OnPeerDiscovered = func(peerID string) {
+		if tm.agentRegistry == nil {
+			return
+		}
+		agent, ok := tm.agentRegistry.S.Get(AgentId(peerID))
+		if !ok {
+			return
+		}
+		tm.OnAgentDiscoveryComplete(agent)
+	}
+
 	return tm
 }
 
@@ -559,6 +576,9 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.SetState(transport.PeerStateIntroducing, "DNS hello accepted and authorized")
 	peer.LastHelloReceived = time.Now()
+	// Bite 1 dual-write: also update per-mechanism state (DNS path).
+	peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted and authorized")
+	peer.SetMechanismLastHelloRecv("DNS", peer.LastHelloReceived)
 
 	// Also update AgentRegistry if available (for backward compatibility)
 	if tm.agentRegistry != nil {
@@ -642,6 +662,9 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
 	peer.SetState(transport.PeerStateOperational, "Beat received from operational peer")
+	// Bite 1 dual-write: also update per-mechanism state (DNS path).
+	peer.SetMechanismState("DNS", transport.PeerStateOperational, "Beat received from operational peer")
+	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
 	// Also update AgentRegistry if available
 	if tm.agentRegistry != nil {
@@ -723,6 +746,9 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
 	peer.SetState(transport.PeerStateOperational, "ping received")
+	// Bite 1 dual-write: also update per-mechanism state (DNS path).
+	peer.SetMechanismState("DNS", transport.PeerStateOperational, "ping received")
+	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
 	report := &AgentMsgReport{
 		MessageType:    AgentMsgPing,
@@ -1332,30 +1358,20 @@ func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Tra
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
 func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
-	// Try primary transport
-	primary := tm.SelectTransport(peer)
-	if primary != nil {
-		resp, err := primary.Sync(ctx, peer, req)
-		if err == nil {
-			return resp, nil
-		}
-		lgConnRetry.Warn("primary transport failed", "transport", primary.Name(), "peer", peer.ID, "err", err)
+	// Bite 3: delegate to the generic primary-then-fallback path on
+	// transport.TransportManager. Hello and Beat are NOT migrated to
+	// tm.Send because their wrappers send on all transports in
+	// parallel rather than primary-then-fallback, with extensive
+	// MP-side state mutation; that is Phase 5 of the main refactor.
+	resp, err := tm.TransportManager.Send(ctx, peer, req)
+	if err != nil {
+		return nil, err
 	}
-
-	// Try fallback transport
-	var fallback transport.Transport
-	if primary == tm.APITransport && tm.DNSTransport != nil {
-		fallback = tm.DNSTransport
-	} else if primary == tm.DNSTransport && tm.APITransport != nil {
-		fallback = tm.APITransport
+	syncResp, ok := resp.(*transport.SyncResponse)
+	if !ok {
+		return nil, fmt.Errorf("SendSyncWithFallback: unexpected response type %T", resp)
 	}
-
-	if fallback != nil {
-		lgTransport.Debug("trying fallback transport", "transport", fallback.Name(), "peer", peer.ID)
-		return fallback.Sync(ctx, peer, req)
-	}
-
-	return nil, fmt.Errorf("all transports failed for peer %s", peer.ID)
+	return syncResp, nil
 }
 
 // SyncPeerFromAgent creates or updates a transport.Peer from an existing Agent.
@@ -1380,7 +1396,7 @@ func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 		})
 	}
 
-	// Sync state
+	// Sync state (legacy single-state field)
 	if agent.ApiDetails != nil {
 		peer.SetState(tm.agentStateToTransportState(agent.ApiDetails.State), "")
 	}
@@ -1389,6 +1405,12 @@ func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 	for zone := range agent.Zones {
 		peer.AddSharedZone(string(zone), "", "")
 	}
+
+	// Bite 7: also populate per-mechanism state on the Peer. Both the
+	// legacy single-state writes above and the new per-mechanism map
+	// are updated; Phase 7 of the main refactor will delete the
+	// legacy block once the per-mechanism path has full coverage.
+	peer.PopulateFromAgent(agent)
 
 	return peer
 }
@@ -1403,6 +1425,11 @@ func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transp
 	case AgentStateIntroduced:
 		return transport.PeerStateIntroducing
 	case AgentStateOperational:
+		return transport.PeerStateOperational
+	case AgentStateLegacy:
+		// Legacy = established relationship but no shared zones.
+		// Treated as active; map to Operational so legacy peers
+		// don't regress in transport snapshots.
 		return transport.PeerStateOperational
 	case AgentStateDegraded:
 		return transport.PeerStateDegraded
@@ -1685,25 +1712,59 @@ func (tm *MPTransportBridge) OnAgentDiscoveryComplete(agent *Agent) {
 }
 
 // GetPreferredTransportName returns the preferred transport name for an agent.
+//
+// Bite 7 (inherited from Bite 1 step 5): delegates to
+// peer.PreferredMechanism() when the peer is in the registry, with a
+// fallback to the agent.ApiMethod / agent.DnsMethod flags for peers
+// not yet synced (e.g. during early startup before the first
+// SyncPeerFromAgent runs). Returns "none" for the no-mechanism case
+// to preserve the original contract.
 func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
-	if agent.ApiMethod && agent.DnsMethod {
-		return "API" // Prefer API when both available
-	} else if agent.ApiMethod {
+	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+		if pref := peer.PreferredMechanism(); pref != "" {
+			return pref
+		}
+	}
+	// Fallback for peers not yet in the registry. API is preferred
+	// when both are available, otherwise pick whichever is set.
+	if agent.ApiMethod {
 		return "API"
-	} else if agent.DnsMethod {
+	}
+	if agent.DnsMethod {
 		return "DNS"
 	}
 	return "none"
 }
 
 // HasDNSTransport returns true if DNS transport is available for an agent.
+//
+// Bite 7: delegates to peer.HasMechanism("DNS") when the peer is in
+// the registry; falls back to the agent flag for peers not yet
+// synced. The local-side check (tm.DNSTransport != nil) is preserved
+// — both ends must be configured for the transport to be usable.
 func (tm *MPTransportBridge) HasDNSTransport(agent *Agent) bool {
-	return tm.DNSTransport != nil && agent.DnsMethod
+	if tm.DNSTransport == nil {
+		return false
+	}
+	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+		return peer.HasMechanism("DNS")
+	}
+	return agent.DnsMethod
 }
 
 // HasAPITransport returns true if API transport is available for an agent.
+//
+// Bite 7: delegates to peer.HasMechanism("API") when the peer is in
+// the registry; falls back to the agent flag for peers not yet
+// synced.
 func (tm *MPTransportBridge) HasAPITransport(agent *Agent) bool {
-	return tm.APITransport != nil && agent.ApiMethod
+	if tm.APITransport == nil {
+		return false
+	}
+	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+		return peer.HasMechanism("API")
+	}
+	return agent.ApiMethod
 }
 
 // --- Reliable message queue integration ---

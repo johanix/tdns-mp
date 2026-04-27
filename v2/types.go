@@ -42,11 +42,12 @@ type CombinerResponse struct {
 }
 
 type CombinerEditPost struct {
-	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear"
+	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear", "purge"
 	Zone    string   `json:"zone"`
 	EditID  int      `json:"edit_id,omitempty"`
 	Reason  string   `json:"reason,omitempty"`
 	Tables  []string `json:"tables,omitempty"` // for "clear": which tables to clear; empty = all
+	Origin  string   `json:"origin,omitempty"` // for "purge": sender ID whose contributions to remove
 }
 
 type CombinerEditResponse struct {

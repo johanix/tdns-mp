@@ -98,18 +98,29 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = "at least one RR is required"
 				return
 			}
-			// Per-RRtype policy for non-signers on signed zones:
-			// block signing RRtypes, allow NS (if nsmgmt=agent) and KEY (if parentsync=agent).
-			if zd != nil && zd.MPOptions[tdns.OptMPDisallowEdits] {
+			// Per-RRtype submission policy: allow NS (if nsmgmt=agent),
+			// KEY (if parentsync=agent), DNSKEY (signers only),
+			// CDS/CSYNC (signers + parentsync=agent). canSubmit is the
+			// agent-side gate; whether the local combiner applies vs
+			// persists-but-ignores is a separate (combiner-side)
+			// decision driven by canApply.
+			//
+			// The gate must apply to ALL multi-provider zones, not just
+			// those with OptMPDisallowEdits set. A signer on a zone
+			// with nsmgmt=owner (i.e. local edits otherwise allowed)
+			// must still be blocked from submitting NS — submission
+			// rules are derived from HSYNCPARAM, independent of the
+			// disallow-edits flag.
+			if zd != nil && zd.Options[tdns.OptMultiProvider] {
 				policy := zd.getEditPolicy()
 				for _, rrStr := range amp.RRs {
 					parsed, err := dns.NewRR(rrStr)
 					if err != nil {
 						continue // will be caught by the parse loop below
 					}
-					if !policy.canApply(parsed.Header().Rrtype) {
+					if !policy.canSubmit(parsed.Header().Rrtype) {
 						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("zone %s: %s modifications not allowed (edit policy: signed=%v, signer=%v, nsmgmt=%d, parentsync=%d)",
+						resp.ErrorMsg = fmt.Sprintf("zone %s: %s submissions not allowed (edit policy: signed=%v, signer=%v, nsmgmt=%d, parentsync=%d)",
 							amp.Zone, dns.TypeToString[parsed.Header().Rrtype],
 							policy.ZoneSigned, policy.WeAreSigner, policy.NSmgmt, policy.ParentSync)
 						return
@@ -152,30 +163,107 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				RRsets:  make(map[uint16]core.RRset),
 			}
 
-			opStr := "add"
-			if !isAdd {
-				opStr = "delete"
+			// Build per-RRtype REPLACE operations with the full
+			// post-mutation set for each affected RRtype.
+			//
+			// Rationale: per-RR add/delete operations let the agent's
+			// view diverge silently from the combiner's view of what
+			// this agent contributed. Example: an agent adds NS=foo,
+			// then changes mind and adds NS=bar via a separate
+			// transaction. The combiner accumulates {foo, bar}; if foo
+			// was actually meant to be replaced, it never gets cleaned
+			// up. With REPLACE-shaped operations, every contribution is
+			// the agent's complete current intended set, and stale RRs
+			// drop automatically. Empty REPLACE is the well-defined
+			// case for "I have no contribution for this RRtype".
+			//
+			// The post-mutation full set per RRtype is computed from
+			// the agent's own SDE entry (its current contribution) plus
+			// the in-flight add/delete delta.
+			// Build currentByType from the agent's intended state, not
+			// the raw SDE snapshot. The data repo retains RRs whose
+			// latest tracking state is PendingRemoval until the
+			// combiner confirms the delete, so a naive snapshot read
+			// would re-include them in a REPLACE and fight the
+			// in-flight delete. Filter those out here so the REPLACE
+			// reflects what we actually want the combiner to hold.
+			selfID := AgentId(conf.Config.MultiProvider.Identity)
+			zdr := conf.InternalMp.ZoneDataRepo
+			currentByType := make(map[uint16][]dns.RR)
+			if zdr != nil {
+				if agentRepo, ok := zdr.Get(amp.Zone); ok {
+					if ownerData, ok := agentRepo.Get(selfID); ok {
+						for _, rrtype := range ownerData.RRtypes.Keys() {
+							rrset, ok := ownerData.RRtypes.Get(rrtype)
+							if !ok {
+								continue
+							}
+							for _, rr := range rrset.RRs {
+								if rrIsPendingRemovalInTracking(zdr, amp.Zone, selfID, rrtype, rr.String()) {
+									continue
+								}
+								currentByType[rrtype] = append(currentByType[rrtype], rr)
+							}
+						}
+					}
+				}
 			}
-			opsMap := make(map[uint16][]string)
+
+			affectedRRtypes := make(map[uint16]bool)
 			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
+				affectedRRtypes[rr.Header().Rrtype] = true
+				rrset, exists := zu.RRsets[rr.Header().Rrtype]
 				if !exists {
 					rrset = core.RRset{
 						Name:   rr.Header().Name,
 						Class:  rr.Header().Class,
-						RRtype: rrtype,
+						RRtype: rr.Header().Rrtype,
 					}
 				}
 				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-				inetRR := dns.Copy(rr)
-				inetRR.Header().Class = dns.ClassINET
-				opsMap[rrtype] = append(opsMap[rrtype], inetRR.String())
+				zu.RRsets[rr.Header().Rrtype] = rrset
 			}
-			for rrtype, records := range opsMap {
+
+			rrIsDuplicate := func(a, b dns.RR) bool { return dns.IsDuplicate(a, b) }
+			for rrtype := range affectedRRtypes {
+				newSet := append([]dns.RR{}, currentByType[rrtype]...)
+				for _, rr := range parsedRRs {
+					if rr.Header().Rrtype != rrtype {
+						continue
+					}
+					if isAdd {
+						alreadyPresent := false
+						for _, existing := range newSet {
+							if rrIsDuplicate(existing, rr) {
+								alreadyPresent = true
+								break
+							}
+						}
+						if !alreadyPresent {
+							inet := dns.Copy(rr)
+							inet.Header().Class = dns.ClassINET
+							newSet = append(newSet, inet)
+						}
+					} else {
+						filtered := newSet[:0]
+						for _, existing := range newSet {
+							inet := dns.Copy(rr)
+							inet.Header().Class = dns.ClassINET
+							if !rrIsDuplicate(existing, inet) {
+								filtered = append(filtered, existing)
+							}
+						}
+						newSet = filtered
+					}
+				}
+				records := make([]string, 0, len(newSet))
+				for _, rr := range newSet {
+					inet := dns.Copy(rr)
+					inet.Header().Class = dns.ClassINET
+					records = append(records, inet.String())
+				}
 				zu.Operations = append(zu.Operations, core.RROperation{
-					Operation: opStr,
+					Operation: "replace",
 					RRtype:    dns.TypeToString[rrtype],
 					Records:   records,
 				})

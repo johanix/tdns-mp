@@ -151,6 +151,13 @@ func showDetailedZoneStatus(zone string) {
 	fmt.Printf("SDE Status for Zone: %s at %s\n", zone, time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Printf("════════════════════════════════════════\n\n")
 
+	// Flag KEYSTATE failure once at the zone level. KeystateError is a
+	// per-zone state, not per-source, so printing it inside the per-source
+	// loop made it look like every contributor had an independent failure.
+	if ksInfo, ok := amr.KeystateStatus[ZoneName(zone)]; ok && !ksInfo.OK {
+		fmt.Printf("WARNING: KEYSTATE exchange FAILED: %s\n\n", ksInfo.Error)
+	}
+
 	if len(amr.ZoneDataRepo) == 0 {
 		fmt.Printf("  (no synchronized data for this zone)\n\n")
 	} else {
@@ -161,11 +168,6 @@ func showDetailedZoneStatus(zone string) {
 				if len(rrTypeMap) == 0 {
 					fmt.Printf("  (no RRsets)\n\n")
 					continue
-				}
-
-				// Flag KEYSTATE failure
-				if ksInfo, ok := amr.KeystateStatus[ZoneName(zone)]; ok && !ksInfo.OK {
-					fmt.Printf("  WARNING: KEYSTATE exchange FAILED: %s\n\n", ksInfo.Error)
 				}
 
 				var rows []string

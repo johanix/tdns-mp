@@ -490,21 +490,57 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 	}
 }
 
-// applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
-// AgentRecords is agentID → owner → []RR strings. Each agent's records are added with
-// proper attribution so the SDE knows which agent contributed what.
+// applyEditsToSDE imports the combiner's contributions response into
+// the SynchedDataEngine using REPLACE semantics on terminal-state
+// entries.
+//
+// AgentRecords is agentID → owner → []RR strings. The response is
+// the combiner's authoritative full snapshot of all confirmed
+// contributions for this zone. Entries the SDE currently holds that
+// are NOT in the snapshot are removed (covers the "combiner had X
+// previously and no longer does" case — e.g. when stale state has
+// been purged on the combiner). Entries in the snapshot that the
+// SDE doesn't have are added. Entries in both are preserved.
+//
+// Pending and PendingRemoval entries are NEVER removed: those are
+// in-flight contributions the local agent submitted that the combiner
+// may not yet have processed. Removing them would lose ongoing
+// transactions.
+//
+// Per-RRtype scope: replace operates within a single
+// (agent, rrtype) bucket, mirroring the combiner's own per-agent
+// per-rrtype REPLACE semantics in AgentContributions.
 func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string, zdr *ZoneDataRepo) {
-	if len(agentRecords) == 0 {
-		zd.Logger.Printf("applyEditsToSDE: zone %s: no records to apply", zd.ZoneName)
-		return
-	}
-
 	if zdr == nil {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
 		return
 	}
 
-	added := 0
+	zone := ZoneName(zd.ZoneName)
+
+	// 1. Build a fast-lookup index of the snapshot:
+	//    snapshot[agentID][rrtype][rrStr] = true
+	//
+	// We also collect per-(agent, rrtype) sets of "this rrtype is
+	// present in the snapshot" so we know which buckets the snapshot
+	// is asserting authority over. A bucket NOT in this map should
+	// be left alone — we have no statement from the combiner about
+	// that (agent, rrtype) pair. (In practice the combiner emits
+	// every contributing (agent, owner, rrtype); the snapshot covers
+	// everything the combiner knows about, and a bucket entirely
+	// missing from the response means the combiner has no
+	// contribution there. For an agent that previously contributed
+	// and was purged, the agent appears with an empty contribution
+	// or not at all — we treat both the same: if the snapshot
+	// doesn't list a (agent, rrtype, rr) triple, that triple is
+	// removed from the SDE if present in terminal state.)
+	type bucketKey struct {
+		agent  AgentId
+		rrtype uint16
+	}
+	snapshotRRs := make(map[bucketKey]map[string]bool)
+	parsedSnapshot := make(map[bucketKey][]dns.RR)
+
 	for agentID, ownerMap := range agentRecords {
 		for _, rrStrings := range ownerMap {
 			for _, rrStr := range rrStrings {
@@ -513,13 +549,185 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 					zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
 					continue
 				}
-				zdr.AddConfirmedRR(ZoneName(zd.ZoneName), AgentId(agentID), rr)
-				added++
+				key := bucketKey{agent: AgentId(agentID), rrtype: rr.Header().Rrtype}
+				if snapshotRRs[key] == nil {
+					snapshotRRs[key] = make(map[string]bool)
+				}
+				canonical := rr.String()
+				snapshotRRs[key][canonical] = true
+				parsedSnapshot[key] = append(parsedSnapshot[key], rr)
 			}
 		}
 	}
 
-	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from %d agents", zd.ZoneName, added, len(agentRecords))
+	// 2. Walk the SDE for this zone and remove terminal-state
+	//    entries that are not present in the snapshot.
+	removed := 0
+	if agentRepo, ok := zdr.Get(zone); ok {
+		for item := range agentRepo.Data.IterBuffered() {
+			agentID := item.Key
+			ownerData := item.Val
+			if ownerData == nil {
+				continue
+			}
+			for _, rrtype := range ownerData.RRtypes.Keys() {
+				key := bucketKey{agent: agentID, rrtype: rrtype}
+				snapForBucket := snapshotRRs[key]
+
+				rrset, ok := ownerData.RRtypes.Get(rrtype)
+				if !ok {
+					continue
+				}
+
+				// Build list of RRs to drop from the data side. A RR
+				// is dropped only if its tracked counterpart is in a
+				// terminal state (Accepted / Ignored / Removed) AND
+				// it is absent from the snapshot.
+				keepRRs := rrset.RRs[:0]
+				for _, rr := range rrset.RRs {
+					rrStr := rr.String()
+					if snapForBucket[rrStr] {
+						keepRRs = append(keepRRs, rr)
+						continue
+					}
+					if !rrIsTerminalInTracking(zdr, zone, agentID, rrtype, rrStr) {
+						// Pending or PendingRemoval — preserve.
+						keepRRs = append(keepRRs, rr)
+						continue
+					}
+					// Drop from the data side.
+					removed++
+					// Also drop the matching tracking entry.
+					zdr.removeTrackedRR(zone, agentID, rrtype, rrStr)
+				}
+				if len(keepRRs) == 0 {
+					ownerData.RRtypes.Delete(rrtype)
+				} else {
+					rrset.RRs = keepRRs
+					ownerData.RRtypes.Set(rrtype, rrset)
+				}
+			}
+
+			// If the agent now has no rrtypes at all, drop the empty
+			// OwnerData entry so the agent disappears from the SDE
+			// rather than lingering as a "(no RRsets)" placeholder.
+			if ownerData.RRtypes.Count() == 0 {
+				agentRepo.Data.Remove(agentID)
+				// Tracking for an agent with no terminal-state data
+				// also has no reason to live; clear the per-agent
+				// rrtype map. (Pending entries that were preserved
+				// above keep their data on the RRsets path, so this
+				// branch only fires when the agent is truly empty.)
+				if zdr.Tracking[zone] != nil {
+					delete(zdr.Tracking[zone], agentID)
+				}
+			}
+		}
+	}
+
+	// 3. Add anything from the snapshot that the SDE doesn't already
+	//    have. AddConfirmedRR is idempotent on the data side
+	//    (RRset.Add dedupes) but appends a fresh tracking entry per
+	//    call — so guard with a presence check on the data side.
+	added := 0
+	for key, rrs := range parsedSnapshot {
+		var existing core.RRset
+		hasExisting := false
+		if agentRepo, ok := zdr.Get(zone); ok {
+			if ownerData, ok := agentRepo.Get(key.agent); ok {
+				if rrset, ok := ownerData.RRtypes.Get(key.rrtype); ok {
+					existing = rrset
+					hasExisting = true
+				}
+			}
+		}
+		for _, rr := range rrs {
+			if hasExisting && rrsetContains(&existing, rr) {
+				continue
+			}
+			zdr.AddConfirmedRR(zone, key.agent, rr)
+			added++
+		}
+	}
+
+	zd.Logger.Printf("applyEditsToSDE: zone %s: snapshot reconciled (added %d, removed %d, agents in snapshot %d)",
+		zd.ZoneName, added, removed, len(agentRecords))
+}
+
+// rrIsTerminalInTracking reports whether the most-recent tracking
+// entry for the given (zone, agent, rrtype, rrStr) is in a terminal
+// state from the combiner's perspective (Accepted, Ignored, or
+// Removed). Returns false if no tracking entry exists for the RR
+// (e.g. a hydration-added RR that bypassed tracking) — those are
+// treated as terminal too, since they don't represent in-flight
+// transactions. Pending and PendingRemoval entries return false.
+//
+// Walks the tracking slice in reverse so we evaluate the *latest*
+// matching entry rather than the oldest. With multiple tracking
+// rows for the same RR (legitimate during retry/transition cycles),
+// the most-recent state is the operationally meaningful one.
+func rrIsTerminalInTracking(zdr *ZoneDataRepo, zone ZoneName, agent AgentId, rrtype uint16, rrStr string) bool {
+	if zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
+		return true
+	}
+	tracked := zdr.Tracking[zone][agent][rrtype]
+	if tracked == nil {
+		return true
+	}
+	for i := len(tracked.Tracked) - 1; i >= 0; i-- {
+		tr := tracked.Tracked[i]
+		if tr.RR.String() != rrStr {
+			continue
+		}
+		switch tr.State {
+		case RRStatePending, RRStatePendingRemoval:
+			return false
+		default:
+			return true
+		}
+	}
+	// No tracking entry for this RR — treat as terminal.
+	return true
+}
+
+// rrIsPendingRemovalInTracking reports whether the most-recent tracking
+// entry for the given (zone, agent, rrtype, rrStr) is RRStatePendingRemoval.
+// Used by apihandler_agent.go when constructing REPLACE-shaped operations:
+// an RR that the agent already asked the combiner to delete should not be
+// re-included in a subsequent REPLACE built from the live SDE snapshot,
+// because the data repo still holds the RR until allRecipientsConfirmed.
+//
+// Walks the tracking slice in reverse so the *latest* matching entry wins,
+// matching rrIsTerminalInTracking's discipline.
+func rrIsPendingRemovalInTracking(zdr *ZoneDataRepo, zone ZoneName, agent AgentId, rrtype uint16, rrStr string) bool {
+	if zdr == nil || zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
+		return false
+	}
+	tracked := zdr.Tracking[zone][agent][rrtype]
+	if tracked == nil {
+		return false
+	}
+	for i := len(tracked.Tracked) - 1; i >= 0; i-- {
+		tr := tracked.Tracked[i]
+		if tr.RR.String() != rrStr {
+			continue
+		}
+		return tr.State == RRStatePendingRemoval
+	}
+	return false
+}
+
+// rrsetContains returns true if the RRset already contains an RR
+// that matches the given RR by content (using miekg/dns
+// IsDuplicate). Used to avoid double-adding a snapshot RR that's
+// already present in the SDE.
+func rrsetContains(rrset *core.RRset, rr dns.RR) bool {
+	for _, existing := range rrset.RRs {
+		if dns.IsDuplicate(existing, rr) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildRemoteDNSKEYsFromTags returns DNSKEY RRs from the zone that match the given key tags.
