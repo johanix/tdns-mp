@@ -64,15 +64,4 @@ func init() {
 	// MP-specific zone subcommands (mplist, addrr, delrr, edits)
 	// are added to cli.AgentZoneCmd via tdns-mp/v2/cli init()
 	mpcli.AgentCmd.AddCommand(cli.AgentZoneCmd)
-
-	// Auditor commands (from tdns-mp/v2/cli). Phase A: just the
-	// parent prefix and the standard daemon commands; auditor-
-	// specific subcommands (eventlog, zones, observations) land
-	// in Phase C.
-	rootCmd.AddCommand(mpcli.AuditorCmd)
-	mpcli.AuditorCmd.AddCommand(cli.NewPingCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewStopCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewDaemonCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewDebugCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewConfigCmd("auditor"))
 }

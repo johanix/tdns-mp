@@ -1411,16 +1411,6 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 					mpzd.Options[tdns.OptDelSyncChild] = true
 				}
 			}
-		case tdns.AppTypeMPAuditor:
-			// The auditor doesn't run HsyncEngine, but provider
-			// groups must still be recomputed when HSYNC3 changes
-			// so incoming gossip can be attributed to the right
-			// group. Pure zone-data computation; no registry
-			// poking — auditorAssociateZonePeers is deferred.
-			if tm != nil && tm.agentRegistry != nil && tm.agentRegistry.ProviderGroupManager != nil {
-				lg.Info("HSYNC RRset changed, recomputing provider groups for auditor", "zone", mpzd.ZoneName)
-				tm.agentRegistry.ProviderGroupManager.RecomputeGroups()
-			}
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
 		// is done in MPPreRefresh on new_zd before the flip.

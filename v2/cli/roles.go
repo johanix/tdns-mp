@@ -14,5 +14,4 @@ func init() {
 	tdnscli.RegisterRole("signer", "tdns-mpsigner")
 	tdnscli.RegisterRole("combiner", "tdns-mpcombiner")
 	tdnscli.RegisterRole("agent", "tdns-mpagent") // overrides the tdns default
-	tdnscli.RegisterRole("auditor", "tdns-mpauditor")
 }
