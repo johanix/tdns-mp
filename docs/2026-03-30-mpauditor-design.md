@@ -1,7 +1,35 @@
 # TDNS MP Auditor Design
 
 Date: 2026-03-30
-Status: DESIGN
+Last updated: 2026-04-27
+Status: DESIGN — revised for `mpauditor-2` reboot
+
+## Revision history
+
+- **2026-04-27 (c)**: Added Size Estimate section
+  (per-phase LOC estimate, anchored to actual file sizes
+  on the abandoned `mpauditor-1` branch).
+- **2026-04-27 (b)**: Split the original `mpauditor-1`
+  "associate zones with peers" work into two distinct
+  pieces. `RecomputeGroups()` is needed for the auditor
+  to interpret incoming gossip (name groups, attribute
+  zones, fire mutual-OPERATIONAL transitions) and is
+  pure-zone-data — promoted into Phase A as a single
+  callback. `auditorAssociateZonePeers` (the registry-
+  poking part) remains deferred — it is only needed for
+  outbound BEAT advertisement of zones to as-yet-unseen
+  peers.
+- **2026-04-27 (a)**: Reboot revision. Original
+  `mpauditor-1` branch abandoned mid-flight during repo
+  split; design re-targeted to a fresh `mpauditor-2`
+  branch off current tdns-mp main. Phase 1 (tdns-side
+  protocol support) is already merged on tdns main, with
+  one shape change from the original design —
+  `HSYNCPARAM_AUDITORS` is plural (list of labels), not
+  singular. Phase 2 stub (`SetupMPAuditorRoutes`) also
+  already merged on tdns-mp main. Phasing renumbered to
+  reflect what is already done; transport-boundary test
+  harness added as Phase 0; web dashboard kept in scope.
 
 ## Overview
 
@@ -37,40 +65,43 @@ Being in HSYNC3 means:
 
 ### HSYNCPARAM Declaration
 
-New SvcParam `auditor=` declares which HSYNC3 label is
-the auditor:
+SvcParam `auditors=` declares which HSYNC3 labels are
+auditors. The value is a comma-separated list of labels;
+a zone may have multiple auditors:
 
 ```
 example.com. 3600 IN HSYNCPARAM signers="alpha,echo" \
-                                auditor="auditor"
+                                auditors="auditor1,auditor2"
 ```
 
-The value is a single HSYNC3 label. A zone may have at
-most one auditor (like it has at most one set of signers).
-
 This enables:
-- Agents to identify the auditor and include it as a
-  mandatory SYNC recipient
+- Agents to identify auditors and include them as
+  mandatory SYNC recipients
 - The combiner to recognize auditor contributions as
   invalid (defense-in-depth)
 - Policy engines to verify auditor participation
 
-### HSYNCPARAM Implementation
+### HSYNCPARAM Implementation (merged)
 
-Add new SvcParam key to existing enum:
+Already on tdns main:
 
 ```go
-HSYNCPARAM_AUDITOR HSYNCPARAMKey = 7 // "label"
+HSYNCPARAM_AUDITORS HSYNCPARAMKey = 7 // "auditors"
 ```
 
-Type: `HSYNCPARAMAuditor` (string, single label).
-Accessors: `GetAuditor() string`, `IsAuditorLabel(label) bool`.
+Type: `HSYNCPARAMAuditors{ Auditors []string }` in
+`tdns/v2/core/rr_hsyncparam.go`. Accessors needed by
+mpauditor (`GetAuditors() []string`,
+`IsAuditorLabel(label) bool`) are not yet present and
+must be added in tdns-mp helpers — the tdns repo is
+under active development by other agents and must not
+be touched from this work stream.
 
-Note: the existing `HSYNCPARAM_AUDIT` (key 2) is a boolean
-"audit=yes/no" flag. The new `HSYNCPARAM_AUDITOR` (key 7)
-names the specific auditor provider. These are distinct:
-`audit=yes` enables audit mode, `auditor=label` identifies
-who performs it.
+Note on shape change vs original design: the original
+spec said singular `auditor=` (one label per zone). The
+merged implementation is plural (list of labels). All
+mpauditor logic must therefore handle a *set* of auditor
+labels, not a single label.
 
 ## Behavioral Rules
 
@@ -112,11 +143,11 @@ combiner data, no local edits. It only sends:
 
 **(b) Peer enforcement (defense-in-depth):**
 When a receiving agent gets a SYNC from a sender, it
-checks if the sender is the declared auditor. If so,
-reject any non-empty data:
+checks if the sender's label is in the declared auditor
+set. If so, reject any non-empty data:
 
 ```go
-if isAuditor(senderLabel, zd) {
+if isAuditor(senderLabel, zd) { // senderLabel ∈ HSYNCPARAM_AUDITORS
     if len(syncReq.Records) > 0 ||
        len(syncReq.Operations) > 0 {
         return reject("auditor may not contribute data")
@@ -125,8 +156,9 @@ if isAuditor(senderLabel, zd) {
 ```
 
 **(c) Combiner enforcement (defense-in-depth):**
-Same check in `combinerProcessOperations`: if sender
-is the auditor label, reject all non-empty operations.
+Same check in `combinerProcessOperations`: if the
+sender's label is in the auditor set, reject all
+non-empty operations.
 
 ### Rule 4: Leader Election Exclusion
 
@@ -135,8 +167,8 @@ It should not become leader (leaders perform delegation
 sync, key publication, etc. — all write operations).
 
 Implementation: when computing election candidates,
-exclude peers whose label matches the HSYNCPARAM
-auditor label.
+exclude peers whose label is in the HSYNCPARAM auditor
+set.
 
 ### Rule 5: RFI SYNC Response
 
@@ -373,60 +405,209 @@ Observations the auditor can detect:
 
 ## Implementation Plan
 
-All implementation in tdns-mp except Phase 1 items 1-4
-which touch tdns (RR types and AppType).
+Reboot on a fresh `mpauditor-2` branch off current
+tdns-mp main. Cherry-pick the auditor-specific files from
+the abandoned `mpauditor-1` branch rather than rebasing —
+the original is 130+ commits stale and carries repo-split-
+era merge artifacts that would collide on rebase. The
+auditor-specific files (`auditor_*.go`,
+`apihandler_auditor.go`, `cli/auditor_cmds.go`,
+`cmd/mpauditor/`) are nearly self-contained and port
+cleanly.
 
-### Phase 1: Protocol Support (tdns)
+**Constraint**: the tdns repository is under active
+development by other agents and must NOT be modified from
+this work stream. Any tdns-side gap is worked around in
+tdns-mp helpers, or queued for a separate coordination
+step.
 
-1. Add `HSYNCPARAM_AUDITOR` SvcParam (key 7) to
-   tdns/v2/core/rr_hsyncparam.go
-2. Add `GetAuditor()` and `IsAuditorLabel()` accessors
-3. Add `AppTypeMPAuditor` to tdns/v2/enums.go
-4. Add AppType guards in tdns (same pattern as
-   MPSigner/MPCombiner/MPAgent)
+### Status of the originally-listed phases
 
-### Phase 2: Auditor Binary (tdns-mp)
+| Original phase                  | Status on current main         |
+|---------------------------------|--------------------------------|
+| Phase 1 — Protocol support (tdns) | **Done** (with shape change) |
+| Phase 2 — Auditor binary (tdns-mp) | **Stub only** (routes file)  |
+| Phase 3 — Event log and state    | **Not started**                |
+| Phase 4 — Reporting and CLI      | **Not started**                |
+| Phase 5 — Enforcement            | **Not started**                |
 
-5. Add `case "auditor"` to MainInit role switch
-6. Create `initMPAuditor` in main_init.go (modeled on
-   initMPAgent: transport, crypto, chunk handler, peers,
-   router, gossip — minus SDE and leader election)
-7. Create `start_auditor.go` — StartMPAuditor (modeled
-   on StartMPAgent: DNS engines + incoming message router
-   + auditor msg handler — minus HsyncEngine/SDE)
-8. Create `auditor_msg_handler.go` — simplified consumer
+What's already merged on tdns main:
+- `HSYNCPARAM_AUDITORS` (key 7, plural — see HSYNCPARAM
+  Implementation section)
+- `HSYNCPARAMAuditors` type with pack/unpack/parse
+- `AppTypeMPAuditor` + AppType guards in `enums.go`,
+  `main_initfuncs.go`, `parseconfig.go`
+
+What's already merged on tdns-mp main:
+- `apihandler_auditor_routes.go` — stub
+  `SetupMPAuditorRoutes` registering only the shared
+  transport-layer endpoints (gossip/router/peer); no
+  auditor-specific endpoints yet.
+- `cmd/mpauditor/` directory exists but contains only a
+  stale prebuilt binary (no source).
+
+Gaps from the original Phase 1 design that mpauditor-2
+must work around (without touching tdns):
+- The `GetAuditors()` / `IsAuditorLabel(label)` accessors
+  on `HSYNCPARAMAuditors` are not present in tdns. Provide
+  equivalent helpers in tdns-mp (e.g. in a new
+  `auditor_helpers.go`) that walk the HSYNCPARAM RRset
+  directly.
+
+### Phase 0: Transport boundary test harness
+
+Land the harness from
+`2026-04-23-transport-boundary-test-harness.md` first.
+The harness is shared infrastructure — it gates the
+upcoming transport interface redesign
+(`2026-04-15-transport-interface-redesign.md`) and serves
+as the regression net for mpauditor work.
+
+For mpauditor purposes, the seven scenarios cover all the
+boundary behaviors the auditor depends on (CHUNK → Msg,
+Confirmation paths, Hello, discovery). No auditor-specific
+scenarios are needed at this stage; auditor-specific tests
+live above the boundary in MP land.
+
+Done criteria: all seven scenarios pass via `go test` in
+tdns-mp/v2, wired into the same CI gate the redesign will
+use.
+
+### Phase A: Auditor binary skeleton (tdns-mp)
+
+1. Add `case "auditor"` to MainInit role switch.
+2. Create `initMPAuditor` in `main_init.go` (modeled on
+   `initMPAgent`: transport, crypto, chunk handler, peers,
+   router, gossip — minus SDE and leader election).
+3. Create `start_auditor.go` — `StartMPAuditor` (modeled
+   on `StartMPAgent`: DNS engines + incoming message
+   router + auditor msg handler — minus HsyncEngine/SDE).
+4. Create `auditor_msg_handler.go` — simplified consumer
    that receives all message types, logs events, updates
-   state, but never sends zone data
-9. Create `cmd/mpauditor/` (main.go, Makefile, go.mod,
-   sample config)
-10. Add "auditor" to mpcli shared_cmds.go
+   state, but never sends zone data.
+5. Create `auditor_helpers.go` with `GetAuditors(zd)` and
+   `IsAuditorLabel(zd, label)` reading the HSYNCPARAM
+   RRset (substitute for the missing tdns accessors).
+6. Wire `ar.ProviderGroupManager.RecomputeGroups()` into
+   the auditor's zone-load path (see "Provider group
+   recomputation" below).
+7. Populate `cmd/mpauditor/` with main.go, Makefile,
+   sample config.
+8. Add "auditor" to `mpcli` shared_cmds.go.
 
-### Phase 3: Event Log and State
+#### Provider group recomputation
 
-10. Create AuditEventLog DB schema + CRUD functions
-11. Log events from AuditorMsgHandler on every inbound
-    SYNC/UPDATE/confirm/resync
-12. Implement automatic retention pruning (background
-    goroutine, configurable interval + max age)
-13. Implement `AuditZoneState` tracking (in-memory)
-14. Implement observation detection
+The agent triggers `RecomputeGroups()` from the
+HSYNC-UPDATE flow inside `HsyncEngine`, which the
+auditor does not run. Without a replacement call, the
+auditor's `ProviderGroupManager` stays empty: incoming
+gossip merges into `GossipStateTable.States[hash]` (the
+merge is keyed on `GroupHash` and does not consult the
+registry), but `GetGroup(hash)` returns nil — so the
+dashboard cannot name groups, list members, or attribute
+zones, and `CheckGroupState` cannot fire mutual-
+OPERATIONAL transitions.
 
-### Phase 4: Reporting and CLI
+`RecomputeGroups` reads HSYNC3 RRsets from each loaded
+zone and is a pure function of zone data — it does not
+need `SharedZones`, `LocateAgent`, or any registry
+poking. The auditor needs exactly one call after each
+zone load (and a re-run on HSYNC3 change). Suggested
+home: a small auditor-only branch in `MPPostRefresh`
+that calls `ar.ProviderGroupManager.RecomputeGroups()`
+and nothing else, or an `OnFirstLoad` callback
+registered in `initMPAuditor` plus a re-run on HSYNC
+change.
 
-15. Add `/audit/*` API endpoints (zones, providers,
-    observations, eventlog)
-16. Add auditor CLI commands to mpcli:
+This is **distinct from** the deferred
+`auditorAssociateZonePeers` work. That function calls
+`LocateAgent`/`AddZoneToAgent` to populate
+`SharedZones` so outbound BEATs advertise zones — needed
+for the auditor to participate in gossip *as a sender*
+of meaningful state about zones it hasn't yet seen
+inbound traffic for. The Phase A `RecomputeGroups` call
+is sufficient for the auditor's *observer* role
+(receiving and interpreting gossip) regardless of
+`SharedZones`.
+
+### Phase B: Event log and audit state
+
+8. Create `AuditEventLog` DB schema + CRUD functions.
+9. Log events from `AuditorMsgHandler` on every inbound
+   SYNC/UPDATE/confirm/resync.
+10. Implement automatic retention pruning (background
+    goroutine, configurable interval + max age).
+11. Implement `AuditZoneState` tracking (in-memory).
+12. Implement observation detection.
+
+### Phase C: Reporting — JSON API + CLI
+
+13. Replace stub `apihandler_auditor_routes.go` with the
+    real `/audit/*` endpoints (zones, providers,
+    observations, eventlog).
+14. Add auditor CLI commands to mpcli:
     - `auditor eventlog list`
     - `auditor eventlog clear`
     - `auditor zones`
     - `auditor observations`
 
-### Phase 5: Enforcement
+### Phase D: Web dashboard
 
-17. Add auditor rejection in agent SYNC processing
-18. Add auditor rejection in combiner processing
-19. Exclude auditor from leader elections
-20. Implement empty SYNC response for RFI
+The web dashboard is required well before the transport
+redesign lands and must therefore be in initial scope. It
+exists on the original `mpauditor-1` branch as 9 htmx +
+Pico CSS templates.
+
+15. Cherry-pick the dashboard templates and handler from
+    `mpauditor-1`.
+16. Audit each rendered struct (`HsyncPeerInfo`,
+    `HsyncMetricsInfo`, etc.) and isolate the rendering
+    behind a thin adapter layer in
+    `apihandler_auditor.go`. The adapter is the only
+    place that touches transport-layer struct shapes — so
+    when the transport redesign moves/renames those
+    structs, only the adapter changes, not the templates.
+17. Wire `/audit/dashboard` route and any supporting
+    static assets.
+
+Done criteria: dashboard renders zone list, per-zone
+provider state, recent events, and observations.
+
+### Phase E: Enforcement
+
+18. Add auditor rejection in agent SYNC processing.
+19. Add auditor rejection in combiner processing.
+20. Exclude auditor from leader elections.
+21. Implement empty SYNC response for RFI.
+
+### Deferred until after transport interface redesign
+
+The following item is deferred until after the transport
+redesign lands (`2026-04-15-transport-interface-redesign.md`)
+to avoid rework when transport-layer types move/rename:
+
+- `auditorAssociateZonePeers` in `MPPostRefresh`. Calls
+  `LocateAgent`/`AddZoneToAgent` to populate
+  `SharedZones` for HSYNC3-listed peers, so outbound
+  BEATs advertise zones to peers the auditor has not yet
+  received traffic from. The most invasive bit on shared
+  MP code on the original branch (introduces a role-
+  global check inside the cross-role `MPPostRefresh` hot
+  path and reaches directly into `tm.agentRegistry`).
+  Without it, the auditor still receives and interprets
+  inbound gossip correctly (Phase A's `RecomputeGroups`
+  call is sufficient for that). What is lost: the
+  auditor's outbound BEATs do not advertise zone
+  membership for peers it has not yet seen inbound
+  traffic for, and the dashboard's "providers I haven't
+  heard from yet" view is lossy until this lands. Add
+  back as a clean callback once the transport redesign
+  has decoupled `agentRegistry` access from role globals.
+
+Note on the web dashboard: even though it renders structs
+the redesign relocates, the rendering goes through the
+Phase D adapter — so the post-redesign change is local to
+`apihandler_auditor.go`, not the templates.
 
 ## Complexity Assessment
 
@@ -465,3 +646,57 @@ send data.
 The protocol integration (HSYNC3 + HSYNCPARAM) is
 straightforward — the auditor is just another provider
 with special policy.
+
+## Size Estimate
+
+Per-phase line-of-code estimate. Numbers in **ref**
+columns are the actual sizes of the corresponding files
+on the abandoned `mpauditor-1` branch (sampled
+2026-04-27); they are an upper bound for cherry-pick
+scope. **est** is the realistic delta to land each phase
+on `mpauditor-2` after porting + rework.
+
+| Phase | Component                              | ref | est | Notes |
+|-------|----------------------------------------|-----|-----|-------|
+| 0     | Transport boundary test harness        | —   | 1500–2500 | Per the harness doc: env builder + 7 scenarios. Test code, not production. Most of this serves the transport redesign too — not properly chargeable to mpauditor alone. |
+| A     | `auditor_msg_handler.go`               | 200 | ~220 | Simplified agent msg consumer. |
+| A     | `start_auditor.go`                      | 162 | ~180 | Modeled on `start_agent.go` (411 LOC) minus HsyncEngine/SDE/leader-election wiring. |
+| A     | `initMPAuditor` (in `main_init.go`)    | —   | ~120 | New case branch; smaller than `initMPAgent` for the same reason as start. |
+| A     | `auditor_helpers.go` (`GetAuditors` etc.) | 89 | ~100 | Local substitute for missing tdns accessors + label-set predicates. |
+| A     | `RecomputeGroups()` wiring             | —   | ~30 | Single-call hook in `MPPostRefresh` or `OnFirstLoad`. |
+| A     | `cmd/mpauditor/` (main + Makefile + sample yaml) | 70 | ~100 | main.go is small; Makefile + sample mostly cherry-pickable. |
+| A     | `mpcli` "auditor" wiring               | —   | ~80 | New shared_cmds entry + role gating. |
+| A     | **subtotal**                           |     | **~830** | |
+| B     | `auditor_state.go`                     | 151 | ~170 | `AuditZoneState`, `AuditProviderState`, `AuditObservation`. |
+| B     | `auditor_eventlog.go`                  | 184 | ~200 | Schema, CRUD, retention pruner. |
+| B     | Observation detection                  | —   | ~150 | Not present as a separate file on the branch — folded into msg handler / state. Estimate based on rules listed in design (silent provider, serial drift, NS inconsistency, etc.). |
+| B     | Eventlog logging hooks in handler      | —   | ~80 | Edits to `auditor_msg_handler.go` to call `InsertAuditEvent` on each event class. |
+| B     | **subtotal**                           |     | **~600** | |
+| C     | `apihandler_auditor.go` (real)         | 197 | ~220 | Replaces the existing 17-LOC stub. `/audit/zones`, `/audit/zone`, `/audit/providers`, `/audit/observations`, `/audit/eventlog`. |
+| C     | `cli/auditor_cmds.go`                  | 399 | ~430 | `eventlog list/clear`, `zones`, `observations`. |
+| C     | API request/response struct types      | —   | ~80 | New `api_audit_*_structs.go`. |
+| C     | **subtotal**                           |     | **~730** | |
+| D     | `auditor_web.go` (handler + adapter)   | 396 | ~440 | Includes the new transport-struct adapter layer (~50 LOC delta vs. branch). |
+| D     | `auditor_web_templates/*.html` (10 files) | 376 | ~376 | Cherry-pick verbatim if shape allows; otherwise minor. |
+| D     | `auditor_web_static/*` (htmx, pico, css) | — | 0 | Vendored libraries + ~50-LOC `auditor.css`. Not counted as new LOC. |
+| D     | **subtotal**                           |     | **~820** | |
+| E     | Auditor SYNC rejection in agent path   | —   | ~30 | `isAuditor(senderLabel, zd)` check + reject. |
+| E     | Auditor SYNC rejection in combiner path | —  | ~30 | Same shape, different file. |
+| E     | Leader election exclusion              | —   | ~20 | Filter on candidate computation. |
+| E     | Empty SYNC response for RFI            | —   | ~30 | One handler branch. |
+| E     | **subtotal**                           |     | **~110** | |
+|       | **Total production code (Phases A–E)** |     | **~3100** | |
+|       | **Plus harness (Phase 0, shared)**     |     | ~1500–2500 | |
+
+Excluded from totals: vendored static assets (htmx, pico
+CSS), prebuilt binaries, generated `go.sum`.
+
+Excluded from initial scope (deferred):
+`auditorAssociateZonePeers` (~50 LOC plus its hook in
+`MPPostRefresh`).
+
+The estimate's largest soft spot is observation
+detection (Phase B), which exists only sketchily on the
+branch — the ~150 LOC figure is for the rules listed in
+this doc, not a measured port. If the rule set grows,
+that figure grows linearly.
