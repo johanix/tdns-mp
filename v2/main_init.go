@@ -137,6 +137,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return conf.initMPCombiner(mp)
 	case "agent":
 		return conf.initMPAgent(mp)
+	case "auditor":
+		return conf.initMPAuditor(mp)
 	default:
 		return fmt.Errorf("unsupported multi-provider.role: %q", mp.Role)
 	}
@@ -545,6 +547,105 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 			}
 			if mp.Signer != nil && mp.Signer.Identity != "" {
 				peers = append(peers, dns.Fqdn(mp.Signer.Identity))
+			}
+			return peers
+		},
+		MessageRetention: func(operation string) int {
+			return mp.Dns.MessageRetention.GetRetentionForMessageType(operation)
+		},
+		GetImrEngine: func() *Imr {
+			return &Imr{conf.Config.Internal.ImrEngine}
+		},
+		GetZone:        tdns.Zones.Get,
+		GetZoneNames:   tdns.Zones.Keys,
+		ClientCertFile: mp.Api.CertFile,
+		ClientKeyFile:  mp.Api.KeyFile,
+	})
+	conf.InternalMp.MPTransport = tm
+	conf.InternalMp.TransportManager = tm.TransportManager
+	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
+	conf.InternalMp.AgentRegistry.MPTransport = tm
+
+	return nil
+}
+
+// initMPAuditor performs auditor-specific MP initialization.
+// Modeled on initMPAgent but skips combiner/signer-as-peer registration,
+// HsyncDB tables, and outbound-sync queues. Reuses the same MP
+// transport bridge configuration so the auditor participates in BEAT/
+// gossip exactly like an agent on the wire.
+func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
+	if mp.Identity == "" {
+		return fmt.Errorf("multi-provider.identity is required for auditor role")
+	}
+
+	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
+
+	// MsgQs: auditor consumes Beat/Hello/Ping/Msg/Confirmation/StatusUpdate.
+	conf.InternalMp.MsgQs = NewMsgQs()
+
+	// Distribution cache: auditor sends BEATs/HELLOs (not zone data),
+	// so distribution tracking is still useful for the management API.
+	conf.InternalMp.DistributionCache = NewDistributionCache()
+	StartDistributionGC(conf.InternalMp.DistributionCache, 1*time.Minute, conf.Config.Internal.StopCh)
+
+	controlZone := mp.Dns.ControlZone
+	if controlZone == "" {
+		controlZone = mp.Identity
+	}
+	chunkMode := mp.Dns.ChunkMode
+	if chunkMode == "" {
+		chunkMode = "edns0"
+	}
+
+	var chunkStore ChunkPayloadStore
+	var chunkQueryEndpoint string
+	var chunkQueryEndpointInNotify bool
+	if chunkMode == "query" {
+		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
+		if cep != "include" && cep != "none" {
+			return fmt.Errorf("auditor.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
+		}
+		chunkQueryEndpointInNotify = (cep == "include")
+		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
+		conf.InternalMp.ChunkPayloadStore = chunkStore
+		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
+			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
+		}
+		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	}
+
+	var payloadCrypto *transport.PayloadCrypto
+	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+		pc, err := initAgentCrypto(conf.Config)
+		if err != nil {
+			return fmt.Errorf("failed to initialize auditor crypto: %w", err)
+		}
+		payloadCrypto = pc
+	}
+
+	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		LocalID:                    dns.Fqdn(mp.Identity),
+		ControlZone:                dns.Fqdn(controlZone),
+		APITimeout:                 10 * time.Second,
+		DNSTimeout:                 5 * time.Second,
+		AgentRegistry:              conf.InternalMp.AgentRegistry,
+		MsgQs:                      conf.InternalMp.MsgQs,
+		ChunkMode:                  chunkMode,
+		ChunkPayloadStore:          chunkStore,
+		ChunkQueryEndpoint:         chunkQueryEndpoint,
+		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
+		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
+		PayloadCrypto:              payloadCrypto,
+		DistributionCache:          conf.InternalMp.DistributionCache,
+		SupportedMechanisms:        mp.SupportedMechanisms,
+		// CombinerID/SignerID intentionally unset: the auditor talks
+		// to peer agents (HSYNC3 members), not to combiner/signer as
+		// infra peers.
+		AuthorizedPeers: func() []string {
+			var peers []string
+			for _, p := range mp.AuthorizedPeers {
+				peers = append(peers, dns.Fqdn(p))
 			}
 			return peers
 		},
