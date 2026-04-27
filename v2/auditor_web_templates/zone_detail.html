@@ -1,0 +1,80 @@
+{{template "layout" .}}
+{{define "content"}}
+<h2>Zone: {{.Zone}}</h2>
+<a href="/web/">&larr; Dashboard</a>
+
+{{if .Error}}
+<article class="audit-error">{{.Error}}</article>
+{{end}}
+
+{{if .ZoneDetail}}
+<section>
+  <h3>Summary</h3>
+  <dl>
+    <dt>Zone</dt><dd>{{.ZoneDetail.Zone}}</dd>
+    <dt>Serial</dt><dd>{{.ZoneDetail.ZoneSerial}}</dd>
+    <dt>Last Refresh</dt><dd>{{fmtTime .ZoneDetail.LastRefresh}}</dd>
+    <dt>Providers</dt><dd>{{.ZoneDetail.ProviderCount}}</dd>
+  </dl>
+</section>
+{{end}}
+
+<section>
+  <h3>Providers</h3>
+  {{if not .Providers}}
+  <p><em>No providers seen yet.</em></p>
+  {{else}}
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Identity</th>
+        <th>Label</th>
+        <th>Signer</th>
+        <th>Gossip State</th>
+        <th>Last Beat</th>
+        <th>Last Sync</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Providers}}
+      <tr
+        hx-get="/web/fragment/provider-detail?zone={{$.Zone}}&provider={{.Identity}}"
+        hx-target="#provider-detail-panel"
+        hx-swap="innerHTML"
+        style="cursor:pointer">
+        <td>{{.Identity}}</td>
+        <td>{{.Label}}</td>
+        <td>{{if .IsSigner}}&#10003;{{end}}</td>
+        <td>{{.GossipState}}</td>
+        <td>{{ago .LastBeat}}</td>
+        <td>{{ago .LastSync}}</td>
+        <td><small>details &darr;</small></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  <div id="provider-detail-panel"></div>
+  {{end}}
+</section>
+
+<section>
+  <h3>Recent Events</h3>
+  <div
+    hx-get="/web/fragment/eventlog-rows?zone={{.Zone}}"
+    hx-trigger="load, every 15s"
+    hx-swap="innerHTML">
+    <em>Loading&hellip;</em>
+  </div>
+</section>
+
+<section>
+  <h3>Observations</h3>
+  <div
+    hx-get="/web/fragment/observation-list?zone={{.Zone}}"
+    hx-trigger="load, every 30s"
+    hx-swap="innerHTML">
+    <em>Loading&hellip;</em>
+  </div>
+</section>
+{{end}}

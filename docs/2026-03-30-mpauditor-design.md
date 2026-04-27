@@ -576,27 +576,47 @@ is sufficient for the auditor's *observer* role
     - `auditor zones`
     - `auditor observations`
 
-### Phase D: Web dashboard
+### Phase D: Web dashboard — DONE
 
-The web dashboard is required well before the transport
-redesign lands and must therefore be in initial scope. It
-exists on the original `mpauditor-1` branch as 9 htmx +
-Pico CSS templates.
+The web dashboard runs on its own HTTPS listener under
+`/web/*`, separate from the JSON API. It uses htmx + Pico
+CSS templates ported from `mpauditor-1`.
 
-15. Cherry-pick the dashboard templates and handler from
-    `mpauditor-1`.
-16. Audit each rendered struct (`HsyncPeerInfo`,
-    `HsyncMetricsInfo`, etc.) and isolate the rendering
-    behind a thin adapter layer in
-    `apihandler_auditor.go`. The adapter is the only
-    place that touches transport-layer struct shapes — so
-    when the transport redesign moves/renames those
-    structs, only the adapter changes, not the templates.
-17. Wire `/audit/dashboard` route and any supporting
-    static assets.
+15. Cherry-picked 9 templates + 3 static assets (htmx,
+    pico, auditor.css) from `mpauditor-1`. ✓
+16. Adapter functions (`buildDashboardData`,
+    `buildZoneDetailData`, `buildEventLogData`,
+    `buildProvidersData`, `buildObservationsData`,
+    `buildGossipData`) in `auditor_web.go` snapshot state
+    into a single `WebData` struct of DTOs. Templates only
+    see DTOs (`AuditZoneSummary`, `AuditProviderSummary`,
+    `GossipMatrixDTO`, etc.) — never runtime types. When
+    the transport redesign moves/renames structs, only the
+    adapter changes. ✓
+17. `/web/*` routes registered with bcrypt auth + signed
+    session cookies + sliding idle timeout (default 30m).
+    `/web/login` (GET form, POST verify), `/web/logout`,
+    `/web/status` (unauthenticated healthcheck), data
+    pages and HTMX fragments behind `requireAuth`. ✓
+
+**Auth**: multi-user, bcrypt-hashed passwords in YAML,
+in-memory sessions with HMAC-signed cookies (`HttpOnly` +
+`Secure` + `SameSite=Strict`). CSRF defended by
+`SameSite=Strict` plus the dashboard being entirely
+read-only (the only POST is `/web/login`).
+`audit.web.auth.mode="none"` is permitted only when all
+bind addresses are loopback — non-loopback no-auth refuses
+to start.
+
+**Gossip view (extension to mpauditor-1)**: per-group
+N×N member×peer state matrix at `/web/gossip` and via
+`{"command": "gossip"}` on `/api/v1/auditor`. Snapshotted
+under both `ProviderGroupManager.mu` and
+`GossipStateTable.mu`.
 
 Done criteria: dashboard renders zone list, per-zone
-provider state, recent events, and observations.
+provider state, providers, gossip matrix, recent events,
+and observations. ✓
 
 ### Phase E: Enforcement
 

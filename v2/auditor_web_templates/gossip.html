@@ -1,0 +1,15 @@
+{{template "layout" .}}
+{{define "content"}}
+<h2>Gossip</h2>
+
+{{if .Error}}
+<article class="audit-error">{{.Error}}</article>
+{{end}}
+
+<div
+  hx-get="/web/fragment/gossip-matrix"
+  hx-trigger="load, every 15s"
+  hx-swap="innerHTML">
+  {{template "gossip-matrix-inner" .}}
+</div>
+{{end}}

@@ -34,14 +34,16 @@ type AuditPost struct {
 
 // AuditResponse is the response body for /api/v1/auditor.
 type AuditResponse struct {
-	Status       string             `json:"status"`
-	Msg          string             `json:"msg,omitempty"`
-	Error        bool               `json:"error,omitempty"`
-	ErrorMsg     string             `json:"error_msg,omitempty"`
-	Zones        []AuditZoneSummary `json:"zones,omitempty"`
-	Events       []AuditEvent       `json:"events,omitempty"`
-	Observations []AuditObservation `json:"observations,omitempty"`
-	Deleted      int64              `json:"deleted,omitempty"`
+	Status       string                 `json:"status"`
+	Msg          string                 `json:"msg,omitempty"`
+	Error        bool                   `json:"error,omitempty"`
+	ErrorMsg     string                 `json:"error_msg,omitempty"`
+	Zones        []AuditZoneSummary     `json:"zones,omitempty"`
+	Events       []AuditEvent           `json:"events,omitempty"`
+	Observations []AuditObservation     `json:"observations,omitempty"`
+	Providers    []AuditProviderSummary `json:"providers,omitempty"`
+	Gossip       []GossipMatrixDTO      `json:"gossip,omitempty"`
+	Deleted      int64                  `json:"deleted,omitempty"`
 }
 
 // APIauditor returns the HTTP handler for /api/v1/auditor.
@@ -81,6 +83,18 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 			if sm != nil {
 				resp.Observations = sm.SnapshotAllObservations(req.Zone)
 			}
+			writeAuditJSON(w, resp)
+
+		case "providers":
+			resp := AuditResponse{Status: "ok"}
+			if sm != nil {
+				resp.Providers = sm.SnapshotAllProviders()
+			}
+			writeAuditJSON(w, resp)
+
+		case "gossip":
+			resp := AuditResponse{Status: "ok"}
+			resp.Gossip = SnapshotGossip(conf.InternalMp.AgentRegistry)
 			writeAuditJSON(w, resp)
 
 		case "eventlog-list":

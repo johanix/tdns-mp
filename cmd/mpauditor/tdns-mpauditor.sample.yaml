@@ -114,3 +114,14 @@ audit:
       prune_interval:   1h     # how often the pruner runs (default: 1h)
    silence_threshold:   90s    # provider silent if no BEAT within this (default: 90s)
    detector_interval:   30s    # how often detectors run (default: 30s)
+   web:
+      enabled:          false           # web dashboard off by default
+      addresses:        [ 127.0.0.1:8099 ]
+      cert_file:        ""              # set both cert and key for HTTPS
+      key_file:         ""              # empty cert+key disables HTTPS (lab only)
+      auth:
+         mode:          basic           # "basic" or "none" (none requires loopback bind)
+         idle_timeout:  30m             # session expires after this much inactivity
+         users:
+            # Generate hashes with: htpasswd -nbBC 12 user pass
+            #   - { name: "admin", password_hash: "$2y$12$..." }

@@ -1,0 +1,34 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — TDNS Auditor</title>
+  <link rel="stylesheet" href="/web/static/pico.min.css">
+  <link rel="stylesheet" href="/web/static/auditor.css">
+  <script src="/web/static/htmx.min.js"></script>
+</head>
+<body>
+  <header class="container-fluid">
+    <nav>
+      <ul>
+        <li><strong><a href="/web/">TDNS Auditor</a></strong></li>
+      </ul>
+      <ul>
+        <li><a href="/web/">Dashboard</a></li>
+        <li><a href="/web/providers">Providers</a></li>
+        <li><a href="/web/gossip">Gossip</a></li>
+        <li><a href="/web/eventlog">Event Log</a></li>
+        <li><a href="/web/observations">Observations</a></li>
+        {{if .User}}<li><small>{{.User}} <a href="/web/logout">logout</a></small></li>{{end}}
+      </ul>
+    </nav>
+  </header>
+  <main class="container">
+    {{template "content" .}}
+  </main>
+  <footer class="container-fluid">
+    <small>TDNS Auditor &mdash; {{.Now.Format "2006-01-02 15:04:05 UTC"}}</small>
+  </footer>
+</body>
+</html>{{end}}

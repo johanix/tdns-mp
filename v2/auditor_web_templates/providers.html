@@ -1,0 +1,33 @@
+{{template "layout" .}}
+{{define "content"}}
+<h2>Providers</h2>
+
+{{if not .Providers}}
+<p><em>No providers seen yet.</em></p>
+{{else}}
+<table role="grid">
+  <thead>
+    <tr>
+      <th>Identity</th>
+      <th>Label</th>
+      <th>Signer</th>
+      <th>Gossip State</th>
+      <th>Last Beat</th>
+      <th>Last Sync</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Providers}}
+    <tr>
+      <td>{{.Identity}}</td>
+      <td>{{.Label}}</td>
+      <td>{{if .IsSigner}}&#10003;{{end}}</td>
+      <td>{{.GossipState}}</td>
+      <td>{{ago .LastBeat}}</td>
+      <td>{{ago .LastSync}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}

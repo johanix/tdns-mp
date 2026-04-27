@@ -210,5 +210,10 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		lgAuditor.Error("SetupAgent failed", "err", err)
 	}
 
+	// Phase D: web dashboard.
+	if err := conf.StartAuditorWebServer(ctx); err != nil {
+		lgAuditor.Error("auditor web dashboard failed to start", "err", err)
+	}
+
 	return nil
 }
