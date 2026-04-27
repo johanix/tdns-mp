@@ -1,110 +1,98 @@
-# TDNS
+# TDNS-MP
 
-TDNS is a set of DNS libraries written in Go together with
-several applications built on those libraries.
+TDNS-MP is the multi-provider DNSSEC coordination layer
+built on top of [TDNS](../tdns/). It implements the
+agent-to-agent, agent-to-combiner, and agent-to-signer
+protocols needed to operate a single zone across two or
+more independent DNS providers (RFC 8901 multi-signer and
+the more general multi-provider case).
 
-The applications include an authoritative nameserver
-(tdns-auth), a recursive nameserver (tdns-imr), a dig-like
-query tool with support for experimental record types (dog),
-a management CLI (tdns-cli), and specialized servers for
-multi-provider DNSSEC coordination (tdns-agent, tdns-combiner).
+This repository contains only the multi-provider-specific
+binaries and code. The underlying DNS engine, authoritative
+nameserver, recursive resolver, query tool, keystore, and
+delegation-sync machinery all live in the
+[tdns repository](../tdns/) and must be present as a sibling
+checkout in order to build.
 
-## Key Features
+## Applications
 
-- DNSSEC online signing with automatic key management
-- Automatic delegation synchronization via DNS UPDATE (RFC 9859)
-- Multi-provider DNSSEC (RFC 8901) with agent-to-agent gossip,
-  leader election, and zone combiner
-- Experimental record types: DSYNC, HSYNC3, HSYNCPARAM, DELEG
-- Modern DNS transports: DoT, DoH, DoQ (in addition to Do53)
-- DNS transport signaling between auth servers and resolvers
-- DNS Catalog Zones (RFC 9432)
-- SIG(0) key management with KeyState EDNS(0) bootstrapping
+| Binary           | Role                                              |
+|------------------|---------------------------------------------------|
+| tdns-mpagent     | Per-provider coordination agent                   |
+| tdns-mpcombiner  | Zone combiner (merges per-provider contributions) |
+| tdns-mpsigner    | DNSSEC signer for multi-provider zones            |
+| tdns-mpcli       | Management CLI for the three services above      |
+
+The `dog` query tool from tdns can be used to inspect
+HSYNC3, HSYNCPARAM, and other experimental record types
+used by tdns-mp.
+
+## Multi-Provider Specific Features
+
+- **Provider groups and gossip protocol** -- agents discover
+  each other from HSYNC3 records and maintain an NxN state
+  matrix per provider group, exchanged on every BEAT.
+- **Leader election** -- per-group three-phase election
+  (CALL/VOTE/CONFIRM) to designate a single agent for
+  parent-facing operations.
+- **Combiner** -- merges contributions from all providers
+  with a single zone owner's input zone, applying policy
+  (signing authorization, protected namespaces) and
+  publishing the result via outbound zone transfer to the
+  signer.
+- **JOSE/CHUNK transport** -- agent-to-agent and
+  agent-to-combiner messages are JWS(JWE(JWT)) payloads
+  carried in the experimental CHUNK DNS record type.
+- **HSYNC3 + HSYNCPARAM** -- per-provider identity records
+  and zone-wide multi-provider policy.
+- **KEYSTATE bootstrap and signaling** -- DNSKEY publication
+  is driven by KEYSTATE EDNS(0) handshakes between signer
+  and agent.
+- **Synched Data Engine (SDE)** -- per-zone runtime cache of
+  combined provider state, hydrated from the combiner on
+  startup via RFI EDITS.
 
 ## Documentation
 
-See the [TDNS Guide](guide/README.md):
+See the [tdns-mp Guide](guide/README.md):
 
-- [TDNS Applications](guide/applications.md) -- overview of
-  all applications with links to detailed docs
+- [tdns-mp Applications](guide/applications.md) -- overview
+  of the four mp binaries with links to per-app docs.
 - [Multi-Provider QuickStart](guide/multi-provider-quickstart.md)
-  -- single-host setup guide
+  -- single-host setup with agent, combiner, and signer
+  serving one example zone.
 - [Multi-Provider Advanced Topics](guide/multi-provider-advanced.md)
-  -- delegation sync, provider zones, gossip, elections
-- [Special Features and Extensions](guide/special-features.md)
-  -- delegation sync, transport signaling, experimental RR types
-- Future Work (coming soon)
+  -- parent synchronization, provider zones,
+  provider-to-provider sync, gossip, leader elections.
+- [MP Change Tracking Semantics](guide/mp-change-tracking-semantics.md)
+  -- design decisions for change tracking, confirmation,
+  and routing across agents, combiners, and signers.
+
+For the underlying DNS engine, authoritative nameserver,
+delegation sync, transport signaling, and experimental RR
+types, see the [TDNS Guide](../tdns/guide/README.md).
 
 ## Building
 
+The code is split across three repositories that must be
+cloned next to each other (the build uses `go.mod` `replace`
+directives that reference sibling directories).
+
 ```sh
-cd cmdv2
+git clone https://github.com/johanix/tdns.git
+git clone https://github.com/johanix/tdns-transport.git
+git clone https://github.com/johanix/tdns-mp.git
+
+cd tdns-mp/cmd
 make
 sudo make install
 ```
 
-Requires Go 1.22+.
-
-# General TDNS Features:
-
-# Running agent in Docker
-
-## Building the image:
+Requires Go 1.22+. Installs:
 
 ```
-$ docker buildx build --no-cache -t tdns - < Dockerfile
-[+] Building 132.7s (24/24) FINISHED                                                                                                                                                                                                                                                                     docker:desktop-linux
- => [internal] load build definition from Dockerfile                                                                                                                                                                                                                                                                     0.0s
- => => transferring dockerfile: 1.81kB                                                                                                                                                                                                                                                                                   0.0s
- => [internal] load metadata for docker.io/library/golang:1.25.2-alpine                                                                                                                                                                                                                                                  0.0s
- => [internal] load metadata for docker.io/library/alpine:latest                                                                                                                                                                                                                                                         1.3s
- => [internal] load .dockerignore                                                                                                                                                                                                                                                                                        0.0s
- => => transferring context: 2B                                                                                                                                                                                                                                                                                          0.0s
- => CACHED [stage-1  1/12] FROM docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659                                                                                                                                                                                  0.0s
- => CACHED [builder 1/7] FROM docker.io/library/golang:1.25.2-alpine                                                                                                                                                                                                                                                     0.0s
- => [stage-1  2/12] RUN apk add --no-cache ca-certificates openssl                                                                                                                                                                                                                                                       5.3s
- => [builder 2/7] RUN apk add --no-cache make git gcc musl-dev                                                                                                                                                                                                                                                          41.7s
- => [stage-1  3/12] WORKDIR /etc/tdns                                                                                                                                                                                                                                                                                    0.0s
- => [builder 3/7] WORKDIR /app                                                                                                                                                                                                                                                                                           0.0s
- => [builder 4/7] RUN git clone --branch main https://github.com/johanix/tdns.git .                                                                                                                                                                                                                                      7.1s
- => [builder 5/7] RUN make all                                                                                                                                                                                                                                                                                          79.8s
- => [builder 6/7] RUN mkdir -p /usr/local/libexec /usr/local/bin     && find . -type f -name "tdns*" -executable -exec cp {} /usr/local/bin/ ;                                                                                                                                                                           0.3s
- => [builder 7/7] RUN make install                                                                                                                                                                                                                                                                                       0.6s
- => [stage-1  4/12] COPY --from=builder /usr/local/bin/tdns-* /usr/local/bin/                                                                                                                                                                                                                                            0.3s
- => [stage-1  5/12] RUN mkdir -p /etc/tdns/certs                                                                                                                                                                                                                                                                         0.1s
- => [stage-1  6/12] COPY --from=builder /app/cmdv2/agentv2/tdns-agent.sample.yaml /etc/tdns/tdns-agentv2.yaml                                                                                                                                                                                                            0.0s
- => [stage-1  7/12] COPY --from=builder /app/cmdv2/agentv2/agent-zones.yaml /etc/tdns/                                                                                                                                                                                                                                   0.0s
- => [stage-1  8/12] COPY --from=builder /app/cmdv2/cliv2/tdns-cli.sample.yaml /etc/tdns/tdns-cli.yaml                                                                                                                                                                                                                    0.0s
- => [stage-1  9/12] COPY --from=builder /app/cmdv2/authv2/tdns-auth.sample.yaml /etc/tdns/tdns-authv2.yaml                                                                                                                                                                                                               0.0s
- => [stage-1 10/12] COPY --from=builder /app/utils/ /tmp/utils/                                                                                                                                                                                                                                                          0.0s
- => [stage-1 11/12] RUN tdns-cli db init -f /var/tmp/tdns-agent.db     && cd /tmp/utils     && for cn in localhost. agent.provider. agent.jose. ; do echo $cn | sh gen-cert.sh ; done     && cp *.key *.crt /etc/tdns/certs/     && rm -rf /tmp/utils                                                                    0.3s
- => [stage-1 12/12] RUN tdns-cliv2 keys generate --jose                                                                                                                                                                                                                                                                  0.1s
- => exporting to image                                                                                                                                                                                                                                                                                                   0.4s
- => => exporting layers                                                                                                                                                                                                                                                                                                  0.4s
- => => writing image sha256:9e7dfed4c4f033ecc03e8a57a574cc876993c26cf258eb1da31f5d4eaf924467                                                                                                                                                                                                                             0.0s
- => => naming to docker.io/library/tdns                                                                                                                                                                                                                                                                                  0.0s
-
-View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/zmhrn3bvdd2vx2pcja70b6yi3
-
-What's next:
-    View a summary of image vulnerabilities and recommendations → docker scout quickview
-```
-
-## Running the image built
-
-```
-$ docker run -it tdns
-*** TDNS tdns-agentv2 version v0.8-main-b2158dd mode of operation: "agent" (verbose: false, debug: false)
-2026/03/09 17:39:49 WARN unknown config keys ignored (possible misspellings) subsystem=config keys="[Service.maxrefresh Service.refresh delegationsync common validator resolver keybootstrap server]"
-2026/03/09 17:39:49 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=apiserver
-2026/03/09 17:39:49 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=dnsengine
-2026/03/09 17:39:49 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=log
-2026/03/09 17:39:49 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=service
-2026/03/09 17:39:49 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=db
-Logging to file: /var/log/tdns/tdns-agent.log
-TDNS tdns-agentv2 version v0.8-main-b2158dd starting.
-Zone "test.net." refers to the non-existing template "parent-primary". Ignored.
-Zone "johani.org." refers to the non-existing template "secondary". Ignored.
-PRINT AT github.com/johanix/tdns/v2.(*KeyDB).GenerateKeypair(sig0_utils.go:232)
-string("/opt/local/bin/dnssec-keygen -K /tmp -a ED25519 -T KEY -f KSK -n ZONE dns.agent.provider."), #len=89
+/usr/local/bin/tdns-mpcli
+/usr/local/libexec/tdns-mpagent
+/usr/local/libexec/tdns-mpcombiner
+/usr/local/libexec/tdns-mpsigner
 ```
