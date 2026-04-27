@@ -107,3 +107,8 @@ log:
 
 common:
    command:  /usr/local/libexec/tdns-mpauditor
+
+audit:
+   event_log:
+      retention:        168h   # how long events are kept (default: 1 week)
+      prune_interval:   1h     # how often the pruner runs (default: 1h)

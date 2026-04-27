@@ -4,12 +4,13 @@
  * MP auditor startup: StartMPAuditor starts DNS infrastructure plus
  * the MP engines needed for a read-only observer role.
  *
- * Phase A scope: passive observer only — receives BEATs, HELLOs,
- * PINGs, SYNC/UPDATE/RFI; participates in gossip; participates in
- * provider group computation. Does NOT run HsyncEngine,
- * SynchedDataEngine, leader election, KeyStateWorker, or any path
- * that produces outbound zone data. Phase B adds persistent event
- * log and in-memory AuditZoneState; Phase D adds the web dashboard.
+ * Phase B scope: passive observer with persistent event log and
+ * in-memory AuditZoneState. Receives BEATs, HELLOs, PINGs,
+ * SYNC/UPDATE/RFI; participates in gossip and provider group
+ * computation; persists notable events to AuditEventLog and tracks
+ * per-provider state. Does NOT run HsyncEngine, SynchedDataEngine,
+ * leader election, KeyStateWorker, or any path that produces
+ * outbound zone data. Phase D adds the web dashboard.
  */
 package tdnsmp
 
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/spf13/viper"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -97,10 +99,30 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		}
 	}
 
+	// Phase B: persistent event log + in-memory audit state.
+	stateManager := NewAuditStateManager()
+	conf.InternalMp.AuditStateManager = stateManager
+
+	kdb := conf.Config.Internal.KeyDB
+	if kdb != nil {
+		if err := InitAuditEventLogTable(kdb); err != nil {
+			lgAuditor.Error("failed to initialize audit event log", "err", err)
+		}
+		retention := viper.GetDuration("audit.event_log.retention")
+		if retention == 0 {
+			retention = 168 * time.Hour
+		}
+		pruneInterval := viper.GetDuration("audit.event_log.prune_interval")
+		if pruneInterval == 0 {
+			pruneInterval = 1 * time.Hour
+		}
+		StartAuditEventPruner(ctx, kdb, retention, pruneInterval)
+	}
+
 	// Auditor message handler.
 	msgQs := conf.InternalMp.MsgQs
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorMsgHandler", func() {
-		AuditorMsgHandler(ctx, conf, msgQs)
+		AuditorMsgHandler(ctx, conf, msgQs, stateManager)
 	})
 
 	// Agent-style protocol participation: infra-peer beats and
@@ -153,7 +175,6 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 
 	// Zone-updater engine for any URI/JWK/SVCB publication the
 	// auditor itself does (its own identity zone). Reused as-is.
-	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
 		tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
 			return kdb.ZoneUpdaterEngine(ctx)
