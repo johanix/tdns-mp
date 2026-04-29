@@ -2,23 +2,15 @@ module github.com/johanix/tdns-mp/cmd/mpsigner
 
 go 1.25.2
 
-replace (
-	github.com/johanix/tdns-mp/v2 => ../../v2
-	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
-	github.com/johanix/tdns/v2 => ../../../tdns/v2
-	github.com/johanix/tdns/v2/cache => ../../../tdns/v2/cache
-	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
-)
+replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2 v2.0.0-20260429140910-279a53cd37ce
 	github.com/mattn/go-sqlite3 v1.14.16
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -29,10 +21,10 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260427162659-70a56004d104 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260429140910-279a53cd37ce // indirect
+	github.com/johanix/tdns/v2/core v0.0.0-20260429140910-279a53cd37ce // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260429140910-279a53cd37ce // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
