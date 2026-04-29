@@ -504,12 +504,14 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 
 	for _, addr := range addrs {
 		a := addr
-		mux := http.NewServeMux()
-		ws.RegisterRoutes(mux)
 		// In "none" mode the require-auth wrapper is bypassed by
-		// substituting a passthrough.
+		// substituting a passthrough; see noAuthMux.
+		var mux *http.ServeMux
 		if auth == nil {
 			mux = noAuthMux(ws)
+		} else {
+			mux = http.NewServeMux()
+			ws.RegisterRoutes(mux)
 		}
 
 		srv := &http.Server{Addr: a, Handler: mux, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}}

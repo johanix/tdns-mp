@@ -73,9 +73,6 @@ var auditorWebUserCreateCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		name, _ := cmd.Flags().GetString("name")
-		if name == "" {
-			log.Fatal("--name is required")
-		}
 		path, err := fetchUsersFilePath()
 		if err != nil {
 			log.Fatal(err)
@@ -112,9 +109,6 @@ var auditorWebUserDeleteCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		name, _ := cmd.Flags().GetString("name")
-		if name == "" {
-			log.Fatal("--name is required")
-		}
 		path, err := fetchUsersFilePath()
 		if err != nil {
 			log.Fatal(err)
@@ -199,7 +193,9 @@ func promptNewPassword() (string, error) {
 
 func init() {
 	auditorWebUserCreateCmd.Flags().String("name", "", "username (required)")
+	_ = auditorWebUserCreateCmd.MarkFlagRequired("name")
 	auditorWebUserDeleteCmd.Flags().String("name", "", "username (required)")
+	_ = auditorWebUserDeleteCmd.MarkFlagRequired("name")
 
 	auditorWebUserCmd.AddCommand(
 		auditorWebUserListCmd,

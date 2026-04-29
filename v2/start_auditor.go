@@ -106,7 +106,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
 		if err := InitAuditEventLogTable(kdb); err != nil {
-			lgAuditor.Error("failed to initialize audit event log", "err", err)
+			return fmt.Errorf("audit event log table init: %w", err)
 		}
 		retention := viper.GetDuration("audit.event_log.retention")
 		if retention <= 0 {

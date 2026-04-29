@@ -48,9 +48,15 @@ type AuditResponse struct {
 	UsersCount   int                    `json:"users_count,omitempty"`
 }
 
+// maxAuditBodySize bounds the JSON request body for /api/v1/auditor.
+// The endpoint's largest legitimate payload is an eventlog query
+// with a since-time and a limit; 1 MiB is far more than that needs.
+const maxAuditBodySize = 1 << 20
+
 // APIauditor returns the HTTP handler for /api/v1/auditor.
 func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAuditBodySize)
 		var req AuditPost
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeAuditError(w, "invalid request body: "+err.Error())

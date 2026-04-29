@@ -231,30 +231,44 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 	pgm := ar.ProviderGroupManager
 	gst := ar.GossipStateTable
 
+	// Snapshot the value-typed fields of every group under pgm.mu.
+	// ProposeGroupName mutates Name in place, so reading g.Name (and
+	// the slice headers for Members/Zones) after RUnlock would race.
+	type groupSnap struct {
+		hash    string
+		name    string
+		members []string
+		zones   []ZoneName
+	}
 	pgm.mu.RLock()
-	groups := make([]*ProviderGroup, 0, len(pgm.Groups))
+	snaps := make([]groupSnap, 0, len(pgm.Groups))
 	for _, g := range pgm.Groups {
-		groups = append(groups, g)
+		snaps = append(snaps, groupSnap{
+			hash:    g.GroupHash,
+			name:    g.Name,
+			members: append([]string(nil), g.Members...),
+			zones:   append([]ZoneName(nil), g.Zones...),
+		})
 	}
 	pgm.mu.RUnlock()
 
 	now := time.Now()
-	out := make([]GossipMatrixDTO, 0, len(groups))
-	for _, g := range groups {
+	out := make([]GossipMatrixDTO, 0, len(snaps))
+	for _, g := range snaps {
 		dto := GossipMatrixDTO{
-			GroupHash: g.GroupHash,
-			Members:   append([]string(nil), g.Members...),
-			ZoneCount: len(g.Zones),
+			GroupHash: g.hash,
+			Members:   g.members,
+			ZoneCount: len(g.zones),
 		}
-		if g.Name != "" {
-			dto.GroupName = g.Name
+		if g.name != "" {
+			dto.GroupName = g.name
 		}
-		for _, z := range g.Zones {
+		for _, z := range g.zones {
 			dto.Zones = append(dto.Zones, string(z))
 		}
 		gst.mu.RLock()
-		if states, ok := gst.States[g.GroupHash]; ok {
-			for _, member := range g.Members {
+		if states, ok := gst.States[g.hash]; ok {
+			for _, member := range g.members {
 				ms := states[member]
 				row := GossipMemberRow{Reporter: member}
 				if ms != nil {
@@ -276,7 +290,7 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 				dto.Rows = append(dto.Rows, row)
 			}
 		}
-		if elec := gst.Elections[g.GroupHash]; elec != nil {
+		if elec := gst.Elections[g.hash]; elec != nil {
 			dto.Election = GossipElectionDTO{
 				Leader:       elec.Leader,
 				Term:         elec.Term,
