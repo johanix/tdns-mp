@@ -71,7 +71,7 @@ func InsertAuditEvent(kdb *tdns.KeyDB, event *AuditEvent) error {
 
 	_, err := kdb.DB.Exec(
 		`INSERT INTO AuditEventLog (time, zone, originator, delivered_by, event_type, summary, rrs_added, rrs_removed, rrtypes, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.Time.Format(time.RFC3339),
+		event.Time.UTC().Format(time.RFC3339),
 		event.Zone,
 		event.Originator,
 		event.DeliveredBy,
@@ -101,7 +101,7 @@ func QueryAuditEvents(kdb *tdns.KeyDB, zone string, since time.Time, limit int) 
 	}
 	if !since.IsZero() {
 		query += ` AND time >= ?`
-		args = append(args, since.Format(time.RFC3339))
+		args = append(args, since.UTC().Format(time.RFC3339))
 	}
 	query += ` ORDER BY time DESC`
 	if limit > 0 {
@@ -121,13 +121,25 @@ func QueryAuditEvents(kdb *tdns.KeyDB, zone string, since time.Time, limit int) 
 		if err := rows.Scan(&e.ID, &timeStr, &e.Zone, &e.Originator, &e.DeliveredBy, &e.EventType, &e.Summary, &e.RRsAdded, &e.RRsRemoved, &e.RRtypes, &e.Details); err != nil {
 			return nil, fmt.Errorf("scan audit event: %w", err)
 		}
-		e.Time, _ = time.Parse(time.RFC3339, timeStr)
+		t, err := time.Parse(time.RFC3339, timeStr)
+		if err != nil {
+			// Skip rows whose timestamp doesn't parse rather than
+			// failing the whole query: one corrupt row should not
+			// blind an admin to the rest of the log.
+			lgAuditor.Warn("audit event has unparseable timestamp; skipping",
+				"id", e.ID, "time", timeStr, "err", err)
+			continue
+		}
+		e.Time = t
 		events = append(events, e)
 	}
 	return events, rows.Err()
 }
 
 // ClearAuditEvents deletes events matching the given filters.
+// `all=true` is mutually exclusive with `zone` / `olderThan`: an
+// admin asking for both has very likely made a mistake and we'd
+// rather error than silently wipe the whole table.
 func ClearAuditEvents(kdb *tdns.KeyDB, zone string, olderThan time.Duration, all bool) (int64, error) {
 	kdb.Lock()
 	defer kdb.Unlock()
@@ -136,18 +148,21 @@ func ClearAuditEvents(kdb *tdns.KeyDB, zone string, olderThan time.Duration, all
 	var args []interface{}
 
 	if all {
+		if zone != "" || olderThan > 0 {
+			return 0, fmt.Errorf("ClearAuditEvents: all=true is mutually exclusive with zone or older_than")
+		}
 		query = `DELETE FROM AuditEventLog`
 	} else if zone != "" && olderThan > 0 {
 		cutoff := time.Now().Add(-olderThan)
 		query = `DELETE FROM AuditEventLog WHERE zone = ? AND time < ?`
-		args = append(args, zone, cutoff.Format(time.RFC3339))
+		args = append(args, zone, cutoff.UTC().Format(time.RFC3339))
 	} else if zone != "" {
 		query = `DELETE FROM AuditEventLog WHERE zone = ?`
 		args = append(args, zone)
 	} else if olderThan > 0 {
 		cutoff := time.Now().Add(-olderThan)
 		query = `DELETE FROM AuditEventLog WHERE time < ?`
-		args = append(args, cutoff.Format(time.RFC3339))
+		args = append(args, cutoff.UTC().Format(time.RFC3339))
 	} else {
 		return 0, fmt.Errorf("must specify zone, older_than, or all")
 	}

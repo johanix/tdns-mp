@@ -138,6 +138,10 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 				}
 				since = t
 			}
+			if req.Limit < 0 {
+				writeAuditError(w, "invalid limit: must be >= 0")
+				return
+			}
 			limit := req.Limit
 			if limit == 0 {
 				limit = 100
@@ -159,6 +163,10 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 				d, err := time.ParseDuration(req.OlderThan)
 				if err != nil {
 					writeAuditError(w, "invalid older_than: "+err.Error())
+					return
+				}
+				if d < 0 {
+					writeAuditError(w, "invalid older_than: must be non-negative")
 					return
 				}
 				olderThan = d

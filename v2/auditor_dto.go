@@ -136,10 +136,17 @@ func (m *AuditStateManager) SnapshotAllObservations(zoneFilter string) []AuditOb
 }
 
 // SnapshotAllProviders returns one entry per distinct provider
-// identity across all tracked zones. The first occurrence wins for
-// per-provider fields (Identity, Label, IsSigner, GossipState);
-// LastBeat/LastSync are kept as the most recent across all zones the
-// provider appeared in.
+// identity across all tracked zones. Merge semantics per field:
+//   - Identity, Label: first occurrence wins (in map-iteration
+//     order of zones, which is non-deterministic).
+//   - IsSigner: OR-merged — true if any zone reports the provider
+//     as a signer, since "signer in any zone" is the useful answer.
+//   - GossipState: most recent non-empty value wins; the order in
+//     which non-empty values are seen is map-iteration dependent
+//     and therefore non-deterministic across snapshots. Don't rely
+//     on this for anything beyond a quick at-a-glance display.
+//   - LastBeat / LastSync: most recent timestamp across zones,
+//     deterministic.
 func (m *AuditStateManager) SnapshotAllProviders() []AuditProviderSummary {
 	m.mu.RLock()
 	zones := make([]*AuditZoneState, 0, len(m.zones))

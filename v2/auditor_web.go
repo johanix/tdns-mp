@@ -360,8 +360,12 @@ func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// RegisterRoutes wires all /web/* paths onto mux.
-func (s *auditorWebServer) RegisterRoutes(mux *http.ServeMux) {
+// registerRoutes wires all /web/* paths onto mux. wrap is applied
+// to every route that requires authentication; routes that must
+// stay open (static, /login, /logout, /status, root redirect) are
+// always registered raw. Callers choose wrap = s.requireAuth for the
+// authenticated mux, or an identity passthrough for no-auth mode.
+func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
 	staticSub, _ := fs.Sub(webStaticFS, "auditor_web_static")
 	mux.Handle("/web/static/", http.StripPrefix("/web/static/", http.FileServer(http.FS(staticSub))))
 
@@ -378,18 +382,18 @@ func (s *auditorWebServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/web/logout", s.handleLogout)
 	mux.HandleFunc("/web/status", s.handleStatus) // unauthenticated healthcheck
 
-	mux.HandleFunc("/web/", s.requireAuth(s.handleDashboard))
-	mux.HandleFunc("/web/zone/", s.requireAuth(s.handleZoneDetail))
-	mux.HandleFunc("/web/eventlog", s.requireAuth(s.handleEventLog))
-	mux.HandleFunc("/web/providers", s.requireAuth(s.handleProviders))
-	mux.HandleFunc("/web/observations", s.requireAuth(s.handleObservations))
-	mux.HandleFunc("/web/gossip", s.requireAuth(s.handleGossip))
+	mux.HandleFunc("/web/", wrap(s.handleDashboard))
+	mux.HandleFunc("/web/zone/", wrap(s.handleZoneDetail))
+	mux.HandleFunc("/web/eventlog", wrap(s.handleEventLog))
+	mux.HandleFunc("/web/providers", wrap(s.handleProviders))
+	mux.HandleFunc("/web/observations", wrap(s.handleObservations))
+	mux.HandleFunc("/web/gossip", wrap(s.handleGossip))
 
-	mux.HandleFunc("/web/fragment/zone-status", s.requireAuth(s.fragmentZoneStatus))
-	mux.HandleFunc("/web/fragment/provider-detail", s.requireAuth(s.fragmentProviderDetail))
-	mux.HandleFunc("/web/fragment/eventlog-rows", s.requireAuth(s.fragmentEventLogRows))
-	mux.HandleFunc("/web/fragment/observation-list", s.requireAuth(s.fragmentObservationList))
-	mux.HandleFunc("/web/fragment/gossip-matrix", s.requireAuth(s.fragmentGossipMatrix))
+	mux.HandleFunc("/web/fragment/zone-status", wrap(s.fragmentZoneStatus))
+	mux.HandleFunc("/web/fragment/provider-detail", wrap(s.fragmentProviderDetail))
+	mux.HandleFunc("/web/fragment/eventlog-rows", wrap(s.fragmentEventLogRows))
+	mux.HandleFunc("/web/fragment/observation-list", wrap(s.fragmentObservationList))
+	mux.HandleFunc("/web/fragment/gossip-matrix", wrap(s.fragmentGossipMatrix))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -398,6 +402,12 @@ func (s *auditorWebServer) RegisterRoutes(mux *http.ServeMux) {
 		}
 		http.NotFound(w, r)
 	})
+}
+
+// RegisterRoutes wires the authenticated mux: every /web/* data
+// route is wrapped with requireAuth.
+func (s *auditorWebServer) RegisterRoutes(mux *http.ServeMux) {
+	s.registerRoutes(mux, s.requireAuth)
 }
 
 // StartAuditorWebServer starts the dashboard listener(s). Reads:
@@ -478,6 +488,15 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 	keyFile := viper.GetString("audit.web.key_file")
 	useHTTPS := certFile != "" && keyFile != ""
 
+	// Plain HTTP with basic auth would send the login POST and the
+	// session cookie in the clear — even on a loopback bind, anyone
+	// on the same host could observe them. Refuse the combination.
+	// Loopback no-auth is acceptable because there is nothing to
+	// protect.
+	if mode == "basic" && !useHTTPS {
+		return errors.New("audit.web.auth.mode=\"basic\" requires HTTPS (set audit.web.cert_file and audit.web.key_file)")
+	}
+
 	ws, err := newAuditorWebServer(conf, auth, useHTTPS)
 	if err != nil {
 		return fmt.Errorf("init web server: %w", err)
@@ -517,34 +536,11 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 	return nil
 }
 
-// noAuthMux re-registers routes without the requireAuth wrapper.
+// noAuthMux builds the route mux without the requireAuth wrapper.
 // Only used when audit.web.auth.mode="none" (loopback-only).
 func noAuthMux(s *auditorWebServer) *http.ServeMux {
 	mux := http.NewServeMux()
-	staticSub, _ := fs.Sub(webStaticFS, "auditor_web_static")
-	mux.Handle("/web/static/", http.StripPrefix("/web/static/", http.FileServer(http.FS(staticSub))))
-	mux.HandleFunc("/web/status", s.handleStatus)
-
-	mux.HandleFunc("/web/", s.handleDashboard)
-	mux.HandleFunc("/web/zone/", s.handleZoneDetail)
-	mux.HandleFunc("/web/eventlog", s.handleEventLog)
-	mux.HandleFunc("/web/providers", s.handleProviders)
-	mux.HandleFunc("/web/observations", s.handleObservations)
-	mux.HandleFunc("/web/gossip", s.handleGossip)
-
-	mux.HandleFunc("/web/fragment/zone-status", s.fragmentZoneStatus)
-	mux.HandleFunc("/web/fragment/provider-detail", s.fragmentProviderDetail)
-	mux.HandleFunc("/web/fragment/eventlog-rows", s.fragmentEventLogRows)
-	mux.HandleFunc("/web/fragment/observation-list", s.fragmentObservationList)
-	mux.HandleFunc("/web/fragment/gossip-matrix", s.fragmentGossipMatrix)
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/web/", http.StatusSeeOther)
-			return
-		}
-		http.NotFound(w, r)
-	})
+	s.registerRoutes(mux, func(h http.HandlerFunc) http.HandlerFunc { return h })
 	return mux
 }
 
@@ -554,13 +550,17 @@ func auditWebUsersFile() string {
 }
 
 // isLoopbackAddr returns true if addr (host:port form) binds to a
-// loopback interface.
+// loopback interface. An empty host (e.g. ":8099") means "all
+// interfaces" and is therefore NOT loopback.
 func isLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
 	}
-	if host == "" || host == "localhost" {
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
 		return true
 	}
 	ip := net.ParseIP(host)

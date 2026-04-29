@@ -177,9 +177,13 @@ func AuditorMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	}
 }
 
-// logEvent inserts an AuditEvent into the persistent log, ignoring
-// errors after logging — failure to record an event must not block
-// the message loop.
+// logEvent inserts an AuditEvent into the persistent log. The insert
+// is synchronous (it runs inline, taking kdb.Lock() and one db.Exec
+// per call); the caller's message-handler goroutine waits for it. At
+// current load this is a single-row write of ~1ms and not a problem.
+// If event volume ever justifies it, switch to a buffered channel +
+// dedicated writer goroutine. Errors are logged and swallowed: a
+// failure to persist must never stop the message loop.
 func logEvent(kdb *tdns.KeyDB, event *AuditEvent) {
 	if kdb == nil {
 		return
@@ -190,22 +194,31 @@ func logEvent(kdb *tdns.KeyDB, event *AuditEvent) {
 	}
 }
 
-// summarizeMsgRecords returns counts and contribution map for a
-// sync/update message. Contributions are keyed owner → rrtype → count
-// (rrtype as numeric DNS type when known, 0 otherwise).
+// summarizeMsgRecords returns counts and the set of RRtypes touched
+// by a sync/update message. Per-owner / per-rrtype attribution is
+// not done here: parsing every RR string just to bucket counts adds
+// CPU on the hot path for state we don't yet display anywhere. Until
+// per-owner attribution is needed, contributions is returned as nil
+// so callers can pass it straight to UpdateProviderSync without
+// clobbering the existing map.
+//
+// TODO: when msg.Records is non-empty (legacy class-overloaded
+// path), the rrtypes slice will miss any types only carried in
+// Records. Today the senders we care about (agent → auditor for
+// DNSKEY-class checks) emit Operations, so this is a latent bug
+// rather than an active one. Fix when we add per-owner attribution.
 func summarizeMsgRecords(msg *AgentMsgPostPlus) (added, removed int,
 	rrtypes []string, contributions map[string]map[uint16]int) {
-	contributions = make(map[string]map[uint16]int)
 	rrtypeSeen := make(map[string]bool)
 
-	for owner, rrs := range msg.Records {
-		if contributions[owner] == nil {
-			contributions[owner] = make(map[uint16]int)
-		}
-		// Class-overloaded legacy path: count as added; rrtype detail
-		// is not available without parsing each RR string, which is
-		// beyond what the auditor needs at this layer.
+	for _, rrs := range msg.Records {
+		// Legacy class-overloaded path: count as added without
+		// parsing the RR strings.
 		added += len(rrs)
+	}
+	if len(msg.Records) > 0 && len(msg.Operations) == 0 {
+		lgAuditor.Warn("sync/update used legacy Records field without Operations; rrtype-based observations may miss this message",
+			"zone", msg.Zone, "sender", msg.OriginatorID, "owners", len(msg.Records))
 	}
 	for _, op := range msg.Operations {
 		if !rrtypeSeen[op.RRtype] {
@@ -219,6 +232,7 @@ func summarizeMsgRecords(msg *AgentMsgPostPlus) (added, removed int,
 			removed += len(op.Records)
 		}
 	}
+	// contributions is intentionally nil — see godoc.
 	return added, removed, rrtypes, contributions
 }
 
@@ -238,10 +252,15 @@ func detectMsgObservations(zs *AuditZoneState, senderID string,
 	if !hasDNSKEY {
 		return
 	}
+	// Read IsSigner under the lock; ps is mutated by
+	// UpdateProviderBeat/UpdateProviderSync from other goroutines.
 	zs.mu.RLock()
-	ps := zs.Providers[senderID]
+	isSigner := false
+	if ps := zs.Providers[senderID]; ps != nil {
+		isSigner = ps.IsSigner
+	}
 	zs.mu.RUnlock()
-	if ps != nil && ps.IsSigner {
+	if isSigner {
 		return
 	}
 	zs.AddObservation("warning", senderID,

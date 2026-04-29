@@ -207,6 +207,26 @@ func HashPassword(password string) (string, error) {
 	return string(h), nil
 }
 
+// dummyBcryptHash is a real bcrypt-12 hash of a random secret,
+// generated once at package init. Verify() compares against this for
+// unknown usernames so the bcrypt key schedule still runs and the
+// timing of "user not found" matches "wrong password". A malformed
+// placeholder would fail bcrypt's parse check and short-circuit,
+// re-introducing the timing leak.
+var dummyBcryptHash []byte
+
+func init() {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		panic(fmt.Sprintf("auditor_auth init: rand.Read: %v", err))
+	}
+	h, err := bcrypt.GenerateFromPassword(secret, 12)
+	if err != nil {
+		panic(fmt.Sprintf("auditor_auth init: bcrypt: %v", err))
+	}
+	dummyBcryptHash = h
+}
+
 // Verify checks user/password against the bcrypt hash. Returns nil on success.
 func (a *AuditWebAuth) Verify(user, password string) error {
 	a.mu.Lock()
@@ -214,10 +234,7 @@ func (a *AuditWebAuth) Verify(user, password string) error {
 	a.mu.Unlock()
 	if !ok {
 		// Run bcrypt anyway to avoid timing leaks of which usernames exist.
-		_ = bcrypt.CompareHashAndPassword(
-			[]byte("$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidi"),
-			[]byte(password),
-		)
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(password))
 		return errors.New("invalid credentials")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {

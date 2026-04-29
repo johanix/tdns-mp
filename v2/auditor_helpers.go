@@ -13,6 +13,8 @@
 package tdnsmp
 
 import (
+	"strings"
+
 	"github.com/miekg/dns"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -77,8 +79,11 @@ func (mpzd *MPZoneData) IsAuditorIdentity(identity string) bool {
 		if dns.Fqdn(h3.Identity) != identity {
 			continue
 		}
+		// HSYNC3 labels are short tokens, but some sources serialize
+		// them with a trailing dot. Normalize before comparing.
+		h3Label := strings.TrimSuffix(h3.Label, ".")
 		for _, lbl := range auditorLabels {
-			if h3.Label == lbl {
+			if h3Label == strings.TrimSuffix(lbl, ".") {
 				return true
 			}
 		}

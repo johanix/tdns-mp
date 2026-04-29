@@ -16,7 +16,7 @@ package tdnsmp
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -39,7 +39,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
 	if imrActive {
 		if err := conf.Config.InitImrEngine(true); err != nil {
-			log.Fatalf("IMR initialization failed: %v", err)
+			return fmt.Errorf("IMR initialization failed: %w", err)
 		}
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
@@ -109,11 +109,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 			lgAuditor.Error("failed to initialize audit event log", "err", err)
 		}
 		retention := viper.GetDuration("audit.event_log.retention")
-		if retention == 0 {
+		if retention <= 0 {
 			retention = 168 * time.Hour
 		}
 		pruneInterval := viper.GetDuration("audit.event_log.prune_interval")
-		if pruneInterval == 0 {
+		if pruneInterval <= 0 {
 			pruneInterval = 1 * time.Hour
 		}
 		StartAuditEventPruner(ctx, kdb, retention, pruneInterval)
@@ -121,11 +121,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 
 	// Anomaly detectors: provider-silent + missing-provider.
 	silenceThreshold := viper.GetDuration("audit.silence_threshold")
-	if silenceThreshold == 0 {
+	if silenceThreshold <= 0 {
 		silenceThreshold = 90 * time.Second
 	}
 	detectorInterval := viper.GetDuration("audit.detector_interval")
-	if detectorInterval == 0 {
+	if detectorInterval <= 0 {
 		detectorInterval = 30 * time.Second
 	}
 	StartAuditDetectors(ctx, stateManager, silenceThreshold, detectorInterval)
