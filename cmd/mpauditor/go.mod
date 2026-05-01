@@ -1,4 +1,4 @@
-module github.com/johanix/tdns-mp/cmd/mpagent
+module github.com/johanix/tdns-mp/cmd/mpauditor
 
 go 1.25.2
 

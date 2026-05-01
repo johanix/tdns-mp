@@ -30,3 +30,12 @@ const (
 	AgentMsgNotify = tdnsmp.AgentMsgNotify
 	AgentMsgRfi    = tdnsmp.AgentMsgRfi
 )
+
+// Auditor API types
+type AuditPost = tdnsmp.AuditPost
+type AuditResponse = tdnsmp.AuditResponse
+type AuditEvent = tdnsmp.AuditEvent
+type AuditObservation = tdnsmp.AuditObservation
+type AuditZoneSummary = tdnsmp.AuditZoneSummary
+type AuditProviderSummary = tdnsmp.AuditProviderSummary
+type AuditWebUser = tdnsmp.AuditWebUser

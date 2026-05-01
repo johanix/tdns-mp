@@ -1,0 +1,18 @@
+{{template "layout" .}}
+{{define "content"}}
+<h2>Observations</h2>
+
+<form method="GET" action="/web/observations">
+  <fieldset role="group">
+    <input type="text" name="zone" placeholder="Filter by zone&hellip;" value="{{.Zone}}">
+    <input type="submit" value="Filter">
+  </fieldset>
+</form>
+
+<div
+  {{if .Zone}}hx-get="/web/fragment/observation-list?zone={{.Zone}}"{{else}}hx-get="/web/fragment/observation-list"{{end}}
+  hx-trigger="every 20s"
+  hx-swap="innerHTML">
+  {{template "observation-list-inner" .}}
+</div>
+{{end}}

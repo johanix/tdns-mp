@@ -65,6 +65,12 @@ type GossipStateTable struct {
 
 // ProviderGroup represents a set of providers that together serve a group of zones.
 // The group is identified by a hash of the sorted member identities.
+//
+// Locking: read or modify any *ProviderGroup field only while
+// holding pgm.mu (RLock for read, Lock for write). RecomputeGroups
+// replaces map entries wholesale; ProposeGroupName mutates Name and
+// NameProposal in place — so callers cannot assume the struct is
+// immutable once stored. Snapshot fields under the lock.
 type ProviderGroup struct {
 	GroupHash    string             // truncated SHA-256 of sorted member identities
 	Name         string             // human-friendly name (resolved via naming protocol)

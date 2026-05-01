@@ -1,0 +1,22 @@
+{{template "layout" .}}
+{{define "content"}}
+<h2>Event Log</h2>
+
+<form method="GET" action="/web/eventlog">
+  <fieldset role="group">
+    <input type="text" name="zone" placeholder="Filter by zone&hellip;" value="{{.Zone}}">
+    <input type="submit" value="Filter">
+  </fieldset>
+</form>
+
+{{if .Error}}
+<article class="audit-error">{{.Error}}</article>
+{{end}}
+
+<div
+  {{if .Zone}}hx-get="/web/fragment/eventlog-rows?zone={{.Zone}}"{{else}}hx-get="/web/fragment/eventlog-rows"{{end}}
+  hx-trigger="every 15s"
+  hx-swap="innerHTML">
+  {{template "eventlog-rows-inner" .}}
+</div>
+{{end}}

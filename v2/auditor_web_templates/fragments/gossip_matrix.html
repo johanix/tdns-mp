@@ -1,0 +1,49 @@
+{{define "gossip-matrix-inner"}}
+{{if not .Gossip}}
+<p><em>No gossip groups yet.</em></p>
+{{else}}
+{{range .Gossip}}
+<section>
+  <h3>{{if .GroupName}}{{.GroupName}}{{else}}{{.GroupHash}}{{end}}</h3>
+  <p>
+    <small>
+      Hash: <code>{{.GroupHash}}</code>
+      &nbsp;|&nbsp; Members: {{len .Members}}
+      &nbsp;|&nbsp; Zones: {{.ZoneCount}}
+      {{if .Election.Leader}}
+      &nbsp;|&nbsp; Leader: <strong>{{.Election.Leader}}</strong>
+      (term {{.Election.Term}})
+      {{end}}
+    </small>
+  </p>
+  {{if .Rows}}
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Reporter ↓ / Peer →</th>
+        {{range .Members}}<th>{{.}}</th>{{end}}
+        <th>Last Beat</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{$members := .Members}}
+      {{range .Rows}}
+      <tr>
+        <td><strong>{{.Reporter}}</strong></td>
+        {{$peers := .PeerStates}}
+        {{range $members}}
+          {{$state := index $peers .}}
+          <td><code>{{if $state}}{{$state}}{{else}}-{{end}}</code></td>
+        {{end}}
+        <td><small>{{if .Timestamp.IsZero}}-{{else}}{{ago .Timestamp}}{{end}}</small></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p><em>No state reports yet.</em></p>
+  {{end}}
+</section>
+{{end}}
+{{end}}
+{{end}}

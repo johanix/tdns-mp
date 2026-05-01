@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — TDNS Auditor</title>
+  <link rel="stylesheet" href="/web/static/pico.min.css">
+  <link rel="stylesheet" href="/web/static/auditor.css">
+</head>
+<body>
+  <main class="container">
+    <article style="max-width: 28rem; margin: 4rem auto;">
+      <header><strong>TDNS Auditor</strong></header>
+      <h3>Sign in</h3>
+      {{if .Error}}<article class="audit-error">{{.Error}}</article>{{end}}
+      <form method="POST" action="/web/login">
+        <label for="user">Username</label>
+        <input type="text" id="user" name="user" required autofocus
+          autocomplete="username">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required
+          autocomplete="current-password">
+        <button type="submit">Sign in</button>
+      </form>
+    </article>
+  </main>
+</body>
+</html>

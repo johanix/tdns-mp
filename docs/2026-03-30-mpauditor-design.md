@@ -374,31 +374,44 @@ The event log supports:
 
 **API endpoints:**
 
-- `POST /audit/eventlog` with JSON body:
+All auditor management goes through a single endpoint with a
+command-dispatched JSON body. The path mirrors the auditor's role
+name (matching `/agent`, `/combiner`, `/signer` for those roles)
+rather than describing the action — i.e. `/auditor`, not `/audit`:
+
+- `POST /api/v1/auditor` with JSON body:
   ```json
-  {"command": "list", "zone": "whisky.dnslab.",
+  {"command": "eventlog-list", "zone": "whisky.dnslab.",
    "since": "2026-03-30T00:00:00Z", "limit": 100}
-  {"command": "clear", "zone": "whisky.dnslab."}
-  {"command": "clear", "older_than": "168h"}
-  {"command": "clear", "all": true}
+  {"command": "eventlog-clear", "zone": "whisky.dnslab."}
+  {"command": "eventlog-clear", "older_than": "168h"}
+  {"command": "eventlog-clear", "all": true}
   ```
 
 ### Reporting Capabilities
 
-The auditor exposes state via its management API:
+The auditor exposes state via its management API. All commands go
+through the single `POST /api/v1/auditor` endpoint:
 
-- `POST /audit/zones` — list all audited zones with summary
-- `POST /audit/zone` — detailed state for one zone
-- `POST /audit/providers` — all providers across all zones
-- `POST /audit/observations` — recent observations/anomalies
-- `POST /audit/eventlog` — event log queries and management
-- `GET /audit/dashboard` — HTML dashboard (optional)
+- `command: "zones"` — list all audited zones with summary
+- `command: "zone"` — detailed state for one zone
+- `command: "observations"` — recent observations/anomalies
+- `command: "eventlog-list"` — event log queries
+- `command: "eventlog-clear"` — event log management
 
-Observations the auditor can detect:
-- Provider went silent (no BEAT for >N seconds)
+Wire-format DTOs (`AuditZoneSummary`, `AuditProviderSummary`,
+`AuditEvent`, `AuditObservation`) are plain value types,
+snapshotted from the runtime state types under their RWMutex.
+Runtime types (`AuditZoneState`, `AuditProviderState`) are never
+exposed directly over the API.
+
+Observations the auditor can detect (Phase B and B' implemented;
+others are future work):
+
+- ✓ Unauthorized DNSKEY contribution (non-signer sent keys) — B
+- ✓ Provider went silent (no BEAT for >N seconds) — B'
+- ✓ Missing provider (listed in HSYNC3 but never seen) — B'
 - SYNC data inconsistency (provider A and B disagree)
-- Unauthorized DNSKEY contribution (non-signer sent keys)
-- Missing provider (listed in HSYNC3 but never seen)
 - Serial drift (zone serial mismatch between providers)
 - NS inconsistency (different providers advertise
   different NS sets)
@@ -530,48 +543,93 @@ is sufficient for the auditor's *observer* role
 (receiving and interpreting gossip) regardless of
 `SharedZones`.
 
-### Phase B: Event log and audit state
+### Phase B: Event log and audit state — DONE
 
-8. Create `AuditEventLog` DB schema + CRUD functions.
+8. Create `AuditEventLog` DB schema + CRUD functions. ✓
 9. Log events from `AuditorMsgHandler` on every inbound
-   SYNC/UPDATE/confirm/resync.
+   SYNC/UPDATE/confirm/resync. ✓
 10. Implement automatic retention pruning (background
-    goroutine, configurable interval + max age).
-11. Implement `AuditZoneState` tracking (in-memory).
-12. Implement observation detection.
+    goroutine, configurable interval + max age). ✓
+11. Implement `AuditZoneState` tracking (in-memory). ✓
+12. Implement observation detection (per-message: unauthorized
+    DNSKEY contribution from non-signers). ✓
 
-### Phase C: Reporting — JSON API + CLI
+### Phase B': Periodic detectors — DONE
 
-13. Replace stub `apihandler_auditor_routes.go` with the
-    real `/audit/*` endpoints (zones, providers,
-    observations, eventlog).
-14. Add auditor CLI commands to mpcli:
+12a. provider-silent detector (no BEAT within
+     `audit.silence_threshold`, default 90s). ✓
+12b. missing-provider detector (HSYNC3 identity never seen). ✓
+     Both run from `StartAuditDetectors` on a configurable
+     interval (`audit.detector_interval`, default 30s); state
+     transitions emit one observation each, not one per tick.
+
+### Phase C: Reporting — JSON API + CLI — DONE
+
+13. Single `POST /api/v1/auditor` endpoint with command
+    dispatch (`zones`, `zone`, `observations`, `eventlog-list`,
+    `eventlog-clear`). Wire format uses snapshot DTOs
+    (`AuditZoneSummary`, `AuditProviderSummary`); runtime
+    state types are never exposed. ✓
+14. mpcli auditor subcommands: ✓
     - `auditor eventlog list`
     - `auditor eventlog clear`
     - `auditor zones`
     - `auditor observations`
 
-### Phase D: Web dashboard
+### Phase D: Web dashboard — DONE
 
-The web dashboard is required well before the transport
-redesign lands and must therefore be in initial scope. It
-exists on the original `mpauditor-1` branch as 9 htmx +
-Pico CSS templates.
+The web dashboard runs on its own HTTPS listener under
+`/web/*`, separate from the JSON API. It uses htmx + Pico
+CSS templates ported from `mpauditor-1`.
 
-15. Cherry-pick the dashboard templates and handler from
-    `mpauditor-1`.
-16. Audit each rendered struct (`HsyncPeerInfo`,
-    `HsyncMetricsInfo`, etc.) and isolate the rendering
-    behind a thin adapter layer in
-    `apihandler_auditor.go`. The adapter is the only
-    place that touches transport-layer struct shapes — so
-    when the transport redesign moves/renames those
-    structs, only the adapter changes, not the templates.
-17. Wire `/audit/dashboard` route and any supporting
-    static assets.
+15. Cherry-picked 9 templates + 3 static assets (htmx,
+    pico, auditor.css) from `mpauditor-1`. ✓
+16. Adapter functions (`buildDashboardData`,
+    `buildZoneDetailData`, `buildEventLogData`,
+    `buildProvidersData`, `buildObservationsData`,
+    `buildGossipData`) in `auditor_web.go` snapshot state
+    into a single `WebData` struct of DTOs. Templates only
+    see DTOs (`AuditZoneSummary`, `AuditProviderSummary`,
+    `GossipMatrixDTO`, etc.) — never runtime types. When
+    the transport redesign moves/renames structs, only the
+    adapter changes. ✓
+17. `/web/*` routes registered with bcrypt auth + signed
+    session cookies + sliding idle timeout (default 30m).
+    `/web/login` (GET form, POST verify), `/web/logout`,
+    `/web/status` (unauthenticated healthcheck), data
+    pages and HTMX fragments behind `requireAuth`. ✓
+
+**Auth**: multi-user, bcrypt-hashed passwords stored in a
+separate YAML user file (`audit.web.auth.users_file`),
+in-memory sessions with HMAC-signed cookies (`HttpOnly` +
+`Secure` + `SameSite=Strict`). CSRF defended by
+`SameSite=Strict` plus the dashboard being entirely
+read-only (the only POST is `/web/login`).
+`audit.web.auth.mode="none"` is permitted only when all
+bind addresses are loopback — non-loopback no-auth refuses
+to start.
+
+**User management**: `mpcli auditor web user
+{list,create,delete,reload}` operates the user file
+directly (atomic write via tempfile + rename, mode 0600
+on first creation, existing mode preserved on rewrite).
+The CLI asks the running auditor for the configured
+file path via `command: "userdb-path"` rather than
+parsing the auditor's own config — same pattern as the
+other CLI/daemon path-discovery flows. After mutation,
+`reload` hits `command: "userdb-reload"` so the running
+auditor swaps its in-memory user map under the lock;
+existing sessions are not invalidated.
+
+**Gossip view (extension to mpauditor-1)**: per-group
+N×N member×peer state matrix at `/web/gossip` and via
+`{"command": "gossip"}` on `/api/v1/auditor`. Snapshotted
+under both `ProviderGroupManager.mu` and
+`GossipStateTable.mu`.
 
 Done criteria: dashboard renders zone list, per-zone
-provider state, recent events, and observations.
+provider state, providers, gossip matrix, recent events,
+and observations. ✓
 
 ### Phase E: Enforcement
 
