@@ -1,10 +1,11 @@
 # Transport Interface Redesign: Clean Separation of
 # Transport and Application Layers
 
-Date: 2026-04-15 (revised 2026-04-16)
-Status: PLAN — ready to begin with **Phase 0** (integration
-        tests). Phases 1+ still require pre-work items
-        I, L, M, N (see Status Update).
+Date: 2026-04-15 (revised 2026-04-16, 2026-04-23, 2026-04-30)
+Status: PLAN — Phase 0 (integration test harness) **DONE**;
+        all 8 early bites + the harness implemented. Phases
+        1+ ready to begin; remaining pre-work is items
+        I, L, N, O (see Status Update).
 
 **Revision 2026-04-16 summary** (see "Re-evaluation" section
 below for details):
@@ -28,29 +29,41 @@ Builds on: 2026-03-24-transport-manager-redesign.md,
            2026-03-23-transport-extraction-implementation-plan.md,
            2026-03-21-transport-extraction-analysis.md
 
-> **STRONG RECOMMENDATION (added 2026-04-25): complete
-> the early bites in
+> **EARLY BITES COMPLETE (2026-04-30).** All 9 items from
 > [2026-04-25-transport-refactor-early-bites.md](./2026-04-25-transport-refactor-early-bites.md)
-> before initiating any phase of this refactor.**
+> are implemented and merged: Bites 0, 1, 3, 4, 6, 7, 8
+> plus Bite 2 (the test harness). Bite 5 closed as a
+> verified no-op.
 >
-> The early-bites doc collects eight small, additive,
-> independently revertible changes — the three original
-> Quick Wins from this plan (Bites 1–3) plus five new
-> bites (4–8) targeting the dual-registry / discovery
-> problem specifically. Each is wire-compatible, leaves
-> all three repos building, and can be reverted with a
-> single `git revert`.
+> **NEXT: SEMI-EASY BITES (2026-04-30).** A second tier
+> of additive work is now tractable. See
+> [2026-04-30-transport-refactor-semi-easy-bites.md](./2026-04-30-transport-refactor-semi-easy-bites.md)
+> for nine more bites (I, C, E, A, B, D, F, G, H —
+> recommended order) that close open items L and I and
+> partially complete Phases 1, 5, 6, 7. Total cost
+> ~4–5 working days.
 >
-> Cumulative cost: roughly 1–2 working weeks.
-> Cumulative effect: Phase 1 collapses to a deletion,
-> Phase 5 collapses to a deletion, Phase 6 part 1 is
-> already done, Phase 7 sub-step 1 is already done, the
-> Phase 6 discovery-completion seam is already installed,
-> and the Phase 0 test harness exit gate is satisfied.
+> The harness in
+> [2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md)
+> lives at `tdns-mp/v2/transport_harness_test.go` +
+> `tdns-mp/v2/transport_integ_test.go`. All seven
+> `TestTransportBoundary_*` scenarios pass. Phase 0 exit
+> gate satisfied.
 >
-> Do not skip the early bites. The 9-phase refactor
-> below is meaningfully de-risked by them, and a chunk
-> of its work is eliminated outright.
+> Net effect on the 9-phase plan below: Phase 0 done;
+> Phase 1 collapses to a deletion (per-mechanism state
+> already in place via Bites 1 + 7); Phase 5 partially
+> collapsed (sync path delegates to `tm.Send`; Hello/Beat
+> still need their parallel-send semantics resolved);
+> Phase 6 part 1 done (IMR helpers in transport via
+> parallel embedding); Phase 6 part 2 seam installed via
+> `OnPeerDiscovered`; Phase 7 step 1 done (`Agent.PeerID`);
+> Phase 7 steps 2–3 partially done (`PopulateFromAgent`
+> + wrapper switch landed; `SyncPeerFromAgent` itself
+> still has 9 write-shaped call sites awaiting Phase 7
+> proper).
+>
+> Per-phase status is annotated inline below.
 
 ## Problem Statement
 
@@ -149,11 +162,28 @@ structure, the target public API, the design principles,
 the migration direction, the tiered API model, or any of
 the other three resolved OQs (scope, QNAME, hello content).
 
-## Status Update (2026-04-15, revised 2026-04-16)
+## Status Update (2026-04-15, revised 2026-04-16,
+## 2026-04-30)
 
-The plan is structurally sound. Phase 0 (integration test
-harness) can start now. Phases 1+ require the pre-work
-items listed below.
+**2026-04-30 update.** All eight early bites from
+[2026-04-25-transport-refactor-early-bites.md](./2026-04-25-transport-refactor-early-bites.md)
+plus the test harness from
+[2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md)
+are implemented. Phase 0 exit gate satisfied (seven
+`TestTransportBoundary_*` scenarios pass). Open items K
+and J close. Per-phase status is now annotated inline at
+each phase heading. Phase 1 unblocked.
+
+The plan remains structurally sound. The 9-phase
+restructure is now meaningfully smaller: Phase 0 done;
+Phase 1 is per-mechanism state already in place + pure
+deletion of single-state fields + removal of
+`ZoneRelation`/`SharedZones`; Phase 5 partial (sync via
+`tm.Send`, Hello/Beat parallel-send pattern still TODO);
+Phase 6 part 1 done (parallel-embedded `transport.Imr`
+with six lookup helpers); Phase 6 part 2 has its callback
+seam (`OnPeerDiscovered`) in place; Phase 7 step 1
+(`Agent.PeerID`) done.
 
 ### Decisions Made
 
@@ -351,25 +381,20 @@ Phase 6 work under this resolution: instantiate a
 `transport.Imr` wrapper, use it for discovery lookups.
 Nothing moves out of `tdns/v2`; nothing changes in IMR.
 
-**K. Tests for the transport boundary.** **Prerequisite
-before Phases 1–9:** implement the harness and **all exit-gate
-scenarios** in
-[2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md)
-and keep them passing on CI. Do not begin transport
-interface redesign work (Phase 1 onward) until that
-document’s exit gate is satisfied. Minimum coverage
-includes:
-- CHUNK NOTIFY → handler → MsgQs round trip
-- SYNC with API/DNS fallback
-- Discovery completion path
-- Confirmation routing (both inline and async)
-- LEGACY-agent / zero–shared-zone **sync** rejection
-  (`HandleSync` in transport)
-- **Hello** policy rejection (`EvaluateHello` / HSYNC3 —
-  see harness doc scenario 6)
+**K. Tests for the transport boundary — CLOSED 2026-04-30.**
+Harness implemented at
+`tdns-mp/v2/transport_harness_test.go` +
+`tdns-mp/v2/transport_integ_test.go`. All seven
+`TestTransportBoundary_*` scenarios pass:
+- ChunkToMsg
+- HelloRejection
+- SyncFallback
+- ConfirmInlineResponsePrep
+- ConfirmAsyncToChannel
+- LegacySyncRejection
+- DiscoveryComplete
 
-Authoritative enumeration and acceptance criteria: harness
-doc §4.
+Phase 0 exit gate satisfied. Phase 1+ unblocked.
 
 Without this safety net, a 9-phase refactor of this scope
 is a serious gamble.
@@ -1057,8 +1082,10 @@ Peer-level `GetState()` returns the best of all mechanisms
 
 ### Phase 0: Transport-boundary integration test harness
 
-**Added 2026-04-16.** Mandatory pre-work. Phases 1+ do not
-begin until this lands.
+**Added 2026-04-16. DONE 2026-04-27.** All seven scenarios
+implemented at `tdns-mp/v2/transport_harness_test.go` +
+`tdns-mp/v2/transport_integ_test.go`. The text below is
+retained for historical context.
 
 **Goal**: establish a regression safety net before touching
 any production code. The original "Bite 2" was listed as
@@ -1109,19 +1136,36 @@ unblocked.
 **Goal**: Make PeerRegistry capable of replacing
 AgentRegistry's transport-related tracking.
 
-Steps:
-1. Add `MechanismState` struct and `Peer.Mechanisms` map
-2. Move per-mechanism fields (addresses, liveness, stats)
-   into MechanismState
-3. Add `Peer.EffectiveState()` that returns best mechanism
-4. Add `Peer.SetMechanismState(mechanism, state, reason)`
+**Status 2026-04-30: steps 1–4 DONE via Bites 1 + 7.**
+`MechanismState` struct, `Peer.Mechanisms` map, and the
+four accessors (`EffectiveState`, `HasMechanism`,
+`PreferredMechanism`, `SetMechanismState`) all live in
+`tdns-transport/v2/transport/peer.go`. Dual-write is
+active across all hello/beat/ping receipt sites in
+tdns-mp; `Peer.PopulateFromAgent` mirrors per-mechanism
+state from `Agent.ApiDetails` / `DnsDetails`. Three
+disposition-table wrappers (`HasDNSTransport`,
+`HasAPITransport`, `GetPreferredTransportName`) now
+delegate to the Peer methods.
+
+Remaining steps (Phase 1 proper):
+1. ~~Add `MechanismState` struct and `Peer.Mechanisms` map~~ — DONE
+2. ~~Move per-mechanism fields into MechanismState~~ — DONE
+3. ~~Add `Peer.EffectiveState()`~~ — DONE
+4. ~~Add `Peer.SetMechanismState(...)`~~ — DONE
 5. Remove `ZoneRelation` and `SharedZones` from Peer —
    replace with generic `Peer.Scopes map[string]any` or
-   remove entirely (let app track scope-to-peer mapping)
-6. Ensure PeerRegistry API is stable and sufficient
+   remove entirely (let app track scope-to-peer mapping).
+   **Still TODO** — Bite 1 explicitly did NOT touch
+   these.
+6. Drop the now-redundant single-state fields on Peer
+   (everything dual-write currently maintains). Pure
+   deletion now that `Mechanisms` is the canonical
+   source.
+7. Ensure PeerRegistry API is stable and sufficient.
 
-Validate: tdns-mp still builds (using old fields via
-compatibility shim if needed temporarily).
+Validate: tdns-mp still builds; integration harness's
+seven scenarios still pass.
 
 ### Phase 2: Strip MP types from transport API
 
@@ -1209,17 +1253,27 @@ with its own callback.
 **Goal**: Generic transport operations move from
 MPTransportBridge into TransportManager.
 
-Steps:
-1. Move `SelectTransport()` into TransportManager
-2. Implement `SendWithFallback()` pattern in
-   TransportManager — try preferred mechanism, fall back to
-   alternative
+**Status 2026-04-30: partially done via Bite 3.**
+`TransportManager.Send` exists and dispatches by
+type-switch over `*SyncRequest`, `*PingRequest`,
+`*RelocateRequest`. `SendSyncWithFallback` is now a thin
+delegation. Hello and Beat were intentionally NOT
+migrated by Bite 3 because their semantics are
+send-on-all-transports-in-parallel, not
+primary-then-fallback — Phase 5 still needs to address
+that distinct pattern.
+
+Remaining steps:
+1. ~~Move `SelectTransport()` into TransportManager~~ — DONE (Bite 3 uses it internally)
+2. ~~Implement `SendWithFallback()` for sync~~ — DONE for sync; **TODO for Hello/Beat** under their parallel-send semantics
 3. Move lifecycle management (RegisterChunkNotifyHandler,
    StartIncomingMessageRouter) into TM startup
 4. Add transport-level middleware that automatically updates
    PeerRegistry liveness on hello/beat receipt (removes
    manual updates from combiner/signer handlers)
-5. Remove `SendPing` duplicate from MPTransportBridge
+5. Remove `SendPing` duplicate from MPTransportBridge —
+   Bite 3 explicitly skipped this (small caller surface);
+   still TODO
 
 Validate: MPTransportBridge's generic methods are gone.
 
@@ -1229,13 +1283,34 @@ Validate: MPTransportBridge's generic methods are gone.
 application can resolve a peer identity to validated
 contact information without implementing its own discovery.
 
-Steps:
-1. Define `transport.Imr` as a struct that embeds
-   `*tdns.Imr` (struct embedding, not an interface — see
-   item J resolution). IMR itself stays in `tdns/v2`.
-   Transport uses the wrapper for discovery lookups and
-   can grow its own receiver methods later without
-   touching tdns.
+**Status 2026-04-30:** Phase 6 split into two parts; part
+1 (lookup helpers) and the part-2 callback seam are both
+DONE.
+
+**Part 1 (mechanics) — DONE via Bites 0 + 6.**
+`transport.Imr` lives in `tdns-transport/v2/transport/imr.go`
+as `type Imr struct { *tdns.Imr }`. The six lookup helpers
+(`LookupAgentJWK`, `LookupAgentKEY`,
+`LookupAgentAPIEndpoint`, `LookupAgentDNSEndpoint`,
+`LookupAgentTLSA`, `LookupServiceAddresses`) are present
+on it. Implemented as **parallel embedding**: tdns-mp's
+`tdnsmp.Imr` and its copy of the helpers stay in place;
+both wrappers point at the same singleton `*tdns.Imr`
+guaranteed by Bite 0's idempotency guard in
+`tdns/v2/imrengine.go`. Call-site migration to
+`*transport.Imr` is a follow-up.
+
+**Part 2 (orchestration) — seam DONE via Bite 8; body
+TODO.** `TransportManager.OnPeerDiscovered func(peerID string)`
+exists; tdns-mp wires the existing
+`OnAgentDiscoveryComplete` body into it at startup.
+Discovery itself (`DiscoverAndRegisterAgent`,
+`attemptDiscovery`, `DiscoveryRetrierNG`) still lives in
+tdns-mp. When it moves, the callback wiring is already
+in place.
+
+Remaining steps:
+1. ~~Define `transport.Imr` embedding `*tdns.Imr`~~ — DONE (Bite 6)
 2. Create `DiscoveryService` in transport that:
    - Watches PeerRegistry for peers in NEEDED state
    - Runs DNS lookups: URI, SVCB, TLSA, JWK records
@@ -1243,18 +1318,18 @@ Steps:
    - Populates Peer with addresses, JOSE keys, ports
    - Transitions peer: NEEDED → DISCOVERING → KNOWN
    - Retries with backoff on failure
-3. Add discovery callbacks to TransportManagerConfig:
-   - `OnPeerDiscovered(peer *Peer)` — discovery succeeded
-   - `OnDiscoveryFailed(peerID string, err error)` —
-     permanent failure after retries
+3. ~~Add `OnPeerDiscovered` to TransportManagerConfig~~ — DONE (Bite 8). Add `OnDiscoveryFailed` — TODO
 4. Add `tm.DiscoverPeer(identity string)` for explicit
    discovery trigger (creates NEEDED peer, kicks discovery)
 5. Move `DiscoverAndRegisterAgent` logic from tdns-mp:
    - Generic discovery mechanics → transport
    - MP-specific agent metadata → stays in tdns-mp's
-     `OnPeerDiscovered` callback
+     `OnPeerDiscovered` callback (already wired)
 6. Move discovery retry/backoff infrastructure from
    tdns-mp (`DiscoveryRetrierNG` or equivalent)
+7. After discovery moves, deduplicate the lookup helpers
+   on `tdnsmp.Imr` against `transport.Imr` (parallel
+   embedding cleanup).
 
 Validate: transport can discover a peer given only an
 identity string, without any MP code involved.
@@ -1264,21 +1339,40 @@ identity string, without any MP code involved.
 **Goal**: MPTransportBridge disappears entirely. MP code uses
 TransportManager directly.
 
+**Status 2026-04-30:** Sub-step 1 (`Agent.PeerID`) DONE
+via Bite 4. The `Peer.PopulateFromAgent` bridge from
+Bite 7 mirrors per-mechanism state from Agent onto Peer,
+documenting the canonical Agent→Peer mapping in code.
+The three disposition-table wrappers
+(`HasDNSTransport`, `HasAPITransport`,
+`GetPreferredTransportName`) now delegate to Peer methods.
+
+Bite 5 audit found all 9 `SyncPeerFromAgent` call sites
+are write-shaped (each acquires a peer to immediately
+send through it). The genuine decoupling work — split
+"get-or-create peer" from "sync state from agent" on
+hot send paths — is bigger than a bite and properly
+belongs here in Phase 7.
+
 Steps:
-1. Move remaining MP methods from MPTransportBridge onto
+1. ~~Add `Agent.PeerID string` field~~ — DONE (Bite 4)
+2. Split `SyncPeerFromAgent` into "get-or-create peer"
+   (cheap lookup) and "populate from agent" (currently
+   `Peer.PopulateFromAgent`, already exists). Migrate
+   the 9 hot send-path call sites to the cheap lookup.
+3. Move remaining MP methods from MPTransportBridge onto
    appropriate MP structs (HsyncEngine, CombinerMsgHandler,
    etc.)
-2. Replace `*MPTransportBridge` with
+4. Replace `*MPTransportBridge` with
    `*transport.TransportManager` in MP config
-3. Agent struct gets `PeerID string` field, drops duplicated
-   transport state
-4. AgentRegistry drops transport-overlapping fields, reads
+5. AgentRegistry drops transport-overlapping fields, reads
    from PeerRegistry via ID lookup
-5. Remove `SyncPeerFromAgent()`,
+6. Remove `SyncPeerFromAgent()`,
    `agentStateToTransportState()` — no longer needed
-6. Delete MPTransportBridge type
+7. Delete MPTransportBridge type
 
-Validate: all binaries build and pass existing tests.
+Validate: all binaries build; integration harness's
+seven scenarios still pass.
 
 ### Phase 8: Reduce core package coupling
 
@@ -1416,13 +1510,10 @@ add it as a Tier 2 feature without changing the field name.
 Remaining open items tracked as **G–O** in the Status
 Update section. Closed: **G** (gossip, with OQ1), **H**
 (type migration map, appendix below), **J** (IMR audit —
-embed `*tdns.Imr` in `transport.Imr`), **M** (destination
-package — inline in `tdns-mp/v2/`, appendix H). Items I,
-K, L, N, O remain as concrete pre-work:
-- **K** (integration tests) → **Phase 0** per
-  [2026-04-23-transport-boundary-test-harness.md](./2026-04-23-transport-boundary-test-harness.md);
-  **prerequisite before Phase 1** — exit gate (7
-  scenarios on CI) must pass first
+embed `*tdns.Imr` in `transport.Imr`), **K** (integration
+tests — harness landed 2026-04-27, seven scenarios pass),
+**M** (destination package — inline in `tdns-mp/v2/`,
+appendix H). Items I, L, N, O remain as concrete pre-work:
 - **L** (PeerRegistry shim spec) → pre-Phase-1 task
 - **I** (chunk_notify_handler split) → pre-Phase-4 task
 - **N, O** → pre-Phase-2 / throughout as noted
