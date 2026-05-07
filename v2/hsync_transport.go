@@ -463,7 +463,23 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		if !ok {
 			return
 		}
-		tm.OnAgentDiscoveryComplete(agent)
+		peer := tm.SyncPeerFromAgent(agent)
+
+		// Set preferred transport based on what's available
+		if agent.ApiMethod && agent.DnsMethod {
+			peer.PreferredTransport = "API"
+			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
+		} else if agent.ApiMethod {
+			peer.PreferredTransport = "API"
+			lgTransport.Info("agent has API only", "agent", agent.Identity)
+		} else if agent.DnsMethod {
+			peer.PreferredTransport = "DNS"
+			lgTransport.Info("agent has DNS only", "agent", agent.Identity)
+		}
+
+		peer.SetState(transport.PeerStateKnown, "discovery complete")
+
+		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
 	}
 
 	return tm
@@ -1702,30 +1718,6 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 
 	// Both failed
 	return nil, fmt.Errorf("all transports failed for Beat to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
-}
-
-// OnAgentDiscoveryComplete is called when agent discovery completes.
-// It syncs the Agent to a transport.Peer and sets preferred transport.
-func (tm *MPTransportBridge) OnAgentDiscoveryComplete(agent *Agent) {
-	peer := tm.SyncPeerFromAgent(agent)
-
-	// Set preferred transport based on what's available
-	if agent.ApiMethod && agent.DnsMethod {
-		// Both available - prefer API (more reliable)
-		peer.PreferredTransport = "API"
-		lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
-	} else if agent.ApiMethod {
-		peer.PreferredTransport = "API"
-		lgTransport.Info("agent has API only", "agent", agent.Identity)
-	} else if agent.DnsMethod {
-		peer.PreferredTransport = "DNS"
-		lgTransport.Info("agent has DNS only", "agent", agent.Identity)
-	}
-
-	// Update peer state
-	peer.SetState(transport.PeerStateKnown, "discovery complete")
-
-	lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
 }
 
 // GetPreferredTransportName returns the preferred transport name for an agent.

@@ -397,8 +397,8 @@ func TestTransportBoundary_LegacySyncRejection(t *testing.T) {
 	}
 }
 
-// TestTransportBoundary_DiscoveryComplete asserts that
-// OnAgentDiscoveryComplete transitions the transport-layer Peer to
+// TestTransportBoundary_DiscoveryComplete asserts that the
+// OnPeerDiscovered seam transitions the transport-layer Peer to
 // PeerStateKnown and sets PreferredTransport according to the
 // agent's ApiMethod / DnsMethod flags. Scenario 7 from the harness
 // doc.
@@ -437,11 +437,15 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 				agent.DnsDetails = &AgentDetails{State: AgentStateKnown, Addrs: []string{"127.0.0.1"}, Port: 5300}
 			}
 
-			env.Alice.Bridge.OnAgentDiscoveryComplete(agent)
+			// Register the agent in Alice's registry so the
+			// OnPeerDiscovered closure (which looks up the agent by
+			// PeerID) can find it.
+			env.Alice.Registry.S.Set(agent.Identity, agent)
+			env.Alice.Bridge.TransportManager.OnPeerDiscovered(agent.PeerID)
 
 			peer, ok := env.Alice.Bridge.PeerRegistry.Get(env.Bob.Identity)
 			if !ok {
-				t.Fatalf("Bob not in Alice's PeerRegistry after OnAgentDiscoveryComplete")
+				t.Fatalf("Bob not in Alice's PeerRegistry after OnPeerDiscovered")
 			}
 			if peer.State != transport.PeerStateKnown {
 				t.Errorf("peer state: got %v, want %v", peer.State, transport.PeerStateKnown)
