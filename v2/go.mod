@@ -2,6 +2,11 @@ module github.com/johanix/tdns-mp/v2
 
 go 1.25.2
 
+// Local replace for the duration of the transport-refactor-semi-easy-bites
+// branch — bites E/D/F/G change the tdns-transport API surface and need
+// in-tree cross-repo verification. Revert before publishing.
+replace github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2
+
 require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1

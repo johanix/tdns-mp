@@ -441,7 +441,11 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 			// OnPeerDiscovered closure (which looks up the agent by
 			// PeerID) can find it.
 			env.Alice.Registry.S.Set(agent.Identity, agent)
-			env.Alice.Bridge.TransportManager.OnPeerDiscovered(agent.PeerID)
+			// Bite E: callback takes *Peer; resolve via the registry
+			// before invoking, mirroring the production invocation
+			// site in agent_utils.go.
+			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+			env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
 
 			peer, ok := env.Alice.Bridge.PeerRegistry.Get(env.Bob.Identity)
 			if !ok {

@@ -4,6 +4,10 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
+// Local replace for the duration of the transport-refactor-semi-easy-bites
+// branch — see ../../v2/go.mod for context. Revert before publishing.
+replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2 v2.0.0-20260517221654-125303ab5c69

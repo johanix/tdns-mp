@@ -396,7 +396,13 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
 
 				if ar.TransportManager != nil && ar.TransportManager.OnPeerDiscovered != nil {
-					ar.TransportManager.OnPeerDiscovered(agent.PeerID)
+					// Bite E: invocation site resolves the peer; the
+					// callback receives a non-nil *Peer. Use
+					// GetOrCreate because discovery completion is
+					// typically the first time a peer materialises
+					// for this agent.
+					peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+					ar.TransportManager.OnPeerDiscovered(peer)
 				}
 
 				// If we're in known state and have a zone, try to send hello

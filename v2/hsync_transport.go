@@ -455,15 +455,18 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	// itself will own the discovery loop and invoke this callback directly;
 	// installing the seam now lets the call-site already use it. See Bite 8
 	// in tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
-	tm.TransportManager.OnPeerDiscovered = func(peerID string) {
+	tm.TransportManager.OnPeerDiscovered = func(peer *transport.Peer) {
 		if tm.agentRegistry == nil {
 			return
 		}
-		agent, ok := tm.agentRegistry.S.Get(AgentId(peerID))
+		agent, ok := tm.agentRegistry.S.Get(AgentId(peer.ID))
 		if !ok {
 			return
 		}
-		peer := tm.SyncPeerFromAgent(agent)
+		// Refresh per-mechanism state from the agent (peer was looked
+		// up by the invocation site; SyncPeerFromAgent returns the
+		// same registry entry).
+		tm.SyncPeerFromAgent(agent)
 
 		// Set preferred transport based on what's available
 		if agent.ApiMethod && agent.DnsMethod {
