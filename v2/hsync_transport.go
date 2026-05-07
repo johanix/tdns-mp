@@ -485,6 +485,16 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
 	}
 
+	// Symmetric failure-side seam (Bite D). Fired by MP's
+	// attemptDiscovery when a discovery round fails; the loop
+	// retries on the next tick, so this can fire repeatedly for
+	// the same peer. Body mirrors the existing failure logging in
+	// agent_utils.go so behaviour stays unchanged.
+	tm.TransportManager.OnDiscoveryFailed = func(peer *transport.Peer, err error) {
+		peer.SetState(transport.PeerStateError, err.Error())
+		lgTransport.Warn("peer discovery failed", "peer", peer.ID, "err", err)
+	}
+
 	return tm
 }
 

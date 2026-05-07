@@ -607,6 +607,7 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 		} else {
 			lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found", "failures", failures)
 		}
+		ar.fireOnDiscoveryFailed(agent, fmt.Errorf("no contact endpoints found (failures=%d)", failures))
 		return
 	}
 
@@ -619,6 +620,7 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 			agent.ApiDetails.LatestErrorTime = time.Now()
 			agent.Mu.Unlock()
 			lgAgent.Warn("registration failed, will retry", "agent", agent.Identity, "err", err)
+			ar.fireOnDiscoveryFailed(agent, fmt.Errorf("registration failed: %w", err))
 			return
 		}
 	}
@@ -665,6 +667,22 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	ar.mu.Unlock()
 	go ar.HelloRetrierNG(helloCtx, agent)
 	lgAgent.Debug("started Hello retry loop", "agent", agent.Identity)
+}
+
+// fireOnDiscoveryFailed invokes the TransportManager's
+// OnDiscoveryFailed seam if registered. Resolves the peer via
+// PeerRegistry.GetOrCreate (the peer typically does not exist yet
+// when discovery is failing) and passes a non-nil *Peer plus the
+// terminating error for this round. The discovery loop continues
+// to retry on the next tick — the callback is per-round, not
+// terminal. See Bite D in
+// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+func (ar *AgentRegistry) fireOnDiscoveryFailed(agent *Agent, err error) {
+	if ar.TransportManager == nil || ar.TransportManager.OnDiscoveryFailed == nil {
+		return
+	}
+	peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+	ar.TransportManager.OnDiscoveryFailed(peer, err)
 }
 
 // DiscoverAgentAsync marks an agent as NEEDED for discovery by DiscoveryRetrierNG.
