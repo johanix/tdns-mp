@@ -495,7 +495,26 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Warn("peer discovery failed", "peer", peer.ID, "err", err)
 	}
 
+	// Bite F: register the bridge as TransportManager's
+	// DiscoveryDriver so tm.DiscoverPeer can delegate sync
+	// discovery back into MP's existing implementation.
+	// TEMPORARY — Phase 6 part 2 moves discovery into transport
+	// and removes the indirection.
+	tm.TransportManager.DiscoveryDriver = tm
+
 	return tm
+}
+
+// RunDiscovery implements transport.DiscoveryDriver (Bite F).
+// Delegates to the existing synchronous DiscoverAndRegisterAgent
+// path; on success the peer is in PeerStateKnown when this
+// returns (set by RegisterDiscoveredAgent).
+//
+// TEMPORARY — Phase 6 part 2 of the transport interface redesign
+// moves discovery into the transport package and deletes both
+// the DiscoveryDriver interface and this implementation.
+func (tm *MPTransportBridge) RunDiscovery(ctx context.Context, peer *transport.Peer) error {
+	return tm.DiscoverAndRegisterAgent(ctx, peer.ID)
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
