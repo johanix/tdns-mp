@@ -1615,22 +1615,6 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
-// SendPing sends a ping to a peer, preferring API transport when available.
-func (tm *MPTransportBridge) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
-	req := &transport.PingRequest{
-		SenderID:  tm.LocalID,
-		Nonce:     generatePingNonce(),
-		Timestamp: time.Now(),
-	}
-	if tm.APITransport != nil && peer.APIEndpoint != "" {
-		return tm.APITransport.Ping(ctx, peer, req)
-	}
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-		return tm.DNSTransport.Ping(ctx, peer, req)
-	}
-	return nil, fmt.Errorf("no transport available for ping to %s", peer.ID)
-}
-
 // SendBeatWithFallback sends a heartbeat to a peer with transport fallback.
 // SendBeatWithFallback sends a Beat heartbeat to a peer (legacy name).
 // UPDATED: Now sends Beat on ALL supported transports independently when both are configured.
