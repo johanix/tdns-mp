@@ -729,7 +729,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 			if ar.TransportManager != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				peer := ar.MPTransport.SyncPeerFromAgent(agent)
+				peer := ar.MPTransport.GetOrCreatePeer(agent)
 				syncReq := &agenttransport.SyncRequest{
 					SenderID:    ar.LocalAgent.Identity,
 					Zone:        string(msg.Zone),
@@ -982,7 +982,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	// Try DNS transport first via TransportManager (primary transport)
 	if ar.TransportManager != nil {
-		peer := ar.MPTransport.SyncPeerFromAgent(agent)
+		peer := ar.MPTransport.GetOrCreatePeer(agent)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 

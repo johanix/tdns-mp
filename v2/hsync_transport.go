@@ -1427,9 +1427,29 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	return syncResp, nil
 }
 
-// SyncPeerFromAgent creates or updates a transport.Peer from an existing Agent.
+// GetOrCreatePeer returns the transport.Peer keyed by agent.Identity,
+// creating it (in PeerStateNeeded) if it does not already exist.
+//
+// Bite H: split out from SyncPeerFromAgent. Hot send paths use this
+// instead because the per-send state-refresh that SyncPeerFromAgent
+// performs is redundant — receipt sites already dual-write the
+// per-mechanism state. SyncPeerFromAgent is reserved for callers
+// that genuinely need a fresh state pull (currently only the
+// OnPeerDiscovered closure at discovery completion).
+func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
+	return tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+}
+
+// SyncPeerFromAgent returns the transport.Peer for this agent and
+// refreshes its per-mechanism state from the agent. Equivalent to
+// GetOrCreatePeer followed by an explicit state-refresh pass.
+//
+// Use only when the agent's state is known to be stale relative to
+// the peer (e.g. after discovery completion). Hot send paths should
+// use GetOrCreatePeer instead — see Bite H in
+// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
 func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
-	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	peer := tm.GetOrCreatePeer(agent)
 
 	// Sync API details
 	if agent.ApiDetails != nil {
@@ -1499,7 +1519,7 @@ func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transp
 // UPDATED: Now sends Hello on ALL supported transports independently when both are configured.
 // Returns success if ANY transport succeeds. Updates per-transport state in Agent struct.
 func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
-	peer := tm.SyncPeerFromAgent(agent)
+	peer := tm.GetOrCreatePeer(agent)
 
 	req := &transport.HelloRequest{
 		SenderID:     tm.LocalID,
@@ -1608,7 +1628,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 // UPDATED: Now sends Beat on ALL supported transports independently when both are configured.
 // Returns success if ANY transport succeeds. Updates per-transport LastContactTime in Agent struct.
 func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
-	peer := tm.SyncPeerFromAgent(agent)
+	peer := tm.GetOrCreatePeer(agent)
 
 	// Build gossip for this peer
 	var gossipData json.RawMessage
@@ -1813,7 +1833,7 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		return fmt.Errorf("recipient %q not found in AgentRegistry", msg.RecipientID)
 	}
 
-	peer := tm.SyncPeerFromAgent(agent)
+	peer := tm.GetOrCreatePeer(agent)
 	isCombiner := AgentId(msg.RecipientID) == tm.combinerID
 
 	// Build sync request
@@ -2274,7 +2294,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 		return fmt.Errorf("combiner %q not found in AgentRegistry", combinerID)
 	}
 
-	peer := tm.SyncPeerFromAgent(combiner)
+	peer := tm.GetOrCreatePeer(combiner)
 
 	syncReq := &transport.SyncRequest{
 		SenderID:    tm.LocalID,
