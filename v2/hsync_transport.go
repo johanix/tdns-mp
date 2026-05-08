@@ -9,9 +9,7 @@ package tdnsmp
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -27,16 +25,6 @@ import (
 
 var lgTransport = tdns.Logger("transport")
 var lgConnRetry = tdns.Logger("conn-retry")
-
-// generatePingNonce returns a random nonce for ping requests.
-// Panics if the system CSPRNG fails, as this indicates a critical system problem.
-func generatePingNonce() string {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("failed to generate random bytes for ping nonce: %v", err))
-	}
-	return hex.EncodeToString(b)
-}
 
 // MPTransportBridge manages multiple transports for agent communication.
 // MPTransportBridge aggregates MP-specific transport state and methods.
