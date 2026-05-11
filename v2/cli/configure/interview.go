@@ -127,13 +127,13 @@ func parseHostPortList(s string) []string {
 	return strings.Fields(s)
 }
 
-// ipLiteral rejects non-IP input. The prompt label promises a
-// "public IP"; accepting hostnames here would silently produce
-// invalid entries in fields that expect IPs (cert SANs, listen
-// addresses for binds). Users who want a hostname can edit the
-// generated configs afterwards.
+// ipLiteral rejects non-IP input. Used by both the PublicIP and
+// InternalIP prompts; accepting hostnames here would silently
+// produce invalid entries in fields that expect IPs (cert SANs,
+// listen addresses for binds). Users who want a hostname can edit
+// the generated configs afterwards.
 func ipLiteral(s string) error {
-	if err := cfg.NonEmpty("public IP")(s); err != nil {
+	if err := cfg.NonEmpty("IP address")(s); err != nil {
 		return err
 	}
 	if net.ParseIP(s) == nil {
