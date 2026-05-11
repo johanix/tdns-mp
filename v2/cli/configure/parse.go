@@ -86,7 +86,10 @@ func readExistingCoordinated() (CoordinatedValues, error) {
 		cv.Global.CertsDir = filepath.Dir(agentCertFile)
 	}
 	if agentApiAddr != "" {
-		cv.Global.PublicIP = hostOnly(agentApiAddr)
+		// The agent's apiserver address is a bind target → InternalIP.
+		// PublicIP cannot be back-derived from any single bind address
+		// and stays zero on re-run unless previously persisted elsewhere.
+		cv.Global.InternalIP = hostOnly(agentApiAddr)
 	}
 	return cv, nil
 }

@@ -51,15 +51,16 @@ service:
    name:           TDNS-MPAGENT
    verbose:        true
    debug:          false
-   refresh:        true
-   maxrefresh:     1800
 
 dnsengine:
    addresses:      [ {{.AgentDnsListen}} ]
+   transports:     [ do53 ]
 
 apiserver:
    addresses:      [ {{.AgentApiListen}} ]
    apikey:         {{.Agent.ApiKey}}
+   certfile:       {{.Paths.AgentCert}}
+   keyfile:        {{.Paths.AgentKey}}
 
 delegationsync:
    leader-election-ttl: 60m
@@ -91,6 +92,9 @@ dnssecpolicies:
       zsk:
          lifetime:      forever
          sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
 
 db:
    file:  /var/lib/tdns/tdns-mpagent.db
@@ -101,13 +105,13 @@ log:
 
 # templates: and zones: directives may be included from a separate file if wanted
 templates:
-   - name:           mpzone
+   - name:           mptest
      type:           secondary
      store:          map
+     primary:        {{.SignerDnsListen}}
      options:
         - multi-provider
 
 zones:
-   - name:            customer.example.
-     template:        mpzone
-     primary:         {{.SignerDnsListen}}
+   - name:            example.test.
+     template:        mptest

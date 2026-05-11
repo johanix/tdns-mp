@@ -3,17 +3,17 @@
 
 apiservers:
    - name:         tdns-mpsigner
-     baseurl:      https://{{.SignerApiListen}}/api/v1
+     baseurl:      https://{{.SignerApiPublic}}/api/v1
      apikey:       {{.Signer.ApiKey}}
      authmethod:   X-API-Key
 
    - name:         tdns-combiner
-     baseurl:      https://{{.CombinerApiListen}}/api/v1
+     baseurl:      https://{{.CombinerApiPublic}}/api/v1
      apikey:       {{.Combiner.ApiKey}}
      authmethod:   X-API-Key
 
    - name:         tdns-agent
-     baseurl:      https://{{.AgentApiListen}}/api/v1
+     baseurl:      https://{{.AgentApiPublic}}/api/v1
      apikey:       {{.Agent.ApiKey}}
      authmethod:   X-API-Key
 

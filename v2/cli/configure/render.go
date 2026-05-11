@@ -33,6 +33,10 @@ type renderCtx struct {
 
 	Paths rolePaths
 
+	// *Listen are bind targets (use InternalIP). *Dial are the
+	// addresses each role uses to reach its peers; same host as
+	// the bind, so they coincide with the listen addresses on a
+	// single-host deployment.
 	AgentDnsListen    string
 	AgentApiListen    string
 	SignerDnsListen   string
@@ -40,6 +44,13 @@ type renderCtx struct {
 	SignerApiListen   string
 	CombinerDnsListen string
 	CombinerApiListen string
+
+	// *PublicListen are bind targets that should be reachable from
+	// outside the host (e.g. mpcli base URLs published in the
+	// generated mpcli config). Built from PublicIP.
+	AgentApiPublic    string
+	SignerApiPublic   string
+	CombinerApiPublic string
 }
 
 // rolePaths collects the deterministic per-role filenames.
@@ -82,9 +93,13 @@ func makeRolePaths(keysDir, certsDir string) rolePaths {
 }
 
 func makeRenderCtx(cv CoordinatedValues) renderCtx {
-	ip := cv.Global.PublicIP
-	hp := func(port int) string {
-		return net.JoinHostPort(ip, strconv.Itoa(port))
+	internal := cv.Global.InternalIP
+	public := cv.Global.PublicIP
+	hpInternal := func(port int) string {
+		return net.JoinHostPort(internal, strconv.Itoa(port))
+	}
+	hpPublic := func(port int) string {
+		return net.JoinHostPort(public, strconv.Itoa(port))
 	}
 	return renderCtx{
 		Global:            cv.Global,
@@ -92,13 +107,16 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 		Signer:            cv.Signer,
 		Combiner:          cv.Combiner,
 		Paths:             makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir),
-		AgentDnsListen:    hp(agentDnsPort),
-		AgentApiListen:    hp(agentApiPort),
-		SignerDnsListen:   hp(signerDnsPort),
-		SignerDnsListen53: hp(signerDns53Port),
-		SignerApiListen:   hp(signerApiPort),
-		CombinerDnsListen: hp(combinerDnsPort),
-		CombinerApiListen: hp(combinerApiPort),
+		AgentDnsListen:    hpInternal(agentDnsPort),
+		AgentApiListen:    hpInternal(agentApiPort),
+		SignerDnsListen:   hpInternal(signerDnsPort),
+		SignerDnsListen53: hpInternal(signerDns53Port),
+		SignerApiListen:   hpInternal(signerApiPort),
+		CombinerDnsListen: hpInternal(combinerDnsPort),
+		CombinerApiListen: hpInternal(combinerApiPort),
+		AgentApiPublic:    hpPublic(agentApiPort),
+		SignerApiPublic:   hpPublic(signerApiPort),
+		CombinerApiPublic: hpPublic(combinerApiPort),
 	}
 }
 

@@ -26,14 +26,20 @@ type CoordinatedValues struct {
 
 // GlobalValues are cross-role settings prompted only once.
 //
-// PublicIP is the address all three roles bind their DNS engine
-// and management API on (same-box deployment). It is also used
-// as the peer address in zone notify/primary and in the mpcli
-// baseurls.
+// PublicIP is the externally-reachable address the operator
+// advertises for this provider. Used for cert SANs, mpcli base
+// URLs, and zone notify/primary in the example template.
+//
+// InternalIP is what each role binds to and what the three roles
+// dial each other on. On a single-host deployment this is
+// 127.0.0.1. On a multi-host or NAT'd setup (e.g. AWS EC2 where
+// PublicIP is not on any local interface) it must be a private
+// IP that is actually on the host.
 type GlobalValues struct {
-	KeysDir  string
-	CertsDir string
-	PublicIP string
+	KeysDir    string
+	CertsDir   string
+	PublicIP   string
+	InternalIP string
 }
 
 // AgentValues is the coordinated config for tdns-mpagent.

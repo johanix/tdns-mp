@@ -82,9 +82,11 @@ func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
 }
 
 // liveTargetsFor builds the LiveTarget list for the three
-// running-daemon roles. mpcli itself is not a server.
+// running-daemon roles. mpcli itself is not a server. The
+// live-ping happens from the same host, so InternalIP is the
+// correct dial target (matches what the daemons bind to).
 func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
-	ip := cv.Global.PublicIP
+	ip := cv.Global.InternalIP
 	mk := func(role, path string, port int, apiKey string) cfg.LiveTarget {
 		url := ""
 		if ip != "" {

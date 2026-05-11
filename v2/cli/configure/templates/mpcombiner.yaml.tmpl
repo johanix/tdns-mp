@@ -21,15 +21,16 @@ service:
    name:           TDNS-MPCOMBINER
    verbose:        true
    debug:          false
-   refresh:        true
-   maxrefresh:     1800
 
 dnsengine:
    addresses:      [ {{.CombinerDnsListen}} ]
+   transports:     [ do53 ]
 
 apiserver:
    addresses:      [ {{.CombinerApiListen}} ]
    apikey:         {{.Combiner.ApiKey}}
+   certfile:       {{.Paths.CombinerCert}}
+   keyfile:        {{.Paths.CombinerKey}}
 
 db:
    file:  /var/lib/tdns/tdns-mpcombiner.db
@@ -40,14 +41,16 @@ log:
 
 # templates: and zones: directives may be included from a separate file if wanted
 templates:
-   - name:           mpzone
-     type:           secondary
+   - name:           mptest
+     type:           primary
      store:          map
      options:
         - multi-provider
      notify:         [ {{.SignerDnsListen}} ]
 
 zones:
-   - name:            customer.example.
-     template:        mpzone
-     primary:         127.0.0.1:5301   # FIXME: set to the customer's authoritative primary
+   - name:            example.test.
+     template:        mptest
+     # Set `primary:` to the customer's authoritative primary
+     # when this combiner pulls a real zone, e.g.:
+     # primary:         203.0.113.53:53

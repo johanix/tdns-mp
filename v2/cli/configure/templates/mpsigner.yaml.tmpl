@@ -22,15 +22,17 @@ service:
    name:           TDNS-MPSIGNER
    verbose:        true
    debug:          false
-   refresh:        true
-   maxrefresh:     1800
+   resign:         true
 
 dnsengine:
    addresses:      [ {{.SignerDnsListen}}, {{.SignerDnsListen53}} ]
+   transports:     [ do53 ]
 
 apiserver:
    addresses:      [ {{.SignerApiListen}} ]
    apikey:         {{.Signer.ApiKey}}
+   certfile:       {{.Paths.SignerCert}}
+   keyfile:        {{.Paths.SignerKey}}
 
 resignerengine:
    interval:       300
@@ -53,6 +55,9 @@ dnssecpolicies:
       zsk:
          lifetime:      forever
          sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
 
 db:
    file:  /var/lib/tdns/tdns-mpsigner.db
@@ -63,14 +68,16 @@ log:
 
 # templates: and zones: directives may be included from a separate file if wanted
 templates:
-   - name:           mpzone
+   - name:           mptest
      type:           secondary
      store:          map
+     primary:        {{.CombinerDnsListen}}
      options:
         - multi-provider
+        - online-signing
+     dnssecpolicy:   default
      notify:         [ {{.AgentDnsListen}} ]
 
 zones:
-   - name:            customer.example.
-     template:        mpzone
-     primary:         {{.CombinerDnsListen}}
+   - name:            example.test.
+     template:        mptest

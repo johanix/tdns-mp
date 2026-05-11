@@ -23,9 +23,10 @@ import (
 
 // Defaults used when a prompt has no seed value (first run).
 const (
-	defaultKeysDir  = "/etc/tdns/keys"
-	defaultCertsDir = "/etc/tdns/certs"
-	defaultPublicIP = "127.0.0.1"
+	defaultKeysDir    = "/etc/tdns/keys"
+	defaultCertsDir   = "/etc/tdns/certs"
+	defaultPublicIP   = "127.0.0.1"
+	defaultInternalIP = "127.0.0.1"
 )
 
 // Built-in port layout (same box, all three roles).
@@ -49,7 +50,14 @@ func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues 
 	fmt.Fprintln(p.Out, "\n=== Global ===")
 	out.Global.KeysDir = p.Ask("keys directory", cfg.OrDefault(current.Global.KeysDir, defaultKeysDir), cfg.AbsDir)
 	out.Global.CertsDir = p.Ask("certs directory", cfg.OrDefault(current.Global.CertsDir, defaultCertsDir), cfg.AbsDir)
-	out.Global.PublicIP = p.Ask("public IP (shared by all three roles)", cfg.OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
+	out.Global.PublicIP = p.Ask("public IP (advertised in certs, mpcli base URLs, example zone notify/primary)", cfg.OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
+
+	// InternalIP is what each role binds and what the roles dial each other on.
+	// On a same-host deployment 127.0.0.1 is correct; on AWS EC2 / multi-host
+	// setups the operator must supply a private IP that is actually on the
+	// local interface (the public IP often is not).
+	internalSeed := cfg.OrDefault(current.Global.InternalIP, defaultInternalIP)
+	out.Global.InternalIP = p.Ask("internal IP (bind address + inter-role dial target; 127.0.0.1 for single-host)", internalSeed, ipLiteral)
 
 	fmt.Fprintln(p.Out, "\n=== Identities ===")
 	out.Agent.Identity = p.AskIdentity("agent identity", current.Agent.Identity)
