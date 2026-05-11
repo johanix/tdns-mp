@@ -32,6 +32,10 @@ type mpagentYAML struct {
 		API                 struct {
 			CertFile string `yaml:"certfile"`
 		} `yaml:"api"`
+		Local struct {
+			Nameservers []string `yaml:"nameservers"`
+			Notify      []string `yaml:"notify"`
+		} `yaml:"local"`
 	} `yaml:"multi-provider"`
 	APIServer struct {
 		Addresses []string `yaml:"addresses"`
@@ -119,6 +123,8 @@ func parseAgentFile(path string, out *AgentValues, jose, cert, apiAddr *string) 
 	}
 	out.Identity = y.MultiProvider.Identity
 	out.ApiKey = y.APIServer.APIKey
+	out.LocalNameservers = y.MultiProvider.Local.Nameservers
+	out.LocalNotify = y.MultiProvider.Local.Notify
 	*jose = y.MultiProvider.LongTermJosePrivKey
 	*cert = y.MultiProvider.API.CertFile
 	if len(y.APIServer.Addresses) > 0 {

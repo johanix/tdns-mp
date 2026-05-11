@@ -17,8 +17,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	cfg "github.com/johanix/tdns/v2/cli/configure"
+	"github.com/miekg/dns"
 )
 
 // Defaults used when a prompt has no seed value (first run).
@@ -64,11 +66,65 @@ func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues 
 	out.Signer.Identity = p.AskIdentity("signer identity", current.Signer.Identity)
 	out.Combiner.Identity = p.AskIdentity("combiner identity", current.Combiner.Identity)
 
+	// The agent has an auto-created zone (the agent identity itself, e.g.
+	// agent.hare.mp.axfr.net.). The two prompts below configure that
+	// zone's published NS RDATA and the downstream secondaries it
+	// NOTIFYs. Both are optional and can be edited later in the YAML.
+	fmt.Fprintln(p.Out, "\n=== Agent auto-zone ===")
+	nsSeed := strings.Join(current.Agent.LocalNameservers, " ")
+	nsAns := p.Ask("nameservers for agent zone (FQDNs published as NS records; whitespace-separated, blank ok)", nsSeed, fqdnList)
+	out.Agent.LocalNameservers = parseFqdnList(nsAns)
+	notifySeed := strings.Join(current.Agent.LocalNotify, " ")
+	notifyAns := p.Ask("notify addresses for agent zone (host:port of downstream secondaries; whitespace-separated, blank ok)", notifySeed, hostPortList)
+	out.Agent.LocalNotify = parseHostPortList(notifyAns)
+
 	showPortTable(p.Out)
 	if !p.AskYesNo("\nAccept these defaults?", true) {
 		fmt.Fprintln(p.Out, "OK — these defaults will be used now; edit the generated configs afterwards to change them.")
 	}
 	return out
+}
+
+// fqdnList accepts whitespace-separated FQDN-like tokens. Empty is
+// allowed. Each token must look like a domain name; a trailing dot
+// is added automatically by parseFqdnList.
+func fqdnList(s string) error {
+	for _, tok := range strings.Fields(s) {
+		// dns.IsDomainName accepts both fqdn and partial; we
+		// only need a coarse check that it is not garbage.
+		if _, ok := dns.IsDomainName(tok); !ok {
+			return fmt.Errorf("%q is not a valid domain name", tok)
+		}
+	}
+	return nil
+}
+
+// parseFqdnList splits whitespace-separated input into FQDNs (with
+// trailing dots added if missing).
+func parseFqdnList(s string) []string {
+	tokens := strings.Fields(s)
+	out := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		out = append(out, dns.Fqdn(t))
+	}
+	return out
+}
+
+// hostPortList accepts whitespace-separated host:port tokens. Empty
+// is allowed. Each token must split via net.SplitHostPort.
+func hostPortList(s string) error {
+	for _, tok := range strings.Fields(s) {
+		if _, _, err := net.SplitHostPort(tok); err != nil {
+			return fmt.Errorf("%q is not a valid host:port: %v", tok, err)
+		}
+	}
+	return nil
+}
+
+// parseHostPortList splits whitespace-separated input into host:port
+// strings, returning them as-is (already validated by hostPortList).
+func parseHostPortList(s string) []string {
+	return strings.Fields(s)
 }
 
 // ipLiteral rejects non-IP input. The prompt label promises a

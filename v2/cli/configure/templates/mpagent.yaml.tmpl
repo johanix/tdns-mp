@@ -15,7 +15,11 @@ multi-provider:
       address:                 {{.SignerDnsDial}}
       long_term_jose_pub_key:  {{.Paths.SignerJosePub}}
    local:
-      notify:        []
+      # NS RDATA published in the auto-created agent zone.
+      nameservers:   [ {{range $i, $ns := .Agent.LocalNameservers}}{{if $i}}, {{end}}{{$ns}}{{end}} ]
+      # host:port addresses of downstream secondaries that should
+      # receive NOTIFY when the agent zone changes.
+      notify:        [ {{range $i, $n := .Agent.LocalNotify}}{{if $i}}, {{end}}{{$n}}{{end}} ]
    remote:
       LocateInterval: 60
    xfr:
@@ -35,10 +39,10 @@ multi-provider:
    #    keyfile:       {{.Paths.AgentKey}}
    dns:
       addresses:
-         publish:    [ 127.0.0.1 ]
-         listen:     [ 127.0.0.1:8998 ]
+         publish:    [ {{.Global.PublicIP}} ]
+         listen:     [ {{.AgentDnsListen}} ]
       baseurl:       dns://dns.{TARGET}:{PORT}/
-      port:          8998
+      port:          {{.AgentDnsPort}}
    syncengine:
       intervals:
          beatinterval:       30

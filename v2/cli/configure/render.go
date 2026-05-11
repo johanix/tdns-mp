@@ -58,6 +58,12 @@ type renderCtx struct {
 	AgentApiPublic    string
 	SignerApiPublic   string
 	CombinerApiPublic string
+
+	// AgentDnsPort is the numeric port the agent's signaling DNS
+	// service listens on. Used in the multi-provider.dns block of
+	// the agent config, where `port:` and the port in `listen:`
+	// must match what dnsengine actually binds.
+	AgentDnsPort int
 }
 
 // rolePaths collects the deterministic per-role filenames.
@@ -130,6 +136,7 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 		AgentApiPublic:    hpPublic(agentApiPort),
 		SignerApiPublic:   hpPublic(signerApiPort),
 		CombinerApiPublic: hpPublic(combinerApiPort),
+		AgentDnsPort:      agentDnsPort,
 	}
 }
 

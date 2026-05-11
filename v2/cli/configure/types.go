@@ -43,9 +43,18 @@ type GlobalValues struct {
 }
 
 // AgentValues is the coordinated config for tdns-mpagent.
+//
+// LocalNameservers and LocalNotify configure the auto-created agent
+// zone (e.g. agent.hare.mp.axfr.net.). LocalNameservers becomes the
+// NS RDATA published in that zone. LocalNotify is the set of
+// downstream secondaries that should receive NOTIFY when the agent
+// zone changes. Both are optional — empty is fine and means the
+// operator will fill them in later.
 type AgentValues struct {
-	Identity string
-	ApiKey   string
+	Identity         string
+	ApiKey           string
+	LocalNameservers []string
+	LocalNotify      []string
 }
 
 // SignerValues is the coordinated config for tdns-mpsigner.
