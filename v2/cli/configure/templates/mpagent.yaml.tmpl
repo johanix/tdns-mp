@@ -8,11 +8,11 @@ multi-provider:
    long_term_jose_priv_key: {{.Paths.AgentJosePriv}}
    combiner:
       identity:                {{.Combiner.Identity}}
-      address:                 {{.CombinerDnsListen}}
+      address:                 {{.CombinerDnsDial}}
       long_term_jose_pub_key:  {{.Paths.CombinerJosePub}}
    signer:
       identity:                {{.Signer.Identity}}
-      address:                 {{.SignerDnsListen}}
+      address:                 {{.SignerDnsDial}}
       long_term_jose_pub_key:  {{.Paths.SignerJosePub}}
    local:
       notify:        []
@@ -108,7 +108,7 @@ templates:
    - name:           mptest
      type:           secondary
      store:          map
-     primary:        {{.SignerDnsListen}}
+     primary:        {{.SignerDnsDial}}
      options:
         - multi-provider
 

@@ -8,7 +8,7 @@ multi-provider:
 
    agents:
       - identity:               {{.Agent.Identity}}
-        address:                {{.AgentDnsListen}}
+        address:                {{.AgentDnsDial}}
         long_term_jose_pub_key: {{.Paths.AgentJosePub}}
 
    # sync_api:
@@ -46,7 +46,7 @@ templates:
      store:          map
      options:
         - multi-provider
-     notify:         [ {{.SignerDnsListen}} ]
+     notify:         [ {{.SignerDnsDial}} ]
 
 zones:
    - name:            example.test.

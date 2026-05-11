@@ -9,7 +9,7 @@ multi-provider:
 
    agents:
       - identity:               {{.Agent.Identity}}
-        address:                {{.AgentDnsListen}}
+        address:                {{.AgentDnsDial}}
         long_term_jose_pub_key: {{.Paths.AgentJosePub}}
 
    # sync_api:
@@ -71,12 +71,12 @@ templates:
    - name:           mptest
      type:           secondary
      store:          map
-     primary:        {{.CombinerDnsListen}}
+     primary:        {{.CombinerDnsDial}}
      options:
         - multi-provider
         - online-signing
      dnssecpolicy:   default
-     notify:         [ {{.AgentDnsListen}} ]
+     notify:         [ {{.AgentDnsDial}} ]
 
 zones:
    - name:            example.test.

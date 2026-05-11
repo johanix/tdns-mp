@@ -33,21 +33,28 @@ type renderCtx struct {
 
 	Paths rolePaths
 
-	// *Listen are bind targets (use InternalIP). *Dial are the
-	// addresses each role uses to reach its peers; same host as
-	// the bind, so they coincide with the listen addresses on a
-	// single-host deployment.
+	// *Dns* bind 0.0.0.0 because the DNS engine serves external
+	// clients and the local interface IP isn't known here.
+	// *Api* bind InternalIP (127.0.0.1 single-host) — management
+	// API stays loopback-only for now; mpcli reaches it via SSH
+	// tunnel or local invocation.
+	// *Dial are the intra-component peer addresses each role uses
+	// to talk to the others; InternalIP works for both same-host
+	// (127.0.0.1) and multi-host (private IP) deployments.
 	AgentDnsListen    string
 	AgentApiListen    string
+	AgentDnsDial      string
 	SignerDnsListen   string
 	SignerDnsListen53 string
 	SignerApiListen   string
+	SignerDnsDial     string
 	CombinerDnsListen string
 	CombinerApiListen string
+	CombinerDnsDial   string
 
-	// *PublicListen are bind targets that should be reachable from
-	// outside the host (e.g. mpcli base URLs published in the
-	// generated mpcli config). Built from PublicIP.
+	// *ApiPublic are operator-facing URLs baked into the mpcli
+	// config. Built from PublicIP so the generated mpcli config
+	// is usable from outside the host.
 	AgentApiPublic    string
 	SignerApiPublic   string
 	CombinerApiPublic string
@@ -101,19 +108,25 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 	hpPublic := func(port int) string {
 		return net.JoinHostPort(public, strconv.Itoa(port))
 	}
+	hpAny := func(port int) string {
+		return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	}
 	return renderCtx{
 		Global:            cv.Global,
 		Agent:             cv.Agent,
 		Signer:            cv.Signer,
 		Combiner:          cv.Combiner,
 		Paths:             makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir),
-		AgentDnsListen:    hpInternal(agentDnsPort),
+		AgentDnsListen:    hpAny(agentDnsPort),
 		AgentApiListen:    hpInternal(agentApiPort),
-		SignerDnsListen:   hpInternal(signerDnsPort),
-		SignerDnsListen53: hpInternal(signerDns53Port),
+		AgentDnsDial:      hpInternal(agentDnsPort),
+		SignerDnsListen:   hpAny(signerDnsPort),
+		SignerDnsListen53: hpAny(signerDns53Port),
 		SignerApiListen:   hpInternal(signerApiPort),
-		CombinerDnsListen: hpInternal(combinerDnsPort),
+		SignerDnsDial:     hpInternal(signerDnsPort),
+		CombinerDnsListen: hpAny(combinerDnsPort),
 		CombinerApiListen: hpInternal(combinerApiPort),
+		CombinerDnsDial:   hpInternal(combinerDnsPort),
 		AgentApiPublic:    hpPublic(agentApiPort),
 		SignerApiPublic:   hpPublic(signerApiPort),
 		CombinerApiPublic: hpPublic(combinerApiPort),
