@@ -43,11 +43,14 @@ func SendGossipCommand(role string, req tdnsmp.GossipPost) (*tdnsmp.GossipRespon
 	return &resp, nil
 }
 
-// gossipRoleGuard prints "not applicable" to stderr for non-agent
-// roles and returns true if the caller should bail out without
-// making an RPC call.
+// gossipRoleGuard prints "not applicable" to stderr for roles
+// that don't participate in gossip (static-peer roles like signer
+// and combiner) and returns true if the caller should bail out
+// without making an RPC call. Agents and auditors do participate
+// — both use HSYNC3-driven dynamic discovery.
 func gossipRoleGuard(role string) bool {
-	if role == "agent" {
+	switch role {
+	case "agent", "auditor":
 		return false
 	}
 	fmt.Fprintf(os.Stderr, "%s does not participate in gossip (static peer configuration)\n", role)
@@ -253,93 +256,46 @@ func runGossipGroupState(role, groupName string) {
 	}
 }
 
-// --- Cobra shells (3 roles × 2 commands = 6) ---
+// NewGossipCmd returns a fresh `gossip` subtree bound to the
+// given role. Each call returns a new set of *cobra.Command
+// pointers, so callers can attach the same logical subcommand
+// under multiple parents (one per role) without sharing
+// cobra-internal state.
+func NewGossipCmd(role string) *cobra.Command {
+	var groupStateName string
 
-var (
-	gossipGroupStateName string
-
-	agentGossipCmd = &cobra.Command{
+	gossipCmd := &cobra.Command{
 		Use:   "gossip",
 		Short: "Gossip protocol commands",
 	}
-	agentGossipGroupCmd = &cobra.Command{
+	groupCmd := &cobra.Command{
 		Use:   "group",
 		Short: "Provider group commands",
 	}
-	agentGossipGroupListCmd = &cobra.Command{
+	listCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all provider groups this agent belongs to",
-		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupList("agent") },
+		Short: "List all provider groups this peer belongs to",
+		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupList(role) },
 	}
-	agentGossipGroupStateCmd = &cobra.Command{
+	stateCmd := &cobra.Command{
 		Use:   "state",
 		Short: "Show gossip state matrix for a provider group",
 		Long: `Display the NxN state matrix for a provider group.
-Each row is a reporting agent; each column shows that reporter's
-view of another agent's state. A healthy group shows OPERATIONAL
+Each row is a reporting peer; each column shows that reporter's
+view of another peer's state. A healthy group shows OPERATIONAL
 in every non-diagonal cell.`,
-		Run: func(cmd *cobra.Command, args []string) { runGossipGroupState("agent", gossipGroupStateName) },
+		Run: func(cmd *cobra.Command, args []string) { runGossipGroupState(role, groupStateName) },
 	}
+	stateCmd.Flags().StringVar(&groupStateName, "group", "", "Provider group name or hash (required)")
 
-	combinerGossipCmd = &cobra.Command{
-		Use:   "gossip",
-		Short: "Gossip protocol commands",
-	}
-	combinerGossipGroupCmd = &cobra.Command{
-		Use:   "group",
-		Short: "Provider group commands",
-	}
-	combinerGossipGroupListCmd = &cobra.Command{
-		Use:   "list",
-		Short: "List all provider groups",
-		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupList("combiner") },
-	}
-	combinerGossipGroupStateCmd = &cobra.Command{
-		Use:   "state",
-		Short: "Show gossip state matrix for a provider group",
-		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupState("combiner", gossipGroupStateName) },
-	}
-
-	signerGossipCmd = &cobra.Command{
-		Use:   "gossip",
-		Short: "Gossip protocol commands",
-	}
-	signerGossipGroupCmd = &cobra.Command{
-		Use:   "group",
-		Short: "Provider group commands",
-	}
-	signerGossipGroupListCmd = &cobra.Command{
-		Use:   "list",
-		Short: "List all provider groups",
-		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupList("signer") },
-	}
-	signerGossipGroupStateCmd = &cobra.Command{
-		Use:   "state",
-		Short: "Show gossip state matrix for a provider group",
-		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupState("signer", gossipGroupStateName) },
-	}
-)
+	groupCmd.AddCommand(listCmd)
+	groupCmd.AddCommand(stateCmd)
+	gossipCmd.AddCommand(groupCmd)
+	return gossipCmd
+}
 
 func init() {
-	// Agent tree
-	AgentCmd.AddCommand(agentGossipCmd)
-	agentGossipCmd.AddCommand(agentGossipGroupCmd)
-	agentGossipGroupCmd.AddCommand(agentGossipGroupListCmd)
-	agentGossipGroupCmd.AddCommand(agentGossipGroupStateCmd)
-	agentGossipGroupStateCmd.Flags().StringVar(&gossipGroupStateName, "group", "", "Provider group name or hash (required)")
-
-	// Combiner tree (same shell variable, same flag binding would conflict;
-	// use separate Flags() call on each state command)
-	CombinerCmd.AddCommand(combinerGossipCmd)
-	combinerGossipCmd.AddCommand(combinerGossipGroupCmd)
-	combinerGossipGroupCmd.AddCommand(combinerGossipGroupListCmd)
-	combinerGossipGroupCmd.AddCommand(combinerGossipGroupStateCmd)
-	combinerGossipGroupStateCmd.Flags().StringVar(&gossipGroupStateName, "group", "", "Provider group name or hash (required)")
-
-	// Signer tree
-	SignerCmd.AddCommand(signerGossipCmd)
-	signerGossipCmd.AddCommand(signerGossipGroupCmd)
-	signerGossipGroupCmd.AddCommand(signerGossipGroupListCmd)
-	signerGossipGroupCmd.AddCommand(signerGossipGroupStateCmd)
-	signerGossipGroupStateCmd.Flags().StringVar(&gossipGroupStateName, "group", "", "Provider group name or hash (required)")
+	AgentCmd.AddCommand(NewGossipCmd("agent"))
+	CombinerCmd.AddCommand(NewGossipCmd("combiner"))
+	SignerCmd.AddCommand(NewGossipCmd("signer"))
 }
