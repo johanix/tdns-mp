@@ -30,6 +30,7 @@ type renderCtx struct {
 	Agent    AgentValues
 	Signer   SignerValues
 	Combiner CombinerValues
+	Auditor  AuditorValues
 
 	Paths rolePaths
 
@@ -134,6 +135,7 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 		Agent:             cv.Agent,
 		Signer:            cv.Signer,
 		Combiner:          cv.Combiner,
+		Auditor:           cv.Auditor,
 		Paths:             makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir),
 		AgentDnsListen:    hpAny(agentDnsPort),
 		AgentApiListen:    hpInternal(agentApiPort),
