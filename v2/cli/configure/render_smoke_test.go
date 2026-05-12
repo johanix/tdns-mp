@@ -68,11 +68,11 @@ func TestRenderAllSmoke(t *testing.T) {
 			// Spot-check that mpcli output includes the auditor block
 			// only when AuditorValues.Identity is set.
 			mpcli := out[pathMpcli]
-			if tc.cv.Auditor.Identity == "" && strings.Contains(mpcli, "tdns-auditor") {
-				t.Errorf("mpcli includes tdns-auditor entry when auditor disabled")
+			if tc.cv.Auditor.Identity == "" && strings.Contains(mpcli, "tdns-mpauditor") {
+				t.Errorf("mpcli includes tdns-mpauditor entry when auditor disabled")
 			}
-			if tc.cv.Auditor.Identity != "" && !strings.Contains(mpcli, "tdns-auditor") {
-				t.Errorf("mpcli missing tdns-auditor entry when auditor enabled")
+			if tc.cv.Auditor.Identity != "" && !strings.Contains(mpcli, "tdns-mpauditor") {
+				t.Errorf("mpcli missing tdns-mpauditor entry when auditor enabled")
 			}
 		})
 	}

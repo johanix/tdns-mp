@@ -5,26 +5,32 @@
 # selects on the command line (e.g. `tdns-mpcli signer ...`).
 # baseurl: uses the public IP so the CLI works from the operator's
 # workstation; the apikey must match each daemon's apiserver.apikey.
+# command: path to the daemon binary, used by `tdns-mpcli ... start`
+# and similar lifecycle commands.
 apiservers:
    - name:         tdns-mpsigner
      baseurl:      https://{{.SignerApiPublic}}/api/v1
      apikey:       {{.Signer.ApiKey}}
      authmethod:   X-API-Key
+     command:      /usr/local/libexec/tdns-mpsigner
 
-   - name:         tdns-combiner
+   - name:         tdns-mpcombiner
      baseurl:      https://{{.CombinerApiPublic}}/api/v1
      apikey:       {{.Combiner.ApiKey}}
      authmethod:   X-API-Key
+     command:      /usr/local/libexec/tdns-mpcombiner
 
-   - name:         tdns-agent
+   - name:         tdns-mpagent
      baseurl:      https://{{.AgentApiPublic}}/api/v1
      apikey:       {{.Agent.ApiKey}}
      authmethod:   X-API-Key
+     command:      /usr/local/libexec/tdns-mpagent
 {{if .Auditor.Identity}}
-   - name:         tdns-auditor
+   - name:         tdns-mpauditor
      baseurl:      https://{{.AuditorApiPublic}}/api/v1
      apikey:       {{.Auditor.ApiKey}}
      authmethod:   X-API-Key
+     command:      /usr/local/libexec/tdns-mpauditor
 {{end}}
 log:
    file:   /var/log/tdns/tdns-mpcli.log
