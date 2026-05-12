@@ -56,14 +56,6 @@ type renderCtx struct {
 	AuditorApiListen  string
 	AuditorDnsDial    string
 
-	// *ApiPublic are operator-facing URLs baked into the mpcli
-	// config. Built from PublicIP so the generated mpcli config
-	// is usable from outside the host.
-	AgentApiPublic    string
-	SignerApiPublic   string
-	CombinerApiPublic string
-	AuditorApiPublic  string
-
 	// AgentDnsPort is the numeric port the agent's signaling DNS
 	// service listens on. Used in the multi-provider.dns block of
 	// the agent config, where `port:` and the port in `listen:`
@@ -120,12 +112,8 @@ func makeRolePaths(keysDir, certsDir string) rolePaths {
 
 func makeRenderCtx(cv CoordinatedValues) renderCtx {
 	internal := cv.Global.InternalIP
-	public := cv.Global.PublicIP
 	hpInternal := func(port int) string {
 		return net.JoinHostPort(internal, strconv.Itoa(port))
-	}
-	hpPublic := func(port int) string {
-		return net.JoinHostPort(public, strconv.Itoa(port))
 	}
 	hpAny := func(port int) string {
 		return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
@@ -147,10 +135,6 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 		CombinerDnsListen: hpAny(combinerDnsPort),
 		CombinerApiListen: hpInternal(combinerApiPort),
 		CombinerDnsDial:   hpInternal(combinerDnsPort),
-		AgentApiPublic:    hpPublic(agentApiPort),
-		SignerApiPublic:   hpPublic(signerApiPort),
-		CombinerApiPublic: hpPublic(combinerApiPort),
-		AuditorApiPublic:  hpPublic(auditorApiPort),
 		AuditorDnsListen:  hpAny(auditorDnsPort),
 		AuditorApiListen:  hpInternal(auditorApiPort),
 		AuditorDnsDial:    hpInternal(auditorDnsPort),
