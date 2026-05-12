@@ -384,9 +384,6 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
 		return hdb.ZoneUpdaterEngine(ctx)
 	})
-	tdns.StartEngine(&tdns.Globals.App, "DeferredUpdaterEngine", func() error {
-		return hdb.DeferredUpdaterEngine(ctx)
-	})
 	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
 		return tdns.UpdateHandler(ctx, conf.Config)
 	})
