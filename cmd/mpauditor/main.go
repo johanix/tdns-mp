@@ -35,6 +35,17 @@ func main() {
 		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error initializing: %v", err))
 	}
 
+	// MainInit skipped registering the default zone-based query
+	// handler when no zones were declared in the config file. The
+	// auditor always creates an auto-zone later via SetupAgent, so
+	// we need the handler regardless — register it ourselves in
+	// the gap case to make the auto-zone reachable via DNS.
+	if len(tdns.Conf.Zones) == 0 {
+		if err := tdns.RegisterQueryHandler(0, tdns.DefaultQueryHandler); err != nil {
+			tdns.Shutdowner(conf.Config, fmt.Sprintf("Error registering default query handler: %v", err))
+		}
+	}
+
 	apirouter, err := conf.Config.SetupAPIRouter(ctx)
 	if err != nil {
 		tdns.Shutdowner(conf.Config, fmt.Sprintf("Error setting up API router: %v", err))

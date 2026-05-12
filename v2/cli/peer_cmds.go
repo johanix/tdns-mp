@@ -87,11 +87,16 @@ func runPeerApiPing(role, peerID string) {
 	fmt.Println(resp.Msg)
 }
 
-// runPeerReset gates non-agent roles with an "not applicable"
-// message because peer-reset depends on IMR-based dynamic
-// discovery — signer and combiner use static peer configuration.
+// runPeerReset gates roles that don't have an AgentRegistry (and
+// thus no dynamic discovery to reset) with a "not applicable"
+// message. Agents and auditors both use HSYNC3-driven dynamic
+// discovery and support reset; signer and combiner use static
+// peer configuration and don't.
 func runPeerReset(role, peerID string) {
-	if role != "agent" {
+	switch role {
+	case "agent", "auditor":
+		// proceed
+	default:
 		fmt.Fprintf(os.Stderr, "peer reset is not applicable to %s (static peer configuration)\n", role)
 		return
 	}
@@ -114,96 +119,75 @@ func runPeerReset(role, peerID string) {
 	fmt.Println(resp.Msg)
 }
 
-// --- Cobra shells (3 roles × 3 commands = 9) ---
+// addPeerLeaves attaches the three role-uniform peer leaves
+// (ping, apiping, reset) to parent. Each leaf binds the --id flag
+// to its own local string so flags don't bleed between roles.
+// Reset's help text is honest about which roles actually act on
+// it; the runPeerReset gate prints "not applicable" when invoked
+// on a static-peer role.
+func addPeerLeaves(parent *cobra.Command, role string) {
+	var pingID, apiPingID, resetID string
 
-var (
-	peerPingID    string
-	peerApiPingID string
-	peerResetID   string
-
-	agentPeerPingCmd = &cobra.Command{
+	pingCmd := &cobra.Command{
 		Use:   "ping",
 		Short: "Ping a peer via DNS CHUNK",
 		Long: `Send a DNS CHUNK ping to a peer and report the result.
 The --id flag specifies the peer identity (e.g. agent.beta.dnslab.
 or combiner.dnslab.).`,
-		Run: func(cmd *cobra.Command, args []string) { runPeerPing("agent", peerPingID) },
+		Run: func(cmd *cobra.Command, args []string) { runPeerPing(role, pingID) },
 	}
-	agentPeerApiPingCmd = &cobra.Command{
+	pingCmd.Flags().StringVar(&pingID, "id", "", "Peer identity to ping (required)")
+
+	apiPingCmd := &cobra.Command{
 		Use:   "apiping",
 		Short: "Ping a peer via HTTPS API",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerApiPing("agent", peerApiPingID) },
+		Run:   func(cmd *cobra.Command, args []string) { runPeerApiPing(role, apiPingID) },
 	}
-	agentPeerResetCmd = &cobra.Command{
+	apiPingCmd.Flags().StringVar(&apiPingID, "id", "", "Peer identity to ping (required)")
+
+	resetCmd := &cobra.Command{
 		Use:   "reset",
-		Short: "Reset peer to NEEDED state, flush cache, restart discovery",
-		Long: `Reset a peer agent to initial NEEDED state. Flushes all IMR
+		Short: "Reset peer (agent/auditor only; no-op elsewhere)",
+		Long: `Reset a peer to initial NEEDED state. Flushes all IMR
 cache entries for the peer's discovery names and restarts
 discovery from scratch. Use this when a peer is stuck in UNKNOWN
-or KNOWN state.`,
-		Run: func(cmd *cobra.Command, args []string) { runPeerReset("agent", peerResetID) },
+or KNOWN state. Only applicable to roles that use dynamic
+HSYNC3-driven discovery (agent, auditor); a no-op on
+static-peer roles (signer, combiner).`,
+		Run: func(cmd *cobra.Command, args []string) { runPeerReset(role, resetID) },
 	}
+	resetCmd.Flags().StringVar(&resetID, "id", "", "Peer identity to reset (required)")
 
-	combinerPeerPingCmd = &cobra.Command{
-		Use:   "ping",
-		Short: "Ping a peer via DNS CHUNK",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerPing("combiner", peerPingID) },
-	}
-	combinerPeerApiPingCmd = &cobra.Command{
-		Use:   "apiping",
-		Short: "Ping a peer via HTTPS API",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerApiPing("combiner", peerApiPingID) },
-	}
-	combinerPeerResetCmd = &cobra.Command{
-		Use:   "reset",
-		Short: "Reset peer (not applicable to combiner — prints a notice)",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerReset("combiner", peerResetID) },
-	}
+	parent.AddCommand(pingCmd)
+	parent.AddCommand(apiPingCmd)
+	parent.AddCommand(resetCmd)
+}
 
-	signerPeerCmd = &cobra.Command{
+// NewPeerCmd returns a fresh `peer` subtree (parent + the three
+// leaves) bound to role. Use when the role does not already own
+// a `peer` parent elsewhere (e.g. signer, auditor). For roles
+// whose `peer` parent has extra children defined in another file
+// (agent, combiner), call addPeerLeaves on that existing parent
+// instead.
+func NewPeerCmd(role string) *cobra.Command {
+	peerCmd := &cobra.Command{
 		Use:   "peer",
 		Short: "Peer management commands",
 	}
-	signerPeerPingCmd = &cobra.Command{
-		Use:   "ping",
-		Short: "Ping a peer via DNS CHUNK",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerPing("signer", peerPingID) },
-	}
-	signerPeerApiPingCmd = &cobra.Command{
-		Use:   "apiping",
-		Short: "Ping a peer via HTTPS API",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerApiPing("signer", peerApiPingID) },
-	}
-	signerPeerResetCmd = &cobra.Command{
-		Use:   "reset",
-		Short: "Reset peer (not applicable to signer — prints a notice)",
-		Run:   func(cmd *cobra.Command, args []string) { runPeerReset("signer", peerResetID) },
-	}
-)
+	addPeerLeaves(peerCmd, role)
+	return peerCmd
+}
 
 func init() {
-	// Agent tree — parent agentPeerCmd is defined in agent_cmds.go.
-	agentPeerCmd.AddCommand(agentPeerPingCmd)
-	agentPeerCmd.AddCommand(agentPeerApiPingCmd)
-	agentPeerCmd.AddCommand(agentPeerResetCmd)
-	agentPeerPingCmd.Flags().StringVar(&peerPingID, "id", "", "Peer identity to ping (required)")
-	agentPeerApiPingCmd.Flags().StringVar(&peerApiPingID, "id", "", "Peer identity to ping (required)")
-	agentPeerResetCmd.Flags().StringVar(&peerResetID, "id", "", "Peer identity to reset (required)")
+	// Agent and combiner peer parents are defined in
+	// agent_cmds.go and combiner_peer_cmds.go respectively
+	// (they have additional list/zones/zone/resync children
+	// from those files). Just attach the role-uniform leaves
+	// here.
+	addPeerLeaves(agentPeerCmd, "agent")
+	addPeerLeaves(combinerPeerCmd, "combiner")
 
-	// Combiner tree — parent combinerPeerCmd is defined in combiner_peer_cmds.go.
-	combinerPeerCmd.AddCommand(combinerPeerPingCmd)
-	combinerPeerCmd.AddCommand(combinerPeerApiPingCmd)
-	combinerPeerCmd.AddCommand(combinerPeerResetCmd)
-	combinerPeerPingCmd.Flags().StringVar(&peerPingID, "id", "", "Peer identity to ping (required)")
-	combinerPeerApiPingCmd.Flags().StringVar(&peerApiPingID, "id", "", "Peer identity to ping (required)")
-	combinerPeerResetCmd.Flags().StringVar(&peerResetID, "id", "", "Peer identity to reset (not used for combiner)")
-
-	// Signer tree — signerPeerCmd parent created here (didn't exist before Task N).
-	SignerCmd.AddCommand(signerPeerCmd)
-	signerPeerCmd.AddCommand(signerPeerPingCmd)
-	signerPeerCmd.AddCommand(signerPeerApiPingCmd)
-	signerPeerCmd.AddCommand(signerPeerResetCmd)
-	signerPeerPingCmd.Flags().StringVar(&peerPingID, "id", "", "Peer identity to ping (required)")
-	signerPeerApiPingCmd.Flags().StringVar(&peerApiPingID, "id", "", "Peer identity to ping (required)")
-	signerPeerResetCmd.Flags().StringVar(&peerResetID, "id", "", "Peer identity to reset (not used for signer)")
+	// Signer has no peer parent elsewhere; build and attach the
+	// whole subtree here.
+	SignerCmd.AddCommand(NewPeerCmd("signer"))
 }

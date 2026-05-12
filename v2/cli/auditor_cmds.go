@@ -26,6 +26,15 @@ var AuditorCmd = &cobra.Command{
 	Short: "Interact with the MP auditor via API",
 }
 
+// AuditorZoneMPListCmd is the auditor-specific "mplist" subcommand.
+// It's attached to the auditor's zone tree by mpcli/shared_cmds.go
+// via tdnscli.NewZoneCmd("auditor", AuditorZoneMPListCmd).
+var AuditorZoneMPListCmd = &cobra.Command{
+	Use:   "mplist",
+	Short: "List multi-provider zones with HSYNCPARAM details",
+	Run:   func(cmd *cobra.Command, args []string) { runZoneMPList("auditor", args) },
+}
+
 var auditorEventlogCmd = &cobra.Command{
 	Use:   "eventlog",
 	Short: "Audit event log commands",

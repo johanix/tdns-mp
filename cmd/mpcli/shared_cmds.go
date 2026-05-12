@@ -67,11 +67,21 @@ func init() {
 
 	// Auditor commands (from tdns-mp/v2/cli). Standard daemon
 	// commands plus the Phase C eventlog/zones/observations
-	// subcommands (registered in auditor_cmds.go init()).
+	// subcommands (registered in auditor_cmds.go init()). Auditor
+	// also gets gossip + peer subtrees because it participates in
+	// the HSYNC3 protocol the same way agents do.
 	rootCmd.AddCommand(mpcli.AuditorCmd)
 	mpcli.AuditorCmd.AddCommand(cli.NewPingCmd("auditor"))
 	mpcli.AuditorCmd.AddCommand(cli.NewStopCmd("auditor"))
 	mpcli.AuditorCmd.AddCommand(cli.NewDaemonCmd("auditor"))
 	mpcli.AuditorCmd.AddCommand(cli.NewDebugCmd("auditor"))
 	mpcli.AuditorCmd.AddCommand(cli.NewConfigCmd("auditor"))
+	mpcli.AuditorCmd.AddCommand(mpcli.NewGossipCmd("auditor"))
+	auditorPeerCmd := mpcli.NewPeerCmd("auditor")
+	auditorPeerCmd.AddCommand(mpcli.NewAuditorPeerListCmd())
+	auditorPeerCmd.AddCommand(mpcli.NewAuditorPeerZonesCmd())
+	mpcli.AuditorCmd.AddCommand(auditorPeerCmd)
+	mpcli.AuditorCmd.AddCommand(cli.NewZoneCmd("auditor", mpcli.AuditorZoneMPListCmd))
+	mpcli.AuditorCmd.AddCommand(cli.NewKeystoreCmd("auditor"))
+	mpcli.AuditorCmd.AddCommand(cli.NewTruststoreCmd("auditor"))
 }
