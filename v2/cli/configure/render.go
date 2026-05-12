@@ -30,16 +30,38 @@ type renderCtx struct {
 	Agent    AgentValues
 	Signer   SignerValues
 	Combiner CombinerValues
+	Auditor  AuditorValues
 
 	Paths rolePaths
 
+	// *Dns* bind 0.0.0.0 because the DNS engine serves external
+	// clients and the local interface IP isn't known here.
+	// *Api* bind InternalIP (127.0.0.1 single-host) — management
+	// API stays loopback-only for now; mpcli reaches it via SSH
+	// tunnel or local invocation.
+	// *Dial are the intra-component peer addresses each role uses
+	// to talk to the others; InternalIP works for both same-host
+	// (127.0.0.1) and multi-host (private IP) deployments.
 	AgentDnsListen    string
 	AgentApiListen    string
+	AgentDnsDial      string
 	SignerDnsListen   string
 	SignerDnsListen53 string
 	SignerApiListen   string
+	SignerDnsDial     string
 	CombinerDnsListen string
 	CombinerApiListen string
+	CombinerDnsDial   string
+	AuditorDnsListen  string
+	AuditorApiListen  string
+	AuditorDnsDial    string
+
+	// AgentDnsPort is the numeric port the agent's signaling DNS
+	// service listens on. Used in the multi-provider.dns block of
+	// the agent config, where `port:` and the port in `listen:`
+	// must match what dnsengine actually binds.
+	AgentDnsPort   int
+	AuditorDnsPort int
 }
 
 // rolePaths collects the deterministic per-role filenames.
@@ -58,6 +80,11 @@ type rolePaths struct {
 	CombinerJosePub  string
 	CombinerCert     string
 	CombinerKey      string
+
+	AuditorJosePriv string
+	AuditorJosePub  string
+	AuditorCert     string
+	AuditorKey      string
 }
 
 func makeRolePaths(keysDir, certsDir string) rolePaths {
@@ -78,27 +105,41 @@ func makeRolePaths(keysDir, certsDir string) rolePaths {
 	p.SignerCert, p.SignerKey = cert("signer")
 	p.CombinerJosePriv, p.CombinerJosePub = jose("combiner")
 	p.CombinerCert, p.CombinerKey = cert("combiner")
+	p.AuditorJosePriv, p.AuditorJosePub = jose("auditor")
+	p.AuditorCert, p.AuditorKey = cert("auditor")
 	return p
 }
 
 func makeRenderCtx(cv CoordinatedValues) renderCtx {
-	ip := cv.Global.PublicIP
-	hp := func(port int) string {
-		return net.JoinHostPort(ip, strconv.Itoa(port))
+	internal := cv.Global.InternalIP
+	hpInternal := func(port int) string {
+		return net.JoinHostPort(internal, strconv.Itoa(port))
+	}
+	hpAny := func(port int) string {
+		return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
 	}
 	return renderCtx{
 		Global:            cv.Global,
 		Agent:             cv.Agent,
 		Signer:            cv.Signer,
 		Combiner:          cv.Combiner,
+		Auditor:           cv.Auditor,
 		Paths:             makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir),
-		AgentDnsListen:    hp(agentDnsPort),
-		AgentApiListen:    hp(agentApiPort),
-		SignerDnsListen:   hp(signerDnsPort),
-		SignerDnsListen53: hp(signerDns53Port),
-		SignerApiListen:   hp(signerApiPort),
-		CombinerDnsListen: hp(combinerDnsPort),
-		CombinerApiListen: hp(combinerApiPort),
+		AgentDnsListen:    hpAny(agentDnsPort),
+		AgentApiListen:    hpInternal(agentApiPort),
+		AgentDnsDial:      hpInternal(agentDnsPort),
+		SignerDnsListen:   hpAny(signerDnsPort),
+		SignerDnsListen53: hpAny(signerDns53Port),
+		SignerApiListen:   hpInternal(signerApiPort),
+		SignerDnsDial:     hpInternal(signerDnsPort),
+		CombinerDnsListen: hpAny(combinerDnsPort),
+		CombinerApiListen: hpInternal(combinerApiPort),
+		CombinerDnsDial:   hpInternal(combinerDnsPort),
+		AuditorDnsListen:  hpAny(auditorDnsPort),
+		AuditorApiListen:  hpInternal(auditorApiPort),
+		AuditorDnsDial:    hpInternal(auditorDnsPort),
+		AgentDnsPort:      agentDnsPort,
+		AuditorDnsPort:    auditorDnsPort,
 	}
 }
 
@@ -115,6 +156,15 @@ func renderAll(cv CoordinatedValues) (map[string]string, error) {
 		{pathMpsigner, "templates/mpsigner.yaml.tmpl"},
 		{pathMpcombiner, "templates/mpcombiner.yaml.tmpl"},
 		{pathMpcli, "templates/mpcli.yaml.tmpl"},
+	}
+	// Auditor is optional. Add its template only when the operator
+	// opted in via the interview (signalled by a non-empty
+	// Auditor.Identity).
+	if cv.Auditor.Identity != "" {
+		pairs = append(pairs, struct {
+			path string
+			tmpl string
+		}{pathMpauditor, "templates/mpauditor.yaml.tmpl"})
 	}
 
 	out := make(map[string]string, len(pairs))
