@@ -21,5 +21,6 @@ func (conf *Config) SetupMPAuditorRoutes(ctx context.Context, apirouter *mux.Rou
 	sr.HandleFunc("/auditor", conf.APIauditor()).Methods("POST")
 	sr.HandleFunc("/keystore", conf.InternalMp.HsyncDB.APIkeystoreMP(conf)).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
+	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/auditor/distrib", conf.APIauditorDistrib()).Methods("POST")
 }
