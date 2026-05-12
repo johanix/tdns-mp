@@ -78,13 +78,20 @@ func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
 	if cv.Combiner.ApiKey, err = cfg.EnsureApiKey(cv.Combiner.ApiKey); err != nil {
 		return cv, err
 	}
+	if cv.Auditor.Identity != "" {
+		if cv.Auditor.ApiKey, err = cfg.EnsureApiKey(cv.Auditor.ApiKey); err != nil {
+			return cv, err
+		}
+	}
 	return cv, nil
 }
 
 // liveTargetsFor builds the LiveTarget list for the three
-// running-daemon roles. mpcli itself is not a server.
+// running-daemon roles. mpcli itself is not a server. The
+// live-ping happens from the same host, so InternalIP is the
+// correct dial target (matches what the daemons bind to).
 func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
-	ip := cv.Global.PublicIP
+	ip := cv.Global.InternalIP
 	mk := func(role, path string, port int, apiKey string) cfg.LiveTarget {
 		url := ""
 		if ip != "" {
@@ -98,11 +105,15 @@ func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
 			HasConfig: apiKey != "",
 		}
 	}
-	return []cfg.LiveTarget{
+	targets := []cfg.LiveTarget{
 		mk("mpagent", pathMpagent, agentApiPort, cv.Agent.ApiKey),
 		mk("mpsigner", pathMpsigner, signerApiPort, cv.Signer.ApiKey),
 		mk("mpcombiner", pathMpcombiner, combinerApiPort, cv.Combiner.ApiKey),
 	}
+	if cv.Auditor.Identity != "" {
+		targets = append(targets, mk("mpauditor", pathMpauditor, auditorApiPort, cv.Auditor.ApiKey))
+	}
+	return targets
 }
 
 // generateMissingMaterial generates any missing JOSE keypairs and
@@ -120,6 +131,15 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 		{"agent", paths.AgentJosePriv, paths.AgentCert, paths.AgentKey, cv.Agent.Identity},
 		{"signer", paths.SignerJosePriv, paths.SignerCert, paths.SignerKey, cv.Signer.Identity},
 		{"combiner", paths.CombinerJosePriv, paths.CombinerCert, paths.CombinerKey, cv.Combiner.Identity},
+	}
+	if cv.Auditor.Identity != "" {
+		roles = append(roles, struct {
+			label    string
+			privKey  string
+			certFile string
+			keyFile  string
+			identity string
+		}{"auditor", paths.AuditorJosePriv, paths.AuditorCert, paths.AuditorKey, cv.Auditor.Identity})
 	}
 
 	for _, role := range roles {

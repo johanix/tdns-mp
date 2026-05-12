@@ -193,16 +193,15 @@ func runGossipGroupState(role, groupName string) {
 		return
 	}
 
-	// Compute short names for columns (use last two labels of FQDN)
-	shortNames := make(map[string]string)
-	for _, m := range members {
-		parts := strings.Split(strings.TrimSuffix(m, "."), ".")
-		if len(parts) >= 2 {
-			shortNames[m] = parts[len(parts)-2] + "." + parts[len(parts)-1]
-		} else {
-			shortNames[m] = m
-		}
-	}
+	// Compute short names by stripping the longest label-aligned
+	// common suffix from the member identities. For
+	// [agent.hare.mp.axfr.net., agent.fox.mp.axfr.net.] the shared
+	// tail .mp.axfr.net. is removed, leaving agent.hare and
+	// agent.fox — the parts that distinguish them. Falls back to
+	// the full identity for any member that would otherwise become
+	// empty (e.g. an identity that is exactly the common suffix of
+	// another member).
+	shortNames := shortenMemberNames(members)
 
 	// Determine column width
 	colWidth := 14
@@ -254,6 +253,63 @@ func runGossipGroupState(role, groupName string) {
 			fmt.Printf("%-6s\n", age)
 		}
 	}
+}
+
+// shortenMemberNames returns a map from full identity to a display
+// form with the longest label-aligned common suffix removed. The
+// suffix split is label-aligned so we never cut a label in half
+// (so [agent.hare.mp.axfr.net., agent.fox.mp.axfr.net.] strips
+// .mp.axfr.net. — not, say, .e.net.). Any member that would map to
+// the empty string keeps its full identity instead, which covers
+// single-member groups and the strict-suffix edge case
+// (e.g. agent.example. vs sub.agent.example.).
+func shortenMemberNames(members []string) map[string]string {
+	out := make(map[string]string, len(members))
+	if len(members) == 0 {
+		return out
+	}
+
+	// Split each identity into labels (no trailing-dot empty label).
+	labelLists := make([][]string, len(members))
+	for i, m := range members {
+		labelLists[i] = strings.Split(strings.TrimSuffix(m, "."), ".")
+	}
+
+	// Walk the shortest member from the right; stop at the first
+	// label position that differs across the set. The remaining
+	// prefix (labels[0:keep]) is what's distinctive.
+	shortest := len(labelLists[0])
+	for _, ll := range labelLists[1:] {
+		if len(ll) < shortest {
+			shortest = len(ll)
+		}
+	}
+	commonTail := 0
+	for commonTail < shortest {
+		ref := labelLists[0][len(labelLists[0])-1-commonTail]
+		same := true
+		for _, ll := range labelLists[1:] {
+			if ll[len(ll)-1-commonTail] != ref {
+				same = false
+				break
+			}
+		}
+		if !same {
+			break
+		}
+		commonTail++
+	}
+
+	for i, m := range members {
+		labels := labelLists[i]
+		keep := len(labels) - commonTail
+		if keep <= 0 {
+			out[m] = m
+			continue
+		}
+		out[m] = strings.Join(labels[:keep], ".")
+	}
+	return out
 }
 
 // NewGossipCmd returns a fresh `gossip` subtree bound to the

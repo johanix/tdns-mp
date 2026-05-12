@@ -32,6 +32,10 @@ type mpagentYAML struct {
 		API                 struct {
 			CertFile string `yaml:"certfile"`
 		} `yaml:"api"`
+		Local struct {
+			Nameservers []string `yaml:"nameservers"`
+			Notify      []string `yaml:"notify"`
+		} `yaml:"local"`
 	} `yaml:"multi-provider"`
 	APIServer struct {
 		Addresses []string `yaml:"addresses"`
@@ -61,6 +65,17 @@ type mpcombinerYAML struct {
 	} `yaml:"apiserver"`
 }
 
+type mpauditorYAML struct {
+	MultiProvider struct {
+		Identity            string `yaml:"identity"`
+		LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	} `yaml:"multi-provider"`
+	APIServer struct {
+		Addresses []string `yaml:"addresses"`
+		APIKey    string   `yaml:"apikey"`
+	} `yaml:"apiserver"`
+}
+
 // readExistingCoordinated populates CoordinatedValues from any
 // existing YAML files on disk. Missing files contribute zero
 // values. Returns an error only for I/O problems or malformed
@@ -78,6 +93,9 @@ func readExistingCoordinated() (CoordinatedValues, error) {
 	if err := parseCombinerFile(pathMpcombiner, &cv.Combiner); err != nil {
 		return cv, err
 	}
+	if err := parseAuditorFile(pathMpauditor, &cv.Auditor); err != nil {
+		return cv, err
+	}
 
 	if agentJosePriv != "" {
 		cv.Global.KeysDir = filepath.Dir(agentJosePriv)
@@ -86,7 +104,10 @@ func readExistingCoordinated() (CoordinatedValues, error) {
 		cv.Global.CertsDir = filepath.Dir(agentCertFile)
 	}
 	if agentApiAddr != "" {
-		cv.Global.PublicIP = hostOnly(agentApiAddr)
+		// The agent's apiserver address is a bind target → InternalIP.
+		// PublicIP cannot be back-derived from any single bind address
+		// and stays zero on re-run unless previously persisted elsewhere.
+		cv.Global.InternalIP = hostOnly(agentApiAddr)
 	}
 	return cv, nil
 }
@@ -116,6 +137,8 @@ func parseAgentFile(path string, out *AgentValues, jose, cert, apiAddr *string) 
 	}
 	out.Identity = y.MultiProvider.Identity
 	out.ApiKey = y.APIServer.APIKey
+	out.LocalNameservers = y.MultiProvider.Local.Nameservers
+	out.LocalNotify = y.MultiProvider.Local.Notify
 	*jose = y.MultiProvider.LongTermJosePrivKey
 	*cert = y.MultiProvider.API.CertFile
 	if len(y.APIServer.Addresses) > 0 {
@@ -150,6 +173,23 @@ func parseCombinerFile(path string, out *CombinerValues) error {
 		return nil
 	}
 	var y mpcombinerYAML
+	if err := yaml.Unmarshal([]byte(content), &y); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	out.Identity = y.MultiProvider.Identity
+	out.ApiKey = y.APIServer.APIKey
+	return nil
+}
+
+func parseAuditorFile(path string, out *AuditorValues) error {
+	content, err := cfg.ReadFileIfExists(path)
+	if err != nil {
+		return err
+	}
+	if content == "" {
+		return nil
+	}
+	var y mpauditorYAML
 	if err := yaml.Unmarshal([]byte(content), &y); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
