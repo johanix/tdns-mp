@@ -8,8 +8,9 @@ multi-provider:
    # FQDN identity of this agent; appears in HSYNC3 records and
    # in CHUNK/HELLO/BEAT/PING signatures.
    identity:       {{.Agent.Identity}}
-   # Active transport mechanisms ("api", "dns"). dns = NOTIFY(CHUNK)
-   # over DNS port 53 / 8054 / etc. api = HTTPS to the SyncApi.
+   # Active transport mechanisms ("api", "dns"). Currently only
+   # "dns" (NOTIFY+CHUNK over DNS) is fully implemented; the "api"
+   # HTTPS transport is partial and not production-ready.
    supported_mechanisms: [ dns ]
    # Path to this agent's long-term JOSE private key (P-256) used
    # to sign outbound CHUNK envelopes and authenticate to peers.
@@ -74,7 +75,11 @@ multi-provider:
          # host:port the signaling DNS service binds (must match
          # the agent's dnsengine.addresses port).
          listen:     [ {{.AgentDnsListen}} ]
-      # URL template peers use; runtime substitutes {TARGET}, {PORT}.
+      # URL template published as a DNS URI RR in the agent's
+      # auto-created identity zone. Remote agents fetch this URI
+      # during their LocateAgent discovery to learn how to reach
+      # this agent for MP signaling. {TARGET} and {PORT} are
+      # substituted at publication time.
       baseurl:       dns://dns.{TARGET}:{PORT}/
       port:          {{.AgentDnsPort}}
    # Tuning knobs for the gossip + discovery loops. Defaults are
