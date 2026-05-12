@@ -50,7 +50,8 @@ log:
    file:   /var/log/tdns/tdns-mpcombiner.log
    level:  info
 
-# templates: and zones: directives may be included from a separate file if wanted
+# If the templates: and zones: sections grow large, move them to a
+# separate YAML file and pull it in via a top-level "include:" entry.
 templates:
    - name:           mptest
      # Combiner is primary for the combined zone — it receives

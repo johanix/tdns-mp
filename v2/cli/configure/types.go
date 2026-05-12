@@ -22,6 +22,7 @@ type CoordinatedValues struct {
 	Agent    AgentValues
 	Signer   SignerValues
 	Combiner CombinerValues
+	Auditor  AuditorValues
 }
 
 // GlobalValues are cross-role settings prompted only once.
@@ -65,6 +66,17 @@ type SignerValues struct {
 
 // CombinerValues is the coordinated config for tdns-mpcombiner.
 type CombinerValues struct {
+	Identity string
+	ApiKey   string
+}
+
+// AuditorValues is the coordinated config for tdns-mpauditor.
+//
+// The auditor is optional. When Identity is empty no auditor
+// config is generated and no keys/certs are produced. Setting
+// Identity (via the interactive y/N prompt) enables auditor
+// generation alongside the three core roles.
+type AuditorValues struct {
 	Identity string
 	ApiKey   string
 }

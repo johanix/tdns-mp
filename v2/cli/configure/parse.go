@@ -65,6 +65,17 @@ type mpcombinerYAML struct {
 	} `yaml:"apiserver"`
 }
 
+type mpauditorYAML struct {
+	MultiProvider struct {
+		Identity            string `yaml:"identity"`
+		LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	} `yaml:"multi-provider"`
+	APIServer struct {
+		Addresses []string `yaml:"addresses"`
+		APIKey    string   `yaml:"apikey"`
+	} `yaml:"apiserver"`
+}
+
 // readExistingCoordinated populates CoordinatedValues from any
 // existing YAML files on disk. Missing files contribute zero
 // values. Returns an error only for I/O problems or malformed
@@ -80,6 +91,9 @@ func readExistingCoordinated() (CoordinatedValues, error) {
 		return cv, err
 	}
 	if err := parseCombinerFile(pathMpcombiner, &cv.Combiner); err != nil {
+		return cv, err
+	}
+	if err := parseAuditorFile(pathMpauditor, &cv.Auditor); err != nil {
 		return cv, err
 	}
 
@@ -159,6 +173,23 @@ func parseCombinerFile(path string, out *CombinerValues) error {
 		return nil
 	}
 	var y mpcombinerYAML
+	if err := yaml.Unmarshal([]byte(content), &y); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	out.Identity = y.MultiProvider.Identity
+	out.ApiKey = y.APIServer.APIKey
+	return nil
+}
+
+func parseAuditorFile(path string, out *AuditorValues) error {
+	content, err := cfg.ReadFileIfExists(path)
+	if err != nil {
+		return err
+	}
+	if content == "" {
+		return nil
+	}
+	var y mpauditorYAML
 	if err := yaml.Unmarshal([]byte(content), &y); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}

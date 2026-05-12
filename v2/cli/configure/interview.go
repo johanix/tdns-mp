@@ -31,7 +31,7 @@ const (
 	defaultInternalIP = "127.0.0.1"
 )
 
-// Built-in port layout (same box, all three roles).
+// Built-in port layout (same box, all four roles).
 const (
 	signerDnsPort   = 8053
 	signerDns53Port = 53
@@ -42,6 +42,9 @@ const (
 
 	agentDnsPort = 8054
 	agentApiPort = 7054
+
+	auditorDnsPort = 8056
+	auditorApiPort = 7056
 )
 
 // runInterview walks the minimum prompt set. `current` seeds
@@ -66,6 +69,18 @@ func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues 
 	out.Signer.Identity = p.AskIdentity("signer identity", current.Signer.Identity)
 	out.Combiner.Identity = p.AskIdentity("combiner identity", current.Combiner.Identity)
 
+	// Optional auditor role. The auditor is a read-only MP
+	// participant — it joins gossip and observes signaling but
+	// never contributes zone data. Default to yes on re-runs where
+	// an auditor identity is already on disk; default to no on
+	// first run so the common three-role setup stays minimal.
+	auditorDefault := current.Auditor.Identity != ""
+	if p.AskYesNo("\nAlso generate a tdns-mpauditor config?", auditorDefault) {
+		out.Auditor.Identity = p.AskIdentity("auditor identity", current.Auditor.Identity)
+	} else {
+		out.Auditor.Identity = ""
+	}
+
 	// The agent has an auto-created zone (the agent identity itself, e.g.
 	// agent.hare.mp.axfr.net.). The two prompts below configure that
 	// zone's published NS RDATA and the downstream secondaries it
@@ -78,7 +93,7 @@ func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues 
 	notifyAns := p.Ask("notify addresses for agent zone (host:port of downstream secondaries; whitespace-separated, blank ok)", notifySeed, hostPortList)
 	out.Agent.LocalNotify = parseHostPortList(notifyAns)
 
-	showPortTable(p.Out)
+	showPortTable(p.Out, out.Auditor.Identity != "")
 	if !p.AskYesNo("\nAccept these defaults?", true) {
 		fmt.Fprintln(p.Out, "OK — these defaults will be used now; edit the generated configs afterwards to change them.")
 	}
@@ -143,11 +158,15 @@ func ipLiteral(s string) error {
 }
 
 // showPortTable prints the fixed port layout so the user knows
-// what is about to be baked in.
-func showPortTable(w io.Writer) {
+// what is about to be baked in. The auditor row is included only
+// when the auditor role was opted into in the interview.
+func showPortTable(w io.Writer, withAuditor bool) {
 	fmt.Fprintln(w, "\nPort layout (same-box defaults):")
 	fmt.Fprintf(w, "   %-17s %-12s %s\n", "role", "DNS", "mgmt API")
 	fmt.Fprintf(w, "   %-17s %-12s %d\n", "tdns-mpsigner", fmt.Sprintf("%d, %d", signerDnsPort, signerDns53Port), signerApiPort)
 	fmt.Fprintf(w, "   %-17s %-12d %d\n", "tdns-mpcombiner", combinerDnsPort, combinerApiPort)
 	fmt.Fprintf(w, "   %-17s %-12d %d\n", "tdns-mpagent", agentDnsPort, agentApiPort)
+	if withAuditor {
+		fmt.Fprintf(w, "   %-17s %-12d %d\n", "tdns-mpauditor", auditorDnsPort, auditorApiPort)
+	}
 }

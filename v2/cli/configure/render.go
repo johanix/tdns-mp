@@ -51,6 +51,9 @@ type renderCtx struct {
 	CombinerDnsListen string
 	CombinerApiListen string
 	CombinerDnsDial   string
+	AuditorDnsListen  string
+	AuditorApiListen  string
+	AuditorDnsDial    string
 
 	// *ApiPublic are operator-facing URLs baked into the mpcli
 	// config. Built from PublicIP so the generated mpcli config
@@ -58,12 +61,14 @@ type renderCtx struct {
 	AgentApiPublic    string
 	SignerApiPublic   string
 	CombinerApiPublic string
+	AuditorApiPublic  string
 
 	// AgentDnsPort is the numeric port the agent's signaling DNS
 	// service listens on. Used in the multi-provider.dns block of
 	// the agent config, where `port:` and the port in `listen:`
 	// must match what dnsengine actually binds.
-	AgentDnsPort int
+	AgentDnsPort   int
+	AuditorDnsPort int
 }
 
 // rolePaths collects the deterministic per-role filenames.
@@ -82,6 +87,11 @@ type rolePaths struct {
 	CombinerJosePub  string
 	CombinerCert     string
 	CombinerKey      string
+
+	AuditorJosePriv string
+	AuditorJosePub  string
+	AuditorCert     string
+	AuditorKey      string
 }
 
 func makeRolePaths(keysDir, certsDir string) rolePaths {
@@ -102,6 +112,8 @@ func makeRolePaths(keysDir, certsDir string) rolePaths {
 	p.SignerCert, p.SignerKey = cert("signer")
 	p.CombinerJosePriv, p.CombinerJosePub = jose("combiner")
 	p.CombinerCert, p.CombinerKey = cert("combiner")
+	p.AuditorJosePriv, p.AuditorJosePub = jose("auditor")
+	p.AuditorCert, p.AuditorKey = cert("auditor")
 	return p
 }
 
@@ -136,7 +148,12 @@ func makeRenderCtx(cv CoordinatedValues) renderCtx {
 		AgentApiPublic:    hpPublic(agentApiPort),
 		SignerApiPublic:   hpPublic(signerApiPort),
 		CombinerApiPublic: hpPublic(combinerApiPort),
+		AuditorApiPublic:  hpPublic(auditorApiPort),
+		AuditorDnsListen:  hpAny(auditorDnsPort),
+		AuditorApiListen:  hpInternal(auditorApiPort),
+		AuditorDnsDial:    hpInternal(auditorDnsPort),
 		AgentDnsPort:      agentDnsPort,
+		AuditorDnsPort:    auditorDnsPort,
 	}
 }
 
@@ -153,6 +170,15 @@ func renderAll(cv CoordinatedValues) (map[string]string, error) {
 		{pathMpsigner, "templates/mpsigner.yaml.tmpl"},
 		{pathMpcombiner, "templates/mpcombiner.yaml.tmpl"},
 		{pathMpcli, "templates/mpcli.yaml.tmpl"},
+	}
+	// Auditor is optional. Add its template only when the operator
+	// opted in via the interview (signalled by a non-empty
+	// Auditor.Identity).
+	if cv.Auditor.Identity != "" {
+		pairs = append(pairs, struct {
+			path string
+			tmpl string
+		}{pathMpauditor, "templates/mpauditor.yaml.tmpl"})
 	}
 
 	out := make(map[string]string, len(pairs))

@@ -20,7 +20,12 @@ apiservers:
      baseurl:      https://{{.AgentApiPublic}}/api/v1
      apikey:       {{.Agent.ApiKey}}
      authmethod:   X-API-Key
-
+{{if .Auditor.Identity}}
+   - name:         tdns-auditor
+     baseurl:      https://{{.AuditorApiPublic}}/api/v1
+     apikey:       {{.Auditor.ApiKey}}
+     authmethod:   X-API-Key
+{{end}}
 log:
    file:   /var/log/tdns/tdns-mpcli.log
    level:  info
