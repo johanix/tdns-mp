@@ -565,7 +565,12 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	if lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroup(groupHash)
 		if pg != nil {
-			lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers, pg.Zones)
+			if len(pg.VotingMembers) == 0 {
+				lgElect.Warn("accepted leader from gossip, but group has no voting members; skipping re-election timer",
+					"group", groupHash[:8])
+			} else {
+				lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers, pg.Zones)
+			}
 		}
 	}
 }

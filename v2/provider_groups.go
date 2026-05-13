@@ -143,19 +143,19 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 		if zg, exists := groupMap[key]; exists {
 			zg.zones = append(zg.zones, ZoneName(zname))
 			// Union voting members across zones in the group.
-			// Inconsistency is unusual but possible; warn so the
-			// operator notices.
-			before := len(zg.votingMembers)
+			// Compare incoming-vs-existing directly (rather than
+			// merged-vs-existing) so subset disagreements still
+			// warn — iteration order over Zones.Items() is
+			// randomized and the merged-equals-existing path
+			// would silence the warning depending on which zone
+			// happened to be processed first.
+			if len(zg.votingMembers) > 0 && !slices.Equal(votingMembers, zg.votingMembers) {
+				lgProviderGroup.Warn("voting members differ across zones in the same provider group; using union",
+					"group_key", key, "zone", zname, "previous", zg.votingMembers, "current", votingMembers)
+			}
 			merged := append(append([]string(nil), zg.votingMembers...), votingMembers...)
 			slices.Sort(merged)
-			merged = slices.Compact(merged)
-			if len(merged) != before || !slices.Equal(merged, zg.votingMembers) {
-				if before > 0 {
-					lgProviderGroup.Warn("voting members differ across zones in the same provider group; using union",
-						"group_key", key, "zone", zname, "previous", zg.votingMembers, "current", votingMembers)
-				}
-				zg.votingMembers = merged
-			}
+			zg.votingMembers = slices.Compact(merged)
 		} else {
 			groupMap[key] = &zoneGroup{
 				identities:    identities,
