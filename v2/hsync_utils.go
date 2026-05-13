@@ -1227,15 +1227,28 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 	}
 
-	// HSYNC and DNSKEY change detection
+	// HSYNC change detection runs for every MP-aware role, including
+	// the auditor. The auditor must learn about new HSYNC3 / HSYNCPARAM
+	// data so that PostRefresh can call RecomputeGroups and the new
+	// provider group becomes visible. Without this, a zone introduced
+	// after a non-auditor restart (or, equivalently, a zone whose
+	// HSYNC3 set changes while the auditor is running) never enters
+	// the auditor's group map.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
+	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner, tdns.AppTypeMPAuditor:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(mpzd.ZoneData, new_zd)
 		if err != nil {
 			lg.Error("HsyncChanged failed", "zone", mpzd.ZoneName, "err", err)
 		}
+	}
 
+	// DNSKEY change detection — only for roles that actually act on
+	// DNSKEY data (signer/agent sign zones; combiner needs awareness;
+	// auth is the parent zone serving DS). The auditor observes
+	// signing but never signs, so DnskeysChangedNG is skipped for it.
+	switch tdns.Globals.App.Type {
+	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
 		dnskeyschanged, err := mpzd.DnskeysChangedNG(new_zd)
 		if err != nil {
 			lg.Error("DnskeysChangedNG failed", "zone", mpzd.ZoneName, "err", err)
