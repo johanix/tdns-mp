@@ -40,20 +40,41 @@ func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
 				return
 			}
 
-			// Only the lexicographically smallest member initiates the election.
-			// Others wait for the ELECT-CALL. This prevents concurrent elections
+			// Only the lexicographically smallest voting member
+			// initiates the election. Others wait for the
+			// ELECT-CALL. This prevents concurrent elections
 			// when all agents fire OnGroupOperational simultaneously.
-			initiator := pg.Members[0]
-			for _, m := range pg.Members[1:] {
+			// Non-voting members (e.g. auditors) are excluded by
+			// using pg.VotingMembers instead of pg.Members.
+			if len(pg.VotingMembers) == 0 {
+				lgEngine.Warn("OnGroupOperational: no voting members in group, skipping election",
+					"group", groupHash[:8])
+				return
+			}
+			localID := string(lem.localID)
+			// We only initiate / wait if we are a voting member.
+			weVote := false
+			for _, m := range pg.VotingMembers {
+				if m == localID {
+					weVote = true
+					break
+				}
+			}
+			if !weVote {
+				lgEngine.Info("OnGroupOperational: not a voting member, observing only",
+					"group", groupHash[:8])
+				return
+			}
+			initiator := pg.VotingMembers[0]
+			for _, m := range pg.VotingMembers[1:] {
 				if m < initiator {
 					initiator = m
 				}
 			}
-			localID := string(lem.localID)
 			if localID == initiator {
 				lgEngine.Info("OnGroupOperational: we are initiator, starting election",
 					"group", groupHash[:8])
-				lem.StartGroupElection(groupHash, pg.Members, pg.Zones)
+				lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
 			} else {
 				lgEngine.Info("OnGroupOperational: waiting for initiator",
 					"group", groupHash[:8], "initiator", initiator)

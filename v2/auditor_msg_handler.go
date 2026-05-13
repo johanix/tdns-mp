@@ -103,9 +103,29 @@ func AuditorMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			// RFI from a peer: log only. Phase E's rule 5 will wire
 			// an actual empty-SYNC response.
+			//
+			// Election RFIs (ELECT-CALL/ELECT-VOTE/ELECT-CONFIRM)
+			// are operationally interesting to an auditor — they
+			// indicate that providers are converging on parent-
+			// update authority — and stay at INFO. Only ELECT-CALL
+			// is logged at INFO (one line per election round);
+			// VOTE/CONFIRM follow each CALL and would just add
+			// noise.
+			//
+			// Other RFI types are observation-only placeholder logs
+			// from phase E and stay at DEBUG until Phase E ships an
+			// actual response.
 			if msg.MessageType == AgentMsgRfi {
-				lgAuditor.Info("RFI received (no response sent yet — phase E)",
-					"type", msg.RfiType, "sender", senderID, "zone", zone)
+				switch msg.RfiType {
+				case "ELECT-CALL":
+					lgAuditor.Info("leader election initiated",
+						"group_or_zone", zone, "initiator", senderID)
+				case "ELECT-VOTE", "ELECT-CONFIRM":
+					// Don't log; follows ELECT-CALL.
+				default:
+					lgAuditor.Debug("RFI received (no response sent yet — phase E)",
+						"type", msg.RfiType, "sender", senderID, "zone", zone)
+				}
 				logEvent(kdb, &AuditEvent{
 					Time:        time.Now(),
 					Zone:        zone,

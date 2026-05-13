@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strconv"
 	"time"
 
@@ -164,19 +165,30 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 	}
 	lem.mu.Unlock()
 
-	// Find group metadata for callbacks
+	// Find group metadata for callbacks. Quorum/initiator logic
+	// uses voting members only — non-voting roles (auditors) may
+	// receive the broadcast but must not be counted.
 	var members []string
 	var zones []ZoneName
 	if lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroup(groupHash)
 		if pg != nil {
-			members = pg.Members
+			members = pg.VotingMembers
 			zones = pg.Zones
 		}
 	}
 
 	if len(members) == 0 {
-		lgElect.Warn("group election: no members found, skipping", "groupHash", groupHash)
+		lgElect.Warn("group election: no voting members found, skipping", "groupHash", groupHash)
+		return
+	}
+
+	// If we're not a voting member ourselves, we still want to
+	// observe the protocol (useful for auditors auditing) but we
+	// must not vote, initiate, or be counted in the quorum.
+	if !slices.Contains(members, string(lem.localID)) {
+		lgElect.Info("leader election observed (not a voting member, no participation)",
+			"group", groupHash[:8], "type", rfiType, "initiator", senderID, "term", parseUint64(records, "_term"))
 		return
 	}
 
@@ -553,7 +565,7 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	if lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroup(groupHash)
 		if pg != nil {
-			lem.scheduleGroupReelection(le, groupHash, pg.Members, pg.Zones)
+			lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers, pg.Zones)
 		}
 	}
 }

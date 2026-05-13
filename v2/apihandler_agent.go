@@ -543,7 +543,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			if ar != nil && ar.ProviderGroupManager != nil {
 				pg := ar.ProviderGroupManager.GetGroupForZone(amp.Zone)
 				if pg != nil {
-					lem.StartGroupElection(pg.GroupHash, pg.Members, pg.Zones)
+					lem.StartGroupElection(pg.GroupHash, pg.VotingMembers, pg.Zones)
 					resp.Msg = fmt.Sprintf("Group election started for zone %s (group %s)", amp.Zone, pg.GroupHash[:8])
 					return
 				}

@@ -72,11 +72,18 @@ type GossipStateTable struct {
 // NameProposal in place — so callers cannot assume the struct is
 // immutable once stored. Snapshot fields under the lock.
 type ProviderGroup struct {
-	GroupHash    string             // truncated SHA-256 of sorted member identities
-	Name         string             // human-friendly name (resolved via naming protocol)
-	Members      []string           // sorted provider identities (FQDNs)
-	Zones        []ZoneName         // zones served by this exact set of providers
-	NameProposal *GroupNameProposal // our proposal for this group's name
+	GroupHash string     // truncated SHA-256 of sorted member identities
+	Name      string     // human-friendly name (resolved via naming protocol)
+	Members   []string   // sorted provider identities (FQDNs) — all HSYNC3 participants regardless of role
+	Zones     []ZoneName // zones served by this exact set of providers
+	// VotingMembers is the subset of Members that may participate
+	// in leader elections — derived from union(HSYNCPARAM.signers,
+	// HSYNCPARAM.servers) translated through HSYNC3 labels to
+	// identities. Non-voting roles (e.g. auditors) appear in
+	// Members but not here. Quorum computations and initiator
+	// selection MUST use VotingMembers, not Members.
+	VotingMembers []string
+	NameProposal  *GroupNameProposal // our proposal for this group's name
 }
 
 // GroupNameProposal is a name proposed by a provider for a group.
