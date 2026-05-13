@@ -223,6 +223,15 @@ type HsyncStatus struct {
 	Msg          string
 	HsyncAdds    []dns.RR
 	HsyncRemoves []dns.RR
+	// ParamChanged is true when HSYNCPARAM differed between the old
+	// and new zone apex, regardless of whether HSYNC3 also changed.
+	// Consumers that recompute provider-group state from HSYNCPARAM
+	// (e.g. RecomputeGroups, which derives VotingMembers from
+	// HSYNCPARAM.signers/servers) must trigger that work when either
+	// HSYNC3 *or* HSYNCPARAM changed — a pure HSYNCPARAM edit (e.g.
+	// re-pointing signers= or servers=) produces no HsyncAdds/Removes
+	// but still requires a recompute.
+	ParamChanged bool
 }
 
 // --- From hsync_utils.go ---

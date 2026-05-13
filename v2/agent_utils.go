@@ -984,12 +984,17 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 		}
 	}
 
-	// Recompute provider groups when HSYNC3 data changes
-	if len(updatedIdentities) > 0 && ar.ProviderGroupManager != nil {
+	// Recompute provider groups when HSYNC3 or HSYNCPARAM changed.
+	// HSYNC3 changes are signalled by len(updatedIdentities) > 0
+	// (populated from HsyncAdds). HSYNCPARAM-only edits produce no
+	// HsyncAdds but still must trigger a recompute because
+	// VotingMembers is derived from HSYNCPARAM.signers/servers.
+	paramChanged := req.SyncStatus != nil && req.SyncStatus.ParamChanged
+	if (len(updatedIdentities) > 0 || paramChanged) && ar.ProviderGroupManager != nil {
 		ar.ProviderGroupManager.RecomputeGroups()
 		groups := ar.ProviderGroupManager.GetGroups()
 		for _, pg := range groups {
-			lgAgent.Info("provider group updated", "group", pg.Name, "hash", pg.GroupHash[:8], "members", len(pg.Members), "zones", len(pg.Zones))
+			lgAgent.Info("provider group updated", "group", pg.Name, "hash", pg.GroupHash[:8], "members", len(pg.Members), "voting", len(pg.VotingMembers), "zones", len(pg.Zones))
 		}
 	}
 
