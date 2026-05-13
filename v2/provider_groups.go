@@ -53,8 +53,9 @@ func ComputeGroupHash(identities []string) string {
 // and rebuilds the provider group map. This is a pure function of zone data.
 func (pgm *ProviderGroupManager) RecomputeGroups() {
 	type zoneGroup struct {
-		identities []string
-		zones      []ZoneName
+		identities    []string
+		votingMembers []string // union of voting identities across zones in this group
+		zones         []ZoneName
 	}
 	groupMap := make(map[string]*zoneGroup)
 
@@ -73,8 +74,12 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			continue
 		}
 
-		// Extract identities from HSYNC3 records
+		// Extract identities and label→identity map from HSYNC3 records.
+		// Labels in HSYNC3 are stored with a trailing dot ("hare.") but
+		// HSYNCPARAM signers=/servers= use the bare form ("hare").
+		// Normalise both sides by trimming the trailing dot.
 		var identities []string
+		labelToIdentity := map[string]string{}
 		for _, rr := range hsyncRRset.RRs {
 			prr, ok := rr.(*dns.PrivateRR)
 			if !ok {
@@ -88,11 +93,50 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 				continue
 			}
 			identities = append(identities, h3.Identity)
+			labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
 		}
 
 		if len(identities) < 2 {
 			continue
 		}
+
+		// Voting members for this zone = union of HSYNCPARAM
+		// signers and servers, translated through the HSYNC3
+		// label→identity map. Non-voting roles (auditors etc.)
+		// appear in HSYNC3 but not in signers/servers, so they
+		// are excluded here by construction. Future role
+		// categories (e.g. "secretary") add HSYNC3 records but
+		// don't list themselves under signers/servers, so this
+		// stays correct.
+		var votingMembers []string
+		if hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM); ok && len(hpRRset.RRs) > 0 {
+			if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
+				if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+					seen := map[string]bool{}
+					addLabels := func(labels []string) {
+						for _, label := range labels {
+							key := strings.TrimSuffix(label, ".")
+							if id, ok := labelToIdentity[key]; ok && !seen[id] {
+								votingMembers = append(votingMembers, id)
+								seen[id] = true
+							}
+						}
+					}
+					addLabels(hp.GetSigners())
+					addLabels(hp.GetServers())
+				}
+			}
+		}
+		// Fallback for zones with HSYNC3 but no HSYNCPARAM yet:
+		// treat all HSYNC3 identities as voting (legacy behaviour).
+		// Logged so the operator notices the missing HSYNCPARAM.
+		if len(votingMembers) == 0 {
+			lgProviderGroup.Warn("zone has HSYNC3 but no HSYNCPARAM with signers/servers; treating all HSYNC3 identities as voting (legacy fallback)",
+				"zone", zname)
+			votingMembers = append(votingMembers, identities...)
+		}
+		slices.Sort(votingMembers)
+		votingMembers = slices.Compact(votingMembers)
 
 		slices.Sort(identities)
 		identities = slices.Compact(identities)
@@ -100,10 +144,25 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 
 		if zg, exists := groupMap[key]; exists {
 			zg.zones = append(zg.zones, ZoneName(zname))
+			// Union voting members across zones in the group.
+			// Compare incoming-vs-existing directly (rather than
+			// merged-vs-existing) so subset disagreements still
+			// warn — iteration order over Zones.Items() is
+			// randomized and the merged-equals-existing path
+			// would silence the warning depending on which zone
+			// happened to be processed first.
+			if len(zg.votingMembers) > 0 && !slices.Equal(votingMembers, zg.votingMembers) {
+				lgProviderGroup.Warn("voting members differ across zones in the same provider group; using union",
+					"group_key", key, "zone", zname, "previous", zg.votingMembers, "current", votingMembers)
+			}
+			merged := append(append([]string(nil), zg.votingMembers...), votingMembers...)
+			slices.Sort(merged)
+			zg.votingMembers = slices.Compact(merged)
 		} else {
 			groupMap[key] = &zoneGroup{
-				identities: identities,
-				zones:      []ZoneName{ZoneName(zname)},
+				identities:    identities,
+				votingMembers: votingMembers,
+				zones:         []ZoneName{ZoneName(zname)},
 			}
 		}
 	}
@@ -118,10 +177,11 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 		})
 
 		pg := &ProviderGroup{
-			GroupHash: hash,
-			Members:   zg.identities,
-			Zones:     zg.zones,
-			Name:      hash[:8],
+			GroupHash:     hash,
+			Members:       zg.identities,
+			VotingMembers: zg.votingMembers,
+			Zones:         zg.zones,
+			Name:          hash[:8],
 		}
 
 		newGroups[hash] = pg
@@ -165,6 +225,7 @@ func cloneProviderGroup(pg *ProviderGroup) *ProviderGroup {
 	}
 	cp := *pg
 	cp.Members = append([]string(nil), pg.Members...)
+	cp.VotingMembers = append([]string(nil), pg.VotingMembers...)
 	cp.Zones = append([]ZoneName(nil), pg.Zones...)
 	if pg.NameProposal != nil {
 		np := *pg.NameProposal

@@ -543,7 +543,26 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			if ar != nil && ar.ProviderGroupManager != nil {
 				pg := ar.ProviderGroupManager.GetGroupForZone(amp.Zone)
 				if pg != nil {
-					lem.StartGroupElection(pg.GroupHash, pg.Members, pg.Zones)
+					if len(pg.VotingMembers) == 0 {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("cannot start group election for zone %s: no voting members in group %s",
+							amp.Zone, pg.GroupHash[:8])
+						return
+					}
+					localID := conf.Config.MultiProvider.Identity
+					weVote := false
+					for _, m := range pg.VotingMembers {
+						if m == localID {
+							weVote = true
+							break
+						}
+					}
+					if !weVote {
+						resp.Msg = fmt.Sprintf("group election observed only for zone %s (this node is not a voting member of group %s)",
+							amp.Zone, pg.GroupHash[:8])
+						return
+					}
+					lem.StartGroupElection(pg.GroupHash, pg.VotingMembers, pg.Zones)
 					resp.Msg = fmt.Sprintf("Group election started for zone %s (group %s)", amp.Zone, pg.GroupHash[:8])
 					return
 				}
