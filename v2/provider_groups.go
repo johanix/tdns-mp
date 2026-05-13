@@ -75,6 +75,9 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 		}
 
 		// Extract identities and label→identity map from HSYNC3 records.
+		// Labels in HSYNC3 are stored with a trailing dot ("hare.") but
+		// HSYNCPARAM signers=/servers= use the bare form ("hare").
+		// Normalise both sides by trimming the trailing dot.
 		var identities []string
 		labelToIdentity := map[string]string{}
 		for _, rr := range hsyncRRset.RRs {
@@ -90,7 +93,7 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 				continue
 			}
 			identities = append(identities, h3.Identity)
-			labelToIdentity[h3.Label] = h3.Identity
+			labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
 		}
 
 		if len(identities) < 2 {
@@ -110,18 +113,17 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
 				if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
 					seen := map[string]bool{}
-					for _, label := range hp.GetSigners() {
-						if id, ok := labelToIdentity[label]; ok && !seen[id] {
-							votingMembers = append(votingMembers, id)
-							seen[id] = true
+					addLabels := func(labels []string) {
+						for _, label := range labels {
+							key := strings.TrimSuffix(label, ".")
+							if id, ok := labelToIdentity[key]; ok && !seen[id] {
+								votingMembers = append(votingMembers, id)
+								seen[id] = true
+							}
 						}
 					}
-					for _, label := range hp.GetServers() {
-						if id, ok := labelToIdentity[label]; ok && !seen[id] {
-							votingMembers = append(votingMembers, id)
-							seen[id] = true
-						}
-					}
+					addLabels(hp.GetSigners())
+					addLabels(hp.GetServers())
 				}
 			}
 		}
