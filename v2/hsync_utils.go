@@ -1235,7 +1235,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// HSYNC3 set changes while the auditor is running) never enters
 	// the auditor's group map.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner, tdns.AppTypeMPAuditor:
+	case tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeMPSigner, tdns.AppTypeMPAuditor:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(mpzd.ZoneData, new_zd)
 		if err != nil {
@@ -1244,11 +1244,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	}
 
 	// DNSKEY change detection — only for roles that actually act on
-	// DNSKEY data (signer/agent sign zones; combiner needs awareness;
-	// auth is the parent zone serving DS). The auditor observes
+	// DNSKEY data (signer signs zones; agent contributes its own
+	// DNSKEYs; combiner needs awareness). The auditor observes
 	// signing but never signs, so DnskeysChangedNG is skipped for it.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
+	case tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeMPSigner:
 		dnskeyschanged, err := mpzd.DnskeysChangedNG(new_zd)
 		if err != nil {
 			lg.Error("DnskeysChangedNG failed", "zone", mpzd.ZoneName, "err", err)
@@ -1257,7 +1257,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		// For multi-provider zones, compute local DNSKEY adds/removes
 		if dnskeyschanged && mpzd.Options[tdns.OptMultiProvider] {
 			switch tdns.Globals.App.Type {
-			case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
+			case tdns.AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				mpzd.RequestAndWaitForKeyInventory(context.Background(), tm)
 				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate()
@@ -1300,7 +1300,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// Signer: dynamically enable/disable inline-signing based on HSYNC analysis.
 	if mpzd.MP.MPdata != nil {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeAuth, tdns.AppTypeMPSigner:
+		case tdns.AppTypeMPSigner:
 			shouldSign := mpzd.MP.MPdata.WeAreSigner
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
@@ -1390,7 +1390,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// DNSKEY change routing
 	if analysis.DnskeyChanged {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
+		case tdns.AppTypeMPAgent:
 			if mpzd.Options[tdns.OptMultiProvider] {
 				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", mpzd.ZoneName)
 				mpzd.SyncQ <- SyncRequest{
@@ -1408,7 +1408,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// HSYNC change routing
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
+		case tdns.AppTypeMPAgent:
 			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
 			mpzd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",

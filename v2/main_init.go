@@ -46,9 +46,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	tdns.RegisterZoneOptionValidator(tdns.OptMultiProvider,
 		func(c *tdns.Config, zname string, zd *tdns.ZoneData, options map[tdns.ZoneOption]bool) bool {
-			// On the signer (AppTypeAuth), require server-level multi-provider config.
+			// On the signer, require server-level multi-provider config.
 			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
-			if tdns.Globals.App.Type == tdns.AppTypeAuth && (c.MultiProvider == nil || !c.MultiProvider.Active) {
+			if tdns.Globals.App.Type == tdns.AppTypeMPSigner && (c.MultiProvider == nil || !c.MultiProvider.Active) {
 				lg.Error("option requires multi-provider.active in server config", "zone", zname,
 					"option", tdns.ZoneOptionToString[tdns.OptMultiProvider])
 				if zd != nil {
