@@ -622,11 +622,18 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 		}
 	}
 
-	// Convert to AgentMsgReport for the existing hsyncengine
+	// Convert to AgentMsgReport for the existing hsyncengine.
+	// Use the first shared zone from the payload as the report's
+	// Zone — downstream consumers (e.g. AuditorMsgHandler's
+	// StateManager.GetOrCreateZone) gate on zone != "", and without
+	// it the auditor never records a per-zone provider entry.
 	report := &AgentMsgReport{
 		MessageType:    AgentMsgHello,
 		Identity:       AgentId(senderID),
 		DistributionID: msg.DistributionID,
+	}
+	if zones := payload.GetSharedZones(); len(zones) > 0 {
+		report.Zone = ZoneName(zones[0])
 	}
 
 	if tm.msgQs == nil {
@@ -715,11 +722,21 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// (same pattern as DNS-87 fix for sync messages).
 	distributionID := msg.DistributionID
 
+	// Set Zone from the payload's Zones list so downstream consumers
+	// (notably AuditorMsgHandler, which gates StateManager updates on
+	// zone != "") can attribute the beat to its zone. Without this,
+	// the auditor dashboard's provider list stays empty even though
+	// beats are flowing — only HELLO-initiated state entries survive,
+	// and HELLOs happen once per handshake while beats happen
+	// continuously.
 	report := &AgentMsgReport{
 		MessageType:    AgentMsgBeat,
 		Identity:       AgentId(senderID),
 		BeatInterval:   beatInterval,
 		DistributionID: distributionID,
+	}
+	if len(payload.Zones) > 0 {
+		report.Zone = ZoneName(payload.Zones[0])
 	}
 
 	if tm.msgQs == nil {
