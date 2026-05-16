@@ -50,3 +50,13 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/johanix/tdns/v2 => ../../../tdns/v2
+
+replace github.com/johanix/tdns/v2/cli => ../../../tdns/v2/cli
+
+replace github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
+
+replace github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
+
+replace github.com/johanix/tdns/v2/cache => ../../../tdns/v2/cache

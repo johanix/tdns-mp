@@ -63,3 +63,13 @@ require (
 	zgo.at/runewidth v0.1.0 // indirect
 	zgo.at/termtext v1.5.0 // indirect
 )
+
+replace github.com/johanix/tdns/v2 => ../../tdns/v2
+
+replace github.com/johanix/tdns/v2/cli => ../../tdns/v2/cli
+
+replace github.com/johanix/tdns/v2/core => ../../tdns/v2/core
+
+replace github.com/johanix/tdns/v2/edns0 => ../../tdns/v2/edns0
+
+replace github.com/johanix/tdns/v2/cache => ../../tdns/v2/cache
