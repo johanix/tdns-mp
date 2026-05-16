@@ -19,6 +19,15 @@ import (
 var lgEngine = tdns.Logger("engine")
 var lg = tdns.Logger("zones")
 
+// HsyncChanged compares old vs new zone apex for both HSYNC3 and
+// HSYNCPARAM and reports whether either differs. HSYNC3 adds/removes
+// are returned in HsyncStatus for the agent's UpdateAgents loop;
+// HSYNCPARAM changes carry no per-RR delta but ParamChanged is set so
+// callers can trigger group recomputation without an HSYNC3 delta.
+//
+// A pure HSYNCPARAM edit (e.g. moving a label between signers= and
+// servers=) produces no HsyncAdds/Removes but must still trigger
+// RecomputeGroups, because VotingMembers is derived from HSYNCPARAM.
 func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 	var hss = HsyncStatus{
 		Time:     time.Now(),
@@ -28,7 +37,6 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 		ErrorMsg: "",
 		Status:   true,
 	}
-	var differ bool
 
 	zd.Logger.Printf("*** HsyncChanged: enter (zone %q)", zd.ZoneName)
 
@@ -44,23 +52,33 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 	if err != nil {
 		return false, nil, err
 	}
+	newparam, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNCPARAM)
+	if err != nil {
+		return false, nil, err
+	}
 
 	if oldapex == nil {
-		if newhsync == nil {
-			lgAgent.Debug("initial zone load, no HSYNC3 RRs in new zone", "zone", zd.ZoneName)
+		// Initial load: any HSYNC3 records present are "added" from
+		// the engine's POV. HSYNCPARAM ParamChanged tracks whether
+		// the new zone has any HSYNCPARAM at all, so callers still
+		// recompute even on the (unusual) HSYNC3-empty + HSYNCPARAM-
+		// present initial load.
+		paramPresent := newparam != nil && len(newparam.RRs) > 0
+		if newhsync == nil && !paramPresent {
+			lgAgent.Debug("initial zone load, no HSYNC3 / HSYNCPARAM RRs in new zone", "zone", zd.ZoneName)
 			return false, &hss, nil
 		}
-		lgAgent.Info("initial zone load, found HSYNC3 RRs", "zone", zd.ZoneName, "count", len(newhsync.RRs))
-		hss.HsyncAdds = newhsync.RRs
+		if newhsync != nil {
+			lgAgent.Info("initial zone load, found HSYNC3 RRs", "zone", zd.ZoneName, "count", len(newhsync.RRs))
+			hss.HsyncAdds = newhsync.RRs
+		}
+		hss.ParamChanged = paramPresent
 		return true, &hss, nil
 	}
 
 	var oldhsync *core.RRset
-
 	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNC3); exists {
 		oldhsync = &rrset
-	} else {
-		oldhsync = nil
 	}
 
 	var newRRs, oldRRs []dns.RR
@@ -71,8 +89,29 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 		oldRRs = oldhsync.RRs
 	}
 
-	differ, hss.HsyncAdds, hss.HsyncRemoves = core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC3, zd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
-	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
+	hsyncDiffer, adds, removes := core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC3, zd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
+	hss.HsyncAdds = adds
+	hss.HsyncRemoves = removes
+
+	// HSYNCPARAM diff. No per-RR delta is published — consumers only
+	// need to know "something in HSYNCPARAM changed" so they can
+	// recompute provider-group state from the new RRset.
+	var oldparam *core.RRset
+	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNCPARAM); exists {
+		oldparam = &rrset
+	}
+	var newParamRRs, oldParamRRs []dns.RR
+	if newparam != nil {
+		newParamRRs = newparam.RRs
+	}
+	if oldparam != nil {
+		oldParamRRs = oldparam.RRs
+	}
+	paramDiffer, _, _ := core.RRsetDiffer(zd.ZoneName, newParamRRs, oldParamRRs, core.TypeHSYNCPARAM, zd.Logger, tdns.Globals.Verbose, tdns.Globals.Debug)
+	hss.ParamChanged = paramDiffer
+
+	differ := hsyncDiffer || paramDiffer
+	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v, hsync3: %v, hsyncparam: %v)", zd.ZoneName, differ, hsyncDiffer, paramDiffer)
 	return differ, &hss, nil
 }
 
@@ -1227,15 +1266,28 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 	}
 
-	// HSYNC and DNSKEY change detection
+	// HSYNC change detection runs for every MP-aware role, including
+	// the auditor. The auditor must learn about new HSYNC3 / HSYNCPARAM
+	// data so that PostRefresh can call RecomputeGroups and the new
+	// provider group becomes visible. Without this, a zone introduced
+	// after a non-auditor restart (or, equivalently, a zone whose
+	// HSYNC3 set changes while the auditor is running) never enters
+	// the auditor's group map.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeAgent, tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeAuth, tdns.AppTypeMPSigner:
+	case tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeMPSigner, tdns.AppTypeMPAuditor:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(mpzd.ZoneData, new_zd)
 		if err != nil {
 			lg.Error("HsyncChanged failed", "zone", mpzd.ZoneName, "err", err)
 		}
+	}
 
+	// DNSKEY change detection — only for roles that actually act on
+	// DNSKEY data (signer signs zones; agent contributes its own
+	// DNSKEYs; combiner needs awareness). The auditor observes
+	// signing but never signs, so DnskeysChangedNG is skipped for it.
+	switch tdns.Globals.App.Type {
+	case tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeMPSigner:
 		dnskeyschanged, err := mpzd.DnskeysChangedNG(new_zd)
 		if err != nil {
 			lg.Error("DnskeysChangedNG failed", "zone", mpzd.ZoneName, "err", err)
@@ -1244,7 +1296,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		// For multi-provider zones, compute local DNSKEY adds/removes
 		if dnskeyschanged && mpzd.Options[tdns.OptMultiProvider] {
 			switch tdns.Globals.App.Type {
-			case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
+			case tdns.AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				mpzd.RequestAndWaitForKeyInventory(context.Background(), tm)
 				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate()
@@ -1287,7 +1339,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// Signer: dynamically enable/disable inline-signing based on HSYNC analysis.
 	if mpzd.MP.MPdata != nil {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeAuth, tdns.AppTypeMPSigner:
+		case tdns.AppTypeMPSigner:
 			shouldSign := mpzd.MP.MPdata.WeAreSigner
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
@@ -1377,7 +1429,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// DNSKEY change routing
 	if analysis.DnskeyChanged {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
+		case tdns.AppTypeMPAgent:
 			if mpzd.Options[tdns.OptMultiProvider] {
 				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", mpzd.ZoneName)
 				mpzd.SyncQ <- SyncRequest{
@@ -1395,7 +1447,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// HSYNC change routing
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeAgent, tdns.AppTypeMPAgent:
+		case tdns.AppTypeMPAgent:
 			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
 			mpzd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
