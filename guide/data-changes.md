@@ -113,10 +113,16 @@ their combiners can include the union of DNSKEYs in
 their served zones) and to track when every peer has
 confirmed.
 
-> **Note.** Automated rollover scheduling is not yet
-> implemented for the multi-provider stack. All rollovers
-> are operator-driven, via the commands below. Automation
-> is planned but not in the current release.
+> **Note on automation.** Fully automatic DNSSEC key
+> rollover is already implemented in the upstream tdns
+> codebase (used by standalone tdns-auth deployments).
+> It has not yet been imported into the tdns-mp stack —
+> the multi-signer coordination layer (KEYSTATE-driven
+> propagation, gating on peer confirmation before each
+> key state transition) needs to be wired up first. The
+> code exists; the integration is pending. Until that is
+> done, all MP rollovers are operator-driven via the
+> commands below.
 
 ### 2.1 Manual rollover
 
