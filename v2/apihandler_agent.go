@@ -51,7 +51,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 		noZoneCommands := map[string]bool{
 			"config": true, "hsync-agentstatus": true,
 			"discover": true, "hsync-locate": true, "hsync-send-hello": true,
-			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
