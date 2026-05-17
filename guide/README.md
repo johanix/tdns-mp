@@ -26,18 +26,23 @@ the [tdns Guide](../../tdns/guide/README.md).
    `agent / combiner zone edits` CLI commands.
 4. **[Quickstart](quickstart.md)** — bring a working
    per-provider stack up via `tdns-mpcli configure`.
-5. **[Customer Zone Setup](customer-zone-setup.md)** —
-   onboard an actual zone: HSYNC3 + HSYNCPARAM,
-   NOTIFY/AXFR to combiners, forcing a refresh.
-6. **[Operation and Debugging](operation-and-debugging.md)**
+5. **[Bringup](bringup.md)** — the ordered runbook for
+   getting from a fresh deployment to a verified
+   working multi-provider network. Phased
+   verification gates with expected CLI output at each
+   step.
+6. **[Customer Zone Setup](customer-zone-setup.md)** —
+   the zone-owner side of phase 2: HSYNC3 + HSYNCPARAM
+   records, NOTIFY/AXFR to combiners, forcing a refresh.
+7. **[Operation and Debugging](operation-and-debugging.md)**
    — the day-2 CLI: peer state, gossip matrix, zone
    inspection, transactions and queues, end-to-end
    triage.
-7. **[Making Data Changes](data-changes.md)** —
-   add-rr/remove-rr, DNSSEC key rollover, inspection
-   at three layers (SDE / combiner / DNS), recovery
-   and resync.
-8. **[The Auditor](auditor.md)** — adding a passive
+8. **[Making Data Changes](data-changes.md)** —
+   addrr/delrr, DNSSEC key rollover, inspection at
+   three layers (SDE / combiner / DNS), recovery and
+   resync.
+9. **[The Auditor](auditor.md)** — adding a passive
    read-only observer to the multi-provider network.
 
 ## Reference

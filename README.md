@@ -72,16 +72,20 @@ guide is organised as a reading order:
    HSYNCPARAM options, `agent / combiner zone edits` CLI.
 4. [Quickstart](guide/quickstart.md) — bring up a
    per-provider stack via `tdns-mpcli configure`.
-5. [Customer Zone Setup](guide/customer-zone-setup.md) —
-   onboard an actual zone (HSYNC3 + HSYNCPARAM,
+5. [Bringup](guide/bringup.md) — the ordered runbook
+   from fresh deployment to verified working
+   multi-provider network, with verification gates and
+   expected CLI output at each phase.
+6. [Customer Zone Setup](guide/customer-zone-setup.md) —
+   the zone-owner side of phase 2 (HSYNC3 + HSYNCPARAM,
    NOTIFY/AXFR, forcing a refresh).
-6. [Operation and Debugging](guide/operation-and-debugging.md)
+7. [Operation and Debugging](guide/operation-and-debugging.md)
    — day-2 CLI for peer/gossip/zone/distrib/transaction
    inspection.
-7. [Making Data Changes](guide/data-changes.md) —
+8. [Making Data Changes](guide/data-changes.md) —
    `agent zone addrr/delrr`, DNSSEC key rollover,
    inspection at three layers, recovery and resync.
-8. [The Auditor](guide/auditor.md) — adding the optional
+9. [The Auditor](guide/auditor.md) — adding the optional
    passive observer.
 
 Reference material:
