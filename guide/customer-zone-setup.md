@@ -141,34 +141,36 @@ between alpha and bravo.
 
 ### 2.3 A complete example.com. zone file
 
-```
-$ORIGIN example.com.
-$TTL 3600
+All names below are written as fully-qualified FQDNs
+with trailing dots — no `$ORIGIN`, no `@`, no short
+names. This is more verbose but unambiguous; it is also
+the form the CLI emits and accepts everywhere.
 
-@   SOA   ns1.alpha.example. hostmaster.example.com. (
-              2026051701  ; serial
-              3600        ; refresh
-              900         ; retry
-              604800      ; expire
-              300         ; minimum
-              )
+```
+example.com.   3600  IN  SOA   ns1.alpha.example. hostmaster.example.com. (
+                                  2026051701  ; serial
+                                  3600        ; refresh
+                                  900         ; retry
+                                  604800      ; expire
+                                  300         ; minimum
+                                  )
 
 ; Apex NS — every serving provider has at least one NS here.
-@   NS   ns1.alpha.example.
-@   NS   ns1.bravo.example.
-@   NS   ns1.charlie.example.
+example.com.   3600  IN  NS   ns1.alpha.example.
+example.com.   3600  IN  NS   ns1.bravo.example.
+example.com.   3600  IN  NS   ns1.charlie.example.
 
 ; Multi-provider coordination records
-@   HSYNC3      ON  alpha    agent.alpha.example.    .
-@   HSYNC3      ON  bravo    agent.bravo.example.    .
-@   HSYNC3      ON  charlie  agent.charlie.example.  .
-@   HSYNCPARAM  servers="alpha,bravo,charlie" signers="alpha" nsmgmt="agent" parentsync="agent"
+example.com.   3600  IN  HSYNC3      ON  alpha    agent.alpha.example.    .
+example.com.   3600  IN  HSYNC3      ON  bravo    agent.bravo.example.    .
+example.com.   3600  IN  HSYNC3      ON  charlie  agent.charlie.example.  .
+example.com.   3600  IN  HSYNCPARAM  servers="alpha,bravo,charlie" signers="alpha" nsmgmt="agent" parentsync="agent"
 
 ; Actual zone content
-www                A    192.0.2.10
-www                AAAA 2001:db8::10
-mail               A    192.0.2.20
-@                  MX   10 mail.example.com.
+www.example.com.    3600  IN  A     192.0.2.10
+www.example.com.    3600  IN  AAAA  2001:db8::10
+mail.example.com.   3600  IN  A     192.0.2.20
+example.com.        3600  IN  MX    10 mail.example.com.
 ```
 
 The combiner will treat the apex NS, DNSKEY, CDS and
