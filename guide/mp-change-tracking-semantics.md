@@ -41,24 +41,36 @@ routed between agents, combiners, and signers.
 
 ### Non-Signing Provider Receives DNSKEY SYNC
 
-**Scenario:** signer.alpha sends DNSKEYs to agent.echo
-via agent-to-agent SYNC. Echo is a provider for the zone
-but not a signer (HSYNCPARAM signers= does not include
-echo).
+**Scenario:** signer.alpha hands DNSKEYs to agent.alpha
+via KEYSTATE. Agent.alpha then SYNCs them to agent.echo.
+Echo is a provider for the zone but not a signer
+(HSYNCPARAM signers= does not include echo).
 
 **Behavior:**
 - agent.echo accepts the DNSKEYs into its SDE (principle 1)
 - agent.echo does NOT forward to combiner.echo because
-  OptMPDisallowEdits is set (echo is not a signer)
+  `OptMPDisallowEdits` is set (echo is not a signer)
 - agent.echo sends ACCEPTED back to agent.alpha
   (principle 4)
+
+**Why does echo not forward, more generally:** for a
+*signed* customer zone, a non-signing provider is
+prohibited from making *any* edits to its served zone —
+not just DNSKEY edits. The constraint is fundamental: a
+non-signer cannot produce valid RRSIGs over its
+modifications, so any change it tried to introduce would
+break DNSSEC validation. `OptMPDisallowEdits` is what
+enforces this: echo's combiner persists nothing into the
+served zone from local contributions. The DNSKEYs reach
+echo's served zone via zone transfer from alpha's signer,
+not via combiner edits.
 
 **Why not REJECTED:** signer.alpha tracks DNSKEY
 propagation and blocks key rollover until all agents
 confirm. If echo rejects, alpha's key rollover is blocked
 by a provider that has no role in the signing process.
-The DNSKEYs reach echo's zone via zone transfer (from
-alpha's signer), not via combiner edits.
+Echo's SDE has the data; the served zone gets it via the
+zone transfer path. ACCEPTED is the honest answer.
 
 **Why not filter at sender:** Alpha could in theory skip
 sending to non-signers. But:
@@ -76,10 +88,12 @@ SYNC to agent.echo. Echo is not a signer.
 
 **Behavior:**
 - agent.echo accepts the NS into its SDE
-- agent.echo does NOT forward to combiner.echo
+- agent.echo does NOT forward to combiner.echo (same
+  reason as DNSKEY above: for signed zones, a non-signer
+  is prohibited from making any edits to its served zone)
 - agent.echo sends ACCEPTED back to agent.alpha
 
-The NS reaches echo's zone via zone transfer from
+The NS reaches echo's served zone via zone transfer from
 alpha's signer (which serves the signed zone including
 the new NS). Echo's combiner is not involved.
 

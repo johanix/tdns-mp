@@ -114,7 +114,7 @@ flowchart TD
     CO["Combiner<br/>(persistent contributions)"]
     SI["Signer<br/>(DNSSEC, public-facing)"]
     AG["Agent<br/>(SDE + peer coord)"]
-    R["External resolvers"]
+    R["Auth nameservers"]
 
     ZO -- "AXFR/IXFR + NOTIFY<br/>(customer zone)" --> CO
     CO -- "AXFR/IXFR + NOTIFY<br/>(merged zone)" --> SI
