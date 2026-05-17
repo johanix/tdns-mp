@@ -1,8 +1,22 @@
-# Multi-Provider QuickStart Guide
+# Initial Provider Configuration (Manual)
 
-This guide sets up a complete TDNS multi-provider environment on
-a single host. All three services (agent, combiner, signer) run
-on the same machine, using distinct ports.
+This document is the long-form manual configuration guide
+for the per-provider services (agent, combiner, signer).
+**For most setups you do not need it** — run
+`tdns-mpcli configure` instead, which interviews you for
+a handful of values and generates the same configs
+automatically. See [Quickstart](quickstart.md).
+
+Read this guide when the `configure` command is not
+appropriate: e.g. you are integrating tdns-mp into
+existing configuration management, you need a
+non-standard port layout, or you are debugging a
+generated config and want to understand each field.
+
+Everything below assumes a single-host deployment where
+all three services run on the same machine, distinguished
+by port. A multi-host deployment uses the same
+configuration shape with different addresses.
 
 ## 1. Overview
 
