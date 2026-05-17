@@ -180,8 +180,11 @@ the zone passes through unchanged.
 
 ### 2.4 Inspecting HSYNC3/HSYNCPARAM records
 
-`dig` cannot display the RDATA for private RR types like
-HSYNC3 and HSYNCPARAM. Use `dog` instead:
+Use `dog` for every query in this guide — it understands
+the same syntax as `dig` and additionally decodes the
+private RR types (HSYNC3, HSYNCPARAM, JWK, CHUNK) that
+tdns-mp uses. `dig` cannot display the RDATA for those
+types.
 
 ```sh
 dog @ns1.example-owner. example.com. HSYNC3
@@ -276,7 +279,7 @@ tdns-mpcli combiner zone list
 tdns-mpcli combiner zone mplist
 
 # Confirm the new serial arrived
-dig @<combiner-addr> -p 8055 example.com. SOA
+dog @<combiner-addr>:8055 example.com. SOA
 ```
 
 `combiner zone mplist` is the most useful of these —

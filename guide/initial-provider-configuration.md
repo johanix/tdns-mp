@@ -552,19 +552,19 @@ tdns-mpagent --config /etc/tdns/tdns-mpagent.yaml
 
 ```sh
 # Query the combiner for the zone
-dig @127.0.0.1 -p 8055 customer.zone. SOA
+dog @127.0.0.1:8055 customer.zone. SOA
 
 # Query the signer (should have DNSSEC signatures)
-dig @127.0.0.1 -p 8053 customer.zone. SOA +dnssec
+dog @127.0.0.1:8053 +dnssec customer.zone. SOA
 
 # Query the agent
-dig @127.0.0.1 -p 8054 customer.zone. SOA
+dog @127.0.0.1:8054 customer.zone. SOA
 ```
 
 ### 6.2 Check HSYNC3 and HSYNCPARAM records
 
-Use `dog` (not dig) to examine HSYNC3 and HSYNCPARAM records
--- dig cannot decode the private RR type RDATA:
+`dog` is also the right tool for the private RR types
+tdns-mp uses — `dig` cannot decode the RDATA:
 
 ```sh
 # HSYNC3 records (type code 65285)

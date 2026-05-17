@@ -18,23 +18,24 @@ noted otherwise.
 ## 1. Adding and Removing Records
 
 Most coordinated changes go through the agent's
-`add-rr` / `remove-rr` API. The CLI surface:
+`addrr` / `delrr` commands:
 
 ```
-tdns-mpcli agent local zonedata add-rr    -z <zone> --RR "<record>"
-tdns-mpcli agent local zonedata remove-rr -z <zone> --RR "<record>"
+tdns-mpcli agent zone addrr --zone <zone> --rr "<record>"
+tdns-mpcli agent zone delrr --zone <zone> --rr "<record>"
 ```
 
-The `--RR` argument is a full DNS record in zone-file
+The `--rr` argument is a full DNS record in zone-file
 syntax: owner, TTL, class, type, RDATA. The CLI parses
 it locally before submitting, so a syntactically broken
-record fails fast.
+record fails fast. Supported RR types: NS, DNSKEY, CDS,
+CSYNC, KEY.
 
 ### 1.1 Adding an NS record
 
 ```sh
-tdns-mpcli agent local zonedata add-rr -z example.com. \
-    --RR "example.com. 3600 IN NS ns2.alpha.example."
+tdns-mpcli agent zone addrr --zone example.com. \
+    --rr "example.com. 3600 IN NS ns2.alpha.example."
 ```
 
 What happens, in order:
@@ -63,8 +64,8 @@ go from PENDING to ACCEPTED as confirmations come in.
 ### 1.2 Removing a record
 
 ```sh
-tdns-mpcli agent local zonedata remove-rr -z example.com. \
-    --RR "example.com. 3600 IN NS ns2.alpha.example."
+tdns-mpcli agent zone delrr --zone example.com. \
+    --rr "example.com. 3600 IN NS ns2.alpha.example."
 ```
 
 The record string must match what is currently in the
@@ -84,19 +85,19 @@ the HSYNCPARAM-derived options:
   true, so contributions are applied.
 - On *non-signing* providers (bravo, charlie):
   `OptMPDisallowEdits` is true. The agent will reject
-  the local `add-rr` API call before it gets anywhere
-  near the SDE, with a message explaining that a
-  non-signer cannot edit a signed zone (it would have
-  no way to produce valid RRSIGs over the change).
+  the local `addrr` call before it gets anywhere near
+  the SDE, with a message explaining that a non-signer
+  cannot edit a signed zone (it would have no way to
+  produce valid RRSIGs over the change).
 
 See [Change Tracking Semantics](mp-change-tracking-semantics.md)
 for the full rationale.
 
-### 1.4 What you should *not* use add-rr / remove-rr for
+### 1.4 What you should *not* use addrr / delrr for
 
 - **DNSKEYs.** The signer owns DNSKEYs and exposes them
   to the agent via KEYSTATE. Use the signer's rollover
-  commands (next section), not `add-rr DNSKEY`.
+  commands (next section), not `addrr DNSKEY`.
 - **RRSIGs.** The signer produces these from DNSKEYs +
   zone content. They are not editable.
 - **SOA.** The signer manages the serial. Use `bump`
@@ -112,48 +113,38 @@ their combiners can include the union of DNSKEYs in
 their served zones) and to track when every peer has
 confirmed.
 
-### 2.1 Automated rollover (the default)
+> **Note.** Automated rollover scheduling is not yet
+> implemented for the multi-provider stack. All rollovers
+> are operator-driven, via the commands below. Automation
+> is planned but not in the current release.
 
-Once a zone has a `dnssecpolicy:` configured, the
-signer's KeyStateWorker handles ZSK and KSK rollovers
-on schedule. Inspect with:
-
-```sh
-tdns-mpcli signer keystore auto-rollover status -z example.com.
-tdns-mpcli signer keystore auto-rollover when   -z example.com.
-```
-
-`status` shows the current phase per key (active, standby,
-retired, etc.) and any pending state transitions. `when`
-computes the earliest moment the next safe rollover step
-could fire — useful for capacity planning.
-
-You will see most rollovers complete without any operator
-action. The CLI is for verifying, not driving.
-
-### 2.2 Manual rollover
-
-To force a rollover (testing, recovery, scheduled
-maintenance window):
+### 2.1 Manual rollover
 
 ```sh
-# Schedule the next safe automated rollover ASAP
-tdns-mpcli signer keystore auto-rollover asap -z example.com.
-
-# Or perform an immediate manual swap (standby -> active,
-# active -> retired). Skips the safe-timing logic — use
-# only when you know what you are doing.
-tdns-mpcli signer keystore rollover -z example.com. --keytype ZSK
-tdns-mpcli signer keystore rollover -z example.com. --keytype KSK
+tdns-mpcli signer keystore dnssec rollover -z example.com. --keytype ZSK
+tdns-mpcli signer keystore dnssec rollover -z example.com. --keytype KSK
 ```
 
-`auto-rollover asap` is almost always what you want for
-"do it soon, safely." The bare `rollover` command
-bypasses the multi-signer safety checks; use it only
-when the automated path is blocked and you have
-diagnosed why.
+This performs a manual key state advance: standby →
+active, active → retired. The new active key starts
+signing immediately; the retired key stops signing but
+stays published until the operator removes it.
 
-### 2.3 Watching the rollover propagate
+Before rolling, you typically generate the standby key:
+
+```sh
+tdns-mpcli signer keystore dnssec generate -z example.com. \
+    --keytype ZSK --state published --algorithm ED25519
+```
+
+Then verify the keystore state before and after the
+rollover with:
+
+```sh
+tdns-mpcli signer keystore dnssec list -z example.com.
+```
+
+### 2.2 Watching the rollover propagate
 
 The interesting thing about a multi-provider rollover is
 *propagation* — the new DNSKEY has to reach every
@@ -184,6 +175,15 @@ same triage as any other peer problem — see
 
 ## 3. Inspecting State
 
+The `agent zone edits` and `combiner zone edits`
+commands are the **primary inspection tools** for
+*every* kind of change — NS, DNSKEY, CDS, CSYNC and any
+per-provider edits. They show the same per-RR tracking
+state and origin attribution regardless of what RR type
+or what operation produced the change. Reach for them
+first whenever you want to know "what does the system
+think about this zone right now?".
+
 Three views to keep straight:
 
 ### 3.1 What the agent has learned (SDE)
@@ -198,7 +198,17 @@ tdns-mpcli agent zone edits list --zone example.com.
 
 This is the *runtime* picture: what data the agent has
 in memory, attributed to each source, and what
-transitions are in flight. Detail in
+transitions are in flight. Use it to answer questions
+like:
+
+- Did my `addrr NS` reach every peer? (look for PENDING
+  vs ACCEPTED per recipient)
+- Has the new DNSKEY from the local signer propagated to
+  bravo and charlie? (DNSKEY entries under
+  `Source: signer.alpha.example.`)
+- Are CDS records consistent across providers?
+
+Detail in
 [Synchronization Model §2.1](synchronization-model.md#21-inspecting-the-sde).
 
 ### 3.2 What the combiner has persisted
@@ -214,28 +224,36 @@ tdns-mpcli combiner zone edits list --zone example.com. --rejected
 ```
 
 This is the *persistent* picture: what the combiner will
-serve after the next rebuild. If the SDE and the
-combiner disagree, the combiner wins for "what is
-actually published."
+serve after the next rebuild. Same scope as the SDE view
+— every RR type, every origin, every change. If the SDE
+and the combiner disagree, the combiner wins for "what
+is actually published."
+
+`--rejected` is especially useful: any time an `addrr`
+goes through the SDE but never lands in the served
+zone, the rejection reason is recorded here.
 
 ### 3.3 What the world sees
 
 ```sh
 # Combiner output (unsigned)
-dig @127.0.0.1 -p 8055 example.com. NS
-dog @127.0.0.1:8055  example.com. HSYNC3
+dog @127.0.0.1:8055 example.com. NS
+dog @127.0.0.1:8055 example.com. HSYNC3
 
 # Signer output (signed)
-dig @127.0.0.1 -p 8053 example.com. NS +dnssec
-dig @127.0.0.1 -p 8053 example.com. DNSKEY +dnssec
+dog @127.0.0.1:8053 +dnssec example.com. NS
+dog @127.0.0.1:8053 +dnssec example.com. DNSKEY
 ```
 
 Always end a verification pass here — confirm that what
 you intended is actually in the DNS responses you can
 see, not just what the management commands report.
 
-For HSYNC3 and HSYNCPARAM (private RR types), use `dog`,
-not `dig`; `dig` cannot decode the RDATA.
+`dog` is used throughout this guide rather than `dig`:
+it understands the same query syntax but also decodes
+the private RR types (HSYNC3, HSYNCPARAM, JWK, CHUNK)
+that tdns-mp uses. `dig` would emit those as opaque
+`TYPE65285`-style blobs.
 
 ## 4. Bumping the Zone
 
@@ -304,8 +322,8 @@ nameserver:
 
 ```sh
 # 1. Add the record on alpha
-tdns-mpcli agent local zonedata add-rr -z example.com. \
-    --RR "example.com. 3600 IN NS ns2.alpha.example."
+tdns-mpcli agent zone addrr --zone example.com. \
+    --rr "example.com. 3600 IN NS ns2.alpha.example."
 
 # 2. Verify the SDE on alpha shows it PENDING then ACCEPTED
 tdns-mpcli agent zone edits list --zone example.com.
@@ -314,11 +332,11 @@ tdns-mpcli agent zone edits list --zone example.com.
 tdns-mpcli combiner zone edits list --zone example.com.
 
 # 4. Verify alpha's signed output contains it
-dig @127.0.0.1 -p 8053 example.com. NS +dnssec
+dog @127.0.0.1:8053 +dnssec example.com. NS
 
 # 5. Verify bravo's served zone contains it (after AXFR
 #    propagation from alpha's signer to bravo's auth)
-dig @<bravo-public-addr> example.com. NS
+dog @<bravo-public-addr> example.com. NS
 ```
 
 If step 2 stays PENDING for one peer: that peer's
