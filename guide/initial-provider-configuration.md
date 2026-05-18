@@ -1,8 +1,22 @@
-# Multi-Provider QuickStart Guide
+# Initial Provider Configuration (Manual)
 
-This guide sets up a complete TDNS multi-provider environment on
-a single host. All three services (agent, combiner, signer) run
-on the same machine, using distinct ports.
+This document is the long-form manual configuration guide
+for the per-provider services (agent, combiner, signer).
+**For most setups you do not need it** — run
+`tdns-mpcli configure` instead, which interviews you for
+a handful of values and generates the same configs
+automatically. See [Quickstart](quickstart.md).
+
+Read this guide when the `configure` command is not
+appropriate: e.g. you are integrating tdns-mp into
+existing configuration management, you need a
+non-standard port layout, or you are debugging a
+generated config and want to understand each field.
+
+Everything below assumes a single-host deployment where
+all three services run on the same machine, distinguished
+by port. A multi-host deployment uses the same
+configuration shape with different addresses.
 
 ## 1. Overview
 
@@ -538,19 +552,19 @@ tdns-mpagent --config /etc/tdns/tdns-mpagent.yaml
 
 ```sh
 # Query the combiner for the zone
-dig @127.0.0.1 -p 8055 customer.zone. SOA
+dog @127.0.0.1:8055 customer.zone. SOA
 
 # Query the signer (should have DNSSEC signatures)
-dig @127.0.0.1 -p 8053 customer.zone. SOA +dnssec
+dog @127.0.0.1:8053 +dnssec customer.zone. SOA
 
 # Query the agent
-dig @127.0.0.1 -p 8054 customer.zone. SOA
+dog @127.0.0.1:8054 customer.zone. SOA
 ```
 
 ### 6.2 Check HSYNC3 and HSYNCPARAM records
 
-Use `dog` (not dig) to examine HSYNC3 and HSYNCPARAM records
--- dig cannot decode the private RR type RDATA:
+`dog` is also the right tool for the private RR types
+tdns-mp uses — `dig` cannot decode the RDATA:
 
 ```sh
 # HSYNC3 records (type code 65285)

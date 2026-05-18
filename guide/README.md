@@ -2,46 +2,77 @@
 
 tdns-mp is the multi-provider DNSSEC coordination layer
 built on top of [tdns](../../tdns/). It implements the
-agent-to-agent, agent-to-combiner, and agent-to-signer
+agent-to-agent, agent-to-combiner and agent-to-signer
 protocols needed to operate a single zone across two or
 more independent DNS providers (RFC 8901 multi-signer and
 the more general multi-provider case).
 
 This guide assumes familiarity with the basic tdns
-applications, configuration, and DNSSEC. For those, see the
-[tdns Guide](../../tdns/guide/README.md).
+applications, configuration and DNSSEC. For those, see
+the [tdns Guide](../../tdns/guide/README.md).
 
-## Documents
+## Read in This Order
 
-- [tdns-mp Applications](applications.md)
-  -- Overview of the four mp binaries (tdns-mpagent,
-  tdns-mpcombiner, tdns-mpsigner, tdns-mpcli) with links
-  to per-app documentation.
+1. **[Applications](applications.md)** — overview of the
+   four mp binaries and what each does.
+2. **[Architecture](multi-provider-architecture.md)** —
+   the problem multi-provider DNSSEC solves, the three
+   roles, and how data flows inside and between
+   providers. Read this before going further.
+3. **[Synchronization Model](synchronization-model.md)**
+   — the combiner as center of persistence, the agent
+   SDE as runtime cache, origin tracking, the dynamic
+   MP options derived from HSYNCPARAM, and the
+   `agent / combiner zone edits` CLI commands.
+4. **[Quickstart](quickstart.md)** — bring a working
+   per-provider stack up via `tdns-mpcli configure`.
+5. **[Bringup](bringup.md)** — the ordered runbook for
+   getting from a fresh deployment to a verified
+   working multi-provider network. Phased
+   verification gates with expected CLI output at each
+   step.
+6. **[Customer Zone Setup](customer-zone-setup.md)** —
+   the zone-owner side of phase 2: HSYNC3 + HSYNCPARAM
+   records, NOTIFY/AXFR to combiners, forcing a refresh.
+7. **[Operation and Debugging](operation-and-debugging.md)**
+   — the day-2 CLI: peer state, gossip matrix, zone
+   inspection, transactions and queues, end-to-end
+   triage.
+8. **[Making Data Changes](data-changes.md)** —
+   addrr/delrr, DNSSEC key rollover, inspection at
+   three layers (SDE / combiner / DNS), recovery and
+   resync.
+9. **[The Auditor](auditor.md)** — adding a passive
+   read-only observer to the multi-provider network.
 
-- [Multi-Provider QuickStart](multi-provider-quickstart.md)
-  -- Get a single-host multi-provider setup running with
-  agent, combiner, and signer serving an example zone.
+## Reference
 
+- [Change Tracking Semantics](mp-change-tracking-semantics.md)
+  — design decisions and corner cases for how
+  multi-provider changes are tracked, confirmed and
+  routed.
 - [Multi-Provider Advanced Topics](multi-provider-advanced.md)
-  -- Parent synchronization, provider zones,
-  provider-to-provider sync, gossip protocol, leader
-  elections.
+  — parent delegation sync (DSYNC), provider zones,
+  `_signal` KEY publication, gossip protocol details,
+  leader elections.
+- [Initial Provider Configuration](initial-provider-configuration.md)
+  — long-form manual configuration of agent, combiner
+  and signer for cases where `tdns-mpcli configure`
+  is not appropriate.
 
-- [MP Change Tracking Semantics](mp-change-tracking-semantics.md)
-  -- Design decisions for how multi-provider changes are
-  tracked, confirmed, and routed. Corner cases for
-  non-signing providers.
+## Per-Binary Reference
 
-- Future Work (coming soon)
-  -- IXFR support, API transport for agent-agent comms,
-  TSIG authentication, HPKE encryption.
+- [tdns-mpagent](app-mpagent.md)
+- [tdns-mpcombiner](app-mpcombiner.md)
+- [tdns-mpsigner](app-mpsigner.md)
+- [tdns-mpcli](app-mpcli.md)
 
 ## Related Documentation
 
-- [tdns Guide](../../tdns/guide/README.md) -- the underlying
-  DNS engine, authoritative nameserver, recursive resolver,
-  delegation sync, transport signaling, and experimental
-  record type definitions.
+- [tdns Guide](../../tdns/guide/README.md) — the
+  underlying DNS engine, authoritative nameserver,
+  recursive resolver, delegation sync, transport
+  signaling and experimental record type definitions.
 - [tdns Special Features](../../tdns/guide/special-features.md)
-  -- definitions of the record types (HSYNC3, HSYNCPARAM,
-  JWK, CHUNK) that tdns-mp builds on.
+  — definitions of the record types (HSYNC3,
+  HSYNCPARAM, JWK, CHUNK) that tdns-mp builds on.
