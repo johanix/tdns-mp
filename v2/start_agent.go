@@ -357,6 +357,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngineNoError(&tdns.Globals.App, "DiscoveryRetrierNG", func() {
 		conf.InternalMp.AgentRegistry.DiscoveryRetrierNG(ctx)
 	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncReconcile", func() {
+		conf.InternalMp.AgentRegistry.ReconcileHsync(ctx)
+	})
 	tdns.StartEngineNoError(&tdns.Globals.App, "SynchedDataEngine", func() {
 		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
 	})

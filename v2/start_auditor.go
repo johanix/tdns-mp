@@ -146,6 +146,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		tdns.StartEngineNoError(&tdns.Globals.App, "DiscoveryRetrierNG", func() {
 			ar.DiscoveryRetrierNG(ctx)
 		})
+		tdns.StartEngineNoError(&tdns.Globals.App, "HsyncReconcile", func() {
+			ar.ReconcileHsync(ctx)
+		})
 
 		heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
 		tdns.StartEngineNoError(&tdns.Globals.App, "AuditorHeartbeatLoop", func() {
