@@ -460,4 +460,4 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 
 // _ tdns.AppType silences the import in case future test additions
 // need to set an AppType; production startup sets this elsewhere.
-var _ = tdns.AppTypeMPAgent
+var _ = AppTypeMPAgent

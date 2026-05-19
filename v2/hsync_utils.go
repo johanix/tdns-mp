@@ -1104,11 +1104,11 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 	}
 	if !matched {
 		mpzd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 record — we are not a participant for this zone", mpzd.ZoneName, ourIdentities)
-		mpzd.MPOptions[tdns.OptMPNotListedErr] = true
+		mpzd.MPOptions[OptMPNotListedErr] = true
 		mpzd.MP.MPdata = nil
 		return
 	}
-	mpzd.MPOptions[tdns.OptMPNotListedErr] = false
+	mpzd.MPOptions[OptMPNotListedErr] = false
 
 	// Guard 4: determine our role from HSYNCPARAM and set options accordingly.
 	// Each role check queries only its own HSYNCPARAM field.
@@ -1130,17 +1130,17 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 	switch {
 	case weAreAuditor:
 		// Auditors never edit
-		mpzd.MPOptions[tdns.OptMPDisallowEdits] = true
+		mpzd.MPOptions[OptMPDisallowEdits] = true
 		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	case zoneSigned && !weShouldSign:
 		// Server in a signed zone but not a signer — contributions are
 		// persisted but not applied
 		mpzd.Logger.Printf("populateMPdata: zone %s: provider %q is not a signer — contributions will be persisted but not applied", mpzd.ZoneName, ourLabel)
-		mpzd.MPOptions[tdns.OptMPDisallowEdits] = true
+		mpzd.MPOptions[OptMPDisallowEdits] = true
 		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	default:
 		// Server and/or signer — may edit
-		mpzd.MPOptions[tdns.OptMPDisallowEdits] = false
+		mpzd.MPOptions[OptMPDisallowEdits] = false
 		mpzd.MPOptions[tdns.OptAllowEdits] = true
 	}
 
@@ -1153,7 +1153,7 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 		mpOpts = make(map[tdns.ZoneOption]bool)
 	}
 	mpOpts[tdns.OptMultiProvider] = true
-	mpOpts[tdns.OptMPDisallowEdits] = mpzd.MPOptions[tdns.OptMPDisallowEdits]
+	mpOpts[OptMPDisallowEdits] = mpzd.MPOptions[OptMPDisallowEdits]
 	mpOpts[tdns.OptMultiSigner] = weShouldSign && otherSigners > 0
 
 	mpzd.MP.MPdata = &MPdata{
@@ -1274,7 +1274,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// HSYNC3 set changes while the auditor is running) never enters
 	// the auditor's group map.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeMPSigner, tdns.AppTypeMPAuditor:
+	case AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPSigner, AppTypeMPAuditor:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = HsyncChanged(mpzd.ZoneData, new_zd)
 		if err != nil {
@@ -1287,7 +1287,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// DNSKEYs; combiner needs awareness). The auditor observes
 	// signing but never signs, so DnskeysChangedNG is skipped for it.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeMPAgent, tdns.AppTypeMPCombiner, tdns.AppTypeMPSigner:
+	case AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPSigner:
 		dnskeyschanged, err := mpzd.DnskeysChangedNG(new_zd)
 		if err != nil {
 			lg.Error("DnskeysChangedNG failed", "zone", mpzd.ZoneName, "err", err)
@@ -1296,7 +1296,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		// For multi-provider zones, compute local DNSKEY adds/removes
 		if dnskeyschanged && mpzd.Options[tdns.OptMultiProvider] {
 			switch tdns.Globals.App.Type {
-			case tdns.AppTypeMPAgent:
+			case AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				mpzd.RequestAndWaitForKeyInventory(context.Background(), tm)
 				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate()
@@ -1318,7 +1318,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 
 	// Combiner: snapshot upstream data before applying contributions to new_zd
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeMPCombiner:
+	case AppTypeMPCombiner:
 		mpzd.snapshotUpstreamData(new_zd)
 	}
 
@@ -1339,7 +1339,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// Signer: dynamically enable/disable inline-signing based on HSYNC analysis.
 	if mpzd.MP.MPdata != nil {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeMPSigner:
+		case AppTypeMPSigner:
 			shouldSign := mpzd.MP.MPdata.WeAreSigner
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
@@ -1362,13 +1362,13 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 
 	// Combiner: HSYNC match check and combine with local changes on new_zd.
 	switch tdns.Globals.App.Type {
-	case tdns.AppTypeMPCombiner:
+	case AppTypeMPCombiner:
 		if analysis.HsyncChanged {
 			matched, _, _ := (&MPZoneData{ZoneData: new_zd}).matchHsyncIdentity(ourHsyncIdentities(mp))
-			if matched && !mpzd.MPOptions[tdns.OptMPDisallowEdits] {
+			if matched && !mpzd.MPOptions[OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", mpzd.ZoneName)
 				mpzd.MPOptions[tdns.OptAllowEdits] = true
-			} else if matched && mpzd.MPOptions[tdns.OptMPDisallowEdits] {
+			} else if matched && mpzd.MPOptions[OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", mpzd.ZoneName)
 				mpzd.MPOptions[tdns.OptAllowEdits] = false
 			} else {
@@ -1429,7 +1429,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// DNSKEY change routing
 	if analysis.DnskeyChanged {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeMPAgent:
+		case AppTypeMPAgent:
 			if mpzd.Options[tdns.OptMultiProvider] {
 				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", mpzd.ZoneName)
 				mpzd.SyncQ <- SyncRequest{
@@ -1439,7 +1439,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 					DnskeyStatus: analysis.DnskeyStatus,
 				}
 			}
-		case tdns.AppTypeMPCombiner:
+		case AppTypeMPCombiner:
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", mpzd.ZoneName)
 		}
 	}
@@ -1447,7 +1447,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// HSYNC change routing
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
-		case tdns.AppTypeMPAgent:
+		case AppTypeMPAgent:
 			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
 			mpzd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
@@ -1463,7 +1463,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 					mpzd.Options[tdns.OptDelSyncChild] = true
 				}
 			}
-		case tdns.AppTypeMPAuditor:
+		case AppTypeMPAuditor:
 			// The auditor doesn't run HsyncEngine, but provider
 			// groups must still be recomputed when HSYNC3 changes
 			// so incoming gossip can be attributed to the right
