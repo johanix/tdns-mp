@@ -14,12 +14,12 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	tdns "github.com/johanix/tdns/v2"
 	tdnsmp "github.com/johanix/tdns-mp/v2"
+	tdns "github.com/johanix/tdns/v2"
 )
 
 func main() {
-	tdns.Globals.App.Type = tdns.AppTypeMPSigner
+	tdns.Globals.App.Type = tdnsmp.AppTypeMPSigner
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate

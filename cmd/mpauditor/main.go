@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	tdns.Globals.App.Type = tdns.AppTypeMPAuditor
+	tdns.Globals.App.Type = tdnsmp.AppTypeMPAuditor
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
