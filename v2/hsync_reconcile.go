@@ -87,6 +87,9 @@ func (ar *AgentRegistry) reconcileZone(mpzd *MPZoneData) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("get apex: %w", err)
 	}
+	if apex == nil {
+		return 0, nil
+	}
 
 	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
 	if !exists || len(hsync3RRset.RRs) == 0 {
