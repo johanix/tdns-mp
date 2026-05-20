@@ -42,8 +42,9 @@ func (e *AuditorEngine) Run(ctx context.Context, msgQs *MsgQs) {
 	e.core.SetSyncHandler(e.onInboundMsg)
 	e.core.SetElectionHandler(e.onInboundMsg)
 
-	helloCh := adaptHelloReports(ctx, msgQs.Hello, e.stateManager, e.auditLog)
-	beatCh := adaptBeatReports(ctx, msgQs.Beat, e.stateManager, e.conf.InternalMp.AgentRegistry)
+	ar := e.conf.InternalMp.AgentRegistry
+	helloCh := adaptHelloReports(ctx, msgQs.Hello, e.stateManager, e.auditLog, ar)
+	beatCh := adaptBeatReports(ctx, msgQs.Beat, e.stateManager, ar)
 
 	go e.core.Run(ctx, hsync.MsgChannels{
 		Hello: helloCh,
@@ -157,7 +158,7 @@ func (e *AuditorEngine) runAux(ctx context.Context, msgQs *MsgQs) {
 }
 
 func adaptHelloReports(ctx context.Context, in <-chan *AgentMsgReport,
-	sm *AuditStateManager, kdb *tdns.KeyDB) <-chan *hsync.InboundReport {
+	sm *AuditStateManager, kdb *tdns.KeyDB, ar *AgentRegistry) <-chan *hsync.InboundReport {
 	out := make(chan *hsync.InboundReport)
 	go func() {
 		defer close(out)
@@ -175,6 +176,9 @@ func adaptHelloReports(ctx context.Context, in <-chan *AgentMsgReport,
 				senderID := string(report.Identity)
 				zone := string(report.Zone)
 				lgAuditor.Info("hello received", "sender", senderID, "zone", zone)
+				if ar != nil {
+					ar.HelloHandler(report)
+				}
 				logEvent(kdb, &AuditEvent{
 					Time:       time.Now(),
 					Zone:       zone,

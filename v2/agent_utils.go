@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -500,6 +501,18 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 // The agent will be discovered asynchronously by DiscoveryRetrierNG in HsyncEngine.
 // This is the new recommended pattern for agent discovery triggered by HSYNC updates.
 func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
+	if ar.HsyncEngine != nil {
+		var task *hsync.DeferredTask
+		if deferredTask != nil {
+			task = &hsync.DeferredTask{
+				Precondition: deferredTask.Precondition,
+				Action:       deferredTask.Action,
+				Desc:         deferredTask.Desc,
+			}
+		}
+		ar.HsyncEngine.MarkNeeded(hsync.PeerID(remoteid), hsync.ZoneName(zonename), task)
+		return
+	}
 	// Skip self-identification
 	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
 		lgAgent.Debug("skipping self-identification", "agent", remoteid)

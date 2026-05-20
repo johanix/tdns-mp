@@ -348,17 +348,12 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 
 	// Agent-specific engines
-	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncEngine", func() {
-		conf.HsyncEngine(ctx, conf.InternalMp.MsgQs)
+	dataEngine := NewHsyncDataEngine(conf)
+	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
+		dataEngine.Run(ctx, conf.InternalMp.MsgQs)
 	})
 	tdns.StartEngineNoError(&tdns.Globals.App, "InfraBeatLoop", func() {
 		conf.InternalMp.AgentRegistry.StartInfraBeatLoop(ctx)
-	})
-	tdns.StartEngineNoError(&tdns.Globals.App, "DiscoveryRetrierNG", func() {
-		conf.InternalMp.AgentRegistry.DiscoveryRetrierNG(ctx)
-	})
-	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncReconcile", func() {
-		conf.InternalMp.AgentRegistry.ReconcileHsync(ctx)
 	})
 	tdns.StartEngineNoError(&tdns.Globals.App, "SynchedDataEngine", func() {
 		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)

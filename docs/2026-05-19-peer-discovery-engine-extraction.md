@@ -693,7 +693,7 @@ phase completes. No Linear.
 | 2 | Build `tdns-mp/v2/hsync/` (unwired) | **done** | `peer-discovery-engine-extraction` — `hsync/` package + unit tests |
 | 3 | Wire `AuditorEngine` | **done** | `peer-discovery-engine-extraction` — `AuditorEngine` + `ApplyHsyncDiff` on auditor PostRefresh |
 | 4 | Build `HsyncDataEngine` (unwired) | **done** | `peer-discovery-engine-extraction` — `hsync_data_engine.go` |
-| 5 | Swap agent, delete legacy engine | not started | feature branch |
+| 5 | Swap agent, delete legacy engine | **done** | `peer-discovery-engine-extraction` — agent uses `HsyncDataEngine`; legacy `HsyncEngine` loop removed |
 
 ---
 
