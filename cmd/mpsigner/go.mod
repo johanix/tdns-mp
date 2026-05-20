@@ -4,19 +4,23 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
-// Local replace for the duration of the transport-refactor-semi-easy-bites
-// branch — see ../../v2/go.mod for context. Revert before publishing.
-replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+// Local replaces for in-tree builds on the feature branch stack.
+// See ../../v2/go.mod. Revert before publishing.
+replace (
+	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+	github.com/johanix/tdns/v2 => ../../../tdns/v2
+	github.com/johanix/tdns/v2/cli => ../../../tdns/v2/cli
+	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
+	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
+)
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2 v2.0.0-20260517221654-125303ab5c69
+	github.com/johanix/tdns/v2 v2.0.0-20260519164626-7033b72a8d55
 	github.com/mattn/go-sqlite3 v1.14.16
 )
 
 require (
-	github.com/c-bata/go-prompt v0.2.6 // indirect
-	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -27,28 +31,18 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260427162659-70a56004d104 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20260517221654-125303ab5c69 // indirect
-	github.com/johanix/tdns/v2/cli v0.0.0-20260517221654-125303ab5c69 // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20260517221654-125303ab5c69 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20260517221654-125303ab5c69 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mattn/go-colorable v0.1.12 // indirect
-	github.com/mattn/go-isatty v0.0.14 // indirect
-	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
-	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/spf13/viper v1.16.0 // indirect
@@ -60,13 +54,9 @@ require (
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	zgo.at/acidtab v1.1.0 // indirect
-	zgo.at/runewidth v0.1.0 // indirect
-	zgo.at/termtext v1.5.0 // indirect
 )

@@ -4,13 +4,19 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
-// Local replace for the duration of the transport-refactor-semi-easy-bites
-// branch — see ../../v2/go.mod for context. Revert before publishing.
-replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+// Local replaces for in-tree builds on the feature branch stack.
+// See ../../v2/go.mod. Revert before publishing.
+replace (
+	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+	github.com/johanix/tdns/v2 => ../../../tdns/v2
+	github.com/johanix/tdns/v2/cli => ../../../tdns/v2/cli
+	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
+	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
+)
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260325085802-b9335832becb
-	github.com/johanix/tdns/v2 v2.0.0-20260517221654-125303ab5c69
+	github.com/johanix/tdns/v2 v2.0.0-20260519164626-7033b72a8d55
 	github.com/johanix/tdns/v2/cli v0.0.0-20260517221654-125303ab5c69
 	github.com/johanix/tdns/v2/core v0.0.0-20260517221654-125303ab5c69
 	github.com/spf13/cobra v1.10.2
@@ -31,7 +37,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260427162659-70a56004d104 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20260517221654-125303ab5c69 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20260517221654-125303ab5c69 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect

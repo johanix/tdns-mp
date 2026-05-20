@@ -16,8 +16,8 @@ replace (
 require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260427162659-70a56004d104
-	github.com/johanix/tdns/v2 v2.0.0-20260517221654-125303ab5c69
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417
+	github.com/johanix/tdns/v2 v2.0.0-20260519164626-7033b72a8d55
 	github.com/johanix/tdns/v2/cache v0.0.0-20260517221654-125303ab5c69
 	github.com/johanix/tdns/v2/cli v0.0.0-20260517221654-125303ab5c69
 	github.com/johanix/tdns/v2/core v0.0.0-20260517221654-125303ab5c69
