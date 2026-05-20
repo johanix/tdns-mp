@@ -690,7 +690,7 @@ phase completes. No Linear.
 | P | Prep: merge `main`→semi-easy, symmetric reconcile | **done** | `peer-discovery-engine-extraction` |
 | 0 | Bite F (`DiscoverPeer` / `DiscoveryDriver`) | done on semi-easy | semi-easy stack |
 | 1 | Bite D (`OnDiscoveryFailed`) | done on semi-easy | semi-easy stack |
-| 2 | Build `tdns-mp/v2/hsync/` (unwired) | not started | feature branch |
+| 2 | Build `tdns-mp/v2/hsync/` (unwired) | **done** | `peer-discovery-engine-extraction` — `hsync/` package + unit tests |
 | 3 | Wire `AuditorEngine` | not started | feature branch |
 | 4 | Build `HsyncDataEngine` (unwired) | not started | feature branch |
 | 5 | Swap agent, delete legacy engine | not started | feature branch |
