@@ -7,6 +7,7 @@
 package tdnsmp
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -80,10 +81,20 @@ func (m *AuditStateManager) GetOrCreateZone(zone string) *AuditZoneState {
 }
 
 // GetZone returns the AuditZoneState for a zone, or nil if not tracked.
+// Accepts FQDN with or without a trailing dot.
 func (m *AuditStateManager) GetZone(zone string) *AuditZoneState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.zones[zone]
+	if zs, ok := m.zones[zone]; ok {
+		return zs
+	}
+	alt := zone
+	if strings.HasSuffix(zone, ".") {
+		alt = strings.TrimSuffix(zone, ".")
+	} else {
+		alt = zone + "."
+	}
+	return m.zones[alt]
 }
 
 // GetAllZones returns a snapshot of all tracked zones.

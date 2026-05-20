@@ -198,12 +198,18 @@ func (s *auditorWebServer) handleLogout(w http.ResponseWriter, r *http.Request) 
 // --- Pages ---
 
 func (s *auditorWebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/web/" && r.URL.Path != "/web" {
-		http.NotFound(w, r)
-		return
-	}
 	data := s.buildDashboardData(r)
 	s.render(w, "dashboard.html", data)
+}
+
+func (s *auditorWebServer) handleZoneByQuery(w http.ResponseWriter, r *http.Request) {
+	zone := r.URL.Query().Get("zone")
+	if zone == "" {
+		http.Redirect(w, r, "/web/", http.StatusSeeOther)
+		return
+	}
+	data := s.buildZoneDetailData(r, zone)
+	s.render(w, "zone_detail.html", data)
 }
 
 func (s *auditorWebServer) handleZoneDetail(w http.ResponseWriter, r *http.Request) {
@@ -287,18 +293,21 @@ func (s *auditorWebServer) fragmentGossipMatrix(w http.ResponseWriter, r *http.R
 
 // --- Adapter functions: state → WebData (DTOs) ---
 
+func (s *auditorWebServer) baseWebData(r *http.Request, title string) *WebData {
+	return &WebData{
+		Title: title,
+		User:  userFromCtx(r),
+		Zones: SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager),
+	}
+}
+
 func (s *auditorWebServer) buildDashboardData(r *http.Request) *WebData {
-	d := &WebData{Title: "Auditor Dashboard", User: userFromCtx(r)}
-	d.Zones = SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager)
-	return d
+	return s.baseWebData(r, "Auditor Dashboard")
 }
 
 func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *WebData {
-	d := &WebData{
-		Title: "Zone: " + zone,
-		User:  userFromCtx(r),
-		Zone:  zone,
-	}
+	d := s.baseWebData(r, "Zone: "+zone)
+	d.Zone = zone
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
 		if zs := sm.GetZone(zone); zs != nil {
 			snap := zs.Snapshot()
@@ -310,7 +319,8 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 }
 
 func (s *auditorWebServer) buildEventLogData(r *http.Request, zone string, limit int) *WebData {
-	d := &WebData{Title: "Event Log", User: userFromCtx(r), Zone: zone}
+	d := s.baseWebData(r, "Event Log")
+	d.Zone = zone
 	if kdb := s.conf.Config.Internal.KeyDB; kdb != nil {
 		var since time.Time
 		if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
@@ -329,7 +339,7 @@ func (s *auditorWebServer) buildEventLogData(r *http.Request, zone string, limit
 }
 
 func (s *auditorWebServer) buildProvidersData(r *http.Request) *WebData {
-	d := &WebData{Title: "Providers", User: userFromCtx(r)}
+	d := s.baseWebData(r, "Providers")
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
 		d.Providers = sm.SnapshotAllProviders()
 	}
@@ -337,7 +347,8 @@ func (s *auditorWebServer) buildProvidersData(r *http.Request) *WebData {
 }
 
 func (s *auditorWebServer) buildObservationsData(r *http.Request, zone string) *WebData {
-	d := &WebData{Title: "Observations", User: userFromCtx(r), Zone: zone}
+	d := s.baseWebData(r, "Observations")
+	d.Zone = zone
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
 		d.Observations = sm.SnapshotAllObservations(zone)
 	}
@@ -345,7 +356,7 @@ func (s *auditorWebServer) buildObservationsData(r *http.Request, zone string) *
 }
 
 func (s *auditorWebServer) buildGossipData(r *http.Request) *WebData {
-	d := &WebData{Title: "Gossip", User: userFromCtx(r)}
+	d := s.baseWebData(r, "Gossip")
 	d.Gossip = SnapshotGossip(s.conf.InternalMp.AgentRegistry)
 	return d
 }
@@ -354,14 +365,16 @@ func (s *auditorWebServer) buildGossipData(r *http.Request) *WebData {
 
 func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	type statusResp struct {
-		Status    string   `json:"status"`
-		Zones     []string `json:"zones"`
-		Timestamp string   `json:"timestamp"`
+		Status       string   `json:"status"`
+		Zones        []string `json:"zones"`
+		GossipGroups int      `json:"gossip_groups"`
+		Timestamp    string   `json:"timestamp"`
 	}
 	resp := statusResp{Status: "ok", Timestamp: time.Now().Format(time.RFC3339)}
 	for _, z := range SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager) {
 		resp.Zones = append(resp.Zones, z.Zone)
 	}
+	resp.GossipGroups = len(SnapshotGossip(s.conf.InternalMp.AgentRegistry))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -388,12 +401,20 @@ func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.Han
 	mux.HandleFunc("/web/logout", s.handleLogout)
 	mux.HandleFunc("/web/status", s.handleStatus) // unauthenticated healthcheck
 
-	mux.HandleFunc("/web/", wrap(s.handleDashboard))
-	mux.HandleFunc("/web/zone/", wrap(s.handleZoneDetail))
+	mux.HandleFunc("/web/gossip", wrap(s.handleGossip))
 	mux.HandleFunc("/web/eventlog", wrap(s.handleEventLog))
 	mux.HandleFunc("/web/providers", wrap(s.handleProviders))
 	mux.HandleFunc("/web/observations", wrap(s.handleObservations))
-	mux.HandleFunc("/web/gossip", wrap(s.handleGossip))
+	mux.HandleFunc("/web/zone", wrap(s.handleZoneByQuery))
+	mux.HandleFunc("/web/zone/", wrap(s.handleZoneDetail))
+	mux.HandleFunc("/web/{$}", wrap(s.handleDashboard))
+	mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/web" {
+			http.Redirect(w, r, "/web/", http.StatusSeeOther)
+			return
+		}
+		http.NotFound(w, r)
+	})
 
 	mux.HandleFunc("/web/fragment/zone-status", wrap(s.fragmentZoneStatus))
 	mux.HandleFunc("/web/fragment/provider-detail", wrap(s.fragmentProviderDetail))

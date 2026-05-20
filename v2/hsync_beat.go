@@ -36,6 +36,9 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 				lgAgent.Debug("merged gossip from incoming API beat", "sender", report.Identity, "groups", len(abp.Gossip))
 
 				if ar.ProviderGroupManager != nil {
+					if len(ar.ProviderGroupManager.Groups) == 0 {
+						ar.ProviderGroupManager.RecomputeGroups()
+					}
 					for i := range abp.Gossip {
 						pg := ar.ProviderGroupManager.GetGroup(abp.Gossip[i].GroupHash)
 						if pg != nil {

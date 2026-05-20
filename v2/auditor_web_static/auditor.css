@@ -33,6 +33,27 @@ tbody tr[hx-get]:hover {
   background: var(--pico-table-row-stripped-background-color, #f5f5f5);
 }
 
+/* Zones dropdown in nav */
+.audit-zones-nav {
+  position: relative;
+}
+.audit-zones-nav summary {
+  cursor: pointer;
+  list-style: none;
+}
+.audit-zones-nav ul {
+  position: absolute;
+  right: 0;
+  z-index: 10;
+  min-width: 16rem;
+  margin: 0.25rem 0 0;
+  padding: 0.5rem 0;
+  background: var(--pico-card-background-color, #fff);
+  border: 1px solid var(--pico-muted-border-color, #ccc);
+  border-radius: var(--pico-border-radius);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
 /* Compact footer */
 footer {
   padding: 0.5rem 1rem;

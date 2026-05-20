@@ -2,6 +2,19 @@
 {{define "content"}}
 <h2>Providers</h2>
 
+{{if .Zones}}
+<section>
+  <h3>Zones</h3>
+  <ul>
+    {{range .Zones}}
+    <li><a href="/web/zone?zone={{zoneQuery .Zone}}">{{.Zone}}</a>
+      {{if .ProviderCount}}<small>({{.ProviderCount}} providers)</small>{{end}}
+    </li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+
 {{if not .Providers}}
 <p><em>No providers seen yet.</em></p>
 {{else}}

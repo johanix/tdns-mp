@@ -299,6 +299,35 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 	}
 	pgm.mu.RUnlock()
 
+	// Auditors often receive gossip before ProviderGroupManager has been
+	// populated from local zone files; still show matrices from gst.
+	seen := make(map[string]bool, len(snaps))
+	for _, g := range snaps {
+		seen[g.hash] = true
+	}
+	gst.mu.RLock()
+	for hash, states := range gst.States {
+		if seen[hash] {
+			continue
+		}
+		members := make([]string, 0, len(states))
+		for member := range states {
+			members = append(members, member)
+		}
+		slices.Sort(members)
+		name := ""
+		if np := gst.Names[hash]; np != nil {
+			name = np.Name
+		}
+		snaps = append(snaps, groupSnap{
+			hash:    hash,
+			name:    name,
+			members: members,
+		})
+		seen[hash] = true
+	}
+	gst.mu.RUnlock()
+
 	now := time.Now()
 	out := make([]GossipMatrixDTO, 0, len(snaps))
 	for _, g := range snaps {

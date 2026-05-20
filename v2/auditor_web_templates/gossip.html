@@ -6,11 +6,5 @@
 <article class="audit-error">{{.Error}}</article>
 {{end}}
 
-<div
-  id="gossip-matrix"
-  hx-get="/web/fragment/gossip-matrix"
-  hx-trigger="every 15s"
-  hx-swap="innerHTML">
-  {{template "gossip-matrix-inner" .}}
-</div>
+{{template "gossip-matrix-inner" .}}
 {{end}}

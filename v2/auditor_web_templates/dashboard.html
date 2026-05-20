@@ -22,7 +22,7 @@
   <tbody>
     {{range .Zones}}
     <tr>
-      <td><a href="/web/zone/{{zonePath .Zone}}">{{.Zone}}</a></td>
+      <td><a href="/web/zone?zone={{zoneQuery .Zone}}">{{.Zone}}</a></td>
       <td>{{.ProviderCount}}</td>
       <td>{{.ZoneSerial}}</td>
       <td>{{ago .LastRefresh}}</td>

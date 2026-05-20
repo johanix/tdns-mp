@@ -16,6 +16,18 @@
       </ul>
       <ul>
         <li><a href="/web/">Dashboard</a></li>
+        {{if .Zones}}
+        <li>
+          <details class="audit-zones-nav">
+            <summary>Zones ({{len .Zones}})</summary>
+            <ul>
+              {{range .Zones}}
+              <li><a href="/web/zone?zone={{zoneQuery .Zone}}">{{.Zone}}</a></li>
+              {{end}}
+            </ul>
+          </details>
+        </li>
+        {{end}}
         <li><a href="/web/providers">Providers</a></li>
         <li><a href="/web/gossip">Gossip</a></li>
         <li><a href="/web/eventlog">Event Log</a></li>
