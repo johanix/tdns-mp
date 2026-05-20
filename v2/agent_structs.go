@@ -115,21 +115,28 @@ func (a *Agent) IsAnyTransportOperational() bool {
 	return false
 }
 
+func agentTransportParticipating(state AgentState) bool {
+	return state >= AgentStateKnown
+}
+
 func (a *Agent) EffectiveState() AgentState {
-	// Return the best active transport state. OPERATIONAL is best,
-	// followed by LEGACY, DEGRADED, INTERRUPTED. If neither transport
-	// has reached an active state, fall back to a.State.
+	a.Mu.RLock()
+	defer a.Mu.RUnlock()
 	best := AgentState(0)
-	for _, s := range []AgentState{
-		a.apiState(), a.dnsState(),
-	} {
-		switch s {
-		case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
-			if best == 0 || s < best {
-				best = s // lower numeric = better (OPERATIONAL < DEGRADED)
+	consider := func(enabled bool, details *AgentDetails) {
+		if !enabled || details == nil || !agentTransportParticipating(details.State) {
+			return
+		}
+		switch details.State {
+		case AgentStateOperational, AgentStateLegacy, AgentStateIntroduced, AgentStateKnown,
+			AgentStateDegraded, AgentStateInterrupted:
+			if best == 0 || details.State < best {
+				best = details.State
 			}
 		}
 	}
+	consider(a.ApiMethod, a.ApiDetails)
+	consider(a.DnsMethod, a.DnsDetails)
 	if best != 0 {
 		return best
 	}
