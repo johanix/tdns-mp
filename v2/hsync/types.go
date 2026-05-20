@@ -65,6 +65,12 @@ type DeferredTask struct {
 
 // PeerDetails holds per-transport contact and beat state.
 type PeerDetails struct {
+	Addrs             []string
+	Port              uint16
+	BaseUri           string
+	ContactInfo       string
+	JWKData           string
+	KeyAlgorithm      string
 	State             PeerState
 	LatestError       string
 	LatestErrorTime   time.Time

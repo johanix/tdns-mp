@@ -44,9 +44,9 @@ func (b *mpHsyncBridge) SendHello(ctx context.Context, peer *hsync.Peer, sharedZ
 	if b.tm == nil {
 		return nil
 	}
-	agent := hsyncPeerToAgent(peer)
+	agent := agentForTransport(b.ar, peer)
 	_, err := b.tm.SendHelloWithFallback(ctx, agent, sharedZones)
-	syncAgentFromHsyncPeer(b.ar, peer, agent)
+	persistAgentAndPeer(b.ar, peer, agent)
 	return err
 }
 
@@ -54,7 +54,7 @@ func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence
 	if b.tm == nil {
 		return false, "", nil
 	}
-	agent := hsyncPeerToAgent(peer)
+	agent := agentForTransport(b.ar, peer)
 	var beforeAPI, beforeDNS uint32
 	agent.Mu.RLock()
 	if agent.ApiDetails != nil {
@@ -66,7 +66,7 @@ func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence
 	agent.Mu.RUnlock()
 
 	resp, err := b.tm.SendBeatWithFallback(ctx, agent, sequence)
-	syncAgentFromHsyncPeer(b.ar, peer, agent)
+	persistAgentAndPeer(b.ar, peer, agent)
 	used := beatTransportUsed(agent, beforeAPI, beforeDNS)
 	if err != nil || resp == nil {
 		return false, used, err
@@ -113,15 +113,7 @@ func (b *mpHsyncBridge) AfterDiscoverPeer(peer *hsync.Peer) {
 		return
 	}
 	if agent, ok := b.ar.S.Get(AgentId(peer.ID)); ok {
-		updated := agentToHsyncPeer(agent)
-		peer.Mu.Lock()
-		peer.ApiDetails = updated.ApiDetails
-		peer.DnsDetails = updated.DnsDetails
-		peer.ApiMethod = updated.ApiMethod
-		peer.DnsMethod = updated.DnsMethod
-		peer.State = updated.State
-		peer.Mu.Unlock()
-		syncHsyncPeerToAgent(b.ar, peer)
+		persistAgentAndPeer(b.ar, peer, agent)
 	}
 }
 
@@ -221,118 +213,6 @@ func (p pgmHsyncLookup) GetGroup(groupHash string) *hsync.ProviderGroupInfo {
 		Zones:     zones,
 	}
 	return info
-}
-
-func hsyncPeerToAgent(peer *hsync.Peer) *Agent {
-	if peer == nil {
-		return nil
-	}
-	peer.Mu.RLock()
-	defer peer.Mu.RUnlock()
-	agent := &Agent{
-		Identity:    AgentId(peer.ID),
-		PeerID:      peer.TransportID,
-		ApiDetails:  hsyncDetailsToAgent(peer.ApiDetails),
-		DnsDetails:  hsyncDetailsToAgent(peer.DnsDetails),
-		ApiMethod:   peer.ApiMethod,
-		DnsMethod:   peer.DnsMethod,
-		IsInfraPeer: peer.IsInfraPeer,
-		Zones:       make(map[ZoneName]bool),
-		State:       AgentState(peer.State),
-		LastState:   peer.LastState,
-	}
-	for z := range peer.Zones {
-		agent.Zones[ZoneName(z)] = true
-	}
-	for _, t := range peer.Deferred {
-		agent.DeferredTasks = append(agent.DeferredTasks, DeferredAgentTask{
-			Precondition: t.Precondition,
-			Action:       t.Action,
-			Desc:         t.Desc,
-		})
-	}
-	return agent
-}
-
-func syncAgentFromHsyncPeer(ar *AgentRegistry, peer *hsync.Peer, agent *Agent) {
-	if ar == nil || peer == nil || agent == nil {
-		return
-	}
-	peer.Mu.RLock()
-	agent.ApiDetails = hsyncDetailsToAgent(peer.ApiDetails)
-	agent.DnsDetails = hsyncDetailsToAgent(peer.DnsDetails)
-	agent.State = AgentState(peer.State)
-	agent.ApiMethod = peer.ApiMethod
-	agent.DnsMethod = peer.DnsMethod
-	peer.Mu.RUnlock()
-	ar.S.Set(agent.Identity, agent)
-}
-
-func agentToHsyncPeer(agent *Agent) *hsync.Peer {
-	if agent == nil {
-		return nil
-	}
-	agent.Mu.RLock()
-	defer agent.Mu.RUnlock()
-	peer := hsync.NewPeer(hsync.PeerID(agent.Identity))
-	peer.TransportID = agent.PeerID
-	peer.ApiDetails = agentDetailsToHsync(agent.ApiDetails)
-	peer.DnsDetails = agentDetailsToHsync(agent.DnsDetails)
-	peer.ApiMethod = agent.ApiMethod
-	peer.DnsMethod = agent.DnsMethod
-	peer.IsInfraPeer = agent.IsInfraPeer
-	peer.State = hsync.PeerState(agent.State)
-	peer.LastState = agent.LastState
-	for z := range agent.Zones {
-		peer.Zones[hsync.ZoneName(z)] = true
-	}
-	return peer
-}
-
-func hsyncDetailsToAgent(d *hsync.PeerDetails) *AgentDetails {
-	if d == nil {
-		return &AgentDetails{State: AgentStateNeeded}
-	}
-	return &AgentDetails{
-		State:             AgentState(d.State),
-		LatestError:       d.LatestError,
-		LatestErrorTime:   d.LatestErrorTime,
-		DiscoveryFailures: d.DiscoveryFailures,
-		HelloTime:         d.HelloTime,
-		LastContactTime:   d.LastContactTime,
-		BeatInterval:      d.BeatInterval,
-		SentBeats:         d.SentBeats,
-		ReceivedBeats:     d.ReceivedBeats,
-		LatestSBeat:       d.LatestSBeat,
-		LatestRBeat:       d.LatestRBeat,
-	}
-}
-
-func agentDetailsToHsync(d *AgentDetails) *hsync.PeerDetails {
-	if d == nil {
-		return &hsync.PeerDetails{State: hsync.PeerStateNeeded}
-	}
-	return &hsync.PeerDetails{
-		State:             hsync.PeerState(d.State),
-		LatestError:       d.LatestError,
-		LatestErrorTime:   d.LatestErrorTime,
-		DiscoveryFailures: d.DiscoveryFailures,
-		HelloTime:         d.HelloTime,
-		LastContactTime:   d.LastContactTime,
-		BeatInterval:      d.BeatInterval,
-		SentBeats:         d.SentBeats,
-		ReceivedBeats:     d.ReceivedBeats,
-		LatestSBeat:       d.LatestSBeat,
-		LatestRBeat:       d.LatestRBeat,
-	}
-}
-
-func syncHsyncPeerToAgent(ar *AgentRegistry, peer *hsync.Peer) {
-	if ar == nil || peer == nil {
-		return
-	}
-	agent := hsyncPeerToAgent(peer)
-	ar.S.Set(agent.Identity, agent)
 }
 
 func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
