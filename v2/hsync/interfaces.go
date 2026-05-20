@@ -59,6 +59,7 @@ type TransportBridge interface {
 	MechanismSupported(name string) bool
 	FireDiscoveryFailed(peerID PeerID, err error)
 	SyncPeerZones(peer *Peer)
+	AfterDiscoverPeer(peer *Peer)
 	PeerRegistry() *transport.PeerRegistry
 }
 
@@ -69,6 +70,12 @@ type HostCallbacks struct {
 	OnGroupDegraded    func(groupHash string)
 	OnElectionGossip   func(groupHash string, state GroupElectionState)
 	OnLocalRemoved     func(zone ZoneName)
+	BeforeHeartbeats   func()
+}
+
+// PeerHooks are optional callbacks when registry peers change.
+type PeerHooks struct {
+	OnPeerStored func(*Peer)
 }
 
 // Deps bundles injected dependencies for NewEngine.
@@ -81,4 +88,5 @@ type Deps struct {
 	ProviderGroups    ProviderGroupLookup
 	Elections         ElectionStateLookup
 	Host              HostCallbacks
+	PeerHooks         PeerHooks
 }

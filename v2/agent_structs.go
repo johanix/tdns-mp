@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -265,6 +266,7 @@ type AgentRegistry struct {
 	LeaderElectionManager *LeaderElectionManager
 	ProviderGroupManager  *ProviderGroupManager
 	GossipStateTable      *GossipStateTable
+	HsyncEngine           *hsync.Engine
 }
 
 type AgentBeatPost struct {

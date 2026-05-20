@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"strings"
 	"time"
 
@@ -1464,14 +1465,18 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 				}
 			}
 		case AppTypeMPAuditor:
-			// The auditor doesn't run HsyncEngine, but provider
-			// groups must still be recomputed when HSYNC3 changes
-			// so incoming gossip can be attributed to the right
-			// group. Pure zone-data computation; no registry
-			// poking — auditorAssociateZonePeers is deferred.
-			if tm != nil && tm.agentRegistry != nil && tm.agentRegistry.ProviderGroupManager != nil {
-				lg.Info("HSYNC RRset changed, recomputing provider groups for auditor", "zone", mpzd.ZoneName)
-				tm.agentRegistry.ProviderGroupManager.RecomputeGroups()
+			if tm != nil && tm.agentRegistry != nil {
+				ar := tm.agentRegistry
+				if ar.HsyncEngine != nil && analysis.HsyncStatus != nil {
+					lg.Info("HSYNC RRset changed, applying hsync diff for auditor", "zone", mpzd.ZoneName)
+					_ = ar.HsyncEngine.ApplyHsyncDiff(hsync.ZoneName(mpzd.ZoneName), hsync.HsyncDiff{
+						Adds:    analysis.HsyncStatus.HsyncAdds,
+						Removes: analysis.HsyncStatus.HsyncRemoves,
+					})
+				}
+				if ar.ProviderGroupManager != nil {
+					ar.ProviderGroupManager.RecomputeGroups()
+				}
 			}
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)

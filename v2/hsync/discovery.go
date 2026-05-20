@@ -33,6 +33,7 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 			peer.Mu.Unlock()
 			r.S.Set(id, peer)
 		}
+		e.storeHook(peer)
 		return
 	}
 
@@ -51,7 +52,14 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 	if zone != "" {
 		r.addRemoteAgent(zone, peer)
 	}
+	e.storeHook(peer)
 	go e.attemptDiscovery(peer, peer.ApiMethod, peer.DnsMethod)
+}
+
+func (e *Engine) storeHook(peer *Peer) {
+	if e.deps.PeerHooks.OnPeerStored != nil {
+		e.deps.PeerHooks.OnPeerStored(peer)
+	}
 }
 
 func (e *Engine) runDiscoveryRetry(ctx context.Context) {
@@ -107,6 +115,9 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	defer cancel()
 
 	_, err := e.deps.Transport.DiscoverPeer(ctx, string(peer.ID))
+	if err == nil {
+		e.deps.Transport.AfterDiscoverPeer(peer)
+	}
 	if err != nil {
 		peer.Mu.Lock()
 		peer.ApiDetails.DiscoveryFailures++

@@ -35,6 +35,7 @@ func (m *mockTransport) SendBeat(ctx context.Context, peer *Peer, sequence uint6
 func (m *mockTransport) MechanismSupported(name string) bool          { return true }
 func (m *mockTransport) FireDiscoveryFailed(peerID PeerID, err error) {}
 func (m *mockTransport) SyncPeerZones(peer *Peer)                     {}
+func (m *mockTransport) AfterDiscoverPeer(peer *Peer)                 {}
 func (m *mockTransport) PeerRegistry() *transport.PeerRegistry {
 	return transport.NewPeerRegistry()
 }

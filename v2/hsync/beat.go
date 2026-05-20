@@ -47,6 +47,9 @@ func (e *Engine) heartbeatHandler(report *InboundReport) {
 }
 
 func (e *Engine) sendHeartbeats() {
+	if e.deps.Host.BeforeHeartbeats != nil {
+		e.deps.Host.BeforeHeartbeats()
+	}
 	if e.deps.Gossip != nil && e.deps.ProviderGroups != nil {
 		e.deps.Gossip.RefreshLocalStates(e.registry, e.deps.ProviderGroups, e.deps.LocalBeatInterval)
 		for _, pg := range e.deps.ProviderGroups.Groups() {
@@ -111,6 +114,7 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	}
 	peer.Mu.Unlock()
 	e.registry.S.Set(peer.ID, peer)
+	e.storeHook(peer)
 }
 
 func (e *Engine) checkPeerState(peer *Peer, ourBeatInterval uint32) {

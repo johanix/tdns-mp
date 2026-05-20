@@ -130,38 +130,15 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	}
 	StartAuditDetectors(ctx, stateManager, silenceThreshold, detectorInterval)
 
-	// Auditor message handler.
 	msgQs := conf.InternalMp.MsgQs
-	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorMsgHandler", func() {
-		AuditorMsgHandler(ctx, conf, msgQs, stateManager)
+	auditorEngine := NewAuditorEngine(conf, stateManager)
+	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorEngine", func() {
+		auditorEngine.Run(ctx, msgQs)
 	})
 
-	// Agent-style protocol participation: infra-peer beats and
-	// discovery retrier. The auditor's heartbeat ticker mirrors the
-	// agent's HsyncEngine ticker without the sync logic.
 	if ar != nil {
 		tdns.StartEngineNoError(&tdns.Globals.App, "InfraBeatLoop", func() {
 			ar.StartInfraBeatLoop(ctx)
-		})
-		tdns.StartEngineNoError(&tdns.Globals.App, "DiscoveryRetrierNG", func() {
-			ar.DiscoveryRetrierNG(ctx)
-		})
-		tdns.StartEngineNoError(&tdns.Globals.App, "HsyncReconcile", func() {
-			ar.ReconcileHsync(ctx)
-		})
-
-		heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
-		tdns.StartEngineNoError(&tdns.Globals.App, "AuditorHeartbeatLoop", func() {
-			ticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					ar.SendHeartbeats()
-				}
-			}
 		})
 	}
 
