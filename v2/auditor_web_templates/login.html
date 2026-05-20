@@ -2,16 +2,16 @@
 <html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width">
   <title>Sign in — TDNS Auditor</title>
   <link rel="stylesheet" href="/web/static/pico.min.css">
   <link rel="stylesheet" href="/web/static/auditor.css">
   <meta http-equiv="Cache-Control" content="no-store">
 </head>
 <body>
-  <main class="container">
-    <article style="max-width: 28rem; margin: 4rem auto;">
-      <header><strong>TDNS Auditor</strong></header>
+  <main class="audit-main">
+    <article style="max-width: 28rem; margin: 2rem auto;">
+      <header><strong style="font-size: 1.25rem;">TDNS Auditor</strong></header>
       <h3>Sign in</h3>
       {{if .Error}}<article class="audit-error">{{.Error}}</article>{{end}}
       <form method="POST" action="/web/login">
