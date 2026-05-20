@@ -105,6 +105,20 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 		"zoneQuery": func(z string) string {
 			return url.QueryEscape(z)
 		},
+		"shortLabel": func(id string) string {
+			id = strings.TrimSuffix(id, ".")
+			parts := strings.Split(id, ".")
+			if len(parts) >= 2 && parts[0] == "agent" {
+				return parts[1]
+			}
+			if len(parts) >= 2 && parts[0] == "auditor" {
+				return parts[1]
+			}
+			if len(parts) > 0 {
+				return parts[len(parts)-1]
+			}
+			return id
+		},
 	}
 	tmpl, err := template.New("").Funcs(fm).ParseFS(
 		webTemplateFS,
@@ -117,10 +131,16 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 	return &auditorWebServer{tmpl: tmpl, conf: conf, auth: auth, secure: secure}, nil
 }
 
+func setNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+}
+
 func (s *auditorWebServer) render(w http.ResponseWriter, name string, data *WebData) {
 	if data.Now.IsZero() {
 		data.Now = time.Now()
 	}
+	setNoStore(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
 		lgAuditor.Error("web template render error", "template", name, "err", err)
@@ -129,18 +149,32 @@ func (s *auditorWebServer) render(w http.ResponseWriter, name string, data *WebD
 }
 
 // requireAuth wraps a handler with session-cookie verification. On
-// missing/expired session, redirects to /web/login.
+// missing/expired session, redirects to /web/login. HTMX requests get
+// 401 + HX-Redirect so the client does not swap login HTML into a fragment.
 func (s *auditorWebServer) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.auth == nil {
+			next(w, r)
+			return
+		}
+		deny := func() {
+			ClearSessionCookie(w, s.secure)
+			setNoStore(w)
+			if r.Header.Get("HX-Request") != "" {
+				w.Header().Set("HX-Redirect", "/web/login")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			http.Redirect(w, r, "/web/login", http.StatusSeeOther)
+		}
 		c, err := r.Cookie(sessionCookieName)
 		if err != nil || c.Value == "" {
-			http.Redirect(w, r, "/web/login", http.StatusSeeOther)
+			deny()
 			return
 		}
 		sess := s.auth.LookupAndBump(c.Value)
 		if sess == nil {
-			ClearSessionCookie(w, s.secure)
-			http.Redirect(w, r, "/web/login", http.StatusSeeOther)
+			deny()
 			return
 		}
 		// Refresh cookie expiry.
@@ -365,16 +399,10 @@ func (s *auditorWebServer) buildGossipData(r *http.Request) *WebData {
 
 func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	type statusResp struct {
-		Status       string   `json:"status"`
-		Zones        []string `json:"zones"`
-		GossipGroups int      `json:"gossip_groups"`
-		Timestamp    string   `json:"timestamp"`
+		Status    string `json:"status"`
+		Timestamp string `json:"timestamp"`
 	}
 	resp := statusResp{Status: "ok", Timestamp: time.Now().Format(time.RFC3339)}
-	for _, z := range SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager) {
-		resp.Zones = append(resp.Zones, z.Zone)
-	}
-	resp.GossipGroups = len(SnapshotGossip(s.conf.InternalMp.AgentRegistry))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }

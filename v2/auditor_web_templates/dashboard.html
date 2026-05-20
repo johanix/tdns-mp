@@ -1,5 +1,4 @@
-{{template "layout" .}}
-{{define "content"}}
+{{define "dashboard.html"}}{{template "layout-head" .}}
 <h2>Dashboard</h2>
 
 {{if .Error}}
@@ -48,4 +47,4 @@
   hx-swap="innerHTML">
   <em>Loading&hellip;</em>
 </div>
-{{end}}
+{{template "layout-foot" .}}{{end}}

@@ -1,5 +1,4 @@
-{{template "layout" .}}
-{{define "content"}}
+{{define "zone_detail.html"}}{{template "layout-head" .}}
 <h2>Zone: {{.Zone}}</h2>
 <a href="/web/">&larr; Dashboard</a>
 
@@ -62,7 +61,7 @@
   <h3>Recent Events</h3>
   <div
     hx-get="/web/fragment/eventlog-rows?zone={{zoneQuery .Zone}}"
-    hx-trigger="load, every 15s"
+    hx-trigger="every 15s"
     hx-swap="innerHTML">
     <em>Loading&hellip;</em>
   </div>
@@ -72,9 +71,9 @@
   <h3>Observations</h3>
   <div
     hx-get="/web/fragment/observation-list?zone={{zoneQuery .Zone}}"
-    hx-trigger="load, every 30s"
+    hx-trigger="every 30s"
     hx-swap="innerHTML">
     <em>Loading&hellip;</em>
   </div>
 </section>
-{{end}}
+{{template "layout-foot" .}}{{end}}

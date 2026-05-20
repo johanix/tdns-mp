@@ -17,11 +17,12 @@
     </small>
   </p>
   {{if .Rows}}
-  <table role="grid">
+  <div class="audit-table-scroll">
+  <table role="grid" class="audit-gossip-matrix">
     <thead>
       <tr>
-        <th>Reporter ↓ / Peer →</th>
-        {{range .Members}}<th>{{.}}</th>{{end}}
+        <th>Reporter</th>
+        {{range .Members}}<th title="{{.}}">{{shortLabel .}}</th>{{end}}
         <th>Last Beat</th>
       </tr>
     </thead>
@@ -29,7 +30,7 @@
       {{$members := .Members}}
       {{range .Rows}}
       <tr>
-        <td><strong>{{.Reporter}}</strong></td>
+        <td><strong title="{{.Reporter}}">{{shortLabel .Reporter}}</strong></td>
         {{$peers := .PeerStates}}
         {{range $members}}
           {{$state := index $peers .}}
@@ -40,6 +41,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p><em>No state reports yet.</em></p>
   {{end}}
