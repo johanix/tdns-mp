@@ -12,7 +12,13 @@
  */
 package tdnsmp
 
-import "time"
+import (
+	"slices"
+	"strings"
+	"time"
+
+	tdns "github.com/johanix/tdns/v2"
+)
 
 // AuditZoneSummary is the JSON shape returned by /auditor "zones"
 // and "zone" commands. Snapshotted from AuditZoneState.
@@ -100,6 +106,47 @@ func providerSummary(ps *AuditProviderState, now time.Time) AuditProviderSummary
 		s.SecondsSinceSync = int64(now.Sub(ps.LastSync).Seconds())
 	}
 	return s
+}
+
+// SnapshotDashboardZones returns zone rows for the web dashboard:
+// audit state (beats/sync) merged with MP provider-group zones and
+// loaded multi-provider zones so links appear before first beat.
+func SnapshotDashboardZones(ar *AgentRegistry, sm *AuditStateManager) []AuditZoneSummary {
+	byZone := make(map[string]AuditZoneSummary)
+	if sm != nil {
+		for _, z := range sm.SnapshotAllZones() {
+			byZone[z.Zone] = z
+		}
+	}
+	if ar != nil && ar.ProviderGroupManager != nil {
+		ar.ProviderGroupManager.mu.RLock()
+		for _, g := range ar.ProviderGroupManager.Groups {
+			for _, zn := range g.Zones {
+				name := string(zn)
+				if _, ok := byZone[name]; !ok {
+					byZone[name] = AuditZoneSummary{Zone: name}
+				}
+			}
+		}
+		ar.ProviderGroupManager.mu.RUnlock()
+	}
+	for zname, zd := range Zones.Items() {
+		if !zd.Ready || !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		name := string(zname)
+		if _, ok := byZone[name]; !ok {
+			byZone[name] = AuditZoneSummary{Zone: name}
+		}
+	}
+	out := make([]AuditZoneSummary, 0, len(byZone))
+	for _, z := range byZone {
+		out = append(out, z)
+	}
+	slices.SortFunc(out, func(a, b AuditZoneSummary) int {
+		return strings.Compare(a.Zone, b.Zone)
+	})
+	return out
 }
 
 // SnapshotAllZones returns summaries for every tracked zone.

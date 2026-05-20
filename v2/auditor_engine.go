@@ -11,6 +11,8 @@ import (
 
 	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // AuditorEngine composes hsync.Engine with auditor-specific observation.
@@ -199,6 +201,59 @@ func adaptHelloReports(ctx context.Context, in <-chan *AgentMsgReport,
 	return out
 }
 
+func providerBeatMeta(ar *AgentRegistry, zone ZoneName, identity string) (label, gossipState string, isSigner bool) {
+	if ar == nil {
+		return "", "", false
+	}
+	if agent, ok := ar.S.Get(AgentId(identity)); ok {
+		gossipState = AgentStateToString[agent.EffectiveState()]
+	}
+	if zone == "" {
+		return label, gossipState, isSigner
+	}
+	zd, exists := Zones.Get(string(zone))
+	if !exists || !zd.Ready {
+		return label, gossipState, isSigner
+	}
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return label, gossipState, isSigner
+	}
+	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
+	if len(hsyncRRset.RRs) == 0 {
+		return label, gossipState, isSigner
+	}
+	labelToIdentity := map[string]string{}
+	for _, rr := range hsyncRRset.RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok || h3.State == 0 {
+			continue
+		}
+		labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
+		if h3.Identity == identity {
+			label = strings.TrimSuffix(h3.Label, ".")
+		}
+	}
+	if hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM); ok && len(hpRRset.RRs) > 0 {
+		if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
+			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+				for _, l := range append(hp.GetSigners(), hp.GetServers()...) {
+					key := strings.TrimSuffix(l, ".")
+					if id, ok := labelToIdentity[key]; ok && id == identity {
+						isSigner = true
+						break
+					}
+				}
+			}
+		}
+	}
+	return label, gossipState, isSigner
+}
+
 func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 	sm *AuditStateManager, ar *AgentRegistry) <-chan *hsync.InboundReport {
 	out := make(chan *hsync.InboundReport)
@@ -219,8 +274,9 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 					ar.HeartbeatHandler(report)
 				}
 				if sm != nil && report.Zone != "" {
+					label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, string(report.Identity))
 					zs := sm.GetOrCreateZone(string(report.Zone))
-					zs.UpdateProviderBeat(string(report.Identity), "", "", false)
+					zs.UpdateProviderBeat(string(report.Identity), label, gossipState, isSigner)
 				}
 				var msg interface{}
 				if abp, ok := report.Msg.(*AgentBeatPost); ok {

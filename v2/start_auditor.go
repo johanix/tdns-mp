@@ -97,6 +97,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 				pgm.RecomputeGroups()
 			})
 		}
+		ar.ProviderGroupManager.RecomputeGroups()
 	}
 
 	// Phase B: persistent event log + in-memory audit state.

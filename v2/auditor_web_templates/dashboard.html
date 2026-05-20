@@ -22,13 +22,13 @@
   <tbody>
     {{range .Zones}}
     <tr>
-      <td><a href="/web/zone/{{.Zone}}">{{.Zone}}</a></td>
+      <td><a href="/web/zone/{{zonePath .Zone}}">{{.Zone}}</a></td>
       <td>{{.ProviderCount}}</td>
       <td>{{.ZoneSerial}}</td>
       <td>{{ago .LastRefresh}}</td>
       <td>
         <div
-          hx-get="/web/fragment/zone-status?zone={{.Zone}}"
+          hx-get="/web/fragment/zone-status?zone={{zoneQuery .Zone}}"
           hx-trigger="every 10s"
           hx-swap="outerHTML"
           class="audit-live">

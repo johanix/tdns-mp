@@ -39,7 +39,7 @@
     <tbody>
       {{range .Providers}}
       <tr
-        hx-get="/web/fragment/provider-detail?zone={{$.Zone}}&provider={{.Identity}}"
+        hx-get="/web/fragment/provider-detail?zone={{zoneQuery $.Zone}}&provider={{zoneQuery .Identity}}"
         hx-target="#provider-detail-panel"
         hx-swap="innerHTML"
         style="cursor:pointer">
@@ -61,7 +61,7 @@
 <section>
   <h3>Recent Events</h3>
   <div
-    hx-get="/web/fragment/eventlog-rows?zone={{.Zone}}"
+    hx-get="/web/fragment/eventlog-rows?zone={{zoneQuery .Zone}}"
     hx-trigger="load, every 15s"
     hx-swap="innerHTML">
     <em>Loading&hellip;</em>
@@ -71,7 +71,7 @@
 <section>
   <h3>Observations</h3>
   <div
-    hx-get="/web/fragment/observation-list?zone={{.Zone}}"
+    hx-get="/web/fragment/observation-list?zone={{zoneQuery .Zone}}"
     hx-trigger="load, every 30s"
     hx-swap="innerHTML">
     <em>Loading&hellip;</em>

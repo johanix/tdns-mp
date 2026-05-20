@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -98,6 +99,12 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 			}
 		},
 		"lower": strings.ToLower,
+		"zonePath": func(z string) string {
+			return url.PathEscape(z)
+		},
+		"zoneQuery": func(z string) string {
+			return url.QueryEscape(z)
+		},
 	}
 	tmpl, err := template.New("").Funcs(fm).ParseFS(
 		webTemplateFS,
@@ -201,6 +208,9 @@ func (s *auditorWebServer) handleDashboard(w http.ResponseWriter, r *http.Reques
 
 func (s *auditorWebServer) handleZoneDetail(w http.ResponseWriter, r *http.Request) {
 	zone := strings.TrimPrefix(r.URL.Path, "/web/zone/")
+	if u, err := url.PathUnescape(zone); err == nil {
+		zone = u
+	}
 	if zone == "" {
 		http.Redirect(w, r, "/web/", http.StatusSeeOther)
 		return
@@ -279,9 +289,7 @@ func (s *auditorWebServer) fragmentGossipMatrix(w http.ResponseWriter, r *http.R
 
 func (s *auditorWebServer) buildDashboardData(r *http.Request) *WebData {
 	d := &WebData{Title: "Auditor Dashboard", User: userFromCtx(r)}
-	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
-		d.Zones = sm.SnapshotAllZones()
-	}
+	d.Zones = SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager)
 	return d
 }
 
@@ -351,10 +359,8 @@ func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		Timestamp string   `json:"timestamp"`
 	}
 	resp := statusResp{Status: "ok", Timestamp: time.Now().Format(time.RFC3339)}
-	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
-		for _, z := range sm.SnapshotAllZones() {
-			resp.Zones = append(resp.Zones, z.Zone)
-		}
+	for _, z := range SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager) {
+		resp.Zones = append(resp.Zones, z.Zone)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

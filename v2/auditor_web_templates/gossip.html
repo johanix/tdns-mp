@@ -7,8 +7,9 @@
 {{end}}
 
 <div
+  id="gossip-matrix"
   hx-get="/web/fragment/gossip-matrix"
-  hx-trigger="load, every 15s"
+  hx-trigger="every 15s"
   hx-swap="innerHTML">
   {{template "gossip-matrix-inner" .}}
 </div>
