@@ -59,6 +59,7 @@ type WebData struct {
 	Zones        []AuditZoneSummary
 	ZoneDetail   *AuditZoneSummary
 	Providers    []AuditProviderSummary
+	Auditors     []AuditProviderSummary
 	Events       []AuditEvent
 	Observations []AuditObservation
 	Gossip       []GossipMatrixDTO
@@ -270,6 +271,19 @@ func (s *auditorWebServer) handleProviders(w http.ResponseWriter, r *http.Reques
 	s.render(w, "providers.html", data)
 }
 
+func (s *auditorWebServer) handleAuditors(w http.ResponseWriter, r *http.Request) {
+	data := s.buildAuditorsData(r)
+	s.render(w, "auditors.html", data)
+}
+
+func (s *auditorWebServer) buildAuditorsData(r *http.Request) *WebData {
+	d := s.baseWebData(r, "Auditors")
+	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
+		d.Auditors = sm.SnapshotAllAuditors()
+	}
+	return d
+}
+
 func (s *auditorWebServer) handleObservations(w http.ResponseWriter, r *http.Request) {
 	zone := r.URL.Query().Get("zone")
 	data := s.buildObservationsData(r, zone)
@@ -347,6 +361,14 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 			snap := zs.Snapshot()
 			d.ZoneDetail = &snap
 			d.Providers = snap.Providers
+			d.Auditors = snap.Auditors
+		} else {
+			d.Auditors = DeclaredAuditorIdentities(zone)
+			d.ZoneDetail = &AuditZoneSummary{
+				Zone:         zone,
+				Auditors:     d.Auditors,
+				AuditorCount: len(d.Auditors),
+			}
 		}
 	}
 	return d
@@ -443,6 +465,7 @@ func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.Han
 	mux.HandleFunc("/web/gossip", wrap(s.handleGossip))
 	mux.HandleFunc("/web/eventlog", wrap(s.handleEventLog))
 	mux.HandleFunc("/web/providers", wrap(s.handleProviders))
+	mux.HandleFunc("/web/auditors", wrap(s.handleAuditors))
 	mux.HandleFunc("/web/observations", wrap(s.handleObservations))
 	mux.HandleFunc("/web/zone", wrap(s.handleZoneByQuery))
 	mux.HandleFunc("/web/zone/", wrap(s.handleZoneDetail))

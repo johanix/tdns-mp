@@ -17,6 +17,7 @@ type AuditZoneState struct {
 	mu           sync.RWMutex
 	Zone         string
 	Providers    map[string]*AuditProviderState
+	Auditors     map[string]*AuditProviderState
 	LastRefresh  time.Time
 	ZoneSerial   uint32
 	Observations []AuditObservation
@@ -75,6 +76,7 @@ func (m *AuditStateManager) GetOrCreateZone(zone string) *AuditZoneState {
 	zs := &AuditZoneState{
 		Zone:      zone,
 		Providers: make(map[string]*AuditProviderState),
+		Auditors:  make(map[string]*AuditProviderState),
 	}
 	m.zones[zone] = zs
 	return zs
@@ -124,6 +126,26 @@ func (zs *AuditZoneState) UpdateProviderBeat(identity, label, gossipState string
 	ps.IsSigner = isSigner
 	ps.GossipState = gossipState
 	ps.LastBeat = time.Now()
+}
+
+// UpdateAuditorBeat updates the auditor state on beat receipt.
+func (zs *AuditZoneState) UpdateAuditorBeat(identity, label, gossipState string) {
+	zs.mu.Lock()
+	defer zs.mu.Unlock()
+	as, ok := zs.Auditors[identity]
+	if !ok {
+		as = &AuditProviderState{
+			Identity:      identity,
+			Label:         label,
+			Contributions: make(map[string]map[uint16]int),
+		}
+		zs.Auditors[identity] = as
+	}
+	if label != "" {
+		as.Label = label
+	}
+	as.GossipState = gossipState
+	as.LastBeat = time.Now()
 }
 
 // UpdateProviderSync updates the provider state on sync receipt.

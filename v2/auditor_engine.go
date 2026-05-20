@@ -276,9 +276,11 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 				if sm != nil && report.Zone != "" {
 					zone := string(report.Zone)
 					identity := string(report.Identity)
-					if IsProviderIdentity(zone, identity) {
-						label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, identity)
-						zs := sm.GetOrCreateZone(zone)
+					label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, identity)
+					zs := sm.GetOrCreateZone(zone)
+					if IsAuditorIdentity(zone, identity) {
+						zs.UpdateAuditorBeat(identity, label, gossipState)
+					} else if IsProviderIdentity(zone, identity) {
 						zs.UpdateProviderBeat(identity, label, gossipState, isSigner)
 					}
 				}

@@ -25,9 +25,11 @@ import (
 type AuditZoneSummary struct {
 	Zone          string                 `json:"zone"`
 	ProviderCount int                    `json:"provider_count"`
+	AuditorCount  int                    `json:"auditor_count"`
 	LastRefresh   time.Time              `json:"last_refresh,omitempty"`
 	ZoneSerial    uint32                 `json:"zone_serial,omitempty"`
 	Providers     []AuditProviderSummary `json:"providers,omitempty"`
+	Auditors      []AuditProviderSummary `json:"auditors,omitempty"`
 }
 
 // AuditProviderSummary is the JSON shape for one provider's state.
@@ -64,7 +66,35 @@ func (zs *AuditZoneState) Snapshot() AuditZoneSummary {
 		summary.Providers = append(summary.Providers, providerSummary(ps, now))
 	}
 	summary.ProviderCount = len(summary.Providers)
+	summary.Auditors = snapshotAuditorsLocked(zs, now)
+	summary.AuditorCount = len(summary.Auditors)
 	return summary
+}
+
+// snapshotAuditorsLocked builds auditor summaries for zs. Caller must
+// hold zs.mu (read or write).
+func snapshotAuditorsLocked(zs *AuditZoneState, now time.Time) []AuditProviderSummary {
+	byID := make(map[string]AuditProviderSummary)
+	for _, s := range DeclaredAuditorIdentities(zs.Zone) {
+		byID[s.Identity] = s
+	}
+	for _, as := range zs.Auditors {
+		if !IsAuditorIdentity(zs.Zone, as.Identity) {
+			continue
+		}
+		byID[as.Identity] = providerSummary(as, now)
+	}
+	out := make([]AuditProviderSummary, 0, len(byID))
+	for _, s := range byID {
+		out = append(out, s)
+	}
+	slices.SortFunc(out, func(a, b AuditProviderSummary) int {
+		if a.Label != b.Label {
+			return strings.Compare(a.Label, b.Label)
+		}
+		return strings.Compare(a.Identity, b.Identity)
+	})
+	return out
 }
 
 // SnapshotObservations returns a copy of zs.Observations under the lock.
@@ -236,6 +266,59 @@ func (m *AuditStateManager) SnapshotAllProviders() []AuditProviderSummary {
 	for _, s := range merged {
 		out = append(out, s)
 	}
+	return out
+}
+
+// SnapshotAllAuditors returns one entry per distinct auditor identity
+// across all tracked zones (HSYNCPARAM auditors=), merged like providers.
+func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
+	m.mu.RLock()
+	zones := make([]*AuditZoneState, 0, len(m.zones))
+	for _, zs := range m.zones {
+		zones = append(zones, zs)
+	}
+	m.mu.RUnlock()
+	now := time.Now()
+	merged := make(map[string]AuditProviderSummary)
+	for zname, zd := range Zones.Items() {
+		if !zd.Ready || !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		for _, s := range DeclaredAuditorIdentities(string(zname)) {
+			if _, exists := merged[s.Identity]; !exists {
+				merged[s.Identity] = s
+			}
+		}
+	}
+	for _, zs := range zones {
+		zs.mu.RLock()
+		for _, s := range snapshotAuditorsLocked(zs, now) {
+			cur, exists := merged[s.Identity]
+			if !exists {
+				merged[s.Identity] = s
+				continue
+			}
+			if s.LastBeat.After(cur.LastBeat) {
+				cur.LastBeat = s.LastBeat
+				cur.SecondsSinceBeat = s.SecondsSinceBeat
+			}
+			if s.GossipState != "" {
+				cur.GossipState = s.GossipState
+			}
+			if cur.Label == "" && s.Label != "" {
+				cur.Label = s.Label
+			}
+			merged[s.Identity] = cur
+		}
+		zs.mu.RUnlock()
+	}
+	out := make([]AuditProviderSummary, 0, len(merged))
+	for _, s := range merged {
+		out = append(out, s)
+	}
+	slices.SortFunc(out, func(a, b AuditProviderSummary) int {
+		return strings.Compare(a.Label, b.Label)
+	})
 	return out
 }
 

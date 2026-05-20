@@ -13,6 +13,7 @@
 package tdnsmp
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -91,6 +92,19 @@ func (mpzd *MPZoneData) IsAuditorIdentity(identity string) bool {
 	return false
 }
 
+// IsAuditorIdentity reports whether identity is declared as an auditor
+// for zone (HSYNCPARAM auditors= resolved via apex HSYNC3).
+func IsAuditorIdentity(zone, identity string) bool {
+	if zone == "" || identity == "" {
+		return false
+	}
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return false
+	}
+	return mpzd.IsAuditorIdentity(identity)
+}
+
 // IsProviderIdentity reports whether identity is an HSYNC3 member that
 // serves the zone (listed in HSYNC3 but not under HSYNCPARAM auditors=).
 func IsProviderIdentity(zone, identity string) bool {
@@ -102,4 +116,49 @@ func IsProviderIdentity(zone, identity string) bool {
 		return true
 	}
 	return !mpzd.IsAuditorIdentity(identity)
+}
+
+// DeclaredAuditorIdentities returns HSYNC3 identities for the zone's
+// auditors= labels (from apex HSYNCPARAM), sorted by label.
+func DeclaredAuditorIdentities(zone string) []AuditProviderSummary {
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return nil
+	}
+	apex, err := mpzd.GetOwner(mpzd.ZoneName)
+	if err != nil || apex == nil {
+		return nil
+	}
+	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !exists {
+		return nil
+	}
+	var out []AuditProviderSummary
+	seen := map[string]bool{}
+	for _, rr := range hsync3RRset.RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok || h3.State == 0 {
+			continue
+		}
+		if !mpzd.IsAuditorIdentity(h3.Identity) {
+			continue
+		}
+		id := dns.Fqdn(h3.Identity)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, AuditProviderSummary{
+			Identity: id,
+			Label:    strings.TrimSuffix(h3.Label, "."),
+		})
+	}
+	slices.SortFunc(out, func(a, b AuditProviderSummary) int {
+		return strings.Compare(a.Label, b.Label)
+	})
+	return out
 }

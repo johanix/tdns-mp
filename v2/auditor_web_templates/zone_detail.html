@@ -14,6 +14,7 @@
     <dt>Serial</dt><dd>{{.ZoneDetail.ZoneSerial}}</dd>
     <dt>Last Refresh</dt><dd>{{fmtTime .ZoneDetail.LastRefresh}}</dd>
     <dt>Providers</dt><dd>{{.ZoneDetail.ProviderCount}}</dd>
+    <dt>Auditors</dt><dd>{{.ZoneDetail.AuditorCount}}</dd>
   </dl>
 </section>
 {{end}}
@@ -54,6 +55,34 @@
     </tbody>
   </table>
   <div id="provider-detail-panel"></div>
+  {{end}}
+</section>
+
+<section>
+  <h3>Auditors</h3>
+  {{if not .Auditors}}
+  <p><em>No auditors declared for this zone.</em></p>
+  {{else}}
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Identity</th>
+        <th>Label</th>
+        <th>Gossip State</th>
+        <th>Last Beat</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Auditors}}
+      <tr>
+        <td>{{.Identity}}</td>
+        <td>{{.Label}}</td>
+        <td>{{.GossipState}}</td>
+        <td>{{ago .LastBeat}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
   {{end}}
 </section>
 
