@@ -65,23 +65,33 @@ type WebData struct {
 	Gossip       []GossipMatrixDTO
 }
 
+func formatAgo(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t)
+	switch {
+	case d < 2*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+}
+
 func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*auditorWebServer, error) {
 	fm := template.FuncMap{
 		"ago": func(t time.Time) string {
-			if t.IsZero() {
-				return "never"
+			return formatAgo(t)
+		},
+		"lastBeatDisplay": func(s AuditProviderSummary) string {
+			if s.Local && s.LastBeat.IsZero() {
+				return "this host"
 			}
-			d := time.Since(t)
-			switch {
-			case d < 2*time.Second:
-				return "just now"
-			case d < time.Minute:
-				return fmt.Sprintf("%ds ago", int(d.Seconds()))
-			case d < time.Hour:
-				return fmt.Sprintf("%dm ago", int(d.Minutes()))
-			default:
-				return fmt.Sprintf("%dh ago", int(d.Hours()))
-			}
+			return formatAgo(s.LastBeat)
 		},
 		"fmtTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -279,9 +289,14 @@ func (s *auditorWebServer) handleAuditors(w http.ResponseWriter, r *http.Request
 func (s *auditorWebServer) buildAuditorsData(r *http.Request) *WebData {
 	d := s.baseWebData(r, "Auditors")
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
-		d.Auditors = sm.SnapshotAllAuditors()
+		d.Auditors = s.finishAuditorSummaries("", sm.SnapshotAllAuditors())
 	}
 	return d
+}
+
+func (s *auditorWebServer) finishAuditorSummaries(zone string, auditors []AuditProviderSummary) []AuditProviderSummary {
+	enrichLocalAuditorGossip(s.conf.InternalMp.AgentRegistry, zone, auditors)
+	return auditors
 }
 
 func (s *auditorWebServer) handleObservations(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +325,7 @@ func (s *auditorWebServer) fragmentProviderDetail(w http.ResponseWriter, r *http
 	sm := s.conf.InternalMp.AuditStateManager
 	if sm != nil && zone != "" && provider != "" {
 		if zs := sm.GetZone(zone); zs != nil {
-			summary := zs.Snapshot()
+			summary := zs.Snapshot(sm.LocalIdentity)
 			for _, p := range summary.Providers {
 				if p.Identity == provider {
 					data.Providers = []AuditProviderSummary{p}
@@ -357,13 +372,16 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 	d := s.baseWebData(r, "Zone: "+zone)
 	d.Zone = zone
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
+		local := sm.LocalIdentity
 		if zs := sm.GetZone(zone); zs != nil {
-			snap := zs.Snapshot()
+			snap := zs.Snapshot(local)
 			d.ZoneDetail = &snap
 			d.Providers = snap.Providers
-			d.Auditors = snap.Auditors
+			d.Auditors = s.finishAuditorSummaries(zone, snap.Auditors)
 		} else {
 			d.Auditors = DeclaredAuditorIdentities(zone)
+			markLocalAuditors(local, d.Auditors)
+			d.Auditors = s.finishAuditorSummaries(zone, d.Auditors)
 			d.ZoneDetail = &AuditZoneSummary{
 				Zone:         zone,
 				Auditors:     d.Auditors,

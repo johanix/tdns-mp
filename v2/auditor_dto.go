@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
+
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -46,11 +48,43 @@ type AuditProviderSummary struct {
 	KeyCount         int       `json:"key_count"`
 	SecondsSinceBeat int64     `json:"seconds_since_beat,omitempty"`
 	SecondsSinceSync int64     `json:"seconds_since_sync,omitempty"`
+	Local            bool      `json:"local,omitempty"`
+}
+
+// markLocalAuditors sets Local on rows matching this auditor instance.
+func markLocalAuditors(localIdentity string, out []AuditProviderSummary) {
+	localIdentity = dns.Fqdn(localIdentity)
+	if localIdentity == "" {
+		return
+	}
+	for i := range out {
+		if dns.Fqdn(out[i].Identity) == localIdentity {
+			out[i].Local = true
+		}
+	}
+}
+
+// enrichLocalAuditorGossip fills gossip for the local auditor from the
+// agent registry (this host does not receive its own inbound beats).
+func enrichLocalAuditorGossip(ar *AgentRegistry, zone string, out []AuditProviderSummary) {
+	if ar == nil {
+		return
+	}
+	for i := range out {
+		if !out[i].Local {
+			continue
+		}
+		_, gossip, _ := providerBeatMeta(ar, ZoneName(zone), out[i].Identity)
+		if gossip != "" && out[i].GossipState == "" {
+			out[i].GossipState = gossip
+		}
+	}
 }
 
 // Snapshot returns an immutable summary of zs. Safe to call without
-// holding any lock; takes the zone lock internally.
-func (zs *AuditZoneState) Snapshot() AuditZoneSummary {
+// holding any lock; takes the zone lock internally. localIdentity
+// marks the running auditor row (no self beats).
+func (zs *AuditZoneState) Snapshot(localIdentity string) AuditZoneSummary {
 	zs.mu.RLock()
 	defer zs.mu.RUnlock()
 	now := time.Now()
@@ -66,14 +100,14 @@ func (zs *AuditZoneState) Snapshot() AuditZoneSummary {
 		summary.Providers = append(summary.Providers, providerSummary(ps, now))
 	}
 	summary.ProviderCount = len(summary.Providers)
-	summary.Auditors = snapshotAuditorsLocked(zs, now)
+	summary.Auditors = snapshotAuditorsLocked(zs, now, localIdentity)
 	summary.AuditorCount = len(summary.Auditors)
 	return summary
 }
 
 // snapshotAuditorsLocked builds auditor summaries for zs. Caller must
 // hold zs.mu (read or write).
-func snapshotAuditorsLocked(zs *AuditZoneState, now time.Time) []AuditProviderSummary {
+func snapshotAuditorsLocked(zs *AuditZoneState, now time.Time, localIdentity string) []AuditProviderSummary {
 	byID := make(map[string]AuditProviderSummary)
 	for _, s := range DeclaredAuditorIdentities(zs.Zone) {
 		byID[s.Identity] = s
@@ -94,6 +128,7 @@ func snapshotAuditorsLocked(zs *AuditZoneState, now time.Time) []AuditProviderSu
 		}
 		return strings.Compare(a.Identity, b.Identity)
 	})
+	markLocalAuditors(localIdentity, out)
 	return out
 }
 
@@ -182,13 +217,14 @@ func SnapshotDashboardZones(ar *AgentRegistry, sm *AuditStateManager) []AuditZon
 func (m *AuditStateManager) SnapshotAllZones() []AuditZoneSummary {
 	m.mu.RLock()
 	zones := make([]*AuditZoneState, 0, len(m.zones))
+	local := m.LocalIdentity
 	for _, zs := range m.zones {
 		zones = append(zones, zs)
 	}
 	m.mu.RUnlock()
 	out := make([]AuditZoneSummary, 0, len(zones))
 	for _, zs := range zones {
-		out = append(out, zs.Snapshot())
+		out = append(out, zs.Snapshot(local))
 	}
 	return out
 }
@@ -274,6 +310,7 @@ func (m *AuditStateManager) SnapshotAllProviders() []AuditProviderSummary {
 func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 	m.mu.RLock()
 	zones := make([]*AuditZoneState, 0, len(m.zones))
+	local := m.LocalIdentity
 	for _, zs := range m.zones {
 		zones = append(zones, zs)
 	}
@@ -292,7 +329,7 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 	}
 	for _, zs := range zones {
 		zs.mu.RLock()
-		for _, s := range snapshotAuditorsLocked(zs, now) {
+		for _, s := range snapshotAuditorsLocked(zs, now, local) {
 			cur, exists := merged[s.Identity]
 			if !exists {
 				merged[s.Identity] = s
@@ -319,6 +356,7 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 	slices.SortFunc(out, func(a, b AuditProviderSummary) int {
 		return strings.Compare(a.Label, b.Label)
 	})
+	markLocalAuditors(local, out)
 	return out
 }
 

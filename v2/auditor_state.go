@@ -57,6 +57,9 @@ type AuditObservation struct {
 type AuditStateManager struct {
 	mu    sync.RWMutex
 	zones map[string]*AuditZoneState
+	// LocalIdentity is this auditor's HSYNC3 FQDN. The process never
+	// receives beats from itself, so snapshots mark that row Local.
+	LocalIdentity string
 }
 
 // NewAuditStateManager creates a new audit state manager.

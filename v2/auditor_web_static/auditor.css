@@ -36,6 +36,16 @@ h2 {
   line-height: 1.2;
 }
 
+.audit-row-local {
+  background: #f4f8ff;
+}
+
+.audit-local-badge {
+  color: #555;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
 h3 {
   font-size: 28px;
   font-weight: 600;

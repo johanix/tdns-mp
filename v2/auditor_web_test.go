@@ -106,6 +106,20 @@ func TestGossipTemplateRendersMatrix(t *testing.T) {
 	}
 }
 
+func TestMarkLocalAuditors_withoutInboundBeat(t *testing.T) {
+	out := []AuditProviderSummary{
+		{Identity: "auditor.skrubb.mp.axfr.net.", Label: "skrubb"},
+		{Identity: "auditor.auden.mp.axfr.net.", Label: "auden"},
+	}
+	markLocalAuditors("auditor.skrubb.mp.axfr.net", out)
+	if !out[0].Local {
+		t.Fatal("skrubb row should be Local")
+	}
+	if out[1].Local {
+		t.Fatal("auden row should not be Local")
+	}
+}
+
 func TestRequireAuth_htmxUnauthorizedRedirect(t *testing.T) {
 	auth, err := NewAuditWebAuth([]AuditWebUser{{Name: "u", PasswordHash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"}}, time.Hour)
 	if err != nil {

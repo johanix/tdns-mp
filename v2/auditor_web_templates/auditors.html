@@ -11,15 +11,17 @@
       <th>Label</th>
       <th>Gossip State</th>
       <th>Last Beat</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
     {{range .Auditors}}
-    <tr>
+    <tr{{if .Local}} class="audit-row-local"{{end}}>
       <td>{{.Identity}}</td>
       <td>{{.Label}}</td>
       <td>{{.GossipState}}</td>
-      <td>{{ago .LastBeat}}</td>
+      <td>{{lastBeatDisplay .}}</td>
+      <td>{{if .Local}}<span class="audit-local-badge">this host</span>{{end}}</td>
     </tr>
     {{end}}
   </tbody>

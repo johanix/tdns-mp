@@ -102,6 +102,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 
 	// Phase B: persistent event log + in-memory audit state.
 	stateManager := NewAuditStateManager()
+	stateManager.LocalIdentity = conf.Config.LocalIdentity()
 	conf.InternalMp.AuditStateManager = stateManager
 
 	kdb := conf.Config.Internal.KeyDB

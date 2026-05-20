@@ -82,7 +82,7 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 			resp := AuditResponse{Status: "ok"}
 			if sm != nil {
 				if zs := sm.GetZone(req.Zone); zs != nil {
-					resp.Zones = []AuditZoneSummary{zs.Snapshot()}
+					resp.Zones = []AuditZoneSummary{zs.Snapshot(sm.LocalIdentity)}
 				}
 			}
 			writeAuditJSON(w, resp)
