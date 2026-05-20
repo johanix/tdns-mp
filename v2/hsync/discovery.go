@@ -120,17 +120,24 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	}
 	if err != nil {
 		peer.Mu.Lock()
-		peer.ApiDetails.DiscoveryFailures++
-		failures := peer.ApiDetails.DiscoveryFailures
-		peer.ApiDetails.LatestError = err.Error()
-		peer.ApiDetails.LatestErrorTime = time.Now()
+		var failures uint32
+		forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
+			td.DiscoveryFailures++
+			td.LatestError = err.Error()
+			td.LatestErrorTime = time.Now()
+			if td.DiscoveryFailures > failures {
+				failures = td.DiscoveryFailures
+			}
+		})
 		peer.Mu.Unlock()
 		e.deps.Transport.FireDiscoveryFailed(peer.ID, fmt.Errorf("discover peer: %w (failures=%d)", err, failures))
 		return
 	}
 
 	peer.Mu.Lock()
-	peer.ApiDetails.DiscoveryFailures = 0
+	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
+		td.DiscoveryFailures = 0
+	})
 	peer.Mu.Unlock()
 
 	peer.Mu.RLock()

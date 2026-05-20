@@ -100,8 +100,8 @@ func NewPeer(id PeerID) *Peer {
 		TransportID: string(id),
 		ApiDetails:  &PeerDetails{State: PeerStateNeeded},
 		DnsDetails:  &PeerDetails{State: PeerStateNeeded},
-		ApiMethod:   true,
-		DnsMethod:   true,
+		ApiMethod:   false,
+		DnsMethod:   false,
 		Zones:       make(map[ZoneName]bool),
 		State:       PeerStateNeeded,
 		LastState:   time.Now(),
@@ -109,15 +109,22 @@ func NewPeer(id PeerID) *Peer {
 }
 
 func (p *Peer) EffectiveState() PeerState {
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 	best := PeerState(0)
-	for _, s := range []PeerState{p.apiState(), p.dnsState()} {
-		switch s {
+	consider := func(enabled bool, td *PeerDetails) {
+		if !enabled || td == nil || !transportParticipating(td.State) {
+			return
+		}
+		switch td.State {
 		case PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
-			if best == 0 || s < best {
-				best = s
+			if best == 0 || td.State < best {
+				best = td.State
 			}
 		}
 	}
+	consider(p.DnsMethod, p.DnsDetails)
+	consider(p.ApiMethod, p.ApiDetails)
 	if best != 0 {
 		return best
 	}
