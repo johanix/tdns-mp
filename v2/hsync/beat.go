@@ -18,14 +18,11 @@ func (e *Engine) heartbeatHandler(report *InboundReport) {
 	}
 	now := time.Now()
 	peer.Mu.Lock()
-	if report.Transport == "DNS" && peer.DnsDetails != nil {
-		peer.DnsDetails.LatestRBeat = now
-		peer.DnsDetails.ReceivedBeats++
-		peer.DnsDetails.BeatInterval = report.BeatInterval
-	} else if peer.ApiDetails != nil {
-		peer.ApiDetails.LatestRBeat = now
-		peer.ApiDetails.ReceivedBeats++
-		peer.ApiDetails.BeatInterval = report.BeatInterval
+	switch report.Transport {
+	case TransportDNS:
+		applyInboundBeat(peer, TransportDNS, report.BeatInterval, now)
+	case TransportAPI:
+		applyInboundBeat(peer, TransportAPI, report.BeatInterval, now)
 	}
 	peer.Mu.Unlock()
 
