@@ -305,6 +305,59 @@ func syncHsyncPeerToAgent(ar *AgentRegistry, peer *hsync.Peer) {
 	ar.S.Set(agent.Identity, agent)
 }
 
+func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
+	if ar == nil || ar.GossipStateTable == nil {
+		return
+	}
+	ar.GossipStateTable.SetOnGroupOperational(func(groupHash string) {
+		lem := conf.InternalMp.LeaderElectionManager
+		pgm := ar.ProviderGroupManager
+		if lem == nil || pgm == nil {
+			return
+		}
+		pg := pgm.GetGroup(groupHash)
+		if pg == nil || len(pg.VotingMembers) == 0 {
+			return
+		}
+		localID := string(lem.localID)
+		weVote := false
+		for _, m := range pg.VotingMembers {
+			if m == localID {
+				weVote = true
+				break
+			}
+		}
+		if !weVote {
+			return
+		}
+		initiator := pg.VotingMembers[0]
+		for _, m := range pg.VotingMembers[1:] {
+			if m < initiator {
+				initiator = m
+			}
+		}
+		if localID == initiator {
+			lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
+		}
+	})
+	ar.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
+		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+			lem.InvalidateGroupLeader(groupHash)
+		}
+	})
+	ar.GossipStateTable.SetOnElectionUpdate(func(groupHash string, state GroupElectionState) {
+		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+			lem.ApplyGossipElection(groupHash, state)
+		}
+	})
+}
+
+func newAgentHsyncEngine(conf *Config) *hsync.Engine {
+	ar := conf.InternalMp.AgentRegistry
+	wireAgentGossipCallbacks(conf, ar)
+	return newAuditorHsyncEngine(conf)
+}
+
 func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 	ar := conf.InternalMp.AgentRegistry
 	cfg := hsync.DefaultConfig()
