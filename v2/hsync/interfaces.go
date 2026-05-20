@@ -84,7 +84,7 @@ type Deps struct {
 	LocalBeatInterval uint32
 	Zones             ZoneLookup
 	Transport         TransportBridge
-	Gossip            *GossipStateTable
+	Gossip            GossipPort
 	ProviderGroups    ProviderGroupLookup
 	Elections         ElectionStateLookup
 	Host              HostCallbacks

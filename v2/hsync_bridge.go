@@ -279,6 +279,7 @@ func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 		LocalBeatInterval: conf.Config.MultiProvider.Remote.BeatInterval,
 		Zones:             mpZoneLookup{},
 		Transport:         &mpHsyncBridge{ar: ar, tm: conf.InternalMp.MPTransport},
+		Gossip:            newAgentGossipPort(ar),
 		ProviderGroups:    pgmHsyncLookup{pgm: ar.ProviderGroupManager},
 		PeerHooks: hsync.PeerHooks{
 			OnPeerStored: func(peer *hsync.Peer) { syncHsyncPeerToAgent(ar, peer) },
