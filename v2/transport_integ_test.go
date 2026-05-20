@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
-	tdns "github.com/johanix/tdns/v2"
 )
 
 // TestTransportBoundary_ChunkToMsg drives a sync IncomingMessage into

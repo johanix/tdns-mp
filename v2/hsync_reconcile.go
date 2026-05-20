@@ -15,20 +15,15 @@ import (
 )
 
 // ReconcileHsync periodically walks every multi-provider zone's
-// HSYNC3 RRset and ensures every listed identity is present in the
-// AgentRegistry. Missing peers are added via MarkAgentAsNeeded,
-// which triggers the normal discovery → HELLO → BEAT chain.
+// HSYNC3 RRset and reconciles the AgentRegistry with that RRset:
+// missing peers are added via MarkAgentAsNeeded (discovery → HELLO →
+// BEAT), and peers no longer listed are removed for that zone.
 //
 // This is a safety-net pass that catches:
 //   - Incremental HSYNC3 updates that bypass or fail UpdateAgents'
 //     diff path.
-//   - Auditors that have no UpdateAgents flow at all and would
-//     otherwise only learn peers via inbound message receipt.
-//   - Stale registry entries from zone-format migrations.
-//
-// The pass is purely additive: it never removes peers from the
-// registry. Removal continues to be handled by HsyncRemoves in
-// UpdateAgents on the agent side, where it belongs.
+//   - Auditors that have no UpdateAgents flow at all.
+//   - Stale registry entries after HSYNC3 removals or migrations.
 //
 // MarkAgentAsNeeded is idempotent for already-registered peers
 // (it returns early after adding the zone association), so this
@@ -50,10 +45,11 @@ func (ar *AgentRegistry) ReconcileHsync(ctx context.Context) {
 	}
 }
 
-// reconcileAllZones iterates every known MP zone, reads its HSYNC3
-// RRset, and ensures every listed identity is in the registry.
+// reconcileAllZones iterates every known MP zone and reconciles its
+// HSYNC3 RRset against the registry.
 func (ar *AgentRegistry) reconcileAllZones() {
 	added := 0
+	removed := 0
 	scanned := 0
 
 	for zoneName, mpzd := range Zones.Items() {
@@ -63,37 +59,32 @@ func (ar *AgentRegistry) reconcileAllZones() {
 		if !mpzd.Options[tdns.OptMultiProvider] {
 			continue
 		}
-		n, err := ar.reconcileZone(mpzd)
+		a, r, err := ar.reconcileZone(mpzd)
 		if err != nil {
 			lgAgent.Debug("HsyncReconcile: skipping zone", "zone", zoneName, "err", err)
 			continue
 		}
 		scanned++
-		added += n
+		added += a
+		removed += r
 	}
 
-	if added > 0 {
+	if added > 0 || removed > 0 {
 		lgAgent.Info("HsyncReconcile pass complete",
-			"zones_scanned", scanned, "peers_added", added)
+			"zones_scanned", scanned, "peers_added", added, "peers_removed", removed)
 	}
 }
 
-// reconcileZone reads the current HSYNC3 RRset for one zone and
-// calls MarkAgentAsNeeded for each listed identity. Returns the
-// number of peers newly added in this pass (peers already present
-// are a no-op).
-func (ar *AgentRegistry) reconcileZone(mpzd *MPZoneData) (int, error) {
+// reconcileZone reads the current HSYNC3 RRset for one zone, removes
+// registry entries for identities no longer listed, and adds missing
+// ones. Returns counts of peers newly added and removed in this pass.
+func (ar *AgentRegistry) reconcileZone(mpzd *MPZoneData) (added int, removed int, err error) {
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil {
-		return 0, fmt.Errorf("get apex: %w", err)
+		return 0, 0, fmt.Errorf("get apex: %w", err)
 	}
 	if apex == nil {
-		return 0, nil
-	}
-
-	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !exists || len(hsync3RRset.RRs) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	localIdentity := ""
@@ -101,29 +92,38 @@ func (ar *AgentRegistry) reconcileZone(mpzd *MPZoneData) (int, error) {
 		localIdentity = ar.LocalAgent.Identity
 	}
 
-	added := 0
 	zoneName := ZoneName(mpzd.ZoneName)
+	expected := make(map[AgentId]struct{})
 
-	for _, rr := range hsync3RRset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
-			continue
+	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if exists && len(hsync3RRset.RRs) > 0 {
+		for id := range hsync3IdentitiesFromRRset(hsync3RRset.RRs, localIdentity) {
+			expected[id] = struct{}{}
 		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok {
-			continue
-		}
-		if h3.Identity == "" {
-			continue
-		}
-		if h3.Identity == localIdentity {
-			continue
-		}
+	}
 
-		remoteID := AgentId(h3.Identity)
+	var toRemove []AgentId
+	for _, agent := range ar.GetAgentsForZone(zoneName) {
+		if localIdentity != "" && string(agent.Identity) == localIdentity {
+			continue
+		}
+		if _, ok := expected[agent.Identity]; !ok {
+			toRemove = append(toRemove, agent.Identity)
+		}
+	}
+
+	for _, remoteID := range toRemove {
+		lgAgent.Info("HsyncReconcile: removing peer no longer in HSYNC3",
+			"zone", zoneName, "identity", remoteID)
+		ar.RemoveRemoteAgent(zoneName, remoteID)
+		if agent, ok := ar.S.Get(remoteID); ok {
+			ar.RecomputeSharedZonesAndSyncState(agent)
+		}
+		removed++
+	}
+
+	for remoteID := range expected {
 		if _, already := ar.S.Get(remoteID); already {
-			// Idempotent: still call MarkAgentAsNeeded so the
-			// zone association is refreshed if needed.
 			ar.MarkAgentAsNeeded(remoteID, zoneName, nil)
 			continue
 		}
@@ -134,5 +134,26 @@ func (ar *AgentRegistry) reconcileZone(mpzd *MPZoneData) (int, error) {
 		added++
 	}
 
-	return added, nil
+	return added, removed, nil
+}
+
+// hsync3IdentitiesFromRRset returns remote HSYNC3 identities in rrset,
+// excluding localIdentity when non-empty.
+func hsync3IdentitiesFromRRset(rrs []dns.RR, localIdentity string) map[AgentId]struct{} {
+	out := make(map[AgentId]struct{})
+	for _, rr := range rrs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok || h3.Identity == "" {
+			continue
+		}
+		if localIdentity != "" && h3.Identity == localIdentity {
+			continue
+		}
+		out[AgentId(h3.Identity)] = struct{}{}
+	}
+	return out
 }

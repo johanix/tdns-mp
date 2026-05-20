@@ -1,8 +1,10 @@
 # Splitting HsyncEngine: Shared Sync Conversation Engine
 # + Agent-Only Data Engine
 
-**Date:** 2026-05-19
-**Status:** Design
+**Date:** 2026-05-19 (updated 2026-05-20)
+**Status:** Design — in progress on feature branch (see §5.0, §5.1)
+**Branch policy:** `main` is frozen for external interop; all Cut A work
+lives on the feature branch stack described in §5.0.
 **Related:**
 - `2026-04-15-transport-interface-redesign.md`
 - `2026-04-25-transport-refactor-early-bites.md`
@@ -10,21 +12,25 @@
 
 ## 1. Motivation
 
-A live debugging session on `customer.mptest.` surfaced a
-production-correctness failure caused by the current architectural
-split between agents and auditors:
+A live debugging session on `customer.mptest.` (May 2026) surfaced a
+production-correctness failure caused by the architectural split
+between agents and auditors. **The immediate symptoms are fixed on
+`main`** (see §10a); this document describes the structural refactor
+that prevents them from recurring.
 
-- Only agents run `HsyncEngine`. Auditors register peers reactively,
-  only when they receive a verified inbound message.
-- `auditor.mp` had a registry of `{fox, hare}` — the two agents
-  whose first beats reached it — and was permanently blind to
-  `agent.cpt.mp` and `auditor.skrubb` because neither side ever
-  reached the threshold to send the other a verifiable BEAT.
-- On the agent side, `agent.cpt.mp` itself was missing `auditor.mp`
-  from its registry because the HSYNC3 RRset for `customer.mptest.`
-  was extended after `cpt`'s `UpdateAgents` had already done its
-  initial count=3 / count=4 processing; the count=5 transition that
-  added `auditor.mp` was never processed.
+### 1.1 What failed (historical)
+
+Before the tactical fix:
+
+- Only agents ran the full `HsyncEngine` goroutine. Auditors had no
+  HSYNC3-driven registration path (`SyncQ` / `UpdateAgents` is
+  agent-only).
+- `auditor.mp` had a registry of `{fox, hare}` — peers whose first
+  beats reached it — and was blind to `agent.cpt.mp` and
+  `auditor.skrubb` until inbound traffic established them.
+- On the agent side, `agent.cpt.mp` missed `auditor.mp` when the
+  HSYNC3 RRset grew from count=4 to count=5 after `UpdateAgents`
+  had already run for the earlier transition.
 
 **Why this is a safety-contract failure, not a cosmetic bug.**
 When a customer enters an auditor into the HSYNC configuration, the
@@ -32,24 +38,25 @@ semantic is *hard requirement*: "I demand that my appointed auditor
 is fully integrated into the synchronization loop; you are not
 allowed to proceed with changes if the auditor is not informed."
 The gossip group state machine enforces this — `CheckGroupState`
-fires `OnGroupOperational` only when *every* HSYNC-listed peer is
-in `OPERATIONAL` state in *every* gossiped row. An undiscovered
-auditor means the group is permanently `DEGRADED`, which means
-agents must not proceed with state changes. The stuck-NEEDED state
-we debugged is exactly that failure mode: a missing auditor blocks
-the whole group's operational lifecycle.
+(using `pg.Members`, which includes auditors) requires every
+HSYNC-listed peer to appear `OPERATIONAL` in every gossip row
+before the group is mutually operational. An undiscovered auditor
+keeps the group `DEGRADED`. That blocks **`OnGroupOperational`**
+callbacks (leader-election initiation, deferred elections) and
+leaves peers stuck in `NEEDED`. It is **not** a single centralized
+gate on all SYNC/UPDATE emission; per-peer operational checks and
+election state still apply elsewhere.
 
 Auditors are also designed to be optional at the group level — a
 group with zero auditors is legitimate — but when present they are
 load-bearing.
 
-These symptoms have one underlying cause: **the sync conversation
-is implemented only for agents.** Agents have a full
-HSYNC3 → registry → discovery → HELLO → BEAT → gossip loop.
-Auditors hand-roll a strict subset (message receipt only), which
-silently lacks the proactive registration, HELLO emission, BEAT
-emission, and gossip participation that the safety contract relies
-on.
+The underlying structural problem remains: **there is no single
+shared sync-conversation implementation.** Agents run
+`HsyncEngine`; auditors run a parallel set of goroutines
+(`DiscoveryRetrierNG`, `ReconcileHsync`, `AuditorHeartbeatLoop`,
+`AuditorMsgHandler`) that duplicate protocol logic and drift easily
+(see §2.3).
 
 This document proposes splitting today's `HsyncEngine` into:
 
@@ -124,27 +131,57 @@ matrix (`GossipStateTable`) rides in BEAT payloads. Group state
 callbacks (`OnGroupOperational`, `OnGroupDegraded`) fire from
 `CheckGroupState` whenever the matrix changes.
 
-### 2.3 Auditor today
+### 2.3 Auditor today (on `main`, post `auditor-discovery-fix`)
 
-`start_auditor.go:7-13` explicitly notes the auditor "does NOT run
-HsyncEngine, SynchedDataEngine, leader election, KeyStateWorker, or
-any path that produces outbound zone data."
+The auditor still does **not** run `HsyncEngine`, `SynchedDataEngine,
+leader-election origination, KeyStateWorker, or outbound zone-data
+paths. It **does** participate in the sync conversation via duplicated
+machinery wired in `start_auditor.go`:
 
-`auditor_msg_handler.go:31-198` consumes Beat, Hello, Ping, Msg,
-Confirmation. It routes Beat/Hello through `HeartbeatHandler` /
-`HelloHandler` (which add the sender to the registry on first
-verified contact) and updates `AuditZoneState`. It does NOT:
+| Goroutine | Source | Role |
+|-----------|--------|------|
+| `DiscoveryRetrierNG` | `hsyncengine.go` | Retry `NEEDED` peers |
+| `HsyncReconcile` | `hsync_reconcile.go` | Periodic HSYNC3 → `MarkAgentAsNeeded` |
+| `AuditorHeartbeatLoop` | `start_auditor.go` | Ticker → `SendHeartbeats()` |
+| `InfraBeatLoop` | `hsync_infra_beat.go` | Infra peers (no-op if unset) |
+| `AuditorMsgHandler` | `auditor_msg_handler.go` | MsgQs consumer + audit log |
 
-- Iterate HSYNC3 to pre-register peers.
-- Send HELLO to anyone.
-- Send BEAT to anyone.
-- Participate in or carry gossip.
+Proactive discovery → HELLO → BEAT → outbound gossip **works** on the
+auditor today via `MarkAgentAsNeeded` / `attemptDiscovery` /
+`HelloRetrierNG` / `SendHeartbeats` — the same `AgentRegistry` methods
+the agent uses, minus the `HsyncEngine` main loop.
 
-The auditor reads HSYNC3 in `auditor_detectors.go:169-172`
-(`expectedHSYNC3Identities`) only to log "expected but not seen"
-anomalies — never to drive registration.
+**Gaps vs agents (why Cut A remains necessary):**
 
-### 2.4 Current TransportManager API (post-Bite-8)
+| Area | Agent | Auditor |
+|------|-------|---------|
+| Event-driven HSYNC3 registration | `PostRefresh` → `SyncQ` → `UpdateAgents` | `PostRefresh` only `RecomputeGroups()`; registration waits for `ReconcileHsync` (up to ~60s) |
+| Single protocol owner | `HsyncEngine` | Four separate goroutines + `AuditorMsgHandler` |
+| `SyncQ` / `HSYNC-UPDATE` | Yes | No (`SyncQ` not created in `initMPAuditor`) |
+| HSYNC3 removes from registry | `UpdateAgents` / `HsyncRemoves` | **Not applied today** — `ReconcileHsync` is additive-only (known gap; fixed in Phase P, §5.0) |
+| `OnGroupOperational` election wiring | Set in `HsyncEngine` startup | Not set (auditor observes elections via gossip only) |
+| Inbound dispatch | `HsyncEngine` + transport routing | `AuditorMsgHandler` + transport routing (duplicate) |
+
+`auditor_detectors.go` still logs "expected but not seen" for HSYNC3
+identities as a **belt-and-suspenders** check; registration is driven
+by `ReconcileHsync`, not the detector.
+
+### 2.4 Current TransportManager API
+
+On **`main`**, transport exposes `DiscoverPeer`, `DiscoveryDriver`,
+`OnPeerDiscovered`, and `OnDiscoveryFailed` in
+`tdns-transport/v2/transport/manager.go`, but **tdns-mp does not use
+them yet** (discovery still flows through `attemptDiscovery` →
+`RegisterDiscoveredAgent`).
+
+On branch **`transport-refactor-semi-easy-bites`** (both repos), Bites
+C/D/E/F/G/H are implemented: `OnPeerDiscovered func(*Peer)`,
+`OnDiscoveryFailed` wired from `attemptDiscovery`, `DiscoveryDriver`
+on `MPTransportBridge` (`RunDiscovery` → `DiscoverAndRegisterAgent`),
+and `SyncPeerFromAgent` split (Bite H). **Cut A Phases 0–1 are
+complete on that branch** — see §5.0.
+
+### 2.5 TransportManager API (reference)
 
 `tdns-transport/v2/transport/manager.go` already exposes the
 primitives we rely on:
@@ -307,9 +344,9 @@ operational/degraded judgements as agents. Concretely:
 - An auditor present in HSYNC3 must reach `OPERATIONAL` in every
   agent's view (and in every other auditor's view) before the
   group is `OPERATIONAL`.
-- `OnGroupOperational` not firing implies the agents' protective
-  gating on zone changes (the part `HsyncDataEngine` enforces)
-  keeps them from emitting SYNC/UPDATE.
+- `OnGroupOperational` not firing blocks leader-election progression
+  and leaves deferred elections pending; combined with gossip
+  `DEGRADED`, agents cannot treat the group as coordination-ready.
 - A group with zero auditors is legitimate: `CheckGroupState`
   only requires `OPERATIONAL` for peers that are members.
 
@@ -387,6 +424,105 @@ values that happen to satisfy these interfaces. `hsync` knows
 nothing about `tdnsmp.Config`, `tdnsmp.MPZoneData`, or the
 combiner/signer hierarchy.
 
+### 3.7 Design decisions (resolved 2026-05-20)
+
+These were open questions from the pre-implementation review.
+Alternatives were evaluated against the current codebase (see §6a).
+
+#### D-1: Message dispatch boundary
+
+| Alternative | Summary | Verdict |
+|-------------|---------|---------|
+| A. `hsync.Engine` owns everything including transport decode | Move `MPTransportBridge` routing into `hsync/` | **Reject** — transport bridge is large, couples TLS/DNS/CHUNK to protocol package, fights import direction |
+| B. Transport routes wire → MsgQs; `hsync.Engine.Run` owns the `select` loop | Same split as today, unified loop | **Accept** |
+| C. Keep separate `AuditorMsgHandler` forever | Minimal Phase 3 diff | **Reject** — permanent drift |
+
+**Decision:** **B.** `MPTransportBridge` continues to verify, decode, update
+`PeerRegistry`, merge inbound gossip, and enqueue `AgentMsgReport` /
+`AgentMsgPostPlus` to `MsgQs`. `hsync.Engine.Run` owns the **single**
+`select` on `Beat`, `Hello`, `Msg`, and the beat/discovery/reconcile
+tickers. Role-specific work is **handler callbacks** registered at
+startup (`AuditorEngine`, `HsyncDataEngine`).
+
+Agent-only channels (`Command`, `DebugCommand`, `SyncStatusQ`,
+`StatusUpdate`, `KeystateInventory`, `SyncQ`) stay in
+`HsyncDataEngine.Run` — not in shared `hsync.Engine`.
+
+#### D-2: Discovery API for `hsync.Engine`
+
+| Alternative | Summary | Verdict |
+|-------------|---------|---------|
+| A. Build Phase 2 on legacy `attemptDiscovery` only | Ignore `DiscoverPeer` until Phase 6 | **Reject** — duplicates work when semi-easy lands |
+| B. `hsync` calls `tm.DiscoverPeer` after `MarkNeeded` creates registry entry | Uses semi-easy stack | **Accept** |
+| C. Move all IMR lookups into `hsync/` | Self-contained package | **Reject** — IMR stays app-layer |
+
+**Decision:** **B.** After semi-easy merge, discovery in `hsync/discovery.go`
+calls `TransportDriver.DiscoverPeer` (wrapper around `tm.DiscoverPeer`).
+`MarkNeeded` still inserts into `AgentRegistry` / peer map first; driver
+updates both registries via existing `RegisterDiscoveredAgent`.
+
+#### D-3: `AgentRegistry` vs `hsync.Registry`
+
+| Alternative | Summary | Verdict |
+|-------------|---------|---------|
+| A. Delete `AgentRegistry`; migrate all call sites to `hsync.Registry` in Phase 5 | ~25 files change in one commit | **Reject** — high blast radius for CLI/API |
+| B. `AgentRegistry` embeds `*hsync.Registry`; protocol methods move to `hsync` | Stable external type | **Accept** |
+| C. `AgentRegistry` is a thin alias over `hsync.Engine` | One pointer everywhere | **Reject** — conflates registry with goroutine lifecycle |
+
+**Decision:** **B.** `hsync.Registry` owns `S`, `RemoteAgents`, `helloContexts`,
+and protocol methods (`MarkNeeded`, `SendHeartbeats`, HELLO/BEAT handlers).
+`AgentRegistry` embeds `*hsync.Registry` and retains
+`GossipStateTable`, `ProviderGroupManager`, `LeaderElectionManager`,
+`TransportManager`, `MPTransport`, `LocalAgent` (election and group
+state stay at `tdnsmp` level because combiner/signer/API handlers
+reference them). Existing `(*AgentRegistry).Method` signatures on
+protocol paths become wrappers delegating to `hsync.Registry` during
+migration, then delete wrappers in Phase 5.
+
+#### D-4: Auditor HSYNC3 registration path
+
+| Alternative | Summary | Verdict |
+|-------------|---------|---------|
+| A. Reconcile-only (60s max latency) | Status quo | **Reject** — unnecessary agent/auditor asymmetry |
+| B. Shared `ApplyHsyncDiff` from `PostRefresh` for all MP roles | Event-driven + reconcile safety net | **Accept** |
+| C. Create `SyncQ` on auditor and run full `UpdateAgents` | Maximum parity | **Reject** — pulls agent-only side effects (election triggers, deferred tasks) |
+
+**Decision:** **B.** `MPPostRefresh` auditor branch calls
+`hsync.Engine.ApplyHsyncDiff` (adds/removes) instead of only
+`RecomputeGroups`. `ReconcileHsync` remains as safety net.
+
+#### D-5: HSYNC3 removes (all roles)
+
+| Alternative | Summary | Verdict |
+|-------------|---------|---------|
+| A. Additive reconcile only | Status quo on `main` | **Reject** — stale registry entries skew gossip matrices and `peer list`; not acceptable even before Cut A lands |
+| B. Symmetric reconcile: diff HSYNC3 vs registry per zone | Same semantics as `HsyncRemoves` in `UpdateAgents` | **Accept** |
+| C. Auditor relies on agent-only `UpdateAgents` | No auditor path | **Reject** |
+
+**Decision:** **B.** `ReconcileZone` and `ApplyHsyncDiff` must both
+**add** missing HSYNC3 identities and **remove** registry entries for
+identities no longer listed (per zone: `RemoveRemoteAgent`; recompute
+shared zones when an identity drops off all zones). Implementation
+lands in **Phase P** on the feature branch (before or alongside Phase 2
+`hsync/` extraction — see §5.0). Extraction copies the symmetric logic
+into `hsync/hsync3_diff.go` / `hsync/reconcile.go`; do not ship
+additive-only reconcile on the Cut A branch.
+
+#### D-6: Phase ordering
+
+| Alternative | Summary | Verdict |
+|-------------|---------|---------|
+| A. Auditor-first (Phase 3 before agent) | Original plan | **Accept** — validates shared engine under traffic before Phase 5 |
+| B. Agent-first | Shorter duplication on agent | **Reject** — higher production risk |
+
+**Decision:** **A**, unchanged. Phase 3 value is **validation and
+deduplication**, not correctness.
+
+#### D-7: `HsyncDataEngine` investment level
+
+**Decision:** unchanged from §11 — minimal transitional shell; no stable
+public API.
+
 **Where this resists the move:** code with bidirectional
 dependencies between protocol and top-level concerns will not
 fit cleanly. Examples that will need either interface insertion
@@ -414,7 +550,8 @@ divergence:
    `OnPeerDiscovered`, `OnDiscoveryFailed`, `transport.Imr`. It
    takes no MP-internal concretes that don't have a natural
    transport-side counterpart.
-2. Bites F and D are prerequisites; this work finishes them.
+2. Bites F and D are prerequisites; satisfied on the semi-easy stack
+   (§5.0).
 3. When Phase 6 part 2 lands, the discovery and retry pieces of
    `HsyncEngine` reduce or dissolve. HELLO/BEAT/gossip stay in
    `HsyncEngine` as app-layer concerns. The split between
@@ -456,18 +593,119 @@ when justifying Item 1.
 
 ## 5. Implementation Plan
 
-Six phases. The ordering is chosen so the lowest-risk role
-(auditor) validates the new shared engine in production *before*
-the agent migrates. Each phase ends in a real safe-checkpoint
-state: even if work pauses after any phase, the codebase is
-coherent and the production system is at least as healthy as it
-was at the start of that phase.
+### 5.0 Branching and repository policy (mandatory)
 
-The auditor migration (Phase 3) is the smallest step that fully
-fixes the production failure documented in §1. Everything after
-that is structural improvement, not bug fix.
+**Constraint (May 2026):** `main` in `tdns-mp` and `tdns-transport` must
+**not** be modified while external interop testing is in progress.
+Semi-easy bites **cannot** be merged to `main` before Cut A starts.
+Semi-easy cannot be exercised in production on its own branch during
+interop.
 
-### Phase 0: Finish Bite F
+**All Cut A work — including capturing commits that exist only on
+`main` today — stays on feature branches.** Nothing merges to `main`
+until interop allows it.
+
+#### Stack (bottom → top)
+
+```
+main                          ← frozen; no commits for Cut A / semi-easy
+  ↑ merge main in (one-time + as needed)
+transport-refactor-semi-easy-bites   ← Phases 0–1 (Bites C/D/E/F/G/H)
+  ↑ branch
+peer-discovery-engine-extraction     ← Cut A (this document)
+```
+
+**Step 1 — Integrate `main` into semi-easy (both repos):**
+
+```text
+git checkout transport-refactor-semi-easy-bites
+git merge main          # NOT merge semi-easy into main
+# resolve conflicts (tdns-mp: v2/enums.go, v2/transport_integ_test.go, …)
+# tdns-mp: bump go.mod transport pin to semi-easy transport commit
+```
+
+This pulls `auditor-discovery-fix` / `HsyncReconcile` and any other
+`main`-only fixes onto the semi-easy stack without touching `main`.
+
+**Step 2 — Create Cut A branch from updated semi-easy:**
+
+```text
+git checkout -b peer-discovery-engine-extraction
+```
+
+**Step 3 — All implementation** on `peer-discovery-engine-extraction`
+(and short-lived topic branches merged into it). Repeat Step 1 on
+semi-easy only when `main` gains fixes that must be captured before
+interop ends.
+
+**Later (post-interop):** merge semi-easy (+ Cut A) to `main` in one
+or two PRs — out of scope until testing allows.
+
+**Phases 0–1:** satisfied on `transport-refactor-semi-easy-bites` after
+Step 1 brings in current `main`.
+
+**Tactical fix on `main`:** `HsyncReconcile` (additive-only today) is
+included via Step 1 but **must be extended** per §3.7 D-5 in Phase P.
+
+---
+
+### Phase P: Prep — merge `main` → semi-easy, symmetric reconcile
+
+**Goal:** branch stack ready; fix additive-only `ReconcileHsync` before
+or as the first Cut A code.
+
+**Tasks:**
+
+1. Merge `main` into `transport-refactor-semi-easy-bites` (`tdns-mp`,
+   `tdns-transport`).
+2. Create `peer-discovery-engine-extraction` from updated semi-easy.
+3. Extend `reconcileZone` (and later `ApplyHsyncDiff`) to remove peers
+   present in the registry for a zone but absent from the current HSYNC3
+   RRset — mirror `UpdateAgents` `HsyncRemoves` handling
+   (`RemoveRemoteAgent`, `RecomputeSharedZonesAndSyncState`).
+
+**Acceptance:** integration test — HSYNC3 count drops; removed identity
+disappears from auditor and agent `peer list` without restart.
+
+**Status:** complete on `peer-discovery-engine-extraction` (2026-05-20)
+
+Delivered:
+
+- `main` merged into `transport-refactor-semi-easy-bites` (`f9e6be0`, tdns-mp).
+- Branch `peer-discovery-engine-extraction` created from that stack.
+- Symmetric `reconcileZone` (+ tests); `tdns-transport` semi-easy already
+  contained `main`.
+- Local `go.mod` replaces for `tdns` + `tdns-transport` (in-tree builds).
+
+---
+
+### 5.1 Progress and work units
+
+Cut A is split along **phase boundaries** (natural PR / review units).
+This document is the **living record** — update the status row when a
+phase completes. No Linear.
+
+| Phase | Description | Status | Branch / notes |
+|-------|-------------|--------|----------------|
+| P | Prep: merge `main`→semi-easy, symmetric reconcile | **done** | `peer-discovery-engine-extraction` |
+| 0 | Bite F (`DiscoverPeer` / `DiscoveryDriver`) | done on semi-easy | semi-easy stack |
+| 1 | Bite D (`OnDiscoveryFailed`) | done on semi-easy | semi-easy stack |
+| 2 | Build `tdns-mp/v2/hsync/` (unwired) | not started | feature branch |
+| 3 | Wire `AuditorEngine` | not started | feature branch |
+| 4 | Build `HsyncDataEngine` (unwired) | not started | feature branch |
+| 5 | Swap agent, delete legacy engine | not started | feature branch |
+
+---
+
+Six phases (0–1 on semi-easy stack). Ordering keeps
+auditor validation before agent migration. Each phase ends in a
+coherent, deployable state.
+
+Phase 3 is **no longer a correctness fix** (§10a); it is the first
+production exercise of the shared engine. Phase 5 remains the only
+agent behaviour change.
+
+### Phase 0: Finish Bite F — DONE on `transport-refactor-semi-easy-bites`
 
 **Goal:** `tm.DiscoverPeer(ctx, identity)` works for an identity
 the caller has no prior knowledge of, returning a fully populated
@@ -498,9 +736,10 @@ will use to drive discovery.
   not go through `MarkAgentAsNeeded`; confirm `OnPeerDiscovered`
   fires.
 
-**Cost:** half a day.
+**Status:** Implemented — `MPTransportBridge.RunDiscovery` delegates to
+`DiscoverAndRegisterAgent`; `tm.DiscoveryDriver = tm` at bridge init.
 
-### Phase 1: Finish Bite D
+### Phase 1: Finish Bite D — DONE on `transport-refactor-semi-easy-bites`
 
 **Goal:** every discovery failure fires `OnDiscoveryFailed(peer,
 err)` exactly once per failed round.
@@ -532,7 +771,8 @@ is constructed.
 fires the callback once per round; peer remains at `NEEDED`; next
 periodic retry triggers another round and another callback.
 
-**Cost:** 1-2 hours.
+**Status:** Implemented — `fireOnDiscoveryFailed` in `attemptDiscovery`;
+`OnDiscoveryFailed` registered on `TransportManager` at bridge init.
 
 ### Phase 2: Build the new shared HsyncEngine in tdns-mp/v2/hsync/
 
@@ -635,10 +875,10 @@ the existing comments and field names where reasonable. Where
 the new shape demands changes (interface-typed dependencies
 instead of global package access), accept the divergence.
 
-**The reconciliation safety-net (the cpt bug fix)** is built in
-from the start: `Engine.Run` runs a `ReconcileZone` pass every
-`ReconcileInterval` (default `4 × RetryInterval = 60s`) for every
-known zone. Idempotent.
+**Reconciliation safety-net (cpt bug fix):** `Engine.Run` runs
+`ReconcileZone` every `ReconcileInterval` (default 60s) for every MP
+zone. **Symmetric** per §3.7 D-5: adds missing HSYNC3 identities and
+removes stale ones. Idempotent.
 
 **Acceptance:**
 
@@ -659,13 +899,12 @@ caller).
 **Goal:** auditor stops running its hand-rolled handlers and
 starts using `hsync.Engine` directly. Agent path unchanged.
 
-**This is the smallest step that fully resolves the production
-failure documented in §1.** If the project pauses here, auditors
-discover HSYNC3 peers proactively, send HELLO/BEAT, participate
-in gossip, and the safety contract holds. The agent's missed-
-delta failure (F4 in the tactical-fix doc) is also covered if the
-agent has already absorbed the `HsyncReconcile` change from
-`auditor-discovery-fix` — which it has.
+**Production correctness is already on `main` via `HsyncReconcile`
+(§10a).** Phase 3 validates the shared engine in production and
+replaces the duplicated auditor goroutines with `AuditorEngine` +
+`hsync.Engine`. If the project pauses after Phase 3, the codebase
+has one protocol implementation exercised on the read-only role
+before the agent migration (Phase 5).
 
 **New file:** `tdns-mp/v2/auditor_engine.go`
 
@@ -808,6 +1047,15 @@ rolling deployment time.
 
 ## 6. File-by-File Change Summary
 
+### Phase P (prep)
+
+- `tdns-mp` / `tdns-transport` — merge `main` into
+  `transport-refactor-semi-easy-bites` (no changes on `main`).
+- `tdns-mp/v2/hsync_reconcile.go` — symmetric `reconcileZone`
+  (removes + adds); update package comment (no longer additive-only).
+- `tdns-mp/v2/go.mod` — transport pseudo-version bump if needed after
+  merge.
+
 ### Phase 0 (Bite F)
 
 - `tdns-transport/v2/transport/manager.go` — modified:
@@ -901,6 +1149,82 @@ handlers, CLI commands) either use the façade or migrate to
 many call sites exist; if a small number, migrate them; if many,
 keep a façade.
 
+## 6a. `AgentRegistry` call-site survey (2026-05-20)
+
+Survey of `tdns-mp/v2` on `main`. Goal: plan the §3.7 D-3 façade
+without a Phase 5 surprise.
+
+### Summary counts
+
+| Category | Files | Action for Cut A |
+|----------|-------|------------------|
+| Protocol methods on `*AgentRegistry` | 9 files, ~45 methods | Move implementation to `hsync/`; leave delegating wrappers until Phase 5 |
+| `conf.InternalMp.AgentRegistry` field access | 14 files, ~35 sites | Keep `*AgentRegistry`; no CLI/API renames |
+| `MPTransportBridge.agentRegistry` | `hsync_transport.go` (~25 refs) | Keep; bridge needs registry for routing — inject `*AgentRegistry` embedding `hsync.Registry` |
+| Tests / harness | `transport_harness_test.go` | Construct `AgentRegistry` with embedded `hsync.Registry` |
+
+### Protocol layer — move to `hsync/` (Phase 2 copy, Phase 5 delete wrappers)
+
+| File | Methods / symbols |
+|------|-------------------|
+| `agent_utils.go` | `MarkAgentAsNeeded`, `attemptDiscovery`, `DiscoverAgentAsync`, `UpdateAgents`, `GetAgentsForZone`, zone association helpers |
+| `hsyncengine.go` | `DiscoveryRetrierNG`, `retryPendingDiscoveries`, `SyncRequestHandler` (HSYNC-UPDATE path only) |
+| `hsync_hello.go` | `HelloRetrierNG`, `SingleHello`, `sendHelloToAgent`, `EvaluateHello`, `HelloHandler`, … |
+| `hsync_beat.go` | `SendHeartbeats`, `HeartbeatHandler` |
+| `hsync_infra_beat.go` | `StartInfraBeatLoop` |
+| `hsync_reconcile.go` | `ReconcileHsync`, `reconcileZone` |
+| `agent_discovery.go` | `RegisterDiscoveredAgent` stays on bridge; discovery **orchestration** moves to `hsync/discovery.go` |
+
+### Shared infrastructure — stay on `AgentRegistry` at `tdnsmp` level
+
+| File | Why |
+|------|-----|
+| `gossip.go`, `gossip_types.go` | Used by transport beat path and API; references `ProviderGroupManager` |
+| `provider_groups.go` | Zone-data-derived; not pure protocol |
+| `parentsync_leader.go` | Election origination (agent); `GetParentSyncStatus` takes `*AgentRegistry` |
+| `combiner_peer.go`, `signer_peer.go` | Virtual peer setup at agent start |
+
+### Wiring — `start_*.go`, `main_init.go`
+
+| Site | Role |
+|------|------|
+| `main_init.go` | `NewAgentRegistry()`, wire `TransportManager` / `MPTransport` |
+| `start_agent.go` | Combiner/signer init; spawn engines (becomes `HsyncDataEngine.Run` in Phase 5) |
+| `start_auditor.go` | Spawn engines (becomes `AuditorEngine.Run` in Phase 3) |
+| `hsyncengine.go` | `HsyncEngine` loop → absorbed by `HsyncDataEngine` + `hsync.Engine` |
+
+### API / CLI — keep `*AgentRegistry` type through Cut A
+
+| File | Usage |
+|------|-------|
+| `apihandler_peer.go` | `/peer` ping, reset — `APIpeer(..., ar *AgentRegistry)` |
+| `apihandler_gossip.go` | `APIgossip(ar, lem)` |
+| `apihandler_agent.go` | Discovery triggers, `EvaluateHello`, agent listing |
+| `apihandler_agent_distrib.go` | Zone agent lists, registry iteration |
+| `apihandler_agent_hsync.go` | `GetZoneAgentData` |
+| `apihandler_*_routes.go` | Pass registry into handlers (agent, auditor, combiner, signer) |
+| `apirouter_sync.go` | TLS client cert lookup in `AgentRegistry.S` |
+| `auditor_web.go`, `auditor_dto.go`, `apihandler_auditor.go` | `SnapshotGossip(ar)` |
+| `cli/agent_debug_cmds.go` | Dump registry |
+| `cli/hsync_cmds.go` | User-facing "AgentRegistry" messages |
+| `cli/peer_cmds.go` | Documents agent-only reset |
+
+### Other
+
+| File | Usage |
+|------|-------|
+| `hsync_utils.go` | `RequestAndWaitForConfig/Audit` — agent RFI; stay top-level |
+| `auditor_msg_handler.go` | Deleted Phase 3 when `hsync.Engine` owns MsgQs loop |
+| `config.go` | `InternalMpConf.AgentRegistry` field — unchanged |
+
+### Conclusion (feeds §3.7 D-3)
+
+**Do not delete `AgentRegistry` in Phase 5.** Embed `*hsync.Registry`,
+move protocol bodies into `hsync/`, delete delegating wrappers and
+duplicate goroutine spawns. API and CLI keep importing `tdnsmp`
+only — no `hsync` in HTTP handler signatures unless we choose to
+later.
+
 ## 7. Testing Strategy
 
 ### Unit
@@ -916,8 +1240,10 @@ keep a façade.
 - HSYNC3 count transition 3 → 4 → 5: each peer registers via the
   delta path. The cpt regression: start count=4, NOTIFY bumps to
   count=5, confirm new peer enters registry without restart.
-- Reconciliation: programmatically remove a peer mid-test;
-  confirm `ReconcileZone` re-inserts it.
+- Reconciliation adds: remove peer from registry mid-test; confirm
+  `ReconcileZone` re-inserts it.
+- Reconciliation removes: drop identity from HSYNC3; confirm
+  `ReconcileZone` removes it from agent and auditor registry.
 - Auditor end-to-end: auditor + four agents in a test harness;
   auditor's `peer list` matches HSYNC3 on first reconcile,
   without depending on agents initiating BEATs first.
@@ -1026,42 +1352,28 @@ production.)
   non-shared responsibilities are genuinely different;
   `HsyncEngine` is the right shared cut.
 
-## 10. Open Items
+## 10. Open items
 
-1. **Per-peer goroutine bound.** `tm.DiscoverPeer` may block on
-   slow IMR. `hsync.Engine.Run`'s retry pass currently has no
-   bound on concurrent in-flight discoveries. Add a semaphore or
-   worker pool; size to taste (suggest `min(N_peers, 8)`).
-2. **Election message *receipt* on auditor side.** Auditors must
-   record election messages but never act on them. Confirm the
-   election-message wire type is identifiable as such by the
-   shared dispatcher so the auditor's
-   `OnElectionMessageReceived` handler reliably catches every
-   election-related message, including votes carried as part of
-   other message bodies (if any).
-3. **`AgentRegistry` façade vs. delete.** Phase 5 decides whether
-   top-level `AgentRegistry` becomes a thin façade over
-   `hsync.Registry` or is deleted entirely. The decision depends
-   on a call-site survey done during Phase 5 implementation.
-   Surveying the call sites earlier (during Phase 2 or 3) would
-   make Phase 5 cheaper to plan.
+| # | Item | Status |
+|---|------|--------|
+| 1 | Per-peer discovery concurrency bound | **Open** — add semaphore in `hsync/discovery.go` (`min(N_peers, 8)`); implement in Phase 2 |
+| 2 | Election message receipt on auditor | **Open** — verify during Phase 3 that `MsgHandler` election subtypes reach auditor `recordToAuditLog`; add dispatcher test |
+| 3 | `AgentRegistry` façade vs delete | **Resolved** — embed `*hsync.Registry`; see §6a, §3.7 D-3 |
 
-## 10a. Already shipped: tactical fix on auditor-discovery-fix branch
+## 10a. Tactical fix (shipped on `main`)
 
-The immediate production correctness gap was closed by the
-`auditor-discovery-fix` branch (commits `84841f7`, `e98bcb4`),
-which adds a periodic `HsyncReconcile` pass that walks every MP
-zone's HSYNC3 RRset and calls `MarkAgentAsNeeded` for missing
-peers. This runs on both agents and auditors. It does not
-extract the shared engine — it works inside the current
-implementation framework — but it removes the production
-urgency of Cut A.
+Merged via PR #24 (`auditor-discovery-fix`). `HsyncReconcile`
+(`hsync_reconcile.go`) walks every MP zone's HSYNC3 RRset and calls
+`MarkAgentAsNeeded` for missing peers on **both** agents and auditors.
+Wired in `start_agent.go` and `start_auditor.go`.
 
-Cut A still has value (drift prevention, cleaner separation,
-on-ramp to transport redesign Phase 6 part 2), but it is no
-longer time-pressured. This affects sequencing: Cut A can be
-scheduled around other priorities rather than treated as a
-must-fix-now correctness item.
+This does not extract the shared engine — it duplicates protocol
+machinery across roles — but it closed the production gap described
+in §1.1.
+
+**Cut A** proceeds on the feature branch stack (§5.0) without merging
+to `main` during interop. Symmetric HSYNC3 reconcile (§3.7 D-5) is
+required on that branch even before the `hsync/` package exists (Phase P).
 
 ## 11. Future Direction: HsyncDataEngine Dissolves
 
