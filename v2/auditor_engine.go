@@ -110,7 +110,7 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 		"zone", zone, "msgType", msg.MessageType,
 		"added", added, "removed", removed)
 
-	if e.stateManager != nil && zone != "" {
+	if e.stateManager != nil && zone != "" && IsProviderIdentity(zone, senderID) {
 		zs := e.stateManager.GetOrCreateZone(zone)
 		zs.UpdateProviderSync(senderID, contributions)
 		detectMsgObservations(zs, senderID, msg, rrtypes)
@@ -274,9 +274,13 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 					ar.HeartbeatHandler(report)
 				}
 				if sm != nil && report.Zone != "" {
-					label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, string(report.Identity))
-					zs := sm.GetOrCreateZone(string(report.Zone))
-					zs.UpdateProviderBeat(string(report.Identity), label, gossipState, isSigner)
+					zone := string(report.Zone)
+					identity := string(report.Identity)
+					if IsProviderIdentity(zone, identity) {
+						label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, identity)
+						zs := sm.GetOrCreateZone(zone)
+						zs.UpdateProviderBeat(identity, label, gossipState, isSigner)
+					}
 				}
 				var msg interface{}
 				if abp, ok := report.Msg.(*AgentBeatPost); ok {

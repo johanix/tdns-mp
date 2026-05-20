@@ -90,3 +90,16 @@ func (mpzd *MPZoneData) IsAuditorIdentity(identity string) bool {
 	}
 	return false
 }
+
+// IsProviderIdentity reports whether identity is an HSYNC3 member that
+// serves the zone (listed in HSYNC3 but not under HSYNCPARAM auditors=).
+func IsProviderIdentity(zone, identity string) bool {
+	if zone == "" || identity == "" {
+		return false
+	}
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return true
+	}
+	return !mpzd.IsAuditorIdentity(identity)
+}

@@ -53,18 +53,17 @@ func (zs *AuditZoneState) Snapshot() AuditZoneSummary {
 	defer zs.mu.RUnlock()
 	now := time.Now()
 	summary := AuditZoneSummary{
-		Zone:          zs.Zone,
-		ProviderCount: len(zs.Providers),
-		LastRefresh:   zs.LastRefresh,
-		ZoneSerial:    zs.ZoneSerial,
+		Zone:        zs.Zone,
+		LastRefresh: zs.LastRefresh,
+		ZoneSerial:  zs.ZoneSerial,
 	}
-	if len(zs.Providers) == 0 {
-		return summary
-	}
-	summary.Providers = make([]AuditProviderSummary, 0, len(zs.Providers))
 	for _, ps := range zs.Providers {
+		if !IsProviderIdentity(zs.Zone, ps.Identity) {
+			continue
+		}
 		summary.Providers = append(summary.Providers, providerSummary(ps, now))
 	}
+	summary.ProviderCount = len(summary.Providers)
 	return summary
 }
 
@@ -206,6 +205,9 @@ func (m *AuditStateManager) SnapshotAllProviders() []AuditProviderSummary {
 	for _, zs := range zones {
 		zs.mu.RLock()
 		for _, ps := range zs.Providers {
+			if !IsProviderIdentity(zs.Zone, ps.Identity) {
+				continue
+			}
 			cur, exists := merged[ps.Identity]
 			s := providerSummary(ps, now)
 			if !exists {
