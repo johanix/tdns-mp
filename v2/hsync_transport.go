@@ -766,6 +766,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// and HELLOs happen once per handshake while beats happen
 	// continuously.
 	report := &AgentMsgReport{
+		Transport:      "DNS",
 		MessageType:    AgentMsgBeat,
 		Identity:       AgentId(senderID),
 		BeatInterval:   beatInterval,

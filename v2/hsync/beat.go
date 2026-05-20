@@ -29,27 +29,6 @@ func (e *Engine) heartbeatHandler(report *InboundReport) {
 	e.mergeGossipFromBeat(report)
 }
 
-func (e *Engine) mergeGossipFromBeat(report *InboundReport) {
-	if e == nil || e.deps.Gossip == nil || report == nil {
-		return
-	}
-	abp, ok := report.Msg.(*BeatPost)
-	if !ok || len(abp.Gossip) == 0 {
-		return
-	}
-	for i := range abp.Gossip {
-		e.deps.Gossip.MergeGossip(&abp.Gossip[i])
-	}
-	if e.deps.ProviderGroups != nil {
-		for i := range abp.Gossip {
-			pg := e.deps.ProviderGroups.GetGroup(abp.Gossip[i].GroupHash)
-			if pg != nil {
-				e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.Members)
-			}
-		}
-	}
-}
-
 func (e *Engine) sendHeartbeats() {
 	if e.deps.Host.BeforeHeartbeats != nil {
 		e.deps.Host.BeforeHeartbeats()
