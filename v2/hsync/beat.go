@@ -65,12 +65,7 @@ func (e *Engine) sendHeartbeats() {
 		if peer.IsInfraPeer {
 			continue
 		}
-		peer.Mu.RLock()
-		apiState := peer.ApiDetails.State
-		dnsState := peer.DnsDetails.State
-		peer.Mu.RUnlock()
-
-		if !transportReady(apiState) && !transportReady(dnsState) {
+		if !peerAnyTransportReady(peer) {
 			continue
 		}
 		go func(p *Peer) {
@@ -81,14 +76,6 @@ func (e *Engine) sendHeartbeats() {
 			e.runDeferredTasks(p)
 		}(peer)
 	}
-}
-
-func transportReady(s PeerState) bool {
-	switch s {
-	case PeerStateIntroduced, PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
-		return true
-	}
-	return false
 }
 
 func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
@@ -140,50 +127,53 @@ func (e *Engine) checkPeerState(peer *Peer, ourBeatInterval uint32) {
 	peer.Mu.Lock()
 	defer peer.Mu.Unlock()
 
-	latestRBeat := peer.ApiDetails.LatestRBeat
-	if peer.DnsDetails.LatestRBeat.After(latestRBeat) {
-		latestRBeat = peer.DnsDetails.LatestRBeat
-	}
-	latestSBeat := peer.ApiDetails.LatestSBeat
-	if peer.DnsDetails.LatestSBeat.After(latestSBeat) {
-		latestSBeat = peer.DnsDetails.LatestSBeat
+	localInterval := time.Duration(ourBeatInterval) * time.Second
+	if localInterval == 0 {
+		localInterval = 30 * time.Second
 	}
 
-	remoteBeatInterval := time.Duration(peer.ApiDetails.BeatInterval) * time.Second
-	if dnsInterval := time.Duration(peer.DnsDetails.BeatInterval) * time.Second; dnsInterval > remoteBeatInterval {
-		remoteBeatInterval = dnsInterval
-	}
-	if remoteBeatInterval == 0 {
-		remoteBeatInterval = 30 * time.Second
-	}
-	localBeatInterval := time.Duration(ourBeatInterval) * time.Second
-	if localBeatInterval == 0 {
-		localBeatInterval = 30 * time.Second
+	anyActive := false
+	anyHealthy := false
+
+	evaluate := func(td *PeerDetails) {
+		if td == nil || !transportParticipating(td.State) {
+			return
+		}
+		switch td.State {
+		case PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
+			anyActive = true
+		default:
+			return
+		}
+		remoteInterval := time.Duration(td.BeatInterval) * time.Second
+		if remoteInterval == 0 {
+			remoteInterval = 30 * time.Second
+		}
+		sinceR := time.Since(td.LatestRBeat)
+		sinceS := time.Since(td.LatestSBeat)
+		if sinceR > 10*remoteInterval || sinceS > 10*localInterval {
+			td.State = PeerStateInterrupted
+		} else if sinceR > 2*remoteInterval || sinceS > 2*localInterval {
+			td.State = PeerStateDegraded
+		} else {
+			anyHealthy = true
+		}
 	}
 
-	apiActive, dnsActive := false, false
-	switch peer.ApiDetails.State {
-	case PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
-		apiActive = true
+	if peer.DnsMethod {
+		evaluate(peer.DnsDetails)
 	}
-	switch peer.DnsDetails.State {
-	case PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
-		dnsActive = true
+	if peer.ApiMethod {
+		evaluate(peer.ApiDetails)
 	}
-	if !apiActive && !dnsActive {
+
+	if !anyActive {
 		return
 	}
-
-	timeSinceLastReceivedBeat := time.Since(latestRBeat)
-	timeSinceLastSentBeat := time.Since(latestSBeat)
-	if timeSinceLastReceivedBeat > 10*remoteBeatInterval || timeSinceLastSentBeat > 10*localBeatInterval {
-		peer.ApiDetails.State = PeerStateInterrupted
-		peer.DnsDetails.State = PeerStateInterrupted
-	} else if timeSinceLastReceivedBeat > 2*remoteBeatInterval || timeSinceLastSentBeat > 2*localBeatInterval {
-		peer.ApiDetails.State = PeerStateDegraded
-		peer.DnsDetails.State = PeerStateDegraded
-	} else if peer.State == PeerStateNeeded || peer.State == PeerStateKnown || peer.State == PeerStateIntroduced {
-		peer.State = PeerStateOperational
+	if anyHealthy {
+		if peer.State == PeerStateNeeded || peer.State == PeerStateKnown || peer.State == PeerStateIntroduced {
+			peer.State = PeerStateOperational
+		}
 	}
 }
 

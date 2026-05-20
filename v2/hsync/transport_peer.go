@@ -43,6 +43,32 @@ func beatOutboundSequence(peer *Peer) uint64 {
 	return seq
 }
 
+// transportParticipating is true once discovery or protocol has advanced past NEEDED.
+func transportParticipating(state PeerState) bool {
+	return state >= PeerStateKnown
+}
+
+func transportReady(state PeerState) bool {
+	switch state {
+	case PeerStateIntroduced, PeerStateOperational, PeerStateLegacy,
+		PeerStateDegraded, PeerStateInterrupted:
+		return true
+	}
+	return false
+}
+
+func peerAnyTransportReady(peer *Peer) bool {
+	ready := false
+	peer.Mu.RLock()
+	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
+		if transportReady(td.State) {
+			ready = true
+		}
+	})
+	peer.Mu.RUnlock()
+	return ready
+}
+
 func applyInboundBeat(peer *Peer, transport string, beatInterval uint32, now time.Time) {
 	td := peerDetailsFor(peer, transport)
 	if td == nil {
