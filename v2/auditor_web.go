@@ -412,9 +412,20 @@ func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 // stay open (static, /login, /logout, /status, root redirect) are
 // always registered raw. Callers choose wrap = s.requireAuth for the
 // authenticated mux, or an identity passthrough for no-auth mode.
-func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+func auditorStaticHandler() http.Handler {
 	staticSub, _ := fs.Sub(webStaticFS, "auditor_web_static")
-	mux.Handle("/web/static/", http.StripPrefix("/web/static/", http.FileServer(http.FS(staticSub))))
+	inner := http.FileServer(http.FS(staticSub))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CSS is embedded in the binary; avoid stale cached tiny-font rules.
+		if strings.HasSuffix(r.URL.Path, ".css") {
+			setNoStore(w)
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+	mux.Handle("/web/static/", http.StripPrefix("/web/static/", auditorStaticHandler()))
 
 	mux.HandleFunc("/web/login", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
