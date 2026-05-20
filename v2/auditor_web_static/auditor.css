@@ -1,4 +1,98 @@
-/* TDNS Auditor — custom styles */
+/* TDNS Auditor — layout and readability overrides */
+
+:root {
+  --audit-page-width: 90rem;
+  --audit-font-size: 17px;
+}
+
+html {
+  font-size: var(--audit-font-size);
+}
+
+body {
+  margin: 0;
+}
+
+/* Header: single-row nav, brand beside links (not space-between) */
+.audit-header {
+  border-bottom: 1px solid var(--pico-muted-border-color, #ddd);
+  background: var(--pico-card-background-color, #fff);
+}
+
+/* Override Pico's two-column nav (space-between) */
+nav.audit-nav {
+  display: block;
+  max-width: var(--audit-page-width);
+  margin: 0 auto;
+  padding: 0.75rem 1.25rem;
+}
+
+.audit-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 1.25rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.audit-nav li {
+  margin: 0;
+  padding: 0;
+}
+
+.audit-nav a {
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.audit-brand {
+  margin-right: 0.5rem;
+}
+
+.audit-brand strong {
+  font-size: 1.15rem;
+}
+
+.audit-user {
+  margin-left: auto;
+  color: var(--pico-muted-color, #666);
+  font-size: 0.95rem;
+}
+
+/* Zone links bar */
+.audit-zone-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  max-width: var(--audit-page-width);
+  margin: 0 auto;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--pico-muted-border-color, #ddd);
+  background: var(--pico-card-background-color, #f8f8f8);
+}
+
+.audit-zone-bar-label {
+  font-weight: 600;
+  margin-right: 0.25rem;
+}
+
+/* Main content column */
+.audit-main {
+  max-width: var(--audit-page-width);
+  margin: 0 auto;
+  padding: 1.25rem 1.25rem 2rem;
+}
+
+.audit-footer {
+  max-width: var(--audit-page-width);
+  margin: 0 auto;
+  padding: 0.5rem 1.25rem 1rem;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+}
 
 /* Status dot for live zone health indicator */
 .audit-dot {
@@ -12,50 +106,22 @@
 .audit-dot-error   { background: #f44336; }
 .audit-dot-unknown { background: #9e9e9e; }
 
-/* Error article */
 .audit-error {
   border-left: 4px solid #f44336;
   padding: 0.5rem 1rem;
   background: #fdecea;
 }
 
-/* Live indicator wrapper */
 .audit-live {
   display: inline-flex;
   align-items: center;
 }
 
-/* Make provider rows clearly clickable */
 tbody tr[hx-get] {
   cursor: pointer;
 }
 tbody tr[hx-get]:hover {
   background: var(--pico-table-row-stripped-background-color, #f5f5f5);
-}
-
-/* Keep top nav on one readable row */
-header nav > ul {
-  flex-wrap: wrap;
-  gap: 0.25rem 1rem;
-}
-header nav a {
-  white-space: nowrap;
-}
-
-/* Zone links bar (below header, not inside cramped nav) */
-.audit-zone-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 1.25rem;
-  padding: 0.6rem 1rem;
-  border-bottom: 1px solid var(--pico-muted-border-color, #ddd);
-  background: var(--pico-card-background-color, #f8f8f8);
-  font-size: 1rem;
-}
-.audit-zone-bar-label {
-  font-weight: 600;
-  margin-right: 0.25rem;
 }
 
 /* Gossip matrix horizontal scroll */
@@ -67,15 +133,13 @@ header nav a {
 table.audit-gossip-matrix {
   width: max-content;
   min-width: 100%;
+  font-size: 0.95rem;
 }
 table.audit-gossip-matrix th,
 table.audit-gossip-matrix td {
   white-space: nowrap;
 }
 
-/* Compact footer */
-footer {
-  padding: 0.5rem 1rem;
-  font-size: 0.75rem;
-  color: var(--pico-muted-color);
+main table[role="grid"] {
+  font-size: 0.95rem;
 }

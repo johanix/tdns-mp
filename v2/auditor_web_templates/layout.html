@@ -9,35 +9,33 @@
   <script src="/web/static/htmx.min.js"></script>
 </head>
 <body>
-  <header class="container-fluid">
-    <nav>
+  <header class="audit-header">
+    <nav class="audit-nav">
       <ul>
-        <li><strong><a href="/web/">TDNS Auditor</a></strong></li>
-      </ul>
-      <ul>
+        <li class="audit-brand"><strong><a href="/web/">TDNS Auditor</a></strong></li>
         <li><a href="/web/">Dashboard</a></li>
         <li><a href="/web/providers">Providers</a></li>
         <li><a href="/web/gossip">Gossip</a></li>
         <li><a href="/web/eventlog">Event Log</a></li>
         <li><a href="/web/observations">Observations</a></li>
-        {{if .User}}<li>{{.User}} <a href="/web/logout">logout</a></li>{{end}}
+        {{if .User}}<li class="audit-user">{{.User}} <a href="/web/logout">logout</a></li>{{end}}
       </ul>
     </nav>
   </header>
   {{if .Zones}}
-  <nav class="audit-zone-bar container-fluid">
+  <nav class="audit-zone-bar">
     <span class="audit-zone-bar-label">Zones:</span>
     {{range .Zones}}
     <a href="/web/zone?zone={{zoneQuery .Zone}}">{{.Zone}}</a>
     {{end}}
   </nav>
   {{end}}
-  <main class="container">
+  <main class="audit-main">
 {{end}}
 
 {{define "layout-foot"}}
   </main>
-  <footer class="container-fluid">
+  <footer class="audit-footer">
     <small>TDNS Auditor &mdash; {{.Now.Format "2006-01-02 15:04:05 UTC"}}</small>
   </footer>
 </body>
