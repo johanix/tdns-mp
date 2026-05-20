@@ -55,7 +55,7 @@ type TransportBridge interface {
 	DiscoverPeer(ctx context.Context, identity string) (*transport.Peer, error)
 	RegisterDiscovered(peer *Peer, result *DiscoveryResult) error
 	SendHello(ctx context.Context, peer *Peer, sharedZones []string) error
-	SendBeat(ctx context.Context, peer *Peer, sequence uint64) (ack bool, err error)
+	SendBeat(ctx context.Context, peer *Peer, sequence uint64) (ack bool, usedTransport string, err error)
 	MechanismSupported(name string) bool
 	FireDiscoveryFailed(peerID PeerID, err error)
 	SyncPeerZones(peer *Peer)

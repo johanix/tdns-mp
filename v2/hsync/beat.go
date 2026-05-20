@@ -95,26 +95,41 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	if e.deps.Transport == nil {
 		return
 	}
-	var sequence uint64
 	peer.Mu.RLock()
-	if peer.ApiDetails.SentBeats > 0 {
-		sequence = uint64(peer.ApiDetails.SentBeats)
-	}
+	seq := beatOutboundSequence(peer)
 	peer.Mu.RUnlock()
 
-	ack, err := e.deps.Transport.SendBeat(ctx, peer, sequence)
+	ack, used, err := e.deps.Transport.SendBeat(ctx, peer, seq)
 	peer.Mu.Lock()
-	switch {
-	case err != nil:
-		if peer.ApiDetails.LatestError == "" {
-			peer.ApiDetails.LatestError = err.Error()
-			peer.ApiDetails.LatestErrorTime = time.Now()
+	if used != "" {
+		td := peerDetailsFor(peer, used)
+		if td != nil {
+			switch {
+			case err != nil:
+				td.LatestError = err.Error()
+				td.LatestErrorTime = time.Now()
+			case !ack:
+				if td.LatestError == "" {
+					td.LatestError = "beat not acknowledged"
+					td.LatestErrorTime = time.Now()
+				}
+			default:
+				td.LatestError = ""
+				if td.State == PeerStateNeeded || td.State == PeerStateKnown || td.State == PeerStateIntroduced {
+					td.State = PeerStateOperational
+				}
+				if peer.State == PeerStateNeeded || peer.State == PeerStateKnown || peer.State == PeerStateIntroduced {
+					peer.State = PeerStateOperational
+				}
+			}
 		}
-	case !ack:
-	default:
-		if peer.State == PeerStateNeeded || peer.State == PeerStateKnown || peer.State == PeerStateIntroduced {
-			peer.State = PeerStateOperational
-		}
+	} else if err != nil {
+		forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
+			if transportReady(td.State) {
+				td.LatestError = err.Error()
+				td.LatestErrorTime = time.Now()
+			}
+		})
 	}
 	peer.Mu.Unlock()
 	e.registry.S.Set(peer.ID, peer)

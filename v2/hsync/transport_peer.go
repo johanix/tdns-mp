@@ -24,6 +24,25 @@ func peerDetailsFor(peer *Peer, transport string) *PeerDetails {
 	return nil
 }
 
+func forEachEnabledTransport(peer *Peer, fn func(name string, td *PeerDetails)) {
+	if peer.DnsMethod && peer.DnsDetails != nil {
+		fn(TransportDNS, peer.DnsDetails)
+	}
+	if peer.ApiMethod && peer.ApiDetails != nil {
+		fn(TransportAPI, peer.ApiDetails)
+	}
+}
+
+func beatOutboundSequence(peer *Peer) uint64 {
+	var seq uint64
+	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
+		if uint64(td.SentBeats) > seq {
+			seq = uint64(td.SentBeats)
+		}
+	})
+	return seq
+}
+
 func applyInboundBeat(peer *Peer, transport string, beatInterval uint32, now time.Time) {
 	td := peerDetailsFor(peer, transport)
 	if td == nil {

@@ -26,11 +26,20 @@ func (m *mockTransport) RegisterDiscovered(peer *Peer, result *DiscoveryResult) 
 func (m *mockTransport) SendHello(ctx context.Context, peer *Peer, sharedZones []string) error {
 	return nil
 }
-func (m *mockTransport) SendBeat(ctx context.Context, peer *Peer, sequence uint64) (bool, error) {
+func (m *mockTransport) SendBeat(ctx context.Context, peer *Peer, sequence uint64) (bool, string, error) {
 	peer.Mu.Lock()
-	peer.ApiDetails.State = PeerStateOperational
+	if peer.DnsMethod && peer.DnsDetails != nil {
+		peer.DnsDetails.State = PeerStateOperational
+		peer.DnsDetails.SentBeats++
+		return true, TransportDNS, nil
+	}
+	if peer.ApiMethod && peer.ApiDetails != nil {
+		peer.ApiDetails.State = PeerStateOperational
+		peer.ApiDetails.SentBeats++
+		return true, TransportAPI, nil
+	}
 	peer.Mu.Unlock()
-	return true, nil
+	return true, "", nil
 }
 func (m *mockTransport) MechanismSupported(name string) bool          { return true }
 func (m *mockTransport) FireDiscoveryFailed(peerID PeerID, err error) {}

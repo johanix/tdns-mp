@@ -50,17 +50,47 @@ func (b *mpHsyncBridge) SendHello(ctx context.Context, peer *hsync.Peer, sharedZ
 	return err
 }
 
-func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence uint64) (bool, error) {
+func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence uint64) (bool, string, error) {
 	if b.tm == nil {
-		return false, nil
+		return false, "", nil
 	}
 	agent := hsyncPeerToAgent(peer)
+	var beforeAPI, beforeDNS uint32
+	agent.Mu.RLock()
+	if agent.ApiDetails != nil {
+		beforeAPI = agent.ApiDetails.SentBeats
+	}
+	if agent.DnsDetails != nil {
+		beforeDNS = agent.DnsDetails.SentBeats
+	}
+	agent.Mu.RUnlock()
+
 	resp, err := b.tm.SendBeatWithFallback(ctx, agent, sequence)
 	syncAgentFromHsyncPeer(b.ar, peer, agent)
+	used := beatTransportUsed(agent, beforeAPI, beforeDNS)
 	if err != nil || resp == nil {
-		return false, err
+		return false, used, err
 	}
-	return resp.Ack, nil
+	return resp.Ack, used, nil
+}
+
+func beatTransportUsed(agent *Agent, beforeAPI, beforeDNS uint32) string {
+	agent.Mu.RLock()
+	defer agent.Mu.RUnlock()
+	apiSent := agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.SentBeats > beforeAPI
+	dnsSent := agent.DnsMethod && agent.DnsDetails != nil && agent.DnsDetails.SentBeats > beforeDNS
+	switch {
+	case dnsSent && !apiSent:
+		return hsync.TransportDNS
+	case apiSent && !dnsSent:
+		return hsync.TransportAPI
+	case dnsSent:
+		return hsync.TransportDNS
+	case apiSent:
+		return hsync.TransportAPI
+	default:
+		return ""
+	}
 }
 
 func (b *mpHsyncBridge) MechanismSupported(name string) bool {
