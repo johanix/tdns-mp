@@ -1,6 +1,10 @@
 {{define "zone_detail.html"}}{{template "layout-head" .}}
 <h2>Zone: {{.Zone}}</h2>
 
+{{range .ZoneConfigErrors}}
+<article class="audit-zone-config-error"><strong>Error:</strong> {{.}}</article>
+{{end}}
+
 {{if .Error}}
 <article class="audit-error">{{.Error}}</article>
 {{end}}

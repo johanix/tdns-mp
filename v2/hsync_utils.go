@@ -1410,6 +1410,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
 func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
+	if tdns.Globals.App.Type == AppTypeMPAuditor && mpzd.Options[tdns.OptMultiProvider] {
+		if tm != nil && tm.agentRegistry != nil && tm.agentRegistry.AuditState != nil {
+			tm.agentRegistry.AuditState.RefreshZoneHSYNCConfig(mpzd.ZoneName)
+		}
+	}
 	if mpzd.MP == nil || mpzd.MP.RefreshAnalysis == nil {
 		return
 	}

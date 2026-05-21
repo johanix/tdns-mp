@@ -75,14 +75,22 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
 	}
 
+	// Phase B: persistent event log + in-memory audit state.
+	stateManager := NewAuditStateManager()
+	stateManager.LocalIdentity = conf.Config.LocalIdentity()
+	conf.InternalMp.AuditStateManager = stateManager
+	ar := conf.InternalMp.AgentRegistry
+	if ar != nil {
+		ar.AuditState = stateManager
+	}
+
 	// Provider group recomputation hook. The agent role triggers
 	// RecomputeGroups via HsyncEngine's HSYNC-UPDATE flow; the auditor
 	// doesn't run HsyncEngine, so we wire a one-shot OnFirstLoad and
-	// rely on the AppTypeMPAuditor branch in MPZoneData.PostRefresh
-	// for re-runs on HSYNC change. RecomputeGroups is a pure function
-	// of zone data and does not require SharedZones / LocateAgent.
-	ar := conf.InternalMp.AgentRegistry
+	// PostRefresh for re-runs on every zone transfer. RecomputeGroups
+	// is a pure function of zone data and does not require SharedZones.
 	if ar != nil && ar.ProviderGroupManager != nil {
+		pgm := ar.ProviderGroupManager
 		for _, zoneName := range conf.Config.Internal.AllZones {
 			mpzd, exists := Zones.Get(zoneName)
 			if !exists {
@@ -91,19 +99,15 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 			if !mpzd.Options[tdns.OptMultiProvider] {
 				continue
 			}
-			pgm := ar.ProviderGroupManager
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				lgAuditor.Debug("OnFirstLoad: recomputing provider groups", "zone", zd.ZoneName)
 				pgm.RecomputeGroups()
+				stateManager.RefreshZoneHSYNCConfig(zd.ZoneName)
 			})
+			stateManager.RefreshZoneHSYNCConfig(zoneName)
 		}
-		ar.ProviderGroupManager.RecomputeGroups()
+		pgm.RecomputeGroups()
 	}
-
-	// Phase B: persistent event log + in-memory audit state.
-	stateManager := NewAuditStateManager()
-	stateManager.LocalIdentity = conf.Config.LocalIdentity()
-	conf.InternalMp.AuditStateManager = stateManager
 
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {

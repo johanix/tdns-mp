@@ -274,6 +274,7 @@ type AgentRegistry struct {
 	ProviderGroupManager  *ProviderGroupManager
 	GossipStateTable      *GossipStateTable
 	HsyncEngine           *hsync.Engine
+	AuditState            *AuditStateManager // auditor only: zone config checks
 }
 
 type AgentBeatPost struct {

@@ -51,19 +51,20 @@ type auditorWebServer struct {
 // WebData is the single struct passed to every full-page render.
 // Pages and fragments use only the subset they need.
 type WebData struct {
-	Title        string
-	User         string
-	Now          time.Time
-	Error        string
-	Zone         string
-	Zones        []AuditZoneSummary
-	ZoneDetail   *AuditZoneSummary
-	Providers    []AuditProviderSummary
-	Auditors     []AuditProviderSummary
-	Events       []AuditEvent
-	Observations []AuditObservation
-	Gossip       []GossipMatrixDTO
-	MPView       *ZoneMPViewDTO
+	Title            string
+	User             string
+	Now              time.Time
+	Error            string
+	Zone             string
+	Zones            []AuditZoneSummary
+	ZoneDetail       *AuditZoneSummary
+	Providers        []AuditProviderSummary
+	Auditors         []AuditProviderSummary
+	Events           []AuditEvent
+	Observations     []AuditObservation
+	Gossip           []GossipMatrixDTO
+	MPView           *ZoneMPViewDTO
+	ZoneConfigErrors []string
 }
 
 func formatAgo(t time.Time) string {
@@ -425,6 +426,11 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 	}
 	d.MPView = SnapshotZoneMPView(zone, sm, ar, local)
 	d.Gossip = SnapshotGossipForZone(ar, zone)
+	if sm != nil {
+		d.ZoneConfigErrors = sm.SnapshotZoneConfigErrors(zone)
+	} else {
+		d.ZoneConfigErrors = CheckZoneHSYNCConfig(zone)
+	}
 	if sm != nil {
 		if zs := sm.GetZone(zone); zs != nil {
 			snap := zs.Snapshot(local)
