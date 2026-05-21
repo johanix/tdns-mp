@@ -2,6 +2,16 @@ module github.com/johanix/tdns-mp/v2
 
 go 1.25.2
 
+// In-tree tdns replace for builds against feat/configurable-rrsig-validity.
+// Drop after tdns publishes a module version that includes UpdateSigValidityFloor.
+replace (
+	github.com/johanix/tdns/v2 => ../../tdns/v2
+	github.com/johanix/tdns/v2/cli => ../../tdns/v2/cli
+	github.com/johanix/tdns/v2/core => ../../tdns/v2/core
+	github.com/johanix/tdns/v2/edns0 => ../../tdns/v2/edns0
+	github.com/johanix/tdns/v2/cache => ../../tdns/v2/cache
+)
+
 require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1

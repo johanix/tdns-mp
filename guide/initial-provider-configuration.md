@@ -380,11 +380,13 @@ dnssecpolicies:
    default:
       algorithm: ED25519
       ksk:
-         lifetime:     forever
-         sigvalidity:  168h
+         lifetime: forever
       zsk:
-         lifetime:     forever
-         sigvalidity:  2h
+         lifetime: forever
+      sigvalidity:
+         default: 14d
+         dnskey:  30d
+         ds:      14d
 
 kasp:
    propagation_delay: 1h

@@ -4,6 +4,14 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
+replace (
+	github.com/johanix/tdns/v2 => ../../../tdns/v2
+	github.com/johanix/tdns/v2/cli => ../../../tdns/v2/cli
+	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
+	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
+	github.com/johanix/tdns/v2/cache => ../../../tdns/v2/cache
+)
+
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2 v2.0.0-20260517221654-125303ab5c69
