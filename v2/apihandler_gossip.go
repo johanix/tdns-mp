@@ -2,10 +2,8 @@
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
  * /gossip endpoint handler — role-agnostic gossip introspection.
- * Registered on all MP roles. Commands operate on whatever
- * AgentRegistry / LeaderElectionManager state exists; a role
- * without a ProviderGroupManager returns an empty list for
- * gossip-group-list and an honest error for gossip-group-state.
+ * Registered on all MP roles. Zone-centric: gossip-zone-state
+ * resolves the provider group for a zone and returns its matrix.
  */
 package tdnsmp
 
@@ -13,7 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -46,93 +48,36 @@ func APIgossip(ar *AgentRegistry, lem *LeaderElectionManager) func(w http.Respon
 		}()
 
 		switch gp.Command {
-		case "gossip-group-state":
-			if ar == nil || ar.GossipStateTable == nil || ar.ProviderGroupManager == nil {
+		case "gossip-zone-state":
+			if ar == nil || ar.GossipStateTable == nil {
 				resp.Error = true
 				resp.ErrorMsg = "gossip state table not available"
 				return
 			}
-
-			groupName := gp.GroupName
-			if groupName == "" {
+			zone := dns.Fqdn(gp.Zone)
+			if zone == "" {
 				resp.Error = true
-				resp.ErrorMsg = "group name or hash is required"
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			pg, groupHash, err := providerGroupForGossipZone(ar, zone)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 				return
 			}
 
-			// Look up group by name first, then by hash
-			pg := ar.ProviderGroupManager.GetGroupByName(groupName)
-			if pg == nil {
-				pg = ar.ProviderGroupManager.GetGroup(groupName)
-			}
-			if pg == nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("provider group %q not found", groupName)
-				return
-			}
-
-			states, election, nameProposal := ar.GossipStateTable.GetGroupState(pg.GroupHash)
-
-			// Build matrix data
-			var matrix []map[string]interface{}
-			for _, member := range pg.Members {
-				row := map[string]interface{}{
-					"reporter": member,
-				}
-				if ms, ok := states[member]; ok {
-					row["peer_states"] = ms.PeerStates
-					row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
-					row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
-					row["zones"] = len(ms.Zones)
-					// Only emit beat_interval when actually known.
-					// Old agents that don't gossip the field send 0;
-					// emitting 0 in the JSON would let consumers treat
-					// it as a reported value of zero seconds rather
-					// than "not provided".
-					if ms.BeatInterval > 0 {
-						row["beat_interval"] = ms.BeatInterval
-					}
-				} else {
-					row["peer_states"] = map[string]string{}
-					row["age"] = "unknown"
-				}
-				matrix = append(matrix, row)
-			}
+			states, election, nameProposal := ar.GossipStateTable.GetGroupState(groupHash)
+			members := unionGossipMembers(pg.Members, states)
+			matrix := buildGossipMatrixRows(members, states)
 
 			result := map[string]interface{}{
-				"group_hash": pg.GroupHash,
-				"group_name": pg.Name,
-				"members":    pg.Members,
-				"matrix":     matrix,
+				"zone":    zone,
+				"members": members,
+				"matrix":  matrix,
 			}
 
-			// Always include election block with status.
-			// LEM is authoritative; gossip table is fallback.
-			electionData := map[string]interface{}{}
-			var es GroupElectionState
-			if lem != nil {
-				es = lem.GetGroupElectionState(pg.GroupHash)
-			}
-			if es.Term == 0 && election != nil {
-				es = *election
-			}
-
-			if es.Term == 0 {
-				electionData["status"] = "no_election"
-			} else if es.Leader == "" {
-				electionData["status"] = "invalidated"
-				electionData["term"] = es.Term
-			} else if time.Now().After(es.LeaderExpiry) {
-				electionData["status"] = "expired"
-				electionData["leader"] = es.Leader
-				electionData["term"] = es.Term
-			} else {
-				electionData["status"] = "active"
-				electionData["leader"] = es.Leader
-				electionData["term"] = es.Term
-				electionData["leader_expiry"] = es.LeaderExpiry.Format(time.RFC3339)
-				electionData["expires_in"] = time.Until(es.LeaderExpiry).Truncate(time.Second).String()
-			}
+			electionData := buildGossipElectionData(lem, groupHash, election)
 			result["election"] = electionData
 
 			if nameProposal != nil {
@@ -144,48 +89,136 @@ func APIgossip(ar *AgentRegistry, lem *LeaderElectionManager) func(w http.Respon
 			}
 
 			resp.Data = result
-			resp.Msg = fmt.Sprintf("Gossip state for group %s (%s)", pg.Name, pg.GroupHash[:8])
-
-		case "gossip-group-list":
-			if ar == nil || ar.ProviderGroupManager == nil {
-				// Role without a ProviderGroupManager — honest empty response.
-				resp.Data = []map[string]interface{}{}
-				resp.Msg = "Found 0 provider groups"
-				return
-			}
-			groups := ar.ProviderGroupManager.GetGroups()
-			var groupData []map[string]interface{}
-			for _, pg := range groups {
-				// Show first 5 zones as sample
-				sampleZones := make([]string, 0)
-				for i, z := range pg.Zones {
-					if i >= 5 {
-						break
-					}
-					sampleZones = append(sampleZones, string(z))
-				}
-				entry := map[string]interface{}{
-					"group_hash":   pg.GroupHash,
-					"name":         pg.Name,
-					"members":      pg.Members,
-					"zone_count":   len(pg.Zones),
-					"sample_zones": sampleZones,
-				}
-				if pg.NameProposal != nil {
-					entry["name_proposal"] = map[string]interface{}{
-						"name":        pg.NameProposal.Name,
-						"proposer":    pg.NameProposal.Proposer,
-						"proposed_at": pg.NameProposal.ProposedAt.Format(time.RFC3339),
-					}
-				}
-				groupData = append(groupData, entry)
-			}
-			resp.Data = groupData
-			resp.Msg = fmt.Sprintf("Found %d provider groups", len(groups))
+			resp.Msg = fmt.Sprintf("Gossip state for zone %s", zone)
 
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown gossip command: %s", gp.Command)
 		}
 	}
+}
+
+// providerGroupForGossipZone finds the provider group serving zone.
+// Prefer ProviderGroupManager; fall back to gossip state when PGM
+// has not been populated yet (common on auditors).
+func providerGroupForGossipZone(ar *AgentRegistry, zone string) (*ProviderGroup, string, error) {
+	zone = dns.Fqdn(zone)
+	zn := ZoneName(zone)
+	if ar.ProviderGroupManager != nil {
+		if pg := ar.ProviderGroupManager.GetGroupForZone(zn); pg != nil {
+			return pg, pg.GroupHash, nil
+		}
+	}
+	if ar.GossipStateTable == nil {
+		return nil, "", fmt.Errorf("no provider group for zone %s", zone)
+	}
+	ar.GossipStateTable.mu.RLock()
+	defer ar.GossipStateTable.mu.RUnlock()
+	for hash, states := range ar.GossipStateTable.States {
+		for _, ms := range states {
+			for _, z := range ms.Zones {
+				if dns.Fqdn(z) == zone {
+					return providerGroupFromGossipState(hash, states, ar.GossipStateTable.Names[hash]), hash, nil
+				}
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("no provider group for zone %s", zone)
+}
+
+func providerGroupFromGossipState(hash string, states map[string]*MemberState, nameProposal *GroupNameProposal) *ProviderGroup {
+	members := make([]string, 0, len(states))
+	zoneSet := make(map[ZoneName]bool)
+	for id, ms := range states {
+		members = append(members, id)
+		if ms != nil {
+			for _, z := range ms.Zones {
+				zoneSet[ZoneName(dns.Fqdn(z))] = true
+			}
+		}
+	}
+	slices.Sort(members)
+	zones := make([]ZoneName, 0, len(zoneSet))
+	for z := range zoneSet {
+		zones = append(zones, z)
+	}
+	slices.Sort(zones)
+	pg := &ProviderGroup{
+		GroupHash: hash,
+		Members:   members,
+		Zones:     zones,
+	}
+	if nameProposal != nil {
+		pg.Name = nameProposal.Name
+		pg.NameProposal = nameProposal
+	}
+	return pg
+}
+
+func buildGossipMatrixRows(members []string, states map[string]*MemberState) []map[string]interface{} {
+	reported := make(map[string]bool, len(states))
+	var matrix []map[string]interface{}
+	for reporter, ms := range states {
+		reported[reporter] = true
+		matrix = append(matrix, gossipMatrixRow(reporter, ms))
+	}
+	for _, member := range members {
+		if reported[member] {
+			continue
+		}
+		matrix = append(matrix, gossipMatrixRow(member, nil))
+	}
+	slices.SortFunc(matrix, func(a, b map[string]interface{}) int {
+		ra, _ := a["reporter"].(string)
+		rb, _ := b["reporter"].(string)
+		return strings.Compare(ra, rb)
+	})
+	return matrix
+}
+
+func gossipMatrixRow(reporter string, ms *MemberState) map[string]interface{} {
+	row := map[string]interface{}{
+		"reporter": reporter,
+	}
+	if ms == nil {
+		row["peer_states"] = map[string]string{}
+		row["age"] = "unknown"
+		return row
+	}
+	row["peer_states"] = ms.PeerStates
+	row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
+	row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
+	row["zones"] = len(ms.Zones)
+	if ms.BeatInterval > 0 {
+		row["beat_interval"] = ms.BeatInterval
+	}
+	return row
+}
+
+func buildGossipElectionData(lem *LeaderElectionManager, groupHash string, gossipElection *GroupElectionState) map[string]interface{} {
+	electionData := map[string]interface{}{}
+	var es GroupElectionState
+	if lem != nil {
+		es = lem.GetGroupElectionState(groupHash)
+	}
+	if es.Term == 0 && gossipElection != nil {
+		es = *gossipElection
+	}
+	if es.Term == 0 {
+		electionData["status"] = "no_election"
+	} else if es.Leader == "" {
+		electionData["status"] = "invalidated"
+		electionData["term"] = es.Term
+	} else if time.Now().After(es.LeaderExpiry) {
+		electionData["status"] = "expired"
+		electionData["leader"] = es.Leader
+		electionData["term"] = es.Term
+	} else {
+		electionData["status"] = "active"
+		electionData["leader"] = es.Leader
+		electionData["term"] = es.Term
+		electionData["leader_expiry"] = es.LeaderExpiry.Format(time.RFC3339)
+		electionData["expires_in"] = time.Until(es.LeaderExpiry).Truncate(time.Second).String()
+	}
+	return electionData
 }

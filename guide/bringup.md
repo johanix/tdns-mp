@@ -326,7 +326,7 @@ HSYNC3 RRsets: every distinct set of identities is one
 group. List them:
 
 ```
-$ tdns-mpcli agent gossip group list
+$ tdns-mpcli agent gossip state --zone customer.mptest.
 
 GROUP        MEMBERS                                                              ZONES
 -----        -------                                                              -----
@@ -343,12 +343,12 @@ the zones probably share members. That is fine.
 
 ### 3.3 Verification gate — the gossip matrix
 
-`gossip group state` shows the N×N matrix for one
+`gossip state --zone` shows the N×N matrix for one
 group: each row is one reporter's view of every other
 member's state.
 
 ```
-$ tdns-mpcli agent gossip group state --group g_3a8f1c
+$ tdns-mpcli agent gossip state --zone customer.mptest.
 
 Group: g_3a8f1c (hash: 3a8f1c2b0e9d4f...)
 Leader: agent.alpha.example. (term 4, expires in 47m12s)

@@ -58,7 +58,7 @@ The four role sub-trees share several common shapes:
 - **`{role} peer ping / apiping / reset`** — exercise
   per-peer transports. `reset` is only meaningful on
   agent/auditor.
-- **`{role} gossip group list / state`** — gossip
+- **`{role} gossip state --zone <zone>`** — gossip
   matrix; only meaningful on agent/auditor.
 - **`{role} zone list / mplist`** — what zones the
   daemon is handling.
