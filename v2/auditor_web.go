@@ -63,6 +63,7 @@ type WebData struct {
 	Events       []AuditEvent
 	Observations []AuditObservation
 	Gossip       []GossipMatrixDTO
+	MPView       *ZoneMPViewDTO
 }
 
 func formatAgo(t time.Time) string {
@@ -93,6 +94,12 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 			}
 			return formatAgo(s.LastBeat)
 		},
+		"memberLastBeat": func(m ZoneMemberRoleDTO) string {
+			if m.Local && m.LastBeat.IsZero() {
+				return "this host"
+			}
+			return formatAgo(m.LastBeat)
+		},
 		"fmtTime": func(t time.Time) string {
 			if t.IsZero() {
 				return "-"
@@ -115,6 +122,18 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 		},
 		"zoneQuery": func(z string) string {
 			return url.QueryEscape(z)
+		},
+		"joinLabels": func(labels []string) string {
+			if len(labels) == 0 {
+				return "(none)"
+			}
+			return strings.Join(labels, ", ")
+		},
+		"hasRole": func(b bool) string {
+			if b {
+				return "yes"
+			}
+			return ""
 		},
 		"shortLabel": func(id string) string {
 			id = strings.TrimSuffix(id, ".")
@@ -350,7 +369,11 @@ func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *htt
 }
 
 func (s *auditorWebServer) fragmentGossipMatrix(w http.ResponseWriter, r *http.Request) {
+	zone := r.URL.Query().Get("zone")
 	data := s.buildGossipData(r)
+	if zone != "" {
+		data.Gossip = SnapshotGossipForZone(s.conf.InternalMp.AgentRegistry, zone)
+	}
 	s.render(w, "gossip-matrix-inner", data)
 }
 
@@ -371,22 +394,33 @@ func (s *auditorWebServer) buildDashboardData(r *http.Request) *WebData {
 func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *WebData {
 	d := s.baseWebData(r, "Zone: "+zone)
 	d.Zone = zone
-	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
-		local := sm.LocalIdentity
+	sm := s.conf.InternalMp.AuditStateManager
+	ar := s.conf.InternalMp.AgentRegistry
+	local := ""
+	if sm != nil {
+		local = sm.LocalIdentity
+	}
+	d.MPView = SnapshotZoneMPView(zone, sm, ar, local)
+	d.Gossip = SnapshotGossipForZone(ar, zone)
+	if sm != nil {
 		if zs := sm.GetZone(zone); zs != nil {
 			snap := zs.Snapshot(local)
 			d.ZoneDetail = &snap
 			d.Providers = snap.Providers
 			d.Auditors = s.finishAuditorSummaries(zone, snap.Auditors)
-		} else {
+		} else if d.MPView != nil {
+			d.ZoneDetail = &AuditZoneSummary{
+				Zone:         zone,
+				AuditorCount:  len(d.MPView.Auditors),
+				Servers:       d.MPView.Servers,
+				Signers:       d.MPView.Signers,
+				AuditorLabels: d.MPView.Auditors,
+				NSmgmt:       d.MPView.NSmgmt,
+				ParentSync:   d.MPView.ParentSync,
+			}
 			d.Auditors = DeclaredAuditorIdentities(zone)
 			markLocalAuditors(local, d.Auditors)
 			d.Auditors = s.finishAuditorSummaries(zone, d.Auditors)
-			d.ZoneDetail = &AuditZoneSummary{
-				Zone:         zone,
-				Auditors:     d.Auditors,
-				AuditorCount: len(d.Auditors),
-			}
 		}
 	}
 	return d

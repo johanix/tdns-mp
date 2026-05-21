@@ -30,8 +30,13 @@ type AuditZoneSummary struct {
 	AuditorCount  int                    `json:"auditor_count"`
 	LastRefresh   time.Time              `json:"last_refresh,omitempty"`
 	ZoneSerial    uint32                 `json:"zone_serial,omitempty"`
-	Providers     []AuditProviderSummary `json:"providers,omitempty"`
-	Auditors      []AuditProviderSummary `json:"auditors,omitempty"`
+	Servers        []string               `json:"servers,omitempty"`
+	Signers        []string               `json:"signers,omitempty"`
+	AuditorLabels  []string               `json:"auditor_labels,omitempty"`
+	NSmgmt         string                 `json:"nsmgmt,omitempty"`
+	ParentSync     string                 `json:"parentsync,omitempty"`
+	Providers      []AuditProviderSummary `json:"providers,omitempty"`
+	Auditors       []AuditProviderSummary `json:"auditors,omitempty"`
 }
 
 // AuditProviderSummary is the JSON shape for one provider's state.
@@ -205,12 +210,29 @@ func SnapshotDashboardZones(ar *AgentRegistry, sm *AuditStateManager) []AuditZon
 	}
 	out := make([]AuditZoneSummary, 0, len(byZone))
 	for _, z := range byZone {
+		enrichZoneSummaryMPList(&z)
 		out = append(out, z)
 	}
 	slices.SortFunc(out, func(a, b AuditZoneSummary) int {
 		return strings.Compare(a.Zone, b.Zone)
 	})
 	return out
+}
+
+func enrichZoneSummaryMPList(z *AuditZoneSummary) {
+	if z == nil || z.Zone == "" {
+		return
+	}
+	mpzd, ok := Zones.Get(z.Zone)
+	if !ok || mpzd == nil {
+		return
+	}
+	info := MPZoneInfoFromMPZoneData(mpzd)
+	z.Servers = info.Servers
+	z.Signers = info.Signers
+	z.AuditorLabels = info.Auditors
+	z.NSmgmt = info.NSmgmt
+	z.ParentSync = info.ParentSync
 }
 
 // SnapshotAllZones returns summaries for every tracked zone.
@@ -454,9 +476,14 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 	now := time.Now()
 	out := make([]GossipMatrixDTO, 0, len(snaps))
 	for _, g := range snaps {
+		gst.mu.RLock()
+		states := gst.States[g.hash]
+		gst.mu.RUnlock()
+		members := unionGossipMembers(g.members, states)
+
 		dto := GossipMatrixDTO{
 			GroupHash: g.hash,
-			Members:   g.members,
+			Members:   members,
 			ZoneCount: len(g.zones),
 		}
 		if g.name != "" {
@@ -466,27 +493,17 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 			dto.Zones = append(dto.Zones, string(z))
 		}
 		gst.mu.RLock()
-		if states, ok := gst.States[g.hash]; ok {
-			for _, member := range g.members {
-				ms := states[member]
-				row := GossipMemberRow{Reporter: member}
-				if ms != nil {
-					row.Timestamp = ms.Timestamp
-					row.BeatInterval = ms.BeatInterval
-					if !ms.Timestamp.IsZero() {
-						row.SecondsSinceBeat = int64(now.Sub(ms.Timestamp).Seconds())
-					}
-					if len(ms.PeerStates) > 0 {
-						row.PeerStates = make(map[string]string, len(ms.PeerStates))
-						for k, v := range ms.PeerStates {
-							row.PeerStates[k] = v
-						}
-					}
-					if len(ms.Zones) > 0 {
-						row.Zones = append([]string(nil), ms.Zones...)
-					}
+		if states != nil {
+			reported := make(map[string]bool, len(states))
+			for reporter, ms := range states {
+				reported[reporter] = true
+				dto.Rows = append(dto.Rows, gossipMemberRow(reporter, ms, now))
+			}
+			for _, member := range members {
+				if reported[member] {
+					continue
 				}
-				dto.Rows = append(dto.Rows, row)
+				dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
 			}
 		}
 		if elec := gst.Elections[g.hash]; elec != nil {
@@ -497,7 +514,86 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 			}
 		}
 		gst.mu.RUnlock()
+		slices.SortFunc(dto.Rows, func(a, b GossipMemberRow) int {
+			return strings.Compare(a.Reporter, b.Reporter)
+		})
 		out = append(out, dto)
 	}
+	slices.SortFunc(out, func(a, b GossipMatrixDTO) int {
+		return strings.Compare(a.GroupHash, b.GroupHash)
+	})
 	return out
+}
+
+func unionGossipMembers(declared []string, states map[string]*MemberState) []string {
+	seen := make(map[string]bool, len(declared)+len(states))
+	for _, m := range declared {
+		seen[m] = true
+	}
+	for m := range states {
+		seen[m] = true
+	}
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func gossipMemberRow(reporter string, ms *MemberState, now time.Time) GossipMemberRow {
+	row := GossipMemberRow{Reporter: reporter}
+	if ms == nil {
+		return row
+	}
+	row.Timestamp = ms.Timestamp
+	row.BeatInterval = ms.BeatInterval
+	if !ms.Timestamp.IsZero() {
+		row.SecondsSinceBeat = int64(now.Sub(ms.Timestamp).Seconds())
+	}
+	if len(ms.PeerStates) > 0 {
+		row.PeerStates = make(map[string]string, len(ms.PeerStates))
+		for k, v := range ms.PeerStates {
+			row.PeerStates[k] = v
+		}
+	}
+	if len(ms.Zones) > 0 {
+		row.Zones = append([]string(nil), ms.Zones...)
+	}
+	return row
+}
+
+// SnapshotGossipForZone returns gossip matrices for groups tied to zone
+// (listed in the group or any member is an apex HSYNC3 identity).
+func SnapshotGossipForZone(ar *AgentRegistry, zone string) []GossipMatrixDTO {
+	all := SnapshotGossip(ar)
+	if zone == "" {
+		return all
+	}
+	zone = dns.Fqdn(zone)
+	ids := zoneMemberIdentities(zone)
+	var out []GossipMatrixDTO
+	for _, g := range all {
+		if gossipGroupMatchesZone(g, zone, ids) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+func gossipGroupMatchesZone(g GossipMatrixDTO, zone string, zoneIDs map[string]bool) bool {
+	for _, z := range g.Zones {
+		if dns.Fqdn(z) == zone {
+			return true
+		}
+	}
+	if len(zoneIDs) == 0 {
+		return false
+	}
+	for _, m := range g.Members {
+		if zoneIDs[dns.Fqdn(m)] {
+			return true
+		}
+	}
+	return false
 }

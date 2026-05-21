@@ -9,6 +9,45 @@ import (
 	"time"
 )
 
+func TestSnapshotGossip_includesAllStateReporters(t *testing.T) {
+	ar := &AgentRegistry{
+		ProviderGroupManager: NewProviderGroupManager("auditor.example."),
+		GossipStateTable:     NewGossipStateTable("auditor.example."),
+	}
+	hash := "abc123"
+	ar.ProviderGroupManager.mu.Lock()
+	ar.ProviderGroupManager.Groups[hash] = &ProviderGroup{
+		GroupHash: hash,
+		Members:   []string{"agent.a.example."},
+	}
+	ar.ProviderGroupManager.mu.Unlock()
+	ar.GossipStateTable.mu.Lock()
+	ar.GossipStateTable.States[hash] = map[string]*MemberState{
+		"agent.a.example.": {
+			Identity:   "agent.a.example.",
+			Timestamp:  time.Now(),
+			PeerStates: map[string]string{"agent.b.example.": "OPERATIONAL"},
+		},
+		"agent.b.example.": {
+			Identity:   "agent.b.example.",
+			Timestamp:  time.Now(),
+			PeerStates: map[string]string{"agent.a.example.": "OPERATIONAL"},
+		},
+	}
+	ar.GossipStateTable.mu.Unlock()
+
+	got := SnapshotGossip(ar)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if len(got[0].Members) != 2 {
+		t.Fatalf("members = %v, want both reporters", got[0].Members)
+	}
+	if len(got[0].Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(got[0].Rows))
+	}
+}
+
 func TestSnapshotGossip_fromGossipStateTableWhenPGMEmpty(t *testing.T) {
 	ar := &AgentRegistry{
 		ProviderGroupManager: NewProviderGroupManager("auditor.example."),

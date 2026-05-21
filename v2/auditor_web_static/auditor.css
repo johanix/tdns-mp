@@ -46,6 +46,22 @@ h2 {
   white-space: nowrap;
 }
 
+.audit-mplist-table td,
+.audit-dashboard-table td {
+  vertical-align: top;
+}
+
+.audit-role-yes {
+  text-align: center;
+  font-weight: 700;
+  color: #0b57d0;
+}
+
+.audit-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
 h3 {
   font-size: 28px;
   font-weight: 600;

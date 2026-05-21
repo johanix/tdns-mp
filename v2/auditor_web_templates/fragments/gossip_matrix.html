@@ -16,6 +16,9 @@
       {{end}}
     </small>
   </p>
+  {{if .Zones}}
+  <p><small>Zones: {{joinLabels .Zones}}</small></p>
+  {{end}}
   {{if .Rows}}
   <div class="audit-table-scroll">
   <table role="grid" class="audit-gossip-matrix">
