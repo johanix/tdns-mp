@@ -481,7 +481,7 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 			Members:   g.members,
 			Zones:     g.zones,
 		}
-		if dto := snapshotGossipMatrix(ar, pg, g.hash); dto != nil {
+		if dto := snapshotGossipMatrix(ar, pg, g.hash, ""); dto != nil {
 			out = append(out, *dto)
 		}
 	}
@@ -542,7 +542,7 @@ func SnapshotGossipForZone(ar *AgentRegistry, zone string) []GossipMatrixDTO {
 	if err != nil {
 		return nil
 	}
-	dto := snapshotGossipMatrix(ar, pg, hash)
+	dto := snapshotGossipMatrix(ar, pg, hash, zone)
 	if dto == nil {
 		return nil
 	}
@@ -550,7 +550,9 @@ func SnapshotGossipForZone(ar *AgentRegistry, zone string) []GossipMatrixDTO {
 }
 
 // snapshotGossipMatrix builds one gossip matrix DTO for a provider group.
-func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash string) *GossipMatrixDTO {
+// When zone is non-empty, matrix columns are limited to that zone's
+// HSYNCPARAM role identities (not the full shared group member set).
+func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone string) *GossipMatrixDTO {
 	if ar == nil || ar.GossipStateTable == nil || pg == nil {
 		return nil
 	}
@@ -565,7 +567,11 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash string
 	}
 	gst.mu.RUnlock()
 
-	members := unionGossipMembers(pg.Members, states)
+	declared := pg.Members
+	if zone != "" {
+		declared = zoneGossipMemberIdentities(zone)
+	}
+	members := unionGossipMembers(declared, states)
 	dto := &GossipMatrixDTO{
 		Members:   members,
 		ZoneCount: len(pg.Zones),

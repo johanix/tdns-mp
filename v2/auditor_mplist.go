@@ -144,19 +144,42 @@ func (mpzd *MPZoneData) hsync3RecordsByLabel() map[string]core.HSYNC3 {
 	return out
 }
 
-func collectZoneMemberLabels(info MPZoneInfo, hsync3 map[string]core.HSYNC3) []string {
+// declaredRoleLabels returns HSYNCPARAM servers/signers/auditors labels only.
+func declaredRoleLabels(info MPZoneInfo) []string {
 	seen := make(map[string]bool)
+	var out []string
 	for _, list := range [][]string{info.Servers, info.Signers, info.Auditors} {
 		for _, lbl := range list {
-			seen[normalizeHSYNC3Label(lbl)] = true
+			lbl = normalizeHSYNC3Label(lbl)
+			if lbl == "" || seen[lbl] {
+				continue
+			}
+			seen[lbl] = true
+			out = append(out, lbl)
 		}
 	}
-	for lbl := range hsync3 {
-		seen[lbl] = true
+	slices.Sort(out)
+	return out
+}
+
+// zoneGossipMemberIdentities returns FQDN identities for this zone's
+// declared roles (HSYNCPARAM), not every HSYNC3 in a shared provider group.
+func zoneGossipMemberIdentities(zone string) []string {
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return nil
 	}
-	out := make([]string, 0, len(seen))
-	for lbl := range seen {
-		out = append(out, lbl)
+	info := MPZoneInfoFromMPZoneData(mpzd)
+	byLabel := mpzd.hsync3IdentitiesByLabel()
+	seen := make(map[string]bool)
+	var out []string
+	for _, lbl := range declaredRoleLabels(info) {
+		id := byLabel[lbl]
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
 	}
 	slices.Sort(out)
 	return out
@@ -195,8 +218,9 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 		zs = sm.GetZone(zone)
 	}
 	localIdentity = dns.Fqdn(localIdentity)
+	seenIdentity := make(map[string]bool)
 
-	for _, label := range collectZoneMemberLabels(info, hsync3) {
+	for _, label := range declaredRoleLabels(info) {
 		row := ZoneMemberRoleDTO{
 			Label:   label,
 			Server:  labelInRoleList(info.Servers, label),
@@ -204,6 +228,10 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 			Auditor: labelInRoleList(info.Auditors, label),
 		}
 		if id := byIdentity[label]; id != "" {
+			if seenIdentity[id] {
+				continue
+			}
+			seenIdentity[id] = true
 			row.Identity = id
 		}
 		if h3, ok := hsync3[label]; ok {
