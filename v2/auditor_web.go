@@ -370,10 +370,14 @@ func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *htt
 
 func (s *auditorWebServer) fragmentGossipMatrix(w http.ResponseWriter, r *http.Request) {
 	zone := r.URL.Query().Get("zone")
-	data := s.buildGossipData(r)
 	if zone != "" {
+		data := s.baseWebData(r, "")
+		data.Zone = zone
 		data.Gossip = SnapshotGossipForZone(s.conf.InternalMp.AgentRegistry, zone)
+		s.render(w, "gossip-matrix-inner", data)
+		return
 	}
+	data := s.buildGossipData(r)
 	s.render(w, "gossip-matrix-inner", data)
 }
 

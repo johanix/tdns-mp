@@ -3,9 +3,7 @@
 <p><em>No gossip state for this zone yet.</em></p>
 {{else}}
 {{range .Gossip}}
-{{if $.Zone}}
-{{/* Zone page: single matrix, no group identifiers */}}
-{{else}}
+{{if not $.Zone}}
 <section>
   <h3>{{if .Zones}}Zones: {{joinLabels .Zones}}{{else}}Gossip{{end}}</h3>
 {{end}}
