@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width">
-  <title>{{.Title}} — TDNS Auditor</title>
+  <title>{{.Title}} — TDNS Multi-Provider Auditor</title>
   <link rel="stylesheet" href="/web/static/auditor.css?v=8">
   <script src="/web/static/htmx.min.js"></script>
 </head>
@@ -11,7 +11,7 @@
   <header class="audit-header">
     <nav class="audit-nav">
       <ul>
-        <li class="audit-brand"><strong><a href="/web/">TDNS Auditor</a></strong></li>
+        <li class="audit-brand"><strong><a href="/web/">TDNS Multi-Provider Auditor</a></strong></li>
         <li><a href="/web/">Dashboard</a></li>
         <li><a href="/web/providers">Providers</a></li>
         <li><a href="/web/auditors">Auditors</a></li>
@@ -36,7 +36,7 @@
 {{define "layout-foot"}}
   </main>
   <footer class="audit-footer">
-    <small>TDNS Auditor &mdash; {{.Now.Format "2006-01-02 15:04:05 UTC"}}</small>
+    <small>TDNS Multi-Provider Auditor &mdash; {{.Now.Format "2006-01-02 15:04:05 UTC"}}</small>
   </footer>
 </body>
 </html>{{end}}
