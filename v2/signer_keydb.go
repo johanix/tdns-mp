@@ -596,7 +596,7 @@ func EnsureActiveDnssecKeysMP(mpzd *MPZoneData, hdb *HsyncDB) (*tdns.DnssecKeys,
 	if len(dak.KSKs) == 0 {
 		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
 		delete(hdb.KeystoreDnskeyCache, zd.ZoneName+"+"+tdns.DnskeyStateActive)
-		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
+		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: KSK: %w", err)
 		}
@@ -617,7 +617,7 @@ func EnsureActiveDnssecKeysMP(mpzd *MPZoneData, hdb *HsyncDB) (*tdns.DnssecKeys,
 	if realZSKCount == 0 {
 		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
 		delete(hdb.KeystoreDnskeyCache, zd.ZoneName+"+"+tdns.DnskeyStateActive)
-		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil)
+		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: ZSK: %w", err)
 		}

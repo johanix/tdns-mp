@@ -232,14 +232,12 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 		if mpzd.DnssecPolicy == nil {
 			continue
 		}
-		alg := mpzd.DnssecPolicy.Algorithm
-
 		// Maintain ZSK standby count (always MP — non-MP zones skipped above)
-		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, true, standbyZskCount)
+		maintainStandbyKeysForType(hdb, zoneName, mpzd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, true, standbyZskCount)
 
 		// Maintain KSK standby count (0 means don't maintain)
 		if standbyKskCount > 0 {
-			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, true, standbyKskCount)
+			maintainStandbyKeysForType(hdb, zoneName, mpzd.DnssecPolicy.KSKAlgorithm, "KSK", 257, true, standbyKskCount)
 		}
 	}
 }

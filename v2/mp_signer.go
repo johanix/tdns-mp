@@ -166,7 +166,7 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	}
 
 	if zd.DnssecPolicy != nil {
-		tdns.UpdateSigValidityFloor(zd, zd.DnssecPolicy, tdns.Conf.KaspPropagationDelay(), maxObservedTTL, true)
+		tdns.UpdateSigValidityFloor(zd, zd.DnssecPolicy, tdns.Conf.KaspPropagationDelay(), maxObservedTTL, true, tdns.Conf.IsLargeAlgorithm)
 	}
 
 	return newrrsigs, nil
