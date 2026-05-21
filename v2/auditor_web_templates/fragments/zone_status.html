@@ -1,6 +1,6 @@
 {{define "zone_status.html"}}
 {{if .ZoneDetail}}
-<span class="audit-dot audit-dot-ok" title="Serial {{.ZoneDetail.ZoneSerial}}, {{.ZoneDetail.ProviderCount}} providers"></span>
+<span class="audit-dot audit-dot-ok" title="{{.ZoneDetail.ProviderCount}} servers"></span>
 {{else}}
 <span class="audit-dot audit-dot-unknown" title="No data"></span>
 {{end}}

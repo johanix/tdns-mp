@@ -1,24 +1,26 @@
 {{define "gossip-matrix-inner"}}
 {{if not .Gossip}}
-<p><em>No gossip groups yet.</em></p>
+<p><em>No gossip state for this zone yet.</em></p>
 {{else}}
 {{range .Gossip}}
+{{if $.Zone}}
+{{/* Zone page: single matrix, no group identifiers */}}
+{{else}}
 <section>
-  <h3>{{if .GroupName}}{{.GroupName}}{{else}}{{.GroupHash}}{{end}}</h3>
+  <h3>{{if .Zones}}Zones: {{joinLabels .Zones}}{{else}}Gossip{{end}}</h3>
+{{end}}
   <p>
     <small>
-      Hash: <code>{{.GroupHash}}</code>
-      &nbsp;|&nbsp; Members: {{len .Members}}
-      &nbsp;|&nbsp; Zones: {{.ZoneCount}}
+      Members: {{len .Members}}
+      {{if and (not $.Zone) .ZoneCount}}
+      &nbsp;|&nbsp; {{.ZoneCount}} zones in group
+      {{end}}
       {{if .Election.Leader}}
-      &nbsp;|&nbsp; Leader: <strong>{{.Election.Leader}}</strong>
+      &nbsp;|&nbsp; Leader: <strong>{{shortLabel .Election.Leader}}</strong>
       (term {{.Election.Term}})
       {{end}}
     </small>
   </p>
-  {{if .Zones}}
-  <p><small>Zones: {{joinLabels .Zones}}</small></p>
-  {{end}}
   {{if .Rows}}
   <div class="audit-table-scroll">
   <table role="grid" class="audit-gossip-matrix">
@@ -48,7 +50,9 @@
   {{else}}
   <p><em>No state reports yet.</em></p>
   {{end}}
+{{if not $.Zone}}
 </section>
+{{end}}
 {{end}}
 {{end}}
 {{end}}

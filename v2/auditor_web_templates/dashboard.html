@@ -16,9 +16,6 @@
       <th>Signers</th>
       <th>Auditors</th>
       <th>NSmgmt</th>
-      <th>Providers seen</th>
-      <th>Serial</th>
-      <th>Last Refresh</th>
       <th></th>
     </tr>
   </thead>
@@ -30,9 +27,6 @@
       <td><small>{{joinLabels .Signers}}</small></td>
       <td><small>{{joinLabels .AuditorLabels}}</small></td>
       <td>{{.NSmgmt}}</td>
-      <td>{{.ProviderCount}}</td>
-      <td>{{.ZoneSerial}}</td>
-      <td>{{ago .LastRefresh}}</td>
       <td>
         <div
           hx-get="/web/fragment/zone-status?zone={{zoneQuery .Zone}}"

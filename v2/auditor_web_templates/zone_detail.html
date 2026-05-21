@@ -1,22 +1,8 @@
 {{define "zone_detail.html"}}{{template "layout-head" .}}
 <h2>Zone: {{.Zone}}</h2>
-<a href="/web/">&larr; Dashboard</a>
 
 {{if .Error}}
 <article class="audit-error">{{.Error}}</article>
-{{end}}
-
-{{if .ZoneDetail}}
-<section>
-  <h3>Summary</h3>
-  <dl>
-    <dt>Zone</dt><dd>{{.ZoneDetail.Zone}}</dd>
-    <dt>Serial</dt><dd>{{.ZoneDetail.ZoneSerial}}</dd>
-    <dt>Last Refresh</dt><dd>{{fmtTime .ZoneDetail.LastRefresh}}</dd>
-    <dt>Providers (seen)</dt><dd>{{.ZoneDetail.ProviderCount}}</dd>
-    <dt>Auditors (declared)</dt><dd>{{.ZoneDetail.AuditorCount}}</dd>
-  </dl>
-</section>
 {{end}}
 
 {{if .MPView}}
@@ -100,8 +86,8 @@
 {{end}}
 
 <section>
-  <h3>Gossip matrix</h3>
-  <p><small>Provider groups for this zone. <a href="/web/gossip">All groups</a></small></p>
+  <h3>Gossip</h3>
+  <p><small>State matrix for this zone's provider group. <a href="/web/gossip">All zones</a></small></p>
   <div
     hx-get="/web/fragment/gossip-matrix?zone={{zoneQuery .Zone}}"
     hx-trigger="every 15s"

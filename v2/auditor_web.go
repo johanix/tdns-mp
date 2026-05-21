@@ -408,22 +408,40 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 			d.ZoneDetail = &snap
 			d.Providers = snap.Providers
 			d.Auditors = s.finishAuditorSummaries(zone, snap.Auditors)
-		} else if d.MPView != nil {
+		}
+	}
+	if d.MPView != nil {
+		if d.ZoneDetail == nil {
 			d.ZoneDetail = &AuditZoneSummary{
-				Zone:         zone,
+				Zone:          zone,
 				AuditorCount:  len(d.MPView.Auditors),
 				Servers:       d.MPView.Servers,
 				Signers:       d.MPView.Signers,
 				AuditorLabels: d.MPView.Auditors,
-				NSmgmt:       d.MPView.NSmgmt,
-				ParentSync:   d.MPView.ParentSync,
+				NSmgmt:        d.MPView.NSmgmt,
+				ParentSync:    d.MPView.ParentSync,
 			}
 			d.Auditors = DeclaredAuditorIdentities(zone)
 			markLocalAuditors(local, d.Auditors)
 			d.Auditors = s.finishAuditorSummaries(zone, d.Auditors)
 		}
+		applyMPViewToZoneSummary(d.ZoneDetail, d.MPView)
 	}
 	return d
+}
+
+// applyMPViewToZoneSummary sets declared role counts from HSYNCPARAM.
+func applyMPViewToZoneSummary(z *AuditZoneSummary, mp *ZoneMPViewDTO) {
+	if z == nil || mp == nil {
+		return
+	}
+	z.ProviderCount = len(mp.Servers)
+	z.AuditorCount = len(mp.Auditors)
+	z.Servers = mp.Servers
+	z.Signers = mp.Signers
+	z.AuditorLabels = mp.Auditors
+	z.NSmgmt = mp.NSmgmt
+	z.ParentSync = mp.ParentSync
 }
 
 func (s *auditorWebServer) buildEventLogData(r *http.Request, zone string, limit int) *WebData {

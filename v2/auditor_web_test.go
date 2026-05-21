@@ -48,6 +48,40 @@ func TestSnapshotGossip_includesAllStateReporters(t *testing.T) {
 	}
 }
 
+func TestSnapshotGossipForZone_singleMatrix(t *testing.T) {
+	ar := &AgentRegistry{
+		ProviderGroupManager: NewProviderGroupManager("auditor.example."),
+		GossipStateTable:     NewGossipStateTable("auditor.example."),
+	}
+	hash := "abc123"
+	zone := ZoneName("customer.mptest.")
+	ar.ProviderGroupManager.mu.Lock()
+	ar.ProviderGroupManager.Groups[hash] = &ProviderGroup{
+		GroupHash: hash,
+		Members:   []string{"agent.a.example.", "agent.b.example."},
+		Zones:     []ZoneName{zone},
+	}
+	ar.ProviderGroupManager.mu.Unlock()
+	ar.GossipStateTable.mu.Lock()
+	ar.GossipStateTable.States[hash] = map[string]*MemberState{
+		"agent.a.example.": {Identity: "agent.a.example.", Zones: []string{string(zone)}},
+	}
+	// Unrelated group that shares a member identity must not appear.
+	ar.GossipStateTable.States["other"] = map[string]*MemberState{
+		"agent.a.example.": {Identity: "agent.a.example.", Zones: []string{"other.zone."}},
+		"agent.c.example.": {Identity: "agent.c.example.", Zones: []string{"other.zone."}},
+	}
+	ar.GossipStateTable.mu.Unlock()
+
+	got := SnapshotGossipForZone(ar, string(zone))
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 matrix for zone", len(got))
+	}
+	if len(got[0].Rows) == 0 && len(got[0].Members) == 0 {
+		t.Fatalf("expected non-empty matrix")
+	}
+}
+
 func TestSnapshotGossip_fromGossipStateTableWhenPGMEmpty(t *testing.T) {
 	ar := &AgentRegistry{
 		ProviderGroupManager: NewProviderGroupManager("auditor.example."),
