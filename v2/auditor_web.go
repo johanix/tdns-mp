@@ -129,6 +129,25 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 			}
 			return strings.Join(labels, ", ")
 		},
+		"gossipColumnPeer": func(m GossipMatrixDTO, col string) string {
+			if m.LabelToIdentity != nil {
+				if id := m.LabelToIdentity[col]; id != "" {
+					return id
+				}
+			}
+			return col
+		},
+		"gossipColumnTitle": func(m GossipMatrixDTO, col string, zone string) string {
+			if zone != "" {
+				if m.LabelToIdentity != nil {
+					if id := m.LabelToIdentity[col]; id != "" {
+						return id
+					}
+				}
+				return col
+			}
+			return col
+		},
 		"hasRole": func(b bool) string {
 			if b {
 				return "yes"

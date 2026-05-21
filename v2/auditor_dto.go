@@ -386,13 +386,15 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 // state matrix. Rows are members reporting (their own MemberState);
 // columns are peers; cells are state strings.
 type GossipMatrixDTO struct {
-	GroupHash string            `json:"group_hash"`
-	GroupName string            `json:"group_name,omitempty"`
-	Members   []string          `json:"members"`
-	Rows      []GossipMemberRow `json:"rows"`
-	Election  GossipElectionDTO `json:"election,omitempty"`
-	ZoneCount int               `json:"zone_count"`
-	Zones     []string          `json:"zones,omitempty"`
+	GroupHash       string            `json:"group_hash"`
+	GroupName       string            `json:"group_name,omitempty"`
+	Members         []string          `json:"members"`
+	ColumnLabels    []string          `json:"column_labels,omitempty"`
+	LabelToIdentity map[string]string `json:"label_to_identity,omitempty"`
+	Rows            []GossipMemberRow `json:"rows"`
+	Election        GossipElectionDTO `json:"election,omitempty"`
+	ZoneCount       int               `json:"zone_count"`
+	Zones           []string          `json:"zones,omitempty"`
 }
 
 // GossipMemberRow is one member's report of their view of all peers.
@@ -550,8 +552,8 @@ func SnapshotGossipForZone(ar *AgentRegistry, zone string) []GossipMatrixDTO {
 }
 
 // snapshotGossipMatrix builds one gossip matrix DTO for a provider group.
-// When zone is non-empty, matrix columns are limited to that zone's
-// HSYNCPARAM role identities (not the full shared group member set).
+// When zone is set, columns are HSYNCPARAM role labels (multiple labels
+// may share one HSYNC3 identity); otherwise columns are member identities.
 func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone string) *GossipMatrixDTO {
 	if ar == nil || ar.GossipStateTable == nil || pg == nil {
 		return nil
@@ -567,14 +569,13 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 	}
 	gst.mu.RUnlock()
 
-	declared := pg.Members
-	if zone != "" {
-		declared = zoneGossipMemberIdentities(zone)
-	}
-	members := unionGossipMembers(declared, states)
 	dto := &GossipMatrixDTO{
-		Members:   members,
 		ZoneCount: len(pg.Zones),
+	}
+	if zone != "" {
+		dto.ColumnLabels, dto.LabelToIdentity = zoneGossipMatrixColumns(zone)
+	} else {
+		dto.Members = unionGossipMembers(pg.Members, states)
 	}
 	for _, z := range pg.Zones {
 		dto.Zones = append(dto.Zones, string(z))
@@ -585,11 +586,13 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 			reported[reporter] = true
 			dto.Rows = append(dto.Rows, gossipMemberRow(reporter, ms, now))
 		}
-		for _, member := range members {
-			if reported[member] {
-				continue
+		if zone == "" {
+			for _, member := range dto.Members {
+				if reported[member] {
+					continue
+				}
+				dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
 			}
-			dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
 		}
 	}
 	if elec != nil {

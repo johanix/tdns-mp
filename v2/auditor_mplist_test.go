@@ -2,6 +2,18 @@ package tdnsmp
 
 import "testing"
 
+func TestDeclaredRoleLabels_sharedIdentity(t *testing.T) {
+	info := MPZoneInfo{
+		Servers:  []string{"cpt", "fox", "hare"},
+		Signers:  []string{"cpt", "hare"},
+		Auditors: []string{"skrubb"},
+	}
+	got := declaredRoleLabels(info)
+	if len(got) != 4 {
+		t.Fatalf("labels = %v, want cpt fox hare skrubb", got)
+	}
+}
+
 func TestDeclaredRoleLabels_onlyHSYNCPARAM(t *testing.T) {
 	info := MPZoneInfo{
 		Servers:  []string{"fox", "hare"},

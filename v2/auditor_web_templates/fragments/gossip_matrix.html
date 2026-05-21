@@ -1,16 +1,20 @@
 {{define "gossip-matrix-inner"}}
+{{$page := .}}
 {{if not .Gossip}}
 <p><em>No gossip state for this zone yet.</em></p>
 {{else}}
 {{range .Gossip}}
-{{if not $.Zone}}
+{{$matrix := .}}
+{{$cols := .ColumnLabels}}
+{{if not $cols}}{{$cols = .Members}}{{end}}
+{{if not $page.Zone}}
 <section>
   <h3>{{if .Zones}}Zones: {{joinLabels .Zones}}{{else}}Gossip{{end}}</h3>
 {{end}}
   <p>
     <small>
-      Members: {{len .Members}}
-      {{if and (not $.Zone) .ZoneCount}}
+      Members: {{len $cols}}
+      {{if and (not $page.Zone) .ZoneCount}}
       &nbsp;|&nbsp; {{.ZoneCount}} zones in group
       {{end}}
       {{if .Election.Leader}}
@@ -25,18 +29,19 @@
     <thead>
       <tr>
         <th>Reporter</th>
-        {{range .Members}}<th title="{{.}}">{{shortLabel .}}</th>{{end}}
+        {{range $cols}}
+        <th title="{{gossipColumnTitle $matrix . $page.Zone}}">{{if $page.Zone}}{{.}}{{else}}{{shortLabel .}}{{end}}</th>
+        {{end}}
         <th>Last Beat</th>
       </tr>
     </thead>
     <tbody>
-      {{$members := .Members}}
       {{range .Rows}}
       <tr>
         <td><strong title="{{.Reporter}}">{{shortLabel .Reporter}}</strong></td>
         {{$peers := .PeerStates}}
-        {{range $members}}
-          {{$state := index $peers .}}
+        {{range $col := $cols}}
+          {{$state := index $peers (gossipColumnPeer $matrix $col)}}
           <td><code>{{if $state}}{{$state}}{{else}}-{{end}}</code></td>
         {{end}}
         <td><small>{{if .Timestamp.IsZero}}-{{else}}{{ago .Timestamp}}{{end}}</small></td>
@@ -48,7 +53,7 @@
   {{else}}
   <p><em>No state reports yet.</em></p>
   {{end}}
-{{if not $.Zone}}
+{{if not $page.Zone}}
 </section>
 {{end}}
 {{end}}
