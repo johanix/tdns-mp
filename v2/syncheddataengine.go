@@ -13,7 +13,6 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func NewZoneDataRepo() (*ZoneDataRepo, error) {
@@ -68,35 +67,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	SDcmdQ := msgQs.SynchedDataCmd
 
 	var synchedDataUpdate *SynchedDataUpdate
-	var ok bool
 
-	if !viper.GetBool("syncheddataengine.active") {
-		lgEngine.Warn("SynchedDataEngine is NOT active, no updates will be sent to the combiner")
-		for {
-			select {
-			case <-ctx.Done():
-				lgEngine.Info("SynchedDataEngine context cancelled")
-				return
-			case synchedDataUpdate, ok = <-SDupdateQ:
-				if !ok {
-					lgEngine.Info("SynchedDataEngine update channel closed")
-					return
-				}
-				lgEngine.Warn("SynchedDataEngine not active but received an update", "zone", synchedDataUpdate.Zone, "type", synchedDataUpdate.UpdateType)
-				// Send error response back to avoid timeout
-				if synchedDataUpdate.Response != nil {
-					synchedDataUpdate.Response <- &AgentMsgResponse{
-						Error:    true,
-						ErrorMsg: "SynchedDataEngine is not active",
-						Msg:      "syncheddataengine.active is set to false in configuration",
-					}
-				}
-			}
-			continue
-		}
-	} else {
-		lgEngine.Info("SynchedDataEngine starting")
-	}
+	// The tdns-mp agent exists solely for multi-provider coordination, so the
+	// SynchedDataEngine is always active. (Historically this was gated by
+	// syncheddataengine.active, a leftover from when MP support lived in the
+	// standard tdns agent; the flag only ever silently disabled sync.)
+	lgEngine.Info("SynchedDataEngine starting")
 
 	// XXX: Set up communication with the combiner
 
