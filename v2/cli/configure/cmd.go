@@ -4,10 +4,10 @@
  * mpcli configure subpackage: cobra command + wiring.
  *
  * Cmd is exported for registration from cmd/mpcli/shared_cmds.go.
- * All role-specific logic (types, YAML parsers, interview flow,
- * templates) lives here; generic plumbing (prompts, diff, atomic
- * write, live-ping, generation of JOSE/TLS/apikey) comes from
- * tdns/v2/cli/configure.
+ * Both the role-specific logic (types, YAML parsers, interview
+ * flow, templates) and the generic plumbing (prompts, diff,
+ * atomic write, live-ping, generation of JOSE/TLS/apikey) live
+ * here in this package.
  */
 package configure
 
@@ -17,8 +17,6 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-
-	cfg "github.com/johanix/tdns/v2/cli/configure"
 )
 
 // Cmd is the `tdns-mpcli configure` cobra command.
@@ -32,18 +30,18 @@ under /etc/tdns/.
 Safe to re-run: existing values become the prompt defaults.
 Live servers must be explicitly confirmed before their
 config is replaced.`,
-	RunE: run,
+	RunE: runConfigureCmd,
 }
 
-func run(cmd *cobra.Command, args []string) error {
-	return cfg.Run(cfg.Spec{
+func runConfigureCmd(cmd *cobra.Command, args []string) error {
+	return Run(Spec{
 		Paths: allConfigPaths(),
 
 		ReadExisting: func() (any, error) {
 			return readExistingCoordinated()
 		},
 
-		RunInterview: func(p *cfg.Prompter, seed any) (any, error) {
+		RunInterview: func(p *Prompter, seed any) (any, error) {
 			return runInterview(p, seed.(CoordinatedValues)), nil
 		},
 
@@ -55,7 +53,7 @@ func run(cmd *cobra.Command, args []string) error {
 			return renderAll(cv)
 		},
 
-		LiveTargets: func(state any) []cfg.LiveTarget {
+		LiveTargets: func(state any) []LiveTarget {
 			return liveTargetsFor(state.(CoordinatedValues))
 		},
 
@@ -69,17 +67,17 @@ func run(cmd *cobra.Command, args []string) error {
 // template render has something to interpolate.
 func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
 	var err error
-	if cv.Agent.ApiKey, err = cfg.EnsureApiKey(cv.Agent.ApiKey); err != nil {
+	if cv.Agent.ApiKey, err = EnsureApiKey(cv.Agent.ApiKey); err != nil {
 		return cv, err
 	}
-	if cv.Signer.ApiKey, err = cfg.EnsureApiKey(cv.Signer.ApiKey); err != nil {
+	if cv.Signer.ApiKey, err = EnsureApiKey(cv.Signer.ApiKey); err != nil {
 		return cv, err
 	}
-	if cv.Combiner.ApiKey, err = cfg.EnsureApiKey(cv.Combiner.ApiKey); err != nil {
+	if cv.Combiner.ApiKey, err = EnsureApiKey(cv.Combiner.ApiKey); err != nil {
 		return cv, err
 	}
 	if cv.Auditor.Identity != "" {
-		if cv.Auditor.ApiKey, err = cfg.EnsureApiKey(cv.Auditor.ApiKey); err != nil {
+		if cv.Auditor.ApiKey, err = EnsureApiKey(cv.Auditor.ApiKey); err != nil {
 			return cv, err
 		}
 	}
@@ -90,14 +88,14 @@ func materialiseApiKeys(cv CoordinatedValues) (CoordinatedValues, error) {
 // running-daemon roles. mpcli itself is not a server. The
 // live-ping happens from the same host, so InternalIP is the
 // correct dial target (matches what the daemons bind to).
-func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
+func liveTargetsFor(cv CoordinatedValues) []LiveTarget {
 	ip := cv.Global.InternalIP
-	mk := func(role, path string, port int, apiKey string) cfg.LiveTarget {
+	mk := func(role, path string, port int, apiKey string) LiveTarget {
 		url := ""
 		if ip != "" {
 			url = "https://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/api/v1"
 		}
-		return cfg.LiveTarget{
+		return LiveTarget{
 			Role:      role,
 			Path:      path,
 			BaseURL:   url,
@@ -105,7 +103,7 @@ func liveTargetsFor(cv CoordinatedValues) []cfg.LiveTarget {
 			HasConfig: apiKey != "",
 		}
 	}
-	targets := []cfg.LiveTarget{
+	targets := []LiveTarget{
 		mk("mpagent", pathMpagent, agentApiPort, cv.Agent.ApiKey),
 		mk("mpsigner", pathMpsigner, signerApiPort, cv.Signer.ApiKey),
 		mk("mpcombiner", pathMpcombiner, combinerApiPort, cv.Combiner.ApiKey),
@@ -143,7 +141,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 	}
 
 	for _, role := range roles {
-		pub, keyID, gen, err := cfg.EnsureJoseKeypair(role.privKey)
+		pub, keyID, gen, err := EnsureJoseKeypair(role.privKey)
 		if err != nil {
 			return fmt.Errorf("%s jose: %w", role.label, err)
 		}
@@ -151,7 +149,7 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 			fmt.Printf("  generated %s JOSE keypair (KeyID %s)\n    priv: %s\n    pub:  %s\n",
 				role.label, keyID, role.privKey, pub)
 		}
-		certGen, err := cfg.EnsureTLSCert(role.certFile, role.keyFile, role.identity, net.JoinHostPort(cv.Global.PublicIP, "0"))
+		certGen, err := EnsureTLSCert(role.certFile, role.keyFile, role.identity, net.JoinHostPort(cv.Global.PublicIP, "0"))
 		if err != nil {
 			return fmt.Errorf("%s tls: %w", role.label, err)
 		}
