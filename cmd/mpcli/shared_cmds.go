@@ -32,8 +32,8 @@ func init() {
 	mpcli.SignerCmd.AddCommand(cli.NewTruststoreCmd("signer"))
 	mpcli.SignerCmd.AddCommand(cli.ReportCmd)
 	mpcli.SignerCmd.AddCommand(cli.AuthCmd)
-	mpcli.SignerCmd.AddCommand(cli.RootKeysCmd)
-	mpcli.SignerCmd.AddCommand(cli.JwtCmd)
+	mpcli.SignerCmd.AddCommand(mpcli.RootKeysCmd)
+	mpcli.SignerCmd.AddCommand(mpcli.JwtCmd)
 
 	// Combiner commands (from tdns-mp/v2/cli)
 	// Note: combiner has its own zone management (combiner_edits_cmds.go)
@@ -44,7 +44,7 @@ func init() {
 	mpcli.CombinerCmd.AddCommand(cli.NewDaemonCmd("combiner"))
 	mpcli.CombinerCmd.AddCommand(cli.NewDebugCmd("combiner"))
 	mpcli.CombinerCmd.AddCommand(cli.NewConfigCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(cli.NewKeysCmd("combiner"))
+	mpcli.CombinerCmd.AddCommand(mpcli.NewKeysCmd("combiner"))
 	mpcli.CombinerCmd.AddCommand(mpcli.CombinerDistribCmd)
 	mpcli.CombinerCmd.AddCommand(mpcli.CombinerTransactionCmd)
 
@@ -57,7 +57,7 @@ func init() {
 	mpcli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
 	mpcli.AgentCmd.AddCommand(cli.NewKeystoreCmd("agent"))
 	mpcli.AgentCmd.AddCommand(cli.NewTruststoreCmd("agent"))
-	mpcli.AgentCmd.AddCommand(cli.NewKeysCmd("agent"))
+	mpcli.AgentCmd.AddCommand(mpcli.NewKeysCmd("agent"))
 	mpcli.AgentCmd.AddCommand(mpcli.AgentDistribCmd)
 	mpcli.AgentCmd.AddCommand(mpcli.AgentTransactionCmd)
 	// Standard zone commands from tdns (list, reload, etc.)
