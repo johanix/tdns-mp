@@ -34,17 +34,35 @@ import (
 // RegisterShadowMpConfigParser installs the PostParseConfigHook that
 // runs the shadow parser. Call from tdnsmp.MainInit before delegating
 // to tdns.MainInit.
+//
+// The hook runs *during* tdns.ParseConfig, which is before
+// SetupLogging wires the file handler — any lg.Info/Warn issued from
+// the hook would be lost (NetBSD daemons typically discard stderr at
+// this stage). So the hook only parses and stashes the result on
+// conf; the actual comparison + log line is emitted later by
+// EmitShadowMpComparison, called from MainInit after SetupLogging.
 func (conf *Config) RegisterShadowMpConfigParser() {
 	conf.Config.Internal.PostParseConfigHook = func(c *tdns.Config, configMap map[string]interface{}) error {
 		shadow, err := parseShadowMultiProvider(configMap)
 		if err != nil {
-			lg.Warn("shadow MP parser: parse error, skipping comparison", "err", err)
+			conf.InternalMp.MpConfigShadowErr = err
 			return nil
 		}
 		conf.InternalMp.MpConfigShadow = shadow
-		compareShadowMultiProvider(shadow, c.MultiProvider)
 		return nil
 	}
+}
+
+// EmitShadowMpComparison emits the result of the shadow MP-config
+// parse. Call after tdns.MainInit returns — at that point SetupLogging
+// has wired the file handler so the log lines actually land in the
+// daemon's logfile.
+func (conf *Config) EmitShadowMpComparison() {
+	if err := conf.InternalMp.MpConfigShadowErr; err != nil {
+		lg.Warn("shadow MP parser: parse error, skipping comparison", "err", err)
+		return
+	}
+	compareShadowMultiProvider(conf.InternalMp.MpConfigShadow, conf.Config.MultiProvider)
 }
 
 // parseShadowMultiProvider decodes the multi-provider: subtree of the

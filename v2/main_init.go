@@ -75,6 +75,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
+	// SetupLogging has now wired the file handler — emit the shadow
+	// MP-config comparison result (stashed during ParseConfig).
+	conf.EmitShadowMpComparison()
 	wiredMultiProvider = conf.MultiProvider
 
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad

@@ -195,4 +195,9 @@ type InternalMpConf struct {
 	// verification and is currently unused by any runtime code. See
 	// shadow_mp_config.go.
 	MpConfigShadow *tdns.MultiProviderConf
+	// MpConfigShadowErr captures any parse failure from the shadow
+	// parser. Stashed from the PostParseConfigHook (which fires before
+	// SetupLogging wires the logfile) and reported later by
+	// EmitShadowMpComparison.
+	MpConfigShadowErr error
 }
