@@ -15,7 +15,7 @@
  * to the shadow, then delete the originals from tdns.
  *
  * This file owns nothing the rest of tdns-mp reads. It only writes
- * conf.InternalMp.MpConfigShadow for verification purposes.
+ * conf.InternalMp.MpConfig for verification purposes.
  */
 package tdnsmp
 
@@ -45,10 +45,10 @@ func (conf *Config) RegisterShadowMpConfigParser() {
 	conf.Config.Internal.PostParseConfigHook = func(c *tdns.Config, configMap map[string]interface{}) error {
 		shadow, err := parseShadowMultiProvider(configMap)
 		if err != nil {
-			conf.InternalMp.MpConfigShadowErr = err
+			conf.InternalMp.MpConfigParseErr = err
 			return nil
 		}
-		conf.InternalMp.MpConfigShadow = shadow
+		conf.InternalMp.MpConfig = shadow
 		return nil
 	}
 }
@@ -58,11 +58,11 @@ func (conf *Config) RegisterShadowMpConfigParser() {
 // has wired the file handler so the log lines actually land in the
 // daemon's logfile.
 func (conf *Config) EmitShadowMpComparison() {
-	if err := conf.InternalMp.MpConfigShadowErr; err != nil {
+	if err := conf.InternalMp.MpConfigParseErr; err != nil {
 		lg.Warn("shadow MP parser: parse error, skipping comparison", "err", err)
 		return
 	}
-	compareShadowMultiProvider(conf.InternalMp.MpConfigShadow, conf.Config.MultiProvider)
+	compareShadowMultiProvider(conf.InternalMp.MpConfig, conf.Config.MultiProvider)
 }
 
 // parseShadowMultiProvider decodes the multi-provider: subtree of the
