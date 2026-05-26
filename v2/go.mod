@@ -4,15 +4,17 @@ go 1.25.2
 
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/google/go-cmp v0.6.0
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/tdns-transport/v2 v2.0.0-20260427162659-70a56004d104
-	github.com/johanix/tdns/v2 v2.0.0-20260525144437-92a4d43b5b26
-	github.com/johanix/tdns/v2/cache v0.0.0-20260525144437-92a4d43b5b26
-	github.com/johanix/tdns/v2/cli v0.0.0-20260525144437-92a4d43b5b26
-	github.com/johanix/tdns/v2/core v0.0.0-20260525144437-92a4d43b5b26
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260525144437-92a4d43b5b26
+	github.com/johanix/tdns/v2 v2.0.0-20260526061513-71749a402cdd
+	github.com/johanix/tdns/v2/cache v0.0.0-20260526061513-71749a402cdd
+	github.com/johanix/tdns/v2/cli v0.0.0-20260526061513-71749a402cdd
+	github.com/johanix/tdns/v2/core v0.0.0-20260526061513-71749a402cdd
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260526061513-71749a402cdd
 	github.com/miekg/dns v1.1.72
+	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
@@ -40,7 +42,6 @@ require (
 	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
-	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect

@@ -64,6 +64,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Register MP config validators to run during tdns's ValidateConfig.
 	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
 
+	// Register the shadow MP-config parser (verification-only — does
+	// not yet replace any runtime accessor of conf.Config.MultiProvider).
+	conf.RegisterShadowMpConfigParser()
+
 	// Reset MPZoneNames before ParseZones re-collects them via the callback above
 	conf.InternalMp.MPZoneNames = nil
 

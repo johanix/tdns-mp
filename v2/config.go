@@ -189,4 +189,10 @@ type InternalMpConf struct {
 	AuditWebAuth          *AuditWebAuth
 	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
+
+	// MpConfigShadow is the tdns-mp-side parse of the multi-provider:
+	// config block. It runs in parallel with the tdns-side parse for
+	// verification and is currently unused by any runtime code. See
+	// shadow_mp_config.go.
+	MpConfigShadow *tdns.MultiProviderConf
 }
