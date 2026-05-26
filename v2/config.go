@@ -189,4 +189,17 @@ type InternalMpConf struct {
 	AuditWebAuth          *AuditWebAuth
 	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
+
+	// MpConfig is the tdns-mp-side parse of the multi-provider: config
+	// block. Today it runs in parallel with the tdns-side parse for
+	// verification (no runtime code reads it yet — accessors still go
+	// through conf.Config.MultiProvider). Named without "Shadow" so
+	// the future cutover only switches accessors, not field names.
+	// See shadow_mp_config.go.
+	MpConfig *tdns.MultiProviderConf
+	// MpConfigParseErr captures any parse failure from the shadow
+	// parser. Stashed from the PostParseConfigHook (which fires before
+	// SetupLogging wires the logfile) and reported later by
+	// EmitShadowMpComparison.
+	MpConfigParseErr error
 }
