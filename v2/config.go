@@ -22,6 +22,16 @@ type Config struct {
 	InternalMp InternalMpConf
 }
 
+// MpConfig returns the tdns-mp-side parse of the multi-provider
+// config. Post-cutover this becomes the runtime source of truth for
+// all MP config accessors; pre-cutover it is the shadow parse, kept
+// in lock-step with conf.Config.MultiProvider by
+// RegisterShadowMpConfigParser. Returns nil if ParseConfig has not
+// yet run.
+func (conf *Config) MpConfig() *tdns.MultiProviderConf {
+	return conf.InternalMp.MpConfig
+}
+
 // RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
 // closures to all MP zones that don't already have them. Called at
 // startup and after every zone reload (SIGHUP / "config reload-zones")
