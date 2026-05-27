@@ -19,16 +19,18 @@ import (
 	"github.com/miekg/dns"
 )
 
-// wiredMpConfig is set once from MainInit after config parse; EnsureMP
-// copies it onto each *MPState so lazy-created MPZoneData wrappers see it.
-// It is the package-level mirror of conf.InternalMp.MpConfig, exposed
-// via WiredMpConfig() for callers that do not have a *tdnsmp.Config in
-// hand (e.g. tdns-side code paths that should not depend on tdnsmp).
-var wiredMpConfig *tdns.MultiProviderConf
+// wiredMpConfig is set by RegisterMpConfigParser's hook during
+// tdns.ParseConfig (mirrored from conf.InternalMp.MpConfig at the
+// moment the parse completes). EnsureMP copies it onto each *MPState
+// so lazy-created MPZoneData wrappers see it. It is exposed via
+// WiredMpConfig() for callers that do not have a *tdnsmp.Config in
+// hand.
+var wiredMpConfig *MultiProviderConf
 
-// WiredMpConfig returns the MP config wired in by MainInit after config
-// parse. Returns nil before MainInit has run.
-func WiredMpConfig() *tdns.MultiProviderConf {
+// WiredMpConfig returns the MP config wired in by the config parser.
+// Returns nil before ParseConfig has run or when no multi-provider:
+// block is present in the config.
+func WiredMpConfig() *MultiProviderConf {
 	return wiredMpConfig
 }
 
@@ -59,7 +61,7 @@ func verifyMpConfigAccessors(conf *Config) error {
 type MPState struct {
 	CombinerData         *core.ConcurrentMap[string, OwnerData]
 	UpstreamData         *core.ConcurrentMap[string, OwnerData]
-	MultiProvider        *tdns.MultiProviderConf
+	MultiProvider        *MultiProviderConf
 	MPdata               *MPdata
 	AgentContributions   map[string]map[string]map[uint16]core.RRset
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error

@@ -8,16 +8,17 @@
  * conf.InternalMp.MpConfig and is the runtime source of truth for
  * MP config in tdns-mp (via conf.MpConfig() / WiredMpConfig()).
  *
- * Until the bite-9 struct migration completes, this parser still
- * decodes into tdns.MultiProviderConf — the type itself still lives
- * in tdns. Bite 9 moves the type into tdns-mp and deletes the
- * parallel parse on the tdns side.
+ * Decodes into tdnsmp.MultiProviderConf (defined in
+ * multi_provider_conf.go). The tdns side still has a parallel
+ * MultiProviderConf type and parse until Bite 9b of the cutover
+ * removes them.
  *
  * Historical context: this file started life as a "shadow" parser
  * that ran alongside tdns's own MP parse for verification. Bites
  * 2-7 of the MP config cutover migrated runtime accessors over to
  * read this parse; bite 8 deleted the verification machinery and
- * dropped the "shadow" naming.
+ * dropped the "shadow" naming; bite 9a moved the type definitions
+ * into tdns-mp so the parser no longer borrows the tdns type.
  */
 package tdnsmp
 
@@ -37,6 +38,10 @@ import (
 // delegating to tdns.MainInit so the hook is in place when
 // tdns.ParseConfig runs.
 //
+// The hook also assigns the wiredMpConfig package-level mirror so
+// EnsureMP and external WiredMpConfig() callers can read the parse
+// without a *tdnsmp.Config in hand.
+//
 // With SetupLogging now running before ParseConfig, the hook can
 // return parse errors directly — they propagate up through
 // tdns.ParseConfig and land in the logfile.
@@ -47,6 +52,7 @@ func (conf *Config) RegisterMpConfigParser() {
 			return fmt.Errorf("multi-provider config parse: %w", err)
 		}
 		conf.InternalMp.MpConfig = mp
+		wiredMpConfig = mp
 		return nil
 	}
 }
@@ -56,13 +62,13 @@ func (conf *Config) RegisterMpConfigParser() {
 // and option-string parsing. Returns nil, nil if no multi-provider:
 // section is present (legitimate for non-MP daemons, though tdns-mp
 // daemons normally require one).
-func parseMultiProvider(configMap map[string]interface{}) (*tdns.MultiProviderConf, error) {
+func parseMultiProvider(configMap map[string]interface{}) (*MultiProviderConf, error) {
 	raw, ok := configMap["multi-provider"]
 	if !ok || raw == nil {
 		return nil, nil
 	}
 
-	var mp tdns.MultiProviderConf
+	var mp MultiProviderConf
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  &mp,
@@ -82,7 +88,7 @@ func parseMultiProvider(configMap map[string]interface{}) (*tdns.MultiProviderCo
 
 // normalizeMultiProviderIdentities FQDN-normalizes every identity
 // field in the multi-provider block.
-func normalizeMultiProviderIdentities(mp *tdns.MultiProviderConf) {
+func normalizeMultiProviderIdentities(mp *MultiProviderConf) {
 	if mp.Identity != "" {
 		mp.Identity = dns.Fqdn(mp.Identity)
 	}
@@ -118,39 +124,39 @@ func normalizeMultiProviderIdentities(mp *tdns.MultiProviderConf) {
 // parseMultiProviderOptions decodes the string-list option fields
 // (combiner_options, signer_options, agent_options) into typed
 // option-set maps on the MultiProviderConf.
-func parseMultiProviderOptions(mp *tdns.MultiProviderConf) {
-	mp.CombinerOptions = map[tdns.CombinerOption]bool{}
+func parseMultiProviderOptions(mp *MultiProviderConf) {
+	mp.CombinerOptions = map[CombinerOption]bool{}
 	for _, raw := range mp.CombinerOptionsStrs {
 		opt := strings.ToLower(strings.TrimSpace(raw))
 		if opt == "" {
 			continue
 		}
-		if co, ok := tdns.StringToCombinerOption[opt]; ok {
+		if co, ok := StringToCombinerOption[opt]; ok {
 			mp.CombinerOptions[co] = true
 		}
 	}
-	if mp.AddSignature && !mp.CombinerOptions[tdns.CombinerOptAddSignature] {
-		mp.CombinerOptions[tdns.CombinerOptAddSignature] = true
+	if mp.AddSignature && !mp.CombinerOptions[CombinerOptAddSignature] {
+		mp.CombinerOptions[CombinerOptAddSignature] = true
 	}
 
-	mp.SignerOptions = map[tdns.SignerOption]bool{}
+	mp.SignerOptions = map[SignerOption]bool{}
 	for _, raw := range mp.SignerOptionsStrs {
 		opt := strings.ToLower(strings.TrimSpace(raw))
 		if opt == "" {
 			continue
 		}
-		if so, ok := tdns.StringToSignerOption[opt]; ok {
+		if so, ok := StringToSignerOption[opt]; ok {
 			mp.SignerOptions[so] = true
 		}
 	}
 
-	mp.AgentOptions = map[tdns.AgentOption]bool{}
+	mp.AgentOptions = map[AgentOption]bool{}
 	for _, raw := range mp.AgentOptionsStrs {
 		opt := strings.ToLower(strings.TrimSpace(raw))
 		if opt == "" {
 			continue
 		}
-		if ao, ok := tdns.StringToAgentOption[opt]; ok {
+		if ao, ok := StringToAgentOption[opt]; ok {
 			mp.AgentOptions[ao] = true
 		}
 	}

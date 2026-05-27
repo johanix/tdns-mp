@@ -77,7 +77,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
-	wiredMpConfig = conf.MultiProvider
+	// wiredMpConfig is set by RegisterMpConfigParser's hook during
+	// tdns.ParseConfig (inside conf.Config.MainInit above), so the
+	// two accessors should be live by the time we get here.
 	if err := verifyMpConfigAccessors(conf); err != nil {
 		return err
 	}
@@ -154,7 +156,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 }
 
 // initMPSigner performs signer-specific MP initialization.
-func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required when multi-provider.active is true")
@@ -287,7 +289,7 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 }
 
 // initMPCombiner performs combiner-specific MP initialization.
-func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required in config")
 	}
@@ -444,7 +446,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 // transport records) runs from StartMPAgent, after ZoneUpdaterEngine is
 // running — PublishUriRR/PublishAddrRR/etc. send on KeyDB.UpdateQ and
 // require a live consumer.
-func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required for agent role")
 	}
@@ -583,7 +585,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 // HsyncDB tables, and outbound-sync queues. Reuses the same MP
 // transport bridge configuration so the auditor participates in BEAT/
 // gossip exactly like an agent on the wire.
-func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required for auditor role")
 	}
@@ -678,7 +680,7 @@ func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
 }
 
 // buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
-func buildAgentChunkQueryEndpoint(mp *tdns.MultiProviderConf) string {
+func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if mp == nil {
 		return ""
 	}

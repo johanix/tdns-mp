@@ -250,12 +250,8 @@ var DebugAgentRegistryCmd = &cobra.Command{
 	Use:   "agentregistry",
 	Short: "Test the agent registry",
 	Run: func(cmd *cobra.Command, args []string) {
-		base := &tdns.Config{
-			MultiProvider: &tdns.MultiProviderConf{
-				Identity: "local",
-			},
-		}
-		conf := &tdnsmp.Config{Config: base}
+		conf := &tdnsmp.Config{Config: &tdns.Config{}}
+		conf.InternalMp.MpConfig = &tdnsmp.MultiProviderConf{Identity: "local"}
 		ar := conf.NewAgentRegistry()
 		ar.LocateInterval = 10
 		ar.S.Set("local", &Agent{

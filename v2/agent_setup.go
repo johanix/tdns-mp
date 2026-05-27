@@ -377,7 +377,7 @@ func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
 }
 
 // AgentJWKKeyPrep publishes a JWK record for the agent's JOSE/HPKE long-term public keys.
-func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *tdns.MultiProviderConf) error {
+func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *MultiProviderConf) error {
 	lgAgent.Info("publishing JWK record", "zone", zd.ZoneName, "name", publishname)
 
 	// Check if JWK publication is disabled
@@ -486,7 +486,7 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *td
 	return nil
 }
 
-func (agent *Agent) NewAgentSyncApiClient(localagent *tdns.MultiProviderConf) error {
+func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
 	if agent == nil {
 		return fmt.Errorf("agent is nil")
 	}

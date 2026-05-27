@@ -68,7 +68,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 		switch amp.Command {
 		case "config":
 			tmp := tdns.SanitizeForJSON(mp)
-			if p, ok := tmp.(*tdns.MultiProviderConf); ok && p != nil {
+			if p, ok := tmp.(*MultiProviderConf); ok && p != nil {
 				resp.AgentConfig = *p
 			}
 			resp.AgentConfig.Api.CertData = ""

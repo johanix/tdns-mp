@@ -26,7 +26,7 @@ type Config struct {
 // config. This is the runtime source of truth for all MP config
 // accessors. Returns nil if no multi-provider: block is present in
 // the config (or if ParseConfig has not yet run).
-func (conf *Config) MpConfig() *tdns.MultiProviderConf {
+func (conf *Config) MpConfig() *MultiProviderConf {
 	return conf.InternalMp.MpConfig
 }
 
@@ -204,7 +204,6 @@ type InternalMpConf struct {
 	// accessors read this via conf.MpConfig() and WiredMpConfig().
 	// Nil if no multi-provider: block is present.
 	//
-	// The underlying type still lives in tdns. Bite 9 of the MP
-	// config cutover moves it into tdns-mp and drops the tdns side.
-	MpConfig *tdns.MultiProviderConf
+	// Type defined in multi_provider_conf.go.
+	MpConfig *MultiProviderConf
 }
