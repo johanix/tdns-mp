@@ -216,18 +216,47 @@ shape sites all get handled within their owning bite where the
 function signature change is local — Bite 7 only catches the
 genuine `*tdns.Config` call sites that can't be locally converted.)
 
-### Bite 7: `*tdns.Config` call sites
-Whatever call sites in bites 2-6 still receive a `*tdns.Config`
-(rather than `*tdnsmp.Config`) at the time their bite is reached.
-For each, decide (a)/(b)/(c) from above and apply. Some may be in
-tdns-mp helper functions that should take `*tdnsmp.Config` to
-begin with.
+### Bite 7: `*tdns.Config` call sites (revised 2026-05-27)
+After the bite-6 review, the deferred-to-Bite-7 backlog turned out
+to split into two camps:
 
-**Estimated count: ~12-27 sites** depending on how many can be
-folded into bites 2-6 by changing local function signatures. The
-plan originally estimated ~12; the validated bare-shape count is
-27, but many of those will resolve naturally within their owning
-bite.
+**(7a) Convert in Bite 7 — change signatures (option (a)/(b)):**
+Three crypto-init helpers, all called from `tdnsmp.MainInit` with
+`conf.Config`. Change signature `*tdns.Config` → `*tdnsmp.Config`;
+body reads `conf.MpConfig()`. All callers are in MainInit *after*
+the shadow parser has run, so `conf.InternalMp.MpConfig` is
+populated.
+
+    combiner_crypto.go  InitCombinerCrypto  ( 3 sites)
+    signer_transport.go initSignerCrypto    ( 1 site)
+    main_init.go        initAgentCrypto     ( 1 site, but uses a
+                                              local `mp` so 1 edit)
+
+**(7b) Defer to Bite 9 — see review notes below:**
+- `config_validate.go` (18 sites). Validators are wired via
+  `tdns.PostValidateConfigHook`, which fires *during*
+  `tdns.ValidateConfig`, which runs *before* the
+  `PostParseConfigHook` that populates `conf.InternalMp.MpConfig`.
+  Switching them to `conf.MpConfig()` would read nil at validation
+  time. They correctly validate the tdns-side parse today; when
+  Bite 9 moves `MultiProviderConf` *into* tdns-mp, the validators
+  move with it and will validate the (then-only) tdns-mp struct.
+  No-op until then.
+- `keys_cmd.go` `getKeysPrivKeyPath` (2 sites). `LoadConfigForKeys`
+  does a plain `yaml.Unmarshal` into a bare `tdns.Config`; it does
+  NOT call `ParseConfig`, so the shadow parser never runs.
+  Switching to `conf.MpConfig()` would read nil. When Bite 9 moves
+  the struct, `LoadConfigForKeys` needs a focused YAML decoder
+  targeting `*tdnsmp.MultiProviderConf`, and `getKeysPrivKeyPath`
+  takes `*tdnsmp.Config` then.
+- `main_init.go` line 82 `wiredMpConfig = conf.MultiProvider`. The
+  literal bridge between the two structs. Goes away in Bite 9 when
+  there is no tdns-side parse to copy from.
+
+**Net Bite 7 scope after review: 5 sites in 3 files.**
+Each is a signature change plus a body swap to `conf.MpConfig()`,
+plus updating the 3 callers in MainInit to pass `conf` instead of
+`conf.Config`.
 
 ### Bite 8: delete the shadow comparison
 Once all accessors are cut over, the comparison in

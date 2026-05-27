@@ -177,7 +177,7 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var signerPayloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initSignerCrypto(conf.Config)
+		pc, err := initSignerCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize signer crypto: %w", err)
 		}
@@ -321,7 +321,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	var secureWrapper *transport.SecurePayloadWrapper
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
 		var err error
-		secureWrapper, err = InitCombinerCrypto(conf.Config)
+		secureWrapper, err = InitCombinerCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 		}
@@ -513,7 +513,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var payloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initAgentCrypto(conf.Config)
+		pc, err := initAgentCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize agent crypto: %w", err)
 		}
@@ -628,7 +628,7 @@ func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
 
 	var payloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initAgentCrypto(conf.Config)
+		pc, err := initAgentCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize auditor crypto: %w", err)
 		}
@@ -707,8 +707,8 @@ func buildAgentChunkQueryEndpoint(mp *tdns.MultiProviderConf) string {
 
 // initAgentCrypto initializes PayloadCrypto for the agent from MultiProviderConf.
 // Loads the agent's JOSE private key and the combiner's public key (if configured).
-func initAgentCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
-	mp := conf.MultiProvider
+func initAgentCrypto(conf *Config) (*transport.PayloadCrypto, error) {
+	mp := conf.MpConfig()
 	if mp == nil {
 		return nil, fmt.Errorf("multi-provider config is not set")
 	}
