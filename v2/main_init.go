@@ -64,8 +64,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Register MP config validators to run during tdns's ValidateConfig.
 	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
 
-	// Register the shadow MP-config parser (verification-only — does
-	// not yet replace any runtime accessor of conf.Config.MultiProvider).
+	// Register the shadow MP-config parser. After bite 6 of the MP
+	// config cutover, most runtime accessors read conf.MpConfig() (the
+	// shadow parse); shadow comparison stays until bite 8.
 	conf.RegisterShadowMpConfigParser()
 
 	// Reset MPZoneNames before ParseZones re-collects them via the callback above
@@ -132,7 +133,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return fmt.Errorf("error initializing KeyDB: %v", err)
 	}
 
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 	if mp == nil {
 		return nil
 	}

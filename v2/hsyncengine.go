@@ -17,7 +17,7 @@ import (
 var lgConnRetryEngine = tdns.Logger("conn-retry")
 
 func (conf *Config) HsyncEngine(ctx context.Context, msgQs *MsgQs) {
-	ourId := AgentId(conf.Config.MultiProvider.Identity)
+	ourId := AgentId(conf.MpConfig().Identity)
 
 	helloQ := msgQs.Hello
 	heartbeatQ := msgQs.Beat

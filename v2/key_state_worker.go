@@ -224,7 +224,7 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 		}
 
 		// Skip MP zones where we are not a signer
-		shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
+		shouldSign, _ := mpzd.weAreASigner(conf.MpConfig())
 		if !shouldSign {
 			continue
 		}

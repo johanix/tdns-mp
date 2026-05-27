@@ -39,7 +39,7 @@ func (conf *Config) MpConfig() *tdns.MultiProviderConf {
 func (conf *Config) RegisterMPRefreshCallbacks() {
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 	if conf.InternalMp.refreshRegistered == nil {
 		conf.InternalMp.refreshRegistered = make(map[string]bool)
 	}
@@ -201,11 +201,10 @@ type InternalMpConf struct {
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
 
 	// MpConfig is the tdns-mp-side parse of the multi-provider: config
-	// block. Today it runs in parallel with the tdns-side parse for
-	// verification (no runtime code reads it yet — accessors still go
-	// through conf.Config.MultiProvider). Named without "Shadow" so
-	// the future cutover only switches accessors, not field names.
-	// See shadow_mp_config.go.
+	// block. After the MP config cutover (bites 2-6), runtime accessors
+	// read this via conf.MpConfig() and tdnsmp.WiredMpConfig(). The
+	// shadow comparison in shadow_mp_config.go still runs against
+	// conf.Config.MultiProvider until bite 8.
 	MpConfig *tdns.MultiProviderConf
 	// MpConfigParseErr captures any parse failure from the shadow
 	// parser. Stashed from the PostParseConfigHook (which fires before
