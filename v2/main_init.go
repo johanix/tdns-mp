@@ -64,10 +64,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Register MP config validators to run during tdns's ValidateConfig.
 	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
 
-	// Register the shadow MP-config parser. After bite 6 of the MP
-	// config cutover, most runtime accessors read conf.MpConfig() (the
-	// shadow parse); shadow comparison stays until bite 8.
-	conf.RegisterShadowMpConfigParser()
+	// Register the MP-config parser. Fires from tdns.ParseConfig's
+	// PostParseConfigHook and stashes the parse on
+	// conf.InternalMp.MpConfig — the runtime source of truth for MP
+	// config (via conf.MpConfig() / WiredMpConfig()).
+	conf.RegisterMpConfigParser()
 
 	// Reset MPZoneNames before ParseZones re-collects them via the callback above
 	conf.InternalMp.MPZoneNames = nil
@@ -76,9 +77,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
-	// SetupLogging has now wired the file handler — emit the shadow
-	// MP-config comparison result (stashed during ParseConfig).
-	conf.EmitShadowMpComparison()
 	wiredMpConfig = conf.MultiProvider
 	if err := verifyMpConfigAccessors(conf); err != nil {
 		return err

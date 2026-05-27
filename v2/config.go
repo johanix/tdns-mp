@@ -23,11 +23,9 @@ type Config struct {
 }
 
 // MpConfig returns the tdns-mp-side parse of the multi-provider
-// config. Post-cutover this becomes the runtime source of truth for
-// all MP config accessors; pre-cutover it is the shadow parse, kept
-// in lock-step with conf.Config.MultiProvider by
-// RegisterShadowMpConfigParser. Returns nil if ParseConfig has not
-// yet run.
+// config. This is the runtime source of truth for all MP config
+// accessors. Returns nil if no multi-provider: block is present in
+// the config (or if ParseConfig has not yet run).
 func (conf *Config) MpConfig() *tdns.MultiProviderConf {
 	return conf.InternalMp.MpConfig
 }
@@ -201,14 +199,12 @@ type InternalMpConf struct {
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
 
 	// MpConfig is the tdns-mp-side parse of the multi-provider: config
-	// block. After the MP config cutover (bites 2-6), runtime accessors
-	// read this via conf.MpConfig() and tdnsmp.WiredMpConfig(). The
-	// shadow comparison in shadow_mp_config.go still runs against
-	// conf.Config.MultiProvider until bite 8.
+	// block, populated by RegisterMpConfigParser (registered as
+	// PostParseConfigHook on the underlying tdns.Config). Runtime
+	// accessors read this via conf.MpConfig() and WiredMpConfig().
+	// Nil if no multi-provider: block is present.
+	//
+	// The underlying type still lives in tdns. Bite 9 of the MP
+	// config cutover moves it into tdns-mp and drops the tdns side.
 	MpConfig *tdns.MultiProviderConf
-	// MpConfigParseErr captures any parse failure from the shadow
-	// parser. Stashed from the PostParseConfigHook (which fires before
-	// SetupLogging wires the logfile) and reported later by
-	// EmitShadowMpComparison.
-	MpConfigParseErr error
 }
