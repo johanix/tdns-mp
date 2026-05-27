@@ -95,11 +95,12 @@ func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 }
 
 func (conf *Config) NewAgentRegistry() *AgentRegistry {
-	if conf.Config.MultiProvider == nil {
+	mp := conf.MpConfig()
+	if mp == nil {
 		lgAgent.Error("NewAgentRegistry: multi-provider config is nil")
 		return nil
 	}
-	if conf.Config.MultiProvider.Identity == "" {
+	if mp.Identity == "" {
 		lgAgent.Error("identity is empty")
 		return nil
 	}
@@ -116,11 +117,11 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		// S:              cmap.New[*Agent](),
 		S:                    core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:         make(map[ZoneName][]AgentId),
-		LocalAgent:           conf.Config.MultiProvider,
+		LocalAgent:           mp,
 		LocateInterval:       li,
 		helloContexts:        make(map[AgentId]context.CancelFunc),
-		ProviderGroupManager: NewProviderGroupManager(conf.Config.MultiProvider.Identity),
-		GossipStateTable:     NewGossipStateTable(conf.Config.MultiProvider.Identity),
+		ProviderGroupManager: NewProviderGroupManager(mp.Identity),
+		GossipStateTable:     NewGossipStateTable(mp.Identity),
 	}
 }
 
