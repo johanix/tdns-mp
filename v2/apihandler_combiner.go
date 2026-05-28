@@ -173,23 +173,23 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			// Only apply protected-namespace checks to remote agents.
 			var protectedNamespaces []string
-			if conf.MultiProvider != nil {
+			if mp := conf.MpConfig(); mp != nil {
 				isLocal := false
-				for _, a := range conf.MultiProvider.Agents {
+				for _, a := range mp.Agents {
 					if a != nil && a.Identity == rec.SenderID {
 						isLocal = true
 						break
 					}
 				}
 				if !isLocal {
-					protectedNamespaces = conf.MultiProvider.ProtectedNamespaces
+					protectedNamespaces = mp.ProtectedNamespaces
 				}
 			}
 
 			tm := conf.InternalMp.MPTransport
 			apiLocalAgents := make(map[string]bool)
-			if conf.MultiProvider != nil {
-				for _, a := range conf.MultiProvider.Agents {
+			if mp := conf.MpConfig(); mp != nil {
+				for _, a := range mp.Agents {
 					if a != nil && a.Identity != "" {
 						apiLocalAgents[a.Identity] = true
 					}

@@ -66,7 +66,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		func() { CombinerMsgHandler(ctx, conf, conf.InternalMp.MsgQs, protectedNS, errJournal) })
 
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 	if mp != nil && len(mp.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
 		if err != nil {

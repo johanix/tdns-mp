@@ -24,30 +24,31 @@ import (
 // so that it shows up in "agent peer list" and can be pinged via "agent peer ping".
 // Mirrors InitializeCombinerAsPeer for the signer role.
 func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
-	if conf.Config.MultiProvider == nil || conf.Config.MultiProvider.Signer == nil {
+	mp := conf.MpConfig()
+	if mp == nil || mp.Signer == nil {
 		lgSigner.Debug("no signer configured, skipping peer registration")
 		return nil
 	}
 
-	if conf.Config.MultiProvider.Signer.Address == "" {
+	if mp.Signer.Address == "" {
 		lgSigner.Debug("signer address not configured, skipping peer registration")
 		return nil
 	}
 
 	// Parse signer address
-	host, portStr, err := net.SplitHostPort(conf.Config.MultiProvider.Signer.Address)
+	host, portStr, err := net.SplitHostPort(mp.Signer.Address)
 	if err != nil {
-		return fmt.Errorf("invalid signer address %q: %w", conf.Config.MultiProvider.Signer.Address, err)
+		return fmt.Errorf("invalid signer address %q: %w", mp.Signer.Address, err)
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("invalid port in signer address %q", conf.Config.MultiProvider.Signer.Address)
+		return fmt.Errorf("invalid port in signer address %q", mp.Signer.Address)
 	}
 
 	signerID := AgentId("signer")
-	if conf.Config.MultiProvider.Signer.Identity != "" {
-		signerID = AgentId(dns.Fqdn(conf.Config.MultiProvider.Signer.Identity))
+	if mp.Signer.Identity != "" {
+		signerID = AgentId(dns.Fqdn(mp.Signer.Identity))
 		lgSigner.Debug("using configured signer identity", "identity", signerID)
 	} else {
 		lgSigner.Warn("no signer identity configured, using default 'signer'")
@@ -79,10 +80,10 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 
 	// Register in AgentRegistry
 	ar.S.Set(signerID, signerAgent)
-	lgSigner.Info("registered signer as virtual peer", "identity", signerID, "address", conf.Config.MultiProvider.Signer.Address)
+	lgSigner.Info("registered signer as virtual peer", "identity", signerID, "address", mp.Signer.Address)
 
 	// Load and register signer's public key for encrypted communication
-	if conf.Config.MultiProvider.Signer.LongTermJosePubKey == "" {
+	if mp.Signer.LongTermJosePubKey == "" {
 		return fmt.Errorf("signer configured but multi-provider.signer.long_term_jose_pub_key is not set - encrypted communication to signer is mandatory")
 	}
 
@@ -95,20 +96,20 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 		return fmt.Errorf("PayloadCrypto or Backend not initialized - cannot load signer public key")
 	}
 
-	signerPubKeyData, err := os.ReadFile(conf.Config.MultiProvider.Signer.LongTermJosePubKey)
+	signerPubKeyData, err := os.ReadFile(mp.Signer.LongTermJosePubKey)
 	if err != nil {
-		return fmt.Errorf("failed to read signer public key from %s: %w", conf.Config.MultiProvider.Signer.LongTermJosePubKey, err)
+		return fmt.Errorf("failed to read signer public key from %s: %w", mp.Signer.LongTermJosePubKey, err)
 	}
 
 	signerPubKey, err := payloadCrypto.Backend.ParsePublicKey(signerPubKeyData)
 	if err != nil {
-		return fmt.Errorf("failed to parse signer public key from %s: %w", conf.Config.MultiProvider.Signer.LongTermJosePubKey, err)
+		return fmt.Errorf("failed to parse signer public key from %s: %w", mp.Signer.LongTermJosePubKey, err)
 	}
 
 	payloadCrypto.AddPeerKey(string(signerID), signerPubKey)
 	payloadCrypto.AddPeerVerificationKey(string(signerID), signerPubKey)
 
-	lgSigner.Info("loaded signer public key", "path", conf.Config.MultiProvider.Signer.LongTermJosePubKey)
+	lgSigner.Info("loaded signer public key", "path", mp.Signer.LongTermJosePubKey)
 
 	// Perform initial connectivity check
 	if err := performSignerConnectivityCheck(conf); err != nil {
@@ -126,19 +127,21 @@ func performSignerConnectivityCheck(conf *Config) error {
 		return fmt.Errorf("TransportManager not available")
 	}
 
-	host, portStr, err := net.SplitHostPort(conf.Config.MultiProvider.Signer.Address)
+	mp := conf.MpConfig()
+
+	host, portStr, err := net.SplitHostPort(mp.Signer.Address)
 	if err != nil {
-		return fmt.Errorf("invalid signer address %q: %w", conf.Config.MultiProvider.Signer.Address, err)
+		return fmt.Errorf("invalid signer address %q: %w", mp.Signer.Address, err)
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("invalid port in signer address %q", conf.Config.MultiProvider.Signer.Address)
+		return fmt.Errorf("invalid port in signer address %q", mp.Signer.Address)
 	}
 
 	signerID := "signer"
-	if conf.Config.MultiProvider.Signer.Identity != "" {
-		signerID = dns.Fqdn(conf.Config.MultiProvider.Signer.Identity)
+	if mp.Signer.Identity != "" {
+		signerID = dns.Fqdn(mp.Signer.Identity)
 	}
 	peer := transport.NewPeer(signerID)
 	peer.SetDiscoveryAddress(&transport.Address{

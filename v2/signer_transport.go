@@ -15,13 +15,12 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	"github.com/johanix/tdns-transport/v2/transport"
-	tdns "github.com/johanix/tdns/v2"
 )
 
 // initSignerCrypto initializes PayloadCrypto for the signer from MultiProviderConf.
 // Loads the signer's JOSE private key and the agent's public key (if configured).
-func initSignerCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
-	mp := conf.MultiProvider
+func initSignerCrypto(conf *Config) (*transport.PayloadCrypto, error) {
+	mp := conf.MpConfig()
 	if mp == nil {
 		return nil, fmt.Errorf("multi-provider config is not set")
 	}

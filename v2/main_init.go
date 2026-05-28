@@ -64,6 +64,12 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Register MP config validators to run during tdns's ValidateConfig.
 	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
 
+	// Register the MP-config parser. Fires from tdns.ParseConfig's
+	// PostParseConfigHook and stashes the parse on
+	// conf.InternalMp.MpConfig — the runtime source of truth for MP
+	// config (via conf.MpConfig() / WiredMpConfig()).
+	conf.RegisterMpConfigParser()
+
 	// Reset MPZoneNames before ParseZones re-collects them via the callback above
 	conf.InternalMp.MPZoneNames = nil
 
@@ -71,7 +77,12 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
-	wiredMultiProvider = conf.MultiProvider
+	// wiredMpConfig is set by RegisterMpConfigParser's hook during
+	// tdns.ParseConfig (inside conf.Config.MainInit above), so the
+	// two accessors should be live by the time we get here.
+	if err := verifyMpConfigAccessors(conf); err != nil {
+		return err
+	}
 
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
 	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
@@ -122,7 +133,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		return fmt.Errorf("error initializing KeyDB: %v", err)
 	}
 
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 	if mp == nil {
 		return nil
 	}
@@ -145,7 +156,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 }
 
 // initMPSigner performs signer-specific MP initialization.
-func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required when multi-provider.active is true")
@@ -166,7 +177,7 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var signerPayloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initSignerCrypto(conf.Config)
+		pc, err := initSignerCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize signer crypto: %w", err)
 		}
@@ -278,7 +289,7 @@ func (conf *Config) initMPSigner(mp *tdns.MultiProviderConf) error {
 }
 
 // initMPCombiner performs combiner-specific MP initialization.
-func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required in config")
 	}
@@ -310,7 +321,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 	var secureWrapper *transport.SecurePayloadWrapper
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
 		var err error
-		secureWrapper, err = InitCombinerCrypto(conf.Config)
+		secureWrapper, err = InitCombinerCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 		}
@@ -435,7 +446,7 @@ func (conf *Config) initMPCombiner(mp *tdns.MultiProviderConf) error {
 // transport records) runs from StartMPAgent, after ZoneUpdaterEngine is
 // running — PublishUriRR/PublishAddrRR/etc. send on KeyDB.UpdateQ and
 // require a live consumer.
-func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required for agent role")
 	}
@@ -502,7 +513,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var payloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initAgentCrypto(conf.Config)
+		pc, err := initAgentCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize agent crypto: %w", err)
 		}
@@ -574,7 +585,7 @@ func (conf *Config) initMPAgent(mp *tdns.MultiProviderConf) error {
 // HsyncDB tables, and outbound-sync queues. Reuses the same MP
 // transport bridge configuration so the auditor participates in BEAT/
 // gossip exactly like an agent on the wire.
-func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
+func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	if mp.Identity == "" {
 		return fmt.Errorf("multi-provider.identity is required for auditor role")
 	}
@@ -617,7 +628,7 @@ func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
 
 	var payloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initAgentCrypto(conf.Config)
+		pc, err := initAgentCrypto(conf)
 		if err != nil {
 			return fmt.Errorf("failed to initialize auditor crypto: %w", err)
 		}
@@ -669,7 +680,7 @@ func (conf *Config) initMPAuditor(mp *tdns.MultiProviderConf) error {
 }
 
 // buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
-func buildAgentChunkQueryEndpoint(mp *tdns.MultiProviderConf) string {
+func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if mp == nil {
 		return ""
 	}
@@ -696,8 +707,8 @@ func buildAgentChunkQueryEndpoint(mp *tdns.MultiProviderConf) string {
 
 // initAgentCrypto initializes PayloadCrypto for the agent from MultiProviderConf.
 // Loads the agent's JOSE private key and the combiner's public key (if configured).
-func initAgentCrypto(conf *tdns.Config) (*transport.PayloadCrypto, error) {
-	mp := conf.MultiProvider
+func initAgentCrypto(conf *Config) (*transport.PayloadCrypto, error) {
+	mp := conf.MpConfig()
 	if mp == nil {
 		return nil, fmt.Errorf("multi-provider config is not set")
 	}

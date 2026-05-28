@@ -152,7 +152,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// peers. Auditors must accept these; refusing them would break
 	// the protocol's expectation that every HSYNC3 member is
 	// reachable.
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 	if mp != nil && len(mp.Api.Addresses.Listen) > 0 {
 		syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 		if err != nil {

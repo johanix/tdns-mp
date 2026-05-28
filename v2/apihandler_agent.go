@@ -32,9 +32,10 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 
 		lgApi.Debug("received /agent request", "cmd", amp.Command, "from", r.RemoteAddr)
 
+		mp := conf.MpConfig()
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
-			Identity: AgentId(conf.Config.MultiProvider.Identity),
+			Identity: AgentId(mp.Identity),
 		}
 
 		defer func() {
@@ -66,8 +67,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 
 		switch amp.Command {
 		case "config":
-			tmp := tdns.SanitizeForJSON(conf.Config.MultiProvider)
-			if p, ok := tmp.(*tdns.MultiProviderConf); ok && p != nil {
+			tmp := tdns.SanitizeForJSON(mp)
+			if p, ok := tmp.(*MultiProviderConf); ok && p != nil {
 				resp.AgentConfig = *p
 			}
 			resp.AgentConfig.Api.CertData = ""
@@ -157,7 +158,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
-				AgentId: AgentId(conf.Config.MultiProvider.Identity),
+				AgentId: AgentId(mp.Identity),
 				RRs:     parsedRRs,
 				RRsets:  make(map[uint16]core.RRset),
 			}
@@ -186,7 +187,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			// would re-include them in a REPLACE and fight the
 			// in-flight delete. Filter those out here so the REPLACE
 			// reflects what we actually want the combiner to hold.
-			selfID := AgentId(conf.Config.MultiProvider.Identity)
+			selfID := AgentId(mp.Identity)
 			zdr := conf.InternalMp.ZoneDataRepo
 			currentByType := make(map[uint16][]dns.RR)
 			if zdr != nil {
@@ -284,7 +285,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			select {
 			case conf.InternalMp.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.Config.MultiProvider.Identity),
+				AgentId:    AgentId(mp.Identity),
 				UpdateType: "local",
 				Update:     zu,
 				Force:      force,
@@ -407,7 +408,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				return
 			}
 
-			myIdentity := AgentId(conf.Config.MultiProvider.Identity)
+			myIdentity := AgentId(mp.Identity)
 			helloMsg := &AgentHelloPost{
 				MessageType: AgentMsgHello,
 				MyIdentity:  myIdentity,
@@ -548,7 +549,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 							amp.Zone, pg.GroupHash[:8])
 						return
 					}
-					localID := conf.Config.MultiProvider.Identity
+					localID := mp.Identity
 					weVote := false
 					for _, m := range pg.VotingMembers {
 						if m == localID {
@@ -775,10 +776,11 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		mp := conf.MpConfig()
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
 			Msg:      "Hi there! Using debug commands are we?",
-			Identity: AgentId(conf.Config.MultiProvider.Identity),
+			Identity: AgentId(mp.Identity),
 		}
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -1095,7 +1097,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{
-				SenderID:       conf.Config.MultiProvider.Identity,
+				SenderID:       mp.Identity,
 				Zone:           string(amp.Zone),
 				SyncType:       transport.SyncTypeNS, // Default to NS, could be detected from RRs
 				Records:        groupRRStringsByOwner(amp.RRs),

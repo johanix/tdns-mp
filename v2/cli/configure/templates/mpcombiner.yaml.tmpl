@@ -20,11 +20,11 @@ multi-provider:
 
    # Optional HTTPS sync API (alternative to NOTIFY+CHUNK).
    # Disabled by default — DNS transport is the primary mechanism.
-   # sync_api:
+   # syncapi:
    #    addresses:
    #       listen:     [ 127.0.0.1:8992 ]
-   #    cert_file:     {{.Paths.CombinerCert}}
-   #    key_file:      {{.Paths.CombinerKey}}
+   #    certfile:      {{.Paths.CombinerCert}}
+   #    keyfile:       {{.Paths.CombinerKey}}
 
 service:
    name:           TDNS-MPCOMBINER

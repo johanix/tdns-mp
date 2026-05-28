@@ -265,7 +265,7 @@ type AgentRegistry struct {
 	RegularS              map[AgentId]*Agent
 	RemoteAgents          map[ZoneName][]AgentId
 	mu                    sync.RWMutex
-	LocalAgent            *tdns.MultiProviderConf
+	LocalAgent            *MultiProviderConf
 	LocateInterval        int
 	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *transport.TransportManager
@@ -432,7 +432,7 @@ type AgentMgmtResponse struct {
 	Agents         []*Agent
 	ZoneAgentData  *ZoneAgentData
 	HsyncRRs       []string
-	AgentConfig    tdns.MultiProviderConf
+	AgentConfig    MultiProviderConf
 	RfiType        string
 	RfiResponse    map[AgentId]*RfiData
 	AgentRegistry  *AgentRegistry

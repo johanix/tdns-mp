@@ -19,7 +19,6 @@ import (
 	"net"
 	"path/filepath"
 
-	cfg "github.com/johanix/tdns/v2/cli/configure"
 	"gopkg.in/yaml.v3"
 )
 
@@ -124,7 +123,7 @@ func hostOnly(hostPort string) string {
 }
 
 func parseAgentFile(path string, out *AgentValues, jose, cert, apiAddr *string) error {
-	content, err := cfg.ReadFileIfExists(path)
+	content, err := ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}
@@ -148,7 +147,7 @@ func parseAgentFile(path string, out *AgentValues, jose, cert, apiAddr *string) 
 }
 
 func parseSignerFile(path string, out *SignerValues) error {
-	content, err := cfg.ReadFileIfExists(path)
+	content, err := ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}
@@ -165,7 +164,7 @@ func parseSignerFile(path string, out *SignerValues) error {
 }
 
 func parseCombinerFile(path string, out *CombinerValues) error {
-	content, err := cfg.ReadFileIfExists(path)
+	content, err := ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}
@@ -182,7 +181,7 @@ func parseCombinerFile(path string, out *CombinerValues) error {
 }
 
 func parseAuditorFile(path string, out *AuditorValues) error {
-	content, err := cfg.ReadFileIfExists(path)
+	content, err := ReadFileIfExists(path)
 	if err != nil {
 		return err
 	}

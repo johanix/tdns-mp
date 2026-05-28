@@ -19,7 +19,6 @@ import (
 	"net"
 	"strings"
 
-	cfg "github.com/johanix/tdns/v2/cli/configure"
 	"github.com/miekg/dns"
 )
 
@@ -49,19 +48,19 @@ const (
 
 // runInterview walks the minimum prompt set. `current` seeds
 // defaults; on first run pass a zero CoordinatedValues.
-func runInterview(p *cfg.Prompter, current CoordinatedValues) CoordinatedValues {
+func runInterview(p *Prompter, current CoordinatedValues) CoordinatedValues {
 	out := current
 
 	fmt.Fprintln(p.Out, "\n=== Global ===")
-	out.Global.KeysDir = p.Ask("keys directory", cfg.OrDefault(current.Global.KeysDir, defaultKeysDir), cfg.AbsDir)
-	out.Global.CertsDir = p.Ask("certs directory", cfg.OrDefault(current.Global.CertsDir, defaultCertsDir), cfg.AbsDir)
-	out.Global.PublicIP = p.Ask("public IP (advertised in certs, mpcli base URLs, example zone notify/primary)", cfg.OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
+	out.Global.KeysDir = p.Ask("keys directory", OrDefault(current.Global.KeysDir, defaultKeysDir), AbsDir)
+	out.Global.CertsDir = p.Ask("certs directory", OrDefault(current.Global.CertsDir, defaultCertsDir), AbsDir)
+	out.Global.PublicIP = p.Ask("public IP (advertised in certs, mpcli base URLs, example zone notify/primary)", OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
 
 	// InternalIP is what each role binds and what the roles dial each other on.
 	// On a same-host deployment 127.0.0.1 is correct; on AWS EC2 / multi-host
 	// setups the operator must supply a private IP that is actually on the
 	// local interface (the public IP often is not).
-	internalSeed := cfg.OrDefault(current.Global.InternalIP, defaultInternalIP)
+	internalSeed := OrDefault(current.Global.InternalIP, defaultInternalIP)
 	out.Global.InternalIP = p.Ask("internal IP (bind address + inter-role dial target; 127.0.0.1 for single-host)", internalSeed, ipLiteral)
 
 	fmt.Fprintln(p.Out, "\n=== Identities ===")
@@ -148,7 +147,7 @@ func parseHostPortList(s string) []string {
 // listen addresses for binds). Users who want a hostname can edit
 // the generated configs afterwards.
 func ipLiteral(s string) error {
-	if err := cfg.NonEmpty("IP address")(s); err != nil {
+	if err := NonEmpty("IP address")(s); err != nil {
 		return err
 	}
 	if net.ParseIP(s) == nil {
