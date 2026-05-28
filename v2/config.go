@@ -37,7 +37,6 @@ func (conf *Config) MpConfig() *MultiProviderConf {
 func (conf *Config) RegisterMPRefreshCallbacks() {
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
-	mp := conf.MpConfig()
 	if conf.InternalMp.refreshRegistered == nil {
 		conf.InternalMp.refreshRegistered = make(map[string]bool)
 	}
@@ -54,10 +53,14 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 			zd.SyncQ = conf.InternalMp.SyncQ
 		}
 		conf.InternalMp.refreshRegistered[zoneName] = true
+		// The closure looks up conf.MpConfig() at invocation rather than
+		// capturing the current pointer, so PostParseConfigHook can
+		// replace the parsed MultiProviderConf on reload (SIGHUP) without
+		// leaving these callbacks pointing at a stale copy.
 		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
 			func(zd, new_zd *tdns.ZoneData) {
 				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
-					mpzd.MPPreRefresh(new_zd, tm, msgQs, mp)
+					mpzd.MPPreRefresh(new_zd, tm, msgQs, conf.MpConfig())
 				}
 			})
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
