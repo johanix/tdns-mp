@@ -77,7 +77,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 
 	// Phase B: persistent event log + in-memory audit state.
 	stateManager := NewAuditStateManager()
-	stateManager.LocalIdentity = conf.Config.LocalIdentity()
+	stateManager.LocalIdentity = conf.MpConfig().Identity
 	conf.InternalMp.AuditStateManager = stateManager
 	ar := conf.InternalMp.AgentRegistry
 	if ar != nil {
