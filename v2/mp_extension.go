@@ -12,6 +12,7 @@ package tdnsmp
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -25,13 +26,18 @@ import (
 // so lazy-created MPZoneData wrappers see it. It is exposed via
 // WiredMpConfig() for callers that do not have a *tdnsmp.Config in
 // hand.
-var wiredMpConfig *MultiProviderConf
+//
+// Concurrency: ParseConfig runs again on SIGHUP / "config reload-zones"
+// while runtime goroutines are reading wiredMpConfig. Use an atomic
+// pointer so writes during reload don't race with reads from those
+// goroutines.
+var wiredMpConfig atomic.Pointer[MultiProviderConf]
 
 // WiredMpConfig returns the MP config wired in by the config parser.
 // Returns nil before ParseConfig has run or when no multi-provider:
 // block is present in the config.
 func WiredMpConfig() *MultiProviderConf {
-	return wiredMpConfig
+	return wiredMpConfig.Load()
 }
 
 // verifyMpConfigAccessors sanity-checks the two MpConfig accessors
@@ -82,7 +88,7 @@ func (mpzd *MPZoneData) EnsureMP() {
 		mpzd.MP = &MPState{}
 	}
 	if mpzd.MP.MultiProvider == nil {
-		mpzd.MP.MultiProvider = wiredMpConfig
+		mpzd.MP.MultiProvider = wiredMpConfig.Load()
 	}
 	if mpzd.MPOptions == nil {
 		mpzd.MPOptions = make(map[tdns.ZoneOption]bool)

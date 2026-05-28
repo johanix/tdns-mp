@@ -52,7 +52,7 @@ func (conf *Config) RegisterMpConfigParser() {
 			return fmt.Errorf("multi-provider config parse: %w", err)
 		}
 		conf.InternalMp.MpConfig = mp
-		wiredMpConfig = mp
+		wiredMpConfig.Store(mp)
 		return nil
 	}
 }
@@ -102,6 +102,9 @@ func normalizeMultiProviderIdentities(mp *MultiProviderConf) {
 		mp.Signer.Identity = dns.Fqdn(mp.Signer.Identity)
 	}
 	for i, p := range mp.AuthorizedPeers {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
 		mp.AuthorizedPeers[i] = dns.Fqdn(p)
 	}
 	for _, peer := range mp.Peers {
@@ -116,6 +119,9 @@ func normalizeMultiProviderIdentities(mp *MultiProviderConf) {
 	}
 	if mp.Role == "combiner" {
 		for i, ns := range mp.ProtectedNamespaces {
+			if strings.TrimSpace(ns) == "" {
+				continue
+			}
 			mp.ProtectedNamespaces[i] = dns.Fqdn(ns)
 		}
 	}
