@@ -46,13 +46,16 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 }
 
 // ValidateAgentNameservers ensures agent.local.nameservers are
-// non-empty and outside the agent autozone (no glue). Each entry
-// is normalized to FQDN in place.
+// non-empty and normalizes each entry to FQDN in place. These names
+// become the RDATA of the autozone NS RRset. In-bailiwick names are
+// allowed — in particular the agent's own dnsengine (dns.<identity>),
+// which is the natural in-bailiwick primary: publishDnsTransport
+// publishes A/AAAA for that name into the autozone, so the required
+// glue is present.
 func ValidateAgentNameservers(mp *MultiProviderConf) error {
 	if mp.Role != "agent" || len(mp.Local.Nameservers) == 0 {
 		return nil
 	}
-	zoneFqdn := dns.Fqdn(mp.Identity)
 	for i, ns := range mp.Local.Nameservers {
 		ns = strings.TrimSpace(ns)
 		if ns == "" {
@@ -61,9 +64,6 @@ func ValidateAgentNameservers(mp *MultiProviderConf) error {
 		nsFqdn := dns.Fqdn(ns)
 		if nsFqdn == "." {
 			return fmt.Errorf("agent.local.nameservers: empty entry")
-		}
-		if dns.IsSubDomain(zoneFqdn, nsFqdn) {
-			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, mp.Identity)
 		}
 		mp.Local.Nameservers[i] = nsFqdn
 	}

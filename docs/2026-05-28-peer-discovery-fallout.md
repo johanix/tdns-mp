@@ -240,8 +240,30 @@ to them stay PENDING until they are upgraded.
 
 ---
 
+---
+
+# Bug 4: ValidateAgentNameservers rejects the in-bailiwick dnsengine NS
+
+`agent.local.nameservers` is the RDATA of the autozone NS RRset. The
+agent's own dnsengine (`dns.<identity>`) is the natural in-bailiwick
+primary, and `publishDnsTransport` publishes its A/AAAA into the
+autozone — i.e. the glue is present. But `ValidateAgentNameservers`
+rejected any in-bailiwick name as "(glue not supported)", which broke a
+valid, long-standing config on upgrade (fox runs the identical
+`[nsb, nsc, dns.agent.fox…]` config on old code with no error, and the
+addrs path of `CreateAutoZone` already builds an in-bailiwick `ns.<zone>`
+NS *with* glue — so glue is clearly supported).
+
+Fix: drop the in-bailiwick rejection in `config_validate.go`; keep the
+empty-entry checks + FQDN normalization.
+
+---
+
 ## What was implemented
 
+- **Bug 4:** `ValidateAgentNameservers` no longer rejects in-bailiwick
+  nameserver names (the dnsengine's own name is a valid in-bailiwick
+  primary; glue comes from `publishDnsTransport`).
 - **Bug 3:** the SDE "remote" no-op branch is now **operations-first**
   — `add`/`replace` present → `AppliedRecords`, `delete` absent →
   `RemovedRecords` — with the legacy class-overloaded form as fallback.
