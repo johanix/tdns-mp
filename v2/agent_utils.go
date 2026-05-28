@@ -810,7 +810,8 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		hsyncStrs[i] = rr.String()
 	}
 
-	// Build label->Identity map so we can resolve Upstream labels to FQDNs
+	// Build label->Identity map so we can resolve Upstream labels to FQDNs.
+	// Kept complete (all HSYNC3 records) so Upstream resolution still works.
 	labelToIdentity := map[string]string{}
 	for _, rr := range hsyncRRset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
@@ -818,6 +819,15 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				labelToIdentity[h3.Label] = h3.Identity
 			}
 		}
+	}
+
+	// Membership is HSYNCPARAM-derived: only identities with a HSYNCPARAM
+	// role are zone members / distribution recipients. An identity present
+	// in HSYNC3 but granted no role is not included.
+	participantList, _ := zoneParticipants(apex)
+	participantSet := make(map[string]struct{}, len(participantList))
+	for _, id := range participantList {
+		participantSet[id] = struct{}{}
 	}
 
 	for _, rr := range hsyncRRset.RRs {
@@ -829,6 +839,11 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 					continue // don't add ourselves to the list of agents
 				} else if labelToIdentity[hsync3.Upstream] == ar.LocalAgent.Identity {
 					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync3.Identity))
+				}
+				// Skip identities with no HSYNCPARAM role — they have an
+				// HSYNC3 mapping but are not members of this zone.
+				if _, isParticipant := participantSet[hsync3.Identity]; !isParticipant {
+					continue
 				}
 				// Found an HSYNC3 record, try to locate the agent
 				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))

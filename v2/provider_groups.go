@@ -49,6 +49,100 @@ func ComputeGroupHash(identities []string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
+// apexHSYNCPARAM returns the zone apex's HSYNCPARAM, or nil if absent.
+func apexHSYNCPARAM(apex *tdns.OwnerData) *core.HSYNCPARAM {
+	if apex == nil || apex.RRtypes == nil {
+		return nil
+	}
+	hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !ok || len(hpRRset.RRs) == 0 {
+		return nil
+	}
+	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
+	if !ok {
+		return nil
+	}
+	hp, ok := prr.Data.(*core.HSYNCPARAM)
+	if !ok {
+		return nil
+	}
+	return hp
+}
+
+// zoneParticipants returns the identities that hold a membership-conferring
+// HSYNCPARAM role in the zone (servers, signers, auditors), each label
+// resolved through the zone's ON HSYNC3 label→identity map. HSYNC3 is only an
+// identity↔label declaration and confers no membership on its own, so an
+// identity present in HSYNC3 but granted no HSYNCPARAM role is excluded.
+// Returned slices are sorted and de-duplicated. voting is the election-voting
+// subset (servers ∪ signers); auditors are non-voting members.
+//
+// Legacy fallback: a zone with HSYNC3 but no HSYNCPARAM (mid-migration) treats
+// every ON HSYNC3 identity as a participant, with a warning.
+func zoneParticipants(apex *tdns.OwnerData) (participants, voting []string) {
+	if apex == nil || apex.RRtypes == nil {
+		return nil, nil
+	}
+	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
+	if len(hsyncRRset.RRs) == 0 {
+		return nil, nil
+	}
+
+	// Build label→identity from ON (non-decommissioned) HSYNC3 records only.
+	labelToIdentity := map[string]string{}
+	var allIdentities []string
+	for _, rr := range hsyncRRset.RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok || h3.State == 0 { // skip OFF (decommissioned)
+			continue
+		}
+		labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
+		allIdentities = append(allIdentities, h3.Identity)
+	}
+
+	hp := apexHSYNCPARAM(apex)
+	if hp == nil {
+		lgProviderGroup.Warn("zone has HSYNC3 but no HSYNCPARAM; treating all HSYNC3 identities as participants (legacy fallback)",
+			"zone", apex.Name)
+		slices.Sort(allIdentities)
+		allIdentities = slices.Compact(allIdentities)
+		return allIdentities, allIdentities
+	}
+
+	seen := map[string]bool{}
+	addRole := func(labels []string, isVoting bool) {
+		for _, label := range labels {
+			id, ok := labelToIdentity[strings.TrimSuffix(label, ".")]
+			if !ok {
+				continue
+			}
+			if !seen[id] {
+				participants = append(participants, id)
+				seen[id] = true
+			}
+			if isVoting {
+				voting = append(voting, id)
+			}
+		}
+	}
+	// Membership-conferring HSYNCPARAM keys. Extend this list as HSYNCPARAM
+	// (an open-ended, SVCB-like param set) gains new membership-conferring
+	// roles.
+	addRole(hp.GetServers(), true)
+	addRole(hp.GetSigners(), true)
+	addRole(hp.GetAuditors(), false)
+
+	slices.Sort(participants)
+	participants = slices.Compact(participants)
+	slices.Sort(voting)
+	voting = slices.Compact(voting)
+	return participants, voting
+}
+
 // RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
 // and rebuilds the provider group map. This is a pure function of zone data.
 func (pgm *ProviderGroupManager) RecomputeGroups() {
@@ -69,77 +163,14 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			continue
 		}
 
-		hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-		if len(hsyncRRset.RRs) == 0 {
-			continue
-		}
-
-		// Extract identities and label→identity map from HSYNC3 records.
-		// Labels in HSYNC3 are stored with a trailing dot ("hare.") but
-		// HSYNCPARAM signers=/servers= use the bare form ("hare").
-		// Normalise both sides by trimming the trailing dot.
-		var identities []string
-		labelToIdentity := map[string]string{}
-		for _, rr := range hsyncRRset.RRs {
-			prr, ok := rr.(*dns.PrivateRR)
-			if !ok {
-				continue
-			}
-			h3, ok := prr.Data.(*core.HSYNC3)
-			if !ok {
-				continue
-			}
-			if h3.State == 0 { // OFF
-				continue
-			}
-			identities = append(identities, h3.Identity)
-			labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
-		}
-
+		// Membership is defined by HSYNCPARAM roles (resolved through the
+		// zone's ON HSYNC3 label→identity map), NOT by the raw HSYNC3
+		// identity set. An identity with an HSYNC3 record but no HSYNCPARAM
+		// role is not a member. participants/voting are sorted+deduped.
+		identities, votingMembers := zoneParticipants(apex)
 		if len(identities) < 2 {
 			continue
 		}
-
-		// Voting members for this zone = union of HSYNCPARAM
-		// signers and servers, translated through the HSYNC3
-		// label→identity map. Non-voting roles (auditors etc.)
-		// appear in HSYNC3 but not in signers/servers, so they
-		// are excluded here by construction. Future role
-		// categories (e.g. "secretary") add HSYNC3 records but
-		// don't list themselves under signers/servers, so this
-		// stays correct.
-		var votingMembers []string
-		if hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM); ok && len(hpRRset.RRs) > 0 {
-			if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
-				if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
-					seen := map[string]bool{}
-					addLabels := func(labels []string) {
-						for _, label := range labels {
-							key := strings.TrimSuffix(label, ".")
-							if id, ok := labelToIdentity[key]; ok && !seen[id] {
-								votingMembers = append(votingMembers, id)
-								seen[id] = true
-							}
-						}
-					}
-					addLabels(hp.GetSigners())
-					addLabels(hp.GetServers())
-				}
-			}
-		}
-		// Fallback for zones with HSYNC3 but no HSYNCPARAM yet:
-		// treat all HSYNC3 identities as voting (legacy behaviour).
-		// Logged so the operator notices the missing HSYNCPARAM.
-		if len(votingMembers) == 0 {
-			lgProviderGroup.Warn("zone has HSYNC3 but no HSYNCPARAM with signers/servers; treating all HSYNC3 identities as voting (legacy fallback)",
-				"zone", zname)
-			votingMembers = append(votingMembers, identities...)
-		}
-		slices.Sort(votingMembers)
-		votingMembers = slices.Compact(votingMembers)
-
-		slices.Sort(identities)
-		identities = slices.Compact(identities)
 		key := strings.Join(identities, ",")
 
 		if zg, exists := groupMap[key]; exists {

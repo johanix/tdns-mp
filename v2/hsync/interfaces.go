@@ -10,11 +10,17 @@ import (
 	"github.com/miekg/dns"
 )
 
-// ZoneView exposes HSYNC3 data for one zone.
+// ZoneView exposes one MP zone to the engine.
 type ZoneView interface {
 	ZoneName() string
 	HSYNC3() []dns.RR
 	IsMultiProvider() bool
+	// Participants returns the identities that hold a membership-conferring
+	// HSYNCPARAM role in this zone (resolved via the zone's ON HSYNC3
+	// label→identity map). HSYNC3 alone is just an identity↔label mapping
+	// and confers no membership, so the host must derive this from
+	// HSYNCPARAM — the engine treats it as the authoritative member set.
+	Participants() []PeerID
 }
 
 // ZoneLookup enumerates MP zones for reconcile and hello validation.

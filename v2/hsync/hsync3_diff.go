@@ -44,6 +44,21 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 	updated := make(map[PeerID]bool)
 	affected := make(map[PeerID]bool)
 
+	// Membership is HSYNCPARAM-derived: an HSYNC3 add for an identity with no
+	// HSYNCPARAM role must not register a member. Gate adds on the participant
+	// set when the zone view is available; if it isn't, fall back to adding
+	// (the periodic ReconcileZone is authoritative and will prune any
+	// non-member shortly after).
+	var members map[PeerID]struct{}
+	if e.deps.Zones != nil {
+		if zv, ok := e.deps.Zones.Get(string(zone)); ok && zv != nil {
+			members = make(map[PeerID]struct{})
+			for _, id := range zv.Participants() {
+				members[id] = struct{}{}
+			}
+		}
+	}
+
 	for _, rr := range diff.Adds {
 		prr, ok := rr.(*dns.PrivateRR)
 		if !ok {
@@ -56,6 +71,11 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 		id := PeerID(h3.Identity)
 		if string(id) == local {
 			continue
+		}
+		if members != nil {
+			if _, isMember := members[id]; !isMember {
+				continue // HSYNC3 record without a HSYNCPARAM role — not a member
+			}
 		}
 		updated[id] = true
 		affected[id] = true
