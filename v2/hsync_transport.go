@@ -1438,7 +1438,21 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 // that genuinely need a fresh state pull (currently only the
 // OnPeerDiscovered closure at discovery completion).
 func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
-	return tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	// Config-only infra peers (combiner, signer) are never discovered
+	// via DNS, so their transport address has no source other than the
+	// agent record. Discovered peers already carry a discovery address
+	// and are left untouched. Bite H dropped this copy along with the
+	// (genuinely redundant) per-send state refresh; only the address —
+	// which non-discovered peers cannot get any other way — is restored.
+	if peer.CurrentAddress() == nil && agent.DnsDetails != nil && len(agent.DnsDetails.Addrs) > 0 {
+		peer.SetDiscoveryAddress(&transport.Address{
+			Host:      agent.DnsDetails.Addrs[0],
+			Port:      agent.DnsDetails.Port,
+			Transport: "udp",
+		})
+	}
+	return peer
 }
 
 // SyncPeerFromAgent returns the transport.Peer for this agent and
