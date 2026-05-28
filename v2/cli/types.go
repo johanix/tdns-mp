@@ -11,6 +11,8 @@ import (
 // Combiner API types
 type CombinerPost = tdnsmp.CombinerPost
 type CombinerResponse = tdnsmp.CombinerResponse
+type CombinerConfigPost = tdnsmp.CombinerConfigPost
+type CombinerConfigResponse = tdnsmp.CombinerConfigResponse
 type CombinerEditPost = tdnsmp.CombinerEditPost
 type CombinerEditResponse = tdnsmp.CombinerEditResponse
 type CombinerDebugPost = tdnsmp.CombinerDebugPost

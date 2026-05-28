@@ -3,19 +3,13 @@
  *
  * Multi-provider configuration types.
  *
- * These types previously lived in tdns/v2. Moved into tdns-mp as part
- * of Bite 9a of the MP config cutover, making tdns-mp the owner of
- * its own MP config types. The tdns side still defines parallel
- * copies (and still parses them) until Bite 9b removes them.
- *
- * Until Bite 9b lands, two parses of the multi-provider: block run:
- * the tdns side populates conf.Config.MultiProvider (*tdns.MultiProviderConf);
- * the tdns-mp side populates conf.InternalMp.MpConfig (*MultiProviderConf,
- * defined here). The tdns-mp side is the runtime source of truth via
- * conf.MpConfig() / WiredMpConfig(). The tdns side is read only by
- * config_validate.go (still validates the tdns parse) and keys_cmd.go
- * (raw yaml.Unmarshal in a CLI utility that doesn't run the parser
- * hook). Both move off the tdns type in Bite 9b.
+ * Owned by tdns-mp since Bite 9a of the MP config cutover (the
+ * struct moved here from tdns/v2). Bite 9b completed the migration
+ * by deleting the parallel definition + parse from tdns. Runtime
+ * source of truth: conf.InternalMp.MpConfig, populated by
+ * RegisterMpConfigParser's PostParseConfigHook on conf.Config
+ * (the underlying *tdns.Config). Accessors: conf.MpConfig() and
+ * WiredMpConfig().
  */
 package tdnsmp
 
