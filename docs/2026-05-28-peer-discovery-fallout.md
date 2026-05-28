@@ -186,8 +186,68 @@ edit drains to the combiner (contribution appears).
 
 ---
 
+---
+
+# Bug 3: idempotent re-send strands the sender (no-op confirmation gap)
+
+## Summary
+
+Re-sending an already-applied update (an idempotent no-op for the
+receiver) left the *sender* stuck in PENDING. The receiver acked
+delivery (phase 1) but sent no final ACCEPTED (phase 2), because the
+no-op confirmation path only covered ADD no-ops.
+
+## Evidence (espresso, 16:58 re-add of an already-present NS)
+
+cpt re-sent distID `6a1873fa` to fox; cpt received exactly one
+confirmation from fox: `status=ok ... applied=0` (recorded PENDING) —
+the phase-1 delivery ack. No phase-2 `SUCCESS/applied=1` ever arrived,
+so cpt stayed PENDING. The original 12:34 send (a real change for fox)
+got both phases. A confirmation is per-sender-distID, so a duplicate
+payload is still the *first* time for the sender — silence is wrong.
+
+## Root cause
+
+The SDE engine loop's "remote" no-op branch (`syncheddataengine.go`,
+`change==false`) built its confirmation by inspecting only
+`Update.RRsets` / `Update.RRs` — the **legacy class-overloaded**
+representation. But the modern edit path is **Operations**:
+`apihandler_agent.go` emits a `"replace"` op, and `ProcessUpdate`
+returns early on `len(Operations) > 0` (it takes precedence). So for
+any operations-based update — i.e. all real edits — the no-op branch
+finds nothing and sends **no positive confirmation, for `add`/`replace`
+*or* `delete` no-ops**. The sender stays PENDING on an idempotent
+re-send. (The espresso 16:58 re-add is a `replace` that is a no-op on
+fox → "no change (idempotent)" → no confirmation → cpt stuck.)
+
+## Fix
+
+Make the no-op branch operations-first (mirroring `ProcessUpdate`):
+- `add`/`replace` records already **present** → `AppliedRecords`.
+- `delete` records already **absent** → `RemovedRecords` (ClassINET
+  form, to match the sender's `markDeletePending` tracking).
+- Emit a positive confirmation when either is non-empty.
+- The legacy class-overloaded `RRsets`/`RRs` form is handled only as a
+  fallback when there are no Operations.
+
+Not covered: a `delete` op with empty `Records` (delete-whole-rrtype)
+and ClassANY in the legacy fallback — per-RR matching has nothing to
+echo. Revisit if delete-rrtype-as-no-op becomes a real case.
+
+Note: a receiver only emits the no-op confirmation if it runs this
+code. Older builds (e.g. fox on `main`) ack delivery only, so re-sends
+to them stay PENDING until they are upgraded.
+
+---
+
 ## What was implemented
 
+- **Bug 3:** the SDE "remote" no-op branch is now **operations-first**
+  — `add`/`replace` present → `AppliedRecords`, `delete` absent →
+  `RemovedRecords` — with the legacy class-overloaded form as fallback.
+  Previously it inspected only `RRsets`/`RRs`, so it never confirmed any
+  operations-based no-op (the modern path). Builds; needs a multi-node
+  re-send to verify.
 - **Bug 2:** `GetOrCreatePeer` sets the discovery address from the
   agent's `DnsDetails` when the transport peer has none.
 - **Bug 1:** new `zoneParticipants(apex)` + `apexHSYNCPARAM` helpers in
