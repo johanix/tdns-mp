@@ -4,6 +4,10 @@
  * JOSE keypair CLI (generate, show). Used by CLI commands that
  * manage long_term_jose_priv_key for any role that publishes
  * JWK records.
+ *
+ * Loads just the multi-provider: subtree of the server's YAML
+ * config — does not invoke ParseConfig and does not depend on
+ * tdns.Config.MultiProvider (which is removed in bite 9b).
  */
 
 package tdnsmp
@@ -21,25 +25,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadConfigForKeys reads the given YAML config file and decodes it into Config.
-// Used by CLI keys commands to get the long_term_jose_priv_key path.
-// Does not process includes or run full ParseConfig.
-func LoadConfigForKeys(path string) (*tdns.Config, error) {
+// LoadMpConfigForKeys reads the given YAML config file and decodes
+// just the multi-provider: subtree into a tdnsmp.MultiProviderConf.
+// Used by CLI keys commands to read long_term_jose_priv_key without
+// invoking ParseConfig.
+//
+// Returns nil, nil when the config file has no multi-provider: block
+// (caller decides whether that's an error).
+func LoadMpConfigForKeys(path string) (*MultiProviderConf, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
-	var conf tdns.Config
-	if err := yaml.Unmarshal(data, &conf); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	// Pointer field distinguishes "no multi-provider: section" from
+	// "section present but zero-valued".
+	var raw struct {
+		MultiProvider *MultiProviderConf `yaml:"multi-provider"`
 	}
-	return &conf, nil
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse multi-provider section of %q: %w", path, err)
+	}
+	return raw.MultiProvider, nil
 }
 
 // RunKeysCmd runs the "keys" subcommand (generate | show). The
 // caller (a cobra command) is expected to pass a valid subcommand;
 // arg validation lives in the cobra layer.
-func RunKeysCmd(conf *tdns.Config, args []string) error {
+func RunKeysCmd(mp *MultiProviderConf, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("missing subcommand (generate or show)")
 	}
@@ -48,22 +60,22 @@ func RunKeysCmd(conf *tdns.Config, args []string) error {
 
 	switch args[0] {
 	case "generate":
-		return runKeysGenerate(conf, backend, args[1:])
+		return runKeysGenerate(mp, backend, args[1:])
 	case "show":
-		return runKeysShow(conf, backend, args[1:])
+		return runKeysShow(mp, backend, args[1:])
 	default:
 		return fmt.Errorf("unknown keys command: %q", args[0])
 	}
 }
 
-func runKeysGenerate(conf *tdns.Config, backend crypto.Backend, args []string) error {
+func runKeysGenerate(mp *MultiProviderConf, backend crypto.Backend, args []string) error {
 	fs := flag.NewFlagSet("keys generate", flag.ContinueOnError)
 	output := fs.String("output", "", "path for generated private key (default from config)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf))
+	privPath := strings.TrimSpace(getKeysPrivKeyPath(mp))
 	if *output != "" {
 		privPath = strings.TrimSpace(*output)
 	}
@@ -101,8 +113,8 @@ func runKeysGenerate(conf *tdns.Config, backend crypto.Backend, args []string) e
 	return nil
 }
 
-func runKeysShow(conf *tdns.Config, backend crypto.Backend, args []string) error {
-	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf))
+func runKeysShow(mp *MultiProviderConf, backend crypto.Backend, args []string) error {
+	privPath := strings.TrimSpace(getKeysPrivKeyPath(mp))
 	if privPath == "" {
 		return fmt.Errorf("no key path: set long_term_jose_priv_key in server config")
 	}
@@ -138,9 +150,9 @@ func runKeysShow(conf *tdns.Config, backend crypto.Backend, args []string) error
 	return nil
 }
 
-func getKeysPrivKeyPath(conf *tdns.Config) string {
-	if conf.MultiProvider != nil {
-		return conf.MultiProvider.LongTermJosePrivKey
+func getKeysPrivKeyPath(mp *MultiProviderConf) string {
+	if mp != nil {
+		return mp.LongTermJosePrivKey
 	}
 	return ""
 }

@@ -1,8 +1,15 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * MP-specific config validators, moved from tdns/v2/config_validate.go.
- * Registered via PostValidateConfigHook from MainInit.
+ * MP-specific config validators. Operate on the tdnsmp-local
+ * MultiProviderConf and are invoked from RegisterMpConfigParser's
+ * PostParseConfigHook right after parseMultiProvider succeeds.
+ *
+ * Previously these took *tdns.Config and ran from
+ * conf.Config.Internal.PostValidateConfigHook (which fires during
+ * tdns.ValidateConfig, BEFORE the MP-config parser hook). That
+ * relied on tdns also parsing multi-provider: itself, which goes
+ * away in bite 9b. Now they validate the tdns-mp parse directly.
  */
 package tdnsmp
 
@@ -12,24 +19,27 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
-
-	tdns "github.com/johanix/tdns/v2"
 )
 
-// ValidateMPConfig runs all MP-specific config validators.
-// Registered as PostValidateConfigHook from MainInit so these
-// run during tdns's ValidateConfig alongside the built-in ones.
-func ValidateMPConfig(conf *tdns.Config) error {
-	if err := ValidateAgentNameservers(conf); err != nil {
+// ValidateMPConfig runs all MP-specific config validators against
+// the supplied MultiProviderConf. Called from RegisterMpConfigParser's
+// hook after parseMultiProvider returns a non-nil mp. Returns nil
+// when mp is nil (no multi-provider: block) so non-MP daemons
+// proceed unchanged.
+func ValidateMPConfig(mp *MultiProviderConf) error {
+	if mp == nil {
+		return nil
+	}
+	if err := ValidateAgentNameservers(mp); err != nil {
 		return err
 	}
-	if err := ValidateAgentSupportedMechanisms(conf); err != nil {
+	if err := ValidateAgentSupportedMechanisms(mp); err != nil {
 		return err
 	}
-	if err := ValidateCryptoFiles(conf); err != nil {
+	if err := ValidateCryptoFiles(mp); err != nil {
 		return err
 	}
-	if err := ValidateMultiProviderBlock(conf); err != nil {
+	if err := ValidateMultiProviderBlock(mp); err != nil {
 		return err
 	}
 	return nil
@@ -38,12 +48,12 @@ func ValidateMPConfig(conf *tdns.Config) error {
 // ValidateAgentNameservers ensures agent.local.nameservers are
 // non-empty and outside the agent autozone (no glue). Each entry
 // is normalized to FQDN in place.
-func ValidateAgentNameservers(conf *tdns.Config) error {
-	if conf.MultiProvider == nil || conf.MultiProvider.Role != "agent" || len(conf.MultiProvider.Local.Nameservers) == 0 {
+func ValidateAgentNameservers(mp *MultiProviderConf) error {
+	if mp.Role != "agent" || len(mp.Local.Nameservers) == 0 {
 		return nil
 	}
-	zoneFqdn := dns.Fqdn(conf.MultiProvider.Identity)
-	for i, ns := range conf.MultiProvider.Local.Nameservers {
+	zoneFqdn := dns.Fqdn(mp.Identity)
+	for i, ns := range mp.Local.Nameservers {
 		ns = strings.TrimSpace(ns)
 		if ns == "" {
 			return fmt.Errorf("agent.local.nameservers: empty entry")
@@ -53,21 +63,21 @@ func ValidateAgentNameservers(conf *tdns.Config) error {
 			return fmt.Errorf("agent.local.nameservers: empty entry")
 		}
 		if dns.IsSubDomain(zoneFqdn, nsFqdn) {
-			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, conf.MultiProvider.Identity)
+			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, mp.Identity)
 		}
-		conf.MultiProvider.Local.Nameservers[i] = nsFqdn
+		mp.Local.Nameservers[i] = nsFqdn
 	}
 	return nil
 }
 
 // ValidateAgentSupportedMechanisms validates
 // agent.supported_mechanisms configuration.
-func ValidateAgentSupportedMechanisms(conf *tdns.Config) error {
-	if conf.MultiProvider == nil || conf.MultiProvider.Role != "agent" {
+func ValidateAgentSupportedMechanisms(mp *MultiProviderConf) error {
+	if mp.Role != "agent" {
 		return nil
 	}
 
-	mechanisms := conf.MultiProvider.SupportedMechanisms
+	mechanisms := mp.SupportedMechanisms
 	if len(mechanisms) == 0 {
 		return fmt.Errorf("agent.supported_mechanisms cannot be empty - agent requires at least one transport mechanism (valid: \"api\", \"dns\")")
 	}
@@ -87,7 +97,7 @@ func ValidateAgentSupportedMechanisms(conf *tdns.Config) error {
 			return fmt.Errorf("agent.supported_mechanisms: duplicate value %q", m)
 		}
 		seen[m] = true
-		conf.MultiProvider.SupportedMechanisms[i] = m
+		mp.SupportedMechanisms[i] = m
 	}
 
 	return nil
@@ -95,18 +105,18 @@ func ValidateAgentSupportedMechanisms(conf *tdns.Config) error {
 
 // ValidateCryptoFiles validates that configured crypto key files
 // exist and are readable.
-func ValidateCryptoFiles(conf *tdns.Config) error {
-	if conf.MultiProvider != nil && conf.MultiProvider.Role == "agent" && strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey) != "" {
-		if err := validateFileExists(conf.MultiProvider.LongTermJosePrivKey, "agent private key"); err != nil {
+func ValidateCryptoFiles(mp *MultiProviderConf) error {
+	if mp.Role == "agent" && strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+		if err := validateFileExists(mp.LongTermJosePrivKey, "agent private key"); err != nil {
 			return err
 		}
-		if conf.MultiProvider.Combiner != nil && strings.TrimSpace(conf.MultiProvider.Combiner.LongTermJosePubKey) != "" {
-			if err := validateFileExists(conf.MultiProvider.Combiner.LongTermJosePubKey, "combiner public key (multi-provider.combiner)"); err != nil {
+		if mp.Combiner != nil && strings.TrimSpace(mp.Combiner.LongTermJosePubKey) != "" {
+			if err := validateFileExists(mp.Combiner.LongTermJosePubKey, "combiner public key (multi-provider.combiner)"); err != nil {
 				return err
 			}
 		}
-		if conf.MultiProvider.Peers != nil {
-			for peerID, peerConf := range conf.MultiProvider.Peers {
+		if mp.Peers != nil {
+			for peerID, peerConf := range mp.Peers {
 				if strings.TrimSpace(peerConf.LongTermJosePubKey) != "" {
 					if err := validateFileExists(peerConf.LongTermJosePubKey, fmt.Sprintf("peer agent %s public key", peerID)); err != nil {
 						return err
@@ -116,11 +126,11 @@ func ValidateCryptoFiles(conf *tdns.Config) error {
 		}
 	}
 
-	if conf.MultiProvider != nil && conf.MultiProvider.Role == "combiner" && strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey) != "" {
-		if err := validateFileExists(conf.MultiProvider.LongTermJosePrivKey, "combiner private key"); err != nil {
+	if mp.Role == "combiner" && strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+		if err := validateFileExists(mp.LongTermJosePrivKey, "combiner private key"); err != nil {
 			return err
 		}
-		for _, agent := range conf.MultiProvider.Agents {
+		for _, agent := range mp.Agents {
 			if strings.TrimSpace(agent.LongTermJosePubKey) != "" {
 				label := fmt.Sprintf("agent public key (multi-provider.agents[%s])", agent.Identity)
 				if err := validateFileExists(agent.LongTermJosePubKey, label); err != nil {
@@ -136,11 +146,7 @@ func ValidateCryptoFiles(conf *tdns.Config) error {
 // ValidateMultiProviderBlock validates essential fields in the
 // multi-provider: config block. At minimum, role and identity
 // must be present when the block is active.
-func ValidateMultiProviderBlock(conf *tdns.Config) error {
-	mp := conf.MultiProvider
-	if mp == nil {
-		return nil
-	}
+func ValidateMultiProviderBlock(mp *MultiProviderConf) error {
 	if !mp.Active {
 		return nil
 	}

@@ -69,9 +69,9 @@ func runKeysCommand(role string, cmd *cobra.Command, subcommand string, args []s
 			tdnscli.GetClientKeyFromParent(role))
 	}
 
-	conf, err := tdnsmp.LoadConfigForKeys(serverConfigPath)
+	mp, err := tdnsmp.LoadMpConfigForKeys(serverConfigPath)
 	if err != nil {
-		log.Fatalf("Load config %s: %v", serverConfigPath, err)
+		log.Fatalf("Load multi-provider section of %s: %v", serverConfigPath, err)
 	}
 
 	runArgs := []string{subcommand}
@@ -82,7 +82,7 @@ func runKeysCommand(role string, cmd *cobra.Command, subcommand string, args []s
 		}
 	}
 
-	if err := tdnsmp.RunKeysCmd(conf, runArgs); err != nil {
+	if err := tdnsmp.RunKeysCmd(mp, runArgs); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

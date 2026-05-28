@@ -69,8 +69,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return true
 		})
 
-	// Register MP config validators to run during tdns's ValidateConfig.
-	conf.Config.Internal.PostValidateConfigHook = ValidateMPConfig
+	// MP config validation runs from inside the parser hook
+	// (RegisterMpConfigParser), not via tdns's PostValidateConfigHook —
+	// validators need the parsed *MultiProviderConf, which the parser
+	// hook produces. See ValidateMPConfig in config_validate.go.
 
 	// Register the MP-config parser. Fires from tdns.ParseConfig's
 	// PostParseConfigHook and stashes the parse on
