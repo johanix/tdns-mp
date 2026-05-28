@@ -414,15 +414,15 @@ func (s *auditorWebServer) RegisterRoutes(mux *http.ServeMux) {
 //
 //	audit.web.enabled         (bool, default false)
 //	audit.web.addresses       ([]string, default ["127.0.0.1:8099"])
-//	audit.web.cert_file       (string)
-//	audit.web.key_file        (string)
+//	audit.web.certfile        (string)
+//	audit.web.keyfile         (string)
 //	audit.web.auth.mode       ("basic"|"none", default "basic")
 //	audit.web.auth.idle_timeout (duration, default 30m)
 //	audit.web.auth.users      ([]{name, password_hash})
 //
 // Bind safety: with auth.mode="none", refuses non-loopback addresses.
 // HTTPS is mandatory unless explicitly disabled by setting both
-// cert_file and key_file to "" — this is intended for local-only
+// certfile and keyfile to "" — this is intended for local-only
 // lab use behind a TLS-terminating proxy.
 func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 	if !viper.GetBool("audit.web.enabled") {
@@ -484,8 +484,8 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 		return fmt.Errorf("audit.web.auth.mode must be \"basic\" or \"none\", got %q", mode)
 	}
 
-	certFile := viper.GetString("audit.web.cert_file")
-	keyFile := viper.GetString("audit.web.key_file")
+	certFile := viper.GetString("audit.web.certfile")
+	keyFile := viper.GetString("audit.web.keyfile")
 	useHTTPS := certFile != "" && keyFile != ""
 
 	// Plain HTTP with basic auth would send the login POST and the
@@ -494,7 +494,7 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 	// Loopback no-auth is acceptable because there is nothing to
 	// protect.
 	if mode == "basic" && !useHTTPS {
-		return errors.New("audit.web.auth.mode=\"basic\" requires HTTPS (set audit.web.cert_file and audit.web.key_file)")
+		return errors.New("audit.web.auth.mode=\"basic\" requires HTTPS (set audit.web.certfile and audit.web.keyfile)")
 	}
 
 	ws, err := newAuditorWebServer(conf, auth, useHTTPS)

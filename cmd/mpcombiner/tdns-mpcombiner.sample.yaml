@@ -68,11 +68,11 @@ multi-provider:
    #      allowed-rrtypes:   [ KEY ]
 
    # Sync API for inbound HELLO/BEAT/PING from agents
-   sync_api:
+   syncapi:
       addresses:
          listen:     [ 127.0.0.1:8992 ]
-      cert_file:     /etc/tdns/certs/servers/combiner.crt
-      key_file:      /etc/tdns/certs/servers/combiner.key
+      certfile:      /etc/tdns/certs/servers/combiner.crt
+      keyfile:       /etc/tdns/certs/servers/combiner.key
 
 db:
    file:  /var/lib/tdns/tdns-mpcombiner.db

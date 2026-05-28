@@ -49,9 +49,9 @@ type MultiProviderConf struct {
 		Addresses struct {
 			Listen []string
 		}
-		CertFile string `yaml:"cert_file" mapstructure:"cert_file"`
-		KeyFile  string `yaml:"key_file" mapstructure:"key_file"`
-	} `yaml:"sync_api" mapstructure:"sync_api"`
+		CertFile string `yaml:"certfile" mapstructure:"certfile"`
+		KeyFile  string `yaml:"keyfile" mapstructure:"keyfile"`
+	} `yaml:"syncapi" mapstructure:"syncapi"`
 
 	// === Combiner-specific fields ===
 
