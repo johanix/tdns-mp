@@ -49,7 +49,7 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 				resp.ErrorMsg = "Distribution cache not configured"
 				return
 			}
-			senderID := string(conf.Config.MultiProvider.Identity)
+			senderID := string(conf.MpConfig().Identity)
 			infos := cache.List(senderID)
 			now := time.Now()
 

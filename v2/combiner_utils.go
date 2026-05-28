@@ -46,7 +46,7 @@ var providerZoneRRtypes = map[string]map[uint16]bool{}
 
 // RegisterProviderZoneRRtypes parses a ProviderZoneConf and registers its allowed
 // RRtype map for use by the combiner policy engine.
-func RegisterProviderZoneRRtypes(pz tdns.ProviderZoneConf) {
+func RegisterProviderZoneRRtypes(pz ProviderZoneConf) {
 	zone := dns.Fqdn(pz.Zone)
 	m := make(map[uint16]bool)
 	for _, s := range pz.AllowedRRtypes {
@@ -696,8 +696,8 @@ func (mpzd *MPZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string
 // InjectSignatureTXT adds a combiner signature TXT record to the zone data.
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.
-func (mpzd *MPZoneData) InjectSignatureTXT(conf *tdns.MultiProviderConf) bool {
-	if conf == nil || !conf.CombinerOptions[tdns.CombinerOptAddSignature] || conf.Signature == "" {
+func (mpzd *MPZoneData) InjectSignatureTXT(conf *MultiProviderConf) bool {
+	if conf == nil || !conf.CombinerOptions[CombinerOptAddSignature] || conf.Signature == "" {
 		return false
 	}
 

@@ -73,11 +73,11 @@ multi-provider:
         long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
 
    # Sync API for inbound HELLO/BEAT/PING from agent
-   sync_api:
+   syncapi:
       addresses:
          listen:     [ 127.0.0.1:8991 ]
-      cert_file:     /etc/tdns/certs/servers/signer.crt
-      key_file:      /etc/tdns/certs/servers/signer.key
+      certfile:      /etc/tdns/certs/servers/signer.crt
+      keyfile:       /etc/tdns/certs/servers/signer.key
 
 db:
    file:  /var/lib/tdns/tdns-mpsigner.db

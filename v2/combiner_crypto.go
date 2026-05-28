@@ -29,9 +29,10 @@ func StripKeyFileComments(data []byte) []byte {
 	return []byte(strings.Join(out, "\n"))
 }
 
-func InitCombinerCrypto(conf *tdns.Config) (*transport.SecurePayloadWrapper, error) {
+func InitCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
+	mp := conf.MpConfig()
 	backend := jose.NewBackend()
-	privKeyPath := strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey)
+	privKeyPath := strings.TrimSpace(mp.LongTermJosePrivKey)
 	privKeyData, err := os.ReadFile(privKeyPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -61,10 +62,10 @@ func InitCombinerCrypto(conf *tdns.Config) (*transport.SecurePayloadWrapper, err
 		return nil, fmt.Errorf("failed to create PayloadCrypto: %w", err)
 	}
 	pc.SetLocalKeys(localPrivKey, localPubKey)
-	if len(conf.MultiProvider.Agents) == 0 {
+	if len(mp.Agents) == 0 {
 		return nil, fmt.Errorf("multi-provider.agents not configured (need at least one agent)")
 	}
-	for _, agent := range conf.MultiProvider.Agents {
+	for _, agent := range mp.Agents {
 		if strings.TrimSpace(agent.Identity) == "" {
 			return nil, fmt.Errorf("multi-provider.agents: agent entry missing required identity field")
 		}

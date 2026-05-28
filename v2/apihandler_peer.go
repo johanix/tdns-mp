@@ -241,7 +241,7 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *PeerResponse {
 // lookupStaticPeer checks all static peer configurations (agent-side: combiner, signer;
 // signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
 func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 	// Agent-side: combiner
 	if mp != nil && mp.Role == "agent" && mp.Combiner != nil &&
 		dns.Fqdn(mp.Combiner.Identity) == peerID && mp.Combiner.Address != "" {

@@ -126,7 +126,7 @@ func newIntegEnv(t *testing.T, cfg *integEnvConfig) *integEnv {
 func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *peerEnv {
 	t.Helper()
 
-	mp := &tdns.MultiProviderConf{Identity: identity}
+	mp := &MultiProviderConf{Identity: identity}
 	registry := &AgentRegistry{
 		S:                    core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:         make(map[ZoneName][]AgentId),

@@ -41,7 +41,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
-			Identity: AgentId(conf.Config.MultiProvider.Identity),
+			Identity: AgentId(conf.MpConfig().Identity),
 		}
 
 		defer func() {

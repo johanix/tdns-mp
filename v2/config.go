@@ -22,6 +22,14 @@ type Config struct {
 	InternalMp InternalMpConf
 }
 
+// MpConfig returns the tdns-mp-side parse of the multi-provider
+// config. This is the runtime source of truth for all MP config
+// accessors. Returns nil if no multi-provider: block is present in
+// the config (or if ParseConfig has not yet run).
+func (conf *Config) MpConfig() *MultiProviderConf {
+	return conf.InternalMp.MpConfig
+}
+
 // RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
 // closures to all MP zones that don't already have them. Called at
 // startup and after every zone reload (SIGHUP / "config reload-zones")
@@ -29,7 +37,6 @@ type Config struct {
 func (conf *Config) RegisterMPRefreshCallbacks() {
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
-	mp := conf.Config.MultiProvider
 	if conf.InternalMp.refreshRegistered == nil {
 		conf.InternalMp.refreshRegistered = make(map[string]bool)
 	}
@@ -46,10 +53,14 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 			zd.SyncQ = conf.InternalMp.SyncQ
 		}
 		conf.InternalMp.refreshRegistered[zoneName] = true
+		// The closure looks up conf.MpConfig() at invocation rather than
+		// capturing the current pointer, so PostParseConfigHook can
+		// replace the parsed MultiProviderConf on reload (SIGHUP) without
+		// leaving these callbacks pointing at a stale copy.
 		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
 			func(zd, new_zd *tdns.ZoneData) {
 				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
-					mpzd.MPPreRefresh(new_zd, tm, msgQs, mp)
+					mpzd.MPPreRefresh(new_zd, tm, msgQs, conf.MpConfig())
 				}
 			})
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
@@ -189,4 +200,13 @@ type InternalMpConf struct {
 	AuditWebAuth          *AuditWebAuth
 	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
+
+	// MpConfig is the tdns-mp-side parse of the multi-provider: config
+	// block, populated by RegisterMpConfigParser (registered as
+	// PostParseConfigHook on the underlying tdns.Config). Runtime
+	// accessors read this via conf.MpConfig() and WiredMpConfig().
+	// Nil if no multi-provider: block is present.
+	//
+	// Type defined in multi_provider_conf.go.
+	MpConfig *MultiProviderConf
 }
