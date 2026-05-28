@@ -150,28 +150,38 @@ type ProviderZoneConf struct {
 }
 
 // LocalAgentApiConf is the agent role's HTTPS API server config.
+//
+// YAML keys use the no-underscore lowercase form (baseurl, certfile,
+// keyfile) to match the operator's existing config files. CertData /
+// KeyData are runtime-only — populated by agent_setup.go from
+// CertFile / KeyFile contents and not read from YAML.
 type LocalAgentApiConf struct {
 	Addresses struct {
-		Publish []string
-		Listen  []string
-	}
-	BaseUrl  string
-	Port     uint16
-	CertFile string
-	KeyFile  string
-	CertData string
-	KeyData  string
+		Publish []string `yaml:"publish" mapstructure:"publish"`
+		Listen  []string `yaml:"listen"  mapstructure:"listen"`
+	} `yaml:"addresses" mapstructure:"addresses"`
+	BaseUrl  string `yaml:"baseurl"  mapstructure:"baseurl"`
+	Port     uint16 `yaml:"port"     mapstructure:"port"`
+	CertFile string `yaml:"certfile" mapstructure:"certfile"`
+	KeyFile  string `yaml:"keyfile"  mapstructure:"keyfile"`
+	CertData string `yaml:"-"        mapstructure:"-"`
+	KeyData  string `yaml:"-"        mapstructure:"-"`
 }
 
 // LocalAgentDnsConf is the agent role's DNS transport config
 // (NOTIFY(CHUNK) listener + outbound transport tuning).
+//
+// YAML keys use the no-underscore lowercase form for BaseUrl / Port
+// to match the operator's existing config files. The other fields
+// (ControlZone, ChunkMode, etc.) use snake_case as established
+// elsewhere in this struct.
 type LocalAgentDnsConf struct {
 	Addresses struct {
-		Publish []string
-		Listen  []string
-	}
-	BaseUrl     string
-	Port        uint16
+		Publish []string `yaml:"publish" mapstructure:"publish"`
+		Listen  []string `yaml:"listen"  mapstructure:"listen"`
+	} `yaml:"addresses" mapstructure:"addresses"`
+	BaseUrl     string `yaml:"baseurl" mapstructure:"baseurl"`
+	Port        uint16 `yaml:"port"    mapstructure:"port"`
 	ControlZone string `yaml:"control_zone" mapstructure:"control_zone"` // Zone used for NOTIFY(CHUNK) QNAMEs in DNS mode (default: agent identity)
 	// Chunk config (same key names as combiner for consistency)
 	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
