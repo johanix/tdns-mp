@@ -26,6 +26,7 @@ func (conf *Config) SetupMPCombinerRoutes(ctx context.Context, apirouter *mux.Ro
 	sr.HandleFunc("/router", APIrouter(conf.InternalMp.TransportManager)).Methods("POST")
 	sr.HandleFunc("/peer", APIpeer(conf, conf.InternalMp.TransportManager, conf.InternalMp.AgentRegistry)).Methods("POST")
 	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
+	sr.HandleFunc("/combiner/config", conf.APIcombinerConfig()).Methods("POST")
 	sr.HandleFunc("/combiner/distrib", conf.APIcombinerDistrib(conf.InternalMp.DistributionCache)).Methods("POST")
 	sr.HandleFunc("/combiner/transaction", conf.APIcombinerTransaction()).Methods("POST")
 	sr.HandleFunc("/combiner/debug", APIcombinerDebug(conf)).Methods("POST")
