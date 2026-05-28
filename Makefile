@@ -1,4 +1,4 @@
-.PHONY: default all clean install bump-johanix-deps
+.PHONY: default all clean install bump-johanix-deps test test-race
 
 default: all
 
@@ -47,3 +47,13 @@ bump-johanix-deps:
 	   done; \
 	   (cd $$dir && go mod tidy) || echo "  ! go mod tidy failed in $$dir"; \
 	done
+
+# Run the Go test suite (transport-boundary harness + SDE/API regression
+# tests). GOROOT is taken from the environment, as with the build.
+test:
+	cd v2 && CGO_ENABLED=1 go test -cover ./...
+
+# Same, with the race detector. Slower, but catches concurrency
+# regressions in the engines/handlers.
+test-race:
+	cd v2 && CGO_ENABLED=1 go test -race ./...
