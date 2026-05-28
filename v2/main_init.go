@@ -48,7 +48,15 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		func(c *tdns.Config, zname string, zd *tdns.ZoneData, options map[tdns.ZoneOption]bool) bool {
 			// On the signer, require server-level multi-provider config.
 			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
-			if tdns.Globals.App.Type == AppTypeMPSigner && (c.MultiProvider == nil || !c.MultiProvider.Active) {
+			//
+			// Zone-option validators fire during ParseZones, which
+			// runs after ParseConfig — by which time
+			// RegisterMpConfigParser's hook has populated
+			// wiredMpConfig. So WiredMpConfig() is safe to read here
+			// even though the *tdns.Config param has no
+			// MultiProvider field (post-bite-9b).
+			mp := WiredMpConfig()
+			if tdns.Globals.App.Type == AppTypeMPSigner && (mp == nil || !mp.Active) {
 				lg.Error("option requires multi-provider.active in server config", "zone", zname,
 					"option", tdns.ZoneOptionToString[tdns.OptMultiProvider])
 				if zd != nil {

@@ -1183,7 +1183,7 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.YourIdentity = abp.MyIdentity
-		resp.MyIdentity = AgentId(conf.Config.LocalIdentity())
+		resp.MyIdentity = AgentId(conf.MpConfig().Identity)
 
 		switch abp.MessageType {
 		case AgentMsgBeat:
@@ -1218,7 +1218,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 
 		resp := AgentHelloResponse{
 			Time:       time.Now(),
-			MyIdentity: AgentId(conf.Config.LocalIdentity()),
+			MyIdentity: AgentId(conf.MpConfig().Identity),
 		}
 
 		defer func() {
@@ -1250,7 +1250,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		if needed {
 			lgApi.Info("hello accepted, HSYNC RRset includes both identities", "zone", ahp.Zone)
 			resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
-				ahp.MyIdentity, conf.Config.LocalIdentity(), ahp.Zone)
+				ahp.MyIdentity, conf.MpConfig().Identity, ahp.Zone)
 		} else {
 			lgApi.Warn("hello rejected, HSYNC RRset does not include both identities", "zone", ahp.Zone)
 			resp.Error = true
@@ -1280,7 +1280,7 @@ func (conf *Config) APIsyncPing() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resp := AgentPingResponse{
 			Time:       time.Now(),
-			MyIdentity: AgentId(conf.Config.LocalIdentity()),
+			MyIdentity: AgentId(conf.MpConfig().Identity),
 		}
 		decoder := json.NewDecoder(r.Body)
 		var app AgentPingPost
