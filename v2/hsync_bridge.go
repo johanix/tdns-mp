@@ -278,10 +278,25 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 	ar := conf.InternalMp.AgentRegistry
 	wireAgentGossipCallbacks(conf, ar)
-	return newAuditorHsyncEngine(conf)
+	deps, cfg := buildHsyncEngineDeps(conf)
+	// Agent-only: gate the diff on local HSYNC3 presence (weAreInHSYNC) and
+	// re-home the removal teardown + RFI/election side effects of UpdateAgents.
+	deps.GateOnLocalPresence = true
+	deps.Host.OnLocalRemoved = func(zone hsync.ZoneName) {
+		ar.CleanupZoneRelationships(ZoneName(zone))
+	}
+	deps.Host.OnHsyncMembersAdded = func(zone hsync.ZoneName, added []hsync.PeerID, localAdded bool) {
+		ar.reattachHsyncMemberAdds(conf, ZoneName(zone), added, localAdded)
+	}
+	return hsync.NewEngine(deps, cfg)
 }
 
 func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
+	deps, cfg := buildHsyncEngineDeps(conf)
+	return hsync.NewEngine(deps, cfg)
+}
+
+func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 	ar := conf.InternalMp.AgentRegistry
 	mp := conf.MpConfig()
 	cfg := hsync.DefaultConfig()
@@ -317,5 +332,5 @@ func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 			},
 		},
 	}
-	return hsync.NewEngine(deps, cfg)
+	return deps, cfg
 }
