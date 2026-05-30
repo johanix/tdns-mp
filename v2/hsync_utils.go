@@ -22,7 +22,7 @@ var lg = tdns.Logger("zones")
 
 // HsyncChanged compares old vs new zone apex for both HSYNC3 and
 // HSYNCPARAM and reports whether either differs. HSYNC3 adds/removes
-// are returned in HsyncStatus for the agent's UpdateAgents loop;
+// are returned in HsyncStatus for the agent's ApplyHsyncDiff call;
 // HSYNCPARAM changes carry no per-RR delta but ParamChanged is set so
 // callers can trigger group recomputation without an HSYNC3 delta.
 //
@@ -1454,12 +1454,15 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
 		case AppTypeMPAgent:
-			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", mpzd.ZoneName)
-			mpzd.SyncQ <- SyncRequest{
-				Command:    "HSYNC-UPDATE",
-				ZoneName:   ZoneName(mpzd.ZoneName),
-				ZoneData:   mpzd.ZoneData,
-				SyncStatus: analysis.HsyncStatus,
+			if tm != nil && tm.agentRegistry != nil {
+				ar := tm.agentRegistry
+				if ar.HsyncEngine != nil && analysis.HsyncStatus != nil {
+					lg.Info("HSYNC RRset changed, applying hsync diff", "zone", mpzd.ZoneName)
+					_ = ar.HsyncEngine.ApplyHsyncDiff(hsync.ZoneName(mpzd.ZoneName), hsync.HsyncDiff{
+						Adds:    analysis.HsyncStatus.HsyncAdds,
+						Removes: analysis.HsyncStatus.HsyncRemoves,
+					})
+				}
 			}
 			// Detect parentsync=agent dynamically from HSYNCPARAM
 			if !mpzd.Options[tdns.OptDelSyncChild] {

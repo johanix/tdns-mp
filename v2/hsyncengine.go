@@ -19,30 +19,6 @@ var lgConnRetryEngine = tdns.Logger("conn-retry")
 func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, synchedDataUpdateQ chan *SynchedDataUpdate, msgQs *MsgQs) {
 	lgEngine.Debug("sync request received", "zone", req.ZoneName)
 	switch req.Command {
-	case "HSYNC-UPDATE":
-		lgEngine.Info("HSYNC RRset changed, updating agents", "zone", req.ZoneName)
-		// Run UpdateAgents without waiting for completion
-		go func() {
-			err := ar.UpdateAgents(ourId, req, req.ZoneName, synchedDataUpdateQ, msgQs)
-			if err != nil {
-				lgEngine.Error("error updating agents", "zone", req.ZoneName, "err", err)
-			}
-			// Send response if needed
-			if req.Response != nil {
-				req.Response <- SyncResponse{
-					Status: err == nil,
-					Error:  err != nil,
-					ErrorMsg: func() string {
-						if err != nil {
-							return err.Error()
-						}
-						return ""
-					}(),
-					Msg: "Agent updates processed",
-				}
-			}
-		}()
-
 	case "SYNC-DNSKEY-RRSET":
 		lgEngine.Info("DNSKEY RRset changed", "zone", req.ZoneName)
 

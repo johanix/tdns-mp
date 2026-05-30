@@ -84,11 +84,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		ar.AuditState = stateManager
 	}
 
-	// Provider group recomputation hook. The agent role triggers
-	// RecomputeGroups via HsyncEngine's HSYNC-UPDATE flow; the auditor
-	// doesn't run HsyncEngine, so we wire a one-shot OnFirstLoad and
-	// PostRefresh for re-runs on every zone transfer. RecomputeGroups
-	// is a pure function of zone data and does not require SharedZones.
+	// Provider group recomputation hook. Both roles recompute via the
+	// HsyncEngine's ApplyHsyncDiff -> OnHsync3Changed callback; we also wire a
+	// one-shot OnFirstLoad and PostRefresh for re-runs on every zone transfer.
+	// RecomputeGroups is a pure function of zone data and does not require
+	// SharedZones.
 	if ar != nil && ar.ProviderGroupManager != nil {
 		pgm := ar.ProviderGroupManager
 		for _, zoneName := range conf.Config.Internal.AllZones {
