@@ -47,7 +47,9 @@ there are no separate "amendment" layers to cross-reference.
    (string)** — never an enum or a 2-element shape. `transport.Peer.
    Mechanisms` is already `map[string]*MechanismState` (good); the gap
    is the send path (`SendBeatWithFallback` hardcodes API-then-DNS) and
-   `supported_mechanisms` config. D1's relocation must keep the
+   `supported_mechanisms` config (`config_validate.go:82-94` currently
+   whitelists only `"api"`/`"dns"` — extend that validator when DOQ
+   ships; not a Stage A blocker). D1's relocation must keep the
    per-mechanism send/result shape a string-keyed collection so adding
    DOQ (or per-mechanism parallel) is a local change, never an API
    break.
@@ -169,9 +171,13 @@ Stage has a trustworthy baseline.
   zero callers; engine `sendHeartbeats` is live) and
   `AgentRegistry.ReconcileHsync` + `reconcileZone`/
   `hsync3IdentitiesFromRRset` (`hsync_reconcile.go`, zero callers; the
-  live net is `hsync.Engine.runReconcile`). Fix the stale
-  `start_auditor.go:11` "does NOT run HsyncEngine" comment. (pass-1
-  Stage 0, pass-2 H7)
+  live net is `hsync.Engine.runReconcile`). **Delete the tests that
+  exercised the dead reconcile path too** — `hsync_reconcile_test.go`
+  `TestHsync3IdentitiesFromRRset` and `TestReconcileZone_removesStalePeer`
+  (0.1 only fixes the `MultiProviderConf` compile lines in that file;
+  0.3 removes the obsolete tests along with the code they covered). Fix
+  the stale `start_auditor.go:11` "does NOT run HsyncEngine" comment.
+  (pass-1 Stage 0, pass-2 H7)
 
 **Probe.** Automated only. Baseline = green suite in all three repos.
 Prediction: INVARIANT runtime (no behavior change; dead-code removal).
@@ -212,47 +218,80 @@ other call site — **re-home them first** (A1.0 below):
   HSYNC3 **identity** change (`len(updatedIdentities)>0`) — param-only
   changes recompute groups but do NOT kick an election (`:1037`).
 
-Plus two semantic gaps the swap exposes (pass-2 B3):
-- the `weAreInHSYNC` global abort (`UpdateAgents` stops all remote
-  processing when our identity is absent from the zone's HSYNC3,
-  `:907-910`) has no `ApplyHsyncDiff` equivalent; wire `OnLocalRemoved`
-  (`hsync/hsync3_diff.go:100`, currently unwired) to that handling.
+Plus three semantic gaps the swap exposes (pass-2 B3):
+- **`weAreInHSYNC` is not the same as `OnLocalRemoved`.** The global
+  abort (`UpdateAgents` stops *all* remote processing when our identity
+  is absent from the zone's HSYNC3 RRset, `:907-910`) fires on every
+  refresh where we are not listed — including param-only edits with no
+  remove RR. `OnLocalRemoved` (`hsync/hsync3_diff.go:100`, currently
+  unwired) fires only on an explicit local remove in the diff. **Bind
+  both:** (1) wire `OnLocalRemoved` for the remove-RR case and decide
+  the fate of `CleanupZoneRelationships` (`agent_utils.go:869`, a TODO
+  stub today — implement the zone teardown there, or explicitly drop
+  with a stated alternative; do not leave dangling); (2) add a
+  **pre-diff guard** in `ApplyHsyncDiff` (or the host callback) that
+  mirrors `weAreInHSYNC`: when the local identity is absent from the
+  zone's *current* HSYNC3 RRset, skip remote add/remove processing
+  (param-only group recompute via `OnHsync3Changed` must also be
+  suppressed in that case — `UpdateAgents` never reached `:1037`).
 - the `members==nil` fallback (`hsync3_diff.go:47-51,75-78`) lets adds
   proceed ungated when the zone view is unavailable — make it fail
   closed (no add) to honor "OFF/role-less excluded everywhere".
+  **Startup invariant:** `ApplyHsyncDiff` runs only after the zone is
+  registered in the `Zones` lookup (PostRefresh ordering guarantees
+  this today); if the zone view is ever nil, adds are blocked and
+  `hsync.Engine.runReconcile` remains authoritative.
 
 Bind the **remove-authority model**: after A1, `hsync.Registry` is the
 sole authority for add AND remove; the agent-only
 `UpdateAgents`→`RemoveRemoteAgent` path (`:1004`, which never calls
 `hsync.Registry.RemovePeerFromZone`) is deleted. `AgentRegistry` is
-updated only via hooks (`OnPeerStored` + the new `OnPeerRemoved` from
-A5).
+updated only via hooks (`OnPeerStored` until bridge teardown in A5, then
+`OnPeerStored` + the new `OnPeerRemoved`). Between A1 and A5, hsync-side
+removes propagate to the agent registry through the existing bridge
+(`SyncPeerZones` / `OnPeerStored`); event-driven `OnPeerRemoved` arrives
+at A5.
 
-**Sub-steps:**
+**Sub-steps (each = one commit — see Execution checklist):**
 - **A1.0** — extend the shared engine factory `HostCallbacks`
   (`newAuditorHsyncEngine`/the agent equivalent, `hsync_bridge.go:301`)
-  to carry `OnLocalRemoved` and a zone+diff context so the upstream/
-  downstream RFI tasks + election kick can be reattached. (`ApplyHsyncDiff`
-  today calls `MarkNeeded(...,nil)`.) Without this, A1 cannot land
-  (pass-2 B5).
+  to carry `OnLocalRemoved`, the `weAreInHSYNC` pre-diff guard, and a
+  zone+diff context so the upstream/downstream RFI tasks + election kick
+  can be reattached. Wire `OnLocalRemoved` → `CleanupZoneRelationships`
+  (implement or explicitly drop). (`ApplyHsyncDiff` today calls
+  `MarkNeeded(...,nil)`.) Without this, A1 cannot land (pass-2 B5).
 - **A1.1** — agent PostRefresh calls `ApplyHsyncDiff` directly; delete
-  the `HSYNC-UPDATE` `SyncQ` branch + agent-path `RemoveRemoteAgent`.
+  the `HSYNC-UPDATE` `SyncQ` branch, agent-path `RemoveRemoteAgent`, and
+  the entire **`UpdateAgents` function** (`agent_utils.go:874` — its
+  only caller is the deleted branch).
 - **A1.2** — dedup the double `RecomputeGroups` (the auditor already
   does `ApplyHsyncDiff`→`OnHsync3Changed`(recompute) **plus** a direct
   `RecomputeGroups`, `hsync_utils.go:1477-1484`; don't inherit it on the
   agent) (pass-2 H9).
 
 **Probe — EXPLAINED DELTA (not INVARIANT, per pass-2 B3):** common case
-identical (membership, gossip, edit round-trip). Deltas: (a) on
-local-identity dropout from a zone, processing now stops via
-`OnLocalRemoved` rather than the global abort — verify equivalent
-outcome; (b) transient role-less adds no longer slip through the
-`members==nil` path. Add regression tests for both.
+identical (membership, gossip, edit round-trip). Deltas: (a)
+local-identity dropout and param-only refresh while local is absent
+from HSYNC3 — verify the pre-diff guard + `OnLocalRemoved`/`CleanupZoneRelationships`
+match today's `weAreInHSYNC` abort (including no spurious group
+recompute); (b) transient role-less adds no longer slip through the
+`members==nil` path; (c) **removal latency** — pruned peers may lag on
+the agent registry until A5 adds `OnPeerRemoved` (bridge sync only until
+then). Add regression tests for (a) and (b).
 
 ### A2 — Derive every membership read from participants (incl. the wire boundary)
 
 Make `zoneParticipants` (HSYNCPARAM roles via ON HSYNC3 labels,
-`provider_groups.go:82`) the single membership truth at **every** reader.
+`provider_groups.go:82`) the single membership truth at **every** reader
+on **agent/auditor** paths. Introduce one shared helper —
+`ParticipantsForZone(zone)` in `provider_groups.go`, wrapping
+`zoneParticipants` — and route every reader below through it (do not
+sprout partial copies in `hsync/` or the bridge).
+
+**Combiner/signer** processes intentionally keep config-only
+`AuthorizedPeers` (`main_init.go:302-384`), not participant derivation —
+that is correct for those roles.
+
 The wire-boundary readers are the security-critical additions (pass-2
 B1/H6):
 - **Auth admission (BLOCKING):** `isInHSYNC`/`isInHSYNCAnyZone`
@@ -280,8 +319,15 @@ hello zone list (`hsync_hello.go:26`), the `peer list` zero-zone display
 filter (`apihandler_agent_distrib.go:356,414`), and the debug reader
 (`cli/hsync_cmds.go:537`). **OFF excluded everywhere** — already true
 once Stage 0 deleted the raw-HSYNC3 reconcile (the only non-filtering
-reader). Recommend a single shared `Participants(zone)` helper all these
-call.
+reader).
+
+**One documented exception:** `zoneParticipants` today falls back to
+*all ON HSYNC3 identities* when a zone has HSYNC3 but **no HSYNCPARAM**
+(`provider_groups.go:107-113`, mid-migration legacy with a warning).
+That is the **sole** remaining non-participant-gated path — keep it as an
+explicit, logged exception in A2 (do not silently widen "OFF/role-less
+excluded everywhere" to cover it unless the operator decides to remove
+the fallback in this Step).
 
 **LEGACY unification (pass-2 H2):** define LEGACY once = **derived
 participations == 0**. Map the three current sites to it:
@@ -338,6 +384,11 @@ is in `routeHelloMessage` — do not wire inbound to the stub (pass-2 M4).
   `helloContexts` vs `hsync/discovery.go`+`helloCancel`) — keep the
   hsync path — or the embed spawns duplicate HELLO goroutines; verify no
   `HsyncEngine==nil` production fallback before deleting the legacy path.
+- **stop storing synced zone membership:** after the embed, neither
+  `agent.Zones` nor `hsync.Peer.Zones` is written as a parallel
+  membership copy — zone participation is derived on read via
+  `ParticipantsForZone`. (Transport `SharedZones` lingers until **C7**;
+  A2 already sources outbound beat zones from participants.)
 
 **Probe — INVARIANT:** `peer list`/`peer zones`/gossip/edits
 byte-comparable; suite green; no new races under `-race` on the
@@ -368,10 +419,10 @@ Scope is **~340 reads across 13+ files** (not the send path only):
   `AgentRegistry`; combiner/signer processes use `PeerRegistry` only) —
   the combiner-reachability probe must hold for both (pass-2 M5).
 
-**Sub-steps:** A4a stop dual-writing the migrated fields; A4b delete the
-fields + redirect all reads. `SendStatusUpdate` is fire-and-forget
-(`dns.go:904`, no confirm wait) — preserve that semantics through the
-send-path changes (pass-2 M6).
+**Sub-steps (each = one commit):** A4a stop dual-writing the migrated
+fields; A4b delete the fields + redirect all reads. `SendStatusUpdate`
+is fire-and-forget (`dns.go:904`, no confirm wait) — preserve that
+semantics through the send-path changes (pass-2 M6).
 
 **Probe — INVARIANT:** `peer list` addresses/states unchanged; `addrr`
 round-trip still ACCEPTED; combiner reachable (both role views). Run
@@ -393,8 +444,9 @@ because the `HandleSync` shared-zones gate and outbound-beat zone source
 move in Stage C. Decision baked in.)
 
 **Probe — INVARIANT** for steady state; **EXPLAINED DELTA** for removal
-latency (a pruned peer disappears promptly via the event, not after a
-reconcile interval).
+latency — completes the delta noted at A1(c): a pruned peer now
+disappears promptly via `OnPeerRemoved` (event), not after a reconcile
+interval or bridge-only sync.
 
 ---
 
@@ -490,7 +542,10 @@ file surgery, not two), coordinating with the in-channel-CHUNK / DOQ
 design (`tdns-transport` `2026-05-27-in-channel-chunk-transport-design.md`
 and the related tdns-nm DOQ notes). The only residual timing question is
 whether the DOQ work needs the label before C5 is scheduled — if so,
-pull just the label out as a tiny pre-C5 step.
+pull just the label out as a tiny pre-C5 step. **Wire note:** the
+envelope indicator is an **additive** field (Do53 peers default to
+`jose` when absent); Stage C probe stays INVARIANT for mixed fleets as
+long as senders omitting the field behave as today.
 
 ### C6 — Minimize constants + payload types
 Reduce `MessageType` constants to transport-own
@@ -538,10 +593,12 @@ liveness transport-owned, wire lifecycle in TM startup.
   string-keyed (API/DNS/DOQ/…), not a 2-element API/DNS shape, so
   per-mechanism parallel and new mechanisms are later local changes.
   Per-**peer** beats are already concurrent (`go func` per peer in
-  `SendHeartbeats`/`sendInfraBeats`), so the comms-matrix skew from a
-  non-responding peer is already avoided; per-**mechanism** parallel
-  (relevant only for multi-mechanism peers — moot while the fleet is
-  DNS-only) is the optional follow-up.
+  `hsync.Engine.sendHeartbeats`/`sendInfraBeats`), so the comms-matrix
+  skew from a non-responding peer is already avoided; per-**mechanism**
+  parallel (relevant only for multi-mechanism peers — moot while the
+  fleet is DNS-only) is the optional follow-up. When DOQ lands, extend
+  `ValidateAgentSupportedMechanisms` (`config_validate.go`) to accept it
+  (principle 8).
 - **D2 — Transport-owned liveness middleware.** A default middleware
   updates `Peer.Mechanisms[mech]` on hello/beat receipt; delete the
   manual updates in combiner/signer handlers.
@@ -629,7 +686,9 @@ heterogeneous operation.
 5. Re-run the probe; compare to the predicted post-state; `-race` where
    relevant.
 6. One Step = one commit; push; operator deploys + verifies on the
-   testbed.
+   testbed. **Lettered sub-steps are Steps** — e.g. A1.0, A1.1, A1.2
+   are three commits, not one; A4a/A4b likewise. Unlettered Stage
+   entries (C1, C2, …) are one commit each.
 
 # Remaining open decisions (few)
 
