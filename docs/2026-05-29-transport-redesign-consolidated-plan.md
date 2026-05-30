@@ -247,6 +247,145 @@ exist (C is mostly relocation); and `SyncPeerFromAgent` has one caller.
 
 ---
 
+# Amendments from the second review (2026-05-30)
+
+A second, independent adversarial review
+(`2026-05-30-transport-redesign-plan-review.md`) confirmed the Gaps
+above and surfaced more. Its highest-stakes claims were re-verified in
+code (all confirmed) and one corrected a factual error in this plan
+(A1-5). These bindings amend the Steps below; resolutions to the
+review's open questions are decided here.
+
+**A1 — remove-authority model (resolves review A1-1/A1-3/A1-4 + open Q2).**
+Bind the model: after A1, **`hsync.Registry` is the sole authority for
+add AND remove**; `AgentRegistry` is updated only via hooks
+(`OnPeerStored` + a new `OnPeerRemoved`, built in A6). Concretely:
+- A1-1: the agent-only remove path (`UpdateAgents` →
+  `RemoveRemoteAgent`, `agent_utils.go:1004`, which never calls
+  `hsync.Registry.RemovePeerFromZone`) is **deleted** when the agent
+  routes through `ApplyHsyncDiff` — removes go through the hsync side
+  only, ending the store divergence on incremental removes.
+- A1-3: wire `OnLocalRemoved` (`hsync3_diff.go:100`, currently unwired)
+  to the local-identity-removed handling that `UpdateAgents`'
+  `weAreInHSYNC` guard (`:907`) performs today.
+- A1-4: `CleanupZoneRelationships` (`agent_utils.go:869`) is a TODO
+  stub today; decide its fate when wiring `OnLocalRemoved` — implement
+  or explicitly drop, do not leave dangling.
+- A1-6: keep the election kick gated on HSYNC3 **identity** change
+  (`len(updatedIdentities) > 0`), not on every `OnHsync3Changed`;
+  param-only changes recompute groups but do **not** kick an election
+  (matches `UpdateAgents` today, `:1018` vs `:1037`).
+- RFI re-home API shape (A1-2): extend the host callback to carry
+  zone+diff context so the upstream/downstream CONFIG RFI deferred
+  tasks can be reattached (today `ApplyHsyncDiff` calls
+  `MarkNeeded(..., nil)`).
+
+**A2 — full reader set + the election-quorum reader (resolves A2-1…A2-8
++ open Q4).** A2 must repoint **every** stored-membership reader, not
+the three originally listed. The material one: **`SetConfiguredPeersFunc`
+(`start_agent.go:137`) computes election quorum as
+`len(hsync3RRset.RRs) - 1`** — raw HSYNC3 count, so a role-less identity
+inflates quorum (the Bug-1 class in the election path). Repoint it to
+the `zoneParticipants` count. Also repoint: `listAgentsForZone`
+(`apihandler_agent_distrib.go:649`, `apihandler_shared_distrib.go:43`,
+`cli/agent_cmds.go:177`), `NotifyPeerOperational(agent.Zones)`
+(`hsync_transport.go:726`), the hello zone list (`hsync_hello.go:26`),
+the `peer list` zero-zone display filter
+(`apihandler_agent_distrib.go:356,414`), and the `RemoteAgents` index
+(`agent_structs.go:266`). **OFF semantics (open Q4): exclude OFF
+everywhere** — this falls out for free because A2 **deletes** the raw
+`reconcileZone`/`hsync3IdentitiesFromRRset` path
+(`hsync_reconcile.go`), the only remaining non-OFF-filtering reader.
+*Expand the A2 probe to include election-leader convergence
+(`gossip state`) and role-less-identity visibility in `peer list`.*
+
+**A3 — embed scope + dead-reconcile deletion (resolves A3-1/A3-2/A3-5 +
+open Q7).** Bind: (a) the embed **deletes** the dead
+`AgentRegistry.ReconcileHsync` (it is not "merged" — only the engine
+loop is live); (b) retire ONE of the dual hello/discovery paths (legacy
+`attemptDiscovery`+`helloContexts` vs `hsync/discovery.go`+`helloCancel`)
+or the embed spawns duplicate HELLO goroutines — keep the hsync path;
+(c) `RegularS` (`agent_structs.go:265`, debug/API only) is folded or
+deleted, not left as a third map; (d) field homes (open Q7):
+`LocalID` lives on `hsync.Registry`; `TransportManager`/`MPTransport`/
+`LocalAgent`/`GossipStateTable`/`ProviderGroupManager`/
+`LeaderElectionManager` stay on the outer `AgentRegistry`.
+
+**A4 — field-home decision + true scope (resolves A4-1…A4-4 + open Q1).**
+Decision (open Q1): the crypto-identity fields
+`KeyRR`/`TlsaRR`/`JWKData`/`KeyAlgorithm` stay **MP-side metadata until
+E1** — they are discovery outputs; transport needs only address +
+per-mechanism state (+ TLSA for wire verify if used). When E1 moves
+discovery into transport, these land in `transport.Peer` naturally.
+So A4 migrates **address/per-mechanism/liveness only**, not identity.
+Scope is **~340 reads / 13+ files** (incl. `hsync/`, infra virtual
+peers `combiner_peer.go`/`signer_peer.go`, the canonical accessors
+`agent_structs.go:109-177`, `db_hsync.go`); delete **both**
+`agentStateToTransportState` and `agentStateToTransportStateFn`
+(`agent_structs.go:216`).
+
+**A5 — ordering vs the zero-shared-zones gate (resolves A5-1, BLOCKING).**
+`HandleSync` rejects a sender with zero shared zones
+(`handlers.go:223-246`, the "LEGACY agent cannot send" path) using
+transport `SharedZones`. A5 (remove zones from transport) must therefore
+land **after** that gate is moved to MP (it moves with the handler in
+C3) — sequence A5 after C3's `HandleSync` move, or move the gate first.
+Add this as an explicit A5 precondition.
+
+**Stage C — role dispatch, inline ACK, third authz (resolves C-2…C-5).**
+- C3 must preserve **role-specific handler sets**, not flatten to one:
+  combiner `HandleUpdate`/`NewCombinerSyncHandler` async-confirm
+  (`combiner_chunk.go:1428`), signer keystate/rfi/status subset
+  (`router_init.go:507`). The single `RegisterAppHandler` *mechanism*
+  is fine; each role registers a different set behind it.
+- C3 must preserve **inline-ACK semantics**: handlers set
+  `ctx.Data["response"]` for the NOTIFY confirm path (`HandleSync:266`,
+  `HandleKeystate:380`) and the combiner async-confirm. Probe with the
+  combiner async path, not only `ConfirmInlineResponsePrep`.
+- **Third authz layer (C-4, resolves open Q6):** besides the two chunk-
+  handler checks, `NewAuthorizationMiddleware` runs on the router
+  (`router_init.go:63/295/441`). Bind: **peer-level authz (sender
+  known) stays in transport** — both the pre-crypto chunk check (C5
+  invariant) and the router middleware for transport-own verbs.
+  **Zone-level authz moves to MP** with the app handlers. The router
+  middleware for app verbs is removed (app authz is post-callback in
+  MP).
+- C5 scope must list the `ChunkHandler` MP callbacks to preserve:
+  `IsPeerAuthorized`, `OnConfirmationReceived`, `GossipForPeer`,
+  `OnPeerDiscoveryNeeded` (`hsync_transport.go:321-416`); and collapse
+  the MP-side duplicate verb table `routeIncomingMessage`
+  (`hsync_transport.go:567`) into the one dispatcher rather than adding
+  a third.
+
+**D1 — relocation, not invention (resolves D-1/D-2 + open Q5).**
+Today `SendHelloWithFallback`/`SendBeatWithFallback` already try API
+**then** DNS, "any success" (sequential, not concurrent). Decision
+(open Q5): D1 **relocates the existing sequential any-success semantics
+into the TM** — INVARIANT, no behavior change. True concurrent fan-out
+is a **separate, optional follow-up** (EXPLAINED DELTA if pursued), not
+part of D1. This removes D1's "open design decision" blocker.
+
+**E1 — three discovery entry points (resolves E-1, BLOCKING).** E1/E2
+must unify **all three**: `hsync/discovery.go`→`DiscoverPeer` seam,
+legacy `AgentRegistry.attemptDiscovery` (`agent_utils.go:588`, via
+`DiscoveryRetrierNG`/`apihandler_peer.go:136`), and
+`OnPeerDiscoveryNeeded` on the chunk handler (`hsync_transport.go:379`).
+The plan previously cited only the `agent_discovery.go` body.
+
+**F1 — full tag inventory (resolves F-1).** The `Gossip` JSON tag is
+inconsistent (`BeatRequest` `json:"gossip"` `transport.go:137` vs
+`DnsBeatPayload` `json:"Gossip"` `dns.go:1253`). F1 must enumerate and
+change **all** gossip tag sites (beat request/response, DNS payloads),
+not just `BeatRequest`/`BeatResponse`.
+
+**Severity calibration note:** the second review marks several items
+BLOCKING that are really "bind-before-that-Step" (e.g. A1-5 is a
+doc-correctness fix). The substance is right; only A5-1, A2-1, E-1 and
+the C5 DoS invariant are true cross-Step blockers. Treat all of them as
+binding regardless.
+
+---
+
 # Stage A — Registry consolidation
 
 **Goal:** collapse the three overlapping peer-state stores into two
@@ -307,8 +446,11 @@ single source, then the transport-side ownership and bridge teardown.
   (finish §D-4). Replace the agent `PostRefresh` branch's
   `SyncQ`/`HSYNC-UPDATE`→`UpdateAgents` path
   (`hsync_utils.go:1456-1463`) with `hsync.Engine.ApplyHsyncDiff`, as
-  the auditor branch already does (`:1472`). Keep `ReconcileHsync` as
-  the safety net. *Wire-compatible.* **NOT safe as a bare swap — see
+  the auditor branch already does (`:1472`). The live reconcile safety
+  net is `hsync.Engine.runReconcile` (`hsync/engine.go:59`); the
+  tdnsmp `AgentRegistry.ReconcileHsync` is **dead code (zero callers)**
+  and is deleted in A2 — do NOT "keep it as a safety net" (corrected
+  per 2nd review A1-5). *Wire-compatible.* **NOT safe as a bare swap — see
   Gaps (2026-05-30): A1 must first re-home the upstream/downstream RFI
   deferred tasks and the membership-change election kick, and handle the
   HSYNCPARAM-only-change recompute, all of which `ApplyHsyncDiff` does
