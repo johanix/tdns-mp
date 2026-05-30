@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -50,23 +51,18 @@ func (m *mockTransport) PeerRegistry() *transport.PeerRegistry {
 }
 
 type mockZone struct {
-	zone string
-	rrs  []dns.RR
-	mp   bool
+	zone       string
+	rrs        []dns.RR
+	hsyncparam *core.HSYNCPARAM
+	mp         bool
 }
 
 func (z *mockZone) ZoneName() string      { return z.zone }
 func (z *mockZone) HSYNC3() []dns.RR      { return z.rrs }
 func (z *mockZone) IsMultiProvider() bool { return z.mp }
 
-// Participants: the mock has no HSYNCPARAM, so (matching the host's legacy
-// fallback) every HSYNC3 identity is a participant.
 func (z *mockZone) Participants() []PeerID {
-	out := make([]PeerID, 0)
-	for id := range IdentitiesFromRRset(z.rrs, "") {
-		out = append(out, id)
-	}
-	return out
+	return ParticipantsFromHSYNC3(z.rrs, z.hsyncparam)
 }
 
 type mapZoneLookup map[string]*mockZone

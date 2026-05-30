@@ -58,6 +58,7 @@ func mustHSYNC3RR(t *testing.T, label, identity string) *dns.PrivateRR {
 	return &dns.PrivateRR{
 		Hdr: dns.RR_Header{Name: "customer.test.", Rrtype: core.TypeHSYNC3, Class: dns.ClassINET, Ttl: 300},
 		Data: &core.HSYNC3{
+			State:    1, // ON
 			Label:    label,
 			Identity: identity,
 			Upstream: ".",
