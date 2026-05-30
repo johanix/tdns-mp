@@ -148,6 +148,105 @@ peer-discovery branch.
 
 ---
 
+# Gaps & required pre-work (adversarial review, 2026-05-30)
+
+A second, adversarial pass (probing what the mapping passes were *not*
+asked about: persistence, locking, wire-reality, crypto/authz ordering,
+blast-radius, external consumers, doc collisions) found the following.
+These amend the Stage definitions below — read them as binding.
+
+**Stage 0 (NEW — pre-work, blocks the probe discipline).** The v2 test
+suite does not compile: `apihandler_agent_test.go:34` and
+`hsync_reconcile_test.go:47,97` reference the removed
+`tdns.MultiProviderConf` (MP-config-cutover leftovers). `go test
+./v2/...` is RED. Fix these two files **first** — the entire
+Characterization-Probe baseline depends on a green automated suite.
+(Also delete the dead `PeerRegistry`/`PeerZones` DB layer in
+`db_hsync.go`/`db_schema_hsync.go` — full CRUD that is never written,
+only read by one CLI command returning empty; a phantom fourth
+"registry" that should not survive the consolidation.)
+
+**A1 is not safe as written — re-home before replacing.** Switching the
+agent `PostRefresh` from `UpdateAgents` to `ApplyHsyncDiff` silently
+DROPS three agent behaviors that `ApplyHsyncDiff` does not reproduce and
+that exist at no other call site:
+- **upstream RFI** deferred task (`agent_utils.go:934-956`),
+- **downstream RFI** deferred task (`:957-981`),
+- the **membership-change election kick** (`:1018-1030`).
+Also the **HSYNCPARAM-only change** case (param edit, zero HSYNC3 diff)
+must still trigger a group recompute — wire `ApplyHsyncDiff`/the
+`OnHsync3Changed` hook to fire on param-only refreshes too. A1 must
+re-home these (attach the RFI tasks via `MarkNeeded`/the host callback;
+add the election kick to `OnHsync3Changed`) **before** it stops calling
+`UpdateAgents`. (Auditors tolerate the drops because they never RFI or
+elect; agents do — this is why the auditor branch already migrated and
+the agent branch did not.)
+
+**A4 blast radius is ~5× the map and has a missing field home.** Reads
+of `Agent.ApiDetails`/`DnsDetails` are **~270 across 13 files**, not the
+~30 send-path sites: also the CLI display builder
+(`apihandler_agent_distrib.go:350-440`, ~21 reads), the liveness engine
+`CheckState` (`hsync_beat.go:194`, which *writes* `State`), receive-side
+beat counters (`hsync_beat.go:19-25`), `peer reset`
+(`apihandler_peer.go:121`), `GetLeaderStatus` (`parentsync_leader.go:1368`),
+and the canonical accessors (`agent_structs.go:109-177`
+`EffectiveState`/`IsAnyTransportOperational`/`APIMechanismState`). And
+the identity fields `KeyRR`/`TlsaRR`/`JWKData`/`KeyAlgorithm` have **no
+home in `transport.Peer`** — A4 needs a destination for them first
+(add to `transport.Peer`, or rule they stay MP-side as non-transport
+metadata). A4 therefore gains an explicit Step A4.0 "give
+`transport.Peer` a home for every field being migrated" and a 13-file
+scope, and sub-splits A4a (stop writing dup fields) / A4b (delete +
+redirect all reads).
+
+**A3 must address concurrency the merge introduces.** Today the two
+reconcile loops (`hsync.Engine.runReconcile`, `AgentRegistry.ReconcileHsync`)
+are decoupled because they mutate *different* stores via the async
+bridge; **collapsing the stores makes them contend on one lock** — A3
+must unify them into a single reconcile (likely drop `ReconcileHsync`,
+keep the hsync one). The embed must yield **one mutex per peer** (do not
+keep both `Agent.Mu` and `hsync.Peer.Mu`). And
+`RecomputeSharedZonesAndSyncState` (`agent_utils.go:60`) holds
+`agent.Mu` across `PeerRegistry.GetOrCreate`+`AddSharedZone` — refactor
+it to release `agent.Mu` before touching the transport peer (the
+template for the "no registry lock held across a transport call" rule)
+*before* the embed amplifies it.
+
+**Stage C "INVARIANT" carries caveats.** Wire-compat is achievable but
+not automatic — the verb is a JSON payload key (`"MessageType"`,
+`chunk_notify_handler.go:256/281`), never a transport envelope field:
+- **C6 hazard:** moving the `Dns*Payload` structs must keep marshalling
+  `"MessageType"` with the same value; a renamed/`omitempty` tag is a
+  silent wire break (`parsePayload` → RcodeFormatError).
+- **Mixed-fleet brittleness:** `parsePayload:273-278` hard-refuses nodes
+  emitting conflicting `MessageType`/`type` (or `Zone`/`zone`), so
+  half-migrated fleets during C are fragile even though steady state is
+  identical. Upgrade C-touching changes fleet-wide promptly.
+- **Probe must cover query mode too:** the verb also rides the
+  query-mode manifest `content` field (`distrib/manifest.go:82`); an
+  edns0-only probe misses a query-mode divergence.
+- **C5 DoS invariant (binding):** the **pre-crypto sender authz**
+  (`chunk_notify_handler.go:434`, `IsPeerAuthorized(sender, "")`,
+  before `fetchChunkViaQuery`+decrypt) MUST stay in transport. Only the
+  **post-decrypt zone authz** (`:551`) moves to MP. Do not collapse the
+  two `IsPeerAuthorized` calls into one post-seam call — that would
+  decrypt/fetch before authorizing.
+
+**C5 collides with the in-channel CHUNK design.** `2026-05-27-in-channel-chunk-transport-design.md`
+(KDC→KRS DoT/DoQ) targets the same `chunk_notify_handler.go`/`crypto.go`
+and wants to replace `IsPayloadEncrypted()` with an explicit envelope
+indicator. Sequence C5 and that work deliberately (do the envelope-mode
+indicator as part of, or immediately before, the C5 split) to avoid
+double-rework on one file.
+
+**Good news (lower risk than assumed):** peer state is **in-memory
+only** (rebuilt from HSYNC3/discovery on start — no DB migration);
+transport has **one consumer today** (tdns-mp), so C's API churn breaks
+nothing external; the generic router + `RouteToCallback` seam already
+exist (C is mostly relocation); and `SyncPeerFromAgent` has one caller.
+
+---
+
 # Stage A — Registry consolidation
 
 **Goal:** collapse the three overlapping peer-state stores into two
@@ -209,8 +308,11 @@ single source, then the transport-side ownership and bridge teardown.
   `SyncQ`/`HSYNC-UPDATE`→`UpdateAgents` path
   (`hsync_utils.go:1456-1463`) with `hsync.Engine.ApplyHsyncDiff`, as
   the auditor branch already does (`:1472`). Keep `ReconcileHsync` as
-  the safety net. Removes the agent-only `UpdateAgents` side effects
-  from the membership path. *Wire-compatible.*
+  the safety net. *Wire-compatible.* **NOT safe as a bare swap — see
+  Gaps (2026-05-30): A1 must first re-home the upstream/downstream RFI
+  deferred tasks and the membership-change election kick, and handle the
+  HSYNCPARAM-only-change recompute, all of which `ApplyHsyncDiff` does
+  not reproduce.**
 - **A2 — Make every membership read derive from participants.** Convert
   the remaining raw-HSYNC3 / stored-`Zones` readers:
   `reconcileZone` `expected` (`hsync_reconcile.go:100`) →
@@ -228,7 +330,11 @@ single source, then the transport-side ownership and bridge teardown.
   are deleted; the duplicated protocol methods become delegating
   wrappers, then wrappers deleted. *Largest blast radius; lands alone;
   pure refactor (probe INVARIANT).* Naming note: §D-3 said
-  `helloContexts`; actual is `helloCancel`.
+  `helloContexts`; actual is `helloCancel`. **Concurrency (see Gaps
+  2026-05-30): embed must yield ONE mutex per peer; unify the two
+  contending reconcile loops; first refactor
+  `RecomputeSharedZonesAndSyncState` to drop `agent.Mu` before calling
+  the transport peer.**
 - **A4 — Transport becomes sole owner of address + per-mechanism
   state.** Delete `SyncPeerFromAgent` (`hsync_transport.go:1466`, 1
   caller) and `agentStateToTransportState` (`:1507`); drop the
@@ -238,8 +344,11 @@ single source, then the transport-side ownership and bridge teardown.
   `SendBeatWithFallback`, `beatTransportUsed` `hsync_bridge.go:77`) to
   `peerRegistry.Get(peerID)`. `GetOrCreatePeer`'s 2026-05-28 address
   patch is subsumed here. *The permanent Bug-2 fix; probe INVARIANT on
-  addresses/convergence.* May sub-split: A4a stop-writing-dup-fields /
-  A4b delete-fields.
+  addresses/convergence.* **Scope is ~270 reads across 13 files (not the
+  send path only) — see Gaps (2026-05-30). Adds A4.0: give
+  `transport.Peer` a home for `KeyRR`/`TlsaRR`/`JWKData`/`KeyAlgorithm`
+  (no home today) before redirecting reads.** Sub-splits A4a
+  stop-writing-dup-fields / A4b delete+redirect-all-reads.
 - **A5 — Remove zone concepts from transport.** Delete `ZoneRelation`
   (`peer.go:155`), `Peer.SharedZones` (`:81`), `AddSharedZone`/
   `GetSharedZone(s)`/`ByZone` (`:546-688`) and their few tdns-mp callers
