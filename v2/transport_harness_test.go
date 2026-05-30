@@ -252,6 +252,29 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 	return zd
 }
 
+// addHSYNCPARAMServers adds an HSYNCPARAM RRset to a seeded zone granting the
+// "servers" role to the given HSYNC3 labels. Identities present in HSYNC3 but
+// absent from any role become non-participants — the role-less case.
+func addHSYNCPARAMServers(t *testing.T, zd *tdns.ZoneData, serverLabels ...string) {
+	t.Helper()
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("apex not found for %s: %v", zd.ZoneName, err)
+	}
+	hp := &core.HSYNCPARAM{
+		Value: []core.HSYNCPARAMKeyValue{
+			&core.HSYNCPARAMServers{Servers: serverLabels},
+		},
+	}
+	prr := &dns.PrivateRR{
+		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: hp,
+	}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	zd.Data.Set(zd.ZoneName, *apex)
+	Zones.Invalidate(zd.ZoneName)
+}
+
 // shortLabel takes an FQDN and returns its first label, used as a
 // human-readable HSYNC3 Label.
 func shortLabel(fqdn string) string {

@@ -584,11 +584,11 @@ func (lem *LeaderElectionManager) DeferElection(zone ZoneName) {
 }
 
 // NotifyPeerOperational is called when a peer becomes operational.
-func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones map[ZoneName]bool) {
+func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones []ZoneName) {
 	var candidates []ZoneName
 
 	lem.mu.RLock()
-	for zone := range peerZones {
+	for _, zone := range peerZones {
 		if lem.pendingElections[zone] {
 			candidates = append(candidates, zone)
 			continue

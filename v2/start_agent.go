@@ -125,20 +125,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 
 	// Wire configured peers counter — elections require ALL configured peers.
+	// Quorum is the participant count minus ourselves, not the raw HSYNC3 count:
+	// a role-less identity must not inflate the quorum.
 	lem.SetConfiguredPeersFunc(func(zone ZoneName) int {
-		zd, exists := Zones.Get(string(zone))
-		if !exists || zd == nil {
-			return 0
-		}
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil || apex == nil {
-			return 0
-		}
-		hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-		if !exists {
-			return 0
-		}
-		count := len(hsync3RRset.RRs) - 1
+		count := len(ParticipantsForZone(zone)) - 1
 		if count < 0 {
 			count = 0
 		}

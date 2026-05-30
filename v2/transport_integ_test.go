@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/miekg/dns"
 )
 
 // TestTransportBoundary_ChunkToMsg drives a sync IncomingMessage into
@@ -141,8 +142,8 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 		if needed {
 			t.Errorf("expected needed=false; got true (errmsg=%q)", errmsg)
 		}
-		if !strings.Contains(errmsg, "no HSYNC3") {
-			t.Errorf("errmsg %q does not mention missing HSYNC3", errmsg)
+		if !strings.Contains(errmsg, "no HSYNC participants") {
+			t.Errorf("errmsg %q does not mention missing HSYNC participants", errmsg)
 		}
 	})
 
@@ -166,8 +167,55 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 		if needed {
 			t.Errorf("expected needed=false; got true (errmsg=%q)", errmsg)
 		}
-		if !strings.Contains(errmsg, "does not include both") {
-			t.Errorf("errmsg %q does not mention HSYNC3 missing both identities", errmsg)
+		if !strings.Contains(errmsg, "do not include both") {
+			t.Errorf("errmsg %q does not mention participants missing both identities", errmsg)
+		}
+	})
+
+	// A2 security regression: an identity present in HSYNC3 but holding no
+	// HSYNCPARAM role is not a participant and must be rejected at HELLO, while a
+	// role-holding member is accepted.
+	t.Run("RoleLessRejected", func(t *testing.T) {
+		env := newIntegEnv(t, &integEnvConfig{SkipBridge: true})
+		const zone = "rolegated.example."
+		bob := dns.Fqdn(env.Bob.Identity)       // local (evaluator)
+		alice := dns.Fqdn(env.Alice.Identity)   // member
+		const roleless = "auden.agent.example." // in HSYNC3, no role
+
+		zd := seedZoneWithHSYNC3(t, zone, bob, alice, roleless)
+		addHSYNCPARAMServers(t, zd, shortLabel(bob), shortLabel(alice))
+
+		// Member HELLO accepted.
+		ok, msg, err := env.Bob.Registry.EvaluateHello(&AgentHelloPost{
+			MyIdentity: AgentId(alice), YourIdentity: AgentId(bob), Zone: ZoneName(zone),
+		})
+		if err != nil {
+			t.Fatalf("EvaluateHello(member) err: %v", err)
+		}
+		if !ok {
+			t.Fatalf("member HELLO should be accepted, rejected: %q", msg)
+		}
+
+		// Role-less HELLO rejected.
+		ok, _, err = env.Bob.Registry.EvaluateHello(&AgentHelloPost{
+			MyIdentity: AgentId(roleless), YourIdentity: AgentId(bob), Zone: ZoneName(zone),
+		})
+		if err != nil {
+			t.Fatalf("EvaluateHello(role-less) err: %v", err)
+		}
+		if ok {
+			t.Errorf("role-less identity must be rejected at HELLO, got accepted")
+		}
+
+		// ParticipantsForZone excludes the role-less identity.
+		parts := ParticipantsForZone(ZoneName(zone))
+		for _, p := range parts {
+			if dns.Fqdn(string(p)) == dns.Fqdn(roleless) {
+				t.Errorf("participants must exclude role-less identity %q; got %v", roleless, parts)
+			}
+		}
+		if len(parts) != 2 {
+			t.Errorf("expected 2 participants (bob, alice); got %d: %v", len(parts), parts)
 		}
 	})
 }

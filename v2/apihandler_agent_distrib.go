@@ -346,6 +346,9 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				peerType = "signer"
 			}
 
+			// LEGACY == derived participations == 0 (not stored agent.Zones).
+			zeroParticipations := len(ar.sharedParticipantZones(agent.Identity)) == 0
+
 			// Add API transport entry when this mechanism is in use
 			if agent.ApiMethod && agent.ApiDetails != nil {
 				key := agentIDFqdn + ":API"
@@ -353,7 +356,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 
 					effectiveState := agent.ApiDetails.State
-					if !isCombiner && !isSigner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
@@ -411,7 +414,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 
 					effectiveState := agent.DnsDetails.State
-					if !isCombiner && !isSigner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
@@ -590,6 +593,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 		agent.Mu.RLock()
 		identity := agent.Identity
 		state := agent.State
+		agent.Mu.RUnlock()
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {
@@ -598,16 +602,12 @@ func listPeerSharedZones(conf *Config) []interface{} {
 				combinerID = "combiner"
 			}
 			if dns.Fqdn(string(identity)) == dns.Fqdn(combinerID) {
-				agent.Mu.RUnlock()
 				return
 			}
 		}
 
-		zoneNames := make([]ZoneName, 0, len(agent.Zones))
-		for zoneName := range agent.Zones {
-			zoneNames = append(zoneNames, zoneName)
-		}
-		agent.Mu.RUnlock()
+		// Shared zones are derived from participants, not stored agent.Zones.
+		zoneNames := conf.InternalMp.AgentRegistry.sharedParticipantZones(identity)
 
 		zoneDetails := make([]map[string]interface{}, 0, len(zoneNames))
 		for _, zoneName := range zoneNames {
@@ -635,7 +635,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 	return data
 }
 
-// listAgentsForZone returns peer agents that share a specific zone
+// listAgentsForZone returns peer agents that are participants in a specific zone
 func listAgentsForZone(conf *Config, zoneName string) []string {
 	agents := make([]string, 0)
 	mp := conf.MpConfig()
@@ -644,11 +644,9 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		return agents
 	}
 
+	members := participantFQDNSetForApex(zoneApex(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
-		agent.Mu.RLock()
-		hasZone := agent.Zones[ZoneName(zoneName)]
 		identity := agent.Identity
-		agent.Mu.RUnlock()
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {
@@ -661,7 +659,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 			}
 		}
 
-		if hasZone {
+		if members[dns.Fqdn(string(identity))] {
 			agents = append(agents, string(identity))
 		}
 	})

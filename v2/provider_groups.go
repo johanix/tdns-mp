@@ -143,6 +143,70 @@ func zoneParticipants(apex *tdns.OwnerData) (participants, voting []string) {
 	return participants, voting
 }
 
+// zoneApex resolves a zone's apex OwnerData via the MP zone map, or nil.
+func zoneApex(zone ZoneName) *tdns.OwnerData {
+	zd, ok := Zones.Get(string(zone))
+	if !ok || zd == nil {
+		return nil
+	}
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return nil
+	}
+	return apex
+}
+
+// ParticipantsForZone is the single membership truth for agent/auditor reads:
+// the identities holding a membership-conferring HSYNCPARAM role in the zone
+// (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with
+// no HSYNC3. Every membership reader routes through this (or the apex/FQDN-set
+// variants below) so there is one derivation — zoneParticipants — and no
+// raw-HSYNC3 co-presence path survives.
+func ParticipantsForZone(zone ZoneName) []AgentId {
+	participants, _ := zoneParticipants(zoneApex(zone))
+	out := make([]AgentId, len(participants))
+	for i, id := range participants {
+		out[i] = AgentId(id)
+	}
+	return out
+}
+
+// participantFQDNSetForApex returns the FQDN-keyed participant set for a zone
+// apex. Used by the wire boundary (auth/HELLO), which already holds the zone
+// data, so it never re-looks-up through a second accessor.
+func participantFQDNSetForApex(apex *tdns.OwnerData) map[string]bool {
+	participants, _ := zoneParticipants(apex)
+	set := make(map[string]bool, len(participants))
+	for _, id := range participants {
+		set[dns.Fqdn(id)] = true
+	}
+	return set
+}
+
+// sharedParticipantZones returns the zones in which both the local identity and
+// the given identity hold a membership role — the derived shared-zone set that
+// replaces the stored agent.Zones for outbound beats, HELLO, and the
+// OPERATIONAL/LEGACY transition (LEGACY == derived participations == 0).
+func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
+	localFQDN := dns.Fqdn(string(ar.LocalAgent.Identity))
+	idFQDN := dns.Fqdn(string(identity))
+	var out []ZoneName
+	for zoneName, zd := range Zones.Items() {
+		if zd == nil {
+			continue
+		}
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil || apex == nil {
+			continue
+		}
+		set := participantFQDNSetForApex(apex)
+		if set[localFQDN] && set[idFQDN] {
+			out = append(out, ZoneName(zoneName))
+		}
+	}
+	return out
+}
+
 // RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
 // and rebuilds the provider group map. This is a pure function of zone data.
 func (pgm *ProviderGroupManager) RecomputeGroups() {

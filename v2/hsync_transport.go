@@ -730,7 +730,8 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
 				// NotifyPeerOperational handles both deferred elections and
 				// new elections — it checks configured vs operational counts.
-				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(agent.Zones)
+				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+					tm.agentRegistry.sharedParticipantZones(agent.Identity))
 			}
 		}
 	}

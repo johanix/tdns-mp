@@ -43,13 +43,12 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 }
 
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
+	members := participantFQDNSetForApex(zoneApex(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		agent.Mu.RLock()
-		if _, exists := agent.Zones[zone]; exists {
+		if members[dns.Fqdn(string(agent.Identity))] {
 			agents = append(agents, agent)
 		}
-		agent.Mu.RUnlock()
 	}
 	return agents
 }
@@ -58,13 +57,18 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 // OPERATIONAL and LEGACY states based on zone count.
 // This should be called after HSYNC changes to keep agent state synchronized with zone membership.
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
+	// Derive the shared-zone set (zones where both we and this agent are
+	// participants) without holding agent.Mu — zone-data access must not nest
+	// under the agent lock. LEGACY is now defined as derived participations == 0.
+	shared := ar.sharedParticipantZones(agent.Identity)
+	zoneCount := len(shared)
+
 	agent.Mu.Lock()
 	defer agent.Mu.Unlock()
 
-	zoneCount := len(agent.Zones)
 	oldState := agent.State
 
-	// State transitions based on zone count
+	// State transitions based on derived participation count
 	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
 		// Transition to LEGACY when zones go to zero
 		agent.State = AgentStateLegacy
@@ -86,8 +90,8 @@ func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 		// Clear existing shared zones
 		peer.SharedZones = make(map[string]*transport.ZoneRelation)
 
-		// Re-add all zones from agent
-		for zone := range agent.Zones {
+		// Re-add the derived shared zones
+		for _, zone := range shared {
 			peer.AddSharedZone(string(zone), "", "")
 		}
 

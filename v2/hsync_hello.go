@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -24,10 +23,9 @@ func configureInterval(key string, min, max int) int {
 }
 
 func (ar *AgentRegistry) sharedZonesForAgent(agent *Agent) []string {
-	agent.Mu.RLock()
-	defer agent.Mu.RUnlock()
-	zones := make([]string, 0, len(agent.Zones))
-	for z := range agent.Zones {
+	shared := ar.sharedParticipantZones(agent.Identity)
+	zones := make([]string, 0, len(shared))
+	for _, z := range shared {
 		zones = append(zones, string(z))
 	}
 	return zones
@@ -330,43 +328,25 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	// Check if we have this zone
-	zd, exists := Zones.Get(string(ahp.Zone))
-	if !exists {
+	if _, exists := Zones.Get(string(ahp.Zone)); !exists {
 		lgAgent.Warn("unknown zone in HELLO, may be a timing issue", "zone", ahp.Zone)
 		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil
 	}
 
-	// Check if zone has HSYNC3 RRset
-	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
-	if err != nil {
-		lgAgent.Error("error retrieving HSYNC3 RRset", "zone", ahp.Zone, "err", err)
-		return false, fmt.Sprintf("Error trying to retrieve HSYNC3 RRset for zone %q: %v", ahp.Zone, err), nil
+	// Both our identity and the remote agent must be participants (HSYNCPARAM
+	// role-holders) in the zone — not merely co-present in HSYNC3. A role-less/
+	// OFF identity is rejected here, the HELLO admission boundary.
+	members := participantFQDNSetForApex(zoneApex(ahp.Zone))
+	if len(members) == 0 {
+		lgAgent.Warn("zone has no HSYNC participants", "zone", ahp.Zone)
+		return false, fmt.Sprintf("Error: Zone %q has no HSYNC participants", ahp.Zone), nil
 	}
-	if hsyncRR == nil {
-		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", ahp.Zone)
-		return false, fmt.Sprintf("Error: Zone %q has no HSYNC3 RRset", ahp.Zone), nil
-	}
-
-	// Check if both our identity and remote agent are in HSYNC3 RRset
-	foundMe := false
-	foundYou := false
-	for _, rr := range hsyncRR.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				if dns.Fqdn(hsync3.Identity) == dns.Fqdn(string(ar.LocalAgent.Identity)) {
-					foundMe = true
-				}
-				if dns.Fqdn(hsync3.Identity) == dns.Fqdn(string(ahp.MyIdentity)) {
-					foundYou = true
-				}
-			}
-		}
-	}
-
+	foundMe := members[dns.Fqdn(string(ar.LocalAgent.Identity))]
+	foundYou := members[dns.Fqdn(string(ahp.MyIdentity))]
 	if !foundMe || !foundYou {
-		lgAgent.Warn("HSYNC3 RRset does not include both identities",
+		lgAgent.Warn("zone participants do not include both identities",
 			"zone", ahp.Zone, "yourIdentity", ahp.MyIdentity, "myIdentity", ar.LocalAgent.Identity)
-		return false, fmt.Sprintf("Error: Zone %q HSYNC3 RRset does not include both our identities", ahp.Zone), nil
+		return false, fmt.Sprintf("Error: Zone %q participants do not include both our identities", ahp.Zone), nil
 	}
 
 	return true, "", nil
