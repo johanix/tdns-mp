@@ -40,6 +40,23 @@ there are no separate "amendment" layers to cross-reference.
    from the single registry on read.
 7. **Inbound dispatch** (`route*Message` → `adapt*` → engine) collapses
    to one path per message type in A3, not just a map merge.
+8. **Open-ended mechanism set (binding constraint).** Mechanisms are
+   NOT a fixed {API, DNS} pair. DOQ (DNS-over-QUIC, where CHUNKs travel
+   **unencrypted inside** the secure channel) is coming, and more may
+   follow. Everything per-mechanism MUST be keyed by mechanism **name
+   (string)** — never an enum or a 2-element shape. `transport.Peer.
+   Mechanisms` is already `map[string]*MechanismState` (good); the gap
+   is the send path (`SendBeatWithFallback` hardcodes API-then-DNS) and
+   `supported_mechanisms` config. D1's relocation must keep the
+   per-mechanism send/result shape a string-keyed collection so adding
+   DOQ (or per-mechanism parallel) is a local change, never an API
+   break.
+9. **Explicit payload-envelope label (decided).** Replace the fragile
+   byte-sniffing `IsPayloadEncrypted()` with an explicit envelope
+   indicator on the message: `envelope = none | jose | cose` (extensible).
+   DOQ uses `none` (the channel provides confidentiality); Do53 uses
+   `jose`. This is now a bound decision (operator, 2026-05-30), driven by
+   the in-channel-CHUNK / DOQ direction; it lands with C5 (see C5).
 
 ---
 
@@ -463,10 +480,17 @@ seam. List the `ChunkHandler` MP callbacks to preserve:
 (`router_init.go:63/295/441`) — peer-level authz stays in transport for
 transport-own verbs; the app-verb middleware is removed (app authz is
 post-callback in MP).
-**Sequence with the in-channel CHUNK design**
-(`2026-05-27-in-channel-chunk-transport-design.md`, same file + wants an
-explicit envelope-mode indicator replacing `IsPayloadEncrypted()`): land
-the envelope-mode indicator with or immediately before C5.
+**Envelope label + in-channel CHUNK coordination (decided).** Two
+efforts edit this same file and both touch "how does the receiver know
+if the payload is encrypted?" — today a fragile byte-sniff
+(`IsPayloadEncrypted()`). Decision (principle 9): replace it with an
+explicit `envelope = none|jose|cose` indicator on the message (DOQ →
+`none`; Do53 → `jose`). Land that envelope label **as part of C5** (one
+file surgery, not two), coordinating with the in-channel-CHUNK / DOQ
+design (`tdns-transport` `2026-05-27-in-channel-chunk-transport-design.md`
+and the related tdns-nm DOQ notes). The only residual timing question is
+whether the DOQ work needs the label before C5 is scheduled — if so,
+pull just the label out as a tiny pre-C5 step.
 
 ### C6 — Minimize constants + payload types
 Reduce `MessageType` constants to transport-own
@@ -510,7 +534,14 @@ liveness transport-owned, wire lifecycle in TM startup.
   try API **then** DNS, "any success" — *sequential*, not concurrent.
   D1 relocates **that exact semantics** into the TM (TM `Send` currently
   rejects Hello/Beat, `manager.go:346`). INVARIANT, no behavior change.
-  True concurrent fan-out is a separate optional follow-up.
+  **Constraint (principle 8):** keep the per-mechanism send/result shape
+  string-keyed (API/DNS/DOQ/…), not a 2-element API/DNS shape, so
+  per-mechanism parallel and new mechanisms are later local changes.
+  Per-**peer** beats are already concurrent (`go func` per peer in
+  `SendHeartbeats`/`sendInfraBeats`), so the comms-matrix skew from a
+  non-responding peer is already avoided; per-**mechanism** parallel
+  (relevant only for multi-mechanism peers — moot while the fleet is
+  DNS-only) is the optional follow-up.
 - **D2 — Transport-owned liveness middleware.** A default middleware
   updates `Peer.Mechanisms[mech]` on hello/beat receipt; delete the
   manual updates in combiner/signer handlers.
@@ -602,8 +633,11 @@ heterogeneous operation.
 
 # Remaining open decisions (few)
 
-1. **C5 ↔ in-channel-CHUNK sequencing** — do the envelope-mode indicator
-   as part of C5, or land the in-channel design's indicator first? (Both
-   touch `chunk_notify_handler.go`/`crypto.go`.)
-2. **True parallel Hello/Beat** — schedule the optional concurrent
-   fan-out follow-up after D1, or leave sequential indefinitely?
+1. **DOQ-vs-C5 timing** — the explicit `envelope` label is decided
+   (principle 9) and lands with C5. The only residual: if the DOQ /
+   in-channel-CHUNK work needs the label *before* C5 is scheduled, pull
+   the label out as a tiny pre-C5 step. (Timing only, not design.)
+2. **Per-mechanism parallel Hello/Beat** — optional follow-up after D1,
+   relevant once multi-mechanism peers (e.g. DOQ alongside DNS) exist.
+   Not a one-way door; D1 just must keep the mechanism shape string-keyed
+   (principle 8). Per-peer concurrency already exists.
