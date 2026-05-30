@@ -1477,12 +1477,13 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 				ar := tm.agentRegistry
 				if ar.HsyncEngine != nil && analysis.HsyncStatus != nil {
 					lg.Info("HSYNC RRset changed, applying hsync diff for auditor", "zone", mpzd.ZoneName)
+					// ApplyHsyncDiff -> OnHsync3Changed already recomputes groups.
 					_ = ar.HsyncEngine.ApplyHsyncDiff(hsync.ZoneName(mpzd.ZoneName), hsync.HsyncDiff{
 						Adds:    analysis.HsyncStatus.HsyncAdds,
 						Removes: analysis.HsyncStatus.HsyncRemoves,
 					})
-				}
-				if ar.ProviderGroupManager != nil {
+				} else if ar.ProviderGroupManager != nil {
+					// No diff applied (no engine/status) — recompute directly.
 					ar.ProviderGroupManager.RecomputeGroups()
 				}
 			}
