@@ -713,9 +713,16 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
+			// Scope agent.Mu to just the DnsDetails field access — the
+			// outbound hello/beat send paths and CheckState write these
+			// same fields under agent.Mu, so the bare writes here were a
+			// data race. Release before NotifyPeerOperational (an election
+			// call) to honor the no-registry-lock-across-callback rule.
+			agent.Mu.Lock()
 			wasOperational := agent.DnsDetails.State == AgentStateOperational
 			agent.DnsDetails.State = AgentStateOperational
 			agent.DnsDetails.LastContactTime = time.Now()
+			agent.Mu.Unlock()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
 
 			// When a peer first becomes operational, check if all configured peers
