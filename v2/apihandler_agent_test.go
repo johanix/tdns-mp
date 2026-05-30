@@ -30,9 +30,8 @@ func TestAPIagentDebug_DumpZoneDataRepo(t *testing.T) {
 		// be set even though dump-zonedatarepo doesn't use it.
 		DebugCommand: make(chan *AgentMgmtPostPlus, 4),
 	}
-	conf := &Config{Config: &tdns.Config{
-		MultiProvider: &tdns.MultiProviderConf{Identity: "test-agent.example."},
-	}}
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.MpConfig = &MultiProviderConf{Identity: "test-agent.example."}
 	conf.InternalMp.MsgQs = msgQs
 
 	go conf.SynchedDataEngine(ctx, msgQs)
