@@ -852,9 +852,8 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 					regs[key] = tmp.(*Agent)
 				}
 			}
-			resp.AgentRegistry = &AgentRegistry{
-				RegularS:       regs,
-				RemoteAgents:   ar.RemoteAgents,
+			resp.AgentRegistry = &AgentRegistryDump{
+				Agents:         regs,
 				LocalAgent:     ar.LocalAgent,
 				LocateInterval: ar.LocateInterval,
 			}

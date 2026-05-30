@@ -129,7 +129,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 	mp := &MultiProviderConf{Identity: identity}
 	registry := &AgentRegistry{
 		S:                    core.NewStringer[AgentId, *Agent](),
-		RemoteAgents:         make(map[ZoneName][]AgentId),
 		LocalAgent:           mp,
 		LocateInterval:       30,
 		helloContexts:        make(map[AgentId]context.CancelFunc),

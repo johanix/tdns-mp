@@ -262,8 +262,6 @@ type AgentApi struct {
 
 type AgentRegistry struct {
 	S                     core.ConcurrentMap[AgentId, *Agent]
-	RegularS              map[AgentId]*Agent
-	RemoteAgents          map[ZoneName][]AgentId
 	mu                    sync.RWMutex
 	LocalAgent            *MultiProviderConf
 	LocateInterval        int
@@ -425,6 +423,15 @@ type KeystateInfo struct {
 	Timestamp string `json:"timestamp,omitempty"`
 }
 
+// AgentRegistryDump is the debug-only serialization of the agent registry for
+// the dump-agentregistry command (the live registry's peer map is not directly
+// JSON-encodable). Not a live registry store.
+type AgentRegistryDump struct {
+	Agents         map[AgentId]*Agent
+	LocalAgent     *MultiProviderConf
+	LocateInterval int
+}
+
 type AgentMgmtResponse struct {
 	Identity       AgentId
 	Status         string
@@ -435,7 +442,7 @@ type AgentMgmtResponse struct {
 	AgentConfig    MultiProviderConf
 	RfiType        string
 	RfiResponse    map[AgentId]*RfiData
-	AgentRegistry  *AgentRegistry
+	AgentRegistry  *AgentRegistryDump
 	ZoneDataRepo   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
 	KeystateStatus map[ZoneName]KeystateInfo `json:"keystate_status,omitempty"`
 	Msg            string

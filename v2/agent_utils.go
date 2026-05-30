@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"slices"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -37,7 +36,6 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	agent.Zones[zone] = true
 	agent.Mu.Unlock()
 
-	ar.AddRemoteAgent(zone, agent)
 	ar.S.Set(identity, agent)
 }
 
@@ -118,7 +116,6 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
 		S:                    core.NewStringer[AgentId, *Agent](),
-		RemoteAgents:         make(map[ZoneName][]AgentId),
 		LocalAgent:           mp,
 		LocateInterval:       li,
 		helloContexts:        make(map[AgentId]context.CancelFunc),
@@ -739,20 +736,9 @@ func AgentToString(a *Agent) string {
 	return string(a.Identity)
 }
 
-// AddRemoteAgent adds an agent to the list of remote agents for a zone
-func (ar *AgentRegistry) AddRemoteAgent(zonename ZoneName, agent *Agent) {
-	ar.mu.Lock()
-	defer ar.mu.Unlock()
-	if ar.RemoteAgents[zonename] == nil {
-		ar.RemoteAgents[zonename] = make([]AgentId, 0)
-	}
-	if !slices.Contains(ar.RemoteAgents[zonename], agent.Identity) {
-		ar.RemoteAgents[zonename] = append(ar.RemoteAgents[zonename], agent.Identity)
-	}
-}
-
-// GetRemoteAgents returns a list of remote agents for a zone. It does not
-// check if the agents are operational, or try to get missing information.
+// GetZoneAgentData returns the zone's member agents, derived from the HSYNC3
+// RRset and HSYNCPARAM roles. It does not check whether the agents are
+// operational, or try to fetch missing information.
 func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, error) {
 	var zad = &ZoneAgentData{
 		ZoneName: zonename,
@@ -760,9 +746,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	agents := []*Agent{}
 
-	ar.mu.RLock()
-	defer ar.mu.RUnlock()
-	lgAgent.Debug("getting zone agent data", "zone", zonename, "remoteAgents", len(ar.RemoteAgents[zonename]))
+	lgAgent.Debug("getting zone agent data", "zone", zonename)
 
 	zd, exists := Zones.Get(string(zonename))
 	if !exists {
