@@ -132,6 +132,33 @@ embed", which is unstarted. Pass-2 M1 collision avoided.)
 - **PENDING:** all of Stage A (the embed + transport-side ownership +
   bridge teardown + the wire-boundary derivation), Stage C, D, E, F.
 
+### Stage A progress (branch `transport-redesign-v1-A`)
+- **A1 DONE** (tdns-mp `c0de553`/`88955d8`/`7e65286`) — agent `PostRefresh`
+  routes HSYNC3 changes through `ApplyHsyncDiff`; `UpdateAgents` +
+  agent-path `RemoveRemoteAgent` deleted; RFI/election re-homed via
+  `OnHsyncMembersAdded`. **Testbed-confirmed.**
+- **A2 DONE** (`5efdd8f`) — every membership read participant-derived,
+  including the auth/HELLO admission boundary and election quorum.
+  **Testbed-confirmed** (role-less `auden` rejected/excluded).
+- **A3a DONE** (tdns-transport `614417f` + tdns-mp `14d8f4b`) — single lock
+  order; `RecomputeSharedZonesAndSyncState` no longer holds the peer mutex
+  across a transport call; new atomic `transport.Peer.ReplaceSharedZones`.
+- **A3c DONE** (`16415f4`) — deleted the vestigial `AgentRegistry.RemoteAgents`
+  index (`GetZoneAgentData` already derives from HSYNC3 + participants); folded
+  `RegularS` into a dedicated `AgentRegistryDump` debug DTO.
+- **A3 RESTRUCTURED (finding):** the inbound-pipeline collapse (originally a
+  separate "A3b") is **entangled with the embed** — a single beat writes both
+  `AgentRegistry` and `hsync.Registry`, and both are live/read until one map
+  exists, so the collapse can only land once. It is **folded into A3d**. The
+  legacy hello/discovery retirement (`attemptDiscovery`+`HelloRetrierNG`+
+  `helloContexts`, the `HsyncEngine==nil` fallback in `MarkAgentAsNeeded`) is
+  likewise **folded into A3d** (its rationale is the embed's duplicate-goroutine
+  problem). So Stage A's order is now **A1 → A2 → A3a → A3c → A3d → A4 → A5**,
+  with A3d = the embed + pipeline collapse + hello-path retirement +
+  `hsync.Registry.RemoteAgents` deletion.
+- **A3d PENDING** — the `Agent`↔`hsync.Peer` type-merge (~300 reads / 21 files);
+  coupled with A4's field-ownership. The remaining Stage A work.
+
 ## Sequencing
 
 **Stage 0 → A → C → D → E → F.** A first: the entire 2026-05-28 bug
@@ -199,7 +226,7 @@ embedded registry is shadowed by the old `AgentRegistry.S`. Therefore
 membership is unified **first**, then the embed, then transport
 ownership, then bridge teardown.
 
-### A1 — Route the agent's HSYNC3 changes through `ApplyHsyncDiff`
+### A1 — Route the agent's HSYNC3 changes through `ApplyHsyncDiff` — DONE (`c0de553`/`88955d8`/`7e65286`, testbed-confirmed)
 
 Replace the agent `PostRefresh` path (`hsync_utils.go:1456-1463`, which
 enqueues `SyncQ`→`SyncRequestHandler`→`UpdateAgents`,
@@ -279,7 +306,7 @@ recompute); (b) transient role-less adds no longer slip through the
 the agent registry until A5 adds `OnPeerRemoved` (bridge sync only until
 then). Add regression tests for (a) and (b).
 
-### A2 — Derive every membership read from participants (incl. the wire boundary)
+### A2 — Derive every membership read from participants (incl. the wire boundary) — DONE (`5efdd8f`, testbed-confirmed)
 
 Make `zoneParticipants` (HSYNCPARAM roles via ON HSYNC3 labels,
 `provider_groups.go:82`) the single membership truth at **every** reader
@@ -344,6 +371,31 @@ sender. If no role-less identity exists on the testbed at probe time,
 note "INVARIANT in practice".
 
 ### A3 — Embed `hsync.Registry`; collapse the inbound pipeline; one lock order
+
+**Decomposition (decided 2026-05-30, after the entanglement finding below).**
+A3 is too large and too design-laden for one commit; it splits into lettered
+sub-steps (each its own commit, building + suite green + `-race` + INVARIANT):
+- **A3a — DONE** (`14d8f4b` + transport `614417f`): the single lock order +
+  `RecomputeSharedZonesAndSyncState` released before the transport call, via the
+  new atomic `transport.Peer.ReplaceSharedZones`. Done up front so the embed
+  does not amplify the peer-mutex-across-transport hazard.
+- **A3c — DONE** (`16415f4`): delete the **`AgentRegistry`** `RemoteAgents`
+  index (vestigial — `GetZoneAgentData` already derives from HSYNC3 +
+  participants) and fold `RegularS` into an `AgentRegistryDump` debug DTO. (The
+  *`hsync.Registry`* `RemoteAgents` deletion stays in A3d.)
+- **A3d — PENDING**: the embed proper (the `Agent`↔`hsync.Peer` type-merge,
+  ~300 reads / 21 files) **plus** the inbound-pipeline collapse **plus** the
+  legacy hello/discovery retirement — see the entanglement note.
+
+> **Entanglement finding (2026-05-30).** The "collapse the inbound pipeline"
+> and "retire one hello/discovery path" work below cannot precede the embed: a
+> single beat writes BOTH `AgentRegistry` (via `routeBeatMessage` +
+> `HeartbeatHandler`) and `hsync.Registry` (via the engine handler), and both
+> maps are live/read until the embed makes them one — so no writer can be
+> deleted earlier. And the legacy discovery path *is* the `HsyncEngine==nil`
+> fallback in `MarkAgentAsNeeded`, whose retirement is motivated precisely by
+> the embed's duplicate-HELLO-goroutine problem. Both therefore land **in A3d**,
+> against the single map. The rest of this section is A3d's spec.
 
 Embed per §D-3 (decision B): `hsync.Registry` owns
 `S`/`RemoteAgents`/`helloCancel` + protocol methods; `AgentRegistry`
