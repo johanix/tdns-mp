@@ -8,9 +8,9 @@
  * in-memory AuditZoneState. Receives BEATs, HELLOs, PINGs,
  * SYNC/UPDATE/RFI; participates in gossip and provider group
  * computation; persists notable events to AuditEventLog and tracks
- * per-provider state. Does NOT run HsyncEngine, SynchedDataEngine,
- * leader election, KeyStateWorker, or any path that produces
- * outbound zone data. Phase D adds the web dashboard.
+ * per-provider state. Runs HsyncEngine for discovery/reconcile/BEATs.
+ * Omits SynchedDataEngine, leader election, KeyStateWorker, and any
+ * path that produces outbound zone data. Phase D adds the web dashboard.
  */
 package tdnsmp
 
@@ -26,8 +26,8 @@ import (
 )
 
 // StartMPAuditor starts the MP auditor. Modeled on StartMPAgent but
-// omits SDE, HsyncEngine, leader election, parent-sync bootstrapping,
-// and other write-side machinery.
+// omits SDE, leader election, parent-sync bootstrapping, and other
+// write-side machinery. Runs HsyncEngine for discovery/reconcile/BEATs.
 func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) error {
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)

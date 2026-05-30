@@ -26,85 +26,6 @@ import (
 // These are added to the KeyDB during initialization.
 var HsyncTables = map[string]string{
 
-	// PeerRegistry stores discovered peer information.
-	// Peers are remote agents that we communicate with for zone synchronization.
-	"PeerRegistry": `CREATE TABLE IF NOT EXISTS 'PeerRegistry' (
-		id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-		peer_id               TEXT NOT NULL UNIQUE,
-
-		-- Discovery information
-		discovery_time        INTEGER NOT NULL,          -- Unix timestamp when first discovered
-		discovery_source      TEXT,                       -- "hsync", "manual", "dns"
-
-		-- API transport details
-		api_endpoint          TEXT,                       -- Full URL for API transport
-		api_host              TEXT,                       -- Hostname for API transport
-		api_port              INTEGER,                    -- Port for API transport
-		api_tlsa_record       TEXT,                       -- TLSA record (wire format, base64)
-		api_available         INTEGER DEFAULT 0,          -- 1 if API transport is available
-
-		-- DNS transport details
-		dns_host              TEXT,                       -- Hostname for DNS transport
-		dns_port              INTEGER DEFAULT 53,         -- Port for DNS transport
-		dns_key_record        TEXT,                       -- KEY record (wire format, base64)
-		dns_available         INTEGER DEFAULT 0,          -- 1 if DNS transport is available
-
-		-- Operational address (may differ from discovery address for DDoS mitigation)
-		operational_host      TEXT,
-		operational_port      INTEGER,
-		operational_transport TEXT,                       -- "udp", "tcp", "https"
-
-		-- Public keys for encryption/verification
-		encryption_pubkey     TEXT,                       -- JWK format public key for encryption
-		verification_pubkey   TEXT,                       -- JWK format public key for signature verification
-
-		-- State and preferences
-		state                 TEXT DEFAULT 'needed',      -- needed, known, introducing, operational, degraded, interrupted, error
-		state_reason          TEXT,                       -- Reason for current state
-		state_changed_at      INTEGER,                    -- Unix timestamp of last state change
-		preferred_transport   TEXT DEFAULT 'api',         -- api, dns
-
-		-- Metrics
-		last_contact_at       INTEGER,                    -- Unix timestamp of last successful contact
-		last_hello_at         INTEGER,                    -- Unix timestamp of last hello handshake
-		last_beat_at          INTEGER,                    -- Unix timestamp of last heartbeat received
-		beat_interval         INTEGER DEFAULT 30,         -- Expected heartbeat interval in seconds
-		beats_sent            INTEGER DEFAULT 0,          -- Total heartbeats sent
-		beats_received        INTEGER DEFAULT 0,          -- Total heartbeats received
-		failed_contacts       INTEGER DEFAULT 0,          -- Consecutive failed contact attempts
-
-		-- Metadata
-		created_at            INTEGER NOT NULL,
-		updated_at            INTEGER NOT NULL,
-
-		UNIQUE(peer_id)
-	)`,
-
-	// PeerZones tracks which zones are shared with which peers.
-	// A peer may be responsible for multiple zones.
-	"PeerZones": `CREATE TABLE IF NOT EXISTS 'PeerZones' (
-		id              INTEGER PRIMARY KEY AUTOINCREMENT,
-		peer_id         TEXT NOT NULL,
-		zone_name       TEXT NOT NULL,
-
-		-- Relationship details
-		relationship    TEXT DEFAULT 'peer',          -- peer, upstream, downstream
-		role            TEXT,                          -- provider, owner, backup
-		hsync_identity  TEXT,                          -- Identity from HSYNC record
-
-		-- Sync state per zone
-		last_sync_at    INTEGER,                       -- Unix timestamp of last successful sync
-		sync_serial     INTEGER,                       -- Last synced SOA serial
-		sync_state      TEXT DEFAULT 'pending',        -- pending, synced, conflict, error
-
-		-- Metadata
-		added_at        INTEGER NOT NULL,
-		updated_at      INTEGER NOT NULL,
-
-		UNIQUE(peer_id, zone_name),
-		FOREIGN KEY(peer_id) REFERENCES PeerRegistry(peer_id) ON DELETE CASCADE
-	)`,
-
 	// SyncOperations tracks individual sync operations for audit and debugging.
 	// Each row represents a sync operation (NS, DNSKEY, CDS, CSYNC, GLUE).
 	"SyncOperations": `CREATE TABLE IF NOT EXISTS 'SyncOperations' (
@@ -314,14 +235,6 @@ var HsyncTables = map[string]string{
 
 // HsyncIndexes defines indexes for the HSYNC tables.
 var HsyncIndexes = []string{
-	// PeerRegistry indexes
-	`CREATE INDEX IF NOT EXISTS idx_peer_registry_state ON PeerRegistry(state)`,
-	`CREATE INDEX IF NOT EXISTS idx_peer_registry_last_contact ON PeerRegistry(last_contact_at)`,
-
-	// PeerZones indexes
-	`CREATE INDEX IF NOT EXISTS idx_peer_zones_zone ON PeerZones(zone_name)`,
-	`CREATE INDEX IF NOT EXISTS idx_peer_zones_peer ON PeerZones(peer_id)`,
-
 	// SyncOperations indexes
 	`CREATE INDEX IF NOT EXISTS idx_sync_ops_zone ON SyncOperations(zone_name)`,
 	`CREATE INDEX IF NOT EXISTS idx_sync_ops_status ON SyncOperations(status)`,
