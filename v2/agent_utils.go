@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
-	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -62,40 +61,38 @@ func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 	// under the agent lock. LEGACY is now defined as derived participations == 0.
 	shared := ar.sharedParticipantZones(agent.Identity)
 	zoneCount := len(shared)
+	identity := agent.Identity
 
+	// State transition under the peer mutex only — released before any transport
+	// call (lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry
+	// -> transport.Peer; never hold the peer mutex across a transport call).
 	agent.Mu.Lock()
-	defer agent.Mu.Unlock()
-
 	oldState := agent.State
-
-	// State transitions based on derived participation count
 	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
 		// Transition to LEGACY when zones go to zero
 		agent.State = AgentStateLegacy
 		agent.LastState = time.Now()
 		lgAgent.Info("agent transitioned to LEGACY (no shared zones)",
-			"agent", agent.Identity, "from", AgentStateToString[oldState])
+			"agent", identity, "from", AgentStateToString[oldState])
 	} else if zoneCount > 0 && oldState == AgentStateLegacy {
 		// Transition back to OPERATIONAL when zones are re-added
 		agent.State = AgentStateOperational
 		agent.LastState = time.Now()
 		lgAgent.Info("agent transitioned LEGACY to OPERATIONAL",
-			"agent", agent.Identity, "zones", zoneCount)
+			"agent", identity, "zones", zoneCount)
 	}
+	agent.Mu.Unlock()
 
-	// Sync zones to peer in PeerRegistry (updates cached SharedZones)
+	// Sync the derived shared zones to the transport peer (atomic replace under
+	// the transport.Peer lock; no peer mutex held here).
 	if ar.TransportManager != nil {
-		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(agent.Identity))
-
-		// Clear existing shared zones
-		peer.SharedZones = make(map[string]*transport.ZoneRelation)
-
-		// Re-add the derived shared zones
-		for _, zone := range shared {
-			peer.AddSharedZone(string(zone), "", "")
+		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(identity))
+		zoneStrs := make([]string, len(shared))
+		for i, zone := range shared {
+			zoneStrs[i] = string(zone)
 		}
-
-		lgAgent.Debug("synced zones to peer", "zones", zoneCount, "peer", agent.Identity)
+		peer.ReplaceSharedZones(zoneStrs)
+		lgAgent.Debug("synced zones to peer", "zones", zoneCount, "peer", identity)
 	}
 }
 
