@@ -378,6 +378,41 @@ inconsistent (`BeatRequest` `json:"gossip"` `transport.go:137` vs
 change **all** gossip tag sites (beat request/response, DNS payloads),
 not just `BeatRequest`/`BeatResponse`.
 
+**Concurrency completion (resolves C-11, A3-3, A3-4 + the lock matrix).**
+Bind a single-writer / single-lock-order rule for per-peer state:
+- **C-11 (data race):** `routeBeatMessage` updates `agent.DnsDetails`
+  **without** taking `agent.Mu` (`hsync_transport.go:716-719`), while
+  the hello send path holds `agent.Mu` over the same fields — a real
+  race today. Fix in A4b (the field moves to `transport.Peer`,
+  single-writer) or, if A4b is later, add the missing lock in C3's
+  handler move. Do not relocate this handler without applying the rule.
+- **A3-3 (stale overwrite):** the bridge merge is asymmetric —
+  `SyncPeerZones` replaces the full agent from the hsync peer
+  (`hsync_bridge.go:120`) while `mergeAgentDetails` is fill-only
+  (`hsync_bridge_sync.go:163`), so a field the hsync side *clears*
+  leaves a stale value on the agent. This disappears when A6 deletes the
+  bridge; until then, do not rely on either path for freshness.
+- **A3-4 (lock order):** define ONE lock order at the embed and hold to
+  it everywhere: `AgentRegistry.mu → peer mutex → transport.PeerRegistry
+  → transport.Peer`. Never acquire `agent`/registry mutex *under* a
+  transport lock, and never hold a registry mutex across a transport
+  call (the `RecomputeSharedZonesAndSyncState` rule, generalized).
+
+**A6 — complete teardown inventory (resolves A6-1).** A6 deletes not
+just the 9 `hsync_bridge_sync.go` functions but the whole bridge
+surface: the `mpHsyncBridge` type, the `SyncPeerZones` shim, the
+`OnPeerStored` wiring, and `Agent.PopulateFromAgent`/the
+`agentStateToTransportState` path (these are the Agent→transport copy,
+dead once transport owns the state after A4).
+
+**Deliberately left to the cross-referenced review doc** (LOW /
+cleanup, not duplicated here): A1-7 (auditor double-`RecomputeGroups`
+dedup), A2-6 (`cli/hsync_cmds.go:537` debug reader — repoint with the
+A2 set), D-3 (enumerate lifecycle registration sites at D3 time), F-2
+(stale `init.go` integration-guide `IncomingChan` reference). These are
+tracked in `2026-05-30-transport-redesign-plan-review.md`; fold at the
+relevant Step rather than carrying them in this summary.
+
 **Severity calibration note:** the second review marks several items
 BLOCKING that are really "bind-before-that-Step" (e.g. A1-5 is a
 doc-correctness fix). The substance is right; only A5-1, A2-1, E-1 and
