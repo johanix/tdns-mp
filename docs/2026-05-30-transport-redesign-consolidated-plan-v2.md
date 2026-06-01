@@ -153,11 +153,18 @@ embed", which is unstarted. Pass-2 M1 collision avoided.)
   legacy hello/discovery retirement (`attemptDiscovery`+`HelloRetrierNG`+
   `helloContexts`, the `HsyncEngine==nil` fallback in `MarkAgentAsNeeded`) is
   likewise **folded into A3d** (its rationale is the embed's duplicate-goroutine
-  problem). So Stage A's order is now **A1 → A2 → A3a → A3c → A3d → A4 → A5**,
-  with A3d = the embed + pipeline collapse + hello-path retirement +
-  `hsync.Registry.RemoteAgents` deletion.
-- **A3d PENDING** — the `Agent`↔`hsync.Peer` type-merge (~300 reads / 21 files);
-  coupled with A4's field-ownership. The remaining Stage A work.
+  problem). So Stage A's order is now **A1 → A2 → A3a → A3c → A3d → (A4
+  residual) → A5**, with A3d = the embed + pipeline collapse + hello-path
+  retirement + `hsync.Registry.RemoteAgents` deletion + **A4's reader-migration
+  core** (see next).
+- **A3d PENDING** — the `Agent`↔`hsync.Peer` type-merge (~300 reads / 21
+  files). Design **pinned in `2026-06-01-a3d-field-ownership.md`** (implement
+  against it): `transport.Peer` is the sole state store, `Agent` is a view
+  embedding `*hsync.Peer` + a transitional `*agentMeta`, NEEDED intent lives on
+  `transport.Peer`. **A3d absorbs A4's core** (redirecting state reads to
+  `transport.Peer` *is* A4's work); residual A4 = a dead-code sweep
+  (`SyncPeerFromAgent`, `agentStateToTransportState`). The remaining Stage A
+  work.
 
 ## Sequencing
 
@@ -385,7 +392,19 @@ sub-steps (each its own commit, building + suite green + `-race` + INVARIANT):
   *`hsync.Registry`* `RemoteAgents` deletion stays in A3d.)
 - **A3d — PENDING**: the embed proper (the `Agent`↔`hsync.Peer` type-merge,
   ~300 reads / 21 files) **plus** the inbound-pipeline collapse **plus** the
-  legacy hello/discovery retirement — see the entanglement note.
+  legacy hello/discovery retirement — see the entanglement note. **The peer-
+  element design is pinned in the addendum
+  `2026-06-01-a3d-field-ownership.md` — implement A3d against that doc.** It
+  resolves the open type-merge: `transport.Peer` is the sole state store
+  (read via `EffectiveState()` + an MP `LEGACY` overlay); `Agent` becomes a
+  view embedding `*hsync.Peer` (thin coordination) + `*agentMeta` (a
+  transitional MP holding pen for crypto/api, → transport at E1/later); the
+  NEEDED intent lives on `transport.Peer` so Stage E is buildable.
+  **Consequence (decided 2026-06-01): A3d absorbs the core of A4** — because
+  `transport.Peer` already owns the state slots, redirecting the ~302
+  `.ApiDetails`/`.DnsDetails` reads to it *is* A4's "switch readers to
+  `peerRegistry.Get`" work, done once during the embed rather than twice. See
+  the revised A4 header below.
 
 > **Entanglement finding (2026-05-30).** The "collapse the inbound pipeline"
 > and "retire one hello/discovery path" work below cannot precede the embed: a
@@ -447,6 +466,18 @@ byte-comparable; suite green; no new races under `-race` on the
 boundary/hsync tests.
 
 ### A4 — Transport = sole owner of address + per-mechanism state
+
+> **REVISED 2026-06-01: A4's core is absorbed into A3d.** The A3d field-
+> ownership design (`2026-06-01-a3d-field-ownership.md`) makes `transport.Peer`
+> the sole state store *during the embed*, so "migrate address + per-mechanism
+> state + liveness to `transport.Peer`" and "switch all readers to
+> `peerRegistry.Get`" happen **inside A3d** — doing it as a separate A4 pass
+> would rewrite the same ~302 `.ApiDetails`/`.DnsDetails` sites twice. What
+> remains as residual A4 is the **dead-code sweep**: delete `SyncPeerFromAgent`
+> and `agentStateToTransportState`(`Fn`), which fall out once A3d's bridge
+> teardown removes their callers. Identity crypto still moves at **E1**. The
+> scope notes below describe the reader-migration work, now executed within
+> A3d.
 
 Delete `SyncPeerFromAgent` (`hsync_transport.go:1466`, one caller at
 `:457`), `agentStateToTransportState` **and** `agentStateToTransportStateFn`
