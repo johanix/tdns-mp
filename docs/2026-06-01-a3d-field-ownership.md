@@ -281,6 +281,15 @@ MP-side hello cluster `HelloRetrier`/`HelloRetrierNG`/`agentNeedsHello`/
 `MarkAgentAsNeeded`. `hsync.Registry.RemoteAgents` deletion remains for the
 end of A3d. `FetchSVCB` is now orphaned (kept pending operator decision).
 
+**DEFERRED — dead-code / orphan sweep (do LAST, after all of A3d).** Decision
+(2026-06-01): do not remove orphaned functions piecemeal as slices land. Once
+A3d is otherwise complete, run a single dead-code sweep (e.g. staticcheck U1000)
+and remove orphans in one reviewed pass. Known orphan so far: `FetchSVCB`
+(`agent_utils.go`, only ever called by the deleted `LocateAgent`; its SVCB
+lookup is superseded by `Imr.LookupServiceAddresses` on the NG discovery path).
+Expect more orphans to surface as the per-field slices and the bridge teardown
+land — collect them here as they appear, sweep at the end.
+
 > **Naming note (resolves an apparent doc conflict).** This addendum §7 says
 > "keep `HelloRetrierNG`/hsync/discovery.go"; the consolidated-plan/prompt says
 > "delete `HelloRetrierNG`". These name **different functions**: the retired one
