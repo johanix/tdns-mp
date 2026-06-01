@@ -5,7 +5,6 @@
 package tdnsmp
 
 import (
-	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -272,7 +271,6 @@ type AgentRegistry struct {
 	mu                    sync.RWMutex
 	LocalAgent            *MultiProviderConf
 	LocateInterval        int
-	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
 	LeaderElectionManager *LeaderElectionManager

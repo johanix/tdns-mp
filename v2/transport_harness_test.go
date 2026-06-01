@@ -131,7 +131,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		S:                    core.NewStringer[AgentId, *Agent](),
 		LocalAgent:           mp,
 		LocateInterval:       30,
-		helloContexts:        make(map[AgentId]context.CancelFunc),
 		ProviderGroupManager: NewProviderGroupManager(identity),
 		GossipStateTable:     NewGossipStateTable(identity),
 	}

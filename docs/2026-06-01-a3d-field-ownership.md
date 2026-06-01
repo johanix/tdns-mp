@@ -265,6 +265,26 @@ INVARIANT: (1) make the field's single live writer target `transport.Peer`
 `Mechanisms[m].State`; keep LEGACY as the MP overlay); (2) redirect that field's
 reads to `transport.Peer`; (3) stop writing the Agent-side field. `AgentDetails`
 is deleted once empty (end of the slice sequence). `.State` is sliced **last**
-(most writers to unify). A3d.3 (crypto/api→`agentMeta`) and A3d.5 (legacy-path
-retirement + `hsync.Registry.RemoteAgents`) are unchanged. The post-A3d.4
-operator checkpoint becomes "after the AgentDetails deletion lands."
+(most writers to unify). A3d.3 (crypto/api→`agentMeta`) is unchanged. The
+post-A3d.4 operator checkpoint becomes "after the AgentDetails deletion lands."
+
+**Legacy-path retirement pulled forward (2026-06-01).** The A3d.5 legacy
+hello/discovery/locate retirement was done **first**, before the field slices,
+because several Agent-side field writers (address population in `LocateAgent`,
+`DiscoveryFailures++` in `attemptDiscovery`) live *only* in that path —
+retiring it deletes those writers outright and removes the legacy-vs-NG
+duality from every per-field proof. Retired: the `HsyncEngine==nil` fallback in
+`MarkAgentAsNeeded`, `attemptDiscovery`, `LocateAgent` (deprecated), and the
+MP-side hello cluster `HelloRetrier`/`HelloRetrierNG`/`agentNeedsHello`/
+`sendHelloToAgent`/`FastBeatAttempts`/`SingleHello`/`sharedZonesForAgent`/
+`configureInterval` + `helloContexts`. `peer reset` rerouted to NG
+`MarkAgentAsNeeded`. `hsync.Registry.RemoteAgents` deletion remains for the
+end of A3d. `FetchSVCB` is now orphaned (kept pending operator decision).
+
+> **Naming note (resolves an apparent doc conflict).** This addendum §7 says
+> "keep `HelloRetrierNG`/hsync/discovery.go"; the consolidated-plan/prompt says
+> "delete `HelloRetrierNG`". These name **different functions**: the retired one
+> is MP's `(ar *AgentRegistry) HelloRetrierNG` in `hsync_hello.go` (reachable
+> only via the legacy path); the kept one is the hsync-package NG path
+> `(e *Engine) helloRetrierNG` + `hsync/discovery.go`, which runs in production
+> when `HsyncEngine != nil`. No design conflict — only a name collision.
