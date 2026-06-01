@@ -229,3 +229,42 @@ remains a distinct stage or is just that dead-code sweep.
 INVARIANT convergence on the testbed before any further stage. Probe stays
 INVARIANT throughout (pure refactor): `peer list`/`peer zones`/`gossip state`/
 `addrr` round-trip byte-comparable.
+
+### 8.1 Resequencing (2026-06-01, after the A3d.1 embed + read audit)
+
+A per-field writer audit (run before starting A3d.2) showed the "redirect reads,
+then collapse writers" order in §8.2/§8.4 is **backwards** for most fields:
+`transport.Peer` is only *partially* the single source today, so reads cannot be
+redirected ahead of their writers without observing a half-populated peer. The
+gate is per-field: *"is `transport.Peer` already kept current for this datum by
+an existing writer on every live path?"* — not the field's category.
+
+Findings driving the change:
+- **`.State` FAILS the gate.** `CheckState` beat-health (DEGRADED/INTERRUPTED,
+  `hsync_beat.go:101-106`), the A3a LEGACY/OPERATIONAL transition
+  (`RecomputeSharedZonesAndSyncState`), and `peer reset` (`apihandler_peer.go`)
+  all write the Agent state with **no** `transport.Peer` counterpart;
+  `transport.Peer` is never set DEGRADED/INTERRUPTED anywhere. So
+  `effectiveAgentState()` is not byte-identical to `Agent.EffectiveState()`
+  until those writers are unified.
+- **Addresses are path-dependent.** Live NG discovery dual-writes; the
+  deprecated `LocateAgent` (`agent_utils.go`) writes Agent-side only (retired in
+  A3d.5).
+- **Most "Group 3" telemetry already has a `transport.MechanismState`/`Stats`
+  home** — `HelloTime→LastHelloRecv`, `LastContactTime`/`LatestRBeat→
+  LastBeatRecv`, `LatestSBeat→LastBeatSent`, `SentBeats`/`ReceivedBeats→Stats`,
+  `DiscoveryFailures→ConsecutiveFails`, `LatestError(+Time)→StateReason`/
+  `StateChanged`. Only **`BeatInterval`** is a genuinely new transport field;
+  **`ContactInfo`** must be proven load-bearing or dropped (likely derivable).
+  Don't add redundant transport surface.
+
+**New plan — per-field vertical slices.** A3d.2 and A3d.4's reader/writer work
+**merge into per-field commits**. Each slice = one commit, green + `-race` +
+INVARIANT: (1) make the field's single live writer target `transport.Peer`
+(for `.State`: relocate `CheckState` DEGRADED/INTERRUPTED to set
+`Mechanisms[m].State`; keep LEGACY as the MP overlay); (2) redirect that field's
+reads to `transport.Peer`; (3) stop writing the Agent-side field. `AgentDetails`
+is deleted once empty (end of the slice sequence). `.State` is sliced **last**
+(most writers to unify). A3d.3 (crypto/api→`agentMeta`) and A3d.5 (legacy-path
+retirement + `hsync.Registry.RemoteAgents`) are unchanged. The post-A3d.4
+operator checkpoint becomes "after the AgentDetails deletion lands."
