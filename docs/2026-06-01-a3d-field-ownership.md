@@ -297,3 +297,11 @@ land — collect them here as they appear, sweep at the end.
 > only via the legacy path); the kept one is the hsync-package NG path
 > `(e *Engine) helloRetrierNG` + `hsync/discovery.go`, which runs in production
 > when `HsyncEngine != nil`. No design conflict — only a name collision.
+
+### 8.2 Testbed checkpoint (2026-06-03)
+
+Branch HEAD `b3fd9a9` (embed A3d.1 + legacy-path retirement) deployed to
+`agent.cpt.mp.axfr.net`. Steady-state INVARIANT probes confirmed: gossip,
+`peer list`, `peer zones`, `zone mplist` all match pre-deploy behavior. The
+one EXPLAINED DELTA (`peer reset` rerouted to NG `MarkNeeded`) — spot-check
+still pending. Per-field vertical slices proceed from this confirmed base.
