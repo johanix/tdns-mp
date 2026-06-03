@@ -422,6 +422,14 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if dnsAddr == "" {
 						dnsAddr = "-"
 					}
+					// Crypto now lives on the agentMeta sidecar (A3d.3).
+					var jwkData, keyAlgorithm string
+					var hasKEY bool
+					if dc := agent.cryptoFor("DNS"); dc != nil {
+						jwkData = dc.JWKData
+						keyAlgorithm = dc.KeyAlgorithm
+						hasKEY = dc.KeyRR != nil
+					}
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
 						PeerType:     peerType,
@@ -432,10 +440,10 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						DNSUri:       agent.DnsDetails.BaseUri,
 						Port:         agent.DnsDetails.Port,
 						Addresses:    agent.DnsDetails.Addrs,
-						JWKData:      agent.DnsDetails.JWKData,
-						KeyAlgorithm: agent.DnsDetails.KeyAlgorithm,
-						HasJWK:       agent.DnsDetails.JWKData != "",
-						HasKEY:       agent.DnsDetails.KeyRR != nil,
+						JWKData:      jwkData,
+						KeyAlgorithm: keyAlgorithm,
+						HasJWK:       jwkData != "",
+						HasKEY:       hasKEY,
 						State:        AgentStateToString[effectiveState],
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {

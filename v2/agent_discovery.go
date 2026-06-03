@@ -300,6 +300,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 				Zones:      make(map[ZoneName]bool),
 				State:      AgentStateKnown,
 				LastState:  time.Now(),
+				meta:       &agentMeta{Crypto: map[string]*mechCrypto{}},
 			}
 		}
 
@@ -338,13 +339,15 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 				agent.DnsDetails.Port = port
 			}
 
-			// Store JWK data if available (preferred)
+			// Store JWK data if available (preferred). Crypto now lives on the
+			// transitional agentMeta sidecar (A3d.3), en route to transport @ E1.
+			dnsCrypto := agent.ensureCrypto("DNS")
 			if result.JWKData != "" {
-				agent.DnsDetails.JWKData = result.JWKData
-				agent.DnsDetails.KeyAlgorithm = result.KeyAlgorithm
+				dnsCrypto.JWKData = result.JWKData
+				dnsCrypto.KeyAlgorithm = result.KeyAlgorithm
 			}
 			// Store KEY record if using legacy fallback
-			agent.DnsDetails.KeyRR = result.LegacyKeyRR
+			dnsCrypto.KeyRR = result.LegacyKeyRR
 			agent.DnsDetails.Addrs = result.DNSAddresses
 			agent.DnsMethod = true
 		} else {

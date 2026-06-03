@@ -77,15 +77,16 @@ type Agent struct {
 	LastState     time.Time  // When state last changed
 	ErrorMsg      string     // Error message if state is error
 	DeferredTasks []DeferredAgentTask
+	// meta is the transitional MP-side sidecar (A3d): per-mechanism crypto
+	// holding pen, en route to transport.Peer at E1. Reached via
+	// ensureCrypto/cryptoFor; lazily allocated.
+	meta *agentMeta
 }
 
 type AgentDetails struct {
 	Addrs             []string
 	Port              uint16
 	BaseUri           string
-	KeyRR             *dns.KEY
-	JWKData           string
-	KeyAlgorithm      string
 	TlsaRR            *dns.TLSA
 	State             AgentState
 	LatestError       string

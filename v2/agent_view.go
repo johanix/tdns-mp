@@ -34,9 +34,36 @@ type agentMeta struct {
 type mechCrypto struct {
 	KeyRR        *dns.KEY
 	TlsaRR       *dns.TLSA
-	UriRR        *dns.URI
 	JWKData      string
 	KeyAlgorithm string
+}
+
+// ensureCrypto returns the per-mechanism crypto holding pen for mech on this
+// agent's transitional agentMeta sidecar, allocating the sidecar + entry
+// lazily. Write path; the caller's locking contract matches the surrounding
+// AgentDetails writes.
+func (a *Agent) ensureCrypto(mech string) *mechCrypto {
+	if a.meta == nil {
+		a.meta = &agentMeta{}
+	}
+	if a.meta.Crypto == nil {
+		a.meta.Crypto = make(map[string]*mechCrypto)
+	}
+	mc := a.meta.Crypto[mech]
+	if mc == nil {
+		mc = &mechCrypto{}
+		a.meta.Crypto[mech] = mc
+	}
+	return mc
+}
+
+// cryptoFor returns the per-mechanism crypto for mech, or nil if none was
+// recorded. Read-only; does not allocate.
+func (a *Agent) cryptoFor(mech string) *mechCrypto {
+	if a.meta == nil || a.meta.Crypto == nil {
+		return nil
+	}
+	return a.meta.Crypto[mech]
 }
 
 // transportToAgentState maps the canonical transport PeerState back to MP's
