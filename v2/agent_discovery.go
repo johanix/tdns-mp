@@ -307,6 +307,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		// Re-discovery must not regress an OPERATIONAL or INTRODUCED transport.
 		if result.APIUri != "" {
 			agent.ApiDetails.BaseUri = result.APIUri
+			agent.ApiDetails.ContactInfo = "complete"
 			if agent.ApiDetails.State <= AgentStateNeeded {
 				agent.ApiDetails.State = AgentStateKnown
 			}
@@ -320,6 +321,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		}
 		if result.DNSUri != "" {
 			agent.DnsDetails.BaseUri = result.DNSUri
+			agent.DnsDetails.ContactInfo = "complete"
 			if agent.DnsDetails.State <= AgentStateNeeded {
 				agent.DnsDetails.State = AgentStateKnown
 			}

@@ -90,6 +90,7 @@ type AgentDetails struct {
 	KeyAlgorithm      string
 	TlsaRR            *dns.TLSA
 	Endpoint          string
+	ContactInfo       string
 	State             AgentState
 	LatestError       string
 	LatestErrorTime   time.Time

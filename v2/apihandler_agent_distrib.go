@@ -364,13 +364,6 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if apiAddr == "" {
 						apiAddr = "-"
 					}
-					// ContactInfo is derived from the discovery signal: a
-					// mechanism is "complete" once its endpoint was discovered
-					// (BaseUri set). No longer stored on the Agent (A3d).
-					apiContact := ""
-					if agent.ApiDetails.BaseUri != "" {
-						apiContact = "complete"
-					}
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
@@ -383,7 +376,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						Addresses:   agent.ApiDetails.Addrs,
 						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
 						State:       AgentStateToString[effectiveState],
-						ContactInfo: apiContact,
+						ContactInfo: agent.ApiDetails.ContactInfo,
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.ApiDetails.HelloTime
@@ -429,10 +422,6 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if dnsAddr == "" {
 						dnsAddr = "-"
 					}
-					dnsContact := ""
-					if agent.DnsDetails.BaseUri != "" {
-						dnsContact = "complete"
-					}
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
 						PeerType:     peerType,
@@ -448,7 +437,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						HasJWK:       agent.DnsDetails.JWKData != "",
 						HasKEY:       agent.DnsDetails.KeyRR != nil,
 						State:        AgentStateToString[effectiveState],
-						ContactInfo:  dnsContact,
+						ContactInfo:  agent.DnsDetails.ContactInfo,
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.DnsDetails.HelloTime
