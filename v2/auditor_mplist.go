@@ -28,6 +28,9 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 	if mpzd == nil {
 		return info
 	}
+	if mpzd.ZoneData != nil && mpzd.Error {
+		info.ZoneError = mpzd.ErrorMsg
+	}
 	seen := make(map[tdns.ZoneOption]bool)
 	for opt, val := range mpzd.Options {
 		if val {
