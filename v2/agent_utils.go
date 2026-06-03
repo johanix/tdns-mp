@@ -201,6 +201,17 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	}
 }
 
+// RediscoverAgent forces a fresh discovery pass for an already-known agent via
+// the NG engine (the `peer reset` path). Unlike MarkAgentAsNeeded, it re-drives
+// discovery even when the peer already exists. No-op if no HsyncEngine.
+func (ar *AgentRegistry) RediscoverAgent(id AgentId) {
+	if ar.HsyncEngine == nil {
+		lgAgent.Warn("RediscoverAgent called with no HsyncEngine; discovery not triggered", "agent", id)
+		return
+	}
+	ar.HsyncEngine.Rediscover(hsync.PeerID(id))
+}
+
 // fireOnDiscoveryFailed invokes the TransportManager's
 // OnDiscoveryFailed seam if registered. Resolves the peer via
 // PeerRegistry.GetOrCreate (the peer typically does not exist yet

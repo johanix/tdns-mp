@@ -149,6 +149,42 @@ func TestMarkNeeded_triggersDiscovery(t *testing.T) {
 	}
 }
 
+// TestRediscover_triggersDiscoveryForExistingPeer is a regression test for the
+// peer-reset bug: MarkNeeded short-circuits an already-known peer (so it cannot
+// re-drive discovery), while Rediscover must force a fresh discovery pass.
+func TestRediscover_triggersDiscoveryForExistingPeer(t *testing.T) {
+	tb := &mockTransport{}
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: tb}, DefaultConfig())
+
+	waitFor := func(want int32) {
+		deadline := time.Now().Add(2 * time.Second)
+		for tb.discoverCalls.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Initial mark: creates the peer and runs discovery once.
+	e.MarkNeeded("remote.example.", "z.test.", nil)
+	waitFor(1)
+	if got := tb.discoverCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 discovery after MarkNeeded, got %d", got)
+	}
+
+	// MarkNeeded on the now-known peer must NOT re-discover.
+	e.MarkNeeded("remote.example.", "", nil)
+	time.Sleep(100 * time.Millisecond)
+	if got := tb.discoverCalls.Load(); got != 1 {
+		t.Fatalf("MarkNeeded must not re-discover a known peer; discoverCalls=%d", got)
+	}
+
+	// Rediscover must force a fresh discovery pass for the existing peer.
+	e.Rediscover("remote.example.")
+	waitFor(2)
+	if got := tb.discoverCalls.Load(); got < 2 {
+		t.Fatalf("Rediscover must re-trigger discovery for a known peer; discoverCalls=%d", got)
+	}
+}
+
 func TestEngine_dispatchRoutesSyncHandler(t *testing.T) {
 	var got bool
 	e := NewEngine(Deps{LocalID: "local.example.", Transport: &mockTransport{}}, DefaultConfig())

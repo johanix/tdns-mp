@@ -131,9 +131,10 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 			agent.State = AgentStateNeeded
 			agent.Mu.Unlock()
 
-			// Trigger immediate re-discovery via the NG discovery path
-			// (HsyncEngine.MarkNeeded); the engine drives discovery + hello.
-			ar.MarkAgentAsNeeded(peerID, "", nil)
+			// Trigger immediate re-discovery via the NG engine. MarkNeeded
+			// short-circuits known peers, so reset uses the dedicated
+			// force-rediscover entry, which re-runs discovery + hello.
+			ar.RediscoverAgent(peerID)
 
 			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", peerID, flushed)
 

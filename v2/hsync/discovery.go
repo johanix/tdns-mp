@@ -56,6 +56,36 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 	go e.attemptDiscovery(peer, peer.ApiMethod, peer.DnsMethod)
 }
 
+// Rediscover forces a fresh discovery pass for an already-known peer (the
+// `peer reset` path). MarkNeeded short-circuits known peers, so it cannot
+// re-drive discovery; Rediscover resets the peer's per-mechanism state to
+// NEEDED and re-runs attemptDiscovery, which re-resolves the address and
+// drives hello -> operational. Discovery promotes NEEDED->KNOWN only when the
+// state is <= NEEDED, so the reset is required for the hello kick to fire.
+// Falls back to MarkNeeded for an unknown peer.
+func (e *Engine) Rediscover(id PeerID) {
+	if e == nil || e.registry == nil {
+		return
+	}
+	peer, exists := e.registry.S.Get(id)
+	if !exists {
+		e.MarkNeeded(id, "", nil)
+		return
+	}
+	peer.Mu.Lock()
+	peer.State = PeerStateNeeded
+	peer.LastState = time.Now()
+	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
+		td.State = PeerStateNeeded
+		td.DiscoveryFailures = 0
+		td.LatestError = ""
+	})
+	peer.Mu.Unlock()
+	e.registry.S.Set(id, peer)
+	e.storeHook(peer)
+	go e.attemptDiscovery(peer, peer.ApiMethod, peer.DnsMethod)
+}
+
 func (e *Engine) storeHook(peer *Peer) {
 	if e.deps.PeerHooks.OnPeerStored != nil {
 		e.deps.PeerHooks.OnPeerStored(peer)
