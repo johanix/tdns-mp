@@ -362,3 +362,25 @@ one). Remaining A3d work: (a) **A3d.3** crypto/api → `agentMeta`; (b) the
 as one larger slice — note MP `CheckState` being dead simplifies the `.State`
 liveness story (the live DEGRADED/INTERRUPTED writer is NG `checkPeerState`);
 (c) the deferred dead-code sweep. (b) and the sweep need operator direction.
+
+### 8.5 Crypto migration done — A3d.3 (tdns-mp `67363b3` + `dc8bb8d`)
+
+Crypto fully moved off `AgentDetails` to the transitional `agentMeta` sidecar
+(`Agent.meta *agentMeta`, lazy `ensureCrypto`/`cryptoFor` helpers). Sole writer
+was `RegisterDiscoveredAgent` (discovery-only, no infra/config writers).
+- **3a:** `JWKData`/`KeyAlgorithm`/`KeyRR` (DNS) → `agentMeta.Crypto["DNS"]`;
+  dropped the now-dead `hsync.PeerDetails.{JWKData,KeyAlgorithm}` (pure
+  bridge-shuffle, zero NG readers) + `mechCrypto.UriRR` slot. Also deleted dead
+  `AgentDetails.UriRR` (0-ref, missed in the (A) sweep).
+- **3b:** `TlsaRR` (API) → `agentMeta.Crypto["API"]`. **Touches the live TLS
+  paths** — outbound client setup (`agent_setup.go`) + inbound mutual-TLS cert
+  verify (`apirouter_sync.go`). Flagged for testbed (API-transport peers; DNS
+  fleets unaffected). The compiler caught the inbound reader (local alias) my
+  grep missed — deletion's self-verifying property again.
+
+`AgentDetails` is now **crypto-free**. Remaining fields split into the **spine
+cluster** (`State`, `Addrs`/`Port`, `BaseUri`, `HelloTime`, `LatestSBeat`/
+`LatestRBeat`, `DiscoveryFailures`, `SentBeats` → `transport.Peer`) and the
+**A5/(B)-deferred dead-on-read** set (`LatestError`/`Time`, `LastContactTime`,
+`BeatInterval`, `ReceivedBeats`). The spine cluster is the last real A3d
+migration.
