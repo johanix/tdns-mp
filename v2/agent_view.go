@@ -102,6 +102,22 @@ func transportToAgentState(s transport.PeerState) AgentState {
 // The overlay fires only for OPERATIONAL/INTRODUCED, mirroring today's
 // RecomputeSharedZonesAndSyncState transition exactly (DEGRADED/INTERRUPTED are
 // liveness states and are not overlaid).
+// isAgentOperational reports whether the agent has an operational transport,
+// reading the canonical transport.Peer store. Replaces the former
+// Agent.IsAnyTransportOperational. No LEGACY overlay (LEGACY is a display
+// concept): a LEGACY peer's mechanism is still OPERATIONAL on transport.Peer,
+// so it counts as operational for send-gating — matching prior behavior.
+func (ar *AgentRegistry) isAgentOperational(id AgentId) bool {
+	if ar.TransportManager == nil {
+		return false
+	}
+	peer, ok := ar.TransportManager.PeerRegistry.Get(string(id))
+	if !ok {
+		return false
+	}
+	return peer.EffectiveState() == transport.PeerStateOperational
+}
+
 func (ar *AgentRegistry) effectiveAgentState(id AgentId) AgentState {
 	if ar.TransportManager == nil {
 		return AgentStateNeeded

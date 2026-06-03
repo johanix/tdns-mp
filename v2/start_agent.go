@@ -117,7 +117,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		count := 0
 		for _, agent := range zad.Agents {
-			if agent.Identity != AgentId(mp.Identity) && agent.IsAnyTransportOperational() {
+			if agent.Identity != AgentId(mp.Identity) && ar.isAgentOperational(agent.Identity) {
 				count++
 			}
 		}
@@ -244,7 +244,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					if agent.Identity == AgentId(ar.LocalAgent.Identity) {
 						continue
 					}
-					if !agent.IsAnyTransportOperational() {
+					if !ar.isAgentOperational(agent.Identity) {
 						continue
 					}
 					lgAgent.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.Identity)

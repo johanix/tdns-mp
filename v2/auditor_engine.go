@@ -207,7 +207,7 @@ func providerBeatMeta(ar *AgentRegistry, zone ZoneName, identity string) (label,
 		return "", "", false
 	}
 	if agent, ok := ar.S.Get(AgentId(identity)); ok {
-		gossipState = AgentStateToString[agent.EffectiveState()]
+		gossipState = AgentStateToString[ar.effectiveAgentState(agent.Identity)]
 	}
 	if zone == "" {
 		return label, gossipState, isSigner

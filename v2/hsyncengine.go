@@ -523,9 +523,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %q not found", msg.Zone, zad.MyUpstream)
 					return
 				}
-				if !agent.IsAnyTransportOperational() {
+				if !ar.isAgentOperational(agent.Identity) {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[agent.EffectiveState()])
+					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[ar.effectiveAgentState(agent.Identity)])
 					return
 				}
 				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
@@ -546,8 +546,8 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not found", aid)}
 						continue
 					}
-					if !agent.IsAnyTransportOperational() {
-						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[agent.EffectiveState()])}
+					if !ar.isAgentOperational(agent.Identity) {
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[ar.effectiveAgentState(agent.Identity)])}
 						continue
 					}
 					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
@@ -563,8 +563,8 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 			case "sig0key":
 				for _, agent := range zad.Agents {
-					if !agent.IsAnyTransportOperational() {
-						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()])}
+					if !ar.isAgentOperational(agent.Identity) {
+						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[ar.effectiveAgentState(agent.Identity)])}
 						continue
 					}
 					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
@@ -589,10 +589,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// Send RFI SYNC to all remote agents for this zone.
 			lgEngine.Info("sending SYNC RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
-				if !agent.IsAnyTransportOperational() {
+				if !ar.isAgentOperational(agent.Identity) {
 					resp.RfiResponse[agent.Identity] = &RfiData{
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()]),
+						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[ar.effectiveAgentState(agent.Identity)]),
 					}
 					continue
 				}
@@ -615,10 +615,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
 			lgEngine.Info("sending AUDIT RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
-				if !agent.IsAnyTransportOperational() {
+				if !ar.isAgentOperational(agent.Identity) {
 					resp.RfiResponse[agent.Identity] = &RfiData{
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()]),
+						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[ar.effectiveAgentState(agent.Identity)]),
 					}
 					continue
 				}

@@ -100,58 +100,6 @@ type AgentDetails struct {
 	LatestRBeat       time.Time
 }
 
-func (a *Agent) IsAnyTransportOperational() bool {
-	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
-		return true
-	}
-	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
-		return true
-	}
-	return false
-}
-
-func agentTransportParticipating(state AgentState) bool {
-	return state >= AgentStateKnown
-}
-
-func (a *Agent) EffectiveState() AgentState {
-	a.Mu.RLock()
-	defer a.Mu.RUnlock()
-	best := AgentState(0)
-	consider := func(enabled bool, details *AgentDetails) {
-		if !enabled || details == nil || !agentTransportParticipating(details.State) {
-			return
-		}
-		switch details.State {
-		case AgentStateOperational, AgentStateLegacy, AgentStateIntroduced, AgentStateKnown,
-			AgentStateDegraded, AgentStateInterrupted:
-			if best == 0 || details.State < best {
-				best = details.State
-			}
-		}
-	}
-	consider(a.ApiMethod, a.ApiDetails)
-	consider(a.DnsMethod, a.DnsDetails)
-	if best != 0 {
-		return best
-	}
-	return a.State
-}
-
-func (a *Agent) apiState() AgentState {
-	if a.ApiDetails != nil {
-		return a.ApiDetails.State
-	}
-	return 0
-}
-
-func (a *Agent) dnsState() AgentState {
-	if a.DnsDetails != nil {
-		return a.DnsDetails.State
-	}
-	return 0
-}
-
 // APIMechanismState satisfies transport.AgentLike. Returns a snapshot
 // of this agent's API-mechanism state for use by
 // transport.Peer.PopulateFromAgent. Bite 7 of the early-bites plan.
