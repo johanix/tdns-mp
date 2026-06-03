@@ -702,6 +702,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 // sendRfiToAgent sends an RFI message to a remote agent using the best available
 // transport. DNS is tried first (primary transport), with API as fallback.
 func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
+	// Capture any DNS-transport failure so the final error preserves the real
+	// cause (e.g. an upstream REFUSED from the peer's zone-auth gate) instead
+	// of collapsing it into a misleading "no transport available".
+	var dnsErr error
 	// Try DNS transport first via TransportManager (primary transport)
 	if ar.TransportManager != nil {
 		peer := ar.MPTransport.GetOrCreatePeer(agent)
@@ -726,6 +730,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 				Zone:   msg.Zone,
 			}, nil
 		}
+		dnsErr = err
 		lgConnRetryEngine.Warn("DNS transport failed, trying API", "agent", agent.Identity, "err", err)
 	}
 
@@ -734,7 +739,10 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 		return agent.SendApiMsg(msg)
 	}
 
-	return nil, fmt.Errorf("no transport available for agent %q", agent.Identity)
+	if dnsErr != nil {
+		return nil, fmt.Errorf("send to agent %q failed and no API fallback: %w", agent.Identity, dnsErr)
+	}
+	return nil, fmt.Errorf("no transport available for agent %q (no DNS transport manager, no API client)", agent.Identity)
 }
 
 // XXX: Not used at the moment.
