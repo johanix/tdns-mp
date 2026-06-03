@@ -83,7 +83,6 @@ type AgentDetails struct {
 	Addrs             []string
 	Port              uint16
 	BaseUri           string
-	UriRR             *dns.URI
 	KeyRR             *dns.KEY
 	JWKData           string
 	KeyAlgorithm      string
