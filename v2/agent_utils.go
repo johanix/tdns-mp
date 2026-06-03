@@ -7,12 +7,9 @@ package tdnsmp
 import (
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/url"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -120,66 +117,6 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		ProviderGroupManager: NewProviderGroupManager(mp.Identity),
 		GossipStateTable:     NewGossipStateTable(mp.Identity),
 	}
-}
-
-func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
-	retries int) (*dns.SVCB, []string, uint16, string, error) {
-	parsedUri, err := url.Parse(baseurl)
-	if err != nil {
-		lgAgent.Error("failed to parse URI target", "url", baseurl, "err", err)
-		return nil, nil, 0, "", err
-	}
-
-	targetName, _, err := net.SplitHostPort(parsedUri.Host)
-	if err != nil {
-		targetName = parsedUri.Host
-	}
-
-	rrset, err := tdns.RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeSVCB, timeout, retries, resolvers)
-	if err != nil {
-		lgAgent.Error("SVCB query failed", "err", err)
-		return nil, nil, 0, "", err
-	}
-
-	// Process SVCB response
-	if rrset == nil {
-		lgAgent.Warn("SVCB response contained zero RRs", "target", targetName)
-		return nil, nil, 0, "", fmt.Errorf("response to %s SVCB contained zero RRs", targetName)
-	}
-
-	var addrs []string
-	var port uint16
-	var svcbrr *dns.SVCB
-
-	if len(rrset.RRs) == 0 {
-		return nil, nil, 0, "", fmt.Errorf("response to %s SVCB contained zero RRs", targetName)
-	}
-
-	for _, rr := range rrset.RRs {
-		if svcb, ok := rr.(*dns.SVCB); ok {
-			lgAgent.Debug("SVCB record found", "target", targetName, "record", svcb.String())
-			svcbrr = svcb
-			// Process SVCB record (addresses and port)
-			for _, kv := range svcb.Value {
-				switch kv.Key() {
-				case dns.SVCB_IPV4HINT:
-					ipv4Hints := kv.(*dns.SVCBIPv4Hint)
-					for _, ip := range ipv4Hints.Hint {
-						addrs = append(addrs, ip.String())
-					}
-				case dns.SVCB_IPV6HINT:
-					ipv6Hints := kv.(*dns.SVCBIPv6Hint)
-					for _, ip := range ipv6Hints.Hint {
-						addrs = append(addrs, ip.String())
-					}
-				case dns.SVCB_PORT:
-					tmpPort := kv.(*dns.SVCBPort)
-					port = uint16(tmpPort.Port)
-				}
-			}
-		}
-	}
-	return svcbrr, addrs, port, targetName, nil
 }
 
 // MarkAgentAsNeeded marks a remote agent as NEEDED by delegating to the hsync

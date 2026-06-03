@@ -84,12 +84,10 @@ type AgentDetails struct {
 	Port              uint16
 	BaseUri           string
 	UriRR             *dns.URI
-	Host              string
 	KeyRR             *dns.KEY
 	JWKData           string
 	KeyAlgorithm      string
 	TlsaRR            *dns.TLSA
-	Endpoint          string
 	State             AgentState
 	LatestError       string
 	LatestErrorTime   time.Time

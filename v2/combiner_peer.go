@@ -61,7 +61,6 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational, // Start as operational
 			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),
-			Host:            host,
 			Port:            uint16(port),
 			Addrs:           []string{host},
 			HelloTime:       time.Now(),

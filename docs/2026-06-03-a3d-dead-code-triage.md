@@ -34,12 +34,24 @@ slated for teardown (A5).
 |---|---|---|---|
 | MP `CheckState` (`hsync_beat.go:57`) | **0 callers** | NG `checkPeerState` (`hsync/beat.go:104`, live) does the same DEGRADED/INTERRUPTED liveness | delete |
 | `FetchSVCB` (`agent_utils.go`) | 0 callers (only the deleted legacy `LocateAgent` used it) | `Imr.LookupServiceAddresses` (NG discovery, `agent_discovery_common.go`) | delete |
-| `AgentDetails.Host` | **0 references** (writes were in the deleted `LocateAgent`) | residue | delete |
+| `AgentDetails.Host` | write-only via infra setup (`combiner_peer.go:64`, `signer_peer.go:67`); no reader (correction: not 0-ref — the compiler surfaced the two infra writes, which were removed with it) | redundant with `Addrs` | delete |
 | `AgentDetails.Endpoint` | **0 references** | residue (already flagged "delete, 0 uses" in field-ownership §4) | delete |
-| `AgentDetails.BeatInterval` | written by live `HeartbeatHandler` (`hsync_beat.go:21/25`) but **read only by the dead `CheckState`** + bridge | NG keeps its own `hsync.PeerDetails.BeatInterval` (live, read by `checkPeerState`) | delete (with CheckState) |
+| ~~`AgentDetails.BeatInterval`~~ | **RE-FILED to A5** — see below | — | defer |
 
-Removing `CheckState` may orphan helpers used only by it — the compiler will
-surface those at deletion time; they extend this (A) set.
+### Resolution (2026-06-03, commit on `transport-redesign-v1-A`)
+
+**(A) deleted:** MP `CheckState`, `FetchSVCB`, `AgentDetails.Host` (+ its two
+infra writes), `AgentDetails.Endpoint`. Orphaned imports (`net`, `net/url`,
+`tdns` in `agent_utils.go`) removed. Build + suite + `-race` green; INVARIANT.
+
+**`AgentDetails.BeatInterval` re-filed from (A) to A5 (bridge teardown).**
+Removing it requires dropping its `agentDetailsToHsync` bridge copy, but
+`syncHsyncPeerFromAgent` does a *wholesale replace* of `peer.{Api,Dns}Details`,
+so that would transiently zero the **live** `hsync.PeerDetails.BeatInterval`
+(NG-owned, read by `checkPeerState`) until the next beat repopulates it — not
+strictly INVARIANT. With `CheckState` now gone, `AgentDetails.BeatInterval` is
+write-only/dead-on-read (like the (B)-kept fields) and comes out cleanly when
+A5 removes the bridge's wholesale-replace.
 
 ---
 
@@ -71,10 +83,15 @@ Related, same feature, flag for review:
 
 | Item | finish / keep / drop | notes |
 |---|---|---|
-| `LatestError` + `LatestErrorTime` (peer error surfacing) | | |
-| `LastContactTime` (last-seen) | | |
-| `ReceivedBeats` (beat metric) | | |
-| `HsyncPeerInfo` DTO | | |
+| `LatestError` + `LatestErrorTime` (peer error surfacing) | **KEEP** | unfinished presentation side; live writes retained, tracked loose end |
+| `LastContactTime` (last-seen) | **KEEP** | unfinished presentation side |
+| `ReceivedBeats` (beat metric) | **KEEP** | operator confirms: a counter whose presentation side was never finished |
+| `HsyncPeerInfo` DTO | **UNDETERMINED** | operator unsure if needed; leave untouched, revisit |
+
+Decision recorded 2026-06-03. Also kept (now dead-on-read but bridge-coupled):
+`AgentDetails.BeatInterval` (→ A5). The kept fields + their NG mirrors stay until
+either their presentation side is finished or the A5 bridge teardown removes the
+copies.
 
 - **drop** → I remove the field(s) + their writes + bridge refs (+ NG mirror),
   one reviewed commit.

@@ -54,65 +54,6 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 	}
 }
 
-func (agent *Agent) CheckState(ourBeatInterval uint32) {
-	// Use best-of-both transports: if either transport has recent beats, agent is healthy.
-	latestRBeat := agent.ApiDetails.LatestRBeat
-	if agent.DnsDetails.LatestRBeat.After(latestRBeat) {
-		latestRBeat = agent.DnsDetails.LatestRBeat
-	}
-	latestSBeat := agent.ApiDetails.LatestSBeat
-	if agent.DnsDetails.LatestSBeat.After(latestSBeat) {
-		latestSBeat = agent.DnsDetails.LatestSBeat
-	}
-
-	remoteBeatInterval := time.Duration(agent.ApiDetails.BeatInterval) * time.Second
-	if dnsInterval := time.Duration(agent.DnsDetails.BeatInterval) * time.Second; dnsInterval > remoteBeatInterval {
-		remoteBeatInterval = dnsInterval
-	}
-	if remoteBeatInterval == 0 {
-		remoteBeatInterval = 30 * time.Second
-	}
-	localBeatInterval := time.Duration(ourBeatInterval) * time.Second
-	if localBeatInterval == 0 {
-		localBeatInterval = 30 * time.Second
-	}
-
-	// Check if either transport is in a state that warrants beat health checking.
-	apiActive := false
-	dnsActive := false
-	switch agent.ApiDetails.State {
-	case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
-		apiActive = true
-	}
-	switch agent.DnsDetails.State {
-	case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
-		dnsActive = true
-	}
-	if !apiActive && !dnsActive {
-		return
-	}
-
-	timeSinceLastReceivedBeat := time.Since(latestRBeat)
-	timeSinceLastSentBeat := time.Since(latestSBeat)
-
-	// Check beat health and set DEGRADED/INTERRUPTED when beats are failing
-	// NOTE: OPERATIONAL vs LEGACY is determined by zone count (see RecomputeSharedZonesAndSyncState)
-	// This function only handles beat health degradation, not zone-based state transitions
-	if timeSinceLastReceivedBeat > 10*remoteBeatInterval || timeSinceLastSentBeat > 10*localBeatInterval {
-		agent.ApiDetails.State = AgentStateInterrupted
-		agent.DnsDetails.State = AgentStateInterrupted
-	} else if timeSinceLastReceivedBeat > 2*remoteBeatInterval || timeSinceLastSentBeat > 2*localBeatInterval {
-		agent.ApiDetails.State = AgentStateDegraded
-		agent.DnsDetails.State = AgentStateDegraded
-	} else {
-		// Beats healthy — promote top-level state if transports are ahead.
-		// Never drag transport states back down to a lower top-level state.
-		if agent.State == AgentStateNeeded || agent.State == AgentStateKnown || agent.State == AgentStateIntroduced {
-			agent.State = AgentStateOperational
-		}
-	}
-}
-
 func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) {
 	if agent == nil {
 		return nil, fmt.Errorf("agent is nil")
