@@ -87,7 +87,6 @@ type AgentDetails struct {
 	Addrs             []string
 	Port              uint16
 	BaseUri           string
-	TlsaRR            *dns.TLSA
 	State             AgentState
 	LatestError       string
 	LatestErrorTime   time.Time

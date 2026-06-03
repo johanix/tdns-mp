@@ -312,7 +312,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			if agent.ApiDetails.State <= AgentStateNeeded {
 				agent.ApiDetails.State = AgentStateKnown
 			}
-			agent.ApiDetails.TlsaRR = result.TLSA
+			agent.ensureCrypto("API").TlsaRR = result.TLSA
 			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
 		} else {

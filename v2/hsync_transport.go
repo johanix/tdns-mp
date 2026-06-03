@@ -1477,7 +1477,7 @@ func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 	// Sync API details
 	if agent.ApiDetails != nil {
 		peer.APIEndpoint = agent.ApiDetails.BaseUri
-		if agent.ApiDetails.TlsaRR != nil {
+		if ac := agent.cryptoFor("API"); ac != nil && ac.TlsaRR != nil {
 			// Store TLSA for TLS verification
 			peer.TLSARecord = []byte{} // Would need to serialize TLSA
 		}

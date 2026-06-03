@@ -167,7 +167,4 @@ func mergeAgentDetails(dst, src *AgentDetails) {
 	if dst.Port == 0 {
 		dst.Port = src.Port
 	}
-	if dst.TlsaRR == nil {
-		dst.TlsaRR = src.TlsaRR
-	}
 }

@@ -364,6 +364,10 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if apiAddr == "" {
 						apiAddr = "-"
 					}
+					hasTLSA := false
+					if ac := agent.cryptoFor("API"); ac != nil {
+						hasTLSA = ac.TlsaRR != nil
+					}
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
@@ -374,7 +378,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						APIUri:      agent.ApiDetails.BaseUri,
 						Port:        agent.ApiDetails.Port,
 						Addresses:   agent.ApiDetails.Addrs,
-						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
+						HasTLSA:     hasTLSA,
 						State:       AgentStateToString[effectiveState],
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
