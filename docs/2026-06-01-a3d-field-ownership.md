@@ -303,5 +303,10 @@ land — collect them here as they appear, sweep at the end.
 Branch HEAD `b3fd9a9` (embed A3d.1 + legacy-path retirement) deployed to
 `agent.cpt.mp.axfr.net`. Steady-state INVARIANT probes confirmed: gossip,
 `peer list`, `peer zones`, `zone mplist` all match pre-deploy behavior. The
-one EXPLAINED DELTA (`peer reset` rerouted to NG `MarkNeeded`) — spot-check
-still pending. Per-field vertical slices proceed from this confirmed base.
+one EXPLAINED DELTA (`peer reset` rerouted to NG `MarkNeeded`) was spot-checked
+on `cpt` and found **broken**: `MarkNeeded` short-circuits a known peer, so
+reset never re-drove discovery (split-brain — election path saw the peer down,
+beat path kept beating and got REFUSED). Fixed in `d4577d4` by adding
+`Engine.Rediscover` (force-rediscover for an existing peer) + a regression
+test; `peer reset` now calls it. Re-deploy + re-verify reset on the testbed
+before relying on it. Per-field vertical slices proceed from this base.
