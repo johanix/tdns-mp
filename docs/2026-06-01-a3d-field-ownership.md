@@ -330,3 +330,35 @@ before relying on it. Per-field vertical slices proceed from this base.
   identically on each. Never derive a field from a *sibling* field (e.g.
   ContactInfo from BaseUri); siblings diverge across peer kinds. Each slice is
   verified on the testbed before the next.
+
+### 8.4 BeatInterval audit (NOT a slice) + dead-code inventory
+
+`BeatInterval` was audited as slice-2 candidate and **disqualified**:
+- MP `CheckState` (`hsync_beat.go:57`), the only reader of
+  `AgentDetails.BeatInterval`, has **zero callers** — dead code. MP
+  `HeartbeatHandler` (live, via `adaptBeatReports`) still *writes* the field
+  (`:21/25`) but nothing live reads it.
+- The **live** BeatInterval is `hsync.PeerDetails.BeatInterval`
+  (`hsync/transport_peer.go:101`), read by the live NG `checkPeerState`
+  (`hsync/beat.go:126`). It is on `hsync.PeerDetails`, not `transport.Peer`, and
+  is part of the **liveness migration (Stage D)** — not an isolated slice.
+
+So BeatInterval splits into: MP-side dead-code (→ sweep) + NG-side liveness
+(→ Stage D). Not migrated now.
+
+**Dead-code inventory (confirmed write-only / dead-on-read MP-side; → the
+deferred §8.1 sweep, NOT piecemeal):**
+- MP `CheckState` (`hsync_beat.go:57`) — 0 callers; the MP liveness checker,
+  superseded by NG `checkPeerState`.
+- `AgentDetails.BeatInterval`, `LatestError`, `LatestErrorTime`,
+  `LastContactTime`, `ReceivedBeats`, `Host` — written (some by the live
+  `HeartbeatHandler`) but read only by dead `CheckState` or nothing.
+- `AgentDetails.Endpoint` — 0 uses (already flagged "delete" in §4).
+- `FetchSVCB` (from the legacy-path retirement).
+
+**Status: clean standalone non-spine slices are exhausted** (ContactInfo was the
+one). Remaining A3d work: (a) **A3d.3** crypto/api → `agentMeta`; (b) the
+**spine cluster** (State + address + hello/beat times + fails) → `transport.Peer`
+as one larger slice — note MP `CheckState` being dead simplifies the `.State`
+liveness story (the live DEGRADED/INTERRUPTED writer is NG `checkPeerState`);
+(c) the deferred dead-code sweep. (b) and the sweep need operator direction.
