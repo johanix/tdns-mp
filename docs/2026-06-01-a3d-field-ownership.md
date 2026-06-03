@@ -310,3 +310,23 @@ beat path kept beating and got REFUSED). Fixed in `d4577d4` by adding
 `Engine.Rediscover` (force-rediscover for an existing peer) + a regression
 test; `peer reset` now calls it. Re-deploy + re-verify reset on the testbed
 before relying on it. Per-field vertical slices proceed from this base.
+
+### 8.3 Slice log + the writer-path-audit rule
+
+- **Slice 1 — ContactInfo → `transport.Peer` (DONE: tdns-transport `495eab4`,
+  tdns-mp `3a536dd`).** First attempt (`a766387`) **dropped** ContactInfo and
+  derived it at display from `BaseUri != ""`; testbed showed a regression —
+  config-only infra peers (combiner/signer) carry a config `BaseUri` but were
+  never discovered, so they wrongly showed `Contact Info: complete`. Reverted
+  (`d8eb11d`). Correct version: ContactInfo is **load-bearing** (marks
+  DNS-discovered mechanisms), so it moved to per-mechanism
+  `MechanismState.ContactInfo`, written **only** on the discovery path
+  (`RegisterDiscoveredAgent` → `SetMechanismContactInfo`), read at display via
+  `MechanismContactInfo`. Infra peers stay blank. INVARIANT.
+
+- **Methodology rule (learned from slice 1):** before redirecting any field's
+  reads, enumerate **all** writer paths — discovered / config-infra /
+  registry-only / inbound-message — and confirm `transport.Peer` is written
+  identically on each. Never derive a field from a *sibling* field (e.g.
+  ContactInfo from BaseUri); siblings diverge across peer kinds. Each slice is
+  verified on the testbed before the next.
