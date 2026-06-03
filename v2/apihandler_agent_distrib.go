@@ -376,13 +376,13 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						Addresses:   agent.ApiDetails.Addrs,
 						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
 						State:       AgentStateToString[effectiveState],
-						ContactInfo: agent.ApiDetails.ContactInfo,
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.ApiDetails.HelloTime
 					}
 					if conf.InternalMp.TransportManager != nil {
 						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							peerInfo.ContactInfo = peer.MechanismContactInfo("API")
 							s := peer.Stats.GetDetailedStats()
 							peerInfo.HelloSent = s.HelloSent
 							peerInfo.HelloReceived = s.HelloReceived
@@ -437,13 +437,13 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						HasJWK:       agent.DnsDetails.JWKData != "",
 						HasKEY:       agent.DnsDetails.KeyRR != nil,
 						State:        AgentStateToString[effectiveState],
-						ContactInfo:  agent.DnsDetails.ContactInfo,
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.DnsDetails.HelloTime
 					}
 					if conf.InternalMp.TransportManager != nil {
 						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							peerInfo.ContactInfo = peer.MechanismContactInfo("DNS")
 							s := peer.Stats.GetDetailedStats()
 							peerInfo.HelloSent = s.HelloSent
 							peerInfo.HelloReceived = s.HelloReceived

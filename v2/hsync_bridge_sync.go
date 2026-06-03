@@ -92,7 +92,6 @@ func hsyncDetailsToAgent(d *hsync.PeerDetails) *AgentDetails {
 		Addrs:             append([]string(nil), d.Addrs...),
 		Port:              d.Port,
 		BaseUri:           d.BaseUri,
-		ContactInfo:       d.ContactInfo,
 		JWKData:           d.JWKData,
 		KeyAlgorithm:      d.KeyAlgorithm,
 		State:             AgentState(d.State),
@@ -117,7 +116,6 @@ func agentDetailsToHsync(d *AgentDetails) *hsync.PeerDetails {
 		Addrs:             append([]string(nil), d.Addrs...),
 		Port:              d.Port,
 		BaseUri:           d.BaseUri,
-		ContactInfo:       d.ContactInfo,
 		JWKData:           d.JWKData,
 		KeyAlgorithm:      d.KeyAlgorithm,
 		State:             hsync.PeerState(d.State),
@@ -166,9 +164,6 @@ func mergeAgentDetails(dst, src *AgentDetails) {
 	}
 	if dst.BaseUri == "" {
 		dst.BaseUri = src.BaseUri
-	}
-	if dst.ContactInfo == "" {
-		dst.ContactInfo = src.ContactInfo
 	}
 	if len(dst.Addrs) == 0 && len(src.Addrs) > 0 {
 		dst.Addrs = append([]string(nil), src.Addrs...)

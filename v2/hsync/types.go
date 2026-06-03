@@ -68,7 +68,6 @@ type PeerDetails struct {
 	Addrs             []string
 	Port              uint16
 	BaseUri           string
-	ContactInfo       string
 	JWKData           string
 	KeyAlgorithm      string
 	State             PeerState
