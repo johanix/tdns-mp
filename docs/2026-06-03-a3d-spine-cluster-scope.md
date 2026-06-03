@@ -100,11 +100,19 @@ Stage D / A5.
 
 ## 5. Proposed sub-slice decomposition (each = commit, green + -race + probe)
 
-1. **Spine-1 `.State`** — wire `effectiveAgentState`; redirect the ~15
-   `EffectiveState`/`IsAnyTransportOperational` callers + the display; rewrite
-   the canonical accessors; delete dead `apiState`/`dnsState`. Stop writing
-   `AgentDetails.State`/`LastState` + retire the `RecomputeSharedZonesAndSyncState`
-   state-flip. **Highest-value, highest-proof-obligation.** Testbed-verify.
+1. **Spine-1 `.State`** — split into 1a/1b during implementation:
+   - **1a — DONE (`95c3cf6`):** wired `effectiveAgentState` + new
+     `isAgentOperational`; redirected the ~15 `EffectiveState`/
+     `IsAnyTransportOperational` callers (operational-gating + `gossip state`)
+     to `transport.Peer`; deleted the obsolete `*Agent` methods + dead
+     `apiState`/`dnsState`/`agentTransportParticipating`. `AgentDetails.State`
+     still written; display untouched. INVARIANT on the DNS-only fleet
+     (latent multi-mechanism difference flagged). **Awaiting testbed verify**
+     (`gossip state` column + election/RFI gating).
+   - **1b — pending:** redirect the peer-list display's per-mechanism State to
+     `transport.Peer.Mechanisms[m].State`; stop writing `AgentDetails.State`/
+     `LastState`; retire the `RecomputeSharedZonesAndSyncState` state-flip
+     (overlay derives LEGACY/OPERATIONAL).
 2. **Spine-2 Address** — redirect `Addrs`/`Port`/`BaseUri` reads to
    `transport.Peer` (`CurrentAddress`/`APIEndpoint`); decide the DNS-URI display
    home; drop the `AgentDetails` address fields + bridge copies (verify NG
