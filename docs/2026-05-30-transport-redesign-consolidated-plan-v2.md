@@ -1,9 +1,10 @@
 # Transport redesign: consolidated implementation plan — v2
 
 Date: 2026-05-30
-Status: AUTHORITATIVE & EXECUTABLE. This is the single source of truth
-for the transport redesign. Each Stage below is a self-contained spec —
-there are no separate "amendment" layers to cross-reference.
+Status: SUPERSEDED 2026-06-11 by
+`2026-06-11-transport-redesign-consolidated-plan-v3.md` for all
+remaining work. Retained as evolution trail; completed-work specs
+herein remain the historical record. Where v2 and v3 differ, v3 wins.
 
 ## Relationship to prior docs
 

@@ -1,6 +1,11 @@
 # A3d design addendum — peer-state ownership & field rehoming
 
 Date: 2026-06-01. Branch: `transport-redesign-v1-A`.
+Status note (2026-06-11): §1–5 (acceptance test, target types,
+field-ownership table, decisions) remain BINDING and are carried
+forward by `2026-06-11-transport-redesign-consolidated-plan-v3.md`;
+§6–8.5 (sequencing, slice log) are superseded by v3's Stage A
+remainder — execute against v3.
 Companion to `2026-05-30-transport-redesign-consolidated-plan-v2.md` §A3.
 This addendum closes the design gap that §A3 left open: the plan settled
 the *registry* embed (decision B) but never the *peer-element* type-merge —

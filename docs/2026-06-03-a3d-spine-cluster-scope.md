@@ -1,6 +1,10 @@
 # A3d spine-cluster migration — detailed scope
 
 Date: 2026-06-03. Branch: `transport-redesign-v1-A`.
+Status note (2026-06-11): SUPERSEDED by
+`2026-06-11-transport-redesign-consolidated-plan-v3.md` Steps
+A3d-S1b…S4 (updated against code 2026-06-11); retained for the
+per-field analysis detail. Execute against v3.
 The last real A3d migration: the remaining live `AgentDetails` fields →
 `transport.Peer`. (Crypto already moved to `agentMeta` in A3d.3; dead code
 swept; `AgentDetails` is now crypto-free.) Companion to
