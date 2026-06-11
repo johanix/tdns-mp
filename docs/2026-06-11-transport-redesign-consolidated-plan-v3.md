@@ -1,0 +1,682 @@
+# Transport redesign: consolidated implementation plan — v3
+# (remaining work)
+
+Date: 2026-06-11
+Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
+REMAINING transport-redesign work. Supersedes, for everything not
+yet implemented: `2026-05-30-transport-redesign-consolidated-plan-v2.md`,
+the A3d addendum chain (`2026-06-01-a3d-field-ownership.md` §6–8.5),
+`2026-06-03-a3d-spine-cluster-scope.md`, and the open items from
+`2026-06-11-transport-redesign-progress-review.md`. Where v2 or an
+addendum differs from v3, **v3 wins.**
+
+Completed work is recorded here as a status table only (with commit
+hashes); its specs live in the superseded docs as the evolution
+trail. The A3d *design* (field-ownership acceptance test, target
+types, lock order) is NOT re-derived — it is carried forward intact
+from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
+
+## Relationship to prior docs
+
+- **v2** (2026-05-30): plan of record for Stage A's first half;
+  retained as evolution trail. Its Stage C/D/E/F sections are
+  folded into v3 with updates (see "What v3 changes").
+- **A3d addendum** (2026-06-01) §1–5: still the binding A3d design.
+  §6–8.5 (sequencing, slice log): superseded — outcomes recorded
+  in the status table below.
+- **Spine scope** (2026-06-03): its remaining slices are now
+  Steps A3d-S1b…S4 below, updated against code verified 2026-06-11.
+- **Dead-code triage** (2026-06-03): the (A) deletions are done;
+  the (B) KEEP decisions are carried into A5 below with a
+  concrete disposition.
+- **Progress review** (2026-06-11): findings F1–F6 are converted
+  into bound Steps here (Gate-1/Gate-2, C0, F2 items).
+
+## What v3 changes vs v2 (supersession list)
+
+1. **A3d sub-decomposition replaced.** v2 §A3d / addendum §8
+   (A3d.2/.4/.5 ordering) is superseded by the per-field slice
+   plan (addendum §8.1) — now Steps A3d-S1b…S4 + A3d-END below.
+2. **`AgentDetails` struct deletion moves to A5** (was "end of the
+   slice sequence"). Reason: the bridge converters reference the
+   struct; deleting it requires the bridge teardown. Resolves an
+   ambiguity the addendum left open.
+3. **(B)-kept diagnostics fields get a disposition** (A5 below):
+   live writes redirect to their existing `transport.Peer` homes;
+   presentation finish becomes a small post-A5 task. (Operator
+   confirmed KEEP on 2026-06-03; this is the "how".)
+4. **Stage A exit gate added** (tag + stage branch + go.mod
+   story). Operator policy: main is untouched until Stage F.
+5. **Pre-C gate (C0) added**: three-repo standalone build restored
+   (review F1), hpke Examples fixed (F2), golden-JSON wire
+   regression test, mixed-fleet runbook as a written procedure.
+6. **Stage D expanded** with D0 (the `hsync.PeerDetails`
+   writer-path audit) per the spine doc's three-stores finding;
+   D2 is bound as the one deliberate displayed-behavior change
+   before F1.
+7. **E1 inventory updated**: the legacy `attemptDiscovery` path
+   was already retired (`6b671ac`); `peer reset` now routes via
+   `Engine.Rediscover` (`d4577d4`). Three entry points remain,
+   not four.
+8. **Probe discipline amended**: the "all three repos" automated
+   leg is currently fiction (review F1) — restored at Gate-2 and
+   mandatory from C0 onward.
+9. **Effort re-estimated bottom-up** (table at end); supersedes
+   both the 05-28 table and the review's top-down figure.
+
+## Verified baseline (code-verified 2026-06-11)
+
+| Step | Status | Evidence |
+|---|---|---|
+| Stage 0 (0.1–0.3) | DONE | `4ba559b`, `3c59382`+`bad9b87`, `6e04424` |
+| A1 (A1.0–A1.2) | DONE, testbed-confirmed | `c0de553`, `88955d8`, `7e65286` |
+| A2 (incl. auth/HELLO boundary) | DONE, testbed-confirmed | `5efdd8f` |
+| A3a (lock order) | DONE | mp `14d8f4b` + transport `614417f` |
+| A3b | dissolved into A3d | `f018e7b` |
+| A3c (`AgentRegistry.RemoteAgents`) | DONE | `16415f4` |
+| A3d.0 view types + `effectiveAgentState` | DONE | `431f9d1` |
+| A3d.1 registry embed (dual-mapped) | DONE | `eb584f7` |
+| Legacy hello/discovery retirement | DONE, testbed-confirmed | `6b671ac`, `b304e1f`; `peer reset` fix `d4577d4` |
+| ContactInfo slice | DONE (after revert `d8eb11d`) | transport `495eab4` + mp `3a536dd` |
+| Dead-code sweep (A) | DONE | `512c864`, `0e87326` |
+| A3d.3a/3b crypto → `agentMeta` | DONE | `67363b3`, `dc8bb8d`; `AgentDetails` crypto-free |
+| Spine-1a (`.State` canonical readers) | DONE, **testbed verify outstanding** | `95c3cf6`; see Gate-1 |
+| Gate-2 (three-repo standalone build) | DONE | transport `e65b057`, mp `b2dd2f6`, tdns `40bda34` |
+| Everything below this line | NOT STARTED | review §1 |
+
+Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
+all 7 `TestTransportBoundary_*`; **tdns-transport/v2 now builds and
+tests standalone** (`-count=1` + `-race`), `cmd/transport-exercise`
+builds (Gate-2 closed); tdns/v2 main builds.
+
+## Target architecture (unchanged — restated for reference)
+
+Two peer-state stores, partitioned by concern, joined only by
+`PeerID`; transport speaks an opaque-message vocabulary; zone
+membership — including admission — derived from HSYNCPARAM, never
+stored-and-synced. `transport.PeerRegistry` owns identity, address,
+per-mechanism state, liveness, wire crypto, stats. One MP registry
+(`AgentRegistry` embedding `*hsync.Registry`) owns app metadata;
+the MP per-peer record is nearly empty in the end state. LEGACY is
+the one MP overlay (participations==0), never seen by transport.
+Transport vocabulary = `hello/beat/ping/confirm/chunk` + one opaque
+carrier `{Scope, TypeToken, Payload}`. Full statement: v2 "Target
+architecture" + addendum §1 (the acceptance test). Both binding.
+
+## Probe discipline (amended)
+
+As v2, with one amendment: the automated leg is
+- `go test ./... -count=1` in **tdns-mp/v2 AND tdns-transport/v2
+  standalone** (the latter restored at Gate-2; until then,
+  tdns-mp-only is an acknowledged temporary state, valid for
+  Stage A only),
+- `tdns/v2` compile, `cmd/transport-exercise` build (from C0 on),
+- the boundary harness + `hsync/*` suites; `-race` on every A/C
+  Step.
+
+Runtime probes unchanged: `peer list`, `peer zones`,
+`gossip state -z`, `zone edits list -z`, `distrib list`.
+INVARIANT vs EXPLAINED DELTA semantics unchanged: an unpredicted
+change in an INVARIANT probe halts the Stage.
+
+## Baseline & branching strategy (bound 2026-06-11)
+
+- **main is untouched until Stage F is proven** (operator policy).
+- At the Stage A exit gate (below): tag `stage-A-complete` in BOTH
+  repos (they move in lock-step); cut `transport-redesign-v1-C`
+  from the tags for Stage C. Same pattern at each later stage
+  boundary (`stage-C-complete`, …).
+- The tagged baselines MUST build standalone (hence Gate-2 sits
+  inside Stage A, not before C).
+- go.mod local replaces ("Revert before publishing") stay on the
+  working branches; each tag records, in its message, the sibling
+  commits it was verified against. The true publishing story
+  (pushed tags fetchable by the module proxy) is decided once, at
+  the Stage F merge — not re-litigated per stage.
+
+---
+
+# Stage A — remainder
+
+## Gate-1 — Spine-1a testbed verification (operator; BLOCKING)
+
+Outstanding since 2026-06-03. Deploy tip (`2bed32a`) and verify
+the Spine-1a INVARIANT: `gossip state` matrix and `peer list`
+State column byte-comparable to pre-deploy; election/RFI
+operational gating unchanged (the ~15 redirected
+`EffectiveState`/`IsAnyTransportOperational` callers). DEGRADED/
+INTERRUPTED: confirmed displayed by neither side (NG-only,
+unchanged). **Failure here halts Stage A** and reopens the A3d.0
+enum-mapping design — everything below stacks on this slice.
+
+## Gate-2 — restore the three-repo build (small; before A3d-S2) — DONE 2026-06-11
+
+Review finding F1. In `tdns-transport/v2`: add the johanix/dns
+fork replace (mirror tdns-mp/v2 `go.mod:80`) + `go mod tidy`
+(picks up `johanix/dnssec-algorithms` indirect). Verify
+`go build ./... && go test ./... -count=1` standalone. Fix or
+neutralize the four hpke `Example*` Output blocks (review F2 —
+placeholders can never match; either correct the expectations or
+drop the `// Output:` markers). Verify `cmd/transport-exercise`
+builds. One commit per repo touched.
+
+**Probe — INVARIANT** (build/test infrastructure only).
+
+**Outcome (transport `e65b057`, mp `b2dd2f6`, tdns `40bda34`):**
+Root cause confirmed — Go ignores `replace` directives from
+dependencies, so each main module must restate the
+`miekg/dns => johanix/dns` replace that `tdns/v2`'s algorithm
+registry (`dns.Algorithm`/`dns.RegisterAlgorithm`, absent from
+upstream miekg/dns v1.1.72) requires. The fork API is NOT
+upstreamed, so the replace cannot be dropped anywhere short of
+the Stage F publishing decision; the achievable cleanup was
+making it identical everywhere. All modules (tdns/v2
+root+core+edns0+cache, tdns-mp/v2, transport/v2,
+`cmd/transport-exercise`) now pin the same algorithm-registry tip
+`2a28f8f1484d` (2026-06-08). `cmd/transport-exercise/go.mod` also
+needed the `tdns/v2` root + `cache` local replaces (it now
+imports `tdns/v2` transitively). hpke `Example*` `// Output:`
+placeholder markers dropped (F2). One incidental fix:
+`testHandler`/`testMiddleware` `.called` counters, raced by
+`TestConcurrentAccess` once the package built standalone, made
+`atomic.Int64`. Transport standalone `go build` + `-count=1` +
+`-race` green; both Makefile builds (tdns 5 binaries, tdns-mp 5
+binaries) green; boundary suite `-race` green. The tdns dep bump
+landed on a generic branch (`johanix-dns-bump-jun8`), not the
+redesign branch, since it is plain dependency maintenance.
+
+## Gate-3 — close the dangling A1 loose end (decision + tiny commit)
+
+`CleanupZoneRelationships` (`agent_utils.go:300`) is a TODO stub
+wired as the `OnLocalRemoved` hook (`hsync_bridge.go:285`). A1.0
+bound "implement or explicitly drop; do not leave dangling".
+**Proposed resolution (operator to confirm):** with membership
+now derived (A2), local-removal teardown is largely automatic —
+participations vanish on the next derivation, groups recompute
+via `OnHsync3Changed`. Replace the stub body with structured
+logging + a comment stating that analysis; revisit only if the
+testbed shows orphaned per-zone state after a local removal.
+
+## A3d-S1b — `.State`: stop dual-writing; display redirect
+
+Prereq: Gate-1 green.
+1. Redirect the peer-list display's per-mechanism State to
+   `transport.Peer.Mechanisms[m].State`
+   (`apihandler_agent_distrib.go:358-360,420-422`; it already
+   applies its own LEGACY overlay — keep that, it becomes the
+   overlay's only display site).
+2. Stop writing `AgentDetails.State`/`LastState`. Verified writer
+   sites: `hsync_transport.go:627,649,723,1577,1605,1695,1725`.
+3. Retire the `RecomputeSharedZonesAndSyncState` LEGACY/
+   OPERATIONAL state-flip (`agent_utils.go:67-74`) — the overlay
+   derives it.
+
+**Probe — INVARIANT:** `peer list` State column + `gossip state`
+byte-comparable; suite + `-race` green.
+
+## A3d-S2 — address: redirect reads, drop fields
+
+Prereq: the **DNS-URI display home decision** (Open decision 1
+below) — do not start without it (writer-path-audit rule).
+1. Per the rule: enumerate ALL writer paths for `Addrs`/`Port`/
+   `BaseUri` — discovery (`RegisterDiscoveredAgent`), config-infra
+   (`combiner_peer.go`/`signer_peer.go`), `GetOrCreatePeer`
+   address restore — and confirm `transport.Peer` is written
+   identically on each (it is for discovered + infra per the
+   ContactInfo slice work; re-verify).
+2. Redirect display reads (`apihandler_agent_distrib.go:363,378,
+   380,425,444,446`) to `transport.Peer`
+   (`Mechanisms["DNS"].Address`/`DiscoveryAddr` for DNS;
+   `APIEndpoint` for API; DNS-URI per the decision).
+3. Redirect the `GetOrCreatePeer` address restore to read
+   transport state (or delete the restore if transport is now
+   always populated first — prove it).
+4. Drop `AgentDetails.Addrs/Port/BaseUri` + their bridge copies.
+   **Verify NG (`hsync.PeerDetails`) does not read them** before
+   dropping the copies (bridge-clobber check, spine doc §4).
+
+**Probe — INVARIANT:** `peer list` address columns byte-comparable
+(all three peer kinds: discovered / config-infra / registry-only);
+`addrr` round-trip ACCEPTED; combiner reachable from the agent.
+
+## A3d-S3 — telemetry: complete transport write coverage, redirect
+
+The only slice that ADDS writes (DNS-only coverage today).
+1. Add API-side `LastHelloRecv/Sent` + beat-time writes at the
+   API hello/beat receipt sites (today only the DNS handler path
+   writes them, spine doc §1).
+2. Verify in tdns-transport that `Stats`, `BeatSequence`,
+   `ConsecutiveFails` are maintained transport-internally
+   (`RecordBeatSent` has 0 MP callers — confirm transport calls
+   it on its own send path; if not, that is a transport-side fix
+   first).
+3. Redirect display `LastUsed` and the **functional** `SentBeats`
+   uses — beat-sequence (`hsync_hello.go`,
+   `hsync_infra_beat.go:76-99`) and gossip-sent detection
+   (`hsync_bridge.go:61-81`) — to `BeatSequence`/`Stats`.
+4. Drop `AgentDetails.HelloTime/LatestSBeat/LatestRBeat/
+   DiscoveryFailures/SentBeats` + bridge copies (same NG-reader
+   check; note NG `checkPeerState` reads the *hsync*-side
+   `LatestRBeat/SBeat` — those stay until D).
+
+**Probe — EXPLAINED DELTA (small):** display `LastUsed` may gain
+API-side timestamps that were previously missing (that is the
+added coverage). Everything else INVARIANT.
+
+## A3d-S4 — the snapshot inversion (residual A4)
+
+Falls out once S1b–S3 land. Delete: `SyncPeerFromAgent`
+(`hsync_transport.go:1474`, caller `:457`),
+`agentStateToTransportState` (`:1515`) +
+`agentStateToTransportStateFn` (`agent_structs.go:163`), the
+snapshot accessors `APIMechanismState`/`DNSMechanismState`
+(`agent_structs.go:111/134`); tdns-transport side:
+`Peer.PopulateFromAgent`, `AgentLike`, `AgentMechanismSnapshot`.
+`GetOrCreatePeer` (hot-path, no-snapshot) stays.
+
+**Probe — INVARIANT.** Compiler-proven deletions.
+
+## A3d-END — embed finalization (the concurrency-sensitive chunk)
+
+One session; sub-steps are separate commits, each green +
+`-race` + INVARIANT.
+
+- **END.1 — type-merge.** `Agent` becomes the view of addendum
+  §3: embed `*hsync.Peer` (+ existing `*agentMeta`); dedupe
+  Identity/PeerID to `hsync.Peer.ID`; `Agent.Mu` →
+  `hsync.Peer.Mu` (ONE peer mutex); `Zones` →
+  `hsync.Peer.Zones` (transitional; reads stay derived per A2);
+  `DeferredTasks` → `hsync.Peer.Deferred`. `AgentDetails` fields
+  are empty of live reads by now; the struct itself is deleted
+  in A5 (supersession item 2).
+- **END.2 — delete the dual map.** Remove the temporary
+  `AgentRegistry.S`/`mu` shadowing the embedded
+  `hsync.Registry.S` (`agent_structs.go:206-214`); duplicated
+  protocol methods become delegating wrappers, then delete.
+- **END.3 — collapse the inbound pipeline.** One writer per
+  message type. Beat: `routeBeatMessage`
+  (`hsync_transport.go:689`) + `adaptBeatReports`→
+  `HeartbeatHandler` (`hsync_beat.go:11`) + engine
+  `heartbeatHandler` converge on a single path writing
+  `transport.Peer` (mechanism state + counters); gossip/election
+  side-effects preserved; delete the redundant writers. Hello
+  likewise via `routeHelloMessage`; do NOT wire inbound hello to
+  the `hsync/hello.go` stub (pass-2 M4). Keep the single-writer
+  rule and the A3a lock order throughout.
+- **END.4 — delete `hsync.Registry.RemoteAgents`**
+  (`hsync/registry.go:17`); derive zone→peer on read via
+  `ParticipantsForZone`.
+- **END.5 — deferred dead-code sweep.** One `staticcheck U1000`
+  pass over tdns-mp/v2 (+hsync); single reviewed commit. Known
+  inventory: triage doc + whatever S1b–S4 orphaned.
+
+**Probe — INVARIANT:** `peer list`/`peer zones`/gossip/edits
+byte-comparable; no new races under `-race` on boundary + hsync
+suites. **Operator checkpoint: deploy + testbed-confirm before
+A5** (this is the addendum's post-embed checkpoint, relocated).
+
+## A5 — bridge teardown
+
+1. **(B)-fields disposition first** (operator KEEP, 2026-06-03;
+   disposition proposed here, confirm before implementing):
+   - `LatestError`/`LatestErrorTime` → per-mechanism
+     `MechanismState.StateReason`/`StateChanged` (exists; verify
+     the hello/beat fail paths write it on every mechanism).
+   - `LastContactTime` → `LastBeatRecv`/`LastHelloRecv` (exists).
+   - `ReceivedBeats` → `Stats` (exists, transport-maintained).
+   - `BeatInterval` → **Stage D** (it is the NG liveness param).
+   - Presentation finish (`peer list -v` reading transport.Peer)
+     becomes a small standalone task, schedulable any time after
+     A5; `HsyncPeerInfo` DTO remains UNDETERMINED.
+   - The no-consumer NG mirrors
+     (`hsync.PeerDetails.{LatestError,LatestErrorTime,
+     LastContactTime,ReceivedBeats}`) are deleted here; the
+     `checkPeerState`-read fields
+     (`State,BeatInterval,LatestRBeat,LatestSBeat`) stay until D.
+2. Delete the bridge: all 9 `hsync_bridge_sync.go` functions
+   (`hsyncPeerToAgent`, `syncHsyncPeerFromAgent`,
+   `agentToHsyncPeer`, `mergeAgentDetails`,
+   `persistAgentAndPeer`, …), the `mpHsyncBridge` type, the
+   `SyncPeerZones` shim, the `OnPeerStored` wiring
+   (`hsync_bridge.go:314`).
+3. Delete the now-empty `AgentDetails` struct.
+4. **Add `OnPeerRemoved`** (the only new machinery left in
+   Stage A) so prunes are events, not reconcile-only — completes
+   the A1(c) removal-latency delta.
+
+**Probe — INVARIANT** steady state; **EXPLAINED DELTA**: pruned
+peers disappear promptly (event) instead of after a reconcile
+interval.
+
+## Stage A exit gate
+
+1. Full probe pass on the testbed (all runtime probes, all three
+   peer kinds).
+2. Tag `stage-A-complete` in tdns-mp AND tdns-transport; tag
+   message records the sibling commit pair + the tdns/v2 commit
+   verified against.
+3. Cut `transport-redesign-v1-C` from the tags.
+4. Re-verify the standalone builds at the tag (Gate-2 must still
+   hold).
+
+---
+
+# Stage C — transport cleanup / the opaque-message seam
+
+Goal unchanged (v2): transport speaks only
+`hello/beat/ping/confirm/chunk` + one opaque carrier; all MP verbs
+are app-level `TypeToken`s; one tdns-mp callback. Delivers the
+reusable-library goal. The hard infrastructure exists
+(`DNSMessageRouter` token-keyed; `RouteToCallback` live at MP) —
+C is mostly relocation + deletion.
+
+## C0 — pre-C gate (NEW; all four items BLOCKING for C1)
+
+1. **Standalone builds green** (Gate-2 done and still holding at
+   the stage-A tag), `cmd/transport-exercise` in the probe run.
+2. **Golden-wire regression test.** Characterize the current wire
+   bytes BEFORE anything moves: golden JSON for the 13
+   `Dns*Payload` types + the query-mode manifest `content`
+   (`distrib/manifest.go:82`), asserting byte-exact tag names and
+   `"MessageType"` values. Lives in the boundary suite; it is the
+   mechanical enforcement of C6's wire-safety gate ("highest
+   wire-break risk in C") and converts silent tag drift into a CI
+   failure.
+3. **Mixed-fleet runbook as a written procedure** (not a bullet):
+   which node upgrades first, what `parsePayload`'s strict
+   conflicting-keys refusal (`chunk_notify_handler.go:273-278`,
+   v2 numbering) does to a half-migrated pair, observable
+   symptoms, rollback step. One page, in docs/.
+4. **DOQ/envelope timing decided** (Open decision 4): does the
+   in-channel-CHUNK work need the `envelope` label before C5? If
+   yes, pull the label out as a tiny pre-C5 step.
+
+## C1 — define the seam
+
+Add `{Scope, TypeToken string, Payload json.RawMessage}` to the
+carrier (generalize `SyncRequest`/`IncomingMessage`); keep the
+live `RouteToCallback` seam; widen `IncomingMessage` to carry
+`TypeToken`. Additive — both sides still work. Wire note: the
+verb stays the JSON payload key `"MessageType"`; carrier-struct
+field names are wire-irrelevant as long as C6 keeps marshalling
+`"MessageType"` with the same value (now enforced by the C0
+golden test).
+
+## C2 — collapse the send side
+
+Replace typed `DNSTransport.Sync/Keystate/Edits/Config/Audit`
+(+`SendStatusUpdate`) with one generic
+`Send(ctx, peer, Scope, TypeToken, rawPayload)`;
+Hello/Beat/Ping/Confirm keep typed entry points. Rewrite the MP
+send wrappers (`SendSyncWithFallback`, `sendRfiToSigner/Combiner`,
+`sendKeystateToSigner`, `sendConfigToAgent`, `sendAuditToAgent`)
+to set `TypeToken`. Preserve `SendStatusUpdate` fire-and-forget
+semantics (pass-2 M6). Keep the per-mechanism send/result shape
+string-keyed (principle 8 — DOQ is coming; never a 2-element
+API/DNS shape).
+
+## C3 — move receive handlers to tdns-mp
+
+Move the 8 MP handlers (`HandleSync/Rfi/Keystate/Edits/Config/
+Audit/StatusUpdate/Relocate`, `handlers.go:220-686`) behind one
+`RouteToCallback` dispatcher keyed on `TypeToken`; transport keeps
+`HandleHello/Beat/Ping/Confirmation`. Preserve: role-specific
+handler sets (combiner `HandleUpdate`/`NewCombinerSyncHandler`
+async-confirm; signer keystate/rfi/status subset); combiner/signer
+registration MUST work without an `AgentRegistry` (they build
+with config-only `AuthorizedPeers`, `main_init.go:302-384`);
+inline-ACK (`ctx.Data["response"]` NOTIFY-confirm path). Collapse
+the MP-side duplicate verb table `routeIncomingMessage` into the
+one dispatcher — no third table. Delete
+`InitializeCombinerRouter`/`InitializeSignerRouter` + configs
+(`router_init.go:253/283/404/429`).
+
+## C4 — move MP types out
+
+Move `SyncType`, `Keystate/Edits/Config/Audit` req+resp,
+`KeyInventoryEntry`, `RejectedItemDTO` to tdns-mp; drop the MP
+`core.` imports (verified 2026-06-11: `core.AgentMsg*`,
+`core.Agent*Post`, `core.KeyInventoryEntry`,
+`core.PublishInstruction`, `core.RROperation`,
+`core.StatusUpdatePost` across 6 transport files), leaving only
+wire/crypto types (`CHUNK`, `TypeCHUNK`, `Format*`, `JWK`,
+`TypeJWK`, `ExtractManifestData`). Validate: tdns-transport
+builds with no MP `core` body types; transport-exercise builds.
+
+## C5 — split `chunk_notify_handler`
+
+Keep generic reassembly/decrypt + QNAME parse in transport; move
+MP payload parsing + post-decrypt **zone** authz to tdns-mp; feed
+the one `(senderID, TypeToken, rawPayload)` callback. **Binding
+DoS invariant:** the pre-crypto **sender** authz
+(`IsPeerAuthorized(sender,"")` before fetch+decrypt) STAYS in
+transport; do not merge the two authz calls across the seam.
+Preserve the `ChunkHandler` MP callbacks (`IsPeerAuthorized`,
+`OnConfirmationReceived`, `GossipForPeer`,
+`OnPeerDiscoveryNeeded`). Peer-level authz middleware stays for
+transport-own verbs; the app-verb middleware is removed (app
+authz is post-callback in MP). **Envelope label lands here**
+(decided, principle 9): explicit `envelope = none|jose|cose`
+replacing the `IsPayloadEncrypted()` byte-sniff; additive field,
+absent ⇒ `jose` (Do53 default), so mixed fleets stay INVARIANT.
+
+## C6 — minimize constants + payload types
+
+Reduce `MessageType` constants to transport-own; collapse
+`DetermineMessageType` to "return the TypeToken"; move the 7 MP
+`Dns*Payload` structs + parse helpers to MP, keep the 5
+transport-own. **Wire-safety gate enforced by the C0 golden
+test** — moved structs keep marshalling `"MessageType"` (and all
+tags) byte-identically.
+
+## C7 — remove zone concepts from transport
+
+Delete `ZoneRelation` (`peer.go:159`), `Peer.SharedZones`
+(`peer.go:81`), `AddSharedZone`/`GetSharedZone(s)`/
+`ReplaceSharedZones`/`ByZone` (`peer.go:587-622,738`) and the MP
+callers. The `HandleSync` zero-shared-zones gate
+(`handlers.go:225`) moved to MP in C3; the outbound-beat zone
+source is participant-derived since A2. **Rewrite or retire
+`TestTransportBoundary_LegacySyncRejection`**
+(`transport_integ_test.go:404`) — it asserts the transport-side
+gate that no longer exists.
+
+**Stage C probe — INVARIANT** (pure relocation; wire unchanged,
+golden test enforcing): exercise BOTH edns0 and query modes;
+SYNC + RFI + combiner async confirm + an election cycle; one
+mixed-version pair per the C0 runbook. Most likely surprises
+remain C6 (tag drift — now CI-caught) and C5 (a dropped field
+that delivers but no longer dispatches — add a dispatch-count
+probe to the harness if cheap).
+
+---
+
+# Stage D — liveness & send semantics
+
+Stage D inherits the **fourth state store**: NG liveness on
+`hsync.PeerDetails` (`State`, `BeatInterval`, `LatestRBeat/SBeat`,
+read by `checkPeerState`, `hsync/beat.go:126`), which Stage A
+deliberately did not touch. The plan was three bullets; given the
+A3d experience (the census grew at every audit), D now starts
+with its own audit step.
+
+## D0 — `hsync.PeerDetails` writer-path audit (NEW; one session-part)
+
+Before any D implementation: per-field table for
+`hsync.PeerDetails` in the A3d-addendum §4 style — every writer
+path (`applyInboundBeat`, `checkPeerState`, discovery), every
+reader, the `transport.Peer` target slot, coverage gaps. Output:
+a short scope doc (or a section appended to this plan) binding
+D1/D2 slices. The known target mapping: `State` →
+`Mechanisms[m].State` (DEGRADED/INTERRUPTED become real transport
+states), `BeatInterval` → new `transport.Peer` liveness param,
+`LatestRBeat/SBeat` → `LastBeatRecv/Sent` (exist).
+
+## D1 — relocate Hello/Beat fallback into the TM
+
+Relocate the EXISTING sequential, any-success semantics of
+`SendHelloWithFallback`/`SendBeatWithFallback` into the TM
+(`TM.Send` currently rejects Hello/Beat, `manager.go:346`).
+INVARIANT — no behavior change. String-keyed mechanism shape
+(principle 8). Per-peer beats are already concurrent;
+per-mechanism parallel remains an optional follow-up (Open
+decision 5).
+
+## D2 — transport-owned liveness (the one deliberate behavior delta)
+
+Unify NG `checkPeerState` onto `transport.Peer`: liveness
+evaluation reads/writes `Mechanisms[m]`; `BeatInterval` moves to
+transport; delete the `hsync.PeerDetails` liveness fields (the
+last bridge-clobber survivors). **EXPLAINED DELTA — bound here:**
+DEGRADED/INTERRUPTED become visible in `peer list`/`gossip state`
+for the first time (today they exist only NG-side, undisplayed).
+This is the only deliberate user-visible behavior change before
+F1; the probe prediction must enumerate which displays change and
+how. Default liveness middleware updates `Peer.Mechanisms[m]` on
+hello/beat receipt; delete the manual updates in combiner/signer
+handlers.
+
+## D3 — lifecycle into TM startup
+
+Enumerate the scattered registration sites (chunk-notify,
+incoming router, role-router replacements post-C3, across
+`start_*.go` + `main_init.go`) and move them into TM startup.
+
+**Probe — INVARIANT** under all-mechanisms-healthy except the D2
+delta, which must be predicted in writing before D2 lands.
+
+---
+
+# Stage E — discovery into transport
+
+## E1 — move the discovery mechanism into transport
+
+Create the transport `DiscoveryService`; move identity→
+{addr,key,SVCB} resolution from `tdns-mp/v2/hsync/discovery.go`.
+**Updated entry-point inventory (3, not 4):** (1) the
+`hsync/discovery.go` → `DiscoverPeer` seam, (2)
+`OnPeerDiscoveryNeeded` on the chunk handler, (3)
+`Engine.Rediscover` (`peer reset`, since `d4577d4`). The legacy
+`attemptDiscovery` path no longer exists (`6b671ac`). MP keeps
+"who to discover" (HSYNC3 → NEEDED intent on `transport.Peer`,
+already the case since A3d.0). **`agentMeta.Crypto` migrates to
+`transport.Peer` crypto slots here** (the addendum's E1
+deferral); `agentMeta.Api` migrates when the API mechanism owns
+its client — if that is not natural at E1, record the residual
+explicitly rather than letting the sidecar silently persist.
+`OnDiscoveryFailed` must fire on all failure paths. Fix the
+post-restart KNOWN→OPERATIONAL gap opportunistically (known
+runtime issue, v2 cross-stage list).
+
+## E2 — delete the `DiscoveryDriver` seam
+
+`manager.go:395-417` ("TEMPORARY seam… Phase 6 part 2 removes
+it") + the MP `RunDiscovery` wiring.
+
+**Probe — INVARIANT:** peer restart → rediscovery → OPERATIONAL;
+discovery works for a non-MP consumer (transport-exercise gains a
+discovery smoke test — this is the reusability proof point).
+
+---
+
+# Stage F — finish
+
+- **F1 — `Gossip`→`AppData` rename.** The ONLY deliberate wire
+  break. Enumerate ALL gossip tag sites (`BeatRequest`
+  `json:"gossip"` `transport.go:137`; `DnsBeatPayload`
+  `json:"Gossip"`; beat-response; master Appendix H.4).
+  Fleet-wide coordinated upgrade; EXPLAINED DELTA (old↔new cannot
+  exchange gossip).
+- **F2 — docs/cleanup.** Stale `init.go` integration guide
+  (references the `IncomingChan` goroutine; production uses
+  `RouteToCallback`); editor backup files (`Makefile~`,
+  `types.go~`, `combiner_chunk.go~`, doc `~` duplicates); mark
+  superseded docs' Status lines; the (B)-fields presentation
+  finish if not already done.
+- **F3 — Phase 8–9 leftovers.** Exported-type count
+  (88 → target <30; most of the reduction falls out of C4/C6/C7 —
+  F3 verifies and unexports the remainder, e.g. the 5 kept
+  `Dns*Payload` types where possible); verify zero MP-coupled
+  imports remain; `imr.go`'s full `tdns/v2` import reviewed.
+- **Merge to main** + resolve the go.mod publishing story (drop
+  local replaces, push fetchable tags). Operator policy satisfied:
+  main is touched exactly once, with the proven system.
+
+---
+
+# Cross-stage rules (carried, binding)
+
+- **Lock order:** `AgentRegistry.mu` → peer mutex (one, =
+  `hsync.Peer.Mu` after A3d-END) → `transport.PeerRegistry` →
+  `transport.Peer`. Never hold a registry/peer mutex across a
+  transport call. Single-writer per peer field. `-race` on
+  boundary/hsync suites at every A/C Step.
+- **Heterogeneous-fleet safety:** every Step except F1 is
+  wire-compatible; C-touching Steps follow the C0 runbook.
+- **Writer-path-audit rule** (addendum §8.3, now global): before
+  redirecting any field's reads, enumerate ALL writer paths and
+  confirm the target store is written identically on each; never
+  derive a field from a sibling field.
+- **One Step = one commit**; lettered sub-steps are commits.
+  Refresh the code map per Step (line numbers in this doc are
+  2026-06-11 for verified items, 2026-05-30 for carried v2 refs).
+- Operator deploys + verifies on the testbed at every Stage
+  checkpoint and at the explicitly marked Gates.
+
+# Execution checklist (per Step)
+
+1. On the stage branch (`transport-redesign-v1-A` through the
+   Stage A exit gate; `-v1-C` thereafter).
+2. Refresh the Step's code map against the branch.
+3. Capture the Stage probe baseline (first Step of a Stage).
+4. Implement; `gofmt -w`; build all affected repos — which, from
+   Gate-2 on, includes tdns-transport/v2 **standalone** and
+   `cmd/transport-exercise`.
+5. Re-run probes; compare to prediction; `-race` where relevant.
+6. Commit; push; operator deploys + verifies per the Stage's
+   probe.
+
+# Effort (re-derived bottom-up, 2026-06-11)
+
+Sessions = burst days incl. the testbed loop, per the 05-28
+convention. Calibration: the 06-03 session landed six A3d slices.
+
+| Work | Sessions | Risk |
+|---|---|---|
+| Gates 1–3 + A3d-S1b…S4 | 1.5–2.5 | medium (S3 adds writes) |
+| A3d-END (embed finalization) | 1 | medium-high (concurrency) |
+| A5 + Stage A exit gate | 1–1.5 | medium (clobber release) |
+| C0 (golden tests, runbook, build) | 0.5–1 | low |
+| C1–C7 | 5–7 | high (wire; mitigated by C0) |
+| D0–D3 | 2–3 | medium-high (D2 behavior delta) |
+| E1–E2 | 1–2 | medium |
+| F1–F3 + merge | 1–2 | low-medium (F1 wire break) |
+| **Total remaining** | **≈ 13–20** | |
+
+Supersedes the 05-28 table (8–13 total) and the review's
+top-down 12–18 total: D was expanded (D0), C0 added, and the
+Stage A growth factor applied to C. Re-check this table at every
+stage exit gate; if a stage exceeds its top range, re-estimate
+the remainder before continuing rather than after.
+
+# Remaining open decisions (operator)
+
+1. **DNS-URI display home (blocks A3d-S2).** Options:
+   (a) add `DNSEndpoint string` to `transport.Peer`, symmetric
+   with `APIEndpoint` — recommended: discovery output is
+   transport-owned per the acceptance test; (b) derive at display
+   from `Mechanisms["DNS"].Address` — rejected by the
+   writer-path-audit rule's sibling-derivation ban unless proven
+   identical on all peer kinds; (c) keep an MP-side display-only
+   string — contradicts the end state.
+2. **`CleanupZoneRelationships` (Gate-3):** confirm the proposed
+   log-only resolution, or specify the teardown to implement.
+3. **(B)-kept fields disposition at A5:** confirm the
+   redirect-to-transport mapping proposed in A5.1, and whether
+   the presentation finish (`peer list -v`) is worth scheduling
+   immediately after A5 or parks until F2.
+4. **DOQ-vs-C5 envelope timing (C0.4):** does the
+   in-channel-CHUNK work need the `envelope` label before C5?
+5. **Per-mechanism parallel Hello/Beat:** optional follow-up
+   after D1, relevant once multi-mechanism peers exist. Not a
+   one-way door (D1 keeps the shape string-keyed).
