@@ -82,6 +82,8 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d.3a/3b crypto → `agentMeta` | DONE | `67363b3`, `dc8bb8d`; `AgentDetails` crypto-free |
 | Spine-1a (`.State` canonical readers) | DONE, **testbed verify outstanding** | `95c3cf6`; see Gate-1 |
 | Gate-2 (three-repo standalone build) | DONE | transport `e65b057`, mp `b2dd2f6`, tdns `40bda34` |
+| Gate-1 (Spine-1a redirect verify) | redirect SOUND; uncovered peer-state bugs | run 2026-06-11; see Gate-1 below |
+| Peer-state truth fix (E/C/A/B) | DONE, testbed-confirmed | mp `fc0c189`, transport `3b85754`; pulls D2 core + Spine-2 display forward |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
@@ -138,16 +140,51 @@ change in an INVARIANT probe halts the Stage.
 
 # Stage A — remainder
 
-## Gate-1 — Spine-1a testbed verification (operator; BLOCKING)
+## Gate-1 — Spine-1a testbed verification (operator) — REDIRECT VERIFIED; uncovered the peer-state bugs (now fixed)
 
-Outstanding since 2026-06-03. Deploy tip (`2bed32a`) and verify
-the Spine-1a INVARIANT: `gossip state` matrix and `peer list`
-State column byte-comparable to pre-deploy; election/RFI
-operational gating unchanged (the ~15 redirected
-`EffectiveState`/`IsAnyTransportOperational` callers). DEGRADED/
-INTERRUPTED: confirmed displayed by neither side (NG-only,
-unchanged). **Failure here halts Stage A** and reopens the A3d.0
-enum-mapping design — everything below stacks on this slice.
+Outstanding since 2026-06-03; run 2026-06-11. Deploying the tip and
+exercising `gossip state`/`peer list` did NOT show a Spine-1a
+redirect regression — the redirect is mechanically correct. What it
+exposed was a pre-existing, hidden state-machine bug: a peer
+(`agent.fox`) read OPERATIONAL with an address while every send to
+it failed (`no address available`). Spine-1a surfaced it by reading
+`transport.Peer`, which was fed the WRONG signal.
+
+Root cause and the complete fix are in
+`2026-06-11-peer-state-and-discovery-truth-fix.md`. Four bugs, one
+disease (success asserted on incomplete evidence, never retracted):
+- **E** discovery probed unsupported transports (API on a DNS-only
+  fleet) → log spam + spurious `Partial`;
+- **C** partial discovery (URI without resolved address) registered
+  as "complete"/KNOWN → phantom address in `peer list`;
+- **A** OPERATIONAL set by INBOUND receipt, not the OUTBOUND beat
+  round-trip the definition requires;
+- **B** demotion (DEGRADED/INTERRUPTED) lived only in the NG store
+  nobody operational reads.
+
+**Fixed and testbed-confirmed 2026-06-11** (tdns-mp `fc0c189`,
+tdns-transport `3b85754`): with the upgraded fleet, the matrix now
+moves through the real progression NEEDED→KNOWN→OPERATIONAL,
+`peer ping` to a discovered peer succeeds, the contradiction is
+gone, and a transient `KNOWN` correctly shows during convergence
+(no longer slammed to OPERATIONAL by inbound beats). The
+"DEGRADED/INTERRUPTED displayed by neither side" line in the
+original Gate-1 wording was wrong for the gossip-matrix path — that
+path always derived from `EffectiveState`; it now decays truthfully
+(Fix B, decay-on-read).
+
+Spine-1a's `transport.Peer.EffectiveState()` as the canonical read
+is CONFIRMED sound — it just needed a truthful machine behind it.
+Net effect on sequencing: Fix B is Stage-D "transport-owned
+liveness" pulled forward; Fix C's display side is Spine-2 pulled
+forward (see those steps). A3d may continue on the now-trustworthy
+`transport.Peer`.
+
+**Still TODO before declaring the slice fully clean:** a homogeneous
+all-tip fleet pass (fox/hare were old during the run) and the
+deliberate break/restore of fox's NS to confirm the FAILURE +
+RECOVERY directions (the controllable-trigger test; `agent zone
+bump` now exists for it).
 
 ## Gate-2 — restore the three-repo build (small; before A3d-S2) — DONE 2026-06-11
 
@@ -500,6 +537,25 @@ deliberately did not touch. The plan was three bullets; given the
 A3d experience (the census grew at every audit), D now starts
 with its own audit step.
 
+**PARTIALLY PULLED FORWARD 2026-06-11.** The peer-state truth fix
+(Gate-1 fallout; see `2026-06-11-peer-state-and-discovery-truth-fix.md`)
+already moved the CORE of D2 onto `transport.Peer`:
+- **OPERATIONAL** is now set on `transport.Peer.Mechanisms[m]` by the
+  outbound beat-success path (Fix A), with all inbound-receipt
+  promotions removed from combiner/signer/agent handlers.
+- **Decay** (OPERATIONAL→DEGRADED→INTERRUPTED) now happens on
+  `transport.Peer` via decay-on-read in `EffectiveState()`
+  (`decayedMechanismState`, Fix B) — keyed on outbound-beat age
+  (`LastBeatSent`), thresholds mirroring NG `checkPeerState`. The
+  EXPLAINED DELTA (DEGRADED/INTERRUPTED becoming visible in
+  `gossip state`) has effectively landed for the gossip-matrix path,
+  which derives from `EffectiveState`.
+
+So D2's hard part is done and verified. What REMAINS for Stage D
+(see the amended D2 below): retiring the now-redundant NG
+`checkPeerState`/`hsync.PeerDetails` decay so there is one store, and
+wiring the exact local beat interval. D0/D1/D3 stand as written.
+
 ## D0 — `hsync.PeerDetails` writer-path audit (NEW; one session-part)
 
 Before any D implementation: per-field table for
@@ -522,19 +578,43 @@ INVARIANT — no behavior change. String-keyed mechanism shape
 per-mechanism parallel remains an optional follow-up (Open
 decision 5).
 
-## D2 — transport-owned liveness (the one deliberate behavior delta)
+## D2 — transport-owned liveness (the one deliberate behavior delta) — CORE DONE 2026-06-11; cleanup remains
 
-Unify NG `checkPeerState` onto `transport.Peer`: liveness
-evaluation reads/writes `Mechanisms[m]`; `BeatInterval` moves to
-transport; delete the `hsync.PeerDetails` liveness fields (the
-last bridge-clobber survivors). **EXPLAINED DELTA — bound here:**
-DEGRADED/INTERRUPTED become visible in `peer list`/`gossip state`
-for the first time (today they exist only NG-side, undisplayed).
-This is the only deliberate user-visible behavior change before
-F1; the probe prediction must enumerate which displays change and
-how. Default liveness middleware updates `Peer.Mechanisms[m]` on
-hello/beat receipt; delete the manual updates in combiner/signer
-handlers.
+**Done (peer-state truth fix):** liveness evaluation now reads from
+`transport.Peer` (`EffectiveState` decay-on-read); OPERATIONAL is set
+on `Mechanisms[m]` by the outbound beat path; inbound-receipt
+OPERATIONAL writes deleted from the combiner/signer/agent handlers.
+The EXPLAINED DELTA (DEGRADED/INTERRUPTED now visible) has landed for
+the gossip-matrix path.
+
+**Remaining D2 cleanup:**
+1. **Retire the NG decay duplicate.** `hsync/beat.go:checkPeerState`
+   still computes the same decay on `hsync.PeerDetails`; it is now
+   redundant for everything reading `transport.Peer`. Delete it (and
+   the `hsync.PeerDetails` liveness fields `State`/`BeatInterval`/
+   `LatestRBeat`/`LatestSBeat`) once nothing reads the NG store —
+   verify no remaining NG-store reader first. Until then the two
+   coexist (one decay computed in two places); they agree because the
+   thresholds were deliberately mirrored.
+2. **Wire the exact local beat interval.** `transport.Peer.LivenessInterval`
+   (the decay's threshold base) currently defaults to 30s when unset.
+   The testbed runs 30s beats, so the default is exact there, but a
+   non-30s deployment would use slightly-off thresholds. Set it from
+   the configured `mp.Remote.BeatInterval` — cleanest via a field on
+   `MPTransportBridge` (set once at construction; 4 `NewMPTransportBridge`
+   sites in `main_init.go` + the harness) stamped onto each peer
+   alongside `SetMechanismLastBeatSent`, OR a default on the
+   `PeerRegistry` that `NewPeer`/`GetOrCreate` inherit. Small, isolated;
+   not a correctness blocker for 30s fleets.
+3. **`peer list` State column still reads AgentDetails** (Spine-1b
+   territory, not yet redirected). After Spine-1b/this cleanup it
+   should read `transport.Peer` too, so `peer list` and `gossip state`
+   are driven by one store. Until then they can momentarily differ
+   (AgentDetails has no decay).
+4. Per the original D2: default liveness middleware updates
+   `Peer.Mechanisms[m]` on hello/beat receipt — the inbound-liveness
+   *evidence* writes (`LastBeatRecv`) are already in place from Fix A;
+   formalize as middleware if desired.
 
 ## D3 — lifecycle into TM startup
 
@@ -566,7 +646,14 @@ its client — if that is not natural at E1, record the residual
 explicitly rather than letting the sidecar silently persist.
 `OnDiscoveryFailed` must fire on all failure paths. Fix the
 post-restart KNOWN→OPERATIONAL gap opportunistically (known
-runtime issue, v2 cross-stage list).
+runtime issue, v2 cross-stage list). **Carry forward (do not
+revert) the peer-state-truth fixes already in this path** (mp
+`fc0c189`): discovery is gated on locally-supported transports
+(Fix E — `DiscoverAgent(…, apiSupported, dnsSupported)`), and a
+URI-without-resolved-address is NOT marked usable/"complete"
+(Fix C — `dnsUsable`/`apiUsable` in `RegisterDiscoveredAgent`).
+When this logic moves into the transport `DiscoveryService`, both
+properties must survive the move.
 
 ## E2 — delete the `DiscoveryDriver` seam
 
