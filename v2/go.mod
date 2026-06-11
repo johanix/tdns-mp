@@ -77,4 +77,4 @@ require (
 )
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
