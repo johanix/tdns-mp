@@ -84,6 +84,8 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | Gate-2 (three-repo standalone build) | DONE | transport `e65b057`, mp `b2dd2f6`, tdns `40bda34` |
 | Gate-1 (Spine-1a redirect verify) | redirect SOUND; uncovered peer-state bugs | run 2026-06-11; see Gate-1 below |
 | Peer-state truth fix (E/C/A/B) | DONE, testbed-confirmed | mp `fc0c189`, transport `3b85754`; pulls D2 core + Spine-2 display forward |
+| Gate-3 (CleanupZoneRelationships) | DONE | mp `18ac2d7` (explanatory no-op) |
+| A3d-S1b (State **display** redirect) | DONE | this commit; functional State retirement re-scoped to A3d-END.0 |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
@@ -238,22 +240,35 @@ per-zone state after a local removal — which would mean some state
 is still stored, and should be moved to derivation rather than
 scrubbed here.
 
-## A3d-S1b — `.State`: stop dual-writing; display redirect
+## A3d-S1b — `.State`: display redirect (DISPLAY-ONLY; functional retirement → A3d-END)
 
 Prereq: Gate-1 green.
-1. Redirect the peer-list display's per-mechanism State to
-   `transport.Peer.Mechanisms[m].State`
-   (`apihandler_agent_distrib.go:358-360,420-422`; it already
-   applies its own LEGACY overlay — keep that, it becomes the
-   overlay's only display site).
-2. Stop writing `AgentDetails.State`/`LastState`. Verified writer
-   sites: `hsync_transport.go:627,649,723,1577,1605,1695,1725`.
-3. Retire the `RecomputeSharedZonesAndSyncState` LEGACY/
-   OPERATIONAL state-flip (`agent_utils.go:67-74`) — the overlay
-   derives it.
+
+**RE-SCOPED 2026-06-11.** S1b is now ONLY the display redirect.
+Redirect the peer-list display's per-mechanism State to the canonical
+`transport.Peer` (decayed per-mechanism via the new
+`MechanismEffectiveState(name)` accessor → `transportToAgentState`),
+keeping the LEGACY overlay (it becomes the overlay's only display
+site). Sites: the API + DNS blocks in `apihandler_agent_distrib.go`.
+AgentDetails fallback retained for peers not yet in the PeerRegistry
+(transitional). With Fix B, the displayed State now also decays.
+
+The original S1b parts 2–3 (stop writing `AgentDetails.State`/
+`LastState`; retire the `RecomputeSharedZonesAndSyncState` flip) are
+MOVED TO A3d-END. Reason discovered during S1b: `AgentDetails.State`
+is still the FUNCTIONAL store driving the beat/hello state machine —
+~45 read/write sites, incl. the `SendBeatWithFallback`/
+`SendHelloWithFallback` send gates. Stopping the writes requires
+migrating all those readers to `transport.Peer` first, which is the
+embed/State-merge — it belongs with A3d-END's type-merge under one
+commit + the post-embed testbed checkpoint, NOT bolted onto a display
+slice. The display now reads `transport.Peer` (truthful), while
+`AgentDetails.State` remains the internal functional store until the
+embed (documented dual-write window).
 
 **Probe — INVARIANT:** `peer list` State column + `gossip state`
-byte-comparable; suite + `-race` green.
+byte-comparable on a healthy fleet; the displayed State now decays
+(EXPLAINED DELTA, already landed via Fix B); suite + `-race` green.
 
 ## A3d-S2 — address: redirect reads, drop fields
 
@@ -322,14 +337,32 @@ snapshot accessors `APIMechanismState`/`DNSMechanismState`
 One session; sub-steps are separate commits, each green +
 `-race` + INVARIANT.
 
+- **END.0 — State functional-merge (moved here from S1b).** Make
+  `transport.Peer.Mechanisms[m].State` the SOLE State store:
+  redirect the ~45 FUNCTIONAL readers/writers of
+  `AgentDetails.State`/`LastState` — chiefly the beat/hello send
+  gates in `SendBeatWithFallback`/`SendHelloWithFallback`
+  (`hsync_transport.go` ~1551/1579/1672/1711) and the
+  NEEDED/KNOWN/INTRODUCED/OPERATIONAL transitions — to read/write
+  `transport.Peer`. Then stop writing `AgentDetails.State`/
+  `LastState` (the residual writer sites; note Fix A already moved
+  the OPERATIONAL writes and removed the inbound-receipt ones) and
+  retire the `RecomputeSharedZonesAndSyncState` LEGACY/OPERATIONAL
+  flip (`agent_utils.go:67-74`) — the display LEGACY overlay derives
+  it. **This is load-bearing** (the beat state machine, just
+  hardened by Fixes A/B) — do it as its own commit with its own
+  `-race` + testbed check before END.1. The display side already
+  reads `transport.Peer` (S1b), so END.0 closes the write side and
+  retires the dual State store.
 - **END.1 — type-merge.** `Agent` becomes the view of addendum
   §3: embed `*hsync.Peer` (+ existing `*agentMeta`); dedupe
   Identity/PeerID to `hsync.Peer.ID`; `Agent.Mu` →
   `hsync.Peer.Mu` (ONE peer mutex); `Zones` →
   `hsync.Peer.Zones` (transitional; reads stay derived per A2);
   `DeferredTasks` → `hsync.Peer.Deferred`. `AgentDetails` fields
-  are empty of live reads by now; the struct itself is deleted
-  in A5 (supersession item 2).
+  are empty of live reads by now (State retired in END.0, address
+  in S2, telemetry in S3); the struct itself is deleted in A5
+  (supersession item 2).
 - **END.2 — delete the dual map.** Remove the temporary
   `AgentRegistry.S`/`mu` shadowing the embedded
   `hsync.Registry.S` (`agent_structs.go:206-214`); duplicated

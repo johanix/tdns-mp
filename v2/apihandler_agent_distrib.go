@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	transport "github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
@@ -355,7 +356,22 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				if !seen[key] {
 					seen[key] = true
 
+					// S1b: the connection State is read from the canonical
+					// transport.Peer (decayed per-mechanism), not AgentDetails.
+					// Fall back to AgentDetails only if the peer/mechanism is
+					// not yet in the PeerRegistry (transitional safety).
+					var apiPeer *transport.Peer
+					if conf.InternalMp.TransportManager != nil {
+						if p, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							apiPeer = p
+						}
+					}
 					effectiveState := agent.ApiDetails.State
+					if apiPeer != nil {
+						if st, ok := apiPeer.MechanismEffectiveState("API"); ok {
+							effectiveState = transportToAgentState(st)
+						}
+					}
 					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
@@ -384,28 +400,26 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if !agent.ApiDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.ApiDetails.HelloTime
 					}
-					if conf.InternalMp.TransportManager != nil {
-						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
-							peerInfo.ContactInfo = peer.MechanismContactInfo("API")
-							s := peer.Stats.GetDetailedStats()
-							peerInfo.HelloSent = s.HelloSent
-							peerInfo.HelloReceived = s.HelloReceived
-							peerInfo.BeatSent = s.BeatSent
-							peerInfo.BeatReceived = s.BeatReceived
-							peerInfo.SyncSent = s.SyncSent
-							peerInfo.SyncReceived = s.SyncReceived
-							peerInfo.PingSent = s.PingSent
-							peerInfo.PingReceived = s.PingReceived
-							peerInfo.TotalSent = s.TotalSent
-							peerInfo.TotalReceived = s.TotalReceived
-							peerInfo.DistribSent = int(s.TotalReceived)
-							if !s.LastUsed.IsZero() {
-								peerInfo.LastUsed = s.LastUsed
-							}
-							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
-						} else {
-							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
+					if apiPeer != nil {
+						peerInfo.ContactInfo = apiPeer.MechanismContactInfo("API")
+						s := apiPeer.Stats.GetDetailedStats()
+						peerInfo.HelloSent = s.HelloSent
+						peerInfo.HelloReceived = s.HelloReceived
+						peerInfo.BeatSent = s.BeatSent
+						peerInfo.BeatReceived = s.BeatReceived
+						peerInfo.SyncSent = s.SyncSent
+						peerInfo.SyncReceived = s.SyncReceived
+						peerInfo.PingSent = s.PingSent
+						peerInfo.PingReceived = s.PingReceived
+						peerInfo.TotalSent = s.TotalSent
+						peerInfo.TotalReceived = s.TotalReceived
+						peerInfo.DistribSent = int(s.TotalReceived)
+						if !s.LastUsed.IsZero() {
+							peerInfo.LastUsed = s.LastUsed
 						}
+						lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
+					} else {
+						lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 					}
 					peers = append(peers, peerInfo)
 				}
@@ -417,7 +431,20 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				if !seen[key] {
 					seen[key] = true
 
+					// S1b: connection State from the canonical transport.Peer
+					// (decayed per-mechanism), AgentDetails as transitional fallback.
+					var dnsPeer *transport.Peer
+					if conf.InternalMp.TransportManager != nil {
+						if p, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							dnsPeer = p
+						}
+					}
 					effectiveState := agent.DnsDetails.State
+					if dnsPeer != nil {
+						if st, ok := dnsPeer.MechanismEffectiveState("DNS"); ok {
+							effectiveState = transportToAgentState(st)
+						}
+					}
 					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
@@ -453,28 +480,26 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if !agent.DnsDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.DnsDetails.HelloTime
 					}
-					if conf.InternalMp.TransportManager != nil {
-						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
-							peerInfo.ContactInfo = peer.MechanismContactInfo("DNS")
-							s := peer.Stats.GetDetailedStats()
-							peerInfo.HelloSent = s.HelloSent
-							peerInfo.HelloReceived = s.HelloReceived
-							peerInfo.BeatSent = s.BeatSent
-							peerInfo.BeatReceived = s.BeatReceived
-							peerInfo.SyncSent = s.SyncSent
-							peerInfo.SyncReceived = s.SyncReceived
-							peerInfo.PingSent = s.PingSent
-							peerInfo.PingReceived = s.PingReceived
-							peerInfo.TotalSent = s.TotalSent
-							peerInfo.TotalReceived = s.TotalReceived
-							peerInfo.DistribSent = int(s.TotalReceived)
-							if !s.LastUsed.IsZero() {
-								peerInfo.LastUsed = s.LastUsed
-							}
-							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
-						} else {
-							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
+					if dnsPeer != nil {
+						peerInfo.ContactInfo = dnsPeer.MechanismContactInfo("DNS")
+						s := dnsPeer.Stats.GetDetailedStats()
+						peerInfo.HelloSent = s.HelloSent
+						peerInfo.HelloReceived = s.HelloReceived
+						peerInfo.BeatSent = s.BeatSent
+						peerInfo.BeatReceived = s.BeatReceived
+						peerInfo.SyncSent = s.SyncSent
+						peerInfo.SyncReceived = s.SyncReceived
+						peerInfo.PingSent = s.PingSent
+						peerInfo.PingReceived = s.PingReceived
+						peerInfo.TotalSent = s.TotalSent
+						peerInfo.TotalReceived = s.TotalReceived
+						peerInfo.DistribSent = int(s.TotalReceived)
+						if !s.LastUsed.IsZero() {
+							peerInfo.LastUsed = s.LastUsed
 						}
+						lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
+					} else {
+						lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 					}
 					peers = append(peers, peerInfo)
 				}
