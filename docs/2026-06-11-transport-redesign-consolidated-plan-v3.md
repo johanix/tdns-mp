@@ -752,14 +752,22 @@ the remainder before continuing rather than after.
 
 # Remaining open decisions (operator)
 
-1. **DNS-URI display home (blocks A3d-S2).** Options:
-   (a) add `DNSEndpoint string` to `transport.Peer`, symmetric
-   with `APIEndpoint` — recommended: discovery output is
-   transport-owned per the acceptance test; (b) derive at display
-   from `Mechanisms["DNS"].Address` — rejected by the
-   writer-path-audit rule's sibling-derivation ban unless proven
-   identical on all peer kinds; (c) keep an MP-side display-only
-   string — contradicts the end state.
+1. **DNS-URI display home (blocks A3d-S2). DECIDED 2026-06-11: (a).**
+   Add `DNSEndpoint string` to `transport.Peer`, symmetric with the
+   existing `APIEndpoint`. Rationale: discovery output is
+   transport-owned (acceptance test), and `APIEndpoint` already
+   sets the precedent — DNS having no endpoint home is the anomaly.
+   Option (b) (derive the display URI from
+   `Mechanisms["DNS"].Address`) is REJECTED with concrete evidence:
+   the fox bug showed the URI (looked up at `<id>`) and the resolved
+   IP (looked up at `dns.<id>`) are independent facts from separate
+   lookups that genuinely disagree (Fix C keeps them separate), so
+   deriving one from the other is exactly the banned sibling
+   derivation. Note `DNSEndpoint` (human-readable `dns://…` URI, for
+   display/diagnostics) is distinct from `Mechanisms["DNS"].Address`
+   (resolved IP, used by the send path) — both are real peer
+   attributes and both live on `transport.Peer`. (c) contradicts the
+   end state (keeps it in dying AgentDetails). S2 is now UNBLOCKED.
 2. **`CleanupZoneRelationships` (Gate-3):** confirm the proposed
    log-only resolution, or specify the teardown to implement.
 3. **(B)-kept fields disposition at A5:** confirm the
