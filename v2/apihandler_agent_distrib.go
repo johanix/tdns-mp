@@ -376,7 +376,20 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						effectiveState = AgentStateLegacy
 					}
 
-					apiAddr := agent.ApiDetails.BaseUri
+					// S2: address fields from the canonical transport.Peer.
+					var apiURI string
+					var apiPort uint16
+					var apiAddrs []string
+					if apiPeer != nil {
+						apiURI = apiPeer.APIEndpoint
+						if a := apiPeer.CurrentAddress(); a != nil {
+							apiPort = a.Port
+							apiAddrs = []string{a.Host}
+						} else {
+							apiAddrs = nil
+						}
+					}
+					apiAddr := apiURI
 					if apiAddr == "" {
 						apiAddr = "-"
 					}
@@ -391,9 +404,9 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						Address:     apiAddr,
 						CryptoType:  "TLS",
 						DistribSent: 0,
-						APIUri:      agent.ApiDetails.BaseUri,
-						Port:        agent.ApiDetails.Port,
-						Addresses:   agent.ApiDetails.Addrs,
+						APIUri:      apiURI,
+						Port:        apiPort,
+						Addresses:   apiAddrs,
 						HasTLSA:     hasTLSA,
 						State:       AgentStateToString[effectiveState],
 					}
@@ -449,7 +462,23 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						effectiveState = AgentStateLegacy
 					}
 
-					dnsAddr := agent.DnsDetails.BaseUri
+					// S2: address fields from the canonical transport.Peer.
+					// dnsURI = display URL (DNSEndpoint); dnsPort/dnsAddrs = resolved
+					// DNS-mechanism address. AgentDetails fallback only when the peer
+					// is not yet in the PeerRegistry.
+					var dnsURI string
+					var dnsPort uint16
+					var dnsAddrs []string
+					if dnsPeer != nil {
+						dnsURI = dnsPeer.DNSEndpoint
+						if a := dnsPeer.CurrentAddress(); a != nil {
+							dnsPort = a.Port
+							dnsAddrs = []string{a.Host}
+						} else {
+							dnsAddrs = nil
+						}
+					}
+					dnsAddr := dnsURI
 					if dnsAddr == "" {
 						dnsAddr = "-"
 					}
@@ -468,9 +497,9 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						Address:      dnsAddr,
 						CryptoType:   "JOSE",
 						DistribSent:  0,
-						DNSUri:       agent.DnsDetails.BaseUri,
-						Port:         agent.DnsDetails.Port,
-						Addresses:    agent.DnsDetails.Addrs,
+						DNSUri:       dnsURI,
+						Port:         dnsPort,
+						Addresses:    dnsAddrs,
 						JWKData:      jwkData,
 						KeyAlgorithm: keyAlgorithm,
 						HasJWK:       jwkData != "",

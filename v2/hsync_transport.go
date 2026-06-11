@@ -1437,19 +1437,12 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 // OnPeerDiscovered closure at discovery completion).
 func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
 	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
-	// Config-only infra peers (combiner, signer) are never discovered
-	// via DNS, so their transport address has no source other than the
-	// agent record. Discovered peers already carry a discovery address
-	// and are left untouched. Bite H dropped this copy along with the
-	// (genuinely redundant) per-send state refresh; only the address —
-	// which non-discovered peers cannot get any other way — is restored.
-	if peer.CurrentAddress() == nil && agent.DnsDetails != nil && len(agent.DnsDetails.Addrs) > 0 {
-		peer.SetDiscoveryAddress(&transport.Address{
-			Host:      agent.DnsDetails.Addrs[0],
-			Port:      agent.DnsDetails.Port,
-			Transport: "udp",
-		})
-	}
+	// S2: the AgentDetails->transport address restore is removed.
+	// transport.Peer is the sole address source: discovered peers write
+	// it during registration (RegisterDiscoveredAgent), config-infra
+	// peers (combiner/signer/config-listed agents) write it at startup
+	// (Initialize*AsPeer / main_init / apihandler_peer). No peer reaches a
+	// send path without its transport address already populated.
 	return peer
 }
 
@@ -1464,22 +1457,14 @@ func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
 func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 	peer := tm.GetOrCreatePeer(agent)
 
-	// Sync API details
+	// S2: address/endpoint are no longer sourced from AgentDetails — they
+	// live on transport.Peer, written at discovery/config registration.
+	// (This whole accessor is deleted in S4.)
 	if agent.ApiDetails != nil {
-		peer.APIEndpoint = agent.ApiDetails.BaseUri
 		if ac := agent.cryptoFor("API"); ac != nil && ac.TlsaRR != nil {
 			// Store TLSA for TLS verification
 			peer.TLSARecord = []byte{} // Would need to serialize TLSA
 		}
-	}
-
-	// Sync DNS details
-	if agent.DnsDetails != nil && len(agent.DnsDetails.Addrs) > 0 {
-		peer.SetDiscoveryAddress(&transport.Address{
-			Host:      agent.DnsDetails.Addrs[0],
-			Port:      agent.DnsDetails.Port,
-			Transport: "udp",
-		})
 	}
 
 	// Sync state (legacy single-state field)
@@ -1548,7 +1533,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 
 	// Try API transport if locally supported, available, has valid endpoint, and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && peer.APIEndpoint != "" && agent.ApiDetails.State == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.Mu.Lock()
 		if apiErr != nil {
@@ -1668,7 +1653,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 
 	// Try API transport if locally supported, available, and has valid endpoint.
 	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && peer.APIEndpoint != "" {
 		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy || agent.ApiDetails.State == AgentStateDegraded || agent.ApiDetails.State == AgentStateInterrupted {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.Mu.Lock()

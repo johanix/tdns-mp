@@ -85,7 +85,8 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | Gate-1 (Spine-1a redirect verify) | redirect SOUND; uncovered peer-state bugs | run 2026-06-11; see Gate-1 below |
 | Peer-state truth fix (E/C/A/B) | DONE, testbed-confirmed | mp `fc0c189`, transport `3b85754`; pulls D2 core + Spine-2 display forward |
 | Gate-3 (CleanupZoneRelationships) | DONE | mp `18ac2d7` (explanatory no-op) |
-| A3d-S1b (State **display** redirect) | DONE | this commit; functional State retirement re-scoped to A3d-END.0 |
+| A3d-S1b (State **display** redirect) | DONE | mp `68e7a69`; functional State retirement re-scoped to A3d-END.0 |
+| A3d-S2 (address redirect + drop fields) | DONE | this commit; transport `DNSEndpoint` accessor; AgentDetails.Addrs/Port/BaseUri removed |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
@@ -270,10 +271,28 @@ embed (documented dual-write window).
 byte-comparable on a healthy fleet; the displayed State now decays
 (EXPLAINED DELTA, already landed via Fix B); suite + `-race` green.
 
-## A3d-S2 — address: redirect reads, drop fields
+## A3d-S2 — address: redirect reads, drop fields — DONE 2026-06-11
 
-Prereq: the **DNS-URI display home decision** (Open decision 1
-below) — do not start without it (writer-path-audit rule).
+**Done** (transport `809ebb6`-followup + this commit). `DNSEndpoint`
+added to `transport.Peer` (Decision 1a), set at every DNS write site
+(discovery, combiner/signer Initialize*AsPeer, main_init config
+agents, apihandler_peer). Peer-list address columns now read
+`transport.Peer` (`DNSEndpoint`/`APIEndpoint` + `CurrentAddress()`).
+The `GetOrCreatePeer` AgentDetails→transport address restore was
+DELETED — infra peers (combiner/signer) now populate their
+`transport.Peer` address at startup registration (the restore's only
+remaining justification), so transport.Peer is the sole address
+source. `AgentDetails.Addrs/Port/BaseUri` + all bridge copies
+removed; `mergeAgentDetails` deleted (it only preserved address
+fields). API-functional readers migrated: the two API send gates read
+`peer.APIEndpoint != ""`; `NewAgentSyncApiClient` (0 callers) takes a
+`*transport.Peer`. NG (`hsync.PeerDetails`) has no functional reader
+of the fields (bridge-clobber check passed; its struct fields are now
+dead, droppable later). Build (5 bins) + suite + boundary `-race`
+green.
+
+Prereq was the **DNS-URI display home decision** (Open decision 1) —
+DECIDED (a), see below.
 1. Per the rule: enumerate ALL writer paths for `Addrs`/`Port`/
    `BaseUri` — discovery (`RegisterDiscoveredAgent`), config-infra
    (`combiner_peer.go`/`signer_peer.go`), `GetOrCreatePeer`

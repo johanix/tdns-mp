@@ -84,9 +84,6 @@ type Agent struct {
 }
 
 type AgentDetails struct {
-	Addrs             []string
-	Port              uint16
-	BaseUri           string
 	State             AgentState
 	LatestError       string
 	LatestErrorTime   time.Time
@@ -138,17 +135,11 @@ func (a *Agent) DNSMechanismState() transport.AgentMechanismSnapshot {
 	if d == nil {
 		return transport.AgentMechanismSnapshot{}
 	}
-	var addr *transport.Address
-	if len(d.Addrs) > 0 {
-		addr = &transport.Address{
-			Host:      d.Addrs[0],
-			Port:      d.Port,
-			Transport: "udp",
-		}
-	}
+	// S2: the DNS address now lives solely on transport.Peer; the
+	// snapshot no longer carries it from AgentDetails. (This whole
+	// snapshot accessor is deleted in S4 along with SyncPeerFromAgent.)
 	return transport.AgentMechanismSnapshot{
 		State:            agentStateToTransportStateFn(d.State),
-		Address:          addr,
 		LastHelloRecv:    d.HelloTime,
 		LastBeatSent:     d.LatestSBeat,
 		LastBeatRecv:     d.LatestRBeat,

@@ -250,6 +250,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// If both transports exist, DNS address goes to DiscoveryAddress (preferred for ping)
 			// API address was already set above but will be overwritten
 			peer.SetDiscoveryAddress(addr)
+			peer.DNSEndpoint = result.DNSUri // display/diagnostics (S2)
 			peer.PreferredTransport = "DNS"
 
 			lgAgent.Info("registered peer with DNS endpoint", "identity", result.Identity, "endpoint", result.DNSUri, "address", host, "port", port)
@@ -319,23 +320,20 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		// address (see the DNS branch below for the full rationale).
 		apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0
 		if apiUsable {
-			agent.ApiDetails.BaseUri = result.APIUri
+			// Address/URI live on transport.Peer (peer.APIEndpoint + the
+			// API mechanism address, set on the transport side above).
 			peer.SetMechanismContactInfo("API", "complete")
 			if agent.ApiDetails.State <= AgentStateNeeded {
 				agent.ApiDetails.State = AgentStateKnown
 			}
 			agent.ensureCrypto("API").TlsaRR = result.TLSA
-			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
 		} else if result.APIUri != "" {
 			// URI found but no resolved address: keep retrying, leave a
 			// not-yet-established peer NEEDED, do not advertise an unusable
-			// URL, and do not regress an already-established peer.
+			// URL (the transport side withholds the address), and do not
+			// regress an already-established peer.
 			agent.ApiMethod = true
-			if agent.ApiDetails.State <= AgentStateNeeded {
-				agent.ApiDetails.BaseUri = ""
-				agent.ApiDetails.Addrs = nil
-			}
 			lgAgent.Warn("API endpoint URI found but no resolved address; not marking usable",
 				"identity", result.Identity, "uri", result.APIUri, "state", AgentStateToString[agent.ApiDetails.State])
 		} else {
@@ -352,22 +350,11 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		// retrier revisits it, and do not advertise a contact URL.
 		dnsUsable := result.DNSUri != "" && len(result.DNSAddresses) > 0
 		if dnsUsable {
-			agent.DnsDetails.BaseUri = result.DNSUri
+			// Address/URI live on transport.Peer (peer.DNSEndpoint + the
+			// DNS mechanism address, set on the transport side above).
 			peer.SetMechanismContactInfo("DNS", "complete")
 			if agent.DnsDetails.State <= AgentStateNeeded {
 				agent.DnsDetails.State = AgentStateKnown
-			}
-
-			// Extract port from DNS URI for SyncPeerFromAgent
-			parsed, err := url.Parse(result.DNSUri)
-			if err == nil {
-				port := uint16(53) // default DNS port
-				if parsed.Port() != "" {
-					var p int
-					fmt.Sscanf(parsed.Port(), "%d", &p)
-					port = uint16(p)
-				}
-				agent.DnsDetails.Port = port
 			}
 
 			// Store JWK data if available (preferred). Crypto now lives on the
@@ -379,21 +366,15 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			}
 			// Store KEY record if using legacy fallback
 			dnsCrypto.KeyRR = result.LegacyKeyRR
-			agent.DnsDetails.Addrs = result.DNSAddresses
 			agent.DnsMethod = true
 		} else if result.DNSUri != "" {
 			// URI found but no resolved address. Keep DnsMethod enabled so
-			// the retrier keeps trying. For a not-yet-established peer,
-			// leave it NEEDED and do not advertise a contact URL we cannot
-			// use. Do NOT regress an already-established (INTRODUCED/
-			// OPERATIONAL/etc.) peer on a transient address-less round —
-			// its prior good address/state stand until liveness demotes it
-			// (Fix B), mirroring the "no regression" guard above.
+			// the retrier keeps trying. Leave a not-yet-established peer
+			// NEEDED; do not advertise a contact URL (the transport side
+			// withholds the address). Do NOT regress an already-established
+			// peer on a transient address-less round — its prior good
+			// address/state stand until liveness demotes it (Fix B).
 			agent.DnsMethod = true
-			if agent.DnsDetails.State <= AgentStateNeeded {
-				agent.DnsDetails.BaseUri = ""
-				agent.DnsDetails.Addrs = nil
-			}
 			lgAgent.Warn("DNS endpoint URI found but no resolved address; not marking usable",
 				"identity", result.Identity, "uri", result.DNSUri, "state", AgentStateToString[agent.DnsDetails.State])
 		} else {

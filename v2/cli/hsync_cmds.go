@@ -11,8 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
-	"strconv"
 	"strings"
 	"time"
 
@@ -560,14 +558,7 @@ func PrintHsyncAgent(agent *Agent, showZones bool) error {
 		fmt.Printf(" *   Heartbeats: Sent: %d (latest %s), received: %d (latest %s)\n",
 			details.SentBeats, details.LatestSBeat.Format(tdns.TimeLayout),
 			details.ReceivedBeats, details.LatestRBeat.Format(tdns.TimeLayout))
-		if tdns.Globals.Verbose && len(details.Addrs) > 0 {
-			port := strconv.Itoa(int(details.Port))
-			var addrs []string
-			for _, a := range details.Addrs {
-				addrs = append(addrs, net.JoinHostPort(a, port))
-			}
-			fmt.Printf(" *   Addresses: %v\n", addrs)
-		}
+		// S2: peer addresses now live on transport.Peer; see `peer list`.
 	}
 	return nil
 }

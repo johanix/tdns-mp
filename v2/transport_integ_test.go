@@ -478,10 +478,10 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 			// only for the mechanism the case advertises so
 			// peer.HasMechanism returns the right answer.
 			if tc.api {
-				agent.ApiDetails = &AgentDetails{State: AgentStateKnown, BaseUri: "https://example.invalid/"}
+				agent.ApiDetails = &AgentDetails{State: AgentStateKnown}
 			}
 			if tc.dns {
-				agent.DnsDetails = &AgentDetails{State: AgentStateKnown, Addrs: []string{"127.0.0.1"}, Port: 5300}
+				agent.DnsDetails = &AgentDetails{State: AgentStateKnown}
 			}
 
 			// Register the agent in Alice's registry so the
@@ -492,6 +492,12 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 			// before invoking, mirroring the production invocation
 			// site in agent_utils.go.
 			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+			if tc.api {
+				peerArg.APIEndpoint = "https://example.invalid/"
+			}
+			if tc.dns {
+				peerArg.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+			}
 			env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
 
 			peer, ok := env.Alice.Bridge.PeerRegistry.Get(env.Bob.Identity)

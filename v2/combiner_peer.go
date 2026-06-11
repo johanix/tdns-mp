@@ -60,9 +60,6 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational, // Start as operational
-			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),
-			Port:            uint16(port),
-			Addrs:           []string{host},
 			HelloTime:       time.Now(),
 			LastContactTime: time.Now(),
 		},
@@ -77,6 +74,20 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	// Register in AgentRegistry with configured identity
 	ar.S.Set(combinerID, combinerAgent)
 	lgCombiner.Info("registered combiner as virtual peer", "identity", combinerID, "address", mp.Combiner.Address)
+
+	// S2: populate the transport.Peer address at registration so the
+	// transport store is the SOLE address source (the GetOrCreatePeer
+	// AgentDetails->transport restore is removed). Config-infra peers are
+	// never discovered via DNS, so this is their only address source.
+	if ar.TransportManager != nil {
+		cpeer := ar.TransportManager.PeerRegistry.GetOrCreate(string(combinerID))
+		cpeer.SetDiscoveryAddress(&transport.Address{
+			Host:      host,
+			Port:      uint16(port),
+			Transport: "udp",
+		})
+		cpeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port)
+	}
 
 	// Load and register combiner's public key for encrypted communication
 	// If combiner is configured, encryption is MANDATORY

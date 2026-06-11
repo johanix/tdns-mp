@@ -286,6 +286,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
+			agentPeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
 			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
@@ -406,6 +407,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
+			agentPeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
 			agentPeer.APIEndpoint = agentConf.ApiBaseUrl

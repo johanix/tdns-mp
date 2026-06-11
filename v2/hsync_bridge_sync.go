@@ -89,9 +89,6 @@ func hsyncDetailsToAgent(d *hsync.PeerDetails) *AgentDetails {
 		return &AgentDetails{State: AgentStateNeeded}
 	}
 	return &AgentDetails{
-		Addrs:             append([]string(nil), d.Addrs...),
-		Port:              d.Port,
-		BaseUri:           d.BaseUri,
 		State:             AgentState(d.State),
 		LatestError:       d.LatestError,
 		LatestErrorTime:   d.LatestErrorTime,
@@ -111,9 +108,6 @@ func agentDetailsToHsync(d *AgentDetails) *hsync.PeerDetails {
 		return &hsync.PeerDetails{State: hsync.PeerStateNeeded}
 	}
 	return &hsync.PeerDetails{
-		Addrs:             append([]string(nil), d.Addrs...),
-		Port:              d.Port,
-		BaseUri:           d.BaseUri,
 		State:             hsync.PeerState(d.State),
 		LatestError:       d.LatestError,
 		LatestErrorTime:   d.LatestErrorTime,
@@ -133,10 +127,9 @@ func agentForTransport(ar *AgentRegistry, peer *hsync.Peer) *Agent {
 	if ar == nil || agent == nil {
 		return agent
 	}
-	if existing, ok := ar.S.Get(agent.Identity); ok {
-		mergeAgentDetails(agent.ApiDetails, existing.ApiDetails)
-		mergeAgentDetails(agent.DnsDetails, existing.DnsDetails)
-	}
+	// S2: address fields no longer live on AgentDetails (they are on
+	// transport.Peer, which these hsync-rebuilds do not touch), so the
+	// former mergeAgentDetails address-preservation is a no-op and gone.
 	return agent
 }
 
@@ -146,25 +139,7 @@ func syncHsyncPeerToAgent(ar *AgentRegistry, peer *hsync.Peer) {
 	}
 	existing, _ := ar.S.Get(AgentId(peer.ID))
 	agent := hsyncPeerToAgent(peer)
-	if existing != nil {
-		mergeAgentDetails(agent.ApiDetails, existing.ApiDetails)
-		mergeAgentDetails(agent.DnsDetails, existing.DnsDetails)
-	}
+	_ = existing // S2: address-merge removed (addresses live on transport.Peer)
 	ar.S.Set(agent.Identity, agent)
 	syncHsyncPeerFromAgent(peer, agent)
-}
-
-func mergeAgentDetails(dst, src *AgentDetails) {
-	if dst == nil || src == nil {
-		return
-	}
-	if dst.BaseUri == "" {
-		dst.BaseUri = src.BaseUri
-	}
-	if len(dst.Addrs) == 0 && len(src.Addrs) > 0 {
-		dst.Addrs = append([]string(nil), src.Addrs...)
-	}
-	if dst.Port == 0 {
-		dst.Port = src.Port
-	}
 }

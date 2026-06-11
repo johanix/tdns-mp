@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/johanix/tdns-transport/v2/crypto/jose"
+	transport "github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -486,7 +487,11 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *Mu
 	return nil
 }
 
-func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
+// NewAgentSyncApiClient builds the agent-to-agent API client. Currently
+// has no callers (API transport is not yet wired up); kept future-ready.
+// S2: the API endpoint/addresses come from the canonical transport.Peer
+// (peer.APIEndpoint / peer.CurrentAddress), not AgentDetails.
+func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf, peer *transport.Peer) error {
 	if agent == nil {
 		return fmt.Errorf("agent is nil")
 	}
@@ -505,11 +510,15 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
 		return fmt.Errorf("local agent config missing either cert or key file")
 	}
 
-	lgAgent.Debug("creating API client", "identity", agent.Identity, "baseurl", agent.ApiDetails.BaseUri)
+	var apiBaseUri string
+	if peer != nil {
+		apiBaseUri = peer.APIEndpoint
+	}
+	lgAgent.Debug("creating API client", "identity", agent.Identity, "baseurl", apiBaseUri)
 
 	// Create API client
 	api := AgentApi{
-		ApiClient: tdns.NewClient(string(agent.Identity), agent.ApiDetails.BaseUri, "", "", "tlsa"),
+		ApiClient: tdns.NewClient(string(agent.Identity), apiBaseUri, "", "", "tlsa"),
 	}
 
 	// Load client certificate
@@ -557,17 +566,13 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
 	api.ApiClient.Debug = tdns.Globals.Debug
 	api.ApiClient.Verbose = tdns.Globals.Verbose
 
-	// Configure API addresses if available
-	if len(agent.ApiDetails.Addrs) > 0 {
-		lgAgent.Debug("remote agent API addresses", "agent", agent.Identity, "addrs", agent.ApiDetails.Addrs)
-		var addressesWithPort []string
-		port := strconv.Itoa(int(agent.ApiDetails.Port))
-
-		for _, addr := range agent.ApiDetails.Addrs {
-			addressesWithPort = append(addressesWithPort, net.JoinHostPort(addr, port))
+	// Configure API addresses from the canonical transport.Peer.
+	if peer != nil {
+		if a := peer.CurrentAddress(); a != nil {
+			port := strconv.Itoa(int(a.Port))
+			api.ApiClient.Addresses = []string{net.JoinHostPort(a.Host, port)}
+			lgAgent.Debug("remote agent API address", "agent", agent.Identity, "addr", a.Host)
 		}
-
-		api.ApiClient.Addresses = addressesWithPort
 	}
 
 	lgAgent.Debug("setting up agent-to-agent sync API client",
