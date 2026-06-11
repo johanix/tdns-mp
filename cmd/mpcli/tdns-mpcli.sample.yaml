@@ -10,6 +10,14 @@
 #   mpcli combiner ping  → tdns-combiner
 #   mpcli agent ping     → tdns-agent
 
+# Pull in shared algorithm enrichment data so that
+# `signer keystore dnssec algorithms` prints the rich table (sizes,
+# maturity, descriptions) instead of a bare name/codepoint list. A
+# missing included file is silently skipped. See algorithms.sample.yaml
+# (shipped with tdns) for the format.
+include:
+   - /etc/tdns/algorithms.yaml
+
 apiservers:
    # The signer (target for "signer" sub-commands)
    - name:         tdns-mpsigner

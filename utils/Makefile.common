@@ -5,6 +5,32 @@ APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
 GOFLAGS:=-v
 
+# Build-tag-gated PQ algorithm families. These knobs are shared by all
+# MP binaries, but only have an effect on a binary that actually wires
+# in the matching algorithms (an import + algs.Register under the same
+# //go:build tag). Today that is only mpsigner; the other binaries have
+# no tagged sources, so the tags select no extra files and their build
+# is byte-identical whether or not a knob is set.
+#
+#   WITH_LIBOQS=1   Falcon-512/1024, MAYO-1/2/3/5, SNOVA-24_5_4/
+#                   37_17_2/25_8_3
+#   WITH_SQISIGN=1  SQIsign-I
+#   WITH_QRUOV=1    QR-UOV-I q=31 L=3
+#
+# Each requires its C library + a sourced env script before `make`;
+# see the pq_algorithms_*.go header comments and dnssec-algorithms/
+# README.md. The conditional is evaluated in shell (backticks) rather
+# than make's ifeq/.if, which are not portable between GNU make and
+# NetBSD bmake. Mirrors tdns/utils/Makefile.common.
+WITH_LIBOQS  ?= 0
+WITH_SQISIGN ?= 0
+WITH_QRUOV   ?= 0
+GO_BUILD_TAGS = `{ test "$(WITH_LIBOQS)"  = 1 && echo liboqs ; \
+                   test "$(WITH_SQISIGN)" = 1 && echo sqisign ; \
+                   test "$(WITH_QRUOV)"   = 1 && echo qruov ; } | \
+                 paste -sd, - | \
+                 sed -e 's/^./-tags &/'`
+
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
 default: ${PROG}
@@ -16,14 +42,66 @@ all: $(PROG)
 version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
-build:
+build: check-liboqs check-sqisign check-qruov
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
-	$(GO) build $(GOFLAGS) -o ${PROG}
+	$(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}
+
+# Pre-flight checks: when a knob is set, verify pkg-config can find the
+# library and print actionable guidance otherwise. No-op when unset.
+check-liboqs:
+	@if [ "$(WITH_LIBOQS)" = "1" ]; then \
+	   pkg-config --exists liboqs-go 2>/dev/null || { \
+	      echo ""; \
+	      echo "  WITH_LIBOQS=1 was set but pkg-config cannot find liboqs-go."; \
+	      echo "  Source the env script in this shell first:"; \
+	      echo ""; \
+	      echo "    . ../../../dnssec-algorithms/liboqs/liboqs-env.sh"; \
+	      echo ""; \
+	      echo "  Then re-run make. See dnssec-algorithms/README.md for"; \
+	      echo "  per-platform liboqs install instructions."; \
+	      echo ""; \
+	      exit 1; \
+	   }; \
+	fi
+
+check-sqisign:
+	@if [ "$(WITH_SQISIGN)" = "1" ]; then \
+	   pkg-config --exists sqisign 2>/dev/null || { \
+	      echo ""; \
+	      echo "  WITH_SQISIGN=1 was set but pkg-config cannot find sqisign."; \
+	      echo "  Source the env script in this shell first:"; \
+	      echo ""; \
+	      echo "    . ../../../dnssec-algorithms/sqisignc/sqisign-env.sh"; \
+	      echo ""; \
+	      echo "  If no install is found, build the reference C library:"; \
+	      echo ""; \
+	      echo "    sh ../../../dnssec-algorithms/sqisignc/build-sqisign.sh"; \
+	      echo ""; \
+	      exit 1; \
+	   }; \
+	fi
+
+check-qruov:
+	@if [ "$(WITH_QRUOV)" = "1" ]; then \
+	   pkg-config --exists qruov 2>/dev/null || { \
+	      echo ""; \
+	      echo "  WITH_QRUOV=1 was set but pkg-config cannot find qruov."; \
+	      echo "  Source the env script in this shell first:"; \
+	      echo ""; \
+	      echo "    . ../../../dnssec-algorithms/qruovc/qruov-env.sh"; \
+	      echo ""; \
+	      echo "  If no install is found, build the reference C library:"; \
+	      echo ""; \
+	      echo "    sh ../../../dnssec-algorithms/qruovc/build-qruov.sh"; \
+	      echo ""; \
+	      exit 1; \
+	   }; \
+	fi
 
 netbsd:
-	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
+	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}.netbsd
 
 test:
 	$(GO) test -v -cover
 
-.PHONY: build version clean
+.PHONY: build version clean check-liboqs check-sqisign check-qruov

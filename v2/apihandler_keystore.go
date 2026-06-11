@@ -16,6 +16,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 	"github.com/miekg/dns"
 )
 
@@ -123,6 +124,16 @@ func (hdb *HsyncDB) APIkeystoreMP(conf *Config) func(w http.ResponseWriter, r *h
 			}
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear") {
 				triggerResign(conf, kp.Zone)
+			}
+
+		case "list-algorithms":
+			// Read-only: report the algorithms this server actually
+			// supports, so the CLI can resolve names to codepoints
+			// without its own hardcoded table.
+			resp = &tdns.KeystoreResponse{
+				AppName:    tdns.Globals.App.Name,
+				Time:       time.Now(),
+				Algorithms: algorithms.All(),
 			}
 
 		default:

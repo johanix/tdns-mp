@@ -147,8 +147,8 @@ github.com/ianlancetaylor/demangle v0.0.0-20181102032728-5e5cf60278f6/go.mod h1:
 github.com/ianlancetaylor/demangle v0.0.0-20200824232613-28f6c0f3b639/go.mod h1:aSSvb/t6k1mPoxDqO4vJh6VOCGPwU4O0C2/Eqndh1Sc=
 github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d h1:rkhMXetTV0gTQPj0Wj6nRaMu1w3iVt+TiL8z2DeMFrA=
 github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d/go.mod h1:hBcNfObhP6OL8tg/LRRiRxqToCk64JmTahUFw2q39GM=
-github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 h1:CiXR4gsxzH08qVIhVHkructrEcnuzUtTSxGStdGM3P0=
-github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819/go.mod h1:9bqZgp2xuoeqFcMazjYzAFOOygrDieZAwlySt+UWe8s=
+github.com/johanix/dnssec-algorithms v0.0.0-20260610050337-d454ac920e5f h1:crEQO7w59Kjyc8LOETXxg474SeSXz8O2o3IKFFPUvhk=
+github.com/johanix/dnssec-algorithms v0.0.0-20260610050337-d454ac920e5f/go.mod h1:6VauTodNzFC0Ck6uxxnnhOA+JvTdU4ZtkEr0u72ZVfc=
 github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9 h1:4kvz3xFgKfBEkUTrv4N/celfvDNitAy6SJkLkw5qIDQ=
 github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9/go.mod h1:jQMAdgNlEKyqnujWh4/gK4k8XrXf4ktZl39j3ji5XNA=
 github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9 h1:2aTC5hD8sNh47f3ivxSg8T3kyLuBZRxX1N5U7NSSL+w=
@@ -176,6 +176,8 @@ github.com/mattn/go-sqlite3 v1.14.16 h1:yOQRA0RpS5PFz/oikGwBEqvAWhWg5ufRz4ETLjwp
 github.com/mattn/go-sqlite3 v1.14.16/go.mod h1:2eHXhiwb8IkHr+BDWZGa96P6+rkvnG63S2DGjv9HUNg=
 github.com/mitchellh/mapstructure v1.5.0 h1:jeMsZIYE/09sWLaz43PL7Gy6RuMjD2eJVyuac5Z2hdY=
 github.com/mitchellh/mapstructure v1.5.0/go.mod h1:bFUtVrKA4DC2yAKiSyO/QUcy7e+RRV2QTWOzhPopBRo=
+github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a h1:ODvqx48snl7BdkeVq+iStisJJlDr5Sfzns8YupfhDTg=
+github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a/go.mod h1:OoIQ+v4rM6S6cF9zLGxsnsXX9vwv7WLp9s0TV2FbD6M=
 github.com/pelletier/go-toml/v2 v2.0.8 h1:0ctb6s9mE31h0/lhu+J6OPmVeDxJn+kYnJc2jZR9tGQ=
 github.com/pelletier/go-toml/v2 v2.0.8/go.mod h1:vuYfssBdrU2XDZ9bYydBu6t+6a6PYNcZljzZR9VXg+4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
