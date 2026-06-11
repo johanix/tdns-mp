@@ -2,27 +2,22 @@ module github.com/johanix/tdns-mp/v2
 
 go 1.25.2
 
-// Local replaces for in-tree cross-repo verification on the feature
-// branch stack (semi-easy + peer-discovery-engine-extraction). Revert
-// before publishing.
-replace (
-	github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2
-	github.com/johanix/tdns/v2 => ../../tdns/v2
-	github.com/johanix/tdns/v2/cli => ../../tdns/v2/cli
-	github.com/johanix/tdns/v2/core => ../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../tdns/v2/edns0
-)
+// tdns-transport/v2 is replaced locally because the transport-redesign
+// branch changes are not yet published. tdns/v2 is consumed from its
+// published version (no replace). Revert the transport replace before
+// publishing.
+replace github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2
 
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/tdns-transport/v2 v2.0.0-20260525200107-82d768a23456
-	github.com/johanix/tdns/v2 v2.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/cache v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/cli v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/core v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260527163406-77a5c2ba5166
+	github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/cli v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/core v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260611090745-44755a2166f9
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible

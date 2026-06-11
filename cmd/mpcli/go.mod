@@ -4,21 +4,15 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
-// Local replaces for in-tree builds on the feature branch stack.
-// See ../../v2/go.mod. Revert before publishing.
-replace (
-	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
-	github.com/johanix/tdns/v2 => ../../../tdns/v2
-	github.com/johanix/tdns/v2/cli => ../../../tdns/v2/cli
-	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
-)
+// tdns-transport/v2 replaced locally (redesign branch unpublished).
+// tdns/v2 consumed from its published version. Revert before publishing.
+replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/cli v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/core v0.0.0-20260527163406-77a5c2ba5166
+	github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/cli v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/core v0.0.0-20260611090745-44755a2166f9
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
 )
@@ -39,8 +33,8 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
 	github.com/johanix/tdns-transport/v2 v2.0.0-20260525200107-82d768a23456 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20260527163406-77a5c2ba5166 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260527163406-77a5c2ba5166 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9 // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260611090745-44755a2166f9 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
@@ -79,4 +73,4 @@ require (
 )
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
