@@ -295,9 +295,22 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 	return zad, nil
 }
 
-// CleanupZoneRelationships handles the complex cleanup when we're no longer involved in a zone's management
+// CleanupZoneRelationships is the OnLocalRemoved hook: it fires when the
+// local agent stops participating in a zone's management. By design it is
+// a no-op beyond logging.
+//
+// Since A2, zone membership is DERIVED, not stored: ParticipantsForZone
+// (provider_groups.go) recomputes the participant set from HSYNCPARAM on
+// every read. So when local participation in `zonename` ends, there is no
+// stored per-zone relationship to tear down — it simply stops being
+// derived on the next read, and provider groups recompute via
+// OnHsync3Changed. There is nothing to manually clean up here.
+//
+// Revisit only if the testbed shows orphaned per-zone state surviving a
+// local removal; that would mean some state is still stored rather than
+// derived, and should be moved to derivation rather than scrubbed here.
 func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
-	lgAgent.Warn("TODO: cleanup not yet implemented", "zone", zonename)
+	lgAgent.Info("local removal from zone; membership is derived, no teardown needed", "zone", zonename)
 }
 
 // reattachHsyncMemberAdds re-homes the per-add CONFIG RFI deferred tasks and the

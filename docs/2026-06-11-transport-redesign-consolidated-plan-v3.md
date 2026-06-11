@@ -222,17 +222,21 @@ binaries) green; boundary suite `-race` green. The tdns dep bump
 landed on a generic branch (`johanix-dns-bump-jun8`), not the
 redesign branch, since it is plain dependency maintenance.
 
-## Gate-3 — close the dangling A1 loose end (decision + tiny commit)
+## Gate-3 — close the dangling A1 loose end (decision + tiny commit) — DONE 2026-06-11
 
-`CleanupZoneRelationships` (`agent_utils.go:300`) is a TODO stub
+`CleanupZoneRelationships` (`agent_utils.go:300`) was a TODO stub
 wired as the `OnLocalRemoved` hook (`hsync_bridge.go:285`). A1.0
 bound "implement or explicitly drop; do not leave dangling".
-**Proposed resolution (operator to confirm):** with membership
-now derived (A2), local-removal teardown is largely automatic —
-participations vanish on the next derivation, groups recompute
-via `OnHsync3Changed`. Replace the stub body with structured
-logging + a comment stating that analysis; revisit only if the
-testbed shows orphaned per-zone state after a local removal.
+**Resolved (operator-confirmed):** with membership now derived
+(A2), local-removal teardown is automatic — `ParticipantsForZone`
+recomputes from HSYNCPARAM on every read, so participation simply
+stops being derived; groups recompute via `OnHsync3Changed`. There
+is no stored per-zone relationship to scrub. The stub body is
+replaced with an explanatory no-op (Info log + comment stating the
+derivation reasoning). Revisit only if the testbed shows orphaned
+per-zone state after a local removal — which would mean some state
+is still stored, and should be moved to derivation rather than
+scrubbed here.
 
 ## A3d-S1b — `.State`: stop dual-writing; display redirect
 
