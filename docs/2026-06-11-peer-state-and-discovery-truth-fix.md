@@ -236,6 +236,28 @@ question 1 — not required to fix the lie.)
    predate the readers under test. Before declaring Gate-1, upgrade
    the fleet to the tip so all nodes use the same state machine —
    otherwise we are comparing new readers against old writers.
+
+   **Test-fleet plan (decided 2026-06-11):**
+   - **cpt stays the observer** on `transport-redesign-v1-A` tip —
+     it is where the fixes land and where they are verified. The
+     bugs live on the *observing* agent's discovery + state path, so
+     the observer's version is what matters; fox's version does not
+     change cpt's logic.
+   - **Upgrade fox to the tip.** fox's value to the test is its
+     broken `dns.agent.fox` NS (the trigger), not its old software.
+     Upgrading gives fox `agent zone bump`, turning it into a
+     *controllable* trigger: (1) first use `zone bump` to FIX the
+     stale NS and establish a clean all-healthy baseline; (2) then
+     deliberately re-break it to reproduce the failure on demand and
+     verify each fix (E→C→A→B), including the RECOVERY direction
+     (NS restored → cpt heals fox back to OPERATIONAL), which the
+     current accidental break cannot test.
+   - **Heterogeneity is tested deliberately, not via fox.** Interop
+     coverage wants a pinned, known-version, *otherwise-healthy*
+     node — not an accidentally-broken one. hare
+     (`peer-discovery-engine-extraction`, 14 days, healthy) already
+     provides one old-but-working node; add a purpose-pinned node if
+     more interop signal is wanted later.
 3. **Fox's NXDOMAIN itself** is an operational data problem (stale
    `dns.agent.fox` NS in the delegation) — fixable with the new
    `agent zone bump` once it deploys. Independent of the code fix,
