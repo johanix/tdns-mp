@@ -701,38 +701,26 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// Messages reaching routeBeatMessage have passed middleware auth.
 	lgTransport.Debug("processing authorized DNS beat", "sender", senderID, "zones", payload.Zones)
 
-	// DNS-37: Update peer state on successful beat
+	// Record inbound liveness ONLY. Receiving a beat proves the peer can
+	// reach us — it does NOT prove we can reach them, which is what
+	// OPERATIONAL means (a successful OUTBOUND beat round-trip; set in
+	// SendBeatWithFallback). So we update LastBeatRecv evidence but do
+	// not touch the connection state. The election trigger likewise
+	// lives on the outbound success edge, not here.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-	peer.SetState(transport.PeerStateOperational, "Beat received from operational peer")
-	// Bite 1 dual-write: also update per-mechanism state (DNS path).
-	peer.SetMechanismState("DNS", transport.PeerStateOperational, "Beat received from operational peer")
 	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
-	// Also update AgentRegistry if available
+	// Mirror the inbound-liveness timestamp onto AgentDetails (still read
+	// by the NG beat-age scanner until Stage D). State is untouched.
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
-			// Scope agent.Mu to just the DnsDetails field access — the
-			// outbound hello/beat send paths and CheckState write these
-			// same fields under agent.Mu, so the bare writes here were a
-			// data race. Release before NotifyPeerOperational (an election
-			// call) to honor the no-registry-lock-across-callback rule.
 			agent.Mu.Lock()
-			wasOperational := agent.DnsDetails.State == AgentStateOperational
-			agent.DnsDetails.State = AgentStateOperational
 			agent.DnsDetails.LastContactTime = time.Now()
+			agent.DnsDetails.LatestRBeat = time.Now()
 			agent.Mu.Unlock()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
-
-			// When a peer first becomes operational, check if all configured peers
-			// are now operational. Elections require full participation.
-			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
-				// NotifyPeerOperational handles both deferred elections and
-				// new elections — it checks configured vs operational counts.
-				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
-					tm.agentRegistry.sharedParticipantZones(agent.Identity))
-			}
 		}
 	}
 
@@ -804,12 +792,11 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	senderID := msg.SenderID
 	lgTransport.Debug("processing ping", "sender", senderID)
 
-	// Update PeerRegistry liveness
+	// Record inbound liveness ONLY (a received ping proves they can reach
+	// us, not that we can reach them). State is set by the outbound beat
+	// path, not here.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-	peer.SetState(transport.PeerStateOperational, "ping received")
-	// Bite 1 dual-write: also update per-mechanism state (DNS path).
-	peer.SetMechanismState("DNS", transport.PeerStateOperational, "ping received")
 	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
 	report := &AgentMsgReport{
@@ -864,9 +851,11 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// Messages reaching routeSyncMessage have passed middleware auth.
 	lgTransport.Debug("processing authorized DNS message", "msgType", msgTypeStr, "sender", senderID, "zone", zone, "transportSender", msg.TransportSender)
 
-	// Update peer state on successful message
+	// Record inbound liveness ONLY — receiving a message proves they can
+	// reach us, not that we can reach them. State is set by the outbound
+	// beat path (SendBeatWithFallback), never on inbound receipt.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.SetState(transport.PeerStateOperational, fmt.Sprintf("%s received from operational peer", msgTypeStr))
+	peer.LastBeatReceived = time.Now()
 
 	// Also update AgentRegistry if available
 	if tm.agentRegistry != nil {
@@ -890,7 +879,8 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// combiner's config. Trigger async discovery so the address is available for confirmation.
 	if deliveredBy != senderID {
 		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
-		deliverPeer.SetState(transport.PeerStateOperational, fmt.Sprintf("delivered %s for %s", msgTypeStr, senderID))
+		// Inbound liveness only — do not assert OPERATIONAL on a delivery.
+		deliverPeer.LastBeatReceived = time.Now()
 		if deliverPeer.CurrentAddress() == nil {
 			lgTransport.Info("transport sender has no address, triggering async discovery", "sender", deliveredBy)
 			go func(peerID string) {
@@ -1692,6 +1682,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
+				apiWasOperational := agent.ApiDetails.State == AgentStateOperational
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LastContactTime = time.Now()
 				agent.ApiDetails.LatestSBeat = time.Now()
@@ -1699,8 +1690,18 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.ApiDetails.SentBeats++
 				agent.ApiDetails.ReceivedBeats++
 				agent.ApiDetails.LatestError = ""
+				agent.Mu.Unlock()
+
+				// OPERATIONAL on the canonical store — only an outbound beat
+				// round-trip means "I can reach this peer" (see DNS path).
+				peer.SetMechanismState("API", transport.PeerStateOperational, "API beat round-trip succeeded")
+				peer.SetMechanismLastBeatSent("API", time.Now())
+
+				if !apiWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
+					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+						tm.agentRegistry.sharedParticipantZones(agent.Identity))
+				}
 			}
-			agent.Mu.Unlock()
 		}
 	}
 
@@ -1722,6 +1723,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
+				dnsWasOperational := agent.DnsDetails.State == AgentStateOperational
 				agent.DnsDetails.State = AgentStateOperational
 				agent.DnsDetails.LastContactTime = time.Now()
 				agent.DnsDetails.LatestSBeat = time.Now()
@@ -1729,8 +1731,22 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.DnsDetails.SentBeats++
 				agent.DnsDetails.ReceivedBeats++
 				agent.DnsDetails.LatestError = ""
+				agent.Mu.Unlock()
+
+				// OPERATIONAL on the canonical store: a successful OUTBOUND
+				// beat round-trip is the ONLY thing that means "I can reach
+				// this peer" (the definition). This is where state is set —
+				// never on inbound receipt.
+				peer.SetMechanismState("DNS", transport.PeerStateOperational, "DNS beat round-trip succeeded")
+				peer.SetMechanismLastBeatSent("DNS", time.Now())
+
+				// Election trigger moved here from the inbound-beat handler:
+				// elections fire when WE first become able to reach a peer.
+				if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
+					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+						tm.agentRegistry.sharedParticipantZones(agent.Identity))
+				}
 			}
-			agent.Mu.Unlock()
 		}
 	}
 

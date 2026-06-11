@@ -133,9 +133,14 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *A
 	}
 }
 
-// DiscoverAgent performs full DNS-based discovery of an agent's contact information
-// for both API and DNS transports. Convenience wrapper around DiscoverAgentAPI + DiscoverAgentDNS.
-func (imr *Imr) DiscoverAgent(ctx context.Context, identity string) *AgentDiscoveryResult {
+// DiscoverAgent performs DNS-based discovery of an agent's contact
+// information, but only for transports the local agent itself supports
+// (apiSupported/dnsSupported). An agent only establishes connectivity
+// over mechanisms it can actually use, so probing for an unsupported
+// transport is pointless: it emits failing lookups (e.g. _https._tcp.<id>
+// URI on a DNS-only fleet) and sets a spurious result.Partial. Each
+// supported leg is run via DiscoverAgentAPI / DiscoverAgentDNS.
+func (imr *Imr) DiscoverAgent(ctx context.Context, identity string, apiSupported, dnsSupported bool) *AgentDiscoveryResult {
 	result := &AgentDiscoveryResult{
 		Identity: identity,
 	}
@@ -145,8 +150,12 @@ func (imr *Imr) DiscoverAgent(ctx context.Context, identity string) *AgentDiscov
 		return result
 	}
 
-	imr.DiscoverAgentAPI(ctx, identity, result)
-	imr.DiscoverAgentDNS(ctx, identity, result)
+	if apiSupported {
+		imr.DiscoverAgentAPI(ctx, identity, result)
+	}
+	if dnsSupported {
+		imr.DiscoverAgentDNS(ctx, identity, result)
+	}
 
 	// Check if we have enough information to contact the agent
 	if result.APIUri == "" && result.DNSUri == "" {
@@ -306,7 +315,10 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 
 		// Update agent details — only set state to KNOWN if not already beyond it.
 		// Re-discovery must not regress an OPERATIONAL or INTRODUCED transport.
-		if result.APIUri != "" {
+		// A transport is USABLE only with both a URI and a resolved
+		// address (see the DNS branch below for the full rationale).
+		apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0
+		if apiUsable {
 			agent.ApiDetails.BaseUri = result.APIUri
 			peer.SetMechanismContactInfo("API", "complete")
 			if agent.ApiDetails.State <= AgentStateNeeded {
@@ -315,12 +327,31 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			agent.ensureCrypto("API").TlsaRR = result.TLSA
 			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
+		} else if result.APIUri != "" {
+			// URI found but no resolved address: keep retrying, leave a
+			// not-yet-established peer NEEDED, do not advertise an unusable
+			// URL, and do not regress an already-established peer.
+			agent.ApiMethod = true
+			if agent.ApiDetails.State <= AgentStateNeeded {
+				agent.ApiDetails.BaseUri = ""
+				agent.ApiDetails.Addrs = nil
+			}
+			lgAgent.Warn("API endpoint URI found but no resolved address; not marking usable",
+				"identity", result.Identity, "uri", result.APIUri, "state", AgentStateToString[agent.ApiDetails.State])
 		} else {
 			// No API endpoint found — clear the flag so DiscoveryRetrierNG
 			// doesn't perpetually retry discovery for a non-existent transport.
 			agent.ApiMethod = false
 		}
-		if result.DNSUri != "" {
+		// A transport is USABLE only if we resolved BOTH its URI and an
+		// address to send to. A URI with no resolved address (e.g. the
+		// SVCB/IP lookup at dns.<identity> returned NXDOMAIN) is NOT a
+		// usable endpoint: marking it "complete"/KNOWN strands the peer
+		// looking operational while every send fails "no address
+		// available". In that case keep the mechanism NEEDED so the
+		// retrier revisits it, and do not advertise a contact URL.
+		dnsUsable := result.DNSUri != "" && len(result.DNSAddresses) > 0
+		if dnsUsable {
 			agent.DnsDetails.BaseUri = result.DNSUri
 			peer.SetMechanismContactInfo("DNS", "complete")
 			if agent.DnsDetails.State <= AgentStateNeeded {
@@ -350,6 +381,21 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			dnsCrypto.KeyRR = result.LegacyKeyRR
 			agent.DnsDetails.Addrs = result.DNSAddresses
 			agent.DnsMethod = true
+		} else if result.DNSUri != "" {
+			// URI found but no resolved address. Keep DnsMethod enabled so
+			// the retrier keeps trying. For a not-yet-established peer,
+			// leave it NEEDED and do not advertise a contact URL we cannot
+			// use. Do NOT regress an already-established (INTRODUCED/
+			// OPERATIONAL/etc.) peer on a transient address-less round —
+			// its prior good address/state stand until liveness demotes it
+			// (Fix B), mirroring the "no regression" guard above.
+			agent.DnsMethod = true
+			if agent.DnsDetails.State <= AgentStateNeeded {
+				agent.DnsDetails.BaseUri = ""
+				agent.DnsDetails.Addrs = nil
+			}
+			lgAgent.Warn("DNS endpoint URI found but no resolved address; not marking usable",
+				"identity", result.Identity, "uri", result.DNSUri, "state", AgentStateToString[agent.DnsDetails.State])
 		} else {
 			// No DNS endpoint found — clear the flag so DiscoveryRetrierNG
 			// doesn't perpetually retry discovery for a non-existent transport.
@@ -376,7 +422,9 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 		return fmt.Errorf("IMR engine not available for discovery (not yet started)")
 	}
 
-	result := imr.DiscoverAgent(ctx, identity)
+	// Only discover transports this agent itself supports (an agent
+	// establishes connectivity over mechanisms it can actually use).
+	result := imr.DiscoverAgent(ctx, identity, tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
 	if result.Error != nil {
 		return fmt.Errorf("discovery failed for %s: %w", identity, result.Error)
 	}

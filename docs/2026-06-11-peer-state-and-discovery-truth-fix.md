@@ -224,6 +224,45 @@ question 1 — not required to fix the lie.)
   `transport.Peer` being the trustworthy single source. Then re-run
   Gate-1 against a homogeneous (all-tip) fleet.
 
+## Implementation notes (2026-06-11)
+
+Fixes E, C, A, B implemented on `transport-redesign-v1-A`:
+
+- **E** — `DiscoverAgent` gated on `apiSupported`/`dnsSupported`
+  (from `tm.isTransportSupported`), so a DNS-only agent no longer
+  probes `_https._tcp` and no longer sets a spurious `Partial`.
+- **C** — `RegisterDiscoveredAgent` treats a transport as USABLE only
+  with both a URI AND a resolved address (`dnsUsable`/`apiUsable`).
+  URI-without-address leaves the mechanism NEEDED, does not mark
+  ContactInfo "complete", clears a not-yet-established peer's stale
+  BaseUri, and never regresses an already-established peer.
+- **A** — OPERATIONAL is set ONLY on a successful outbound beat
+  round-trip (`SendBeatWithFallback`, now dual-writing
+  `transport.Peer.Mechanisms[m]` + AgentDetails). All inbound-receipt
+  OPERATIONAL writes (beat/hello/ping/msg/delivered, combiner+signer
+  handlers) reduced to liveness-evidence only (`LastBeatRecv`). The
+  election trigger (`NotifyPeerOperational`) moved to the outbound
+  success edge.
+- **B** — decay-on-read: `transport.Peer.EffectiveState()` now decays
+  an active mechanism to DEGRADED/INTERRUPTED based on the age of its
+  last successful outbound beat (`LastBeatSent`), via
+  `decayedMechanismState` (mirrors NG `checkPeerState` thresholds:
+  2× ⇒ DEGRADED, 10× ⇒ INTERRUPTED). Keyed on `sinceS` (our outbound
+  reachability) only — NOT inbound silence, keeping the two
+  directions separate. No external decay loop; promotion and
+  demotion both live on `transport.Peer` next to the beat data.
+
+**Deferred (small follow-up):** `transport.Peer.LivenessInterval` (our
+local beat interval, the decay's threshold base) defaults to 30s when
+unset. The testbed runs 30s beats, so the default is exact there;
+wiring the configured `mp.Remote.BeatInterval` through to the peer (4
+`NewMPTransportBridge` sites) for non-30s deployments is a clean
+follow-up, not a correctness blocker for verification.
+
+Not done here: the hello→INTRODUCING inbound transition is left as-is
+(it is a non-operational state and not the bug); retiring the now-
+redundant NG `checkPeerState` decay / `hsync.PeerDetails` is Stage D.
+
 ## Open questions
 
 1. **Inbound axis representation.** Do we add an explicit
