@@ -329,13 +329,14 @@ slice, NOT the EXPLAINED-DELTA "adds writes" slice originally framed.
 2. **DONE (transport-first, operator-chosen).** `RecordBeatSent` had
    0 callers and transport's `Beat()` did not maintain `BeatSequence`/
    `Stats` — they were maintained only by MP's `AgentDetails.SentBeats`.
-   Added `Peer.RecordMechanismBeatSent(name)` (transport `<hash>`):
-   `APITransport.Beat`/`DNSTransport.Beat` now bump per-mechanism
-   `Mechanisms[m].{BeatSequence,LastBeatSent}` + top-level aggregate +
-   `Stats` on their Ack-true success path. `Peer.MechanismBeatSequence(name)`
-   read accessor added. `ConsecutiveFails` left as-is (it is a Stage-D
-   liveness field, not an S3 concern).
-3. **DONE (mp `<hash>`).** Redirected the two FUNCTIONAL `SentBeats`
+   Added `Peer.RecordMechanismBeatSent(name)` (transport `292b0ea`→
+   `31f38da`): `APITransport.Beat`/`DNSTransport.Beat` now bump
+   per-mechanism `Mechanisms[m].{BeatSequence,LastBeatSent}` +
+   top-level aggregate + `Stats` on their Ack-true success path.
+   `Peer.MechanismBeatSequence(name)` read accessor added (`f932f4e`).
+   `ConsecutiveFails` left as-is (it is a Stage-D liveness field, not
+   an S3 concern).
+3. **DONE (mp `56dec3d`).** Redirected the two FUNCTIONAL `SentBeats`
    readers to `transport.Peer.MechanismBeatSequence`: infra-beat
    sequence seeding (`hsync_infra_beat.go`) and gossip-sent detection
    (`beatTransportUsed`, `hsync_bridge.go`). Display `LastUsed`: the
