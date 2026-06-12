@@ -73,7 +73,7 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A2 (incl. auth/HELLO boundary) | DONE, testbed-confirmed | `5efdd8f` |
 | A3a (lock order) | DONE | mp `14d8f4b` + transport `614417f` |
 | A3b | dissolved into A3d | `f018e7b` |
-| A3c (`AgentRegistry.RemoteAgents`) | DONE | `16415f4` |
+| A3c (`AgentRegistry.RemoteAgents` — note: `hsync.Registry.RemoteAgents` is separate, deleted later in END.4) | DONE | `16415f4` |
 | A3d.0 view types + `effectiveAgentState` | DONE | `431f9d1` |
 | A3d.1 registry embed (dual-mapped) | DONE | `eb584f7` |
 | Legacy hello/discovery retirement | DONE, testbed-confirmed | `6b671ac`, `b304e1f`; `peer reset` fix `d4577d4` |
@@ -91,10 +91,14 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d-S4 (snapshot inversion) | DONE | deleted SyncPeerFromAgent/PopulateFromAgent/AgentLike/AgentMechanismSnapshot + snapshot accessors; OnPeerDiscovered writes peer directly; transport `MechanismRawState`; ~420 lines net deleted |
 | Everything below this line | NOT STARTED | review §1 |
 
-Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
-all 7 `TestTransportBoundary_*`; **tdns-transport/v2 now builds and
-tests standalone** (`-count=1` + `-race`), `cmd/transport-exercise`
-builds (Gate-2 closed); tdns/v2 main builds.
+Build/test at tip (2026-06-12, post-S4: tdns-mp `ccd3ee5`,
+tdns-transport `4270893`): tdns-mp/v2 green incl. `-race` and all 7
+`TestTransportBoundary_*`; tdns-transport/v2 builds and tests
+standalone (`-count=1` + `-race`); `cmd/transport-exercise` builds
+(Gate-2 closed); tdns/v2 main builds (5 binaries each via Makefile).
+**S3 and S4 are NOT yet testbed-confirmed** — they are code-/race-green
+only; the operator deploy + runtime-probe pass (folded with the
+outstanding Gate-1 fox-NS break/restore) is pending.
 
 ## Target architecture (unchanged — restated for reference)
 
