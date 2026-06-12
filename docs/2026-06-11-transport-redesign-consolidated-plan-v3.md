@@ -88,6 +88,7 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d-S1b (State **display** redirect) | DONE | mp `68e7a69`; functional State retirement re-scoped to A3d-END.0 |
 | A3d-S2 (address redirect + drop fields) | DONE | this commit; transport `DNSEndpoint` accessor; AgentDetails.Addrs/Port/BaseUri removed |
 | A3d-S3 (transport-internal stats + functional redirect) | DONE; field-drop deferred to END.0 | transport `RecordMechanismBeatSent`/`MechanismBeatSequence`; mp redirects the 2 functional SentBeats readers; 5 fields stay as wire-DTO carrier (see S3) |
+| A3d-S4 (snapshot inversion) | DONE | deleted SyncPeerFromAgent/PopulateFromAgent/AgentLike/AgentMechanismSnapshot + snapshot accessors; OnPeerDiscovered writes peer directly; transport `MechanismRawState`; ~420 lines net deleted |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
@@ -366,18 +367,45 @@ counters; the two MP functional readers consume them; no display or
 wire change (the dropped `HelloTime` display fallback was already
 dead). Suite + boundary + `-race` green; 5 binaries build.
 
-## A3d-S4 — the snapshot inversion (residual A4)
+## A3d-S4 — the snapshot inversion (residual A4) — DONE 2026-06-12
 
-Falls out once S1b–S3 land. Delete: `SyncPeerFromAgent`
-(`hsync_transport.go:1474`, caller `:457`),
-`agentStateToTransportState` (`:1515`) +
-`agentStateToTransportStateFn` (`agent_structs.go:163`), the
-snapshot accessors `APIMechanismState`/`DNSMechanismState`
-(`agent_structs.go:111/134`); tdns-transport side:
-`Peer.PopulateFromAgent`, `AgentLike`, `AgentMechanismSnapshot`.
-`GetOrCreatePeer` (hot-path, no-snapshot) stays.
+Deleted: `SyncPeerFromAgent` + `agentStateToTransportState`
+(`hsync_transport.go`), `agentStateToTransportStateFn` +
+`APIMechanismState`/`DNSMechanismState` (`agent_structs.go`);
+tdns-transport side: `Peer.PopulateFromAgent`, `AgentLike`,
+`AgentMechanismSnapshot`, and the now-dead `peer_test.go` (its
+entire content was `PopulateFromAgent` tests). `GetOrCreatePeer`
+(hot-path, no-snapshot) stays.
 
-**Probe — INVARIANT.** Compiler-proven deletions.
+**NOT pure dead-code** — one live caller had to be inverted first.
+`SyncPeerFromAgent` was still called by the `OnPeerDiscovered`
+closure (`hsync_transport.go`) at discovery completion. Audited what
+it actually contributed there post-S1b/S2/S3:
+- TLSA block: a no-op stub (`TLSARecord = []byte{}`).
+- top-level `SetState`: dead — overwritten 1 line later by the
+  closure's own `SetState(KNOWN, "discovery complete")`.
+- zone-seeding (`agent.Zones`→`AddSharedZone`): redundant AND wrong
+  source — `peer.SharedZones` is populated synchronously by the
+  participant-derived `RecomputeSharedZonesAndSyncState`→
+  `ReplaceSharedZones` inside `ApplyHsyncDiff`, before discovery
+  completes; beats only go to READY peers, so no empty-zone window.
+  `agent.Zones` was the banned stored set, not the derived one.
+- `PopulateFromAgent`: the only real contribution was promoting each
+  usable mechanism's per-mechanism State to KNOWN (address/beat
+  fields are already canonical on the peer post-S2/S3 and guarded
+  against clobber).
+So the closure now writes the canonical peer DIRECTLY: for each
+mechanism with `MechanismContactInfo == "complete"`, promote to
+KNOWN guarded against regression (`MechanismRawState < KNOWN`) —
+mirroring `RegisterDiscoveredAgent`'s `state <= NEEDED -> KNOWN`.
+That is the "snapshot inversion": discovery writes the peer instead
+of round-tripping through an Agent snapshot. New transport accessor
+`Peer.MechanismRawState(name)` (non-decayed read) supports the guard.
+
+**Probe — INVARIANT** (verified). 5 binaries build; transport
+standalone + tdns-mp + hsync + all 7 `TestTransportBoundary_*`
+(incl. `_DiscoveryComplete` across API/DNS/both) green under `-race`;
+`cmd/transport-exercise` builds.
 
 ## A3d-END — embed finalization (the concurrency-sensitive chunk)
 

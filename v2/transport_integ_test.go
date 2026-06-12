@@ -473,10 +473,10 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 				DnsMethod: tc.dns,
 				Zones:     map[ZoneName]bool{},
 			}
-			// SyncPeerFromAgent populates APIEndpoint /
-			// DiscoveryAddress from these fields; populate them
-			// only for the mechanism the case advertises so
-			// peer.HasMechanism returns the right answer.
+			// Per-mechanism details exist only for the mechanism the
+			// case advertises (the OnPeerDiscovered closure looks the
+			// agent up; addresses are written on the peer directly
+			// below, mirroring discovery).
 			if tc.api {
 				agent.ApiDetails = &AgentDetails{State: AgentStateKnown}
 			}

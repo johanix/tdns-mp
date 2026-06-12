@@ -67,8 +67,9 @@ func (a *Agent) cryptoFor(mech string) *mechCrypto {
 }
 
 // transportToAgentState maps the canonical transport PeerState back to MP's
-// AgentState. Inverse of agentStateToTransportStateFn. LEGACY is never produced
-// here — it is the MP overlay applied by effectiveAgentState.
+// AgentState (the read direction; transport.Peer is the source of truth).
+// LEGACY is never produced here — it is the MP overlay applied by
+// effectiveAgentState.
 //
 // transport.PeerState has the transient DISCOVERING/INTRODUCING and no LEGACY;
 // MP has no transient equivalents, so DISCOVERING folds to NEEDED and

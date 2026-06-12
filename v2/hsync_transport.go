@@ -451,10 +451,23 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		if !ok {
 			return
 		}
-		// Refresh per-mechanism state from the agent (peer was looked
-		// up by the invocation site; SyncPeerFromAgent returns the
-		// same registry entry).
-		tm.SyncPeerFromAgent(agent)
+		// S4 (snapshot inversion): discovery writes the canonical peer
+		// directly instead of round-tripping per-mechanism state through
+		// an Agent snapshot (SyncPeerFromAgent/PopulateFromAgent, deleted).
+		// Promote each usable mechanism to KNOWN, but never regress one
+		// already past KNOWN (a re-discovery must not knock an
+		// OPERATIONAL/INTRODUCED transport back down) — mirrors the
+		// `state <= NEEDED -> KNOWN` guard in RegisterDiscoveredAgent.
+		// Usability is the "complete" contact-info set there; address and
+		// beat counters already live on the peer (S2/S3).
+		for _, name := range []string{"API", "DNS"} {
+			if peer.MechanismContactInfo(name) != "complete" {
+				continue
+			}
+			if s, present := peer.MechanismRawState(name); !present || s < transport.PeerStateKnown {
+				peer.SetMechanismState(name, transport.PeerStateKnown, "discovery complete")
+			}
+		}
 
 		// Set preferred transport based on what's available
 		if agent.ApiMethod && agent.DnsMethod {
@@ -1429,12 +1442,10 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 // GetOrCreatePeer returns the transport.Peer keyed by agent.Identity,
 // creating it (in PeerStateNeeded) if it does not already exist.
 //
-// Bite H: split out from SyncPeerFromAgent. Hot send paths use this
-// instead because the per-send state-refresh that SyncPeerFromAgent
-// performs is redundant — receipt sites already dual-write the
-// per-mechanism state. SyncPeerFromAgent is reserved for callers
-// that genuinely need a fresh state pull (currently only the
-// OnPeerDiscovered closure at discovery completion).
+// transport.Peer is the canonical per-mechanism state store: receipt
+// and send sites write it directly, so there is no Agent->Peer state
+// pull. (S4 removed the SyncPeerFromAgent snapshot path; discovery
+// completion writes the peer directly in the OnPeerDiscovered closure.)
 func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
 	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
 	// S2: the AgentDetails->transport address restore is removed.
@@ -1444,73 +1455,6 @@ func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
 	// (Initialize*AsPeer / main_init / apihandler_peer). No peer reaches a
 	// send path without its transport address already populated.
 	return peer
-}
-
-// SyncPeerFromAgent returns the transport.Peer for this agent and
-// refreshes its per-mechanism state from the agent. Equivalent to
-// GetOrCreatePeer followed by an explicit state-refresh pass.
-//
-// Use only when the agent's state is known to be stale relative to
-// the peer (e.g. after discovery completion). Hot send paths should
-// use GetOrCreatePeer instead — see Bite H in
-// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
-func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
-	peer := tm.GetOrCreatePeer(agent)
-
-	// S2: address/endpoint are no longer sourced from AgentDetails — they
-	// live on transport.Peer, written at discovery/config registration.
-	// (This whole accessor is deleted in S4.)
-	if agent.ApiDetails != nil {
-		if ac := agent.cryptoFor("API"); ac != nil && ac.TlsaRR != nil {
-			// Store TLSA for TLS verification
-			peer.TLSARecord = []byte{} // Would need to serialize TLSA
-		}
-	}
-
-	// Sync state (legacy single-state field)
-	if agent.ApiDetails != nil {
-		peer.SetState(tm.agentStateToTransportState(agent.ApiDetails.State), "")
-	}
-
-	// Sync zones
-	for zone := range agent.Zones {
-		peer.AddSharedZone(string(zone), "", "")
-	}
-
-	// Bite 7: also populate per-mechanism state on the Peer. Both the
-	// legacy single-state writes above and the new per-mechanism map
-	// are updated; Phase 7 of the main refactor will delete the
-	// legacy block once the per-mechanism path has full coverage.
-	peer.PopulateFromAgent(agent)
-
-	return peer
-}
-
-// agentStateToTransportState converts AgentState to transport.PeerState.
-func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transport.PeerState {
-	switch state {
-	case AgentStateNeeded:
-		return transport.PeerStateNeeded
-	case AgentStateKnown:
-		return transport.PeerStateKnown
-	case AgentStateIntroduced:
-		return transport.PeerStateIntroducing
-	case AgentStateOperational:
-		return transport.PeerStateOperational
-	case AgentStateLegacy:
-		// Legacy = established relationship but no shared zones.
-		// Treated as active; map to Operational so legacy peers
-		// don't regress in transport snapshots.
-		return transport.PeerStateOperational
-	case AgentStateDegraded:
-		return transport.PeerStateDegraded
-	case AgentStateInterrupted:
-		return transport.PeerStateInterrupted
-	case AgentStateError:
-		return transport.PeerStateError
-	default:
-		return transport.PeerStateNeeded
-	}
 }
 
 // SendHelloWithFallback sends a Hello handshake to a peer with transport fallback (legacy name).
@@ -1773,9 +1717,8 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 // Bite 7 (inherited from Bite 1 step 5): delegates to
 // peer.PreferredMechanism() when the peer is in the registry, with a
 // fallback to the agent.ApiMethod / agent.DnsMethod flags for peers
-// not yet synced (e.g. during early startup before the first
-// SyncPeerFromAgent runs). Returns "none" for the no-mechanism case
-// to preserve the original contract.
+// not yet in the registry (e.g. during early startup). Returns "none"
+// for the no-mechanism case to preserve the original contract.
 func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
 	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
 		if pref := peer.PreferredMechanism(); pref != "" {
