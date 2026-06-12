@@ -87,6 +87,7 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | Gate-3 (CleanupZoneRelationships) | DONE | mp `18ac2d7` (explanatory no-op) |
 | A3d-S1b (State **display** redirect) | DONE | mp `68e7a69`; functional State retirement re-scoped to A3d-END.0 |
 | A3d-S2 (address redirect + drop fields) | DONE | this commit; transport `DNSEndpoint` accessor; AgentDetails.Addrs/Port/BaseUri removed |
+| A3d-S3 (transport-internal stats + functional redirect) | DONE; field-drop deferred to END.0 | transport `RecordMechanismBeatSent`/`MechanismBeatSequence`; mp redirects the 2 functional SentBeats readers; 5 fields stay as wire-DTO carrier (see S3) |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
@@ -314,29 +315,55 @@ DECIDED (a), see below.
 (all three peer kinds: discovered / config-infra / registry-only);
 `addrr` round-trip ACCEPTED; combiner reachable from the agent.
 
-## A3d-S3 — telemetry: complete transport write coverage, redirect
+## A3d-S3 — telemetry: transport-internal stats + functional redirect — DONE (item 4 deferred to END.0)
 
-The only slice that ADDS writes (DNS-only coverage today).
-1. Add API-side `LastHelloRecv/Sent` + beat-time writes at the
-   API hello/beat receipt sites (today only the DNS handler path
-   writes them, spine doc §1).
-2. Verify in tdns-transport that `Stats`, `BeatSequence`,
-   `ConsecutiveFails` are maintained transport-internally
-   (`RecordBeatSent` has 0 MP callers — confirm transport calls
-   it on its own send path; if not, that is a transport-side fix
-   first).
-3. Redirect display `LastUsed` and the **functional** `SentBeats`
-   uses — beat-sequence (`hsync_hello.go`,
-   `hsync_infra_beat.go:76-99`) and gossip-sent detection
-   (`hsync_bridge.go:61-81`) — to `BeatSequence`/`Stats`.
-4. Drop `AgentDetails.HelloTime/LatestSBeat/LatestRBeat/
-   DiscoveryFailures/SentBeats` + bridge copies (same NG-reader
-   check; note NG `checkPeerState` reads the *hsync*-side
-   `LatestRBeat/SBeat` — those stay until D).
+**RE-SCOPED 2026-06-11.** Item 1's premise was stale: the peer-state
+truth fix (`fc0c189`) already gave the API path full hello/beat-time
+coverage (`HeartbeatHandler` writes both API+DNS inbound; the outbound
+Hello :1555/:1583 and Beat :1673-1676/:1714-1717 paths are symmetric;
+the API beat path already calls `SetMechanismLastBeatSent("API")`).
+So there was NO coverage gap to add — S3 became a pure INVARIANT
+slice, NOT the EXPLAINED-DELTA "adds writes" slice originally framed.
 
-**Probe — EXPLAINED DELTA (small):** display `LastUsed` may gain
-API-side timestamps that were previously missing (that is the
-added coverage). Everything else INVARIANT.
+1. ~~Add API-side coverage~~ — already present (Fix A). No-op.
+2. **DONE (transport-first, operator-chosen).** `RecordBeatSent` had
+   0 callers and transport's `Beat()` did not maintain `BeatSequence`/
+   `Stats` — they were maintained only by MP's `AgentDetails.SentBeats`.
+   Added `Peer.RecordMechanismBeatSent(name)` (transport `<hash>`):
+   `APITransport.Beat`/`DNSTransport.Beat` now bump per-mechanism
+   `Mechanisms[m].{BeatSequence,LastBeatSent}` + top-level aggregate +
+   `Stats` on their Ack-true success path. `Peer.MechanismBeatSequence(name)`
+   read accessor added. `ConsecutiveFails` left as-is (it is a Stage-D
+   liveness field, not an S3 concern).
+3. **DONE (mp `<hash>`).** Redirected the two FUNCTIONAL `SentBeats`
+   readers to `transport.Peer.MechanismBeatSequence`: infra-beat
+   sequence seeding (`hsync_infra_beat.go`) and gossip-sent detection
+   (`beatTransportUsed`, `hsync_bridge.go`). Display `LastUsed`: the
+   `AgentDetails.HelloTime` fallbacks in `apihandler_agent_distrib.go`
+   were already dead (unconditionally overwritten by the
+   `transport.Peer` `Stats.LastUsed` path) — deleted. `peer reset` no
+   longer touches `AgentDetails.DiscoveryFailures`.
+4. **DEFERRED to A3d-END.0** (was: drop the 5 fields + bridge copies).
+   Reason discovered during S3: `AgentDetails` doubles as the WIRE DTO
+   — `GetZoneAgentData` serializes the live `Agent` (incl. `*AgentDetails`)
+   into the `peer status`/hsync API response, and the CLI client
+   (`cli/hsync_cmds.go:558-560`, no `transport.Peer` client-side) reads
+   `SentBeats/LatestSBeat/LatestRBeat` off the deserialized DTO for its
+   "Heartbeats: Sent/received" line. Dropping the fields breaks that
+   line unless the DTO is first fed from `transport.Peer`. Two of the
+   same line's fields (`ReceivedBeats`→A5, `BeatInterval`→Stage D) can't
+   move in S3 regardless. So the 5 fields stay as a write-mostly DTO
+   carrier (no live FUNCTIONAL reads remain after item 3) until END.0/
+   END.1 give `Agent` a transport-fed view and answer the DTO question
+   once for all fields. The converter/bridge copies
+   (`hsync_bridge_sync.go`, `agent_structs.go` snapshot methods) stay
+   with them. NG `checkPeerState` reads the *hsync*-side
+   `LatestRBeat/SBeat` (separate struct) — untouched, stays until D.
+
+**Probe — INVARIANT:** `transport.Peer` now maintains its own beat
+counters; the two MP functional readers consume them; no display or
+wire change (the dropped `HelloTime` display fallback was already
+dead). Suite + boundary + `-race` green; 5 binaries build.
 
 ## A3d-S4 — the snapshot inversion (residual A4)
 
@@ -379,9 +406,15 @@ One session; sub-steps are separate commits, each green +
   `hsync.Peer.Mu` (ONE peer mutex); `Zones` →
   `hsync.Peer.Zones` (transitional; reads stay derived per A2);
   `DeferredTasks` → `hsync.Peer.Deferred`. `AgentDetails` fields
-  are empty of live reads by now (State retired in END.0, address
-  in S2, telemetry in S3); the struct itself is deleted in A5
-  (supersession item 2).
+  are empty of live FUNCTIONAL reads by now (State retired in END.0,
+  address in S2, telemetry-functional in S3) — BUT the 5 telemetry
+  fields (`HelloTime/LatestSBeat/LatestRBeat/DiscoveryFailures/
+  SentBeats`) plus `ReceivedBeats` are still serialized as the
+  `GetZoneAgentData` wire DTO read by the CLI `peer status` line
+  (S3 item 4 deferral). Before the struct is deleted in A5, feed
+  that DTO from `transport.Peer` (a `GetZoneAgentData` populate
+  step, or a dedicated response DTO) — do it as part of END.0 (it
+  pairs with the State DTO migration) so the CLI line survives.
 - **END.2 — delete the dual map.** Remove the temporary
   `AgentRegistry.S`/`mu` shadowing the embedded
   `hsync.Registry.S` (`agent_structs.go:206-214`); duplicated

@@ -410,9 +410,6 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						HasTLSA:     hasTLSA,
 						State:       AgentStateToString[effectiveState],
 					}
-					if !agent.ApiDetails.HelloTime.IsZero() {
-						peerInfo.LastUsed = agent.ApiDetails.HelloTime
-					}
 					if apiPeer != nil {
 						peerInfo.ContactInfo = apiPeer.MechanismContactInfo("API")
 						s := apiPeer.Stats.GetDetailedStats()
@@ -505,9 +502,6 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						HasJWK:       jwkData != "",
 						HasKEY:       hasKEY,
 						State:        AgentStateToString[effectiveState],
-					}
-					if !agent.DnsDetails.HelloTime.IsZero() {
-						peerInfo.LastUsed = agent.DnsDetails.HelloTime
 					}
 					if dnsPeer != nil {
 						peerInfo.ContactInfo = dnsPeer.MechanismContactInfo("DNS")

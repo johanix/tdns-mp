@@ -71,12 +71,7 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			ctx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
 			defer cancel()
 
-			agent.Mu.RLock()
-			var sequence uint64
-			if agent.DnsDetails.SentBeats > 0 {
-				sequence = uint64(agent.DnsDetails.SentBeats)
-			}
-			agent.Mu.RUnlock()
+			sequence := ar.MPTransport.GetOrCreatePeer(agent).MechanismBeatSequence("DNS")
 
 			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
 			agent.Mu.Lock()
@@ -96,8 +91,6 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			}
 
 			lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
-			agent.DnsDetails.SentBeats++
-			agent.DnsDetails.LatestSBeat = time.Now()
 			agent.DnsDetails.LatestError = ""
 		}(a)
 	}

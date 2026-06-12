@@ -55,30 +55,25 @@ func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence
 		return false, "", nil
 	}
 	agent := agentForTransport(b.ar, peer)
-	var beforeAPI, beforeDNS uint32
-	agent.Mu.RLock()
-	if agent.ApiDetails != nil {
-		beforeAPI = agent.ApiDetails.SentBeats
-	}
-	if agent.DnsDetails != nil {
-		beforeDNS = agent.DnsDetails.SentBeats
-	}
-	agent.Mu.RUnlock()
+	tp := b.tm.GetOrCreatePeer(agent)
+	beforeAPI := tp.MechanismBeatSequence("API")
+	beforeDNS := tp.MechanismBeatSequence("DNS")
 
 	resp, err := b.tm.SendBeatWithFallback(ctx, agent, sequence)
 	persistAgentAndPeer(b.ar, peer, agent)
-	used := beatTransportUsed(agent, beforeAPI, beforeDNS)
+	used := beatTransportUsed(agent, tp, beforeAPI, beforeDNS)
 	if err != nil || resp == nil {
 		return false, used, err
 	}
 	return resp.Ack, used, nil
 }
 
-func beatTransportUsed(agent *Agent, beforeAPI, beforeDNS uint32) string {
+func beatTransportUsed(agent *Agent, tp *transport.Peer, beforeAPI, beforeDNS uint64) string {
 	agent.Mu.RLock()
-	defer agent.Mu.RUnlock()
-	apiSent := agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.SentBeats > beforeAPI
-	dnsSent := agent.DnsMethod && agent.DnsDetails != nil && agent.DnsDetails.SentBeats > beforeDNS
+	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
+	agent.Mu.RUnlock()
+	apiSent := apiMethod && tp.MechanismBeatSequence("API") > beforeAPI
+	dnsSent := dnsMethod && tp.MechanismBeatSequence("DNS") > beforeDNS
 	switch {
 	case dnsSent && !apiSent:
 		return hsync.TransportDNS

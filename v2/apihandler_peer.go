@@ -120,12 +120,10 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 			agent.Mu.Lock()
 			if agent.ApiDetails != nil {
 				agent.ApiDetails.State = AgentStateNeeded
-				agent.ApiDetails.DiscoveryFailures = 0
 				agent.ApiDetails.LatestError = ""
 			}
 			if agent.DnsDetails != nil {
 				agent.DnsDetails.State = AgentStateNeeded
-				agent.DnsDetails.DiscoveryFailures = 0
 				agent.DnsDetails.LatestError = ""
 			}
 			agent.State = AgentStateNeeded
