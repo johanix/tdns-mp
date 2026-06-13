@@ -474,13 +474,13 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		// Set preferred transport based on what's available
 		if agent.ApiMethod && agent.DnsMethod {
 			peer.PreferredTransport = "API"
-			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
+			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.ID)
 		} else if agent.ApiMethod {
 			peer.PreferredTransport = "API"
-			lgTransport.Info("agent has API only", "agent", agent.Identity)
+			lgTransport.Info("agent has API only", "agent", agent.ID)
 		} else if agent.DnsMethod {
 			peer.PreferredTransport = "DNS"
-			lgTransport.Info("agent has DNS only", "agent", agent.Identity)
+			lgTransport.Info("agent has DNS only", "agent", agent.ID)
 		}
 
 		// Top-level State must agree with the per-mechanism truth:
@@ -494,7 +494,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			peer.SetState(transport.PeerStateKnown, "discovery complete")
 		}
 
-		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
+		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
 	}
 
 	// Symmetric failure-side seam (Bite D). Fired by MP's
@@ -673,7 +673,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
 			agent.Mu.Unlock()
-			tm.agentRegistry.S.Set(agent.Identity, agent)
+			tm.agentRegistry.S.Set(agent.ID, agent)
 		} else {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
 			// This ensures receiver can send beats back to sender
@@ -753,7 +753,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 			agent.DnsDetails.LastContactTime = time.Now()
 			agent.DnsDetails.LatestRBeat = time.Now()
 			agent.Mu.Unlock()
-			tm.agentRegistry.S.Set(agent.Identity, agent)
+			tm.agentRegistry.S.Set(agent.ID, agent)
 		}
 	}
 
@@ -895,7 +895,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
 			agent.DnsDetails.LastContactTime = time.Now()
-			tm.agentRegistry.S.Set(agent.Identity, agent)
+			tm.agentRegistry.S.Set(agent.ID, agent)
 		}
 	}
 
@@ -1459,7 +1459,7 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	return syncResp, nil
 }
 
-// GetOrCreatePeer returns the transport.Peer keyed by agent.Identity,
+// GetOrCreatePeer returns the transport.Peer keyed by agent.ID,
 // creating it (in PeerStateNeeded) if it does not already exist.
 //
 // transport.Peer is the canonical per-mechanism state store: receipt
@@ -1467,7 +1467,7 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 // pull. (S4 removed the SyncPeerFromAgent snapshot path; discovery
 // completion writes the peer directly in the OnPeerDiscovered closure.)
 func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
-	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	peer := tm.PeerRegistry.GetOrCreate(string(agent.ID))
 	// S2: the AgentDetails->transport address restore is removed.
 	// transport.Peer is the sole address source: discovered peers write
 	// it during registration (RegisterDiscoveredAgent), config-infra
@@ -1607,7 +1607,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	var gossipData json.RawMessage
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
-			string(agent.Identity), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
+			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 		if len(gossipMsgs) > 0 {
 			gossipData, _ = json.Marshal(gossipMsgs)
 		}
@@ -1663,7 +1663,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 
 				if !apiWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
 					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
-						tm.agentRegistry.sharedParticipantZones(agent.Identity))
+						tm.agentRegistry.sharedParticipantZones(agent.ID))
 				}
 			}
 		}
@@ -1712,7 +1712,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				// elections fire when WE first become able to reach a peer.
 				if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
 					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
-						tm.agentRegistry.sharedParticipantZones(agent.Identity))
+						tm.agentRegistry.sharedParticipantZones(agent.ID))
 				}
 			}
 		}
@@ -1759,7 +1759,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 // not yet in the registry (e.g. during early startup). Returns "none"
 // for the no-mechanism case to preserve the original contract.
 func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
-	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+	if peer, ok := tm.PeerRegistry.Get(string(agent.ID)); ok {
 		if pref := peer.PreferredMechanism(); pref != "" {
 			return pref
 		}
@@ -1785,7 +1785,7 @@ func (tm *MPTransportBridge) HasDNSTransport(agent *Agent) bool {
 	if tm.DNSTransport == nil {
 		return false
 	}
-	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+	if peer, ok := tm.PeerRegistry.Get(string(agent.ID)); ok {
 		return peer.HasMechanism("DNS")
 	}
 	return agent.DnsMethod
@@ -1800,7 +1800,7 @@ func (tm *MPTransportBridge) HasAPITransport(agent *Agent) bool {
 	if tm.APITransport == nil {
 		return false
 	}
-	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+	if peer, ok := tm.PeerRegistry.Get(string(agent.ID)); ok {
 		return peer.HasMechanism("API")
 	}
 	return agent.ApiMethod
@@ -2035,7 +2035,7 @@ func (tm *MPTransportBridge) getAllAgentsForZone(zone ZoneName) ([]AgentId, erro
 
 	var agents []AgentId
 	for _, agent := range zad.Agents {
-		agents = append(agents, agent.Identity)
+		agents = append(agents, agent.ID)
 	}
 
 	return agents, nil

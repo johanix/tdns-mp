@@ -7,39 +7,42 @@ import (
 	"github.com/johanix/tdns-mp/v2/hsync"
 )
 
+// hsyncPeerToAgent builds the MP-side Agent VIEW over a hsync.Peer (E1.a). The
+// Agent now EMBEDS the *hsync.Peer, so ID / Zones / Deferred / ApiMethod /
+// DnsMethod / IsInfraPeer / LastState come directly from the shared peer — no
+// copy. Only the different-typed shadowing fields (ApiDetails/DnsDetails as
+// *AgentDetails, State as AgentState) are derived from the peer's connection
+// state (now dead post-D2.5, kept until A5/D). The peer pointer is shared, not
+// cloned; E1.b removes this function and the dual map entirely.
 func hsyncPeerToAgent(peer *hsync.Peer) *Agent {
 	if peer == nil {
 		return nil
 	}
 	peer.Mu.RLock()
 	defer peer.Mu.RUnlock()
-	agent := &Agent{
-		Identity:    AgentId(peer.ID),
-		PeerID:      peer.TransportID,
-		ApiDetails:  hsyncDetailsToAgent(peer.ApiDetails),
-		DnsDetails:  hsyncDetailsToAgent(peer.DnsDetails),
-		ApiMethod:   peer.ApiMethod,
-		DnsMethod:   peer.DnsMethod,
-		IsInfraPeer: peer.IsInfraPeer,
-		Zones:       make(map[ZoneName]bool),
-		State:       AgentState(peer.State),
-		LastState:   peer.LastState,
+	return &Agent{
+		Peer:       peer,
+		ApiDetails: hsyncDetailsToAgent(peer.ApiDetails),
+		DnsDetails: hsyncDetailsToAgent(peer.DnsDetails),
+		State:      AgentState(peer.State),
 	}
-	for z := range peer.Zones {
-		agent.Zones[ZoneName(z)] = true
-	}
-	for _, t := range peer.Deferred {
-		agent.DeferredTasks = append(agent.DeferredTasks, DeferredAgentTask{
-			Precondition: t.Precondition,
-			Action:       t.Action,
-			Desc:         t.Desc,
-		})
-	}
-	return agent
 }
 
 func syncHsyncPeerFromAgent(peer *hsync.Peer, agent *Agent) {
 	if peer == nil || agent == nil {
+		return
+	}
+	// E1.a: ApiMethod/DnsMethod/IsInfraPeer/LastState now PROMOTE from agent.Peer
+	// (one copy) — no longer copied here. Only the different-typed connection
+	// state (ApiDetails/DnsDetails/State) is mirrored onto the embed's same-named
+	// fields, keeping the NG store in step (dead post-D2.5; retires A5/D). When
+	// peer == agent.Peer (the shared embed) this is a self-update of those fields.
+	if peer == agent.Peer {
+		peer.Mu.Lock()
+		defer peer.Mu.Unlock()
+		peer.ApiDetails = agentDetailsToHsync(agent.ApiDetails)
+		peer.DnsDetails = agentDetailsToHsync(agent.DnsDetails)
+		peer.State = hsync.PeerState(agent.State)
 		return
 	}
 	agent.Mu.RLock()
@@ -60,7 +63,7 @@ func persistAgentAndPeer(ar *AgentRegistry, peer *hsync.Peer, agent *Agent) {
 		return
 	}
 	syncHsyncPeerFromAgent(peer, agent)
-	ar.S.Set(agent.Identity, agent)
+	ar.S.Set(agent.ID, agent)
 }
 
 func agentToHsyncPeer(agent *Agent) *hsync.Peer {
@@ -69,8 +72,8 @@ func agentToHsyncPeer(agent *Agent) *hsync.Peer {
 	}
 	agent.Mu.RLock()
 	defer agent.Mu.RUnlock()
-	peer := hsync.NewPeer(hsync.PeerID(agent.Identity))
-	peer.TransportID = agent.PeerID
+	peer := hsync.NewPeer(agent.ID)
+	peer.TransportID = string(agent.ID)
 	peer.ApiDetails = agentDetailsToHsync(agent.ApiDetails)
 	peer.DnsDetails = agentDetailsToHsync(agent.DnsDetails)
 	peer.ApiMethod = agent.ApiMethod
@@ -79,7 +82,7 @@ func agentToHsyncPeer(agent *Agent) *hsync.Peer {
 	peer.State = hsync.PeerState(agent.State)
 	peer.LastState = agent.LastState
 	for z := range agent.Zones {
-		peer.Zones[hsync.ZoneName(z)] = true
+		peer.Zones[z] = true
 	}
 	return peer
 }
@@ -137,9 +140,9 @@ func syncHsyncPeerToAgent(ar *AgentRegistry, peer *hsync.Peer) {
 	if ar == nil || peer == nil {
 		return
 	}
-	existing, _ := ar.S.Get(AgentId(peer.ID))
+	existing, _ := ar.S.Get(peer.ID)
 	agent := hsyncPeerToAgent(peer)
 	_ = existing // S2: address-merge removed (addresses live on transport.Peer)
-	ar.S.Set(agent.Identity, agent)
+	ar.S.Set(agent.ID, agent)
 	syncHsyncPeerFromAgent(peer, agent)
 }

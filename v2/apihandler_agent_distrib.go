@@ -324,20 +324,20 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 		ar := conf.InternalMp.AgentRegistry
 
 		ar.S.IterCb(func(agentID AgentId, agent *Agent) {
-			agentIDFqdn := dns.Fqdn(string(agent.Identity))
+			agentIDFqdn := dns.Fqdn(string(agent.ID))
 
 			isCombiner := false
 			if mp.Combiner != nil && mp.Combiner.Identity != "" {
-				isCombiner = string(agent.Identity) == mp.Combiner.Identity ||
-					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(mp.Combiner.Identity)
+				isCombiner = string(agent.ID) == mp.Combiner.Identity ||
+					dns.Fqdn(string(agent.ID)) == dns.Fqdn(mp.Combiner.Identity)
 			} else {
-				isCombiner = agent.Identity == "combiner"
+				isCombiner = agent.ID == "combiner"
 			}
 
 			isSigner := false
 			if mp.Signer != nil && mp.Signer.Identity != "" {
-				isSigner = string(agent.Identity) == mp.Signer.Identity ||
-					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(mp.Signer.Identity)
+				isSigner = string(agent.ID) == mp.Signer.Identity ||
+					dns.Fqdn(string(agent.ID)) == dns.Fqdn(mp.Signer.Identity)
 			}
 
 			peerType := "agent"
@@ -348,7 +348,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 			}
 
 			// LEGACY == derived participations == 0 (not stored agent.Zones).
-			zeroParticipations := len(ar.sharedParticipantZones(agent.Identity)) == 0
+			zeroParticipations := len(ar.sharedParticipantZones(agent.ID)) == 0
 
 			// Add API transport entry when this mechanism is in use
 			if agent.ApiMethod && agent.ApiDetails != nil {
@@ -651,7 +651,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.Mu.RLock()
-		identity := agent.Identity
+		identity := agent.ID
 		state := agent.State
 		agent.Mu.RUnlock()
 
@@ -706,7 +706,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 
 	members := participantFQDNSetForApex(zoneApex(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
-		identity := agent.Identity
+		identity := agent.ID
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {

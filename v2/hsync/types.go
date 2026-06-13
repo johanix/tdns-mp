@@ -18,6 +18,10 @@ func (id PeerID) String() string { return string(id) }
 // ZoneName is a DNS zone name served in the HSYNC group.
 type ZoneName string
 
+// String lets ZoneName satisfy core.Stringer (used by tdnsmp via the
+// ZoneName = hsync.ZoneName alias, E1.a).
+func (zn ZoneName) String() string { return string(zn) }
+
 // PeerState is the HSYNC peer lifecycle state.
 type PeerState uint8
 

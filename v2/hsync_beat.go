@@ -59,7 +59,7 @@ func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) 
 		return nil, fmt.Errorf("agent is nil")
 	}
 	if agent.Api == nil {
-		return nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
+		return nil, fmt.Errorf("no API client configured for agent %s", agent.ID)
 	}
 
 	// Create a context with a 2-second timeout

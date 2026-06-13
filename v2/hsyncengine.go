@@ -476,7 +476,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				amr, err := agent.SendApiMsg(&AgentMsgPost{
 					MessageType:  AgentMsgNotify,
 					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.Identity,
+					YourIdentity: agent.ID,
 					Zone:         msg.Zone,
 					Records:      groupRRStringsByOwner(msg.RRs),
 					Time:         time.Now(),
@@ -495,8 +495,8 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			}
 
 			if syncErr != nil {
-				lgEngine.Error("error sending message to agent", "agent", agent.Identity, "err", syncErr)
-				errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.Identity, syncErr))
+				lgEngine.Error("error sending message to agent", "agent", agent.ID, "err", syncErr)
+				errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.ID, syncErr))
 				continue
 			}
 			resp.Msg = syncMsg
@@ -523,18 +523,18 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %q not found", msg.Zone, zad.MyUpstream)
 					return
 				}
-				if !ar.isAgentOperational(agent.Identity) {
+				if !ar.isAgentOperational(agent.ID) {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[ar.effectiveAgentState(agent.Identity)])
+					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[ar.effectiveAgentState(agent.ID)])
 					return
 				}
 				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
 				if configResp == nil {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.Identity)
+					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.ID)
 					return
 				}
-				resp.RfiResponse[agent.Identity] = &RfiData{
+				resp.RfiResponse[agent.ID] = &RfiData{
 					Status:     "ok",
 					ConfigData: configResp.ConfigData,
 				}
@@ -546,8 +546,8 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not found", aid)}
 						continue
 					}
-					if !ar.isAgentOperational(agent.Identity) {
-						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[ar.effectiveAgentState(agent.Identity)])}
+					if !ar.isAgentOperational(agent.ID) {
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[ar.effectiveAgentState(agent.ID)])}
 						continue
 					}
 					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
@@ -563,16 +563,16 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 			case "sig0key":
 				for _, agent := range zad.Agents {
-					if !ar.isAgentOperational(agent.Identity) {
-						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[ar.effectiveAgentState(agent.Identity)])}
+					if !ar.isAgentOperational(agent.ID) {
+						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)])}
 						continue
 					}
 					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
 					if configResp == nil {
-						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
 						continue
 					}
-					resp.RfiResponse[agent.Identity] = &RfiData{
+					resp.RfiResponse[agent.ID] = &RfiData{
 						Status:     "ok",
 						ConfigData: configResp.ConfigData,
 					}
@@ -589,25 +589,25 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// Send RFI SYNC to all remote agents for this zone.
 			lgEngine.Info("sending SYNC RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
-				if !ar.isAgentOperational(agent.Identity) {
-					resp.RfiResponse[agent.Identity] = &RfiData{
+				if !ar.isAgentOperational(agent.ID) {
+					resp.RfiResponse[agent.ID] = &RfiData{
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[ar.effectiveAgentState(agent.Identity)]),
+						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)]),
 					}
 					continue
 				}
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
 					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.Identity,
+					YourIdentity: agent.ID,
 					Zone:         msg.Zone,
 					RfiType:      "SYNC",
 				})
 				if err != nil {
-					resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: err.Error()}
+					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: err.Error()}
 					continue
 				}
-				resp.RfiResponse[agent.Identity] = &RfiData{Status: "ok", Msg: amr.Msg}
+				resp.RfiResponse[agent.ID] = &RfiData{Status: "ok", Msg: amr.Msg}
 			}
 			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
 
@@ -615,16 +615,16 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
 			lgEngine.Info("sending AUDIT RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
-				if !ar.isAgentOperational(agent.Identity) {
-					resp.RfiResponse[agent.Identity] = &RfiData{
+				if !ar.isAgentOperational(agent.ID) {
+					resp.RfiResponse[agent.ID] = &RfiData{
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[ar.effectiveAgentState(agent.Identity)]),
+						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)]),
 					}
 					continue
 				}
 				auditResp := RequestAndWaitForAudit(ar, agent, string(msg.Zone), msgQs)
 				if auditResp == nil {
-					resp.RfiResponse[agent.Identity] = &RfiData{
+					resp.RfiResponse[agent.ID] = &RfiData{
 						Error:    true,
 						ErrorMsg: "timeout or error waiting for AUDIT response",
 					}
@@ -637,7 +637,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				if typed, ok := auditResp.AuditData.(map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo); ok {
 					rfiData.AuditData = typed
 				}
-				resp.RfiResponse[agent.Identity] = rfiData
+				resp.RfiResponse[agent.ID] = rfiData
 			}
 			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
 
@@ -731,7 +731,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 			}, nil
 		}
 		dnsErr = err
-		lgConnRetryEngine.Warn("DNS transport failed, trying API", "agent", agent.Identity, "err", err)
+		lgConnRetryEngine.Warn("DNS transport failed, trying API", "agent", agent.ID, "err", err)
 	}
 
 	// Fall back to API transport (synchronous request-response)
@@ -740,9 +740,9 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 	}
 
 	if dnsErr != nil {
-		return nil, fmt.Errorf("send to agent %q failed and no API fallback: %w", agent.Identity, dnsErr)
+		return nil, fmt.Errorf("send to agent %q failed and no API fallback: %w", agent.ID, dnsErr)
 	}
-	return nil, fmt.Errorf("no transport available for agent %q (no DNS transport manager, no API client)", agent.Identity)
+	return nil, fmt.Errorf("no transport available for agent %q (no DNS transport manager, no API client)", agent.ID)
 }
 
 // XXX: Not used at the moment.
@@ -760,9 +760,9 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 		// Pass pointer to avoid copying the mutex
 		saneAgent := tdns.SanitizeForJSON(agent)
 		if foo, ok := saneAgent.(*Agent); ok {
-			agents[agent.Identity] = foo
+			agents[agent.ID] = foo
 		} else {
-			lgEngine.Error("failed to sanitize agent for JSON", "agent", agent.Identity)
+			lgEngine.Error("failed to sanitize agent for JSON", "agent", agent.ID)
 		}
 	}
 
@@ -780,7 +780,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 
 func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	if agent.Api == nil {
-		return nil, fmt.Errorf("no API client configured for agent %q", agent.Identity)
+		return nil, fmt.Errorf("no API client configured for agent %q", agent.ID)
 	}
 
 	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/msg", msg, false)

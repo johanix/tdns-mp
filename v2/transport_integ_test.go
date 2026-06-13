@@ -466,13 +466,9 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newIntegEnv(t, nil)
 
-			agent := &Agent{
-				Identity:  AgentId(env.Bob.Identity),
-				PeerID:    env.Bob.Identity,
-				ApiMethod: tc.api,
-				DnsMethod: tc.dns,
-				Zones:     map[ZoneName]bool{},
-			}
+			agent := NewAgent(AgentId(env.Bob.Identity))
+			agent.ApiMethod = tc.api
+			agent.DnsMethod = tc.dns
 			// Per-mechanism details exist only for the mechanism the
 			// case advertises (the OnPeerDiscovered closure looks the
 			// agent up; addresses are written on the peer directly
@@ -487,11 +483,11 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 			// Register the agent in Alice's registry so the
 			// OnPeerDiscovered closure (which looks up the agent by
 			// PeerID) can find it.
-			env.Alice.Registry.S.Set(agent.Identity, agent)
+			env.Alice.Registry.S.Set(agent.ID, agent)
 			// Bite E: callback takes *Peer; resolve via the registry
 			// before invoking, mirroring the production invocation
 			// site in agent_utils.go.
-			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))
 			// Mirror RegisterDiscoveredAgent: a mechanism is "usable" only
 			// when it has BOTH an endpoint/address AND contact-info marked
 			// "complete". OnPeerDiscovered promotes to KNOWN only for usable
@@ -537,16 +533,12 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 func TestTransportBoundary_DiscoveryUnreachableStaysNeeded(t *testing.T) {
 	env := newIntegEnv(t, nil)
 
-	agent := &Agent{
-		Identity:   AgentId(env.Bob.Identity),
-		PeerID:     env.Bob.Identity,
-		DnsMethod:  true,
-		Zones:      map[ZoneName]bool{},
-		DnsDetails: &AgentDetails{State: AgentStateNeeded},
-	}
-	env.Alice.Registry.S.Set(agent.Identity, agent)
+	agent := NewAgent(AgentId(env.Bob.Identity))
+	agent.DnsMethod = true
+	agent.DnsDetails = &AgentDetails{State: AgentStateNeeded}
+	env.Alice.Registry.S.Set(agent.ID, agent)
 
-	peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+	peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))
 	// DNS advertised but UNREACHABLE: no resolved address, no contact-info
 	// "complete" — exactly what RegisterDiscoveredAgent leaves when the
 	// SVCB/address lookup fails. Discovery still fires OnPeerDiscovered.

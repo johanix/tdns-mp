@@ -498,11 +498,11 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf, peer *t
 
 	// Check if API method is supported and TLSA record exists
 	if agent.ApiDetails == nil {
-		return fmt.Errorf("agent %s: ApiDetails not initialized", agent.Identity)
+		return fmt.Errorf("agent %s: ApiDetails not initialized", agent.ID)
 	}
 	apiCrypto := agent.cryptoFor("API")
 	if !agent.ApiMethod || apiCrypto == nil || apiCrypto.TlsaRR == nil {
-		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
+		return fmt.Errorf("agent %s does not support the API Method", agent.ID)
 	}
 
 	// Verify local agent has necessary certificates
@@ -514,11 +514,11 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf, peer *t
 	if peer != nil {
 		apiBaseUri = peer.APIEndpoint
 	}
-	lgAgent.Debug("creating API client", "identity", agent.Identity, "baseurl", apiBaseUri)
+	lgAgent.Debug("creating API client", "identity", agent.ID, "baseurl", apiBaseUri)
 
 	// Create API client
 	api := AgentApi{
-		ApiClient: tdns.NewClient(string(agent.Identity), apiBaseUri, "", "", "tlsa"),
+		ApiClient: tdns.NewClient(string(agent.ID), apiBaseUri, "", "", "tlsa"),
 	}
 
 	// Load client certificate
@@ -542,8 +542,8 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf, peer *t
 				return fmt.Errorf("failed to parse certificate: %v", err)
 			}
 
-			if dns.Fqdn(cert.Subject.CommonName) != dns.Fqdn(string(agent.Identity)) {
-				return fmt.Errorf("unexpected certificate common name %q (should have been %s)", cert.Subject.CommonName, agent.Identity)
+			if dns.Fqdn(cert.Subject.CommonName) != dns.Fqdn(string(agent.ID)) {
+				return fmt.Errorf("unexpected certificate common name %q (should have been %s)", cert.Subject.CommonName, agent.ID)
 			}
 
 			err = tdns.VerifyCertAgainstTlsaRR(apiCrypto.TlsaRR, rawCert)
@@ -551,7 +551,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf, peer *t
 				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 			}
 
-			lgAgent.Debug("verified cert against TLSA record", "agent", agent.Identity)
+			lgAgent.Debug("verified cert against TLSA record", "agent", agent.ID)
 		}
 
 		return nil
@@ -571,12 +571,12 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf, peer *t
 		if a := peer.CurrentAddress(); a != nil {
 			port := strconv.Itoa(int(a.Port))
 			api.ApiClient.Addresses = []string{net.JoinHostPort(a.Host, port)}
-			lgAgent.Debug("remote agent API address", "agent", agent.Identity, "addr", a.Host)
+			lgAgent.Debug("remote agent API address", "agent", agent.ID, "addr", a.Host)
 		}
 	}
 
 	lgAgent.Debug("setting up agent-to-agent sync API client",
-		"agent", agent.Identity, "baseurl", api.ApiClient.BaseUrl, "authmethod", api.ApiClient.AuthMethod)
+		"agent", agent.ID, "baseurl", api.ApiClient.BaseUrl, "authmethod", api.ApiClient.AuthMethod)
 
 	// Assign the API client to the agent
 	agent.Api = &api

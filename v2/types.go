@@ -7,6 +7,7 @@ package tdnsmp
 import (
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -245,13 +246,16 @@ type KeyInventorySnapshot struct {
 	Received  time.Time
 }
 
-type AgentId string
+// END.1 (E1.a): AgentId and ZoneName are now ALIASES of the hsync types, so the
+// fields promoted from the embedded *hsync.Peer (ID PeerID, Zones
+// map[hsync.ZoneName]bool) are type-identical to the existing AgentId/ZoneName
+// call sites — the embed's "dedupe Identity/PeerID -> hsync.Peer.ID" without a
+// ~440-site type cascade. The aliased types' String() methods come from hsync
+// (the local copies are removed). hsync.PeerID is itself string (= transport's
+// identity by value); it is the surviving thin MP-side join key.
+type AgentId = hsync.PeerID
 
-func (id AgentId) String() string { return string(id) }
-
-type ZoneName string
-
-func (zn ZoneName) String() string { return string(zn) }
+type ZoneName = hsync.ZoneName
 
 type ZoneUpdate struct {
 	Zone       ZoneName

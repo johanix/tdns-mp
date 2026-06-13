@@ -55,32 +55,52 @@ const (
 
 var AgentMsgToString = core.AgentMsgToString
 
+// Agent is the MP-side view of a peer (END.1 / addendum §3). It embeds the thin
+// *hsync.Peer (the surviving MP coordination/identity holder) and promotes its
+// ID / Mu / Zones / Deferred — the END.1 "dedupe Identity/PeerID -> hsync.Peer.ID"
+// (E1.a). hsync.Peer is allocated 1:1 with the Agent; the bridge keeps the two
+// objects in sync until E1.b collapses them to one object.
+//
+// The connection-state fields (ApiDetails/DnsDetails/State/ApiMethod/DnsMethod/
+// IsInfraPeer/LastState) are KEPT here, shadowing the same-named fields on the
+// embedded *hsync.Peer. They are retired to transport.Peer in A5/Stage D, not
+// END.1 — except their values are dead post-D2.5 (no production reader of the
+// connection-state half). Keeping them avoids a type cascade (ApiDetails is
+// *AgentDetails here, *hsync.PeerDetails on the embed).
+//
+// E1.a dedupes every field whose type already matches the embedded hsync.Peer
+// (no type cascade): ID (Identity/PeerID), Mu, Zones, Deferred, ApiMethod,
+// DnsMethod, IsInfraPeer, LastState — all PROMOTE from *hsync.Peer, so e.g.
+// agent.ApiMethod IS agent.Peer.ApiMethod (one copy; engine and MP read the same
+// field). Only the DIFFERENT-typed connection-state fields stay on Agent,
+// shadowing the embed's same-named ones: ApiDetails/DnsDetails (*AgentDetails vs
+// *hsync.PeerDetails) and State (AgentState vs hsync.PeerState). Those retire to
+// transport.Peer in A5/Stage D.
+//
+// Access notes after the embed:
+//   - agent.ID (was agent.Identity / agent.PeerID) — type AgentId (= hsync.PeerID)
+//   - agent.Mu / agent.Zones / agent.Deferred (was DeferredTasks),
+//     agent.ApiMethod / agent.DnsMethod / agent.IsInfraPeer / agent.LastState — from *hsync.Peer
 type Agent struct {
-	Identity AgentId
-	// PeerID is the transport-layer identifier for this agent, used as
-	// the key into the transport PeerRegistry. Currently identical to
-	// Identity but kept as a separate field so future identity schemes
-	// (e.g. UUID-based peer IDs) can decouple transport identity from
-	// MP agent identity without touching every consumer. See Bite 4 in
-	// docs/2026-04-25-transport-refactor-early-bites.md.
-	PeerID        string
-	Mu            sync.RWMutex
-	InitialZone   ZoneName
-	ApiDetails    *AgentDetails
-	DnsDetails    *AgentDetails
-	ApiMethod     bool
-	DnsMethod     bool
-	IsInfraPeer   bool // true for combiner/signer — handled by StartInfraBeatLoop, not SendHeartbeats
-	Zones         map[ZoneName]bool
-	Api           *AgentApi
-	State         AgentState // Agent states: needed, known, hello-done, operational, error
-	LastState     time.Time  // When state last changed
-	ErrorMsg      string     // Error message if state is error
-	DeferredTasks []DeferredAgentTask
+	*hsync.Peer // ID, Mu, Zones, Deferred, ApiMethod, DnsMethod, IsInfraPeer, LastState
+
+	InitialZone ZoneName
+	ApiDetails  *AgentDetails // shadows hsync.Peer.ApiDetails (different type); retires A5/D
+	DnsDetails  *AgentDetails // shadows hsync.Peer.DnsDetails (different type); retires A5/D
+	Api         *AgentApi
+	State       AgentState // shadows hsync.Peer.State (AgentState vs hsync.PeerState); retires A5/D
+	ErrorMsg    string     // Error message if state is error
 	// meta is the transitional MP-side sidecar (A3d): per-mechanism crypto
 	// holding pen, en route to transport.Peer at E1. Reached via
 	// ensureCrypto/cryptoFor; lazily allocated.
 	meta *agentMeta
+}
+
+// NewAgent allocates an Agent view over a fresh thin hsync.Peer with the given
+// identity (E1.a). Callers set the MP-only shadow fields (ApiDetails/DnsDetails/
+// State/meta) and the promoted capability flags as needed.
+func NewAgent(id AgentId) *Agent {
+	return &Agent{Peer: hsync.NewPeer(id)}
 }
 
 type AgentDetails struct {
@@ -97,11 +117,11 @@ type AgentDetails struct {
 	LatestRBeat       time.Time
 }
 
-type DeferredAgentTask struct {
-	Precondition func() bool
-	Action       func() (bool, error)
-	Desc         string
-}
+// DeferredAgentTask aliases hsync.DeferredTask so the field promoted from the
+// embedded *hsync.Peer (Deferred []hsync.DeferredTask) is type-identical to the
+// existing DeferredAgentTask call sites (END.1 / E1.a). Same shape (Precondition
+// / Action / Desc); the alias dedupes the type.
+type DeferredAgentTask = hsync.DeferredTask
 
 type AgentApi struct {
 	Name       string

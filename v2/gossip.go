@@ -350,7 +350,7 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 				peerStates[member] = AgentStateToString[AgentStateNeeded]
 				continue
 			}
-			state := ar.effectiveAgentState(agent.Identity)
+			state := ar.effectiveAgentState(agent.ID)
 			peerStates[member] = AgentStateToString[state]
 			lgGossip.Debug("RefreshLocalStates peer", "group", shortHash(hash),
 				"peer", member, "state", AgentStateToString[state], "ptr", fmt.Sprintf("%p", agent))

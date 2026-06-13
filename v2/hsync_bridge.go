@@ -32,7 +32,7 @@ func (b *mpHsyncBridge) RegisterDiscovered(peer *hsync.Peer, result *hsync.Disco
 		return nil
 	}
 	agent := hsyncPeerToAgent(peer)
-	b.ar.S.Set(agent.Identity, agent)
+	b.ar.S.Set(agent.ID, agent)
 	return b.tm.RegisterDiscoveredAgent(&AgentDiscoveryResult{
 		Identity: string(peer.ID),
 		APIUri:   result.APIUri,
@@ -114,7 +114,7 @@ func (b *mpHsyncBridge) AfterDiscoverPeer(peer *hsync.Peer) {
 
 func (b *mpHsyncBridge) SyncPeerZones(peer *hsync.Peer) {
 	agent := hsyncPeerToAgent(peer)
-	b.ar.S.Set(agent.Identity, agent)
+	b.ar.S.Set(agent.ID, agent)
 	b.ar.RecomputeSharedZonesAndSyncState(agent)
 }
 

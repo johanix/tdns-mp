@@ -39,7 +39,7 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	members := participantFQDNSetForApex(zoneApex(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		if members[dns.Fqdn(string(agent.Identity))] {
+		if members[dns.Fqdn(string(agent.ID))] {
 			agents = append(agents, agent)
 		}
 	}
@@ -58,9 +58,9 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 	// Derive the shared-zone set (zones where both we and this agent are
 	// participants). LEGACY is defined as derived participations == 0.
-	shared := ar.sharedParticipantZones(agent.Identity)
+	shared := ar.sharedParticipantZones(agent.ID)
 	zoneCount := len(shared)
-	identity := agent.Identity
+	identity := agent.ID
 
 	// Sync the derived shared zones to the transport peer (atomic replace under
 	// the transport.Peer lock; no registry/peer mutex held across the call —
@@ -148,7 +148,7 @@ func (ar *AgentRegistry) fireOnDiscoveryFailed(agent *Agent, err error) {
 	if ar.TransportManager == nil || ar.TransportManager.OnDiscoveryFailed == nil {
 		return
 	}
-	peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+	peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))
 	ar.TransportManager.OnDiscoveryFailed(peer, err)
 }
 
@@ -188,7 +188,7 @@ func AgentToString(a *Agent) string {
 	if a == nil {
 		return "<nil>"
 	}
-	return string(a.Identity)
+	return string(a.ID)
 }
 
 // GetZoneAgentData returns the zone's member agents, derived from the HSYNC3
@@ -266,12 +266,11 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
 				if err != nil {
 					agent = &Agent{
-						Identity:  AgentId(hsync3.Identity),
-						PeerID:    hsync3.Identity,
-						State:     AgentStateError,
-						ErrorMsg:  fmt.Sprintf("error getting agent info: %v", err),
-						LastState: time.Now(),
+						Peer:     hsync.NewPeer(AgentId(hsync3.Identity)),
+						State:    AgentStateError,
+						ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
 					}
+					agent.LastState = time.Now()
 				}
 				agents = append(agents, agent)
 			}
@@ -418,7 +417,7 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.Mu.Lock()
-	agent.DeferredTasks = append(agent.DeferredTasks, *task)
+	agent.Deferred = append(agent.Deferred, *task)
 	agent.Mu.Unlock()
 }
 
@@ -439,7 +438,7 @@ func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
 			return agent.State == AgentStateOperational
 		},
 		Action: func() (bool, error) {
-			lgAgent.Info("sending RFI to upstream agent (NYI)", "agent", agent.Identity)
+			lgAgent.Info("sending RFI to upstream agent (NYI)", "agent", agent.ID)
 			return true, nil
 		},
 	}
@@ -464,7 +463,7 @@ func (agent *Agent) MarshalJSON() ([]byte, error) {
 		zones[k] = v
 	}
 	aj := AgentJSON{
-		Identity:    agent.Identity,
+		Identity:    agent.ID,
 		InitialZone: agent.InitialZone,
 		ApiMethod:   agent.ApiMethod,
 		DnsMethod:   agent.DnsMethod,
@@ -475,6 +474,6 @@ func (agent *Agent) MarshalJSON() ([]byte, error) {
 	}
 	agent.Mu.RUnlock()
 
-	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.Identity)
+	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.ID)
 	return json.Marshal(aj)
 }

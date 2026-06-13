@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -53,11 +54,7 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 
 	// Create an agent entry for the combiner
 	combinerAgent := &Agent{
-		Identity:    combinerID,
-		PeerID:      string(combinerID),
-		DnsMethod:   true,  // Combiner supports DNS transport (CHUNK)
-		ApiMethod:   false, // API transport added when combiner.api is configured
-		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats
+		Peer: hsync.NewPeer(combinerID),
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational, // Start as operational
 			HelloTime:       time.Now(),
@@ -66,10 +63,14 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		ApiDetails: &AgentDetails{
 			State: AgentStateNeeded, // Not using API transport
 		},
-		Zones:     make(map[ZoneName]bool),
-		State:     AgentStateOperational,
-		LastState: time.Now(),
+		State: AgentStateOperational,
 	}
+	combinerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
+	// Capability/role flags promote from the embedded hsync.Peer (E1.a) — the
+	// engine reads them there (e.g. beat.go's IsInfraPeer skip).
+	combinerAgent.DnsMethod = true   // Combiner supports DNS transport (CHUNK)
+	combinerAgent.ApiMethod = false  // API transport added when combiner.api is configured
+	combinerAgent.IsInfraPeer = true // handled by StartInfraBeatLoop, not SendHeartbeats
 
 	// Register in AgentRegistry with configured identity
 	ar.S.Set(combinerID, combinerAgent)

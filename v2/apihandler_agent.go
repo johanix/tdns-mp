@@ -843,7 +843,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			lgApi.Debug("dump-agentregistry", "keys", keys)
 			for _, key := range keys {
 				if agent, exists := ar.S.Get(key); exists {
-					lgApi.Debug("agent registry entry", "identity", agent.Identity)
+					lgApi.Debug("agent registry entry", "identity", agent.ID)
 				}
 			}
 			lgApi.Debug("dump-agentregistry", "numShards", ar.S.NumShards())

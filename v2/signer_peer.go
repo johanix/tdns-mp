@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -56,11 +57,7 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 
 	// Create an agent entry for the signer
 	signerAgent := &Agent{
-		Identity:    signerID,
-		PeerID:      string(signerID),
-		DnsMethod:   true,  // Signer uses DNS transport (CHUNK)
-		ApiMethod:   false, // No API transport for signer
-		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats
+		Peer: hsync.NewPeer(signerID),
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational,
 			HelloTime:       time.Now(),
@@ -69,10 +66,13 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 		ApiDetails: &AgentDetails{
 			State: AgentStateNeeded,
 		},
-		Zones:     make(map[ZoneName]bool),
-		State:     AgentStateOperational,
-		LastState: time.Now(),
+		State: AgentStateOperational,
 	}
+	signerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
+	// Capability/role flags promote from the embedded hsync.Peer (E1.a).
+	signerAgent.DnsMethod = true   // Signer uses DNS transport (CHUNK)
+	signerAgent.ApiMethod = false  // No API transport for signer
+	signerAgent.IsInfraPeer = true // handled by StartInfraBeatLoop, not SendHeartbeats
 
 	// Register in AgentRegistry
 	ar.S.Set(signerID, signerAgent)

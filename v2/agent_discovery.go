@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -307,15 +308,13 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		agent, exists := tm.agentRegistry.S.Get(AgentId(result.Identity))
 		if !exists {
 			agent = &Agent{
-				Identity:   AgentId(result.Identity),
-				PeerID:     result.Identity,
+				Peer:       hsync.NewPeer(AgentId(result.Identity)),
 				ApiDetails: &AgentDetails{},
 				DnsDetails: &AgentDetails{},
-				Zones:      make(map[ZoneName]bool),
 				State:      AgentStateKnown,
-				LastState:  time.Now(),
 				meta:       &agentMeta{Crypto: map[string]*mechCrypto{}},
 			}
+			agent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
 		}
 
 		// Update agent details — only set state to KNOWN if not already beyond it.

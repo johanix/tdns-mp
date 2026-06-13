@@ -63,7 +63,7 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			apiState == AgentStateLegacy || apiState == AgentStateDegraded || apiState == AgentStateInterrupted
 
 		if !dnsReady && !apiReady {
-			lgAgent.Debug("infra peer not ready for beat, skipping", "peer", a.Identity,
+			lgAgent.Debug("infra peer not ready for beat, skipping", "peer", a.ID,
 				"dnsState", AgentStateToString[dnsState], "apiState", AgentStateToString[apiState])
 			continue
 		}
@@ -79,7 +79,7 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			defer agent.Mu.Unlock()
 
 			if err != nil {
-				lgAgent.Warn("infra beat failed", "peer", agent.Identity, "err", err)
+				lgAgent.Warn("infra beat failed", "peer", agent.ID, "err", err)
 				agent.DnsDetails.LatestError = err.Error()
 				agent.DnsDetails.LatestErrorTime = time.Now()
 				return
@@ -91,7 +91,7 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 				return
 			}
 
-			lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
+			lgAgent.Debug("infra beat acknowledged", "peer", agent.ID, "state", resp.State)
 			agent.DnsDetails.LatestError = ""
 		}(a)
 	}

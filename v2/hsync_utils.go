@@ -461,13 +461,13 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 		MessageType:  AgentMsgRfi,
 		OriginatorID: AgentId(ar.LocalAgent.Identity),
-		YourIdentity: agent.Identity,
+		YourIdentity: agent.ID,
 		Zone:         ZoneName(zone),
 		RfiType:      "CONFIG",
 		RfiSubtype:   subtype,
 	})
 	if err != nil {
-		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.Identity, "zone", zone, "subtype", subtype, "err", err)
+		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.ID, "zone", zone, "subtype", subtype, "err", err)
 		return nil
 	}
 
@@ -502,12 +502,12 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 		MessageType:  AgentMsgRfi,
 		OriginatorID: AgentId(ar.LocalAgent.Identity),
-		YourIdentity: agent.Identity,
+		YourIdentity: agent.ID,
 		Zone:         ZoneName(zone),
 		RfiType:      "AUDIT",
 	})
 	if err != nil {
-		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.Identity, "zone", zone, "err", err)
+		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.ID, "zone", zone, "err", err)
 		return nil
 	}
 

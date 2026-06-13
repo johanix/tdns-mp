@@ -89,7 +89,7 @@ var hsyncZoneStatusCmd = &cobra.Command{
 		if resp.ZoneAgentData != nil && len(resp.ZoneAgentData.Agents) > 0 {
 			fmt.Printf("\n%s Remote Agents:\n", tdns.Globals.Zonename)
 			for _, agent := range resp.ZoneAgentData.Agents {
-				if agent.Identity == resp.Identity {
+				if agent.ID == resp.Identity {
 					continue
 				}
 				if err := PrintHsyncAgent(agent, true); err != nil {
@@ -399,7 +399,7 @@ var hsyncLocateCmd = &cobra.Command{
 
 		if len(amr.Agents) > 0 {
 			agent := amr.Agents[0]
-			fmt.Printf("Located agent: %s\n", agent.Identity)
+			fmt.Printf("Located agent: %s\n", agent.ID)
 			if err := PrintHsyncAgent(agent, false); err != nil {
 				log.Printf("Error printing agent: %v", err)
 			}
@@ -528,7 +528,7 @@ func PrintHsyncRRs(agentid AgentId, rrs []string) {
 // PrintHsyncAgent prints a remote agent's transports and key material.
 // Modeled on the older PrintAgent helper that lived in tdns/v2/cli.
 func PrintHsyncAgent(agent *Agent, showZones bool) error {
-	fmt.Printf("Remote agent %q: state: %s\n", agent.Identity, AgentStateToString[agent.State])
+	fmt.Printf("Remote agent %q: state: %s\n", agent.ID, AgentStateToString[agent.State])
 
 	if showZones {
 		var zones []string
