@@ -492,11 +492,17 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 			// before invoking, mirroring the production invocation
 			// site in agent_utils.go.
 			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+			// Mirror RegisterDiscoveredAgent: a mechanism is "usable" only
+			// when it has BOTH an endpoint/address AND contact-info marked
+			// "complete". OnPeerDiscovered promotes to KNOWN only for usable
+			// mechanisms (an address-less mechanism stays NEEDED — Fix C).
 			if tc.api {
 				peerArg.APIEndpoint = "https://example.invalid/"
+				peerArg.SetMechanismContactInfo("API", "complete")
 			}
 			if tc.dns {
 				peerArg.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+				peerArg.SetMechanismContactInfo("DNS", "complete")
 			}
 			env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
 
@@ -516,6 +522,50 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 				t.Errorf("GetPreferredTransportName: got %q, want %q", got, tc.wantPref)
 			}
 		})
+	}
+}
+
+// TestTransportBoundary_DiscoveryUnreachableStaysNeeded is the regression
+// test for the fox bug (2026-06-13): a peer whose only mechanism never
+// became usable (URI resolved but no address, so contact-info is NOT
+// "complete") must NOT be promoted to KNOWN. The earlier bug set the
+// top-level peer State to KNOWN unconditionally, so EffectiveState() (and
+// therefore the gossip matrix) reported KNOWN while peer list correctly
+// showed the per-mechanism NEEDED — a KNOWN/NEEDED contradiction. Here the
+// top-level State, the DNS mechanism state, and EffectiveState() must ALL
+// agree on NEEDED.
+func TestTransportBoundary_DiscoveryUnreachableStaysNeeded(t *testing.T) {
+	env := newIntegEnv(t, nil)
+
+	agent := &Agent{
+		Identity:   AgentId(env.Bob.Identity),
+		PeerID:     env.Bob.Identity,
+		DnsMethod:  true,
+		Zones:      map[ZoneName]bool{},
+		DnsDetails: &AgentDetails{State: AgentStateNeeded},
+	}
+	env.Alice.Registry.S.Set(agent.Identity, agent)
+
+	peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+	// DNS advertised but UNREACHABLE: no resolved address, no contact-info
+	// "complete" — exactly what RegisterDiscoveredAgent leaves when the
+	// SVCB/address lookup fails. Discovery still fires OnPeerDiscovered.
+	env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
+
+	peer, ok := env.Alice.Bridge.PeerRegistry.Get(env.Bob.Identity)
+	if !ok {
+		t.Fatalf("Bob not in Alice's PeerRegistry after OnPeerDiscovered")
+	}
+	if peer.GetState() != transport.PeerStateNeeded {
+		t.Errorf("top-level State: got %v, want NEEDED (unreachable peer must not be promoted)", peer.GetState())
+	}
+	if s, present := peer.MechanismRawState("DNS"); present && s >= transport.PeerStateKnown {
+		t.Errorf("DNS mechanism State: got %v, want < KNOWN (no usable address)", s)
+	}
+	// The crux: EffectiveState (what the gossip matrix derives from) must
+	// agree with the per-mechanism truth, not report a phantom KNOWN.
+	if eff := peer.EffectiveState(); eff == transport.PeerStateKnown {
+		t.Errorf("EffectiveState: got KNOWN for an unreachable peer — the gossip/peer-list contradiction is back")
 	}
 }
 

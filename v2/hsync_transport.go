@@ -460,10 +460,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		// `state <= NEEDED -> KNOWN` guard in RegisterDiscoveredAgent.
 		// Usability is the "complete" contact-info set there; address and
 		// beat counters already live on the peer (S2/S3).
+		anyUsable := false
 		for _, name := range []string{"API", "DNS"} {
 			if peer.MechanismContactInfo(name) != "complete" {
 				continue
 			}
+			anyUsable = true
 			if s, present := peer.MechanismRawState(name); !present || s < transport.PeerStateKnown {
 				peer.SetMechanismState(name, transport.PeerStateKnown, "discovery complete")
 			}
@@ -481,9 +483,18 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			lgTransport.Info("agent has DNS only", "agent", agent.Identity)
 		}
 
-		peer.SetState(transport.PeerStateKnown, "discovery complete")
+		// Top-level State must agree with the per-mechanism truth:
+		// EffectiveState() falls back to p.State when no mechanism is yet
+		// OPERATIONAL+, so an unconditional SetState(KNOWN) here would make
+		// gossip report KNOWN for a peer whose only mechanism never resolved
+		// an address (peer list still reads the per-mechanism NEEDED — the
+		// KNOWN/NEEDED contradiction). Only declare KNOWN if a mechanism
+		// actually became usable, and never regress a peer already past it.
+		if anyUsable && peer.GetState() < transport.PeerStateKnown {
+			peer.SetState(transport.PeerStateKnown, "discovery complete")
+		}
 
-		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
+		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
 	}
 
 	// Symmetric failure-side seam (Bite D). Fired by MP's

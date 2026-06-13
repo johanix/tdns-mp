@@ -173,9 +173,13 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		return fmt.Errorf("cannot register agent with discovery error: %w", result.Error)
 	}
 
-	// Get or create peer in PeerRegistry
+	// Get or create peer in PeerRegistry. The top-level peer State is set
+	// to KNOWN further down, but ONLY for a mechanism that actually became
+	// usable (URI + resolved address) — see the apiUsable/dnsUsable blocks.
+	// Setting it unconditionally here made EffectiveState() report KNOWN
+	// for an unreachable peer (no address) while peer list correctly showed
+	// the per-mechanism NEEDED — a KNOWN/NEEDED contradiction (Fix C).
 	peer := tm.PeerRegistry.GetOrCreate(result.Identity)
-	peer.SetState(transport.PeerStateKnown, "discovered via DNS")
 
 	// Register API transport address
 	if result.APIUri != "" {
@@ -326,6 +330,9 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			if agent.ApiDetails.State <= AgentStateNeeded {
 				agent.ApiDetails.State = AgentStateKnown
 			}
+			if peer.GetState() < transport.PeerStateKnown {
+				peer.SetState(transport.PeerStateKnown, "discovered via DNS (API usable)")
+			}
 			agent.ensureCrypto("API").TlsaRR = result.TLSA
 			agent.ApiMethod = true
 		} else if result.APIUri != "" {
@@ -355,6 +362,9 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			peer.SetMechanismContactInfo("DNS", "complete")
 			if agent.DnsDetails.State <= AgentStateNeeded {
 				agent.DnsDetails.State = AgentStateKnown
+			}
+			if peer.GetState() < transport.PeerStateKnown {
+				peer.SetState(transport.PeerStateKnown, "discovered via DNS (DNS usable)")
 			}
 
 			// Store JWK data if available (preferred). Crypto now lives on the
