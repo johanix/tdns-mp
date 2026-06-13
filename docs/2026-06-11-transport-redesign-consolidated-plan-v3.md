@@ -91,14 +91,23 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d-S4 (snapshot inversion) | DONE | deleted SyncPeerFromAgent/PopulateFromAgent/AgentLike/AgentMechanismSnapshot + snapshot accessors; OnPeerDiscovered writes peer directly; transport `MechanismRawState`; ~420 lines net deleted |
 | Everything below this line | NOT STARTED | review §1 |
 
-Build/test at tip (2026-06-12, post-S4: tdns-mp `ccd3ee5`,
-tdns-transport `4270893`): tdns-mp/v2 green incl. `-race` and all 7
-`TestTransportBoundary_*`; tdns-transport/v2 builds and tests
+Build/test at tip (2026-06-13, post-S4 + testbed fixes: tdns-mp
+`168c999`, tdns-transport `892e5de`): tdns-mp/v2 green incl. `-race`
+and all `TestTransportBoundary_*`; tdns-transport/v2 builds and tests
 standalone (`-count=1` + `-race`); `cmd/transport-exercise` builds
 (Gate-2 closed); tdns/v2 main builds (5 binaries each via Makefile).
-**S3 and S4 are NOT yet testbed-confirmed** — they are code-/race-green
-only; the operator deploy + runtime-probe pass (folded with the
-outstanding Gate-1 fox-NS break/restore) is pending.
+**S3 and S4 are TESTBED-CONFIRMED 2026-06-13** on the espresso.mp fleet
+(cpt/fox/hare/auditor): post-restart convergence reaches a fully
+OPERATIONAL matrix with correct leader election. Verification surfaced
+three truth-model bugs (KNOWN/NEEDED contradiction `44f06bd`; infra
+false-INTERRUPTED `6b07ed8`+`892e5de`; ERROR-clobbers-established-peer
+`0bb1d5d`) — all fixed, regression-tested, and re-verified clean on the
+testbed (operator: "all looks good now"). The remaining benign item is
+the documented convergence-window gossip-vs-peerlist difference, which
+closes at END.0/D2 when `peer list` reads `transport.Peer` as the sole
+store. The deliberate Gate-1 fox-NS break/restore (FAILURE+RECOVERY
+directions) is still a nice-to-have but no longer blocking, since the
+ERROR/decay paths were exercised live.
 
 ## Target architecture (unchanged — restated for reference)
 
