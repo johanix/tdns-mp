@@ -21,27 +21,10 @@ func TestEffectiveState_dnsOnlyOperational(t *testing.T) {
 	}
 }
 
-func TestCheckPeerState_dnsOnlyDoesNotInterruptApi(t *testing.T) {
-	peer := NewPeer("peer.example.")
-	peer.DnsMethod = true
-	peer.ApiMethod = false
-	now := time.Now()
-	peer.DnsDetails.State = PeerStateOperational
-	peer.DnsDetails.LatestRBeat = now
-	peer.DnsDetails.LatestSBeat = now
-	peer.DnsDetails.BeatInterval = 30
-	peer.ApiDetails.State = PeerStateNeeded
-
-	e := NewEngine(Deps{LocalBeatInterval: 30}, DefaultConfig())
-	e.checkPeerState(peer, 30)
-
-	if peer.ApiDetails.State != PeerStateNeeded {
-		t.Fatalf("ApiDetails.State = %v, want NEEDED", StateToString[peer.ApiDetails.State])
-	}
-	if peer.DnsDetails.State != PeerStateOperational {
-		t.Fatalf("DnsDetails.State = %v, want OPERATIONAL", StateToString[peer.DnsDetails.State])
-	}
-}
+// D2.5: TestCheckPeerState_dnsOnlyDoesNotInterruptApi removed — the NG
+// checkPeerState decay it exercised is retired (liveness decay now lives on
+// transport.Peer via decayedMechanismState, where per-mechanism independence
+// is covered by the transport boundary suite).
 
 func TestHeartbeatHandler_dnsBeatMergesGossip(t *testing.T) {
 	gst := NewGossipStateTable("local.example.")

@@ -43,14 +43,16 @@ func (e *Engine) sendHeartbeats() {
 		if peer.IsInfraPeer {
 			continue
 		}
-		if !peerAnyTransportReady(peer) {
+		if !e.peerAnyTransportReady(peer) {
 			continue
 		}
 		go func(p *Peer) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			e.sendBeatToPeer(ctx, p)
-			e.checkPeerState(p, e.deps.LocalBeatInterval)
+			// D2.5: the NG checkPeerState decay is retired — liveness decay now
+			// lives on transport.Peer (EffectiveState decay-on-read), read by the
+			// MP-side gossip path. No hsync.PeerDetails.State to decay here.
 			e.runDeferredTasks(p)
 		}(peer)
 	}
@@ -64,95 +66,14 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	seq := beatOutboundSequence(peer)
 	peer.Mu.RUnlock()
 
-	ack, used, err := e.deps.Transport.SendBeat(ctx, peer, seq)
-	peer.Mu.Lock()
-	if used != "" {
-		td := peerDetailsFor(peer, used)
-		if td != nil {
-			switch {
-			case err != nil:
-				td.LatestError = err.Error()
-				td.LatestErrorTime = time.Now()
-			case !ack:
-				if td.LatestError == "" {
-					td.LatestError = "beat not acknowledged"
-					td.LatestErrorTime = time.Now()
-				}
-			default:
-				td.LatestError = ""
-				if td.State == PeerStateNeeded || td.State == PeerStateKnown || td.State == PeerStateIntroduced {
-					td.State = PeerStateOperational
-				}
-				if peer.State == PeerStateNeeded || peer.State == PeerStateKnown || peer.State == PeerStateIntroduced {
-					peer.State = PeerStateOperational
-				}
-			}
-		}
-	} else if err != nil {
-		forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
-			if transportReady(td.State) {
-				td.LatestError = err.Error()
-				td.LatestErrorTime = time.Now()
-			}
-		})
-	}
-	peer.Mu.Unlock()
+	// SendBeat (the MP bridge) writes the canonical transport.Peer mechanism
+	// state OPERATIONAL on a successful round-trip — that is now the SOLE
+	// connection-state store (D2.5). The former hsync.PeerDetails.State /
+	// LatestError bookkeeping here was write-only (no live reader) and is
+	// removed; outcome/error telemetry lives on transport.Peer.Stats.
+	_, _, _ = e.deps.Transport.SendBeat(ctx, peer, seq)
 	e.registry.S.Set(peer.ID, peer)
 	e.storeHook(peer)
-}
-
-func (e *Engine) checkPeerState(peer *Peer, ourBeatInterval uint32) {
-	peer.Mu.Lock()
-	defer peer.Mu.Unlock()
-
-	localInterval := time.Duration(ourBeatInterval) * time.Second
-	if localInterval == 0 {
-		localInterval = 30 * time.Second
-	}
-
-	anyActive := false
-	anyHealthy := false
-
-	evaluate := func(td *PeerDetails) {
-		if td == nil || !transportParticipating(td.State) {
-			return
-		}
-		switch td.State {
-		case PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
-			anyActive = true
-		default:
-			return
-		}
-		remoteInterval := time.Duration(td.BeatInterval) * time.Second
-		if remoteInterval == 0 {
-			remoteInterval = 30 * time.Second
-		}
-		sinceR := time.Since(td.LatestRBeat)
-		sinceS := time.Since(td.LatestSBeat)
-		if sinceR > 10*remoteInterval || sinceS > 10*localInterval {
-			td.State = PeerStateInterrupted
-		} else if sinceR > 2*remoteInterval || sinceS > 2*localInterval {
-			td.State = PeerStateDegraded
-		} else {
-			anyHealthy = true
-		}
-	}
-
-	if peer.DnsMethod {
-		evaluate(peer.DnsDetails)
-	}
-	if peer.ApiMethod {
-		evaluate(peer.ApiDetails)
-	}
-
-	if !anyActive {
-		return
-	}
-	if anyHealthy {
-		if peer.State == PeerStateNeeded || peer.State == PeerStateKnown || peer.State == PeerStateIntroduced {
-			peer.State = PeerStateOperational
-		}
-	}
 }
 
 func (e *Engine) runDeferredTasks(peer *Peer) {

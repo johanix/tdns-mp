@@ -110,10 +110,15 @@ func (e *Engine) retryPendingDiscoveries() {
 		return
 	}
 	for _, peer := range e.registry.S.Items() {
+		// "Needs discovery" reads the canonical transport.Peer (END.0). A peer
+		// with no transport entry maps to NEEDED via mechPeerState — exactly
+		// the peers that still need discovery.
 		peer.Mu.RLock()
-		apiNeeded := peer.ApiMethod && peer.ApiDetails.State == PeerStateNeeded
-		dnsNeeded := peer.DnsMethod && peer.DnsDetails.State == PeerStateNeeded
+		apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
+		id := peer.ID
 		peer.Mu.RUnlock()
+		apiNeeded := apiMethod && mechPeerState(e, id, TransportAPI) == PeerStateNeeded
+		dnsNeeded := dnsMethod && mechPeerState(e, id, TransportDNS) == PeerStateNeeded
 		if !apiNeeded && !dnsNeeded {
 			continue
 		}
@@ -170,12 +175,18 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	})
 	peer.Mu.Unlock()
 
+	// Post-discovery usability + needs-hello read the canonical transport.Peer
+	// (END.0). "Useful" = mechanism advanced past NEEDED; "needsHello" = at KNOWN.
 	peer.Mu.RLock()
-	apiUseful := peer.ApiMethod && peer.ApiDetails.State >= PeerStateKnown
-	dnsUseful := peer.DnsMethod && peer.DnsDetails.State >= PeerStateKnown
-	apiNeedsHello := peer.ApiMethod && peer.ApiDetails.State == PeerStateKnown
-	dnsNeedsHello := peer.DnsMethod && peer.DnsDetails.State == PeerStateKnown
+	apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
+	id := peer.ID
 	peer.Mu.RUnlock()
+	apiState := mechPeerState(e, id, TransportAPI)
+	dnsState := mechPeerState(e, id, TransportDNS)
+	apiUseful := apiMethod && apiState >= PeerStateKnown
+	dnsUseful := dnsMethod && dnsState >= PeerStateKnown
+	apiNeedsHello := apiMethod && apiState == PeerStateKnown
+	dnsNeedsHello := dnsMethod && dnsState == PeerStateKnown
 
 	if !apiUseful && !dnsUseful {
 		return

@@ -672,12 +672,6 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 			agent.Mu.Lock()
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
-			// END.0 dual-write (transitional, retire in Stage D): feed
-			// hsync.PeerDetails.State on inbound hello receipt, guarded against
-			// regression, so the receiver's hsync engine view advances too.
-			if agent.DnsDetails.State < AgentStateIntroduced {
-				agent.DnsDetails.State = AgentStateIntroduced
-			}
 			agent.Mu.Unlock()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
 		} else {
@@ -1521,13 +1515,6 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			agent.ApiDetails.HelloTime = time.Now()
 			agent.ApiDetails.LastContactTime = time.Now()
 			agent.ApiDetails.LatestError = ""
-			// END.0 dual-write (transitional, retire in Stage D): feed
-			// hsync.PeerDetails.State so the hsync engine's fastBeatAttempts
-			// trigger (gates on PeerStateIntroduced) fires the beat. Guarded
-			// like the transport write below.
-			if agent.ApiDetails.State < AgentStateIntroduced {
-				agent.ApiDetails.State = AgentStateIntroduced
-			}
 		}
 		agent.Mu.Unlock()
 
@@ -1563,12 +1550,6 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
 			agent.DnsDetails.LatestError = ""
-			// END.0 dual-write (transitional, retire in Stage D): feed
-			// hsync.PeerDetails.State so the hsync engine's fastBeatAttempts
-			// trigger fires. See the API path above.
-			if agent.DnsDetails.State < AgentStateIntroduced {
-				agent.DnsDetails.State = AgentStateIntroduced
-			}
 		}
 		agent.Mu.Unlock()
 
@@ -1667,9 +1648,6 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
-				// END.0 dual-write (transitional, retire in Stage D): feed
-				// hsync.PeerDetails.State -> OPERATIONAL via the bridge.
-				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LastContactTime = time.Now()
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.LatestRBeat = time.Now()
@@ -1715,9 +1693,6 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
-				// END.0 dual-write (transitional, retire in Stage D): feed
-				// hsync.PeerDetails.State -> OPERATIONAL via the bridge.
-				agent.DnsDetails.State = AgentStateOperational
 				agent.DnsDetails.LastContactTime = time.Now()
 				agent.DnsDetails.LatestSBeat = time.Now()
 				agent.DnsDetails.LatestRBeat = time.Now()

@@ -15,10 +15,14 @@ func (e *Engine) helloHandler(report *InboundReport) {
 }
 
 func (e *Engine) agentNeedsHello(peer *Peer) bool {
+	// Connection state reads the canonical transport.Peer (END.0); capability
+	// flags (ApiMethod/DnsMethod) stay on the hsync.Peer.
 	peer.Mu.RLock()
-	defer peer.Mu.RUnlock()
-	apiNeeds := peer.ApiMethod && peer.ApiDetails.State == PeerStateKnown
-	dnsNeeds := peer.DnsMethod && peer.DnsDetails.State == PeerStateKnown
+	apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
+	id := peer.ID
+	peer.Mu.RUnlock()
+	apiNeeds := apiMethod && mechPeerState(e, id, TransportAPI) == PeerStateKnown
+	dnsNeeds := dnsMethod && mechPeerState(e, id, TransportDNS) == PeerStateKnown
 	return apiNeeds || dnsNeeds
 }
 
@@ -81,10 +85,13 @@ func (e *Engine) fastBeatAttempts(ctx context.Context, peer *Peer) {
 	const fastInterval = 5 * time.Second
 
 	needsBeat := func() bool {
+		// Connection state reads the canonical transport.Peer (END.0).
 		peer.Mu.RLock()
-		defer peer.Mu.RUnlock()
-		apiIntro := peer.ApiMethod && peer.ApiDetails.State == PeerStateIntroduced
-		dnsIntro := peer.DnsMethod && peer.DnsDetails.State == PeerStateIntroduced
+		apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
+		id := peer.ID
+		peer.Mu.RUnlock()
+		apiIntro := apiMethod && mechPeerState(e, id, TransportAPI) == PeerStateIntroduced
+		dnsIntro := dnsMethod && mechPeerState(e, id, TransportDNS) == PeerStateIntroduced
 		return apiIntro || dnsIntro
 	}
 	if !needsBeat() {

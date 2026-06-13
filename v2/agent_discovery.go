@@ -333,14 +333,6 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			if raw, ok := peer.MechanismRawState("API"); !ok || raw <= transport.PeerStateNeeded {
 				peer.SetMechanismState("API", transport.PeerStateKnown, "discovered via DNS (API usable)")
 			}
-			// END.0 dual-write (transitional, retire in Stage D): the hsync
-			// engine's Hello/Beat trigger (agentNeedsHello in hsync/hello.go)
-			// gates on hsync.PeerDetails.State, fed from agent.ApiDetails.State
-			// via the bridge. Until that trigger reads transport.Peer (Stage D /
-			// END.3), keep feeding the NG store or the engine never sends Hello.
-			if agent.ApiDetails.State <= AgentStateNeeded {
-				agent.ApiDetails.State = AgentStateKnown
-			}
 			if peer.GetState() < transport.PeerStateKnown {
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (API usable)")
 			}
@@ -376,12 +368,6 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// (guarded against regression). The send gates read this.
 			if raw, ok := peer.MechanismRawState("DNS"); !ok || raw <= transport.PeerStateNeeded {
 				peer.SetMechanismState("DNS", transport.PeerStateKnown, "discovered via DNS (DNS usable)")
-			}
-			// END.0 dual-write (transitional, retire in Stage D): feed
-			// hsync.PeerDetails.State via the bridge so the hsync engine's
-			// agentNeedsHello trigger fires. See the API branch above.
-			if agent.DnsDetails.State <= AgentStateNeeded {
-				agent.DnsDetails.State = AgentStateKnown
 			}
 			if peer.GetState() < transport.PeerStateKnown {
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (DNS usable)")
