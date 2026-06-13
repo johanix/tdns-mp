@@ -204,7 +204,7 @@ surfaced because `EffectiveState()` falls back to top-level `peer.State`:
   gossip showed KNOWN while `peer list` correctly showed NEEDED for an
   unreachable peer (fox). Fixed: promote to KNOWN only if a mechanism is
   usable (`OnPeerDiscovered` + `RegisterDiscoveredAgent`).
-- **ERROR clobbers established peer** (mp `<this commit>`): discovery
+- **ERROR clobbers established peer** (mp `0bb1d5d`): discovery
   attempts RACE — a chunk-notify "missing key" kick fires a discovery
   while a startup/retry leg is still in flight, so a stale failing leg
   (resolver i/o timeout) fired `OnDiscoveryFailed` AFTER a concurrent
