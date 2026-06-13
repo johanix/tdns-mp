@@ -89,6 +89,8 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d-S2 (address redirect + drop fields) | DONE | this commit; transport `DNSEndpoint` accessor; AgentDetails.Addrs/Port/BaseUri removed |
 | A3d-S3 (transport-internal stats + functional redirect) | DONE; field-drop deferred to END.0 | transport `RecordMechanismBeatSent`/`MechanismBeatSequence`; mp redirects the 2 functional SentBeats readers; 5 fields stay as wire-DTO carrier (see S3) |
 | A3d-S4 (snapshot inversion) | DONE | deleted SyncPeerFromAgent/PopulateFromAgent/AgentLike/AgentMechanismSnapshot + snapshot accessors; OnPeerDiscovered writes peer directly; transport `MechanismRawState`; ~420 lines net deleted |
+| A3d-END.0 (State functional-merge) | DONE, TESTBED-CONFIRMED 2026-06-13 | mp `dbcb166` + fix `7d1ec60`; marker model (top-level `peer.State`=discovery-phase NEEDED/KNOWN/ERROR only); send-gates/inbound-hello/functional-gates read `transport.Peer` per-mechanism via `mechStateForGate`; inbound API-hello gap fixed; infra peers seed OPERATIONAL. tdns-transport UNCHANGED. Plan: `2026-06-13-a3d-end0-plan.md`. **Residual dual-write → D2.5 below.** |
+| A3d-END.1…END.5 | NOT STARTED | type-merge → dead-code sweep |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-13, post-S4 + testbed fixes: tdns-mp
@@ -730,7 +732,11 @@ a short scope doc (or a section appended to this plan) binding
 D1/D2 slices. The known target mapping: `State` →
 `Mechanisms[m].State` (DEGRADED/INTERRUPTED become real transport
 states), `BeatInterval` → new `transport.Peer` liveness param,
-`LatestRBeat/SBeat` → `LastBeatRecv/Sent` (exist).
+`LatestRBeat/SBeat` → `LastBeatRecv/Sent` (exist). **The audit MUST
+enumerate the END.0 dual-write feed and the hsync-engine send-trigger
+readers (`agentNeedsHello`/`fastBeatAttempts`, `hsync/hello.go`) — these
+are the `hsync.PeerDetails.State` readers/writers D2.5 retires; see D2
+item 5.**
 
 ## D1 — relocate Hello/Beat fallback into the TM
 
@@ -797,6 +803,32 @@ the gossip-matrix path.
    `Peer.Mechanisms[m]` on hello/beat receipt — the inbound-liveness
    *evidence* writes (`LastBeatRecv`) are already in place from Fix A;
    formalize as middleware if desired.
+5. **Migrate the hsync-engine SEND-TRIGGER off `hsync.PeerDetails.State`
+   (END.0 residual — BINDING).** Distinct from item 1's *decay* reader
+   (`checkPeerState`): the engine's send *decision* reads
+   `hsync.PeerDetails.State` too — `agentNeedsHello`
+   (`hsync/hello.go:17`, gates Hello on `== PeerStateKnown`) and
+   `fastBeatAttempts` (`hsync/hello.go:79`, gates Beat on
+   `== PeerStateIntroduced`). END.0 stopped writing
+   `agent.{Api,Dns}Details.State` as the *functional read* source
+   (gates/display now read `transport.Peer`) but, because this engine
+   trigger still reads the NG store, END.0 had to RESTORE those writes as
+   a transitional **dual-write** (mp `7d1ec60`) — else the engine never
+   fires Hello/Beat (the testbed regression: agents stuck at KNOWN, no
+   handshake, election storm; root-caused 2026-06-13). The dual-write
+   sites, each tagged `// END.0 dual-write (transitional, retire in
+   Stage D)`: discovery KNOWN (`agent_discovery.go`, API+DNS),
+   Hello-success INTRODUCED + inbound-hello INTRODUCED + Beat-success
+   OPERATIONAL (`hsync_transport.go`). They reach the NG store via the
+   bridge (`agentDetailsToHsync`/`syncHsyncPeerFromAgent`). **D2.5 = point
+   `agentNeedsHello`/`fastBeatAttempts` at `transport.Peer` mechanism
+   state, then delete the 4 dual-write sites + the `hsync.PeerDetails`
+   non-liveness `State` reads.** Needs the hsync `Transport` dep (or a
+   state-getter) to expose per-mechanism state into the `hsync/`
+   subpackage — same plumbing END.3 wants for the inbound pipeline, so
+   sequence D2.5 with END.3 if convenient. Until done, `transport.Peer` is
+   canonical for reads/display/gossip/send-gates/the top-level marker, and
+   the dual-write is ONLY the feed to this not-yet-migrated trigger.
 
 ## D3 — lifecycle into TM startup
 
