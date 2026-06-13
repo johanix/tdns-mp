@@ -804,7 +804,31 @@ the gossip-matrix path.
    *evidence* writes (`LastBeatRecv`) are already in place from Fix A;
    formalize as middleware if desired.
 5. **Migrate the hsync-engine SEND-TRIGGER off `hsync.PeerDetails.State`
-   (END.0 residual — BINDING).** Distinct from item 1's *decay* reader
+   — DONE 2026-06-13, TESTBED-CONFIRMED (mp `6b97300` + fix `74368c0`),
+   PULLED FORWARD ahead of END.1** (it was the END.0 dual-write residual;
+   the deferral had already failed once, so we finished it). The hsync
+   engine's Hello/Beat/discovery/beat-readiness gates (`agentNeedsHello`,
+   `fastBeatAttempts`, `retryPendingDiscoveries`/`attemptDiscovery`,
+   `peerAnyTransportReady`) now read connection state from `transport.Peer`
+   via a new `mechPeerState` helper (raw, default NEEDED on absence). All 7
+   END.0 dual-write sites deleted; the now-dead NG decay (`checkPeerState`)
+   + dead helpers (`apiState`/`dnsState`/`IsAnyTransportOperational`)
+   removed. `EffectiveState` + the hsync `GossipStateTable` KEPT — dead in
+   production (agent/auditor wire the no-op `agentGossipPort`; real gossip
+   refreshes MP-side from `transport.Peer`) but entangled, for a later
+   dedicated removal. **One regression found+fixed on the testbed
+   (`74368c0`):** `helloRetrierNG` was launched ONLY from the engine's
+   `attemptDiscovery`; a peer discovered out-of-band (the chunk-notify
+   "missing key" kick → MP `DiscoverAndRegisterAgent`, reaching KNOWN
+   without entering `attemptDiscovery`) stranded at KNOWN. Pre-D2.5 this
+   worked by accident (the lagging NG store made the scan re-run discovery,
+   incidentally launching Hello). Fix: `retryPendingDiscoveries` now starts
+   the Hello for any KNOWN-no-retrier peer via the idempotent
+   `startHelloRetrier`; `helloRetrierNG` clears its cancel on exit so the
+   guard tracks "running" not "ever ran". Engine-path regression tests
+   added (`hsync/d25_test.go`). **This UNBLOCKS END.1** — the bridge is no
+   longer state-load-bearing. Original framing (kept for the trail):
+   Distinct from item 1's *decay* reader
    (`checkPeerState`): the engine's send *decision* reads
    `hsync.PeerDetails.State` too — `agentNeedsHello`
    (`hsync/hello.go:17`, gates Hello on `== PeerStateKnown`) and
