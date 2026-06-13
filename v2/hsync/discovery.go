@@ -110,24 +110,37 @@ func (e *Engine) retryPendingDiscoveries() {
 		return
 	}
 	for _, peer := range e.registry.S.Items() {
-		// "Needs discovery" reads the canonical transport.Peer (END.0). A peer
-		// with no transport entry maps to NEEDED via mechPeerState — exactly
-		// the peers that still need discovery.
+		// State reads the canonical transport.Peer (END.0). A peer with no
+		// transport entry maps to NEEDED — exactly the peers needing discovery.
 		peer.Mu.RLock()
 		apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
 		id := peer.ID
 		peer.Mu.RUnlock()
-		apiNeeded := apiMethod && mechPeerState(e, id, TransportAPI) == PeerStateNeeded
-		dnsNeeded := dnsMethod && mechPeerState(e, id, TransportDNS) == PeerStateNeeded
-		if !apiNeeded && !dnsNeeded {
+		apiState := mechPeerState(e, id, TransportAPI)
+		dnsState := mechPeerState(e, id, TransportDNS)
+		apiNeeded := apiMethod && apiState == PeerStateNeeded
+		dnsNeeded := dnsMethod && dnsState == PeerStateNeeded
+
+		if apiNeeded || dnsNeeded {
+			sem := e.discoverySem()
+			sem <- struct{}{}
+			go func(p *Peer, api, dns bool) {
+				defer func() { <-sem }()
+				e.attemptDiscovery(p, api, dns)
+			}(peer, apiNeeded, dnsNeeded)
 			continue
 		}
-		sem := e.discoverySem()
-		sem <- struct{}{}
-		go func(p *Peer, api, dns bool) {
-			defer func() { <-sem }()
-			e.attemptDiscovery(p, api, dns)
-		}(peer, apiNeeded, dnsNeeded)
+
+		// A peer that reached KNOWN without going through the engine's
+		// attemptDiscovery (e.g. discovered via the chunk-notify kick) needs its
+		// Hello started here — attemptDiscovery is the only other launcher, and
+		// it didn't run for this peer. startHelloRetrier is idempotent (no-op if
+		// a retrier is already running, so engine-discovered peers don't restart).
+		apiNeedsHello := apiMethod && apiState == PeerStateKnown
+		dnsNeedsHello := dnsMethod && dnsState == PeerStateKnown
+		if apiNeedsHello || dnsNeedsHello {
+			e.startHelloRetrier(peer)
+		}
 	}
 }
 
@@ -195,6 +208,19 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 		return
 	}
 
+	e.startHelloRetrier(peer)
+}
+
+// startHelloRetrier launches the Hello retrier for a peer, unless one is already
+// running. Idempotent: safe to call from both attemptDiscovery (engine-driven
+// discovery) and retryPendingDiscoveries (for peers discovered out-of-band that
+// reached KNOWN without going through attemptDiscovery — e.g. the chunk-notify
+// kick). The hello-launch is thus state-driven (KNOWN ⇒ hello), not tied to who
+// discovered the peer.
+func (e *Engine) startHelloRetrier(peer *Peer) {
+	if e.registry.hasHelloCancel(peer.ID) {
+		return
+	}
 	helloCtx, helloCancel := context.WithCancel(context.Background())
 	e.registry.setHelloCancel(peer.ID, helloCancel)
 	go e.helloRetrierNG(helloCtx, peer)

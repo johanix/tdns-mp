@@ -6,6 +6,7 @@ package hsync
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
 )
@@ -85,6 +86,34 @@ func TestD25_agentNeedsHello_readsTransport(t *testing.T) {
 	tb.seed(string(peer.ID), TransportDNS, transport.PeerStateIntroducing)
 	if e.agentNeedsHello(peer) {
 		t.Fatal("agentNeedsHello: want false when transport DNS state is INTRODUCING")
+	}
+}
+
+// TestD25_outOfBandKnownStartsHello is the regression guard for the fox/hare
+// stall: a peer discovered OUT OF BAND (e.g. the chunk-notify kick) reaches
+// KNOWN on transport.Peer without going through the engine's attemptDiscovery —
+// the only other Hello launcher. retryPendingDiscoveries must start the Hello
+// for such a KNOWN peer, or it strands at KNOWN forever. We assert the retrier
+// registers a hello-cancel (i.e. it launched).
+func TestD25_outOfBandKnownStartsHello(t *testing.T) {
+	tb := newD25Transport()
+	e, peer := engineWithD25(tb)
+
+	// Simulate the out-of-band discovery: transport mechanism is KNOWN, but the
+	// engine never ran attemptDiscovery (no hello-cancel registered).
+	tb.seed(string(peer.ID), TransportDNS, transport.PeerStateKnown)
+	if e.registry.hasHelloCancel(peer.ID) {
+		t.Fatal("precondition: no hello retrier should be running yet")
+	}
+
+	e.retryPendingDiscoveries()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !e.registry.hasHelloCancel(peer.ID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !e.registry.hasHelloCancel(peer.ID) {
+		t.Fatal("retryPendingDiscoveries must start the Hello retrier for an out-of-band KNOWN peer")
 	}
 }
 

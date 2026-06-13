@@ -129,6 +129,17 @@ func (r *Registry) clearHelloCancel(id PeerID) {
 	delete(r.helloCancel, id)
 }
 
+// hasHelloCancel reports whether a hello retrier is already running for this
+// peer (its cancel func is registered). Used to avoid launching a duplicate
+// retrier when retryPendingDiscoveries starts the hello for a KNOWN peer that
+// was discovered out-of-band (e.g. the chunk-notify kick).
+func (r *Registry) hasHelloCancel(id PeerID) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.helloCancel[id]
+	return ok
+}
+
 func (r *Registry) sharedZones(peer *Peer) []string {
 	peer.Mu.RLock()
 	defer peer.Mu.RUnlock()

@@ -27,6 +27,11 @@ func (e *Engine) agentNeedsHello(peer *Peer) bool {
 }
 
 func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
+	// Clear the cancel registration on exit so hasHelloCancel accurately tracks
+	// "a retrier is currently running" — otherwise startHelloRetrier would
+	// permanently skip a peer that finished one handshake (e.g. after a reset
+	// drops it back to KNOWN, the retrier must be able to start again).
+	defer e.registry.clearHelloCancel(peer.ID)
 	if !e.agentNeedsHello(peer) {
 		return
 	}
