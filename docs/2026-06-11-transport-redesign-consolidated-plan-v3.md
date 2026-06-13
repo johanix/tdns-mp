@@ -90,7 +90,10 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d-S3 (transport-internal stats + functional redirect) | DONE; field-drop deferred to END.0 | transport `RecordMechanismBeatSent`/`MechanismBeatSequence`; mp redirects the 2 functional SentBeats readers; 5 fields stay as wire-DTO carrier (see S3) |
 | A3d-S4 (snapshot inversion) | DONE | deleted SyncPeerFromAgent/PopulateFromAgent/AgentLike/AgentMechanismSnapshot + snapshot accessors; OnPeerDiscovered writes peer directly; transport `MechanismRawState`; ~420 lines net deleted |
 | A3d-END.0 (State functional-merge) | DONE, TESTBED-CONFIRMED 2026-06-13 | mp `dbcb166` + fix `7d1ec60`; marker model (top-level `peer.State`=discovery-phase NEEDED/KNOWN/ERROR only); send-gates/inbound-hello/functional-gates read `transport.Peer` per-mechanism via `mechStateForGate`; inbound API-hello gap fixed; infra peers seed OPERATIONAL. tdns-transport UNCHANGED. Plan: `2026-06-13-a3d-end0-plan.md`. **Residual dual-write → D2.5 below.** |
-| A3d-END.1…END.5 | NOT STARTED | type-merge → dead-code sweep |
+| D2.5 (hsync engine reads transport; dual-write retired) | DONE, TESTBED-CONFIRMED 2026-06-13 | mp `6b97300` + out-of-band-hello fix `74368c0`; PULLED FORWARD ahead of END.1; `mechPeerState` helper; deleted 7 dual-writes + dead NG decay; engine-path tests. Unblocks END.1. See D2 item 5. |
+| A3d-END.1 E1.a (Agent embeds *hsync.Peer) | DONE 2026-06-13, build+`-race` green, NOT YET DEPLOYED | mp `3fbeffd`; field dedup via type aliases (AgentId/ZoneName/DeferredAgentTask = hsync types); ~440 sites compatible; STILL two objects + dual map. Testbed checkpoint deferred to after E1.b. |
+| A3d-END.1 E1.b (object collapse + bridge teardown; ABSORBS END.2) | NOT STARTED — re-scoped 2026-06-13 (one ALLOCATION not one map; engine MUST keep `*hsync.Peer` map) | RISKIEST commit; see END.1 in the END section for the full re-census + plan. Restart tag `end0-complete-pre-d2`. |
+| A3d-END.3…END.5 | NOT STARTED | inbound pipeline → RemoteAgents → dead-code sweep |
 | Everything below this line | NOT STARTED | review §1 |
 
 Build/test at tip (2026-06-13, post-S4 + testbed fixes: tdns-mp
@@ -469,25 +472,95 @@ One session; sub-steps are separate commits, each green +
   `-race` + testbed check before END.1. The display side already
   reads `transport.Peer` (S1b), so END.0 closes the write side and
   retires the dual State store.
-- **END.1 — type-merge.** `Agent` becomes the view of addendum
-  §3: embed `*hsync.Peer` (+ existing `*agentMeta`); dedupe
-  Identity/PeerID to `hsync.Peer.ID`; `Agent.Mu` →
-  `hsync.Peer.Mu` (ONE peer mutex); `Zones` →
-  `hsync.Peer.Zones` (transitional; reads stay derived per A2);
-  `DeferredTasks` → `hsync.Peer.Deferred`. `AgentDetails` fields
-  are empty of live FUNCTIONAL reads by now (State retired in END.0,
-  address in S2, telemetry-functional in S3) — BUT the 5 telemetry
-  fields (`HelloTime/LatestSBeat/LatestRBeat/DiscoveryFailures/
-  SentBeats`) plus `ReceivedBeats` are still serialized as the
-  `GetZoneAgentData` wire DTO read by the CLI `peer status` line
-  (S3 item 4 deferral). Before the struct is deleted in A5, feed
-  that DTO from `transport.Peer` (a `GetZoneAgentData` populate
-  step, or a dedicated response DTO) — do it as part of END.0 (it
-  pairs with the State DTO migration) so the CLI line survives.
-- **END.2 — delete the dual map.** Remove the temporary
-  `AgentRegistry.S`/`mu` shadowing the embedded
-  `hsync.Registry.S` (`agent_structs.go:206-214`); duplicated
-  protocol methods become delegating wrappers, then delete.
+- **END.1 — type-merge. Split into E1.a (DONE) + E1.b (NOT
+  STARTED). Sequencing decided 2026-06-13: E1.a → E1.b → END.3 →
+  END.4 → END.5; END.2 is ABSORBED INTO E1.b (see below).**
+
+  **E1.a — DONE 2026-06-13 (mp `3fbeffd`), build + all tests green
+  `-race`, tdns-transport untouched, NOT YET DEPLOYED (pure
+  structural intermediate, no behavior change — testbed checkpoint
+  is after E1.b).** `Agent` now embeds `*hsync.Peer` and PROMOTES
+  every same-typed field (no type cascade): `ID` (was
+  `Identity`/`PeerID`), `Mu`, `Zones`, `Deferred` (was
+  `DeferredTasks`), `ApiMethod`, `DnsMethod`, `IsInfraPeer`,
+  `LastState`. Enabled by three TYPE ALIASES so ~440 call sites
+  stay compatible: `AgentId = hsync.PeerID`,
+  `ZoneName = hsync.ZoneName`, `DeferredAgentTask =
+  hsync.DeferredTask` (added `hsync.ZoneName.String()` for
+  `core.Stringer`; deleted the now-redundant MP `String()`s). The
+  DIFFERENT-typed connection-state fields stay on `Agent`,
+  shadowing the embed's same-named ones: `ApiDetails`/`DnsDetails`
+  (`*AgentDetails` vs `*hsync.PeerDetails`) and `State` (`AgentState`
+  vs `hsync.PeerState`) — retire in A5/D. New `NewAgent(id)`
+  constructor wraps `hsync.NewPeer`. `hsyncPeerToAgent` now SHARES
+  the peer pointer (`&Agent{Peer: peer, …}`), starting the E1.b
+  collapse; `syncHsyncPeerFromAgent` got a `peer == agent.Peer`
+  near-noop fast path. STILL TWO OBJECTS per peer (the bridge still
+  deep-copies the non-promoted State on the non-shared paths) and
+  the dual map remains.
+
+  **E1.b — NOT STARTED. Re-census 2026-06-13 CHANGED ITS SHAPE —
+  read this before starting.** The original framing ("collapse to
+  ONE Go map / one object type") is NOT ACHIEVABLE, because of a
+  hard package-boundary constraint:
+  - The hsync ENGINE lives in `hsync/` and CANNOT import the main
+    package (import cycle). It constructs/iterates/operates on
+    `*hsync.Peer` in ~31 sites, so `hsync.Registry.S` MUST stay
+    `[PeerID]*hsync.Peer`.
+  - MP's ~27 `ar.S` sites want `*Agent` (which carries the MP-only
+    fields `ApiDetails`/`DnsDetails`/`State`/`Api`/`meta`).
+  - `*Agent` and `*hsync.Peer` are different Go types in different
+    packages; neither map can hold the other's type. So there will
+    ALWAYS be a `*hsync.Peer` map (engine's) + a `*Agent` map (MP's).
+
+  **The achievable E1.b end-state is ONE ALLOCATION per peer, two
+  typed views, NO deep-copy** — i.e. the `*Agent` in
+  `AgentRegistry.S` and the `*hsync.Peer` in `hsync.Registry.S`
+  reference the SAME underlying `hsync.Peer` (`agent.Peer == that
+  peer`). E1.a already started this on the discovered path
+  (`RegisterDiscovered` → `hsyncPeerToAgent` shares the pointer).
+  E1.b's real work:
+  1. Make pointer-sharing UNIVERSAL on every peer create/update path
+     (discovery, `MarkNeeded`, infra-peer registration in
+     `combiner_peer.go`/`signer_peer.go` — note infra peers are
+     ONLY in `ar.S`, never `hsync.Registry.S`; the MP infra-beat
+     loop `hsync_infra_beat.go:49` iterates `ar.S`, the engine loop
+     `hsync/beat.go:42` iterates `hsync.Registry.S` and never sees
+     them — by design).
+  2. Delete the deep-copy bridge: `syncHsyncPeerFromAgent`,
+     `agentToHsyncPeer` (already orphaned/dead),
+     `persistAgentAndPeer`'s copy, and reduce `hsyncPeerToAgent`/
+     `agentForTransport` to trivial wrappers or remove. The
+     `OnPeerStored`→`syncHsyncPeerToAgent` hook
+     (`hsync_bridge.go:~309`) is the sync trigger to rework.
+  3. The two maps PERSIST (engine needs its typed one) but stop
+     being independently-stored copies — consistent via the shared
+     pointer, not field-copying. This is the addendum's "two stores
+     joined by PeerID."
+
+  **END.2 (delete the dual-map shadow `AgentRegistry.S`/`mu`) is
+  ABSORBED HERE** — it is NOT a clean standalone deletion because
+  `ar.S` (`[AgentId]*Agent`) and the embedded `hsync.Registry.S`
+  (`[PeerID]*hsync.Peer`) hold different types; the shadow can't
+  simply be removed to fall through to the embedded map. Whether
+  `ar.S` survives as the MP `*Agent` view (recommended) or is
+  replaced needs deciding at E1.b execution time.
+
+  **E1.b is the riskiest commit of the stage** (one shared mutex,
+  bridge teardown, concurrency). Stopped before it on 2026-06-13
+  (long session, two regressions already surfaced+fixed). REQUIRES a
+  testbed checkpoint after. Restart tag for the whole END.1+ block:
+  `end0-complete-pre-d2` (mp `2f00cca` / transport `892e5de`).
+
+  **`AgentDetails` wire-DTO note (carried):** the 5 telemetry fields
+  + `ReceivedBeats` are serialized as the `GetZoneAgentData` DTO read
+  by the CLI `peer status` line. Verified DEAD over the wire in END.0
+  (`Agent.MarshalJSON` omits `*AgentDetails`), so the struct deletion
+  in A5 needs no DTO-feed step. No action in E1.b.
+- **END.2 — ABSORBED INTO E1.b** (see END.1 above). The dual-map
+  shadow cannot be deleted independently of the object-collapse,
+  because `ar.S` (`[AgentId]*Agent`) and the embedded
+  `hsync.Registry.S` (`[PeerID]*hsync.Peer`) hold different types.
 - **END.3 — collapse the inbound pipeline.** One writer per
   message type. Beat: `routeBeatMessage`
   (`hsync_transport.go:689`) + `adaptBeatReports`→
