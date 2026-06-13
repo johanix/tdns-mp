@@ -195,6 +195,31 @@ deliberate break/restore of fox's NS to confirm the FAILURE +
 RECOVERY directions (the controllable-trigger test; `agent zone
 bump` now exists for it).
 
+**Two more truth-model bugs found + fixed during S3/S4 testbed
+verification (2026-06-13)** — same disease (a failure/secondary signal
+asserting top-level State over a peer another path proved good), both
+surfaced because `EffectiveState()` falls back to top-level `peer.State`:
+- **KNOWN/NEEDED contradiction** (mp `44f06bd`): two sites set top-level
+  `peer.State = KNOWN` unconditionally even with no usable address, so
+  gossip showed KNOWN while `peer list` correctly showed NEEDED for an
+  unreachable peer (fox). Fixed: promote to KNOWN only if a mechanism is
+  usable (`OnPeerDiscovered` + `RegisterDiscoveredAgent`).
+- **ERROR clobbers established peer** (mp `<this commit>`): discovery
+  attempts RACE — a chunk-notify "missing key" kick fires a discovery
+  while a startup/retry leg is still in flight, so a stale failing leg
+  (resolver i/o timeout) fired `OnDiscoveryFailed` AFTER a concurrent
+  attempt had already succeeded + registered the address; the
+  unconditional `SetState(ERROR)` then clobbered a peer that was
+  demonstrably reachable (and actively exchanging election votes),
+  surfacing a transient ERROR in the gossip matrix. Confirmed from cpt
+  logs (08:40:47 `successfully discovered and registered` → 08:40:48
+  `peer discovery failed` i/o timeout → ERROR). Fixed: `OnDiscoveryFailed`
+  does not regress a peer already KNOWN+ or with a resolved address.
+  Regression tests added for both (boundary suite).
+
+**Infra-peer false INTERRUPTED also fixed** (D2 item #2 infra slice,
+pulled forward; mp `6b07ed8` + transport `892e5de`) — see D2 below.
+
 ## Gate-2 — restore the three-repo build (small; before A3d-S2) — DONE 2026-06-11
 
 Review finding F1. In `tdns-transport/v2`: add the johanix/dns

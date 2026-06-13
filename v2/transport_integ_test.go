@@ -569,6 +569,44 @@ func TestTransportBoundary_DiscoveryUnreachableStaysNeeded(t *testing.T) {
 	}
 }
 
+// TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer is the
+// regression test for the racing-discovery bug (2026-06-13): a chunk-notify
+// "missing key" kick triggers a discovery while a startup/retry discovery is
+// still in flight, so a STALE failing leg (resolver i/o timeout) can fire
+// OnDiscoveryFailed AFTER a concurrent attempt already succeeded. The old
+// code slammed top-level State to ERROR unconditionally, clobbering a peer
+// that was demonstrably reachable (and even actively voting in elections);
+// EffectiveState() then surfaced the bogus ERROR in the gossip matrix. An
+// established peer (KNOWN+ or with a resolved address) must survive a stale
+// discovery failure.
+func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *testing.T) {
+	env := newIntegEnv(t, nil)
+
+	// A peer that a concurrent discovery already established: it has a
+	// resolved address and is KNOWN.
+	peer := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(env.Bob.Identity)
+	peer.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+	peer.SetMechanismContactInfo("DNS", "complete")
+	peer.SetState(transport.PeerStateKnown, "discovered")
+
+	// A stale/racing discovery leg now fails.
+	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(peer, errors.New("no contact endpoints found (no API or DNS URI records)"))
+
+	if got := peer.GetState(); got == transport.PeerStateError {
+		t.Errorf("established peer regressed to ERROR by a stale discovery failure (got %v); the racing-discovery clobber is back", got)
+	}
+	if peer.CurrentAddress() == nil {
+		t.Errorf("established peer lost its address on discovery failure")
+	}
+
+	// A peer that was NEVER established SHOULD still go to ERROR.
+	fresh := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate("never-seen.example.")
+	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(fresh, errors.New("no contact endpoints found"))
+	if got := fresh.GetState(); got != transport.PeerStateError {
+		t.Errorf("unestablished peer: got %v, want ERROR (a genuine first-time discovery failure must still register)", got)
+	}
+}
+
 // _ tdns.AppType silences the import in case future test additions
 // need to set an AppType; production startup sets this elsewhere.
 var _ = AppTypeMPAgent

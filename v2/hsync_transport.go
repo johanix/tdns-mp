@@ -503,6 +503,23 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	// the same peer. Body mirrors the existing failure logging in
 	// agent_utils.go so behaviour stays unchanged.
 	tm.TransportManager.OnDiscoveryFailed = func(peer *transport.Peer, err error) {
+		// Do NOT regress a peer that is already established. Discovery
+		// attempts race: a chunk-notify "missing key" kick triggers a
+		// discovery while a startup/retry discovery is still in flight, so
+		// a STALE failing leg (e.g. a resolver i/o timeout) can fire
+		// OnDiscoveryFailed AFTER a concurrent attempt already succeeded
+		// and registered the peer's address. Slamming ERROR here then
+		// clobbers a peer that is demonstrably reachable (EffectiveState
+		// falls back to this top-level State, so the bogus ERROR surfaces
+		// in the gossip matrix). A failure only means "not established" for
+		// a peer that was never established — same truth-model principle as
+		// Fix A/C: a failure on one path must not assert state over a peer
+		// another path just proved good.
+		if peer.GetState() >= transport.PeerStateKnown || peer.CurrentAddress() != nil {
+			lgTransport.Warn("peer discovery failed but peer already established; not regressing to ERROR",
+				"peer", peer.ID, "state", peer.GetState(), "err", err)
+			return
+		}
 		peer.SetState(transport.PeerStateError, err.Error())
 		lgTransport.Warn("peer discovery failed", "peer", peer.ID, "err", err)
 	}
