@@ -90,6 +90,10 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 			Transport: "udp",
 		})
 		speer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port)
+		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
+		// agent beat interval — match the decay thresholds to it (see
+		// InitializeCombinerAsPeer for the rationale).
+		speer.SetLivenessInterval(uint32(defaultInfraBeatInterval / time.Second))
 	}
 
 	// Load and register signer's public key for encrypted communication

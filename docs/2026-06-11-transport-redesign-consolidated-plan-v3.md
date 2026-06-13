@@ -727,20 +727,38 @@ the gossip-matrix path.
    coexist (one decay computed in two places); they agree because the
    thresholds were deliberately mirrored.
 2. **Wire the exact local beat interval.** `transport.Peer.LivenessInterval`
-   (the decay's threshold base) currently defaults to 30s when unset.
-   The testbed runs 30s beats, so the default is exact there, but a
-   non-30s deployment would use slightly-off thresholds. Set it from
-   the configured `mp.Remote.BeatInterval` — cleanest via a field on
-   `MPTransportBridge` (set once at construction; 4 `NewMPTransportBridge`
-   sites in `main_init.go` + the harness) stamped onto each peer
-   alongside `SetMechanismLastBeatSent`, OR a default on the
-   `PeerRegistry` that `NewPeer`/`GetOrCreate` inherit. Small, isolated;
-   not a correctness blocker for 30s fleets.
+   (the decay's threshold base) defaults to 30s when unset.
+   **INFRA SLICE DONE 2026-06-13 (pulled forward).** The testbed showed
+   combiner/signer (`peer list`) stuck at INTERRUPTED while healthy:
+   infra peers beat on the 600s `StartInfraBeatLoop` cadence but were
+   decayed by the 30s default (INTERRUPTED at 300s, before the next
+   600s beat). Added `Peer.SetLivenessInterval(seconds)` (transport) and
+   stamped `defaultInfraBeatInterval` (600s) onto the combiner/signer
+   transport.Peer in `InitializeCombinerAsPeer`/`InitializeSignerAsPeer`.
+   This was NOT an S3/S4 regression — the decay-on-read predates them
+   (`3b85754`); the canonical-state reads merely surfaced it.
+   **STILL TODO (agent slice):** stamp `LivenessInterval` from
+   `mp.Remote.BeatInterval` on AGENT peers (discovered + config). It is
+   correct on a 30s fleet via the default, so not a blocker; cleanest
+   via a field on `MPTransportBridge` (set once at construction; 4
+   `NewMPTransportBridge` sites in `main_init.go` + the harness) stamped
+   alongside `SetMechanismLastBeatSent`, OR a `PeerRegistry` default that
+   `NewPeer`/`GetOrCreate` inherit.
 3. **`peer list` State column still reads AgentDetails** (Spine-1b
    territory, not yet redirected). After Spine-1b/this cleanup it
    should read `transport.Peer` too, so `peer list` and `gossip state`
    are driven by one store. Until then they can momentarily differ
-   (AgentDetails has no decay).
+   (AgentDetails has no decay). **Observed 2026-06-13 (post-restart
+   convergence):** during reconvergence the two readouts briefly showed
+   different states for the same agent peer (e.g. gossip OPERATIONAL vs
+   peer list NEEDED/INTRODUCED), self-healing within a beat round-trip.
+   Root cause: `peer list` falls back to `agent.DnsDetails.State`, which
+   the outbound-HELLO success path advances (to INTRODUCED) WITHOUT
+   writing the transport stores — a coupling the deleted
+   `PopulateFromAgent` used to provide. TRANSIENT (the next beat
+   round-trip writes the transport mechanism state and they reconverge),
+   not a stable desync; fully resolved when `peer list` reads
+   `transport.Peer` as the sole store (END.0 DTO + this item).
 4. Per the original D2: default liveness middleware updates
    `Peer.Mechanisms[m]` on hello/beat receipt — the inbound-liveness
    *evidence* writes (`LastBeatRecv`) are already in place from Fix A;

@@ -87,6 +87,11 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 			Transport: "udp",
 		})
 		cpeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port)
+		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
+		// agent beat interval. Match the decay thresholds to it, else a
+		// healthy combiner false-decays to INTERRUPTED ~5 min after each
+		// 10-min beat (the 30s LivenessInterval default).
+		cpeer.SetLivenessInterval(uint32(defaultInfraBeatInterval / time.Second))
 	}
 
 	// Load and register combiner's public key for encrypted communication
