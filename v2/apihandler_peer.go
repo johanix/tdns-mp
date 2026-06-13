@@ -117,17 +117,27 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 				return
 			}
 
+			// Clear the display error fields on AgentDetails (telemetry only).
 			agent.Mu.Lock()
 			if agent.ApiDetails != nil {
-				agent.ApiDetails.State = AgentStateNeeded
 				agent.ApiDetails.LatestError = ""
 			}
 			if agent.DnsDetails != nil {
-				agent.DnsDetails.State = AgentStateNeeded
 				agent.DnsDetails.LatestError = ""
 			}
-			agent.State = AgentStateNeeded
 			agent.Mu.Unlock()
+
+			// END.0: reset the canonical connection state on transport.Peer —
+			// top-level marker back to NEEDED and each mechanism back to NEEDED
+			// (was agent.{Api,Dns}Details.State / agent.State). Rediscovery
+			// re-promotes through the marker + per-mechanism states.
+			if ar.TransportManager != nil {
+				if peer, ok := ar.TransportManager.PeerRegistry.Get(string(peerID)); ok {
+					peer.SetState(transport.PeerStateNeeded, "peer reset")
+					peer.SetMechanismState("API", transport.PeerStateNeeded, "peer reset")
+					peer.SetMechanismState("DNS", transport.PeerStateNeeded, "peer reset")
+				}
+			}
 
 			// Trigger immediate re-discovery via the NG engine. MarkNeeded
 			// short-circuits known peers, so reset uses the dedicated

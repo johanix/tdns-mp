@@ -119,6 +119,26 @@ func (ar *AgentRegistry) isAgentOperational(id AgentId) bool {
 	return peer.EffectiveState() == transport.PeerStateOperational
 }
 
+// mechStateForGate returns the RAW (non-decayed) per-mechanism state of the
+// peer, mapped into MP's AgentState, for use by the Hello/Beat send gates.
+// Raw — not decayed — because the gates ask "where are we in the handshake"
+// (KNOWN → send Hello; INTRODUCED/OPERATIONAL/… → send Beat), which must not
+// flip on liveness decay: a DEGRADED/INTERRUPTED mechanism is still
+// beat-eligible (beats are how we recover), and that is exactly what the raw
+// OPERATIONAL→…→INTERRUPTED ladder preserves. ok is false when the peer or the
+// named mechanism is not (yet) in the registry — the caller then has no peer to
+// gate on (treated as not-ready by the send paths).
+func mechStateForGate(peer *transport.Peer, mech string) (AgentState, bool) {
+	if peer == nil {
+		return AgentStateNeeded, false
+	}
+	st, ok := peer.MechanismRawState(mech)
+	if !ok {
+		return AgentStateNeeded, false
+	}
+	return transportToAgentState(st), true
+}
+
 func (ar *AgentRegistry) effectiveAgentState(id AgentId) AgentState {
 	if ar.TransportManager == nil {
 		return AgentStateNeeded

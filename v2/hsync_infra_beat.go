@@ -51,10 +51,11 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			continue
 		}
 
-		a.Mu.RLock()
-		dnsState := a.DnsDetails.State
-		apiState := a.ApiDetails.State
-		a.Mu.RUnlock()
+		// Readiness reads the canonical transport.Peer per-mechanism state
+		// (END.0; raw, via mechStateForGate); was a.{Dns,Api}Details.State.
+		infraPeer := ar.MPTransport.GetOrCreatePeer(a)
+		dnsState, _ := mechStateForGate(infraPeer, "DNS")
+		apiState, _ := mechStateForGate(infraPeer, "API")
 
 		dnsReady := dnsState == AgentStateOperational || dnsState == AgentStateIntroduced ||
 			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted

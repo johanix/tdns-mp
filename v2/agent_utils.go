@@ -46,39 +46,26 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	return agents
 }
 
-// RecomputeSharedZonesAndSyncState updates an agent's shared zones and transitions between
-// OPERATIONAL and LEGACY states based on zone count.
-// This should be called after HSYNC changes to keep agent state synchronized with zone membership.
+// RecomputeSharedZonesAndSyncState recomputes an agent's derived shared zones
+// and syncs them to the transport peer. Called after HSYNC changes to keep the
+// peer's shared-zone set in step with zone membership.
+//
+// END.0: the former LEGACY↔OPERATIONAL top-level agent.State flip is RETIRED.
+// LEGACY is now a pure derived display overlay (effectiveAgentState): an
+// established peer with zero derived participations. There is no top-level
+// State to flip here — the canonical connection state lives per-mechanism on
+// transport.Peer, and the LEGACY overlay is recomputed on every read.
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 	// Derive the shared-zone set (zones where both we and this agent are
-	// participants) without holding agent.Mu — zone-data access must not nest
-	// under the agent lock. LEGACY is now defined as derived participations == 0.
+	// participants). LEGACY is defined as derived participations == 0.
 	shared := ar.sharedParticipantZones(agent.Identity)
 	zoneCount := len(shared)
 	identity := agent.Identity
 
-	// State transition under the peer mutex only — released before any transport
-	// call (lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry
-	// -> transport.Peer; never hold the peer mutex across a transport call).
-	agent.Mu.Lock()
-	oldState := agent.State
-	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
-		// Transition to LEGACY when zones go to zero
-		agent.State = AgentStateLegacy
-		agent.LastState = time.Now()
-		lgAgent.Info("agent transitioned to LEGACY (no shared zones)",
-			"agent", identity, "from", AgentStateToString[oldState])
-	} else if zoneCount > 0 && oldState == AgentStateLegacy {
-		// Transition back to OPERATIONAL when zones are re-added
-		agent.State = AgentStateOperational
-		agent.LastState = time.Now()
-		lgAgent.Info("agent transitioned LEGACY to OPERATIONAL",
-			"agent", identity, "zones", zoneCount)
-	}
-	agent.Mu.Unlock()
-
 	// Sync the derived shared zones to the transport peer (atomic replace under
-	// the transport.Peer lock; no peer mutex held here).
+	// the transport.Peer lock; no registry/peer mutex held across the call —
+	// lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry ->
+	// transport.Peer).
 	if ar.TransportManager != nil {
 		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(identity))
 		zoneStrs := make([]string, len(shared))
@@ -361,10 +348,9 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 				upstreamLabel := h3.Upstream
 				ar.MarkAgentAsNeeded(upstreamIdentity, zonename, &DeferredAgentTask{
 					Precondition: func() bool {
-						if agent, exists := ar.S.Get(upstreamIdentity); exists {
-							return agent.ApiDetails.State == AgentStateOperational
-						}
-						return false
+						// Operational gate reads the canonical transport.Peer
+						// store (END.0); was agent.ApiDetails.State.
+						return ar.isAgentOperational(upstreamIdentity)
 					},
 					Action: func() (bool, error) {
 						lgAgent.Info("executing deferred RFI for upstream data", "upstream", upstreamLabel, "zone", zonename)
@@ -397,10 +383,9 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 		downstreamId := id
 		ar.MarkAgentAsNeeded(downstreamId, zonename, &DeferredAgentTask{
 			Precondition: func() bool {
-				if agent, exists := ar.S.Get(downstreamId); exists {
-					return agent.State == AgentStateOperational
-				}
-				return false
+				// Operational gate reads the canonical transport.Peer store
+				// (END.0); was agent.State.
+				return ar.isAgentOperational(downstreamId)
 			},
 			Action: func() (bool, error) {
 				lgAgent.Info("executing deferred RFI for downstream data", "downstream", downstreamId, "zone", zonename)

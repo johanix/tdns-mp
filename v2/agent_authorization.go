@@ -42,10 +42,13 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 
 	// Check 2: LEGACY state agents (established relationship, zero zones)
 	// These agents were previously in HSYNC3 but all shared zones have been removed
-	// We still allow beat messages to maintain the relationship
+	// We still allow beat messages to maintain the relationship. LEGACY is now a
+	// derived overlay (END.0): an established peer with zero participations,
+	// computed by effectiveAgentState from the canonical transport.Peer store.
 	if tm.agentRegistry != nil {
-		if agent, exists := tm.agentRegistry.S.Get(AgentId(dns.Fqdn(senderID))); exists {
-			if agent.State == AgentStateLegacy {
+		id := AgentId(dns.Fqdn(senderID))
+		if _, exists := tm.agentRegistry.S.Get(id); exists {
+			if tm.agentRegistry.effectiveAgentState(id) == AgentStateLegacy {
 				return true, "authorized via LEGACY state (established relationship, zero shared zones)"
 			}
 		}

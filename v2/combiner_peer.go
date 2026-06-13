@@ -92,6 +92,14 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		// healthy combiner false-decays to INTERRUPTED ~5 min after each
 		// 10-min beat (the 30s LivenessInterval default).
 		cpeer.SetLivenessInterval(uint32(defaultInfraBeatInterval / time.Second))
+		// END.0: the combiner is a config-defined, pre-trusted infra peer that
+		// is always reachable. Seed its canonical DNS mechanism state to
+		// OPERATIONAL (this replaces the former AgentDetails.State=OPERATIONAL),
+		// and stamp LastBeatSent so the decay-on-read starts from "fresh"
+		// instead of treating a zero timestamp as infinitely old. The
+		// infra-beat readiness gate and the send gates now read this store.
+		cpeer.SetMechanismState("DNS", transport.PeerStateOperational, "combiner infra peer (config-defined, pre-trusted)")
+		cpeer.SetMechanismLastBeatSent("DNS", time.Now())
 	}
 
 	// Load and register combiner's public key for encrypted communication

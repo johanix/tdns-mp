@@ -94,6 +94,12 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 		// agent beat interval — match the decay thresholds to it (see
 		// InitializeCombinerAsPeer for the rationale).
 		speer.SetLivenessInterval(uint32(defaultInfraBeatInterval / time.Second))
+		// END.0: seed the canonical DNS mechanism state to OPERATIONAL for this
+		// config-defined, pre-trusted infra peer (replaces the former
+		// AgentDetails.State=OPERATIONAL); stamp LastBeatSent so decay starts
+		// fresh. See InitializeCombinerAsPeer for the rationale.
+		speer.SetMechanismState("DNS", transport.PeerStateOperational, "signer infra peer (config-defined, pre-trusted)")
+		speer.SetMechanismLastBeatSent("DNS", time.Now())
 	}
 
 	// Load and register signer's public key for encrypted communication

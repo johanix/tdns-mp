@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -1364,11 +1365,17 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 				if agent.Identity == lem.localID {
 					continue // skip self
 				}
+				// Which transport is live reads the canonical transport.Peer
+				// per-mechanism state (END.0, decayed); was {Dns,Api}Details.State.
 				transportStr := "-"
-				if agent.DnsDetails != nil && agent.DnsDetails.State == AgentStateOperational {
-					transportStr = "DNS"
-				} else if agent.ApiDetails != nil && agent.ApiDetails.State == AgentStateOperational {
-					transportStr = "API"
+				if ar.TransportManager != nil {
+					if peer, ok := ar.TransportManager.PeerRegistry.Get(string(agent.Identity)); ok {
+						if st, ok := peer.MechanismEffectiveState("DNS"); ok && st == transport.PeerStateOperational {
+							transportStr = "DNS"
+						} else if st, ok := peer.MechanismEffectiveState("API"); ok && st == transport.PeerStateOperational {
+							transportStr = "API"
+						}
+					}
 				}
 				status.Peers = append(status.Peers, PeerSyncInfo{
 					Identity:    agent.Identity,

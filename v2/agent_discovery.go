@@ -327,8 +327,12 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// Address/URI live on transport.Peer (peer.APIEndpoint + the
 			// API mechanism address, set on the transport side above).
 			peer.SetMechanismContactInfo("API", "complete")
-			if agent.ApiDetails.State <= AgentStateNeeded {
-				agent.ApiDetails.State = AgentStateKnown
+			// END.0: promote the canonical API mechanism state to KNOWN
+			// (guarded: do not regress an already-established mechanism). This
+			// is the per-mechanism discovery-phase write the send gates read;
+			// replaces the former agent.ApiDetails.State = KNOWN twin.
+			if raw, ok := peer.MechanismRawState("API"); !ok || raw <= transport.PeerStateNeeded {
+				peer.SetMechanismState("API", transport.PeerStateKnown, "discovered via DNS (API usable)")
 			}
 			if peer.GetState() < transport.PeerStateKnown {
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (API usable)")
@@ -341,8 +345,9 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// URL (the transport side withholds the address), and do not
 			// regress an already-established peer.
 			agent.ApiMethod = true
+			apiSt, _ := mechStateForGate(peer, "API")
 			lgAgent.Warn("API endpoint URI found but no resolved address; not marking usable",
-				"identity", result.Identity, "uri", result.APIUri, "state", AgentStateToString[agent.ApiDetails.State])
+				"identity", result.Identity, "uri", result.APIUri, "state", AgentStateToString[apiSt])
 		} else {
 			// No API endpoint found — clear the flag so DiscoveryRetrierNG
 			// doesn't perpetually retry discovery for a non-existent transport.
@@ -360,8 +365,11 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// Address/URI live on transport.Peer (peer.DNSEndpoint + the
 			// DNS mechanism address, set on the transport side above).
 			peer.SetMechanismContactInfo("DNS", "complete")
-			if agent.DnsDetails.State <= AgentStateNeeded {
-				agent.DnsDetails.State = AgentStateKnown
+			// END.0: promote the canonical DNS mechanism state to KNOWN
+			// (guarded against regression); replaces the former
+			// agent.DnsDetails.State = KNOWN twin. The send gates read this.
+			if raw, ok := peer.MechanismRawState("DNS"); !ok || raw <= transport.PeerStateNeeded {
+				peer.SetMechanismState("DNS", transport.PeerStateKnown, "discovered via DNS (DNS usable)")
 			}
 			if peer.GetState() < transport.PeerStateKnown {
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (DNS usable)")
@@ -385,8 +393,9 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// peer on a transient address-less round — its prior good
 			// address/state stand until liveness demotes it (Fix B).
 			agent.DnsMethod = true
+			dnsSt, _ := mechStateForGate(peer, "DNS")
 			lgAgent.Warn("DNS endpoint URI found but no resolved address; not marking usable",
-				"identity", result.Identity, "uri", result.DNSUri, "state", AgentStateToString[agent.DnsDetails.State])
+				"identity", result.Identity, "uri", result.DNSUri, "state", AgentStateToString[dnsSt])
 		} else {
 			// No DNS endpoint found — clear the flag so DiscoveryRetrierNG
 			// doesn't perpetually retry discovery for a non-existent transport.
