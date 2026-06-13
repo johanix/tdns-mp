@@ -619,6 +619,14 @@ authz is post-callback in MP). **Envelope label lands here**
 replacing the `IsPayloadEncrypted()` byte-sniff; additive field,
 absent ⇒ `jose` (Do53 default), so mixed fleets stay INVARIANT.
 
+**Scope note — receive path only.** C5 splits the *receive* path
+(`chunk_notify_handler`). It deliberately does NOT touch the
+query-mode *serve* path that still lives in tdns-mp
+(`chunk_store.go`, `chunk_query_handler.go`, the signer's
+`fetchChunkPayloadViaQuery`, the `ChunkPayloadStore` config field
++ `main_init.go` wiring). Moving those is post-refactor cleanup —
+see the "Transport owns the full transportation chain" item in F2.
+
 ## C6 — minimize constants + payload types
 
 Reduce `MessageType` constants to transport-own; collapse
@@ -802,6 +810,35 @@ discovery smoke test — this is the reusability proof point).
   `types.go~`, `combiner_chunk.go~`, doc `~` duplicates); mark
   superseded docs' Status lines; the (B)-fields presentation
   finish if not already done.
+- **F2b — transport owns the FULL transportation chain (deferred
+  goal; design at execution time, not now).** End state (operator
+  intent, 2026-06-13): the application says to transport "send this
+  data to this recipient and tell me when it has been received" —
+  and touches NO framing, chunking, query-mode, payload store, or
+  fetch mechanics. The opaque-message seam (C1–C3) + receive-path
+  split (C5) get the *receive* side there; this item finishes the
+  *send/serve* side that the C-stages deliberately leave in tdns-mp.
+  Remnant inventory to move into transport (verified 2026-06-13):
+  - `chunk_store.go` — `ChunkPayloadStore` iface + `MemChunkPayloadStore`
+    (serve-side TTL payload cache).
+  - `chunk_query_handler.go` — `RegisterChunkQueryHandler`,
+    `chunkQueryHandler`, `serveChunkRR` (answers inbound CHUNK queries).
+  - `signer_chunk_handler.go` — `fetchChunkPayloadViaQuery` (the
+    query-mode fetch callback) + the `RegisterSignerChunkHandler`
+    wiring (the role-router half collapses in C3; the fetch half
+    lands here).
+  - `config.go` `ChunkPayloadStore` field + the ~4 `main_init.go`
+    wiring sites (agent/auditor/combiner/signer:
+    `NewMemChunkPayloadStore`, `RegisterChunkQueryHandler`,
+    `conf.InternalMp.ChunkPayloadStore`).
+  - `chunk_mode` / `chunk_query_endpoint` operator config become
+    transport-internal (the app should not choose edns0-vs-query).
+  After F2b, tdns-mp retains NO chunk *framing* — only application
+  semantics over the reassembled payload (combiner edit logic in
+  `combiner_chunk.go`, which is misnamed and should lose the "chunk"
+  name). Scope/risk: medium; touches the serve path + config surface;
+  do it as its own slice AFTER the merge proves the receive side, so
+  the C-stage wire risk and this are never entangled. NOT C-stage work.
 - **F3 — Phase 8–9 leftovers.** Exported-type count
   (88 → target <30; most of the reduction falls out of C4/C6/C7 —
   F3 verifies and unexports the remainder, e.g. the 5 kept
