@@ -295,9 +295,9 @@ is what leaves the discovery *process* as transport-only code.
 
 ---
 
-# Phase 2.6 — relocate the discovery PROCESS into transport (OPTIONAL — open decision #5 = C)
+# Phase 2.6 — relocate the discovery PROCESS into transport (IN scope — decision #5 = C)
 
-**Include ONLY if open decision #5 = C.** Skip for A/B. Prereq: Phase 2.5.
+Prereq: Phase 2.5.
 
 **Principle: gate stays MP, process moves to transport.** MP keeps the
 HSYNC3 gate (compute shared-zone participants → find unknown needed peer)
@@ -442,21 +442,12 @@ phase is compiler-proven deletion.
    all deletion off the Phase-1 base) vs separate testbed checkpoints.
    Recommend separate checkpoints for 1 and 2.5 (behavior-touching),
    batch 2+3 if the testbed pass after 2 is clean.
-5. **Discovery relocation — how far (Phase 2.6)?** Per the gate/process
-   split in the Scope section, the gate stays MP; the question is how much
-   of the process to move now.
-   - **A — none (Stage E later):** shortest path to the Stage-C start.
-   - **B — de-dup lookups only:** point MP discovery at `transport.Imr`,
-     delete MP's duplicate `Lookup*`. Leaves orchestration +
-     `DiscoveryDriver` in place.
-   - **C — full relocation (Phase 2.6):** move `DiscoverAgent` + the
-     process half of `RegisterDiscoveredAgent` into transport; MP keeps
-     only the gate (compute-needed → `DiscoverPeer(identity)`); retire
-     `DiscoveryDriver`; `OnPeerDiscovered` materializes the `*Agent` view.
-
-   **Recommend C.** Phase 2.5 already repoints every crypto/capability
-   write in the discovery process to `transport.Peer`, so C right after it
-   rewrites `RegisterDiscoveredAgent` once (2.5 repoints, 2.6 moves)
-   rather than twice. C is behavior-observable (gets its own testbed
-   checkpoint) and clears most of v3's Stage E. B is the fallback if 2.6
-   overruns; A is the minimum.
+5. **Discovery relocation — DECIDED: C (full relocation, Phase 2.6).**
+   The gate stays MP; the discovery process moves to transport. Phase 2.6
+   is IN scope: move `DiscoverAgent` + the process half of
+   `RegisterDiscoveredAgent` into transport; MP keeps only the gate
+   (compute-needed → `DiscoverPeer(identity)`); retire `DiscoveryDriver`;
+   `OnPeerDiscovered` materializes the `*Agent` view. This clears most of
+   v3's Stage E (E1/E2). Run it right after Phase 2.5 (which repoints the
+   crypto/capability writes), so `RegisterDiscoveredAgent` is rewritten
+   once, not twice.
