@@ -77,34 +77,61 @@ docs on top of that.
   test, standalone builds green, mixed-fleet runbook, envelope-timing
   decision. This is the "starting point for Stage C" the prompt asks for.
 
-**EXPANDED SCOPE — decided IN, with a hard boundary:**
-The prompt allows extending through "discovery and associated bits." I
-am scoping in the **discovery-prep that belongs with the consolidation**
-(it's cheap now and removes a future cross-layer headache), but scoping
-OUT the actual relocation of the discovery *mechanism* into transport.
-Concretely:
+**EXPANDED SCOPE — partly IN, the discovery boundary is an OPERATOR
+DECISION (see correction below):**
+The prompt allows extending through "discovery and associated bits."
 - **IN (Phase 2.5): finish the `agentMeta.Crypto` → `transport.Peer`
   crypto-slot migration** (the addendum's deferred "E1" crypto move).
   Reason: it is small, it is pure consolidation (another MP-side sidecar
   that duplicates a transport-owned concept), and leaving it makes both
   A5 and Stage E messier. Doing it here means `transport.Peer` owns ALL
   per-peer connection+crypto state when we reach Stage C — a clean seam.
-- **OUT (true Stage E): moving `DiscoverAgent`/the IMR-driven lookup
-  into transport.** The measurement shows this is genuinely hard and
-  genuinely wire/behavior-observable: it depends on the IMR engine
-  (tdns/v2, which transport cannot import), on HSYNC3 zone-gating, and
-  on the OnPeerDiscovered/DiscoveryDriver seam. That is real Stage-E
-  work with its own testbed surface, and the current out-of-band seam
-  (MP drives discovery, transport notified via `OnPeerDiscovered`) is a
-  CORRECT layering, not debt. Relocating it is NOT a prerequisite for
-  Stage C and does not fit the "delete the scaffolding" model — it is
-  net-new design. **Keep it incremental, after Stage C, as v3's Stage E.**
+- **DISCOVERY MECHANISM RELOCATION — boundary CORRECTED 2026-06-14
+  (operator caught a factual error; see below). UNDECIDED pending
+  operator call at the Phase 2 gate.**
 
-Rationale for the boundary: the cheap, consolidation-shaped discovery
-work (crypto rehoming) comes in; the expensive, design-shaped discovery
-work (mechanism relocation) stays out and stays incremental. The
-deciding test is the same one this whole plan is built on — *is it
-scaffolding deletion, or is it net-new oracle-visible behavior?*
+**CORRECTION (2026-06-14).** An earlier draft of this section scoped
+discovery relocation OUT on the claim that "transport cannot import the
+IMR engine (tdns/v2)." **That is false.** `tdns-transport/v2/transport`
+already imports `github.com/johanix/tdns/v2` (`imr.go:37`, `init.go:17`),
+and `transport.Imr` (embeds `*tdns.Imr`) ALREADY implements every
+discovery lookup — `LookupAgentJWK`, `LookupAgentKEY`,
+`LookupAgentAPIEndpoint`, `LookupAgentDNSEndpoint`, `LookupAgentTLSA`,
+`LookupServiceAddresses` (`transport/imr.go`). Its own header calls these
+"parallel copies of the same helpers on `*tdnsmp.Imr`" — i.e. MP and
+transport hold DUPLICATE discovery primitives over the same singleton
+`*tdns.Imr`. Furthermore `transport.TransportManager.DiscoverPeer` +
+the `DiscoveryDriver` interface (`manager.go:130-158`) are explicitly
+documented as a "TEMPORARY seam... Phase 6 part 2 moves the discovery
+loop into transport and deletes this interface." So discovery relocation
+is a PLANNED, already-scaffolded move, NOT blocked by layering.
+
+**Revised assessment.** With the IMR objection gone, discovery
+relocation is materially more tractable than the prior draft claimed.
+The genuine residual MP-coupling, measured 2026-06-14:
+  - `RegisterDiscoveredAgent` writes MP state: `ar.S.Set` (the `*Agent`
+    view), `agentMeta.Crypto` via `ensureCrypto`, `ApiMethod/DnsMethod`
+    flags. BUT: Phase 2.5 moves crypto onto `transport.Peer`, and
+    ApiMethod/DnsMethod become `transport.Peer.HasMechanism` (addendum
+    §4). After Phase 2.5 the ONLY MP-only write left is materializing the
+    `*Agent` view in `ar.S` — which `OnPeerDiscovered` already does.
+  - Zone-gating: the engine decides WHO to discover from HSYNC3 via
+    `MarkNeeded(id, zone, …)`. Addendum §1 already settled that the
+    NEEDED INTENT lives on `transport.Peer` and the engine sets it. So
+    "MP decides intent, transport runs the mechanism" is the CORRECT
+    end-state split — the zone-gating stays MP-side and is not a blocker.
+  - The duplicate Imr helpers (MP-side + transport-side) want
+    de-duplicating to the transport copy — that IS scaffolding deletion.
+
+**So the deciding test cuts BOTH ways now:** consolidating the duplicate
+lookups + retiring the `DiscoveryDriver` seam is scaffolding-deletion
+(fits this plan); but the orchestration move still has a behavior-
+observable surface (restart→rediscover→OPERATIONAL; the
+OnPeerDiscovered→ar.S view materialization) that wants a testbed pass.
+It is a genuine mix, which is why it is now an OPERATOR DECISION at the
+Phase 2 gate rather than a unilateral OUT. Options A/B/C are listed in
+"Open decisions" #5. The prior draft's confident OUT was built on the
+false IMR premise and is retracted.
 
 ## The method (how each phase is executed and verified)
 
@@ -402,3 +429,28 @@ phase is compiler-proven deletion.
    all deletion off the Phase-1 base) vs separate testbed checkpoints.
    Recommend separate checkpoints for 1 and 2.5 (behavior-touching),
    batch 2+3 if the testbed pass after 2 is clean.
+5. **Discovery mechanism relocation — how much, if any, into this plan?**
+   (The IMR-blocker premise that justified a clean OUT was false; see the
+   corrected Scope section.) Three options:
+   - **A — keep OUT (Stage E after Stage C):** smallest scope to reach
+     the Stage-C start; discovery stays MP-driven via the existing
+     (correct) `OnPeerDiscovered` seam. The seam is not debt, so parking
+     it costs nothing toward Stage C.
+   - **B — fold in only the scaffolding-deletion slice:** de-duplicate
+     the MP-side vs transport-side Imr lookup helpers down to the
+     transport copy (they already exist there), and have MP discovery
+     call `transport.Imr`. Pure consolidation, fits this plan; does NOT
+     move the orchestration. Leaves `DiscoveryDriver` seam in place.
+   - **C — full relocation:** move `DiscoverAgent` orchestration +
+     `RegisterDiscoveredAgent` into transport, retire the
+     `DiscoveryDriver` seam, transport owns discovery end-to-end. Most
+     scope; behavior-observable (needs its own testbed pass); best done
+     AFTER Phase 2.5 (so crypto + capability flags already live on
+     `transport.Peer`, removing discovery's last MP-only writes).
+   Recommendation: **B** if you want the duplicate-lookup debt gone while
+   reaching Stage C; **A** if you want the shortest path to Stage C and
+   prefer to do discovery as one clean Stage-E unit later. **C** is
+   viable but expands "to Stage C" into "to Stage C + most of E" — only
+   pick it if you'd rather finish discovery now than context-switch to
+   the wire seam. I lean **B**: it captures the cheap win the corrected
+   facts expose, without turning this into a discovery project.
