@@ -14,18 +14,13 @@ work below, **this doc wins.**
 ## Why this plan exists (the decision behind it)
 
 The redesign has run ~12 weeks / 475 commits and is still inside Stage
-A. A re-examination (2026-06-14) asked: is the "keep it compiling and
-functional at every microstep" discipline still earning its cost?
-Finding: it earns its cost **where intermediate behavior is
-oracle-visible** (wire format, liveness deltas, the testbed catching
-the three peer-state truth bugs this month) and **wastes cost where it
-is not** (the long chain of INVARIANT state-store-consolidation slices,
-each of which had to be *designed coherent* on its own — dual-write
-windows, shadow fields, bridge converters — while the testbed could
-see no change). The END.0 episode is the proof: a step whose purpose
-was to *reduce* state-store coupling had to *re-add* a dual-write to
-keep the fleet alive, caught only on the testbed because unit tests
-structurally can't see the engine trigger.
+A. The method here is chosen per the property that decides it: the
+"keep it compiling and functional at every microstep" discipline pays
+off **where intermediate behavior is oracle-visible** (wire format,
+liveness deltas — Stage C and the testbed-verified bug work) and not
+where it is invisible (INVARIANT state-store consolidation, where each
+intermediate must be hand-designed coherent — dual-write windows, shadow
+fields, bridge converters — with nothing observable to verify).
 
 So this plan is **hybrid by design**:
 - The remaining **consolidation** (embed finish + bridge teardown +
@@ -77,66 +72,39 @@ docs on top of that.
   test, standalone builds green, mixed-fleet runbook, envelope-timing
   decision. This is the "starting point for Stage C" the prompt asks for.
 
-**EXPANDED SCOPE — partly IN, the discovery boundary is an OPERATOR
-DECISION (see correction below):**
-The prompt allows extending through "discovery and associated bits."
-- **IN (Phase 2.5): finish the `agentMeta.Crypto` → `transport.Peer`
+**EXPANDED SCOPE — Phase 2.5 IN; discovery relocation (Phase 2.6) per
+open decision #5.** The prompt allows extending through "discovery."
+- **Phase 2.5 (IN): finish `agentMeta.Crypto` → `transport.Peer`
   crypto-slot migration** (the addendum's deferred "E1" crypto move).
-  Reason: it is small, it is pure consolidation (another MP-side sidecar
-  that duplicates a transport-owned concept), and leaving it makes both
-  A5 and Stage E messier. Doing it here means `transport.Peer` owns ALL
-  per-peer connection+crypto state when we reach Stage C — a clean seam.
-- **DISCOVERY MECHANISM RELOCATION — boundary CORRECTED 2026-06-14
-  (operator caught a factual error; see below). UNDECIDED pending
-  operator call at the Phase 2 gate.**
+  Small, pure consolidation (an MP sidecar duplicating a transport-owned
+  concept). After it, `transport.Peer` owns ALL per-peer
+  connection+crypto state — a clean seam for Stage C.
+- **Phase 2.6 (per decision #5): relocate the discovery PROCESS into
+  transport.** See the gate/process principle below.
 
-**CORRECTION (2026-06-14).** An earlier draft of this section scoped
-discovery relocation OUT on the claim that "transport cannot import the
-IMR engine (tdns/v2)." **That is false.** `tdns-transport/v2/transport`
-already imports `github.com/johanix/tdns/v2` (`imr.go:37`, `init.go:17`),
-and `transport.Imr` (embeds `*tdns.Imr`) ALREADY implements every
-discovery lookup — `LookupAgentJWK`, `LookupAgentKEY`,
-`LookupAgentAPIEndpoint`, `LookupAgentDNSEndpoint`, `LookupAgentTLSA`,
-`LookupServiceAddresses` (`transport/imr.go`). Its own header calls these
-"parallel copies of the same helpers on `*tdnsmp.Imr`" — i.e. MP and
-transport hold DUPLICATE discovery primitives over the same singleton
-`*tdns.Imr`. Furthermore `transport.TransportManager.DiscoverPeer` +
-the `DiscoveryDriver` interface (`manager.go:130-158`) are explicitly
-documented as a "TEMPORARY seam... Phase 6 part 2 moves the discovery
-loop into transport and deletes this interface." So discovery relocation
-is a PLANNED, already-scaffolded move, NOT blocked by layering.
+**Gate ≠ process.** The *gate* — "which peers do I need?" — is MP: it
+needs HSYNC3/zones, which transport never knows. MP computes shared-zone
+participants, finds an unknown needed peer, and declares intent via
+`transport.DiscoverPeer(identity)` / setting the peer NEEDED on
+`transport.Peer`. The *process* — lookups → resolve → register → KNOWN —
+is transport: it needs only an identity. This is addendum §1 ("the engine
+declares a need by setting `transport.Peer` to NEEDED; the discovery
+handler reads NEEDED out of the `PeerRegistry`").
 
-**Revised assessment.** With the IMR objection gone, discovery
-relocation is materially more tractable than the prior draft claimed.
-The genuine residual MP-coupling, measured 2026-06-14:
-  - `RegisterDiscoveredAgent` writes MP state: `ar.S.Set` (the `*Agent`
-    view), `agentMeta.Crypto` via `ensureCrypto`, `ApiMethod/DnsMethod`
-    flags. BUT: Phase 2.5 moves crypto onto `transport.Peer`, and
-    ApiMethod/DnsMethod become `transport.Peer.HasMechanism` (addendum
-    §4). After Phase 2.5 the ONLY MP-only write left is materializing the
-    `*Agent` view in `ar.S` — which `OnPeerDiscovered` already does.
-  - Zone-gating: the engine decides WHO to discover from HSYNC3 via
-    `MarkNeeded(id, zone, …)`. Addendum §1 already settled that the
-    NEEDED INTENT lives on `transport.Peer` and the engine sets it. So
-    "MP decides intent, transport runs the mechanism" is the CORRECT
-    end-state split — the zone-gating stays MP-side and is not a blocker.
-  - The duplicate Imr helpers (MP-side + transport-side) want
-    de-duplicating to the transport copy — that IS scaffolding deletion.
+Transport is already equipped for the process: it imports `tdns/v2`
+(`imr.go:37`, `init.go:17`); `transport.Imr` (embeds `*tdns.Imr`)
+implements every lookup (`LookupAgentJWK/KEY/APIEndpoint/DNSEndpoint/
+TLSA/ServiceAddresses`); `DiscoverPeer` + the `DiscoveryDriver` seam
+(`manager.go:130-158`) are built to be retired when the process lands.
 
-**The clean split (operator, 2026-06-14): GATE ≠ PROCESS.** The *gate*
-("which peers do I need?") is MP — it needs HSYNC3/zones, which transport
-must never know. The *process* (lookups → resolve → register → KNOWN) is
-transport — it needs none of that. MP runs the gate, then declares intent
-via `transport.DiscoverPeer(identity)` / setting NEEDED on
-`transport.Peer`; transport runs the process. This is precisely addendum
-§1 ("the engine declares a need by setting `transport.Peer` to NEEDED;
-the discovery handler reads NEEDED out of the `PeerRegistry`; Stage E
-relocates that handler"). The IMR "blocker" conflated the two; they are
-orthogonal. With that split, discovery-process relocation is tractable
-and on-design — it is now an OPERATOR DECISION on HOW FAR to take it in
-THIS plan (options A/B/C, "Open decisions" #5), not a unilateral OUT. The
-prior draft's confident OUT was built on the false IMR premise and is
-retracted.
+Residual MP-coupling in the process (`RegisterDiscoveredAgent`, measured
+2026-06-14): its real work already writes `transport.Peer`
+(ContactInfo/mechanism-KNOWN/address/usability). Its only non-transport
+writes are crypto (Phase 2.5 moves it to `transport.Peer`),
+`ApiMethod/DnsMethod` (= `transport.Peer.HasMechanism`, addendum §4), and
+`ar.S.Set` (materialize the `*Agent` view — what `OnPeerDiscovered`
+already does). So after Phase 2.5 the process is transport-only code
+still living in the MP package; Phase 2.6 relocates it.
 
 ## The method (how each phase is executed and verified)
 
@@ -474,52 +442,21 @@ phase is compiler-proven deletion.
    all deletion off the Phase-1 base) vs separate testbed checkpoints.
    Recommend separate checkpoints for 1 and 2.5 (behavior-touching),
    batch 2+3 if the testbed pass after 2 is clean.
-5. **Discovery mechanism relocation — how much into this plan?**
+5. **Discovery relocation — how far (Phase 2.6)?** Per the gate/process
+   split in the Scope section, the gate stays MP; the question is how much
+   of the process to move now.
+   - **A — none (Stage E later):** shortest path to the Stage-C start.
+   - **B — de-dup lookups only:** point MP discovery at `transport.Imr`,
+     delete MP's duplicate `Lookup*`. Leaves orchestration +
+     `DiscoveryDriver` in place.
+   - **C — full relocation (Phase 2.6):** move `DiscoverAgent` + the
+     process half of `RegisterDiscoveredAgent` into transport; MP keeps
+     only the gate (compute-needed → `DiscoverPeer(identity)`); retire
+     `DiscoveryDriver`; `OnPeerDiscovered` materializes the `*Agent` view.
 
-   **Governing principle (operator, 2026-06-14): GATE ≠ PROCESS.** The
-   *gate* ("which remote agents do I need to discover?") is MP's: it
-   parses HSYNC3, computes shared-zone participants, finds an unknown
-   peer it shares a zone with, and declares intent —
-   `transport.DiscoverPeer(identity)` (or sets the peer NEEDED on
-   `transport.Peer`, which the addendum §1 already specifies). The
-   *process* (URI/SVCB/JWK/TLSA lookups → address resolution → register →
-   KNOWN promotion) is transport's, and transport already has every piece
-   (`transport.Imr.Lookup*`, `DiscoverPeer`, the `DiscoveryDriver` seam
-   built explicitly to be deleted when this lands). The IMR "blocker" was
-   never a process-coupling — it was a misread. The gate stays MP; the
-   process moves to transport. They are orthogonal.
-
-   **Residual check (measured in `RegisterDiscoveredAgent`, 2026-06-14):**
-   the function's real work already writes `transport.Peer` (ContactInfo,
-   mechanism KNOWN, address, usability). Its only non-transport writes
-   are: per-mechanism crypto (`ensureCrypto` — **Phase 2.5 moves this to
-   `transport.Peer`**), `ApiMethod/DnsMethod` (= `transport.Peer.HasMechanism`
-   per addendum §4 — move with the crypto), and `ar.S.Set` (materialize
-   the `*Agent` view — already what `OnPeerDiscovered` does). So **after
-   Phase 2.5, the discovery process is essentially pure transport code
-   that merely still lives in the MP package.**
-
-   Options:
-   - **A — keep OUT (Stage E later):** shortest path to the Stage-C start.
-   - **B — de-dup the lookups only:** point MP discovery at
-     `transport.Imr`, delete MP's duplicate `Lookup*`. Scaffolding
-     deletion; leaves orchestration + `DiscoveryDriver` in place.
-   - **C — full relocation:** move `DiscoverAgent` + the process half of
-     `RegisterDiscoveredAgent` into transport, MP keeps only the gate
-     (compute-needed → `DiscoverPeer(identity)`), retire `DiscoveryDriver`,
-     fire `OnPeerDiscovered` to materialize the `*Agent` view. Transport
-     owns discovery end-to-end.
-
-   **Recommendation REVISED to C-as-Phase-2.6 (was B).** The gate/process
-   split + the residual check show C is no longer "to Stage C + most of
-   E": Phase 2.5 already rewrites every crypto/capability write in the
-   discovery process, so once it lands, relocating the now-transport-only
-   process is *continuation*, not redesign. Doing C right after 2.5 means
-   `RegisterDiscoveredAgent` is rewritten ONCE (2.5 repoints its writes,
-   2.6 moves the function) instead of twice (2.5 now, Stage-E move later).
-   It is behavior-observable (restart→rediscover→OPERATIONAL) so it gets
-   its own testbed checkpoint — but that is one pass, against an
-   already-validated transport target. B is the fallback if C overruns at
-   execution time; A only if you want to stop at the minimum. C delivers
-   the prompt's "take us all the way with the transport redesign incl.
-   discovery" option, cleanly, because the gate correctly stays in MP.
+   **Recommend C.** Phase 2.5 already repoints every crypto/capability
+   write in the discovery process to `transport.Peer`, so C right after it
+   rewrites `RegisterDiscoveredAgent` once (2.5 repoints, 2.6 moves)
+   rather than twice. C is behavior-observable (gets its own testbed
+   checkpoint) and clears most of v3's Stage E. B is the fallback if 2.6
+   overruns; A is the minimum.
