@@ -1,0 +1,17 @@
+{
+  "MessageType": "edits",
+  "MyIdentity": "combiner.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "AgentRecords": {
+    "me.example.": {
+      "a.zone1.example.": [
+        "a.zone1.example. 3600 IN A 192.0.2.1"
+      ]
+    }
+  },
+  "Message": "current contributions",
+  "timestamp": 1700000008,
+  "type": "edits",
+  "sender_id": "legacy-sender.example."
+}

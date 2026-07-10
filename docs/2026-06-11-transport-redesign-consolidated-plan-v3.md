@@ -1112,8 +1112,15 @@ the remainder before continuing rather than after.
    redirect-to-transport mapping proposed in A5.1, and whether
    the presentation finish (`peer list -v`) is worth scheduling
    immediately after A5 or parks until F2.
-4. **DOQ-vs-C5 envelope timing (C0.4):** does the
-   in-channel-CHUNK work need the `envelope` label before C5?
+4. **DOQ-vs-C5 envelope timing (C0.4): DECIDED 2026-07-10 — defer to
+   C5 as planned.** The label is additive (absent ⇒ `jose`), sits
+   OUTSIDE the JOSE envelope (dispatch before the JOSE library — design
+   doc §6), and changes neither the signed bytes nor mixed-fleet
+   compatibility; its only consumer needing `none` is the in-channel
+   DoT/DoQ transport, still at design-doc stage. Revisit ONLY if the
+   in-channel-CHUNK implementation starts before Stage C reaches C5.
+   The C0 goldens lock today's bytes WITHOUT the field, so C5's
+   addition becomes a deliberate reviewed golden regeneration.
 5. **Per-mechanism parallel Hello/Beat:** optional follow-up
    after D1, relevant once multi-mechanism peers exist. Not a
    one-way door (D1 keeps the shape string-keyed).

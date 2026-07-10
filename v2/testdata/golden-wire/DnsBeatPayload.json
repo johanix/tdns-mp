@@ -1,0 +1,20 @@
+{
+  "type": "beat",
+  "sender_id": "legacy-sender.example.",
+  "timestamp": 1700000002,
+  "sequence": 42,
+  "state": "OPERATIONAL",
+  "MessageType": "beat",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "MyBeatInterval": 30,
+  "Zones": [
+    "zone1.example."
+  ],
+  "Time": "2026-01-02T03:04:05Z",
+  "Gossip": [
+    {
+      "group_hash": "gh1"
+    }
+  ]
+}

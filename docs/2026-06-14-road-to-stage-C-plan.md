@@ -506,6 +506,26 @@ view; one allocation per peer; no bridge; no dead stores.
 
 # Phase 4 — Stage-C starting point (the C0 gate)
 
+**STATUS 2026-07-10: DONE (mp branch `phase-4-c0-gate`). All four gate
+items closed:**
+1. **Standalone builds green** re-verified at this point (transport
+   build+test, transport-exercise, mp full `-race`, 5 binaries).
+2. **Golden-wire suite landed** (`golden_wire_test.go` +
+   `testdata/golden-wire/`, 14 goldens): byte-exact JSON for the 13
+   `Dns*Payload` types + `core.ManifestData`, the manifest metadata key
+   convention, and the 13-verb `DetermineMessageType` dispatch set.
+   Intentional wire changes = regenerate via
+   `go test -run TestGoldenWire -update ./...` + review the diff.
+3. **Mixed-fleet runbook written**:
+   `2026-07-10-stage-c-mixed-fleet-runbook.md` (deploy order, M21
+   conflicting-twins refusal, silent-verb-drift symptoms, rollback).
+4. **Envelope/DOQ decision closed**: defer to C5 (see v3 open decision
+   4 for the recorded rationale).
+
+**The `stage-C-start` tag is deferred with all the others to the
+testbed pass. THE ROAD-TO-C PLAN ENDS HERE — Stage C proceeds
+incrementally per v3 C1–C7.**
+
 This phase writes NO consolidation code. It establishes the
 preconditions v3 requires before C1, so the next agent starts Stage C
 from a defined line. All four are BLOCKING for C1 (v3 C0).

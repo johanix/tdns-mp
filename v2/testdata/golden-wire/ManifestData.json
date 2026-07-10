@@ -1,0 +1,11 @@
+{
+  "chunk_count": 3,
+  "chunk_size": 512,
+  "metadata": {
+    "content": "key_operations",
+    "distribution_id": "dist-003",
+    "receiver_id": "you.example.",
+    "timestamp": 1700000013
+  },
+  "payload": "aW5saW5lLXBheWxvYWQ="
+}

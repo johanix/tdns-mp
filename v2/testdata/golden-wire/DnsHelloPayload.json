@@ -1,0 +1,19 @@
+{
+  "type": "hello",
+  "sender_id": "legacy-sender.example.",
+  "capabilities": [
+    "cap-a",
+    "cap-b"
+  ],
+  "shared_zones": [
+    "zone1.example.",
+    "zone2.example."
+  ],
+  "timestamp": 1700000001,
+  "nonce": "hello-nonce",
+  "MessageType": "hello",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "Time": "2026-01-02T03:04:05Z"
+}
