@@ -282,16 +282,3 @@ func markLocalMembers(localIdentity string, members []ZoneMemberRoleDTO) {
 		}
 	}
 }
-
-// zoneMemberIdentities returns apex HSYNC3 identity FQDNs for zone.
-func zoneMemberIdentities(zone string) map[string]bool {
-	mpzd, ok := Zones.Get(zone)
-	if !ok || mpzd == nil {
-		return nil
-	}
-	ids := make(map[string]bool)
-	for _, id := range mpzd.hsync3IdentitiesByLabel() {
-		ids[id] = true
-	}
-	return ids
-}

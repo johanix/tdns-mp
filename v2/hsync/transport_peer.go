@@ -73,20 +73,6 @@ func transportToHsyncState(s transport.PeerState) PeerState {
 	}
 }
 
-func peerDetailsFor(peer *Peer, transport string) *PeerDetails {
-	switch transport {
-	case TransportDNS:
-		if peer.DnsMethod && peer.DnsDetails != nil {
-			return peer.DnsDetails
-		}
-	case TransportAPI:
-		if peer.ApiMethod && peer.ApiDetails != nil {
-			return peer.ApiDetails
-		}
-	}
-	return nil
-}
-
 func forEachEnabledTransport(peer *Peer, fn func(name string, td *PeerDetails)) {
 	if peer.DnsMethod && peer.DnsDetails != nil {
 		fn(TransportDNS, peer.DnsDetails)

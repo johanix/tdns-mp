@@ -1207,57 +1207,6 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 	return resp
 }
 
-// isNoOpUpdate checks whether an incoming update would cause any actual change.
-func (mpzd *MPZoneData) isNoOpUpdate(senderID string, records map[string][]string) bool {
-	for owner, rrStrings := range records {
-		for _, rrStr := range rrStrings {
-			rr, err := dns.NewRR(rrStr)
-			if err != nil {
-				return false
-			}
-
-			rrtype := rr.Header().Rrtype
-			switch rr.Header().Class {
-			case dns.ClassINET:
-				if !mpzd.rrExistsInZone(owner, rrtype, rr) {
-					lgCombiner.Info("legacy isNoOpUpdate: RR not found, update is NOT a no-op",
-						"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
-					return false
-				}
-				lgCombiner.Debug("legacy isNoOpUpdate: RR already present (no-op)",
-					"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
-
-			case dns.ClassNONE:
-				delRR := dns.Copy(rr)
-				delRR.Header().Class = dns.ClassINET
-				if mpzd.rrExistsInZone(owner, rrtype, delRR) {
-					lgCombiner.Info("legacy isNoOpUpdate: RR exists, delete is NOT a no-op",
-						"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
-					return false
-				}
-				lgCombiner.Debug("legacy isNoOpUpdate: RR already absent (delete is no-op)",
-					"sender", senderID, "zone", mpzd.ZoneName, "rr", rr.String())
-
-			case dns.ClassANY:
-				if mpzd.rrTypeExistsInZone(owner, rrtype) {
-					lgCombiner.Info("legacy isNoOpUpdate: RRtype has records, bulk delete is NOT a no-op",
-						"sender", senderID, "zone", mpzd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
-					return false
-				}
-				lgCombiner.Debug("legacy isNoOpUpdate: RRtype empty (bulk delete is no-op)",
-					"sender", senderID, "zone", mpzd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
-
-			default:
-				return false
-			}
-		}
-	}
-
-	lgCombiner.Info("isNoOpUpdate: all records already present, update is a no-op",
-		"sender", senderID, "zone", mpzd.ZoneName)
-	return true
-}
-
 // IsNoOpOperations checks whether explicit Operations would cause any actual change.
 func (mpzd *MPZoneData) IsNoOpOperations(senderID string, ops []core.RROperation) bool {
 	zonename := mpzd.ZoneName
@@ -1406,22 +1355,6 @@ func (mpzd *MPZoneData) rrExistsInZone(owner string, rrtype uint16, rr dns.RR) b
 		}
 	}
 
-	return false
-}
-
-// rrTypeExistsInZone checks whether the given owner/rrtype has any records.
-func (mpzd *MPZoneData) rrTypeExistsInZone(owner string, rrtype uint16) bool {
-	existing, err := mpzd.GetRRset(owner, rrtype)
-	if err == nil && existing != nil && len(existing.RRs) > 0 {
-		return true
-	}
-	if mpzd.MP.CombinerData != nil {
-		if ownerData, ok := mpzd.MP.CombinerData.Get(owner); ok {
-			if cdRRset, ok := ownerData.RRtypes.Get(rrtype); ok && len(cdRRset.RRs) > 0 {
-				return true
-			}
-		}
-	}
 	return false
 }
 

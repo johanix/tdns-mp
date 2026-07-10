@@ -6,7 +6,6 @@ package tdnsmp
 
 import (
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -198,7 +197,6 @@ type AgentRegistry struct {
 	// embedded ones, so all existing ar.S/ar.mu usage is unchanged.
 	*hsync.Registry
 	S                     core.ConcurrentMap[AgentId, *Agent]
-	mu                    sync.RWMutex
 	LocalAgent            *MultiProviderConf
 	LocateInterval        int
 	TransportManager      *transport.TransportManager

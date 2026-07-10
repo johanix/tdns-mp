@@ -1286,40 +1286,6 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
 
-// sendSyncConfirmation sends a confirmation for a received sync message.
-func (tm *MPTransportBridge) sendSyncConfirmation(msg *transport.IncomingMessage, payload *transport.DnsSyncPayload) {
-	if tm.DNSTransport == nil {
-		return
-	}
-
-	// Get or create peer
-	senderID := payload.GetSenderID()
-	peer, exists := tm.PeerRegistry.Get(senderID)
-	if !exists {
-		lgTransport.Warn("cannot send confirmation, peer not in registry", "peer", senderID)
-		return
-	}
-
-	// Send confirmation
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
-		SenderID:       tm.LocalID,
-		Zone:           payload.Zone,
-		DistributionID: payload.DistributionID,
-		Status:         transport.ConfirmSuccess,
-		Message:        "Sync received and processed",
-		Timestamp:      time.Now(),
-	})
-
-	if err != nil {
-		lgTransport.Error("failed to send confirmation", "distributionID", payload.DistributionID, "err", err)
-	} else {
-		lgTransport.Debug("sent confirmation for sync", "distributionID", payload.DistributionID)
-	}
-}
-
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).

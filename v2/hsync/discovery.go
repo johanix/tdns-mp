@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-const discoveryFailureFlushThreshold = 3
-
 // MarkNeeded creates or updates a peer in NEEDED state and kicks discovery.
 func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 	if e == nil || e.registry == nil {

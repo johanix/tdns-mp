@@ -27,18 +27,6 @@ type ElectionHandler func(msg *InboundMsg)
 // KeyStateHandler processes inbound keystate messages.
 type KeyStateHandler func(msg *InboundMsg)
 
-func (e *Engine) dispatchMsg(msg *InboundMsg) {
-	if msg == nil {
-		return
-	}
-	switch msg.MessageType {
-	default:
-		if e.onSync != nil {
-			e.onSync(msg)
-		}
-	}
-}
-
 func (e *Engine) dispatchByType(msg *InboundMsg) {
 	if msg == nil {
 		return

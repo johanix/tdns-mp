@@ -15,10 +15,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// discoveryFailureFlushThreshold is the number of consecutive discovery
-// failures before flushing the IMR cache for the agent's domain.
-const discoveryFailureFlushThreshold = 3
-
 func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	agent, exists := ar.S.Get(identity)
 	if !exists {
