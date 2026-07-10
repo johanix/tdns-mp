@@ -159,6 +159,21 @@ Binding throughout (carried from v3 / addendum §7, NON-NEGOTIABLE):
 
 # Phase 1 — E1.b: one allocation per peer, kill the deep-copy bridge
 
+**STATUS 2026-07-10: CODE DONE (mp `31d0dd7` on branch `phase-1-e1b`),
+build + full suite `-race` green, TESTBED CHECKPOINT PENDING (testbed
+unavailable at implementation time). The branch was cut from
+`transport-redesign-v1-A` @ `388dd3b` precisely so the branch point marks
+where the pre-Phase-1 tip (E1.a + the `edfa079` readiness fix, both
+undeployed) must be testbed-verified before Phase 1 is declared. Tag
+`phase-1-e1b-complete` deferred until the operator confirms. Predicted
+delta for the checkpoint: `peer status` State now derives from
+`effectiveAgentState` (same source as peer list/gossip) instead of the
+stale NG-lagged shadow; everything else INVARIANT. Findings during
+implementation: the old bridge's per-store/hello/beat wrapper-replace
+was silently wiping MP-only view fields (meta/Api/ErrorMsg) — crypto
+survived only because RegisterDiscoveredAgent rebuilt it; fixed
+structurally by materializeAgentView's never-replace contract.**
+
 **Goal (the achievable end-state, per v3's re-census — NOT "one map"):**
 The `*Agent` in `AgentRegistry.S` and the `*hsync.Peer` in
 `hsync.Registry.S` reference the SAME underlying `hsync.Peer`
