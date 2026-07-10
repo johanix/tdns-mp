@@ -27,18 +27,6 @@ func (b *mpHsyncBridge) DiscoverPeer(ctx context.Context, identity string) (*tra
 	return b.tm.TransportManager.DiscoverPeer(ctx, identity)
 }
 
-func (b *mpHsyncBridge) RegisterDiscovered(peer *hsync.Peer, result *hsync.DiscoveryResult) error {
-	if b.tm == nil {
-		return nil
-	}
-	b.ar.materializeAgentView(peer)
-	return b.tm.RegisterDiscoveredAgent(&AgentDiscoveryResult{
-		Identity: string(peer.ID),
-		APIUri:   result.APIUri,
-		DNSUri:   result.DNSUri,
-	})
-}
-
 // agentViewForPeer returns the persistent ar.S view for the peer (materializing
 // it if needed), or a transient unstored view when no AgentRegistry is wired
 // (test harnesses). E1.b: the view shares the peer pointer, so there is no

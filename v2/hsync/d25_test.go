@@ -37,7 +37,6 @@ func (m *d25Transport) DiscoverPeer(ctx context.Context, identity string) (*tran
 }
 
 // The remaining TransportBridge methods are unused by these gate tests.
-func (m *d25Transport) RegisterDiscovered(peer *Peer, result *DiscoveryResult) error { return nil }
 func (m *d25Transport) SendHello(ctx context.Context, peer *Peer, sharedZones []string) error {
 	return nil
 }

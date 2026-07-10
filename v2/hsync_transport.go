@@ -464,29 +464,35 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Info("DNS transport disabled by configuration")
 	}
 
-	// Register the discovery-completion callback on the embedded TM. The
-	// callback is invoked by MP's discovery loop once an agent transitions
-	// to KNOWN. After Phase 6 of the transport interface redesign, transport
-	// itself will own the discovery loop and invoke this callback directly;
-	// installing the seam now lets the call-site already use it. See Bite 8
-	// in tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+	// Phase 2.6: the discovery-completion callback is now LIVE — transport's
+	// RegisterDiscoveredPeer fires it after the process completes (it was
+	// installed-but-never-invoked before; the ar-work happened inline in the
+	// deleted RegisterDiscoveredAgent). MP's residue: materialize the *Agent
+	// view and derive its capability flags from the per-mechanism discovery
+	// outcome recorded on the peer (ContactInfo: "complete"/"partial" ⇒
+	// mechanism offered, absent ⇒ not offered/not probed). The guarded KNOWN
+	// promotions and preferred-transport derivation are kept here too —
+	// idempotent after transport's own writes, and they keep the callback
+	// self-sufficient for tests that drive it directly.
 	tm.TransportManager.OnPeerDiscovered = func(peer *transport.Peer) {
 		if tm.agentRegistry == nil {
 			return
 		}
-		agent, ok := tm.agentRegistry.S.Get(AgentId(peer.ID))
-		if !ok {
+		agent := tm.agentRegistry.agentViewForIdentity(AgentId(peer.ID),
+			tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
+		if agent == nil {
 			return
 		}
-		// S4 (snapshot inversion): discovery writes the canonical peer
-		// directly instead of round-tripping per-mechanism state through
-		// an Agent snapshot (SyncPeerFromAgent/PopulateFromAgent, deleted).
-		// Promote each usable mechanism to KNOWN, but never regress one
-		// already past KNOWN (a re-discovery must not knock an
-		// OPERATIONAL/INTRODUCED transport back down) — mirrors the
-		// `state <= NEEDED -> KNOWN` guard in RegisterDiscoveredAgent.
-		// Usability is the "complete" contact-info set there; address and
-		// beat counters already live on the peer (S2/S3).
+		apiOffered := peer.MechanismContactInfo("API") != ""
+		dnsOffered := peer.MechanismContactInfo("DNS") != ""
+		agent.Mu.Lock()
+		agent.ApiMethod = apiOffered
+		agent.DnsMethod = dnsOffered
+		agent.Mu.Unlock()
+
+		// Promote each usable ("complete") mechanism to KNOWN, but never
+		// regress one already past KNOWN (a re-discovery must not knock an
+		// OPERATIONAL/INTRODUCED transport back down).
 		anyUsable := false
 		for _, name := range []string{"API", "DNS"} {
 			if peer.MechanismContactInfo(name) != "complete" {
@@ -498,30 +504,28 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			}
 		}
 
-		// Set preferred transport based on what's available
-		if agent.ApiMethod && agent.DnsMethod {
+		// Set preferred transport based on what's offered
+		switch {
+		case apiOffered && dnsOffered:
 			peer.PreferredTransport = "API"
 			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.ID)
-		} else if agent.ApiMethod {
+		case apiOffered:
 			peer.PreferredTransport = "API"
-			lgTransport.Info("agent has API only", "agent", agent.ID)
-		} else if agent.DnsMethod {
+		case dnsOffered:
 			peer.PreferredTransport = "DNS"
-			lgTransport.Info("agent has DNS only", "agent", agent.ID)
 		}
 
 		// Top-level State must agree with the per-mechanism truth:
 		// EffectiveState() falls back to p.State when no mechanism is yet
 		// OPERATIONAL+, so an unconditional SetState(KNOWN) here would make
 		// gossip report KNOWN for a peer whose only mechanism never resolved
-		// an address (peer list still reads the per-mechanism NEEDED — the
-		// KNOWN/NEEDED contradiction). Only declare KNOWN if a mechanism
-		// actually became usable, and never regress a peer already past it.
+		// an address (the KNOWN/NEEDED contradiction, Fix C). Only declare
+		// KNOWN if a mechanism actually became usable, never regressing.
 		if anyUsable && peer.GetState() < transport.PeerStateKnown {
 			peer.SetState(transport.PeerStateKnown, "discovery complete")
 		}
 
-		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
+		lgTransport.Info("agent discovery complete, view materialized", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
 	}
 
 	// Symmetric failure-side seam (Bite D). Fired by MP's
@@ -551,26 +555,24 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Warn("peer discovery failed", "peer", peer.ID, "err", err)
 	}
 
-	// Bite F: register the bridge as TransportManager's
-	// DiscoveryDriver so tm.DiscoverPeer can delegate sync
-	// discovery back into MP's existing implementation.
-	// TEMPORARY — Phase 6 part 2 moves discovery into transport
-	// and removes the indirection.
-	tm.TransportManager.DiscoveryDriver = tm
+	// Phase 2.6: the transport-owned discovery process needs the local
+	// mechanism set (Fix E — only supported transports are probed; the TM
+	// literal above cannot set the unexported field) and a late-bound IMR
+	// accessor (the resolver starts asynchronously). The TEMPORARY
+	// DiscoveryDriver seam and MP's RunDiscovery are gone.
+	tm.TransportManager.SetSupportedMechanisms(supportedMechanisms)
+	if cfg.GetImrEngine != nil {
+		getImr := cfg.GetImrEngine
+		tm.TransportManager.GetImr = func() *transport.Imr {
+			mpImr := getImr()
+			if mpImr == nil || mpImr.Imr == nil {
+				return nil
+			}
+			return &transport.Imr{Imr: mpImr.Imr}
+		}
+	}
 
 	return tm
-}
-
-// RunDiscovery implements transport.DiscoveryDriver (Bite F).
-// Delegates to the existing synchronous DiscoverAndRegisterAgent
-// path; on success the peer is in PeerStateKnown when this
-// returns (set by RegisterDiscoveredAgent).
-//
-// TEMPORARY — Phase 6 part 2 of the transport interface redesign
-// moves discovery into the transport package and deletes both
-// the DiscoveryDriver interface and this implementation.
-func (tm *MPTransportBridge) RunDiscovery(ctx context.Context, peer *transport.Peer) error {
-	return tm.DiscoverAndRegisterAgent(ctx, peer.ID)
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
