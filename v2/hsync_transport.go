@@ -90,18 +90,48 @@ func (tm *MPTransportBridge) deleteKeystateRfi(zone string) {
 	delete(tm.keystateRfiState, zone)
 }
 
-// isTransportReady returns true if the transport details indicate a reachable agent.
-func isTransportReady(details *AgentDetails) bool {
-	if details == nil {
+// isTransportReady reports whether the named mechanism on the canonical
+// transport.Peer is in a state where the peer can receive app messages — the
+// same handshaked-state OR as the beat send gates. Reads the RAW (non-decayed)
+// mechanism state via mechStateForGate: readiness is "have we handshaked", not
+// liveness — the ReliableMessageQueue's own retry/backoff owns delivery
+// failures, so DEGRADED/INTERRUPTED stay eligible. LEGACY needs no case here:
+// it is the MP display overlay; at mechanism level such a peer reads
+// OPERATIONAL.
+func isTransportReady(peer *transport.Peer, mech string) bool {
+	st, ok := mechStateForGate(peer, mech)
+	if !ok {
 		return false
 	}
-	switch details.State {
-	case AgentStateOperational, AgentStateIntroduced, AgentStateLegacy,
+	switch st {
+	case AgentStateOperational, AgentStateIntroduced,
 		AgentStateDegraded, AgentStateInterrupted:
 		return true
 	default:
 		return false
 	}
+}
+
+// recipientTransportReady is the ReliableMessageQueue's IsRecipientReady
+// predicate: the recipient must be a known agent AND have at least one
+// handshaked mechanism on the canonical transport.Peer store. It must NOT
+// read agent.{Api,Dns}Details.State — that sidecar stopped being written at
+// END.0/D2.5, so gating on it deferred every queued message to an agent
+// recipient until the 24h expiry (a reader the END.0 census missed).
+func recipientTransportReady(ar *AgentRegistry, peers *transport.PeerRegistry, recipientID string) bool {
+	if ar == nil {
+		// Roles constructed without an AgentRegistry (combiner/signer) keep
+		// the pre-existing always-ready behavior.
+		return true
+	}
+	if _, exists := ar.S.Get(AgentId(recipientID)); !exists {
+		return false
+	}
+	peer, ok := peers.Get(recipientID)
+	if !ok {
+		return false
+	}
+	return isTransportReady(peer, "DNS") || isTransportReady(peer, "API")
 }
 
 func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
@@ -186,20 +216,17 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		supportedMechanisms = []string{"api", "dns"}
 	}
 
+	// Hoisted so the IsRecipientReady predicate can read the canonical
+	// per-mechanism peer state (the literal below has no name to close over).
+	peerRegistry := transport.NewPeerRegistry()
+
 	tm := &MPTransportBridge{
 		TransportManager: &transport.TransportManager{
-			PeerRegistry: transport.NewPeerRegistry(),
+			PeerRegistry: peerRegistry,
 			Router:       transport.NewDNSMessageRouter(),
 			ReliableQueue: transport.NewReliableMessageQueue(&transport.ReliableMessageQueueConfig{
 				IsRecipientReady: func(recipientID string) bool {
-					if cfg.AgentRegistry == nil {
-						return true
-					}
-					agent, exists := cfg.AgentRegistry.S.Get(AgentId(recipientID))
-					if !exists {
-						return false
-					}
-					return isTransportReady(agent.DnsDetails) || isTransportReady(agent.ApiDetails)
+					return recipientTransportReady(cfg.AgentRegistry, peerRegistry, recipientID)
 				},
 			}),
 			LocalID:     cfg.LocalID,
