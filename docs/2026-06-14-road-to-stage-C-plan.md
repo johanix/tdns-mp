@@ -448,6 +448,21 @@ Stage E (E1/E2) — record that in v3 if taken.
 
 # Phase 3 — inbound-pipeline collapse + RemoteAgents + dead-code sweep + OnPeerRemoved
 
+**STATUS 2026-07-10: 3a–3c CODE DONE (mp `8c3611f` on branch
+`phase-3-consolidation`; transport untouched), suite `-race` green.
+3a: engine heartbeatHandler stops writing the retired PeerDetails beat
+fields (applyInboundBeat deleted, zero readers); hello was already
+collapsed. 3b: RemoteAgents was WRITE-ONLY (zero readers) — pure
+deletion. 3c: Engine.RemovePeer + PeerHooks.OnPeerRemoved + MP
+removePeerView (view + transport peer dropped promptly); the pruning
+POLICY remains an explicit caller decision — nothing prunes
+automatically, zero-zone peers stay LEGACY by design, so no behavior
+delta until a prune caller (e.g. an operator `peer delete`) exists.
+3d: U1000 list produced (10 items), NOT applied — awaiting operator
+review per the standing rule; the list is in the 2026-07-10 session
+notes and reproduces with `staticcheck -checks U1000 ./...`
+(staticcheck ≥ 2025.1.1 built with go1.26). TESTBED PENDING (stacked).**
+
 These are independent deletions; group as one phase (each its own commit,
 phase builds at the end).
 
