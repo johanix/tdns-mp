@@ -458,10 +458,14 @@ removePeerView (view + transport peer dropped promptly); the pruning
 POLICY remains an explicit caller decision — nothing prunes
 automatically, zero-zone peers stay LEGACY by design, so no behavior
 delta until a prune caller (e.g. an operator `peer delete`) exists.
-3d: U1000 list produced (10 items), NOT applied — awaiting operator
-review per the standing rule; the list is in the 2026-07-10 session
-notes and reproduces with `staticcheck -checks U1000 ./...`
-(staticcheck ≥ 2025.1.1 built with go1.26). TESTBED PENDING (stacked).**
+3d: DONE (mp `4ffc0bc`) — all 10 U1000 findings deleted with operator
+approval (2026-07-10), incl. the AgentRegistry.mu shadow (unused; the
+ConcurrentMap owns its locking). `staticcheck -checks U1000` now
+reports ZERO findings. TESTBED PENDING (stacked). **This tag point IS
+the end of the transport.Peer consolidation** — sole per-peer store,
+Agent a pure view, one allocation, no bridge, no dead stores; the
+`phase-3-consolidation-complete` tag itself is deferred to the testbed
+pass with the rest.**
 
 These are independent deletions; group as one phase (each its own commit,
 phase builds at the end).
