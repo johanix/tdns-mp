@@ -247,6 +247,24 @@ and confirms before Phase 2.**
 
 # Phase 2 — delete AgentDetails (the dead store) + telemetry write cleanup
 
+**STATUS 2026-07-10: CODE DONE (mp `234933d` on branch
+`phase-2-agentdetails`, cut from phase-1 tip `66be160`), full suite
+`-race` green, net −250 lines. TESTBED CHECKPOINT PENDING (stacked with
+Phase 1's; operator chose to continue without testbed). Step-1a
+decisions executed as approved: TLSA-as-gate (mTLS), NEEDED-not-skip-row
+(distrib display — the predicted delta), CLI heartbeat block dropped
+(dead over the wire since END.0). Two findings: (1) the compiler could
+NOT prove this deletion complete — deleting the shadows makes
+`agent.{Api,Dns}Details` silently re-resolve to the embedded
+hsync.Peer's `*hsync.PeerDetails` (same field names, the retired NG
+store); every site was hand-enumerated + a grep-zero check added; the
+Stage-D/Phase-3 hsync.PeerDetails deletion removes the trap for good.
+(2) SendBeatWithFallback's failure branches leaked agent.Mu — harmless
+pre-E1.a (per-call wrapper mutex), a guaranteed first-failed-beat
+deadlock since E1.a; deleted with the telemetry blocks. Residual: the
+`parentsync_leader.go` transport-label display reads were already
+transport-based; `Agent.State` shadow survives as the DTO display field.**
+
 **Goal:** remove `AgentDetails` entirely. All 11 fields are write-only/
 dead (measurement §2), so this is the cleanest possible deletion: rip out
 the struct, and the compiler lists every write site to delete.
