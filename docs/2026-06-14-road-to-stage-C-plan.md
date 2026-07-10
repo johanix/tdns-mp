@@ -48,6 +48,18 @@ Verified 2026-06-14:
 - **All 11 `AgentDetails` fields are write-only or DEAD** — ZERO
   functional read sites in production. `Agent.MarshalJSON` already omits
   `*AgentDetails`, so it is dead over the wire too.
+  **[CORRECTED 2026-07-10: the measurement missed ONE functional reader
+  — the ReliableMessageQueue's `IsRecipientReady` gate (`isTransportReady`,
+  hsync_transport.go) read `{Api,Dns}Details.State`, silently deferring
+  every queued zone update to an agent recipient until the 24h expiry.
+  Fixed pre-Phase-1 (mp `edfa079`): the gate now reads `transport.Peer`
+  raw mechanism state. The ZERO-readers claim holds as of that commit
+  for the 11 FIELDS. Separately, the `ApiDetails`/`DnsDetails` POINTERS
+  are read as presence-gates in three places (`apirouter_sync.go` inbound
+  mTLS, the distrib display row-gates + state fallback, the dead
+  `NewAgentSyncApiClient`) — Phase 2's struct deletion must replace those
+  semantically (e.g. a transport-side has-mechanism predicate), not just
+  delete writes.]**
 - The deep-copy bridge is 8 functions, 1 already dead (`agentToHsyncPeer`).
 
 Translation: the embed's hard, inventive part (make transport canonical
