@@ -389,6 +389,28 @@ is what leaves the discovery *process* as transport-only code.
 
 # Phase 2.6 — relocate the discovery PROCESS into transport (IN scope — decision #5 = C)
 
+**STATUS 2026-07-10: CODE DONE (transport `37c0dfb` + mp `a17deb0` on
+paired `phase-2.6-discovery` branches), both suites `-race` green, net
+mp −733 lines. TESTBED CHECKPOINT PENDING (stacked; this phase is
+behavior-observable — restart→rediscovery→NEEDED→KNOWN→OPERATIONAL and
+`peer reset` are its designated probes). Process lives in
+transport/discovery.go (DiscoverAgent* + RegisterDiscoveredPeer);
+OnPeerDiscovered seam is now LIVE (fired by transport on every
+successful registration; it was never invoked in production before —
+the ar-work happened inline in the deleted RegisterDiscoveredAgent).
+MP keeps the gate + view-materialization in the callback, deriving
+capability flags from ContactInfo (new \"partial\" value = Fix C's
+URI-no-address retry case). DiscoveryDriver seam + MP RunDiscovery +
+hsync RegisterDiscovered/DiscoveryResult (vestigial) deleted; MP's six
+duplicate Lookup* helpers deleted. Fixes E/C carried into transport
+verbatim; ERROR-no-regress (0bb1d5d) untouched MP-side. Recorded
+deltas: dual-mechanism PreferredTransport now ends \"API\" (DNS-only
+fleets unaffected); a peer that stops publishing a transport keeps a
+stale offered-flag until ContactInfo cleanup (Stage D note). This
+clears most of v3 Stage E (E1/E2); residual: `agentMeta.Api` was
+already deleted in 2.5, and the transport-exercise discovery smoke
+test (the reusability proof) remains a Phase 4 candidate.**
+
 Prereq: Phase 2.5.
 
 **Principle: gate stays MP, process moves to transport.** MP keeps the
