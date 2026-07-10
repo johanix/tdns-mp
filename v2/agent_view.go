@@ -14,57 +14,12 @@ package tdnsmp
 
 import (
 	"github.com/johanix/tdns-transport/v2/transport"
-	"github.com/miekg/dns"
 )
 
-// agentMeta is the TRANSITIONAL MP-side sidecar for per-peer fields whose final
-// home is transport but whose migration is deferred. Keyed by PeerID in the
-// AgentRegistry. Every field is tagged with its end-state destination — this is
-// a holding pen, not a permanent store. See the field-ownership table in
-// docs/2026-06-01-a3d-field-ownership.md §3–§4.
-type agentMeta struct {
-	InitialZone ZoneName               // → MP (or drop); 2 uses
-	Api         *AgentApi              // → transport (mechanism client), at/after E1
-	Crypto      map[string]*mechCrypto // keys "API","DNS"; → transport.Peer crypto slots @ E1
-}
-
-// mechCrypto is the per-mechanism MP-side crypto material that moves into
-// transport.Peer's crypto slots at E1 (decision: identity crypto stays MP-side
-// until E1). Holding pen only.
-type mechCrypto struct {
-	KeyRR        *dns.KEY
-	TlsaRR       *dns.TLSA
-	JWKData      string
-	KeyAlgorithm string
-}
-
-// ensureCrypto returns the per-mechanism crypto holding pen for mech on this
-// agent's transitional agentMeta sidecar, allocating the sidecar + entry
-// lazily. Write path; the caller's locking contract matches the surrounding
-// AgentDetails writes.
-func (a *Agent) ensureCrypto(mech string) *mechCrypto {
-	if a.meta == nil {
-		a.meta = &agentMeta{}
-	}
-	if a.meta.Crypto == nil {
-		a.meta.Crypto = make(map[string]*mechCrypto)
-	}
-	mc := a.meta.Crypto[mech]
-	if mc == nil {
-		mc = &mechCrypto{}
-		a.meta.Crypto[mech] = mc
-	}
-	return mc
-}
-
-// cryptoFor returns the per-mechanism crypto for mech, or nil if none was
-// recorded. Read-only; does not allocate.
-func (a *Agent) cryptoFor(mech string) *mechCrypto {
-	if a.meta == nil || a.meta.Crypto == nil {
-		return nil
-	}
-	return a.meta.Crypto[mech]
-}
+// The agentMeta/mechCrypto sidecar is GONE (Phase 2.5): per-mechanism crypto
+// lives on transport.Peer's crypto slots (SetMechanismTLSA/JWK/KeyRR +
+// MechanismTLSA/JWK/KeyRR accessors). Its InitialZone/Api fields were dead
+// duplicates of the Agent-level fields and were folded out with it.
 
 // transportToAgentState maps the canonical transport PeerState back to MP's
 // AgentState (the read direction; transport.Peer is the source of truth).

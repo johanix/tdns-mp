@@ -393,10 +393,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if apiAddr == "" {
 						apiAddr = "-"
 					}
-					hasTLSA := false
-					if ac := agent.cryptoFor("API"); ac != nil {
-						hasTLSA = ac.TlsaRR != nil
-					}
+					// Phase 2.5: crypto presence from transport.Peer's slots.
+					hasTLSA := apiPeer != nil && apiPeer.MechanismTLSA("API") != nil
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
@@ -480,13 +478,12 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					if dnsAddr == "" {
 						dnsAddr = "-"
 					}
-					// Crypto now lives on the agentMeta sidecar (A3d.3).
+					// Phase 2.5: crypto from transport.Peer's per-mechanism slots.
 					var jwkData, keyAlgorithm string
 					var hasKEY bool
-					if dc := agent.cryptoFor("DNS"); dc != nil {
-						jwkData = dc.JWKData
-						keyAlgorithm = dc.KeyAlgorithm
-						hasKEY = dc.KeyRR != nil
+					if dnsPeer != nil {
+						jwkData, keyAlgorithm = dnsPeer.MechanismJWK("DNS")
+						hasKEY = dnsPeer.MechanismKeyRR("DNS") != nil
 					}
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/mux"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // SetupAgentSyncRouter creates the HTTPS sync API router for agent role.
@@ -73,27 +74,29 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 			clientCert := r.TLS.PeerCertificates[0]
 
 			clientId := clientCert.Subject.CommonName
-			agent, ok := conf.InternalMp.AgentRegistry.S.Get(AgentId(clientId))
-			if !ok {
+			ar := conf.InternalMp.AgentRegistry
+			if _, ok := ar.S.Get(AgentId(clientId)); !ok {
 				lgApi.Warn(apiName+": unknown remote agent identity", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			// Phase 2 (operator-decided): TLSA presence + certificate
-			// verification IS the gate — the former ApiDetails presence check
-			// was never security-relevant (every discovered agent had the
-			// struct). cryptoFor read under the peer lock (its writers hold it).
-			agent.Mu.RLock()
-			apiCrypto := agent.cryptoFor("API")
-			agent.Mu.RUnlock()
-			if apiCrypto == nil || apiCrypto.TlsaRR == nil {
+			// Phase 2/2.5 (operator-decided): TLSA presence + certificate
+			// verification IS the gate. The TLSA lives on transport.Peer's
+			// per-mechanism crypto slots (self-locking accessor).
+			var tlsaRR *dns.TLSA
+			if ar.TransportManager != nil {
+				if peer, ok := ar.TransportManager.PeerRegistry.Get(clientId); ok {
+					tlsaRR = peer.MechanismTLSA("API")
+				}
+			}
+			if tlsaRR == nil {
 				lgApi.Warn(apiName+": no TLSA record for client", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			if err := tdns.VerifyCertAgainstTlsaRR(apiCrypto.TlsaRR, clientCert.Raw); err != nil {
+			if err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw); err != nil {
 				lgApi.Warn(apiName+": certificate verification failed", "clientId", clientId, "err", err)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return

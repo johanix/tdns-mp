@@ -86,10 +86,6 @@ type Agent struct {
 	Api         *AgentApi
 	State       AgentState // shadows hsync.Peer.State (AgentState vs hsync.PeerState); DTO display field, stamped from effectiveAgentState; retires with the DTO rework
 	ErrorMsg    string     // Error message if state is error
-	// meta is the transitional MP-side sidecar (A3d): per-mechanism crypto
-	// holding pen, en route to transport.Peer at Phase 2.5. Reached via
-	// ensureCrypto/cryptoFor; lazily allocated.
-	meta *agentMeta
 }
 
 // NewAgent allocates an Agent view over a fresh thin hsync.Peer with the given

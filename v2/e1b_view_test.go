@@ -41,13 +41,13 @@ func TestMaterializeAgentView(t *testing.T) {
 		peer := hsync.NewPeer(id)
 		first := ar.materializeAgentView(peer)
 		first.ErrorMsg = "marker"
-		first.ensureCrypto("DNS").JWKData = "jwk-marker"
+		first.InitialZone = "zone.marker.test."
 
 		second := ar.materializeAgentView(peer)
 		if second != first {
 			t.Fatal("re-materialization must return the SAME view, not a fresh wrapper")
 		}
-		if second.ErrorMsg != "marker" || second.cryptoFor("DNS") == nil {
+		if second.ErrorMsg != "marker" || second.InitialZone != "zone.marker.test." {
 			t.Fatal("MP-only fields must survive re-materialization")
 		}
 	})

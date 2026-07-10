@@ -324,10 +324,10 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			if peer.GetState() < transport.PeerStateKnown {
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (API usable)")
 			}
-			// E1.b: the view is the live shared object (agent.Mu == the one
-			// peer mutex) — capability/crypto writes go under the lock.
+			// Phase 2.5: crypto lives on transport.Peer's per-mechanism
+			// slots (self-locking). Capability flag under the peer lock.
+			peer.SetMechanismTLSA("API", result.TLSA)
 			agent.Mu.Lock()
-			agent.ensureCrypto("API").TlsaRR = result.TLSA
 			agent.ApiMethod = true
 			agent.Mu.Unlock()
 		} else if result.APIUri != "" {
@@ -369,16 +369,15 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (DNS usable)")
 			}
 
-			// Store JWK data if available (preferred). Crypto now lives on the
-			// transitional agentMeta sidecar (A3d.3), en route to transport @ E1.
-			agent.Mu.Lock()
-			dnsCrypto := agent.ensureCrypto("DNS")
+			// Phase 2.5: crypto lives on transport.Peer's per-mechanism
+			// slots. JWK only when discovered (re-discovery must not wipe a
+			// previous JWK with an empty result); KEY record replace-style
+			// (legacy fallback).
 			if result.JWKData != "" {
-				dnsCrypto.JWKData = result.JWKData
-				dnsCrypto.KeyAlgorithm = result.KeyAlgorithm
+				peer.SetMechanismJWK("DNS", result.JWKData, result.KeyAlgorithm)
 			}
-			// Store KEY record if using legacy fallback
-			dnsCrypto.KeyRR = result.LegacyKeyRR
+			peer.SetMechanismKeyRR("DNS", result.LegacyKeyRR)
+			agent.Mu.Lock()
 			agent.DnsMethod = true
 			agent.Mu.Unlock()
 		} else if result.DNSUri != "" {
