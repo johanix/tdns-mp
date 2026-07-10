@@ -52,17 +52,11 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		lgCombiner.Warn("no combiner identity configured, using default 'combiner' (agents with chunk_mode=query will fail)")
 	}
 
-	// Create an agent entry for the combiner
+	// Create an agent entry for the combiner. Connection state/telemetry live
+	// on transport.Peer (DNS mechanism seeded OPERATIONAL below); the State
+	// shadow is only the DTO display initial value (Phase 2).
 	combinerAgent := &Agent{
-		Peer: hsync.NewPeer(combinerID),
-		DnsDetails: &AgentDetails{
-			State:           AgentStateOperational, // Start as operational
-			HelloTime:       time.Now(),
-			LastContactTime: time.Now(),
-		},
-		ApiDetails: &AgentDetails{
-			State: AgentStateNeeded, // Not using API transport
-		},
+		Peer:  hsync.NewPeer(combinerID),
 		State: AgentStateOperational,
 	}
 	combinerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)

@@ -61,21 +61,19 @@ var AgentMsgToString = core.AgentMsgToString
 // (E1.a). hsync.Peer is allocated 1:1 with the Agent; the bridge keeps the two
 // objects in sync until E1.b collapses them to one object.
 //
-// The connection-state fields (ApiDetails/DnsDetails/State/ApiMethod/DnsMethod/
-// IsInfraPeer/LastState) are KEPT here, shadowing the same-named fields on the
-// embedded *hsync.Peer. They are retired to transport.Peer in A5/Stage D, not
-// END.1 — except their values are dead post-D2.5 (no production reader of the
-// connection-state half). Keeping them avoids a type cascade (ApiDetails is
-// *AgentDetails here, *hsync.PeerDetails on the embed).
-//
 // E1.a dedupes every field whose type already matches the embedded hsync.Peer
 // (no type cascade): ID (Identity/PeerID), Mu, Zones, Deferred, ApiMethod,
 // DnsMethod, IsInfraPeer, LastState — all PROMOTE from *hsync.Peer, so e.g.
 // agent.ApiMethod IS agent.Peer.ApiMethod (one copy; engine and MP read the same
-// field). Only the DIFFERENT-typed connection-state fields stay on Agent,
-// shadowing the embed's same-named ones: ApiDetails/DnsDetails (*AgentDetails vs
-// *hsync.PeerDetails) and State (AgentState vs hsync.PeerState). Those retire to
-// transport.Peer in A5/Stage D.
+// field).
+//
+// Phase 2 deleted the AgentDetails shadows entirely (connection state +
+// telemetry live on transport.Peer). CAUTION: because of the embed,
+// `agent.ApiDetails`/`agent.DnsDetails` still RESOLVE — to the embedded
+// hsync.Peer's *hsync.PeerDetails (the retired NG store). Do not reintroduce
+// readers/writers through those names; the hsync.PeerDetails deletion (Stage
+// D / Phase 3) removes the trap. Only State (AgentState vs hsync.PeerState)
+// still shadows the embed, as the DTO display field.
 //
 // Access notes after the embed:
 //   - agent.ID (was agent.Identity / agent.PeerID) — type AgentId (= hsync.PeerID)
@@ -85,34 +83,27 @@ type Agent struct {
 	*hsync.Peer // ID, Mu, Zones, Deferred, ApiMethod, DnsMethod, IsInfraPeer, LastState
 
 	InitialZone ZoneName
-	ApiDetails  *AgentDetails // shadows hsync.Peer.ApiDetails (different type); retires A5/D
-	DnsDetails  *AgentDetails // shadows hsync.Peer.DnsDetails (different type); retires A5/D
 	Api         *AgentApi
-	State       AgentState // shadows hsync.Peer.State (AgentState vs hsync.PeerState); retires A5/D
+	State       AgentState // shadows hsync.Peer.State (AgentState vs hsync.PeerState); DTO display field, stamped from effectiveAgentState; retires with the DTO rework
 	ErrorMsg    string     // Error message if state is error
 	// meta is the transitional MP-side sidecar (A3d): per-mechanism crypto
-	// holding pen, en route to transport.Peer at E1. Reached via
+	// holding pen, en route to transport.Peer at Phase 2.5. Reached via
 	// ensureCrypto/cryptoFor; lazily allocated.
 	meta *agentMeta
 }
 
 // NewAgent allocates an Agent view over a fresh thin hsync.Peer with the given
-// identity (E1.a). Callers set the MP-only shadow fields (ApiDetails/DnsDetails/
-// State/meta) and the promoted capability flags as needed.
+// identity (E1.a). Callers set the MP-only shadow fields (State/meta) and the
+// promoted capability flags as needed.
 func NewAgent(id AgentId) *Agent {
 	return &Agent{Peer: hsync.NewPeer(id)}
 }
 
 // newAgentView builds an *Agent view SHARING the given peer pointer (E1.b) —
-// never a copy. The AgentDetails shadows are dead stores (Phase 2 deletes
-// them) but stay non-nil so the distrib display row-gates
-// (agent.{Api,Dns}Details != nil) keep passing.
+// never a copy. Since Phase 2 (AgentDetails deleted) this is just the shared
+// embed; kept as the named constructor for the view semantics.
 func newAgentView(peer *hsync.Peer) *Agent {
-	return &Agent{
-		Peer:       peer,
-		ApiDetails: &AgentDetails{State: AgentStateNeeded},
-		DnsDetails: &AgentDetails{State: AgentStateNeeded},
-	}
+	return &Agent{Peer: peer}
 }
 
 // materializeAgentView returns the ar.S *Agent view over an engine-owned
@@ -172,20 +163,6 @@ func (ar *AgentRegistry) agentViewForIdentity(id AgentId, apiSupported, dnsSuppo
 		return np
 	})
 	return ar.materializeAgentView(hpeer)
-}
-
-type AgentDetails struct {
-	State             AgentState
-	LatestError       string
-	LatestErrorTime   time.Time
-	DiscoveryFailures uint32
-	HelloTime         time.Time
-	LastContactTime   time.Time
-	BeatInterval      uint32
-	SentBeats         uint32
-	ReceivedBeats     uint32
-	LatestSBeat       time.Time
-	LatestRBeat       time.Time
 }
 
 // DeferredAgentTask aliases hsync.DeferredTask so the field promoted from the

@@ -80,15 +80,13 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 				return
 			}
 
+			// Phase 2 (operator-decided): TLSA presence + certificate
+			// verification IS the gate — the former ApiDetails presence check
+			// was never security-relevant (every discovered agent had the
+			// struct). cryptoFor read under the peer lock (its writers hold it).
 			agent.Mu.RLock()
-			apiDetails := agent.ApiDetails
-			agent.Mu.RUnlock()
-			if apiDetails == nil {
-				lgApi.Warn(apiName+": no API details for client", "clientId", clientId)
-				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
-				return
-			}
 			apiCrypto := agent.cryptoFor("API")
+			agent.Mu.RUnlock()
 			if apiCrypto == nil || apiCrypto.TlsaRR == nil {
 				lgApi.Warn(apiName+": no TLSA record for client", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)

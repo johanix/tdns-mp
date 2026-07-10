@@ -351,22 +351,22 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 			zeroParticipations := len(ar.sharedParticipantZones(agent.ID)) == 0
 
 			// Add API transport entry when this mechanism is in use
-			if agent.ApiMethod && agent.ApiDetails != nil {
+			if agent.ApiMethod {
 				key := agentIDFqdn + ":API"
 				if !seen[key] {
 					seen[key] = true
 
-					// S1b: the connection State is read from the canonical
-					// transport.Peer (decayed per-mechanism), not AgentDetails.
-					// Fall back to AgentDetails only if the peer/mechanism is
-					// not yet in the PeerRegistry (transitional safety).
+					// S1b/Phase 2: the connection State is read from the
+					// canonical transport.Peer (decayed per-mechanism). A peer
+					// not yet in the PeerRegistry shows NEEDED — the
+					// AgentDetails fallback is gone with the struct.
 					var apiPeer *transport.Peer
 					if conf.InternalMp.TransportManager != nil {
 						if p, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
 							apiPeer = p
 						}
 					}
-					effectiveState := agent.ApiDetails.State
+					effectiveState := AgentStateNeeded
 					if apiPeer != nil {
 						if st, ok := apiPeer.MechanismEffectiveState("API"); ok {
 							effectiveState = transportToAgentState(st)
@@ -436,20 +436,21 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 			}
 
 			// Add DNS transport entry when this mechanism is in use
-			if agent.DnsMethod && agent.DnsDetails != nil {
+			if agent.DnsMethod {
 				key := agentIDFqdn + ":DNS"
 				if !seen[key] {
 					seen[key] = true
 
-					// S1b: connection State from the canonical transport.Peer
-					// (decayed per-mechanism), AgentDetails as transitional fallback.
+					// S1b/Phase 2: connection State from the canonical
+					// transport.Peer (decayed per-mechanism); NEEDED when the
+					// peer is not yet in the PeerRegistry.
 					var dnsPeer *transport.Peer
 					if conf.InternalMp.TransportManager != nil {
 						if p, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
 							dnsPeer = p
 						}
 					}
-					effectiveState := agent.DnsDetails.State
+					effectiveState := AgentStateNeeded
 					if dnsPeer != nil {
 						if st, ok := dnsPeer.MechanismEffectiveState("DNS"); ok {
 							effectiveState = transportToAgentState(st)

@@ -19,14 +19,11 @@ import (
 const readyTestID = "agent.ready-test.example."
 
 // newReadyTestRegistry builds an AgentRegistry holding one agent in the shape
-// RegisterDiscoveredAgent creates it: zero-value AgentDetails that nothing
-// advances post-END.0/D2.5 (the bug's trigger condition).
+// discovery creates it (Phase 2: no AgentDetails — readiness must come from
+// transport.Peer alone, which is exactly what these tests assert).
 func newReadyTestRegistry() *AgentRegistry {
 	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent]()}
-	agent := NewAgent(AgentId(readyTestID))
-	agent.ApiDetails = &AgentDetails{}
-	agent.DnsDetails = &AgentDetails{}
-	ar.S.Set(AgentId(readyTestID), agent)
+	ar.S.Set(AgentId(readyTestID), NewAgent(AgentId(readyTestID)))
 	return ar
 }
 

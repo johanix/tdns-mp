@@ -689,19 +689,11 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 	peer.SetMechanismLastHelloRecv("DNS", peer.LastHelloReceived)
 
-	// Also update AgentRegistry if available: refresh the AgentDetails contact
-	// timestamps (display/telemetry) and, for an unknown sender, trigger
-	// discovery so we can beat back. The per-mechanism connection state lives on
-	// transport.Peer above, not AgentDetails.State.
+	// For an unknown (but authorized) sender, trigger discovery so we can beat
+	// back. Contact timestamps live on transport.Peer above — the AgentDetails
+	// telemetry mirror is gone (Phase 2).
 	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-		if exists {
-			agent.Mu.Lock()
-			agent.DnsDetails.HelloTime = time.Now()
-			agent.DnsDetails.LastContactTime = time.Now()
-			agent.Mu.Unlock()
-			tm.agentRegistry.S.Set(agent.ID, agent)
-		} else {
+		if _, exists := tm.agentRegistry.S.Get(AgentId(senderID)); !exists {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
 			// This ensures receiver can send beats back to sender
 			lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
@@ -771,18 +763,9 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	peer.LastBeatReceived = time.Now()
 	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
-	// Mirror the inbound-liveness timestamp onto AgentDetails (still read
-	// by the NG beat-age scanner until Stage D). State is untouched.
-	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-		if exists {
-			agent.Mu.Lock()
-			agent.DnsDetails.LastContactTime = time.Now()
-			agent.DnsDetails.LatestRBeat = time.Now()
-			agent.Mu.Unlock()
-			tm.agentRegistry.S.Set(agent.ID, agent)
-		}
-	}
+	// Inbound-liveness evidence lives on transport.Peer above (Phase 2: the
+	// AgentDetails telemetry mirror is gone; the NG beat-age scanner it once
+	// fed was already retired in D2.5).
 
 	// Process gossip data if present
 	if len(payload.Gossip) > 0 && tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
@@ -916,15 +899,6 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// beat path (SendBeatWithFallback), never on inbound receipt.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-
-	// Also update AgentRegistry if available
-	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-		if exists {
-			agent.DnsDetails.LastContactTime = time.Now()
-			tm.agentRegistry.S.Set(agent.ID, agent)
-		}
-	}
 
 	// DeliveredBy is the transport-level sender (from QNAME), which may differ from
 	// the originator for forwarded messages. The combiner needs this to send confirmations
@@ -1526,24 +1500,18 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
 	// State gate reads the canonical transport.Peer mechanism state (raw).
 	apiGate, _ := mechStateForGate(peer, "API")
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && peer.APIEndpoint != "" && apiGate == AgentStateKnown {
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
-		agent.Mu.Lock()
+		// Phase 2: outcome telemetry lives on transport.Peer (hello times via
+		// the transport send path; per-mechanism state below) — the
+		// AgentDetails mirror is gone.
 		if apiErr != nil {
 			lgConnRetry.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
-			agent.ApiDetails.LatestError = apiErr.Error()
-			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else if apiResp != nil && !apiResp.Accepted {
 			lgTransport.Warn("API Hello not accepted", "peer", peer.ID, "reason", apiResp.RejectReason)
-			agent.ApiDetails.LatestError = apiResp.RejectReason
-			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else {
 			lgTransport.Info("API Hello succeeded", "peer", peer.ID)
-			agent.ApiDetails.HelloTime = time.Now()
-			agent.ApiDetails.LastContactTime = time.Now()
-			agent.ApiDetails.LatestError = ""
 		}
-		agent.Mu.Unlock()
 
 		// Canonical INTRODUCING on the transport peer (guarded: do not
 		// regress an already-OPERATIONAL-or-better mechanism, e.g. after a
@@ -1563,22 +1531,15 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	dnsGate, _ := mechStateForGate(peer, "DNS")
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown {
 		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
-		agent.Mu.Lock()
+		// Phase 2: outcome telemetry lives on transport.Peer — the
+		// AgentDetails mirror is gone.
 		if dnsErr != nil {
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
-			agent.DnsDetails.LatestError = dnsErr.Error()
-			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else if dnsResp != nil && !dnsResp.Accepted {
 			lgTransport.Warn("DNS Hello not accepted", "peer", peer.ID, "reason", dnsResp.RejectReason)
-			agent.DnsDetails.LatestError = dnsResp.RejectReason
-			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else {
 			lgTransport.Info("DNS Hello succeeded", "peer", peer.ID)
-			agent.DnsDetails.HelloTime = time.Now()
-			agent.DnsDetails.LastContactTime = time.Now()
-			agent.DnsDetails.LatestError = ""
 		}
-		agent.Mu.Unlock()
 
 		// Canonical INTRODUCING on the transport peer (guarded: do not
 		// regress an already-OPERATIONAL-or-better mechanism, e.g. after a
@@ -1605,10 +1566,10 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// transport. Read the canonical transport.Peer mechanism state (raw).
 	dnsMech, _ := mechStateForGate(peer, "DNS")
 	apiMech, _ := mechStateForGate(peer, "API")
-	if agent.DnsDetails != nil && dnsMech >= AgentStateIntroduced && dnsErr == nil {
+	if dnsMech >= AgentStateIntroduced && dnsErr == nil {
 		return nil, nil
 	}
-	if agent.ApiDetails != nil && apiMech >= AgentStateIntroduced && apiErr == nil {
+	if apiMech >= AgentStateIntroduced && apiErr == nil {
 		return nil, nil
 	}
 
@@ -1657,31 +1618,24 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
 	// State gate reads the canonical transport.Peer mechanism state (raw).
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && peer.APIEndpoint != "" {
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" {
 		if apiBeatGate == AgentStateOperational || apiBeatGate == AgentStateIntroduced || apiBeatGate == AgentStateLegacy || apiBeatGate == AgentStateDegraded || apiBeatGate == AgentStateInterrupted {
 			// Was this mechanism already OPERATIONAL on the canonical store
 			// before this beat? Decides whether to fire the election notify.
 			apiRaw, _ := peer.MechanismRawState("API")
 			apiWasOperational := apiRaw == transport.PeerStateOperational
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
-			agent.Mu.Lock()
+			// Phase 2: beat telemetry lives on transport.Peer (Stats +
+			// BeatSequence via RecordMechanismBeatSent on the transport send
+			// path) — the AgentDetails mirror is gone. Deleting it also
+			// removes an E1.a-latent deadlock: the failure branches locked
+			// the (since-E1.a shared) peer mutex and never released it.
 			if apiErr != nil {
 				lgConnRetry.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
-				agent.ApiDetails.LatestError = apiErr.Error()
-				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else if apiResp != nil && !apiResp.Ack {
 				lgTransport.Debug("API Beat no confirmation (Ack=false)", "peer", peer.ID)
-				agent.ApiDetails.LatestError = "beat sent but not confirmed by peer"
-				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
-				agent.ApiDetails.LastContactTime = time.Now()
-				agent.ApiDetails.LatestSBeat = time.Now()
-				agent.ApiDetails.LatestRBeat = time.Now()
-				agent.ApiDetails.SentBeats++
-				agent.ApiDetails.ReceivedBeats++
-				agent.ApiDetails.LatestError = ""
-				agent.Mu.Unlock()
 
 				// OPERATIONAL on the canonical store — only an outbound beat
 				// round-trip means "I can reach this peer" (see DNS path).
@@ -1707,26 +1661,16 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			dnsRaw, _ := peer.MechanismRawState("DNS")
 			dnsWasOperational := dnsRaw == transport.PeerStateOperational
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
-			agent.Mu.Lock()
+			// Phase 2: beat telemetry lives on transport.Peer — the
+			// AgentDetails mirror (and its failure-branch mutex leak) is gone.
 			if dnsErr != nil {
 				lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
-				agent.DnsDetails.LatestError = dnsErr.Error()
-				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else if dnsResp != nil && !dnsResp.Ack {
 				// Beat() returns nil error but Ack:false when EDNS0 confirmation is missing.
 				// This means the DNS response was received but the peer didn't confirm processing.
 				lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
-				agent.DnsDetails.LatestError = "beat sent but not confirmed by peer"
-				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
-				agent.DnsDetails.LastContactTime = time.Now()
-				agent.DnsDetails.LatestSBeat = time.Now()
-				agent.DnsDetails.LatestRBeat = time.Now()
-				agent.DnsDetails.SentBeats++
-				agent.DnsDetails.ReceivedBeats++
-				agent.DnsDetails.LatestError = ""
-				agent.Mu.Unlock()
 
 				// OPERATIONAL on the canonical store: a successful OUTBOUND
 				// beat round-trip is the ONLY thing that means "I can reach

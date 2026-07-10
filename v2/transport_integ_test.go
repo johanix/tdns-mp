@@ -469,16 +469,9 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 			agent := NewAgent(AgentId(env.Bob.Identity))
 			agent.ApiMethod = tc.api
 			agent.DnsMethod = tc.dns
-			// Per-mechanism details exist only for the mechanism the
-			// case advertises (the OnPeerDiscovered closure looks the
-			// agent up; addresses are written on the peer directly
-			// below, mirroring discovery).
-			if tc.api {
-				agent.ApiDetails = &AgentDetails{State: AgentStateKnown}
-			}
-			if tc.dns {
-				agent.DnsDetails = &AgentDetails{State: AgentStateKnown}
-			}
+			// Phase 2: no AgentDetails — mechanism state/addresses are
+			// written on the transport.Peer directly below, mirroring
+			// discovery.
 
 			// Register the agent in Alice's registry so the
 			// OnPeerDiscovered closure (which looks up the agent by
@@ -535,7 +528,6 @@ func TestTransportBoundary_DiscoveryUnreachableStaysNeeded(t *testing.T) {
 
 	agent := NewAgent(AgentId(env.Bob.Identity))
 	agent.DnsMethod = true
-	agent.DnsDetails = &AgentDetails{State: AgentStateNeeded}
 	env.Alice.Registry.S.Set(agent.ID, agent)
 
 	peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))

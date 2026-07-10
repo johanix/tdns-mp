@@ -109,23 +109,13 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 				flushed = removed
 			}
 
-			// Reset agent to NEEDED state and restart discovery
-			agent, exists := ar.S.Get(peerID)
-			if !exists {
+			// Reset agent to NEEDED state and restart discovery. (Phase 2:
+			// the AgentDetails error mirror is gone — nothing to clear.)
+			if _, exists := ar.S.Get(peerID); !exists {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", peerID)
 				return
 			}
-
-			// Clear the display error fields on AgentDetails (telemetry only).
-			agent.Mu.Lock()
-			if agent.ApiDetails != nil {
-				agent.ApiDetails.LatestError = ""
-			}
-			if agent.DnsDetails != nil {
-				agent.DnsDetails.LatestError = ""
-			}
-			agent.Mu.Unlock()
 
 			// END.0: reset the canonical connection state on transport.Peer —
 			// top-level marker back to NEEDED and each mechanism back to NEEDED

@@ -538,28 +538,12 @@ func PrintHsyncAgent(agent *Agent, showZones bool) error {
 		fmt.Printf(" * Zones shared with this agent: %v\n", zones)
 	}
 
-	for transport, details := range map[string]*AgentDetails{
-		"API": agent.ApiDetails,
-		"DNS": agent.DnsDetails,
-	} {
-		if details == nil {
-			continue
-		}
-		if hsyncTransport != "" && strings.ToUpper(hsyncTransport) != transport {
-			continue
-		}
-		fmt.Printf("\n * Transport: %s, State: %s\n",
-			transport, AgentStateToString[details.State])
-		if details.LatestError != "" {
-			fmt.Printf(" - Latest Error: %s\n", details.LatestError)
-			fmt.Printf(" - Time of error: %s (duration of outage: %v)\n",
-				details.LatestErrorTime.Format(tdns.TimeLayout), time.Since(details.LatestErrorTime))
-		}
-		fmt.Printf(" *   Heartbeats: Sent: %d (latest %s), received: %d (latest %s)\n",
-			details.SentBeats, details.LatestSBeat.Format(tdns.TimeLayout),
-			details.ReceivedBeats, details.LatestRBeat.Format(tdns.TimeLayout))
-		// S2: peer addresses now live on transport.Peer; see `peer list`.
-	}
+	// Phase 2 (operator-decided): the per-transport State/error/heartbeat
+	// block is dropped — it was dead over the wire since END.0
+	// (Agent.MarshalJSON never serialized AgentDetails, so the details==nil
+	// guard always skipped it). Per-transport state and addresses live in
+	// `peer list`; working heartbeat data lives in `hsync-peer-status`
+	// (HsyncPeerInfo, backed by HsyncDB).
 	return nil
 }
 

@@ -34,9 +34,6 @@ func TestMaterializeAgentView(t *testing.T) {
 		if !ok || stored != view {
 			t.Fatal("view must be stored in ar.S")
 		}
-		if view.ApiDetails == nil || view.DnsDetails == nil {
-			t.Fatal("shadow details must be non-nil (display row-gates)")
-		}
 	})
 
 	t.Run("idempotent: never replaces, MP-only fields survive", func(t *testing.T) {

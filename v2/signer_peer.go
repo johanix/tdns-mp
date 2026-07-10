@@ -55,17 +55,11 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 		lgSigner.Warn("no signer identity configured, using default 'signer'")
 	}
 
-	// Create an agent entry for the signer
+	// Create an agent entry for the signer. Connection state/telemetry live
+	// on transport.Peer (DNS mechanism seeded OPERATIONAL below); the State
+	// shadow is only the DTO display initial value (Phase 2).
 	signerAgent := &Agent{
-		Peer: hsync.NewPeer(signerID),
-		DnsDetails: &AgentDetails{
-			State:           AgentStateOperational,
-			HelloTime:       time.Now(),
-			LastContactTime: time.Now(),
-		},
-		ApiDetails: &AgentDetails{
-			State: AgentStateNeeded,
-		},
+		Peer:  hsync.NewPeer(signerID),
 		State: AgentStateOperational,
 	}
 	signerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)

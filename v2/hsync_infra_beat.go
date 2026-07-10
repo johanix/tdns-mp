@@ -75,24 +75,18 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			sequence := ar.MPTransport.GetOrCreatePeer(agent).MechanismBeatSequence("DNS")
 
 			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
-			agent.Mu.Lock()
-			defer agent.Mu.Unlock()
-
+			// Phase 2: outcome telemetry lives on transport.Peer (state +
+			// LastBeatSent on the success path inside SendBeatWithFallback);
+			// the AgentDetails error mirror is gone.
 			if err != nil {
 				lgAgent.Warn("infra beat failed", "peer", agent.ID, "err", err)
-				agent.DnsDetails.LatestError = err.Error()
-				agent.DnsDetails.LatestErrorTime = time.Now()
 				return
 			}
-
 			if resp == nil || !resp.Ack {
-				agent.DnsDetails.LatestError = "infra beat not acknowledged"
-				agent.DnsDetails.LatestErrorTime = time.Now()
+				lgAgent.Debug("infra beat not acknowledged", "peer", agent.ID)
 				return
 			}
-
 			lgAgent.Debug("infra beat acknowledged", "peer", agent.ID, "state", resp.State)
-			agent.DnsDetails.LatestError = ""
 		}(a)
 	}
 }
