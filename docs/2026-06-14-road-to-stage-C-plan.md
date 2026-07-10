@@ -329,6 +329,20 @@ INVARIANT. Tag `phase-2-agentdetails-gone`.
 
 # Phase 2.5 — agentMeta.Crypto → transport.Peer crypto slots (the cheap discovery-prep)
 
+**STATUS 2026-07-10: CODE DONE (mp `c181439` on branch `phase-2.5-crypto`
++ transport `c5604ae` on its OWN `phase-2.5-crypto` branch — the first
+phase to advance tdns-transport; the sibling checkouts must move in
+lock-step from here). Both full suites `-race` green; the boundary
+suite's JOSE exchanges are the secure-exchange stand-in until the
+testbed pass (stacked with Phases 1–2). transport gains
+`MechanismCrypto` + self-locking SetMechanismTLSA/JWK/KeyRR accessors;
+discovery writes them; the mTLS gate + distrib display read them;
+agentMeta/mechCrypto/ensureCrypto/cryptoFor and Agent.meta deleted.
+Open decision #3 resolved trivially: agentMeta.InitialZone/Api had zero
+references (dead duplicates of the Agent-level fields) — the whole
+sidecar folds out, nothing kept for Stage E. transport.Peer is now the
+sole per-peer connection+crypto state owner; Phase 2.6 is unblocked.**
+
 **Goal:** retire the transitional `agentMeta.Crypto` sidecar; move
 per-mechanism crypto (`KeyRR`/`TlsaRR`/`JWKData`/`KeyAlgorithm`) onto
 `transport.Peer` crypto slots (`LongTermPubKey`/`KeyType`/`TLSARecord`
