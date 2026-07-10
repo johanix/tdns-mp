@@ -179,7 +179,14 @@ create/update paths, not in inventing new behavior.
 
 **Steps (one branch; internal RED ok; final commit green):**
 1. Make pointer-sharing UNIVERSAL on every peer create/update path:
-   - discovered: already shared (E1.a).
+   - discovered: the `OnPeerDiscovered` → `hsyncPeerToAgent` path already
+     shares the pointer (E1.a). **BUT [added 2026-07-10] the
+     `RegisterDiscoveredAgent` create-if-missing branch
+     (`agent_discovery.go:310`) still allocates a FRESH `hsync.NewPeer`
+     for an agent not yet in `ar.S`** — it must wrap the engine's
+     existing peer, or the two views diverge on exactly the path
+     Phase 1 exists to unify. "Already shared" is only half the
+     discovered path.
    - `MarkNeeded`/engine-created peers: ensure the `*Agent` view wraps the
      engine's `*hsync.Peer`, not a fresh one.
    - infra peers (`combiner_peer.go`/`signer_peer.go`): these live ONLY in
@@ -230,7 +237,8 @@ dead (measurement §2), so this is the cleanest possible deletion: rip out
 the struct, and the compiler lists every write site to delete.
 
 **Steps (one branch):**
-1. Delete the write sites (they feed nothing — confirmed 0 readers):
+1. Delete the write sites (they feed nothing — 0 FIELD readers as of the
+   2026-07-10 `edfa079` fix; see the corrected measurement note above):
    - `HelloTime` (hsync_transport.go:673,1515,1550),
      `LastContactTime` (×7), `BeatInterval` (hsync_beat.go:21,25),
      `SentBeats` (hsync_transport.go:1654), `ReceivedBeats`
@@ -242,6 +250,29 @@ the struct, and the compiler lists every write site to delete.
      `ConsecutiveFails`) and are already maintained (S3 + Fix A/B/C). So
      deletion loses NOTHING observable — verify each by confirming the
      transport-side equivalent is written on the same path.
+1a. **[added 2026-07-10] Presence-gate reads need SEMANTIC replacements,
+   not deletion.** Three sites read the `ApiDetails`/`DnsDetails`
+   POINTERS as "does this peer have this mechanism" gates; the compiler
+   will flag them at step 2, but the replacement is a decision, not
+   mechanics — decide each BEFORE the batch (writer-path-audit spirit):
+   - `apirouter_sync.go:84` — the inbound-mTLS middleware rejects on
+     `agent.ApiDetails == nil`. Replace with a transport-side predicate
+     (peer has an API mechanism / `APIEndpoint != ""` / TLSA present via
+     `cryptoFor("API")`, which the same block already consults). This is
+     authz-adjacent: decide the predicate deliberately, don't improvise
+     it mid-compile. (API transport is not in production use today, so
+     risk is low — but the gate's semantics must be stated.)
+   - the distrib display row-gates (`agent.{Api,Dns}Details != nil`,
+     `apihandler_agent_distrib.go:354,439`) + the S1b `effectiveState`
+     fallback reads (`:369,452`). Deleting the fallback ends S1b's
+     transitional safety; predict IN WRITING what a peer not yet in the
+     PeerRegistry displays (skip the row vs show NEEDED) — this is a
+     small predictable EXPLAINED DELTA, fold it into the existing
+     Phase-2 delta prediction alongside the CLI heartbeat line.
+   - `NewAgentSyncApiClient` (`agent_setup.go`, 0 callers, kept
+     "future-ready") — delete outright rather than migrate; its
+     replacement is designed when the API mechanism owns its client
+     (v3 E1 note).
 2. Delete the `AgentDetails` struct and the `Agent.ApiDetails`/
    `Agent.DnsDetails` fields. Compiler-prove complete.
 3. **CLI `peer status` check:** confirm the heartbeat line
@@ -256,7 +287,9 @@ the struct, and the compiler lists every write site to delete.
 
 **Verify:** as Phase 1. EXPLAINED DELTA possible ONLY in the CLI
 `peer status` heartbeat line (predict in writing before deploy: either
-identical via transport feed, or the line is dropped). Everything else
+identical via transport feed, or the line is dropped) and in the distrib
+display for a peer not yet in the PeerRegistry (step 1a: the S1b
+fallback ends — predict skip-row vs NEEDED). Everything else
 INVARIANT. Tag `phase-2-agentdetails-gone`.
 
 ---
