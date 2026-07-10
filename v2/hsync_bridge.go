@@ -311,6 +311,9 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 			// E1.b: pure view-materialization — the view shares the stored
 			// peer's pointer, so there is nothing to copy or sync.
 			OnPeerStored: func(peer *hsync.Peer) { ar.materializeAgentView(peer) },
+			// Phase 3c: prunes are events — drop the MP view + transport
+			// peer promptly when the engine removes a peer object.
+			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer.ID) },
 		},
 		Host: hsync.HostCallbacks{
 			OnHsync3Changed: func(zone hsync.ZoneName) {

@@ -24,7 +24,6 @@ func TestReconcileZone_removesStalePeer(t *testing.T) {
 	stale := NewPeer("stale.agent.example.")
 	stale.Zones[ZoneName(zone)] = true
 	e.registry.S.Set(stale.ID, stale)
-	e.registry.addRemoteAgent(ZoneName(zone), stale)
 
 	added, removed, err := e.ReconcileZone(ZoneName(zone))
 	if err != nil {
@@ -62,7 +61,6 @@ func TestReconcileZone_emptyHSYNC3RemovesAllRemote(t *testing.T) {
 	peer := NewPeer("gone.agent.example.")
 	peer.Zones[ZoneName(zone)] = true
 	e.registry.S.Set(peer.ID, peer)
-	e.registry.addRemoteAgent(ZoneName(zone), peer)
 
 	_, removed, err := e.ReconcileZone(ZoneName(zone))
 	if err != nil {

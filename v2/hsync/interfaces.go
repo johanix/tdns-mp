@@ -83,6 +83,10 @@ type HostCallbacks struct {
 // PeerHooks are optional callbacks when registry peers change.
 type PeerHooks struct {
 	OnPeerStored func(*Peer)
+	// OnPeerRemoved fires when a peer object is removed from the registry
+	// (Phase 3c / A5 residue: prunes are EVENTS, not reconcile-only). The
+	// application uses it to drop its own view of the peer promptly.
+	OnPeerRemoved func(*Peer)
 }
 
 // Deps bundles injected dependencies for NewEngine.

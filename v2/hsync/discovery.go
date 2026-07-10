@@ -49,9 +49,6 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 		peer.Deferred = append(peer.Deferred, *task)
 	}
 	r.S.Set(id, peer)
-	if zone != "" {
-		r.addRemoteAgent(zone, peer)
-	}
 	e.storeHook(peer)
 	go e.attemptDiscovery(peer, peer.ApiMethod, peer.DnsMethod)
 }
@@ -89,6 +86,29 @@ func (e *Engine) Rediscover(id PeerID) {
 func (e *Engine) storeHook(peer *Peer) {
 	if e.deps.PeerHooks.OnPeerStored != nil {
 		e.deps.PeerHooks.OnPeerStored(peer)
+	}
+}
+
+// RemovePeer removes a peer object from the registry and fires the
+// OnPeerRemoved hook (Phase 3c: prunes are events, not reconcile-only —
+// the application drops its view of the peer promptly instead of waiting
+// for a scan). The removal PRIMITIVE lives here; the pruning POLICY (who
+// decides a peer is gone for good) is the caller's — today that is an
+// explicit operator/API action, never automatic: peers that merely leave
+// their last shared zone stay as LEGACY by design.
+func (e *Engine) RemovePeer(id PeerID) {
+	if e == nil || e.registry == nil {
+		return
+	}
+	peer, ok := e.registry.S.Get(id)
+	if !ok {
+		return
+	}
+	// Stop any hello retrier running for this peer before dropping it.
+	e.registry.cancelHello(id)
+	e.registry.S.Remove(id)
+	if e.deps.PeerHooks.OnPeerRemoved != nil {
+		e.deps.PeerHooks.OnPeerRemoved(peer)
 	}
 }
 

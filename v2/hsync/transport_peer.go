@@ -4,8 +4,6 @@
 package hsync
 
 import (
-	"time"
-
 	"github.com/johanix/tdns-transport/v2/transport"
 )
 
@@ -161,17 +159,5 @@ func (e *Engine) mergeGossipFromBeat(report *InboundReport) {
 				e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.Members)
 			}
 		}
-	}
-}
-
-func applyInboundBeat(peer *Peer, transport string, beatInterval uint32, now time.Time) {
-	td := peerDetailsFor(peer, transport)
-	if td == nil {
-		return
-	}
-	td.LatestRBeat = now
-	td.ReceivedBeats++
-	if beatInterval > 0 {
-		td.BeatInterval = beatInterval
 	}
 }

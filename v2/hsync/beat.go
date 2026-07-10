@@ -12,20 +12,11 @@ func (e *Engine) heartbeatHandler(report *InboundReport) {
 	if report == nil || report.MessageType != MsgBeat {
 		return
 	}
-	peer, exists := e.registry.S.Get(report.Identity)
-	if !exists {
-		return
-	}
-	now := time.Now()
-	peer.Mu.Lock()
-	switch report.Transport {
-	case TransportDNS:
-		applyInboundBeat(peer, TransportDNS, report.BeatInterval, now)
-	case TransportAPI:
-		applyInboundBeat(peer, TransportAPI, report.BeatInterval, now)
-	}
-	peer.Mu.Unlock()
-
+	// END.3 (Phase 3a): ONE writer per inbound message type — the producer
+	// (DNS router / API handler) records inbound-liveness evidence on
+	// transport.Peer. The former applyInboundBeat wrote only the retired
+	// hsync.PeerDetails beat fields (zero readers post-D2.5) and is gone.
+	// The engine keeps only its gossip side-effect.
 	e.mergeGossipFromBeat(report)
 }
 

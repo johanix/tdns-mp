@@ -161,6 +161,19 @@ func (ar *AgentRegistry) agentViewForIdentity(id AgentId, apiSupported, dnsSuppo
 	return ar.materializeAgentView(hpeer)
 }
 
+// removePeerView drops the MP view and the transport peer for a removed
+// peer (Phase 3c: the engine's RemovePeer fires OnPeerRemoved, and the
+// removal propagates promptly instead of waiting for a scan).
+func (ar *AgentRegistry) removePeerView(id AgentId) {
+	if ar == nil {
+		return
+	}
+	ar.S.Remove(id)
+	if ar.TransportManager != nil {
+		ar.TransportManager.PeerRegistry.Remove(string(id))
+	}
+}
+
 // DeferredAgentTask aliases hsync.DeferredTask so the field promoted from the
 // embedded *hsync.Peer (Deferred []hsync.DeferredTask) is type-identical to the
 // existing DeferredAgentTask call sites (END.1 / E1.a). Same shape (Precondition
