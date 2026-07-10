@@ -103,6 +103,77 @@ func NewAgent(id AgentId) *Agent {
 	return &Agent{Peer: hsync.NewPeer(id)}
 }
 
+// newAgentView builds an *Agent view SHARING the given peer pointer (E1.b) —
+// never a copy. The AgentDetails shadows are dead stores (Phase 2 deletes
+// them) but stay non-nil so the distrib display row-gates
+// (agent.{Api,Dns}Details != nil) keep passing.
+func newAgentView(peer *hsync.Peer) *Agent {
+	return &Agent{
+		Peer:       peer,
+		ApiDetails: &AgentDetails{State: AgentStateNeeded},
+		DnsDetails: &AgentDetails{State: AgentStateNeeded},
+	}
+}
+
+// materializeAgentView returns the ar.S *Agent view over an engine-owned
+// hsync.Peer, creating and storing it if absent (E1.b). Once materialized the
+// view is NEVER replaced: MP-only fields (meta/Api/InitialZone/ErrorMsg and
+// the dead shadows) accumulate on the one view — the pre-E1.b bridge rebuilt
+// and re-Set a fresh wrapper on every store/hello/beat, silently wiping them.
+// Atomic via Upsert so concurrent materializations converge on a single view.
+func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
+	if ar == nil || peer == nil {
+		return nil
+	}
+	return ar.S.Upsert(peer.ID, nil, func(exist bool, current *Agent, _ *Agent) *Agent {
+		if exist && current != nil {
+			if current.Peer != peer {
+				// Every create path shares the pointer post-E1.b, so this is
+				// a divergent allocation — keep the stored view (live readers
+				// hold it) and log loudly.
+				lgAgent.Error("agent view wraps a different hsync.Peer allocation; keeping the stored view",
+					"peer", peer.ID)
+			}
+			return current
+		}
+		return newAgentView(peer)
+	})
+}
+
+// agentViewForIdentity returns the ar.S view for an identity, wrapping the
+// ENGINE's hsync.Peer — never allocating a second peer for a known identity
+// (E1.b). When the engine has not seen the identity yet (true out-of-band
+// discoveries: the chunk-notify kick, distrib-time discovery), the peer is
+// created IN the embedded engine registry with the same capability seeding as
+// the engine's MarkNeeded — being in the engine map is also what lets
+// retryPendingDiscoveries start the peer's Hello (D2.5). Falls back to an
+// agent-only view (the infra-peer shape) when no engine registry is wired.
+func (ar *AgentRegistry) agentViewForIdentity(id AgentId, apiSupported, dnsSupported bool) *Agent {
+	if ar == nil {
+		return nil
+	}
+	if agent, ok := ar.S.Get(id); ok {
+		return agent
+	}
+	if ar.Registry == nil {
+		// No engine wired (harness/edge case): agent-only view, one
+		// allocation — the same shape as the infra peers.
+		agent := newAgentView(hsync.NewPeer(id))
+		ar.S.Set(agent.ID, agent)
+		return agent
+	}
+	hpeer := ar.Registry.S.Upsert(id, nil, func(exist bool, current *hsync.Peer, _ *hsync.Peer) *hsync.Peer {
+		if exist && current != nil {
+			return current
+		}
+		np := hsync.NewPeer(id)
+		np.ApiMethod = apiSupported
+		np.DnsMethod = dnsSupported
+		return np
+	})
+	return ar.materializeAgentView(hpeer)
+}
+
 type AgentDetails struct {
 	State             AgentState
 	LatestError       string

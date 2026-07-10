@@ -265,12 +265,24 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				// Found an HSYNC3 record, try to locate the agent
 				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
 				if err != nil {
+					// Transient DTO placeholder — never stored in ar.S, so the
+					// throwaway hsync.Peer allocation is fine (E1.b).
 					agent = &Agent{
 						Peer:     hsync.NewPeer(AgentId(hsync3.Identity)),
 						State:    AgentStateError,
 						ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
 					}
 					agent.LastState = time.Now()
+				} else {
+					// E1.b: the marshaled State shadow used to be refreshed by
+					// the bridge's per-hello/beat wrapper-replace (from the NG
+					// store, itself stale post-D2.5). Stamp it from the
+					// canonical transport.Peer store at DTO-build time instead
+					// — the same source `peer list` and `gossip state` read.
+					st := ar.effectiveAgentState(agent.ID)
+					agent.Mu.Lock()
+					agent.State = st
+					agent.Mu.Unlock()
 				}
 				agents = append(agents, agent)
 			}

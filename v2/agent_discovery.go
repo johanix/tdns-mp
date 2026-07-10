@@ -13,9 +13,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
-	"time"
 
-	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -305,17 +303,8 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 
 	// Also add to AgentRegistry if available (for backward compatibility)
 	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(result.Identity))
-		if !exists {
-			agent = &Agent{
-				Peer:       hsync.NewPeer(AgentId(result.Identity)),
-				ApiDetails: &AgentDetails{},
-				DnsDetails: &AgentDetails{},
-				State:      AgentStateKnown,
-				meta:       &agentMeta{Crypto: map[string]*mechCrypto{}},
-			}
-			agent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
-		}
+		agent := tm.agentRegistry.agentViewForIdentity(AgentId(result.Identity),
+			tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
 
 		// Update agent details — only set state to KNOWN if not already beyond it.
 		// Re-discovery must not regress an OPERATIONAL or INTRODUCED transport.
@@ -335,21 +324,29 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			if peer.GetState() < transport.PeerStateKnown {
 				peer.SetState(transport.PeerStateKnown, "discovered via DNS (API usable)")
 			}
+			// E1.b: the view is the live shared object (agent.Mu == the one
+			// peer mutex) — capability/crypto writes go under the lock.
+			agent.Mu.Lock()
 			agent.ensureCrypto("API").TlsaRR = result.TLSA
 			agent.ApiMethod = true
+			agent.Mu.Unlock()
 		} else if result.APIUri != "" {
 			// URI found but no resolved address: keep retrying, leave a
 			// not-yet-established peer NEEDED, do not advertise an unusable
 			// URL (the transport side withholds the address), and do not
 			// regress an already-established peer.
+			agent.Mu.Lock()
 			agent.ApiMethod = true
+			agent.Mu.Unlock()
 			apiSt, _ := mechStateForGate(peer, "API")
 			lgAgent.Warn("API endpoint URI found but no resolved address; not marking usable",
 				"identity", result.Identity, "uri", result.APIUri, "state", AgentStateToString[apiSt])
 		} else {
 			// No API endpoint found — clear the flag so DiscoveryRetrierNG
 			// doesn't perpetually retry discovery for a non-existent transport.
+			agent.Mu.Lock()
 			agent.ApiMethod = false
+			agent.Mu.Unlock()
 		}
 		// A transport is USABLE only if we resolved BOTH its URI and an
 		// address to send to. A URI with no resolved address (e.g. the
@@ -374,6 +371,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 
 			// Store JWK data if available (preferred). Crypto now lives on the
 			// transitional agentMeta sidecar (A3d.3), en route to transport @ E1.
+			agent.Mu.Lock()
 			dnsCrypto := agent.ensureCrypto("DNS")
 			if result.JWKData != "" {
 				dnsCrypto.JWKData = result.JWKData
@@ -382,6 +380,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// Store KEY record if using legacy fallback
 			dnsCrypto.KeyRR = result.LegacyKeyRR
 			agent.DnsMethod = true
+			agent.Mu.Unlock()
 		} else if result.DNSUri != "" {
 			// URI found but no resolved address. Keep DnsMethod enabled so
 			// the retrier keeps trying. Leave a not-yet-established peer
@@ -389,18 +388,23 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 			// withholds the address). Do NOT regress an already-established
 			// peer on a transient address-less round — its prior good
 			// address/state stand until liveness demotes it (Fix B).
+			agent.Mu.Lock()
 			agent.DnsMethod = true
+			agent.Mu.Unlock()
 			dnsSt, _ := mechStateForGate(peer, "DNS")
 			lgAgent.Warn("DNS endpoint URI found but no resolved address; not marking usable",
 				"identity", result.Identity, "uri", result.DNSUri, "state", AgentStateToString[dnsSt])
 		} else {
 			// No DNS endpoint found — clear the flag so DiscoveryRetrierNG
 			// doesn't perpetually retry discovery for a non-existent transport.
+			agent.Mu.Lock()
 			agent.DnsMethod = false
+			agent.Mu.Unlock()
 		}
 
-		tm.agentRegistry.S.Set(AgentId(result.Identity), agent)
-		lgAgent.Debug("also added agent to AgentRegistry", "identity", result.Identity)
+		// E1.b: no trailing ar.S.Set — the view is already in the map (shared
+		// pointer); the writes above mutated it in place.
+		lgAgent.Debug("agent view updated in AgentRegistry", "identity", result.Identity)
 	}
 
 	return nil
