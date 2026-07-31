@@ -30,6 +30,9 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
 		return 0, fmt.Errorf("SignZone: zone %s should not be signed here", zd.ZoneName)
 	}
+	if zd.HasError(tdns.DnssecError) {
+		return 0, fmt.Errorf("SignZone: zone %s has DNSSEC error: %s", zd.ZoneName, zd.ErrorMsg)
+	}
 
 	// Mode selection using MPOptions
 	if mpzd.MPOptions[tdns.OptMultiSigner] {
@@ -52,6 +55,7 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	}
 
 	newrrsigs := 0
+	var maxObservedTTL uint32
 
 	if !zd.Options[tdns.OptBlackLies] {
 		err = zd.GenerateNsecChainWithDak(dak)
@@ -141,6 +145,12 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 			rrset, signed = MaybeSignRRset(rrset, zd.ZoneName)
 			owner.RRtypes.Set(rrt, rrset)
 
+			if len(rrset.RRs) > 0 {
+				if t := rrset.RRs[0].Header().Ttl; t > maxObservedTTL {
+					maxObservedTTL = t
+				}
+			}
+
 			if signed {
 				zoneResigned = true
 			}
@@ -153,6 +163,10 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 			lgSigner.Error("failed to bump SOA serial", "zone", zd.ZoneName, "err", err)
 			return 0, err
 		}
+	}
+
+	if zd.DnssecPolicy != nil {
+		tdns.UpdateSigValidityFloor(zd, zd.DnssecPolicy, tdns.Conf.KaspPropagationDelay(), maxObservedTTL, true, tdns.Conf.IsLargeAlgorithm)
 	}
 
 	return newrrsigs, nil

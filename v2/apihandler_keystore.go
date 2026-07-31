@@ -364,17 +364,16 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			return &resp, nil
 		}
 
-		alg := zd.DnssecPolicy.Algorithm
 		var generated []string
 
-		zskPkc, _, err := hdb.GenerateKeypairMP(kp.Zone, "clear-regen", tdns.DnskeyStateActive, dns.TypeDNSKEY, alg, "ZSK", tx)
+		zskPkc, _, err := hdb.GenerateKeypairMP(kp.Zone, "clear-regen", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", tx)
 		if err != nil {
 			lgSigner.Error("clear: failed to generate active ZSK", "zone", kp.Zone, "err", err)
 		} else {
 			generated = append(generated, fmt.Sprintf("ZSK %d (active)", zskPkc.KeyId))
 		}
 
-		kskPkc, _, err := hdb.GenerateKeypairMP(kp.Zone, "clear-regen", tdns.DnskeyStateActive, dns.TypeDNSKEY, alg, "KSK", tx)
+		kskPkc, _, err := hdb.GenerateKeypairMP(kp.Zone, "clear-regen", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", tx)
 		if err != nil {
 			lgSigner.Error("clear: failed to generate active KSK", "zone", kp.Zone, "err", err)
 		} else {

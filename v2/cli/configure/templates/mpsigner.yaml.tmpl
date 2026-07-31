@@ -23,11 +23,11 @@ multi-provider:
    # Optional HTTPS sync API (alternative to NOTIFY+CHUNK for
    # HELLO/BEAT/PING). Disabled by default — DNS transport is the
    # primary mechanism.
-   # sync_api:
+   # syncapi:
    #    addresses:
    #       listen:     [ 127.0.0.1:8991 ]
-   #    cert_file:     {{.Paths.SignerCert}}
-   #    key_file:      {{.Paths.SignerKey}}
+   #    certfile:      {{.Paths.SignerCert}}
+   #    keyfile:       {{.Paths.SignerKey}}
 
 service:
    name:           TDNS-MPSIGNER
@@ -79,19 +79,16 @@ kasp:
 dnssecpolicies:
    default:
       algorithm:  ED25519
-      # Key Signing Key parameters.
       ksk:
-         lifetime:      forever   # "forever" | "none" | Go duration
-         sigvalidity:   168h      # RRSIG validity window
-      # Zone Signing Key parameters.
+         lifetime:  forever   # "forever" | "none" | Go duration
       zsk:
-         lifetime:      forever
-         sigvalidity:   2h
-      # Combined Signing Key (single key for everything). lifetime=
-      # "none" disables CSK mode in this policy.
+         lifetime:  forever
       csk:
-         lifetime:      none
-         sigvalidity:   168h
+         lifetime:  none      # "none" disables CSK mode in this policy
+      sigvalidity:
+         default:  14d       # all RRsets unless overridden
+         dnskey:   30d       # DNSKEY RRset (KSK-signed)
+         ds:       14d       # DS RRsets at child delegations
 
 db:
    file:  /var/lib/tdns/tdns-mpsigner.db

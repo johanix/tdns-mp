@@ -35,7 +35,7 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
-			Identity: AgentId(conf.Config.MultiProvider.Identity),
+			Identity: AgentId(conf.MpConfig().Identity),
 		}
 
 		defer func() {

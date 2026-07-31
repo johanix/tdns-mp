@@ -149,20 +149,17 @@ imrengine:
 # Named DNSSEC policies. Zones reference one via dnssecpolicy:.
 dnssecpolicies:
    default:
-      algorithm:   ED25519
-      # Key Signing Key parameters.
+      algorithm:  ED25519
       ksk:
-         lifetime:      forever   # "forever" | "none" | Go duration
-         sigvalidity:   168h      # RRSIG validity window
-      # Zone Signing Key parameters.
+         lifetime:  forever   # "forever" | "none" | Go duration
       zsk:
-         lifetime:      forever
-         sigvalidity:   2h
-      # Combined Signing Key (single key for everything). lifetime=
-      # "none" disables CSK mode in this policy.
+         lifetime:  forever
       csk:
-         lifetime:      none
-         sigvalidity:   168h
+         lifetime:  none      # "none" disables CSK mode in this policy
+      sigvalidity:
+         default:  14d       # all RRsets unless overridden
+         dnskey:   30d       # DNSKEY RRset (KSK-signed)
+         ds:       14d       # DS RRsets at child delegations
 
 db:
    file:  /var/lib/tdns/tdns-mpagent.db

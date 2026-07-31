@@ -224,7 +224,7 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 		}
 
 		// Skip MP zones where we are not a signer
-		shouldSign, _ := mpzd.weAreASigner(conf.Config.MultiProvider)
+		shouldSign, _ := mpzd.weAreASigner(conf.MpConfig())
 		if !shouldSign {
 			continue
 		}
@@ -232,14 +232,12 @@ func maintainStandbyKeys(conf *Config, hdb *HsyncDB, standbyZskCount, standbyKsk
 		if mpzd.DnssecPolicy == nil {
 			continue
 		}
-		alg := mpzd.DnssecPolicy.Algorithm
-
 		// Maintain ZSK standby count (always MP — non-MP zones skipped above)
-		maintainStandbyKeysForType(hdb, zoneName, alg, "ZSK", 256, true, standbyZskCount)
+		maintainStandbyKeysForType(hdb, zoneName, mpzd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, true, standbyZskCount)
 
 		// Maintain KSK standby count (0 means don't maintain)
 		if standbyKskCount > 0 {
-			maintainStandbyKeysForType(hdb, zoneName, alg, "KSK", 257, true, standbyKskCount)
+			maintainStandbyKeysForType(hdb, zoneName, mpzd.DnssecPolicy.KSKAlgorithm, "KSK", 257, true, standbyKskCount)
 		}
 	}
 }
@@ -253,7 +251,7 @@ func maintainStandbyKeysForType(hdb *HsyncDB, zoneName string, alg uint8, keytyp
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	standbyCount := countKeysByFlags(standbyKeys, expectedFlags)
+	standbyCount := countKeysByFlagsAndAlg(standbyKeys, expectedFlags, alg)
 
 	if standbyCount >= standbyKeyCount {
 		return // Already have enough
@@ -261,10 +259,10 @@ func maintainStandbyKeysForType(hdb *HsyncDB, zoneName string, alg uint8, keytyp
 
 	// Check pipeline: don't generate if published or mpdist keys exist for this type
 	publishedKeys, _ := GetDnssecKeysByState(hdb, zoneName, tdns.DnskeyStatePublished)
-	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
+	publishedCount := countKeysByFlagsAndAlg(publishedKeys, expectedFlags, alg)
 
 	mpdistKeys, _ := GetDnssecKeysByState(hdb, zoneName, DnskeyStateMpdist)
-	mpdistCount := countKeysByFlags(mpdistKeys, expectedFlags)
+	mpdistCount := countKeysByFlagsAndAlg(mpdistKeys, expectedFlags, alg)
 
 	if publishedCount > 0 || mpdistCount > 0 {
 		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount, "mpdist", mpdistCount)
@@ -284,12 +282,12 @@ func maintainStandbyKeysForType(hdb *HsyncDB, zoneName string, alg uint8, keytyp
 	}
 }
 
-// countKeysByFlags counts how many keys in the slice have the expected flags value.
+// countKeysByFlagsAndAlg counts keys matching flags and algorithm.
 // ZSK: flags=256, KSK/CSK: flags=257.
-func countKeysByFlags(keys []DnssecKeyWithTimestamps, expectedFlags uint16) int {
+func countKeysByFlagsAndAlg(keys []DnssecKeyWithTimestamps, expectedFlags uint16, alg uint8) int {
 	count := 0
 	for _, k := range keys {
-		if k.Flags == expectedFlags {
+		if k.Flags == expectedFlags && k.Algorithm == alg {
 			count++
 		}
 	}

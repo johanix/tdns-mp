@@ -118,7 +118,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				if err != nil {
 					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
 				} else if changed && ds != nil {
-					localAgentID := AgentId(conf.Config.MultiProvider.Identity)
+					localAgentID := AgentId(conf.MpConfig().Identity)
 					for _, rr := range ds.CurrentLocalKeys {
 						zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
 					}
@@ -582,7 +582,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					RequestAndWaitForEdits(zd.ZoneData, ctx, tm, conf.InternalMp.MsgQs, zdr)
 				}
 
-				myAgentId := AgentId(conf.Config.MultiProvider.Identity)
+				myAgentId := AgentId(conf.MpConfig().Identity)
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
 				if !ok {
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local data for zone %s", sdcmd.Zone)}
@@ -756,7 +756,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
 					continue
 				}
-				myAgentId := AgentId(conf.Config.MultiProvider.Identity)
+				myAgentId := AgentId(conf.MpConfig().Identity)
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
 				if !ok {
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local data for zone %s", sdcmd.Zone)}

@@ -120,8 +120,8 @@ audit:
    web:
       enabled:          false           # web dashboard off by default
       addresses:        [ 127.0.0.1:8099 ]
-      cert_file:        ""              # set both cert and key for HTTPS
-      key_file:         ""              # empty cert+key disables HTTPS (lab only)
+      certfile:         ""              # set both cert and key for HTTPS
+      keyfile:          ""              # empty cert+key disables HTTPS (lab only)
       auth:
          mode:          basic           # "basic" or "none" (none requires loopback bind)
          idle_timeout:  30m             # session expires after this much inactivity

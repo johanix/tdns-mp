@@ -1,6 +1,19 @@
 # Transport Interface Redesign: Clean Separation of
 # Transport and Application Layers
 
+> **SUPERSEDED (2026-05-21).** This document is a historical plan
+> snapshot (April 2026). It does not reflect the `hsync/` engine
+> extraction, the semi-easy bite tier, or the single-`PeerRegistry`
+> north star agreed in May 2026.
+>
+> **Current plan:**
+> [2026-05-21-transport-redesign-status-and-roadmap.md](./2026-05-21-transport-redesign-status-and-roadmap.md)
+>
+> Bite-level docs (`2026-04-25` … `2026-05-08`) and specs
+> (`peerregistry-field-disposition`, `chunk-notify-handler-split`,
+> `peer-discovery-engine-extraction`) remain useful as implementation
+> history or authoritative sub-specs where this file links to them.
+
 Date: 2026-04-15 (revised 2026-04-16, 2026-04-23, 2026-04-30)
 Status: PLAN — Phase 0 (integration test harness) **DONE**;
         all 8 early bites + the harness implemented. Phases
