@@ -53,9 +53,7 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	if e.deps.Transport == nil {
 		return
 	}
-	peer.Mu.RLock()
-	seq := beatOutboundSequence(peer)
-	peer.Mu.RUnlock()
+	seq := e.beatOutboundSequence(peer.ID)
 
 	// SendBeat (the MP bridge) writes the canonical transport.Peer mechanism
 	// state OPERATIONAL on a successful round-trip — that is now the SOLE

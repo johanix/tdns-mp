@@ -336,6 +336,14 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = fmt.Sprintf("error getting agent info: %v", err)
 				return
 			}
+			// The response marshals the Agent, and MarshalJSON serializes the
+			// State shadow (stamped only at GetZoneAgentData time). Stamp it
+			// from the canonical transport.Peer store first (2026-08-25
+			// review, finding 1).
+			st := conf.InternalMp.AgentRegistry.effectiveAgentState(agent.ID)
+			agent.Mu.Lock()
+			agent.State = st
+			agent.Mu.Unlock()
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Data for remote agent %q", amp.AgentId)
 
@@ -381,12 +389,19 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 
 			// If agent info is incomplete, start a new lookup. State reads the
 			// canonical transport.Peer store (END.0); was agent.State.
-			if conf.InternalMp.AgentRegistry.effectiveAgentState(amp.AgentId) == AgentStateNeeded {
+			st := conf.InternalMp.AgentRegistry.effectiveAgentState(amp.AgentId)
+			if st == AgentStateNeeded {
 				conf.InternalMp.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent information is incomplete for %s, lookup in progress", amp.AgentId)
 				return
 			}
+
+			// Stamp the marshaled State shadow from the canonical store before
+			// returning the Agent (2026-08-25 review, finding 1).
+			agent.Mu.Lock()
+			agent.State = st
+			agent.Mu.Unlock()
 
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)

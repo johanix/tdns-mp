@@ -82,13 +82,29 @@ func forEachEnabledTransport(peer *Peer, fn func(name string, td *PeerDetails)) 
 	}
 }
 
-func beatOutboundSequence(peer *Peer) uint64 {
-	var seq uint64
-	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
-		if uint64(td.SentBeats) > seq {
-			seq = uint64(td.SentBeats)
-		}
-	})
+// beatOutboundSequence returns the outbound beat sequence for the peer from
+// the canonical transport.Peer per-mechanism counters (max across mechanisms
+// — the same shape the retired PeerDetails.SentBeats read had). The retired
+// store lost its last SentBeats writer in Phase 2, which froze the wire
+// sequence at 0 (2026-08-25 review, finding 2); the transport counters are
+// maintained by the transport's own Beat() success path, the same source the
+// infra beat loop already reads.
+func (e *Engine) beatOutboundSequence(peerID PeerID) uint64 {
+	if e == nil || e.deps.Transport == nil {
+		return 0
+	}
+	reg := e.deps.Transport.PeerRegistry()
+	if reg == nil {
+		return 0
+	}
+	p, ok := reg.Get(string(peerID))
+	if !ok || p == nil {
+		return 0
+	}
+	seq := p.MechanismBeatSequence(TransportAPI)
+	if d := p.MechanismBeatSequence(TransportDNS); d > seq {
+		seq = d
+	}
 	return seq
 }
 

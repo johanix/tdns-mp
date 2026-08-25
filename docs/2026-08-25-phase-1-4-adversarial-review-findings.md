@@ -71,12 +71,15 @@ peer-list-vs-gossip disagreement of exactly the probed kind.
 
 Confidence: high (writer inventory exhaustive). Settled by: first
 `peer zones` after convergence; also reproducible in a 5-minute
-two-node local run. Fix shape (not applied): stamp from
-`effectiveAgentState` at the three read sites, as `GetZoneAgentData`
-already does — or declare the delta in v4 and park the fix for F2's
-DTO rework.
+two-node local run. Fix shape: stamp from `effectiveAgentState` at
+the three read sites, as `GetZoneAgentData` already does.
 
-**Testbed disposition:** _pending_
+**Testbed disposition:** FIXED-IN-CODE 2026-08-25 (all three surfaces
+stamped from `effectiveAgentState`: `listPeerSharedZones`,
+`hsync-agentstatus`, `hsync-locate`; full suite + `-race` green).
+Testbed verifies: `peer zones` / agent-status State agrees with
+`peer list` / gossip on a converged fleet. The ListKnownPeers
+LEGACY-overlay nit is NOT fixed (deliberate — separate judgment call).
 
 ---
 
@@ -112,7 +115,14 @@ Action before C1: add to v4's predicted deltas, or repoint the reader
 at `MechanismBeatSequence` like the infra loop (one-line fix; wire
 then resumes incrementing).
 
-**Testbed disposition:** _pending_
+**Testbed disposition:** FIXED-IN-CODE 2026-08-25 —
+`beatOutboundSequence` is now an Engine method reading the canonical
+transport counters (max across mechanisms), same source as the infra
+loop; the retired `PeerDetails.SentBeats` has ZERO readers left
+(update the D0 census). Counters are in-memory, so sequences restart
+from 0 on process restart — identical to pre-stack behavior; no delta
+to declare. Testbed verifies: captured beats show incrementing
+`"sequence"` again.
 
 ---
 
@@ -336,7 +346,10 @@ Cross-references the v4 probe set; items 1–2 map to Findings 1–2.
 
 1. Finding 1: stamp the three surfaces from `effectiveAgentState` (or
    explicitly declare the empty-state delta in v4 before deploying).
+   **DONE 2026-08-25** (this branch; see F1 disposition).
 2. Finding 2: add the frozen beat sequence to v4's predicted-delta
    list (or take the one-line `MechanismBeatSequence` repoint).
+   **DONE 2026-08-25** — repoint taken; no delta to declare (see F2
+   disposition). v4's D0 census row updated in the same commit.
 3. Fold Findings 4/5 and the informational notes into the D0 census so
    the PeerDetails deletion slice closes them.

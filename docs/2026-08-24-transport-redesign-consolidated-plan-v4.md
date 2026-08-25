@@ -476,7 +476,7 @@ table in the A3d-addendum §4 style. Known 2026-08-24 census
 |---|---|---|
 | `PeerDetails.State` | `Rediscover` (`discovery.go:73–77`) | `hsync.Peer.EffectiveState` — dead in production (only the leftover hsync GossipStateTable / tests) |
 | `DiscoveryFailures` / `LatestError*` | `attemptDiscovery` fail/success (`discovery.go:190–206`) | none found in production gates |
-| `BeatInterval` / `LatestRBeat/SBeat` / `SentBeats` / `ReceivedBeats` / `HelloTime` / `LastContactTime` / `Addrs`/`Port`/`BaseUri` | init in `NewPeer`; `beatOutboundSequence` still *reads* `SentBeats` | `beatOutboundSequence` (`transport_peer.go:85–92`) — confirm whether anyone still consumes that sequence |
+| `BeatInterval` / `LatestRBeat/SBeat` / `SentBeats` / `ReceivedBeats` / `HelloTime` / `LastContactTime` / `Addrs`/`Port`/`BaseUri` | init in `NewPeer` | none — `beatOutboundSequence` repointed to the `transport.Peer` beat counters 2026-08-25 (review finding 2; `SentBeats` had lost its last writer in Phase 2, freezing the wire sequence at 0) |
 | `hsync.Peer.ApiDetails`/`DnsDetails` | `NewPeer` always allocates | the Agent embed trap (caution #1) |
 
 Output of D0: a short section appended here binding the
