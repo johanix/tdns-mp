@@ -153,7 +153,30 @@ Settled by: one testbed node on a `-race` build through a restart →
 rediscovery → beat overlap (extends the plan's existing testbed-prep
 `-race` mandate to a short live soak).
 
-**Testbed disposition:** _pending_
+**Interaction with the Finding 1 fix (found 2026-08-25, post-fix).**
+Fixing Finding 1 made this materially more reachable. Before that fix
+`Agent.State` had exactly ONE writer (`GetZoneAgentData`); it now has
+four, and three of them are operator-triggered display surfaces that
+write the field under `agent.Mu`. `SendBeatWithFallback` holds no lock
+on `agent` for its entire body, so the string read at
+`hsync_transport.go:1576` races every one of them. The trigger is
+awkward: this review's own verification step for Finding 1 — "run
+`peer zones` on a converged fleet", probe items 1 and 8 — is now the
+most likely way to provoke the race left pending here.
+
+**Testbed disposition:** PARTLY FIXED-IN-CODE 2026-08-25 — the
+`agent.State` read is gone from the beat send path, which now takes
+the state from `effectiveAgentState` (the canonical transport.Peer
+store), the same source every display surface was just repointed at.
+The shadow is read only on the harness-only nil-registry branch, where
+no display surface exists to race with and where RLocking `agent.Mu`
+(the embedded peer mutex) would risk recursive-RLock writer
+starvation. Suite + `-race` green; 5 binaries build.
+NOT fixed: the `agent.ApiMethod` / `agent.DnsMethod` reads at `:1589`
+and `:1625` (and the Hello equivalents at `:1471` / `:1500`) are still
+unlocked. Those are word-sized bools that cannot tear, so the residual
+exposure is a stale read that the next tick corrects — benign, and
+unchanged by the Finding 1 fix. Testbed still verifies via probe 3.
 
 ---
 
@@ -351,5 +374,9 @@ Cross-references the v4 probe set; items 1–2 map to Findings 1–2.
    list (or take the one-line `MechanismBeatSequence` repoint).
    **DONE 2026-08-25** — repoint taken; no delta to declare (see F2
    disposition). v4's D0 census row updated in the same commit.
-3. Fold Findings 4/5 and the informational notes into the D0 census so
+3. Finding 3: take the `agent.State` read out of the beat send path, so
+   the Finding 1 fix does not widen a race that the Finding 1
+   verification step provokes. **DONE 2026-08-25** (see F3
+   disposition); the benign bool reads remain for probe 3.
+4. Fold Findings 4/5 and the informational notes into the D0 census so
    the PeerDetails deletion slice closes them.
