@@ -2,13 +2,12 @@
 # (remaining work)
 
 Date: 2026-06-11
-Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
-REMAINING transport-redesign work. Supersedes, for everything not
-yet implemented: `2026-05-30-transport-redesign-consolidated-plan-v2.md`,
-the A3d addendum chain (`2026-06-01-a3d-field-ownership.md` §6–8.5),
-`2026-06-03-a3d-spine-cluster-scope.md`, and the open items from
-`2026-06-11-transport-redesign-progress-review.md`. Where v2 or an
-addendum differs from v3, **v3 wins.**
+Status: SUPERSEDED 2026-08-24 by
+`2026-08-24-transport-redesign-consolidated-plan-v4.md` for all
+remaining work. Retained as evolution trail; completed-work specs
+herein remain the historical record. The remaining-work table
+below is STALE as of 2026-07-10 (END.3–END.5 / A5 / C0 / E landed
+via the road-to-C phases). Where v3 and v4 differ, **v4 wins.**
 
 Completed work is recorded here as a status table only (with commit
 hashes); its specs live in the superseded docs as the evolution

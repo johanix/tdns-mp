@@ -1,15 +1,12 @@
 # Road to Stage C — finish the transport.Peer consolidation, then build the Stage-C starting point
 
 Date: 2026-06-14
-Status: PROPOSED. A from-here-to-Stage-C plan that replaces the
-remaining INVARIANT microstep grind with a smaller number of
-consequential commits, grounded in a full code-surface measurement
-(2026-06-14, tip tdns-mp `e0186be`, tdns-transport `892e5de`).
-Supersedes, for the END/A5/discovery-prep work, the corresponding
-sections of `2026-06-11-transport-redesign-consolidated-plan-v3.md`
-(v3 stays authoritative for Stage C itself and everything it specifies
-that this doc does not change). Where this doc and v3 differ for the
-work below, **this doc wins.**
+Status: SUPERSEDED 2026-08-24 by
+`2026-08-24-transport-redesign-consolidated-plan-v4.md` for all
+remaining work. This plan EXECUTED: Phases 1–4 are CODE DONE
+(2026-07-10); the stacked testbed pass and Stage C onward live
+in v4. Retained as the historical record of the consolidation
+method and the per-phase specs.
 
 ## Why this plan exists (the decision behind it)
 
