@@ -2,7 +2,7 @@
 # (remaining work)
 
 Date: 2026-08-24
-Amended: 2026-09-09 — see "Amendment 2026-09-09" at the end of this
+Amended: 2026-09-09 and 2026-09-10 — see the amendments at the end of this
 file (corrections, three new items C3.0 / C0.5 / F0, effort). The
 body text above the amendment is unchanged.
 Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
@@ -855,3 +855,76 @@ relocation.
 | F0 re-pin + merge-forward | — | 1.5–3 (floor; re-estimate from the regenerated drift list) |
 | F1–F3 + F2b + merge | 1.5–2.5 | unchanged |
 | **Total** | 9–14 | **≈ 11–17** |
+
+---
+
+# Amendment 2026-09-10 — Stage C executed; D0/D2/D3 and E residual landed
+
+Unattended run 2026-09-09 20:00 – 2026-09-10 (UTC) on branch
+`transport-redesign-v1-C` in both repos, cut from the 09-09 amendment
+commit (mp) and `37c0dfb` (transport). Every step was built, unit- and
+race-tested, and deployed to the whole testbed (cpt first as observer,
+then the rest) before the next step started. Full operational log:
+`tdns-project/handovers/2026-09-09-tdns-mp-transport-v1C-progress.md`.
+
+## Landed (in order; one commit per step per repo)
+
+| Step | transport | mp | Deployed |
+|---|---|---|---|
+| C0.5a callback skips refused verbs | `06726cd` | — | #1 |
+| C0.5b per-verb dispatch gate | — | `5b146e6` | #1 |
+| C3.0 dead IncomingChan plumbing | `ebba341` | `ac976d4` | #1 |
+| C1 AppMessage carrier + TypeToken | `b2701e0` | `27458ed` | #1 |
+| C2 typed sends → SendApp; send goldens | `09ce226` | `80d15dc` | #2 |
+| C3 handlers → mp; one verb table per role | `b5c6002` | `d18965c` | #3 |
+| C4 request/response types → mp | `8e1475a` | `f5dd769` | #4 |
+| C5a application-owned payload parser (ParseApp) | `0f6b253` | `f655618` | #4 |
+| C6 payload structs/parsers → mp; dead Relocate, DetermineMessageType, test-only consts deleted | `6038704` | `54be8a1` | #4 |
+| C7 zone concepts out of transport.Peer; MP LEGACY sync gate live | `01d963a` | `9bdf373` | #4 |
+| D0 PeerDetails + engine gossip table deleted; findings 4/5/6 | `7c0a520` (finding 4) | `68106d9` | #5 |
+| D2 agent LivenessInterval stamp | — | `68106d9` | #5 |
+| D3 one Start entry point per role | — | `d544c5d` | #6 |
+| E residual: transport-exercise discovery smoke | `28e7733` | — | n/a |
+| Discovery-cache fix (stuck NEEDED after restart) | — | `4e2fe08` | #6 |
+
+transport's exported types: 87 → 64. `transport.go`/`api.go` import no
+tdns core; `dns.go` keeps core only for CHUNK/format constants and for
+the hello/beat/ping send builders.
+
+## Deviations from the text above (operator to confirm)
+
+- **C5**: both authorization calls (pre-crypto sender, post-decrypt
+  zone-peer) stay in transport's RouteViaRouter, through the application's
+  IsPeerAuthorized callback, so an unauthorized sender is still answered
+  REFUSED. Moving the zone check behind the callback would ack-then-drop.
+  The **envelope label is not added**; its carrier (EDNS0 Format byte vs
+  manifest metadata) needs a decision. C5's receive split is otherwise
+  done through the ParseApp seam.
+- **C4**: RejectedItemDTO stays in transport (confirm is transport-own).
+- **C6**: DetermineMessageType had no production caller and no legacy
+  `type` fallback — deleted, not collapsed; the verb tests use the
+  production parser. The six uppercase MessageType constants were
+  test-only — deleted.
+- **C7**: the sync LEGACY gate is now live in MP (isKnownLegacy); it never
+  fired in transport because nothing set MessageContext.Peer. EXPLAINED
+  DELTA: a sync from an established peer sharing no participant zone is
+  now rejected. Beat zone order stays unspecified on purpose.
+- **D1 not done** (Hello/Beat relocation into the TM) — the one Stage D
+  item left; its concurrency notes from the 08-25 review still apply.
+- **F0/F1–F3 not started**, per instruction (F0 = tdns re-pin is out of
+  scope; F1 is the wire break; F2/F3 are cleanup).
+- Stage A exit tags: `stage-A-complete` set on the verified pair
+  (mp `7a10ef9` / transport `37c0dfb`) — the stack ran live on all five
+  nodes from 2026-08-25 and passed tonight's probe set.
+
+## Testbed findings that belong to no plan step
+
+1. A peer whose discovery fails while its target restarts stays NEEDED
+   until a cached entry one label above its identity expires; retries
+   fail with "no auth-server attempts made". Fixed in mp (the discovery
+   kick and `peer reset` now flush the parent zone). Before the fix the
+   deploy script's heal pass (`imr flush <parent>` + `peer reset`) was
+   the workaround.
+2. The espresso/yabba election churn (~300/day, 54-min period) predates
+   this work and is untouched.
+3. Two NetBSD nodes had no ntpd (88 s skew each way); enabled 2026-09-09.
