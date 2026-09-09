@@ -232,7 +232,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Keystate(sendCtx, peer, req)
+	resp, err := tm.sendKeystate(sendCtx, peer, req)
 	if err != nil {
 		return fmt.Errorf("keystate send failed: %w", err)
 	}

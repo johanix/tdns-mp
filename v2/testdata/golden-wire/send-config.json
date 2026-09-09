@@ -1,0 +1,13 @@
+{
+  "MessageType": "config",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "Subtype": "policy",
+  "ConfigData": {
+    "key1": "val1",
+    "key2": "val2"
+  },
+  "Message": "config response",
+  "Time": "2026-01-02T03:04:05Z"
+}

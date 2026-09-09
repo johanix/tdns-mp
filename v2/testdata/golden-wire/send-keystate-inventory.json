@@ -1,0 +1,20 @@
+{
+  "MessageType": "keystate",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "KeyTag": 0,
+  "Algorithm": 0,
+  "Signal": "inventory",
+  "Message": "full set",
+  "KeyInventory": [
+    {
+      "key_tag": 12345,
+      "algorithm": 15,
+      "flags": 257,
+      "state": "active",
+      "keyrr": "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA=="
+    }
+  ],
+  "Time": "2026-01-02T03:04:05Z"
+}

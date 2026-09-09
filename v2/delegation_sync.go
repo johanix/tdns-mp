@@ -224,7 +224,7 @@ func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg
 			sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := tm.DNSTransport.SendStatusUpdate(sendCtx, p, post)
+			err := tm.sendStatusUpdate(sendCtx, p, post)
 			if err != nil {
 				lg.Warn("notifyPeersParentSyncDone: failed to send", "agent", id, "zone", zonename, "err", err)
 			} else {

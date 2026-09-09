@@ -1139,7 +1139,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Config(sendCtx, peer, req)
+	resp, err := tm.sendConfig(sendCtx, peer, req)
 	if err != nil {
 		lgTransport.Error("sendConfigToAgent: failed to send", "requester", requesterID, "zone", zone, "subtype", subtype, "err", err)
 		return
@@ -1243,7 +1243,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Audit(sendCtx, peer, req)
+	resp, err := tm.sendAudit(sendCtx, peer, req)
 	if err != nil {
 		lgTransport.Error("sendAuditToAgent: failed to send", "requester", requesterID, "zone", zone, "err", err)
 		return
@@ -1415,15 +1415,23 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	// tm.Send because their wrappers send on all transports in
 	// parallel rather than primary-then-fallback, with extensive
 	// MP-side state mutation; that is Phase 5 of the main refactor.
-	resp, err := tm.TransportManager.Send(ctx, peer, req)
+	//
+	// C2: the wire payload is built here (syncAppMessage, the same
+	// core.AgentMsgPost the typed DNSTransport.Sync marshalled) and
+	// travels as one opaque AppMessage; the manager picks the mechanism.
+	msg, err := syncAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
 	}
-	syncResp, ok := resp.(*transport.SyncResponse)
+	resp, err := tm.TransportManager.Send(ctx, peer, msg)
+	if err != nil {
+		return nil, err
+	}
+	appResp, ok := resp.(*transport.AppResponse)
 	if !ok {
 		return nil, fmt.Errorf("SendSyncWithFallback: unexpected response type %T", resp)
 	}
-	return syncResp, nil
+	return syncResponseFromApp(req, appResp), nil
 }
 
 // GetOrCreatePeer returns the transport.Peer keyed by agent.ID,
@@ -2173,7 +2181,7 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint1
 			Timestamp: time.Now(),
 		}
 
-		resp, err := tm.DNSTransport.Keystate(ctx, peer, req)
+		resp, err := tm.sendKeystate(ctx, peer, req)
 		if err != nil {
 			lgTransport.Error("KEYSTATE send to signer failed", "zone", zone, "keyTag", keyTag, "signal", signal, "err", err)
 			continue
