@@ -40,7 +40,7 @@ type appVerb struct {
 	// handle validates the payload, stores the parsed message for the
 	// RouteToCallback seam and prepares the inline confirmation. nil for
 	// transport-own verbs.
-	handle transport.MessageHandlerFunc
+	handle func(tm *MPTransportBridge, ctx *transport.MessageContext) error
 	// route is the MP-side consumer invoked by RouteToCallback after the
 	// handler ran. nil when transport handles the verb completely.
 	route func(tm *MPTransportBridge, msg *transport.IncomingMessage)
@@ -67,7 +67,7 @@ func appVerbTable() []appVerb {
 		{token: "sync", roles: rolesAgentLike, handle: handleAppSync,
 			route: (*MPTransportBridge).routeSyncMessage,
 			desc:  "Processes zone synchronization messages"},
-		{token: "update", roles: rolesCombiner, handle: NewCombinerSyncHandler(),
+		{token: "update", roles: rolesCombiner, handle: combinerUpdateHandler(),
 			route: (*MPTransportBridge).routeSyncMessage,
 			desc:  "Combiner: processes zone update contributions from agents"},
 		{token: "rfi", roles: rolesAll, handle: handleAppRfi,
@@ -116,7 +116,9 @@ func (tm *MPTransportBridge) RegisterAppVerbs(router *transport.DNSMessageRouter
 		if v.handle == nil || !roleAccepts(v, role) {
 			continue
 		}
-		if err := router.Register(v.token+"-handler", transport.MessageType(v.token), v.handle,
+		handle := v.handle
+		if err := router.Register(v.token+"-handler", transport.MessageType(v.token),
+			func(ctx *transport.MessageContext) error { return handle(tm, ctx) },
 			transport.WithPriority(100), transport.WithDescription(v.desc)); err != nil {
 			return err
 		}
@@ -142,4 +144,11 @@ func (tm *MPTransportBridge) routeIncomingMessage(msg *transport.IncomingMessage
 		return
 	}
 	lgTransport.Warn("unknown message type", "type", token)
+}
+
+// combinerUpdateHandler adapts the combiner's pending-ack update handler
+// (combiner_chunk.go) to the table's handler shape.
+func combinerUpdateHandler() func(*MPTransportBridge, *transport.MessageContext) error {
+	h := NewCombinerSyncHandler()
+	return func(_ *MPTransportBridge, ctx *transport.MessageContext) error { return h(ctx) }
 }

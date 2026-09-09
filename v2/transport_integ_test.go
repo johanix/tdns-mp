@@ -314,7 +314,6 @@ func TestTransportBoundary_ConfirmInlineResponsePrep(t *testing.T) {
 	// shared zone; otherwise HandleSync rejects with a LEGACY error
 	// (that path is scenario 5).
 	alicePeer := env.Bob.Bridge.PeerRegistry.GetOrCreate(env.Alice.Identity)
-	alicePeer.AddSharedZone(zone, "agent", "agent")
 
 	distID := nextDistributionID()
 	ctx := buildSyncMessageContext(t, env.Bob.Bridge,
@@ -390,10 +389,12 @@ func TestTransportBoundary_ConfirmAsyncToChannel(t *testing.T) {
 	}
 }
 
-// TestTransportBoundary_LegacySyncRejection asserts that a sync from
-// a peer with zero shared zones is rejected by HandleSync at the
-// transport layer, before the message reaches MsgQs.Msg. Scenario 5
-// from the harness doc.
+// TestTransportBoundary_LegacySyncRejection asserts that a sync from an
+// established peer that shares no participant zone with us (LEGACY) is
+// rejected by the application's sync handler before the message reaches
+// MsgQs.Msg. Scenario 5 from the harness doc. Since C3/C7 the gate lives
+// in tdns-mp (handleAppSync) and is keyed on the MP registry, not on
+// transport.Peer.
 //
 // The rejection signal is twofold:
 //   - Router.Route returns a non-nil error.
@@ -405,11 +406,13 @@ func TestTransportBoundary_LegacySyncRejection(t *testing.T) {
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
 
 	const zone = "scenario5.example."
-	// Alice in Bob's PeerRegistry, but with NO shared zones -> LEGACY.
-	alicePeer := env.Bob.Bridge.PeerRegistry.GetOrCreate(env.Alice.Identity)
-	if got := alicePeer.GetSharedZones(); len(got) != 0 {
-		t.Fatalf("precondition: expected 0 shared zones on Alice peer, got %d (%v)", len(got), got)
+	// Alice is an established peer in Bob's registry, but no zone lists
+	// both of them as participants -> LEGACY.
+	env.Bob.Registry.S.Set(AgentId(env.Alice.Identity), NewAgent(AgentId(env.Alice.Identity)))
+	if !env.Bob.Registry.isKnownLegacy(env.Alice.Identity) {
+		t.Fatalf("precondition: expected Alice to be LEGACY for Bob")
 	}
+	alicePeer := env.Bob.Bridge.PeerRegistry.GetOrCreate(env.Alice.Identity)
 
 	distID := nextDistributionID()
 	ctx := buildSyncMessageContext(t, env.Bob.Bridge,

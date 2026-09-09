@@ -56,7 +56,7 @@ func TestTransportDispatch_RoleTables(t *testing.T) {
 	alice := env.Alice.Identity
 	env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
 	alicePeer := env.Bob.Bridge.PeerRegistry.GetOrCreate(alice)
-	alicePeer.AddSharedZone(dispatchZone, "agent", "agent")
+	seedZoneWithHSYNC3(t, dispatchZone, alice, env.Bob.Identity)
 
 	newRoleRouter := func(role string) *transport.DNSMessageRouter {
 		r := transport.NewDNSMessageRouter()

@@ -26,12 +26,14 @@ import (
 )
 
 // handleAppSync processes sync messages and sends acknowledgment.
-func handleAppSync(ctx *transport.MessageContext) error {
+func handleAppSync(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing sync", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Check if sender has zero shared zones (LEGACY state)
-	// LEGACY agents should not send sync messages (only beats)
-	if ctx.Peer != nil && len(ctx.Peer.GetSharedZones()) == 0 {
+	// LEGACY gate (C3 moved it here; C7 keyed it on MP's own participant
+	// view): an established peer with zero shared participant zones must
+	// not send sync messages (only beats). Unknown senders were already
+	// vetted by the authorization middleware and pass through.
+	if tm != nil && tm.agentRegistry != nil && tm.agentRegistry.isKnownLegacy(ctx.PeerID) {
 		// Agent is LEGACY (zero shared zones) - reject sync with informative error payload
 		lgTransport.Warn("rejecting sync from LEGACY agent (zero shared zones)", "peer", ctx.PeerID)
 		errorPayload := struct {
@@ -95,7 +97,7 @@ func handleAppSync(ctx *transport.MessageContext) error {
 }
 
 // handleAppRfi processes RFI (Request For Information) messages.
-func handleAppRfi(ctx *transport.MessageContext) error {
+func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing RFI", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by agent RouteViaRouter)
@@ -138,7 +140,7 @@ func handleAppRfi(ctx *transport.MessageContext) error {
 // handleAppKeystate processes KEYSTATE messages for key lifecycle signaling.
 // Used for agent↔signer communication about DNSKEY propagation status.
 // Signals: propagated, rejected, removed (agent→signer), published, retired (signer→agent).
-func handleAppKeystate(ctx *transport.MessageContext) error {
+func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing keystate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Parse the keystate message.
@@ -222,7 +224,7 @@ func handleAppKeystate(ctx *transport.MessageContext) error {
 // handleAppEdits processes EDITS messages carrying an agent's current contributions
 // from the combiner. Modeled on HandleKeystate.
 // Sent by the combiner in response to an RFI EDITS request.
-func handleAppEdits(ctx *transport.MessageContext) error {
+func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing edits", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Parse the edits message.
@@ -283,7 +285,7 @@ func handleAppEdits(ctx *transport.MessageContext) error {
 
 // handleAppConfig processes CONFIG response messages carrying config data from a peer agent.
 // Sent by the receiving agent in response to an RFI CONFIG request.
-func handleAppConfig(ctx *transport.MessageContext) error {
+func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing config", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	var config DnsConfigPayload
@@ -339,7 +341,7 @@ func handleAppConfig(ctx *transport.MessageContext) error {
 
 // handleAppAudit processes AUDIT response messages carrying audit data from a peer agent.
 // Sent by the receiving agent in response to an RFI AUDIT request.
-func handleAppAudit(ctx *transport.MessageContext) error {
+func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing audit", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	var audit DnsAuditPayload
@@ -396,7 +398,7 @@ func handleAppAudit(ctx *transport.MessageContext) error {
 // handleAppStatusUpdate processes STATUS-UPDATE messages.
 // Used for combiner→agent notifications (delegation changes) and
 // agent→agent notifications (parent sync completed).
-func handleAppStatusUpdate(ctx *transport.MessageContext) error {
+func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing status-update", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	var statusUpdate DnsStatusUpdatePayload
@@ -451,7 +453,7 @@ func handleAppStatusUpdate(ctx *transport.MessageContext) error {
 }
 
 // handleAppRelocate processes relocate messages for DDoS mitigation.
-func handleAppRelocate(ctx *transport.MessageContext) error {
+func handleAppRelocate(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing relocate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by agent RouteViaRouter)

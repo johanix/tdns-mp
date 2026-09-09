@@ -330,7 +330,8 @@ func TestTransportDispatch_PerVerb(t *testing.T) {
 			// registry with a shared zone (HandleSync's zero-zone gate).
 			env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
 			alicePeer := env.Bob.Bridge.PeerRegistry.GetOrCreate(alice)
-			alicePeer.AddSharedZone(dispatchZone, "agent", "agent")
+			// C7: shared zones are derived from HSYNC3 participation.
+			seedZoneWithHSYNC3(t, dispatchZone, alice, bob)
 
 			// The production seam: RouteToCallback -> routeIncomingMessage.
 			env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)

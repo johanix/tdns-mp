@@ -1576,6 +1576,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		Timestamp: time.Now(),
 		Sequence:  sequence,
 		State:     string(beatState),
+		Zones:     tm.beatZones(agent.ID),
 		Gossip:    gossipData,
 	}
 
@@ -2261,4 +2262,32 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	lgTransport.Info("RFI sent to combiner", "rfiType", rfiType, "zone", zone, "combiner", combinerID, "status", resp.Status)
 	return nil
+}
+
+// beatZones is the zone list a beat to the given peer carries: the zones in
+// which both we and the peer are participants (C7: derived here, no longer
+// stored on transport.Peer). The receiver uses the first one as the
+// authorization scope.
+func (tm *MPTransportBridge) beatZones(id AgentId) []string {
+	if tm.agentRegistry == nil {
+		return nil
+	}
+	shared := tm.agentRegistry.sharedParticipantZones(id)
+	if len(shared) == 0 {
+		return nil
+	}
+	// Order is deliberately unspecified (map iteration), exactly as the
+	// pre-C7 transport.Peer.GetSharedZones was: the receiver authorizes
+	// the beat on Zones[0], and a fixed order would turn one zone the
+	// receiver does not list us for into a permanent refusal instead of
+	// an intermittent one.
+	set := make(map[string]struct{}, len(shared))
+	for _, z := range shared {
+		set[string(z)] = struct{}{}
+	}
+	zones := make([]string, 0, len(set))
+	for z := range set {
+		zones = append(zones, z)
+	}
+	return zones
 }

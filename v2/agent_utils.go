@@ -42,9 +42,9 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	return agents
 }
 
-// RecomputeSharedZonesAndSyncState recomputes an agent's derived shared zones
-// and syncs them to the transport peer. Called after HSYNC changes to keep the
-// peer's shared-zone set in step with zone membership.
+// RecomputeSharedZonesAndSyncState is the hook fired after HSYNC changes.
+// Since C7 there is nothing to sync into transport; the derived shared-zone
+// set is computed on demand.
 //
 // END.0: the former LEGACY↔OPERATIONAL top-level agent.State flip is RETIRED.
 // LEGACY is now a pure derived display overlay (effectiveAgentState): an
@@ -52,25 +52,11 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 // State to flip here — the canonical connection state lives per-mechanism on
 // transport.Peer, and the LEGACY overlay is recomputed on every read.
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
-	// Derive the shared-zone set (zones where both we and this agent are
-	// participants). LEGACY is defined as derived participations == 0.
+	// C7: transport.Peer holds no zone knowledge any more. The derived set is
+	// read at the points that need it (beat construction, the sync LEGACY
+	// gate, the LEGACY display overlay) via sharedParticipantZones.
 	shared := ar.sharedParticipantZones(agent.ID)
-	zoneCount := len(shared)
-	identity := agent.ID
-
-	// Sync the derived shared zones to the transport peer (atomic replace under
-	// the transport.Peer lock; no registry/peer mutex held across the call —
-	// lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry ->
-	// transport.Peer).
-	if ar.TransportManager != nil {
-		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(identity))
-		zoneStrs := make([]string, len(shared))
-		for i, zone := range shared {
-			zoneStrs[i] = string(zone)
-		}
-		peer.ReplaceSharedZones(zoneStrs)
-		lgAgent.Debug("synced zones to peer", "zones", zoneCount, "peer", identity)
-	}
+	lgAgent.Debug("recomputed shared zones", "zones", len(shared), "peer", agent.ID)
 }
 
 func (conf *Config) NewAgentRegistry() *AgentRegistry {
