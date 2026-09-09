@@ -195,10 +195,10 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 
 	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
 
-	// Convert KeyInventoryItem → transport.KeyInventoryEntry
-	inventory := make([]transport.KeyInventoryEntry, len(items))
+	// Convert KeyInventoryItem → KeyInventoryEntry
+	inventory := make([]KeyInventoryEntry, len(items))
 	for i, item := range items {
-		inventory[i] = transport.KeyInventoryEntry{
+		inventory[i] = KeyInventoryEntry{
 			KeyTag:    item.KeyTag,
 			Algorithm: item.Algorithm,
 			Flags:     item.Flags,

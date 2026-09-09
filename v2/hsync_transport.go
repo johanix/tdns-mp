@@ -842,7 +842,7 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 
 // routeSyncMessage routes a sync message to the message channel.
 func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
-	payload, err := transport.ParseSyncPayload(msg.Payload)
+	payload, err := ParseSyncPayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse sync payload", "err", err)
 		return
@@ -952,7 +952,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 // For "inventory" signals, delivers the full key inventory to MsgQs.KeystateInventory
 // so RequestAndWaitForKeyInventory can pick it up.
 func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsKeystatePayload
+	var payload DnsKeystatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse keystate payload", "err", err)
 		return
@@ -991,7 +991,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		return
 	}
 
-	// Convert transport.KeyInventoryEntry → KeyInventoryItem for the channel
+	// Convert KeyInventoryEntry → KeyInventoryItem for the channel
 	items := make([]KeyInventoryItem, len(payload.KeyInventory))
 	for i, e := range payload.KeyInventory {
 		items[i] = KeyInventoryItem{
@@ -1033,7 +1033,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 // Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
 // Modeled on routeKeystateMessage.
 func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsEditsPayload
+	var payload DnsEditsPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse edits payload", "err", err)
 		return
@@ -1064,7 +1064,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 // routeConfigMessage routes an incoming CONFIG response message from a peer agent.
 // Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
 func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsConfigPayload
+	var payload DnsConfigPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse config payload", "err", err)
 		return
@@ -1135,7 +1135,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 // routeAuditMessage routes an incoming AUDIT response message from a peer agent.
 // Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
 func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsAuditPayload
+	var payload DnsAuditPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse audit payload", "err", err)
 		return
@@ -1166,7 +1166,7 @@ func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 // routeStatusUpdateMessage routes an incoming STATUS-UPDATE notification.
 // Delivers to MsgQs.StatusUpdate for processing by the role-specific message handler.
 func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsStatusUpdatePayload
+	var payload DnsStatusUpdatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse status-update payload", "err", err)
 		return
@@ -1238,7 +1238,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 
 // routeRelocateMessage handles a relocate request.
 func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage) {
-	payload, err := transport.ParseRelocatePayload(msg.Payload)
+	payload, err := ParseRelocatePayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse relocate payload", "err", err)
 		return
@@ -1267,7 +1267,7 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
-func (tm *MPTransportBridge) sendImmediateConfirmation(payload *transport.DnsSyncPayload) {
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) {
 	if tm.DNSTransport == nil {
 		return
 	}

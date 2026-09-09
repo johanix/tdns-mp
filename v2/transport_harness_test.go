@@ -313,7 +313,7 @@ func recvMsgWithin(t *testing.T, ch <-chan *AgentMsgPostPlus, d time.Duration) (
 // would emerge from those layers and hands it to routeIncomingMessage.
 func makeSyncIncomingMessage(t *testing.T, senderID, receiverID, zone, distributionID string, records map[string][]string) *transport.IncomingMessage {
 	t.Helper()
-	payload := transport.DnsSyncPayload{
+	payload := DnsSyncPayload{
 		MessageType:    "sync",
 		OriginatorID:   senderID,
 		YourIdentity:   receiverID,
@@ -376,7 +376,7 @@ func recvConfirmWithin(t *testing.T, ch <-chan *ConfirmationDetail, d time.Durat
 // local_id). Used by scenarios 3 and 5 that drive Router.Route("sync").
 func buildSyncMessageContext(t *testing.T, tm *MPTransportBridge, senderID, receiverID, zone, distributionID string, records map[string][]string) *transport.MessageContext {
 	t.Helper()
-	payload := transport.DnsSyncPayload{
+	payload := DnsSyncPayload{
 		MessageType:    "sync",
 		OriginatorID:   senderID,
 		YourIdentity:   receiverID,

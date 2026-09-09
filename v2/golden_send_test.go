@@ -60,7 +60,7 @@ func goldenSendMessages(t *testing.T) []struct {
 		{"send-rfi", must(syncAppMessage(syncReq("rfi"), you))},
 		{"send-keystate-inventory", must(keystateAppMessage(&PeerKeystateRequest{
 			SenderID: me, Zone: zone, Signal: "inventory", Message: "full set", Timestamp: ts,
-			KeyInventory: []transport.KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
+			KeyInventory: []KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
 				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA=="}},
 		}, you))},
 		{"send-keystate-signal", must(keystateAppMessage(&PeerKeystateRequest{
@@ -113,7 +113,7 @@ func TestGoldenWireSendPayloads(t *testing.T) {
 			}
 			// The verb inside the payload must be the carrier's TypeToken
 			// (the receiver dispatches on the payload, not the carrier).
-			if got := transport.DetermineMessageType(tc.Msg.Payload); string(got) != tc.Msg.TypeToken {
+			if got := wireVerb(tc.Msg.Payload); got != tc.Msg.TypeToken {
 				t.Errorf("payload MessageType %q != TypeToken %q", got, tc.Msg.TypeToken)
 			}
 			var pretty bytes.Buffer

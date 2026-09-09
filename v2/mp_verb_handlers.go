@@ -143,7 +143,7 @@ func handleAppKeystate(ctx *transport.MessageContext) error {
 
 	// Parse the keystate message.
 	// Size bounded: ctx.ChunkPayload originates from a DNS message (max ~65535 bytes over TCP).
-	var keystate transport.DnsKeystatePayload
+	var keystate DnsKeystatePayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &keystate); err != nil {
 		return fmt.Errorf("failed to parse keystate: %w", err)
 	}
@@ -227,7 +227,7 @@ func handleAppEdits(ctx *transport.MessageContext) error {
 
 	// Parse the edits message.
 	// Size bounded: ctx.ChunkPayload originates from a DNS message (max ~65535 bytes over TCP).
-	var edits transport.DnsEditsPayload
+	var edits DnsEditsPayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &edits); err != nil {
 		return fmt.Errorf("failed to parse edits: %w", err)
 	}
@@ -286,7 +286,7 @@ func handleAppEdits(ctx *transport.MessageContext) error {
 func handleAppConfig(ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing config", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	var config transport.DnsConfigPayload
+	var config DnsConfigPayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &config); err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
@@ -342,7 +342,7 @@ func handleAppConfig(ctx *transport.MessageContext) error {
 func handleAppAudit(ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing audit", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	var audit transport.DnsAuditPayload
+	var audit DnsAuditPayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &audit); err != nil {
 		return fmt.Errorf("failed to parse audit: %w", err)
 	}
@@ -399,7 +399,7 @@ func handleAppAudit(ctx *transport.MessageContext) error {
 func handleAppStatusUpdate(ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing status-update", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	var statusUpdate transport.DnsStatusUpdatePayload
+	var statusUpdate DnsStatusUpdatePayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &statusUpdate); err != nil {
 		return fmt.Errorf("failed to parse status-update: %w", err)
 	}

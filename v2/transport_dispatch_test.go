@@ -4,7 +4,7 @@
  * The C0 goldens lock BYTES. This file locks DISPATCH: for every wire verb
  * the agent router accepts, a payload built with today's structs
  *
- *   (a) resolves to that verb in DetermineMessageType,
+ *   (a) resolves to that verb in the production parser (parseAppPayload),
  *   (b) is accepted by the registered handler through the real middleware
  *       chain (Router.Route, not the handler function directly), and
  *   (c) is delivered by the RouteToCallback -> routeIncomingMessage seam to
@@ -104,12 +104,6 @@ type dispatchCase struct {
 	// unhandled marks a verb the agent router has no handler for: it must be
 	// REFUSED on the wire and must NOT reach any MP queue.
 	unhandled bool
-	// legacyTagOnly marks payload types that carry only the legacy "type"
-	// tag (no "MessageType"). RouteViaRouter dispatches them via the parse
-	// fallback; DetermineMessageType has NO such fallback and returns
-	// UNKNOWN for them today. C6 must keep (or unify) that distinction —
-	// see the 2026-09-09 amendment, C6 row.
-	legacyTagOnly bool
 	// observe asserts the MP-side delivery.
 	observe func(t *testing.T, env *integEnv, alice, distID string)
 }
@@ -162,7 +156,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "sync", verb: "sync", wantAck: `"type":"confirm"`,
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsSyncPayload{MessageType: "sync", OriginatorID: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsSyncPayload{MessageType: "sync", OriginatorID: a, YourIdentity: b, Zone: dispatchZone,
 					Records: map[string][]string{dispatchZone: {rr}}, Timestamp: time.Now().Unix(), DistributionID: d, Nonce: "sync-" + d}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -177,7 +171,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "rfi", verb: "rfi", wantAck: `"type":"confirm"`,
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsSyncPayload{MessageType: "rfi", OriginatorID: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsSyncPayload{MessageType: "rfi", OriginatorID: a, YourIdentity: b, Zone: dispatchZone,
 					RfiType: "downstream", RfiSubtype: "ns", Timestamp: time.Now().Unix(), DistributionID: d, Nonce: "rfi-" + d}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -194,7 +188,7 @@ func dispatchCases() []dispatchCase {
 			// "update" is the agent->combiner verb; the agent router has no
 			// handler for it. It must be refused AND not leak to MsgQs.Msg.
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsSyncPayload{MessageType: "update", OriginatorID: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsSyncPayload{MessageType: "update", OriginatorID: a, YourIdentity: b, Zone: dispatchZone,
 					Records: map[string][]string{dispatchZone: {rr}}, Timestamp: time.Now().Unix(), DistributionID: d}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -204,9 +198,9 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "keystate-inventory", verb: "keystate", wantAck: "keystate inventory received",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Signal: "inventory", Timestamp: time.Now().Unix(),
-					KeyInventory: []transport.KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
+					KeyInventory: []KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
 						KeyRR: dispatchZone + " 3600 IN DNSKEY 257 3 15 dGVzdA=="}}}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -220,7 +214,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "keystate-signal", verb: "keystate", wantAck: "keystate propagated received",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Signal: "propagated", KeyTag: 12345, Algorithm: 15, Timestamp: time.Now().Unix()}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -234,7 +228,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "edits", verb: "edits", wantAck: "edits received",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsEditsPayload{MessageType: "edits", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsEditsPayload{MessageType: "edits", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					AgentRecords: map[string]map[string][]string{b: {dispatchZone: {rr}}}, Timestamp: time.Now().Unix()}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -248,7 +242,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "config", verb: "config", wantAck: "config received",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsConfigPayload{MessageType: "config", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsConfigPayload{MessageType: "config", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Timestamp: time.Now().Unix()}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -262,7 +256,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "audit", verb: "audit", wantAck: "audit received",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsAuditPayload{MessageType: "audit", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsAuditPayload{MessageType: "audit", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					AuditData: map[string]interface{}{"check": "ok"}, Timestamp: time.Now().Unix()}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -276,7 +270,7 @@ func dispatchCases() []dispatchCase {
 			}},
 		{name: "status-update", verb: "status-update", wantAck: "status-update received",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsStatusUpdatePayload{MessageType: "status-update", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
+				return &DnsStatusUpdatePayload{MessageType: "status-update", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					SubType: "delegation-change", NSRecords: []string{dispatchZone + " 3600 IN NS ns1.example."}, Result: "ok", Timestamp: time.Now().Unix()}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -288,10 +282,10 @@ func dispatchCases() []dispatchCase {
 					t.Errorf("status-update: %+v", *m)
 				}
 			}},
-		{name: "relocate", verb: "relocate", legacyTagOnly: true,
+		{name: "relocate", verb: "relocate",
 			build: func(a, b, d string) interface{} {
-				return &transport.DnsRelocatePayload{Type: "relocate", SenderID: a,
-					NewAddress: transport.DnsAddress{Host: "192.0.2.3", Port: 5353, Transport: "udp"},
+				return &DnsRelocatePayload{Type: "relocate", SenderID: a,
+					NewAddress: DnsAddress{Host: "192.0.2.3", Port: 5353, Transport: "udp"},
 					Reason:     "dispatch-test", ValidUntil: time.Now().Add(time.Hour).Unix()}
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
@@ -305,7 +299,7 @@ func dispatchCases() []dispatchCase {
 					t.Errorf("relocate: operational address not applied: %+v", addr)
 				}
 			}},
-		{name: "confirm", verb: "confirm", legacyTagOnly: true,
+		{name: "confirm", verb: "confirm",
 			build: func(a, b, d string) interface{} {
 				return &transport.DnsConfirmPayload{Type: "confirm", SenderID: a, Zone: dispatchZone, DistributionID: d,
 					Status: "ok", AppliedRecords: []string{rr}, Timestamp: time.Now().Unix()}
@@ -347,14 +341,9 @@ func TestTransportDispatch_PerVerb(t *testing.T) {
 				t.Fatalf("marshal %s payload: %v", tc.verb, err)
 			}
 
-			// (a) verb table. Legacy-tag-only payloads are dispatched by the
-			// parse fallback, not by DetermineMessageType (documented gap).
-			if tc.legacyTagOnly {
-				if got := transport.DetermineMessageType(body); got != transport.MessageTypeUnknown {
-					t.Errorf("DetermineMessageType now resolves legacy-only %s to %q; update this case and the C6 notes", tc.verb, got)
-				}
-			} else if got := transport.DetermineMessageType(body); string(got) != tc.verb {
-				t.Fatalf("DetermineMessageType: got %q, want %q", got, tc.verb)
+			// (a) verb table: the production parser must extract this verb.
+			if got := wireVerb(body); got != tc.verb {
+				t.Fatalf("wireVerb: got %q, want %q", got, tc.verb)
 			}
 
 			// (b) handler through the middleware chain

@@ -78,8 +78,8 @@ func TestTransportDispatch_RoleTables(t *testing.T) {
 		ctx.Peer = alicePeer
 		return ctx, r.Route(ctx, msgType)
 	}
-	syncPayload := func(verb string) *transport.DnsSyncPayload {
-		return &transport.DnsSyncPayload{MessageType: verb, OriginatorID: alice, YourIdentity: env.Bob.Identity, Zone: dispatchZone,
+	syncPayload := func(verb string) *DnsSyncPayload {
+		return &DnsSyncPayload{MessageType: verb, OriginatorID: alice, YourIdentity: env.Bob.Identity, Zone: dispatchZone,
 			Records: map[string][]string{dispatchZone: {dispatchZone + " 3600 IN TXT \"role\""}}, Timestamp: time.Now().Unix()}
 	}
 	refused := func(t *testing.T, ctx *transport.MessageContext, verb string) {
@@ -113,7 +113,7 @@ func TestTransportDispatch_RoleTables(t *testing.T) {
 	})
 	t.Run("signer", func(t *testing.T) {
 		r := newRoleRouter(roleSigner)
-		ctx, err := route(r, &transport.DnsKeystatePayload{MessageType: "keystate", MyIdentity: alice, YourIdentity: env.Bob.Identity,
+		ctx, err := route(r, &DnsKeystatePayload{MessageType: "keystate", MyIdentity: alice, YourIdentity: env.Bob.Identity,
 			Zone: dispatchZone, Signal: "propagated", KeyTag: 7, Timestamp: time.Now().Unix()})
 		if err != nil {
 			t.Fatalf("keystate: %v", err)
@@ -124,7 +124,7 @@ func TestTransportDispatch_RoleTables(t *testing.T) {
 		if m, ok := recvWithin(env.Bob.MsgQs.KeystateSignal, integTestTimeout); !ok || m.KeyTag != 7 {
 			t.Errorf("keystate signal not delivered: %v %v", ok, m)
 		}
-		ctx, _ = route(r, &transport.DnsEditsPayload{MessageType: "edits", MyIdentity: alice, YourIdentity: env.Bob.Identity, Zone: dispatchZone, Timestamp: time.Now().Unix()})
+		ctx, _ = route(r, &DnsEditsPayload{MessageType: "edits", MyIdentity: alice, YourIdentity: env.Bob.Identity, Zone: dispatchZone, Timestamp: time.Now().Unix()})
 		refused(t, ctx, "edits on signer")
 		ctx, _ = route(r, syncPayload("sync"))
 		refused(t, ctx, "sync on signer")
