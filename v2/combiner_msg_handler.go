@@ -416,7 +416,7 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 		return
 	}
 
-	req := &transport.EditsRequest{
+	req := &PeerEditsRequest{
 		SenderID:     conf.MpConfig().Identity,
 		Zone:         zone,
 		AgentRecords: agentRecords,

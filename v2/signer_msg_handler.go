@@ -221,7 +221,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 	}
 
 	// Build and send KEYSTATE inventory
-	req := &transport.KeystateRequest{
+	req := &PeerKeystateRequest{
 		SenderID:     conf.MpConfig().Identity,
 		Zone:         zone,
 		Signal:       "inventory",

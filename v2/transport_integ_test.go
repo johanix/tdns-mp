@@ -261,7 +261,7 @@ func TestTransportBoundary_SyncFallback(t *testing.T) {
 	bob.APIEndpoint = srv.URL
 	bob.PreferredTransport = "API"
 
-	req := &transport.SyncRequest{
+	req := &PeerSyncRequest{
 		SenderID:       env.Alice.Identity,
 		Zone:           "scenario2.example.",
 		MessageType:    "sync",

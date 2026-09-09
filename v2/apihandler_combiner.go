@@ -602,7 +602,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			for _, peer := range agentPeers {
 				for _, zone := range zones {
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-					_, err := tm.SendSyncWithFallback(ctx, peer, &transport.SyncRequest{
+					_, err := tm.SendSyncWithFallback(ctx, peer, &PeerSyncRequest{
 						SenderID:    tm.LocalID,
 						Zone:        zone,
 						Records:     map[string][]string{},

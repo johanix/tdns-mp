@@ -452,10 +452,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			if ar.TransportManager != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				peer := ar.MPTransport.GetOrCreatePeer(agent)
-				syncReq := &agenttransport.SyncRequest{
+				syncReq := &PeerSyncRequest{
 					SenderID:    ar.LocalAgent.Identity,
 					Zone:        string(msg.Zone),
-					SyncType:    agenttransport.SyncTypeNS,
+					SyncType:    PeerSyncTypeNS,
 					Records:     groupRRStringsByOwner(msg.RRs),
 					Timestamp:   time.Now(),
 					MessageType: "sync",
@@ -712,7 +712,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		syncReq := &agenttransport.SyncRequest{
+		syncReq := &PeerSyncRequest{
 			SenderID:    ar.LocalAgent.Identity,
 			Zone:        string(msg.Zone),
 			Records:     msg.Records,

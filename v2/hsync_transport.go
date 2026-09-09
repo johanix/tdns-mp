@@ -1107,7 +1107,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		return
 	}
 
-	req := &transport.ConfigRequest{
+	req := &PeerConfigRequest{
 		SenderID:   ar.LocalAgent.Identity,
 		Zone:       zone,
 		Subtype:    subtype,
@@ -1212,7 +1212,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 		return
 	}
 
-	req := &transport.AuditRequest{
+	req := &PeerAuditRequest{
 		SenderID:  ar.LocalAgent.Identity,
 		Zone:      zone,
 		AuditData: auditData,
@@ -1388,7 +1388,7 @@ func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Tra
 }
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
-func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
+func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *PeerSyncRequest) (*PeerSyncResponse, error) {
 	// Bite 3: delegate to the generic primary-then-fallback path on
 	// transport.TransportManager. Hello and Beat are NOT migrated to
 	// tm.Send because their wrappers send on all transports in
@@ -1792,7 +1792,7 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		}
 	}
 
-	syncReq := &transport.SyncRequest{
+	syncReq := &PeerSyncRequest{
 		SenderID:       senderID,
 		Zone:           msg.Zone,
 		Timestamp:      msg.CreatedAt,
@@ -2151,7 +2151,7 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint1
 
 	// Send one KEYSTATE per key tag
 	for _, keyTag := range keyTags {
-		req := &transport.KeystateRequest{
+		req := &PeerKeystateRequest{
 			SenderID:  tm.LocalID,
 			Zone:      string(zone),
 			KeyTag:    keyTag,
@@ -2203,7 +2203,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 		Transport: "udp",
 	})
 
-	syncReq := &transport.SyncRequest{
+	syncReq := &PeerSyncRequest{
 		SenderID:    tm.LocalID,
 		Zone:        zone,
 		Timestamp:   time.Now(),
@@ -2242,7 +2242,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	peer := tm.GetOrCreatePeer(combiner)
 
-	syncReq := &transport.SyncRequest{
+	syncReq := &PeerSyncRequest{
 		SenderID:    tm.LocalID,
 		Zone:        zone,
 		Timestamp:   time.Now(),

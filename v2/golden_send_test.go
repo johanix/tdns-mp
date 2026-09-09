@@ -35,8 +35,8 @@ func goldenSendMessages(t *testing.T) []struct {
 		}
 		return m
 	}
-	syncReq := func(verb string) *transport.SyncRequest {
-		return &transport.SyncRequest{
+	syncReq := func(verb string) *PeerSyncRequest {
+		return &PeerSyncRequest{
 			SenderID: me, Zone: zone, MessageType: verb,
 			Records: map[string][]string{"a.zone1.example.": {"a.zone1.example. 3600 IN A 192.0.2.1"}},
 			Operations: []core.RROperation{{Operation: "add", RRtype: "A",
@@ -58,23 +58,23 @@ func goldenSendMessages(t *testing.T) []struct {
 		{"send-sync-default", must(syncAppMessage(syncReq(""), you))},
 		{"send-update", must(syncAppMessage(syncReq("update"), you))},
 		{"send-rfi", must(syncAppMessage(syncReq("rfi"), you))},
-		{"send-keystate-inventory", must(keystateAppMessage(&transport.KeystateRequest{
+		{"send-keystate-inventory", must(keystateAppMessage(&PeerKeystateRequest{
 			SenderID: me, Zone: zone, Signal: "inventory", Message: "full set", Timestamp: ts,
 			KeyInventory: []transport.KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
 				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA=="}},
 		}, you))},
-		{"send-keystate-signal", must(keystateAppMessage(&transport.KeystateRequest{
+		{"send-keystate-signal", must(keystateAppMessage(&PeerKeystateRequest{
 			SenderID: me, Zone: zone, KeyTag: 12345, Algorithm: 15, Signal: "propagated", Message: "ok", Timestamp: ts,
 		}, you))},
-		{"send-edits", must(editsAppMessage(&transport.EditsRequest{
+		{"send-edits", must(editsAppMessage(&PeerEditsRequest{
 			SenderID: "combiner.example.", Zone: zone, Message: "current contributions", Timestamp: ts,
 			AgentRecords: map[string]map[string][]string{me: {"a.zone1.example.": {"a.zone1.example. 3600 IN A 192.0.2.1"}}},
 		}, you))},
-		{"send-config", must(configAppMessage(&transport.ConfigRequest{
+		{"send-config", must(configAppMessage(&PeerConfigRequest{
 			SenderID: me, Zone: zone, Subtype: "policy", ConfigData: map[string]string{"key1": "val1", "key2": "val2"},
 			Message: "config response", Timestamp: ts,
 		}, you))},
-		{"send-audit", must(auditAppMessage(&transport.AuditRequest{
+		{"send-audit", must(auditAppMessage(&PeerAuditRequest{
 			SenderID: me, Zone: zone, AuditData: map[string]interface{}{"check": "ok", "count": 3},
 			Message: "audit response", Timestamp: ts,
 		}, "auditor.example."))},

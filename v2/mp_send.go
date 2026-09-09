@@ -25,7 +25,7 @@ import (
 
 // syncAppMessage builds the sync-family carrier ("sync", "update", "rfi")
 // exactly as DNSTransport.Sync marshalled it: a core.AgentMsgPost.
-func syncAppMessage(req *transport.SyncRequest, peerID string) (*transport.AppMessage, error) {
+func syncAppMessage(req *PeerSyncRequest, peerID string) (*transport.AppMessage, error) {
 	messageType := core.AgentMsg(req.MessageType)
 	if messageType == "" {
 		messageType = core.AgentMsgNotify // default to sync
@@ -56,8 +56,8 @@ func syncAppMessage(req *transport.SyncRequest, peerID string) (*transport.AppMe
 	}, nil
 }
 
-func syncResponseFromApp(req *transport.SyncRequest, resp *transport.AppResponse) *transport.SyncResponse {
-	return &transport.SyncResponse{
+func syncResponseFromApp(req *PeerSyncRequest, resp *transport.AppResponse) *PeerSyncResponse {
+	return &PeerSyncResponse{
 		ResponderID:    resp.ResponderID,
 		Zone:           req.Zone,
 		DistributionID: resp.DistributionID,
@@ -72,7 +72,7 @@ func syncResponseFromApp(req *transport.SyncRequest, resp *transport.AppResponse
 }
 
 // keystateAppMessage mirrors DNSTransport.Keystate (core.AgentKeystatePost).
-func keystateAppMessage(req *transport.KeystateRequest, peerID string) (*transport.AppMessage, error) {
+func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.AppMessage, error) {
 	var coreInventory []core.KeyInventoryEntry
 	for _, e := range req.KeyInventory {
 		coreInventory = append(coreInventory, core.KeyInventoryEntry{
@@ -103,7 +103,7 @@ func keystateAppMessage(req *transport.KeystateRequest, peerID string) (*transpo
 }
 
 // editsAppMessage mirrors DNSTransport.Edits (core.AgentEditsPost).
-func editsAppMessage(req *transport.EditsRequest, peerID string) (*transport.AppMessage, error) {
+func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessage, error) {
 	payload := &core.AgentEditsPost{
 		MessageType:  core.AgentMsgEdits,
 		MyIdentity:   req.SenderID,
@@ -121,7 +121,7 @@ func editsAppMessage(req *transport.EditsRequest, peerID string) (*transport.App
 }
 
 // configAppMessage mirrors DNSTransport.Config (core.AgentConfigPost).
-func configAppMessage(req *transport.ConfigRequest, peerID string) (*transport.AppMessage, error) {
+func configAppMessage(req *PeerConfigRequest, peerID string) (*transport.AppMessage, error) {
 	payload := &core.AgentConfigPost{
 		MessageType:  core.AgentMsgConfig,
 		MyIdentity:   req.SenderID,
@@ -140,7 +140,7 @@ func configAppMessage(req *transport.ConfigRequest, peerID string) (*transport.A
 }
 
 // auditAppMessage mirrors DNSTransport.Audit (core.AgentAuditPost).
-func auditAppMessage(req *transport.AuditRequest, peerID string) (*transport.AppMessage, error) {
+func auditAppMessage(req *PeerAuditRequest, peerID string) (*transport.AppMessage, error) {
 	payload := &core.AgentAuditPost{
 		MessageType:  core.AgentMsgAudit,
 		MyIdentity:   req.SenderID,
@@ -182,13 +182,13 @@ func (tm *MPTransportBridge) sendAppDNS(ctx context.Context, peer *transport.Pee
 	return tm.DNSTransport.SendApp(ctx, peer, msg)
 }
 
-func (tm *MPTransportBridge) sendKeystate(ctx context.Context, peer *transport.Peer, req *transport.KeystateRequest) (*transport.KeystateResponse, error) {
+func (tm *MPTransportBridge) sendKeystate(ctx context.Context, peer *transport.Peer, req *PeerKeystateRequest) (*PeerKeystateResponse, error) {
 	msg, err := keystateAppMessage(req, peer.ID)
 	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
 	if err != nil {
 		return nil, err
 	}
-	return &transport.KeystateResponse{
+	return &PeerKeystateResponse{
 		ResponderID: peer.ID,
 		Zone:        req.Zone,
 		KeyTag:      req.KeyTag,
@@ -199,13 +199,13 @@ func (tm *MPTransportBridge) sendKeystate(ctx context.Context, peer *transport.P
 	}, nil
 }
 
-func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer, req *transport.EditsRequest) (*transport.EditsResponse, error) {
+func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer, req *PeerEditsRequest) (*PeerEditsResponse, error) {
 	msg, err := editsAppMessage(req, peer.ID)
 	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
 	if err != nil {
 		return nil, err
 	}
-	return &transport.EditsResponse{
+	return &PeerEditsResponse{
 		ResponderID: peer.ID,
 		Zone:        req.Zone,
 		Accepted:    resp.Status == transport.ConfirmSuccess,
@@ -214,13 +214,13 @@ func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer
 	}, nil
 }
 
-func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, req *transport.ConfigRequest) (*transport.ConfigResponse, error) {
+func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, req *PeerConfigRequest) (*PeerConfigResponse, error) {
 	msg, err := configAppMessage(req, peer.ID)
 	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
 	if err != nil {
 		return nil, err
 	}
-	return &transport.ConfigResponse{
+	return &PeerConfigResponse{
 		ResponderID: peer.ID,
 		Zone:        req.Zone,
 		Accepted:    resp.Status == transport.ConfirmSuccess,
@@ -229,13 +229,13 @@ func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Pee
 	}, nil
 }
 
-func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer, req *transport.AuditRequest) (*transport.AuditResponse, error) {
+func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer, req *PeerAuditRequest) (*PeerAuditResponse, error) {
 	msg, err := auditAppMessage(req, peer.ID)
 	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
 	if err != nil {
 		return nil, err
 	}
-	return &transport.AuditResponse{
+	return &PeerAuditResponse{
 		ResponderID: peer.ID,
 		Zone:        req.Zone,
 		Accepted:    resp.Status == transport.ConfirmSuccess,
