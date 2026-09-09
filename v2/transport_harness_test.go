@@ -143,6 +143,14 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		Beat:  make(chan *AgentMsgReport, 4),
 		// PR-2 scenarios use these:
 		Confirmation: make(chan *ConfirmationDetail, 4),
+		// C0.5 dispatch gate observes every queue the route* functions feed.
+		Ping:              make(chan *AgentMsgReport, 4),
+		KeystateInventory: make(chan *KeystateInventoryMsg, 4),
+		KeystateSignal:    make(chan *KeystateSignalMsg, 4),
+		EditsResponse:     make(chan *EditsResponseMsg, 4),
+		ConfigResponse:    make(chan *ConfigResponseMsg, 4),
+		AuditResponse:     make(chan *AuditResponseMsg, 4),
+		StatusUpdate:      make(chan *StatusUpdateMsg, 4),
 	}
 
 	pe := &peerEnv{
