@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -420,11 +421,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 
 			// Flush IMR cache for this peer's discovery names before re-discovery
 			if tm.getImrEngine != nil {
-				if imr := tm.getImrEngine(); imr != nil && imr.Cache != nil {
-					removed, err := imr.Cache.FlushDomain(peerID, false)
-					if err == nil && removed > 0 {
-						lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
-					}
+				if removed := flushDiscoveryCache(tm.getImrEngine(), peerID); removed > 0 {
+					lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
 				}
 			}
 
@@ -2325,4 +2323,38 @@ func (tm *MPTransportBridge) Start(ctx context.Context) {
 		}
 	}
 	tm.StartIncomingMessageRouter(ctx)
+}
+
+// flushDiscoveryCache flushes the IMR cache at and below the peer identity
+// AND its parent zone, returning the number of entries removed. A lookup
+// that fails while the peer restarts (its identity zone is republished at
+// startup) leaves an unusable cached entry one label up — the delegation
+// the URI/SVCB/JWK names live under — which a flush of the identity alone
+// never reaches, so every later discovery attempt failed with "no
+// auth-server attempts made" until the entry expired (2026-09-09 fleet
+// observation; `imr flush <parent>` + `peer reset` recovered it at once).
+func flushDiscoveryCache(imr *Imr, peerID string) int {
+	if imr == nil || imr.Imr == nil || imr.Cache == nil {
+		return 0
+	}
+	total := 0
+	if n, err := imr.Cache.FlushDomain(peerID, false); err == nil {
+		total += n
+	}
+	if parent := parentDomain(peerID); parent != "" {
+		if n, err := imr.Cache.FlushDomain(parent, false); err == nil {
+			total += n
+		}
+	}
+	return total
+}
+
+// parentDomain returns the name one label up ("agent.x.example." ->
+// "x.example."), or "" at the top.
+func parentDomain(name string) string {
+	labels := dns.SplitDomainName(dns.Fqdn(name))
+	if len(labels) < 2 {
+		return ""
+	}
+	return dns.Fqdn(strings.Join(labels[1:], "."))
 }

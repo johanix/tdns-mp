@@ -102,12 +102,10 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 			// Flush IMR cache for this identity's discovery names.
 			// Read Globals.ImrEngine lazily: the IMR starts async after
 			// route setup, so a captured reference would be nil.
-			imr := &Imr{tdns.Globals.ImrEngine}
-			flushed := 0
-			if imr.Imr != nil && imr.Cache != nil {
-				removed, _ := imr.Cache.FlushDomain(string(peerID), false)
-				flushed = removed
-			}
+			// Flush the peer's names AND its parent zone from the IMR cache
+			// (see flushDiscoveryCache): the stuck-after-restart entry lives
+			// one label up.
+			flushed := flushDiscoveryCache(&Imr{tdns.Globals.ImrEngine}, string(peerID))
 
 			// Reset agent to NEEDED state and restart discovery. (Phase 2:
 			// the AgentDetails error mirror is gone — nothing to clear.)
