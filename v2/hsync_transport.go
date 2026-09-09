@@ -32,7 +32,8 @@ var lgConnRetry = tdns.Logger("conn-retry")
 // adds multi-provider functionality (message routing, authorization,
 // agent discovery, DNSKEY propagation, reliable delivery wrappers).
 type MPTransportBridge struct {
-	*transport.TransportManager // generic (fields promoted via embedding)
+	beatInterval                uint32 // D2: LivenessInterval stamped on discovered agent peers
+	*transport.TransportManager        // generic (fields promoted via embedding)
 
 	agentRegistry *AgentRegistry
 	msgQs         *MsgQs
@@ -152,6 +153,10 @@ type MPTransportBridgeConfig struct {
 	DNSTimeout    time.Duration
 	AgentRegistry *AgentRegistry
 	MsgQs         *MsgQs
+	// BeatInterval is our beat interval towards agent peers (seconds); it
+	// is stamped as LivenessInterval on every discovered agent peer (D2).
+	// Zero keeps transport's default.
+	BeatInterval uint32
 	// ChunkMode: "edns0" or "query"; when "query", agent stores payload and sends NOTIFY without EDNS0; receiver fetches via CHUNK query
 	ChunkMode         string
 	ChunkPayloadStore ChunkPayloadStore
@@ -224,6 +229,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	peerRegistry := transport.NewPeerRegistry()
 
 	tm := &MPTransportBridge{
+		beatInterval: cfg.BeatInterval,
 		TransportManager: &transport.TransportManager{
 			PeerRegistry: peerRegistry,
 			Router:       transport.NewDNSMessageRouter(),
@@ -500,6 +506,11 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		agent.ApiMethod = apiOffered
 		agent.DnsMethod = dnsOffered
 		agent.Mu.Unlock()
+		// D2: stamp our beat interval as the peer's liveness interval so
+		// decay-on-read uses the real cadence, not transport's default.
+		if tm.beatInterval > 0 {
+			peer.SetLivenessInterval(tm.beatInterval)
+		}
 
 		// Promote each usable ("complete") mechanism to KNOWN, but never
 		// regress one already past KNOWN (a re-discovery must not knock an

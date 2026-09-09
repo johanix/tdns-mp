@@ -73,15 +73,6 @@ func transportToHsyncState(s transport.PeerState) PeerState {
 	}
 }
 
-func forEachEnabledTransport(peer *Peer, fn func(name string, td *PeerDetails)) {
-	if peer.DnsMethod && peer.DnsDetails != nil {
-		fn(TransportDNS, peer.DnsDetails)
-	}
-	if peer.ApiMethod && peer.ApiDetails != nil {
-		fn(TransportAPI, peer.ApiDetails)
-	}
-}
-
 // beatOutboundSequence returns the outbound beat sequence for the peer from
 // the canonical transport.Peer per-mechanism counters (max across mechanisms
 // — the same shape the retired PeerDetails.SentBeats read had). The retired
@@ -106,13 +97,6 @@ func (e *Engine) beatOutboundSequence(peerID PeerID) uint64 {
 		seq = d
 	}
 	return seq
-}
-
-// transportParticipating is true once discovery or protocol has advanced past
-// NEEDED. Used only by the dead-in-production hsync GossipStateTable's
-// EffectiveState (see types.go) — removed with it in a later cleanup.
-func transportParticipating(state PeerState) bool {
-	return state >= PeerStateKnown
 }
 
 // transportReady reports whether a mechanism state is past the Hello handshake

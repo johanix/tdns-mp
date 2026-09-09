@@ -5,21 +5,7 @@ package hsync
 
 import (
 	"testing"
-	"time"
 )
-
-func TestEffectiveState_dnsOnlyOperational(t *testing.T) {
-	peer := NewPeer("peer.example.")
-	peer.DnsMethod = true
-	peer.ApiMethod = false
-	peer.DnsDetails.State = PeerStateOperational
-	peer.DnsDetails.LatestRBeat = time.Now()
-	peer.DnsDetails.LatestSBeat = time.Now()
-
-	if got := peer.EffectiveState(); got != PeerStateOperational {
-		t.Fatalf("EffectiveState() = %v, want OPERATIONAL", StateToString[got])
-	}
-}
 
 // D2.5: TestCheckPeerState_dnsOnlyDoesNotInterruptApi removed — the NG
 // checkPeerState decay it exercised is retired (liveness decay now lives on
@@ -27,7 +13,7 @@ func TestEffectiveState_dnsOnlyOperational(t *testing.T) {
 // is covered by the transport boundary suite).
 
 func TestHeartbeatHandler_dnsBeatMergesGossip(t *testing.T) {
-	gst := NewGossipStateTable("local.example.")
+	gst := &stubGossipPort{}
 	e := NewEngine(Deps{
 		LocalID: "local.example.",
 		Gossip:  gst,
@@ -48,10 +34,18 @@ func TestHeartbeatHandler_dnsBeatMergesGossip(t *testing.T) {
 		},
 	})
 
-	gst.mu.RLock()
-	_, ok := gst.States["hash1"]
-	gst.mu.RUnlock()
-	if !ok {
-		t.Fatal("expected gossip merge from DNS beat")
+	if len(gst.merged) != 1 || gst.merged[0].GroupHash != "hash1" {
+		t.Fatalf("expected gossip merge from DNS beat, got %+v", gst.merged)
 	}
 }
+
+// stubGossipPort records merges; the engine has no gossip table of its own
+// since D0 (the application wires its port).
+type stubGossipPort struct{ merged []*GossipMessage }
+
+func (s *stubGossipPort) MergeGossip(m *GossipMessage)                              { s.merged = append(s.merged, m) }
+func (s *stubGossipPort) CheckGroupState(string, []string)                          {}
+func (s *stubGossipPort) RefreshLocalStates(*Registry, ProviderGroupLookup, uint32) {}
+func (s *stubGossipPort) SetOnGroupOperational(func(string))                        {}
+func (s *stubGossipPort) SetOnGroupDegraded(func(string))                           {}
+func (s *stubGossipPort) SetOnElectionUpdate(func(string, GroupElectionState))      {}

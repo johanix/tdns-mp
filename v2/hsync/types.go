@@ -67,31 +67,11 @@ type DeferredTask struct {
 	Desc         string
 }
 
-// PeerDetails holds per-transport contact and beat state.
-type PeerDetails struct {
-	Addrs             []string
-	Port              uint16
-	BaseUri           string
-	State             PeerState
-	LatestError       string
-	LatestErrorTime   time.Time
-	DiscoveryFailures uint32
-	HelloTime         time.Time
-	LastContactTime   time.Time
-	BeatInterval      uint32
-	SentBeats         uint32
-	ReceivedBeats     uint32
-	LatestSBeat       time.Time
-	LatestRBeat       time.Time
-}
-
 // Peer is one remote HSYNC participant in the registry.
 type Peer struct {
 	ID          PeerID
 	TransportID string
 	Mu          sync.RWMutex
-	ApiDetails  *PeerDetails
-	DnsDetails  *PeerDetails
 	ApiMethod   bool
 	DnsMethod   bool
 	IsInfraPeer bool
@@ -105,8 +85,6 @@ func NewPeer(id PeerID) *Peer {
 	return &Peer{
 		ID:          id,
 		TransportID: string(id),
-		ApiDetails:  &PeerDetails{State: PeerStateNeeded},
-		DnsDetails:  &PeerDetails{State: PeerStateNeeded},
 		ApiMethod:   false,
 		DnsMethod:   false,
 		Zones:       make(map[ZoneName]bool),
@@ -115,38 +93,8 @@ func NewPeer(id PeerID) *Peer {
 	}
 }
 
-// EffectiveState picks the best participating per-mechanism state, falling back
-// to the top-level marker. D2.5 note: the engine's send-decision and beat
-// gates no longer call this — they read transport.Peer (via mechPeerState).
-// This survives only for the hsync GossipStateTable (dead in production: agent
-// and auditor wire the no-op agentGossipPort and refresh gossip MP-side from
-// transport.Peer; reachable only via NewEngine's nil-Gossip fallback + tests).
-// It is removed wholesale with that gossip table in a later, dedicated cleanup.
-func (p *Peer) EffectiveState() PeerState {
-	p.Mu.RLock()
-	defer p.Mu.RUnlock()
-	best := PeerState(0)
-	consider := func(enabled bool, td *PeerDetails) {
-		if !enabled || td == nil || !transportParticipating(td.State) {
-			return
-		}
-		switch td.State {
-		case PeerStateOperational, PeerStateLegacy, PeerStateDegraded, PeerStateInterrupted:
-			if best == 0 || td.State < best {
-				best = td.State
-			}
-		}
-	}
-	consider(p.DnsMethod, p.DnsDetails)
-	consider(p.ApiMethod, p.ApiDetails)
-	if best != 0 {
-		return best
-	}
-	return p.State
-}
-
-// D2.5: Peer.apiState/dnsState/IsAnyTransportOperational removed — they had no
-// caller and read the retired hsync.PeerDetails.State sidecar.
+// D0 (2026-09-09): the NG PeerDetails sidecar (ApiDetails/DnsDetails) and
+// EffectiveState are gone; per-mechanism state lives on transport.Peer.
 
 // InboundReport is a decoded hello or beat from the transport bridge.
 type InboundReport struct {

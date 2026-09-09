@@ -555,6 +555,7 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// Create MPTransportBridge
 	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 		Role:                       roleAgent,
+		BeatInterval:               mp.Remote.BeatInterval,
 		LocalID:                    dns.Fqdn(mp.Identity),
 		ControlZone:                dns.Fqdn(controlZone),
 		APITimeout:                 10 * time.Second,
@@ -661,6 +662,7 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 
 	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 		Role:                       roleAuditor,
+		BeatInterval:               mp.Remote.BeatInterval,
 		LocalID:                    dns.Fqdn(mp.Identity),
 		ControlZone:                dns.Fqdn(controlZone),
 		APITimeout:                 10 * time.Second,

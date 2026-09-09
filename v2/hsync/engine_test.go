@@ -28,18 +28,15 @@ func (m *mockTransport) SendHello(ctx context.Context, peer *Peer, sharedZones [
 	return nil
 }
 func (m *mockTransport) SendBeat(ctx context.Context, peer *Peer, sequence uint64) (bool, string, error) {
-	peer.Mu.Lock()
-	if peer.DnsMethod && peer.DnsDetails != nil {
-		peer.DnsDetails.State = PeerStateOperational
-		peer.DnsDetails.SentBeats++
+	peer.Mu.RLock()
+	dns, api := peer.DnsMethod, peer.ApiMethod
+	peer.Mu.RUnlock()
+	if dns {
 		return true, TransportDNS, nil
 	}
-	if peer.ApiMethod && peer.ApiDetails != nil {
-		peer.ApiDetails.State = PeerStateOperational
-		peer.ApiDetails.SentBeats++
+	if api {
 		return true, TransportAPI, nil
 	}
-	peer.Mu.Unlock()
 	return true, "", nil
 }
 func (m *mockTransport) MechanismSupported(name string) bool          { return true }
@@ -193,27 +190,6 @@ func TestEngine_dispatchRoutesSyncHandler(t *testing.T) {
 	e.dispatchByType(&InboundMsg{Originator: "peer.example.", MessageType: MsgNotify})
 	if !got {
 		t.Fatal("sync handler not invoked")
-	}
-}
-
-func TestCheckGroupState_operational(t *testing.T) {
-	gst := NewGossipStateTable("a.example.")
-	members := []string{"a.example.", "b.example."}
-	gst.UpdateLocalState("hash", map[string]string{
-		"b.example.": StateToString[PeerStateOperational],
-	}, nil, 30)
-	gst.States["hash"]["b.example."] = &MemberState{
-		Identity: "b.example.",
-		PeerStates: map[string]string{
-			"a.example.": StateToString[PeerStateOperational],
-		},
-		Timestamp: time.Now(),
-	}
-	var fired bool
-	gst.SetOnGroupOperational(func(string) { fired = true })
-	gst.CheckGroupState("hash", members)
-	if !fired {
-		t.Fatal("expected operational callback")
 	}
 }
 

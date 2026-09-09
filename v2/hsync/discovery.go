@@ -70,11 +70,6 @@ func (e *Engine) Rediscover(id PeerID) {
 	peer.Mu.Lock()
 	peer.State = PeerStateNeeded
 	peer.LastState = time.Now()
-	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
-		td.State = PeerStateNeeded
-		td.DiscoveryFailures = 0
-		td.LatestError = ""
-	})
 	peer.Mu.Unlock()
 	e.registry.S.Set(id, peer)
 	e.storeHook(peer)
@@ -185,26 +180,12 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 		e.deps.Transport.AfterDiscoverPeer(peer)
 	}
 	if err != nil {
-		peer.Mu.Lock()
-		var failures uint32
-		forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
-			td.DiscoveryFailures++
-			td.LatestError = err.Error()
-			td.LatestErrorTime = time.Now()
-			if td.DiscoveryFailures > failures {
-				failures = td.DiscoveryFailures
-			}
-		})
-		peer.Mu.Unlock()
-		e.deps.Transport.FireDiscoveryFailed(peer.ID, fmt.Errorf("discover peer: %w (failures=%d)", err, failures))
+		// The failure itself is recorded on transport.Peer by the
+		// application's OnDiscoveryFailed (D0: the NG sidecar's failure
+		// counters are gone).
+		e.deps.Transport.FireDiscoveryFailed(peer.ID, fmt.Errorf("discover peer: %w", err))
 		return
 	}
-
-	peer.Mu.Lock()
-	forEachEnabledTransport(peer, func(_ string, td *PeerDetails) {
-		td.DiscoveryFailures = 0
-	})
-	peer.Mu.Unlock()
 
 	// Post-discovery usability + needs-hello read the canonical transport.Peer
 	// (END.0). "Useful" = mechanism advanced past NEEDED; "needsHello" = at KNOWN.

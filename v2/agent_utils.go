@@ -415,29 +415,6 @@ func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.Mu.Unlock()
 }
 
-func (agent *Agent) CreateOperationalAgentTask(action func() (bool, error), desc string) *DeferredAgentTask {
-	return &DeferredAgentTask{
-		Precondition: func() bool {
-			return agent.State == AgentStateOperational
-		},
-		Action: action,
-		Desc:   desc,
-	}
-}
-
-func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
-	return &DeferredAgentTask{
-		Desc: "Create Upstream RFI",
-		Precondition: func() bool {
-			return agent.State == AgentStateOperational
-		},
-		Action: func() (bool, error) {
-			lgAgent.Info("sending RFI to upstream agent (NYI)", "agent", agent.ID)
-			return true, nil
-		},
-	}
-}
-
 func (agent *Agent) MarshalJSON() ([]byte, error) {
 	// Create a temporary struct without non-JSON-friendly fields
 	type AgentJSON struct {

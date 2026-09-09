@@ -24,9 +24,8 @@ type Engine struct {
 // NewEngine constructs an Engine. Gossip table may be nil until wired.
 func NewEngine(deps Deps, cfg Config) *Engine {
 	reg := NewRegistry(deps.LocalID, deps.Transport)
-	if deps.Gossip == nil && deps.LocalID != "" {
-		deps.Gossip = NewGossipStateTable(string(deps.LocalID))
-	}
+	// D0: no built-in gossip table. deps.Gossip is the application's port
+	// (nil-guarded wherever it is used).
 	e := &Engine{
 		deps:     deps,
 		cfg:      cfg,
