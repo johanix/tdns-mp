@@ -1397,6 +1397,7 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	}
 
 	handler := &transport.ChunkNotifyHandler{
+		ParseApp:      parseAppPayload, // C5: the application parses its own payloads
 		LocalID:       localID,
 		Router:        nil,
 		SecureWrapper: secureWrapper,

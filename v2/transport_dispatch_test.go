@@ -31,56 +31,13 @@ import (
 
 const dispatchZone = "dispatch.example."
 
-// parseLikeRouteViaRouter mirrors ChunkNotifyHandler.parsePayload (unexported
-// in tdns-transport): the pre-parsed IncomingMessage that handlers receive
-// in ctx.Data["incoming_message"].
-func parseLikeRouteViaRouter(t *testing.T, distID string, payload []byte) *transport.IncomingMessage {
-	t.Helper()
-	var f struct {
-		MessageType  string `json:"MessageType"`
-		Type         string `json:"type"`
-		OriginatorID string `json:"OriginatorID"`
-		MyIdentity   string `json:"MyIdentity"`
-		SenderID     string `json:"sender_id"`
-		Zone         string `json:"Zone"`
-		LegacyZone   string `json:"zone"`
-		Nonce        string `json:"nonce"`
-	}
-	if err := json.Unmarshal(payload, &f); err != nil {
-		t.Fatalf("parse payload: %v", err)
-	}
-	msgType := f.MessageType
-	if msgType == "" {
-		msgType = f.Type
-	}
-	sender := f.OriginatorID
-	if sender == "" {
-		sender = f.MyIdentity
-	}
-	if sender == "" {
-		sender = f.SenderID
-	}
-	zone := f.Zone
-	if zone == "" {
-		zone = f.LegacyZone
-	}
-	return &transport.IncomingMessage{
-		Type:           msgType,
-		TypeToken:      msgType,
-		DistributionID: distID,
-		SenderID:       sender,
-		Zone:           zone,
-		Nonce:          f.Nonce,
-		Payload:        payload,
-		ReceivedAt:     time.Now(),
-		SourceAddr:     "127.0.0.1:0",
-	}
-}
-
 // buildDispatchContext mirrors RouteViaRouter's post-decryption context.
 func buildDispatchContext(t *testing.T, tm *MPTransportBridge, senderHint, distID string, payload []byte) (*transport.MessageContext, transport.MessageType) {
 	t.Helper()
-	im := parseLikeRouteViaRouter(t, distID, payload)
+	im, err := parseAppPayload(distID, payload, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("parseAppPayload: %v", err)
+	}
 	im.TransportSender = senderHint
 	msgType := transport.MessageType(im.Type)
 
@@ -113,13 +70,6 @@ func buildDispatchContext(t *testing.T, tm *MPTransportBridge, senderHint, distI
 	ctx.Data["incoming_message"] = im
 	if im.Zone != "" {
 		ctx.Data["zone"] = im.Zone
-	} else if msgType == transport.MessageType("beat") {
-		var b struct {
-			Zones []string `json:"Zones"`
-		}
-		if json.Unmarshal(payload, &b) == nil && len(b.Zones) > 0 {
-			ctx.Data["zone"] = b.Zones[0]
-		}
 	}
 	return ctx, msgType
 }

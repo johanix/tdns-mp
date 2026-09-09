@@ -334,6 +334,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			cfg.LocalID,
 			tm.DNSTransport,
 		)
+		tm.ChunkHandler.ParseApp = parseAppPayload // C5: the application parses its own payloads
 		// Attach router to handler for new routing path
 		tm.ChunkHandler.Router = tm.Router
 
