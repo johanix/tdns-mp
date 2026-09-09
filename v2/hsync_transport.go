@@ -447,7 +447,6 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			TransportManager:             tm,
 			PeerRegistry:                 tm.PeerRegistry,
 			PayloadCrypto:                cfg.PayloadCrypto,
-			IncomingChan:                 nil, // routing via RouteToCallback, not IncomingChan
 			TriggerDiscoveryOnMissingKey: true,
 			AllowUnencrypted:             false,
 			VerboseStats:                 false, // Set to true for verbose statistics logging
@@ -623,9 +622,8 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// parsed IncomingMessage. The callback dispatches to typed MsgQs
 	// channels based on message type.
 	//
-	// This replaces the old pattern of reading from a single IncomingChan
-	// in a dedicated goroutine. Each message type now fans out directly
-	// to its own channel without a shared bottleneck.
+	// Each message type fans out directly to its own MsgQs channel; the
+	// single IncomingChan this replaced was deleted (C3.0).
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))

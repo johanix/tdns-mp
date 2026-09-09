@@ -252,7 +252,6 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		Authorizer:       tm,
 		PeerRegistry:     tm.PeerRegistry,
 		AllowUnencrypted: true,
-		IncomingChan:     nil, // routing via RouteToCallback
 	}
 	if signerPayloadCrypto != nil {
 		signerRouterCfg.PayloadCrypto = signerPayloadCrypto
@@ -439,7 +438,6 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 		Authorizer:   tm,
 		PeerRegistry: tm.PeerRegistry,
 		HandleUpdate: NewCombinerSyncHandler(),
-		IncomingChan: nil,
 	}
 	if combinerPayloadCrypto != nil {
 		combinerRouterCfg.PayloadCrypto = combinerPayloadCrypto

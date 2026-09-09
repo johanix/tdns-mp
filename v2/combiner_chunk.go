@@ -1400,7 +1400,6 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 		LocalID:       localID,
 		Router:        nil,
 		SecureWrapper: secureWrapper,
-		IncomingChan:  make(chan *transport.IncomingMessage, 100),
 	}
 
 	if secureWrapper != nil && secureWrapper.IsEnabled() {
