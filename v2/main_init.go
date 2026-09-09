@@ -207,6 +207,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	}
 	controlZone := dns.Fqdn(mp.Identity)
 	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		Role:                roleSigner,
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         controlZone,
 		APITimeout:          10 * time.Second,
@@ -247,9 +248,12 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	tm.ChunkHandler = signerState.ChunkHandler()
 
 	// Initialize signer router
+	// C3: the signer's router is the generic transport router (middleware
+	// + hello/beat/ping; no confirm handler, as before) plus the signer's
+	// application verbs from the MP verb table.
 	signerRouter := transport.NewDNSMessageRouter()
-	signerRouterCfg := &transport.SignerRouterConfig{
-		Authorizer:       tm,
+	signerRouterCfg := &transport.RouterConfig{
+		TransportManager: tm,
 		PeerRegistry:     tm.PeerRegistry,
 		AllowUnencrypted: true,
 	}
@@ -257,8 +261,11 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		signerRouterCfg.PayloadCrypto = signerPayloadCrypto
 		signerRouterCfg.AllowUnencrypted = false
 	}
-	if err := transport.InitializeSignerRouter(signerRouter, signerRouterCfg); err != nil {
-		return fmt.Errorf("InitializeSignerRouter: %w", err)
+	if err := transport.InitializeRouter(signerRouter, signerRouterCfg); err != nil {
+		return fmt.Errorf("InitializeRouter (signer): %w", err)
+	}
+	if err := tm.RegisterAppVerbs(signerRouter, roleSigner); err != nil {
+		return fmt.Errorf("RegisterAppVerbs (signer): %w", err)
 	}
 	signerState.SetRouter(signerRouter)
 	tm.Router = signerRouter
@@ -361,6 +368,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		Role:                roleCombiner,
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         dns.Fqdn(mp.Identity),
 		DNSTimeout:          5 * time.Second,
@@ -433,17 +441,22 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	tm.ChunkHandler = combinerState.ChunkHandler()
 
 	// Initialize combiner router
+	// C3: the combiner's router is the generic transport router (middleware
+	// + hello/beat/ping; no confirm handler, as before) plus the combiner's
+	// application verbs (rfi, status-update, update) from the MP verb table.
 	combinerRouter := transport.NewDNSMessageRouter()
-	combinerRouterCfg := &transport.CombinerRouterConfig{
-		Authorizer:   tm,
-		PeerRegistry: tm.PeerRegistry,
-		HandleUpdate: NewCombinerSyncHandler(),
+	combinerRouterCfg := &transport.RouterConfig{
+		TransportManager: tm,
+		PeerRegistry:     tm.PeerRegistry,
 	}
 	if combinerPayloadCrypto != nil {
 		combinerRouterCfg.PayloadCrypto = combinerPayloadCrypto
 	}
-	if err := transport.InitializeCombinerRouter(combinerRouter, combinerRouterCfg); err != nil {
-		return fmt.Errorf("InitializeCombinerRouter: %w", err)
+	if err := transport.InitializeRouter(combinerRouter, combinerRouterCfg); err != nil {
+		return fmt.Errorf("InitializeRouter (combiner): %w", err)
+	}
+	if err := tm.RegisterAppVerbs(combinerRouter, roleCombiner); err != nil {
+		return fmt.Errorf("RegisterAppVerbs (combiner): %w", err)
 	}
 	combinerState.SetRouter(combinerRouter)
 	tm.Router = combinerRouter
@@ -541,6 +554,7 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 
 	// Create MPTransportBridge
 	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		Role:                       roleAgent,
 		LocalID:                    dns.Fqdn(mp.Identity),
 		ControlZone:                dns.Fqdn(controlZone),
 		APITimeout:                 10 * time.Second,
@@ -646,6 +660,7 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	}
 
 	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+		Role:                       roleAuditor,
 		LocalID:                    dns.Fqdn(mp.Identity),
 		ControlZone:                dns.Fqdn(controlZone),
 		APITimeout:                 10 * time.Second,

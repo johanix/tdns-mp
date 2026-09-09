@@ -177,6 +177,7 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 	}
 
 	bridgeCfg := &MPTransportBridgeConfig{
+		Role:                roleAgent,
 		LocalID:             identity,
 		ControlZone:         integControlZone,
 		APITimeout:          2 * time.Second,

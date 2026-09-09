@@ -143,6 +143,9 @@ func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventor
 
 // MPTransportBridgeConfig holds configuration for creating a MPTransportBridge.
 type MPTransportBridgeConfig struct {
+	// Role selects the application verb set registered on the router
+	// (C3): "agent", "auditor", "signer" or "combiner". Empty means agent.
+	Role          string
 	LocalID       string
 	ControlZone   string
 	APITimeout    time.Duration
@@ -450,10 +453,18 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			TriggerDiscoveryOnMissingKey: true,
 			AllowUnencrypted:             false,
 			VerboseStats:                 false, // Set to true for verbose statistics logging
+			Confirmations:                true,
 		}
 		lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
 		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
 			lgTransport.Warn("router initialization failed", "err", err)
+		}
+		role := cfg.Role
+		if role == "" {
+			role = roleAgent
+		}
+		if err := tm.RegisterAppVerbs(tm.Router, role); err != nil {
+			lgTransport.Warn("application verb registration failed", "role", role, "err", err)
 		}
 
 		lgTransport.Info("DNS transport enabled")
@@ -629,38 +640,6 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	}))
 
 	lgTransport.Info("incoming message router registered via RouteToCallback")
-}
-
-// routeIncomingMessage routes an incoming DNS message to the appropriate hsyncengine channel.
-func (tm *MPTransportBridge) routeIncomingMessage(msg *transport.IncomingMessage) {
-	lgTransport.Debug("routing message", "type", msg.Type, "sender", msg.SenderID)
-
-	switch msg.Type {
-	case "hello":
-		tm.routeHelloMessage(msg)
-	case "beat":
-		tm.routeBeatMessage(msg)
-	case "ping":
-		tm.routePingMessage(msg)
-	case "sync", "update", "rfi":
-		tm.routeSyncMessage(msg)
-	case "keystate":
-		tm.routeKeystateMessage(msg)
-	case "edits":
-		tm.routeEditsMessage(msg)
-	case "config":
-		tm.routeConfigMessage(msg)
-	case "audit":
-		tm.routeAuditMessage(msg)
-	case "relocate":
-		tm.routeRelocateMessage(msg)
-	case "status-update":
-		tm.routeStatusUpdateMessage(msg)
-	case "confirm":
-		// Already handled by Router's HandleConfirmation handler — nothing to do here
-	default:
-		lgTransport.Warn("unknown message type", "type", msg.Type)
-	}
 }
 
 // routeHelloMessage routes a hello message to the hello channel.
