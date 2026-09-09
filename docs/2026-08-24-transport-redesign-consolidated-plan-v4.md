@@ -2,6 +2,9 @@
 # (remaining work)
 
 Date: 2026-08-24
+Amended: 2026-09-09 — see "Amendment 2026-09-09" at the end of this
+file (corrections, three new items C3.0 / C0.5 / F0, effort). The
+body text above the amendment is unchanged.
 Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
 REMAINING transport-redesign work. Supersedes, for everything not
 yet implemented: `2026-06-11-transport-redesign-consolidated-plan-v3.md`
@@ -705,3 +708,150 @@ Still open:
    Stage A exit gate.
 5. **Operator `peer delete`:** `OnPeerRemoved` is ready; no
    production caller. Product decision, not Stage C work.
+
+---
+
+# Amendment 2026-09-09 — code re-verified at mp `7a10ef9` / transport `37c0dfb`
+
+Appended per the dated-doc rule; nothing above this line is edited.
+Companion with the full status table and verification log:
+`tdns-project/reviews/2026-09-09-tdns-mp-transport-plan-v4-vs-code.md`.
+
+## A. Baseline delta since 2026-08-24
+
+- mp `92e64a6` → `7a10ef9`: `5683c5b` (this doc), `f720468` (review
+  findings doc), `08a3b8e` (findings 1+2), `7a10ef9` (finding 3).
+  Transport unchanged at `37c0dfb`. No new tags in either repo; no
+  `transport-redesign-v1-C`; the stacked testbed pass has not run
+  (findings 4 and 6 dispositions still `_pending_`). Every line in
+  the "Verified baseline" table marked NOT STARTED is still NOT
+  STARTED; every transport line number cited above is still exact.
+- Verified 2026-09-09 in throwaway worktrees (mp built against
+  transport `37c0dfb` via a scratch `go.work`): standalone build +
+  `go vet` + `go test ./... -count=1` + `-race` green in both repos;
+  `cmd/transport-exercise` builds; the 14 C0 goldens and the 9
+  boundary-harness tests pass; the 5 binaries build after
+  `make -C cmd version` (the git-ignored `version.go`).
+- Line drift: `hsync_transport.go` +16 below `:1570` after `7a10ef9`.
+  The finding-3 residual bool reads are now `:1471`, `:1500`, `:1605`,
+  `:1641`; the canonical-state read is `:1583`; the shadow read
+  (nil-registry branch only) `:1585`. `Agent.State` has four writers:
+  `agent_utils.go:280`, `apihandler_agent.go:343` / `:392`,
+  `apihandler_agent_distrib.go:659`. The `ListKnownPeers` LEGACY
+  overlay on KNOWN (`apihandler_agent_distrib.go:375`, `:457`) is
+  deliberately unfixed.
+
+## B. Corrections to the text above
+
+| Where | Text above says | Code says (2026-09-09) |
+|---|---|---|
+| C7 | `TestTransportBoundary_LegacySyncRejection` (`transport_integ_test.go`) | The file is **tdns-mp** `v2/transport_integ_test.go:404` (the boundary harness), not a tdns-transport test. Disposition: rewrite, do not retire — after C3 it asserts the MP-side rejection with the same error payload; it is the only end-to-end LEGACY-sync check. |
+| C7 | shared-zone methods at `peer.go:723–756` incl. `ByZone` | `AddSharedZone`/`ReplaceSharedZones`/`GetSharedZone(s)` at `peer.go:719–751`; `ByZone` is `PeerRegistry.ByZone` at `peer.go:898`. |
+| C6 | "7 MP `Dns*Payload` structs … keep the 5 transport-own" | 13 structs. Transport-own 5: Hello, Beat, Ping, PingConfirm, Confirm. MP 8: Sync, Relocate, Keystate, KeystateConfirm, Edits, Config, Audit, StatusUpdate (Relocate follows `HandleRelocate`, which C3 lists as MP). |
+| C6 | "Reduce `MessageType` constants to transport-own" | The 7 named constants (`dns_message_router.go:24–30`) are UPPERCASE (`"HELLO"`, `"BEAT"`, `"UPDATE"`, …) and have zero production use except `MessageTypeUnknown`; their 43 uses are all in `_test.go`. Production registers handlers on lowercase literals (`router.Register("BeatHandler", MessageType("beat"), …)`) and `DetermineMessageType` returns lowercase literals — the wire vocabulary. C6 deletes the six unused uppercase constants and moves the router tests onto the lowercase tokens, leaving one vocabulary. |
+| C4 | "~7 transport files" | 6 files import `core` (`imr`, `transport`, `dns`, `chunk_notify_handler`, `handlers`, `api`); `init.go` is a comment-only guide that quotes the import in prose. MP body types are confined to `dns.go`, `transport.go`, `api.go`. |
+| D0 census | residual writers `Rediscover` / `attemptDiscovery` | Both write through `forEachEnabledTransport` (`hsync/transport_peer.go:76`), the only non-test accessor of `Peer.ApiDetails`/`DnsDetails` besides `hsync.Peer.EffectiveState` (`hsync/types.go:140–141`; sole caller `hsync/gossip.go:218`). The helper goes with the sidecar. |
+| D0 slice | (not listed) | Add from the 08-25 review: Finding 5 constructors `CreateOperationalAgentTask` / `CreateAgentUpstreamRFI` (`agent_utils.go:432` / `:442`; zero callers; read the shadow) — delete. Finding 4 TLSA asymmetry (`transport/discovery.go:325` unconditional vs JWK gated at `:347`) — gate like JWK. Finding 6 stub (`apihandler_agent_hsync.go:87–88`; `cli/hsync_cmds.go:545` still points operators at it) — fix the pointer in D0, implement or drop the endpoint in F2. |
+| D1 | (not listed) | `peer.LastHelloReceived` / `LastBeatReceived` plain-field writes at `hsync_transport.go:688`, `:765`, `:844`, `:903`, `:919` move under the TM with the Hello/Beat relocation. |
+| F1 | `BeatRequest`, `DnsBeatPayload`, `apiBeatRequest`, "beat-response" | Response-side sites are `inlineConfirm.Gossip` (`dns.go:1119`; struct at `:1106`) and the inline confirm payload in `HandleBeat` (`handlers.go:194`). Five sites total. |
+| F2 | "mark superseded docs' Status lines (v2, v3, road-to-C, bite-era)" | v2, v3 and road-to-C are marked. Still stale: `2026-05-29-transport-redesign-consolidated-plan.md` ("AUTHORITATIVE PLAN (in progress"), `2026-05-08-transport-refactor-next-bites.md` and `-third-bites.md` ("PLAN"). |
+| F2 | `.md~` duplicate "still in `tdns-mp/docs/`" | Untracked and git-ignored (`*~`); a local `rm` in the operator's checkout, not a commit. |
+| F2 | stale comments `agent_structs.go:197`, `agent_utils.go:63` | Confirmed at `agent_structs.go:195–197` ("until A3d.4", `ar.mu`) and `agent_utils.go:63` (`AgentRegistry.mu` in the lock-order comment). |
+
+## C. New item C3.0 — delete the dead `IncomingChan` plumbing
+
+**Census (2026-09-09).** `ChunkNotifyHandler.IncomingChan`
+(`chunk_notify_handler.go:46–47`) is allocated three times —
+`NewChunkNotifyHandler` (`:95`), `combiner_chunk.go:1403`,
+`signer_chunk_handler.go:32` — and never written or read. The only
+writer in the codebase, `RouteToMsgHandler` (`handlers.go:838`), takes
+the *router config's* channel (`RouterConfig` / `CombinerRouterConfig`
+/ `SignerRouterConfig.IncomingChan`, `router_init.go:29` / `:277` /
+`:423`), and every production site sets that to nil
+(`main_init.go:255`, `:442`; `hsync_transport.go:450`). No `_test.go`
+in either repo references `IncomingChan` or `RouteToMsgHandler`.
+`transport/init.go:41` (the comment-only integration guide) still
+documents the channel loop — the F2 "stale `init.go` guide" item is
+stale because the mechanism it describes is dead.
+
+**Proposal.** One commit, transport + mp together, wire-invariant, as
+the first C3 sub-step (after the testbed checkpoint, so the undeployed
+stack does not grow):
+
+1. transport: delete `ChunkNotifyHandler.IncomingChan` and its
+   allocation in `NewChunkNotifyHandler`; delete `RouteToMsgHandler`;
+   delete the three `*RouterConfig.IncomingChan` fields and the three
+   `if cfg.IncomingChan != nil { router.Use(RouteToMsgHandler(…)) }`
+   blocks (`router_init.go:93`, `:323`, `:469`); rewrite the `init.go`
+   guide to the `RouteToCallback` shape, or delete `init.go` and point
+   readers at the per-type fan-out comment at `handlers.go:870`.
+2. mp: drop the two `make(chan …, 100)` lines and the three
+   `IncomingChan: nil` config lines.
+3. Gate: standalone builds, `go vet`, both suites, goldens unchanged
+   (no payload struct is touched).
+
+Why in C3: C3 already deletes `InitializeCombinerRouter` /
+`InitializeSignerRouter` and their configs (`router_init.go:283`,
+`:429`) — the config fields die with them, and taking the dead
+plumbing out first keeps the C3 diff readable. Why not after C1: C1
+widens `IncomingMessage`; a dead channel of the widened type is one
+more false lead of the embed-trap class.
+
+## D. New item F0 — tdns/v2 re-pin (missing from Stage F and the estimate)
+
+Both repos pin `tdns/v2 v2.0.0-20260611090745-44755a2166f9`
+(2026-06-11). tdns `origin/main` was 1,324 commits past it on
+2026-09-08. mp `main` carries `docs/2026-07-21-tdns-repo-drift.md`
+(`9a4cb48`), which documented ~10 independent API breaks plus a
+`johanix/dns` fork bump at the 468-commit mark; that commit is the
+only one on `main` not in `phase-4-c0-gate` (merge-base `0f2c99fa`).
+
+Decisions:
+
+- The pin stays frozen through Stages C and D. A re-pin is a compile
+  break with its own testbed cycle and must not share a window with
+  the wire stage.
+- **F0 — merge `main` forward, re-pin tdns/v2, regenerate the drift
+  list** becomes the first Stage F step, before F1. Regenerate the
+  list with the recipe in the 07-21 doc; its ~10 breaks are a floor.
+  The `johanix/dns` fork bump makes this a three-repo lockstep.
+- The mp `go.mod` `require` of tdns-transport (`82d768a`, 22 commits
+  behind the working tip) stays covered by the local replace until
+  the Stage F publishing story, as already planned.
+- Merge `main` (one docs commit, textual-only) into `phase-4-c0-gate`
+  at the Stage A exit gate.
+
+## E. New gate C0.5 — dispatch coverage before C3
+
+The C0 goldens lock **bytes**; the review prompt already records that
+they cannot see a renamed verb that resolves to UNKNOWN and is dropped
+after delivery. Coverage census 2026-09-09: no `_test.go` in
+tdns-transport mentions `keystate`, `edits`, `config`, `audit`,
+`status-update`, `relocate`, `rfi` or `ping`; in tdns-mp those tokens
+appear only in `golden_wire_test.go` (marshal only). The boundary
+harness exercises `sync`, `confirm`, hello-rejection and discovery. Of
+the eight handlers C3 moves, only `HandleSync` has a dispatch test;
+`HandleRfi/Keystate/Edits/Config/Audit/StatusUpdate/Relocate` have
+none on either side of the seam, and neither does transport-own
+`HandlePing`.
+
+v4 §C7 says "add a dispatch-count probe to the harness if cheap". It
+is now a gate, before C3: extend the boundary harness with one
+round-trip per verb (payload → CHUNK → router → handler →
+`IncomingMessage`/callback observed), asserting which handler fired.
+C3, C5 and C6 each re-run it. Cost ≈ 0.5 session; it is the only
+mechanical enforcement of "same verb, same handler" during the
+relocation.
+
+## F. Effort (amended)
+
+| Work | v4 | Amended |
+|---|---|---|
+| Stacked testbed + Stage A exit | 0.5–1.5 | unchanged |
+| C0.5 dispatch coverage | — | 0.5 |
+| C1–C7 (incl. C3.0) | 5–7 | 5–7 |
+| D0–D3 | 1.5–2.5 | unchanged |
+| E residual | 0.5 | unchanged |
+| F0 re-pin + merge-forward | — | 1.5–3 (floor; re-estimate from the regenerated drift list) |
+| F1–F3 + F2b + merge | 1.5–2.5 | unchanged |
+| **Total** | 9–14 | **≈ 11–17** |
