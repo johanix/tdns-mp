@@ -328,6 +328,7 @@ func makeSyncIncomingMessage(t *testing.T, senderID, receiverID, zone, distribut
 	}
 	return &transport.IncomingMessage{
 		Type:            "sync",
+		TypeToken:       "sync",
 		DistributionID:  distributionID,
 		SenderID:        senderID,
 		TransportSender: senderID, // direct delivery, no relay
@@ -390,6 +391,7 @@ func buildSyncMessageContext(t *testing.T, tm *MPTransportBridge, senderID, rece
 	}
 	im := &transport.IncomingMessage{
 		Type:            "sync",
+		TypeToken:       "sync",
 		DistributionID:  distributionID,
 		SenderID:        senderID,
 		TransportSender: senderID,

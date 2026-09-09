@@ -66,6 +66,7 @@ func parseLikeRouteViaRouter(t *testing.T, distID string, payload []byte) *trans
 	}
 	return &transport.IncomingMessage{
 		Type:           msgType,
+		TypeToken:      msgType,
 		DistributionID: distID,
 		SenderID:       sender,
 		Zone:           zone,
@@ -429,8 +430,8 @@ func TestTransportDispatch_PerVerb(t *testing.T) {
 						t.Errorf("ctx.Data[message_type] = %q, want %q", mt, tc.verb)
 					}
 					im, _ := ctx.Data["incoming_message"].(*transport.IncomingMessage)
-					if im == nil || im.Type != tc.verb {
-						t.Errorf("ctx.Data[incoming_message].Type = %v, want %q", im, tc.verb)
+					if im == nil || im.Type != tc.verb || im.TypeToken != tc.verb || im.Token() != tc.verb {
+						t.Errorf("ctx.Data[incoming_message] = %+v, want Type/TypeToken %q (C1 seam)", im, tc.verb)
 					}
 				}
 				if tc.wantAck != "" && !strings.Contains(resp, tc.wantAck) {
