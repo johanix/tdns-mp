@@ -32,6 +32,7 @@ var lgConnRetry = tdns.Logger("conn-retry")
 // adds multi-provider functionality (message routing, authorization,
 // agent discovery, DNSKEY propagation, reliable delivery wrappers).
 type MPTransportBridge struct {
+	role                        string // agent|auditor|signer|combiner (D3: selects the startup wiring)
 	beatInterval                uint32 // D2: LivenessInterval stamped on discovered agent peers
 	*transport.TransportManager        // generic (fields promoted via embedding)
 
@@ -229,6 +230,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	peerRegistry := transport.NewPeerRegistry()
 
 	tm := &MPTransportBridge{
+		role:         cfg.Role,
 		beatInterval: cfg.BeatInterval,
 		TransportManager: &transport.TransportManager{
 			PeerRegistry: peerRegistry,
@@ -466,12 +468,11 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
 			lgTransport.Warn("router initialization failed", "err", err)
 		}
-		role := cfg.Role
-		if role == "" {
-			role = roleAgent
+		if tm.role == "" {
+			tm.role = roleAgent
 		}
-		if err := tm.RegisterAppVerbs(tm.Router, role); err != nil {
-			lgTransport.Warn("application verb registration failed", "role", role, "err", err)
+		if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
+			lgTransport.Warn("application verb registration failed", "role", tm.role, "err", err)
 		}
 
 		lgTransport.Info("DNS transport enabled")
@@ -2301,4 +2302,27 @@ func (tm *MPTransportBridge) beatZones(id AgentId) []string {
 		zones = append(zones, z)
 	}
 	return zones
+}
+
+// Start wires this role's receive path at daemon start (D3): the CHUNK
+// NOTIFY handler for the roles whose handler the bridge owns (agent,
+// auditor — the signer and combiner register theirs at init), then the
+// RouteToCallback dispatch. It replaces the per-role snippets that lived
+// in start_*.go and must run before tdns's NotifyHandler starts. The
+// reliable queue is started separately (StartReliableQueue) because the
+// agent needs its infra peers initialised first.
+func (tm *MPTransportBridge) Start(ctx context.Context) {
+	if tm == nil || tm.TransportManager == nil {
+		return
+	}
+	switch tm.role {
+	case roleSigner, roleCombiner:
+		// Chunk handler and router were built and registered at init.
+	default:
+		if err := tm.RegisterChunkNotifyHandler(); err != nil {
+			lgTransport.Error("failed to register CHUNK NOTIFY handler", "role", tm.role, "err", err)
+			return
+		}
+	}
+	tm.StartIncomingMessageRouter(ctx)
 }

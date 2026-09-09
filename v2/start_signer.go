@@ -66,7 +66,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// --- MP engines from tdns-mp ---
 	tm := conf.InternalMp.MPTransport
 	if tm != nil {
-		tm.StartIncomingMessageRouter(ctx)
+		tm.Start(ctx) // D3: router dispatch (chunk handler registered at init)
 	}
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
