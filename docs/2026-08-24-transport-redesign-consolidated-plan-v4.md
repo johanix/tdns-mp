@@ -858,7 +858,7 @@ relocation.
 
 ---
 
-# Amendment 2026-09-10 — Stage C executed; D0/D2/D3 and E residual landed
+# Amendment 2026-09-10 — Stage C executed; D0–D3 and E residual landed
 
 Unattended run 2026-09-09 20:00 – 2026-09-10 (UTC) on branch
 `transport-redesign-v1-C` in both repos, cut from the 09-09 amendment
@@ -886,6 +886,7 @@ then the rest) before the next step started. Full operational log:
 | D3 one Start entry point per role | — | `d544c5d` | #6 |
 | E residual: transport-exercise discovery smoke | `28e7733` | — | n/a |
 | Discovery-cache fix (stuck NEEDED after restart) | — | `4e2fe08` | #6 |
+| D1 hello/beat fan-out into the TM (SendAll) | `c20689d` | `79bacf2` | #7 |
 
 transport's exported types: 87 → 64. `transport.go`/`api.go` import no
 tdns core; `dns.go` keeps core only for CHUNK/format constants and for
@@ -909,8 +910,12 @@ the hello/beat/ping send builders.
   fired in transport because nothing set MessageContext.Peer. EXPLAINED
   DELTA: a sync from an established peer sharing no participant zone is
   now rejected. Beat zone order stays unspecified on purpose.
-- **D1 not done** (Hello/Beat relocation into the TM) — the one Stage D
-  item left; its concurrency notes from the 08-25 review still apply.
+- **D1**: done as `TransportManager.SendAll` — an ordered, string-keyed
+  fan-out that tries every eligible mechanism (not primary-then-fallback,
+  which is what the hello/beat senders always did). The gates and the
+  per-mechanism outcome rules stay in the MP wrappers; the 08-25
+  finding-3 note (unlocked bool reads of agent.ApiMethod/DnsMethod on
+  the send path) still applies to those wrappers.
 - **F0/F1–F3 not started**, per instruction (F0 = tdns re-pin is out of
   scope; F1 is the wire break; F2/F3 are cleanup).
 - Stage A exit tags: `stage-A-complete` set on the verified pair
