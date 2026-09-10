@@ -59,9 +59,9 @@ func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 	identity := agent.ID
 
 	// Sync the derived shared zones to the transport peer (atomic replace under
-	// the transport.Peer lock; no registry/peer mutex held across the call —
-	// lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry ->
-	// transport.Peer).
+	// the transport.Peer lock; no peer mutex held across the call -- lock
+	// order: peer mutex -> transport.PeerRegistry -> transport.Peer; the
+	// registry's own shadow mutex went with Phase 3d).
 	if ar.TransportManager != nil {
 		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(identity))
 		zoneStrs := make([]string, len(shared))
@@ -427,29 +427,6 @@ func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.Mu.Lock()
 	agent.Deferred = append(agent.Deferred, *task)
 	agent.Mu.Unlock()
-}
-
-func (agent *Agent) CreateOperationalAgentTask(action func() (bool, error), desc string) *DeferredAgentTask {
-	return &DeferredAgentTask{
-		Precondition: func() bool {
-			return agent.State == AgentStateOperational
-		},
-		Action: action,
-		Desc:   desc,
-	}
-}
-
-func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
-	return &DeferredAgentTask{
-		Desc: "Create Upstream RFI",
-		Precondition: func() bool {
-			return agent.State == AgentStateOperational
-		},
-		Action: func() (bool, error) {
-			lgAgent.Info("sending RFI to upstream agent (NYI)", "agent", agent.ID)
-			return true, nil
-		},
-	}
 }
 
 func (agent *Agent) MarshalJSON() ([]byte, error) {
