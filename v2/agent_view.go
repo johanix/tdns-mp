@@ -2,14 +2,13 @@
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 
-// A3d peer-element type-merge: transitional types and the canonical
-// state-overlay accessor. transport.Peer is the SOLE connection-state store;
-// these definitions stage the Agent-as-view migration without changing
-// behavior. Design pinned in docs/2026-06-01-a3d-field-ownership.md.
-//
-// A3d.0 lands these additively (no live struct swap). The Agent-view embed
-// (struct { *hsync.Peer; *agentMeta }) and the ~300-site read redirects to
-// transport.Peer arrive in A3d.1–A3d.3.
+// The Agent view's state readers. transport.Peer is the SOLE
+// connection-state store; everything here reads it and maps it back to MP's
+// AgentState vocabulary (transportToAgentState, effectiveAgentState with
+// the LEGACY display overlay, isAgentOperational). Design pinned in
+// docs/2026-06-01-a3d-field-ownership.md; the transitional types that
+// once lived here (agentMeta, the additive A3d.0 staging) are gone since
+// Phase 2.5, and Agent itself embeds the engine's *hsync.Peer.
 package tdnsmp
 
 import (

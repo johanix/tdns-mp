@@ -189,12 +189,17 @@ func adaptHelloReports(ctx context.Context, in <-chan *AgentMsgReport,
 					EventType:  "hello",
 					Summary:    fmt.Sprintf("HELLO from %s", senderID),
 				})
-				out <- &hsync.InboundReport{
+				select {
+				case out <- &hsync.InboundReport{
 					Transport:   report.Transport,
 					MessageType: hsync.AgentMsg(report.MessageType),
 					Zone:        hsync.ZoneName(report.Zone),
 					Identity:    hsync.PeerID(report.Identity),
 					Msg:         report.Msg,
+				}:
+				case <-ctx.Done():
+					// the consumer (hsync.Engine.Run) has stopped reading
+					return
 				}
 			}
 		}
@@ -212,39 +217,29 @@ func providerBeatMeta(ar *AgentRegistry, zone ZoneName, identity string) (label,
 	if zone == "" {
 		return label, gossipState, isSigner
 	}
-	zd, exists := Zones.Get(string(zone))
+	zd, exists := Zones.Get(dns.Fqdn(string(zone)))
 	if !exists || !zd.Ready {
 		return label, gossipState, isSigner
 	}
+	// Resolve the label the way the zone view does (hsync3IdentitiesByLabel):
+	// inactive members included, identities compared as FQDNs.
+	// UpdateProviderBeat sets the label only when it creates the entry,
+	// so an empty label here would stick for the life of the process.
+	label = zd.hsync3LabelForIdentity(identity)
+	if label == "" {
+		return label, gossipState, isSigner
+	}
+	// A member is a signer only when listed under signers=; a servers=
+	// member serves the zone without signing it.
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
 		return label, gossipState, isSigner
 	}
-	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-	if len(hsyncRRset.RRs) == 0 {
-		return label, gossipState, isSigner
-	}
-	labelToIdentity := map[string]string{}
-	for _, rr := range hsyncRRset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
-			continue
-		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok || h3.State == 0 {
-			continue
-		}
-		labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
-		if h3.Identity == identity {
-			label = strings.TrimSuffix(h3.Label, ".")
-		}
-	}
 	if hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM); ok && len(hpRRset.RRs) > 0 {
 		if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
 			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
-				for _, l := range append(hp.GetSigners(), hp.GetServers()...) {
-					key := strings.TrimSuffix(l, ".")
-					if id, ok := labelToIdentity[key]; ok && id == identity {
+				for _, l := range hp.GetSigners() {
+					if normalizeHSYNC3Label(l) == label {
 						isSigner = true
 						break
 					}
@@ -296,13 +291,17 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 						Gossip:      gossip,
 					}
 				}
-				out <- &hsync.InboundReport{
+				select {
+				case out <- &hsync.InboundReport{
 					Transport:    report.Transport,
 					MessageType:  hsync.MsgBeat,
 					Zone:         hsync.ZoneName(report.Zone),
 					Identity:     hsync.PeerID(report.Identity),
 					BeatInterval: report.BeatInterval,
 					Msg:          msg,
+				}:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}
@@ -325,11 +324,15 @@ func adaptInboundMsgs(ctx context.Context, in <-chan *AgentMsgPostPlus) <-chan *
 				if msg == nil {
 					continue
 				}
-				out <- &hsync.InboundMsg{
+				select {
+				case out <- &hsync.InboundMsg{
 					MessageType: hsync.AgentMsg(msg.MessageType),
 					Originator:  hsync.PeerID(msg.OriginatorID),
 					Zone:        hsync.ZoneName(msg.Zone),
 					Payload:     msg,
+				}:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}

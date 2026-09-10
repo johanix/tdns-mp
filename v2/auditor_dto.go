@@ -58,15 +58,26 @@ type AuditProviderSummary struct {
 
 // markLocalAuditors sets Local on rows matching this auditor instance.
 func markLocalAuditors(localIdentity string, out []AuditProviderSummary) {
-	localIdentity = dns.Fqdn(localIdentity)
 	if localIdentity == "" {
 		return
 	}
+	localIdentity = dns.Fqdn(localIdentity)
 	for i := range out {
-		if dns.Fqdn(out[i].Identity) == localIdentity {
+		if out[i].Identity != "" && strings.EqualFold(dns.Fqdn(out[i].Identity), localIdentity) {
 			out[i].Local = true
 		}
 	}
+}
+
+// auditorMergeKey keys an auditor row for merging: by identity once the
+// apex HSYNC3 record has resolved it, otherwise by the auditors= label,
+// so two declared auditors that have not published HSYNC3 yet stay
+// distinct rows instead of collapsing into one.
+func auditorMergeKey(s AuditProviderSummary) string {
+	if s.Identity != "" {
+		return s.Identity
+	}
+	return "label:" + s.Label
 }
 
 // enrichLocalAuditorGossip fills gossip for the local auditor from the
@@ -115,7 +126,7 @@ func (zs *AuditZoneState) Snapshot(localIdentity string) AuditZoneSummary {
 func snapshotAuditorsLocked(zs *AuditZoneState, now time.Time, localIdentity string) []AuditProviderSummary {
 	byID := make(map[string]AuditProviderSummary)
 	for _, s := range DeclaredAuditorIdentities(zs.Zone) {
-		byID[s.Identity] = s
+		byID[auditorMergeKey(s)] = s
 	}
 	for _, as := range zs.Auditors {
 		if !IsAuditorIdentity(zs.Zone, as.Identity) {
@@ -344,17 +355,17 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 			continue
 		}
 		for _, s := range DeclaredAuditorIdentities(string(zname)) {
-			if _, exists := merged[s.Identity]; !exists {
-				merged[s.Identity] = s
+			if _, exists := merged[auditorMergeKey(s)]; !exists {
+				merged[auditorMergeKey(s)] = s
 			}
 		}
 	}
 	for _, zs := range zones {
 		zs.mu.RLock()
 		for _, s := range snapshotAuditorsLocked(zs, now, local) {
-			cur, exists := merged[s.Identity]
+			cur, exists := merged[auditorMergeKey(s)]
 			if !exists {
-				merged[s.Identity] = s
+				merged[auditorMergeKey(s)] = s
 				continue
 			}
 			if s.LastBeat.After(cur.LastBeat) {
@@ -367,7 +378,7 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 			if cur.Label == "" && s.Label != "" {
 				cur.Label = s.Label
 			}
-			merged[s.Identity] = cur
+			merged[auditorMergeKey(s)] = cur
 		}
 		zs.mu.RUnlock()
 	}
@@ -560,8 +571,19 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 	}
 	gst := ar.GossipStateTable
 	now := time.Now()
+	// Everything read from the state table is read under gst.mu: the
+	// inbound beat path writes the inner map under the same lock, and a
+	// concurrent range over it is a fatal runtime error, not a race report.
 	gst.mu.RLock()
 	states := gst.States[groupHash]
+	haveStates := states != nil
+	members := unionGossipMembers(pg.Members, states)
+	rows := make([]GossipMemberRow, 0, len(states))
+	reported := make(map[string]bool, len(states))
+	for reporter, ms := range states {
+		reported[reporter] = true
+		rows = append(rows, gossipMemberRow(reporter, ms, now))
+	}
 	var elec *GroupElectionState
 	if e := gst.Elections[groupHash]; e != nil {
 		cp := *e
@@ -575,17 +597,13 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 	if zone != "" {
 		dto.ColumnLabels, dto.LabelToIdentity = zoneGossipMatrixColumns(zone)
 	} else {
-		dto.Members = unionGossipMembers(pg.Members, states)
+		dto.Members = members
 	}
 	for _, z := range pg.Zones {
 		dto.Zones = append(dto.Zones, string(z))
 	}
-	if states != nil {
-		reported := make(map[string]bool, len(states))
-		for reporter, ms := range states {
-			reported[reporter] = true
-			dto.Rows = append(dto.Rows, gossipMemberRow(reporter, ms, now))
-		}
+	if haveStates {
+		dto.Rows = append(dto.Rows, rows...)
 		if zone == "" {
 			for _, member := range dto.Members {
 				if reported[member] {

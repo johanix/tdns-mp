@@ -74,6 +74,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		lgAgent.Warn("failed to initialize signer as peer, continuing without signer peer registration", "err", err)
 	}
 
+	// The hsync engine is constructed before RefreshEngine starts (its Run
+	// starts further down, with the other agent engines): the first zone
+	// load reports every HSYNC3 record as an addition, and PostRefresh
+	// applies that diff only when AgentRegistry.HsyncEngine is already set
+	// (NewHsyncDataEngine sets it). Same order as the auditor since #39.
+	dataEngine := NewHsyncDataEngine(conf)
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
@@ -335,8 +342,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return nil
 	})
 
-	// Agent-specific engines
-	dataEngine := NewHsyncDataEngine(conf)
+	// Agent-specific engines (the hsync data engine itself was constructed
+	// above, before RefreshEngine)
 	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
 		dataEngine.Run(ctx, conf.InternalMp.MsgQs)
 	})

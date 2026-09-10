@@ -186,7 +186,7 @@ func expectedHSYNC3Identities(zone string) []string {
 	auditorLabels := mpzd.GetAuditors()
 	auditorSet := make(map[string]bool, len(auditorLabels))
 	for _, lbl := range auditorLabels {
-		auditorSet[strings.TrimSuffix(lbl, ".")] = true
+		auditorSet[strings.ToLower(normalizeHSYNC3Label(lbl))] = true
 	}
 	var out []string
 	for _, rr := range rrset.RRs {
@@ -198,7 +198,7 @@ func expectedHSYNC3Identities(zone string) []string {
 		if !ok {
 			continue
 		}
-		if auditorSet[strings.TrimSuffix(h3.Label, ".")] {
+		if auditorSet[strings.ToLower(normalizeHSYNC3Label(h3.Label))] {
 			continue
 		}
 		identity := dns.Fqdn(h3.Identity)
