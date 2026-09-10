@@ -94,12 +94,12 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
 	}
 
-	// Provider group recomputation hook. The agent role triggers
-	// RecomputeGroups via HsyncEngine's HSYNC-UPDATE flow; the auditor
-	// doesn't run HsyncEngine, so we wire a one-shot OnFirstLoad and
-	// rely on the AppTypeMPAuditor branch in MPZoneData.PostRefresh
-	// for re-runs on HSYNC change. RecomputeGroups is a pure function
-	// of zone data and does not require SharedZones / LocateAgent.
+	// Provider group recomputation hook. HSYNC changes reach RecomputeGroups
+	// through the hsync engine's OnHsync3Changed callback; the one-shot
+	// OnFirstLoad below covers the first load, and the AppTypeMPAuditor
+	// branch in MPZoneData.PostRefresh re-runs it on every zone transfer.
+	// RecomputeGroups is a pure function of zone data and does not require
+	// SharedZones / LocateAgent.
 	if ar != nil && ar.ProviderGroupManager != nil {
 		for _, zoneName := range conf.Config.Internal.AllZones {
 			mpzd, exists := Zones.Get(zoneName)
