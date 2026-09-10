@@ -48,7 +48,15 @@ local replaces are still in place (see "Baseline & branching strategy").
   send goldens), `TestTransportDispatch_*`, `TestAppVerbTable`,
   `TestTransportBoundary_*`, `TestParseAppPayload`, `-race` on mp root +
   hsync, tdns-transport standalone tests, `cmd/transport-exercise`.
-- **Left:** C5 envelope label (carrier decision), C4b (transport-own
+- **C5 envelope label: DONE 2026-09-10** (tdns-transport, after the #7
+  review round). Carrier: the Format byte of the CHUNK EDNS0 option, the
+  transport-owned pre-crypto slot every message already carries, so no
+  wire change and no golden regeneration: 1 = none, 2 = jose, 3 = cose
+  (reserved, answered FORMERR). The receiver switches on the label; the
+  byte-sniff survives only as the fallback for the unlabelled query-mode
+  fetch, which F2b labels when transport owns the whole chunk chain. The
+  API mechanism carries no label and stays implicitly none.
+- **Left:** C4b (transport-own
   hello/beat/ping send structs, byte-locked) which unblocks F1, F2's
   `hsync-peer-status` stub, F3 (unexport decision; 22 candidates listed
   in the amendment), and one D1 follow-up (a discovery-vs-beat race test;
