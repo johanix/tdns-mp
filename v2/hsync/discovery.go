@@ -53,7 +53,15 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 		r.addRemoteAgent(zone, peer)
 	}
 	e.storeHook(peer)
-	go e.attemptDiscovery(peer, peer.ApiMethod, peer.DnsMethod)
+	// Same concurrency limit as retryPendingDiscoveries, acquired inside
+	// the goroutine so MarkNeeded itself never blocks (ReconcileZone calls
+	// it once per expected identity).
+	sem := e.discoverySem()
+	go func(p *Peer, api, dns bool) {
+		sem <- struct{}{}
+		defer func() { <-sem }()
+		e.attemptDiscovery(p, api, dns)
+	}(peer, peer.ApiMethod, peer.DnsMethod)
 }
 
 // Rediscover forces a fresh discovery pass for an already-known peer (the

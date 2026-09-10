@@ -32,6 +32,7 @@ func (m *mockTransport) SendHello(ctx context.Context, peer *Peer, sharedZones [
 }
 func (m *mockTransport) SendBeat(ctx context.Context, peer *Peer, sequence uint64) (bool, string, error) {
 	peer.Mu.Lock()
+	defer peer.Mu.Unlock()
 	if peer.DnsMethod && peer.DnsDetails != nil {
 		peer.DnsDetails.State = PeerStateOperational
 		peer.DnsDetails.SentBeats++
@@ -42,7 +43,6 @@ func (m *mockTransport) SendBeat(ctx context.Context, peer *Peer, sequence uint6
 		peer.ApiDetails.SentBeats++
 		return true, TransportAPI, nil
 	}
-	peer.Mu.Unlock()
 	return true, "", nil
 }
 func (m *mockTransport) MechanismSupported(name string) bool          { return true }

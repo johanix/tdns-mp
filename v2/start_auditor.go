@@ -29,6 +29,14 @@ import (
 // omits SDE, leader election, parent-sync bootstrapping, and other
 // write-side machinery. Runs HsyncEngine for discovery/reconcile/BEATs.
 func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) error {
+	// Without the multi-provider config block MainInit leaves the agent
+	// registry unset, and the auditor engine below dereferences it.
+	// Refuse to start instead of panicking.
+	ar := conf.InternalMp.AgentRegistry
+	if conf.MpConfig() == nil || ar == nil {
+		return fmt.Errorf("auditor startup: multi-provider configuration missing (no agent registry)")
+	}
+
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
@@ -63,6 +71,17 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		}
 	}
 
+	// Phase B: in-memory audit state and the auditor engine. Constructed
+	// before RefreshEngine starts: the first zone load reports every
+	// HSYNC3 record as an addition, and PostRefresh applies that diff only
+	// when AgentRegistry.HsyncEngine is already set (NewAuditorEngine sets
+	// it). The engine's Run starts further down, once the event log is up.
+	stateManager := NewAuditStateManager()
+	stateManager.LocalIdentity = conf.MpConfig().Identity
+	conf.InternalMp.AuditStateManager = stateManager
+	ar.AuditState = stateManager
+	auditorEngine := NewAuditorEngine(conf, stateManager)
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
@@ -75,20 +94,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
 	}
 
-	// Phase B: persistent event log + in-memory audit state.
-	stateManager := NewAuditStateManager()
-	stateManager.LocalIdentity = conf.MpConfig().Identity
-	conf.InternalMp.AuditStateManager = stateManager
-	ar := conf.InternalMp.AgentRegistry
-	if ar != nil {
-		ar.AuditState = stateManager
-	}
-
-	// Provider group recomputation hook. Both roles recompute via the
-	// HsyncEngine's ApplyHsyncDiff -> OnHsync3Changed callback; we also wire a
-	// one-shot OnFirstLoad and PostRefresh for re-runs on every zone transfer.
-	// RecomputeGroups is a pure function of zone data and does not require
-	// SharedZones.
+	// Provider group recomputation hook. HSYNC changes reach RecomputeGroups
+	// through the hsync engine's OnHsync3Changed callback; the one-shot
+	// OnFirstLoad below covers the first load, and PostRefresh re-runs it
+	// on every zone transfer. RecomputeGroups is a pure function of zone
+	// data and does not require SharedZones.
 	if ar != nil && ar.ProviderGroupManager != nil {
 		pgm := ar.ProviderGroupManager
 		for _, zoneName := range conf.Config.Internal.AllZones {
@@ -109,6 +119,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		pgm.RecomputeGroups()
 	}
 
+	// Phase B: persistent event log.
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
 		if err := InitAuditEventLogTable(kdb); err != nil {
@@ -137,7 +148,6 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	StartAuditDetectors(ctx, stateManager, silenceThreshold, detectorInterval)
 
 	msgQs := conf.InternalMp.MsgQs
-	auditorEngine := NewAuditorEngine(conf, stateManager)
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorEngine", func() {
 		auditorEngine.Run(ctx, msgQs)
 	})

@@ -89,6 +89,10 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 		gst.States[groupHash] = make(map[string]*MemberState)
 	}
 	for id, remote := range msg.Members {
+		if remote == nil {
+			// a decoded beat may carry a null member
+			continue
+		}
 		local, exists := gst.States[groupHash][id]
 		if !exists || remote.Timestamp.After(local.Timestamp) {
 			gst.States[groupHash][id] = deepCopyMemberState(remote)
