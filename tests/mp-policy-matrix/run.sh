@@ -5,7 +5,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 . "$SRC/lib.sh"
 
-usage() { echo "usage: sh run.sh start|stop|restart|status|converge|verify|scenario <name>|clean|redirect [--do]|unredirect" >&2; exit 2; }
+usage() { echo "usage: sh run.sh start|stop|restart|status|converge|watch|verify|scenario <name>|clean|redirect [--do]|unredirect" >&2; exit 2; }
 
 # ---------------------------------------------------------------- redirect
 # The daemons' embedded resolvers look rig.test. up through a stub that is
@@ -27,15 +27,15 @@ redirect() {
 	case "$(uname -s)" in
 	Darwin)
 		rule="rdr pass on lo0 inet proto { tcp, udp } from any to 127.0.0.1 port 53 -> 127.0.0.1 port $wp"
-		echo "macOS: pf redirect of 127.0.0.1:53 to the world server ($wp), in anchor mp-policy-matrix:"
-		echo "  echo '$rule' | sudo pfctl -a mp-policy-matrix -f -"
+		echo "macOS: pf redirect of 127.0.0.1:53 to the world server ($wp), in anchor com.apple/mp-policy-matrix (the stock pf.conf only evaluates com.apple/* anchors):"
+		echo "  echo '$rule' | sudo pfctl -a com.apple/mp-policy-matrix -f -"
 		echo "  sudo pfctl -e"
-		echo "undo: sh run.sh unredirect   (or: sudo pfctl -a mp-policy-matrix -F all)"
+		echo "undo: sh run.sh unredirect   (or: sudo pfctl -a com.apple/mp-policy-matrix -F all)"
 		if [ "$1" = "--do" ]; then
 			was=$(sudo pfctl -s info 2>/dev/null | grep -c 'Status: Enabled')
-			echo "$rule" | sudo pfctl -a mp-policy-matrix -f - || return 1
+			echo "$rule" | sudo pfctl -a com.apple/mp-policy-matrix -f - || return 1
 			sudo pfctl -e 2>/dev/null; true
-			printf 'os=Darwin\npf_was_enabled=%s\ninstalled=%s\nrule=%s\n' "$was" "$(date '+%Y-%m-%d %H:%M:%S')" "$rule" > "$MARKER"
+			printf "os=Darwin\npf_was_enabled=%s\ninstalled='%s'\nrule='%s'\n" "$was" "$(date '+%Y-%m-%d %H:%M:%S')" "$rule" > "$MARKER"
 			echo "installed; recorded in $MARKER"
 		fi ;;
 	Linux)
@@ -48,7 +48,7 @@ redirect() {
 			for proto in udp tcp; do
 				sudo iptables -t nat -A OUTPUT -o lo -p "$proto" -d 127.0.0.1 --dport 53 -j REDIRECT --to-ports "$wp" || return 1
 			done
-			printf 'os=Linux\nport=%s\ninstalled=%s\n' "$wp" "$(date '+%Y-%m-%d %H:%M:%S')" > "$MARKER"
+			printf "os=Linux\nport=%s\ninstalled='%s'\n" "$wp" "$(date '+%Y-%m-%d %H:%M:%S')" > "$MARKER"
 			echo "installed; recorded in $MARKER"
 		fi ;;
 	*) echo "no redirect recipe for $(uname -s); run the world server on port 53 instead" ;;
@@ -63,8 +63,8 @@ unredirect() {
 	. "$MARKER"
 	case "$os" in
 	Darwin)
-		echo "removing pf anchor mp-policy-matrix (sudo pfctl -a mp-policy-matrix -F all)"
-		sudo pfctl -a mp-policy-matrix -F all >/dev/null 2>&1 || { echo "pfctl failed; the rule may still be in place -- check: sudo pfctl -a mp-policy-matrix -s nat" >&2; return 1; }
+		echo "removing pf anchor com.apple/mp-policy-matrix (sudo pfctl -a com.apple/mp-policy-matrix -F all)"
+		sudo pfctl -a com.apple/mp-policy-matrix -F all >/dev/null 2>&1 || { echo "pfctl failed; the rule may still be in place -- check: sudo pfctl -a com.apple/mp-policy-matrix -s nat" >&2; return 1; }
 		if [ "$pf_was_enabled" = 0 ]; then echo "pf was disabled before the rig enabled it: sudo pfctl -d"; sudo pfctl -d 2>/dev/null; fi ;;
 	Linux)
 		for proto in udp tcp; do
@@ -199,6 +199,39 @@ converge() {
 	fi
 }
 
+# ---------------------------------------------------------------- watch
+# One line per multi-provider cell, refreshed every 5 s: for each reporter
+# (the cell's agents and the auditor) how many of its peers it sees
+# OPERATIONAL, out of how many. Ctrl-C to stop; stops by itself when every
+# cell is complete.
+watch_cells() {
+	need_seeded
+	while :; do
+		clear 2>/dev/null
+		echo "$(date '+%H:%M:%S')  reporter -> OPERATIONAL peers / peers   (redirect: $(port53_ok && echo ok || echo MISSING))"
+		alldone=1
+		for z in $(cells); do
+			P=$(cell_field "$z" 2); [ "$P" -ge 2 ] || continue
+			line=$(printf '%-16s' "$z")
+			for pr in $(cell_providers "$z") aud; do
+				case $pr in aud) w=aud; r=auditor ;; *) w=$pr-agent; r=agent.$pr ;; esac
+				m=$(mp "$w" gossip state -z "$z" 2>/dev/null)
+				# the reporter's own row: short names are the identities with
+				# the common suffix removed (agent.p1, auditor)
+				row=$(echo "$m" | awk -v r="$r" '$1 == r')
+				if [ -z "$row" ]; then line="$line $pr:?/$P"; alldone=0; continue; fi
+				ok=$(echo "$row" | grep -o 'OPERATIONAL' | wc -l | tr -d ' ')
+				line="$line $pr:$ok/$P"
+				[ "$ok" -eq "$P" ] || alldone=0
+			done
+			echo "$line"
+		done
+		[ "$alldone" = 1 ] && { echo; echo "every cell complete"; break; }
+		[ "${WATCH_ONCE:-0}" = 1 ] && break
+		sleep 5
+	done
+}
+
 # ---------------------------------------------------------------- verify
 . "$SRC/verify.sh"
 
@@ -208,6 +241,7 @@ case "${1:-status}" in
 	restart)  stop; start ;;
 	status)   status ;;
 	converge) converge ;;
+	watch)    watch_cells ;;
 	verify)   verify_all ;;
 	scenario) shift; scenario "$@" ;;
 	clean)    KEEP_REDIRECT=0 stop; rm -rf "$RIG"; echo "removed $RIG" ;;

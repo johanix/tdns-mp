@@ -18,6 +18,7 @@ sh setup.sh                  # seed $RIG: binaries, configs, zones, keys, certs
 sh run.sh redirect --do      # ONCE per boot, needs sudo: 127.0.0.1:53 -> world server
 sh run.sh start
 sh run.sh converge           # every cell OPERATIONAL from every reporter (~1-2 min)
+sh run.sh watch              # meanwhile, in another window: the gossip matrices, refreshed
 sh run.sh verify             # one PASS/FAIL per assertion; non-zero exit on failure
 sh run.sh stop               # removes the redirect too; or: clean (stop + remove $RIG)
 ```
@@ -39,7 +40,9 @@ reach the rig's names via a stub for `rig.test.` — and the pinned tdns dials
 stubs, like root servers, on port 53 only. So `127.0.0.1:53` must reach the
 world server, which runs unprivileged on 5300. `run.sh redirect` prints (or
 with `--do` runs) the one-line packet redirect for macOS (`pfctl`, in the
-rig's own anchor `mp-policy-matrix`) or Linux (`iptables`). It is the rig's
+rig's own anchor `com.apple/mp-policy-matrix` — the stock `/etc/pf.conf`
+evaluates only `com.apple/*` anchors, so a rule loaded into any other
+anchor is silently ignored) or Linux (`iptables`). It is the rig's
 single privileged step; nothing runs as root. Without it everything starts
 and every zone flows, but the agents never find each other (`status` says
 so). A tdns with IMR forwarding — post-pin — removes the need.
@@ -49,7 +52,7 @@ what it installed in `$RIG/.redirect` (on macOS also whether pf was
 already enabled), **`stop` and `clean` remove it again** (one more sudo
 prompt; `KEEP_REDIRECT=1 sh run.sh stop` keeps it for the next `start`),
 `status` shows whether it is in place, `unredirect` removes it by hand, and
-a reboot clears it regardless. The undo is `sudo pfctl -a mp-policy-matrix
+a reboot clears it regardless. The undo is `sudo pfctl -a com.apple/mp-policy-matrix
 -F all` (Linux: the two rules with `-D`), and `unredirect` checks
 afterwards that 127.0.0.1:53 no longer answers.
 
