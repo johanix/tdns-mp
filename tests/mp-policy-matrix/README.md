@@ -111,11 +111,11 @@ checks. Adding a cell is one line.
   signing provider's signer (the rig configures those NOTIFYs); a change
   still takes one combiner→signer→agent hop per provider, so `OP_TIMEOUT`
   (default 120 s) is what the NS scenarios wait.
-- Signature validity in the rig: 6 h on the signers (the daemon's floor
-  is 2 × (served TTL + propagation delay), and the signer publishes
-  DNSKEYs with a 1 h TTL), 168 h on the agents and the auditor (their
-  auto-created identity zones carry tdns's compiled-in 24 h TTL). A
-  policy below the floor makes the daemon SERVFAIL the zone, not warn.
+- Signature validity in the rig is 6 h everywhere: the daemon's floor is
+  2 × (served TTL + propagation delay); the signer publishes DNSKEYs with
+  a 1 h TTL and the auto-created identity zones carry a 1 h TTL (24 h
+  before tdns's `mp-pin-2026-06` fix, which tdns-mp pins). A policy below
+  the floor makes the daemon SERVFAIL the zone, not warn.
 - Two log lines to ignore: the world server reports `bind: address already
   in use` for its API port once at start (tdns-auth starts its API
   dispatcher twice on the same address; the first wins), and every daemon

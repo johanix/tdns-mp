@@ -238,34 +238,19 @@ INTERVALS = """   syncengine:
 # "unknown algorithm: 0".
 #
 # The daemon refuses a policy whose validity is not above
-# 2 x (served TTL + propagation delay). Two policies, because two TTLs:
-#   - the customer zones are 300 s but the signer publishes DNSKEYs with a
-#     1 h TTL, so its floor is 2 x (1 h + 60 s): 6 h clears it (2 h does
-#     not, and a policy below the floor makes the daemon SERVFAIL the
-#     zone rather than serve it);
-#   - the agents' and auditor's auto-created identity zones carry tdns's
-#     compiled-in 24 h TTL (CreateAutoZone in the pinned tdns), which no
-#     config reaches, so those daemons need a week.
-POLICY_SIGNER = """dnssecpolicies:
+# 2 x (served TTL + propagation delay), and a policy below the floor makes
+# it SERVFAIL the zone rather than serve it. The signer publishes DNSKEYs
+# with a 1 h TTL and the agents' and auditor's auto-created identity zones
+# carry a 1 h TTL (tdns CreateAutoZone; it was 24 h before the mp-pin
+# branch's fix, which is why tdns-mp pins that branch), so 6 h clears
+# every floor with margin and 2 h does not.
+POLICY = """dnssecpolicies:
    default:
       algorithm:   ED25519
       sigvalidity:
          default:   6h
          dnskey:    12h
          ds:        12h
-      ksk:
-         lifetime:  forever
-      zsk:
-         lifetime:  forever
-"""
-
-POLICY_IDENTITY = """dnssecpolicies:
-   default:
-      algorithm:   ED25519
-      sigvalidity:
-         default:   168h
-         dnskey:    336h
-         ds:        336h
       ksk:
          lifetime:  forever
       zsk:
@@ -362,7 +347,7 @@ imrengine:
    addresses:      [ 127.0.0.1:{P['agent_imr']} ]
    transports:     [ do53 ]
 {STUBS}
-{POLICY_IDENTITY}
+{POLICY}
 db:
    file:  {d}/agent.db
 
@@ -492,7 +477,7 @@ kasp:
    standby_zsk_count:  1
    standby_ksk_count:  0
 
-{POLICY_SIGNER}
+{POLICY}
 db:
    file:  {d}/signer.db
 
@@ -590,7 +575,7 @@ imrengine:
    addresses:      [ 127.0.0.1:{AUD['imr']} ]
    transports:     [ do53 ]
 {STUBS}
-{POLICY_IDENTITY}
+{POLICY}
 db:
    file:  {d}/auditor.db
 

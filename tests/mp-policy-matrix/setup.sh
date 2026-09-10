@@ -51,7 +51,10 @@ else
 	rm -rf "$RIG"
 fi
 mkdir -p "$RIG/bin" "$RIG/log" "$RIG/zones"
-for b in mpagent mpcombiner mpsigner mpauditor mpcli; do cp "$MP/cmd/$b/tdns-$b" "$RIG/bin/"; done
+# Unlink before copying: overwriting a Mach-O in place on macOS invalidates
+# the kernel's cached code signature and the next exec is killed silently.
+for b in mpagent mpcombiner mpsigner mpauditor mpcli; do rm -f "$RIG/bin/tdns-$b"; cp "$MP/cmd/$b/tdns-$b" "$RIG/bin/"; done
+rm -f "$RIG/bin/tdns-auth" "$RIG/bin/tdns-cli"
 cp "$TDNS/cmdv2/auth/tdns-auth" "$RIG/bin/"
 [ -x "$TDNS/cmdv2/cli/tdns-cli" ] && cp "$TDNS/cmdv2/cli/tdns-cli" "$RIG/bin/"
 
