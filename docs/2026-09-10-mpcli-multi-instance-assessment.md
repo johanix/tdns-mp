@@ -230,8 +230,15 @@ Gets wrong (pre-existing, unchanged by this work, fixed upstream on
   `query-parent` and `auto-rollover` (and its `validate`) hardcode
   `GetApiClient("auth")`. On the fleet today
   `tdns-mpcli signer keystore dnssec policy …` dies with "No API client
-  found for tdns-auth". Instances inherit exactly that behaviour.
-  Document it in the README's known-gaps list; do not work around it.
+  found for tdns-auth". This is cosmetic for mp: those leaves call
+  `/rollover/*` and `/config/paths`, tdns-auth's KSK-rollover
+  automation, which the mp signer does not serve at all (its routes:
+  `/keystore`, `/signer`, `/zone/dsync`, `/delegation`, …), so a
+  correct role would only change the error message. The leaves the
+  rig needs — `generate`, `rollover`, `list` — are role-clean and hit
+  `/keystore`, which the mp signer implements. Step 4 prunes the four
+  from the signer trees (`RemoveCommand`) so `--help` stops
+  advertising them; one line to undo if the signer ever serves them.
 - `cli.AuthCmd` and `cli.ReportCmd` are attached under `SignerCmd`.
   `signer auth …` already fails the same way (verified on the fleet:
   "No API client found for tdns-auth"). Both are static vars, so they
@@ -359,7 +366,11 @@ role's block in `cmd/mpcli/shared_cmds.go` (lines 24–36, 41–49,
 52–66, 73–87 at `74f2f09`) minus the static tdns vars (`AuthCmd`,
 `ReportCmd`, `RootKeysCmd`, `JwtCmd` under signer). Keystore and
 truststore last, as in `NewAuthTree`, because their help text is built
-at construction from the algorithms registered in `init()`. Then
+at construction from the algorithms registered in `init()`. In
+`NewSignerTree` (and the canonical signer wiring, same code path) take
+the `dnssec` child of `NewKeystoreCmd(role)` and `RemoveCommand` its
+`policy`, `ds-push`, `query-parent` and `auto-rollover` leaves — see A;
+they target endpoints the mp signer does not have. Then
 `shared_cmds.go` itself becomes four calls: `rootCmd.AddCommand(
 mpcli.NewAgentTree("agent","agent"), …)`, which makes the canonical
 tree and the instance tree the same code path and deletes the drift
