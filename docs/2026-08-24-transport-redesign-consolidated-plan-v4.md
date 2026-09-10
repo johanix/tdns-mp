@@ -2,14 +2,58 @@
 # (remaining work)
 
 Date: 2026-08-24
-Amended: 2026-09-09 and 2026-09-10 — see the amendments at the end of this
-file (corrections, three new items C3.0 / C0.5 / F0, effort). The
-body text above the amendment is unchanged.
-Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
-REMAINING transport-redesign work. Supersedes, for everything not
-yet implemented: `2026-06-11-transport-redesign-consolidated-plan-v3.md`
-and `2026-06-14-road-to-stage-C-plan.md`. Where v3 or the road-to-C
-plan differs from v4, **v4 wins.**
+Amended: 2026-09-09 (corrections, C3.0 / C0.5 / F0, effort) and
+2026-09-10 (execution record). Both amendments are appended at the end
+of this file; the body text between is the 2026-08-24 plan, unchanged.
+Status: PLAN OF RECORD — **Stages A–D and the E residual are EXECUTED
+and live on the testbed as of 2026-09-10** (see "Current state" just
+below and the 2026-09-10 amendment for the commit table). Remaining:
+the C5 envelope label, C4b + F1, F2's stub, F3; F0 is out of scope.
+Supersedes, for everything not yet implemented:
+`2026-06-11-transport-redesign-consolidated-plan-v3.md` and
+`2026-06-14-road-to-stage-C-plan.md`. Where v3 or the road-to-C plan
+differs from v4, **v4 wins.**
+
+## Current state (2026-09-10)
+
+Branch `transport-redesign-v1-C` in BOTH repos (tdns-mp and
+tdns-transport), cut 2026-09-09 from the tips of `phase-4-c0-gate` /
+`phase-2.6-discovery`. `main` is untouched; there are no PRs; the go.mod
+local replaces are still in place (see "Baseline & branching strategy").
+
+- **Executed 2026-09-09/10:** C0.5, C3.0, C1, C2, C3, C4, C5a, C6, C7,
+  D0, D1, D2, D3, the E residual, plus one fix outside the plan
+  (discovery-cache flush of the parent zone). Each step is one commit
+  per repo; the table is in the 2026-09-10 amendment.
+- **Deployed:** every step went to the whole five-node testbed in
+  seven deploys (observer node first), each followed by the probe set;
+  the fleet converged after every deploy and was fully OPERATIONAL at
+  the end of the run. Tags `stage-A-complete` mark the verified
+  pre-Stage-C pair in both repos.
+- **Transport package now:** vocabulary hello/beat/ping/confirm/chunk +
+  one opaque `AppMessage`/`AppResponse` carrier (`SendApp`,
+  `TransportManager.Send`, `SendAll` for hello/beat fan-out); the
+  application registers its verbs on the router per role and parses
+  its own payloads (`ParseApp`); no application request/response or
+  payload types, no zone knowledge on `Peer`, no `IncomingChan`;
+  exported types 87 → 64; `transport.go`/`api.go` import no tdns core.
+- **MP now:** owns the wire payload types (`mp_wire_payloads.go`), the
+  peer request/response types (`mp_peer_types.go`), the send builders
+  (`mp_send.go`, golden-locked), the receive parser (`mp_chunk_parse.go`),
+  the verb handlers (`mp_verb_handlers.go`) and ONE verb table that both
+  registers handlers per role and dispatches the callback (`mp_verbs.go`).
+  The NG `PeerDetails` sidecar and the engine's own gossip table are gone;
+  `Agent` still embeds `*hsync.Peer` but the embed trap has no target.
+- **Gates that must stay green:** `TestGoldenWire*` (13 receive + 10
+  send goldens), `TestTransportDispatch_*`, `TestAppVerbTable`,
+  `TestTransportBoundary_*`, `TestParseAppPayload`, `-race` on mp root +
+  hsync, tdns-transport standalone tests, `cmd/transport-exercise`.
+- **Left:** C5 envelope label (carrier decision), C4b (transport-own
+  hello/beat/ping send structs, byte-locked) which unblocks F1, F2's
+  `hsync-peer-status` stub, F3 (unexport decision; 22 candidates listed
+  in the amendment), and the D1 follow-ups (unlocked bool reads on the
+  send path; a discovery-vs-beat race test). F0 (tdns re-pin) is a
+  separate project by operator decision.
 
 Completed work is recorded here as a status table only (with commit
 hashes and the branch it lives on); its specs live in the superseded
@@ -921,6 +965,48 @@ the hello/beat/ping send builders.
 - Stage A exit tags: `stage-A-complete` set on the verified pair
   (mp `7a10ef9` / transport `37c0dfb`) — the stack ran live on all five
   nodes from 2026-08-25 and passed tonight's probe set.
+
+## Run narrative (2026-09-09, UTC)
+
+| Deploy | Time | Carried | Result |
+|---|---|---|---|
+| #1 | 20:22–20:33 | C0.5a/b, C3.0, C1 | converged; predicted deltas only |
+| #2 | 20:44–20:51 | C2 | converged; one node kept a peer NEEDED for 10 min → led to the discovery-cache finding |
+| #3 | 21:04–21:10 | C3 | converged; verbs dispatched on the mixed fleet during the observer window |
+| #4 | 21:28–21:34 | C4, C5a, C6, C7 | converged; no LEGACY-gate rejections; zone-authz refusals at the pre-existing rate |
+| #5 | 21:39–21:45 | D0, D2, finding 4 | converged after the heal pass |
+| #6 | 21:53–21:57 | D3, discovery-cache fix | converged; agents no longer got stuck |
+| #7 | 22:05–22:10 | D1 | converged 22:14; three of four zones with leaders |
+
+Probe discipline per step: standalone build + vet + tests in both
+repos, `-race` on mp root and hsync, the gate tests above, the five
+binaries; then deploy to the observer node, watch its gossip matrix
+and warning classes for a minute on the mixed fleet, then the rest,
+then a heal pass and a full probe. INVARIANT held throughout: no
+unpredicted matrix change; the only declared deltas were the C7 LEGACY
+sync gate (never exercised on the fleet) and the deploy-time restart
+transients.
+
+## Verification tooling added in this run
+
+- `transport_dispatch_test.go` (C0.5): per verb, the production parser
+  must extract it, the registered handler must accept it through the
+  real middleware chain, and the RouteToCallback delivery must reach the
+  expected MP queue; plus role-shaped routers (signer, combiner).
+- `golden_send_test.go` (C2): bytes of every send builder's payload.
+- `mp_verbs_test.go` (C3): the per-role verb sets.
+- `mp_chunk_parse_test.go` (C5a): the parser's rules and rejections.
+- `manager_fanout_test.go` (D1, transport): SendAll order and coverage.
+- `transport-exercise` discovery smoke (E residual).
+
+## How to resume
+
+Build tdns-mp against the sibling transport checkout with a `go.work`
+listing `<mp>/v2`, `<transport>/v2` and the five `<mp>/cmd/*` modules;
+`make -C cmd version` once for the ignored `version.go` files. Every
+step is one commit per repo on `transport-redesign-v1-C`; deploy the
+observer node first, run the probe set, then the rest. The operational
+log (hosts, commands, captures) is kept outside the repo by design.
 
 ## Testbed findings that belong to no plan step
 
