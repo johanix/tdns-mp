@@ -1,0 +1,17 @@
+# One row per cell of the matrix; one customer zone per cell. Columns are
+# tab-separated. providers = labels serving the zone (in NS order);
+# signers = subset that signs; upstreams = downstream:upstream pairs for the
+# providers that pull the signed zone from a signing provider.
+# zone	P	S	nsmgmt	providers	signers	upstreams
+p1s1a.rig.test.	1	1	agent	p1	p1	-
+p1s1o.rig.test.	1	1	owner	p1	p1	-
+p2s1a.rig.test.	2	1	agent	p1,p2	p1	p2:p1
+p2s1o.rig.test.	2	1	owner	p1,p2	p1	p2:p1
+p2s2a.rig.test.	2	2	agent	p1,p2	p1,p2	-
+p2s2o.rig.test.	2	2	owner	p1,p2	p1,p2	-
+p3s1a.rig.test.	3	1	agent	p1,p2,p3	p1	p2:p1,p3:p1
+p3s1o.rig.test.	3	1	owner	p1,p2,p3	p1	p2:p1,p3:p1
+p3s2a.rig.test.	3	2	agent	p1,p2,p3	p1,p2	p3:p2
+p3s2o.rig.test.	3	2	owner	p1,p2,p3	p1,p2	p3:p2
+p2s0a.rig.test.	2	0	agent	p1,p2	-	-
+p2s0o.rig.test.	2	0	owner	p1,p2	-	-
