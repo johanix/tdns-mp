@@ -614,7 +614,7 @@ long: |
   view of another peer's state. A healthy group shows OPERATIONAL
   in every non-diagonal cell.
 flags: |
-      --zone string   Zone name (required)
+  -z, --zone string   Zone name (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -2608,7 +2608,7 @@ long: |
   view of another peer's state. A healthy group shows OPERATIONAL
   in every non-diagonal cell.
 flags: |
-      --zone string   Zone name (required)
+  -z, --zone string   Zone name (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -4188,7 +4188,7 @@ long: |
   view of another peer's state. A healthy group shows OPERATIONAL
   in every non-diagonal cell.
 flags: |
-      --zone string   Zone name (required)
+  -z, --zone string   Zone name (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -5619,7 +5619,7 @@ long: |
   view of another peer's state. A healthy group shows OPERATIONAL
   in every non-diagonal cell.
 flags: |
-      --zone string   Zone name (required)
+  -z, --zone string   Zone name (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output

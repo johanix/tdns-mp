@@ -235,7 +235,10 @@ view of another peer's state. A healthy group shows OPERATIONAL
 in every non-diagonal cell.`,
 		Run: func(cmd *cobra.Command, args []string) { runGossipZoneState(cmd, kind, zoneName) },
 	}
-	stateCmd.Flags().StringVar(&zoneName, "zone", "", "Zone name (required)")
+	// Shorthand -z, matching the root's persistent --zone/-z which this
+	// local flag shadows by name; without it "gossip state -z" failed with
+	// "unknown shorthand flag" while every other zone command took -z.
+	stateCmd.Flags().StringVarP(&zoneName, "zone", "z", "", "Zone name (required)")
 
 	gossipCmd.AddCommand(stateCmd)
 	return gossipCmd
