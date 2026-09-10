@@ -6,7 +6,6 @@ package hsync
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/johanix/tdns/v2/core"
 )
@@ -76,18 +75,10 @@ func (r *Registry) RecomputeSharedZones(peer *Peer) {
 	if peer == nil {
 		return
 	}
-	peer.Mu.Lock()
-	zoneCount := len(peer.Zones)
-	oldState := peer.State
-	if zoneCount == 0 && (oldState == PeerStateOperational || oldState == PeerStateIntroduced) {
-		peer.State = PeerStateLegacy
-		peer.LastState = time.Now()
-	} else if zoneCount > 0 && oldState == PeerStateLegacy {
-		peer.State = PeerStateOperational
-		peer.LastState = time.Now()
-	}
-	peer.Mu.Unlock()
-
+	// The LEGACY/OPERATIONAL flip that used to live here wrote
+	// hsync.Peer.State, which nothing reads any more (v4 D0): connection
+	// state is transport.Peer's, and LEGACY is the MP display overlay
+	// (effectiveAgentState). Only the zone sync remains.
 	if r.transport != nil {
 		r.transport.SyncPeerZones(peer)
 	}

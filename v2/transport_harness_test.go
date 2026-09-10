@@ -188,7 +188,11 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		SupportedMechanisms: []string{"api", "dns"},
 		AuthorizedPeers:     authorizedPeers,
 	}
-	pe.Bridge = NewMPTransportBridge(bridgeCfg)
+	bridge, err := NewMPTransportBridge(bridgeCfg)
+	if err != nil {
+		t.Fatalf("NewMPTransportBridge(%s): %v", identity, err)
+	}
+	pe.Bridge = bridge
 	registry.MPTransport = pe.Bridge
 	registry.TransportManager = pe.Bridge.TransportManager
 

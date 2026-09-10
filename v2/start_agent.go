@@ -53,7 +53,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// Wire the receive path (CHUNK NOTIFY handler + router dispatch); must
 	// run before NotifyHandler (D3: one entry point per role).
 	if conf.InternalMp.TransportManager != nil {
-		conf.InternalMp.MPTransport.Start(ctx)
+		if err := conf.InternalMp.MPTransport.Start(ctx); err != nil {
+			return fmt.Errorf("%s receive path: %w", "agent", err)
+		}
 	}
 
 	// Initialize the combiner and signer as virtual peers BEFORE RefreshEngine

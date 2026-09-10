@@ -51,9 +51,15 @@ local replaces are still in place (see "Baseline & branching strategy").
 - **Left:** C5 envelope label (carrier decision), C4b (transport-own
   hello/beat/ping send structs, byte-locked) which unblocks F1, F2's
   `hsync-peer-status` stub, F3 (unexport decision; 22 candidates listed
-  in the amendment), and the D1 follow-ups (unlocked bool reads on the
-  send path; a discovery-vs-beat race test). F0 (tdns re-pin) is a
-  separate project by operator decision.
+  in the amendment), and one D1 follow-up (a discovery-vs-beat race test;
+  the unlocked bool reads on the send path were fixed 2026-09-10 in the
+  #34 review round). F0 (tdns re-pin) is a separate project by operator
+  decision.
+- **go.mod state:** tdns-transport is still consumed through a
+  sibling-directory replace and stays so until tdns-transport #7 lands
+  and can be pinned (the last step of the Stage F publishing story). The
+  tdns pin moved to `84101cd8` via #35: that is the June pin plus the
+  identity-zone TTL fix, not F0.
 
 Completed work is recorded here as a status table only (with commit
 hashes and the branch it lives on); its specs live in the superseded
@@ -127,6 +133,12 @@ re-derived:
 8. **Effort re-estimated** against the 2026-08-24 code census.
 
 ## Verified baseline (code-verified 2026-08-24)
+
+> **2026-09-10:** this table is the 2026-08-24 snapshot and is left as
+> written (evolution trail). The rows that say NOT STARTED for the Stage A
+> exit gate, C1-C7, D0-D3 and F2b were executed 2026-09-09/10; "Current
+> state (2026-09-10)" at the top and the 2026-09-10 amendment are the truth
+> for them. F1-F3 rows are still current.
 
 Checked at: tdns-mp `phase-4-c0-gate` `92e64a6`; tdns-transport
 `phase-2.6-discovery` `37c0dfb`. No testbed re-run (none since

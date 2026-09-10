@@ -206,7 +206,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 	controlZone := dns.Fqdn(mp.Identity)
-	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+	tm, err := NewMPTransportBridge(&MPTransportBridgeConfig{
 		Role:                roleSigner,
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         controlZone,
@@ -228,6 +228,9 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 			return peers
 		},
 	})
+	if err != nil {
+		return fmt.Errorf("transport bridge (signer): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
 
@@ -367,7 +370,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	if chunkMode == "" {
 		chunkMode = "edns0"
 	}
-	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+	tm, err := NewMPTransportBridge(&MPTransportBridgeConfig{
 		Role:                roleCombiner,
 		LocalID:             dns.Fqdn(mp.Identity),
 		ControlZone:         dns.Fqdn(mp.Identity),
@@ -389,6 +392,9 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			return peers
 		},
 	})
+	if err != nil {
+		return fmt.Errorf("transport bridge (combiner): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
 
@@ -553,7 +559,7 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 
 	// Create MPTransportBridge
-	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+	tm, err := NewMPTransportBridge(&MPTransportBridgeConfig{
 		Role:                       roleAgent,
 		BeatInterval:               mp.Remote.BeatInterval,
 		LocalID:                    dns.Fqdn(mp.Identity),
@@ -597,6 +603,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		ClientCertFile: mp.Api.CertFile,
 		ClientKeyFile:  mp.Api.KeyFile,
 	})
+	if err != nil {
+		return fmt.Errorf("transport bridge (agent): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
@@ -660,7 +669,7 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		payloadCrypto = pc
 	}
 
-	tm := NewMPTransportBridge(&MPTransportBridgeConfig{
+	tm, err := NewMPTransportBridge(&MPTransportBridgeConfig{
 		Role:                       roleAuditor,
 		BeatInterval:               mp.Remote.BeatInterval,
 		LocalID:                    dns.Fqdn(mp.Identity),
@@ -698,6 +707,9 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		ClientCertFile: mp.Api.CertFile,
 		ClientKeyFile:  mp.Api.KeyFile,
 	})
+	if err != nil {
+		return fmt.Errorf("transport bridge (auditor): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager

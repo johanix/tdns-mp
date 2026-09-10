@@ -217,7 +217,7 @@ type MPTransportBridgeConfig struct {
 }
 
 // NewTransportManager creates a new MPTransportBridge with both API and DNS transports.
-func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
+func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, error) {
 	// Default to both transports if not specified (backward compatibility for tests)
 	// Production configs MUST specify supported_mechanisms explicitly (validated at config load)
 	supportedMechanisms := cfg.SupportedMechanisms
@@ -464,13 +464,16 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		}
 		lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
 		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
-			lgTransport.Warn("router initialization failed", "err", err)
+			return nil, fmt.Errorf("router initialization: %w", err)
 		}
 		if tm.role == "" {
 			tm.role = roleAgent
 		}
+		// A half-registered verb table would look like a live process with
+		// no application receive path; refuse to construct instead (the
+		// signer and combiner already fail main_init on the same errors).
 		if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
-			lgTransport.Warn("application verb registration failed", "role", tm.role, "err", err)
+			return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
 		}
 
 		lgTransport.Info("DNS transport enabled")
@@ -593,7 +596,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		}
 	}
 
-	return tm
+	return tm, nil
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
@@ -1447,6 +1450,11 @@ func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
 // Returns success if ANY transport succeeds. Updates per-transport state in Agent struct.
 func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
 	peer := tm.GetOrCreatePeer(agent)
+	// The mechanism flags are written under agent.Mu by discovery; read
+	// them once under the same lock instead of racing the writer.
+	agent.Mu.RLock()
+	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
+	agent.Mu.RUnlock()
 
 	req := &transport.HelloRequest{
 		SenderID:     tm.LocalID,
@@ -1467,9 +1475,9 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// transport's SendAll — every eligible mechanism is tried, in order,
 	// and each outcome is applied below exactly as before.
 	apiGate, _ := mechStateForGate(peer, "API")
-	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown
+	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown
 	dnsGate, _ := mechStateForGate(peer, "DNS")
-	dnsEligible := tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
+	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
 	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
 	if apiEligible {
 		apiResp, apiErr = helloResult(results["API"])
@@ -1539,6 +1547,11 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 // Returns success if ANY transport succeeds. Updates per-transport LastContactTime in Agent struct.
 func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
 	peer := tm.GetOrCreatePeer(agent)
+	// The mechanism flags are written under agent.Mu by discovery; read
+	// them once under the same lock instead of racing the writer.
+	agent.Mu.RLock()
+	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
+	agent.Mu.RUnlock()
 
 	// Build gossip for this peer
 	var gossipData json.RawMessage
@@ -1590,9 +1603,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		return st == AgentStateOperational || st == AgentStateIntroduced || st == AgentStateLegacy || st == AgentStateDegraded || st == AgentStateInterrupted
 	}
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" && beatable(apiBeatGate)
+	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
-	dnsBeatEligible := tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
+	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
 	apiRaw, _ := peer.MechanismRawState("API")
 	apiWasOperational := apiRaw == transport.PeerStateOperational
 	dnsRaw, _ := peer.MechanismRawState("DNS")
@@ -2268,20 +2281,22 @@ func (tm *MPTransportBridge) beatZones(id AgentId) []string {
 // in start_*.go and must run before tdns's NotifyHandler starts. The
 // reliable queue is started separately (StartReliableQueue) because the
 // agent needs its infra peers initialised first.
-func (tm *MPTransportBridge) Start(ctx context.Context) {
+func (tm *MPTransportBridge) Start(ctx context.Context) error {
 	if tm == nil || tm.TransportManager == nil {
-		return
+		return nil
 	}
 	switch tm.role {
 	case roleSigner, roleCombiner:
 		// Chunk handler and router were built and registered at init.
 	default:
+		// Without the CHUNK NOTIFY handler the process has no DNS receive
+		// path; the callers (StartMPAgent, StartMPAuditor) fail startup.
 		if err := tm.RegisterChunkNotifyHandler(); err != nil {
-			lgTransport.Error("failed to register CHUNK NOTIFY handler", "role", tm.role, "err", err)
-			return
+			return fmt.Errorf("CHUNK NOTIFY handler (%s): %w", tm.role, err)
 		}
 	}
 	tm.StartIncomingMessageRouter(ctx)
+	return nil
 }
 
 // flushDiscoveryCache flushes the IMR cache at and below the peer identity
@@ -2299,10 +2314,14 @@ func flushDiscoveryCache(imr *Imr, peerID string) int {
 	total := 0
 	if n, err := imr.Cache.FlushDomain(peerID, false); err == nil {
 		total += n
+	} else {
+		lgTransport.Warn("discovery cache flush failed; a negative entry may persist until its TTL", "domain", peerID, "err", err)
 	}
 	if parent := parentDomain(peerID); parent != "" {
 		if n, err := imr.Cache.FlushDomain(parent, false); err == nil {
 			total += n
+		} else {
+			lgTransport.Warn("discovery cache flush failed; a negative entry may persist until its TTL", "domain", parent, "err", err)
 		}
 	}
 	return total
