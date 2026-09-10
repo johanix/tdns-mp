@@ -9,9 +9,7 @@ package tdnsmp
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -27,16 +25,6 @@ import (
 
 var lgTransport = tdns.Logger("transport")
 var lgConnRetry = tdns.Logger("conn-retry")
-
-// generatePingNonce returns a random nonce for ping requests.
-// Panics if the system CSPRNG fails, as this indicates a critical system problem.
-func generatePingNonce() string {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("failed to generate random bytes for ping nonce: %v", err))
-	}
-	return hex.EncodeToString(b)
-}
 
 // MPTransportBridge manages multiple transports for agent communication.
 // MPTransportBridge aggregates MP-specific transport state and methods.
@@ -455,18 +443,66 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	// itself will own the discovery loop and invoke this callback directly;
 	// installing the seam now lets the call-site already use it. See Bite 8
 	// in tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
-	tm.TransportManager.OnPeerDiscovered = func(peerID string) {
+	tm.TransportManager.OnPeerDiscovered = func(peer *transport.Peer) {
 		if tm.agentRegistry == nil {
 			return
 		}
-		agent, ok := tm.agentRegistry.S.Get(AgentId(peerID))
+		agent, ok := tm.agentRegistry.S.Get(AgentId(peer.ID))
 		if !ok {
 			return
 		}
-		tm.OnAgentDiscoveryComplete(agent)
+		// Refresh per-mechanism state from the agent (peer was looked
+		// up by the invocation site; SyncPeerFromAgent returns the
+		// same registry entry).
+		tm.SyncPeerFromAgent(agent)
+
+		// Set preferred transport based on what's available
+		if agent.ApiMethod && agent.DnsMethod {
+			peer.PreferredTransport = "API"
+			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
+		} else if agent.ApiMethod {
+			peer.PreferredTransport = "API"
+			lgTransport.Info("agent has API only", "agent", agent.Identity)
+		} else if agent.DnsMethod {
+			peer.PreferredTransport = "DNS"
+			lgTransport.Info("agent has DNS only", "agent", agent.Identity)
+		}
+
+		peer.SetState(transport.PeerStateKnown, "discovery complete")
+
+		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
 	}
 
+	// Symmetric failure-side seam (Bite D). Fired by MP's
+	// attemptDiscovery when a discovery round fails; the loop
+	// retries on the next tick, so this can fire repeatedly for
+	// the same peer. Body mirrors the existing failure logging in
+	// agent_utils.go so behaviour stays unchanged.
+	tm.TransportManager.OnDiscoveryFailed = func(peer *transport.Peer, err error) {
+		peer.SetState(transport.PeerStateError, err.Error())
+		lgTransport.Warn("peer discovery failed", "peer", peer.ID, "err", err)
+	}
+
+	// Bite F: register the bridge as TransportManager's
+	// DiscoveryDriver so tm.DiscoverPeer can delegate sync
+	// discovery back into MP's existing implementation.
+	// TEMPORARY — Phase 6 part 2 moves discovery into transport
+	// and removes the indirection.
+	tm.TransportManager.DiscoveryDriver = tm
+
 	return tm
+}
+
+// RunDiscovery implements transport.DiscoveryDriver (Bite F).
+// Delegates to the existing synchronous DiscoverAndRegisterAgent
+// path; on success the peer is in PeerStateKnown when this
+// returns (set by RegisterDiscoveredAgent).
+//
+// TEMPORARY — Phase 6 part 2 of the transport interface redesign
+// moves discovery into the transport package and deletes both
+// the DiscoveryDriver interface and this implementation.
+func (tm *MPTransportBridge) RunDiscovery(ctx context.Context, peer *transport.Peer) error {
+	return tm.DiscoverAndRegisterAgent(ctx, peer.ID)
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
@@ -730,6 +766,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// and HELLOs happen once per handshake while beats happen
 	// continuously.
 	report := &AgentMsgReport{
+		Transport:      "DNS",
 		MessageType:    AgentMsgBeat,
 		Identity:       AgentId(senderID),
 		BeatInterval:   beatInterval,
@@ -1391,9 +1428,29 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	return syncResp, nil
 }
 
-// SyncPeerFromAgent creates or updates a transport.Peer from an existing Agent.
+// GetOrCreatePeer returns the transport.Peer keyed by agent.Identity,
+// creating it (in PeerStateNeeded) if it does not already exist.
+//
+// Bite H: split out from SyncPeerFromAgent. Hot send paths use this
+// instead because the per-send state-refresh that SyncPeerFromAgent
+// performs is redundant — receipt sites already dual-write the
+// per-mechanism state. SyncPeerFromAgent is reserved for callers
+// that genuinely need a fresh state pull (currently only the
+// OnPeerDiscovered closure at discovery completion).
+func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
+	return tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+}
+
+// SyncPeerFromAgent returns the transport.Peer for this agent and
+// refreshes its per-mechanism state from the agent. Equivalent to
+// GetOrCreatePeer followed by an explicit state-refresh pass.
+//
+// Use only when the agent's state is known to be stale relative to
+// the peer (e.g. after discovery completion). Hot send paths should
+// use GetOrCreatePeer instead — see Bite H in
+// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
 func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
-	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	peer := tm.GetOrCreatePeer(agent)
 
 	// Sync API details
 	if agent.ApiDetails != nil {
@@ -1463,7 +1520,7 @@ func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transp
 // UPDATED: Now sends Hello on ALL supported transports independently when both are configured.
 // Returns success if ANY transport succeeds. Updates per-transport state in Agent struct.
 func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
-	peer := tm.SyncPeerFromAgent(agent)
+	peer := tm.GetOrCreatePeer(agent)
 
 	req := &transport.HelloRequest{
 		SenderID:     tm.LocalID,
@@ -1567,28 +1624,12 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
-// SendPing sends a ping to a peer, preferring API transport when available.
-func (tm *MPTransportBridge) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
-	req := &transport.PingRequest{
-		SenderID:  tm.LocalID,
-		Nonce:     generatePingNonce(),
-		Timestamp: time.Now(),
-	}
-	if tm.APITransport != nil && peer.APIEndpoint != "" {
-		return tm.APITransport.Ping(ctx, peer, req)
-	}
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-		return tm.DNSTransport.Ping(ctx, peer, req)
-	}
-	return nil, fmt.Errorf("no transport available for ping to %s", peer.ID)
-}
-
 // SendBeatWithFallback sends a heartbeat to a peer with transport fallback.
 // SendBeatWithFallback sends a Beat heartbeat to a peer (legacy name).
 // UPDATED: Now sends Beat on ALL supported transports independently when both are configured.
 // Returns success if ANY transport succeeds. Updates per-transport LastContactTime in Agent struct.
 func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
-	peer := tm.SyncPeerFromAgent(agent)
+	peer := tm.GetOrCreatePeer(agent)
 
 	// Build gossip for this peer
 	var gossipData json.RawMessage
@@ -1704,30 +1745,6 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	return nil, fmt.Errorf("all transports failed for Beat to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
-// OnAgentDiscoveryComplete is called when agent discovery completes.
-// It syncs the Agent to a transport.Peer and sets preferred transport.
-func (tm *MPTransportBridge) OnAgentDiscoveryComplete(agent *Agent) {
-	peer := tm.SyncPeerFromAgent(agent)
-
-	// Set preferred transport based on what's available
-	if agent.ApiMethod && agent.DnsMethod {
-		// Both available - prefer API (more reliable)
-		peer.PreferredTransport = "API"
-		lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
-	} else if agent.ApiMethod {
-		peer.PreferredTransport = "API"
-		lgTransport.Info("agent has API only", "agent", agent.Identity)
-	} else if agent.DnsMethod {
-		peer.PreferredTransport = "DNS"
-		lgTransport.Info("agent has DNS only", "agent", agent.Identity)
-	}
-
-	// Update peer state
-	peer.SetState(transport.PeerStateKnown, "discovery complete")
-
-	lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
-}
-
 // GetPreferredTransportName returns the preferred transport name for an agent.
 //
 // Bite 7 (inherited from Bite 1 step 5): delegates to
@@ -1817,7 +1834,7 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		return fmt.Errorf("recipient %q not found in AgentRegistry", msg.RecipientID)
 	}
 
-	peer := tm.SyncPeerFromAgent(agent)
+	peer := tm.GetOrCreatePeer(agent)
 	isCombiner := AgentId(msg.RecipientID) == tm.combinerID
 
 	// Build sync request
@@ -2278,7 +2295,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 		return fmt.Errorf("combiner %q not found in AgentRegistry", combinerID)
 	}
 
-	peer := tm.SyncPeerFromAgent(combiner)
+	peer := tm.GetOrCreatePeer(combiner)
 
 	syncReq := &transport.SyncRequest{
 		SenderID:    tm.LocalID,

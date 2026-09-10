@@ -346,8 +346,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				peerType = "signer"
 			}
 
-			// Add API transport entry if available
-			if agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
+			// Add API transport entry when this mechanism is in use
+			if agent.ApiMethod && agent.ApiDetails != nil {
 				key := agentIDFqdn + ":API"
 				if !seen[key] {
 					seen[key] = true
@@ -357,11 +357,15 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						effectiveState = AgentStateLegacy
 					}
 
+					apiAddr := agent.ApiDetails.BaseUri
+					if apiAddr == "" {
+						apiAddr = "-"
+					}
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
 						Transport:   "API",
-						Address:     agent.ApiDetails.BaseUri,
+						Address:     apiAddr,
 						CryptoType:  "TLS",
 						DistribSent: 0,
 						APIUri:      agent.ApiDetails.BaseUri,
@@ -400,8 +404,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				}
 			}
 
-			// Add DNS transport entry if available
-			if agent.DnsDetails != nil && agent.DnsDetails.BaseUri != "" {
+			// Add DNS transport entry when this mechanism is in use
+			if agent.DnsMethod && agent.DnsDetails != nil {
 				key := agentIDFqdn + ":DNS"
 				if !seen[key] {
 					seen[key] = true
@@ -411,11 +415,15 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						effectiveState = AgentStateLegacy
 					}
 
+					dnsAddr := agent.DnsDetails.BaseUri
+					if dnsAddr == "" {
+						dnsAddr = "-"
+					}
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
 						PeerType:     peerType,
 						Transport:    "DNS",
-						Address:      agent.DnsDetails.BaseUri,
+						Address:      dnsAddr,
 						CryptoType:   "JOSE",
 						DistribSent:  0,
 						DNSUri:       agent.DnsDetails.BaseUri,

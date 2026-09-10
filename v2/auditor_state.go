@@ -9,6 +9,8 @@ package tdnsmp
 import (
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // AuditZoneState tracks the auditor's view of one zone.
@@ -16,6 +18,7 @@ type AuditZoneState struct {
 	mu           sync.RWMutex
 	Zone         string
 	Providers    map[string]*AuditProviderState
+	Auditors     map[string]*AuditProviderState
 	LastRefresh  time.Time
 	ZoneSerial   uint32
 	Observations []AuditObservation
@@ -55,6 +58,9 @@ type AuditObservation struct {
 type AuditStateManager struct {
 	mu    sync.RWMutex
 	zones map[string]*AuditZoneState
+	// LocalIdentity is this auditor's HSYNC3 FQDN. The process never
+	// receives beats from itself, so snapshots mark that row Local.
+	LocalIdentity string
 }
 
 // NewAuditStateManager creates a new audit state manager.
@@ -64,8 +70,11 @@ func NewAuditStateManager() *AuditStateManager {
 	}
 }
 
-// GetOrCreateZone returns the AuditZoneState for a zone, creating it if needed.
+// GetOrCreateZone returns the AuditZoneState for a zone, creating it if
+// needed. The zone name is stored as an FQDN whichever form the caller
+// passed, so beats, sync messages and API requests share one entry.
 func (m *AuditStateManager) GetOrCreateZone(zone string) *AuditZoneState {
+	zone = dns.Fqdn(zone)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if zs, ok := m.zones[zone]; ok {
@@ -74,13 +83,16 @@ func (m *AuditStateManager) GetOrCreateZone(zone string) *AuditZoneState {
 	zs := &AuditZoneState{
 		Zone:      zone,
 		Providers: make(map[string]*AuditProviderState),
+		Auditors:  make(map[string]*AuditProviderState),
 	}
 	m.zones[zone] = zs
 	return zs
 }
 
 // GetZone returns the AuditZoneState for a zone, or nil if not tracked.
+// Accepts a zone name with or without a trailing dot.
 func (m *AuditStateManager) GetZone(zone string) *AuditZoneState {
+	zone = dns.Fqdn(zone)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.zones[zone]
@@ -113,6 +125,26 @@ func (zs *AuditZoneState) UpdateProviderBeat(identity, label, gossipState string
 	ps.IsSigner = isSigner
 	ps.GossipState = gossipState
 	ps.LastBeat = time.Now()
+}
+
+// UpdateAuditorBeat updates the auditor state on beat receipt.
+func (zs *AuditZoneState) UpdateAuditorBeat(identity, label, gossipState string) {
+	zs.mu.Lock()
+	defer zs.mu.Unlock()
+	as, ok := zs.Auditors[identity]
+	if !ok {
+		as = &AuditProviderState{
+			Identity:      identity,
+			Label:         label,
+			Contributions: make(map[string]map[uint16]int),
+		}
+		zs.Auditors[identity] = as
+	}
+	if label != "" {
+		as.Label = label
+	}
+	as.GossipState = gossipState
+	as.LastBeat = time.Now()
 }
 
 // UpdateProviderSync updates the provider state on sync receipt.

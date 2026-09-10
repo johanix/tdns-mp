@@ -23,7 +23,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260427162659-70a56004d104 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20260526061513-71749a402cdd // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20260526061513-71749a402cdd // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20260526061513-71749a402cdd // indirect
@@ -55,3 +55,8 @@ require (
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
 replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
+
+// tdns-transport is consumed from the sibling checkout while the
+// transport-redesign-v1-C branch of tdns-transport is unmerged; this
+// part of the stack builds against its commit e956f6ab (2026-05-09).
+replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2

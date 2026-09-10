@@ -1,15 +1,12 @@
-{{template "layout" .}}
-{{define "content"}}
+{{define "gossip.html"}}{{template "layout-head" .}}
 <h2>Gossip</h2>
+<p><small>Complete provider-group matrices (all members and reporters).</small></p>
 
 {{if .Error}}
 <article class="audit-error">{{.Error}}</article>
 {{end}}
 
-<div
-  hx-get="/web/fragment/gossip-matrix"
-  hx-trigger="load, every 15s"
-  hx-swap="innerHTML">
-  {{template "gossip-matrix-inner" .}}
+<div class="audit-gossip-wrap">
+{{template "gossip-matrix-inner" .}}
 </div>
-{{end}}
+{{template "layout-foot" .}}{{end}}

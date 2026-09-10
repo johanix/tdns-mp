@@ -1091,7 +1091,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 
 			// Convert agent to transport peer
-			peer := conf.InternalMp.MPTransport.SyncPeerFromAgent(agent)
+			peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{

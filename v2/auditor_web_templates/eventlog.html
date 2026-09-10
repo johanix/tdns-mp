@@ -1,5 +1,4 @@
-{{template "layout" .}}
-{{define "content"}}
+{{define "eventlog.html"}}{{template "layout-head" .}}
 <h2>Event Log</h2>
 
 <form method="GET" action="/web/eventlog">
@@ -14,9 +13,9 @@
 {{end}}
 
 <div
-  {{if .Zone}}hx-get="/web/fragment/eventlog-rows?zone={{.Zone}}"{{else}}hx-get="/web/fragment/eventlog-rows"{{end}}
+  {{if .Zone}}hx-get="/web/fragment/eventlog-rows?zone={{zoneQuery .Zone}}"{{else}}hx-get="/web/fragment/eventlog-rows"{{end}}
   hx-trigger="every 15s"
   hx-swap="innerHTML">
   {{template "eventlog-rows-inner" .}}
 </div>
-{{end}}
+{{template "layout-foot" .}}{{end}}

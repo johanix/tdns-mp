@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -58,28 +59,46 @@ type WebData struct {
 	Zones        []AuditZoneSummary
 	ZoneDetail   *AuditZoneSummary
 	Providers    []AuditProviderSummary
+	Auditors     []AuditProviderSummary
 	Events       []AuditEvent
 	Observations []AuditObservation
 	Gossip       []GossipMatrixDTO
+	MPView       *ZoneMPViewDTO
+}
+
+func formatAgo(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t)
+	switch {
+	case d < 2*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
 }
 
 func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*auditorWebServer, error) {
 	fm := template.FuncMap{
 		"ago": func(t time.Time) string {
-			if t.IsZero() {
-				return "never"
+			return formatAgo(t)
+		},
+		"lastBeatDisplay": func(s AuditProviderSummary) string {
+			if s.Local && s.LastBeat.IsZero() {
+				return "this host"
 			}
-			d := time.Since(t)
-			switch {
-			case d < 2*time.Second:
-				return "just now"
-			case d < time.Minute:
-				return fmt.Sprintf("%ds ago", int(d.Seconds()))
-			case d < time.Hour:
-				return fmt.Sprintf("%dm ago", int(d.Minutes()))
-			default:
-				return fmt.Sprintf("%dh ago", int(d.Hours()))
+			return formatAgo(s.LastBeat)
+		},
+		"memberLastBeat": func(m ZoneMemberRoleDTO) string {
+			if m.Local && m.LastBeat.IsZero() {
+				return "this host"
 			}
+			return formatAgo(m.LastBeat)
 		},
 		"fmtTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -98,6 +117,38 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 			}
 		},
 		"lower": strings.ToLower,
+		"zonePath": func(z string) string {
+			return url.PathEscape(z)
+		},
+		"zoneQuery": func(z string) string {
+			return url.QueryEscape(z)
+		},
+		"joinLabels": func(labels []string) string {
+			if len(labels) == 0 {
+				return "(none)"
+			}
+			return strings.Join(labels, ", ")
+		},
+		"hasRole": func(b bool) string {
+			if b {
+				return "yes"
+			}
+			return ""
+		},
+		"shortLabel": func(id string) string {
+			id = strings.TrimSuffix(id, ".")
+			parts := strings.Split(id, ".")
+			if len(parts) >= 2 && parts[0] == "agent" {
+				return parts[1]
+			}
+			if len(parts) >= 2 && parts[0] == "auditor" {
+				return parts[1]
+			}
+			if len(parts) > 0 {
+				return parts[len(parts)-1]
+			}
+			return id
+		},
 	}
 	tmpl, err := template.New("").Funcs(fm).ParseFS(
 		webTemplateFS,
@@ -110,10 +161,16 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 	return &auditorWebServer{tmpl: tmpl, conf: conf, auth: auth, secure: secure}, nil
 }
 
+func setNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+}
+
 func (s *auditorWebServer) render(w http.ResponseWriter, name string, data *WebData) {
 	if data.Now.IsZero() {
 		data.Now = time.Now()
 	}
+	setNoStore(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
 		lgAuditor.Error("web template render error", "template", name, "err", err)
@@ -122,18 +179,32 @@ func (s *auditorWebServer) render(w http.ResponseWriter, name string, data *WebD
 }
 
 // requireAuth wraps a handler with session-cookie verification. On
-// missing/expired session, redirects to /web/login.
+// missing/expired session, redirects to /web/login. HTMX requests get
+// 401 + HX-Redirect so the client does not swap login HTML into a fragment.
 func (s *auditorWebServer) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.auth == nil {
+			next(w, r)
+			return
+		}
+		deny := func() {
+			ClearSessionCookie(w, s.secure)
+			setNoStore(w)
+			if r.Header.Get("HX-Request") != "" {
+				w.Header().Set("HX-Redirect", "/web/login")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			http.Redirect(w, r, "/web/login", http.StatusSeeOther)
+		}
 		c, err := r.Cookie(sessionCookieName)
 		if err != nil || c.Value == "" {
-			http.Redirect(w, r, "/web/login", http.StatusSeeOther)
+			deny()
 			return
 		}
 		sess := s.auth.LookupAndBump(c.Value)
 		if sess == nil {
-			ClearSessionCookie(w, s.secure)
-			http.Redirect(w, r, "/web/login", http.StatusSeeOther)
+			deny()
 			return
 		}
 		// Refresh cookie expiry.
@@ -191,16 +262,25 @@ func (s *auditorWebServer) handleLogout(w http.ResponseWriter, r *http.Request) 
 // --- Pages ---
 
 func (s *auditorWebServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/web/" && r.URL.Path != "/web" {
-		http.NotFound(w, r)
-		return
-	}
 	data := s.buildDashboardData(r)
 	s.render(w, "dashboard.html", data)
 }
 
+func (s *auditorWebServer) handleZoneByQuery(w http.ResponseWriter, r *http.Request) {
+	zone := r.URL.Query().Get("zone")
+	if zone == "" {
+		http.Redirect(w, r, "/web/", http.StatusSeeOther)
+		return
+	}
+	data := s.buildZoneDetailData(r, zone)
+	s.render(w, "zone_detail.html", data)
+}
+
 func (s *auditorWebServer) handleZoneDetail(w http.ResponseWriter, r *http.Request) {
 	zone := strings.TrimPrefix(r.URL.Path, "/web/zone/")
+	if u, err := url.PathUnescape(zone); err == nil {
+		zone = u
+	}
 	if zone == "" {
 		http.Redirect(w, r, "/web/", http.StatusSeeOther)
 		return
@@ -218,6 +298,24 @@ func (s *auditorWebServer) handleEventLog(w http.ResponseWriter, r *http.Request
 func (s *auditorWebServer) handleProviders(w http.ResponseWriter, r *http.Request) {
 	data := s.buildProvidersData(r)
 	s.render(w, "providers.html", data)
+}
+
+func (s *auditorWebServer) handleAuditors(w http.ResponseWriter, r *http.Request) {
+	data := s.buildAuditorsData(r)
+	s.render(w, "auditors.html", data)
+}
+
+func (s *auditorWebServer) buildAuditorsData(r *http.Request) *WebData {
+	d := s.baseWebData(r, "Auditors")
+	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
+		d.Auditors = s.finishAuditorSummaries("", sm.SnapshotAllAuditors())
+	}
+	return d
+}
+
+func (s *auditorWebServer) finishAuditorSummaries(zone string, auditors []AuditProviderSummary) []AuditProviderSummary {
+	enrichLocalAuditorGossip(s.conf.InternalMp.AgentRegistry, zone, auditors)
+	return auditors
 }
 
 func (s *auditorWebServer) handleObservations(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +344,7 @@ func (s *auditorWebServer) fragmentProviderDetail(w http.ResponseWriter, r *http
 	sm := s.conf.InternalMp.AuditStateManager
 	if sm != nil && zone != "" && provider != "" {
 		if zs := sm.GetZone(zone); zs != nil {
-			summary := zs.Snapshot()
+			summary := zs.Snapshot(sm.LocalIdentity)
 			for _, p := range summary.Providers {
 				if p.Identity == provider {
 					data.Providers = []AuditProviderSummary{p}
@@ -271,38 +369,66 @@ func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *htt
 }
 
 func (s *auditorWebServer) fragmentGossipMatrix(w http.ResponseWriter, r *http.Request) {
+	zone := r.URL.Query().Get("zone")
 	data := s.buildGossipData(r)
+	if zone != "" {
+		data.Gossip = SnapshotGossipForZone(s.conf.InternalMp.AgentRegistry, zone)
+	}
 	s.render(w, "gossip-matrix-inner", data)
 }
 
 // --- Adapter functions: state → WebData (DTOs) ---
 
-func (s *auditorWebServer) buildDashboardData(r *http.Request) *WebData {
-	d := &WebData{Title: "Auditor Dashboard", User: userFromCtx(r)}
-	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
-		d.Zones = sm.SnapshotAllZones()
+func (s *auditorWebServer) baseWebData(r *http.Request, title string) *WebData {
+	return &WebData{
+		Title: title,
+		User:  userFromCtx(r),
+		Zones: SnapshotDashboardZones(s.conf.InternalMp.AgentRegistry, s.conf.InternalMp.AuditStateManager),
 	}
-	return d
+}
+
+func (s *auditorWebServer) buildDashboardData(r *http.Request) *WebData {
+	return s.baseWebData(r, "Auditor Dashboard")
 }
 
 func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *WebData {
-	d := &WebData{
-		Title: "Zone: " + zone,
-		User:  userFromCtx(r),
-		Zone:  zone,
+	d := s.baseWebData(r, "Zone: "+zone)
+	d.Zone = zone
+	sm := s.conf.InternalMp.AuditStateManager
+	ar := s.conf.InternalMp.AgentRegistry
+	local := ""
+	if sm != nil {
+		local = sm.LocalIdentity
 	}
-	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
+	d.MPView = SnapshotZoneMPView(zone, sm, ar, local)
+	d.Gossip = SnapshotGossipForZone(ar, zone)
+	if sm != nil {
 		if zs := sm.GetZone(zone); zs != nil {
-			snap := zs.Snapshot()
+			snap := zs.Snapshot(local)
 			d.ZoneDetail = &snap
 			d.Providers = snap.Providers
+			d.Auditors = s.finishAuditorSummaries(zone, snap.Auditors)
+		} else if d.MPView != nil {
+			d.ZoneDetail = &AuditZoneSummary{
+				Zone:         zone,
+				AuditorCount:  len(d.MPView.Auditors),
+				Servers:       d.MPView.Servers,
+				Signers:       d.MPView.Signers,
+				AuditorLabels: d.MPView.Auditors,
+				NSmgmt:       d.MPView.NSmgmt,
+				ParentSync:   d.MPView.ParentSync,
+			}
+			d.Auditors = DeclaredAuditorIdentities(zone)
+			markLocalAuditors(local, d.Auditors)
+			d.Auditors = s.finishAuditorSummaries(zone, d.Auditors)
 		}
 	}
 	return d
 }
 
 func (s *auditorWebServer) buildEventLogData(r *http.Request, zone string, limit int) *WebData {
-	d := &WebData{Title: "Event Log", User: userFromCtx(r), Zone: zone}
+	d := s.baseWebData(r, "Event Log")
+	d.Zone = zone
 	if kdb := s.conf.Config.Internal.KeyDB; kdb != nil {
 		var since time.Time
 		if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
@@ -321,7 +447,7 @@ func (s *auditorWebServer) buildEventLogData(r *http.Request, zone string, limit
 }
 
 func (s *auditorWebServer) buildProvidersData(r *http.Request) *WebData {
-	d := &WebData{Title: "Providers", User: userFromCtx(r)}
+	d := s.baseWebData(r, "Providers")
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
 		d.Providers = sm.SnapshotAllProviders()
 	}
@@ -329,7 +455,8 @@ func (s *auditorWebServer) buildProvidersData(r *http.Request) *WebData {
 }
 
 func (s *auditorWebServer) buildObservationsData(r *http.Request, zone string) *WebData {
-	d := &WebData{Title: "Observations", User: userFromCtx(r), Zone: zone}
+	d := s.baseWebData(r, "Observations")
+	d.Zone = zone
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
 		d.Observations = sm.SnapshotAllObservations(zone)
 	}
@@ -337,7 +464,7 @@ func (s *auditorWebServer) buildObservationsData(r *http.Request, zone string) *
 }
 
 func (s *auditorWebServer) buildGossipData(r *http.Request) *WebData {
-	d := &WebData{Title: "Gossip", User: userFromCtx(r)}
+	d := s.baseWebData(r, "Gossip")
 	d.Gossip = SnapshotGossip(s.conf.InternalMp.AgentRegistry)
 	return d
 }
@@ -346,16 +473,10 @@ func (s *auditorWebServer) buildGossipData(r *http.Request) *WebData {
 
 func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	type statusResp struct {
-		Status    string   `json:"status"`
-		Zones     []string `json:"zones"`
-		Timestamp string   `json:"timestamp"`
+		Status    string `json:"status"`
+		Timestamp string `json:"timestamp"`
 	}
 	resp := statusResp{Status: "ok", Timestamp: time.Now().Format(time.RFC3339)}
-	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
-		for _, z := range sm.SnapshotAllZones() {
-			resp.Zones = append(resp.Zones, z.Zone)
-		}
-	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -365,9 +486,20 @@ func (s *auditorWebServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 // stay open (static, /login, /logout, /status, root redirect) are
 // always registered raw. Callers choose wrap = s.requireAuth for the
 // authenticated mux, or an identity passthrough for no-auth mode.
-func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+func auditorStaticHandler() http.Handler {
 	staticSub, _ := fs.Sub(webStaticFS, "auditor_web_static")
-	mux.Handle("/web/static/", http.StripPrefix("/web/static/", http.FileServer(http.FS(staticSub))))
+	inner := http.FileServer(http.FS(staticSub))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CSS is embedded in the binary; avoid stale cached tiny-font rules.
+		if strings.HasSuffix(r.URL.Path, ".css") {
+			setNoStore(w)
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+	mux.Handle("/web/static/", http.StripPrefix("/web/static/", auditorStaticHandler()))
 
 	mux.HandleFunc("/web/login", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -382,12 +514,21 @@ func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.Han
 	mux.HandleFunc("/web/logout", s.handleLogout)
 	mux.HandleFunc("/web/status", s.handleStatus) // unauthenticated healthcheck
 
-	mux.HandleFunc("/web/", wrap(s.handleDashboard))
-	mux.HandleFunc("/web/zone/", wrap(s.handleZoneDetail))
+	mux.HandleFunc("/web/gossip", wrap(s.handleGossip))
 	mux.HandleFunc("/web/eventlog", wrap(s.handleEventLog))
 	mux.HandleFunc("/web/providers", wrap(s.handleProviders))
+	mux.HandleFunc("/web/auditors", wrap(s.handleAuditors))
 	mux.HandleFunc("/web/observations", wrap(s.handleObservations))
-	mux.HandleFunc("/web/gossip", wrap(s.handleGossip))
+	mux.HandleFunc("/web/zone", wrap(s.handleZoneByQuery))
+	mux.HandleFunc("/web/zone/", wrap(s.handleZoneDetail))
+	mux.HandleFunc("/web/{$}", wrap(s.handleDashboard))
+	mux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/web" {
+			http.Redirect(w, r, "/web/", http.StatusSeeOther)
+			return
+		}
+		http.NotFound(w, r)
+	})
 
 	mux.HandleFunc("/web/fragment/zone-status", wrap(s.fragmentZoneStatus))
 	mux.HandleFunc("/web/fragment/provider-detail", wrap(s.fragmentProviderDetail))

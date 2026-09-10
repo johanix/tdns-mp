@@ -1,0 +1,30 @@
+{{define "auditors.html"}}{{template "layout-head" .}}
+<h2>Auditors</h2>
+
+{{if not .Auditors}}
+<p><em>No auditors declared in HSYNCPARAM for loaded zones.</em></p>
+{{else}}
+<table role="grid">
+  <thead>
+    <tr>
+      <th>Identity</th>
+      <th>Label</th>
+      <th>Gossip State</th>
+      <th>Last Beat</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Auditors}}
+    <tr{{if .Local}} class="audit-row-local"{{end}}>
+      <td>{{.Identity}}</td>
+      <td>{{.Label}}</td>
+      <td>{{.GossipState}}</td>
+      <td>{{lastBeatDisplay .}}</td>
+      <td>{{if .Local}}<span class="audit-local-badge">this host</span>{{end}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{template "layout-foot" .}}{{end}}

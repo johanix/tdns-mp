@@ -1,5 +1,4 @@
-{{template "layout" .}}
-{{define "content"}}
+{{define "dashboard.html"}}{{template "layout-head" .}}
 <h2>Dashboard</h2>
 
 {{if .Error}}
@@ -9,11 +8,15 @@
 {{if not .Zones}}
 <p><em>No zones are being audited yet.</em></p>
 {{else}}
-<table role="grid">
+<table role="grid" class="audit-dashboard-table">
   <thead>
     <tr>
       <th>Zone</th>
-      <th>Providers</th>
+      <th>Servers</th>
+      <th>Signers</th>
+      <th>Auditors</th>
+      <th>NSmgmt</th>
+      <th>Providers seen</th>
       <th>Serial</th>
       <th>Last Refresh</th>
       <th></th>
@@ -22,13 +25,17 @@
   <tbody>
     {{range .Zones}}
     <tr>
-      <td><a href="/web/zone/{{.Zone}}">{{.Zone}}</a></td>
+      <td><a href="/web/zone?zone={{zoneQuery .Zone}}">{{.Zone}}</a></td>
+      <td><small>{{joinLabels .Servers}}</small></td>
+      <td><small>{{joinLabels .Signers}}</small></td>
+      <td><small>{{joinLabels .AuditorLabels}}</small></td>
+      <td>{{.NSmgmt}}</td>
       <td>{{.ProviderCount}}</td>
       <td>{{.ZoneSerial}}</td>
       <td>{{ago .LastRefresh}}</td>
       <td>
         <div
-          hx-get="/web/fragment/zone-status?zone={{.Zone}}"
+          hx-get="/web/fragment/zone-status?zone={{zoneQuery .Zone}}"
           hx-trigger="every 10s"
           hx-swap="outerHTML"
           class="audit-live">
@@ -48,4 +55,4 @@
   hx-swap="innerHTML">
   <em>Loading&hellip;</em>
 </div>
-{{end}}
+{{template "layout-foot" .}}{{end}}

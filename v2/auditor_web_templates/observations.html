@@ -1,5 +1,4 @@
-{{template "layout" .}}
-{{define "content"}}
+{{define "observations.html"}}{{template "layout-head" .}}
 <h2>Observations</h2>
 
 <form method="GET" action="/web/observations">
@@ -10,9 +9,9 @@
 </form>
 
 <div
-  {{if .Zone}}hx-get="/web/fragment/observation-list?zone={{.Zone}}"{{else}}hx-get="/web/fragment/observation-list"{{end}}
+  {{if .Zone}}hx-get="/web/fragment/observation-list?zone={{zoneQuery .Zone}}"{{else}}hx-get="/web/fragment/observation-list"{{end}}
   hx-trigger="every 20s"
   hx-swap="innerHTML">
   {{template "observation-list-inner" .}}
 </div>
-{{end}}
+{{template "layout-foot" .}}{{end}}

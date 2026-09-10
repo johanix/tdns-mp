@@ -42,6 +42,7 @@ type AuditResponse struct {
 	Events       []AuditEvent           `json:"events,omitempty"`
 	Observations []AuditObservation     `json:"observations,omitempty"`
 	Providers    []AuditProviderSummary `json:"providers,omitempty"`
+	Auditors     []AuditProviderSummary `json:"auditors,omitempty"`
 	Gossip       []GossipMatrixDTO      `json:"gossip,omitempty"`
 	Deleted      int64                  `json:"deleted,omitempty"`
 	UsersFile    string                 `json:"users_file,omitempty"`
@@ -81,7 +82,7 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 			resp := AuditResponse{Status: "ok"}
 			if sm != nil {
 				if zs := sm.GetZone(req.Zone); zs != nil {
-					resp.Zones = []AuditZoneSummary{zs.Snapshot()}
+					resp.Zones = []AuditZoneSummary{zs.Snapshot(sm.LocalIdentity)}
 				}
 			}
 			writeAuditJSON(w, resp)
@@ -97,6 +98,13 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 			resp := AuditResponse{Status: "ok"}
 			if sm != nil {
 				resp.Providers = sm.SnapshotAllProviders()
+			}
+			writeAuditJSON(w, resp)
+
+		case "auditors":
+			resp := AuditResponse{Status: "ok"}
+			if sm != nil {
+				resp.Auditors = sm.SnapshotAllAuditors()
 			}
 			writeAuditJSON(w, resp)
 

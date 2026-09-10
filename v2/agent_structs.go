@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -114,21 +115,47 @@ func (a *Agent) IsAnyTransportOperational() bool {
 	return false
 }
 
+func agentTransportParticipating(state AgentState) bool {
+	return state >= AgentStateKnown
+}
+
+// agentStatePriority ranks a transport's state for EffectiveState: a
+// transport that carries traffic outranks one still being introduced,
+// whatever the enum order says. 0 means the state does not count.
+func agentStatePriority(s AgentState) int {
+	switch s {
+	case AgentStateOperational:
+		return 6
+	case AgentStateLegacy:
+		return 5
+	case AgentStateDegraded:
+		return 4
+	case AgentStateInterrupted:
+		return 3
+	case AgentStateIntroduced:
+		return 2
+	case AgentStateKnown:
+		return 1
+	}
+	return 0
+}
+
 func (a *Agent) EffectiveState() AgentState {
-	// Return the best active transport state. OPERATIONAL is best,
-	// followed by LEGACY, DEGRADED, INTERRUPTED. If neither transport
-	// has reached an active state, fall back to a.State.
+	a.Mu.RLock()
+	defer a.Mu.RUnlock()
 	best := AgentState(0)
-	for _, s := range []AgentState{
-		a.apiState(), a.dnsState(),
-	} {
-		switch s {
-		case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
-			if best == 0 || s < best {
-				best = s // lower numeric = better (OPERATIONAL < DEGRADED)
-			}
+	bestPriority := 0
+	consider := func(enabled bool, details *AgentDetails) {
+		if !enabled || details == nil || !agentTransportParticipating(details.State) {
+			return
+		}
+		if p := agentStatePriority(details.State); p > bestPriority {
+			bestPriority = p
+			best = details.State
 		}
 	}
+	consider(a.ApiMethod, a.ApiDetails)
+	consider(a.DnsMethod, a.DnsDetails)
 	if best != 0 {
 		return best
 	}
@@ -265,6 +292,7 @@ type AgentRegistry struct {
 	LeaderElectionManager *LeaderElectionManager
 	ProviderGroupManager  *ProviderGroupManager
 	GossipStateTable      *GossipStateTable
+	HsyncEngine           *hsync.Engine
 }
 
 type AgentBeatPost struct {

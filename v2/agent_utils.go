@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -395,16 +396,14 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				ar.S.Set(remoteid, agent)
 				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
 
-				if ar.TransportManager != nil {
-					// Bite 8: prefer the OnPeerDiscovered seam on TM if
-					// registered (production path); fall back to the direct
-					// bridge call for setups that don't go through
-					// NewMPTransportBridge (some test fixtures).
-					if ar.TransportManager.OnPeerDiscovered != nil {
-						ar.TransportManager.OnPeerDiscovered(agent.PeerID)
-					} else {
-						ar.MPTransport.OnAgentDiscoveryComplete(agent)
-					}
+				if ar.TransportManager != nil && ar.TransportManager.OnPeerDiscovered != nil {
+					// Bite E: invocation site resolves the peer; the
+					// callback receives a non-nil *Peer. Use
+					// GetOrCreate because discovery completion is
+					// typically the first time a peer materialises
+					// for this agent.
+					peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+					ar.TransportManager.OnPeerDiscovered(peer)
 				}
 
 				// If we're in known state and have a zone, try to send hello
@@ -502,6 +501,18 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 // The agent will be discovered asynchronously by DiscoveryRetrierNG in HsyncEngine.
 // This is the new recommended pattern for agent discovery triggered by HSYNC updates.
 func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
+	if ar.HsyncEngine != nil {
+		var task *hsync.DeferredTask
+		if deferredTask != nil {
+			task = &hsync.DeferredTask{
+				Precondition: deferredTask.Precondition,
+				Action:       deferredTask.Action,
+				Desc:         deferredTask.Desc,
+			}
+		}
+		ar.HsyncEngine.MarkNeeded(hsync.PeerID(remoteid), hsync.ZoneName(zonename), task)
+		return
+	}
 	// Skip self-identification
 	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
 		lgAgent.Debug("skipping self-identification", "agent", remoteid)
@@ -609,6 +620,7 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 		} else {
 			lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found", "failures", failures)
 		}
+		ar.fireOnDiscoveryFailed(agent, fmt.Errorf("no contact endpoints found (failures=%d)", failures))
 		return
 	}
 
@@ -621,6 +633,7 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 			agent.ApiDetails.LatestErrorTime = time.Now()
 			agent.Mu.Unlock()
 			lgAgent.Warn("registration failed, will retry", "agent", agent.Identity, "err", err)
+			ar.fireOnDiscoveryFailed(agent, fmt.Errorf("registration failed: %w", err))
 			return
 		}
 	}
@@ -667,6 +680,22 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	ar.mu.Unlock()
 	go ar.HelloRetrierNG(helloCtx, agent)
 	lgAgent.Debug("started Hello retry loop", "agent", agent.Identity)
+}
+
+// fireOnDiscoveryFailed invokes the TransportManager's
+// OnDiscoveryFailed seam if registered. Resolves the peer via
+// PeerRegistry.GetOrCreate (the peer typically does not exist yet
+// when discovery is failing) and passes a non-nil *Peer plus the
+// terminating error for this round. The discovery loop continues
+// to retry on the next tick — the callback is per-round, not
+// terminal. See Bite D in
+// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+func (ar *AgentRegistry) fireOnDiscoveryFailed(agent *Agent, err error) {
+	if ar.TransportManager == nil || ar.TransportManager.OnDiscoveryFailed == nil {
+		return
+	}
+	peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+	ar.TransportManager.OnDiscoveryFailed(peer, err)
 }
 
 // DiscoverAgentAsync marks an agent as NEEDED for discovery by DiscoveryRetrierNG.
