@@ -23,100 +23,128 @@ import (
 
 var force bool
 
-var combinerZoneCmd = &cobra.Command{
-	Use:   "zone",
-	Short: "Combiner zone management commands",
+func newCombinerZoneCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "zone",
+		Short: "Combiner zone management commands",
+	}
+	c.AddCommand(newCombinerZoneListCmd(kind), newCombinerZoneMPListCmd(kind))
+	c.AddCommand(newCombinerZoneBumpCmd(kind))
+	c.AddCommand(newCombinerZoneReloadCmd(kind))
+	c.AddCommand(newCombinerZoneEditsCmd(kind))
+	c.PersistentFlags().BoolVarP(&force, "force", "F", false, "Force operation")
+	return c
 }
 
-var combinerZoneListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List configured zones",
-	Run: func(cmd *cobra.Command, args []string) {
-		// combinerZoneCmd is only attached under CombinerCmd → role "combiner".
-		api, err := tdnscli.GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+func newCombinerZoneListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List configured zones",
+		Run: func(cmd *cobra.Command, args []string) {
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
+			cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
+				Command: "list-zones",
+			})
+			if err != nil {
+				fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+				log.Fatalf("Error: %v", err)
+			}
 
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
+			if cr.Msg != "" {
+				fmt.Printf("%s\n", cr.Msg)
+			}
 
-		switch tdns.Globals.Verbose {
-		case true:
-			tdnscli.VerboseListZone(cr)
-		case false:
-			tdnscli.ListZones(cr)
-		}
-	},
+			switch tdns.Globals.Verbose {
+			case true:
+				tdnscli.VerboseListZone(cr)
+			case false:
+				tdnscli.ListZones(cr)
+			}
+		},
+	}
+	return c
 }
 
-var combinerZoneMPListCmd = &cobra.Command{
-	Use:   "mplist",
-	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run: func(cmd *cobra.Command, args []string) {
-		// combinerZoneCmd is only attached under CombinerCmd → role "combiner".
-		api, err := tdnscli.GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+func newCombinerZoneMPListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "mplist",
+		Short: "List multi-provider zones with HSYNCPARAM details",
+		Run: func(cmd *cobra.Command, args []string) {
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		resp, err := SendMPListCommand(api)
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendMPListCommand(api)
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				log.Fatalf("Error: %v", err)
+			}
 
-		ListMPZones(resp)
-	},
+			ListMPZones(resp)
+		},
+	}
+	return c
 }
 
-var combinerZoneEditsCmd = &cobra.Command{
-	Use:   "edits",
-	Short: "Manage pending, approved and rejected edits",
+func newCombinerZoneEditsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "edits",
+		Short: "Manage pending, approved and rejected edits",
+	}
+	c.AddCommand(newCombinerZoneEditsListCmd(kind))
+	c.AddCommand(newCombinerZoneEditsApproveCmd(kind))
+	c.AddCommand(newCombinerZoneEditsRejectCmd(kind))
+	c.AddCommand(newCombinerZoneEditsClearCmd(kind))
+	c.AddCommand(newCombinerZoneEditsReapplyCmd(kind))
+	c.AddCommand(newCombinerZoneEditsPurgeCmd(kind))
+	return c
 }
 
-var combinerZoneEditsListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List edits for a zone (default: current contributions; use --pending/--approved/--rejected)",
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		if zone == "" {
-			log.Fatalf("--zone is required")
-		}
+func newCombinerZoneEditsListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List edits for a zone (default: current contributions; use --pending/--approved/--rejected)",
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			if zone == "" {
+				log.Fatalf("--zone is required")
+			}
 
-		showPending, _ := cmd.Flags().GetBool("pending")
-		showApproved, _ := cmd.Flags().GetBool("approved")
-		showRejected, _ := cmd.Flags().GetBool("rejected")
+			showPending, _ := cmd.Flags().GetBool("pending")
+			showApproved, _ := cmd.Flags().GetBool("approved")
+			showRejected, _ := cmd.Flags().GetBool("rejected")
 
-		// Default to current contributions if no flag specified
-		if !showPending && !showApproved && !showRejected {
-			listCurrentContributions(zone)
-			return
-		}
+			// Default to current contributions if no flag specified
+			if !showPending && !showApproved && !showRejected {
+				listCurrentContributions(cmd, zone)
+				return
+			}
 
-		if showPending {
-			listPendingEdits(zone)
-		}
-		if showApproved {
-			listApprovedEdits(zone)
-		}
-		if showRejected {
-			listRejectedEdits(zone)
-		}
-	},
+			if showPending {
+				listPendingEdits(cmd, zone)
+			}
+			if showApproved {
+				listApprovedEdits(cmd, zone)
+			}
+			if showRejected {
+				listRejectedEdits(cmd, zone)
+			}
+		},
+	}
+	c.Flags().String("zone", "", "Zone to list edits for")
+	c.Flags().Bool("pending", false, "Show pending edits")
+	c.Flags().Bool("approved", false, "Show approved edits (transaction history)")
+	c.Flags().Bool("rejected", false, "Show rejected edits")
+	return c
 }
 
-func listCurrentContributions(zone string) {
-	resp, err := SendCombinerEditCmd(CombinerEditPost{
+func listCurrentContributions(cmd *cobra.Command, zone string) {
+	resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
 		Command: "list-current",
 		Zone:    zone,
 	})
@@ -168,8 +196,8 @@ func listCurrentContributions(zone string) {
 	fmt.Println()
 }
 
-func listPendingEdits(zone string) {
-	resp, err := SendCombinerEditCmd(CombinerEditPost{
+func listPendingEdits(cmd *cobra.Command, zone string) {
+	resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
 		Command: "list",
 		Zone:    zone,
 	})
@@ -200,8 +228,8 @@ func listPendingEdits(zone string) {
 	}
 }
 
-func listApprovedEdits(zone string) {
-	resp, err := SendCombinerEditCmd(CombinerEditPost{
+func listApprovedEdits(cmd *cobra.Command, zone string) {
+	resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
 		Command: "list-approved",
 		Zone:    zone,
 	})
@@ -232,8 +260,8 @@ func listApprovedEdits(zone string) {
 	}
 }
 
-func listRejectedEdits(zone string) {
-	resp, err := SendCombinerEditCmd(CombinerEditPost{
+func listRejectedEdits(cmd *cobra.Command, zone string) {
+	resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
 		Command: "list-rejected",
 		Zone:    zone,
 	})
@@ -265,106 +293,125 @@ func listRejectedEdits(zone string) {
 	}
 }
 
-var combinerZoneEditsApproveCmd = &cobra.Command{
-	Use:   "approve",
-	Short: "Approve a pending edit",
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		editID, _ := cmd.Flags().GetInt("edit")
+func newCombinerZoneEditsApproveCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "approve",
+		Short: "Approve a pending edit",
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			editID, _ := cmd.Flags().GetInt("edit")
 
-		if zone == "" {
-			log.Fatalf("--zone is required")
-		}
-		if editID <= 0 {
-			log.Fatalf("--edit is required (positive integer)")
-		}
+			if zone == "" {
+				log.Fatalf("--zone is required")
+			}
+			if editID <= 0 {
+				log.Fatalf("--edit is required (positive integer)")
+			}
 
-		resp, err := SendCombinerEditCmd(CombinerEditPost{
-			Command: "approve",
-			Zone:    zone,
-			EditID:  editID,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
+				Command: "approve",
+				Zone:    zone,
+				EditID:  editID,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		fmt.Println(resp.Msg)
-	},
+			fmt.Println(resp.Msg)
+		},
+	}
+	c.Flags().String("zone", "", "Zone the edit belongs to")
+	c.Flags().Int("edit", 0, "Edit ID to approve")
+	return c
 }
 
-var combinerZoneEditsRejectCmd = &cobra.Command{
-	Use:   "reject",
-	Short: "Reject a pending edit",
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		editID, _ := cmd.Flags().GetInt("edit")
-		reason, _ := cmd.Flags().GetString("reason")
+func newCombinerZoneEditsRejectCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "reject",
+		Short: "Reject a pending edit",
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			editID, _ := cmd.Flags().GetInt("edit")
+			reason, _ := cmd.Flags().GetString("reason")
 
-		if zone == "" {
-			log.Fatalf("--zone is required")
-		}
-		if editID <= 0 {
-			log.Fatalf("--edit is required (positive integer)")
-		}
-		if strings.TrimSpace(reason) == "" {
-			log.Fatalf("--reason is required for rejection")
-		}
+			if zone == "" {
+				log.Fatalf("--zone is required")
+			}
+			if editID <= 0 {
+				log.Fatalf("--edit is required (positive integer)")
+			}
+			if strings.TrimSpace(reason) == "" {
+				log.Fatalf("--reason is required for rejection")
+			}
 
-		resp, err := SendCombinerEditCmd(CombinerEditPost{
-			Command: "reject",
-			Zone:    zone,
-			EditID:  editID,
-			Reason:  reason,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
+				Command: "reject",
+				Zone:    zone,
+				EditID:  editID,
+				Reason:  reason,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		fmt.Println(resp.Msg)
-	},
+			fmt.Println(resp.Msg)
+		},
+	}
+	c.Flags().String("zone", "", "Zone the edit belongs to")
+	c.Flags().Int("edit", 0, "Edit ID to reject")
+	c.Flags().String("reason", "", "Reason for rejection (required)")
+	return c
 }
 
-var combinerZoneEditsClearCmd = &cobra.Command{
-	Use:   "clear",
-	Short: "Clear edit tables (default: all; use --pending/--approved/--rejected/--current to select)",
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		showPending, _ := cmd.Flags().GetBool("pending")
-		showApproved, _ := cmd.Flags().GetBool("approved")
-		showRejected, _ := cmd.Flags().GetBool("rejected")
-		showCurrent, _ := cmd.Flags().GetBool("current")
+func newCombinerZoneEditsClearCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear edit tables (default: all; use --pending/--approved/--rejected/--current to select)",
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			showPending, _ := cmd.Flags().GetBool("pending")
+			showApproved, _ := cmd.Flags().GetBool("approved")
+			showRejected, _ := cmd.Flags().GetBool("rejected")
+			showCurrent, _ := cmd.Flags().GetBool("current")
 
-		var tables []string
-		if showPending {
-			tables = append(tables, "pending")
-		}
-		if showApproved {
-			tables = append(tables, "approved")
-		}
-		if showRejected {
-			tables = append(tables, "rejected")
-		}
-		if showCurrent {
-			tables = append(tables, "current")
-		}
-		// Empty tables list means "all"
+			var tables []string
+			if showPending {
+				tables = append(tables, "pending")
+			}
+			if showApproved {
+				tables = append(tables, "approved")
+			}
+			if showRejected {
+				tables = append(tables, "rejected")
+			}
+			if showCurrent {
+				tables = append(tables, "current")
+			}
+			// Empty tables list means "all"
 
-		resp, err := SendCombinerEditCmd(CombinerEditPost{
-			Command: "clear",
-			Zone:    zone,
-			Tables:  tables,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
+				Command: "clear",
+				Zone:    zone,
+				Tables:  tables,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		fmt.Println(resp.Msg)
-	},
+			fmt.Println(resp.Msg)
+		},
+	}
+	c.Flags().String("zone", "", "Scope to zone (default: all zones)")
+	c.Flags().Bool("pending", false, "Clear pending edits")
+	c.Flags().Bool("approved", false, "Clear approved edits")
+	c.Flags().Bool("rejected", false, "Clear rejected edits")
+	c.Flags().Bool("current", false, "Clear current contributions")
+	return c
 }
 
 // SendCombinerEditCmd sends a combiner edit management request to the combiner API.
-func SendCombinerEditCmd(req CombinerEditPost) (*CombinerEditResponse, error) {
-	api, err := tdnscli.GetApiClient("combiner", true)
+func SendCombinerEditCmd(cmd *cobra.Command, req CombinerEditPost) (*CombinerEditResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
@@ -396,31 +443,36 @@ func SendCombinerEditCmd(req CombinerEditPost) (*CombinerEditResponse, error) {
 	return &resp, nil
 }
 
-var combinerZoneEditsReapplyCmd = &cobra.Command{
-	Use:   "reapply",
-	Short: "Reload contributions from DB and re-apply to zone data",
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		if zone == "" {
-			log.Fatalf("--zone is required")
-		}
+func newCombinerZoneEditsReapplyCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "reapply",
+		Short: "Reload contributions from DB and re-apply to zone data",
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			if zone == "" {
+				log.Fatalf("--zone is required")
+			}
 
-		resp, err := SendCombinerEditCmd(CombinerEditPost{
-			Command: "reapply",
-			Zone:    zone,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
+				Command: "reapply",
+				Zone:    zone,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		fmt.Println(resp.Msg)
-	},
+			fmt.Println(resp.Msg)
+		},
+	}
+	c.Flags().String("zone", "", "Zone to reapply contributions for (required)")
+	return c
 }
 
-var combinerZoneEditsPurgeCmd = &cobra.Command{
-	Use:   "purge",
-	Short: "Remove all contributions attributed to a specific origin from a zone",
-	Long: `Remove all contributions for a given origin (sender ID) from
+func newCombinerZoneEditsPurgeCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "purge",
+		Short: "Remove all contributions attributed to a specific origin from a zone",
+		Long: `Remove all contributions for a given origin (sender ID) from
 the combiner's view of a zone. Used to clean up ghost or stale
 contributions left over from earlier code versions or
 mis-configured peers — e.g. an entry attributed to a bare
@@ -431,78 +483,88 @@ in-memory AgentContributions map, the persisted
 CombinerContributions DB rows, and the rebuilt CombinerData are
 all updated. CombineWithLocalChanges runs after the rebuild so
 the served zone reflects the change.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		origin, _ := cmd.Flags().GetString("origin")
-		if zone == "" {
-			log.Fatalf("--zone is required")
-		}
-		if origin == "" {
-			log.Fatalf("--origin is required")
-		}
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			origin, _ := cmd.Flags().GetString("origin")
+			if zone == "" {
+				log.Fatalf("--zone is required")
+			}
+			if origin == "" {
+				log.Fatalf("--origin is required")
+			}
 
-		resp, err := SendCombinerEditCmd(CombinerEditPost{
-			Command: "purge",
-			Zone:    zone,
-			Origin:  origin,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerEditCmd(cmd, CombinerEditPost{
+				Command: "purge",
+				Zone:    zone,
+				Origin:  origin,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		fmt.Println(resp.Msg)
-	},
+			fmt.Println(resp.Msg)
+		},
+	}
+	c.Flags().String("zone", "", "Zone to purge contributions from (required)")
+	c.Flags().String("origin", "", "Origin (sender ID) whose contributions to remove (required)")
+	return c
 }
 
-var combinerZoneReloadCmd = &cobra.Command{
-	Use:   "reload",
-	Short: "Request re-loading a zone on the combiner",
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
-		api, err := tdnscli.GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client for combiner: %v", err)
-		}
+func newCombinerZoneReloadCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "reload",
+		Short: "Request re-loading a zone on the combiner",
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client for combiner: %v", err)
+			}
 
-		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-			Command: "reload",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
+			cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
+				Command: "reload",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+				Force:   force,
+			})
+			if err != nil {
+				fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+				log.Fatalf("Error: %v", err)
+			}
 
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
+			if cr.Msg != "" {
+				fmt.Printf("%s\n", cr.Msg)
+			}
+		},
+	}
+	return c
 }
 
-var combinerZoneBumpCmd = &cobra.Command{
-	Use:   "bump",
-	Short: "Bump SOA serial for a zone on the combiner",
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
-		api, err := tdnscli.GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client for combiner: %v", err)
-		}
+func newCombinerZoneBumpCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "bump",
+		Short: "Bump SOA serial for a zone on the combiner",
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client for combiner: %v", err)
+			}
 
-		cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
-			Command: "bump",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
+			cr, err := tdnscli.SendZoneCommand(api, tdns.ZonePost{
+				Command: "bump",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
+			if err != nil {
+				fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+				log.Fatalf("Error: %v", err)
+			}
 
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
+			if cr.Msg != "" {
+				fmt.Printf("%s\n", cr.Msg)
+			}
+		},
+	}
+	return c
 }
 
 // truncateDNSKEY truncates DNSKEY public key material in an RR string for display.
@@ -521,50 +583,4 @@ func truncateDNSKEY(rrStr string) string {
 	}
 	return fmt.Sprintf("%s %d IN DNSKEY %d %d %d %s",
 		dnskey.Hdr.Name, dnskey.Hdr.Ttl, dnskey.Flags, dnskey.Protocol, dnskey.Algorithm, pub)
-}
-
-func init() {
-	CombinerCmd.AddCommand(combinerZoneCmd)
-	combinerZoneCmd.AddCommand(combinerZoneListCmd, combinerZoneMPListCmd)
-	combinerZoneCmd.AddCommand(combinerZoneBumpCmd)
-	combinerZoneCmd.AddCommand(combinerZoneReloadCmd)
-	combinerZoneCmd.AddCommand(combinerZoneEditsCmd)
-
-	combinerZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "Force operation")
-
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsListCmd)
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsApproveCmd)
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsRejectCmd)
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsClearCmd)
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsReapplyCmd)
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsPurgeCmd)
-
-	// Flags for reapply
-	combinerZoneEditsReapplyCmd.Flags().String("zone", "", "Zone to reapply contributions for (required)")
-
-	// Flags for purge
-	combinerZoneEditsPurgeCmd.Flags().String("zone", "", "Zone to purge contributions from (required)")
-	combinerZoneEditsPurgeCmd.Flags().String("origin", "", "Origin (sender ID) whose contributions to remove (required)")
-
-	// Flags for list
-	combinerZoneEditsListCmd.Flags().String("zone", "", "Zone to list edits for")
-	combinerZoneEditsListCmd.Flags().Bool("pending", false, "Show pending edits")
-	combinerZoneEditsListCmd.Flags().Bool("approved", false, "Show approved edits (transaction history)")
-	combinerZoneEditsListCmd.Flags().Bool("rejected", false, "Show rejected edits")
-
-	// Flags for clear
-	combinerZoneEditsClearCmd.Flags().String("zone", "", "Scope to zone (default: all zones)")
-	combinerZoneEditsClearCmd.Flags().Bool("pending", false, "Clear pending edits")
-	combinerZoneEditsClearCmd.Flags().Bool("approved", false, "Clear approved edits")
-	combinerZoneEditsClearCmd.Flags().Bool("rejected", false, "Clear rejected edits")
-	combinerZoneEditsClearCmd.Flags().Bool("current", false, "Clear current contributions")
-
-	// Flags for approve
-	combinerZoneEditsApproveCmd.Flags().String("zone", "", "Zone the edit belongs to")
-	combinerZoneEditsApproveCmd.Flags().Int("edit", 0, "Edit ID to approve")
-
-	// Flags for reject
-	combinerZoneEditsRejectCmd.Flags().String("zone", "", "Zone the edit belongs to")
-	combinerZoneEditsRejectCmd.Flags().Int("edit", 0, "Edit ID to reject")
-	combinerZoneEditsRejectCmd.Flags().String("reason", "", "Reason for rejection (required)")
 }

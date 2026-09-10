@@ -13,80 +13,109 @@ import (
 
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
-
-	tdnscli "github.com/johanix/tdns/v2/cli"
 )
 
-var AgentTransactionCmd = &cobra.Command{
-	Use:   "transaction",
-	Short: "Transaction diagnostics",
-	Long:  `Commands for diagnosing open transactions, pending confirmations, and errors.`,
+func newAgentTransactionCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "transaction",
+		Short: "Transaction diagnostics",
+		Long:  `Commands for diagnosing open transactions, pending confirmations, and errors.`,
+	}
+	c.AddCommand(newAgentTransactionOpenCmd(kind), newAgentTransactionErrorsCmd(kind))
+	return c
 }
 
-var CombinerTransactionCmd = &cobra.Command{
-	Use:   "transaction",
-	Short: "Transaction diagnostics",
-	Long:  `Commands for diagnosing transaction errors on the combiner.`,
+func newCombinerTransactionCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "transaction",
+		Short: "Transaction diagnostics",
+		Long:  `Commands for diagnosing transaction errors on the combiner.`,
+	}
+	c.AddCommand(newCombinerTransactionErrorsCmd(kind))
+	return c
 }
 
 // --- Agent commands ---
 
-var agentTransactionOpenCmd = &cobra.Command{
-	Use:   "open",
-	Short: "Show open transactions",
-	Long:  `Show transactions that have not yet been confirmed.`,
+func newAgentTransactionOpenCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "open",
+		Short: "Show open transactions",
+		Long:  `Show transactions that have not yet been confirmed.`,
+	}
+	c.AddCommand(newAgentTransactionOpenOutgoingCmd(kind), newAgentTransactionOpenIncomingCmd(kind))
+	return c
 }
 
-var agentTransactionOpenOutgoingCmd = &cobra.Command{
-	Use:   "outgoing",
-	Short: "Show open outgoing transactions",
-	Long:  `Show outgoing transactions that have not yet been confirmed by the receiver.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		showOpenTransactions(cmd, "agent", "open-outgoing")
-	},
+func newAgentTransactionOpenOutgoingCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "outgoing",
+		Short: "Show open outgoing transactions",
+		Long:  `Show outgoing transactions that have not yet been confirmed by the receiver.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			showOpenTransactions(cmd, "agent", "open-outgoing")
+		},
+	}
+	return c
 }
 
-var agentTransactionOpenIncomingCmd = &cobra.Command{
-	Use:   "incoming",
-	Short: "Show open incoming transactions (remote syncs awaiting combiner)",
-	Long:  `Show incoming remote syncs that have been forwarded to the combiner but not yet confirmed.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		showOpenTransactions(cmd, "agent", "open-incoming")
-	},
+func newAgentTransactionOpenIncomingCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "incoming",
+		Short: "Show open incoming transactions (remote syncs awaiting combiner)",
+		Long:  `Show incoming remote syncs that have been forwarded to the combiner but not yet confirmed.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			showOpenTransactions(cmd, "agent", "open-incoming")
+		},
+	}
+	return c
 }
 
-var agentTransactionErrorsCmd = &cobra.Command{
-	Use:   "errors",
-	Short: "Show recent transaction errors (combiner only)",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Error journal is only available on the combiner. Use 'combiner transaction errors' instead.")
-	},
+func newAgentTransactionErrorsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "errors",
+		Short: "Show recent transaction errors (combiner only)",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Error journal is only available on the combiner. Use 'combiner transaction errors' instead.")
+		},
+	}
+	return c
 }
 
 // --- Combiner commands ---
 
-var combinerTransactionErrorsCmd = &cobra.Command{
-	Use:   "errors",
-	Short: "Show recent transaction errors",
-	Long:  `Show errors from recent CHUNK NOTIFY processing. Use --last to filter by time window (default: 30m).`,
-	Run: func(cmd *cobra.Command, args []string) {
-		showTransactionErrors(cmd)
-	},
+func newCombinerTransactionErrorsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "errors",
+		Short: "Show recent transaction errors",
+		Long:  `Show errors from recent CHUNK NOTIFY processing. Use --last to filter by time window (default: 30m).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			showTransactionErrors(cmd)
+		},
+	}
+	c.AddCommand(newCombinerTransactionErrorDetailsCmd(kind))
+	c.Flags().String("last", "30m", "Time window for error listing (e.g. 30m, 2h, 1h30m)")
+	return c
 }
 
-var combinerTransactionErrorDetailsCmd = &cobra.Command{
-	Use:   "details",
-	Short: "Show details for a specific transaction error",
-	Long:  `Look up a specific distribution ID in the error journal and show full details.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		showTransactionErrorDetails(cmd)
-	},
+func newCombinerTransactionErrorDetailsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "details",
+		Short: "Show details for a specific transaction error",
+		Long:  `Look up a specific distribution ID in the error journal and show full details.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			showTransactionErrorDetails(cmd)
+		},
+	}
+	c.Flags().String("distid", "", "Distribution ID to look up")
+	c.MarkFlagRequired("distid")
+	return c
 }
 
 // --- Implementation ---
 
 func showOpenTransactions(cmd *cobra.Command, component, command string) {
-	api, err := tdnscli.GetApiClient(component, true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -163,8 +192,7 @@ func showOpenTransactions(cmd *cobra.Command, component, command string) {
 }
 
 func showTransactionErrors(cmd *cobra.Command) {
-	// Only invoked from combinerTransactionErrorsCmd under CombinerTransactionCmd.
-	api, err := tdnscli.GetApiClient("combiner", true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -226,8 +254,7 @@ func showTransactionErrors(cmd *cobra.Command) {
 }
 
 func showTransactionErrorDetails(cmd *cobra.Command) {
-	// Only invoked from combinerTransactionErrorDetailsCmd under CombinerTransactionCmd.
-	api, err := tdnscli.GetApiClient("combiner", true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -272,19 +299,4 @@ func showTransactionErrorDetails(cmd *cobra.Command) {
 	fmt.Printf("  QNAME:           %s CHUNK\n", getStringValue(detail, "qname"))
 	fmt.Printf("  Age:             %s\n", getStringValue(detail, "age"))
 	fmt.Printf("  Timestamp:       %s\n", getStringValue(detail, "timestamp"))
-}
-
-func init() {
-	// Agent transaction commands
-	agentTransactionOpenCmd.AddCommand(agentTransactionOpenOutgoingCmd, agentTransactionOpenIncomingCmd)
-	AgentTransactionCmd.AddCommand(agentTransactionOpenCmd, agentTransactionErrorsCmd)
-
-	// Combiner transaction commands
-	combinerTransactionErrorsCmd.AddCommand(combinerTransactionErrorDetailsCmd)
-	CombinerTransactionCmd.AddCommand(combinerTransactionErrorsCmd)
-
-	// Flags
-	combinerTransactionErrorsCmd.Flags().String("last", "30m", "Time window for error listing (e.g. 30m, 2h, 1h30m)")
-	combinerTransactionErrorDetailsCmd.Flags().String("distid", "", "Distribution ID to look up")
-	combinerTransactionErrorDetailsCmd.MarkFlagRequired("distid")
 }

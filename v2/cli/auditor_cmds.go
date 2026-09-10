@@ -16,124 +16,141 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
-
-	tdnscli "github.com/johanix/tdns/v2/cli"
 )
 
-// AuditorCmd is the parent command for all auditor operations.
-var AuditorCmd = &cobra.Command{
-	Use:   "auditor",
-	Short: "Interact with the MP auditor via API",
+// newAuditorZoneMPListCmd is the auditor-specific "mplist" subcommand,
+// handed to tdnscli.NewZoneCmd as an extra by NewAuditorTree.
+func newAuditorZoneMPListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "mplist",
+		Short: "List multi-provider zones with HSYNCPARAM details",
+		Run:   func(cmd *cobra.Command, args []string) { runZoneMPList(cmd, args) },
+	}
+	return c
 }
 
-// AuditorZoneMPListCmd is the auditor-specific "mplist" subcommand.
-// It's attached to the auditor's zone tree by mpcli/shared_cmds.go
-// via tdnscli.NewZoneCmd("auditor", AuditorZoneMPListCmd).
-var AuditorZoneMPListCmd = &cobra.Command{
-	Use:   "mplist",
-	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run:   func(cmd *cobra.Command, args []string) { runZoneMPList("auditor", args) },
+func newAuditorEventlogCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "eventlog",
+		Short: "Audit event log commands",
+	}
+	c.AddCommand(newAuditorEventlogListCmd(kind), newAuditorEventlogClearCmd(kind))
+	return c
 }
 
-var auditorEventlogCmd = &cobra.Command{
-	Use:   "eventlog",
-	Short: "Audit event log commands",
+func newAuditorEventlogListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List audit events",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			req := AuditPost{Command: "eventlog-list"}
+			if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
+				req.Zone = dns.Fqdn(zone)
+			}
+			if since, _ := cmd.Flags().GetString("since"); since != "" {
+				req.Since = since
+			}
+			limit, _ := cmd.Flags().GetInt("last")
+			if limit > 0 {
+				req.Limit = limit
+			} else {
+				req.Limit = 50
+			}
+			resp, err := callAuditor(cmd, req)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if len(resp.Events) == 0 {
+				fmt.Println("No events found")
+				return
+			}
+			printEvents(resp.Events)
+		},
+	}
+	c.Flags().StringP("zone", "z", "", "filter by zone")
+	c.Flags().String("since", "", "events since (RFC3339)")
+	c.Flags().Int("last", 50, "number of events to show")
+	return c
 }
 
-var auditorEventlogListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List audit events",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		req := AuditPost{Command: "eventlog-list"}
-		if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
-			req.Zone = dns.Fqdn(zone)
-		}
-		if since, _ := cmd.Flags().GetString("since"); since != "" {
-			req.Since = since
-		}
-		limit, _ := cmd.Flags().GetInt("last")
-		if limit > 0 {
-			req.Limit = limit
-		} else {
-			req.Limit = 50
-		}
-		resp, err := callAuditor(req)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if len(resp.Events) == 0 {
-			fmt.Println("No events found")
-			return
-		}
-		printEvents(resp.Events)
-	},
+func newAuditorEventlogClearCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear audit events",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			req := AuditPost{Command: "eventlog-clear"}
+			if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
+				req.Zone = dns.Fqdn(zone)
+			}
+			if olderThan, _ := cmd.Flags().GetString("older-than"); olderThan != "" {
+				req.OlderThan = olderThan
+			}
+			req.All, _ = cmd.Flags().GetBool("all")
+			if !req.All && req.Zone == "" && req.OlderThan == "" {
+				log.Fatal("must specify --zone, --older-than, or --all")
+			}
+			resp, err := callAuditor(cmd, req)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(resp.Msg)
+		},
+	}
+	c.Flags().StringP("zone", "z", "", "clear events for zone")
+	c.Flags().String("older-than", "", "clear events older than duration (e.g. 24h)")
+	c.Flags().Bool("all", false, "clear all events")
+	return c
 }
 
-var auditorEventlogClearCmd = &cobra.Command{
-	Use:   "clear",
-	Short: "Clear audit events",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		req := AuditPost{Command: "eventlog-clear"}
-		if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
-			req.Zone = dns.Fqdn(zone)
-		}
-		if olderThan, _ := cmd.Flags().GetString("older-than"); olderThan != "" {
-			req.OlderThan = olderThan
-		}
-		req.All, _ = cmd.Flags().GetBool("all")
-		if !req.All && req.Zone == "" && req.OlderThan == "" {
-			log.Fatal("must specify --zone, --older-than, or --all")
-		}
-		resp, err := callAuditor(req)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println(resp.Msg)
-	},
+func newAuditorZonesCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "zones",
+		Short: "List audited zones with provider summaries",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			resp, err := callAuditor(cmd, AuditPost{Command: "zones"})
+			if err != nil {
+				log.Fatal(err)
+			}
+			if len(resp.Zones) == 0 {
+				fmt.Println("No zones tracked")
+				return
+			}
+			printZones(resp.Zones)
+		},
+	}
+	return c
 }
 
-var auditorZonesCmd = &cobra.Command{
-	Use:   "zones",
-	Short: "List audited zones with provider summaries",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := callAuditor(AuditPost{Command: "zones"})
-		if err != nil {
-			log.Fatal(err)
-		}
-		if len(resp.Zones) == 0 {
-			fmt.Println("No zones tracked")
-			return
-		}
-		printZones(resp.Zones)
-	},
+func newAuditorObservationsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "observations",
+		Short: "Show anomalies/observations detected by the auditor",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			req := AuditPost{Command: "observations"}
+			if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
+				req.Zone = dns.Fqdn(zone)
+			}
+			resp, err := callAuditor(cmd, req)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if len(resp.Observations) == 0 {
+				fmt.Println("No observations")
+				return
+			}
+			printObservations(resp.Observations)
+		},
+	}
+	c.Flags().StringP("zone", "z", "", "filter by zone")
+	return c
 }
 
-var auditorObservationsCmd = &cobra.Command{
-	Use:   "observations",
-	Short: "Show anomalies/observations detected by the auditor",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		req := AuditPost{Command: "observations"}
-		if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
-			req.Zone = dns.Fqdn(zone)
-		}
-		resp, err := callAuditor(req)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if len(resp.Observations) == 0 {
-			fmt.Println("No observations")
-			return
-		}
-		printObservations(resp.Observations)
-	},
-}
-
-func callAuditor(req AuditPost) (*AuditResponse, error) {
-	api, err := tdnscli.GetApiClient("auditor", true)
+func callAuditor(cmd *cobra.Command, req AuditPost) (*AuditResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
@@ -199,19 +216,4 @@ func ageOrDash(t time.Time) string {
 		return "-"
 	}
 	return time.Since(t).Round(time.Second).String()
-}
-
-func init() {
-	auditorEventlogListCmd.Flags().StringP("zone", "z", "", "filter by zone")
-	auditorEventlogListCmd.Flags().String("since", "", "events since (RFC3339)")
-	auditorEventlogListCmd.Flags().Int("last", 50, "number of events to show")
-
-	auditorEventlogClearCmd.Flags().StringP("zone", "z", "", "clear events for zone")
-	auditorEventlogClearCmd.Flags().String("older-than", "", "clear events older than duration (e.g. 24h)")
-	auditorEventlogClearCmd.Flags().Bool("all", false, "clear all events")
-
-	auditorObservationsCmd.Flags().StringP("zone", "z", "", "filter by zone")
-
-	auditorEventlogCmd.AddCommand(auditorEventlogListCmd, auditorEventlogClearCmd)
-	AuditorCmd.AddCommand(auditorEventlogCmd, auditorZonesCmd, auditorObservationsCmd)
 }

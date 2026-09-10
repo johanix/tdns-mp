@@ -32,129 +32,153 @@ import (
 	"golang.org/x/term"
 )
 
-var auditorWebCmd = &cobra.Command{
-	Use:   "web",
-	Short: "Auditor web-dashboard commands",
+func newAuditorWebCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "web",
+		Short: "Auditor web-dashboard commands",
+	}
+	c.AddCommand(newAuditorWebUserCmd(kind))
+	return c
 }
 
-var auditorWebUserCmd = &cobra.Command{
-	Use:   "user",
-	Short: "Manage web dashboard users",
+func newAuditorWebUserCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "user",
+		Short: "Manage web dashboard users",
+	}
+	c.AddCommand(newAuditorWebUserListCmd(kind), newAuditorWebUserCreateCmd(kind), newAuditorWebUserDeleteCmd(kind), newAuditorWebUserReloadCmd(kind))
+	return c
 }
 
-var auditorWebUserListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List configured web dashboard users",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		path, err := fetchUsersFilePath()
-		if err != nil {
-			log.Fatal(err)
-		}
-		users, err := tdnsmp.ReadAuditWebUsersFile(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if len(users) == 0 {
-			fmt.Println("No users configured")
-			return
-		}
-		fmt.Printf("%-32s\n", "Name")
-		fmt.Println(strings.Repeat("-", 32))
-		for _, u := range users {
-			fmt.Println(u.Name)
-		}
-	},
-}
-
-var auditorWebUserCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create a new web dashboard user (prompts for password)",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		name, _ := cmd.Flags().GetString("name")
-		path, err := fetchUsersFilePath()
-		if err != nil {
-			log.Fatal(err)
-		}
-		users, err := tdnsmp.ReadAuditWebUsersFile(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		for _, u := range users {
-			if u.Name == name {
-				log.Fatalf("user %q already exists", name)
+func newAuditorWebUserListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List configured web dashboard users",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			path, err := fetchUsersFilePath(cmd)
+			if err != nil {
+				log.Fatal(err)
 			}
-		}
-		password, err := promptNewPassword()
-		if err != nil {
-			log.Fatal(err)
-		}
-		hash, err := tdnsmp.HashPassword(password)
-		if err != nil {
-			log.Fatalf("hash password: %v", err)
-		}
-		users = append(users, AuditWebUser{Name: name, PasswordHash: hash})
-		if err := tdnsmp.WriteAuditWebUsersFile(path, users); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("User %q created in %s.\n", name, path)
-		fmt.Println("Run 'mpcli auditor web user reload' to apply to the running auditor.")
-	},
-}
-
-var auditorWebUserDeleteCmd = &cobra.Command{
-	Use:   "delete",
-	Short: "Delete a web dashboard user",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		name, _ := cmd.Flags().GetString("name")
-		path, err := fetchUsersFilePath()
-		if err != nil {
-			log.Fatal(err)
-		}
-		users, err := tdnsmp.ReadAuditWebUsersFile(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		out := make([]AuditWebUser, 0, len(users))
-		removed := false
-		for _, u := range users {
-			if u.Name == name {
-				removed = true
-				continue
+			users, err := tdnsmp.ReadAuditWebUsersFile(path)
+			if err != nil {
+				log.Fatal(err)
 			}
-			out = append(out, u)
-		}
-		if !removed {
-			log.Fatalf("user %q not found", name)
-		}
-		if err := tdnsmp.WriteAuditWebUsersFile(path, out); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("User %q deleted from %s.\n", name, path)
-		fmt.Println("Run 'mpcli auditor web user reload' to apply to the running auditor.")
-	},
+			if len(users) == 0 {
+				fmt.Println("No users configured")
+				return
+			}
+			fmt.Printf("%-32s\n", "Name")
+			fmt.Println(strings.Repeat("-", 32))
+			for _, u := range users {
+				fmt.Println(u.Name)
+			}
+		},
+	}
+	return c
 }
 
-var auditorWebUserReloadCmd = &cobra.Command{
-	Use:   "reload",
-	Short: "Tell the running auditor to re-read its users file",
-	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := callAuditor(AuditPost{Command: "userdb-reload"})
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println(resp.Msg)
-	},
+func newAuditorWebUserCreateCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new web dashboard user (prompts for password)",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			name, _ := cmd.Flags().GetString("name")
+			path, err := fetchUsersFilePath(cmd)
+			if err != nil {
+				log.Fatal(err)
+			}
+			users, err := tdnsmp.ReadAuditWebUsersFile(path)
+			if err != nil {
+				log.Fatal(err)
+			}
+			for _, u := range users {
+				if u.Name == name {
+					log.Fatalf("user %q already exists", name)
+				}
+			}
+			password, err := promptNewPassword()
+			if err != nil {
+				log.Fatal(err)
+			}
+			hash, err := tdnsmp.HashPassword(password)
+			if err != nil {
+				log.Fatalf("hash password: %v", err)
+			}
+			users = append(users, AuditWebUser{Name: name, PasswordHash: hash})
+			if err := tdnsmp.WriteAuditWebUsersFile(path, users); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("User %q created in %s.\n", name, path)
+			fmt.Println("Run 'mpcli auditor web user reload' to apply to the running auditor.")
+		},
+	}
+	c.Flags().String("name", "", "username (required)")
+	_ = c.MarkFlagRequired("name")
+	return c
+}
+
+func newAuditorWebUserDeleteCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a web dashboard user",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			name, _ := cmd.Flags().GetString("name")
+			path, err := fetchUsersFilePath(cmd)
+			if err != nil {
+				log.Fatal(err)
+			}
+			users, err := tdnsmp.ReadAuditWebUsersFile(path)
+			if err != nil {
+				log.Fatal(err)
+			}
+			out := make([]AuditWebUser, 0, len(users))
+			removed := false
+			for _, u := range users {
+				if u.Name == name {
+					removed = true
+					continue
+				}
+				out = append(out, u)
+			}
+			if !removed {
+				log.Fatalf("user %q not found", name)
+			}
+			if err := tdnsmp.WriteAuditWebUsersFile(path, out); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("User %q deleted from %s.\n", name, path)
+			fmt.Println("Run 'mpcli auditor web user reload' to apply to the running auditor.")
+		},
+	}
+	c.Flags().String("name", "", "username (required)")
+	_ = c.MarkFlagRequired("name")
+	return c
+}
+
+func newAuditorWebUserReloadCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "reload",
+		Short: "Tell the running auditor to re-read its users file",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			resp, err := callAuditor(cmd, AuditPost{Command: "userdb-reload"})
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(resp.Msg)
+		},
+	}
+	return c
 }
 
 // fetchUsersFilePath asks the running auditor for the configured
 // users-file path. The CLI does not parse the auditor's own config
 // file directly.
-func fetchUsersFilePath() (string, error) {
-	resp, err := callAuditor(AuditPost{Command: "userdb-path"})
+func fetchUsersFilePath(cmd *cobra.Command) (string, error) {
+	resp, err := callAuditor(cmd, AuditPost{Command: "userdb-path"})
 	if err != nil {
 		return "", err
 	}
@@ -189,20 +213,4 @@ func promptNewPassword() (string, error) {
 		return "", errors.New("passwords do not match")
 	}
 	return string(first), nil
-}
-
-func init() {
-	auditorWebUserCreateCmd.Flags().String("name", "", "username (required)")
-	_ = auditorWebUserCreateCmd.MarkFlagRequired("name")
-	auditorWebUserDeleteCmd.Flags().String("name", "", "username (required)")
-	_ = auditorWebUserDeleteCmd.MarkFlagRequired("name")
-
-	auditorWebUserCmd.AddCommand(
-		auditorWebUserListCmd,
-		auditorWebUserCreateCmd,
-		auditorWebUserDeleteCmd,
-		auditorWebUserReloadCmd,
-	)
-	auditorWebCmd.AddCommand(auditorWebUserCmd)
-	AuditorCmd.AddCommand(auditorWebCmd)
 }

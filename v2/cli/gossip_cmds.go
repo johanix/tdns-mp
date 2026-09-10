@@ -15,15 +15,14 @@ import (
 	"strings"
 
 	tdnsmp "github.com/johanix/tdns-mp/v2"
-	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
-// SendGossipCommand posts a GossipPost to the /gossip endpoint of
-// the role-selected API client and returns the parsed response.
-func SendGossipCommand(role string, req tdnsmp.GossipPost) (*tdnsmp.GossipResponse, error) {
-	api, err := tdnscli.GetApiClient(role, true)
+// SendGossipCommand posts a GossipPost to the /gossip endpoint of the
+// instance cmd's tree targets and returns the parsed response.
+func SendGossipCommand(cmd *cobra.Command, req tdnsmp.GossipPost) (*tdnsmp.GossipResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %v", err)
 	}
@@ -46,17 +45,17 @@ func SendGossipCommand(role string, req tdnsmp.GossipPost) (*tdnsmp.GossipRespon
 // and combiner) and returns true if the caller should bail out
 // without making an RPC call. Agents and auditors do participate
 // — both use HSYNC3-driven dynamic discovery.
-func gossipRoleGuard(role string) bool {
-	switch role {
+func gossipRoleGuard(kind string) bool {
+	switch kind {
 	case "agent", "auditor":
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "%s does not participate in gossip (static peer configuration)\n", role)
+	fmt.Fprintf(os.Stderr, "%s does not participate in gossip (static peer configuration)\n", kind)
 	return true
 }
 
-func runGossipZoneState(role, zone string) {
-	if gossipRoleGuard(role) {
+func runGossipZoneState(cmd *cobra.Command, kind, zone string) {
+	if gossipRoleGuard(kind) {
 		return
 	}
 
@@ -65,7 +64,7 @@ func runGossipZoneState(role, zone string) {
 	}
 	zone = dns.Fqdn(zone)
 
-	resp, err := SendGossipCommand(role, tdnsmp.GossipPost{
+	resp, err := SendGossipCommand(cmd, tdnsmp.GossipPost{
 		Command: "gossip-zone-state",
 		Zone:    zone,
 	})
@@ -215,12 +214,12 @@ func shortenMemberNames(members []string) map[string]string {
 	return out
 }
 
-// NewGossipCmd returns a fresh `gossip` subtree bound to the
-// given role. Each call returns a new set of *cobra.Command
-// pointers, so callers can attach the same logical subcommand
-// under multiple parents (one per role) without sharing
-// cobra-internal state.
-func NewGossipCmd(role string) *cobra.Command {
+// NewGossipCmd returns a fresh `gossip` subtree for a daemon of the
+// given kind. Each call returns a new set of *cobra.Command pointers,
+// so callers can attach the same logical subcommand under multiple
+// parents (one per tree) without sharing cobra-internal state. The
+// target instance is read from the tree.
+func NewGossipCmd(kind string) *cobra.Command {
 	var zoneName string
 
 	gossipCmd := &cobra.Command{
@@ -234,16 +233,10 @@ func NewGossipCmd(role string) *cobra.Command {
 Each row is a reporting peer; each column shows that reporter's
 view of another peer's state. A healthy group shows OPERATIONAL
 in every non-diagonal cell.`,
-		Run: func(cmd *cobra.Command, args []string) { runGossipZoneState(role, zoneName) },
+		Run: func(cmd *cobra.Command, args []string) { runGossipZoneState(cmd, kind, zoneName) },
 	}
 	stateCmd.Flags().StringVar(&zoneName, "zone", "", "Zone name (required)")
 
 	gossipCmd.AddCommand(stateCmd)
 	return gossipCmd
-}
-
-func init() {
-	AgentCmd.AddCommand(NewGossipCmd("agent"))
-	CombinerCmd.AddCommand(NewGossipCmd("combiner"))
-	SignerCmd.AddCommand(NewGossipCmd("signer"))
 }

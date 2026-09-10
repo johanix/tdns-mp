@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	mpcli "github.com/johanix/tdns-mp/v2/cli"
 	tdns "github.com/johanix/tdns/v2"
 	cli "github.com/johanix/tdns/v2/cli"
 	_ "github.com/johanix/tdns/v2/core"
@@ -20,8 +20,6 @@ import (
 
 var cfgFile, cfgFileUsed string
 var LocalConfig string
-
-const defaultMpcliCfgFile = "/etc/tdns/tdns-mpcli.yaml"
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-mpcli",
@@ -36,11 +34,41 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+// wireInstances adds one command tree per extra daemon instance named in the
+// CLI config, and reports any entry it declined to wire.
+//
+// This runs from Execute rather than from an init() because it needs the
+// config, and it runs BEFORE rootCmd.Execute because an instance name is a
+// command WORD: cobra resolves the command path in Find(), which happens
+// before PersistentPreRun, where the config is normally loaded. A tree that
+// does not exist by then cannot be routed to.
+//
+// The read is deliberately best-effort (see mpcli.EarlyApiServers): commands
+// that need no config at all -- keys generate, configure -- must keep working
+// with no config file present, and at this point we do not yet know which
+// command was typed. The authoritative config load, with real error
+// reporting, still happens in PersistentPreRun.
+func wireInstances() {
+	// cobra adds "help" and "completion" lazily, during Execute -- i.e. after
+	// this runs. Force them in first so the collision check can see them: an
+	// instance named "help" would otherwise be accepted here and then fight
+	// cobra's own command. Both initialisers are idempotent.
+	rootCmd.InitDefaultHelpCmd()
+	rootCmd.InitDefaultCompletionCmd()
+
+	cfgPath := mpcli.ConfigPathFromArgs(os.Args[1:])
+	for _, w := range mpcli.WireInstanceTrees(rootCmd, mpcli.EarlyApiServers(cfgPath)) {
+		fmt.Fprintf(os.Stderr, "tdns-mpcli: %s\n", w)
+	}
+}
+
 func Execute() {
+	wireInstances()
 	cobra.CheckErr(rootCmd.Execute())
 }
 
 func ExecuteContext(ctx context.Context) {
+	wireInstances()
 	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
 }
 
@@ -66,7 +94,7 @@ func isConfigureCommand(cmd *cobra.Command) bool {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		fmt.Sprintf("config file (default is %s)", defaultMpcliCfgFile))
+		fmt.Sprintf("config file (default is $%s, then %s)", mpcli.ConfigEnvVar, mpcli.DefaultConfigFile))
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "debug output")
@@ -78,7 +106,7 @@ func initConfig() {
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {
-		viper.SetConfigFile(defaultMpcliCfgFile)
+		viper.SetConfigFile(mpcli.ConfigPathFromArgs(nil)) // $TDNS_MPCLI_CONFIG or the default
 	}
 
 	viper.AutomaticEnv()
@@ -92,39 +120,11 @@ func initConfig() {
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
 
-	// Expand any top-level "include:" directives. viper has no native
-	// include support, so we merge each listed file in turn. This is a
-	// single-level (non-recursive) shim: an included file's own
-	// "include:" is not processed. Relative paths resolve against the
-	// main config file's directory. Used e.g. to pull algorithm
-	// enrichment data in from a shareable /etc/tdns/algorithms.yaml,
-	// keeping it out of this host-local, secret-bearing config.
-	for _, inc := range viper.GetStringSlice("include") {
-		incPath := inc
-		if !filepath.IsAbs(incPath) {
-			incPath = filepath.Join(filepath.Dir(cfgFileUsed), incPath)
-		}
-		// A missing included file is not fatal — it is treated as an
-		// optional overlay (mirrors the LocalConfig handling below), so
-		// e.g. an as-yet-uninstalled /etc/tdns/algorithms.yaml just
-		// leaves the CLI without that enrichment. A present-but-broken
-		// include is still a hard error.
-		if _, err := os.Stat(incPath); err != nil {
-			if os.IsNotExist(err) {
-				if tdns.Globals.Verbose {
-					fmt.Fprintln(os.Stderr, "Skipping missing included config:", incPath)
-				}
-				continue
-			}
-			log.Fatalf("Error stat(%s): %v", incPath, err)
-		}
-		viper.SetConfigFile(incPath)
-		if err := viper.MergeInConfig(); err != nil {
-			log.Fatalf("Could not merge included config %s: Error: %v", incPath, err)
-		}
-		if tdns.Globals.Verbose {
-			fmt.Fprintln(os.Stderr, "Merged included config:", incPath)
-		}
+	// Expand any top-level "include:" directives (single-level; see
+	// mpcli.MergeIncludes, which the early apiservers read uses too so that
+	// an instance entry living in an include: file becomes a command word).
+	if err := mpcli.MergeIncludes(viper.GetViper(), cfgFileUsed); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	LocalConfig = viper.GetString("cli.localconfig")
