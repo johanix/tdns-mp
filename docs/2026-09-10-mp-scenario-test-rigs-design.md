@@ -203,9 +203,12 @@ port below 1024.
 | p3 combiner / signer / agent | provider 3 | 8355 / 8353 / 8354 | 7355 / 7353 / 7354 | never a signer in this matrix |
 | auditor | observer, identity `auditor.rig.test.` | 8456 | 7456 | listed in every cell's HSYNC3 + `auditors=` |
 
-Eleven processes (nine provider daemons, the auditor, the world server). Each provider has its own `tdns-mpcli.yaml` under
-its directory, so `tdns-mpcli --config $RIG/p2/tdns-mpcli.yaml agent …`
-addresses provider 2 unambiguously.
+Eleven processes (nine provider daemons, the auditor, the world server). Each daemon is addressed by an instance name — `p1-agent` …
+`p3-signer`, `aud` — from ONE `tdns-mpcli.yaml`, once tdns-mpcli has
+the multi-instance trees tdns-ncli already has
+(`2026-09-10-mpcli-multi-instance-assessment.md`); until then `lib.sh`
+wraps `tdns-mpcli --config $RIG/<provider>/tdns-mpcli.yaml` behind the
+same names, so nothing in this document changes when the wrapper goes.
 
 ### 5.2 Identity discovery without public DNS
 
