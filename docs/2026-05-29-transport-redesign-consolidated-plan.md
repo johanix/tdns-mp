@@ -1,6 +1,7 @@
 # Transport redesign: consolidated implementation plan
 
 Date: 2026-05-29
+Status: SUPERSEDED 2026-06-11 by v2/v3 and 2026-08-24 by v4 (see `2026-08-24-transport-redesign-consolidated-plan-v4.md` and its 2026-09-09/10 amendments); retained as evolution trail. Original status line follows.
 Status: AUTHORITATIVE PLAN (in progress — built Stage by Stage with a
 code-to-doc mapping pass per Stage). This is the single source of truth
 for *direction and sequencing* of the transport redesign.

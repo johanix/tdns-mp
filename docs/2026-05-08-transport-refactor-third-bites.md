@@ -2,6 +2,7 @@
 # Third Bites — Post-Semi-Easy-Bites Quick Wins
 
 Date: 2026-05-08
+Status: SUPERSEDED — absorbed by the consolidated plan (v4, 2026-08-24, amended 2026-09-10); retained as evolution trail. Original status line follows.
 Status: PLAN — proposed next set of small, low-risk
         bites following the merge of the
         `transport-refactor-semi-easy-bites` branch.

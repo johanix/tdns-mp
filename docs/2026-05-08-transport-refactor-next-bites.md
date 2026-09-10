@@ -2,6 +2,7 @@
 # Next Bites — Post-Semi-Easy-Bites Quick Wins
 
 Date: 2026-05-08
+Status: SUPERSEDED — the bites landed or were absorbed by the consolidated plan (v4, 2026-08-24, amended 2026-09-10); retained as evolution trail. Original status line follows.
 Status: PLAN — recommended pre-work to land **after** the
         semi-easy bites complete and **before** initiating
         the larger main-plan phases (2/3/4 + remaining
