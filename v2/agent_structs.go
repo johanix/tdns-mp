@@ -119,20 +119,39 @@ func agentTransportParticipating(state AgentState) bool {
 	return state >= AgentStateKnown
 }
 
+// agentStatePriority ranks a transport's state for EffectiveState: a
+// transport that carries traffic outranks one still being introduced,
+// whatever the enum order says. 0 means the state does not count.
+func agentStatePriority(s AgentState) int {
+	switch s {
+	case AgentStateOperational:
+		return 6
+	case AgentStateLegacy:
+		return 5
+	case AgentStateDegraded:
+		return 4
+	case AgentStateInterrupted:
+		return 3
+	case AgentStateIntroduced:
+		return 2
+	case AgentStateKnown:
+		return 1
+	}
+	return 0
+}
+
 func (a *Agent) EffectiveState() AgentState {
 	a.Mu.RLock()
 	defer a.Mu.RUnlock()
 	best := AgentState(0)
+	bestPriority := 0
 	consider := func(enabled bool, details *AgentDetails) {
 		if !enabled || details == nil || !agentTransportParticipating(details.State) {
 			return
 		}
-		switch details.State {
-		case AgentStateOperational, AgentStateLegacy, AgentStateIntroduced, AgentStateKnown,
-			AgentStateDegraded, AgentStateInterrupted:
-			if best == 0 || details.State < best {
-				best = details.State
-			}
+		if p := agentStatePriority(details.State); p > bestPriority {
+			bestPriority = p
+			best = details.State
 		}
 	}
 	consider(a.ApiMethod, a.ApiDetails)

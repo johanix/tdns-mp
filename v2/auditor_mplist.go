@@ -194,7 +194,9 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 	if sm != nil {
 		zs = sm.GetZone(zone)
 	}
-	localIdentity = dns.Fqdn(localIdentity)
+	if localIdentity != "" {
+		localIdentity = dns.Fqdn(localIdentity)
+	}
 
 	for _, label := range collectZoneMemberLabels(info, hsync3) {
 		row := ZoneMemberRoleDTO{
@@ -236,7 +238,7 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 				row.SecondsSinceBeat = int64(now.Sub(row.LastBeat).Seconds())
 			}
 		}
-		if row.Identity == localIdentity {
+		if localIdentity != "" && row.Identity == localIdentity {
 			row.Local = true
 			if ar != nil && row.GossipState == "" {
 				_, gossip, _ := providerBeatMeta(ar, ZoneName(zone), row.Identity)
@@ -250,12 +252,12 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 }
 
 func markLocalMembers(localIdentity string, members []ZoneMemberRoleDTO) {
-	localIdentity = dns.Fqdn(localIdentity)
 	if localIdentity == "" {
 		return
 	}
+	localIdentity = dns.Fqdn(localIdentity)
 	for i := range members {
-		if dns.Fqdn(members[i].Identity) == localIdentity {
+		if members[i].Identity != "" && dns.Fqdn(members[i].Identity) == localIdentity {
 			members[i].Local = true
 		}
 	}

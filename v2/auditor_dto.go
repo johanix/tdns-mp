@@ -30,13 +30,13 @@ type AuditZoneSummary struct {
 	AuditorCount  int                    `json:"auditor_count"`
 	LastRefresh   time.Time              `json:"last_refresh,omitempty"`
 	ZoneSerial    uint32                 `json:"zone_serial,omitempty"`
-	Servers        []string               `json:"servers,omitempty"`
-	Signers        []string               `json:"signers,omitempty"`
-	AuditorLabels  []string               `json:"auditor_labels,omitempty"`
-	NSmgmt         string                 `json:"nsmgmt,omitempty"`
-	ParentSync     string                 `json:"parentsync,omitempty"`
-	Providers      []AuditProviderSummary `json:"providers,omitempty"`
-	Auditors       []AuditProviderSummary `json:"auditors,omitempty"`
+	Servers       []string               `json:"servers,omitempty"`
+	Signers       []string               `json:"signers,omitempty"`
+	AuditorLabels []string               `json:"auditor_labels,omitempty"`
+	NSmgmt        string                 `json:"nsmgmt,omitempty"`
+	ParentSync    string                 `json:"parentsync,omitempty"`
+	Providers     []AuditProviderSummary `json:"providers,omitempty"`
+	Auditors      []AuditProviderSummary `json:"auditors,omitempty"`
 }
 
 // AuditProviderSummary is the JSON shape for one provider's state.
@@ -58,15 +58,26 @@ type AuditProviderSummary struct {
 
 // markLocalAuditors sets Local on rows matching this auditor instance.
 func markLocalAuditors(localIdentity string, out []AuditProviderSummary) {
-	localIdentity = dns.Fqdn(localIdentity)
 	if localIdentity == "" {
 		return
 	}
+	localIdentity = dns.Fqdn(localIdentity)
 	for i := range out {
-		if dns.Fqdn(out[i].Identity) == localIdentity {
+		if out[i].Identity != "" && dns.Fqdn(out[i].Identity) == localIdentity {
 			out[i].Local = true
 		}
 	}
+}
+
+// auditorMergeKey keys an auditor row for merging: by identity once the
+// apex HSYNC3 record has resolved it, otherwise by the auditors= label,
+// so two declared auditors that have not published HSYNC3 yet stay
+// distinct rows instead of collapsing into one.
+func auditorMergeKey(s AuditProviderSummary) string {
+	if s.Identity != "" {
+		return s.Identity
+	}
+	return "label:" + s.Label
 }
 
 // enrichLocalAuditorGossip fills gossip for the local auditor from the
@@ -115,7 +126,7 @@ func (zs *AuditZoneState) Snapshot(localIdentity string) AuditZoneSummary {
 func snapshotAuditorsLocked(zs *AuditZoneState, now time.Time, localIdentity string) []AuditProviderSummary {
 	byID := make(map[string]AuditProviderSummary)
 	for _, s := range DeclaredAuditorIdentities(zs.Zone) {
-		byID[s.Identity] = s
+		byID[auditorMergeKey(s)] = s
 	}
 	for _, as := range zs.Auditors {
 		if !IsAuditorIdentity(zs.Zone, as.Identity) {
@@ -344,17 +355,17 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 			continue
 		}
 		for _, s := range DeclaredAuditorIdentities(string(zname)) {
-			if _, exists := merged[s.Identity]; !exists {
-				merged[s.Identity] = s
+			if _, exists := merged[auditorMergeKey(s)]; !exists {
+				merged[auditorMergeKey(s)] = s
 			}
 		}
 	}
 	for _, zs := range zones {
 		zs.mu.RLock()
 		for _, s := range snapshotAuditorsLocked(zs, now, local) {
-			cur, exists := merged[s.Identity]
+			cur, exists := merged[auditorMergeKey(s)]
 			if !exists {
-				merged[s.Identity] = s
+				merged[auditorMergeKey(s)] = s
 				continue
 			}
 			if s.LastBeat.After(cur.LastBeat) {
@@ -367,7 +378,7 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 			if cur.Label == "" && s.Label != "" {
 				cur.Label = s.Label
 			}
-			merged[s.Identity] = cur
+			merged[auditorMergeKey(s)] = cur
 		}
 		zs.mu.RUnlock()
 	}
@@ -476,10 +487,12 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 	now := time.Now()
 	out := make([]GossipMatrixDTO, 0, len(snaps))
 	for _, g := range snaps {
+		// The inner States map is written by the inbound beat path under
+		// gst.mu; the union must range over it with the lock still held.
 		gst.mu.RLock()
 		states := gst.States[g.hash]
-		gst.mu.RUnlock()
 		members := unionGossipMembers(g.members, states)
+		gst.mu.RUnlock()
 
 		dto := GossipMatrixDTO{
 			GroupHash: g.hash,
