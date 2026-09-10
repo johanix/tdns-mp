@@ -43,6 +43,45 @@ func TestCheckPeerState_dnsOnlyDoesNotInterruptApi(t *testing.T) {
 	}
 }
 
+// A transport that was marked DEGRADED or INTERRUPTED returns to
+// OPERATIONAL once beats flow again within the interval, and drops back
+// when they stop; nothing else about the peer changes.
+func TestCheckPeerState_recoveredTransportIsOperationalAgain(t *testing.T) {
+	peer := NewPeer("peer.example.")
+	peer.DnsMethod = true
+	peer.ApiMethod = false
+	peer.DnsDetails.BeatInterval = 30
+	peer.State = PeerStateOperational
+	e := NewEngine(Deps{LocalBeatInterval: 30}, DefaultConfig())
+
+	for _, from := range []PeerState{PeerStateDegraded, PeerStateInterrupted} {
+		now := time.Now()
+		peer.DnsDetails.State = from
+		peer.DnsDetails.LatestRBeat = now
+		peer.DnsDetails.LatestSBeat = now
+		e.checkPeerState(peer, 30)
+		if peer.DnsDetails.State != PeerStateOperational {
+			t.Fatalf("from %v with fresh beats: DnsDetails.State = %v, want OPERATIONAL",
+				StateToString[from], StateToString[peer.DnsDetails.State])
+		}
+	}
+
+	// beats stop: 2x the interval -> DEGRADED, 10x -> INTERRUPTED
+	peer.DnsDetails.LatestRBeat = time.Now().Add(-3 * 30 * time.Second)
+	e.checkPeerState(peer, 30)
+	if peer.DnsDetails.State != PeerStateDegraded {
+		t.Fatalf("stale by 3 intervals: DnsDetails.State = %v, want DEGRADED", StateToString[peer.DnsDetails.State])
+	}
+	peer.DnsDetails.LatestRBeat = time.Now().Add(-11 * 30 * time.Second)
+	e.checkPeerState(peer, 30)
+	if peer.DnsDetails.State != PeerStateInterrupted {
+		t.Fatalf("stale by 11 intervals: DnsDetails.State = %v, want INTERRUPTED", StateToString[peer.DnsDetails.State])
+	}
+	if peer.ApiDetails.State != PeerStateNeeded {
+		t.Fatalf("ApiDetails.State = %v, want NEEDED (untouched)", StateToString[peer.ApiDetails.State])
+	}
+}
+
 func TestHeartbeatHandler_dnsBeatMergesGossip(t *testing.T) {
 	gst := NewGossipStateTable("local.example.")
 	e := NewEngine(Deps{

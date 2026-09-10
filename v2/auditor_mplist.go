@@ -7,6 +7,7 @@ package tdnsmp
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -257,7 +258,7 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 				row.SecondsSinceBeat = int64(now.Sub(row.LastBeat).Seconds())
 			}
 		}
-		if localIdentity != "" && row.Identity == localIdentity {
+		if localIdentity != "" && strings.EqualFold(row.Identity, localIdentity) {
 			row.Local = true
 			if ar != nil && row.GossipState == "" {
 				_, gossip, _ := providerBeatMeta(ar, ZoneName(zone), row.Identity)
@@ -276,7 +277,7 @@ func markLocalMembers(localIdentity string, members []ZoneMemberRoleDTO) {
 	}
 	localIdentity = dns.Fqdn(localIdentity)
 	for i := range members {
-		if members[i].Identity != "" && dns.Fqdn(members[i].Identity) == localIdentity {
+		if members[i].Identity != "" && strings.EqualFold(dns.Fqdn(members[i].Identity), localIdentity) {
 			members[i].Local = true
 		}
 	}
