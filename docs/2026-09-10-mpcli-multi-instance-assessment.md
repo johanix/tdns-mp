@@ -439,6 +439,7 @@ Branch `mpcli-multi-instance` (cut from `transport-redesign-v1-C` tip
 | `5d00929` | the work: `v2/cli/role_target.go` + `instances.go` (copies of tdns `d9071e65`, adapted), 117 vars → factories, `trees.go` with the four tree factories, `cmd/mpcli/shared_cmds.go` reduced to four calls, `wireInstances()` in `root.go`, `TDNS_MPCLI_CONFIG`, golden regenerated |
 | `7c26629` | the tests of appendix step 7, under the names in the table below |
 | `0e6efc4` | `guide/app-mpcli.md` section, `tdns-mpcli.sample.yaml` entry |
+| `e0504be` | `gossip state` gets the `-z` shorthand (pre-existing: the local `--zone` shadowed the root's `-z/--zone`; the fleet's build fails the same way). Found by the live smoke test |
 
 Deviations from the appendix, all small:
 
@@ -467,4 +468,19 @@ Tests: `TestCommandTreeGolden`, `TestInstanceTreeMatchesCanonicalTree`,
 config of fake ports: `p2-signer keystore dnssec list` dials the p2
 port, `agent ping` the built-in one, the env var replaces `--config`, a
 colliding name is refused on stderr, `keys generate --help` works with
-no config at all. Not merged; to be exercised by the rig first (§6).
+no config at all.
+
+Live check (2026-09-11, one provider host, binary built from the branch
+in a separate worktree, not installed): the built-in words `agent zone
+mplist`, `agent gossip state`, `agent zone list -P`, `signer keystore
+dnssec list`, `combiner config status` and the newly reachable
+`combiner config reload-zones` / `agent debug lav` all answer from the
+running daemons; a config with `h-agent`/`h-combiner`/`h-signer`
+instance entries pointing at the same daemons gives the same answers
+through the instance words, `-d ping` reports `Using API client for
+"h-agent"`, and the env var replaces `--config`. One more `-z` gap of
+the same kind remains and is NOT fixed here: `zone edits list` (agent
+and combiner) and the other `edits` leaves define a local `--zone`
+without shorthand; the guide documents them with `--zone`.
+
+Not merged; to be exercised by the rig first (§6).
