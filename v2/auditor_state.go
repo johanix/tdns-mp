@@ -7,9 +7,10 @@
 package tdnsmp
 
 import (
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // AuditZoneState tracks the auditor's view of one zone.
@@ -70,8 +71,11 @@ func NewAuditStateManager() *AuditStateManager {
 	}
 }
 
-// GetOrCreateZone returns the AuditZoneState for a zone, creating it if needed.
+// GetOrCreateZone returns the AuditZoneState for a zone, creating it if
+// needed. The zone name is stored as an FQDN whichever form the caller
+// passed, so beats, sync messages and API requests share one entry.
 func (m *AuditStateManager) GetOrCreateZone(zone string) *AuditZoneState {
+	zone = dns.Fqdn(zone)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if zs, ok := m.zones[zone]; ok {
@@ -87,20 +91,12 @@ func (m *AuditStateManager) GetOrCreateZone(zone string) *AuditZoneState {
 }
 
 // GetZone returns the AuditZoneState for a zone, or nil if not tracked.
-// Accepts FQDN with or without a trailing dot.
+// Accepts a zone name with or without a trailing dot.
 func (m *AuditStateManager) GetZone(zone string) *AuditZoneState {
+	zone = dns.Fqdn(zone)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if zs, ok := m.zones[zone]; ok {
-		return zs
-	}
-	alt := zone
-	if strings.HasSuffix(zone, ".") {
-		alt = strings.TrimSuffix(zone, ".")
-	} else {
-		alt = zone + "."
-	}
-	return m.zones[alt]
+	return m.zones[zone]
 }
 
 // GetAllZones returns a snapshot of all tracked zones.

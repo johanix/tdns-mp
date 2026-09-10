@@ -115,7 +115,7 @@ func IsAuditorIdentity(zone, identity string) bool {
 	if zone == "" || identity == "" {
 		return false
 	}
-	mpzd, ok := Zones.Get(zone)
+	mpzd, ok := Zones.Get(dns.Fqdn(zone))
 	if !ok || mpzd == nil {
 		return false
 	}
@@ -128,7 +128,7 @@ func IsProviderIdentity(zone, identity string) bool {
 	if zone == "" || identity == "" {
 		return false
 	}
-	mpzd, ok := Zones.Get(zone)
+	mpzd, ok := Zones.Get(dns.Fqdn(zone))
 	if !ok || mpzd == nil {
 		return true
 	}
@@ -138,7 +138,7 @@ func IsProviderIdentity(zone, identity string) bool {
 // DeclaredAuditorIdentities returns one row per auditors= label from
 // apex HSYNCPARAM, with identity filled from matching apex HSYNC3.
 func DeclaredAuditorIdentities(zone string) []AuditProviderSummary {
-	mpzd, ok := Zones.Get(zone)
+	mpzd, ok := Zones.Get(dns.Fqdn(zone))
 	if !ok || mpzd == nil {
 		return nil
 	}

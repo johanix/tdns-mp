@@ -2,22 +2,11 @@ module github.com/johanix/tdns-mp/v2
 
 go 1.25.2
 
-// Local replaces for in-tree cross-repo verification on the feature
-// branch stack (semi-easy + peer-discovery-engine-extraction). Revert
-// before publishing.
-replace (
-	github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2
-	github.com/johanix/tdns/v2 => ../../tdns/v2
-	github.com/johanix/tdns/v2/cli => ../../tdns/v2/cli
-	github.com/johanix/tdns/v2/core => ../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../tdns/v2/edns0
-)
-
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260525200107-82d768a23456
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417
 	github.com/johanix/tdns/v2 v2.0.0-20260527163406-77a5c2ba5166
 	github.com/johanix/tdns/v2/cache v0.0.0-20260527163406-77a5c2ba5166
 	github.com/johanix/tdns/v2/cli v0.0.0-20260527163406-77a5c2ba5166
@@ -78,3 +67,8 @@ require (
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
 replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
+
+// tdns-transport is consumed from the sibling checkout while the
+// transport-redesign-v1-C branch of tdns-transport is unmerged; this
+// part of the stack builds against its commit e956f6ab (2026-05-09).
+replace github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2

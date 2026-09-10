@@ -4,16 +4,6 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
-// Local replaces for in-tree builds on the feature branch stack.
-// See ../../v2/go.mod. Revert before publishing.
-replace (
-	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
-	github.com/johanix/tdns/v2 => ../../../tdns/v2
-	github.com/johanix/tdns/v2/cli => ../../../tdns/v2/cli
-	github.com/johanix/tdns/v2/core => ../../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../../tdns/v2/edns0
-)
-
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
 	github.com/johanix/tdns/v2 v2.0.0-20260527163406-77a5c2ba5166
@@ -38,7 +28,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260525200107-82d768a23456 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20260527163406-77a5c2ba5166 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20260527163406-77a5c2ba5166 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
@@ -80,3 +70,8 @@ require (
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
 replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
+
+// tdns-transport is consumed from the sibling checkout while the
+// transport-redesign-v1-C branch of tdns-transport is unmerged; this
+// part of the stack builds against its commit e956f6ab (2026-05-09).
+replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2

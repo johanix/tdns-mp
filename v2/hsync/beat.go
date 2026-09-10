@@ -135,6 +135,9 @@ func (e *Engine) checkPeerState(peer *Peer, ourBeatInterval uint32) {
 			td.State = PeerStateDegraded
 		} else {
 			anyHealthy = true
+			if td.State == PeerStateDegraded || td.State == PeerStateInterrupted {
+				td.State = PeerStateOperational
+			}
 		}
 	}
 

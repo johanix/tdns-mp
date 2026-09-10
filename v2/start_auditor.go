@@ -29,6 +29,14 @@ import (
 // omits SDE, HsyncEngine, leader election, parent-sync bootstrapping,
 // and other write-side machinery.
 func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) error {
+	// Without the multi-provider config block MainInit leaves the agent
+	// registry unset, and the auditor engine below dereferences it.
+	// Refuse to start instead of panicking.
+	ar := conf.InternalMp.AgentRegistry
+	if conf.Config.MultiProvider == nil || ar == nil {
+		return fmt.Errorf("auditor startup: multi-provider configuration missing (no agent registry)")
+	}
+
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
@@ -63,6 +71,17 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		}
 	}
 
+	// Phase B: in-memory audit state and the auditor engine. Constructed
+	// before RefreshEngine starts: the first zone load reports every
+	// HSYNC3 record as an addition, and PostRefresh applies that diff only
+	// when AgentRegistry.HsyncEngine is already set (NewAuditorEngine sets
+	// it). The engine's Run starts further down, once the event log is up.
+	stateManager := NewAuditStateManager()
+	stateManager.LocalIdentity = conf.Config.LocalIdentity()
+	conf.InternalMp.AuditStateManager = stateManager
+	ar.AuditState = stateManager
+	auditorEngine := NewAuditorEngine(conf, stateManager)
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
@@ -73,15 +92,6 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// Reliable message queue for outbound BEATs/HELLOs.
 	if conf.InternalMp.TransportManager != nil {
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
-	}
-
-	// Phase B: persistent event log + in-memory audit state.
-	stateManager := NewAuditStateManager()
-	stateManager.LocalIdentity = conf.Config.LocalIdentity()
-	conf.InternalMp.AuditStateManager = stateManager
-	ar := conf.InternalMp.AgentRegistry
-	if ar != nil {
-		ar.AuditState = stateManager
 	}
 
 	// Provider group recomputation hook. The agent role triggers
@@ -109,6 +119,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		pgm.RecomputeGroups()
 	}
 
+	// Phase B: persistent event log.
 	kdb := conf.Config.Internal.KeyDB
 	if kdb != nil {
 		if err := InitAuditEventLogTable(kdb); err != nil {
@@ -137,7 +148,6 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	StartAuditDetectors(ctx, stateManager, silenceThreshold, detectorInterval)
 
 	msgQs := conf.InternalMp.MsgQs
-	auditorEngine := NewAuditorEngine(conf, stateManager)
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorEngine", func() {
 		auditorEngine.Run(ctx, msgQs)
 	})
