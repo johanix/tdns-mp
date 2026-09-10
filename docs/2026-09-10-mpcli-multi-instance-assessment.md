@@ -425,3 +425,46 @@ Delete `v2/cli/role_target.go` and `v2/cli/instances.go`, import the
 tdns ones, add `Role` to nothing (tdns's `ApiDetails` has it), drop the
 local `instanceEntry`. The four tree factories and all conversions
 stay; they are the same code tdns would have wanted.
+
+---
+
+# Implemented (2026-09-11)
+
+Branch `mpcli-multi-instance` (cut from `transport-redesign-v1-C` tip
+`74f2f09`), four signed commits:
+
+| Commit | What |
+|---|---|
+| `b702097` | the command tree as a golden file (`cmd/mpcli/tree_test.go`, `testdata/tree-golden.txt`), recorded BEFORE the refactor, duplicates rendered with `#2` |
+| `5d00929` | the work: `v2/cli/role_target.go` + `instances.go` (copies of tdns `d9071e65`, adapted), 117 vars → factories, `trees.go` with the four tree factories, `cmd/mpcli/shared_cmds.go` reduced to four calls, `wireInstances()` in `root.go`, `TDNS_MPCLI_CONFIG`, golden regenerated |
+| `7c26629` | the tests of appendix step 7, under the names in the table below |
+| `0e6efc4` | `guide/app-mpcli.md` section, `tdns-mpcli.sample.yaml` entry |
+
+Deviations from the appendix, all small:
+
+- Helpers that need the daemon type take a `kind` parameter and read the
+  target from `cmd` (`GetApiClientForCmd`/`RoleForCmd`); factories take
+  `kind`, tree factories take `(use, role)`. `NewAgentZoneCmd(role, kind)`
+  takes both because it lifts tdns's `zone list` leaf out of
+  `NewZoneCmd(role)` so its `-f/-N/-P` flags (bound to tdns-private
+  variables) survive; that replaced the planned ten-line copy.
+- Two more pre-existing duplications surfaced and were folded in the same
+  way as `agent zone`: `agent debug` (mp's leaves now sit beside tdns's
+  under one `debug`; tdns's `lav`, `rrset`, `show-ta` … become reachable)
+  and `combiner config` (tdns's `reload`/`reload-zones` become reachable;
+  `status` stays the combiner's own).
+- The shape guard is one golden of the whole tree rather than per-subtree
+  `--help` goldens; `TestCanonicalHelpUnchanged` in the plan is
+  `TestCommandTreeGolden`. Every flag of every command is in it.
+- The pinned `ApiDetails` field is `config_file`, not `config-file`.
+- The mechanism files were not tagged with an `init()`: the tree
+  factories tag their roots, and nothing static is left to tag.
+
+Tests: `TestCommandTreeGolden`, `TestInstanceTreeMatchesCanonicalTree`,
+`TestInstanceWiringFromConfig`, `TestConfigPathPrecedence` (cmd/mpcli);
+`TestNoHardcodedRoleRemains`, `TestRoleForCmdWalksUp`,
+`TestEveryTreeLeafResolvesItsInstance` (v2/cli). Smoke-tested with a
+config of fake ports: `p2-signer keystore dnssec list` dials the p2
+port, `agent ping` the built-in one, the env var replaces `--config`, a
+colliding name is refused on stderr, `keys generate --help` works with
+no config at all. Not merged; to be exercised by the rig first (§6).
