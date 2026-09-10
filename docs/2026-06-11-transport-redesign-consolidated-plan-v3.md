@@ -84,6 +84,13 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | Gate-2 (three-repo standalone build) | DONE | transport `e65b057`, mp `b2dd2f6`, tdns `40bda34` |
 | Everything below this line | NOT STARTED | review §1 |
 
+> **Status note (2026-09-10, added while the PR stack was reviewed):** a DONE
+> row above records that the step's commit landed, not that its end state is
+> reached. At this point of the stack the peer map is still dual (`ar.S` and
+> `Registry.S`; END.2 open) and `hsync.Registry.RemoteAgents` is still maintained
+> (END.4 open). E1.b later in the stack removes the dual map; END.4 is still open
+> at the stack tip.
+
 Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
 all 7 `TestTransportBoundary_*`; **tdns-transport/v2 now builds and
 tests standalone** (`-count=1` + `-race`), `cmd/transport-exercise`
