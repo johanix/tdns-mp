@@ -203,7 +203,7 @@ port below 1024.
 | p3 combiner / signer / agent | provider 3 | 8355 / 8353 / 8354 | 7355 / 7353 / 7354 | never a signer in this matrix |
 | auditor | observer, identity `auditor.rig.test.` | 8456 | 7456 | listed in every cell's HSYNC3 + `auditors=` |
 
-Thirteen processes. Each provider has its own `tdns-mpcli.yaml` under
+Eleven processes (nine provider daemons, the auditor, the world server). Each provider has its own `tdns-mpcli.yaml` under
 its directory, so `tdns-mpcli --config $RIG/p2/tdns-mpcli.yaml agent …`
 addresses provider 2 unambiguously.
 
@@ -224,7 +224,13 @@ secondaries. The rig reproduces that shape on loopback:
   of them to `world.rig.test.`;
 - every IMR (agents, auditor) is configured with
   `imrengine.forward: [{ zone: rig.test., upstreams: [{ addr: 127.0.0.1, port: 5300, transport: do53 }] }]`
-  and `require-dnssec-validation: false`.
+  and `imrengine.require-dnssec-validation: false` (hyphens; the key is
+  a pointer bool defaulting to true, read in `imrengine.go`). In the
+  transport that flag gates only the TLSA lookup of the API mechanism;
+  the DNS-mechanism lookups (URI, SVCB, JWK) do not check the
+  validation state at all, so with `supported_mechanisms: [ dns ]` the
+  rig would work even without it. It is set anyway so the rig does not
+  depend on that asymmetry.
 
 The forward path exists so that a port can be given (root hints and
 stubs cannot carry one, which would force port 53), and it stamps
