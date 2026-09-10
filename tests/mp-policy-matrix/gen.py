@@ -69,9 +69,13 @@ for line in open(CELLS_TSV):
         for pair in upstreams.split(","):
             d, u = pair.split(":")
             ups[d] = u
-    for p in providers:
-        if p not in signers and p not in ups:
-            raise SystemExit(f"{zone}: non-signer {p} has no upstream")
+    # In a signed cell every non-signer pulls the signed zone from a signer.
+    # In an unsigned cell (S=0) every provider serves its own combiner's
+    # output; there is nothing to pull.
+    if signers:
+        for p in providers:
+            if p not in signers and p not in ups:
+                raise SystemExit(f"{zone}: non-signer {p} has no upstream")
     cells.append(dict(zone=zone, P=int(P), S=int(S), nsmgmt=nsmgmt,
                       providers=providers, signers=signers, upstreams=ups))
 if not cells:
