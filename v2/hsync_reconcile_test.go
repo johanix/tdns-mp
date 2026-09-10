@@ -44,7 +44,7 @@ func TestReconcileZone_removesStalePeer(t *testing.T) {
 	ar := &AgentRegistry{
 		S:            core.NewStringer[AgentId, *Agent](),
 		RemoteAgents: make(map[ZoneName][]AgentId),
-		LocalAgent:   &tdns.MultiProviderConf{Identity: local},
+		LocalAgent:   &MultiProviderConf{Identity: local},
 	}
 
 	stale := &Agent{
@@ -94,7 +94,7 @@ func TestReconcileZone_emptyHSYNC3RemovesAllRemote(t *testing.T) {
 	ar := &AgentRegistry{
 		S:            core.NewStringer[AgentId, *Agent](),
 		RemoteAgents: make(map[ZoneName][]AgentId),
-		LocalAgent:   &tdns.MultiProviderConf{Identity: local},
+		LocalAgent:   &MultiProviderConf{Identity: local},
 	}
 
 	peer := &Agent{
