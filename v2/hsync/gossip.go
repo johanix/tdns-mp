@@ -108,6 +108,10 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 		gst.States[groupHash] = make(map[string]*MemberState)
 	}
 	for id, remote := range msg.Members {
+		if remote == nil {
+			// a decoded beat may carry a null member
+			continue
+		}
 		local, exists := gst.States[groupHash][id]
 		if !exists || remote.Timestamp.After(local.Timestamp) {
 			gst.States[groupHash][id] = deepCopyMemberState(remote)
@@ -214,9 +218,9 @@ func (gst *GossipStateTable) RefreshLocalStates(reg *Registry, pgm ProviderGroup
 				peerStates[member] = StateToString[PeerStateNeeded]
 				continue
 			}
-			peer.Mu.RLock()
+			// EffectiveState takes peer.Mu itself; holding it here as well
+			// is a recursive RLock, which deadlocks against a queued writer.
 			state := peer.EffectiveState()
-			peer.Mu.RUnlock()
 			peerStates[member] = StateToString[state]
 		}
 		for _, z := range pg.Zones {

@@ -97,6 +97,13 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d-END.3…END.5 | NOT STARTED | inbound pipeline → RemoteAgents → dead-code sweep |
 | Everything below this line | NOT STARTED | review §1 |
 
+> **Status note (2026-09-10, added while the PR stack was reviewed):** a DONE
+> row above records that the step's commit landed, not that its end state is
+> reached. At this point of the stack the peer map is still dual (`ar.S` and
+> `Registry.S`; END.2 open) and `hsync.Registry.RemoteAgents` is still maintained
+> (END.4 open). E1.b later in the stack removes the dual map; END.4 is still open
+> at the stack tip.
+
 Build/test at tip (2026-06-13, post-S4 + testbed fixes: tdns-mp
 `168c999`, tdns-transport `892e5de`): tdns-mp/v2 green incl. `-race`
 and all `TestTransportBoundary_*`; tdns-transport/v2 builds and tests
