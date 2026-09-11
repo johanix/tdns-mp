@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -109,6 +110,17 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 				continue
 			}
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				// PostRefresh's ApplyHsyncDiff on the first load runs before
+				// tdns marks the zone Ready, so it cannot read the zone view
+				// and registers nobody (the agent has the same callback,
+				// start_agent.go). Without this the auditor found its peers
+				// only at the first periodic ReconcileZone, one
+				// ReconcileInterval (60 s by default) after start.
+				if ar.HsyncEngine != nil {
+					if _, _, err := ar.HsyncEngine.ReconcileZone(hsync.ZoneName(zd.ZoneName)); err != nil {
+						lgAuditor.Warn("OnFirstLoad: reconciling zone peers failed", "zone", zd.ZoneName, "err", err)
+					}
+				}
 				lgAuditor.Debug("OnFirstLoad: recomputing provider groups", "zone", zd.ZoneName)
 				pgm.RecomputeGroups()
 				stateManager.RefreshZoneHSYNCConfig(zd.ZoneName)

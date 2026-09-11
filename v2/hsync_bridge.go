@@ -24,7 +24,43 @@ func (b *mpHsyncBridge) DiscoverPeer(ctx context.Context, identity string) (*tra
 	if b.tm == nil || b.tm.TransportManager == nil {
 		return nil, context.Canceled
 	}
+	rearmFailedDiscovery(b.tm.TransportManager.PeerRegistry, identity)
 	return b.tm.TransportManager.DiscoverPeer(ctx, identity)
+}
+
+// rearmFailedDiscovery puts a peer whose last discovery failed back to
+// NEEDED so that the transport discovers it again.
+//
+// OnDiscoveryFailed (the bridge's own seam in NewMPTransportBridge) marks
+// such a peer ERROR at the top level. The transport's DiscoverPeer takes any
+// top-level state at or above KNOWN for "already discovered" and returns the
+// peer untouched; ERROR is the highest state value, so a failed peer was
+// never resolved again by the engine's periodic discovery retry: every
+// attempt returned at once, without a query, and only a kick from the
+// peer's own traffic (an inbound message with no verification key) ever
+// rediscovered it. On a cold start, where a peer's identity is not yet
+// published when it is first looked up, that made discovery wait for the
+// peer to call first.
+//
+// Only a peer that really is unresolved is re-armed: one with no address
+// and no mechanism past NEEDED. OnDiscoveryFailed writes ERROR again if the
+// retry fails too.
+func rearmFailedDiscovery(reg *transport.PeerRegistry, identity string) {
+	if reg == nil {
+		return
+	}
+	p, ok := reg.Get(identity)
+	if !ok || p == nil || p.GetState() != transport.PeerStateError || p.CurrentAddress() != nil {
+		return
+	}
+	for _, mech := range []string{"API", "DNS"} {
+		switch st, _ := p.MechanismRawState(mech); st {
+		case transport.PeerStateKnown, transport.PeerStateIntroducing, transport.PeerStateOperational,
+			transport.PeerStateDegraded, transport.PeerStateInterrupted:
+			return
+		}
+	}
+	p.SetState(transport.PeerStateNeeded, "discovery retry after a failed discovery")
 }
 
 // agentViewForPeer returns the persistent ar.S view for the peer (materializing
@@ -293,13 +329,46 @@ func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 	return hsync.NewEngine(deps, cfg)
 }
 
+// hsyncConfigFromMp builds the hsync engine's timer config from the parsed
+// multi-provider: block: hsync.DefaultConfig() with every
+// syncengine.intervals key that is set (> 0) applied, in seconds. The beat
+// interval is read from Remote.BeatInterval, which the config parser has
+// already reconciled with syncengine.intervals.beatinterval
+// (normalizeSyncengineIntervals), so the engine's beat ticker, the gossiped
+// LocalBeatInterval and the transport bridge all run on the same value.
+func hsyncConfigFromMp(mp *MultiProviderConf) hsync.Config {
+	cfg := hsync.DefaultConfig()
+	if mp == nil {
+		return cfg
+	}
+	secs := func(dst *time.Duration, v int) {
+		if v > 0 {
+			*dst = time.Duration(v) * time.Second
+		}
+	}
+	iv := mp.Syncengine.Intervals
+	secs(&cfg.BeatInterval, int(mp.Remote.BeatInterval))
+	secs(&cfg.HelloRetryInterval, iv.HelloRetry)
+	secs(&cfg.RetryInterval, iv.DiscoveryRetry)
+	secs(&cfg.ReconcileInterval, iv.Reconcile)
+	secs(&cfg.HelloFastSpacing, iv.HelloFastInterval)
+	if iv.HelloFastAttempts > 0 {
+		cfg.HelloFastAttempts = iv.HelloFastAttempts
+	}
+	return cfg
+}
+
 func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 	ar := conf.InternalMp.AgentRegistry
 	mp := conf.MpConfig()
-	cfg := hsync.DefaultConfig()
-	if bi := mp.Remote.BeatInterval; bi > 0 {
-		cfg.BeatInterval = time.Duration(bi) * time.Second
-	}
+	cfg := hsyncConfigFromMp(mp)
+	lgEngine.Info("hsync engine intervals",
+		"beat", cfg.BeatInterval,
+		"helloretry", cfg.HelloRetryInterval,
+		"hello_fast_attempts", cfg.HelloFastAttempts,
+		"hello_fast_interval", cfg.HelloFastSpacing,
+		"discoveryretry", cfg.RetryInterval,
+		"reconcile", cfg.ReconcileInterval)
 	deps := hsync.Deps{
 		LocalID:           hsync.PeerID(mp.Identity),
 		LocalBeatInterval: mp.Remote.BeatInterval,

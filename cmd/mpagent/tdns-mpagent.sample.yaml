@@ -64,6 +64,7 @@ multi-provider:
          beatinterval:       30
          helloretry:         15
          discoveryretry:     15
+         reconcile:          60
          hello_fast_attempts: 3
          hello_fast_interval: 2
 

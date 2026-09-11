@@ -42,6 +42,33 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateMultiProviderBlock(mp); err != nil {
 		return err
 	}
+	if err := ValidateSyncengineIntervals(mp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateSyncengineIntervals rejects a negative
+// multi-provider.syncengine.intervals value. Zero or absent means the
+// engine's default; anything positive is taken as given, in seconds
+// (attempts for hello_fast_attempts).
+func ValidateSyncengineIntervals(mp *MultiProviderConf) error {
+	iv := mp.Syncengine.Intervals
+	for _, k := range []struct {
+		name string
+		v    int
+	}{
+		{"beatinterval", iv.BeatInterval},
+		{"helloretry", iv.HelloRetry},
+		{"discoveryretry", iv.DiscoveryRetry},
+		{"reconcile", iv.Reconcile},
+		{"hello_fast_attempts", iv.HelloFastAttempts},
+		{"hello_fast_interval", iv.HelloFastInterval},
+	} {
+		if k.v < 0 {
+			return fmt.Errorf("multi-provider.syncengine.intervals.%s: %d is negative", k.name, k.v)
+		}
+	}
 	return nil
 }
 

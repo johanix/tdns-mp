@@ -90,11 +90,23 @@ type MultiProviderConf struct {
 		LocateInterval int
 		BeatInterval   uint32
 	}
+	// Syncengine.Intervals: the hsync engine's protocol timers, in seconds
+	// (YAML: multi-provider.syncengine.intervals). Zero or absent means the
+	// engine's built-in default (hsync.DefaultConfig); hsyncConfigFromMp
+	// turns the block into the engine's hsync.Config. beatinterval is
+	// reconciled with the older remote.beatinterval by the config parser
+	// (normalizeSyncengineIntervals) so that every reader of the beat
+	// interval sees one value.
 	Syncengine struct {
 		Intervals struct {
-			HelloRetry int
-		}
-	}
+			BeatInterval      int `yaml:"beatinterval" mapstructure:"beatinterval"`
+			HelloRetry        int `yaml:"helloretry" mapstructure:"helloretry"`
+			DiscoveryRetry    int `yaml:"discoveryretry" mapstructure:"discoveryretry"`
+			Reconcile         int `yaml:"reconcile" mapstructure:"reconcile"`
+			HelloFastAttempts int `yaml:"hello_fast_attempts" mapstructure:"hello_fast_attempts"`
+			HelloFastInterval int `yaml:"hello_fast_interval" mapstructure:"hello_fast_interval"`
+		} `yaml:"intervals" mapstructure:"intervals"`
+	} `yaml:"syncengine" mapstructure:"syncengine"`
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
