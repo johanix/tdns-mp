@@ -31,6 +31,17 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 	lgAgent.Info("creating a minimal auto zone", "zone", zonename)
 
 	mp := conf.MpConfig()
+	// The notified secondaries are granted transfer below, and the transfer
+	// ACL takes addresses: refuse a notify target that is not an IP literal
+	// before creating anything, rather than NOTIFY a secondary that will then
+	// be denied the transfer.
+	notify := tdns.NormalizeAddresses(mp.Local.Notify)
+	for _, addr := range notify {
+		if hostPrefix(addr) == "" {
+			return nil, fmt.Errorf("SetupAgentAutoZone: multi-provider.local.notify entry %q is not an IP address[:port]; the identity zone's transfer ACL needs an address", addr)
+		}
+	}
+
 	var zd *tdns.ZoneData
 	var err error
 	if len(mp.Local.Nameservers) > 0 {
@@ -60,13 +71,12 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 	// zd.Downstreams as the provide-xfr ACL (empty => deny); before the
 	// re-pin Downstreams WAS the notify list and transfers were not
 	// ACL-gated per zone, so the notified secondaries are also granted
-	// transfer access here to keep the auto zone transferable.
-	if len(mp.Local.Notify) > 0 {
-		for _, addr := range tdns.NormalizeAddresses(mp.Local.Notify) {
+	// transfer access here to keep the auto zone transferable (every entry
+	// is an IP literal, checked above).
+	if len(notify) > 0 {
+		for _, addr := range notify {
 			zd.Notify = append(zd.Notify, tdns.PeerConf{Addr: addr, Key: tdns.NOKEY})
-			if prefix := hostPrefix(addr); prefix != "" {
-				zd.Downstreams = append(zd.Downstreams, tdns.AclEntry{Prefix: prefix, Key: tdns.NOKEY})
-			}
+			zd.Downstreams = append(zd.Downstreams, tdns.AclEntry{Prefix: hostPrefix(addr), Key: tdns.NOKEY})
 		}
 		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "notify", zd.Notify, "downstreams", zd.Downstreams)
 	}
