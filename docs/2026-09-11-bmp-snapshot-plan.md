@@ -1084,3 +1084,12 @@ and governs.
 
 The order stands as §4: T-A, T-B and T-S in tdns; then M-1 for the
 combiner, agent and auditor; then M-2S for the signer; then R-1 and R-2.
+
+**Correction to Q3, the same evening.** The consequence written above
+over-read "minimise" as "never". The states keep the names §2.4.4 gives
+them: `mpdist`, `mpremove` and `foreign`. What T-S1 puts into tdns is two of
+those names in one SQL predicate (`FetchZoneDnskeysSql`, shared with
+`CollectDynamicRRs`) and the hook struct; tdns still attaches no meaning to
+them beyond "served" and "not served", and everything that decides
+transitions stays behind the hooks in tdns-mp. That is the minimum, and it
+spares the flag day a state rename. The generic names are withdrawn.
