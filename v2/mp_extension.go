@@ -12,6 +12,7 @@ package tdnsmp
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -78,6 +79,13 @@ type MPState struct {
 	KeystateError        string
 	KeystateTime         time.Time
 	RefreshAnalysis      *ZoneRefreshAnalysis
+
+	// pendingCleanups are the (owner, rrtype) pairs a contribution change may
+	// have emptied: the next CombineWithLocalChanges restores or deletes what
+	// no agent contributes any more. Its own mutex, because MPZoneData.Lock
+	// is the zone's lock and the batch that consumes this list holds that.
+	cleanupMu       sync.Mutex
+	pendingCleanups []ownerRRtype
 }
 
 // EnsureMP initializes the MP extension if nil. Callers that hold

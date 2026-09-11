@@ -69,25 +69,14 @@ func additiveRRtype(rrtype uint16) bool {
 	return rrtype == dns.TypeNS
 }
 
-// mergeWithUpstream merges agent contributions on top of the upstream (zone file)
-// baseline for additive RRtypes like NS. Deduplicates by RR string.
-func (mpzd *MPZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset core.RRset) core.RRset {
+// mergeRRsets merges agent contributions on top of a baseline (the upstream
+// zone file's RRset) for additive RRtypes like NS. Deduplicates by RR string.
+func mergeRRsets(baseline []dns.RR, agentRRset core.RRset) core.RRset {
 	merged := core.RRset{
 		Name:   agentRRset.Name,
 		RRtype: agentRRset.RRtype,
 	}
-
-	// Start with upstream baseline if available
-	if mpzd.MP.UpstreamData != nil {
-		if upstreamOd, ok := mpzd.MP.UpstreamData.Get(owner); ok {
-			if baselineRRset, exists := upstreamOd.RRtypes.Get(rrtype); exists {
-				merged.RRs = make([]dns.RR, len(baselineRRset.RRs))
-				copy(merged.RRs, baselineRRset.RRs)
-			}
-		}
-	}
-
-	// Append agent contributions, dedup by rr.String()
+	merged.RRs = append(merged.RRs, baseline...)
 	for _, rr := range agentRRset.RRs {
 		rrStr := rr.String()
 		alreadyPresent := false
@@ -101,76 +90,306 @@ func (mpzd *MPZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRse
 			merged.RRs = append(merged.RRs, rr)
 		}
 	}
-
 	return merged
 }
 
-// CombineWithLocalChanges applies CombinerData (merged agent contributions)
-// to the live zone data. Uses per-RRtype edit policy to determine which
-// RRtypes are applied. This overrides the promoted tdns method to add
-// role-based filtering (the tdns version uses AllowedLocalRRtypes only).
-func (mpzd *MPZoneData) CombineWithLocalChanges() (bool, error) {
-	if mpzd.MP == nil {
-		return false, nil
+// rrsetEqual reports whether two RRsets carry the same records, RRSIGs
+// aside: the combiner writes unsigned RRsets and the signer downstream signs
+// them, so a served RRset that differs only by its signatures is unchanged.
+func rrsetEqual(a, b core.RRset) bool {
+	if len(a.RRs) != len(b.RRs) {
+		return false
 	}
-	if mpzd.MP.CombinerData == nil {
-		mpzd.Logger.Printf("CombineWithLocalChanges: Zone %s: No combiner data to apply", mpzd.ZoneName)
-		return false, nil
+	seen := make(map[string]int, len(a.RRs))
+	for _, rr := range a.RRs {
+		seen[rr.String()]++
 	}
-
-	if mpzd.ZoneStore != tdns.MapZone {
-		return false, fmt.Errorf("CombineWithLocalChanges: zone store %s not implemented", tdns.ZoneStoreToString[mpzd.ZoneStore])
-	}
-
-	policy := mpzd.getEditPolicy()
-
-	// Determine RRtype whitelist: provider zones use their own set.
-	providerRRtypes := GetProviderZoneRRtypes(mpzd.ZoneName)
-	isProvider := providerRRtypes != nil
-
-	modified := false
-	for item := range mpzd.MP.CombinerData.IterBuffered() {
-		ownerName := item.Key
-		newOwnerData := item.Val
-
-		// MP zones: only apex records. Provider zones: any owner within the zone.
-		if !isProvider && ownerName != mpzd.ZoneName {
-			mpzd.Logger.Printf("CombineWithLocalChanges: Zone %s: LocalChanges outside apex (%s). Ignored", mpzd.ZoneName, ownerName)
-			continue
+	for _, rr := range b.RRs {
+		if seen[rr.String()] == 0 {
+			return false
 		}
+		seen[rr.String()]--
+	}
+	return true
+}
 
-		existingOwnerData, exists := mpzd.Data.Get(ownerName)
-		if !exists {
-			existingOwnerData = OwnerData{
-				Name:    ownerName,
-				RRtypes: tdns.NewRRTypeStore(),
-			}
+// --- The combiner's zone writes -------------------------------------------
+//
+// The combiner's state (AgentContributions, merged into CombinerData) is
+// MP-private; the served zone is a projection of it. Every function that
+// changes the state changes only the state, and notes what may need cleaning
+// up; ONE call, CombineWithLocalChanges, projects the state onto the zone in
+// one tdns StageBatch -- the combine, the cleanups and the signature TXT,
+// under one hold of the zone's lock, published once when anything changed.
+// On a draft, the incoming zone MPPreRefresh receives, the batch writes Data
+// and the refresh publish is the publish.
+//
+// The batch callback takes no locks and reads nothing from MPState: what it
+// needs is copied out first (combineInput). MPZoneData.Lock IS the zone's own
+// lock, the one StageBatch takes, so a contribution function that holds it
+// must never run the batch itself; every caller runs CombineWithLocalChanges
+// after the contribution function has returned and the lock is released.
+
+// ownerRRtype names one RRset of one owner.
+type ownerRRtype struct {
+	owner  string
+	rrtype uint16
+}
+
+func (mp *MPState) noteCleanup(owner string, rrtype uint16) {
+	mp.cleanupMu.Lock()
+	defer mp.cleanupMu.Unlock()
+	for _, c := range mp.pendingCleanups {
+		if c.owner == owner && c.rrtype == rrtype {
+			return
 		}
+	}
+	mp.pendingCleanups = append(mp.pendingCleanups, ownerRRtype{owner: owner, rrtype: rrtype})
+}
 
-		for _, rrtype := range newOwnerData.RRtypes.Keys() {
-			// Provider zones use their own whitelist; MP zones use edit policy.
-			if isProvider {
-				if !providerRRtypes[rrtype] {
-					continue
-				}
-			} else if !policy.canApply(rrtype) {
+// noteCleanupsFor notes every (owner, rrtype) named by RR strings, the shape
+// RemoveCombinerDataNG receives.
+func (mp *MPState) noteCleanupsFor(data map[string][]string) {
+	for owner, rrStrings := range data {
+		for _, rrStr := range rrStrings {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
 				continue
 			}
-
-			newRRset, _ := newOwnerData.RRtypes.Get(rrtype)
-			if additiveRRtype(rrtype) && ownerName == mpzd.ZoneName {
-				merged := mpzd.mergeWithUpstream(ownerName, rrtype, newRRset)
-				existingOwnerData.RRtypes.Set(rrtype, merged)
-			} else {
-				existingOwnerData.RRtypes.Set(rrtype, newRRset)
-			}
-			modified = true
+			mp.noteCleanup(owner, rr.Header().Rrtype)
 		}
-
-		mpzd.Data.Set(ownerName, existingOwnerData)
 	}
+}
 
-	return modified, nil
+func (mp *MPState) takeCleanups() []ownerRRtype {
+	mp.cleanupMu.Lock()
+	defer mp.cleanupMu.Unlock()
+	out := mp.pendingCleanups
+	mp.pendingCleanups = nil
+	return out
+}
+
+// combineInput is what the batch callback works from: a copy of the state,
+// taken before the batch, so the callback reads nothing that needs a lock.
+type combineInput struct {
+	zone            string
+	isProvider      bool
+	providerRRtypes map[uint16]bool
+	policy          *editPolicy
+	contributions   map[string]map[uint16]core.RRset // CombinerData, RRsets cloned
+	upstreamApex    map[uint16]core.RRset            // UpstreamData at the apex, cloned
+	cleanups        []ownerRRtype
+	signatureOwner  string
+	signature       dns.RR // the signature TXT to serve, nil when the option is off
+}
+
+func (mpzd *MPZoneData) combineInput(conf *MultiProviderConf) *combineInput {
+	in := &combineInput{zone: mpzd.ZoneName}
+	in.providerRRtypes = GetProviderZoneRRtypes(mpzd.ZoneName)
+	in.isProvider = in.providerRRtypes != nil
+	in.policy = mpzd.getEditPolicy()
+	if mpzd.MP.CombinerData != nil {
+		in.contributions = make(map[string]map[uint16]core.RRset)
+		for item := range mpzd.MP.CombinerData.IterBuffered() {
+			if item.Val.RRtypes == nil {
+				continue
+			}
+			m := make(map[uint16]core.RRset)
+			for _, rrtype := range item.Val.RRtypes.Keys() {
+				if rs, ok := item.Val.RRtypes.Get(rrtype); ok {
+					m[rrtype] = tdns.CloneRRset(rs)
+				}
+			}
+			in.contributions[item.Key] = m
+		}
+	}
+	if mpzd.MP.UpstreamData != nil {
+		if od, ok := mpzd.MP.UpstreamData.Get(mpzd.ZoneName); ok && od.RRtypes != nil {
+			in.upstreamApex = make(map[uint16]core.RRset)
+			for _, rrtype := range od.RRtypes.Keys() {
+				if rs, ok := od.RRtypes.Get(rrtype); ok {
+					in.upstreamApex[rrtype] = tdns.CloneRRset(rs)
+				}
+			}
+		}
+	}
+	in.cleanups = mpzd.MP.takeCleanups()
+	if conf != nil && conf.CombinerOptions[CombinerOptAddSignature] && conf.Signature != "" {
+		sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
+		sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
+		// At hsync-signature.{zone}, to avoid conflicts with apex TXT records.
+		in.signatureOwner = "hsync-signature." + mpzd.ZoneName
+		rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN TXT %q", in.signatureOwner, sig))
+		if err != nil {
+			lgCombiner.Error("combiner signature TXT does not parse", "zone", mpzd.ZoneName, "err", err)
+		} else {
+			in.signature = rr
+		}
+	}
+	return in
+}
+
+// combineInto applies the merged contributions to the zone's next content.
+// An RRset that already reads as the contribution is left alone, so a pass
+// over an unchanged state stages nothing and the batch publishes nothing.
+func combineInto(s tdns.Stager, in *combineInput) bool {
+	changed := false
+	for ownerName, rrtypes := range in.contributions {
+		// MP zones: only apex records. Provider zones: any owner within the zone.
+		if !in.isProvider && ownerName != in.zone {
+			lgCombiner.Debug("combine: local changes outside the apex ignored", "zone", in.zone, "owner", ownerName)
+			continue
+		}
+		for rrtype, newRRset := range rrtypes {
+			// Provider zones use their own whitelist; MP zones use edit policy.
+			if in.isProvider {
+				if !in.providerRRtypes[rrtype] {
+					continue
+				}
+			} else if !in.policy.canApply(rrtype) {
+				continue
+			}
+			next := newRRset
+			if additiveRRtype(rrtype) && ownerName == in.zone {
+				var baseline []dns.RR
+				if up, ok := in.upstreamApex[rrtype]; ok {
+					baseline = up.RRs
+				}
+				next = mergeRRsets(baseline, newRRset)
+			}
+			if cur := s.RRset(ownerName, rrtype); cur != nil && rrsetEqual(*cur, next) {
+				continue
+			}
+			s.SetRRset(ownerName, next)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// cleanupInto handles the (owner, rrtype) pairs a contribution change may
+// have emptied: nothing if some agent still contributes there; the upstream
+// NS restored at the apex; otherwise the RRset deleted, and the owner with
+// it when that was its last RRset.
+func cleanupInto(s tdns.Stager, in *combineInput) bool {
+	changed := false
+	for _, c := range in.cleanups {
+		if m, ok := in.contributions[c.owner]; ok {
+			if _, still := m[c.rrtype]; still {
+				continue
+			}
+		}
+		if c.rrtype == dns.TypeNS && c.owner == in.zone {
+			up, ok := in.upstreamApex[dns.TypeNS]
+			if !ok {
+				lgCombiner.Warn("cleanup: no upstream NS to restore", "zone", in.zone)
+				continue
+			}
+			if cur := s.RRset(c.owner, dns.TypeNS); cur != nil && rrsetEqual(*cur, up) {
+				continue
+			}
+			s.SetRRset(c.owner, up)
+			changed = true
+			lgCombiner.Info("cleanup: restored the upstream NS RRset", "zone", in.zone, "records", len(up.RRs))
+			continue
+		}
+		if s.RRset(c.owner, c.rrtype) == nil {
+			continue
+		}
+		s.Delete(c.owner, c.rrtype)
+		changed = true
+		if c.owner != in.zone && len(s.Types(c.owner)) == 0 {
+			s.DeleteOwner(c.owner)
+		}
+		lgCombiner.Info("cleanup: removed an RRset no agent contributes any more",
+			"zone", in.zone, "owner", c.owner, "rrtype", dns.TypeToString[c.rrtype])
+	}
+	return changed
+}
+
+// injectSignatureInto serves the combiner's signature TXT, once.
+func injectSignatureInto(s tdns.Stager, in *combineInput) bool {
+	if in.signature == nil {
+		return false
+	}
+	want := in.signature.String()
+	cur := s.RRset(in.signatureOwner, dns.TypeTXT)
+	if cur != nil {
+		for _, rr := range cur.RRs {
+			if rr.String() == want {
+				return false
+			}
+		}
+	}
+	next := core.RRset{Name: in.signatureOwner, RRtype: dns.TypeTXT, Class: dns.ClassINET}
+	if cur != nil {
+		next = *cur
+	}
+	next.RRs = append(next.RRs, in.signature)
+	s.SetRRset(in.signatureOwner, next)
+	return true
+}
+
+// CombineWithLocalChanges projects the combiner's state onto the zone in one
+// StageBatch: the merged contributions (per-RRtype edit policy for MP zones,
+// the configured RRtypes for provider zones), the pending cleanups and the
+// signature TXT. On a live zone it publishes once, when anything changed; on
+// a draft it writes Data and publishes nothing. Reports whether the zone's
+// next content changed.
+//
+// Not to be called with MPZoneData.Lock held: that is the zone's lock, and
+// the batch takes it.
+func (mpzd *MPZoneData) CombineWithLocalChanges() (bool, error) {
+	var conf *MultiProviderConf
+	if mpzd.MP != nil {
+		conf = mpzd.MP.MultiProvider
+	}
+	changed, _, err := mpzd.combineAndPublish(conf)
+	return changed, err
+}
+
+func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.BumperResponse, error) {
+	var resp tdns.BumperResponse
+	if mpzd.MP == nil {
+		return false, resp, nil
+	}
+	if mpzd.ZoneStore != tdns.MapZone {
+		return false, resp, fmt.Errorf("CombineWithLocalChanges: zone store %s not implemented", tdns.ZoneStoreToString[mpzd.ZoneStore])
+	}
+	// Non-signer combiners on signed zones persist contributions but do not
+	// modify the zone; their cleanups have nothing to clean.
+	if !mpzd.combinerShouldApplyEdits() {
+		mpzd.MP.takeCleanups()
+		return false, resp, nil
+	}
+	in := mpzd.combineInput(conf)
+	changed := false
+	resp, err := mpzd.ZoneData.StageBatch(func(s tdns.Stager) (bool, error) {
+		changed = combineInto(s, in)
+		changed = cleanupInto(s, in) || changed
+		changed = injectSignatureInto(s, in) || changed
+		return changed, nil
+	})
+	if err != nil {
+		return false, resp, err
+	}
+	if changed && resp.NewSerial != resp.OldSerial {
+		lgCombiner.Info("combiner state published", "zone", mpzd.ZoneName, "old", resp.OldSerial, "new", resp.NewSerial)
+	}
+	return changed, resp, nil
+}
+
+// replaceAndPublish is ReplaceCombinerDataByRRtype followed by the one
+// publish, for the callers that make exactly one replacement.
+func (mpzd *MPZoneData) replaceAndPublish(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
+	applied, removed, changed, err = mpzd.ReplaceCombinerDataByRRtype(senderID, owner, rrtype, newRRs)
+	if err != nil || !changed {
+		return
+	}
+	if _, cerr := mpzd.CombineWithLocalChanges(); cerr != nil {
+		lgCombiner.Error("publishing the combiner state failed", "zone", mpzd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype], "err", cerr)
+	}
+	return
 }
 
 // AddCombinerData adds or updates local RRsets for the zone from a specific agent.
@@ -245,20 +464,8 @@ func (mpzd *MPZoneData) AddCombinerData(senderID string, data map[string][]core.
 		}
 	}
 
-	if mpzd.combinerShouldApplyEdits() {
-		modified, err := mpzd.CombineWithLocalChanges()
-		if err != nil {
-			return changed, err
-		}
-		if modified {
-			mpzd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", mpzd.ZoneName, senderID)
-		}
-
-		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
-			mpzd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", mpzd.ZoneName)
-		}
-	}
-
+	// State only; the caller projects it onto the zone with
+	// CombineWithLocalChanges once, after this lock is released.
 	return true, nil
 }
 
@@ -465,24 +672,9 @@ func (mpzd *MPZoneData) RemoveCombinerDataNG(senderID string, data map[string][]
 		}
 	}
 
-	if mpzd.combinerShouldApplyEdits() {
-		modified, err := mpzd.CombineWithLocalChanges()
-		if err != nil {
-			return removedRecords, err
-		}
-		if modified {
-			mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", mpzd.ZoneName, senderID)
-		}
-	}
-
-	if mpzd.combinerShouldApplyEdits() {
-		// Clean up rrtypes with no remaining agent contributions
-		mpzd.cleanupRemovedRRtypes(data)
-
-		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
-			mpzd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", mpzd.ZoneName)
-		}
-	}
+	// RRtypes with no remaining agent contributions are cleaned up by the
+	// caller's CombineWithLocalChanges.
+	mpzd.MP.noteCleanupsFor(data)
 
 	return removedRecords, nil
 }
@@ -545,22 +737,9 @@ func (mpzd *MPZoneData) RemoveCombinerDataByRRtype(senderID string, owner string
 		}
 	}
 
-	if mpzd.combinerShouldApplyEdits() {
-		modified, err := mpzd.CombineWithLocalChanges()
-		if err != nil {
-			return removedRecords, err
-		}
-		if modified {
-			mpzd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", mpzd.ZoneName, senderID)
-		}
-	}
-
-	// Clean up if this rrtype has no remaining contributions from any agent
-	mpzd.cleanupRemovedRRtype(owner, rrtype)
-
-	if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
-		mpzd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Signature TXT injected", mpzd.ZoneName)
-	}
+	// Cleaned up by the caller's CombineWithLocalChanges if no contributions
+	// remain for this rrtype.
+	mpzd.MP.noteCleanup(owner, rrtype)
 
 	return removedRecords, nil
 }
@@ -666,149 +845,11 @@ func (mpzd *MPZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string
 		}
 	}
 
-	// Apply to live zone only if this combiner is allowed to edit.
-	// Non-signer combiners on signed zones persist but don't apply.
-	shouldApply := mpzd.combinerShouldApplyEdits()
-
-	if shouldApply {
-		modified, combErr := mpzd.CombineWithLocalChanges()
-		if combErr != nil {
-			err = combErr
-			return
-		}
-		if modified {
-			mpzd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Local changes applied after replace (from %s)", mpzd.ZoneName, senderID)
-		}
-	}
-
-	// Clean up if no contributions remain for this rrtype
-	mpzd.cleanupRemovedRRtype(owner, rrtype)
-
-	if shouldApply {
-		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
-			mpzd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", mpzd.ZoneName)
-		}
-	}
+	// Cleaned up by the caller's CombineWithLocalChanges if no contributions
+	// remain for this rrtype.
+	mpzd.MP.noteCleanup(owner, rrtype)
 
 	return
-}
-
-// InjectSignatureTXT adds a combiner signature TXT record to the zone data.
-// The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
-// Returns true if the signature was injected.
-func (mpzd *MPZoneData) InjectSignatureTXT(conf *MultiProviderConf) bool {
-	if conf == nil || !conf.CombinerOptions[CombinerOptAddSignature] || conf.Signature == "" {
-		return false
-	}
-
-	// Template expansion
-	sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
-	sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
-
-	// Build the TXT RR at hsync-signature.{zone}
-	ownerName := "hsync-signature." + mpzd.ZoneName
-	rrStr := fmt.Sprintf("%s 300 IN TXT %q", ownerName, sig)
-	rr, err := dns.NewRR(rrStr)
-	if err != nil {
-		mpzd.Logger.Printf("InjectSignatureTXT: Zone %s: Failed to parse TXT RR: %v", mpzd.ZoneName, err)
-		return false
-	}
-
-	// Insert directly into zone data (bypasses CombinerData/apex-only filters)
-	ownerData, exists := mpzd.Data.Get(ownerName)
-	if !exists {
-		ownerData = OwnerData{
-			Name:    ownerName,
-			RRtypes: tdns.NewRRTypeStore(),
-		}
-	}
-	existing, hasExisting := ownerData.RRtypes.Get(dns.TypeTXT)
-	if hasExisting {
-		// Check if this exact RR is already present (avoid duplicates on repeated calls)
-		rrStr := rr.String()
-		alreadyPresent := false
-		for _, existingRR := range existing.RRs {
-			if existingRR.String() == rrStr {
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
-			existing.RRs = append(existing.RRs, rr)
-		}
-	} else {
-		existing = core.RRset{
-			Name:   ownerName,
-			RRtype: dns.TypeTXT,
-			RRs:    []dns.RR{rr},
-		}
-	}
-	ownerData.RRtypes.Set(dns.TypeTXT, existing)
-	mpzd.Data.Set(ownerName, ownerData)
-	return true
-}
-
-// restoreUpstreamRRset restores an rrtype from UpstreamData back into the zone.
-// Used when all agent contributions for a mandatory rrtype (e.g. NS) are removed.
-func (mpzd *MPZoneData) restoreUpstreamRRset(owner string, rrtype uint16) {
-	if mpzd.MP.UpstreamData == nil {
-		mpzd.Logger.Printf("restoreUpstreamRRset: Zone %q: No upstream data, cannot restore %s",
-			mpzd.ZoneName, dns.TypeToString[rrtype])
-		return
-	}
-	if od, ok := mpzd.MP.UpstreamData.Get(owner); ok {
-		if rrset, exists := od.RRtypes.Get(rrtype); exists {
-			if zoneOd, ok := mpzd.Data.Get(owner); ok {
-				zoneOd.RRtypes.Set(rrtype, rrset)
-				mpzd.Data.Set(owner, zoneOd)
-				mpzd.Logger.Printf("restoreUpstreamRRset: Zone %q: Restored original %s for %q (%d records)",
-					mpzd.ZoneName, dns.TypeToString[rrtype], owner, len(rrset.RRs))
-				return
-			}
-		}
-	}
-	mpzd.Logger.Printf("restoreUpstreamRRset: Zone %q: No upstream %s found for %q",
-		mpzd.ZoneName, dns.TypeToString[rrtype], owner)
-}
-
-// cleanupRemovedRRtypes checks each owner+rrtype in data for remaining agent contributions.
-// If no contributions remain: for NS at the apex, restore from upstream; otherwise delete from zone.
-func (mpzd *MPZoneData) cleanupRemovedRRtypes(data map[string][]string) {
-	for owner, rrStrings := range data {
-		for _, rrStr := range rrStrings {
-			rr, err := dns.NewRR(rrStr)
-			if err != nil {
-				continue
-			}
-			mpzd.cleanupRemovedRRtype(owner, rr.Header().Rrtype)
-		}
-	}
-}
-
-// cleanupRemovedRRtype checks if a single owner+rrtype still has agent contributions.
-// If not: for NS at the apex, restore from upstream; otherwise delete from zone data.
-func (mpzd *MPZoneData) cleanupRemovedRRtype(owner string, rrtype uint16) {
-	stillExists := false
-	if mpzd.MP.CombinerData != nil {
-		if od, ok := mpzd.MP.CombinerData.Get(owner); ok {
-			if _, exists := od.RRtypes.Get(rrtype); exists {
-				stillExists = true
-			}
-		}
-	}
-	if stillExists {
-		return
-	}
-	if rrtype == dns.TypeNS && owner == mpzd.ZoneName {
-		mpzd.restoreUpstreamRRset(owner, rrtype)
-	} else {
-		if od, ok := mpzd.ZoneData.Data.Get(owner); ok {
-			od.RRtypes.Delete(rrtype)
-			mpzd.ZoneData.Data.Set(owner, od)
-			mpzd.Logger.Printf("cleanupRemovedRRtype: Zone %q: Removed %s from %q (no remaining contributions)",
-				mpzd.ZoneName, dns.TypeToString[rrtype], owner)
-		}
-	}
 }
 
 // combinerReapplyContributions reloads contributions from the database and
@@ -917,20 +958,18 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	}
 	mpzd.Unlock()
 
-	// 4. Apply to zone data (only if this combiner is allowed to edit).
-	if mpzd.combinerShouldApplyEdits() {
-		modified, err := mpzd.CombineWithLocalChanges()
-		if err != nil {
-			return "", fmt.Errorf("CombineWithLocalChanges failed: %w", err)
-		}
-		if modified {
-			bumperResp, err := mpzd.BumpSerialOnly()
-			if err != nil {
-				parts = append(parts, "serial bump failed")
-			} else {
-				parts = append(parts, fmt.Sprintf("serial %d→%d", bumperResp.OldSerial, bumperResp.NewSerial))
-			}
-		}
+	// 4. Apply to zone data, in one publish (only if this combiner is allowed
+	// to edit, which combineAndPublish decides).
+	var conf *MultiProviderConf
+	if mpzd.MP != nil {
+		conf = mpzd.MP.MultiProvider
+	}
+	modified, bumperResp, err := mpzd.combineAndPublish(conf)
+	if err != nil {
+		return "", fmt.Errorf("CombineWithLocalChanges failed: %w", err)
+	}
+	if modified {
+		parts = append(parts, fmt.Sprintf("serial %d→%d", bumperResp.OldSerial, bumperResp.NewSerial))
 	}
 
 	return fmt.Sprintf("Reapplied contributions for %s: %s", zone, strings.Join(parts, "; ")), nil
@@ -984,7 +1023,7 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 					dedupRRs = append(dedupRRs, rr)
 				}
 			}
-			ownerData.RRtypes.Set(rrtype, core.RRset{
+			ownerData.RRtypes.Set(rrtype, core.RRset{ // mp-private: CombinerData rebuild, not zone data
 				Name:   owner,
 				RRtype: rrtype,
 				RRs:    dedupRRs,
@@ -1046,10 +1085,6 @@ func (mpzd *MPZoneData) PurgeContributionsForOrigin(origin string, hdb *HsyncDB)
 	// CombinerData). Mirrors the cleanupRemovedRRtype follow-up that
 	// RemoveCombinerDataNG and ReplaceCombinerDataByRRtype already do.
 	removed := 0
-	type ownerRRtype struct {
-		owner  string
-		rrtype uint16
-	}
 	var purged []ownerRRtype
 	for owner, ownerMap := range agentData {
 		for rrtype, rrset := range ownerMap {
@@ -1075,26 +1110,12 @@ func (mpzd *MPZoneData) PurgeContributionsForOrigin(origin string, hdb *HsyncDB)
 		}
 	}
 
-	if mpzd.combinerShouldApplyEdits() {
-		modified, err := mpzd.CombineWithLocalChanges()
-		if err != nil {
-			return removed, err
-		}
-		if modified {
-			mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: live zone updated after purging origin %q", mpzd.ZoneName, origin)
-		}
-
-		// Drop any (owner, rrtype) tuples that no longer have any
-		// contributor anywhere in AgentContributions. Without this,
-		// the served zone (mpzd.Data) keeps answering with the old
-		// RRsets attributed to the purged origin.
-		for _, t := range purged {
-			mpzd.cleanupRemovedRRtype(t.owner, t.rrtype)
-		}
-
-		if mpzd.MP != nil && mpzd.MP.MultiProvider != nil && mpzd.InjectSignatureTXT(mpzd.MP.MultiProvider) {
-			mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: Signature TXT injected", mpzd.ZoneName)
-		}
+	// The (owner, rrtype) tuples that may have lost their last contributor
+	// are cleaned up by the caller's CombineWithLocalChanges: without that,
+	// the served zone keeps answering with the RRsets attributed to the
+	// purged origin.
+	for _, t := range purged {
+		mpzd.MP.noteCleanup(t.owner, t.rrtype)
 	}
 
 	mpzd.Logger.Printf("PurgeContributionsForOrigin: Zone %q: purged %d RR(s) attributed to origin %q",

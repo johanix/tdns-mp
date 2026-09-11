@@ -6,7 +6,6 @@ package tdnsmp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/johanix/tdns-mp/v2/hsync"
 	"strings"
@@ -29,25 +28,6 @@ var lg = tdns.Logger("zones")
 // A pure HSYNCPARAM edit (e.g. moving a label between signers= and
 // servers=) produces no HsyncAdds/Removes but must still trigger
 // RecomputeGroups, because VotingMembers is derived from HSYNCPARAM.
-// incomingRRset reads an RRset from a zone that has just been transferred in
-// and not yet published. GetRRset reads the published snapshot, which such a
-// zone does not have yet -- and at a missing apex tdns panics rather than
-// returning an error. The transfer lands in Data, which is also what the
-// refresh publish consumes, so Data is the right thing to inspect here.
-func incomingRRset(zd *tdns.ZoneData, name string, rrtype uint16) *core.RRset {
-	if zd == nil || zd.Data == nil {
-		return nil
-	}
-	owner, ok := zd.Data.Get(name)
-	if !ok || owner.RRtypes == nil {
-		return nil
-	}
-	if rrset, ok := owner.RRtypes.Get(rrtype); ok {
-		return &rrset
-	}
-	return nil
-}
-
 func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 	var hss = HsyncStatus{
 		Time:     time.Now(),
@@ -60,16 +40,16 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 
 	zd.Logger.Printf("*** HsyncChanged: enter (zone %q)", zd.ZoneName)
 
-	oldapex, err := zd.GetOwner(zd.ZoneName)
+	// The analysis readers: the served snapshot where there is one, Data
+	// otherwise. On the first load zd has published nothing and oldapex is
+	// nil; newzd is the incoming zone, which never has a snapshot.
+	oldapex, err := zd.OwnerForAnalysis(zd.ZoneName)
 	if err != nil {
-		if !errors.Is(err, tdns.ErrZoneNotReady) {
-			return false, nil, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
-		}
-		// Fall through with oldapex == nil (initial load)
+		return false, nil, fmt.Errorf("error from zd.OwnerForAnalysis(%s): %v", zd.ZoneName, err)
 	}
 
-	newhsync := incomingRRset(newzd, zd.ZoneName, core.TypeHSYNC3)
-	newparam := incomingRRset(newzd, zd.ZoneName, core.TypeHSYNCPARAM)
+	newhsync, _ := newzd.RRsetForAnalysis(zd.ZoneName, core.TypeHSYNC3)
+	newparam, _ := newzd.RRsetForAnalysis(zd.ZoneName, core.TypeHSYNCPARAM)
 
 	if oldapex == nil {
 		// Initial load: any HSYNC3 records present are "added" from
@@ -151,22 +131,16 @@ func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *Dnske
 		}
 	}
 
-	// Get old DNSKEY RRset (from current zone data).
-	// On initial load, zd may not be ready yet, so GetRRset returns ErrZoneNotReady.
-	// Treat this as oldkeys == nil (no old data) — the existing nil handling below
-	// will correctly classify all new keys as adds.
-	oldkeys, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY)
+	// Old DNSKEY RRset from the served zone, through the analysis reader: on
+	// the initial load nothing is published and oldkeys is nil, which the
+	// handling below classifies as "all new keys are adds".
+	oldkeys, err := mpzd.RRsetForAnalysis(mpzd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
-		if errors.Is(err, tdns.ErrZoneNotReady) {
-			mpzd.Logger.Printf("LocalDnskeysChanged: old zone not ready (initial load), treating as no old keys")
-			oldkeys = nil
-		} else {
-			return false, nil, fmt.Errorf("LocalDnskeysChanged: old GetRRset: %v", err)
-		}
+		return false, nil, fmt.Errorf("LocalDnskeysChanged: old RRsetForAnalysis: %v", err)
 	}
 
-	// Get new DNSKEY RRset (from incoming zone data)
-	newkeys := incomingRRset(new_zd, mpzd.ZoneName, dns.TypeDNSKEY)
+	// New DNSKEY RRset from the incoming zone, which has no snapshot yet.
+	newkeys, _ := new_zd.RRsetForAnalysis(mpzd.ZoneName, dns.TypeDNSKEY)
 
 	// Filter: keep only local DNSKEYs (not in remote set)
 	oldLocal := filterLocalDNSKEYs(oldkeys, remoteKeyTags)
@@ -654,7 +628,7 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 					ownerData.RRtypes.Delete(rrtype)
 				} else {
 					rrset.RRs = keepRRs
-					ownerData.RRtypes.Set(rrtype, rrset)
+					ownerData.RRtypes.Set(rrtype, rrset) // mp-private: SDE reconcile record, not zone data
 				}
 			}
 
@@ -786,8 +760,8 @@ func (mpzd *MPZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]boo
 		return nil
 	}
 
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil {
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
 		mpzd.Logger.Printf("buildRemoteDNSKEYsFromTags: zone %s: cannot get apex: %v", mpzd.ZoneName, err)
 		return nil
 	}
@@ -814,9 +788,12 @@ func (mpzd *MPZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]boo
 // Returns true if both record types exist and are valid, false otherwise.
 // error is non-nil for errors other than the records not existing.
 func ValidateHsyncRRset(zd *tdns.ZoneData) (bool, error) {
-	apex, err := zd.GetOwner(zd.ZoneName)
+	apex, err := zd.OwnerForAnalysis(zd.ZoneName)
 	if err != nil {
-		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, fmt.Errorf("error from zd.OwnerForAnalysis(%s): %v", zd.ZoneName, err)
+	}
+	if apex == nil {
+		return false, nil
 	}
 
 	// Check that HSYNC3 exists
@@ -871,9 +848,12 @@ func ourHsyncIdentities(mp *MultiProviderConf) []string {
 //   - label: the HSYNC3 Label of the matching record (e.g. "netnod")
 //   - err: non-nil on lookup errors
 func (mpzd *MPZoneData) matchHsyncIdentity(ourIdentities []string) (matched bool, label string, err error) {
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil {
 		return false, "", fmt.Errorf("matchHsyncIdentity: cannot get apex for zone %s: %v", mpzd.ZoneName, err)
+	}
+	if apex == nil {
+		return false, "", nil
 	}
 
 	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
@@ -932,8 +912,8 @@ func (mpzd *MPZoneData) matchHsyncIdentity(ourIdentities []string) (matched bool
 
 // getHSYNCPARAM returns the HSYNCPARAM record for a zone, or nil.
 func (mpzd *MPZoneData) getHSYNCPARAM() *core.HSYNCPARAM {
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil {
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
 		return nil
 	}
 	rrset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
@@ -985,9 +965,12 @@ func (mpzd *MPZoneData) isAuditor(label string) bool {
 //   - otherSigners: count of other signers
 //   - zoneSigned: whether the zone has any signers listed (HSYNCPARAM signers= non-empty)
 func (mpzd *MPZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel string) (weShouldSign bool, otherSigners int, zoneSigned bool, err error) {
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil {
 		return false, 0, false, fmt.Errorf("analyzeHsyncSigners: cannot get apex for zone %s: %v", mpzd.ZoneName, err)
+	}
+	if apex == nil {
+		return false, 0, false, nil
 	}
 
 	// Try HSYNC3+HSYNCPARAM first (preferred)
@@ -1085,9 +1068,11 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
 		return
 	}
 
-	// Guard 2: zone owner must have HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2)
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil {
+	// Guard 2: zone owner must have HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2).
+	// Through the analysis reader: this runs on the incoming zone, which has
+	// no published snapshot, as well as on a live one.
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
 		mpzd.Logger.Printf("populateMPdata: zone %s: cannot get apex: %v", mpzd.ZoneName, err)
 		mpzd.MP.MPdata = nil
 		return
@@ -1205,9 +1190,12 @@ func (mpzd *MPZoneData) PrintOwnerNames() error {
 }
 
 func (mpzd *MPZoneData) PrintApexRRs() error {
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil {
-		return fmt.Errorf("error from mpzd.GetOwner(%s): %v", mpzd.ZoneName, err)
+		return fmt.Errorf("error from mpzd.OwnerForAnalysis(%s): %v", mpzd.ZoneName, err)
+	}
+	if apex == nil {
+		return fmt.Errorf("zone %s has no apex", mpzd.ZoneName)
 	}
 
 	for _, rrtype := range apex.RRtypes.Keys() {
@@ -1239,7 +1227,7 @@ func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
 				// Deep copy the RR slice to avoid sharing references
 				copiedRRs := make([]dns.RR, len(rrset.RRs))
 				copy(copiedRRs, rrset.RRs)
-				snapshotOd.RRtypes.Set(rrtype, core.RRset{
+				snapshotOd.RRtypes.Set(rrtype, core.RRset{ // mp-private: UpstreamData copy, not zone data
 					Name:   rrset.Name,
 					RRtype: rrset.RRtype,
 					RRs:    copiedRRs,
@@ -1394,16 +1382,15 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 				MPOptions: mpzd.MPOptions,
 			}
 
+			// One batch on the draft: the combine and the signature TXT go
+			// into new_zd's Data, and the refresh publish that consumes it
+			// is the publish.
 			lg.Info("combining with local changes", "zone", mpzd.ZoneName)
-			success, err := tmpMpzd.CombineWithLocalChanges()
+			success, _, err := tmpMpzd.combineAndPublish(mp)
 			if err != nil {
 				lg.Error("CombineWithLocalChanges failed", "zone", mpzd.ZoneName, "err", err)
 			} else if success {
 				lg.Info("local changes applied to new zone data", "zone", mpzd.ZoneName)
-			}
-
-			if tmpMpzd.InjectSignatureTXT(mp) {
-				lg.Debug("signature TXT injected", "zone", mpzd.ZoneName)
 			}
 		}
 	}

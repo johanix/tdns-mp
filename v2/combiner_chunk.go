@@ -168,9 +168,11 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 		p.ZoneSigned = zd.MP.MPdata.ZoneSigned
 		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
 	}
-	// Extract NSmgmt and ParentSync from HSYNCPARAM
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
+	// Extract NSmgmt and ParentSync from HSYNCPARAM. The analysis reader,
+	// because this runs on the incoming zone during the pre-refresh combine
+	// as well as on a live zone.
+	apex, err := zd.OwnerForAnalysis(zd.ZoneName)
+	if err != nil || apex == nil {
 		return p
 	}
 	hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
@@ -503,10 +505,8 @@ func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, se
 		}
 	}
 	if changed {
-		if bumperResp, err := mpzd.BumpSerialOnly(); err != nil {
-			lgCombiner.Error("combinerNotifyDelegationChange: BumpSerialOnly failed", "zone", zonename, "err", err)
-		} else {
-			lgCombiner.Debug("combinerNotifyDelegationChange: serial bumped", "zone", zonename, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("combinerNotifyDelegationChange: publishing the combiner state failed", "zone", zonename, "err", err)
 		}
 	}
 
@@ -589,7 +589,7 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	}
 
 	if len(instr.Locations) == 0 {
-		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil)
 		if storedInstr != nil {
 			for _, ns := range storedInstr.PublishedNS {
 				publishSignalKeyToProvider(zone, ns, senderID, nil)
@@ -617,9 +617,9 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 			}
 			parsedRRs = append(parsedRRs, rr)
 		}
-		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
+		mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, parsedRRs)
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
-		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil)
 	}
 
 	var publishedNS []string
@@ -728,10 +728,8 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		return
 	}
 	if changed {
-		if bumperResp, err := mpzd.BumpSerialOnly(); err != nil {
-			lgCombiner.Error("BumpSerialOnly failed for provider zone", "zone", providerZone, "err", err)
-		} else {
-			lgCombiner.Debug("provider zone serial bumped", "zone", providerZone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("publishing the combiner state failed for provider zone", "zone", providerZone, "err", err)
 		}
 	}
 	lgCombiner.Info("_signal KEY applied to provider zone", "zone", providerZone, "owner", ownerName, "keys", len(parsedRRs), "changed", changed)
@@ -841,6 +839,7 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 		return
 	}
 
+	anyChanged := false
 	for _, entry := range myEntries {
 		var parsedRRs []dns.RR
 		for _, rrStr := range entry.KEYRRs {
@@ -857,7 +856,14 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 			continue
 		}
 		if changed {
+			anyChanged = true
 			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", mpzd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
+		}
+	}
+	// One publish for the whole re-apply.
+	if anyChanged {
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("startup re-apply: publishing the combiner state failed", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
 }
@@ -1195,12 +1201,11 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 	}
 
 	resp.DataChanged = dataChanged
+	// One publish for the whole update, however many operations it carried:
+	// the contribution functions above changed only the combiner's state.
 	if dataChanged {
-		bumperResp, err := mpzd.BumpSerialOnly()
-		if err != nil {
-			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
-		} else {
-			lgCombiner.Info("serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("publishing the combiner state failed", "zone", req.Zone, "err", err)
 		}
 	}
 
