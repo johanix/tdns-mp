@@ -278,15 +278,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
 			combinerSendConfirmation(tm, deliveredBy, resp)
 
-			// Notify downstream servers (e.g. signer) about the zone change
-			// so they can fetch the updated zone promptly instead of waiting
-			// for the next periodic SOA refresh.
-			// Run async to avoid blocking the message handler on network I/O.
-			if resp.Status != "error" {
-				if zd, ok := Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
-					go zd.NotifyDownstreams()
-				}
-			}
+			// No NOTIFY here: the publish CombinerProcessUpdate makes is the
+			// one that notifies downstreams, once per version.
 		}
 	}
 }

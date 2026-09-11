@@ -308,10 +308,14 @@ func triggerResign(conf *Config, zoneName string) {
 		return
 	}
 
+	// A bounded wait rather than a drop: the periodic pass renews signatures
+	// by age, and after a key-state change the signatures to replace are
+	// valid but by the wrong key, so a dropped request is not repaired by the
+	// next pass (tdns-mp#46 item 3).
 	select {
-	case conf.Config.Internal.ResignQ <- zd.ZoneData:
+	case conf.Config.Internal.ResignQ <- tdns.ResignRequest{Zd: zd.ZoneData, Reason: tdns.ResignKeyStateChanged}:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
-	default:
-		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign will happen on next cycle", "zone", zoneName)
+	case <-time.After(10 * time.Second):
+		lgSigner.Error("KeyStateWorker: ResignQ full for 10s, re-sign request lost", "zone", zoneName)
 	}
 }

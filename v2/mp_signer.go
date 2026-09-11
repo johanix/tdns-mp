@@ -9,6 +9,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -54,7 +55,7 @@ func (mpzd *MPZoneData) SignZone(hdb *HsyncDB, force bool) (int, error) {
 	newrrsigs := 0
 
 	if !zd.Options[tdns.OptBlackLies] {
-		err = zd.GenerateNsecChainWithDak(dak)
+		err = zd.GenerateNsecChainWithDak(context.Background(), dak)
 		if err != nil {
 			return 0, err
 		}
