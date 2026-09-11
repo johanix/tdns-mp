@@ -189,12 +189,11 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	// *hsync.Registry is the single peer map + protocol methods (decision B,
-	// docs/2026-05-30 §A3). A3d.1 embeds the SAME instance owned by
-	// HsyncEngine (wired at engine construction). AgentRegistry.S stays
-	// dual-mapped alongside it until A3d.4; the embedded registry's own S is
-	// reached via ar.Registry.S. The outer S/mu (depth 0) shadow the
-	// embedded ones, so all existing ar.S/ar.mu usage is unchanged.
+	// *hsync.Registry is the engine-owned peer map + protocol methods
+	// (decision B, docs/2026-05-30 §A3), embedded as the SAME instance the
+	// HsyncEngine uses. S below holds the *Agent views; the engine's own
+	// map (ar.Registry.S) holds the *hsync.Peer each view embeds — two maps
+	// joined by the shared pointer (E1.b), no outer mutex (Phase 3d).
 	*hsync.Registry
 	S                     core.ConcurrentMap[AgentId, *Agent]
 	LocalAgent            *MultiProviderConf

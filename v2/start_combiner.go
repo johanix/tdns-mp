@@ -51,7 +51,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	// MP engines
 	tm := conf.InternalMp.MPTransport
 	if tm != nil {
-		tm.StartIncomingMessageRouter(ctx)
+		tm.Start(ctx) // D3: router dispatch (chunk handler registered at init)
 		lgCombiner.Info("combiner incoming message router started")
 	}
 

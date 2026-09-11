@@ -50,12 +50,11 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
 
-	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
+	// Wire the receive path (CHUNK NOTIFY handler + router dispatch); must
+	// run before NotifyHandler (D3: one entry point per role).
 	if conf.InternalMp.TransportManager != nil {
-		if err := conf.InternalMp.MPTransport.RegisterChunkNotifyHandler(); err != nil {
-			lgAgent.Error("failed to register CHUNK NOTIFY handler", "err", err)
-		} else {
-			conf.InternalMp.MPTransport.StartIncomingMessageRouter(ctx)
+		if err := conf.InternalMp.MPTransport.Start(ctx); err != nil {
+			return fmt.Errorf("%s receive path: %w", "agent", err)
 		}
 	}
 

@@ -2,11 +2,72 @@
 # (remaining work)
 
 Date: 2026-08-24
-Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
-REMAINING transport-redesign work. Supersedes, for everything not
-yet implemented: `2026-06-11-transport-redesign-consolidated-plan-v3.md`
-and `2026-06-14-road-to-stage-C-plan.md`. Where v3 or the road-to-C
-plan differs from v4, **v4 wins.**
+Amended: 2026-09-09 (corrections, C3.0 / C0.5 / F0, effort) and
+2026-09-10 (execution record). Both amendments are appended at the end
+of this file; the body text between is the 2026-08-24 plan, unchanged.
+Status: PLAN OF RECORD — **Stages A–D and the E residual are EXECUTED
+and live on the testbed as of 2026-09-10** (see "Current state" just
+below and the 2026-09-10 amendment for the commit table). Remaining:
+the C5 envelope label, C4b + F1, F2's stub, F3; F0 is out of scope.
+Supersedes, for everything not yet implemented:
+`2026-06-11-transport-redesign-consolidated-plan-v3.md` and
+`2026-06-14-road-to-stage-C-plan.md`. Where v3 or the road-to-C plan
+differs from v4, **v4 wins.**
+
+## Current state (2026-09-10)
+
+Branch `transport-redesign-v1-C` in BOTH repos (tdns-mp and
+tdns-transport), cut 2026-09-09 from the tips of `phase-4-c0-gate` /
+`phase-2.6-discovery`. `main` is untouched; there are no PRs; the go.mod
+local replaces are still in place (see "Baseline & branching strategy").
+
+- **Executed 2026-09-09/10:** C0.5, C3.0, C1, C2, C3, C4, C5a, C6, C7,
+  D0, D1, D2, D3, the E residual, plus one fix outside the plan
+  (discovery-cache flush of the parent zone). Each step is one commit
+  per repo; the table is in the 2026-09-10 amendment.
+- **Deployed:** every step went to the whole five-node testbed in
+  seven deploys (observer node first), each followed by the probe set;
+  the fleet converged after every deploy and was fully OPERATIONAL at
+  the end of the run. Tags `stage-A-complete` mark the verified
+  pre-Stage-C pair in both repos.
+- **Transport package now:** vocabulary hello/beat/ping/confirm/chunk +
+  one opaque `AppMessage`/`AppResponse` carrier (`SendApp`,
+  `TransportManager.Send`, `SendAll` for hello/beat fan-out); the
+  application registers its verbs on the router per role and parses
+  its own payloads (`ParseApp`); no application request/response or
+  payload types, no zone knowledge on `Peer`, no `IncomingChan`;
+  exported types 87 → 64; `transport.go`/`api.go` import no tdns core.
+- **MP now:** owns the wire payload types (`mp_wire_payloads.go`), the
+  peer request/response types (`mp_peer_types.go`), the send builders
+  (`mp_send.go`, golden-locked), the receive parser (`mp_chunk_parse.go`),
+  the verb handlers (`mp_verb_handlers.go`) and ONE verb table that both
+  registers handlers per role and dispatches the callback (`mp_verbs.go`).
+  The NG `PeerDetails` sidecar and the engine's own gossip table are gone;
+  `Agent` still embeds `*hsync.Peer` but the embed trap has no target.
+- **Gates that must stay green:** `TestGoldenWire*` (13 receive + 10
+  send goldens), `TestTransportDispatch_*`, `TestAppVerbTable`,
+  `TestTransportBoundary_*`, `TestParseAppPayload`, `-race` on mp root +
+  hsync, tdns-transport standalone tests, `cmd/transport-exercise`.
+- **C5 envelope label: DONE 2026-09-10** (tdns-transport, after the #7
+  review round). Carrier: the Format byte of the CHUNK EDNS0 option, the
+  transport-owned pre-crypto slot every message already carries, so no
+  wire change and no golden regeneration: 1 = none, 2 = jose, 3 = cose
+  (reserved, answered FORMERR). The receiver switches on the label; the
+  byte-sniff survives only as the fallback for the unlabelled query-mode
+  fetch, which F2b labels when transport owns the whole chunk chain. The
+  API mechanism carries no label and stays implicitly none.
+- **Left:** C4b (transport-own
+  hello/beat/ping send structs, byte-locked) which unblocks F1, F2's
+  `hsync-peer-status` stub, F3 (unexport decision; 22 candidates listed
+  in the amendment), and one D1 follow-up (a discovery-vs-beat race test;
+  the unlocked bool reads on the send path were fixed 2026-09-10 in the
+  #34 review round). F0 (tdns re-pin) is a separate project by operator
+  decision.
+- **go.mod state:** tdns-transport is still consumed through a
+  sibling-directory replace and stays so until tdns-transport #7 lands
+  and can be pinned (the last step of the Stage F publishing story). The
+  tdns pin moved to `84101cd8` via #35: that is the June pin plus the
+  identity-zone TTL fix, not F0.
 
 Completed work is recorded here as a status table only (with commit
 hashes and the branch it lives on); its specs live in the superseded
@@ -80,6 +141,12 @@ re-derived:
 8. **Effort re-estimated** against the 2026-08-24 code census.
 
 ## Verified baseline (code-verified 2026-08-24)
+
+> **2026-09-10:** this table is the 2026-08-24 snapshot and is left as
+> written (evolution trail). The rows that say NOT STARTED for the Stage A
+> exit gate, C1-C7, D0-D3 and F2b were executed 2026-09-09/10; "Current
+> state (2026-09-10)" at the top and the 2026-09-10 amendment are the truth
+> for them. F1-F3 rows are still current.
 
 Checked at: tdns-mp `phase-4-c0-gate` `92e64a6`; tdns-transport
 `phase-2.6-discovery` `37c0dfb`. No testbed re-run (none since
@@ -705,3 +772,270 @@ Still open:
    Stage A exit gate.
 5. **Operator `peer delete`:** `OnPeerRemoved` is ready; no
    production caller. Product decision, not Stage C work.
+
+---
+
+# Amendment 2026-09-09 — code re-verified at mp `7a10ef9` / transport `37c0dfb`
+
+Appended per the dated-doc rule; nothing above this line is edited.
+Companion with the full status table and verification log:
+`tdns-project/reviews/2026-09-09-tdns-mp-transport-plan-v4-vs-code.md`.
+
+## A. Baseline delta since 2026-08-24
+
+- mp `92e64a6` → `7a10ef9`: `5683c5b` (this doc), `f720468` (review
+  findings doc), `08a3b8e` (findings 1+2), `7a10ef9` (finding 3).
+  Transport unchanged at `37c0dfb`. No new tags in either repo; no
+  `transport-redesign-v1-C`; the stacked testbed pass has not run
+  (findings 4 and 6 dispositions still `_pending_`). Every line in
+  the "Verified baseline" table marked NOT STARTED is still NOT
+  STARTED; every transport line number cited above is still exact.
+- Verified 2026-09-09 in throwaway worktrees (mp built against
+  transport `37c0dfb` via a scratch `go.work`): standalone build +
+  `go vet` + `go test ./... -count=1` + `-race` green in both repos;
+  `cmd/transport-exercise` builds; the 14 C0 goldens and the 9
+  boundary-harness tests pass; the 5 binaries build after
+  `make -C cmd version` (the git-ignored `version.go`).
+- Line drift: `hsync_transport.go` +16 below `:1570` after `7a10ef9`.
+  The finding-3 residual bool reads are now `:1471`, `:1500`, `:1605`,
+  `:1641`; the canonical-state read is `:1583`; the shadow read
+  (nil-registry branch only) `:1585`. `Agent.State` has four writers:
+  `agent_utils.go:280`, `apihandler_agent.go:343` / `:392`,
+  `apihandler_agent_distrib.go:659`. The `ListKnownPeers` LEGACY
+  overlay on KNOWN (`apihandler_agent_distrib.go:375`, `:457`) is
+  deliberately unfixed.
+
+## B. Corrections to the text above
+
+| Where | Text above says | Code says (2026-09-09) |
+|---|---|---|
+| C7 | `TestTransportBoundary_LegacySyncRejection` (`transport_integ_test.go`) | The file is **tdns-mp** `v2/transport_integ_test.go:404` (the boundary harness), not a tdns-transport test. Disposition: rewrite, do not retire — after C3 it asserts the MP-side rejection with the same error payload; it is the only end-to-end LEGACY-sync check. |
+| C7 | shared-zone methods at `peer.go:723–756` incl. `ByZone` | `AddSharedZone`/`ReplaceSharedZones`/`GetSharedZone(s)` at `peer.go:719–751`; `ByZone` is `PeerRegistry.ByZone` at `peer.go:898`. |
+| C6 | "7 MP `Dns*Payload` structs … keep the 5 transport-own" | 13 structs. Transport-own 5: Hello, Beat, Ping, PingConfirm, Confirm. MP 8: Sync, Relocate, Keystate, KeystateConfirm, Edits, Config, Audit, StatusUpdate (Relocate follows `HandleRelocate`, which C3 lists as MP). |
+| C6 | "Reduce `MessageType` constants to transport-own" | The 7 named constants (`dns_message_router.go:24–30`) are UPPERCASE (`"HELLO"`, `"BEAT"`, `"UPDATE"`, …) and have zero production use except `MessageTypeUnknown`; their 43 uses are all in `_test.go`. Production registers handlers on lowercase literals (`router.Register("BeatHandler", MessageType("beat"), …)`) and `DetermineMessageType` returns lowercase literals — the wire vocabulary. C6 deletes the six unused uppercase constants and moves the router tests onto the lowercase tokens, leaving one vocabulary. |
+| C4 | "~7 transport files" | 6 files import `core` (`imr`, `transport`, `dns`, `chunk_notify_handler`, `handlers`, `api`); `init.go` is a comment-only guide that quotes the import in prose. MP body types are confined to `dns.go`, `transport.go`, `api.go`. |
+| D0 census | residual writers `Rediscover` / `attemptDiscovery` | Both write through `forEachEnabledTransport` (`hsync/transport_peer.go:76`), the only non-test accessor of `Peer.ApiDetails`/`DnsDetails` besides `hsync.Peer.EffectiveState` (`hsync/types.go:140–141`; sole caller `hsync/gossip.go:218`). The helper goes with the sidecar. |
+| D0 slice | (not listed) | Add from the 08-25 review: Finding 5 constructors `CreateOperationalAgentTask` / `CreateAgentUpstreamRFI` (`agent_utils.go:432` / `:442`; zero callers; read the shadow) — delete. Finding 4 TLSA asymmetry (`transport/discovery.go:325` unconditional vs JWK gated at `:347`) — gate like JWK. Finding 6 stub (`apihandler_agent_hsync.go:87–88`; `cli/hsync_cmds.go:545` still points operators at it) — fix the pointer in D0, implement or drop the endpoint in F2. |
+| D1 | (not listed) | `peer.LastHelloReceived` / `LastBeatReceived` plain-field writes at `hsync_transport.go:688`, `:765`, `:844`, `:903`, `:919` move under the TM with the Hello/Beat relocation. |
+| F1 | `BeatRequest`, `DnsBeatPayload`, `apiBeatRequest`, "beat-response" | Response-side sites are `inlineConfirm.Gossip` (`dns.go:1119`; struct at `:1106`) and the inline confirm payload in `HandleBeat` (`handlers.go:194`). Five sites total. |
+| F2 | "mark superseded docs' Status lines (v2, v3, road-to-C, bite-era)" | v2, v3 and road-to-C are marked. Still stale: `2026-05-29-transport-redesign-consolidated-plan.md` ("AUTHORITATIVE PLAN (in progress"), `2026-05-08-transport-refactor-next-bites.md` and `-third-bites.md` ("PLAN"). |
+| F2 | `.md~` duplicate "still in `tdns-mp/docs/`" | Untracked and git-ignored (`*~`); a local `rm` in the operator's checkout, not a commit. |
+| F2 | stale comments `agent_structs.go:197`, `agent_utils.go:63` | Confirmed at `agent_structs.go:195–197` ("until A3d.4", `ar.mu`) and `agent_utils.go:63` (`AgentRegistry.mu` in the lock-order comment). |
+
+## C. New item C3.0 — delete the dead `IncomingChan` plumbing
+
+**Census (2026-09-09).** `ChunkNotifyHandler.IncomingChan`
+(`chunk_notify_handler.go:46–47`) is allocated three times —
+`NewChunkNotifyHandler` (`:95`), `combiner_chunk.go:1403`,
+`signer_chunk_handler.go:32` — and never written or read. The only
+writer in the codebase, `RouteToMsgHandler` (`handlers.go:838`), takes
+the *router config's* channel (`RouterConfig` / `CombinerRouterConfig`
+/ `SignerRouterConfig.IncomingChan`, `router_init.go:29` / `:277` /
+`:423`), and every production site sets that to nil
+(`main_init.go:255`, `:442`; `hsync_transport.go:450`). No `_test.go`
+in either repo references `IncomingChan` or `RouteToMsgHandler`.
+`transport/init.go:41` (the comment-only integration guide) still
+documents the channel loop — the F2 "stale `init.go` guide" item is
+stale because the mechanism it describes is dead.
+
+**Proposal.** One commit, transport + mp together, wire-invariant, as
+the first C3 sub-step (after the testbed checkpoint, so the undeployed
+stack does not grow):
+
+1. transport: delete `ChunkNotifyHandler.IncomingChan` and its
+   allocation in `NewChunkNotifyHandler`; delete `RouteToMsgHandler`;
+   delete the three `*RouterConfig.IncomingChan` fields and the three
+   `if cfg.IncomingChan != nil { router.Use(RouteToMsgHandler(…)) }`
+   blocks (`router_init.go:93`, `:323`, `:469`); rewrite the `init.go`
+   guide to the `RouteToCallback` shape, or delete `init.go` and point
+   readers at the per-type fan-out comment at `handlers.go:870`.
+2. mp: drop the two `make(chan …, 100)` lines and the three
+   `IncomingChan: nil` config lines.
+3. Gate: standalone builds, `go vet`, both suites, goldens unchanged
+   (no payload struct is touched).
+
+Why in C3: C3 already deletes `InitializeCombinerRouter` /
+`InitializeSignerRouter` and their configs (`router_init.go:283`,
+`:429`) — the config fields die with them, and taking the dead
+plumbing out first keeps the C3 diff readable. Why not after C1: C1
+widens `IncomingMessage`; a dead channel of the widened type is one
+more false lead of the embed-trap class.
+
+## D. New item F0 — tdns/v2 re-pin (missing from Stage F and the estimate)
+
+Both repos pin `tdns/v2 v2.0.0-20260611090745-44755a2166f9`
+(2026-06-11). tdns `origin/main` was 1,324 commits past it on
+2026-09-08. mp `main` carries `docs/2026-07-21-tdns-repo-drift.md`
+(`9a4cb48`), which documented ~10 independent API breaks plus a
+`johanix/dns` fork bump at the 468-commit mark; that commit is the
+only one on `main` not in `phase-4-c0-gate` (merge-base `0f2c99fa`).
+
+Decisions:
+
+- The pin stays frozen through Stages C and D. A re-pin is a compile
+  break with its own testbed cycle and must not share a window with
+  the wire stage.
+- **F0 — merge `main` forward, re-pin tdns/v2, regenerate the drift
+  list** becomes the first Stage F step, before F1. Regenerate the
+  list with the recipe in the 07-21 doc; its ~10 breaks are a floor.
+  The `johanix/dns` fork bump makes this a three-repo lockstep.
+- The mp `go.mod` `require` of tdns-transport (`82d768a`, 22 commits
+  behind the working tip) stays covered by the local replace until
+  the Stage F publishing story, as already planned.
+- Merge `main` (one docs commit, textual-only) into `phase-4-c0-gate`
+  at the Stage A exit gate.
+
+## E. New gate C0.5 — dispatch coverage before C3
+
+The C0 goldens lock **bytes**; the review prompt already records that
+they cannot see a renamed verb that resolves to UNKNOWN and is dropped
+after delivery. Coverage census 2026-09-09: no `_test.go` in
+tdns-transport mentions `keystate`, `edits`, `config`, `audit`,
+`status-update`, `relocate`, `rfi` or `ping`; in tdns-mp those tokens
+appear only in `golden_wire_test.go` (marshal only). The boundary
+harness exercises `sync`, `confirm`, hello-rejection and discovery. Of
+the eight handlers C3 moves, only `HandleSync` has a dispatch test;
+`HandleRfi/Keystate/Edits/Config/Audit/StatusUpdate/Relocate` have
+none on either side of the seam, and neither does transport-own
+`HandlePing`.
+
+v4 §C7 says "add a dispatch-count probe to the harness if cheap". It
+is now a gate, before C3: extend the boundary harness with one
+round-trip per verb (payload → CHUNK → router → handler →
+`IncomingMessage`/callback observed), asserting which handler fired.
+C3, C5 and C6 each re-run it. Cost ≈ 0.5 session; it is the only
+mechanical enforcement of "same verb, same handler" during the
+relocation.
+
+## F. Effort (amended)
+
+| Work | v4 | Amended |
+|---|---|---|
+| Stacked testbed + Stage A exit | 0.5–1.5 | unchanged |
+| C0.5 dispatch coverage | — | 0.5 |
+| C1–C7 (incl. C3.0) | 5–7 | 5–7 |
+| D0–D3 | 1.5–2.5 | unchanged |
+| E residual | 0.5 | unchanged |
+| F0 re-pin + merge-forward | — | 1.5–3 (floor; re-estimate from the regenerated drift list) |
+| F1–F3 + F2b + merge | 1.5–2.5 | unchanged |
+| **Total** | 9–14 | **≈ 11–17** |
+
+---
+
+# Amendment 2026-09-10 — Stage C executed; D0–D3 and E residual landed
+
+Unattended run 2026-09-09 20:00 – 2026-09-10 (UTC) on branch
+`transport-redesign-v1-C` in both repos, cut from the 09-09 amendment
+commit (mp) and `37c0dfb` (transport). Every step was built, unit- and
+race-tested, and deployed to the whole testbed (cpt first as observer,
+then the rest) before the next step started. Full operational log:
+`tdns-project/handovers/2026-09-09-tdns-mp-transport-v1C-progress.md`.
+
+## Landed (in order; one commit per step per repo)
+
+| Step | transport | mp | Deployed |
+|---|---|---|---|
+| C0.5a callback skips refused verbs | `06726cd` | — | #1 |
+| C0.5b per-verb dispatch gate | — | `5b146e6` | #1 |
+| C3.0 dead IncomingChan plumbing | `ebba341` | `ac976d4` | #1 |
+| C1 AppMessage carrier + TypeToken | `b2701e0` | `27458ed` | #1 |
+| C2 typed sends → SendApp; send goldens | `09ce226` | `80d15dc` | #2 |
+| C3 handlers → mp; one verb table per role | `b5c6002` | `d18965c` | #3 |
+| C4 request/response types → mp | `8e1475a` | `f5dd769` | #4 |
+| C5a application-owned payload parser (ParseApp) | `0f6b253` | `f655618` | #4 |
+| C6 payload structs/parsers → mp; dead Relocate, DetermineMessageType, test-only consts deleted | `6038704` | `54be8a1` | #4 |
+| C7 zone concepts out of transport.Peer; MP LEGACY sync gate live | `01d963a` | `9bdf373` | #4 |
+| D0 PeerDetails + engine gossip table deleted; findings 4/5/6 | `7c0a520` (finding 4) | `68106d9` | #5 |
+| D2 agent LivenessInterval stamp | — | `68106d9` | #5 |
+| D3 one Start entry point per role | — | `d544c5d` | #6 |
+| E residual: transport-exercise discovery smoke | `28e7733` | — | n/a |
+| Discovery-cache fix (stuck NEEDED after restart) | — | `4e2fe08` | #6 |
+| D1 hello/beat fan-out into the TM (SendAll) | `c20689d` | `79bacf2` | #7 |
+
+transport's exported types: 87 → 64. `transport.go`/`api.go` import no
+tdns core; `dns.go` keeps core only for CHUNK/format constants and for
+the hello/beat/ping send builders.
+
+## Deviations from the text above (operator to confirm)
+
+- **C5**: both authorization calls (pre-crypto sender, post-decrypt
+  zone-peer) stay in transport's RouteViaRouter, through the application's
+  IsPeerAuthorized callback, so an unauthorized sender is still answered
+  REFUSED. Moving the zone check behind the callback would ack-then-drop.
+  The **envelope label is not added**; its carrier (EDNS0 Format byte vs
+  manifest metadata) needs a decision. C5's receive split is otherwise
+  done through the ParseApp seam.
+- **C4**: RejectedItemDTO stays in transport (confirm is transport-own).
+- **C6**: DetermineMessageType had no production caller and no legacy
+  `type` fallback — deleted, not collapsed; the verb tests use the
+  production parser. The six uppercase MessageType constants were
+  test-only — deleted.
+- **C7**: the sync LEGACY gate is now live in MP (isKnownLegacy); it never
+  fired in transport because nothing set MessageContext.Peer. EXPLAINED
+  DELTA: a sync from an established peer sharing no participant zone is
+  now rejected. Beat zone order stays unspecified on purpose.
+- **D1**: done as `TransportManager.SendAll` — an ordered, string-keyed
+  fan-out that tries every eligible mechanism (not primary-then-fallback,
+  which is what the hello/beat senders always did). The gates and the
+  per-mechanism outcome rules stay in the MP wrappers; the 08-25
+  finding-3 note (unlocked bool reads of agent.ApiMethod/DnsMethod on
+  the send path) still applies to those wrappers.
+- **F0/F1–F3 not started**, per instruction (F0 = tdns re-pin is out of
+  scope; F1 is the wire break; F2/F3 are cleanup).
+- Stage A exit tags: `stage-A-complete` set on the verified pair
+  (mp `7a10ef9` / transport `37c0dfb`) — the stack ran live on all five
+  nodes from 2026-08-25 and passed tonight's probe set.
+
+## Run narrative (2026-09-09, UTC)
+
+| Deploy | Time | Carried | Result |
+|---|---|---|---|
+| #1 | 20:22–20:33 | C0.5a/b, C3.0, C1 | converged; predicted deltas only |
+| #2 | 20:44–20:51 | C2 | converged; one node kept a peer NEEDED for 10 min → led to the discovery-cache finding |
+| #3 | 21:04–21:10 | C3 | converged; verbs dispatched on the mixed fleet during the observer window |
+| #4 | 21:28–21:34 | C4, C5a, C6, C7 | converged; no LEGACY-gate rejections; zone-authz refusals at the pre-existing rate |
+| #5 | 21:39–21:45 | D0, D2, finding 4 | converged after the heal pass |
+| #6 | 21:53–21:57 | D3, discovery-cache fix | converged; agents no longer got stuck |
+| #7 | 22:05–22:10 | D1 | converged 22:14; three of four zones with leaders |
+
+Probe discipline per step: standalone build + vet + tests in both
+repos, `-race` on mp root and hsync, the gate tests above, the five
+binaries; then deploy to the observer node, watch its gossip matrix
+and warning classes for a minute on the mixed fleet, then the rest,
+then a heal pass and a full probe. INVARIANT held throughout: no
+unpredicted matrix change; the only declared deltas were the C7 LEGACY
+sync gate (never exercised on the fleet) and the deploy-time restart
+transients.
+
+## Verification tooling added in this run
+
+- `transport_dispatch_test.go` (C0.5): per verb, the production parser
+  must extract it, the registered handler must accept it through the
+  real middleware chain, and the RouteToCallback delivery must reach the
+  expected MP queue; plus role-shaped routers (signer, combiner).
+- `golden_send_test.go` (C2): bytes of every send builder's payload.
+- `mp_verbs_test.go` (C3): the per-role verb sets.
+- `mp_chunk_parse_test.go` (C5a): the parser's rules and rejections.
+- `manager_fanout_test.go` (D1, transport): SendAll order and coverage.
+- `transport-exercise` discovery smoke (E residual).
+
+## How to resume
+
+Build tdns-mp against the sibling transport checkout with a `go.work`
+listing `<mp>/v2`, `<transport>/v2` and the five `<mp>/cmd/*` modules;
+`make -C cmd version` once for the ignored `version.go` files. Every
+step is one commit per repo on `transport-redesign-v1-C`; deploy the
+observer node first, run the probe set, then the rest. The operational
+log (hosts, commands, captures) is kept outside the repo by design.
+
+## Testbed findings that belong to no plan step
+
+1. A peer whose discovery fails while its target restarts stays NEEDED
+   until a cached entry one label above its identity expires; retries
+   fail with "no auth-server attempts made". Fixed in mp (the discovery
+   kick and `peer reset` now flush the parent zone). Before the fix the
+   deploy script's heal pass (`imr flush <parent>` + `peer reset`) was
+   the workaround.
+2. The espresso/yabba election churn (~300/day, 54-min period) predates
+   this work and is untouched.
+3. Two NetBSD nodes had no ntpd (88 s skew each way); enabled 2026-09-09.

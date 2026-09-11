@@ -9,7 +9,7 @@
  *   - byte-exact JSON (tags + values) for the 13 Dns*Payload types,
  *   - the query-mode manifest (core.ManifestData + the metadata key
  *     convention from distrib.CreateManifestMetadata),
- *   - the wire verb set DetermineMessageType dispatches on.
+ *   - the wire verb set the parser extracts and the verb table dispatches on.
  *
  * Any intentional wire change (e.g. C5's additive `envelope` field, F1's
  * Gossip→AppData rename) is made by regenerating the goldens with
@@ -66,7 +66,7 @@ func goldenWirePayloads() []struct {
 			Time:   "2026-01-02T03:04:05Z",
 			Gossip: json.RawMessage(`[{"group_hash":"gh1"}]`),
 		}},
-		{"DnsSyncPayload", &transport.DnsSyncPayload{
+		{"DnsSyncPayload", &DnsSyncPayload{
 			MessageType: "sync", OriginatorID: "me.example.",
 			YourIdentity: "you.example.", Zone: "zone1.example.",
 			Nonce: "sync-nonce",
@@ -86,9 +86,9 @@ func goldenWirePayloads() []struct {
 				Locations: []string{"at-apex", "at-ns"},
 			},
 		}},
-		{"DnsRelocatePayload", &transport.DnsRelocatePayload{
+		{"DnsRelocatePayload", &DnsRelocatePayload{
 			Type: "relocate", SenderID: "me.example.",
-			NewAddress: transport.DnsAddress{
+			NewAddress: DnsAddress{
 				Host: "192.0.2.3", Port: 5353, Transport: "udp", Path: "/x",
 			},
 			Reason: "ddos-mitigation", ValidUntil: 1700009999,
@@ -113,12 +113,12 @@ func goldenWirePayloads() []struct {
 			MessageType: "ping", MyIdentity: "me.example.",
 			YourIdentity: "you.example.", Time: "2026-01-02T03:04:05Z",
 		}},
-		{"DnsKeystatePayload", &transport.DnsKeystatePayload{
+		{"DnsKeystatePayload", &DnsKeystatePayload{
 			MessageType: "keystate", MyIdentity: "me.example.",
 			YourIdentity: "you.example.", Zone: "zone1.example.",
 			KeyTag: 12345, Algorithm: 15, Signal: "inventory",
 			Message: "full set",
-			KeyInventory: []transport.KeyInventoryEntry{{
+			KeyInventory: []KeyInventoryEntry{{
 				KeyTag: 12345, Algorithm: 15, Flags: 257,
 				State: "active",
 				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA==",
@@ -126,12 +126,12 @@ func goldenWirePayloads() []struct {
 			Timestamp: 1700000006, Type: "keystate",
 			SenderID: "legacy-sender.example.",
 		}},
-		{"DnsKeystateConfirmPayload", &transport.DnsKeystateConfirmPayload{
+		{"DnsKeystateConfirmPayload", &DnsKeystateConfirmPayload{
 			Type: "keystate_confirm", SenderID: "me.example.",
 			Zone: "zone1.example.", KeyTag: 12345, Signal: "inventory",
 			Status: "ok", Message: "ack", Timestamp: 1700000007,
 		}},
-		{"DnsEditsPayload", &transport.DnsEditsPayload{
+		{"DnsEditsPayload", &DnsEditsPayload{
 			MessageType: "edits", MyIdentity: "combiner.example.",
 			YourIdentity: "you.example.", Zone: "zone1.example.",
 			AgentRecords: map[string]map[string][]string{
@@ -142,7 +142,7 @@ func goldenWirePayloads() []struct {
 			Message: "current contributions", Timestamp: 1700000008,
 			Type: "edits", SenderID: "legacy-sender.example.",
 		}},
-		{"DnsConfigPayload", &transport.DnsConfigPayload{
+		{"DnsConfigPayload", &DnsConfigPayload{
 			MessageType: "config", MyIdentity: "me.example.",
 			YourIdentity: "you.example.", Zone: "zone1.example.",
 			Subtype:    "policy",
@@ -150,14 +150,14 @@ func goldenWirePayloads() []struct {
 			Message:    "config response", Timestamp: 1700000009,
 			Type: "config", SenderID: "legacy-sender.example.",
 		}},
-		{"DnsAuditPayload", &transport.DnsAuditPayload{
+		{"DnsAuditPayload", &DnsAuditPayload{
 			MessageType: "audit", MyIdentity: "me.example.",
 			YourIdentity: "auditor.example.", Zone: "zone1.example.",
 			AuditData: map[string]interface{}{"check": "ok", "count": 3},
 			Message:   "audit response", Timestamp: 1700000010,
 			Type: "audit", SenderID: "legacy-sender.example.",
 		}},
-		{"DnsStatusUpdatePayload", &transport.DnsStatusUpdatePayload{
+		{"DnsStatusUpdatePayload", &DnsStatusUpdatePayload{
 			MessageType: "status-update", MyIdentity: "combiner.example.",
 			YourIdentity: "you.example.", Zone: "zone1.example.",
 			SubType:   "delegation-change",
@@ -220,7 +220,7 @@ func TestGoldenWirePayloads(t *testing.T) {
 }
 
 // TestGoldenWireVerbs locks the wire verb set: the "MessageType" values
-// DetermineMessageType dispatches on. A verb that disappears here delivers
+// the production parser extracts and the verb table dispatches on. A verb that disappears here delivers
 // but no longer dispatches on an un-upgraded receiver — exactly the silent
 // failure C6's wire-safety gate exists to prevent.
 func TestGoldenWireVerbs(t *testing.T) {
@@ -230,14 +230,21 @@ func TestGoldenWireVerbs(t *testing.T) {
 	}
 	for _, verb := range verbs {
 		payload := []byte(`{"MessageType":"` + verb + `"}`)
-		if got := transport.DetermineMessageType(payload); string(got) != verb {
-			t.Errorf("verb %q no longer dispatches (got %q) — wire break for un-upgraded peers", verb, got)
+		if got := wireVerb(payload); got != verb {
+			t.Errorf("verb %q no longer parses (got %q) — wire break for un-upgraded peers", verb, got)
+		}
+		if !appVerbKnown(verb) {
+			t.Errorf("verb %q has no row in the verb table — delivers but no longer dispatches", verb)
 		}
 	}
-	// And an unknown verb must stay unknown (the strictness the mixed-fleet
-	// runbook relies on).
-	if got := transport.DetermineMessageType([]byte(`{"MessageType":"no-such-verb"}`)); got != transport.MessageTypeUnknown {
-		t.Errorf("unknown verb dispatched as %q", got)
+	// Legacy-tag-only payloads (confirm, relocate) must still resolve.
+	if got := wireVerb([]byte(`{"type":"confirm"}`)); got != "confirm" {
+		t.Errorf("legacy type tag: got %q", got)
+	}
+	// And an unknown verb must stay unknown to the table (the strictness the
+	// mixed-fleet runbook relies on).
+	if appVerbKnown("no-such-verb") {
+		t.Errorf("unknown verb has a table row")
 	}
 }
 

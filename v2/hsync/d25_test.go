@@ -49,14 +49,12 @@ func (m *d25Transport) SyncPeerZones(peer *Peer)                     {}
 func (m *d25Transport) AfterDiscoverPeer(peer *Peer)                 {}
 
 // engineWithTransport builds an Engine and registers a DNS-only hsync peer whose
-// hsync.PeerDetails.State is left at the NEEDED init — proving the gates read
-// transport.Peer, NOT the NG sidecar.
+// state lives only on transport.Peer (the NG sidecar is gone since D0).
 func engineWithD25(tb TransportBridge) (*Engine, *Peer) {
 	e := NewEngine(Deps{LocalID: "local.example.", Transport: tb}, DefaultConfig())
 	peer := NewPeer("remote.example.")
 	peer.DnsMethod = true
 	peer.ApiMethod = false
-	// Deliberately leave peer.DnsDetails.State == NEEDED (the retired sidecar).
 	e.registry.S.Set(peer.ID, peer)
 	return e, peer
 }
@@ -77,8 +75,7 @@ func TestD25_agentNeedsHello_readsTransport(t *testing.T) {
 	// transport says KNOWN -> hello must fire, even though the NG sidecar is NEEDED.
 	tb.seed(string(peer.ID), TransportDNS, transport.PeerStateKnown)
 	if !e.agentNeedsHello(peer) {
-		t.Fatalf("agentNeedsHello: want true when transport DNS state is KNOWN (NG sidecar=%s)",
-			StateToString[peer.DnsDetails.State])
+		t.Fatal("agentNeedsHello: want true when transport DNS state is KNOWN")
 	}
 
 	// transport advanced past KNOWN -> hello no longer needed.

@@ -566,7 +566,7 @@ func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtyp
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.SendStatusUpdate(ctx, peer, post)
+	err := tm.sendStatusUpdate(ctx, peer, post)
 	if err != nil {
 		lgCombiner.Error("sendDelegationStatusUpdate: failed to send", "zone", zonename, "subtype", subtype, "agent", agentID, "err", err)
 	} else {
@@ -1397,10 +1397,10 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	}
 
 	handler := &transport.ChunkNotifyHandler{
+		ParseApp:      parseAppPayload, // C5: the application parses its own payloads
 		LocalID:       localID,
 		Router:        nil,
 		SecureWrapper: secureWrapper,
-		IncomingChan:  make(chan *transport.IncomingMessage, 100),
 	}
 
 	if secureWrapper != nil && secureWrapper.IsEnabled() {

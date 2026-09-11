@@ -1,0 +1,12 @@
+{
+  "MessageType": "audit",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "auditor.example.",
+  "Zone": "zone1.example.",
+  "AuditData": {
+    "check": "ok",
+    "count": 3
+  },
+  "Message": "audit response",
+  "Time": "2026-01-02T03:04:05Z"
+}

@@ -416,7 +416,7 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 		return
 	}
 
-	req := &transport.EditsRequest{
+	req := &PeerEditsRequest{
 		SenderID:     conf.MpConfig().Identity,
 		Zone:         zone,
 		AgentRecords: agentRecords,
@@ -426,7 +426,7 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Edits(sendCtx, peer, req)
+	resp, err := tm.sendEdits(sendCtx, peer, req)
 	if err != nil {
 		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
 		return

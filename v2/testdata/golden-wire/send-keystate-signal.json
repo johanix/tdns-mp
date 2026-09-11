@@ -1,0 +1,12 @@
+{
+  "MessageType": "keystate",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "KeyTag": 12345,
+  "Algorithm": 15,
+  "Signal": "propagated",
+  "Message": "ok",
+  "KeyInventory": null,
+  "Time": "2026-01-02T03:04:05Z"
+}

@@ -1113,10 +1113,10 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 			// Create sync request
-			syncReq := &transport.SyncRequest{
+			syncReq := &PeerSyncRequest{
 				SenderID:       mp.Identity,
 				Zone:           string(amp.Zone),
-				SyncType:       transport.SyncTypeNS, // Default to NS, could be detected from RRs
+				SyncType:       PeerSyncTypeNS, // Default to NS, could be detected from RRs
 				Records:        groupRRStringsByOwner(amp.RRs),
 				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
 				MessageType:    "sync",

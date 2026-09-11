@@ -195,10 +195,10 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 
 	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
 
-	// Convert KeyInventoryItem → transport.KeyInventoryEntry
-	inventory := make([]transport.KeyInventoryEntry, len(items))
+	// Convert KeyInventoryItem → KeyInventoryEntry
+	inventory := make([]KeyInventoryEntry, len(items))
 	for i, item := range items {
-		inventory[i] = transport.KeyInventoryEntry{
+		inventory[i] = KeyInventoryEntry{
 			KeyTag:    item.KeyTag,
 			Algorithm: item.Algorithm,
 			Flags:     item.Flags,
@@ -221,7 +221,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 	}
 
 	// Build and send KEYSTATE inventory
-	req := &transport.KeystateRequest{
+	req := &PeerKeystateRequest{
 		SenderID:     conf.MpConfig().Identity,
 		Zone:         zone,
 		Signal:       "inventory",
@@ -232,7 +232,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Keystate(sendCtx, peer, req)
+	resp, err := tm.sendKeystate(sendCtx, peer, req)
 	if err != nil {
 		return fmt.Errorf("keystate send failed: %w", err)
 	}

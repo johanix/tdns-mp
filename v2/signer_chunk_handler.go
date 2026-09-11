@@ -26,10 +26,10 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 	}
 
 	handler := &transport.ChunkNotifyHandler{
+		ParseApp:      parseAppPayload, // C5: the application parses its own payloads
 		LocalID:       localID,
 		Router:        nil, // Set after router initialization via SetRouter()
 		SecureWrapper: secureWrapper,
-		IncomingChan:  make(chan *transport.IncomingMessage, 100),
 	}
 
 	// Wire FetchChunkQuery for chunk_mode=query (signer has no DNSTransport)

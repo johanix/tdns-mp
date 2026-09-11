@@ -542,8 +542,8 @@ func PrintHsyncAgent(agent *Agent, showZones bool) error {
 	// block is dropped — it was dead over the wire since END.0
 	// (Agent.MarshalJSON never serialized AgentDetails, so the details==nil
 	// guard always skipped it). Per-transport state and addresses live in
-	// `peer list`; working heartbeat data lives in `hsync-peer-status`
-	// (HsyncPeerInfo, backed by HsyncDB).
+	// `peer list` / `peer list -v` (transport.Peer). Note that
+	// `hsync-peer-status` is a stub that always reports "Found 0 peers".
 	return nil
 }
 

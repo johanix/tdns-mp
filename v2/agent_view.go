@@ -13,6 +13,7 @@ package tdnsmp
 
 import (
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/miekg/dns"
 )
 
 // The agentMeta/mechCrypto sidecar is GONE (Phase 2.5): per-mechanism crypto
@@ -108,4 +109,18 @@ func (ar *AgentRegistry) effectiveAgentState(id AgentId) AgentState {
 		}
 	}
 	return st
+}
+
+// isKnownLegacy reports whether the identity is an established peer (in the
+// registry) that shares no participant zone with us — the LEGACY condition
+// the sync gate rejects.
+func (ar *AgentRegistry) isKnownLegacy(identity string) bool {
+	if ar == nil {
+		return false
+	}
+	id := AgentId(dns.Fqdn(identity))
+	if _, known := ar.S.Get(id); !known {
+		return false
+	}
+	return len(ar.sharedParticipantZones(id)) == 0
 }

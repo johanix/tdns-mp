@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +33,9 @@ var lgConnRetry = tdns.Logger("conn-retry")
 // adds multi-provider functionality (message routing, authorization,
 // agent discovery, DNSKEY propagation, reliable delivery wrappers).
 type MPTransportBridge struct {
-	*transport.TransportManager // generic (fields promoted via embedding)
+	role                        string // agent|auditor|signer|combiner (D3: selects the startup wiring)
+	beatInterval                uint32 // D2: LivenessInterval stamped on discovered agent peers
+	*transport.TransportManager        // generic (fields promoted via embedding)
 
 	agentRegistry *AgentRegistry
 	msgQs         *MsgQs
@@ -143,12 +146,19 @@ func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventor
 
 // MPTransportBridgeConfig holds configuration for creating a MPTransportBridge.
 type MPTransportBridgeConfig struct {
+	// Role selects the application verb set registered on the router
+	// (C3): "agent", "auditor", "signer" or "combiner". Empty means agent.
+	Role          string
 	LocalID       string
 	ControlZone   string
 	APITimeout    time.Duration
 	DNSTimeout    time.Duration
 	AgentRegistry *AgentRegistry
 	MsgQs         *MsgQs
+	// BeatInterval is our beat interval towards agent peers (seconds); it
+	// is stamped as LivenessInterval on every discovered agent peer (D2).
+	// Zero keeps transport's default.
+	BeatInterval uint32
 	// ChunkMode: "edns0" or "query"; when "query", agent stores payload and sends NOTIFY without EDNS0; receiver fetches via CHUNK query
 	ChunkMode         string
 	ChunkPayloadStore ChunkPayloadStore
@@ -207,7 +217,7 @@ type MPTransportBridgeConfig struct {
 }
 
 // NewTransportManager creates a new MPTransportBridge with both API and DNS transports.
-func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
+func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, error) {
 	// Default to both transports if not specified (backward compatibility for tests)
 	// Production configs MUST specify supported_mechanisms explicitly (validated at config load)
 	supportedMechanisms := cfg.SupportedMechanisms
@@ -221,6 +231,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	peerRegistry := transport.NewPeerRegistry()
 
 	tm := &MPTransportBridge{
+		role:         cfg.Role,
+		beatInterval: cfg.BeatInterval,
 		TransportManager: &transport.TransportManager{
 			PeerRegistry: peerRegistry,
 			Router:       transport.NewDNSMessageRouter(),
@@ -331,6 +343,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			cfg.LocalID,
 			tm.DNSTransport,
 		)
+		tm.ChunkHandler.ParseApp = parseAppPayload // C5: the application parses its own payloads
 		// Attach router to handler for new routing path
 		tm.ChunkHandler.Router = tm.Router
 
@@ -408,11 +421,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 
 			// Flush IMR cache for this peer's discovery names before re-discovery
 			if tm.getImrEngine != nil {
-				if imr := tm.getImrEngine(); imr != nil && imr.Cache != nil {
-					removed, err := imr.Cache.FlushDomain(peerID, false)
-					if err == nil && removed > 0 {
-						lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
-					}
+				if removed := flushDiscoveryCache(tm.getImrEngine(), peerID); removed > 0 {
+					lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
 				}
 			}
 
@@ -447,14 +457,23 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 			TransportManager:             tm,
 			PeerRegistry:                 tm.PeerRegistry,
 			PayloadCrypto:                cfg.PayloadCrypto,
-			IncomingChan:                 nil, // routing via RouteToCallback, not IncomingChan
 			TriggerDiscoveryOnMissingKey: true,
 			AllowUnencrypted:             false,
 			VerboseStats:                 false, // Set to true for verbose statistics logging
+			Confirmations:                true,
 		}
 		lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
 		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
-			lgTransport.Warn("router initialization failed", "err", err)
+			return nil, fmt.Errorf("router initialization: %w", err)
+		}
+		if tm.role == "" {
+			tm.role = roleAgent
+		}
+		// A half-registered verb table would look like a live process with
+		// no application receive path; refuse to construct instead (the
+		// signer and combiner already fail main_init on the same errors).
+		if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
+			return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
 		}
 
 		lgTransport.Info("DNS transport enabled")
@@ -489,6 +508,11 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		agent.ApiMethod = apiOffered
 		agent.DnsMethod = dnsOffered
 		agent.Mu.Unlock()
+		// D2: stamp our beat interval as the peer's liveness interval so
+		// decay-on-read uses the real cadence, not transport's default.
+		if tm.beatInterval > 0 {
+			peer.SetLivenessInterval(tm.beatInterval)
+		}
 
 		// Promote each usable ("complete") mechanism to KNOWN, but never
 		// regress one already past KNOWN (a re-discovery must not knock an
@@ -572,7 +596,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		}
 	}
 
-	return tm
+	return tm, nil
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
@@ -623,46 +647,13 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// parsed IncomingMessage. The callback dispatches to typed MsgQs
 	// channels based on message type.
 	//
-	// This replaces the old pattern of reading from a single IncomingChan
-	// in a dedicated goroutine. Each message type now fans out directly
-	// to its own channel without a shared bottleneck.
+	// Each message type fans out directly to its own MsgQs channel; the
+	// single IncomingChan this replaced was deleted (C3.0).
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))
 
 	lgTransport.Info("incoming message router registered via RouteToCallback")
-}
-
-// routeIncomingMessage routes an incoming DNS message to the appropriate hsyncengine channel.
-func (tm *MPTransportBridge) routeIncomingMessage(msg *transport.IncomingMessage) {
-	lgTransport.Debug("routing message", "type", msg.Type, "sender", msg.SenderID)
-
-	switch msg.Type {
-	case "hello":
-		tm.routeHelloMessage(msg)
-	case "beat":
-		tm.routeBeatMessage(msg)
-	case "ping":
-		tm.routePingMessage(msg)
-	case "sync", "update", "rfi":
-		tm.routeSyncMessage(msg)
-	case "keystate":
-		tm.routeKeystateMessage(msg)
-	case "edits":
-		tm.routeEditsMessage(msg)
-	case "config":
-		tm.routeConfigMessage(msg)
-	case "audit":
-		tm.routeAuditMessage(msg)
-	case "relocate":
-		tm.routeRelocateMessage(msg)
-	case "status-update":
-		tm.routeStatusUpdateMessage(msg)
-	case "confirm":
-		// Already handled by Router's HandleConfirmation handler — nothing to do here
-	default:
-		lgTransport.Warn("unknown message type", "type", msg.Type)
-	}
 }
 
 // routeHelloMessage routes a hello message to the hello channel.
@@ -864,7 +855,7 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 
 // routeSyncMessage routes a sync message to the message channel.
 func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
-	payload, err := transport.ParseSyncPayload(msg.Payload)
+	payload, err := ParseSyncPayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse sync payload", "err", err)
 		return
@@ -974,7 +965,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 // For "inventory" signals, delivers the full key inventory to MsgQs.KeystateInventory
 // so RequestAndWaitForKeyInventory can pick it up.
 func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsKeystatePayload
+	var payload DnsKeystatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse keystate payload", "err", err)
 		return
@@ -1013,7 +1004,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		return
 	}
 
-	// Convert transport.KeyInventoryEntry → KeyInventoryItem for the channel
+	// Convert KeyInventoryEntry → KeyInventoryItem for the channel
 	items := make([]KeyInventoryItem, len(payload.KeyInventory))
 	for i, e := range payload.KeyInventory {
 		items[i] = KeyInventoryItem{
@@ -1055,7 +1046,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 // Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
 // Modeled on routeKeystateMessage.
 func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsEditsPayload
+	var payload DnsEditsPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse edits payload", "err", err)
 		return
@@ -1086,7 +1077,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 // routeConfigMessage routes an incoming CONFIG response message from a peer agent.
 // Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
 func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsConfigPayload
+	var payload DnsConfigPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse config payload", "err", err)
 		return
@@ -1130,7 +1121,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		return
 	}
 
-	req := &transport.ConfigRequest{
+	req := &PeerConfigRequest{
 		SenderID:   ar.LocalAgent.Identity,
 		Zone:       zone,
 		Subtype:    subtype,
@@ -1141,7 +1132,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Config(sendCtx, peer, req)
+	resp, err := tm.sendConfig(sendCtx, peer, req)
 	if err != nil {
 		lgTransport.Error("sendConfigToAgent: failed to send", "requester", requesterID, "zone", zone, "subtype", subtype, "err", err)
 		return
@@ -1157,7 +1148,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 // routeAuditMessage routes an incoming AUDIT response message from a peer agent.
 // Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
 func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsAuditPayload
+	var payload DnsAuditPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse audit payload", "err", err)
 		return
@@ -1188,7 +1179,7 @@ func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 // routeStatusUpdateMessage routes an incoming STATUS-UPDATE notification.
 // Delivers to MsgQs.StatusUpdate for processing by the role-specific message handler.
 func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMessage) {
-	var payload transport.DnsStatusUpdatePayload
+	var payload DnsStatusUpdatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse status-update payload", "err", err)
 		return
@@ -1235,7 +1226,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 		return
 	}
 
-	req := &transport.AuditRequest{
+	req := &PeerAuditRequest{
 		SenderID:  ar.LocalAgent.Identity,
 		Zone:      zone,
 		AuditData: auditData,
@@ -1245,7 +1236,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := tm.DNSTransport.Audit(sendCtx, peer, req)
+	resp, err := tm.sendAudit(sendCtx, peer, req)
 	if err != nil {
 		lgTransport.Error("sendAuditToAgent: failed to send", "requester", requesterID, "zone", zone, "err", err)
 		return
@@ -1260,7 +1251,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 
 // routeRelocateMessage handles a relocate request.
 func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage) {
-	payload, err := transport.ParseRelocatePayload(msg.Payload)
+	payload, err := ParseRelocatePayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse relocate payload", "err", err)
 		return
@@ -1289,7 +1280,7 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
-func (tm *MPTransportBridge) sendImmediateConfirmation(payload *transport.DnsSyncPayload) {
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) {
 	if tm.DNSTransport == nil {
 		return
 	}
@@ -1411,21 +1402,29 @@ func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Tra
 }
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
-func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
+func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *PeerSyncRequest) (*PeerSyncResponse, error) {
 	// Bite 3: delegate to the generic primary-then-fallback path on
 	// transport.TransportManager. Hello and Beat are NOT migrated to
 	// tm.Send because their wrappers send on all transports in
 	// parallel rather than primary-then-fallback, with extensive
 	// MP-side state mutation; that is Phase 5 of the main refactor.
-	resp, err := tm.TransportManager.Send(ctx, peer, req)
+	//
+	// C2: the wire payload is built here (syncAppMessage, the same
+	// core.AgentMsgPost the typed DNSTransport.Sync marshalled) and
+	// travels as one opaque AppMessage; the manager picks the mechanism.
+	msg, err := syncAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
 	}
-	syncResp, ok := resp.(*transport.SyncResponse)
+	resp, err := tm.TransportManager.Send(ctx, peer, msg)
+	if err != nil {
+		return nil, err
+	}
+	appResp, ok := resp.(*transport.AppResponse)
 	if !ok {
 		return nil, fmt.Errorf("SendSyncWithFallback: unexpected response type %T", resp)
 	}
-	return syncResp, nil
+	return syncResponseFromApp(req, appResp), nil
 }
 
 // GetOrCreatePeer returns the transport.Peer keyed by agent.ID,
@@ -1451,6 +1450,11 @@ func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
 // Returns success if ANY transport succeeds. Updates per-transport state in Agent struct.
 func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
 	peer := tm.GetOrCreatePeer(agent)
+	// The mechanism flags are written under agent.Mu by discovery; read
+	// them once under the same lock instead of racing the writer.
+	agent.Mu.RLock()
+	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
+	agent.Mu.RUnlock()
 
 	req := &transport.HelloRequest{
 		SenderID:     tm.LocalID,
@@ -1467,12 +1471,16 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// Try API transport if locally supported, available, has valid endpoint, and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
 	// State gate reads the canonical transport.Peer mechanism state (raw).
+	// D1: eligibility (the gates) is decided here; the fan-out itself is
+	// transport's SendAll — every eligible mechanism is tried, in order,
+	// and each outcome is applied below exactly as before.
 	apiGate, _ := mechStateForGate(peer, "API")
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown {
-		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
-		// Phase 2: outcome telemetry lives on transport.Peer (hello times via
-		// the transport send path; per-mechanism state below) — the
-		// AgentDetails mirror is gone.
+	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown
+	dnsGate, _ := mechStateForGate(peer, "DNS")
+	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
+	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
+	if apiEligible {
+		apiResp, apiErr = helloResult(results["API"])
 		if apiErr != nil {
 			lgConnRetry.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
 		} else if apiResp != nil && !apiResp.Accepted {
@@ -1480,11 +1488,6 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 		} else {
 			lgTransport.Info("API Hello succeeded", "peer", peer.ID)
 		}
-
-		// Canonical INTRODUCING on the transport peer (guarded: do not
-		// regress an already-OPERATIONAL-or-better mechanism, e.g. after a
-		// retry or peer restart). transport.Peer self-locks; written outside
-		// agent.Mu (lock order).
 		if apiErr == nil && apiResp != nil && apiResp.Accepted {
 			if raw, ok := peer.MechanismRawState("API"); !ok || raw < transport.PeerStateIntroducing {
 				peer.SetMechanismState("API", transport.PeerStateIntroducing, "API hello accepted")
@@ -1492,15 +1495,8 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			}
 		}
 	}
-
-	// Try DNS transport if supported and actually needs Hello (state == KNOWN).
-	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
-	// State gate reads the canonical transport.Peer mechanism state (raw).
-	dnsGate, _ := mechStateForGate(peer, "DNS")
-	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown {
-		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
-		// Phase 2: outcome telemetry lives on transport.Peer — the
-		// AgentDetails mirror is gone.
+	if dnsEligible {
+		dnsResp, dnsErr = helloResult(results["DNS"])
 		if dnsErr != nil {
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
 		} else if dnsResp != nil && !dnsResp.Accepted {
@@ -1508,11 +1504,6 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 		} else {
 			lgTransport.Info("DNS Hello succeeded", "peer", peer.ID)
 		}
-
-		// Canonical INTRODUCING on the transport peer (guarded: do not
-		// regress an already-OPERATIONAL-or-better mechanism, e.g. after a
-		// retry or peer restart). transport.Peer self-locks; written outside
-		// agent.Mu (lock order).
 		if dnsErr == nil && dnsResp != nil && dnsResp.Accepted {
 			if raw, ok := peer.MechanismRawState("DNS"); !ok || raw < transport.PeerStateIntroducing {
 				peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted")
@@ -1520,8 +1511,6 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			}
 		}
 	}
-
-	// Return success if ANY transport succeeded this call.
 	if apiErr == nil && apiResp != nil && apiResp.Accepted {
 		return apiResp, nil
 	}
@@ -1558,6 +1547,11 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 // Returns success if ANY transport succeeds. Updates per-transport LastContactTime in Agent struct.
 func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
 	peer := tm.GetOrCreatePeer(agent)
+	// The mechanism flags are written under agent.Mu by discovery; read
+	// them once under the same lock instead of racing the writer.
+	agent.Mu.RLock()
+	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
+	agent.Mu.RUnlock()
 
 	// Build gossip for this peer
 	var gossipData json.RawMessage
@@ -1590,6 +1584,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		Timestamp: time.Now(),
 		Sequence:  sequence,
 		State:     string(beatState),
+		Zones:     tm.beatZones(agent.ID),
 		Gossip:    gossipData,
 	}
 
@@ -1601,79 +1596,53 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	// Try API transport if locally supported, available, and has valid endpoint.
 	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
 	// State gate reads the canonical transport.Peer mechanism state (raw).
+	// D1: eligibility (the gates) is decided here; the fan-out itself is
+	// transport's SendAll — every eligible mechanism is beaten, in order,
+	// and each outcome is applied below exactly as before.
+	beatable := func(st AgentState) bool {
+		return st == AgentStateOperational || st == AgentStateIntroduced || st == AgentStateLegacy || st == AgentStateDegraded || st == AgentStateInterrupted
+	}
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" {
-		if apiBeatGate == AgentStateOperational || apiBeatGate == AgentStateIntroduced || apiBeatGate == AgentStateLegacy || apiBeatGate == AgentStateDegraded || apiBeatGate == AgentStateInterrupted {
-			// Was this mechanism already OPERATIONAL on the canonical store
-			// before this beat? Decides whether to fire the election notify.
-			apiRaw, _ := peer.MechanismRawState("API")
-			apiWasOperational := apiRaw == transport.PeerStateOperational
-			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
-			// Phase 2: beat telemetry lives on transport.Peer (Stats +
-			// BeatSequence via RecordMechanismBeatSent on the transport send
-			// path) — the AgentDetails mirror is gone. Deleting it also
-			// removes an E1.a-latent deadlock: the failure branches locked
-			// the (since-E1.a shared) peer mutex and never released it.
-			if apiErr != nil {
-				lgConnRetry.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
-			} else if apiResp != nil && !apiResp.Ack {
-				lgTransport.Debug("API Beat no confirmation (Ack=false)", "peer", peer.ID)
-			} else {
-				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
-
-				// OPERATIONAL on the canonical store — only an outbound beat
-				// round-trip means "I can reach this peer" (see DNS path).
-				peer.SetMechanismState("API", transport.PeerStateOperational, "API beat round-trip succeeded")
-				peer.SetMechanismLastBeatSent("API", time.Now())
-
-				if !apiWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
-					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
-						tm.agentRegistry.sharedParticipantZones(agent.ID))
-				}
-			}
-		}
-	}
-
-	// Try DNS transport if supported.
-	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
-	// State gate reads the canonical transport.Peer mechanism state (raw).
+	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
-	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
-		if dnsBeatGate == AgentStateOperational || dnsBeatGate == AgentStateIntroduced || dnsBeatGate == AgentStateLegacy || dnsBeatGate == AgentStateDegraded || dnsBeatGate == AgentStateInterrupted {
-			// Was this mechanism already OPERATIONAL on the canonical store
-			// before this beat? Decides whether to fire the election notify.
-			dnsRaw, _ := peer.MechanismRawState("DNS")
-			dnsWasOperational := dnsRaw == transport.PeerStateOperational
-			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
-			// Phase 2: beat telemetry lives on transport.Peer — the
-			// AgentDetails mirror (and its failure-branch mutex leak) is gone.
-			if dnsErr != nil {
-				lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
-			} else if dnsResp != nil && !dnsResp.Ack {
-				// Beat() returns nil error but Ack:false when EDNS0 confirmation is missing.
-				// This means the DNS response was received but the peer didn't confirm processing.
-				lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
-			} else {
-				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
-
-				// OPERATIONAL on the canonical store: a successful OUTBOUND
-				// beat round-trip is the ONLY thing that means "I can reach
-				// this peer" (the definition). This is where state is set —
-				// never on inbound receipt.
-				peer.SetMechanismState("DNS", transport.PeerStateOperational, "DNS beat round-trip succeeded")
-				peer.SetMechanismLastBeatSent("DNS", time.Now())
-
-				// Election trigger moved here from the inbound-beat handler:
-				// elections fire when WE first become able to reach a peer.
-				if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
-					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
-						tm.agentRegistry.sharedParticipantZones(agent.ID))
-				}
+	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
+	apiRaw, _ := peer.MechanismRawState("API")
+	apiWasOperational := apiRaw == transport.PeerStateOperational
+	dnsRaw, _ := peer.MechanismRawState("DNS")
+	dnsWasOperational := dnsRaw == transport.PeerStateOperational
+	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiBeatEligible, dnsBeatEligible), req)
+	if apiBeatEligible {
+		apiResp, apiErr = beatResult(results["API"])
+		if apiErr != nil {
+			lgConnRetry.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
+		} else if apiResp != nil && !apiResp.Ack {
+			lgTransport.Debug("API Beat no confirmation (Ack=false)", "peer", peer.ID)
+		} else {
+			lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
+			peer.SetMechanismState("API", transport.PeerStateOperational, "API beat round-trip succeeded")
+			peer.SetMechanismLastBeatSent("API", time.Now())
+			if !apiWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
+				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+					tm.agentRegistry.sharedParticipantZones(agent.ID))
 			}
 		}
 	}
-
-	// Merge gossip from beat responses (bidirectional gossip exchange)
+	if dnsBeatEligible {
+		dnsResp, dnsErr = beatResult(results["DNS"])
+		if dnsErr != nil {
+			lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
+		} else if dnsResp != nil && !dnsResp.Ack {
+			lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
+		} else {
+			lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
+			peer.SetMechanismState("DNS", transport.PeerStateOperational, "DNS beat round-trip succeeded")
+			peer.SetMechanismLastBeatSent("DNS", time.Now())
+			if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
+				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+					tm.agentRegistry.sharedParticipantZones(agent.ID))
+			}
+		}
+	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
 			if resp == nil || len(resp.Gossip) == 0 {
@@ -1807,7 +1776,7 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		}
 	}
 
-	syncReq := &transport.SyncRequest{
+	syncReq := &PeerSyncRequest{
 		SenderID:       senderID,
 		Zone:           msg.Zone,
 		Timestamp:      msg.CreatedAt,
@@ -2166,7 +2135,7 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint1
 
 	// Send one KEYSTATE per key tag
 	for _, keyTag := range keyTags {
-		req := &transport.KeystateRequest{
+		req := &PeerKeystateRequest{
 			SenderID:  tm.LocalID,
 			Zone:      string(zone),
 			KeyTag:    keyTag,
@@ -2175,7 +2144,7 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint1
 			Timestamp: time.Now(),
 		}
 
-		resp, err := tm.DNSTransport.Keystate(ctx, peer, req)
+		resp, err := tm.sendKeystate(ctx, peer, req)
 		if err != nil {
 			lgTransport.Error("KEYSTATE send to signer failed", "zone", zone, "keyTag", keyTag, "signal", signal, "err", err)
 			continue
@@ -2218,7 +2187,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 		Transport: "udp",
 	})
 
-	syncReq := &transport.SyncRequest{
+	syncReq := &PeerSyncRequest{
 		SenderID:    tm.LocalID,
 		Zone:        zone,
 		Timestamp:   time.Now(),
@@ -2257,7 +2226,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	peer := tm.GetOrCreatePeer(combiner)
 
-	syncReq := &transport.SyncRequest{
+	syncReq := &PeerSyncRequest{
 		SenderID:    tm.LocalID,
 		Zone:        zone,
 		Timestamp:   time.Now(),
@@ -2275,4 +2244,124 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	lgTransport.Info("RFI sent to combiner", "rfiType", rfiType, "zone", zone, "combiner", combinerID, "status", resp.Status)
 	return nil
+}
+
+// beatZones is the zone list a beat to the given peer carries: the zones in
+// which both we and the peer are participants (C7: derived here, no longer
+// stored on transport.Peer). The receiver uses the first one as the
+// authorization scope.
+func (tm *MPTransportBridge) beatZones(id AgentId) []string {
+	if tm.agentRegistry == nil {
+		return nil
+	}
+	shared := tm.agentRegistry.sharedParticipantZones(id)
+	if len(shared) == 0 {
+		return nil
+	}
+	// Order is deliberately unspecified (map iteration), exactly as the
+	// pre-C7 transport.Peer.GetSharedZones was: the receiver authorizes
+	// the beat on Zones[0], and a fixed order would turn one zone the
+	// receiver does not list us for into a permanent refusal instead of
+	// an intermittent one.
+	set := make(map[string]struct{}, len(shared))
+	for _, z := range shared {
+		set[string(z)] = struct{}{}
+	}
+	zones := make([]string, 0, len(set))
+	for z := range set {
+		zones = append(zones, z)
+	}
+	return zones
+}
+
+// Start wires this role's receive path at daemon start (D3): the CHUNK
+// NOTIFY handler for the roles whose handler the bridge owns (agent,
+// auditor — the signer and combiner register theirs at init), then the
+// RouteToCallback dispatch. It replaces the per-role snippets that lived
+// in start_*.go and must run before tdns's NotifyHandler starts. The
+// reliable queue is started separately (StartReliableQueue) because the
+// agent needs its infra peers initialised first.
+func (tm *MPTransportBridge) Start(ctx context.Context) error {
+	if tm == nil || tm.TransportManager == nil {
+		return nil
+	}
+	switch tm.role {
+	case roleSigner, roleCombiner:
+		// Chunk handler and router were built and registered at init.
+	default:
+		// Without the CHUNK NOTIFY handler the process has no DNS receive
+		// path; the callers (StartMPAgent, StartMPAuditor) fail startup.
+		if err := tm.RegisterChunkNotifyHandler(); err != nil {
+			return fmt.Errorf("CHUNK NOTIFY handler (%s): %w", tm.role, err)
+		}
+	}
+	tm.StartIncomingMessageRouter(ctx)
+	return nil
+}
+
+// flushDiscoveryCache flushes the IMR cache at and below the peer identity
+// AND its parent zone, returning the number of entries removed. A lookup
+// that fails while the peer restarts (its identity zone is republished at
+// startup) leaves an unusable cached entry one label up — the delegation
+// the URI/SVCB/JWK names live under — which a flush of the identity alone
+// never reaches, so every later discovery attempt failed with "no
+// auth-server attempts made" until the entry expired (2026-09-09 fleet
+// observation; `imr flush <parent>` + `peer reset` recovered it at once).
+func flushDiscoveryCache(imr *Imr, peerID string) int {
+	if imr == nil || imr.Imr == nil || imr.Cache == nil {
+		return 0
+	}
+	total := 0
+	if n, err := imr.Cache.FlushDomain(peerID, false); err == nil {
+		total += n
+	} else {
+		lgTransport.Warn("discovery cache flush failed; a negative entry may persist until its TTL", "domain", peerID, "err", err)
+	}
+	if parent := parentDomain(peerID); parent != "" {
+		if n, err := imr.Cache.FlushDomain(parent, false); err == nil {
+			total += n
+		} else {
+			lgTransport.Warn("discovery cache flush failed; a negative entry may persist until its TTL", "domain", parent, "err", err)
+		}
+	}
+	return total
+}
+
+// parentDomain returns the name one label up ("agent.x.example." ->
+// "x.example."), or "" at the top.
+func parentDomain(name string) string {
+	labels := dns.SplitDomainName(dns.Fqdn(name))
+	if len(labels) < 2 {
+		return ""
+	}
+	return dns.Fqdn(strings.Join(labels[1:], "."))
+}
+
+// eligibleMechanisms lists the mechanisms a hello/beat fan-out tries, in
+// the order the pre-D1 senders used (API, then DNS).
+func eligibleMechanisms(api, dns bool) []string {
+	var out []string
+	if api {
+		out = append(out, "API")
+	}
+	if dns {
+		out = append(out, "DNS")
+	}
+	return out
+}
+
+func helloResult(r transport.MechanismResult) (*transport.HelloResponse, error) {
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	resp, _ := r.Response.(*transport.HelloResponse)
+	return resp, nil
+}
+
+func beatResult(r transport.MechanismResult) (*transport.BeatResponse, error) {
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	resp, _ := r.Response.(*transport.BeatResponse)
+	return resp, nil
 }

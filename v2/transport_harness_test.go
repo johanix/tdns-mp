@@ -143,6 +143,14 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		Beat:  make(chan *AgentMsgReport, 4),
 		// PR-2 scenarios use these:
 		Confirmation: make(chan *ConfirmationDetail, 4),
+		// C0.5 dispatch gate observes every queue the route* functions feed.
+		Ping:              make(chan *AgentMsgReport, 4),
+		KeystateInventory: make(chan *KeystateInventoryMsg, 4),
+		KeystateSignal:    make(chan *KeystateSignalMsg, 4),
+		EditsResponse:     make(chan *EditsResponseMsg, 4),
+		ConfigResponse:    make(chan *ConfigResponseMsg, 4),
+		AuditResponse:     make(chan *AuditResponseMsg, 4),
+		StatusUpdate:      make(chan *StatusUpdateMsg, 4),
 	}
 
 	pe := &peerEnv{
@@ -169,6 +177,7 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 	}
 
 	bridgeCfg := &MPTransportBridgeConfig{
+		Role:                roleAgent,
 		LocalID:             identity,
 		ControlZone:         integControlZone,
 		APITimeout:          2 * time.Second,
@@ -179,7 +188,11 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		SupportedMechanisms: []string{"api", "dns"},
 		AuthorizedPeers:     authorizedPeers,
 	}
-	pe.Bridge = NewMPTransportBridge(bridgeCfg)
+	bridge, err := NewMPTransportBridge(bridgeCfg)
+	if err != nil {
+		t.Fatalf("NewMPTransportBridge(%s): %v", identity, err)
+	}
+	pe.Bridge = bridge
 	registry.MPTransport = pe.Bridge
 	registry.TransportManager = pe.Bridge.TransportManager
 
@@ -304,7 +317,7 @@ func recvMsgWithin(t *testing.T, ch <-chan *AgentMsgPostPlus, d time.Duration) (
 // would emerge from those layers and hands it to routeIncomingMessage.
 func makeSyncIncomingMessage(t *testing.T, senderID, receiverID, zone, distributionID string, records map[string][]string) *transport.IncomingMessage {
 	t.Helper()
-	payload := transport.DnsSyncPayload{
+	payload := DnsSyncPayload{
 		MessageType:    "sync",
 		OriginatorID:   senderID,
 		YourIdentity:   receiverID,
@@ -320,6 +333,7 @@ func makeSyncIncomingMessage(t *testing.T, senderID, receiverID, zone, distribut
 	}
 	return &transport.IncomingMessage{
 		Type:            "sync",
+		TypeToken:       "sync",
 		DistributionID:  distributionID,
 		SenderID:        senderID,
 		TransportSender: senderID, // direct delivery, no relay
@@ -366,7 +380,7 @@ func recvConfirmWithin(t *testing.T, ch <-chan *ConfirmationDetail, d time.Durat
 // local_id). Used by scenarios 3 and 5 that drive Router.Route("sync").
 func buildSyncMessageContext(t *testing.T, tm *MPTransportBridge, senderID, receiverID, zone, distributionID string, records map[string][]string) *transport.MessageContext {
 	t.Helper()
-	payload := transport.DnsSyncPayload{
+	payload := DnsSyncPayload{
 		MessageType:    "sync",
 		OriginatorID:   senderID,
 		YourIdentity:   receiverID,
@@ -382,6 +396,7 @@ func buildSyncMessageContext(t *testing.T, tm *MPTransportBridge, senderID, rece
 	}
 	im := &transport.IncomingMessage{
 		Type:            "sync",
+		TypeToken:       "sync",
 		DistributionID:  distributionID,
 		SenderID:        senderID,
 		TransportSender: senderID,
