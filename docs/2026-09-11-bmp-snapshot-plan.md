@@ -1061,3 +1061,35 @@ both corrections above, and prefers T-S as now specified. Its leftovers:
 | L3 the combiner test still pinned stage-then-bump | Taken: rewritten around `StageBatch` (§5.2). |
 | L4 drain after the journal replay, to match a later refresh's order | Taken (§2.2). |
 | L5 say that a permitted bootstrap mint is `active`, not `StagedState` | Taken (§2.4.4). |
+
+## 9. Decisions (2026-09-11)
+
+Johan's answers to §6, recorded the same evening. The sections above are
+not rewritten; where an answer changes a detail, the change is stated here
+and governs.
+
+| Q | decision | consequence |
+|---|---|---|
+| 1 | O1 | as §2.2: the drain lands on the Ready flip, after the journal replay |
+| 2 | T-S | T-C is not built; §2.3 stays as the record of the alternative and the fallback |
+| 3 | hooks; and keep tdns-mp references and code in tdns to a minimum | T-S1's states get tdns-generic names: `foreign` stays; `mpdist` becomes `staged` (served, promotion owner-controlled) and `mpremove` becomes `withdrawn` (out of the RRset, deletion owner-controlled). tdns-mp's constants take those values, the migration maps the old names, and the KEYSTATE inventory carries the new ones, which the flag day (Q10) covers. Nothing in tdns names tdns-mp, the KEYSTATE protocol or the agent; the hooks are the only seam, and tdns's own behaviour with nil hooks is unchanged |
+| 4 | no decision needed | `MPResignerEngine` is retired in M-2S, as §3.3 says |
+| 5 | `new_zd.Data` stays the draft that staging writes | as §2.1 |
+| 6 | yes | `Publish()` is added in T-A beside `BumpSerialOnly()` |
+| 7 | extend the multi-host rig | as §5.3 |
+| 8 | per-site `mp-private:` markers | as §3.4 |
+| 9 | already withdrawn | no mpsigner re-pin before the key seam |
+| 10 | yes | one flag day: the key migration, the codepoint renumbering (trial item E) and the config-key migration (item C) |
+| 11 | `StageBatch` | as §2.1 |
+
+The order stands as §4: T-A, T-B and T-S in tdns; then M-1 for the
+combiner, agent and auditor; then M-2S for the signer; then R-1 and R-2.
+
+**Correction to Q3, the same evening.** The consequence written above
+over-read "minimise" as "never". The states keep the names §2.4.4 gives
+them: `mpdist`, `mpremove` and `foreign`. What T-S1 puts into tdns is two of
+those names in one SQL predicate (`FetchZoneDnskeysSql`, shared with
+`CollectDynamicRRs`) and the hook struct; tdns still attaches no meaning to
+them beyond "served" and "not served", and everything that decides
+transitions stays behind the hooks in tdns-mp. That is the minimum, and it
+spares the flag day a state rename. The generic names are withdrawn.
