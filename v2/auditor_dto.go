@@ -592,6 +592,8 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 	gst.mu.RUnlock()
 
 	dto := &GossipMatrixDTO{
+		GroupHash: pg.GroupHash,
+		GroupName: pg.Name,
 		ZoneCount: len(pg.Zones),
 	}
 	if zone != "" {
@@ -604,14 +606,15 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 	}
 	if haveStates {
 		dto.Rows = append(dto.Rows, rows...)
-		if zone == "" {
-			for _, member := range dto.Members {
-				if reported[member] {
-					continue
-				}
-				dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
-			}
+	}
+	// A declared member that has not reported gossip still gets a row, in
+	// both the group view and the zone view: a silent member is exactly
+	// what the matrix exists to show.
+	for _, member := range members {
+		if reported[member] {
+			continue
 		}
+		dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
 	}
 	if elec != nil {
 		dto.Election = GossipElectionDTO{

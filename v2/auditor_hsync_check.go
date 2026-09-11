@@ -43,16 +43,20 @@ func checkHSYNCConfig(info MPZoneInfo, byLabel map[string]string) []string {
 		}
 		identityLabels[id] = append(identityLabels[id], lbl)
 	}
+	// The role errors above follow the declared order; the duplicate-identity
+	// errors come out of a map, so sort them for a stable listing.
+	var dups []string
 	for id, labels := range identityLabels {
 		if len(labels) <= 1 {
 			continue
 		}
 		slices.Sort(labels)
-		errs = append(errs, fmt.Sprintf(
+		dups = append(dups, fmt.Sprintf(
 			"HSYNC3 labels %s map to the same identity %s",
 			strings.Join(labels, ", "), id))
 	}
-	return errs
+	slices.Sort(dups)
+	return append(errs, dups...)
 }
 
 // RefreshZoneHSYNCConfig re-runs CheckZoneHSYNCConfig and stores the

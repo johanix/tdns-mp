@@ -5,7 +5,7 @@
  *
  * Registered as a PostParseConfigHook on the underlying tdns.Config
  * so it runs during tdns.ParseConfig. The result is stashed on
- * conf.InternalMp.MpConfig and is the runtime source of truth for
+ * conf.SetMpConfig (read back via conf.MpConfig()) and is the runtime source of truth for
  * MP config in tdns-mp (via conf.MpConfig() / WiredMpConfig()).
  *
  * Decodes into tdnsmp.MultiProviderConf (defined in
@@ -35,12 +35,12 @@ import (
 var lgConfig = tdns.Logger("config")
 
 // RegisterMpConfigParser installs the PostParseConfigHook that
-// parses the multi-provider: block and stashes the result on
-// conf.InternalMp.MpConfig. Call from tdnsmp.MainInit before
+// parses the multi-provider: block and installs the result with
+// conf.SetMpConfig. Call from tdnsmp.MainInit before
 // delegating to tdns.MainInit so the hook is in place when
 // tdns.ParseConfig runs.
 //
-// The hook also assigns the wiredMpConfig package-level mirror so
+// SetMpConfig also assigns the wiredMpConfig package-level mirror so
 // EnsureMP and external WiredMpConfig() callers can read the parse
 // without a *tdnsmp.Config in hand.
 //
@@ -56,8 +56,7 @@ func (conf *Config) RegisterMpConfigParser() {
 		if err := ValidateMPConfig(mp); err != nil {
 			return fmt.Errorf("multi-provider config validation: %w", err)
 		}
-		conf.InternalMp.MpConfig = mp
-		wiredMpConfig.Store(mp)
+		conf.SetMpConfig(mp)
 		return nil
 	}
 }

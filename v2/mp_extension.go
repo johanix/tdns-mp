@@ -21,8 +21,8 @@ import (
 )
 
 // wiredMpConfig is set by RegisterMpConfigParser's hook during
-// tdns.ParseConfig (mirrored from conf.InternalMp.MpConfig at the
-// moment the parse completes). EnsureMP copies it onto each *MPState
+// tdns.ParseConfig (SetMpConfig mirrors it here at the moment the
+// parse completes). EnsureMP copies it onto each *MPState
 // so lazy-created MPZoneData wrappers see it. It is exposed via
 // WiredMpConfig() for callers that do not have a *tdnsmp.Config in
 // hand.
@@ -55,8 +55,8 @@ func verifyMpConfigAccessors(conf *Config) error {
 	if conf.MpConfig() == nil {
 		return fmt.Errorf("conf.MpConfig() returned nil after MainInit")
 	}
-	if conf.MpConfig() != conf.InternalMp.MpConfig {
-		return fmt.Errorf("conf.MpConfig() does not return conf.InternalMp.MpConfig")
+	if conf.MpConfig() != WiredMpConfig() {
+		return fmt.Errorf("conf.MpConfig() and WiredMpConfig() disagree")
 	}
 	return nil
 }
