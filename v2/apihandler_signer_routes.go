@@ -29,7 +29,7 @@ func (conf *Config) SetupMPSignerRoutes(ctx context.Context, apirouter *mux.Rout
 	sr.HandleFunc("/peer", APIpeer(conf, conf.InternalMp.TransportManager, conf.InternalMp.AgentRegistry)).Methods("POST")
 	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
 	sr.HandleFunc("/signer/distrib", conf.APIsingerDistrib()).Methods("POST")
-	sr.HandleFunc("/keystore", conf.InternalMp.HsyncDB.APIkeystoreMP(conf)).Methods("POST")
+	sr.HandleFunc("/keystore", conf.Config.Internal.KeyDB.APIkeystore(conf.Config)).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	sr.HandleFunc("/zone/parentsync", tdns.APIzoneParentSync(ctx, &tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/zone/childsync", tdns.APIzoneChildSync(ctx, &tdns.Globals.App)).Methods("POST")
