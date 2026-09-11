@@ -115,14 +115,19 @@ func RegisterMPKeyLifecycleHooks(conf *Config) {
 	})
 }
 
+// countOwnKeysOfRole counts the zone's own keys of a role in any state but
+// removed. A KSK is any key with the SEP bit, revoked ones (flags 385)
+// included; a ZSK is flags 256.
 func countOwnKeysOfRole(kdb *tdns.KeyDB, zone, role string) (int, error) {
-	flags := 257
-	if role == "ZSK" {
-		flags = 256
-	}
 	var n int
-	err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND flags=? AND state NOT IN (?, ?)`,
-		zone, flags, tdns.DnskeyStateRemoved, DnskeyStateForeign).Scan(&n)
+	var err error
+	if role == "ZSK" {
+		err = kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND flags=256 AND state NOT IN (?, ?)`,
+			zone, tdns.DnskeyStateRemoved, DnskeyStateForeign).Scan(&n)
+	} else {
+		err = kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND (flags & 1) = 1 AND state NOT IN (?, ?)`,
+			zone, tdns.DnskeyStateRemoved, DnskeyStateForeign).Scan(&n)
+	}
 	return n, err
 }
 
@@ -177,11 +182,16 @@ func getDnssecKeyPropagationMP(hdb *HsyncDB, zonename string, keyid uint16) (boo
 	if err != nil {
 		return false, time.Time{}, err
 	}
-	var confirmedAt time.Time
-	if confirmedAtStr != "" {
-		confirmedAt, _ = time.Parse(time.RFC3339, confirmedAtStr)
+	if confirmed == 0 {
+		return false, time.Time{}, nil
 	}
-	return confirmed != 0, confirmedAt, nil
+	// A confirmation whose time does not parse is not a confirmation: the
+	// zero time would make the TTL look long elapsed and open the gate.
+	confirmedAt, perr := time.Parse(time.RFC3339, confirmedAtStr)
+	if perr != nil {
+		return false, time.Time{}, fmt.Errorf("propagation confirmed_at %q for key %d in zone %s does not parse: %w", confirmedAtStr, keyid, zonename, perr)
+	}
+	return true, confirmedAt, nil
 }
 
 // canPromoteMultiProviderMP is the promotion gate: propagation confirmed by

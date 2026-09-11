@@ -589,7 +589,9 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	}
 
 	if len(instr.Locations) == 0 {
-		mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil)
+		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil); err != nil {
+			lgCombiner.Error("publish instruction: retracting the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
+		}
 		if storedInstr != nil {
 			for _, ns := range storedInstr.PublishedNS {
 				publishSignalKeyToProvider(zone, ns, senderID, nil)
@@ -617,9 +619,13 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 			}
 			parsedRRs = append(parsedRRs, rr)
 		}
-		mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, parsedRRs)
+		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, parsedRRs); err != nil {
+			lgCombiner.Error("publish instruction: applying the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
+		}
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
-		mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil)
+		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil); err != nil {
+			lgCombiner.Error("publish instruction: retracting the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
+		}
 	}
 
 	var publishedNS []string
@@ -1205,7 +1211,11 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 	// the contribution functions above changed only the combiner's state.
 	if dataChanged {
 		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			// Persisted, not served: say so, rather than acknowledge an edit
+			// the zone does not carry.
 			lgCombiner.Error("publishing the combiner state failed", "zone", req.Zone, "err", err)
+			resp.Status = "partial"
+			resp.Message = fmt.Sprintf("%s; publishing the combined zone failed: %v", resp.Message, err)
 		}
 	}
 

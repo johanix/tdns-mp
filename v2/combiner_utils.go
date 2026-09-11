@@ -169,6 +169,14 @@ func (mp *MPState) takeCleanups() []ownerRRtype {
 	return out
 }
 
+// requeueCleanups puts back what a failed batch did not get to apply, so a
+// later combine still restores or deletes what no agent contributes.
+func (mp *MPState) requeueCleanups(cs []ownerRRtype) {
+	for _, c := range cs {
+		mp.noteCleanup(c.owner, c.rrtype)
+	}
+}
+
 // combineInput is what the batch callback works from: a copy of the state,
 // taken before the batch, so the callback reads nothing that needs a lock.
 type combineInput struct {
@@ -362,6 +370,10 @@ func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.B
 		mpzd.MP.takeCleanups()
 		return false, resp, nil
 	}
+	// One combine at a time per zone, copy and projection together (see
+	// MPState.combineMu). The batch takes the zone's lock inside.
+	mpzd.MP.combineMu.Lock()
+	defer mpzd.MP.combineMu.Unlock()
 	in := mpzd.combineInput(conf)
 	changed := false
 	resp, err := mpzd.ZoneData.StageBatch(func(s tdns.Stager) (bool, error) {
@@ -371,6 +383,7 @@ func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.B
 		return changed, nil
 	})
 	if err != nil {
+		mpzd.MP.requeueCleanups(in.cleanups)
 		return false, resp, err
 	}
 	if changed && resp.NewSerial != resp.OldSerial {
@@ -387,7 +400,7 @@ func (mpzd *MPZoneData) replaceAndPublish(senderID, owner string, rrtype uint16,
 		return
 	}
 	if _, cerr := mpzd.CombineWithLocalChanges(); cerr != nil {
-		lgCombiner.Error("publishing the combiner state failed", "zone", mpzd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype], "err", cerr)
+		err = fmt.Errorf("publishing the combiner state: %w", cerr)
 	}
 	return
 }

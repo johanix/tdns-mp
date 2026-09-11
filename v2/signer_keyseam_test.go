@@ -481,3 +481,31 @@ func TestMPKeystoreMigration(t *testing.T) {
 		t.Fatalf("the refused migration left %d rows behind", n)
 	}
 }
+
+// A confirmation whose timestamp does not parse must not open the gate: the
+// zero time would read as a TTL long elapsed. And a revoked KSK (flags 385)
+// is a KSK for the "no key of that role exists" test.
+func TestSignerGateAndRoleCountEdges(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	hdb := NewHsyncDB(kdb)
+	if err := hdb.InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+	const zone = "edges.example."
+	ksk := mpGenKey(t, kdb, zone, tdns.DnskeyStatePublished, "KSK")
+	if _, err := kdb.DB.Exec(`INSERT INTO MPKeyPropagation (zonename, keyid, confirmed, confirmed_at) VALUES (?, ?, 1, 'not a time')`, zone, ksk); err != nil {
+		t.Fatal(err)
+	}
+	if canPromoteMultiProviderMP(hdb, zone, ksk) {
+		t.Fatal("a confirmation with an unparsable time opened the promotion gate")
+	}
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET flags=385 WHERE zonename=? AND keyid=?`, zone, ksk); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := countOwnKeysOfRole(kdb, zone, "KSK"); err != nil || n != 1 {
+		t.Fatalf("a revoked KSK (flags 385) counts %d as a KSK (err=%v), want 1", n, err)
+	}
+	if n, _ := countOwnKeysOfRole(kdb, zone, "ZSK"); n != 0 {
+		t.Fatalf("a KSK counted as a ZSK: %d", n)
+	}
+}

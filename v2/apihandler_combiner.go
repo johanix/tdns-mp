@@ -452,6 +452,9 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			if removed > 0 {
 				if _, err := mpzd.CombineWithLocalChanges(); err != nil {
 					lgApi.Warn("publishing the combiner state after the purge failed", "zone", zone, "err", err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("purged %d RR(s) attributed to origin %q, but publishing the combined zone failed: %v", removed, cp.Origin, err)
+					return
 				}
 			}
 			if removed == 0 {

@@ -48,8 +48,14 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 		return false, nil, fmt.Errorf("error from zd.OwnerForAnalysis(%s): %v", zd.ZoneName, err)
 	}
 
-	newhsync, _ := newzd.RRsetForAnalysis(zd.ZoneName, core.TypeHSYNC3)
-	newparam, _ := newzd.RRsetForAnalysis(zd.ZoneName, core.TypeHSYNCPARAM)
+	newhsync, err := newzd.RRsetForAnalysis(zd.ZoneName, core.TypeHSYNC3)
+	if err != nil {
+		return false, nil, fmt.Errorf("error from newzd.RRsetForAnalysis(%s, HSYNC3): %v", zd.ZoneName, err)
+	}
+	newparam, err := newzd.RRsetForAnalysis(zd.ZoneName, core.TypeHSYNCPARAM)
+	if err != nil {
+		return false, nil, fmt.Errorf("error from newzd.RRsetForAnalysis(%s, HSYNCPARAM): %v", zd.ZoneName, err)
+	}
 
 	if oldapex == nil {
 		// Initial load: any HSYNC3 records present are "added" from
@@ -140,7 +146,10 @@ func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *Dnske
 	}
 
 	// New DNSKEY RRset from the incoming zone, which has no snapshot yet.
-	newkeys, _ := new_zd.RRsetForAnalysis(mpzd.ZoneName, dns.TypeDNSKEY)
+	newkeys, err := new_zd.RRsetForAnalysis(mpzd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, nil, fmt.Errorf("LocalDnskeysChanged: new RRsetForAnalysis: %v", err)
+	}
 
 	// Filter: keep only local DNSKEYs (not in remote set)
 	oldLocal := filterLocalDNSKEYs(oldkeys, remoteKeyTags)
