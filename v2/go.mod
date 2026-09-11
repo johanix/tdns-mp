@@ -6,7 +6,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260910214138-5a13b2cb7198
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260911152218-66dc80d3ad07
 	github.com/johanix/tdns/v2 v2.0.0-20260911111736-d1eec10219b7
 	github.com/johanix/tdns/v2/cache v0.0.0-20260911111736-d1eec10219b7
 	github.com/johanix/tdns/v2/cli v0.0.0-20260911111736-d1eec10219b7
@@ -66,6 +66,3 @@ require (
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
 replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
-
-// scratch/modern-repin: the re-pinned tdns-transport worktree next to this tree.
-replace github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2

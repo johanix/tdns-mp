@@ -28,7 +28,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260910214138-5a13b2cb7198 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260911152218-66dc80d3ad07 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20260911111736-d1eec10219b7 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20260911111736-d1eec10219b7 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
@@ -69,6 +69,3 @@ require (
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
 replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
-
-// scratch/modern-repin: the re-pinned tdns-transport worktree next to this tree.
-replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
