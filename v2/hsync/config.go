@@ -16,15 +16,17 @@ type Config struct {
 	DiscoverySemLimit  int
 }
 
-// DefaultConfig returns production-like defaults matching tdnsmp viper keys.
+// DefaultConfig returns the engine's defaults: what a daemon runs with for
+// every multi-provider.syncengine.intervals key it does not set. They are
+// the values the sample configs document (cmd/*/tdns-mp*.sample.yaml).
 func DefaultConfig() Config {
 	return Config{
-		RetryInterval:      15 * time.Second,
-		ReconcileInterval:  60 * time.Second,
-		BeatInterval:       30 * time.Second,
-		HelloRetryInterval: 60 * time.Second,
-		HelloFastAttempts:  5,
-		HelloFastSpacing:   2 * time.Second,
+		RetryInterval:      15 * time.Second, // discoveryretry
+		ReconcileInterval:  60 * time.Second, // reconcile
+		BeatInterval:       30 * time.Second, // beatinterval
+		HelloRetryInterval: 15 * time.Second, // helloretry
+		HelloFastAttempts:  3,                // hello_fast_attempts
+		HelloFastSpacing:   2 * time.Second,  // hello_fast_interval
 		DiscoverySemLimit:  8,
 	}
 }

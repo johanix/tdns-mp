@@ -86,8 +86,23 @@ func parseMultiProvider(configMap map[string]interface{}) (*MultiProviderConf, e
 	}
 
 	normalizeMultiProviderIdentities(&mp)
+	normalizeSyncengineIntervals(&mp)
 	parseMultiProviderOptions(&mp)
 	return &mp, nil
+}
+
+// normalizeSyncengineIntervals reconciles the two spellings of the beat
+// interval. The documented key is syncengine.intervals.beatinterval (the
+// sample configs and the test rigs write it); remote.beatinterval is the
+// older one the runtime reads (Remote.BeatInterval feeds the engine's beat
+// ticker, the transport bridge and the beat interval gossiped to peers).
+// A set syncengine.intervals.beatinterval is copied to Remote.BeatInterval,
+// so the documented key wins when both are given and every reader sees
+// one value.
+func normalizeSyncengineIntervals(mp *MultiProviderConf) {
+	if bi := mp.Syncengine.Intervals.BeatInterval; bi > 0 {
+		mp.Remote.BeatInterval = uint32(bi)
+	}
 }
 
 // normalizeMultiProviderIdentities FQDN-normalizes every identity

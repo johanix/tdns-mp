@@ -312,3 +312,25 @@ comfortable. Each bite is independently mergeable and reversible.
   move from tdns to tdns-mp's range" in the project notes).
 - `MultiProviderConf` FQDN normalization currently happens in tdns;
   the shadow already does its own copy. Bite 9 removes tdns's copy.
+
+## Amendment 2026-09-11: the syncengine.intervals keys are read again
+
+The six `multi-provider.syncengine.intervals` keys listed above as
+PARTIALLY MAPPED lost their last readers during the cutover:
+`beatinterval` and `discoveryretry` in `ca8b439` (2026-05-20, the agent's
+swap to HsyncDataEngine), `helloretry`, `hello_fast_attempts` and
+`hello_fast_interval` in `6b671ac` (2026-06-01, the legacy hello path
+retirement). `buildHsyncEngineDeps` was left starting from
+`hsync.DefaultConfig()` and applying only `remote.beatinterval`, so the
+sample configs and the test rigs set timers that had no effect: the engine
+ran a 60 s hello retry, 15 s discovery retry, 60 s reconcile and 30 s beat
+regardless.
+
+Now `hsyncConfigFromMp` (v2/hsync_bridge.go) turns the block into the
+engine's `hsync.Config`; `reconcile` is a key too. `beatinterval` is
+reconciled with `remote.beatinterval` at parse time
+(`normalizeSyncengineIntervals`, the documented key wins) so the engine's
+ticker, the transport bridge and the gossiped beat interval share one
+value. A negative value is a config error; zero or absent keeps the
+engine's default. The daemon logs the effective intervals at startup
+(`hsync engine intervals`).
