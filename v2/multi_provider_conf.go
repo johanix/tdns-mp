@@ -10,7 +10,7 @@
  *
  * Until Bite 9b lands, two parses of the multi-provider: block run:
  * the tdns side populates conf.Config.MultiProvider (*tdns.MultiProviderConf);
- * the tdns-mp side populates conf.InternalMp.MpConfig (*MultiProviderConf,
+ * the tdns-mp side installs it with conf.SetMpConfig (*MultiProviderConf,
  * defined here). The tdns-mp side is the runtime source of truth via
  * conf.MpConfig() / WiredMpConfig(). The tdns side is read only by
  * config_validate.go (still validates the tdns parse) and keys_cmd.go

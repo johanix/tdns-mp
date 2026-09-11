@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -77,8 +78,17 @@ func TestSnapshotGossipForZone_singleMatrix(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("len = %d, want 1 matrix for zone", len(got))
 	}
-	if len(got[0].Rows) == 0 && len(got[0].Members) == 0 {
-		t.Fatalf("expected non-empty matrix")
+	if got[0].GroupHash != hash {
+		t.Fatalf("group hash = %q, want %q", got[0].GroupHash, hash)
+	}
+	// Exactly the group's members as reporters (the silent agent.b gets an
+	// empty row), and nothing from the unrelated group agent.a also sits in.
+	var reporters []string
+	for _, r := range got[0].Rows {
+		reporters = append(reporters, r.Reporter)
+	}
+	if want := []string{"agent.a.example.", "agent.b.example."}; !slices.Equal(reporters, want) {
+		t.Fatalf("reporters = %v, want %v (no leakage from the other group)", reporters, want)
 	}
 }
 
