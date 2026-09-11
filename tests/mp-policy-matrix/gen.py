@@ -53,6 +53,17 @@ def ns_name(p, i=1):
     return f"ns{i}.{p}.{PARENT}"
 
 
+# tdns config forms at the current pin. Transfer peers and ACLs are
+# {addr|prefix, key} maps -- a bare-string list quarantines the zone -- and an
+# empty downstreams: list DENIES every transfer. Every daemon here is on
+# loopback, so loopback is the whole trust boundary of the rig.
+LOOPBACK_ACL = '[ { prefix: "127.0.0.0/8", key: NOKEY } ]'
+
+
+def peers(addrs):
+    return "[ " + ", ".join(f"{{ addr: {a}, key: NOKEY }}" for a in addrs) + " ]"
+
+
 # ---------------------------------------------------------------- cells
 cells = []
 for line in open(CELLS_TSV):
@@ -162,7 +173,7 @@ service:
    refresh:    true
    maxrefresh: 30
 
-dnsengine:
+listeners:
    addresses:  [ 127.0.0.1:{WORLD_DNS} ]
    transports: [ do53 ]
 
@@ -186,7 +197,8 @@ templates:
    - name:      owner
      type:      primary
      store:     map
-     notify:    [ {', '.join(combiners + [aud])} ]
+     notify:       {peers(combiners + [aud])}
+     downstreams:  {LOOPBACK_ACL}
 
    - name:      identity
      type:      secondary
@@ -207,12 +219,12 @@ zones:
         out += f"""
    - name:      {ident('agent', p)}
      template:  identity
-     primary:   127.0.0.1:{ports(p)['agent_dns']}
+     primaries: {peers(['127.0.0.1:' + str(ports(p)['agent_dns'])])}
 """
     out += f"""
    - name:      {AUDITOR_ID}
      template:  identity
-     primary:   127.0.0.1:{AUD['dns']}
+     primaries: {peers(['127.0.0.1:' + str(AUD['dns'])])}
 """
     return out
 
@@ -248,18 +260,28 @@ INTERVALS = """   syncengine:
 # carry a 1 h TTL (tdns CreateAutoZone; it was 24 h before the mp-pin
 # branch's fix, which is why tdns-mp pins that branch), so 6 h clears
 # every floor with margin and 2 h does not.
-POLICY = """dnssecpolicies:
-   default:
-      algorithm:   ED25519
-      sigvalidity:
-         default:   6h
-         dnskey:    12h
-         ds:        12h
-      ksk:
-         lifetime:  forever
-      zsk:
-         lifetime:  forever
+# dnssecpolicies: and kasp: both moved under dnssec: (tdns restructure
+# 2026-06-16), and the kasp keys are hyphenated now. The signer needs both in
+# ONE dnssec: block, so the policies body is shared.
+POLICIES_BODY = """   policies:
+      default:
+         algorithm:   ED25519
+         sigvalidity:
+            default:   6h
+            dnskey:    12h
+            ds:        12h
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
 """
+POLICY = "dnssec:\n" + POLICIES_BODY
+SIGNER_DNSSEC = ("dnssec:\n"
+                 "   kasp:\n"
+                 "      propagation-delay:  60s\n"
+                 "      check-interval:     10s\n"
+                 "      standby-zsk-count:  1\n"
+                 "      standby-ksk-count:  0\n" + POLICIES_BODY)
 
 
 def zones_for(p):
@@ -321,9 +343,10 @@ service:
    refresh:        true
    maxrefresh:     30
 
-dnsengine:
+listeners:
    addresses:      [ 127.0.0.1:{P['agent_dns']} ]
    transports:     [ do53 ]
+   imr-debug-address: 127.0.0.1:{P['agent_imr']}
 
 apiserver:
    addresses:      [ 127.0.0.1:{P['agent_api']} ]
@@ -340,16 +363,8 @@ delegationsync:
             mode:       internal
             algorithm:  ED25519
 
-keybootstrap:
-   consistent-lookup:
-      iterations:  3
-      interval:    60
-      nameservers: all
-
 imrengine:
    active:         true
-   addresses:      [ 127.0.0.1:{P['agent_imr']} ]
-   transports:     [ do53 ]
 {STUBS}
 {POLICY}
 db:
@@ -364,7 +379,8 @@ templates:
      type:           secondary
      store:          map
      options:        [ multi-provider ]
-     primary:        127.0.0.1:{P['signer_dns']}
+     primaries:      {peers(['127.0.0.1:' + str(P['signer_dns'])])}
+     downstreams:    {LOOPBACK_ACL}
 
 zones:
 """
@@ -394,10 +410,12 @@ service:
    refresh:        true
    maxrefresh:     30
 
-dnsengine:
+listeners:
    addresses:      [ 127.0.0.1:{P['combiner_dns']} ]
    transports:     [ do53 ]
-   outbound_soa_serial: persist
+
+authengine:
+   outbound-soa-serial: persist
 
 apiserver:
    addresses:      [ 127.0.0.1:{P['combiner_api']} ]
@@ -417,8 +435,9 @@ templates:
      type:           secondary
      store:          map
      options:        [ multi-provider ]
-     primary:        127.0.0.1:{WORLD_DNS}
-     notify:         [ 127.0.0.1:{P['signer_dns']} ]
+     primaries:      {peers(['127.0.0.1:' + str(WORLD_DNS)])}
+     notify:         {peers(['127.0.0.1:' + str(P['signer_dns'])])}
+     downstreams:    {LOOPBACK_ACL}
 
 zones:
 """
@@ -458,10 +477,12 @@ service:
    maxrefresh:     30
    resign:         true
 
-dnsengine:
+listeners:
    addresses:      [ 127.0.0.1:{P['signer_dns']} ]
    transports:     [ do53 ]
-   outbound_soa_serial: persist
+
+authengine:
+   outbound-soa-serial: persist
 
 apiserver:
    addresses:      [ 127.0.0.1:{P['signer_api']} ]
@@ -475,13 +496,7 @@ resignerengine:
       mode:        internal
       algorithm:   ED25519
 
-kasp:
-   propagation_delay:  60s
-   check_interval:     10s
-   standby_zsk_count:  1
-   standby_ksk_count:  0
-
-{POLICY}
+{SIGNER_DNSSEC}
 db:
    file:  {d}/signer.db
 
@@ -499,8 +514,9 @@ zones:
                     f"     type:          secondary\n"
                     f"     store:         map\n"
                     f"     options:       [ multi-provider ]\n"
-                    f"     primary:       127.0.0.1:{ports(up)['signer_dns']}\n"
-                    f"     notify:        [ 127.0.0.1:{P['agent_dns']} ]\n\n")
+                    f"     primaries:     {peers(['127.0.0.1:' + str(ports(up)['signer_dns'])])}\n"
+                    f"     notify:        {peers(['127.0.0.1:' + str(P['agent_dns'])])}\n"
+                    f"     downstreams:   {LOOPBACK_ACL}\n\n")
         else:
             downstream = [q for q, u in c["upstreams"].items() if u == p]
             notify = [f"127.0.0.1:{P['agent_dns']}"] + [f"127.0.0.1:{ports(q)['signer_dns']}" for q in downstream]
@@ -510,9 +526,10 @@ zones:
                     f"     type:          secondary\n"
                     f"     store:         map\n"
                     f"     options:       [ multi-provider ]\n"
-                    f"     primary:       127.0.0.1:{P['combiner_dns']}\n"
+                    f"     primaries:     {peers(['127.0.0.1:' + str(P['combiner_dns'])])}\n"
                     f"     dnssecpolicy:  default\n"
-                    f"     notify:        [ {', '.join(notify)} ]\n\n")
+                    f"     notify:        {peers(notify)}\n"
+                    f"     downstreams:   {LOOPBACK_ACL}\n\n")
     return out
 
 
@@ -564,9 +581,10 @@ service:
    refresh:        true
    maxrefresh:     30
 
-dnsengine:
+listeners:
    addresses:      [ 127.0.0.1:{AUD['dns']} ]
    transports:     [ do53 ]
+   imr-debug-address: 127.0.0.1:{AUD['imr']}
 
 apiserver:
    addresses:      [ 127.0.0.1:{AUD['api']} ]
@@ -576,8 +594,6 @@ apiserver:
 
 imrengine:
    active:         true
-   addresses:      [ 127.0.0.1:{AUD['imr']} ]
-   transports:     [ do53 ]
 {STUBS}
 {POLICY}
 db:
@@ -598,7 +614,8 @@ templates:
      type:           secondary
      store:           map
      options:        [ multi-provider ]
-     primary:        127.0.0.1:{WORLD_DNS}
+     primaries:      {peers(['127.0.0.1:' + str(WORLD_DNS)])}
+     downstreams:    {LOOPBACK_ACL}
 
 zones:
 """

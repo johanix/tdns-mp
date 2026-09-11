@@ -39,7 +39,7 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
-		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
 		return tdns.NotifyHandler(ctx, conf.Config)

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
 )
 
 // MPZoneData embeds *tdns.ZoneData. All core ZoneData fields and
@@ -32,6 +33,42 @@ type MPZoneData struct {
 	MP        *MPState
 	MPOptions map[tdns.ZoneOption]bool
 	SyncQ     chan SyncRequest
+}
+
+// GetOwner and GetRRset shadow the promoted tdns.ZoneData methods, which read
+// the zone's published snapshot. A zone that has only just been transferred
+// in -- the new_zd that MPPreRefresh analyses -- holds its data in Data and
+// has no snapshot yet, so every tdns read of it came back empty (and
+// GetRRset panics at an empty apex). Until the zone is published these read
+// Data; once it is, they are exactly tdns's.
+func (mpzd *MPZoneData) readsData() bool {
+	zd := mpzd.ZoneData
+	return zd != nil && zd.Ready && zd.ZoneStore == tdns.MapZone && zd.Data != nil && !zd.HasPublishedData()
+}
+
+func (mpzd *MPZoneData) GetOwner(qname string) (*tdns.OwnerData, error) {
+	if !mpzd.readsData() {
+		return mpzd.ZoneData.GetOwner(qname)
+	}
+	owner, ok := mpzd.Data.Get(qname)
+	if !ok {
+		return nil, nil
+	}
+	return &owner, nil
+}
+
+func (mpzd *MPZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
+	if !mpzd.readsData() {
+		return mpzd.ZoneData.GetRRset(qname, rrtype)
+	}
+	owner, _ := mpzd.GetOwner(qname)
+	if owner == nil || owner.RRtypes == nil {
+		return nil, nil
+	}
+	if rrset, ok := owner.RRtypes.Get(rrtype); ok {
+		return &rrset, nil
+	}
+	return nil, nil
 }
 
 // MPZoneTuple is the iteration element returned by IterBuffered.
@@ -119,10 +156,10 @@ func (mz *MPZones) IterBuffered() <-chan MPZoneTuple {
 
 // IterCb calls fn for each zone, wrapping the value in *MPZoneData.
 func (mz *MPZones) IterCb(fn func(key string, v *MPZoneData)) {
-	tdns.Zones.IterCb(func(key string, zd *tdns.ZoneData) {
-		mpzd := mz.getOrCreate(key, zd)
-		fn(key, mpzd)
-	})
+	for item := range tdns.Zones.IterBuffered() {
+		mpzd := mz.getOrCreate(item.Key, item.Val)
+		fn(item.Key, mpzd)
+	}
 }
 
 // Set stores a pre-populated *MPZoneData in the cache. Used by

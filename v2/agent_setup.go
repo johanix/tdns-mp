@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
@@ -30,6 +31,17 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 	lgAgent.Info("creating a minimal auto zone", "zone", zonename)
 
 	mp := conf.MpConfig()
+	// The notified secondaries are granted transfer below, and the transfer
+	// ACL takes addresses: refuse a notify target that is not an IP literal
+	// before creating anything, rather than NOTIFY a secondary that will then
+	// be denied the transfer.
+	notify := tdns.NormalizeAddresses(mp.Local.Notify)
+	for _, addr := range notify {
+		if hostPrefix(addr) == "" {
+			return nil, fmt.Errorf("SetupAgentAutoZone: multi-provider.local.notify entry %q is not an IP address[:port]; the identity zone's transfer ACL needs an address", addr)
+		}
+	}
+
 	var zd *tdns.ZoneData
 	var err error
 	if len(mp.Local.Nameservers) > 0 {
@@ -54,10 +66,19 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 		mpzd.SyncQ = conf.InternalMp.SyncQ
 	}
 
-	// Check for local notify configuration and set downstream targets
-	if len(mp.Local.Notify) > 0 {
-		zd.Downstreams = tdns.NormalizeAddresses(mp.Local.Notify)
-		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "downstreams", zd.Downstreams)
+	// Check for local notify configuration and set downstream targets.
+	// tdns keeps the NOTIFY targets in zd.Notify ([]PeerConf) and uses
+	// zd.Downstreams as the provide-xfr ACL (empty => deny); before the
+	// re-pin Downstreams WAS the notify list and transfers were not
+	// ACL-gated per zone, so the notified secondaries are also granted
+	// transfer access here to keep the auto zone transferable (every entry
+	// is an IP literal, checked above).
+	if len(notify) > 0 {
+		for _, addr := range notify {
+			zd.Notify = append(zd.Notify, tdns.PeerConf{Addr: addr, Key: tdns.NOKEY})
+			zd.Downstreams = append(zd.Downstreams, tdns.AclEntry{Prefix: hostPrefix(addr), Key: tdns.NOKEY})
+		}
+		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "notify", zd.Notify, "downstreams", zd.Downstreams)
 	}
 
 	// Agent auto zone needs to be signed
@@ -481,4 +502,22 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *Mu
 
 	lgAgent.Info("published JWK record", "name", publishname)
 	return nil
+}
+
+// hostPrefix turns a notify address (host or host:port) into the single-host
+// CIDR that AclEntry.Prefix requires (ValidateACL rejects a bare IP).
+// Returns "" when the host is not an IP literal.
+func hostPrefix(addr string) string {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return ""
+	}
+	if ip.Is4() {
+		return ip.String() + "/32"
+	}
+	return ip.String() + "/128"
 }

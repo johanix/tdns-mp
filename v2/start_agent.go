@@ -17,6 +17,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 )
@@ -32,7 +33,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// initialization fails, crash early rather than get nil panics later.
 	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
 	if imrActive {
-		if err := conf.Config.InitImrEngine(true); err != nil {
+		if err := conf.Config.InitImrEngine(ctx, true); err != nil {
 			log.Fatalf("IMR initialization failed: %v", err)
 		}
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
@@ -87,7 +88,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
-		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
@@ -156,7 +157,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		// Detect parentsync=agent from HSYNCPARAM and enable delegation sync.
 		if mpzd.Options[tdns.OptMultiProvider] {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if zd.Options[tdns.OptDelSyncChild] {
+				if zd.Options[tdns.OptParentSync] {
 					return // already set via static config
 				}
 				mp := conf.MpConfig()
@@ -178,17 +179,38 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				}
 				if hp.GetParentSync() == core.HsyncParentSyncAgent {
 					lgAgent.Info("HSYNCPARAM parentsync=agent, enabling delegation sync", "zone", zd.ZoneName)
-					zd.Options[tdns.OptDelSyncChild] = true
+					zd.Options[tdns.OptParentSync] = true
 					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
 						lgAgent.Error("SetupZoneSync failed in MP OnFirstLoad", "zone", zd.ZoneName, "err", err)
 					}
 				}
 			})
 		}
-		// Leader election callback (must run after parentsync detection above).
-		if mpzd.Options[tdns.OptDelSyncChild] || mpzd.Options[tdns.OptMultiProvider] {
+		// Peers and provider groups, once the zone is Ready. The HSYNC diff
+		// PostRefresh applies on the first load runs before tdns marks the
+		// zone Ready (tdns sets Ready only when the first load completes), so
+		// ApplyHsyncDiff cannot read the zone view and registers nobody, and
+		// RecomputeGroups skips the zone. The peers would wait for the
+		// periodic ReconcileZone (60 s) and the groups for an HSYNC3 change.
+		// Must run before the election callback, which looks the zone's group
+		// up.
+		if mpzd.Options[tdns.OptMultiProvider] {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if !zd.Options[tdns.OptDelSyncChild] {
+				if ar.HsyncEngine != nil {
+					if _, _, err := ar.HsyncEngine.ReconcileZone(hsync.ZoneName(zd.ZoneName)); err != nil {
+						lgAgent.Warn("OnFirstLoad: reconciling zone peers failed", "zone", zd.ZoneName, "err", err)
+					}
+				}
+				if ar.ProviderGroupManager != nil {
+					lgAgent.Debug("OnFirstLoad: recomputing provider groups", "zone", zd.ZoneName)
+					ar.ProviderGroupManager.RecomputeGroups()
+				}
+			})
+		}
+		// Leader election callback (must run after parentsync detection above).
+		if mpzd.Options[tdns.OptParentSync] || mpzd.Options[tdns.OptMultiProvider] {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				if !zd.Options[tdns.OptParentSync] {
 					return
 				}
 				zone := ZoneName(zd.ZoneName)
@@ -216,8 +238,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		if !ok || zd == nil {
 			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
 		}
-		if !zd.Options[tdns.OptDelSyncChild] {
-			lgAgent.Info("onLeaderElected: zone does not have OptDelSyncChild, skipping", "zone", zone)
+		if !zd.Options[tdns.OptParentSync] {
+			lgAgent.Info("onLeaderElected: zone does not have OptParentSync, skipping", "zone", zone)
 			return nil
 		}
 		lgAgent.Info("onLeaderElected: processing", "zone", zone)
@@ -335,10 +357,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 
 		// Step e: trigger KeyState inquiry + bootstrap with parent (async)
-		if zd.Options[tdns.OptDelSyncChild] {
+		if zd.Options[tdns.OptParentSync] {
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.ParentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(ctx, zone, keyName, keyid, algorithm)
 		}
 
 		return nil

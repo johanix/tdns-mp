@@ -83,12 +83,13 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				zd := ds.ZoneData
-				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = imr().Imr.ParentZone(zd.ZoneName)
-					if err != nil {
-						lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
+				if p := zd.GetParent(); p == "" || p == "." {
+					parent, perr := imr().Imr.ParentZone(zd.ZoneName)
+					if perr != nil {
+						lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", perr)
 						continue
 					}
+					zd.SetParent(parent)
 				}
 
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, ds.SyncStatus, imr().Imr)
@@ -170,7 +171,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				// Publish CDS records from current DNSKEYs if zone has delegation sync
-				if zd.Options[tdns.OptDelSyncChild] {
+				if zd.Options[tdns.OptParentSync] {
 					if err := zd.PublishCdsRRs(); err != nil {
 						lg.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
 					} else {

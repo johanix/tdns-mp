@@ -38,7 +38,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
-		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuthQueryEngine", func() {
 		tdns.AuthQueryEngine(ctx, conf.Config.Internal.AuthQueryQ)

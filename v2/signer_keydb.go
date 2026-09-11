@@ -130,10 +130,7 @@ func UpdateDnssecKeyState(hdb *HsyncDB, zonename string, keyid uint16, newstate 
 		return err
 	}
 
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+newstate)
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, oldstate))
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, newstate))
+	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zonename, oldstate), mpDnssecCacheKey(zonename, newstate))
 
 	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
 	return nil
@@ -216,8 +213,7 @@ func SetPropagationConfirmed(hdb *HsyncDB, zonename string, keyid uint16) error 
 		return fmt.Errorf("SetPropagationConfirmed: key %d not found in zone %s", keyid, zonename)
 	}
 
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStatePublished)
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStatePublished))
+	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zonename, tdns.DnskeyStatePublished))
 	lgSigner.Info("key marked as propagation confirmed", "keyid", keyid, "zone", zonename)
 	return nil
 }
@@ -335,7 +331,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM MPDnssecKeyStore WHERE zo
 
 	cacheKey := mpDnssecCacheKey(zonename, state)
 	if state == tdns.DnskeyStateActive {
-		if dak, ok := hdb.KeystoreDnskeyCache[cacheKey]; ok {
+		if dak, ok := hdb.mpDnskeyCacheGet(cacheKey); ok {
 			return dak, nil
 		}
 	}
@@ -404,7 +400,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM MPDnssecKeyStore WHERE zo
 
 	lgSigner.Debug("GetDnssecKeysMP returned keys", "zone", zonename, "state", state, "keys", logmsg)
 
-	hdb.KeystoreDnskeyCache[cacheKey] = &dk
+	hdb.mpDnskeyCacheSet(cacheKey, &dk)
 
 	return &dk, nil
 }
@@ -455,10 +451,7 @@ func PromoteDnssecKeyMP(hdb *HsyncDB, zonename string, keyid uint16, oldstate, n
 		return fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
 	}
 
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+newstate)
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, oldstate))
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, newstate))
+	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zonename, oldstate), mpDnssecCacheKey(zonename, newstate))
 
 	return nil
 }
@@ -506,8 +499,7 @@ func canPromoteMultiProviderMP(hdb *HsyncDB, zonename string, keyid uint16) bool
 }
 
 func refreshActiveDnssecKeysMP(zd *tdns.ZoneData, hdb *HsyncDB, context string) (*tdns.DnssecKeys, error) {
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
-	delete(hdb.KeystoreDnskeyCache, zd.ZoneName+"+"+tdns.DnskeyStateActive)
+	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
 	dak, err := GetDnssecKeysMP(hdb, zd.ZoneName, tdns.DnskeyStateActive)
 	if err != nil {
 		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "context", context, "err", err)
@@ -594,8 +586,7 @@ func EnsureActiveDnssecKeysMP(mpzd *MPZoneData, hdb *HsyncDB) (*tdns.DnssecKeys,
 	}
 
 	if len(dak.KSKs) == 0 {
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
-		delete(hdb.KeystoreDnskeyCache, zd.ZoneName+"+"+tdns.DnskeyStateActive)
+		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
 		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: KSK: %w", err)
@@ -615,8 +606,7 @@ func EnsureActiveDnssecKeysMP(mpzd *MPZoneData, hdb *HsyncDB) (*tdns.DnssecKeys,
 	}
 
 	if realZSKCount == 0 {
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
-		delete(hdb.KeystoreDnskeyCache, zd.ZoneName+"+"+tdns.DnskeyStateActive)
+		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
 		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: ZSK: %w", err)
@@ -723,12 +713,10 @@ func RolloverKeyMP(hdb *HsyncDB, zonename string, keytype string, tx *tdns.Tx) (
 		return 0, 0, fmt.Errorf("active→retired transition failed: %w", txErr)
 	}
 
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStateActive)
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStateStandby)
-	delete(hdb.KeystoreDnskeyCache, zonename+"+"+tdns.DnskeyStateRetired)
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStateActive))
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStateStandby))
-	delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(zonename, tdns.DnskeyStateRetired))
+	hdb.mpDnskeyCacheDelete(
+		mpDnssecCacheKey(zonename, tdns.DnskeyStateActive),
+		mpDnssecCacheKey(zonename, tdns.DnskeyStateStandby),
+		mpDnssecCacheKey(zonename, tdns.DnskeyStateRetired))
 
 	lgSigner.Info("key rollover completed (MP)", "zone", zonename, "keytype", keytype,
 		"old_active", activeKey.KeyTag, "new_active", standbyKey.KeyTag)

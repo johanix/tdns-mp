@@ -740,7 +740,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 // findProviderZoneForOwner finds the most specific configured provider zone
 // that contains the given owner name.
 func findProviderZoneForOwner(ownerName string) string {
-	zd, _ := tdns.FindZone(dns.Fqdn(ownerName))
+	zd := tdns.FindZone(dns.Fqdn(ownerName))
 	if zd == nil {
 		return ""
 	}
