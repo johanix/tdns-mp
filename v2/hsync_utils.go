@@ -29,6 +29,25 @@ var lg = tdns.Logger("zones")
 // A pure HSYNCPARAM edit (e.g. moving a label between signers= and
 // servers=) produces no HsyncAdds/Removes but must still trigger
 // RecomputeGroups, because VotingMembers is derived from HSYNCPARAM.
+// incomingRRset reads an RRset from a zone that has just been transferred in
+// and not yet published. GetRRset reads the published snapshot, which such a
+// zone does not have yet -- and at a missing apex tdns panics rather than
+// returning an error. The transfer lands in Data, which is also what the
+// refresh publish consumes, so Data is the right thing to inspect here.
+func incomingRRset(zd *tdns.ZoneData, name string, rrtype uint16) *core.RRset {
+	if zd == nil || zd.Data == nil {
+		return nil
+	}
+	owner, ok := zd.Data.Get(name)
+	if !ok || owner.RRtypes == nil {
+		return nil
+	}
+	if rrset, ok := owner.RRtypes.Get(rrtype); ok {
+		return &rrset
+	}
+	return nil
+}
+
 func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 	var hss = HsyncStatus{
 		Time:     time.Now(),
@@ -49,14 +68,8 @@ func HsyncChanged(zd, newzd *tdns.ZoneData) (bool, *HsyncStatus, error) {
 		// Fall through with oldapex == nil (initial load)
 	}
 
-	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
-	if err != nil {
-		return false, nil, err
-	}
-	newparam, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNCPARAM)
-	if err != nil {
-		return false, nil, err
-	}
+	newhsync := incomingRRset(newzd, zd.ZoneName, core.TypeHSYNC3)
+	newparam := incomingRRset(newzd, zd.ZoneName, core.TypeHSYNCPARAM)
 
 	if oldapex == nil {
 		// Initial load: any HSYNC3 records present are "added" from
@@ -153,10 +166,7 @@ func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *Dnske
 	}
 
 	// Get new DNSKEY RRset (from incoming zone data)
-	newkeys, err := new_zd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY)
-	if err != nil {
-		return false, nil, fmt.Errorf("LocalDnskeysChanged: new GetRRset: %v", err)
-	}
+	newkeys := incomingRRset(new_zd, mpzd.ZoneName, dns.TypeDNSKEY)
 
 	// Filter: keep only local DNSKEYs (not in remote set)
 	oldLocal := filterLocalDNSKEYs(oldkeys, remoteKeyTags)
