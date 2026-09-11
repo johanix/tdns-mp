@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -54,32 +55,46 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 		lgSigner.Warn("no signer identity configured, using default 'signer'")
 	}
 
-	// Create an agent entry for the signer
+	// Create an agent entry for the signer. Connection state/telemetry live
+	// on transport.Peer (DNS mechanism seeded OPERATIONAL below); the State
+	// shadow is only the DTO display initial value (Phase 2).
 	signerAgent := &Agent{
-		Identity:    signerID,
-		PeerID:      string(signerID),
-		DnsMethod:   true,  // Signer uses DNS transport (CHUNK)
-		ApiMethod:   false, // No API transport for signer
-		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats
-		DnsDetails: &AgentDetails{
-			State:           AgentStateOperational,
-			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),
-			Port:            uint16(port),
-			Addrs:           []string{host},
-			HelloTime:       time.Now(),
-			LastContactTime: time.Now(),
-		},
-		ApiDetails: &AgentDetails{
-			State: AgentStateNeeded,
-		},
-		Zones:     make(map[ZoneName]bool),
-		State:     AgentStateOperational,
-		LastState: time.Now(),
+		Peer:  hsync.NewPeer(signerID),
+		State: AgentStateOperational,
 	}
+	signerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
+	// Capability/role flags promote from the embedded hsync.Peer (E1.a).
+	signerAgent.DnsMethod = true   // Signer uses DNS transport (CHUNK)
+	signerAgent.ApiMethod = false  // No API transport for signer
+	signerAgent.IsInfraPeer = true // handled by StartInfraBeatLoop, not SendHeartbeats
 
 	// Register in AgentRegistry
 	ar.S.Set(signerID, signerAgent)
 	lgSigner.Info("registered signer as virtual peer", "identity", signerID, "address", mp.Signer.Address)
+
+	// S2: populate the transport.Peer address at registration so the
+	// transport store is the SOLE address source (the GetOrCreatePeer
+	// AgentDetails->transport restore is removed). Config-infra peers are
+	// never discovered via DNS, so this is their only address source.
+	if ar.TransportManager != nil {
+		speer := ar.TransportManager.PeerRegistry.GetOrCreate(string(signerID))
+		speer.SetDiscoveryAddress(&transport.Address{
+			Host:      host,
+			Port:      uint16(port),
+			Transport: "udp",
+		})
+		speer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port)
+		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
+		// agent beat interval — match the decay thresholds to it (see
+		// InitializeCombinerAsPeer for the rationale).
+		speer.SetLivenessInterval(uint32(defaultInfraBeatInterval / time.Second))
+		// END.0: seed the canonical DNS mechanism state to OPERATIONAL for this
+		// config-defined, pre-trusted infra peer (replaces the former
+		// AgentDetails.State=OPERATIONAL); stamp LastBeatSent so decay starts
+		// fresh. See InitializeCombinerAsPeer for the rationale.
+		speer.SetMechanismState("DNS", transport.PeerStateOperational, "signer infra peer (config-defined, pre-trusted)")
+		speer.SetMechanismLastBeatSent("DNS", time.Now())
+	}
 
 	// Load and register signer's public key for encrypted communication
 	if mp.Signer.LongTermJosePubKey == "" {

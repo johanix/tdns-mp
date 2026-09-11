@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -51,32 +52,50 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		lgCombiner.Warn("no combiner identity configured, using default 'combiner' (agents with chunk_mode=query will fail)")
 	}
 
-	// Create an agent entry for the combiner
+	// Create an agent entry for the combiner. Connection state/telemetry live
+	// on transport.Peer (DNS mechanism seeded OPERATIONAL below); the State
+	// shadow is only the DTO display initial value (Phase 2).
 	combinerAgent := &Agent{
-		Identity:    combinerID,
-		PeerID:      string(combinerID),
-		DnsMethod:   true,  // Combiner supports DNS transport (CHUNK)
-		ApiMethod:   false, // API transport added when combiner.api is configured
-		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats
-		DnsDetails: &AgentDetails{
-			State:           AgentStateOperational, // Start as operational
-			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),
-			Port:            uint16(port),
-			Addrs:           []string{host},
-			HelloTime:       time.Now(),
-			LastContactTime: time.Now(),
-		},
-		ApiDetails: &AgentDetails{
-			State: AgentStateNeeded, // Not using API transport
-		},
-		Zones:     make(map[ZoneName]bool),
-		State:     AgentStateOperational,
-		LastState: time.Now(),
+		Peer:  hsync.NewPeer(combinerID),
+		State: AgentStateOperational,
 	}
+	combinerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
+	// Capability/role flags promote from the embedded hsync.Peer (E1.a) — the
+	// engine reads them there (e.g. beat.go's IsInfraPeer skip).
+	combinerAgent.DnsMethod = true   // Combiner supports DNS transport (CHUNK)
+	combinerAgent.ApiMethod = false  // API transport added when combiner.api is configured
+	combinerAgent.IsInfraPeer = true // handled by StartInfraBeatLoop, not SendHeartbeats
 
 	// Register in AgentRegistry with configured identity
 	ar.S.Set(combinerID, combinerAgent)
 	lgCombiner.Info("registered combiner as virtual peer", "identity", combinerID, "address", mp.Combiner.Address)
+
+	// S2: populate the transport.Peer address at registration so the
+	// transport store is the SOLE address source (the GetOrCreatePeer
+	// AgentDetails->transport restore is removed). Config-infra peers are
+	// never discovered via DNS, so this is their only address source.
+	if ar.TransportManager != nil {
+		cpeer := ar.TransportManager.PeerRegistry.GetOrCreate(string(combinerID))
+		cpeer.SetDiscoveryAddress(&transport.Address{
+			Host:      host,
+			Port:      uint16(port),
+			Transport: "udp",
+		})
+		cpeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port)
+		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
+		// agent beat interval. Match the decay thresholds to it, else a
+		// healthy combiner false-decays to INTERRUPTED ~5 min after each
+		// 10-min beat (the 30s LivenessInterval default).
+		cpeer.SetLivenessInterval(uint32(defaultInfraBeatInterval / time.Second))
+		// END.0: the combiner is a config-defined, pre-trusted infra peer that
+		// is always reachable. Seed its canonical DNS mechanism state to
+		// OPERATIONAL (this replaces the former AgentDetails.State=OPERATIONAL),
+		// and stamp LastBeatSent so the decay-on-read starts from "fresh"
+		// instead of treating a zero timestamp as infinitely old. The
+		// infra-beat readiness gate and the send gates now read this store.
+		cpeer.SetMechanismState("DNS", transport.PeerStateOperational, "combiner infra peer (config-defined, pre-trusted)")
+		cpeer.SetMechanismLastBeatSent("DNS", time.Now())
+	}
 
 	// Load and register combiner's public key for encrypted communication
 	// If combiner is configured, encryption is MANDATORY

@@ -24,9 +24,6 @@ func (m *mockTransport) DiscoverPeer(ctx context.Context, identity string) (*tra
 	m.discoverCalls.Add(1)
 	return transport.NewPeer(identity), nil
 }
-func (m *mockTransport) RegisterDiscovered(peer *Peer, result *DiscoveryResult) error {
-	return nil
-}
 func (m *mockTransport) SendHello(ctx context.Context, peer *Peer, sharedZones []string) error {
 	return nil
 }

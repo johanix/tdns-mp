@@ -109,27 +109,25 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 				flushed = removed
 			}
 
-			// Reset agent to NEEDED state and restart discovery
-			agent, exists := ar.S.Get(peerID)
-			if !exists {
+			// Reset agent to NEEDED state and restart discovery. (Phase 2:
+			// the AgentDetails error mirror is gone — nothing to clear.)
+			if _, exists := ar.S.Get(peerID); !exists {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", peerID)
 				return
 			}
 
-			agent.Mu.Lock()
-			if agent.ApiDetails != nil {
-				agent.ApiDetails.State = AgentStateNeeded
-				agent.ApiDetails.DiscoveryFailures = 0
-				agent.ApiDetails.LatestError = ""
+			// END.0: reset the canonical connection state on transport.Peer —
+			// top-level marker back to NEEDED and each mechanism back to NEEDED
+			// (was agent.{Api,Dns}Details.State / agent.State). Rediscovery
+			// re-promotes through the marker + per-mechanism states.
+			if ar.TransportManager != nil {
+				if peer, ok := ar.TransportManager.PeerRegistry.Get(string(peerID)); ok {
+					peer.SetState(transport.PeerStateNeeded, "peer reset")
+					peer.SetMechanismState("API", transport.PeerStateNeeded, "peer reset")
+					peer.SetMechanismState("DNS", transport.PeerStateNeeded, "peer reset")
+				}
 			}
-			if agent.DnsDetails != nil {
-				agent.DnsDetails.State = AgentStateNeeded
-				agent.DnsDetails.DiscoveryFailures = 0
-				agent.DnsDetails.LatestError = ""
-			}
-			agent.State = AgentStateNeeded
-			agent.Mu.Unlock()
 
 			// Trigger immediate re-discovery via the NG engine. MarkNeeded
 			// short-circuits known peers, so reset uses the dedicated
@@ -289,5 +287,6 @@ func peerFromAddress(peerID string, address string) *transport.Peer {
 		Port:      uint16(port),
 		Transport: "udp",
 	})
+	peer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port) // S2 display
 	return peer
 }

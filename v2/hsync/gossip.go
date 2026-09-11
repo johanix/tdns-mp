@@ -235,9 +235,8 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm ProviderGroup
 		return nil
 	}
 	type groupInfo struct {
-		hash         string
-		members      []string
-		nameProposal *GroupNameProposal
+		hash    string
+		members []string
 	}
 	var groups []groupInfo
 	for _, pg := range pgm.Groups() {

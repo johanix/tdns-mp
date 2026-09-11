@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -1175,11 +1176,11 @@ func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, rec
 	}
 
 	for _, agent := range zad.Agents {
-		if AgentId(agent.Identity) == AgentId(ar.LocalAgent.Identity) {
+		if AgentId(agent.ID) == AgentId(ar.LocalAgent.Identity) {
 			continue // don't send to ourselves
 		}
-		if !ar.isAgentOperational(agent.Identity) {
-			lgElect.Debug("skipping non-operational agent", "agent", agent.Identity)
+		if !ar.isAgentOperational(agent.ID) {
+			lgElect.Debug("skipping non-operational agent", "agent", agent.ID)
 			continue
 		}
 		msg := &AgentMsgPost{
@@ -1192,7 +1193,7 @@ func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, rec
 		}
 		go func(a *Agent) {
 			if _, err := ar.sendRfiToAgent(a, msg); err != nil {
-				lgElect.Warn("failed to send election message", "agent", a.Identity, "rfiType", rfiType, "err", err)
+				lgElect.Warn("failed to send election message", "agent", a.ID, "rfiType", rfiType, "err", err)
 			}
 		}(agent)
 	}
@@ -1361,20 +1362,26 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 		zad, err := ar.GetZoneAgentData(zone)
 		if err == nil {
 			for _, agent := range zad.Agents {
-				if agent.Identity == lem.localID {
+				if agent.ID == lem.localID {
 					continue // skip self
 				}
+				// Which transport is live reads the canonical transport.Peer
+				// per-mechanism state (END.0, decayed); was {Dns,Api}Details.State.
 				transportStr := "-"
-				if agent.DnsDetails != nil && agent.DnsDetails.State == AgentStateOperational {
-					transportStr = "DNS"
-				} else if agent.ApiDetails != nil && agent.ApiDetails.State == AgentStateOperational {
-					transportStr = "API"
+				if ar.TransportManager != nil {
+					if peer, ok := ar.TransportManager.PeerRegistry.Get(string(agent.ID)); ok {
+						if st, ok := peer.MechanismEffectiveState("DNS"); ok && st == transport.PeerStateOperational {
+							transportStr = "DNS"
+						} else if st, ok := peer.MechanismEffectiveState("API"); ok && st == transport.PeerStateOperational {
+							transportStr = "API"
+						}
+					}
 				}
 				status.Peers = append(status.Peers, PeerSyncInfo{
-					Identity:    agent.Identity,
-					State:       string(ar.effectiveAgentState(agent.Identity)),
+					Identity:    agent.ID,
+					State:       string(ar.effectiveAgentState(agent.ID)),
 					Transport:   transportStr,
-					Operational: ar.isAgentOperational(agent.Identity),
+					Operational: ar.isAgentOperational(agent.ID),
 				})
 			}
 		}

@@ -11,23 +11,24 @@ import (
 	"github.com/johanix/tdns/v2/core"
 )
 
-// Registry owns the HSYNC peer map and zone index.
+// Registry owns the HSYNC peer map. (END.4 / Phase 3b: the RemoteAgents
+// zone→peer index is gone — it was write-only; zone→peer derives on read
+// via peer.Zones / GetPeersForZone, and membership itself derives from
+// HSYNCPARAM via ParticipantsForZone.)
 type Registry struct {
-	S            core.ConcurrentMap[PeerID, *Peer]
-	RemoteAgents map[ZoneName][]PeerID
-	mu           sync.RWMutex
-	LocalID      PeerID
-	helloCancel  map[PeerID]context.CancelFunc
-	transport    TransportBridge
+	S           core.ConcurrentMap[PeerID, *Peer]
+	mu          sync.RWMutex
+	LocalID     PeerID
+	helloCancel map[PeerID]context.CancelFunc
+	transport   TransportBridge
 }
 
 func NewRegistry(localID PeerID, transport TransportBridge) *Registry {
 	return &Registry{
-		S:            core.NewStringer[PeerID, *Peer](),
-		RemoteAgents: make(map[ZoneName][]PeerID),
-		LocalID:      localID,
-		helloCancel:  make(map[PeerID]context.CancelFunc),
-		transport:    transport,
+		S:           core.NewStringer[PeerID, *Peer](),
+		LocalID:     localID,
+		helloCancel: make(map[PeerID]context.CancelFunc),
+		transport:   transport,
 	}
 }
 
@@ -46,19 +47,7 @@ func (r *Registry) AddZoneToPeer(id PeerID, zone ZoneName) {
 	}
 	peer.Zones[zone] = true
 	peer.Mu.Unlock()
-	r.addRemoteAgent(zone, peer)
 	r.S.Set(id, peer)
-}
-
-func (r *Registry) addRemoteAgent(zone ZoneName, peer *Peer) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, existing := range r.RemoteAgents[zone] {
-		if existing == peer.ID {
-			return
-		}
-	}
-	r.RemoteAgents[zone] = append(r.RemoteAgents[zone], peer.ID)
 }
 
 func (r *Registry) GetPeersForZone(zone ZoneName) []*Peer {
@@ -75,16 +64,6 @@ func (r *Registry) GetPeersForZone(zone ZoneName) []*Peer {
 }
 
 func (r *Registry) RemovePeerFromZone(zone ZoneName, id PeerID) {
-	r.mu.Lock()
-	ids := r.RemoteAgents[zone]
-	for i, a := range ids {
-		if a == id {
-			r.RemoteAgents[zone] = append(ids[:i], ids[i+1:]...)
-			break
-		}
-	}
-	r.mu.Unlock()
-
 	if peer, ok := r.S.Get(id); ok {
 		peer.Mu.Lock()
 		delete(peer.Zones, zone)
@@ -127,6 +106,28 @@ func (r *Registry) clearHelloCancel(id PeerID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.helloCancel, id)
+}
+
+// cancelHello stops any running hello retrier for the peer and clears its
+// registration (used by RemovePeer before dropping the peer object).
+func (r *Registry) cancelHello(id PeerID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing, ok := r.helloCancel[id]; ok {
+		existing()
+		delete(r.helloCancel, id)
+	}
+}
+
+// hasHelloCancel reports whether a hello retrier is already running for this
+// peer (its cancel func is registered). Used to avoid launching a duplicate
+// retrier when retryPendingDiscoveries starts the hello for a KNOWN peer that
+// was discovered out-of-band (e.g. the chunk-notify kick).
+func (r *Registry) hasHelloCancel(id PeerID) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.helloCancel[id]
+	return ok
 }
 
 func (r *Registry) sharedZones(peer *Peer) []string {

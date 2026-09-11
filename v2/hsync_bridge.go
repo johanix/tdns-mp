@@ -27,26 +27,26 @@ func (b *mpHsyncBridge) DiscoverPeer(ctx context.Context, identity string) (*tra
 	return b.tm.TransportManager.DiscoverPeer(ctx, identity)
 }
 
-func (b *mpHsyncBridge) RegisterDiscovered(peer *hsync.Peer, result *hsync.DiscoveryResult) error {
-	if b.tm == nil {
+// agentViewForPeer returns the persistent ar.S view for the peer (materializing
+// it if needed), or a transient unstored view when no AgentRegistry is wired
+// (test harnesses). E1.b: the view shares the peer pointer, so there is no
+// post-send copy-back — persistAgentAndPeer is gone.
+func agentViewForPeer(ar *AgentRegistry, peer *hsync.Peer) *Agent {
+	if peer == nil {
 		return nil
 	}
-	agent := hsyncPeerToAgent(peer)
-	b.ar.S.Set(agent.Identity, agent)
-	return b.tm.RegisterDiscoveredAgent(&AgentDiscoveryResult{
-		Identity: string(peer.ID),
-		APIUri:   result.APIUri,
-		DNSUri:   result.DNSUri,
-	})
+	if ar != nil {
+		return ar.materializeAgentView(peer)
+	}
+	return newAgentView(peer)
 }
 
 func (b *mpHsyncBridge) SendHello(ctx context.Context, peer *hsync.Peer, sharedZones []string) error {
 	if b.tm == nil {
 		return nil
 	}
-	agent := agentForTransport(b.ar, peer)
+	agent := agentViewForPeer(b.ar, peer)
 	_, err := b.tm.SendHelloWithFallback(ctx, agent, sharedZones)
-	persistAgentAndPeer(b.ar, peer, agent)
 	return err
 }
 
@@ -54,31 +54,25 @@ func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence
 	if b.tm == nil {
 		return false, "", nil
 	}
-	agent := agentForTransport(b.ar, peer)
-	var beforeAPI, beforeDNS uint32
-	agent.Mu.RLock()
-	if agent.ApiDetails != nil {
-		beforeAPI = agent.ApiDetails.SentBeats
-	}
-	if agent.DnsDetails != nil {
-		beforeDNS = agent.DnsDetails.SentBeats
-	}
-	agent.Mu.RUnlock()
+	agent := agentViewForPeer(b.ar, peer)
+	tp := b.tm.GetOrCreatePeer(agent)
+	beforeAPI := tp.MechanismBeatSequence("API")
+	beforeDNS := tp.MechanismBeatSequence("DNS")
 
 	resp, err := b.tm.SendBeatWithFallback(ctx, agent, sequence)
-	persistAgentAndPeer(b.ar, peer, agent)
-	used := beatTransportUsed(agent, beforeAPI, beforeDNS)
+	used := beatTransportUsed(agent, tp, beforeAPI, beforeDNS)
 	if err != nil || resp == nil {
 		return false, used, err
 	}
 	return resp.Ack, used, nil
 }
 
-func beatTransportUsed(agent *Agent, beforeAPI, beforeDNS uint32) string {
+func beatTransportUsed(agent *Agent, tp *transport.Peer, beforeAPI, beforeDNS uint64) string {
 	agent.Mu.RLock()
-	defer agent.Mu.RUnlock()
-	apiSent := agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.SentBeats > beforeAPI
-	dnsSent := agent.DnsMethod && agent.DnsDetails != nil && agent.DnsDetails.SentBeats > beforeDNS
+	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
+	agent.Mu.RUnlock()
+	apiSent := apiMethod && tp.MechanismBeatSequence("API") > beforeAPI
+	dnsSent := dnsMethod && tp.MechanismBeatSequence("DNS") > beforeDNS
 	switch {
 	case dnsSent && !apiSent:
 		return hsync.TransportDNS
@@ -112,14 +106,17 @@ func (b *mpHsyncBridge) AfterDiscoverPeer(peer *hsync.Peer) {
 	if b.ar == nil || peer == nil {
 		return
 	}
-	if agent, ok := b.ar.S.Get(AgentId(peer.ID)); ok {
-		persistAgentAndPeer(b.ar, peer, agent)
-	}
+	// E1.b: the view shares the peer pointer — there is no copy to re-sync.
+	// Just make sure the view exists for a peer whose discovery completed
+	// before anything materialized it.
+	b.ar.materializeAgentView(peer)
 }
 
 func (b *mpHsyncBridge) SyncPeerZones(peer *hsync.Peer) {
-	agent := hsyncPeerToAgent(peer)
-	b.ar.S.Set(agent.Identity, agent)
+	agent := b.ar.materializeAgentView(peer)
+	if agent == nil {
+		return
+	}
 	b.ar.RecomputeSharedZonesAndSyncState(agent)
 }
 
@@ -311,7 +308,12 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 		Gossip:            newAgentGossipPort(ar),
 		ProviderGroups:    pgmHsyncLookup{pgm: ar.ProviderGroupManager},
 		PeerHooks: hsync.PeerHooks{
-			OnPeerStored: func(peer *hsync.Peer) { syncHsyncPeerToAgent(ar, peer) },
+			// E1.b: pure view-materialization — the view shares the stored
+			// peer's pointer, so there is nothing to copy or sync.
+			OnPeerStored: func(peer *hsync.Peer) { ar.materializeAgentView(peer) },
+			// Phase 3c: prunes are events — drop the MP view + transport
+			// peer promptly when the engine removes a peer object.
+			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer.ID) },
 		},
 		Host: hsync.HostCallbacks{
 			OnHsync3Changed: func(zone hsync.ZoneName) {

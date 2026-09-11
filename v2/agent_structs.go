@@ -6,7 +6,6 @@ package tdnsmp
 
 import (
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -55,144 +54,130 @@ const (
 
 var AgentMsgToString = core.AgentMsgToString
 
+// Agent is the MP-side view of a peer (END.1 / addendum §3). It embeds the thin
+// *hsync.Peer (the surviving MP coordination/identity holder) and promotes its
+// ID / Mu / Zones / Deferred — the END.1 "dedupe Identity/PeerID -> hsync.Peer.ID"
+// (E1.a). hsync.Peer is allocated 1:1 with the Agent; the bridge keeps the two
+// objects in sync until E1.b collapses them to one object.
+//
+// E1.a dedupes every field whose type already matches the embedded hsync.Peer
+// (no type cascade): ID (Identity/PeerID), Mu, Zones, Deferred, ApiMethod,
+// DnsMethod, IsInfraPeer, LastState — all PROMOTE from *hsync.Peer, so e.g.
+// agent.ApiMethod IS agent.Peer.ApiMethod (one copy; engine and MP read the same
+// field).
+//
+// Phase 2 deleted the AgentDetails shadows entirely (connection state +
+// telemetry live on transport.Peer). CAUTION: because of the embed,
+// `agent.ApiDetails`/`agent.DnsDetails` still RESOLVE — to the embedded
+// hsync.Peer's *hsync.PeerDetails (the retired NG store). Do not reintroduce
+// readers/writers through those names; the hsync.PeerDetails deletion (Stage
+// D / Phase 3) removes the trap. Only State (AgentState vs hsync.PeerState)
+// still shadows the embed, as the DTO display field.
+//
+// Access notes after the embed:
+//   - agent.ID (was agent.Identity / agent.PeerID) — type AgentId (= hsync.PeerID)
+//   - agent.Mu / agent.Zones / agent.Deferred (was DeferredTasks),
+//     agent.ApiMethod / agent.DnsMethod / agent.IsInfraPeer / agent.LastState — from *hsync.Peer
 type Agent struct {
-	Identity AgentId
-	// PeerID is the transport-layer identifier for this agent, used as
-	// the key into the transport PeerRegistry. Currently identical to
-	// Identity but kept as a separate field so future identity schemes
-	// (e.g. UUID-based peer IDs) can decouple transport identity from
-	// MP agent identity without touching every consumer. See Bite 4 in
-	// docs/2026-04-25-transport-refactor-early-bites.md.
-	PeerID        string
-	Mu            sync.RWMutex
-	InitialZone   ZoneName
-	ApiDetails    *AgentDetails
-	DnsDetails    *AgentDetails
-	ApiMethod     bool
-	DnsMethod     bool
-	IsInfraPeer   bool // true for combiner/signer — handled by StartInfraBeatLoop, not SendHeartbeats
-	Zones         map[ZoneName]bool
-	Api           *AgentApi
-	State         AgentState // Agent states: needed, known, hello-done, operational, error
-	LastState     time.Time  // When state last changed
-	ErrorMsg      string     // Error message if state is error
-	DeferredTasks []DeferredAgentTask
-	// meta is the transitional MP-side sidecar (A3d): per-mechanism crypto
-	// holding pen, en route to transport.Peer at E1. Reached via
-	// ensureCrypto/cryptoFor; lazily allocated.
-	meta *agentMeta
+	*hsync.Peer // ID, Mu, Zones, Deferred, ApiMethod, DnsMethod, IsInfraPeer, LastState
+
+	InitialZone ZoneName
+	Api         *AgentApi
+	State       AgentState // shadows hsync.Peer.State (AgentState vs hsync.PeerState); DTO display field, stamped from effectiveAgentState; retires with the DTO rework
+	ErrorMsg    string     // Error message if state is error
 }
 
-type AgentDetails struct {
-	Addrs             []string
-	Port              uint16
-	BaseUri           string
-	State             AgentState
-	LatestError       string
-	LatestErrorTime   time.Time
-	DiscoveryFailures uint32
-	HelloTime         time.Time
-	LastContactTime   time.Time
-	BeatInterval      uint32
-	SentBeats         uint32
-	ReceivedBeats     uint32
-	LatestSBeat       time.Time
-	LatestRBeat       time.Time
+// NewAgent allocates an Agent view over a fresh thin hsync.Peer with the given
+// identity (E1.a). Callers set the MP-only shadow fields (State/meta) and the
+// promoted capability flags as needed.
+func NewAgent(id AgentId) *Agent {
+	return &Agent{Peer: hsync.NewPeer(id)}
 }
 
-// APIMechanismState satisfies transport.AgentLike. Returns a snapshot
-// of this agent's API-mechanism state for use by
-// transport.Peer.PopulateFromAgent. Bite 7 of the early-bites plan.
-//
-// Acquires a.Mu.RLock for the duration of the read. The hello/beat
-// receipt sites that mutate ApiDetails fields all hold a.Mu.Lock,
-// so taking the read lock here closes the race CodeRabbit flagged
-// on PR #8 (discussion r3142505250).
-func (a *Agent) APIMechanismState() transport.AgentMechanismSnapshot {
-	a.Mu.RLock()
-	defer a.Mu.RUnlock()
-	d := a.ApiDetails
-	if d == nil {
-		return transport.AgentMechanismSnapshot{}
-	}
-	// API has no host/port-shaped Address; reachability is carried by
-	// peer.APIEndpoint (a URL string), populated by SyncPeerFromAgent
-	// from agent.ApiDetails.BaseUri. Leave Address nil here.
-	return transport.AgentMechanismSnapshot{
-		State:            agentStateToTransportStateFn(d.State),
-		LastHelloRecv:    d.HelloTime,
-		LastBeatSent:     d.LatestSBeat,
-		LastBeatRecv:     d.LatestRBeat,
-		ConsecutiveFails: int(d.DiscoveryFailures),
-	}
+// newAgentView builds an *Agent view SHARING the given peer pointer (E1.b) —
+// never a copy. Since Phase 2 (AgentDetails deleted) this is just the shared
+// embed; kept as the named constructor for the view semantics.
+func newAgentView(peer *hsync.Peer) *Agent {
+	return &Agent{Peer: peer}
 }
 
-// DNSMechanismState satisfies transport.AgentLike. Returns a snapshot
-// of this agent's DNS-mechanism state. Bite 7.
-//
-// Same locking contract as APIMechanismState — acquires a.Mu.RLock.
-func (a *Agent) DNSMechanismState() transport.AgentMechanismSnapshot {
-	a.Mu.RLock()
-	defer a.Mu.RUnlock()
-	d := a.DnsDetails
-	if d == nil {
-		return transport.AgentMechanismSnapshot{}
+// materializeAgentView returns the ar.S *Agent view over an engine-owned
+// hsync.Peer, creating and storing it if absent (E1.b). Once materialized the
+// view is NEVER replaced: MP-only fields (meta/Api/InitialZone/ErrorMsg and
+// the dead shadows) accumulate on the one view — the pre-E1.b bridge rebuilt
+// and re-Set a fresh wrapper on every store/hello/beat, silently wiping them.
+// Atomic via Upsert so concurrent materializations converge on a single view.
+func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
+	if ar == nil || peer == nil {
+		return nil
 	}
-	var addr *transport.Address
-	if len(d.Addrs) > 0 {
-		addr = &transport.Address{
-			Host:      d.Addrs[0],
-			Port:      d.Port,
-			Transport: "udp",
+	return ar.S.Upsert(peer.ID, nil, func(exist bool, current *Agent, _ *Agent) *Agent {
+		if exist && current != nil {
+			if current.Peer != peer {
+				// Every create path shares the pointer post-E1.b, so this is
+				// a divergent allocation — keep the stored view (live readers
+				// hold it) and log loudly.
+				lgAgent.Error("agent view wraps a different hsync.Peer allocation; keeping the stored view",
+					"peer", peer.ID)
+			}
+			return current
 		}
+		return newAgentView(peer)
+	})
+}
+
+// agentViewForIdentity returns the ar.S view for an identity, wrapping the
+// ENGINE's hsync.Peer — never allocating a second peer for a known identity
+// (E1.b). When the engine has not seen the identity yet (true out-of-band
+// discoveries: the chunk-notify kick, distrib-time discovery), the peer is
+// created IN the embedded engine registry with the same capability seeding as
+// the engine's MarkNeeded — being in the engine map is also what lets
+// retryPendingDiscoveries start the peer's Hello (D2.5). Falls back to an
+// agent-only view (the infra-peer shape) when no engine registry is wired.
+func (ar *AgentRegistry) agentViewForIdentity(id AgentId, apiSupported, dnsSupported bool) *Agent {
+	if ar == nil {
+		return nil
 	}
-	return transport.AgentMechanismSnapshot{
-		State:            agentStateToTransportStateFn(d.State),
-		Address:          addr,
-		LastHelloRecv:    d.HelloTime,
-		LastBeatSent:     d.LatestSBeat,
-		LastBeatRecv:     d.LatestRBeat,
-		ConsecutiveFails: int(d.DiscoveryFailures),
+	if agent, ok := ar.S.Get(id); ok {
+		return agent
+	}
+	if ar.Registry == nil {
+		// No engine wired (harness/edge case): agent-only view, one
+		// allocation — the same shape as the infra peers.
+		agent := newAgentView(hsync.NewPeer(id))
+		ar.S.Set(agent.ID, agent)
+		return agent
+	}
+	hpeer := ar.Registry.S.Upsert(id, nil, func(exist bool, current *hsync.Peer, _ *hsync.Peer) *hsync.Peer {
+		if exist && current != nil {
+			return current
+		}
+		np := hsync.NewPeer(id)
+		np.ApiMethod = apiSupported
+		np.DnsMethod = dnsSupported
+		return np
+	})
+	return ar.materializeAgentView(hpeer)
+}
+
+// removePeerView drops the MP view and the transport peer for a removed
+// peer (Phase 3c: the engine's RemovePeer fires OnPeerRemoved, and the
+// removal propagates promptly instead of waiting for a scan).
+func (ar *AgentRegistry) removePeerView(id AgentId) {
+	if ar == nil {
+		return
+	}
+	ar.S.Remove(id)
+	if ar.TransportManager != nil {
+		ar.TransportManager.PeerRegistry.Remove(string(id))
 	}
 }
 
-// agentStateToTransportStateFn is a free-function variant of the
-// MPTransportBridge method, usable from contexts that don't have a
-// bridge in scope (e.g. *Agent receiver methods that don't import
-// the bridge type to avoid a cycle).
-func agentStateToTransportStateFn(s AgentState) transport.PeerState {
-	switch s {
-	case AgentStateNeeded:
-		return transport.PeerStateNeeded
-	case AgentStateKnown:
-		return transport.PeerStateKnown
-	case AgentStateIntroduced:
-		return transport.PeerStateIntroducing
-	case AgentStateOperational:
-		return transport.PeerStateOperational
-	case AgentStateLegacy:
-		// Legacy = established relationship but no shared zones.
-		// Treated as active by Agent.EffectiveState() and the Peer
-		// EffectiveState() peer-side mirror. Map to Operational so
-		// PopulateFromAgent doesn't regress legacy peers in
-		// transport snapshots.
-		return transport.PeerStateOperational
-	case AgentStateDegraded:
-		return transport.PeerStateDegraded
-	case AgentStateInterrupted:
-		return transport.PeerStateInterrupted
-	case AgentStateError:
-		return transport.PeerStateError
-	default:
-		return transport.PeerStateNeeded
-	}
-}
-
-type DeferredAgentTask struct {
-	Precondition func() bool
-	Action       func() (bool, error)
-	Desc         string
-}
+// DeferredAgentTask aliases hsync.DeferredTask so the field promoted from the
+// embedded *hsync.Peer (Deferred []hsync.DeferredTask) is type-identical to the
+// existing DeferredAgentTask call sites (END.1 / E1.a). Same shape (Precondition
+// / Action / Desc); the alias dedupes the type.
+type DeferredAgentTask = hsync.DeferredTask
 
 type AgentApi struct {
 	Name       string
@@ -212,7 +197,6 @@ type AgentRegistry struct {
 	// embedded ones, so all existing ar.S/ar.mu usage is unchanged.
 	*hsync.Registry
 	S                     core.ConcurrentMap[AgentId, *Agent]
-	mu                    sync.RWMutex
 	LocalAgent            *MultiProviderConf
 	LocateInterval        int
 	TransportManager      *transport.TransportManager

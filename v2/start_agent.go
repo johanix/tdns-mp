@@ -124,7 +124,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		count := 0
 		for _, agent := range zad.Agents {
-			if agent.Identity != AgentId(mp.Identity) && ar.isAgentOperational(agent.Identity) {
+			if agent.ID != AgentId(mp.Identity) && ar.isAgentOperational(agent.ID) {
 				count++
 			}
 		}
@@ -248,28 +248,28 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			zad, err := ar.GetZoneAgentData(zone)
 			if err == nil {
 				for _, agent := range zad.Agents {
-					if agent.Identity == AgentId(ar.LocalAgent.Identity) {
+					if agent.ID == AgentId(ar.LocalAgent.Identity) {
 						continue
 					}
-					if !ar.isAgentOperational(agent.Identity) {
+					if !ar.isAgentOperational(agent.ID) {
 						continue
 					}
-					lgAgent.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.Identity)
+					lgAgent.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.ID)
 					configResp := RequestAndWaitForConfig(ar, agent, string(zone), "sig0key", msgQs)
 					if configResp == nil {
-						lgAgent.Info("peer did not respond to CONFIG sig0key", "zone", zone, "peer", agent.Identity)
+						lgAgent.Info("peer did not respond to CONFIG sig0key", "zone", zone, "peer", agent.ID)
 						continue
 					}
 					if len(configResp.ConfigData) > 0 && configResp.ConfigData["status"] != "no sig0 key for zone" {
 						if err := importSig0KeyFromPeer(hdb, keyName, configResp.ConfigData); err != nil {
 							lgAgent.Error("failed to import SIG(0) key from peer",
-								"zone", zone, "peer", agent.Identity, "err", err)
+								"zone", zone, "peer", agent.ID, "err", err)
 							continue
 						}
-						lgAgent.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.Identity)
+						lgAgent.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.ID)
 						goto publish
 					}
-					lgAgent.Info("peer does not have SIG(0) key", "zone", zone, "peer", agent.Identity)
+					lgAgent.Info("peer does not have SIG(0) key", "zone", zone, "peer", agent.ID)
 				}
 			}
 		}

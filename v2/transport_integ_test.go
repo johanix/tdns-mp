@@ -466,32 +466,33 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newIntegEnv(t, nil)
 
-			agent := &Agent{
-				Identity:  AgentId(env.Bob.Identity),
-				PeerID:    env.Bob.Identity,
-				ApiMethod: tc.api,
-				DnsMethod: tc.dns,
-				Zones:     map[ZoneName]bool{},
-			}
-			// SyncPeerFromAgent populates APIEndpoint /
-			// DiscoveryAddress from these fields; populate them
-			// only for the mechanism the case advertises so
-			// peer.HasMechanism returns the right answer.
-			if tc.api {
-				agent.ApiDetails = &AgentDetails{State: AgentStateKnown, BaseUri: "https://example.invalid/"}
-			}
-			if tc.dns {
-				agent.DnsDetails = &AgentDetails{State: AgentStateKnown, Addrs: []string{"127.0.0.1"}, Port: 5300}
-			}
+			agent := NewAgent(AgentId(env.Bob.Identity))
+			agent.ApiMethod = tc.api
+			agent.DnsMethod = tc.dns
+			// Phase 2: no AgentDetails — mechanism state/addresses are
+			// written on the transport.Peer directly below, mirroring
+			// discovery.
 
 			// Register the agent in Alice's registry so the
 			// OnPeerDiscovered closure (which looks up the agent by
 			// PeerID) can find it.
-			env.Alice.Registry.S.Set(agent.Identity, agent)
+			env.Alice.Registry.S.Set(agent.ID, agent)
 			// Bite E: callback takes *Peer; resolve via the registry
 			// before invoking, mirroring the production invocation
 			// site in agent_utils.go.
-			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+			peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))
+			// Mirror RegisterDiscoveredAgent: a mechanism is "usable" only
+			// when it has BOTH an endpoint/address AND contact-info marked
+			// "complete". OnPeerDiscovered promotes to KNOWN only for usable
+			// mechanisms (an address-less mechanism stays NEEDED — Fix C).
+			if tc.api {
+				peerArg.APIEndpoint = "https://example.invalid/"
+				peerArg.SetMechanismContactInfo("API", "complete")
+			}
+			if tc.dns {
+				peerArg.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+				peerArg.SetMechanismContactInfo("DNS", "complete")
+			}
 			env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
 
 			peer, ok := env.Alice.Bridge.PeerRegistry.Get(env.Bob.Identity)
@@ -510,6 +511,83 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 				t.Errorf("GetPreferredTransportName: got %q, want %q", got, tc.wantPref)
 			}
 		})
+	}
+}
+
+// TestTransportBoundary_DiscoveryUnreachableStaysNeeded is the regression
+// test for the fox bug (2026-06-13): a peer whose only mechanism never
+// became usable (URI resolved but no address, so contact-info is NOT
+// "complete") must NOT be promoted to KNOWN. The earlier bug set the
+// top-level peer State to KNOWN unconditionally, so EffectiveState() (and
+// therefore the gossip matrix) reported KNOWN while peer list correctly
+// showed the per-mechanism NEEDED — a KNOWN/NEEDED contradiction. Here the
+// top-level State, the DNS mechanism state, and EffectiveState() must ALL
+// agree on NEEDED.
+func TestTransportBoundary_DiscoveryUnreachableStaysNeeded(t *testing.T) {
+	env := newIntegEnv(t, nil)
+
+	agent := NewAgent(AgentId(env.Bob.Identity))
+	agent.DnsMethod = true
+	env.Alice.Registry.S.Set(agent.ID, agent)
+
+	peerArg := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))
+	// DNS advertised but UNREACHABLE: no resolved address, no contact-info
+	// "complete" — exactly what RegisterDiscoveredAgent leaves when the
+	// SVCB/address lookup fails. Discovery still fires OnPeerDiscovered.
+	env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
+
+	peer, ok := env.Alice.Bridge.PeerRegistry.Get(env.Bob.Identity)
+	if !ok {
+		t.Fatalf("Bob not in Alice's PeerRegistry after OnPeerDiscovered")
+	}
+	if peer.GetState() != transport.PeerStateNeeded {
+		t.Errorf("top-level State: got %v, want NEEDED (unreachable peer must not be promoted)", peer.GetState())
+	}
+	if s, present := peer.MechanismRawState("DNS"); present && s >= transport.PeerStateKnown {
+		t.Errorf("DNS mechanism State: got %v, want < KNOWN (no usable address)", s)
+	}
+	// The crux: EffectiveState (what the gossip matrix derives from) must
+	// agree with the per-mechanism truth, not report a phantom KNOWN.
+	if eff := peer.EffectiveState(); eff == transport.PeerStateKnown {
+		t.Errorf("EffectiveState: got KNOWN for an unreachable peer — the gossip/peer-list contradiction is back")
+	}
+}
+
+// TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer is the
+// regression test for the racing-discovery bug (2026-06-13): a chunk-notify
+// "missing key" kick triggers a discovery while a startup/retry discovery is
+// still in flight, so a STALE failing leg (resolver i/o timeout) can fire
+// OnDiscoveryFailed AFTER a concurrent attempt already succeeded. The old
+// code slammed top-level State to ERROR unconditionally, clobbering a peer
+// that was demonstrably reachable (and even actively voting in elections);
+// EffectiveState() then surfaced the bogus ERROR in the gossip matrix. An
+// established peer (KNOWN+ or with a resolved address) must survive a stale
+// discovery failure.
+func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *testing.T) {
+	env := newIntegEnv(t, nil)
+
+	// A peer that a concurrent discovery already established: it has a
+	// resolved address and is KNOWN.
+	peer := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(env.Bob.Identity)
+	peer.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+	peer.SetMechanismContactInfo("DNS", "complete")
+	peer.SetState(transport.PeerStateKnown, "discovered")
+
+	// A stale/racing discovery leg now fails.
+	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(peer, errors.New("no contact endpoints found (no API or DNS URI records)"))
+
+	if got := peer.GetState(); got == transport.PeerStateError {
+		t.Errorf("established peer regressed to ERROR by a stale discovery failure (got %v); the racing-discovery clobber is back", got)
+	}
+	if peer.CurrentAddress() == nil {
+		t.Errorf("established peer lost its address on discovery failure")
+	}
+
+	// A peer that was NEVER established SHOULD still go to ERROR.
+	fresh := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate("never-seen.example.")
+	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(fresh, errors.New("no contact endpoints found"))
+	if got := fresh.GetState(); got != transport.PeerStateError {
+		t.Errorf("unestablished peer: got %v, want ERROR (a genuine first-time discovery failure must still register)", got)
 	}
 }
 

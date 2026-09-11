@@ -12,20 +12,10 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 	switch report.MessageType {
 	case AgentMsgBeat:
 		lgAgent.Debug("received BEAT", "from", report.Identity)
-		if agent, exists := ar.S.Get(report.Identity); exists {
-			agent.Mu.Lock()
-			now := time.Now()
-			if report.Transport == "DNS" && agent.DnsDetails != nil {
-				agent.DnsDetails.LatestRBeat = now
-				agent.DnsDetails.ReceivedBeats++
-				agent.DnsDetails.BeatInterval = report.BeatInterval
-			} else if agent.ApiDetails != nil {
-				agent.ApiDetails.LatestRBeat = now
-				agent.ApiDetails.ReceivedBeats++
-				agent.ApiDetails.BeatInterval = report.BeatInterval
-			}
-			agent.Mu.Unlock()
-		}
+		// Phase 2: inbound-beat evidence (LastBeatRecv, Stats) is recorded on
+		// transport.Peer at the router/handler; the AgentDetails telemetry
+		// mirror is gone. report.BeatInterval (the NG liveness param) was a
+		// write-only Stage-D leftover.
 
 		// Process gossip from API beat (DNS beats process gossip in routeBeatMessage)
 		if report.Transport == "API" && ar.GossipStateTable != nil {
@@ -62,7 +52,7 @@ func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) 
 		return nil, fmt.Errorf("agent is nil")
 	}
 	if agent.Api == nil {
-		return nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
+		return nil, fmt.Errorf("no API client configured for agent %s", agent.ID)
 	}
 
 	// Create a context with a 2-second timeout

@@ -1,0 +1,30 @@
+{
+  "type": "confirm",
+  "sender_id": "me.example.",
+  "zone": "zone1.example.",
+  "distribution_id": "dist-001",
+  "nonce": "sync-nonce",
+  "status": "ok",
+  "message": "applied",
+  "applied_count": 2,
+  "removed_count": 1,
+  "rejected_count": 1,
+  "applied_records": [
+    "a.zone1.example. 3600 IN A 192.0.2.1"
+  ],
+  "removed_records": [
+    "old.zone1.example. 3600 IN A 192.0.2.9"
+  ],
+  "rejected_items": [
+    {
+      "record": "bad.zone1.example. 3600 IN A 192.0.2.66",
+      "reason": "not yours"
+    }
+  ],
+  "ignored_count": 1,
+  "ignored_records": [
+    "dup.zone1.example. 3600 IN A 192.0.2.1"
+  ],
+  "truncated": true,
+  "timestamp": 1700000004
+}

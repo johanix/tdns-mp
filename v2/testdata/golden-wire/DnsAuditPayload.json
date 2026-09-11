@@ -1,0 +1,14 @@
+{
+  "MessageType": "audit",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "auditor.example.",
+  "Zone": "zone1.example.",
+  "AuditData": {
+    "check": "ok",
+    "count": 3
+  },
+  "Message": "audit response",
+  "timestamp": 1700000010,
+  "type": "audit",
+  "sender_id": "legacy-sender.example."
+}

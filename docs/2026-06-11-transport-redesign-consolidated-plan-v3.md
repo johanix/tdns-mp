@@ -2,13 +2,12 @@
 # (remaining work)
 
 Date: 2026-06-11
-Status: AUTHORITATIVE & EXECUTABLE. Single source of truth for all
-REMAINING transport-redesign work. Supersedes, for everything not
-yet implemented: `2026-05-30-transport-redesign-consolidated-plan-v2.md`,
-the A3d addendum chain (`2026-06-01-a3d-field-ownership.md` §6–8.5),
-`2026-06-03-a3d-spine-cluster-scope.md`, and the open items from
-`2026-06-11-transport-redesign-progress-review.md`. Where v2 or an
-addendum differs from v3, **v3 wins.**
+Status: SUPERSEDED 2026-08-24 by
+`2026-08-24-transport-redesign-consolidated-plan-v4.md` for all
+remaining work. Retained as evolution trail; completed-work specs
+herein remain the historical record. The remaining-work table
+below is STALE as of 2026-07-10 (END.3–END.5 / A5 / C0 / E landed
+via the road-to-C phases). Where v3 and v4 differ, **v4 wins.**
 
 Completed work is recorded here as a status table only (with commit
 hashes); its specs live in the superseded docs as the evolution
@@ -73,7 +72,7 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A2 (incl. auth/HELLO boundary) | DONE, testbed-confirmed | `5efdd8f` |
 | A3a (lock order) | DONE | mp `14d8f4b` + transport `614417f` |
 | A3b | dissolved into A3d | `f018e7b` |
-| A3c (`AgentRegistry.RemoteAgents`) | DONE | `16415f4` |
+| A3c (`AgentRegistry.RemoteAgents` — note: `hsync.Registry.RemoteAgents` is separate, deleted later in END.4) | DONE | `16415f4` |
 | A3d.0 view types + `effectiveAgentState` | DONE | `431f9d1` |
 | A3d.1 registry embed (dual-mapped) | DONE | `eb584f7` |
 | Legacy hello/discovery retirement | DONE, testbed-confirmed | `6b671ac`, `b304e1f`; `peer reset` fix `d4577d4` |
@@ -82,6 +81,20 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 | A3d.3a/3b crypto → `agentMeta` | DONE | `67363b3`, `dc8bb8d`; `AgentDetails` crypto-free |
 | Spine-1a (`.State` canonical readers) | DONE, **testbed verify outstanding** | `95c3cf6`; see Gate-1 |
 | Gate-2 (three-repo standalone build) | DONE | transport `e65b057`, mp `b2dd2f6`, tdns `40bda34` |
+| Gate-1 (Spine-1a redirect verify) | redirect SOUND; uncovered peer-state bugs | run 2026-06-11; see Gate-1 below |
+| Peer-state truth fix (E/C/A/B) | DONE, testbed-confirmed | mp `fc0c189`, transport `3b85754`; pulls D2 core + Spine-2 display forward |
+| Gate-3 (CleanupZoneRelationships) | DONE | mp `18ac2d7` (explanatory no-op) |
+| A3d-S1b (State **display** redirect) | DONE | mp `68e7a69`; functional State retirement re-scoped to A3d-END.0 |
+| A3d-S2 (address redirect + drop fields) | DONE | this commit; transport `DNSEndpoint` accessor; AgentDetails.Addrs/Port/BaseUri removed |
+| A3d-S3 (transport-internal stats + functional redirect) | DONE; field-drop deferred to END.0 | transport `RecordMechanismBeatSent`/`MechanismBeatSequence`; mp redirects the 2 functional SentBeats readers; 5 fields stay as wire-DTO carrier (see S3) |
+| A3d-S4 (snapshot inversion) | DONE | deleted SyncPeerFromAgent/PopulateFromAgent/AgentLike/AgentMechanismSnapshot + snapshot accessors; OnPeerDiscovered writes peer directly; transport `MechanismRawState`; ~420 lines net deleted |
+| A3d-END.0 (State functional-merge) | DONE, TESTBED-CONFIRMED 2026-06-13 | mp `dbcb166` + fix `7d1ec60`; marker model (top-level `peer.State`=discovery-phase NEEDED/KNOWN/ERROR only); send-gates/inbound-hello/functional-gates read `transport.Peer` per-mechanism via `mechStateForGate`; inbound API-hello gap fixed; infra peers seed OPERATIONAL. tdns-transport UNCHANGED. Plan: `2026-06-13-a3d-end0-plan.md`. **Residual dual-write → D2.5 below.** |
+| D2.5 (hsync engine reads transport; dual-write retired) | DONE, TESTBED-CONFIRMED 2026-06-13 | mp `6b97300` + out-of-band-hello fix `74368c0`; PULLED FORWARD ahead of END.1; `mechPeerState` helper; deleted 7 dual-writes + dead NG decay; engine-path tests. Unblocks END.1. See D2 item 5. |
+| A3d-END.1 E1.a (Agent embeds *hsync.Peer) | DONE 2026-06-13, build+`-race` green, NOT YET DEPLOYED | mp `3fbeffd`; field dedup via type aliases (AgentId/ZoneName/DeferredAgentTask = hsync types); ~440 sites compatible; STILL two objects + dual map. Testbed checkpoint deferred to after E1.b. |
+| IsRecipientReady missed-reader fix | DONE 2026-07-10, build+`-race` green, NOT YET DEPLOYED | mp `edfa079`; the ReliableMessageQueue readiness gate (`isTransportReady`, hsync_transport.go) was the ONE functional `AgentDetails.State` reader the END.0 census missed — after END.0/D2.5 retired the sidecar's writers it deferred every queued zone update to an AGENT recipient (`EnqueueForZoneAgents`/`EnqueueForSpecificAgent`) until the 24h expiry (combiner/signer unaffected: struct-literal OPERATIONAL seed). Now reads `transport.Peer` raw mechanism state via `mechStateForGate` (extracted `recipientTransportReady`); regression tests `reliable_ready_test.go`. Found by the 2026-07-10 plan-vs-code re-verification. |
+| A3d-END.1 E1.b (object collapse + bridge teardown; ABSORBS END.2) | CODE DONE 2026-07-10 (road-to-C Phase 1), build+full-suite `-race` green, **TESTBED CHECKPOINT PENDING** (testbed unavailable; phase tag deferred) | Branch `phase-1-e1b` (cut from `388dd3b`; the branch point marks "verify pre-Phase-1 tip on testbed first"), mp `31d0dd7`. One allocation per peer on EVERY create path; `materializeAgentView` (Upsert-atomic, never replaces — the old bridge wiped MP-only fields on every store/hello/beat); `agentViewForIdentity` wraps/creates the ENGINE's peer for out-of-band discoveries; `hsync_bridge_sync.go` deleted whole; OnPeerStored/AfterDiscoverPeer = view-materialization; `GetZoneAgentData` stamps the DTO State from `effectiveAgentState` (predicted delta: `peer status` State now matches gossip/peer-list instead of the stale NG-lagged value). E1.b pointer-identity tests in `e1b_view_test.go`. tdns-transport UNCHANGED. |
+| AgentDetails deletion (road-to-C Phase 2; = A5 item 3 + telemetry write cleanup, pulled forward) | CODE DONE 2026-07-10, `-race` green, TESTBED PENDING (stacked with Phase 1) | Branch `phase-2-agentdetails`, mp `234933d`. Struct + shadows + all write sites + dead `NewAgentSyncApiClient` deleted (−250 lines); mTLS gate = TLSA+cert-verify; distrib row-gates = capability flags, no-peer shows NEEDED; CLI heartbeat block dropped (wire-dead since END.0). Also removed an E1.a-latent deadlock (beat failure branches leaked the shared peer mutex). CAUTION recorded: `agent.{Api,Dns}Details` still resolve via the embed to `hsync.PeerDetails` — hand-enumerated + grep-zero check; hsync.PeerDetails deletion (Stage D) removes the trap. |
+| A3d-END.3…END.5 | NOT STARTED | inbound pipeline → RemoteAgents → dead-code sweep |
 | Everything below this line | NOT STARTED | review §1 |
 
 > **Status note (2026-09-10, added while the PR stack was reviewed):** a DONE
@@ -91,10 +104,23 @@ from `2026-06-01-a3d-field-ownership.md` §1–5 and remains binding.
 > (END.4 open). E1.b later in the stack removes the dual map; END.4 is still open
 > at the stack tip.
 
-Build/test at tip (2026-06-11): tdns-mp/v2 green incl. `-race` and
-all 7 `TestTransportBoundary_*`; **tdns-transport/v2 now builds and
-tests standalone** (`-count=1` + `-race`), `cmd/transport-exercise`
-builds (Gate-2 closed); tdns/v2 main builds.
+Build/test at tip (2026-06-13, post-S4 + testbed fixes: tdns-mp
+`168c999`, tdns-transport `892e5de`): tdns-mp/v2 green incl. `-race`
+and all `TestTransportBoundary_*`; tdns-transport/v2 builds and tests
+standalone (`-count=1` + `-race`); `cmd/transport-exercise` builds
+(Gate-2 closed); tdns/v2 main builds (5 binaries each via Makefile).
+**S3 and S4 are TESTBED-CONFIRMED 2026-06-13** on the espresso.mp fleet
+(cpt/fox/hare/auditor): post-restart convergence reaches a fully
+OPERATIONAL matrix with correct leader election. Verification surfaced
+three truth-model bugs (KNOWN/NEEDED contradiction `44f06bd`; infra
+false-INTERRUPTED `6b07ed8`+`892e5de`; ERROR-clobbers-established-peer
+`0bb1d5d`) — all fixed, regression-tested, and re-verified clean on the
+testbed (operator: "all looks good now"). The remaining benign item is
+the documented convergence-window gossip-vs-peerlist difference, which
+closes at END.0/D2 when `peer list` reads `transport.Peer` as the sole
+store. The deliberate Gate-1 fox-NS break/restore (FAILURE+RECOVERY
+directions) is still a nice-to-have but no longer blocking, since the
+ERROR/decay paths were exercised live.
 
 ## Target architecture (unchanged — restated for reference)
 
@@ -145,16 +171,76 @@ change in an INVARIANT probe halts the Stage.
 
 # Stage A — remainder
 
-## Gate-1 — Spine-1a testbed verification (operator; BLOCKING)
+## Gate-1 — Spine-1a testbed verification (operator) — REDIRECT VERIFIED; uncovered the peer-state bugs (now fixed)
 
-Outstanding since 2026-06-03. Deploy tip (`2bed32a`) and verify
-the Spine-1a INVARIANT: `gossip state` matrix and `peer list`
-State column byte-comparable to pre-deploy; election/RFI
-operational gating unchanged (the ~15 redirected
-`EffectiveState`/`IsAnyTransportOperational` callers). DEGRADED/
-INTERRUPTED: confirmed displayed by neither side (NG-only,
-unchanged). **Failure here halts Stage A** and reopens the A3d.0
-enum-mapping design — everything below stacks on this slice.
+Outstanding since 2026-06-03; run 2026-06-11. Deploying the tip and
+exercising `gossip state`/`peer list` did NOT show a Spine-1a
+redirect regression — the redirect is mechanically correct. What it
+exposed was a pre-existing, hidden state-machine bug: a peer
+(`agent.fox`) read OPERATIONAL with an address while every send to
+it failed (`no address available`). Spine-1a surfaced it by reading
+`transport.Peer`, which was fed the WRONG signal.
+
+Root cause and the complete fix are in
+`2026-06-11-peer-state-and-discovery-truth-fix.md`. Four bugs, one
+disease (success asserted on incomplete evidence, never retracted):
+- **E** discovery probed unsupported transports (API on a DNS-only
+  fleet) → log spam + spurious `Partial`;
+- **C** partial discovery (URI without resolved address) registered
+  as "complete"/KNOWN → phantom address in `peer list`;
+- **A** OPERATIONAL set by INBOUND receipt, not the OUTBOUND beat
+  round-trip the definition requires;
+- **B** demotion (DEGRADED/INTERRUPTED) lived only in the NG store
+  nobody operational reads.
+
+**Fixed and testbed-confirmed 2026-06-11** (tdns-mp `fc0c189`,
+tdns-transport `3b85754`): with the upgraded fleet, the matrix now
+moves through the real progression NEEDED→KNOWN→OPERATIONAL,
+`peer ping` to a discovered peer succeeds, the contradiction is
+gone, and a transient `KNOWN` correctly shows during convergence
+(no longer slammed to OPERATIONAL by inbound beats). The
+"DEGRADED/INTERRUPTED displayed by neither side" line in the
+original Gate-1 wording was wrong for the gossip-matrix path — that
+path always derived from `EffectiveState`; it now decays truthfully
+(Fix B, decay-on-read).
+
+Spine-1a's `transport.Peer.EffectiveState()` as the canonical read
+is CONFIRMED sound — it just needed a truthful machine behind it.
+Net effect on sequencing: Fix B is Stage-D "transport-owned
+liveness" pulled forward; Fix C's display side is Spine-2 pulled
+forward (see those steps). A3d may continue on the now-trustworthy
+`transport.Peer`.
+
+**Still TODO before declaring the slice fully clean:** a homogeneous
+all-tip fleet pass (fox/hare were old during the run) and the
+deliberate break/restore of fox's NS to confirm the FAILURE +
+RECOVERY directions (the controllable-trigger test; `agent zone
+bump` now exists for it).
+
+**Two more truth-model bugs found + fixed during S3/S4 testbed
+verification (2026-06-13)** — same disease (a failure/secondary signal
+asserting top-level State over a peer another path proved good), both
+surfaced because `EffectiveState()` falls back to top-level `peer.State`:
+- **KNOWN/NEEDED contradiction** (mp `44f06bd`): two sites set top-level
+  `peer.State = KNOWN` unconditionally even with no usable address, so
+  gossip showed KNOWN while `peer list` correctly showed NEEDED for an
+  unreachable peer (fox). Fixed: promote to KNOWN only if a mechanism is
+  usable (`OnPeerDiscovered` + `RegisterDiscoveredAgent`).
+- **ERROR clobbers established peer** (mp `0bb1d5d`): discovery
+  attempts RACE — a chunk-notify "missing key" kick fires a discovery
+  while a startup/retry leg is still in flight, so a stale failing leg
+  (resolver i/o timeout) fired `OnDiscoveryFailed` AFTER a concurrent
+  attempt had already succeeded + registered the address; the
+  unconditional `SetState(ERROR)` then clobbered a peer that was
+  demonstrably reachable (and actively exchanging election votes),
+  surfacing a transient ERROR in the gossip matrix. Confirmed from cpt
+  logs (08:40:47 `successfully discovered and registered` → 08:40:48
+  `peer discovery failed` i/o timeout → ERROR). Fixed: `OnDiscoveryFailed`
+  does not regress a peer already KNOWN+ or with a resolved address.
+  Regression tests added for both (boundary suite).
+
+**Infra-peer false INTERRUPTED also fixed** (D2 item #2 infra slice,
+pulled forward; mp `6b07ed8` + transport `892e5de`) — see D2 below.
 
 ## Gate-2 — restore the three-repo build (small; before A3d-S2) — DONE 2026-06-11
 
@@ -192,39 +278,74 @@ binaries) green; boundary suite `-race` green. The tdns dep bump
 landed on a generic branch (`johanix-dns-bump-jun8`), not the
 redesign branch, since it is plain dependency maintenance.
 
-## Gate-3 — close the dangling A1 loose end (decision + tiny commit)
+## Gate-3 — close the dangling A1 loose end (decision + tiny commit) — DONE 2026-06-11
 
-`CleanupZoneRelationships` (`agent_utils.go:300`) is a TODO stub
+`CleanupZoneRelationships` (`agent_utils.go:300`) was a TODO stub
 wired as the `OnLocalRemoved` hook (`hsync_bridge.go:285`). A1.0
 bound "implement or explicitly drop; do not leave dangling".
-**Proposed resolution (operator to confirm):** with membership
-now derived (A2), local-removal teardown is largely automatic —
-participations vanish on the next derivation, groups recompute
-via `OnHsync3Changed`. Replace the stub body with structured
-logging + a comment stating that analysis; revisit only if the
-testbed shows orphaned per-zone state after a local removal.
+**Resolved (operator-confirmed):** with membership now derived
+(A2), local-removal teardown is automatic — `ParticipantsForZone`
+recomputes from HSYNCPARAM on every read, so participation simply
+stops being derived; groups recompute via `OnHsync3Changed`. There
+is no stored per-zone relationship to scrub. The stub body is
+replaced with an explanatory no-op (Info log + comment stating the
+derivation reasoning). Revisit only if the testbed shows orphaned
+per-zone state after a local removal — which would mean some state
+is still stored, and should be moved to derivation rather than
+scrubbed here.
 
-## A3d-S1b — `.State`: stop dual-writing; display redirect
+## A3d-S1b — `.State`: display redirect (DISPLAY-ONLY; functional retirement → A3d-END)
 
 Prereq: Gate-1 green.
-1. Redirect the peer-list display's per-mechanism State to
-   `transport.Peer.Mechanisms[m].State`
-   (`apihandler_agent_distrib.go:358-360,420-422`; it already
-   applies its own LEGACY overlay — keep that, it becomes the
-   overlay's only display site).
-2. Stop writing `AgentDetails.State`/`LastState`. Verified writer
-   sites: `hsync_transport.go:627,649,723,1577,1605,1695,1725`.
-3. Retire the `RecomputeSharedZonesAndSyncState` LEGACY/
-   OPERATIONAL state-flip (`agent_utils.go:67-74`) — the overlay
-   derives it.
+
+**RE-SCOPED 2026-06-11.** S1b is now ONLY the display redirect.
+Redirect the peer-list display's per-mechanism State to the canonical
+`transport.Peer` (decayed per-mechanism via the new
+`MechanismEffectiveState(name)` accessor → `transportToAgentState`),
+keeping the LEGACY overlay (it becomes the overlay's only display
+site). Sites: the API + DNS blocks in `apihandler_agent_distrib.go`.
+AgentDetails fallback retained for peers not yet in the PeerRegistry
+(transitional). With Fix B, the displayed State now also decays.
+
+The original S1b parts 2–3 (stop writing `AgentDetails.State`/
+`LastState`; retire the `RecomputeSharedZonesAndSyncState` flip) are
+MOVED TO A3d-END. Reason discovered during S1b: `AgentDetails.State`
+is still the FUNCTIONAL store driving the beat/hello state machine —
+~45 read/write sites, incl. the `SendBeatWithFallback`/
+`SendHelloWithFallback` send gates. Stopping the writes requires
+migrating all those readers to `transport.Peer` first, which is the
+embed/State-merge — it belongs with A3d-END's type-merge under one
+commit + the post-embed testbed checkpoint, NOT bolted onto a display
+slice. The display now reads `transport.Peer` (truthful), while
+`AgentDetails.State` remains the internal functional store until the
+embed (documented dual-write window).
 
 **Probe — INVARIANT:** `peer list` State column + `gossip state`
-byte-comparable; suite + `-race` green.
+byte-comparable on a healthy fleet; the displayed State now decays
+(EXPLAINED DELTA, already landed via Fix B); suite + `-race` green.
 
-## A3d-S2 — address: redirect reads, drop fields
+## A3d-S2 — address: redirect reads, drop fields — DONE 2026-06-11
 
-Prereq: the **DNS-URI display home decision** (Open decision 1
-below) — do not start without it (writer-path-audit rule).
+**Done** (transport `809ebb6`-followup + this commit). `DNSEndpoint`
+added to `transport.Peer` (Decision 1a), set at every DNS write site
+(discovery, combiner/signer Initialize*AsPeer, main_init config
+agents, apihandler_peer). Peer-list address columns now read
+`transport.Peer` (`DNSEndpoint`/`APIEndpoint` + `CurrentAddress()`).
+The `GetOrCreatePeer` AgentDetails→transport address restore was
+DELETED — infra peers (combiner/signer) now populate their
+`transport.Peer` address at startup registration (the restore's only
+remaining justification), so transport.Peer is the sole address
+source. `AgentDetails.Addrs/Port/BaseUri` + all bridge copies
+removed; `mergeAgentDetails` deleted (it only preserved address
+fields). API-functional readers migrated: the two API send gates read
+`peer.APIEndpoint != ""`; `NewAgentSyncApiClient` (0 callers) takes a
+`*transport.Peer`. NG (`hsync.PeerDetails`) has no functional reader
+of the fields (bridge-clobber check passed; its struct fields are now
+dead, droppable later). Build (5 bins) + suite + boundary `-race`
+green.
+
+Prereq was the **DNS-URI display home decision** (Open decision 1) —
+DECIDED (a), see below.
 1. Per the rule: enumerate ALL writer paths for `Addrs`/`Port`/
    `BaseUri` — discovery (`RegisterDiscoveredAgent`), config-infra
    (`combiner_peer.go`/`signer_peer.go`), `GetOrCreatePeer`
@@ -246,60 +367,208 @@ below) — do not start without it (writer-path-audit rule).
 (all three peer kinds: discovered / config-infra / registry-only);
 `addrr` round-trip ACCEPTED; combiner reachable from the agent.
 
-## A3d-S3 — telemetry: complete transport write coverage, redirect
+## A3d-S3 — telemetry: transport-internal stats + functional redirect — DONE (item 4 deferred to END.0)
 
-The only slice that ADDS writes (DNS-only coverage today).
-1. Add API-side `LastHelloRecv/Sent` + beat-time writes at the
-   API hello/beat receipt sites (today only the DNS handler path
-   writes them, spine doc §1).
-2. Verify in tdns-transport that `Stats`, `BeatSequence`,
-   `ConsecutiveFails` are maintained transport-internally
-   (`RecordBeatSent` has 0 MP callers — confirm transport calls
-   it on its own send path; if not, that is a transport-side fix
-   first).
-3. Redirect display `LastUsed` and the **functional** `SentBeats`
-   uses — beat-sequence (`hsync_hello.go`,
-   `hsync_infra_beat.go:76-99`) and gossip-sent detection
-   (`hsync_bridge.go:61-81`) — to `BeatSequence`/`Stats`.
-4. Drop `AgentDetails.HelloTime/LatestSBeat/LatestRBeat/
-   DiscoveryFailures/SentBeats` + bridge copies (same NG-reader
-   check; note NG `checkPeerState` reads the *hsync*-side
-   `LatestRBeat/SBeat` — those stay until D).
+**RE-SCOPED 2026-06-11.** Item 1's premise was stale: the peer-state
+truth fix (`fc0c189`) already gave the API path full hello/beat-time
+coverage (`HeartbeatHandler` writes both API+DNS inbound; the outbound
+Hello :1555/:1583 and Beat :1673-1676/:1714-1717 paths are symmetric;
+the API beat path already calls `SetMechanismLastBeatSent("API")`).
+So there was NO coverage gap to add — S3 became a pure INVARIANT
+slice, NOT the EXPLAINED-DELTA "adds writes" slice originally framed.
 
-**Probe — EXPLAINED DELTA (small):** display `LastUsed` may gain
-API-side timestamps that were previously missing (that is the
-added coverage). Everything else INVARIANT.
+1. ~~Add API-side coverage~~ — already present (Fix A). No-op.
+2. **DONE (transport-first, operator-chosen).** `RecordBeatSent` had
+   0 callers and transport's `Beat()` did not maintain `BeatSequence`/
+   `Stats` — they were maintained only by MP's `AgentDetails.SentBeats`.
+   Added `Peer.RecordMechanismBeatSent(name)` (transport `292b0ea`→
+   `31f38da`): `APITransport.Beat`/`DNSTransport.Beat` now bump
+   per-mechanism `Mechanisms[m].{BeatSequence,LastBeatSent}` +
+   top-level aggregate + `Stats` on their Ack-true success path.
+   `Peer.MechanismBeatSequence(name)` read accessor added (`f932f4e`).
+   `ConsecutiveFails` left as-is (it is a Stage-D liveness field, not
+   an S3 concern).
+3. **DONE (mp `56dec3d`).** Redirected the two FUNCTIONAL `SentBeats`
+   readers to `transport.Peer.MechanismBeatSequence`: infra-beat
+   sequence seeding (`hsync_infra_beat.go`) and gossip-sent detection
+   (`beatTransportUsed`, `hsync_bridge.go`). Display `LastUsed`: the
+   `AgentDetails.HelloTime` fallbacks in `apihandler_agent_distrib.go`
+   were already dead (unconditionally overwritten by the
+   `transport.Peer` `Stats.LastUsed` path) — deleted. `peer reset` no
+   longer touches `AgentDetails.DiscoveryFailures`.
+4. **DEFERRED to A3d-END.0** (was: drop the 5 fields + bridge copies).
+   Reason discovered during S3: `AgentDetails` doubles as the WIRE DTO
+   — `GetZoneAgentData` serializes the live `Agent` (incl. `*AgentDetails`)
+   into the `peer status`/hsync API response, and the CLI client
+   (`cli/hsync_cmds.go:558-560`, no `transport.Peer` client-side) reads
+   `SentBeats/LatestSBeat/LatestRBeat` off the deserialized DTO for its
+   "Heartbeats: Sent/received" line. Dropping the fields breaks that
+   line unless the DTO is first fed from `transport.Peer`. Two of the
+   same line's fields (`ReceivedBeats`→A5, `BeatInterval`→Stage D) can't
+   move in S3 regardless. So the 5 fields stay as a write-mostly DTO
+   carrier (no live FUNCTIONAL reads remain after item 3) until END.0/
+   END.1 give `Agent` a transport-fed view and answer the DTO question
+   once for all fields. The converter/bridge copies
+   (`hsync_bridge_sync.go`, `agent_structs.go` snapshot methods) stay
+   with them. NG `checkPeerState` reads the *hsync*-side
+   `LatestRBeat/SBeat` (separate struct) — untouched, stays until D.
 
-## A3d-S4 — the snapshot inversion (residual A4)
+**Probe — INVARIANT:** `transport.Peer` now maintains its own beat
+counters; the two MP functional readers consume them; no display or
+wire change (the dropped `HelloTime` display fallback was already
+dead). Suite + boundary + `-race` green; 5 binaries build.
 
-Falls out once S1b–S3 land. Delete: `SyncPeerFromAgent`
-(`hsync_transport.go:1474`, caller `:457`),
-`agentStateToTransportState` (`:1515`) +
-`agentStateToTransportStateFn` (`agent_structs.go:163`), the
-snapshot accessors `APIMechanismState`/`DNSMechanismState`
-(`agent_structs.go:111/134`); tdns-transport side:
-`Peer.PopulateFromAgent`, `AgentLike`, `AgentMechanismSnapshot`.
-`GetOrCreatePeer` (hot-path, no-snapshot) stays.
+## A3d-S4 — the snapshot inversion (residual A4) — DONE 2026-06-12
 
-**Probe — INVARIANT.** Compiler-proven deletions.
+Deleted: `SyncPeerFromAgent` + `agentStateToTransportState`
+(`hsync_transport.go`), `agentStateToTransportStateFn` +
+`APIMechanismState`/`DNSMechanismState` (`agent_structs.go`);
+tdns-transport side: `Peer.PopulateFromAgent`, `AgentLike`,
+`AgentMechanismSnapshot`, and the now-dead `peer_test.go` (its
+entire content was `PopulateFromAgent` tests). `GetOrCreatePeer`
+(hot-path, no-snapshot) stays.
+
+**NOT pure dead-code** — one live caller had to be inverted first.
+`SyncPeerFromAgent` was still called by the `OnPeerDiscovered`
+closure (`hsync_transport.go`) at discovery completion. Audited what
+it actually contributed there post-S1b/S2/S3:
+- TLSA block: a no-op stub (`TLSARecord = []byte{}`).
+- top-level `SetState`: dead — overwritten 1 line later by the
+  closure's own `SetState(KNOWN, "discovery complete")`.
+- zone-seeding (`agent.Zones`→`AddSharedZone`): redundant AND wrong
+  source — `peer.SharedZones` is populated synchronously by the
+  participant-derived `RecomputeSharedZonesAndSyncState`→
+  `ReplaceSharedZones` inside `ApplyHsyncDiff`, before discovery
+  completes; beats only go to READY peers, so no empty-zone window.
+  `agent.Zones` was the banned stored set, not the derived one.
+- `PopulateFromAgent`: the only real contribution was promoting each
+  usable mechanism's per-mechanism State to KNOWN (address/beat
+  fields are already canonical on the peer post-S2/S3 and guarded
+  against clobber).
+So the closure now writes the canonical peer DIRECTLY: for each
+mechanism with `MechanismContactInfo == "complete"`, promote to
+KNOWN guarded against regression (`MechanismRawState < KNOWN`) —
+mirroring `RegisterDiscoveredAgent`'s `state <= NEEDED -> KNOWN`.
+That is the "snapshot inversion": discovery writes the peer instead
+of round-tripping through an Agent snapshot. New transport accessor
+`Peer.MechanismRawState(name)` (non-decayed read) supports the guard.
+
+**Probe — INVARIANT** (verified). 5 binaries build; transport
+standalone + tdns-mp + hsync + all 7 `TestTransportBoundary_*`
+(incl. `_DiscoveryComplete` across API/DNS/both) green under `-race`;
+`cmd/transport-exercise` builds.
 
 ## A3d-END — embed finalization (the concurrency-sensitive chunk)
 
 One session; sub-steps are separate commits, each green +
 `-race` + INVARIANT.
 
-- **END.1 — type-merge.** `Agent` becomes the view of addendum
-  §3: embed `*hsync.Peer` (+ existing `*agentMeta`); dedupe
-  Identity/PeerID to `hsync.Peer.ID`; `Agent.Mu` →
-  `hsync.Peer.Mu` (ONE peer mutex); `Zones` →
-  `hsync.Peer.Zones` (transitional; reads stay derived per A2);
-  `DeferredTasks` → `hsync.Peer.Deferred`. `AgentDetails` fields
-  are empty of live reads by now; the struct itself is deleted
-  in A5 (supersession item 2).
-- **END.2 — delete the dual map.** Remove the temporary
-  `AgentRegistry.S`/`mu` shadowing the embedded
-  `hsync.Registry.S` (`agent_structs.go:206-214`); duplicated
-  protocol methods become delegating wrappers, then delete.
+- **END.0 — State functional-merge (moved here from S1b).** Make
+  `transport.Peer.Mechanisms[m].State` the SOLE State store:
+  redirect the ~45 FUNCTIONAL readers/writers of
+  `AgentDetails.State`/`LastState` — chiefly the beat/hello send
+  gates in `SendBeatWithFallback`/`SendHelloWithFallback`
+  (`hsync_transport.go` ~1551/1579/1672/1711) and the
+  NEEDED/KNOWN/INTRODUCED/OPERATIONAL transitions — to read/write
+  `transport.Peer`. Then stop writing `AgentDetails.State`/
+  `LastState` (the residual writer sites; note Fix A already moved
+  the OPERATIONAL writes and removed the inbound-receipt ones) and
+  retire the `RecomputeSharedZonesAndSyncState` LEGACY/OPERATIONAL
+  flip (`agent_utils.go:67-74`) — the display LEGACY overlay derives
+  it. **This is load-bearing** (the beat state machine, just
+  hardened by Fixes A/B) — do it as its own commit with its own
+  `-race` + testbed check before END.1. The display side already
+  reads `transport.Peer` (S1b), so END.0 closes the write side and
+  retires the dual State store.
+- **END.1 — type-merge. Split into E1.a (DONE) + E1.b (NOT
+  STARTED). Sequencing decided 2026-06-13: E1.a → E1.b → END.3 →
+  END.4 → END.5; END.2 is ABSORBED INTO E1.b (see below).**
+
+  **E1.a — DONE 2026-06-13 (mp `3fbeffd`), build + all tests green
+  `-race`, tdns-transport untouched, NOT YET DEPLOYED (pure
+  structural intermediate, no behavior change — testbed checkpoint
+  is after E1.b).** `Agent` now embeds `*hsync.Peer` and PROMOTES
+  every same-typed field (no type cascade): `ID` (was
+  `Identity`/`PeerID`), `Mu`, `Zones`, `Deferred` (was
+  `DeferredTasks`), `ApiMethod`, `DnsMethod`, `IsInfraPeer`,
+  `LastState`. Enabled by three TYPE ALIASES so ~440 call sites
+  stay compatible: `AgentId = hsync.PeerID`,
+  `ZoneName = hsync.ZoneName`, `DeferredAgentTask =
+  hsync.DeferredTask` (added `hsync.ZoneName.String()` for
+  `core.Stringer`; deleted the now-redundant MP `String()`s). The
+  DIFFERENT-typed connection-state fields stay on `Agent`,
+  shadowing the embed's same-named ones: `ApiDetails`/`DnsDetails`
+  (`*AgentDetails` vs `*hsync.PeerDetails`) and `State` (`AgentState`
+  vs `hsync.PeerState`) — retire in A5/D. New `NewAgent(id)`
+  constructor wraps `hsync.NewPeer`. `hsyncPeerToAgent` now SHARES
+  the peer pointer (`&Agent{Peer: peer, …}`), starting the E1.b
+  collapse; `syncHsyncPeerFromAgent` got a `peer == agent.Peer`
+  near-noop fast path. STILL TWO OBJECTS per peer (the bridge still
+  deep-copies the non-promoted State on the non-shared paths) and
+  the dual map remains.
+
+  **E1.b — NOT STARTED. Re-census 2026-06-13 CHANGED ITS SHAPE —
+  read this before starting.** The original framing ("collapse to
+  ONE Go map / one object type") is NOT ACHIEVABLE, because of a
+  hard package-boundary constraint:
+  - The hsync ENGINE lives in `hsync/` and CANNOT import the main
+    package (import cycle). It constructs/iterates/operates on
+    `*hsync.Peer` in ~31 sites, so `hsync.Registry.S` MUST stay
+    `[PeerID]*hsync.Peer`.
+  - MP's ~27 `ar.S` sites want `*Agent` (which carries the MP-only
+    fields `ApiDetails`/`DnsDetails`/`State`/`Api`/`meta`).
+  - `*Agent` and `*hsync.Peer` are different Go types in different
+    packages; neither map can hold the other's type. So there will
+    ALWAYS be a `*hsync.Peer` map (engine's) + a `*Agent` map (MP's).
+
+  **The achievable E1.b end-state is ONE ALLOCATION per peer, two
+  typed views, NO deep-copy** — i.e. the `*Agent` in
+  `AgentRegistry.S` and the `*hsync.Peer` in `hsync.Registry.S`
+  reference the SAME underlying `hsync.Peer` (`agent.Peer == that
+  peer`). E1.a already started this on the discovered path
+  (`RegisterDiscovered` → `hsyncPeerToAgent` shares the pointer).
+  E1.b's real work:
+  1. Make pointer-sharing UNIVERSAL on every peer create/update path
+     (discovery, `MarkNeeded`, infra-peer registration in
+     `combiner_peer.go`/`signer_peer.go` — note infra peers are
+     ONLY in `ar.S`, never `hsync.Registry.S`; the MP infra-beat
+     loop `hsync_infra_beat.go:49` iterates `ar.S`, the engine loop
+     `hsync/beat.go:42` iterates `hsync.Registry.S` and never sees
+     them — by design).
+  2. Delete the deep-copy bridge: `syncHsyncPeerFromAgent`,
+     `agentToHsyncPeer` (already orphaned/dead),
+     `persistAgentAndPeer`'s copy, and reduce `hsyncPeerToAgent`/
+     `agentForTransport` to trivial wrappers or remove. The
+     `OnPeerStored`→`syncHsyncPeerToAgent` hook
+     (`hsync_bridge.go:~309`) is the sync trigger to rework.
+  3. The two maps PERSIST (engine needs its typed one) but stop
+     being independently-stored copies — consistent via the shared
+     pointer, not field-copying. This is the addendum's "two stores
+     joined by PeerID."
+
+  **END.2 (delete the dual-map shadow `AgentRegistry.S`/`mu`) is
+  ABSORBED HERE** — it is NOT a clean standalone deletion because
+  `ar.S` (`[AgentId]*Agent`) and the embedded `hsync.Registry.S`
+  (`[PeerID]*hsync.Peer`) hold different types; the shadow can't
+  simply be removed to fall through to the embedded map. Whether
+  `ar.S` survives as the MP `*Agent` view (recommended) or is
+  replaced needs deciding at E1.b execution time.
+
+  **E1.b is the riskiest commit of the stage** (one shared mutex,
+  bridge teardown, concurrency). Stopped before it on 2026-06-13
+  (long session, two regressions already surfaced+fixed). REQUIRES a
+  testbed checkpoint after. Restart tag for the whole END.1+ block:
+  `end0-complete-pre-d2` (mp `2f00cca` / transport `892e5de`).
+
+  **`AgentDetails` wire-DTO note (carried):** the 5 telemetry fields
+  + `ReceivedBeats` are serialized as the `GetZoneAgentData` DTO read
+  by the CLI `peer status` line. Verified DEAD over the wire in END.0
+  (`Agent.MarshalJSON` omits `*AgentDetails`), so the struct deletion
+  in A5 needs no DTO-feed step. No action in E1.b.
+- **END.2 — ABSORBED INTO E1.b** (see END.1 above). The dual-map
+  shadow cannot be deleted independently of the object-collapse,
+  because `ar.S` (`[AgentId]*Agent`) and the embedded
+  `hsync.Registry.S` (`[PeerID]*hsync.Peer`) hold different types.
 - **END.3 — collapse the inbound pipeline.** One writer per
   message type. Beat: `routeBeatMessage`
   (`hsync_transport.go:689`) + `adaptBeatReports`→
@@ -467,6 +736,14 @@ authz is post-callback in MP). **Envelope label lands here**
 replacing the `IsPayloadEncrypted()` byte-sniff; additive field,
 absent ⇒ `jose` (Do53 default), so mixed fleets stay INVARIANT.
 
+**Scope note — receive path only.** C5 splits the *receive* path
+(`chunk_notify_handler`). It deliberately does NOT touch the
+query-mode *serve* path that still lives in tdns-mp
+(`chunk_store.go`, `chunk_query_handler.go`, the signer's
+`fetchChunkPayloadViaQuery`, the `ChunkPayloadStore` config field
++ `main_init.go` wiring). Moving those is post-refactor cleanup —
+see the "Transport owns the full transportation chain" item in F2.
+
 ## C6 — minimize constants + payload types
 
 Reduce `MessageType` constants to transport-own; collapse
@@ -507,6 +784,25 @@ deliberately did not touch. The plan was three bullets; given the
 A3d experience (the census grew at every audit), D now starts
 with its own audit step.
 
+**PARTIALLY PULLED FORWARD 2026-06-11.** The peer-state truth fix
+(Gate-1 fallout; see `2026-06-11-peer-state-and-discovery-truth-fix.md`)
+already moved the CORE of D2 onto `transport.Peer`:
+- **OPERATIONAL** is now set on `transport.Peer.Mechanisms[m]` by the
+  outbound beat-success path (Fix A), with all inbound-receipt
+  promotions removed from combiner/signer/agent handlers.
+- **Decay** (OPERATIONAL→DEGRADED→INTERRUPTED) now happens on
+  `transport.Peer` via decay-on-read in `EffectiveState()`
+  (`decayedMechanismState`, Fix B) — keyed on outbound-beat age
+  (`LastBeatSent`), thresholds mirroring NG `checkPeerState`. The
+  EXPLAINED DELTA (DEGRADED/INTERRUPTED becoming visible in
+  `gossip state`) has effectively landed for the gossip-matrix path,
+  which derives from `EffectiveState`.
+
+So D2's hard part is done and verified. What REMAINS for Stage D
+(see the amended D2 below): retiring the now-redundant NG
+`checkPeerState`/`hsync.PeerDetails` decay so there is one store, and
+wiring the exact local beat interval. D0/D1/D3 stand as written.
+
 ## D0 — `hsync.PeerDetails` writer-path audit (NEW; one session-part)
 
 Before any D implementation: per-field table for
@@ -517,7 +813,11 @@ a short scope doc (or a section appended to this plan) binding
 D1/D2 slices. The known target mapping: `State` →
 `Mechanisms[m].State` (DEGRADED/INTERRUPTED become real transport
 states), `BeatInterval` → new `transport.Peer` liveness param,
-`LatestRBeat/SBeat` → `LastBeatRecv/Sent` (exist).
+`LatestRBeat/SBeat` → `LastBeatRecv/Sent` (exist). **The audit MUST
+enumerate the END.0 dual-write feed and the hsync-engine send-trigger
+readers (`agentNeedsHello`/`fastBeatAttempts`, `hsync/hello.go`) — these
+are the `hsync.PeerDetails.State` readers/writers D2.5 retires; see D2
+item 5.**
 
 ## D1 — relocate Hello/Beat fallback into the TM
 
@@ -529,19 +829,111 @@ INVARIANT — no behavior change. String-keyed mechanism shape
 per-mechanism parallel remains an optional follow-up (Open
 decision 5).
 
-## D2 — transport-owned liveness (the one deliberate behavior delta)
+## D2 — transport-owned liveness (the one deliberate behavior delta) — CORE DONE 2026-06-11; cleanup remains
 
-Unify NG `checkPeerState` onto `transport.Peer`: liveness
-evaluation reads/writes `Mechanisms[m]`; `BeatInterval` moves to
-transport; delete the `hsync.PeerDetails` liveness fields (the
-last bridge-clobber survivors). **EXPLAINED DELTA — bound here:**
-DEGRADED/INTERRUPTED become visible in `peer list`/`gossip state`
-for the first time (today they exist only NG-side, undisplayed).
-This is the only deliberate user-visible behavior change before
-F1; the probe prediction must enumerate which displays change and
-how. Default liveness middleware updates `Peer.Mechanisms[m]` on
-hello/beat receipt; delete the manual updates in combiner/signer
-handlers.
+**Done (peer-state truth fix):** liveness evaluation now reads from
+`transport.Peer` (`EffectiveState` decay-on-read); OPERATIONAL is set
+on `Mechanisms[m]` by the outbound beat path; inbound-receipt
+OPERATIONAL writes deleted from the combiner/signer/agent handlers.
+The EXPLAINED DELTA (DEGRADED/INTERRUPTED now visible) has landed for
+the gossip-matrix path.
+
+**Remaining D2 cleanup:**
+1. **Retire the NG decay duplicate.** `hsync/beat.go:checkPeerState`
+   still computes the same decay on `hsync.PeerDetails`; it is now
+   redundant for everything reading `transport.Peer`. Delete it (and
+   the `hsync.PeerDetails` liveness fields `State`/`BeatInterval`/
+   `LatestRBeat`/`LatestSBeat`) once nothing reads the NG store —
+   verify no remaining NG-store reader first. Until then the two
+   coexist (one decay computed in two places); they agree because the
+   thresholds were deliberately mirrored.
+2. **Wire the exact local beat interval.** `transport.Peer.LivenessInterval`
+   (the decay's threshold base) defaults to 30s when unset.
+   **INFRA SLICE DONE 2026-06-13 (pulled forward).** The testbed showed
+   combiner/signer (`peer list`) stuck at INTERRUPTED while healthy:
+   infra peers beat on the 600s `StartInfraBeatLoop` cadence but were
+   decayed by the 30s default (INTERRUPTED at 300s, before the next
+   600s beat). Added `Peer.SetLivenessInterval(seconds)` (transport) and
+   stamped `defaultInfraBeatInterval` (600s) onto the combiner/signer
+   transport.Peer in `InitializeCombinerAsPeer`/`InitializeSignerAsPeer`.
+   This was NOT an S3/S4 regression — the decay-on-read predates them
+   (`3b85754`); the canonical-state reads merely surfaced it.
+   **STILL TODO (agent slice):** stamp `LivenessInterval` from
+   `mp.Remote.BeatInterval` on AGENT peers (discovered + config). It is
+   correct on a 30s fleet via the default, so not a blocker; cleanest
+   via a field on `MPTransportBridge` (set once at construction; 4
+   `NewMPTransportBridge` sites in `main_init.go` + the harness) stamped
+   alongside `SetMechanismLastBeatSent`, OR a `PeerRegistry` default that
+   `NewPeer`/`GetOrCreate` inherit.
+3. **`peer list` State column still reads AgentDetails** (Spine-1b
+   territory, not yet redirected). After Spine-1b/this cleanup it
+   should read `transport.Peer` too, so `peer list` and `gossip state`
+   are driven by one store. Until then they can momentarily differ
+   (AgentDetails has no decay). **Observed 2026-06-13 (post-restart
+   convergence):** during reconvergence the two readouts briefly showed
+   different states for the same agent peer (e.g. gossip OPERATIONAL vs
+   peer list NEEDED/INTRODUCED), self-healing within a beat round-trip.
+   Root cause: `peer list` falls back to `agent.DnsDetails.State`, which
+   the outbound-HELLO success path advances (to INTRODUCED) WITHOUT
+   writing the transport stores — a coupling the deleted
+   `PopulateFromAgent` used to provide. TRANSIENT (the next beat
+   round-trip writes the transport mechanism state and they reconverge),
+   not a stable desync; fully resolved when `peer list` reads
+   `transport.Peer` as the sole store (END.0 DTO + this item).
+4. Per the original D2: default liveness middleware updates
+   `Peer.Mechanisms[m]` on hello/beat receipt — the inbound-liveness
+   *evidence* writes (`LastBeatRecv`) are already in place from Fix A;
+   formalize as middleware if desired.
+5. **Migrate the hsync-engine SEND-TRIGGER off `hsync.PeerDetails.State`
+   — DONE 2026-06-13, TESTBED-CONFIRMED (mp `6b97300` + fix `74368c0`),
+   PULLED FORWARD ahead of END.1** (it was the END.0 dual-write residual;
+   the deferral had already failed once, so we finished it). The hsync
+   engine's Hello/Beat/discovery/beat-readiness gates (`agentNeedsHello`,
+   `fastBeatAttempts`, `retryPendingDiscoveries`/`attemptDiscovery`,
+   `peerAnyTransportReady`) now read connection state from `transport.Peer`
+   via a new `mechPeerState` helper (raw, default NEEDED on absence). All 7
+   END.0 dual-write sites deleted; the now-dead NG decay (`checkPeerState`)
+   + dead helpers (`apiState`/`dnsState`/`IsAnyTransportOperational`)
+   removed. `EffectiveState` + the hsync `GossipStateTable` KEPT — dead in
+   production (agent/auditor wire the no-op `agentGossipPort`; real gossip
+   refreshes MP-side from `transport.Peer`) but entangled, for a later
+   dedicated removal. **One regression found+fixed on the testbed
+   (`74368c0`):** `helloRetrierNG` was launched ONLY from the engine's
+   `attemptDiscovery`; a peer discovered out-of-band (the chunk-notify
+   "missing key" kick → MP `DiscoverAndRegisterAgent`, reaching KNOWN
+   without entering `attemptDiscovery`) stranded at KNOWN. Pre-D2.5 this
+   worked by accident (the lagging NG store made the scan re-run discovery,
+   incidentally launching Hello). Fix: `retryPendingDiscoveries` now starts
+   the Hello for any KNOWN-no-retrier peer via the idempotent
+   `startHelloRetrier`; `helloRetrierNG` clears its cancel on exit so the
+   guard tracks "running" not "ever ran". Engine-path regression tests
+   added (`hsync/d25_test.go`). **This UNBLOCKS END.1** — the bridge is no
+   longer state-load-bearing. Original framing (kept for the trail):
+   Distinct from item 1's *decay* reader
+   (`checkPeerState`): the engine's send *decision* reads
+   `hsync.PeerDetails.State` too — `agentNeedsHello`
+   (`hsync/hello.go:17`, gates Hello on `== PeerStateKnown`) and
+   `fastBeatAttempts` (`hsync/hello.go:79`, gates Beat on
+   `== PeerStateIntroduced`). END.0 stopped writing
+   `agent.{Api,Dns}Details.State` as the *functional read* source
+   (gates/display now read `transport.Peer`) but, because this engine
+   trigger still reads the NG store, END.0 had to RESTORE those writes as
+   a transitional **dual-write** (mp `7d1ec60`) — else the engine never
+   fires Hello/Beat (the testbed regression: agents stuck at KNOWN, no
+   handshake, election storm; root-caused 2026-06-13). The dual-write
+   sites, each tagged `// END.0 dual-write (transitional, retire in
+   Stage D)`: discovery KNOWN (`agent_discovery.go`, API+DNS),
+   Hello-success INTRODUCED + inbound-hello INTRODUCED + Beat-success
+   OPERATIONAL (`hsync_transport.go`). They reach the NG store via the
+   bridge (`agentDetailsToHsync`/`syncHsyncPeerFromAgent`). **D2.5 = point
+   `agentNeedsHello`/`fastBeatAttempts` at `transport.Peer` mechanism
+   state, then delete the 4 dual-write sites + the `hsync.PeerDetails`
+   non-liveness `State` reads.** Needs the hsync `Transport` dep (or a
+   state-getter) to expose per-mechanism state into the `hsync/`
+   subpackage — same plumbing END.3 wants for the inbound pipeline, so
+   sequence D2.5 with END.3 if convenient. Until done, `transport.Peer` is
+   canonical for reads/display/gossip/send-gates/the top-level marker, and
+   the dual-write is ONLY the feed to this not-yet-migrated trigger.
 
 ## D3 — lifecycle into TM startup
 
@@ -573,7 +965,14 @@ its client — if that is not natural at E1, record the residual
 explicitly rather than letting the sidecar silently persist.
 `OnDiscoveryFailed` must fire on all failure paths. Fix the
 post-restart KNOWN→OPERATIONAL gap opportunistically (known
-runtime issue, v2 cross-stage list).
+runtime issue, v2 cross-stage list). **Carry forward (do not
+revert) the peer-state-truth fixes already in this path** (mp
+`fc0c189`): discovery is gated on locally-supported transports
+(Fix E — `DiscoverAgent(…, apiSupported, dnsSupported)`), and a
+URI-without-resolved-address is NOT marked usable/"complete"
+(Fix C — `dnsUsable`/`apiUsable` in `RegisterDiscoveredAgent`).
+When this logic moves into the transport `DiscoveryService`, both
+properties must survive the move.
 
 ## E2 — delete the `DiscoveryDriver` seam
 
@@ -600,6 +999,35 @@ discovery smoke test — this is the reusability proof point).
   `types.go~`, `combiner_chunk.go~`, doc `~` duplicates); mark
   superseded docs' Status lines; the (B)-fields presentation
   finish if not already done.
+- **F2b — transport owns the FULL transportation chain (deferred
+  goal; design at execution time, not now).** End state (operator
+  intent, 2026-06-13): the application says to transport "send this
+  data to this recipient and tell me when it has been received" —
+  and touches NO framing, chunking, query-mode, payload store, or
+  fetch mechanics. The opaque-message seam (C1–C3) + receive-path
+  split (C5) get the *receive* side there; this item finishes the
+  *send/serve* side that the C-stages deliberately leave in tdns-mp.
+  Remnant inventory to move into transport (verified 2026-06-13):
+  - `chunk_store.go` — `ChunkPayloadStore` iface + `MemChunkPayloadStore`
+    (serve-side TTL payload cache).
+  - `chunk_query_handler.go` — `RegisterChunkQueryHandler`,
+    `chunkQueryHandler`, `serveChunkRR` (answers inbound CHUNK queries).
+  - `signer_chunk_handler.go` — `fetchChunkPayloadViaQuery` (the
+    query-mode fetch callback) + the `RegisterSignerChunkHandler`
+    wiring (the role-router half collapses in C3; the fetch half
+    lands here).
+  - `config.go` `ChunkPayloadStore` field + the ~4 `main_init.go`
+    wiring sites (agent/auditor/combiner/signer:
+    `NewMemChunkPayloadStore`, `RegisterChunkQueryHandler`,
+    `conf.InternalMp.ChunkPayloadStore`).
+  - `chunk_mode` / `chunk_query_endpoint` operator config become
+    transport-internal (the app should not choose edns0-vs-query).
+  After F2b, tdns-mp retains NO chunk *framing* — only application
+  semantics over the reassembled payload (combiner edit logic in
+  `combiner_chunk.go`, which is misnamed and should lose the "chunk"
+  name). Scope/risk: medium; touches the serve path + config surface;
+  do it as its own slice AFTER the merge proves the receive side, so
+  the C-stage wire risk and this are never entangled. NOT C-stage work.
 - **F3 — Phase 8–9 leftovers.** Exported-type count
   (88 → target <30; most of the reduction falls out of C4/C6/C7 —
   F3 verifies and unexports the remainder, e.g. the 5 kept
@@ -668,22 +1096,37 @@ the remainder before continuing rather than after.
 
 # Remaining open decisions (operator)
 
-1. **DNS-URI display home (blocks A3d-S2).** Options:
-   (a) add `DNSEndpoint string` to `transport.Peer`, symmetric
-   with `APIEndpoint` — recommended: discovery output is
-   transport-owned per the acceptance test; (b) derive at display
-   from `Mechanisms["DNS"].Address` — rejected by the
-   writer-path-audit rule's sibling-derivation ban unless proven
-   identical on all peer kinds; (c) keep an MP-side display-only
-   string — contradicts the end state.
+1. **DNS-URI display home (blocks A3d-S2). DECIDED 2026-06-11: (a).**
+   Add `DNSEndpoint string` to `transport.Peer`, symmetric with the
+   existing `APIEndpoint`. Rationale: discovery output is
+   transport-owned (acceptance test), and `APIEndpoint` already
+   sets the precedent — DNS having no endpoint home is the anomaly.
+   Option (b) (derive the display URI from
+   `Mechanisms["DNS"].Address`) is REJECTED with concrete evidence:
+   the fox bug showed the URI (looked up at `<id>`) and the resolved
+   IP (looked up at `dns.<id>`) are independent facts from separate
+   lookups that genuinely disagree (Fix C keeps them separate), so
+   deriving one from the other is exactly the banned sibling
+   derivation. Note `DNSEndpoint` (human-readable `dns://…` URI, for
+   display/diagnostics) is distinct from `Mechanisms["DNS"].Address`
+   (resolved IP, used by the send path) — both are real peer
+   attributes and both live on `transport.Peer`. (c) contradicts the
+   end state (keeps it in dying AgentDetails). S2 is now UNBLOCKED.
 2. **`CleanupZoneRelationships` (Gate-3):** confirm the proposed
    log-only resolution, or specify the teardown to implement.
 3. **(B)-kept fields disposition at A5:** confirm the
    redirect-to-transport mapping proposed in A5.1, and whether
    the presentation finish (`peer list -v`) is worth scheduling
    immediately after A5 or parks until F2.
-4. **DOQ-vs-C5 envelope timing (C0.4):** does the
-   in-channel-CHUNK work need the `envelope` label before C5?
+4. **DOQ-vs-C5 envelope timing (C0.4): DECIDED 2026-07-10 — defer to
+   C5 as planned.** The label is additive (absent ⇒ `jose`), sits
+   OUTSIDE the JOSE envelope (dispatch before the JOSE library — design
+   doc §6), and changes neither the signed bytes nor mixed-fleet
+   compatibility; its only consumer needing `none` is the in-channel
+   DoT/DoQ transport, still at design-doc stage. Revisit ONLY if the
+   in-channel-CHUNK implementation starts before Stage C reaches C5.
+   The C0 goldens lock today's bytes WITHOUT the field, so C5's
+   addition becomes a deliberate reviewed golden regeneration.
 5. **Per-mechanism parallel Hello/Beat:** optional follow-up
    after D1, relevant once multi-mechanism peers exist. Not a
    one-way door (D1 keeps the shape string-keyed).

@@ -15,10 +15,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// discoveryFailureFlushThreshold is the number of consecutive discovery
-// failures before flushing the IMR cache for the agent's domain.
-const discoveryFailureFlushThreshold = 3
-
 func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	agent, exists := ar.S.Get(identity)
 	if !exists {
@@ -39,46 +35,33 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	members := participantFQDNSetForApex(zoneApex(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		if members[dns.Fqdn(string(agent.Identity))] {
+		if members[dns.Fqdn(string(agent.ID))] {
 			agents = append(agents, agent)
 		}
 	}
 	return agents
 }
 
-// RecomputeSharedZonesAndSyncState updates an agent's shared zones and transitions between
-// OPERATIONAL and LEGACY states based on zone count.
-// This should be called after HSYNC changes to keep agent state synchronized with zone membership.
+// RecomputeSharedZonesAndSyncState recomputes an agent's derived shared zones
+// and syncs them to the transport peer. Called after HSYNC changes to keep the
+// peer's shared-zone set in step with zone membership.
+//
+// END.0: the former LEGACY↔OPERATIONAL top-level agent.State flip is RETIRED.
+// LEGACY is now a pure derived display overlay (effectiveAgentState): an
+// established peer with zero derived participations. There is no top-level
+// State to flip here — the canonical connection state lives per-mechanism on
+// transport.Peer, and the LEGACY overlay is recomputed on every read.
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 	// Derive the shared-zone set (zones where both we and this agent are
-	// participants) without holding agent.Mu — zone-data access must not nest
-	// under the agent lock. LEGACY is now defined as derived participations == 0.
-	shared := ar.sharedParticipantZones(agent.Identity)
+	// participants). LEGACY is defined as derived participations == 0.
+	shared := ar.sharedParticipantZones(agent.ID)
 	zoneCount := len(shared)
-	identity := agent.Identity
-
-	// State transition under the peer mutex only — released before any transport
-	// call (lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry
-	// -> transport.Peer; never hold the peer mutex across a transport call).
-	agent.Mu.Lock()
-	oldState := agent.State
-	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
-		// Transition to LEGACY when zones go to zero
-		agent.State = AgentStateLegacy
-		agent.LastState = time.Now()
-		lgAgent.Info("agent transitioned to LEGACY (no shared zones)",
-			"agent", identity, "from", AgentStateToString[oldState])
-	} else if zoneCount > 0 && oldState == AgentStateLegacy {
-		// Transition back to OPERATIONAL when zones are re-added
-		agent.State = AgentStateOperational
-		agent.LastState = time.Now()
-		lgAgent.Info("agent transitioned LEGACY to OPERATIONAL",
-			"agent", identity, "zones", zoneCount)
-	}
-	agent.Mu.Unlock()
+	identity := agent.ID
 
 	// Sync the derived shared zones to the transport peer (atomic replace under
-	// the transport.Peer lock; no peer mutex held here).
+	// the transport.Peer lock; no peer mutex held across the call -- lock
+	// order: peer mutex -> transport.PeerRegistry -> transport.Peer; the
+	// registry's own shadow mutex went with Phase 3d).
 	if ar.TransportManager != nil {
 		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(identity))
 		zoneStrs := make([]string, len(shared))
@@ -161,7 +144,7 @@ func (ar *AgentRegistry) fireOnDiscoveryFailed(agent *Agent, err error) {
 	if ar.TransportManager == nil || ar.TransportManager.OnDiscoveryFailed == nil {
 		return
 	}
-	peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
+	peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(agent.ID))
 	ar.TransportManager.OnDiscoveryFailed(peer, err)
 }
 
@@ -201,7 +184,7 @@ func AgentToString(a *Agent) string {
 	if a == nil {
 		return "<nil>"
 	}
-	return string(a.Identity)
+	return string(a.ID)
 }
 
 // GetZoneAgentData returns the zone's member agents, derived from the HSYNC3
@@ -278,13 +261,24 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				// Found an HSYNC3 record, try to locate the agent
 				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
 				if err != nil {
+					// Transient DTO placeholder — never stored in ar.S, so the
+					// throwaway hsync.Peer allocation is fine (E1.b).
 					agent = &Agent{
-						Identity:  AgentId(hsync3.Identity),
-						PeerID:    hsync3.Identity,
-						State:     AgentStateError,
-						ErrorMsg:  fmt.Sprintf("error getting agent info: %v", err),
-						LastState: time.Now(),
+						Peer:     hsync.NewPeer(AgentId(hsync3.Identity)),
+						State:    AgentStateError,
+						ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
 					}
+					agent.LastState = time.Now()
+				} else {
+					// E1.b: the marshaled State shadow used to be refreshed by
+					// the bridge's per-hello/beat wrapper-replace (from the NG
+					// store, itself stale post-D2.5). Stamp it from the
+					// canonical transport.Peer store at DTO-build time instead
+					// — the same source `peer list` and `gossip state` read.
+					st := ar.effectiveAgentState(agent.ID)
+					agent.Mu.Lock()
+					agent.State = st
+					agent.Mu.Unlock()
 				}
 				agents = append(agents, agent)
 			}
@@ -295,9 +289,22 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 	return zad, nil
 }
 
-// CleanupZoneRelationships handles the complex cleanup when we're no longer involved in a zone's management
+// CleanupZoneRelationships is the OnLocalRemoved hook: it fires when the
+// local agent stops participating in a zone's management. By design it is
+// a no-op beyond logging.
+//
+// Since A2, zone membership is DERIVED, not stored: ParticipantsForZone
+// (provider_groups.go) recomputes the participant set from HSYNCPARAM on
+// every read. So when local participation in `zonename` ends, there is no
+// stored per-zone relationship to tear down — it simply stops being
+// derived on the next read, and provider groups recompute via
+// OnHsync3Changed. There is nothing to manually clean up here.
+//
+// Revisit only if the testbed shows orphaned per-zone state surviving a
+// local removal; that would mean some state is still stored rather than
+// derived, and should be moved to derivation rather than scrubbed here.
 func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
-	lgAgent.Warn("TODO: cleanup not yet implemented", "zone", zonename)
+	lgAgent.Info("local removal from zone; membership is derived, no teardown needed", "zone", zonename)
 }
 
 // reattachHsyncMemberAdds re-homes the per-add CONFIG RFI deferred tasks and the
@@ -348,10 +355,9 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 				upstreamLabel := h3.Upstream
 				ar.MarkAgentAsNeeded(upstreamIdentity, zonename, &DeferredAgentTask{
 					Precondition: func() bool {
-						if agent, exists := ar.S.Get(upstreamIdentity); exists {
-							return agent.ApiDetails.State == AgentStateOperational
-						}
-						return false
+						// Operational gate reads the canonical transport.Peer
+						// store (END.0); was agent.ApiDetails.State.
+						return ar.isAgentOperational(upstreamIdentity)
 					},
 					Action: func() (bool, error) {
 						lgAgent.Info("executing deferred RFI for upstream data", "upstream", upstreamLabel, "zone", zonename)
@@ -384,10 +390,9 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 		downstreamId := id
 		ar.MarkAgentAsNeeded(downstreamId, zonename, &DeferredAgentTask{
 			Precondition: func() bool {
-				if agent, exists := ar.S.Get(downstreamId); exists {
-					return agent.State == AgentStateOperational
-				}
-				return false
+				// Operational gate reads the canonical transport.Peer store
+				// (END.0); was agent.State.
+				return ar.isAgentOperational(downstreamId)
 			},
 			Action: func() (bool, error) {
 				lgAgent.Info("executing deferred RFI for downstream data", "downstream", downstreamId, "zone", zonename)
@@ -420,31 +425,8 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.Mu.Lock()
-	agent.DeferredTasks = append(agent.DeferredTasks, *task)
+	agent.Deferred = append(agent.Deferred, *task)
 	agent.Mu.Unlock()
-}
-
-func (agent *Agent) CreateOperationalAgentTask(action func() (bool, error), desc string) *DeferredAgentTask {
-	return &DeferredAgentTask{
-		Precondition: func() bool {
-			return agent.State == AgentStateOperational
-		},
-		Action: action,
-		Desc:   desc,
-	}
-}
-
-func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
-	return &DeferredAgentTask{
-		Desc: "Create Upstream RFI",
-		Precondition: func() bool {
-			return agent.State == AgentStateOperational
-		},
-		Action: func() (bool, error) {
-			lgAgent.Info("sending RFI to upstream agent (NYI)", "agent", agent.Identity)
-			return true, nil
-		},
-	}
 }
 
 func (agent *Agent) MarshalJSON() ([]byte, error) {
@@ -466,7 +448,7 @@ func (agent *Agent) MarshalJSON() ([]byte, error) {
 		zones[k] = v
 	}
 	aj := AgentJSON{
-		Identity:    agent.Identity,
+		Identity:    agent.ID,
 		InitialZone: agent.InitialZone,
 		ApiMethod:   agent.ApiMethod,
 		DnsMethod:   agent.DnsMethod,
@@ -477,6 +459,6 @@ func (agent *Agent) MarshalJSON() ([]byte, error) {
 	}
 	agent.Mu.RUnlock()
 
-	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.Identity)
+	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.ID)
 	return json.Marshal(aj)
 }

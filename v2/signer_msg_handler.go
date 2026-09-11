@@ -50,13 +50,12 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			senderID := string(report.Identity)
 			lgSigner.Debug("Beat received", "sender", senderID, "interval", report.BeatInterval, "distrib", report.DistributionID)
 
-			// Update PeerRegistry liveness
+			// Record inbound liveness ONLY (a received beat proves they can
+			// reach us, not that we can reach them — which is what
+			// OPERATIONAL means). State is set on the outbound beat path.
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
 				peer.LastBeatReceived = time.Now()
-				peer.SetState(transport.PeerStateOperational, "beat received")
-				// Bite 1 dual-write: also update per-mechanism state (DNS path).
-				peer.SetMechanismState("DNS", transport.PeerStateOperational, "beat received")
 				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 			}
 
@@ -67,10 +66,11 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			senderID := string(report.Identity)
 			lgSigner.Debug("Hello received", "sender", senderID)
 
-			// Update PeerRegistry on hello
+			// Inbound liveness only — a received hello does not assert
+			// OPERATIONAL (that requires an outbound beat round-trip).
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.SetState(transport.PeerStateOperational, "hello received")
+				peer.LastBeatReceived = time.Now()
 			}
 
 		case report := <-msgQs.Ping:

@@ -58,7 +58,7 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 
 func (agent *Agent) SendApiHello(msg *AgentHelloPost) (*AgentHelloResponse, error) {
 	if agent.Api == nil {
-		return nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
+		return nil, fmt.Errorf("no API client configured for agent %s", agent.ID)
 	}
 
 	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/hello", msg, false)

@@ -1,0 +1,9 @@
+{
+  "type": "ping_confirm",
+  "sender_id": "you.example.",
+  "nonce": "ping-nonce",
+  "distribution_id": "dist-002",
+  "status": "ok",
+  "message": "pong",
+  "timestamp": 1700000012
+}

@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-const discoveryFailureFlushThreshold = 3
-
 // MarkNeeded creates or updates a peer in NEEDED state and kicks discovery.
 func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 	if e == nil || e.registry == nil {
@@ -49,9 +47,6 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 		peer.Deferred = append(peer.Deferred, *task)
 	}
 	r.S.Set(id, peer)
-	if zone != "" {
-		r.addRemoteAgent(zone, peer)
-	}
 	e.storeHook(peer)
 	// Same concurrency limit as retryPendingDiscoveries, acquired inside
 	// the goroutine so MarkNeeded itself never blocks (ReconcileZone calls
@@ -100,6 +95,29 @@ func (e *Engine) storeHook(peer *Peer) {
 	}
 }
 
+// RemovePeer removes a peer object from the registry and fires the
+// OnPeerRemoved hook (Phase 3c: prunes are events, not reconcile-only —
+// the application drops its view of the peer promptly instead of waiting
+// for a scan). The removal PRIMITIVE lives here; the pruning POLICY (who
+// decides a peer is gone for good) is the caller's — today that is an
+// explicit operator/API action, never automatic: peers that merely leave
+// their last shared zone stay as LEGACY by design.
+func (e *Engine) RemovePeer(id PeerID) {
+	if e == nil || e.registry == nil {
+		return
+	}
+	peer, ok := e.registry.S.Get(id)
+	if !ok {
+		return
+	}
+	// Stop any hello retrier running for this peer before dropping it.
+	e.registry.cancelHello(id)
+	e.registry.S.Remove(id)
+	if e.deps.PeerHooks.OnPeerRemoved != nil {
+		e.deps.PeerHooks.OnPeerRemoved(peer)
+	}
+}
+
 func (e *Engine) runDiscoveryRetry(ctx context.Context) {
 	ticker := time.NewTicker(e.cfg.RetryInterval)
 	defer ticker.Stop()
@@ -118,19 +136,37 @@ func (e *Engine) retryPendingDiscoveries() {
 		return
 	}
 	for _, peer := range e.registry.S.Items() {
+		// State reads the canonical transport.Peer (END.0). A peer with no
+		// transport entry maps to NEEDED — exactly the peers needing discovery.
 		peer.Mu.RLock()
-		apiNeeded := peer.ApiMethod && peer.ApiDetails.State == PeerStateNeeded
-		dnsNeeded := peer.DnsMethod && peer.DnsDetails.State == PeerStateNeeded
+		apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
+		id := peer.ID
 		peer.Mu.RUnlock()
-		if !apiNeeded && !dnsNeeded {
+		apiState := mechPeerState(e, id, TransportAPI)
+		dnsState := mechPeerState(e, id, TransportDNS)
+		apiNeeded := apiMethod && apiState == PeerStateNeeded
+		dnsNeeded := dnsMethod && dnsState == PeerStateNeeded
+
+		if apiNeeded || dnsNeeded {
+			sem := e.discoverySem()
+			sem <- struct{}{}
+			go func(p *Peer, api, dns bool) {
+				defer func() { <-sem }()
+				e.attemptDiscovery(p, api, dns)
+			}(peer, apiNeeded, dnsNeeded)
 			continue
 		}
-		sem := e.discoverySem()
-		sem <- struct{}{}
-		go func(p *Peer, api, dns bool) {
-			defer func() { <-sem }()
-			e.attemptDiscovery(p, api, dns)
-		}(peer, apiNeeded, dnsNeeded)
+
+		// A peer that reached KNOWN without going through the engine's
+		// attemptDiscovery (e.g. discovered via the chunk-notify kick) needs its
+		// Hello started here — attemptDiscovery is the only other launcher, and
+		// it didn't run for this peer. startHelloRetrier is idempotent (no-op if
+		// a retrier is already running, so engine-discovered peers don't restart).
+		apiNeedsHello := apiMethod && apiState == PeerStateKnown
+		dnsNeedsHello := dnsMethod && dnsState == PeerStateKnown
+		if apiNeedsHello || dnsNeedsHello {
+			e.startHelloRetrier(peer)
+		}
 	}
 }
 
@@ -178,12 +214,18 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	})
 	peer.Mu.Unlock()
 
+	// Post-discovery usability + needs-hello read the canonical transport.Peer
+	// (END.0). "Useful" = mechanism advanced past NEEDED; "needsHello" = at KNOWN.
 	peer.Mu.RLock()
-	apiUseful := peer.ApiMethod && peer.ApiDetails.State >= PeerStateKnown
-	dnsUseful := peer.DnsMethod && peer.DnsDetails.State >= PeerStateKnown
-	apiNeedsHello := peer.ApiMethod && peer.ApiDetails.State == PeerStateKnown
-	dnsNeedsHello := peer.DnsMethod && peer.DnsDetails.State == PeerStateKnown
+	apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
+	id := peer.ID
 	peer.Mu.RUnlock()
+	apiState := mechPeerState(e, id, TransportAPI)
+	dnsState := mechPeerState(e, id, TransportDNS)
+	apiUseful := apiMethod && apiState >= PeerStateKnown
+	dnsUseful := dnsMethod && dnsState >= PeerStateKnown
+	apiNeedsHello := apiMethod && apiState == PeerStateKnown
+	dnsNeedsHello := dnsMethod && dnsState == PeerStateKnown
 
 	if !apiUseful && !dnsUseful {
 		return
@@ -192,6 +234,19 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 		return
 	}
 
+	e.startHelloRetrier(peer)
+}
+
+// startHelloRetrier launches the Hello retrier for a peer, unless one is already
+// running. Idempotent: safe to call from both attemptDiscovery (engine-driven
+// discovery) and retryPendingDiscoveries (for peers discovered out-of-band that
+// reached KNOWN without going through attemptDiscovery — e.g. the chunk-notify
+// kick). The hello-launch is thus state-driven (KNOWN ⇒ hello), not tied to who
+// discovered the peer.
+func (e *Engine) startHelloRetrier(peer *Peer) {
+	if e.registry.hasHelloCancel(peer.ID) {
+		return
+	}
 	helloCtx, helloCancel := context.WithCancel(context.Background())
 	e.registry.setHelloCancel(peer.ID, helloCancel)
 	go e.helloRetrierNG(helloCtx, peer)

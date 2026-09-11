@@ -2,73 +2,28 @@
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 
-// A3d peer-element type-merge: transitional types and the canonical
-// state-overlay accessor. transport.Peer is the SOLE connection-state store;
-// these definitions stage the Agent-as-view migration without changing
-// behavior. Design pinned in docs/2026-06-01-a3d-field-ownership.md.
-//
-// A3d.0 lands these additively (no live struct swap). The Agent-view embed
-// (struct { *hsync.Peer; *agentMeta }) and the ~300-site read redirects to
-// transport.Peer arrive in A3d.1–A3d.3.
+// The Agent view's state readers. transport.Peer is the SOLE
+// connection-state store; everything here reads it and maps it back to MP's
+// AgentState vocabulary (transportToAgentState, effectiveAgentState with
+// the LEGACY display overlay, isAgentOperational). Design pinned in
+// docs/2026-06-01-a3d-field-ownership.md; the transitional types that
+// once lived here (agentMeta, the additive A3d.0 staging) are gone since
+// Phase 2.5, and Agent itself embeds the engine's *hsync.Peer.
 package tdnsmp
 
 import (
 	"github.com/johanix/tdns-transport/v2/transport"
-	"github.com/miekg/dns"
 )
 
-// agentMeta is the TRANSITIONAL MP-side sidecar for per-peer fields whose final
-// home is transport but whose migration is deferred. Keyed by PeerID in the
-// AgentRegistry. Every field is tagged with its end-state destination — this is
-// a holding pen, not a permanent store. See the field-ownership table in
-// docs/2026-06-01-a3d-field-ownership.md §3–§4.
-type agentMeta struct {
-	InitialZone ZoneName               // → MP (or drop); 2 uses
-	Api         *AgentApi              // → transport (mechanism client), at/after E1
-	Crypto      map[string]*mechCrypto // keys "API","DNS"; → transport.Peer crypto slots @ E1
-}
-
-// mechCrypto is the per-mechanism MP-side crypto material that moves into
-// transport.Peer's crypto slots at E1 (decision: identity crypto stays MP-side
-// until E1). Holding pen only.
-type mechCrypto struct {
-	KeyRR        *dns.KEY
-	TlsaRR       *dns.TLSA
-	JWKData      string
-	KeyAlgorithm string
-}
-
-// ensureCrypto returns the per-mechanism crypto holding pen for mech on this
-// agent's transitional agentMeta sidecar, allocating the sidecar + entry
-// lazily. Write path; the caller's locking contract matches the surrounding
-// AgentDetails writes.
-func (a *Agent) ensureCrypto(mech string) *mechCrypto {
-	if a.meta == nil {
-		a.meta = &agentMeta{}
-	}
-	if a.meta.Crypto == nil {
-		a.meta.Crypto = make(map[string]*mechCrypto)
-	}
-	mc := a.meta.Crypto[mech]
-	if mc == nil {
-		mc = &mechCrypto{}
-		a.meta.Crypto[mech] = mc
-	}
-	return mc
-}
-
-// cryptoFor returns the per-mechanism crypto for mech, or nil if none was
-// recorded. Read-only; does not allocate.
-func (a *Agent) cryptoFor(mech string) *mechCrypto {
-	if a.meta == nil || a.meta.Crypto == nil {
-		return nil
-	}
-	return a.meta.Crypto[mech]
-}
+// The agentMeta/mechCrypto sidecar is GONE (Phase 2.5): per-mechanism crypto
+// lives on transport.Peer's crypto slots (SetMechanismTLSA/JWK/KeyRR +
+// MechanismTLSA/JWK/KeyRR accessors). Its InitialZone/Api fields were dead
+// duplicates of the Agent-level fields and were folded out with it.
 
 // transportToAgentState maps the canonical transport PeerState back to MP's
-// AgentState. Inverse of agentStateToTransportStateFn. LEGACY is never produced
-// here — it is the MP overlay applied by effectiveAgentState.
+// AgentState (the read direction; transport.Peer is the source of truth).
+// LEGACY is never produced here — it is the MP overlay applied by
+// effectiveAgentState.
 //
 // transport.PeerState has the transient DISCOVERING/INTRODUCING and no LEGACY;
 // MP has no transient equivalents, so DISCOVERING folds to NEEDED and
@@ -116,6 +71,26 @@ func (ar *AgentRegistry) isAgentOperational(id AgentId) bool {
 		return false
 	}
 	return peer.EffectiveState() == transport.PeerStateOperational
+}
+
+// mechStateForGate returns the RAW (non-decayed) per-mechanism state of the
+// peer, mapped into MP's AgentState, for use by the Hello/Beat send gates.
+// Raw — not decayed — because the gates ask "where are we in the handshake"
+// (KNOWN → send Hello; INTRODUCED/OPERATIONAL/… → send Beat), which must not
+// flip on liveness decay: a DEGRADED/INTERRUPTED mechanism is still
+// beat-eligible (beats are how we recover), and that is exactly what the raw
+// OPERATIONAL→…→INTERRUPTED ladder preserves. ok is false when the peer or the
+// named mechanism is not (yet) in the registry — the caller then has no peer to
+// gate on (treated as not-ready by the send paths).
+func mechStateForGate(peer *transport.Peer, mech string) (AgentState, bool) {
+	if peer == nil {
+		return AgentStateNeeded, false
+	}
+	st, ok := peer.MechanismRawState(mech)
+	if !ok {
+		return AgentStateNeeded, false
+	}
+	return transportToAgentState(st), true
 }
 
 func (ar *AgentRegistry) effectiveAgentState(id AgentId) AgentState {

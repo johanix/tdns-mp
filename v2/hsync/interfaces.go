@@ -47,19 +47,14 @@ type ElectionStateLookup interface {
 	GetGroupElectionState(groupHash string) GroupElectionState
 }
 
-// DiscoveryResult holds IMR discovery output before registration.
-type DiscoveryResult struct {
-	Identity string
-	APIUri   string
-	DNSUri   string
-	Error    error
-}
-
 // TransportBridge is the hsync-facing surface of MP transport wiring.
 // Satisfied by tdnsmp.MPTransportBridge at integration time.
+// (Phase 2.6: RegisterDiscovered + DiscoveryResult deleted — the discovery
+// process lives in tdns-transport; registration happens inside
+// transport.TransportManager.DiscoverPeer/DiscoverAndRegisterPeer, which
+// fires OnPeerDiscovered for the application's view materialization.)
 type TransportBridge interface {
 	DiscoverPeer(ctx context.Context, identity string) (*transport.Peer, error)
-	RegisterDiscovered(peer *Peer, result *DiscoveryResult) error
 	SendHello(ctx context.Context, peer *Peer, sharedZones []string) error
 	SendBeat(ctx context.Context, peer *Peer, sequence uint64) (ack bool, usedTransport string, err error)
 	MechanismSupported(name string) bool
@@ -88,6 +83,10 @@ type HostCallbacks struct {
 // PeerHooks are optional callbacks when registry peers change.
 type PeerHooks struct {
 	OnPeerStored func(*Peer)
+	// OnPeerRemoved fires when a peer object is removed from the registry
+	// (Phase 3c / A5 residue: prunes are EVENTS, not reconcile-only). The
+	// application uses it to drop its own view of the peer promptly.
+	OnPeerRemoved func(*Peer)
 }
 
 // Deps bundles injected dependencies for NewEngine.

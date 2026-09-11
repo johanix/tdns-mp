@@ -1,0 +1,18 @@
+{
+  "MessageType": "status-update",
+  "MyIdentity": "combiner.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "SubType": "delegation-change",
+  "NSRecords": [
+    "zone1.example. 3600 IN NS ns1.example."
+  ],
+  "DSRecords": [
+    "zone1.example. 3600 IN DS 12345 15 2 abcd"
+  ],
+  "Result": "ok",
+  "Msg": "parent synced",
+  "timestamp": 1700000011,
+  "type": "status-update",
+  "sender_id": "legacy-sender.example."
+}

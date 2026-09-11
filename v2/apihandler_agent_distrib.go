@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	transport "github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
@@ -323,20 +324,20 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 		ar := conf.InternalMp.AgentRegistry
 
 		ar.S.IterCb(func(agentID AgentId, agent *Agent) {
-			agentIDFqdn := dns.Fqdn(string(agent.Identity))
+			agentIDFqdn := dns.Fqdn(string(agent.ID))
 
 			isCombiner := false
 			if mp.Combiner != nil && mp.Combiner.Identity != "" {
-				isCombiner = string(agent.Identity) == mp.Combiner.Identity ||
-					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(mp.Combiner.Identity)
+				isCombiner = string(agent.ID) == mp.Combiner.Identity ||
+					dns.Fqdn(string(agent.ID)) == dns.Fqdn(mp.Combiner.Identity)
 			} else {
-				isCombiner = agent.Identity == "combiner"
+				isCombiner = agent.ID == "combiner"
 			}
 
 			isSigner := false
 			if mp.Signer != nil && mp.Signer.Identity != "" {
-				isSigner = string(agent.Identity) == mp.Signer.Identity ||
-					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(mp.Signer.Identity)
+				isSigner = string(agent.ID) == mp.Signer.Identity ||
+					dns.Fqdn(string(agent.ID)) == dns.Fqdn(mp.Signer.Identity)
 			}
 
 			peerType := "agent"
@@ -347,27 +348,53 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 			}
 
 			// LEGACY == derived participations == 0 (not stored agent.Zones).
-			zeroParticipations := len(ar.sharedParticipantZones(agent.Identity)) == 0
+			zeroParticipations := len(ar.sharedParticipantZones(agent.ID)) == 0
 
 			// Add API transport entry when this mechanism is in use
-			if agent.ApiMethod && agent.ApiDetails != nil {
+			if agent.ApiMethod {
 				key := agentIDFqdn + ":API"
 				if !seen[key] {
 					seen[key] = true
 
-					effectiveState := agent.ApiDetails.State
+					// S1b/Phase 2: the connection State is read from the
+					// canonical transport.Peer (decayed per-mechanism). A peer
+					// not yet in the PeerRegistry shows NEEDED — the
+					// AgentDetails fallback is gone with the struct.
+					var apiPeer *transport.Peer
+					if conf.InternalMp.TransportManager != nil {
+						if p, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							apiPeer = p
+						}
+					}
+					effectiveState := AgentStateNeeded
+					if apiPeer != nil {
+						if st, ok := apiPeer.MechanismEffectiveState("API"); ok {
+							effectiveState = transportToAgentState(st)
+						}
+					}
 					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
-					apiAddr := agent.ApiDetails.BaseUri
+					// S2: address fields from the canonical transport.Peer.
+					var apiURI string
+					var apiPort uint16
+					var apiAddrs []string
+					if apiPeer != nil {
+						apiURI = apiPeer.APIEndpoint
+						if a := apiPeer.CurrentAddress(); a != nil {
+							apiPort = a.Port
+							apiAddrs = []string{a.Host}
+						} else {
+							apiAddrs = nil
+						}
+					}
+					apiAddr := apiURI
 					if apiAddr == "" {
 						apiAddr = "-"
 					}
-					hasTLSA := false
-					if ac := agent.cryptoFor("API"); ac != nil {
-						hasTLSA = ac.TlsaRR != nil
-					}
+					// Phase 2.5: crypto presence from transport.Peer's slots.
+					hasTLSA := apiPeer != nil && apiPeer.MechanismTLSA("API") != nil
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
@@ -375,64 +402,88 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						Address:     apiAddr,
 						CryptoType:  "TLS",
 						DistribSent: 0,
-						APIUri:      agent.ApiDetails.BaseUri,
-						Port:        agent.ApiDetails.Port,
-						Addresses:   agent.ApiDetails.Addrs,
+						APIUri:      apiURI,
+						Port:        apiPort,
+						Addresses:   apiAddrs,
 						HasTLSA:     hasTLSA,
 						State:       AgentStateToString[effectiveState],
 					}
-					if !agent.ApiDetails.HelloTime.IsZero() {
-						peerInfo.LastUsed = agent.ApiDetails.HelloTime
-					}
-					if conf.InternalMp.TransportManager != nil {
-						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
-							peerInfo.ContactInfo = peer.MechanismContactInfo("API")
-							s := peer.Stats.GetDetailedStats()
-							peerInfo.HelloSent = s.HelloSent
-							peerInfo.HelloReceived = s.HelloReceived
-							peerInfo.BeatSent = s.BeatSent
-							peerInfo.BeatReceived = s.BeatReceived
-							peerInfo.SyncSent = s.SyncSent
-							peerInfo.SyncReceived = s.SyncReceived
-							peerInfo.PingSent = s.PingSent
-							peerInfo.PingReceived = s.PingReceived
-							peerInfo.TotalSent = s.TotalSent
-							peerInfo.TotalReceived = s.TotalReceived
-							peerInfo.DistribSent = int(s.TotalReceived)
-							if !s.LastUsed.IsZero() {
-								peerInfo.LastUsed = s.LastUsed
-							}
-							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
-						} else {
-							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
+					if apiPeer != nil {
+						peerInfo.ContactInfo = apiPeer.MechanismContactInfo("API")
+						s := apiPeer.Stats.GetDetailedStats()
+						peerInfo.HelloSent = s.HelloSent
+						peerInfo.HelloReceived = s.HelloReceived
+						peerInfo.BeatSent = s.BeatSent
+						peerInfo.BeatReceived = s.BeatReceived
+						peerInfo.SyncSent = s.SyncSent
+						peerInfo.SyncReceived = s.SyncReceived
+						peerInfo.PingSent = s.PingSent
+						peerInfo.PingReceived = s.PingReceived
+						peerInfo.TotalSent = s.TotalSent
+						peerInfo.TotalReceived = s.TotalReceived
+						peerInfo.DistribSent = int(s.TotalReceived)
+						if !s.LastUsed.IsZero() {
+							peerInfo.LastUsed = s.LastUsed
 						}
+						lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
+					} else {
+						lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 					}
 					peers = append(peers, peerInfo)
 				}
 			}
 
 			// Add DNS transport entry when this mechanism is in use
-			if agent.DnsMethod && agent.DnsDetails != nil {
+			if agent.DnsMethod {
 				key := agentIDFqdn + ":DNS"
 				if !seen[key] {
 					seen[key] = true
 
-					effectiveState := agent.DnsDetails.State
+					// S1b/Phase 2: connection State from the canonical
+					// transport.Peer (decayed per-mechanism); NEEDED when the
+					// peer is not yet in the PeerRegistry.
+					var dnsPeer *transport.Peer
+					if conf.InternalMp.TransportManager != nil {
+						if p, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							dnsPeer = p
+						}
+					}
+					effectiveState := AgentStateNeeded
+					if dnsPeer != nil {
+						if st, ok := dnsPeer.MechanismEffectiveState("DNS"); ok {
+							effectiveState = transportToAgentState(st)
+						}
+					}
 					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
-					dnsAddr := agent.DnsDetails.BaseUri
+					// S2: address fields from the canonical transport.Peer.
+					// dnsURI = display URL (DNSEndpoint); dnsPort/dnsAddrs = resolved
+					// DNS-mechanism address. AgentDetails fallback only when the peer
+					// is not yet in the PeerRegistry.
+					var dnsURI string
+					var dnsPort uint16
+					var dnsAddrs []string
+					if dnsPeer != nil {
+						dnsURI = dnsPeer.DNSEndpoint
+						if a := dnsPeer.CurrentAddress(); a != nil {
+							dnsPort = a.Port
+							dnsAddrs = []string{a.Host}
+						} else {
+							dnsAddrs = nil
+						}
+					}
+					dnsAddr := dnsURI
 					if dnsAddr == "" {
 						dnsAddr = "-"
 					}
-					// Crypto now lives on the agentMeta sidecar (A3d.3).
+					// Phase 2.5: crypto from transport.Peer's per-mechanism slots.
 					var jwkData, keyAlgorithm string
 					var hasKEY bool
-					if dc := agent.cryptoFor("DNS"); dc != nil {
-						jwkData = dc.JWKData
-						keyAlgorithm = dc.KeyAlgorithm
-						hasKEY = dc.KeyRR != nil
+					if dnsPeer != nil {
+						jwkData, keyAlgorithm = dnsPeer.MechanismJWK("DNS")
+						hasKEY = dnsPeer.MechanismKeyRR("DNS") != nil
 					}
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
@@ -441,40 +492,35 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						Address:      dnsAddr,
 						CryptoType:   "JOSE",
 						DistribSent:  0,
-						DNSUri:       agent.DnsDetails.BaseUri,
-						Port:         agent.DnsDetails.Port,
-						Addresses:    agent.DnsDetails.Addrs,
+						DNSUri:       dnsURI,
+						Port:         dnsPort,
+						Addresses:    dnsAddrs,
 						JWKData:      jwkData,
 						KeyAlgorithm: keyAlgorithm,
 						HasJWK:       jwkData != "",
 						HasKEY:       hasKEY,
 						State:        AgentStateToString[effectiveState],
 					}
-					if !agent.DnsDetails.HelloTime.IsZero() {
-						peerInfo.LastUsed = agent.DnsDetails.HelloTime
-					}
-					if conf.InternalMp.TransportManager != nil {
-						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
-							peerInfo.ContactInfo = peer.MechanismContactInfo("DNS")
-							s := peer.Stats.GetDetailedStats()
-							peerInfo.HelloSent = s.HelloSent
-							peerInfo.HelloReceived = s.HelloReceived
-							peerInfo.BeatSent = s.BeatSent
-							peerInfo.BeatReceived = s.BeatReceived
-							peerInfo.SyncSent = s.SyncSent
-							peerInfo.SyncReceived = s.SyncReceived
-							peerInfo.PingSent = s.PingSent
-							peerInfo.PingReceived = s.PingReceived
-							peerInfo.TotalSent = s.TotalSent
-							peerInfo.TotalReceived = s.TotalReceived
-							peerInfo.DistribSent = int(s.TotalReceived)
-							if !s.LastUsed.IsZero() {
-								peerInfo.LastUsed = s.LastUsed
-							}
-							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
-						} else {
-							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
+					if dnsPeer != nil {
+						peerInfo.ContactInfo = dnsPeer.MechanismContactInfo("DNS")
+						s := dnsPeer.Stats.GetDetailedStats()
+						peerInfo.HelloSent = s.HelloSent
+						peerInfo.HelloReceived = s.HelloReceived
+						peerInfo.BeatSent = s.BeatSent
+						peerInfo.BeatReceived = s.BeatReceived
+						peerInfo.SyncSent = s.SyncSent
+						peerInfo.SyncReceived = s.SyncReceived
+						peerInfo.PingSent = s.PingSent
+						peerInfo.PingReceived = s.PingReceived
+						peerInfo.TotalSent = s.TotalSent
+						peerInfo.TotalReceived = s.TotalReceived
+						peerInfo.DistribSent = int(s.TotalReceived)
+						if !s.LastUsed.IsZero() {
+							peerInfo.LastUsed = s.LastUsed
 						}
+						lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
+					} else {
+						lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 					}
 					peers = append(peers, peerInfo)
 				}
@@ -603,9 +649,17 @@ func listPeerSharedZones(conf *Config) []interface{} {
 
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.Mu.RLock()
-		identity := agent.Identity
-		state := agent.State
+		identity := agent.ID
 		agent.Mu.RUnlock()
+
+		// The State shadow's only stamp is GetZoneAgentData, so this column
+		// froze once E1.b removed the per-beat refresh. Read the canonical
+		// transport.Peer store — the same source `peer list` and gossip use —
+		// and re-stamp the shadow (2026-08-25 review, finding 1).
+		state := conf.InternalMp.AgentRegistry.effectiveAgentState(identity)
+		agent.Mu.Lock()
+		agent.State = state
+		agent.Mu.Unlock()
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {
@@ -658,7 +712,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 
 	members := participantFQDNSetForApex(zoneApex(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
-		identity := agent.Identity
+		identity := agent.ID
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {

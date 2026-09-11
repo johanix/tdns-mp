@@ -213,7 +213,7 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 		if len(amr.AgentRegistry.Agents) > 0 {
 			var agentNames []AgentId
 			for _, agent := range amr.AgentRegistry.Agents {
-				agentNames = append(agentNames, agent.Identity)
+				agentNames = append(agentNames, agent.ID)
 			}
 			fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
 			for _, agent := range amr.AgentRegistry.Agents {
@@ -254,20 +254,9 @@ var DebugAgentRegistryCmd = &cobra.Command{
 		conf.SetMpConfig(&tdnsmp.MultiProviderConf{Identity: "local"})
 		ar := conf.NewAgentRegistry()
 		ar.LocateInterval = 10
-		ar.S.Set("local", &Agent{
-			Identity: "local",
-			PeerID:   "local",
-		})
-
-		ar.S.Set("agent.example.com", &Agent{
-			Identity: "agent.example.com",
-			PeerID:   "agent.example.com",
-		})
-
-		ar.S.Set("agent.example.org", &Agent{
-			Identity: "agent.example.org",
-			PeerID:   "agent.example.org",
-		})
+		ar.S.Set("local", tdnsmp.NewAgent("local"))
+		ar.S.Set("agent.example.com", tdnsmp.NewAgent("agent.example.com"))
+		ar.S.Set("agent.example.org", tdnsmp.NewAgent("agent.example.org"))
 
 		fmt.Printf("Agent registry:\ntype=%T\n", ar.S)
 		fmt.Printf("Agent registry:\n%d shards\n", ar.S.NumShards())

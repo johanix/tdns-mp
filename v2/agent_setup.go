@@ -7,7 +7,6 @@ package tdnsmp
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -16,11 +15,9 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/johanix/tdns-transport/v2/crypto/jose"
@@ -483,98 +480,5 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *Mu
 	}
 
 	lgAgent.Info("published JWK record", "name", publishname)
-	return nil
-}
-
-func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
-	if agent == nil {
-		return fmt.Errorf("agent is nil")
-	}
-
-	// Check if API method is supported and TLSA record exists
-	if agent.ApiDetails == nil {
-		return fmt.Errorf("agent %s: ApiDetails not initialized", agent.Identity)
-	}
-	apiCrypto := agent.cryptoFor("API")
-	if !agent.ApiMethod || apiCrypto == nil || apiCrypto.TlsaRR == nil {
-		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
-	}
-
-	// Verify local agent has necessary certificates
-	if localagent.Api.CertFile == "" || localagent.Api.KeyFile == "" {
-		return fmt.Errorf("local agent config missing either cert or key file")
-	}
-
-	lgAgent.Debug("creating API client", "identity", agent.Identity, "baseurl", agent.ApiDetails.BaseUri)
-
-	// Create API client
-	api := AgentApi{
-		ApiClient: tdns.NewClient(string(agent.Identity), agent.ApiDetails.BaseUri, "", "", "tlsa"),
-	}
-
-	// Load client certificate
-	cert, err := tls.LoadX509KeyPair(localagent.Api.CertFile, localagent.Api.KeyFile)
-	if err != nil {
-		return fmt.Errorf("failed to load client certificate: %v", err)
-	}
-
-	// Configure TLS with client certificate
-	tlsconfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
-	}
-
-	// Configure certificate verification using TLSA record
-	tlsconfig.InsecureSkipVerify = true
-	tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		for _, rawCert := range rawCerts {
-			cert, err := x509.ParseCertificate(rawCert)
-			if err != nil {
-				return fmt.Errorf("failed to parse certificate: %v", err)
-			}
-
-			if dns.Fqdn(cert.Subject.CommonName) != dns.Fqdn(string(agent.Identity)) {
-				return fmt.Errorf("unexpected certificate common name %q (should have been %s)", cert.Subject.CommonName, agent.Identity)
-			}
-
-			err = tdns.VerifyCertAgainstTlsaRR(apiCrypto.TlsaRR, rawCert)
-			if err != nil {
-				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
-			}
-
-			lgAgent.Debug("verified cert against TLSA record", "agent", agent.Identity)
-		}
-
-		return nil
-	}
-
-	// Create HTTP client with TLS config
-	api.ApiClient.Client = &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsconfig},
-	}
-
-	// Set debug flags
-	api.ApiClient.Debug = tdns.Globals.Debug
-	api.ApiClient.Verbose = tdns.Globals.Verbose
-
-	// Configure API addresses if available
-	if len(agent.ApiDetails.Addrs) > 0 {
-		lgAgent.Debug("remote agent API addresses", "agent", agent.Identity, "addrs", agent.ApiDetails.Addrs)
-		var addressesWithPort []string
-		port := strconv.Itoa(int(agent.ApiDetails.Port))
-
-		for _, addr := range agent.ApiDetails.Addrs {
-			addressesWithPort = append(addressesWithPort, net.JoinHostPort(addr, port))
-		}
-
-		api.ApiClient.Addresses = addressesWithPort
-	}
-
-	lgAgent.Debug("setting up agent-to-agent sync API client",
-		"agent", agent.Identity, "baseurl", api.ApiClient.BaseUrl, "authmethod", api.ApiClient.AuthMethod)
-
-	// Assign the API client to the agent
-	agent.Api = &api
-
 	return nil
 }

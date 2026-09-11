@@ -18,6 +18,10 @@ func (id PeerID) String() string { return string(id) }
 // ZoneName is a DNS zone name served in the HSYNC group.
 type ZoneName string
 
+// String lets ZoneName satisfy core.Stringer (used by tdnsmp via the
+// ZoneName = hsync.ZoneName alias, E1.a).
+func (zn ZoneName) String() string { return string(zn) }
+
 // PeerState is the HSYNC peer lifecycle state.
 type PeerState uint8
 
@@ -111,6 +115,13 @@ func NewPeer(id PeerID) *Peer {
 	}
 }
 
+// EffectiveState picks the best participating per-mechanism state, falling back
+// to the top-level marker. D2.5 note: the engine's send-decision and beat
+// gates no longer call this — they read transport.Peer (via mechPeerState).
+// This survives only for the hsync GossipStateTable (dead in production: agent
+// and auditor wire the no-op agentGossipPort and refresh gossip MP-side from
+// transport.Peer; reachable only via NewEngine's nil-Gossip fallback + tests).
+// It is removed wholesale with that gossip table in a later, dedicated cleanup.
 func (p *Peer) EffectiveState() PeerState {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -134,29 +145,8 @@ func (p *Peer) EffectiveState() PeerState {
 	return p.State
 }
 
-func (p *Peer) apiState() PeerState {
-	if p.ApiDetails != nil {
-		return p.ApiDetails.State
-	}
-	return 0
-}
-
-func (p *Peer) dnsState() PeerState {
-	if p.DnsDetails != nil {
-		return p.DnsDetails.State
-	}
-	return 0
-}
-
-func (p *Peer) IsAnyTransportOperational() bool {
-	if p.DnsDetails != nil && p.DnsDetails.State == PeerStateOperational {
-		return true
-	}
-	if p.ApiDetails != nil && p.ApiDetails.State == PeerStateOperational {
-		return true
-	}
-	return false
-}
+// D2.5: Peer.apiState/dnsState/IsAnyTransportOperational removed — they had no
+// caller and read the retired hsync.PeerDetails.State sidecar.
 
 // InboundReport is a decoded hello or beat from the transport bridge.
 type InboundReport struct {

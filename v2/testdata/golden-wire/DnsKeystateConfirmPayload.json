@@ -1,0 +1,10 @@
+{
+  "type": "keystate_confirm",
+  "sender_id": "me.example.",
+  "zone": "zone1.example.",
+  "key_tag": 12345,
+  "signal": "inventory",
+  "status": "ok",
+  "message": "ack",
+  "timestamp": 1700000007
+}

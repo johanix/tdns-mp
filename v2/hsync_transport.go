@@ -90,18 +90,48 @@ func (tm *MPTransportBridge) deleteKeystateRfi(zone string) {
 	delete(tm.keystateRfiState, zone)
 }
 
-// isTransportReady returns true if the transport details indicate a reachable agent.
-func isTransportReady(details *AgentDetails) bool {
-	if details == nil {
+// isTransportReady reports whether the named mechanism on the canonical
+// transport.Peer is in a state where the peer can receive app messages — the
+// same handshaked-state OR as the beat send gates. Reads the RAW (non-decayed)
+// mechanism state via mechStateForGate: readiness is "have we handshaked", not
+// liveness — the ReliableMessageQueue's own retry/backoff owns delivery
+// failures, so DEGRADED/INTERRUPTED stay eligible. LEGACY needs no case here:
+// it is the MP display overlay; at mechanism level such a peer reads
+// OPERATIONAL.
+func isTransportReady(peer *transport.Peer, mech string) bool {
+	st, ok := mechStateForGate(peer, mech)
+	if !ok {
 		return false
 	}
-	switch details.State {
-	case AgentStateOperational, AgentStateIntroduced, AgentStateLegacy,
+	switch st {
+	case AgentStateOperational, AgentStateIntroduced,
 		AgentStateDegraded, AgentStateInterrupted:
 		return true
 	default:
 		return false
 	}
+}
+
+// recipientTransportReady is the ReliableMessageQueue's IsRecipientReady
+// predicate: the recipient must be a known agent AND have at least one
+// handshaked mechanism on the canonical transport.Peer store. It must NOT
+// read agent.{Api,Dns}Details.State — that sidecar stopped being written at
+// END.0/D2.5, so gating on it deferred every queued message to an agent
+// recipient until the 24h expiry (a reader the END.0 census missed).
+func recipientTransportReady(ar *AgentRegistry, peers *transport.PeerRegistry, recipientID string) bool {
+	if ar == nil {
+		// Roles constructed without an AgentRegistry (combiner/signer) keep
+		// the pre-existing always-ready behavior.
+		return true
+	}
+	if _, exists := ar.S.Get(AgentId(recipientID)); !exists {
+		return false
+	}
+	peer, ok := peers.Get(recipientID)
+	if !ok {
+		return false
+	}
+	return isTransportReady(peer, "DNS") || isTransportReady(peer, "API")
 }
 
 func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
@@ -186,20 +216,17 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		supportedMechanisms = []string{"api", "dns"}
 	}
 
+	// Hoisted so the IsRecipientReady predicate can read the canonical
+	// per-mechanism peer state (the literal below has no name to close over).
+	peerRegistry := transport.NewPeerRegistry()
+
 	tm := &MPTransportBridge{
 		TransportManager: &transport.TransportManager{
-			PeerRegistry: transport.NewPeerRegistry(),
+			PeerRegistry: peerRegistry,
 			Router:       transport.NewDNSMessageRouter(),
 			ReliableQueue: transport.NewReliableMessageQueue(&transport.ReliableMessageQueueConfig{
 				IsRecipientReady: func(recipientID string) bool {
-					if cfg.AgentRegistry == nil {
-						return true
-					}
-					agent, exists := cfg.AgentRegistry.S.Get(AgentId(recipientID))
-					if !exists {
-						return false
-					}
-					return isTransportReady(agent.DnsDetails) || isTransportReady(agent.ApiDetails)
+					return recipientTransportReady(cfg.AgentRegistry, peerRegistry, recipientID)
 				},
 			}),
 			LocalID:     cfg.LocalID,
@@ -437,40 +464,68 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		lgTransport.Info("DNS transport disabled by configuration")
 	}
 
-	// Register the discovery-completion callback on the embedded TM. The
-	// callback is invoked by MP's discovery loop once an agent transitions
-	// to KNOWN. After Phase 6 of the transport interface redesign, transport
-	// itself will own the discovery loop and invoke this callback directly;
-	// installing the seam now lets the call-site already use it. See Bite 8
-	// in tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+	// Phase 2.6: the discovery-completion callback is now LIVE — transport's
+	// RegisterDiscoveredPeer fires it after the process completes (it was
+	// installed-but-never-invoked before; the ar-work happened inline in the
+	// deleted RegisterDiscoveredAgent). MP's residue: materialize the *Agent
+	// view and derive its capability flags from the per-mechanism discovery
+	// outcome recorded on the peer (ContactInfo: "complete"/"partial" ⇒
+	// mechanism offered, absent ⇒ not offered/not probed). The guarded KNOWN
+	// promotions and preferred-transport derivation are kept here too —
+	// idempotent after transport's own writes, and they keep the callback
+	// self-sufficient for tests that drive it directly.
 	tm.TransportManager.OnPeerDiscovered = func(peer *transport.Peer) {
 		if tm.agentRegistry == nil {
 			return
 		}
-		agent, ok := tm.agentRegistry.S.Get(AgentId(peer.ID))
-		if !ok {
+		agent := tm.agentRegistry.agentViewForIdentity(AgentId(peer.ID),
+			tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
+		if agent == nil {
 			return
 		}
-		// Refresh per-mechanism state from the agent (peer was looked
-		// up by the invocation site; SyncPeerFromAgent returns the
-		// same registry entry).
-		tm.SyncPeerFromAgent(agent)
+		apiOffered := peer.MechanismContactInfo("API") != ""
+		dnsOffered := peer.MechanismContactInfo("DNS") != ""
+		agent.Mu.Lock()
+		agent.ApiMethod = apiOffered
+		agent.DnsMethod = dnsOffered
+		agent.Mu.Unlock()
 
-		// Set preferred transport based on what's available
-		if agent.ApiMethod && agent.DnsMethod {
-			peer.PreferredTransport = "API"
-			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
-		} else if agent.ApiMethod {
-			peer.PreferredTransport = "API"
-			lgTransport.Info("agent has API only", "agent", agent.Identity)
-		} else if agent.DnsMethod {
-			peer.PreferredTransport = "DNS"
-			lgTransport.Info("agent has DNS only", "agent", agent.Identity)
+		// Promote each usable ("complete") mechanism to KNOWN, but never
+		// regress one already past KNOWN (a re-discovery must not knock an
+		// OPERATIONAL/INTRODUCED transport back down).
+		anyUsable := false
+		for _, name := range []string{"API", "DNS"} {
+			if peer.MechanismContactInfo(name) != "complete" {
+				continue
+			}
+			anyUsable = true
+			if s, present := peer.MechanismRawState(name); !present || s < transport.PeerStateKnown {
+				peer.SetMechanismState(name, transport.PeerStateKnown, "discovery complete")
+			}
 		}
 
-		peer.SetState(transport.PeerStateKnown, "discovery complete")
+		// Set preferred transport based on what's offered
+		switch {
+		case apiOffered && dnsOffered:
+			peer.PreferredTransport = "API"
+			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.ID)
+		case apiOffered:
+			peer.PreferredTransport = "API"
+		case dnsOffered:
+			peer.PreferredTransport = "DNS"
+		}
 
-		lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
+		// Top-level State must agree with the per-mechanism truth:
+		// EffectiveState() falls back to p.State when no mechanism is yet
+		// OPERATIONAL+, so an unconditional SetState(KNOWN) here would make
+		// gossip report KNOWN for a peer whose only mechanism never resolved
+		// an address (the KNOWN/NEEDED contradiction, Fix C). Only declare
+		// KNOWN if a mechanism actually became usable, never regressing.
+		if anyUsable && peer.GetState() < transport.PeerStateKnown {
+			peer.SetState(transport.PeerStateKnown, "discovery complete")
+		}
+
+		lgTransport.Info("agent discovery complete, view materialized", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
 	}
 
 	// Symmetric failure-side seam (Bite D). Fired by MP's
@@ -479,30 +534,45 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	// the same peer. Body mirrors the existing failure logging in
 	// agent_utils.go so behaviour stays unchanged.
 	tm.TransportManager.OnDiscoveryFailed = func(peer *transport.Peer, err error) {
+		// Do NOT regress a peer that is already established. Discovery
+		// attempts race: a chunk-notify "missing key" kick triggers a
+		// discovery while a startup/retry discovery is still in flight, so
+		// a STALE failing leg (e.g. a resolver i/o timeout) can fire
+		// OnDiscoveryFailed AFTER a concurrent attempt already succeeded
+		// and registered the peer's address. Slamming ERROR here then
+		// clobbers a peer that is demonstrably reachable (EffectiveState
+		// falls back to this top-level State, so the bogus ERROR surfaces
+		// in the gossip matrix). A failure only means "not established" for
+		// a peer that was never established — same truth-model principle as
+		// Fix A/C: a failure on one path must not assert state over a peer
+		// another path just proved good.
+		if peer.GetState() >= transport.PeerStateKnown || peer.CurrentAddress() != nil {
+			lgTransport.Warn("peer discovery failed but peer already established; not regressing to ERROR",
+				"peer", peer.ID, "state", peer.GetState(), "err", err)
+			return
+		}
 		peer.SetState(transport.PeerStateError, err.Error())
 		lgTransport.Warn("peer discovery failed", "peer", peer.ID, "err", err)
 	}
 
-	// Bite F: register the bridge as TransportManager's
-	// DiscoveryDriver so tm.DiscoverPeer can delegate sync
-	// discovery back into MP's existing implementation.
-	// TEMPORARY — Phase 6 part 2 moves discovery into transport
-	// and removes the indirection.
-	tm.TransportManager.DiscoveryDriver = tm
+	// Phase 2.6: the transport-owned discovery process needs the local
+	// mechanism set (Fix E — only supported transports are probed; the TM
+	// literal above cannot set the unexported field) and a late-bound IMR
+	// accessor (the resolver starts asynchronously). The TEMPORARY
+	// DiscoveryDriver seam and MP's RunDiscovery are gone.
+	tm.TransportManager.SetSupportedMechanisms(supportedMechanisms)
+	if cfg.GetImrEngine != nil {
+		getImr := cfg.GetImrEngine
+		tm.TransportManager.GetImr = func() *transport.Imr {
+			mpImr := getImr()
+			if mpImr == nil || mpImr.Imr == nil {
+				return nil
+			}
+			return &transport.Imr{Imr: mpImr.Imr}
+		}
+	}
 
 	return tm
-}
-
-// RunDiscovery implements transport.DiscoveryDriver (Bite F).
-// Delegates to the existing synchronous DiscoverAndRegisterAgent
-// path; on success the peer is in PeerStateKnown when this
-// returns (set by RegisterDiscoveredAgent).
-//
-// TEMPORARY — Phase 6 part 2 of the transport interface redesign
-// moves discovery into the transport package and deletes both
-// the DiscoveryDriver interface and this implementation.
-func (tm *MPTransportBridge) RunDiscovery(ctx context.Context, peer *transport.Peer) error {
-	return tm.DiscoverAndRegisterAgent(ctx, peer.ID)
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
@@ -608,30 +678,24 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	senderID := payload.GetSenderID()
 	lgTransport.Debug("processing authorized DNS hello", "sender", senderID)
 
-	// DNS-37: Update PeerRegistry state (DNS hello accepted → INTRODUCING state)
+	// DNS-37: inbound DNS hello accepted → INTRODUCING on the canonical
+	// transport.Peer per-mechanism store. END.0: the top-level SetState is NOT
+	// written on inbound receipt — top-level peer.State is the discovery-phase
+	// marker (NEEDED/KNOWN/ERROR), set only by the discovery paths; INTRODUCING
+	// is a per-mechanism fact. (Marker model; mirrors the truth-fix rule that
+	// inbound receipt must not assert top-level state.)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.SetState(transport.PeerStateIntroducing, "DNS hello accepted and authorized")
 	peer.LastHelloReceived = time.Now()
-	// Bite 1 dual-write: also update per-mechanism state (DNS path).
-	peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted and authorized")
+	if raw, ok := peer.MechanismRawState("DNS"); !ok || raw < transport.PeerStateIntroducing {
+		peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted and authorized")
+	}
 	peer.SetMechanismLastHelloRecv("DNS", peer.LastHelloReceived)
 
-	// Also update AgentRegistry if available (for backward compatibility)
+	// For an unknown (but authorized) sender, trigger discovery so we can beat
+	// back. Contact timestamps live on transport.Peer above — the AgentDetails
+	// telemetry mirror is gone (Phase 2).
 	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-		if exists {
-			agent.Mu.Lock()
-			// Only transition to INTRODUCED if not already OPERATIONAL or better
-			// This prevents Hello messages from downgrading state (e.g., after peer restart)
-			if agent.DnsDetails.State < AgentStateIntroduced {
-				agent.DnsDetails.State = AgentStateIntroduced
-				lgTransport.Info("updated agent DNS state to INTRODUCED after receiving Hello", "agent", senderID)
-			}
-			agent.DnsDetails.HelloTime = time.Now()
-			agent.DnsDetails.LastContactTime = time.Now()
-			agent.Mu.Unlock()
-			tm.agentRegistry.S.Set(agent.Identity, agent)
-		} else {
+		if _, exists := tm.agentRegistry.S.Get(AgentId(senderID)); !exists {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
 			// This ensures receiver can send beats back to sender
 			lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
@@ -643,16 +707,6 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 					lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
 				} else {
 					lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
-					// Update the newly discovered agent's DNS state to INTRODUCED
-					if discoveredAgent, ok := tm.agentRegistry.S.Get(AgentId(peerID)); ok {
-						discoveredAgent.Mu.Lock()
-						discoveredAgent.DnsDetails.State = AgentStateIntroduced
-						discoveredAgent.DnsDetails.HelloTime = time.Now()
-						discoveredAgent.DnsDetails.LastContactTime = time.Now()
-						discoveredAgent.Mu.Unlock()
-						tm.agentRegistry.S.Set(discoveredAgent.Identity, discoveredAgent)
-						lgTransport.Info("updated discovered agent DNS state to INTRODUCED", "agent", peerID)
-					}
 				}
 			}(senderID)
 		}
@@ -701,40 +755,19 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// Messages reaching routeBeatMessage have passed middleware auth.
 	lgTransport.Debug("processing authorized DNS beat", "sender", senderID, "zones", payload.Zones)
 
-	// DNS-37: Update peer state on successful beat
+	// Record inbound liveness ONLY. Receiving a beat proves the peer can
+	// reach us — it does NOT prove we can reach them, which is what
+	// OPERATIONAL means (a successful OUTBOUND beat round-trip; set in
+	// SendBeatWithFallback). So we update LastBeatRecv evidence but do
+	// not touch the connection state. The election trigger likewise
+	// lives on the outbound success edge, not here.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-	peer.SetState(transport.PeerStateOperational, "Beat received from operational peer")
-	// Bite 1 dual-write: also update per-mechanism state (DNS path).
-	peer.SetMechanismState("DNS", transport.PeerStateOperational, "Beat received from operational peer")
 	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
-	// Also update AgentRegistry if available
-	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-		if exists {
-			// Scope agent.Mu to just the DnsDetails field access — the
-			// outbound hello/beat send paths and CheckState write these
-			// same fields under agent.Mu, so the bare writes here were a
-			// data race. Release before NotifyPeerOperational (an election
-			// call) to honor the no-registry-lock-across-callback rule.
-			agent.Mu.Lock()
-			wasOperational := agent.DnsDetails.State == AgentStateOperational
-			agent.DnsDetails.State = AgentStateOperational
-			agent.DnsDetails.LastContactTime = time.Now()
-			agent.Mu.Unlock()
-			tm.agentRegistry.S.Set(agent.Identity, agent)
-
-			// When a peer first becomes operational, check if all configured peers
-			// are now operational. Elections require full participation.
-			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
-				// NotifyPeerOperational handles both deferred elections and
-				// new elections — it checks configured vs operational counts.
-				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
-					tm.agentRegistry.sharedParticipantZones(agent.Identity))
-			}
-		}
-	}
+	// Inbound-liveness evidence lives on transport.Peer above (Phase 2: the
+	// AgentDetails telemetry mirror is gone; the NG beat-age scanner it once
+	// fed was already retired in D2.5).
 
 	// Process gossip data if present
 	if len(payload.Gossip) > 0 && tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
@@ -804,12 +837,11 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	senderID := msg.SenderID
 	lgTransport.Debug("processing ping", "sender", senderID)
 
-	// Update PeerRegistry liveness
+	// Record inbound liveness ONLY (a received ping proves they can reach
+	// us, not that we can reach them). State is set by the outbound beat
+	// path, not here.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-	peer.SetState(transport.PeerStateOperational, "ping received")
-	// Bite 1 dual-write: also update per-mechanism state (DNS path).
-	peer.SetMechanismState("DNS", transport.PeerStateOperational, "ping received")
 	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
 
 	report := &AgentMsgReport{
@@ -864,18 +896,11 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// Messages reaching routeSyncMessage have passed middleware auth.
 	lgTransport.Debug("processing authorized DNS message", "msgType", msgTypeStr, "sender", senderID, "zone", zone, "transportSender", msg.TransportSender)
 
-	// Update peer state on successful message
+	// Record inbound liveness ONLY — receiving a message proves they can
+	// reach us, not that we can reach them. State is set by the outbound
+	// beat path (SendBeatWithFallback), never on inbound receipt.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.SetState(transport.PeerStateOperational, fmt.Sprintf("%s received from operational peer", msgTypeStr))
-
-	// Also update AgentRegistry if available
-	if tm.agentRegistry != nil {
-		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-		if exists {
-			agent.DnsDetails.LastContactTime = time.Now()
-			tm.agentRegistry.S.Set(agent.Identity, agent)
-		}
-	}
+	peer.LastBeatReceived = time.Now()
 
 	// DeliveredBy is the transport-level sender (from QNAME), which may differ from
 	// the originator for forwarded messages. The combiner needs this to send confirmations
@@ -890,7 +915,8 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// combiner's config. Trigger async discovery so the address is available for confirmation.
 	if deliveredBy != senderID {
 		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
-		deliverPeer.SetState(transport.PeerStateOperational, fmt.Sprintf("delivered %s for %s", msgTypeStr, senderID))
+		// Inbound liveness only — do not assert OPERATIONAL on a delivery.
+		deliverPeer.LastBeatReceived = time.Now()
 		if deliverPeer.CurrentAddress() == nil {
 			lgTransport.Info("transport sender has no address, triggering async discovery", "sender", deliveredBy)
 			go func(peerID string) {
@@ -1260,40 +1286,6 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
 
-// sendSyncConfirmation sends a confirmation for a received sync message.
-func (tm *MPTransportBridge) sendSyncConfirmation(msg *transport.IncomingMessage, payload *transport.DnsSyncPayload) {
-	if tm.DNSTransport == nil {
-		return
-	}
-
-	// Get or create peer
-	senderID := payload.GetSenderID()
-	peer, exists := tm.PeerRegistry.Get(senderID)
-	if !exists {
-		lgTransport.Warn("cannot send confirmation, peer not in registry", "peer", senderID)
-		return
-	}
-
-	// Send confirmation
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
-		SenderID:       tm.LocalID,
-		Zone:           payload.Zone,
-		DistributionID: payload.DistributionID,
-		Status:         transport.ConfirmSuccess,
-		Message:        "Sync received and processed",
-		Timestamp:      time.Now(),
-	})
-
-	if err != nil {
-		lgTransport.Error("failed to send confirmation", "distributionID", payload.DistributionID, "err", err)
-	} else {
-		lgTransport.Debug("sent confirmation for sync", "distributionID", payload.DistributionID)
-	}
-}
-
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
@@ -1436,106 +1428,22 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	return syncResp, nil
 }
 
-// GetOrCreatePeer returns the transport.Peer keyed by agent.Identity,
+// GetOrCreatePeer returns the transport.Peer keyed by agent.ID,
 // creating it (in PeerStateNeeded) if it does not already exist.
 //
-// Bite H: split out from SyncPeerFromAgent. Hot send paths use this
-// instead because the per-send state-refresh that SyncPeerFromAgent
-// performs is redundant — receipt sites already dual-write the
-// per-mechanism state. SyncPeerFromAgent is reserved for callers
-// that genuinely need a fresh state pull (currently only the
-// OnPeerDiscovered closure at discovery completion).
+// transport.Peer is the canonical per-mechanism state store: receipt
+// and send sites write it directly, so there is no Agent->Peer state
+// pull. (S4 removed the SyncPeerFromAgent snapshot path; discovery
+// completion writes the peer directly in the OnPeerDiscovered closure.)
 func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
-	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
-	// Config-only infra peers (combiner, signer) are never discovered
-	// via DNS, so their transport address has no source other than the
-	// agent record. Discovered peers already carry a discovery address
-	// and are left untouched. Bite H dropped this copy along with the
-	// (genuinely redundant) per-send state refresh; only the address —
-	// which non-discovered peers cannot get any other way — is restored.
-	if peer.CurrentAddress() == nil && agent.DnsDetails != nil && len(agent.DnsDetails.Addrs) > 0 {
-		peer.SetDiscoveryAddress(&transport.Address{
-			Host:      agent.DnsDetails.Addrs[0],
-			Port:      agent.DnsDetails.Port,
-			Transport: "udp",
-		})
-	}
+	peer := tm.PeerRegistry.GetOrCreate(string(agent.ID))
+	// S2: the AgentDetails->transport address restore is removed.
+	// transport.Peer is the sole address source: discovered peers write
+	// it during registration (RegisterDiscoveredAgent), config-infra
+	// peers (combiner/signer/config-listed agents) write it at startup
+	// (Initialize*AsPeer / main_init / apihandler_peer). No peer reaches a
+	// send path without its transport address already populated.
 	return peer
-}
-
-// SyncPeerFromAgent returns the transport.Peer for this agent and
-// refreshes its per-mechanism state from the agent. Equivalent to
-// GetOrCreatePeer followed by an explicit state-refresh pass.
-//
-// Use only when the agent's state is known to be stale relative to
-// the peer (e.g. after discovery completion). Hot send paths should
-// use GetOrCreatePeer instead — see Bite H in
-// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
-func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
-	peer := tm.GetOrCreatePeer(agent)
-
-	// Sync API details
-	if agent.ApiDetails != nil {
-		peer.APIEndpoint = agent.ApiDetails.BaseUri
-		if ac := agent.cryptoFor("API"); ac != nil && ac.TlsaRR != nil {
-			// Store TLSA for TLS verification
-			peer.TLSARecord = []byte{} // Would need to serialize TLSA
-		}
-	}
-
-	// Sync DNS details
-	if agent.DnsDetails != nil && len(agent.DnsDetails.Addrs) > 0 {
-		peer.SetDiscoveryAddress(&transport.Address{
-			Host:      agent.DnsDetails.Addrs[0],
-			Port:      agent.DnsDetails.Port,
-			Transport: "udp",
-		})
-	}
-
-	// Sync state (legacy single-state field)
-	if agent.ApiDetails != nil {
-		peer.SetState(tm.agentStateToTransportState(agent.ApiDetails.State), "")
-	}
-
-	// Sync zones
-	for zone := range agent.Zones {
-		peer.AddSharedZone(string(zone), "", "")
-	}
-
-	// Bite 7: also populate per-mechanism state on the Peer. Both the
-	// legacy single-state writes above and the new per-mechanism map
-	// are updated; Phase 7 of the main refactor will delete the
-	// legacy block once the per-mechanism path has full coverage.
-	peer.PopulateFromAgent(agent)
-
-	return peer
-}
-
-// agentStateToTransportState converts AgentState to transport.PeerState.
-func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transport.PeerState {
-	switch state {
-	case AgentStateNeeded:
-		return transport.PeerStateNeeded
-	case AgentStateKnown:
-		return transport.PeerStateKnown
-	case AgentStateIntroduced:
-		return transport.PeerStateIntroducing
-	case AgentStateOperational:
-		return transport.PeerStateOperational
-	case AgentStateLegacy:
-		// Legacy = established relationship but no shared zones.
-		// Treated as active; map to Operational so legacy peers
-		// don't regress in transport snapshots.
-		return transport.PeerStateOperational
-	case AgentStateDegraded:
-		return transport.PeerStateDegraded
-	case AgentStateInterrupted:
-		return transport.PeerStateInterrupted
-	case AgentStateError:
-		return transport.PeerStateError
-	default:
-		return transport.PeerStateNeeded
-	}
 }
 
 // SendHelloWithFallback sends a Hello handshake to a peer with transport fallback (legacy name).
@@ -1558,58 +1466,59 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 
 	// Try API transport if locally supported, available, has valid endpoint, and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
+	// State gate reads the canonical transport.Peer mechanism state (raw).
+	apiGate, _ := mechStateForGate(peer, "API")
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
-		agent.Mu.Lock()
+		// Phase 2: outcome telemetry lives on transport.Peer (hello times via
+		// the transport send path; per-mechanism state below) — the
+		// AgentDetails mirror is gone.
 		if apiErr != nil {
 			lgConnRetry.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
-			agent.ApiDetails.LatestError = apiErr.Error()
-			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else if apiResp != nil && !apiResp.Accepted {
 			lgTransport.Warn("API Hello not accepted", "peer", peer.ID, "reason", apiResp.RejectReason)
-			agent.ApiDetails.LatestError = apiResp.RejectReason
-			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else {
 			lgTransport.Info("API Hello succeeded", "peer", peer.ID)
-			// Only transition to INTRODUCED if not already OPERATIONAL or better
-			// This prevents Hello messages from downgrading state (e.g., after retry or peer restart)
-			if agent.ApiDetails.State < AgentStateIntroduced {
-				agent.ApiDetails.State = AgentStateIntroduced
-				lgTransport.Info("updated agent API state to INTRODUCED after successful Hello", "agent", peer.ID)
-			}
-			agent.ApiDetails.HelloTime = time.Now()
-			agent.ApiDetails.LastContactTime = time.Now()
-			agent.ApiDetails.LatestError = ""
 		}
-		agent.Mu.Unlock()
+
+		// Canonical INTRODUCING on the transport peer (guarded: do not
+		// regress an already-OPERATIONAL-or-better mechanism, e.g. after a
+		// retry or peer restart). transport.Peer self-locks; written outside
+		// agent.Mu (lock order).
+		if apiErr == nil && apiResp != nil && apiResp.Accepted {
+			if raw, ok := peer.MechanismRawState("API"); !ok || raw < transport.PeerStateIntroducing {
+				peer.SetMechanismState("API", transport.PeerStateIntroducing, "API hello accepted")
+				lgTransport.Info("updated API mechanism state to INTRODUCING after successful Hello", "agent", peer.ID)
+			}
+		}
 	}
 
 	// Try DNS transport if supported and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
-	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && agent.DnsDetails.State == AgentStateKnown {
+	// State gate reads the canonical transport.Peer mechanism state (raw).
+	dnsGate, _ := mechStateForGate(peer, "DNS")
+	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown {
 		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
-		agent.Mu.Lock()
+		// Phase 2: outcome telemetry lives on transport.Peer — the
+		// AgentDetails mirror is gone.
 		if dnsErr != nil {
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
-			agent.DnsDetails.LatestError = dnsErr.Error()
-			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else if dnsResp != nil && !dnsResp.Accepted {
 			lgTransport.Warn("DNS Hello not accepted", "peer", peer.ID, "reason", dnsResp.RejectReason)
-			agent.DnsDetails.LatestError = dnsResp.RejectReason
-			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else {
 			lgTransport.Info("DNS Hello succeeded", "peer", peer.ID)
-			// Only transition to INTRODUCED if not already OPERATIONAL or better
-			// This prevents Hello messages from downgrading state (e.g., after retry or peer restart)
-			if agent.DnsDetails.State < AgentStateIntroduced {
-				agent.DnsDetails.State = AgentStateIntroduced
-				lgTransport.Info("updated agent DNS state to INTRODUCED after successful Hello", "agent", peer.ID)
-			}
-			agent.DnsDetails.HelloTime = time.Now()
-			agent.DnsDetails.LastContactTime = time.Now()
-			agent.DnsDetails.LatestError = ""
 		}
-		agent.Mu.Unlock()
+
+		// Canonical INTRODUCING on the transport peer (guarded: do not
+		// regress an already-OPERATIONAL-or-better mechanism, e.g. after a
+		// retry or peer restart). transport.Peer self-locks; written outside
+		// agent.Mu (lock order).
+		if dnsErr == nil && dnsResp != nil && dnsResp.Accepted {
+			if raw, ok := peer.MechanismRawState("DNS"); !ok || raw < transport.PeerStateIntroducing {
+				peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted")
+				lgTransport.Info("updated DNS mechanism state to INTRODUCING after successful Hello", "agent", peer.ID)
+			}
+		}
 	}
 
 	// Return success if ANY transport succeeded this call.
@@ -1620,24 +1529,21 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 		return dnsResp, nil
 	}
 
-	// If a transport was skipped (already past KNOWN) and no transport actively failed,
-	// treat that as success — the peer is already introduced on that transport.
-	if agent.DnsDetails != nil && agent.DnsDetails.State >= AgentStateIntroduced && dnsErr == nil {
+	// If a transport was skipped (already past KNOWN) and no transport actively
+	// failed, treat that as success — the peer is already introduced on that
+	// transport. Read the canonical transport.Peer mechanism state (raw).
+	dnsMech, _ := mechStateForGate(peer, "DNS")
+	apiMech, _ := mechStateForGate(peer, "API")
+	if dnsMech >= AgentStateIntroduced && dnsErr == nil {
 		return nil, nil
 	}
-	if agent.ApiDetails != nil && agent.ApiDetails.State >= AgentStateIntroduced && apiErr == nil {
+	if apiMech >= AgentStateIntroduced && apiErr == nil {
 		return nil, nil
 	}
 
 	// Both failed or skipped with nothing established
-	apiState := "<nil>"
-	if agent.ApiDetails != nil {
-		apiState = AgentStateToString[agent.ApiDetails.State]
-	}
-	dnsState := "<nil>"
-	if agent.DnsDetails != nil {
-		dnsState = AgentStateToString[agent.DnsDetails.State]
-	}
+	apiState := AgentStateToString[apiMech]
+	dnsState := AgentStateToString[dnsMech]
 	if apiResp == nil && dnsResp == nil && apiErr == nil && dnsErr == nil {
 		// No transport was in KNOWN state — nothing to do
 		return nil, fmt.Errorf("no transports in KNOWN state for Hello to peer %s (API: %s, DNS: %s)",
@@ -1657,17 +1563,33 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	var gossipData json.RawMessage
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
-			string(agent.Identity), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
+			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 		if len(gossipMsgs) > 0 {
 			gossipData, _ = json.Marshal(gossipMsgs)
 		}
+	}
+
+	// Read the canonical transport.Peer store rather than the Agent.State
+	// shadow. The shadow is written under agent.Mu by GetZoneAgentData and by
+	// the display surfaces (peer zones / hsync-agentstatus / hsync-locate),
+	// while this send path holds no lock on agent at all — a torn-read hazard
+	// on a string field, and one that `peer zones` on a converged fleet would
+	// provoke (2026-08-25 review, finding 3). The nil-registry branch is
+	// harness-only: no display surface exists to race with, and agent.Mu is
+	// the embedded peer mutex, so RLocking it here would risk recursive-RLock
+	// writer starvation.
+	var beatState AgentState
+	if tm.agentRegistry != nil {
+		beatState = tm.agentRegistry.effectiveAgentState(agent.ID)
+	} else {
+		beatState = agent.State
 	}
 
 	req := &transport.BeatRequest{
 		SenderID:  tm.LocalID,
 		Timestamp: time.Now(),
 		Sequence:  sequence,
-		State:     string(agent.State),
+		State:     string(beatState),
 		Gossip:    gossipData,
 	}
 
@@ -1678,59 +1600,76 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 
 	// Try API transport if locally supported, available, and has valid endpoint.
 	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
-	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
-		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy || agent.ApiDetails.State == AgentStateDegraded || agent.ApiDetails.State == AgentStateInterrupted {
+	// State gate reads the canonical transport.Peer mechanism state (raw).
+	apiBeatGate, _ := mechStateForGate(peer, "API")
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && peer.APIEndpoint != "" {
+		if apiBeatGate == AgentStateOperational || apiBeatGate == AgentStateIntroduced || apiBeatGate == AgentStateLegacy || apiBeatGate == AgentStateDegraded || apiBeatGate == AgentStateInterrupted {
+			// Was this mechanism already OPERATIONAL on the canonical store
+			// before this beat? Decides whether to fire the election notify.
+			apiRaw, _ := peer.MechanismRawState("API")
+			apiWasOperational := apiRaw == transport.PeerStateOperational
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
-			agent.Mu.Lock()
+			// Phase 2: beat telemetry lives on transport.Peer (Stats +
+			// BeatSequence via RecordMechanismBeatSent on the transport send
+			// path) — the AgentDetails mirror is gone. Deleting it also
+			// removes an E1.a-latent deadlock: the failure branches locked
+			// the (since-E1.a shared) peer mutex and never released it.
 			if apiErr != nil {
 				lgConnRetry.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
-				agent.ApiDetails.LatestError = apiErr.Error()
-				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else if apiResp != nil && !apiResp.Ack {
 				lgTransport.Debug("API Beat no confirmation (Ack=false)", "peer", peer.ID)
-				agent.ApiDetails.LatestError = "beat sent but not confirmed by peer"
-				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
-				agent.ApiDetails.State = AgentStateOperational
-				agent.ApiDetails.LastContactTime = time.Now()
-				agent.ApiDetails.LatestSBeat = time.Now()
-				agent.ApiDetails.LatestRBeat = time.Now()
-				agent.ApiDetails.SentBeats++
-				agent.ApiDetails.ReceivedBeats++
-				agent.ApiDetails.LatestError = ""
+
+				// OPERATIONAL on the canonical store — only an outbound beat
+				// round-trip means "I can reach this peer" (see DNS path).
+				peer.SetMechanismState("API", transport.PeerStateOperational, "API beat round-trip succeeded")
+				peer.SetMechanismLastBeatSent("API", time.Now())
+
+				if !apiWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
+					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+						tm.agentRegistry.sharedParticipantZones(agent.ID))
+				}
 			}
-			agent.Mu.Unlock()
 		}
 	}
 
 	// Try DNS transport if supported.
 	// Send on any active state including DEGRADED/INTERRUPTED — beats are how we recover.
+	// State gate reads the canonical transport.Peer mechanism state (raw).
+	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
-		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy || agent.DnsDetails.State == AgentStateDegraded || agent.DnsDetails.State == AgentStateInterrupted {
+		if dnsBeatGate == AgentStateOperational || dnsBeatGate == AgentStateIntroduced || dnsBeatGate == AgentStateLegacy || dnsBeatGate == AgentStateDegraded || dnsBeatGate == AgentStateInterrupted {
+			// Was this mechanism already OPERATIONAL on the canonical store
+			// before this beat? Decides whether to fire the election notify.
+			dnsRaw, _ := peer.MechanismRawState("DNS")
+			dnsWasOperational := dnsRaw == transport.PeerStateOperational
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
-			agent.Mu.Lock()
+			// Phase 2: beat telemetry lives on transport.Peer — the
+			// AgentDetails mirror (and its failure-branch mutex leak) is gone.
 			if dnsErr != nil {
 				lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
-				agent.DnsDetails.LatestError = dnsErr.Error()
-				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else if dnsResp != nil && !dnsResp.Ack {
 				// Beat() returns nil error but Ack:false when EDNS0 confirmation is missing.
 				// This means the DNS response was received but the peer didn't confirm processing.
 				lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
-				agent.DnsDetails.LatestError = "beat sent but not confirmed by peer"
-				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else {
 				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
-				agent.DnsDetails.State = AgentStateOperational
-				agent.DnsDetails.LastContactTime = time.Now()
-				agent.DnsDetails.LatestSBeat = time.Now()
-				agent.DnsDetails.LatestRBeat = time.Now()
-				agent.DnsDetails.SentBeats++
-				agent.DnsDetails.ReceivedBeats++
-				agent.DnsDetails.LatestError = ""
+
+				// OPERATIONAL on the canonical store: a successful OUTBOUND
+				// beat round-trip is the ONLY thing that means "I can reach
+				// this peer" (the definition). This is where state is set —
+				// never on inbound receipt.
+				peer.SetMechanismState("DNS", transport.PeerStateOperational, "DNS beat round-trip succeeded")
+				peer.SetMechanismLastBeatSent("DNS", time.Now())
+
+				// Election trigger moved here from the inbound-beat handler:
+				// elections fire when WE first become able to reach a peer.
+				if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
+					tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+						tm.agentRegistry.sharedParticipantZones(agent.ID))
+				}
 			}
-			agent.Mu.Unlock()
 		}
 	}
 
@@ -1772,11 +1711,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 // Bite 7 (inherited from Bite 1 step 5): delegates to
 // peer.PreferredMechanism() when the peer is in the registry, with a
 // fallback to the agent.ApiMethod / agent.DnsMethod flags for peers
-// not yet synced (e.g. during early startup before the first
-// SyncPeerFromAgent runs). Returns "none" for the no-mechanism case
-// to preserve the original contract.
+// not yet in the registry (e.g. during early startup). Returns "none"
+// for the no-mechanism case to preserve the original contract.
 func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
-	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+	if peer, ok := tm.PeerRegistry.Get(string(agent.ID)); ok {
 		if pref := peer.PreferredMechanism(); pref != "" {
 			return pref
 		}
@@ -1802,7 +1740,7 @@ func (tm *MPTransportBridge) HasDNSTransport(agent *Agent) bool {
 	if tm.DNSTransport == nil {
 		return false
 	}
-	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+	if peer, ok := tm.PeerRegistry.Get(string(agent.ID)); ok {
 		return peer.HasMechanism("DNS")
 	}
 	return agent.DnsMethod
@@ -1817,7 +1755,7 @@ func (tm *MPTransportBridge) HasAPITransport(agent *Agent) bool {
 	if tm.APITransport == nil {
 		return false
 	}
-	if peer, ok := tm.PeerRegistry.Get(agent.PeerID); ok {
+	if peer, ok := tm.PeerRegistry.Get(string(agent.ID)); ok {
 		return peer.HasMechanism("API")
 	}
 	return agent.ApiMethod
@@ -2052,7 +1990,7 @@ func (tm *MPTransportBridge) getAllAgentsForZone(zone ZoneName) ([]AgentId, erro
 
 	var agents []AgentId
 	for _, agent := range zad.Agents {
-		agents = append(agents, agent.Identity)
+		agents = append(agents, agent.ID)
 	}
 
 	return agents, nil

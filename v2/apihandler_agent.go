@@ -336,6 +336,14 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				resp.ErrorMsg = fmt.Sprintf("error getting agent info: %v", err)
 				return
 			}
+			// The response marshals the Agent, and MarshalJSON serializes the
+			// State shadow (stamped only at GetZoneAgentData time). Stamp it
+			// from the canonical transport.Peer store first (2026-08-25
+			// review, finding 1).
+			st := conf.InternalMp.AgentRegistry.effectiveAgentState(agent.ID)
+			agent.Mu.Lock()
+			agent.State = st
+			agent.Mu.Unlock()
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Data for remote agent %q", amp.AgentId)
 
@@ -379,13 +387,21 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 				return
 			}
 
-			// If agent info is incomplete, start a new lookup
-			if agent.State == AgentStateNeeded {
+			// If agent info is incomplete, start a new lookup. State reads the
+			// canonical transport.Peer store (END.0); was agent.State.
+			st := conf.InternalMp.AgentRegistry.effectiveAgentState(amp.AgentId)
+			if st == AgentStateNeeded {
 				conf.InternalMp.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent information is incomplete for %s, lookup in progress", amp.AgentId)
 				return
 			}
+
+			// Stamp the marshaled State shadow from the canonical store before
+			// returning the Agent (2026-08-25 review, finding 1).
+			agent.Mu.Lock()
+			agent.State = st
+			agent.Mu.Unlock()
 
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
@@ -400,7 +416,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
 
 			agent, exists := conf.InternalMp.AgentRegistry.S.Get(amp.AgentId)
-			if !exists || agent.State < AgentStateKnown {
+			// "Not yet discovered" reads the canonical transport.Peer store
+			// (END.0); was agent.State < AgentStateKnown.
+			if !exists || conf.InternalMp.AgentRegistry.effectiveAgentState(amp.AgentId) < AgentStateKnown {
 				// Try discovery first
 				conf.InternalMp.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
 				resp.Error = true
@@ -840,7 +858,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			lgApi.Debug("dump-agentregistry", "keys", keys)
 			for _, key := range keys {
 				if agent, exists := ar.S.Get(key); exists {
-					lgApi.Debug("agent registry entry", "identity", agent.Identity)
+					lgApi.Debug("agent registry entry", "identity", agent.ID)
 				}
 			}
 			lgApi.Debug("dump-agentregistry", "numShards", ar.S.NumShards())
@@ -1260,6 +1278,21 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		switch ahp.MessageType {
 		case AgentMsgHello:
 			resp.Status = "ok" // important
+
+			// END.0: inbound API hello accepted → INTRODUCING on the canonical
+			// transport.Peer API mechanism (symmetric with the inbound DNS path
+			// in routeHelloMessage). Guarded against regressing an already
+			// OPERATIONAL-or-better mechanism. Top-level peer.State is NOT
+			// written on inbound receipt (discovery-phase marker only).
+			if conf.InternalMp.TransportManager != nil {
+				peer := conf.InternalMp.TransportManager.PeerRegistry.GetOrCreate(dns.Fqdn(string(ahp.MyIdentity)))
+				peer.LastHelloReceived = time.Now()
+				if raw, ok := peer.MechanismRawState("API"); !ok || raw < transport.PeerStateIntroducing {
+					peer.SetMechanismState("API", transport.PeerStateIntroducing, "API hello accepted and authorized")
+				}
+				peer.SetMechanismLastHelloRecv("API", peer.LastHelloReceived)
+			}
+
 			conf.InternalMp.MsgQs.Hello <- &AgentMsgReport{
 				Transport:   "API",
 				MessageType: ahp.MessageType,

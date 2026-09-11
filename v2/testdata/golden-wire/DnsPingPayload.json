@@ -1,0 +1,10 @@
+{
+  "type": "ping",
+  "sender_id": "legacy-sender.example.",
+  "nonce": "ping-nonce",
+  "timestamp": 1700000005,
+  "MessageType": "ping",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "Time": "2026-01-02T03:04:05Z"
+}

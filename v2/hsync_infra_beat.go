@@ -51,10 +51,11 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			continue
 		}
 
-		a.Mu.RLock()
-		dnsState := a.DnsDetails.State
-		apiState := a.ApiDetails.State
-		a.Mu.RUnlock()
+		// Readiness reads the canonical transport.Peer per-mechanism state
+		// (END.0; raw, via mechStateForGate); was a.{Dns,Api}Details.State.
+		infraPeer := ar.MPTransport.GetOrCreatePeer(a)
+		dnsState, _ := mechStateForGate(infraPeer, "DNS")
+		apiState, _ := mechStateForGate(infraPeer, "API")
 
 		dnsReady := dnsState == AgentStateOperational || dnsState == AgentStateIntroduced ||
 			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
@@ -62,7 +63,7 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			apiState == AgentStateLegacy || apiState == AgentStateDegraded || apiState == AgentStateInterrupted
 
 		if !dnsReady && !apiReady {
-			lgAgent.Debug("infra peer not ready for beat, skipping", "peer", a.Identity,
+			lgAgent.Debug("infra peer not ready for beat, skipping", "peer", a.ID,
 				"dnsState", AgentStateToString[dnsState], "apiState", AgentStateToString[apiState])
 			continue
 		}
@@ -71,34 +72,21 @@ func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 			ctx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
 			defer cancel()
 
-			agent.Mu.RLock()
-			var sequence uint64
-			if agent.DnsDetails.SentBeats > 0 {
-				sequence = uint64(agent.DnsDetails.SentBeats)
-			}
-			agent.Mu.RUnlock()
+			sequence := ar.MPTransport.GetOrCreatePeer(agent).MechanismBeatSequence("DNS")
 
 			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
-			agent.Mu.Lock()
-			defer agent.Mu.Unlock()
-
+			// Phase 2: outcome telemetry lives on transport.Peer (state +
+			// LastBeatSent on the success path inside SendBeatWithFallback);
+			// the AgentDetails error mirror is gone.
 			if err != nil {
-				lgAgent.Warn("infra beat failed", "peer", agent.Identity, "err", err)
-				agent.DnsDetails.LatestError = err.Error()
-				agent.DnsDetails.LatestErrorTime = time.Now()
+				lgAgent.Warn("infra beat failed", "peer", agent.ID, "err", err)
 				return
 			}
-
 			if resp == nil || !resp.Ack {
-				agent.DnsDetails.LatestError = "infra beat not acknowledged"
-				agent.DnsDetails.LatestErrorTime = time.Now()
+				lgAgent.Debug("infra beat not acknowledged", "peer", agent.ID)
 				return
 			}
-
-			lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
-			agent.DnsDetails.SentBeats++
-			agent.DnsDetails.LatestSBeat = time.Now()
-			agent.DnsDetails.LatestError = ""
+			lgAgent.Debug("infra beat acknowledged", "peer", agent.ID, "state", resp.State)
 		}(a)
 	}
 }
