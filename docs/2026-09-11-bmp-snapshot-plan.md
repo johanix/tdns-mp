@@ -21,6 +21,8 @@ gone, `SignZone` takes a context), and an external review of this PR arrived
 (`reviews/2026-09-11-tdns-mp-PR44-bmp-snapshot-plan-review.md`, checked
 against `fe83b216`). §1.2, §1.4, §2.1–2.4, §3, §4, §5 and §6 are updated; §8
 records what was taken from the review and where this plan differs from it.
+**Re-reviewed at `4dfdcaf`** (`reviews/2026-09-11-tdns-mp-PR44-bmp-snapshot-plan-rereview.md`):
+"this is the working plan"; its five leftovers are applied here (§8).
 **Supersedes:** §9 of the 2026-07-02 doc. Its claim that `MPZoneData` gets the
 staging receivers "for free" by embedding is wrong: they are unexported and do
 not promote across packages. T-A below carries the dated amendment.
@@ -275,7 +277,7 @@ form:
 // Stager is what StageBatch hands its callback: staged writes, and reads of
 // the zone's next content (current including pending), all under zd.mu.
 type Stager interface {
-    RRset(name string, rrtype uint16) *core.RRset   // nil when absent
+    RRset(name string, rrtype uint16) *core.RRset   // next content; nil when absent
     SetRRset(name string, rs core.RRset)
     Delete(name string, rrtype uint16)
     DeleteOwner(name string)
@@ -286,10 +288,15 @@ type Stager interface {
 func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (BumperResponse, error)
 ```
 
-`RRset` reads the working set, so a pass sees its own earlier writes, and
-the read-then-stage race two concurrent combines would otherwise have
-through `RRsetForAnalysis` goes with it. The per-call `Stage*` functions stay
-for one-record changes.
+`RRset` reads the zone's next content. On a live zone the working set is
+nil between publishes, so a literal read of it would return nothing for
+every existing RRset and the combiner's merge would be wrong (re-review L2):
+`RRset` first seeds the working set from the published snapshot
+(`ensureWorkingSet`, exactly what `stagedOwner` does) and reads that, so a
+pass sees the served RRsets and its own earlier writes. On a draft it reads
+`Data`. The read-then-stage race two concurrent combines would otherwise
+have through `RRsetForAnalysis` goes with it. The per-call `Stage*`
+functions stay for one-record changes.
 
 **`CloneRRset`.** Export `cloneRRset` (review C1): the one-line way to build
 a new RRset from a served one before appending, which is what
@@ -330,8 +337,8 @@ owed instead of running them (`zd.postRefreshOwed = true`, under the `zd.mu`
 already held around `applyRefreshReplacementLocked`). Run them once the zone
 is Ready, and only then: in `completeFirstZonePolicyAndLoad` and in its
 retry twin `finishFirstLoadPolicy`, after `signOnceAfterPolicyBind` returns
-nil and before the journal replay and the `OnFirstLoad` drain, guarded by
-`zd.Ready`. The flag clears on that run and on no other path. Every later
+nil and the journal replay has run, before the `OnFirstLoad` drain, guarded
+by `zd.Ready`. The flag clears on that run and on no other path. Every later
 refresh is unchanged.
 
 - The callbacks then run at the moment the zone becomes Ready, which is the
@@ -354,6 +361,11 @@ refresh is unchanged.
   first-load a zone from file, assert the callback saw `Ready == true` and
   `GetOwner` succeed; once on an unsigned zone, once on a signing zone with a
   bound policy, where the callback must run after the sign.
+- After the replay, not before it (re-review L4). A later refresh reconciles
+  the journal and then runs its post-refresh callbacks (`FetchFromFile`), so
+  the first load keeps that order, and a change that only the journal holds
+  is visible to the callbacks. `finishFirstLoadPolicy` has no replay, so
+  there the drain follows the sign directly.
 - T-B changes when the callbacks run, not what Ready means. #514's rule that
   a signing zone is Ready only on a signed apex SOA stays (review B3); that
   rule is also why O2 below is rejected.
@@ -427,7 +439,11 @@ the TTL clamp and `UpsertZoneSigningMaxTTL`, and `HsyncDB` embeds
 first refresh. `CollectDynamicRRs` runs before the pre-refresh callbacks
 (`zone_utils.go:123`), so a source installed from `MPPreRefresh` is one
 refresh late and the first publish mints. Install it from the
-`multi-provider` zone-option handler, which fires during `ParseZones`.
+`multi-provider` zone-option handler, which fires during `ParseZones` once
+the zone is registered and before its first refresh. The handler receives
+the zone name and its options, not the zone (`ZoneOptionHandler`,
+`option_handlers.go`), so it looks the zone up with `Zones.Get(zname)`. One
+site, and the only one (re-review L1).
 
 **K1 — install keys into the signing-keys snapshot, plus a DNSKEY hook.**
 Export `InstallSigningKeys(dak)` (store a built `signingKeysSnapshot`) and a
@@ -571,7 +587,13 @@ exactly the three places where the MP fork's branches would have to go.
   in that same situation (`EnsureActiveDnssecKeysMP`, the `len(dak.KSKs) ==
   0` branch after its gate), so the hook does not preserve MP behaviour, it
   tightens it: the bootstrap mint is allowed only for a zone with no keys at
-  all, and MP may refuse even that and generate on its own terms.
+  all, and MP may refuse even that and generate on its own terms. When the
+  hook allows it, the key is generated `active`, as today's MP bootstrap
+  does; `StagedState` is not on this path, and T-S must not turn the
+  bootstrap into an `mpdist` key by accident, because a zone with no active
+  key cannot sign at all (re-review L5). Operator paths that also mint
+  active keys (the keystore's clear-and-regenerate, the policy reset) stay
+  unhooked: they are not the publish path.
   The alternative of keying these branches on `OptMultiProvider` inside tdns
   is smaller but puts the MP protocol's states into tdns; the hooks keep tdns
   ignorant of what `mpdist` means.
@@ -747,9 +769,8 @@ instead.
   is the body of `MPZoneData.PublishDnskeyRRs` (`mp_signer.go:283–349`)
   minus the apex `Set`: active keys, the `MPDnssecKeyStore` rows
   (mpdist/published/standby/retired/foreign), the `RemoteDNSKEYs` merge,
-  deduplicated. `SetKeySource` is called where a zone becomes a signer zone
-  (`MPPreRefresh`, where inline-signing is switched on) and at startup for
-  zones already so.
+  deduplicated. `SetKeySource` is called once, from the `multi-provider`
+  zone-option handler (§2.3), which looks the zone up by name.
 - `MPZoneData.SignZone` and `PublishDnskeyRRs` are deleted; tdns signs the
   zone on first load, on every refresh and on renewal exactly as under M-2S
   (§2.4.4, first bullet), asking the source for keys. `extractRemoteDNSKEYs`
@@ -762,8 +783,6 @@ instead.
   wait instead of today's drop-when-full: after #514 a dropped key-state
   trigger is not repaired by the periodic pass, which renews by age (#46
   item 3).
-- `SetKeySource` is called from the `multi-provider` zone-option handler
-  (§2.3, startup order), not from `MPPreRefresh`.
 - Invalidate: every MP key-state change that today calls
   `mpDnskeyCacheDelete` (`signer_keydb.go`) is where the source's answer
   changes; nothing else to do, since tdns asks the source on every sign and
@@ -833,15 +852,19 @@ In package `tdnsmp`, so only exported tdns API: a zone from `ReadZoneData` +
 `StopPublisher` to its cleanup) and a temporary `KeyDB` for the `HsyncDB`.
 
 - **Combiner (M-1).** Seed `AgentContributions` for two agents;
-  `RebuildCombinerData`; `CombineWithLocalChanges`; assert the served NS
-  RRset is unchanged and the serial unchanged (staged, not published);
-  `BumpSerialOnly`; assert the merged NS is served and the serial advanced
-  by exactly one. Then `InjectSignatureTXT` twice (one TXT, one bump);
-  `RemoveCombinerDataNG` of the last contribution for a type → the type is
-  gone and, when it was the owner's only type, the owner too;
-  `restoreUpstreamRRset` for NS restores the upstream set. Same sequence on a
-  draft (a zone with `Data` and no snapshot) → `RRsetForAnalysis` sees the
-  result, `InstallInitialSnapshot` serves it.
+  `RebuildCombinerData`; run the combine as the one `StageBatch` it becomes
+  after M-1. Inside the callback, `s.RRset` shows the served NS RRset before
+  `s.SetRRset` and the merged one after it, and the served zone is still
+  the old one. After the batch: the merged NS is served, the serial advanced
+  by exactly one, one NOTIFY was queued. A second identical batch reports no
+  change and publishes nothing. Then `InjectSignatureTXT` twice, two batches
+  (one TXT, one bump); `RemoveCombinerDataNG` of the last contribution for a
+  type → the type is gone and, when it was the owner's only type, the owner
+  too; `restoreUpstreamRRset` for NS restores the upstream set. Same
+  sequence on a draft (a zone with `Data` and no snapshot) → the batch
+  writes `Data` and publishes nothing, `RRsetForAnalysis` sees the result,
+  `InstallInitialSnapshot` serves it. (The two-step stage-then-bump the
+  first versions described would pin an API M-1 deletes; re-review L3.)
 - **Signer, mode 2.** MP policy; `SignZone(ctx, …)` and then a refresh
   from file (the publish-path sign); assert after each: DNSKEY RRset is
   exactly the MP active keys; every RRset including SOA and NSEC has RRSIGs
@@ -1026,3 +1049,14 @@ does with it:
 | C1 export `CloneRRset` | Taken (§2.1). |
 | "IMR forwarding is still the remaining matrix gate" | Not so: #433, #445 and #464 are on `main`. The rig's gate is its own tdns pin (§5.4). |
 | "T-C until T-S is completed" | The review offered two ways to close: recommend T-C, or keep T-S and design A1–A3 into it. This version takes the second (Q2); Johan's stated preference for reusing the signer core is the reason. |
+
+The re-review at `4dfdcaf` closed A1–A7, B1–B3, C1, Q4 and Q9, agreed with
+both corrections above, and prefers T-S as now specified. Its leftovers:
+
+| finding | disposition |
+|---|---|
+| L1 the key source's install site named a handler that does not receive the zone; §3.3 named two sites | Taken: one site, the `multi-provider` zone-option handler looking the zone up by name (§2.3, §3.3). |
+| L2 `Stager.RRset` on a live zone must seed the working set first | Taken (§2.1). |
+| L3 the combiner test still pinned stage-then-bump | Taken: rewritten around `StageBatch` (§5.2). |
+| L4 drain after the journal replay, to match a later refresh's order | Taken (§2.2). |
+| L5 say that a permitted bootstrap mint is `active`, not `StagedState` | Taken (§2.4.4). |
