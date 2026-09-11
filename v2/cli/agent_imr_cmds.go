@@ -18,11 +18,15 @@ import (
 // IMR command tree for tdns-mpcli. Mirrors the tdns library's
 // factory-based layout so adding more daemons (or more commands)
 // stays one-line. Today the only tdns-mp app with an IMR is
-// tdns-mpagent, so we only attach a single subtree under AgentCmd.
+// tdns-mpagent, so only the agent tree gets this subtree.
 
-var agentImrCmd = &cobra.Command{
-	Use:   "imr",
-	Short: "IMR (Internal Recursive Resolver) cache commands",
+func newAgentImrCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "imr",
+		Short: "IMR (Internal Recursive Resolver) cache commands",
+	}
+	addImrLeafCmds(c, kind)
+	return c
 }
 
 func newImrQueryCmd(role string) *cobra.Command {
@@ -33,7 +37,7 @@ func newImrQueryCmd(role string) *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			qname := dns.Fqdn(args[0])
 			qtype := args[1]
-			amr, err := SendImrMgmtCmd(role, &AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(cmd, &AgentMgmtPost{
 				Command: "imr-query",
 				Data: map[string]interface{}{
 					"qname": qname,
@@ -74,7 +78,7 @@ func newImrFlushCmd(role string) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			qname := dns.Fqdn(args[0])
-			amr, err := SendImrMgmtCmd(role, &AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(cmd, &AgentMgmtPost{
 				Command: "imr-flush",
 				Data:    map[string]interface{}{"qname": qname},
 			})
@@ -95,7 +99,7 @@ func newImrResetCmd(role string) *cobra.Command {
 		Use:   "reset",
 		Short: "Flush entire IMR cache and re-prime (preserves root NS)",
 		Run: func(cmd *cobra.Command, args []string) {
-			amr, err := SendImrMgmtCmd(role, &AgentMgmtPost{Command: "imr-reset"})
+			amr, err := SendImrMgmtCmd(cmd, &AgentMgmtPost{Command: "imr-reset"})
 			if err != nil {
 				log.Fatalf("Request failed: %v", err)
 			}
@@ -117,7 +121,7 @@ func newImrShowCmd(role string) *cobra.Command {
 			if imrShowID == "" {
 				log.Fatal("--id flag is required")
 			}
-			amr, err := SendImrMgmtCmd(role, &AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(cmd, &AgentMgmtPost{
 				Command: "imr-show",
 				AgentId: AgentId(imrShowID),
 			})
@@ -164,7 +168,7 @@ func newImrDumpTuningCmd(role string) *cobra.Command {
 		Use:   "dump-tuning",
 		Short: "Show effective IMR tuning values (backoff policy, family, discovery, etc.)",
 		Run: func(cmd *cobra.Command, args []string) {
-			amr, err := SendImrMgmtCmd(role, &AgentMgmtPost{Command: "imr-dump-tuning"})
+			amr, err := SendImrMgmtCmd(cmd, &AgentMgmtPost{Command: "imr-dump-tuning"})
 			if err != nil {
 				log.Fatalf("Request failed: %v", err)
 			}
@@ -212,7 +216,7 @@ func newImrDumpZoneBackoffsCmd(role string) *cobra.Command {
 			if len(args) == 1 {
 				data["zone"] = dns.Fqdn(args[0])
 			}
-			amr, err := SendImrMgmtCmd(role, &AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(cmd, &AgentMgmtPost{
 				Command: "imr-dump-zone-backoffs",
 				Data:    data,
 			})
@@ -255,9 +259,4 @@ func addImrLeafCmds(parent *cobra.Command, role string) {
 		newImrDumpTuningCmd(role),
 		newImrDumpZoneBackoffsCmd(role),
 	)
-}
-
-func init() {
-	AgentCmd.AddCommand(agentImrCmd)
-	addImrLeafCmds(agentImrCmd, "agent")
 }

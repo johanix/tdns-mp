@@ -9,109 +9,112 @@ import (
 	"log"
 	"sort"
 
-	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
-var CombinerShowDataCmd = &cobra.Command{
-	Use:   "show-combiner-data",
-	Short: "Show the combiner's local data store (merged + per-agent)",
-	Long: `Display the combiner's CombinerData (merged view) and AgentContributions
+func newCombinerShowDataCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "show-combiner-data",
+		Short: "Show the combiner's local data store (merged + per-agent)",
+		Long: `Display the combiner's CombinerData (merged view) and AgentContributions
 (per-agent breakdown) for all zones or a specific zone.
 
 Example:
   tdns-cliv2 combiner show-combiner-data
   tdns-cliv2 combiner show-combiner-data --zone whisky.dnslab.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
 
-		resp, err := SendCombinerDebugCmd(CombinerDebugPost{
-			Command: "show-combiner-data",
-			Zone:    zone,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerDebugCmd(cmd, CombinerDebugPost{
+				Command: "show-combiner-data",
+				Zone:    zone,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		if resp.Error {
-			log.Fatalf("Error: %s", resp.ErrorMsg)
-		}
+			if resp.Error {
+				log.Fatalf("Error: %s", resp.ErrorMsg)
+			}
 
-		hasMerged := len(resp.CombinerData) > 0
-		hasContribs := len(resp.AgentContributions) > 0
+			hasMerged := len(resp.CombinerData) > 0
+			hasContribs := len(resp.AgentContributions) > 0
 
-		if !hasMerged && !hasContribs {
-			fmt.Printf("No combiner data stored\n")
-			return
-		}
+			if !hasMerged && !hasContribs {
+				fmt.Printf("No combiner data stored\n")
+				return
+			}
 
-		// Display per-agent contributions first (more detailed)
-		if hasContribs {
-			fmt.Printf("Per-Agent Contributions\n")
-			fmt.Printf("=======================\n\n")
+			// Display per-agent contributions first (more detailed)
+			if hasContribs {
+				fmt.Printf("Per-Agent Contributions\n")
+				fmt.Printf("=======================\n\n")
 
-			// Sort zones
-			zones := sortedKeys(resp.AgentContributions)
-			for _, zoneName := range zones {
-				agentMap := resp.AgentContributions[zoneName]
-				fmt.Printf("Zone: %s\n", zoneName)
-				fmt.Printf("────────────────────────────────────────\n")
+				// Sort zones
+				zones := sortedKeys(resp.AgentContributions)
+				for _, zoneName := range zones {
+					agentMap := resp.AgentContributions[zoneName]
+					fmt.Printf("Zone: %s\n", zoneName)
+					fmt.Printf("────────────────────────────────────────\n")
 
-				// Sort agents
-				agents := sortedKeys(agentMap)
-				for _, agentID := range agents {
-					ownerMap := agentMap[agentID]
-					fmt.Printf("  Agent: %s\n", agentID)
+					// Sort agents
+					agents := sortedKeys(agentMap)
+					for _, agentID := range agents {
+						ownerMap := agentMap[agentID]
+						fmt.Printf("  Agent: %s\n", agentID)
 
-					// Sort owners
-					owners := sortedKeys(ownerMap)
-					for _, owner := range owners {
-						rrTypeMap := ownerMap[owner]
-						// Sort RR types
-						rrTypes := sortedKeys(rrTypeMap)
-						for _, rrTypeName := range rrTypes {
-							rrs := rrTypeMap[rrTypeName]
-							fmt.Printf("    %s %s (%d records):\n", owner, rrTypeName, len(rrs))
-							for _, rr := range rrs {
-								fmt.Printf("      %s\n", rr)
+						// Sort owners
+						owners := sortedKeys(ownerMap)
+						for _, owner := range owners {
+							rrTypeMap := ownerMap[owner]
+							// Sort RR types
+							rrTypes := sortedKeys(rrTypeMap)
+							for _, rrTypeName := range rrTypes {
+								rrs := rrTypeMap[rrTypeName]
+								fmt.Printf("    %s %s (%d records):\n", owner, rrTypeName, len(rrs))
+								for _, rr := range rrs {
+									fmt.Printf("      %s\n", rr)
+								}
 							}
 						}
 					}
+					fmt.Printf("\n")
 				}
-				fmt.Printf("\n")
 			}
-		}
 
-		// Display merged CombinerData
-		if hasMerged {
-			fmt.Printf("Merged CombinerData\n")
-			fmt.Printf("===================\n\n")
+			// Display merged CombinerData
+			if hasMerged {
+				fmt.Printf("Merged CombinerData\n")
+				fmt.Printf("===================\n\n")
 
-			// Sort zones
-			zones := sortedKeys(resp.CombinerData)
-			for _, zoneName := range zones {
-				ownerMap := resp.CombinerData[zoneName]
-				fmt.Printf("Zone: %s\n", zoneName)
-				fmt.Printf("────────────────────────────────────────\n")
+				// Sort zones
+				zones := sortedKeys(resp.CombinerData)
+				for _, zoneName := range zones {
+					ownerMap := resp.CombinerData[zoneName]
+					fmt.Printf("Zone: %s\n", zoneName)
+					fmt.Printf("────────────────────────────────────────\n")
 
-				// Sort owners
-				owners := sortedKeys(ownerMap)
-				for _, ownerName := range owners {
-					rrTypeMap := ownerMap[ownerName]
-					rrTypes := sortedKeys(rrTypeMap)
-					for _, rrTypeName := range rrTypes {
-						rrs := rrTypeMap[rrTypeName]
-						fmt.Printf("  %s %s (%d records):\n", ownerName, rrTypeName, len(rrs))
-						for _, rr := range rrs {
-							fmt.Printf("    %s\n", rr)
+					// Sort owners
+					owners := sortedKeys(ownerMap)
+					for _, ownerName := range owners {
+						rrTypeMap := ownerMap[ownerName]
+						rrTypes := sortedKeys(rrTypeMap)
+						for _, rrTypeName := range rrTypes {
+							rrs := rrTypeMap[rrTypeName]
+							fmt.Printf("  %s %s (%d records):\n", ownerName, rrTypeName, len(rrs))
+							for _, rr := range rrs {
+								fmt.Printf("    %s\n", rr)
+							}
 						}
 					}
+					fmt.Printf("\n")
 				}
-				fmt.Printf("\n")
 			}
-		}
-	},
+		},
+	}
+	c.Flags().String("zone", "", "Filter by specific zone")
+	return c
 }
 
 // sortedKeys returns the sorted keys of a map[string]T.
@@ -124,9 +127,8 @@ func sortedKeys[T any](m map[string]T) []string {
 	return keys
 }
 
-func SendCombinerDebugCmd(req CombinerDebugPost) (*CombinerDebugResponse, error) {
-	// Always use the combiner API client — this command only talks to the combiner.
-	api, err := tdnscli.GetApiClient("combiner", true)
+func SendCombinerDebugCmd(cmd *cobra.Command, req CombinerDebugPost) (*CombinerDebugResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
@@ -156,10 +158,4 @@ func SendCombinerDebugCmd(req CombinerDebugPost) (*CombinerDebugResponse, error)
 	}
 
 	return &resp, nil
-}
-
-func init() {
-	CombinerCmd.AddCommand(CombinerShowDataCmd)
-
-	CombinerShowDataCmd.Flags().String("zone", "", "Filter by specific zone")
 }

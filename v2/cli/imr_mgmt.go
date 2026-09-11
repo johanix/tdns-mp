@@ -8,19 +8,15 @@ import (
 	"fmt"
 	"log"
 
-	tdnscli "github.com/johanix/tdns/v2/cli"
+	"github.com/spf13/cobra"
 )
 
-// SendImrMgmtCmd POSTs an AgentMgmtPost to the daemon's /imr endpoint.
-// role selects the ApiClient -- presently always "agent" in tdns-mpcli
-// since tdns-mpagent is the only tdns-mp app that hosts an IMR, but
-// kept as an argument so the helper stays symmetric with the tdns
-// library's SendImrMgmtCmd and accepts new roles trivially if more
-// MP apps ever embed an IMR.
-func SendImrMgmtCmd(role string, req *AgentMgmtPost) (*AgentMgmtResponse, error) {
-	api, err := tdnscli.GetApiClient(role, true)
+// SendImrMgmtCmd POSTs an AgentMgmtPost to the /imr endpoint of the
+// instance cmd's tree targets. Presently only tdns-mpagent hosts an IMR.
+func SendImrMgmtCmd(cmd *cobra.Command, req *AgentMgmtPost) (*AgentMgmtResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
-		log.Fatalf("Error getting API client for role %q: %v", role, err)
+		log.Fatalf("Error getting API client for %q: %v", RoleForCmd(cmd), err)
 	}
 
 	_, buf, err := api.RequestNG("POST", "/imr", req, true)

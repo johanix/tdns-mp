@@ -19,10 +19,11 @@ import (
 
 var keysServerConfig string
 
-// NewKeysCmd returns a fresh "keys" command tree bound to the given role.
-// Role must be "agent" or "combiner" — the tree is only meaningful under
-// those two API clients (their configs point to the long_term_jose_priv_key).
-func NewKeysCmd(role string) *cobra.Command {
+// NewKeysCmd returns a fresh "keys" command tree for a daemon of the given
+// kind. kind must be "agent" or "combiner" — the tree is only meaningful for
+// those two (their configs point to the long_term_jose_priv_key). The target
+// instance is read from the tree.
+func NewKeysCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "keys",
 		Short: "JOSE keypair for secure CHUNK (generate, show)",
@@ -35,7 +36,7 @@ func NewKeysCmd(role string) *cobra.Command {
 		Use:   "generate",
 		Short: "Generate JOSE keypair and write to config path or -output",
 		Run: func(cmd *cobra.Command, args []string) {
-			runKeysCommand(role, cmd, "generate", args)
+			runKeysCommand(kind, cmd, "generate", args)
 		},
 	}
 	generate.Flags().StringP("output", "o", "", "path for generated private key (overrides config)")
@@ -44,7 +45,7 @@ func NewKeysCmd(role string) *cobra.Command {
 		Use:   "show",
 		Short: "Print public key (JWK) from configured long_term_jose_priv_key",
 		Run: func(cmd *cobra.Command, args []string) {
-			runKeysCommand(role, cmd, "show", args)
+			runKeysCommand(kind, cmd, "show", args)
 		},
 	}
 
@@ -52,21 +53,21 @@ func NewKeysCmd(role string) *cobra.Command {
 	return c
 }
 
-func runKeysCommand(role string, cmd *cobra.Command, subcommand string, args []string) {
-	if role != "agent" && role != "combiner" {
+func runKeysCommand(kind string, cmd *cobra.Command, subcommand string, args []string) {
+	if kind != "agent" && kind != "combiner" {
 		log.Fatalf("keys must be run under agent or combiner (e.g. tdns-cli agent keys %s)", subcommand)
 	}
 
 	serverConfigPath := keysServerConfig
 	if serverConfigPath == "" {
-		clientKey := tdnscli.GetClientKeyFromParent(role)
+		clientKey := tdnscli.GetClientKeyFromParent(RoleForCmd(cmd))
 		if ad := tdnscli.GetApiDetailsByClientKey(clientKey); ad != nil && ad.ConfigFile != "" {
 			serverConfigPath = ad.ConfigFile
 		}
 	}
 	if serverConfigPath == "" {
 		log.Fatalf("No server config: set apiservers.*.config_file in tdns-cli config for %s, or use --server-config",
-			tdnscli.GetClientKeyFromParent(role))
+			tdnscli.GetClientKeyFromParent(RoleForCmd(cmd)))
 	}
 
 	mp, err := tdnsmp.LoadMpConfigForKeys(serverConfigPath)
