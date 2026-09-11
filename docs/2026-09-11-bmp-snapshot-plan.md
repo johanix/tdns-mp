@@ -2,11 +2,11 @@
 
 **Date:** 2026-09-11
 **Status:** plan. Nothing here is implemented.
-**Basis:** tdns `main` at `d1eec102` (the pin of #43; `02581d04` on top is a
-dependency bump only) and tdns-mp `fix/modern-repin` at `b955faf` (#43; the
-four commits it gained afterwards, up to `a8e1e50`, touch none of the files
-cited here).
-Line numbers are anchors at those commits and drift; re-locate by symbol.
+**Basis:** tdns `main` at `fe83b216` (#514 merged 2026-09-11 20:08 UTC) and
+tdns-mp `fix/modern-repin` at `a8e1e50` (#43). The first two versions of this
+plan were written against `d1eec102`, the pin of #43; anchors below are kept
+where the code did not move and restated where #514 moved it. Line numbers
+drift; re-locate by symbol.
 **Reads with:** tdns `docs/2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 (the model; its §9 defined B-MP and is corrected below), the re-pin trial
 review of 2026-09-10 (§G) and the lab-run log of 2026-09-11, both in the
@@ -14,6 +14,13 @@ project's `reviews/` directory.
 **Amended the same evening:** §2.4 evaluates making tdns-signer the core of
 tdns-mpsigner, as Johan asked after the first version, and the
 recommendation for the key seam changed to it (§0, §4, §6 Q2 updated).
+**Amended again, late the same day, for two events:** tdns merged #514
+(publish signs the staged content before the swap, a signing zone is Ready
+only on a signed apex SOA, `SetupZoneSigning` and `NotifyDownstreams` are
+gone, `SignZone` takes a context), and an external review of this PR arrived
+(`reviews/2026-09-11-tdns-mp-PR44-bmp-snapshot-plan-review.md`, checked
+against `fe83b216`). §1.2, §1.4, §2.1–2.4, §3, §4, §5 and §6 are updated; §8
+records what was taken from the review and where this plan differs from it.
 **Supersedes:** §9 of the 2026-07-02 doc. Its claim that `MPZoneData` gets the
 staging receivers "for free" by embedding is wrong: they are unexported and do
 not promote across packages. T-A below carries the dated amendment.
@@ -32,11 +39,11 @@ Three small tdns PRs come first, then two tdns-mp PRs, then the test rigs:
 
 | PR | what | size |
 |---|---|---|
-| T-A | export the analysis readers, a draft-aware staging API, `StopPublisher` | ½ day |
-| T-B | a first load runs its post-refresh callbacks once the zone is Ready | ½ day |
-| T-C or T-S | the key seam: a per-zone key source (§2.3) **or** MP keys in tdns's keystore with three states and lifecycle hooks (§2.4, recommended) | 1 day |
-| M-1 | re-pin; readers, combiner staging, gate, both workarounds deleted | 1½ days + lab |
-| M-2 or M-2S | re-pin; the signer uses tdns's `SignZone`: through the key source (M-2) or with the signer fork retired and its keys migrated (M-2S, recommended) | 1–2 days + lab |
+| T-A | export the analysis readers, a draft-aware staging API with a batched stage-and-publish, `CloneRRset`, `StopPublisher` | ¾ day |
+| T-B | a first load runs its post-refresh callbacks once the zone is Ready (for a signer: once its SOA is signed) | ½ day |
+| T-C or T-S | the key seam: a per-zone key source (§2.3) **or** MP keys in tdns's keystore with three states and lifecycle hooks, generation included (§2.4, recommended) | 1 day / 1½–2 days |
+| M-1 | re-pin of the combiner, agent and auditor only; readers, combiner staging, gate, both workarounds deleted | 2 days + lab |
+| M-2 or M-2S | the mpsigner's re-pin, and its first past #514: through the key source (M-2) or with the signer fork retired and its keys migrated (M-2S, recommended) | 1 day / 2–3 days + lab |
 | R-1 | `mp-comms` gains data-path assertions | 1 day |
 | R-2 | `mp-policy-matrix` gains signature validation and a DNSKEY roll | ½ day |
 
@@ -50,7 +57,8 @@ tdns's signer core carry multi-provider zones).
 All four items are read from the code. Items 1 and 2 were seen in the lab and
 are worked around in #43; items 3 and 4 have not been observed because the
 `mp-comms` rig asserts only communications. Item 4 goes further than the
-trial's §G.
+trial's §G, and #514 made items 2 and 4 worse than the first version of this
+plan said.
 
 ### 1.1 Pre-refresh reads of the incoming zone (worked around by `802f0c5`)
 
@@ -72,9 +80,20 @@ with the unexported `ownerForAnalysis` / `rrsetForAnalysis`
 
 On a first load the sequence is: pre-refresh callbacks →
 `applyRefreshReplacementLocked` publishes the snapshot but sets `Ready` only
-`if !firstLoad` (`zone_mutation.go:732`) → post-refresh callbacks →
-`completeFirstZonePolicyAndLoad` → `InstallInitialSnapshot` sets `Ready`
-(`zone_mutation.go:808`) → policy sync → journal replay → `OnFirstLoad`.
+`if !firstLoad` → post-refresh callbacks → `completeFirstZonePolicyAndLoad`
+→ `InstallInitialSnapshot` → policy sync → `signOnceAfterPolicyBind` →
+journal replay → `OnFirstLoad` (`refreshengine.go:384`, after #514).
+
+Where `Ready` flips depends on the zone. After #514 a zone is Ready only on a
+servable snapshot (`markReadyIfServableLocked`,
+`snapshotContentIsServableLocked`): any snapshot for a zone that does not
+sign its own content, one whose apex SOA carries an RRSIG for a zone that
+does. A combiner's zones therefore become Ready at `InstallInitialSnapshot`.
+A signer's do not: the first-load publish cannot sign because the policy is
+not bound yet, `InstallInitialSnapshot` finds an unsigned SOA and leaves
+`Ready` false, and the flip happens inside the publish that
+`signOnceAfterPolicyBind` → `SignZone` makes, after the policy sync. The
+first-load post-refresh callbacks run before all of that in both cases.
 
 So the post-refresh callbacks of a first load run against a zone that HAS a
 published snapshot and is NOT Ready. `GetOwner` refuses with
@@ -90,9 +109,10 @@ the auditor already had one (`start_auditor.go:111`).
 
 The deferral of `Ready` on a first load is deliberate: `Ready` means "complete
 content", and a to-be-signed zone must not serve or transfer before its first
-`SignZone` (tdns `docs/2026-07-13-unsigned-publish-window.md`). The defect is
-not the deferral, it is that one class of callback runs on the wrong side of
-it.
+`SignZone` (tdns `docs/2026-07-13-unsigned-publish-window.md`; #514 closed
+that window, C1 in `docs/2026-09-05-signing-publish-notify-correctness.md`).
+The defect is not the deferral, it is that one class of callback runs on the
+wrong side of it.
 
 ### 1.3 Combiner writes after load go nowhere
 
@@ -122,12 +142,13 @@ Only the last row is served. On a cold start the first pre-refresh combine has
 no contributions yet (they are hydrated in `OnFirstLoad`, `config.go:152`),
 so a combiner serves the upstream zone unmodified until the next refresh.
 
-Two side effects of the same model change: `publishLocked` NOTIFYs
-downstreams itself (`zone_mutation.go`, end of `publishWorkingSetLocked`), so
-the explicit `go zd.NotifyDownstreams()` at `apihandler_combiner.go:215` and
-`combiner_msg_handler.go:287` now notifies twice; and `InjectSignatureTXT`
-appends onto `existing.RRs` obtained from a served owner, which is the §1.4
-aliasing the model forbids.
+Two side effects of the same model change. Publish NOTIFYs downstreams
+itself, and after #514 it is the only thing that does (C2; `NotifyDownstreams`
+no longer exists), so the explicit `go zd.NotifyDownstreams()` at
+`apihandler_combiner.go:215` and `combiner_msg_handler.go:287` notified twice
+on `d1eec102` and do not compile at the next re-pin (tdns-mp#46). And
+`InjectSignatureTXT` appends onto `existing.RRs` obtained from a served owner,
+which is the §1.4 aliasing the model forbids.
 
 ### 1.4 The signer signs the served snapshot in place, and publish re-signs the SOA with the wrong keys
 
@@ -149,28 +170,36 @@ Tracing one call on tdns main shows it is worse than that:
    included, into the **snapshot's** apex (`:356`), not the working-set clone.
 4. The loop signs the snapshot's owners in place; for the apex that is again
    the snapshot's store, not the clone.
-5. `BumpSerial` → `publishSync` → `publishLocked`: the working set's apex
-   clone (step 1's DNSKEY set, unsigned RRsets) replaces the apex that step
-   3 and 4 wrote. `resignWorkingSetSOAIfSigned` then calls
-   `zd.EnsureActiveDnssecKeys(zd.KeyDB, true)` (`zone_mutation.go`, the
-   publish path) — tdns's keystore, `DnssecKeyStore`, which holds no keys for
-   an MP zone (they are in `MPDnssecKeyStore`) — and with `zd.DnssecPolicy`
+5. `BumpSerial` → `publishSync` → `publishWorkingSetLocked`: the working
+   set's apex clone (step 1's DNSKEY set, unsigned RRsets) replaces the apex
+   that steps 3 and 4 wrote. Before the swap, publish resolves its signing
+   material through `resolveSigningMaterialLocked` →
+   `zd.EnsureActiveDnssecKeys(zd.KeyDB, true)` (`zone_mutation.go:965` after
+   #514). That is tdns's keystore, `DnssecKeyStore`, which holds no keys for
+   an MP zone (they are in `MPDnssecKeyStore`), so with `zd.DnssecPolicy`
    bound it **generates a KSK and ZSK in the tdns keystore**, stages a DNSKEY
-   RRset of those keys, and signs the SOA with them.
+   RRset of those keys, and signs the whole staged scope with them
+   (`signStagedScopeLocked`). Before #514 the same call re-signed only the
+   SOA.
 
-Expected served result after one `SignZone` on tdns main: apex RRsets unsigned
-or stale-signed, DNSKEY RRset made of tdns-minted keys (no MP keys, no
-foreign keys), SOA signed by a tdns-minted ZSK, every other RRset signed by
-MP keys that are not in the DNSKEY set. That is a bogus zone from the first
-sign. If key generation fails instead (an MP policy the tdns generator
-refuses), the SOA is not re-signed and the DNSKEY set is the MP active keys
-only — also wrong, less loudly. Which of the two happens is the first thing
-the lab data-path run (§5.3, D0) must establish; neither is acceptable.
+Expected served result after one `SignZone` on tdns main: a zone signed
+throughout by tdns-minted keys that no agent knows and no other signer has
+been told about, with a DNSKEY RRset of those keys and none of the MP or
+foreign keys. Its apex SOA is signed, so it is Ready: it answers queries and
+transfers out. Before #514 the apex stayed unsigned and the zone was bogus in
+a way every validator would see; after #514 it validates against the wrong
+keyset, which is worse. If key generation fails instead (an MP policy the
+tdns generator refuses), the publish is refused and the zone stays not Ready.
+The same path runs on every refresh of a signer zone with no MP code involved
+at all: `applyRefreshReplacementLocked` stages a full sign and the refresh
+publish resolves keys the same way. D0 (§5.3) is the assertion, and the
+consequence for sequencing is in §4: no mpsigner re-pins onto a tdns with
+#514 before the key seam has landed.
 
 The trial's §G asked tdns to export a `dak`-taking staged `SignZone` and a
 `PublishDnskeyRRs` that accepts foreign keys. Those two exports would fix
-steps 1–4 and leave step 5 in place: the SOA re-sign lives inside publish and
-resolves keys on its own. The fix has to be a key seam: either tdns asks the zone for its keys
+steps 1–4 and leave step 5 in place: the signing pass lives inside publish
+and resolves keys on its own. The fix has to be a key seam: either tdns asks the zone for its keys
 (§2.3) or the zone's keys live where tdns already looks (§2.4).
 
 ### 1.5 Mutator inventory at `b955faf`
@@ -198,7 +227,8 @@ they reuse tdns's `OwnerData` type and one of them names its field `Data`.
 Three PRs, each reviewable alone. T-A and T-B unblock M-1; the key seam
 (T-C in §2.3, or T-S in §2.4, the recommended one) unblocks M-2.
 Every tdns change here is app-neutral: tdns-auth's behaviour does not change
-unless a caller opts in (a key source set, a callback registered).
+unless a caller opts in (a key source set, a callback registered). Anchors in
+this section are post-#514.
 
 ### 2.1 T-A — analysis readers, draft-aware staging, `StopPublisher`
 
@@ -231,10 +261,45 @@ MP-private stores). The live branch is `zd.mu.Lock(); stageRRsetLocked(...)`.
 RRtype goes must leave the working set, or it publishes as an empty owner
 (compare `stageOwnerDeleteLocked` callers in `nsec_restitch.go`).
 
+**One lock across a logical change (review A4).** The three calls above take
+`zd.mu` per call and drop it. `CombineWithLocalChanges` stages several RRsets
+and then publishes; a refresh of the same zone arriving between two of its
+calls replaces the working set (`applyRefreshReplacementLocked`) and
+publishes on its own, so the combiner's trailing publish then republishes
+content the refresh already served, one serial later. The contributions
+survive, because the pre-refresh combine re-applies `CombinerData`; "exactly
+one serial per accepted edit" (D1) does not. So T-A also exports a batched
+form:
+
+```go
+// Stager is what StageBatch hands its callback: staged writes, and reads of
+// the zone's next content (current including pending), all under zd.mu.
+type Stager interface {
+    RRset(name string, rrtype uint16) *core.RRset   // nil when absent
+    SetRRset(name string, rs core.RRset)
+    Delete(name string, rrtype uint16)
+    DeleteOwner(name string)
+}
+// StageBatch runs fn with zd.mu held and publishes once if fn reports a
+// change. On a draft it writes Data and publishes nothing. fn must not call
+// anything that takes zd.mu.
+func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (BumperResponse, error)
+```
+
+`RRset` reads the working set, so a pass sees its own earlier writes, and
+the read-then-stage race two concurrent combines would otherwise have
+through `RRsetForAnalysis` goes with it. The per-call `Stage*` functions stay
+for one-record changes.
+
+**`CloneRRset`.** Export `cloneRRset` (review C1): the one-line way to build
+a new RRset from a served one before appending, which is what
+`InjectSignatureTXT` must do.
+
 **Publish.** `BumpSerialOnly()` already is `publishSync()`: one serial, one
-snapshot, one delta, one NOTIFY. It stays the publish call. Optionally add
-`Publish()` as a second name for the same thing so MP code reads as what it
-does; not required (§6, Q6).
+snapshot, one delta, one NOTIFY. It stays the publish call for the per-call
+form; `StageBatch` publishes through the same function. Optionally add
+`Publish()` as a second name so MP code reads as what it does; not required
+(§6, Q6).
 
 **`StopPublisher()`.** Export `stopPublisher` for external test harnesses
 (trial item F: tdns-mp's transport harness leaks one publisher goroutine per
@@ -246,9 +311,12 @@ not promote; the exported surface is the above; B-MP is this plan.
 **Tests.** `TestStageOnDraftWritesData` (Data populated, no snapshot: stage,
 read back through `RRsetForAnalysis`, `InstallInitialSnapshot`, served);
 `TestStageOnLiveZoneLeavesSnapshot` (the exported `StageRRset` obeys
-`TestSnapshotImmutability`'s assertion); `TestAnalysisReadersPreferSnapshot`.
+`TestSnapshotImmutability`'s assertion); `TestAnalysisReadersPreferSnapshot`;
+`TestStageBatchOneSerial` (a batch of three writes publishes once; a batch
+reporting no change publishes nothing; a refresh started during the batch
+publishes after it).
 
-**Size and risk.** ~120 lines plus tests. No behaviour change for existing
+**Size and risk.** ~180 lines plus tests. No behaviour change for existing
 callers.
 
 ### 2.2 T-B — a first load's post-refresh callbacks run once the zone is Ready
@@ -259,26 +327,36 @@ were weighed.
 **O1 — defer the callbacks (recommended).** In `FetchFromUpstream` and
 `FetchFromFile`, when `firstLoad`, record that post-refresh callbacks are
 owed instead of running them (`zd.postRefreshOwed = true`, under the `zd.mu`
-already held around `applyRefreshReplacementLocked`). In
-`completeFirstZonePolicyAndLoad`, immediately after `InstallInitialSnapshot`
-and before the policy sync, run them once and clear the flag
-(`runOwedPostRefresh`). Every later refresh is unchanged.
+already held around `applyRefreshReplacementLocked`). Run them once the zone
+is Ready, and only then: in `completeFirstZonePolicyAndLoad` and in its
+retry twin `finishFirstLoadPolicy`, after `signOnceAfterPolicyBind` returns
+nil and before the journal replay and the `OnFirstLoad` drain, guarded by
+`zd.Ready`. The flag clears on that run and on no other path. Every later
+refresh is unchanged.
 
 - The callbacks then run at the moment the zone becomes Ready, which is the
   moment a non-first refresh's callbacks correspond to. The asymmetry is
   gone for every consumer, not patched in one.
-- Before the policy sync, so a sync failure (which returns early and retries
-  `OnFirstLoad` on the ticker) cannot lose them; a retry finds the flag
-  clear. The other `InstallInitialSnapshot` caller (`zone_utils.go:2341`)
-  runs the same drain; the flag makes it a no-op where nothing was deferred.
+- After the sign, not after `InstallInitialSnapshot`. The first version of
+  this plan put the drain right after Install; the review (A6) is right that
+  on post-#514 `main` a signer's zone is not Ready there (§1.2), so
+  `GetOwner` would still refuse and `ApplyHsyncDiff` still register nobody.
+  A combiner's zones are Ready at Install and would have worked by accident.
+  After `signOnceAfterPolicyBind` covers both, and a failed sign leaves the
+  flag owed for the ticker retry, which runs the same tail.
 - tdns's own two post-refresh consumers are enqueue-only and idempotent:
   `ProxyDelegationPostRefresh` (`delsync_proxy.go:175`) enqueues PROXY-SYNC
   from an analysis computed pre-flip; `ChildSyncProxyPostRefresh`
   (`childsync_proxy.go:279`) reconciles in memory and enqueues. Running them
   a few milliseconds later, on the engine goroutine they already run on for
   a first load, changes nothing they depend on.
-- ~40 lines. One test: register a post-refresh callback, first-load a zone
-  from file, assert the callback saw `Ready == true` and `GetOwner` succeed.
+- ~40 lines. One test, run twice: register a post-refresh callback,
+  first-load a zone from file, assert the callback saw `Ready == true` and
+  `GetOwner` succeed; once on an unsigned zone, once on a signing zone with a
+  bound policy, where the callback must run after the sign.
+- T-B changes when the callbacks run, not what Ready means. #514's rule that
+  a signing zone is Ready only on a signed apex SOA stays (review B3); that
+  rule is also why O2 below is rejected.
 
 **O2 — gate `GetOwner` on `HasPublishedData()` instead of `Ready`.** Smallest
 diff, and it would make 1.2 disappear without reordering anything. Rejected:
@@ -305,8 +383,9 @@ The signer needs tdns to sign with keys tdns's keystore does not hold, and
 to publish a DNSKEY RRset tdns's keystore does not describe (pre-published
 MP keys, foreign keys in multi-signer mode). Every place tdns resolves keys
 must ask the same seam: `EnsureActiveDnssecKeys` (called by `SignZone`,
-`ResignZone`, `SignRRset` with a nil `dak`, and `resignWorkingSetSOAIfSigned`
-inside publish), `publishDnskeyRRsLocked` (the DNSKEY RRset at sign time) and
+`ResignZone`, `SignRRset` with a nil `dak`, and after #514 by
+`resolveSigningMaterialLocked` inside every signing publish),
+`publishDnskeyRRsLocked` (the DNSKEY RRset at sign time) and
 `CollectDynamicRRs` (the DNSKEY RRset at refresh time; the comment in
 `ops_dnskey.go` explains why those two must agree).
 
@@ -340,9 +419,15 @@ Wiring, four sites:
 - `reconcileActiveKeyAlgorithms`, promotion and generation are skipped when a
   source is set: the source owns its keys' lifecycle.
 
-`SignZone(kdb, force)` keeps its signature; `kdb` is still needed for the TTL
-clamp and `UpsertZoneSigningMaxTTL`, and `HsyncDB` embeds `*tdns.KeyDB`, so
-tdns-mp passes `hdb.KeyDB`.
+`SignZone(ctx, kdb, force)` keeps its signature; `kdb` is still needed for
+the TTL clamp and `UpsertZoneSigningMaxTTL`, and `HsyncDB` embeds
+`*tdns.KeyDB`, so tdns-mp passes `hdb.KeyDB`.
+
+**Startup order (review A5).** The source must be set before the zone's
+first refresh. `CollectDynamicRRs` runs before the pre-refresh callbacks
+(`zone_utils.go:123`), so a source installed from `MPPreRefresh` is one
+refresh late and the first publish mints. Install it from the
+`multi-provider` zone-option handler, which fires during `ParseZones`.
 
 **K1 — install keys into the signing-keys snapshot, plus a DNSKEY hook.**
 Export `InstallSigningKeys(dak)` (store a built `signingKeysSnapshot`) and a
@@ -401,7 +486,7 @@ split out and not kept current. Sizes at `b955faf`.
 | fork | lines | copied from | drift since the copy |
 |---|---|---|---|
 | `mp_signer.go` `SignZone`, `PublishDnskeyRRs` | 359 | pre-snapshot `sign.go` | everything in 1.4; no occluded-name, delegation, ZONEMD, TTL-clamp or canonical-NSEC handling |
-| `mp_resigner.go` `MPResignerEngine`, `SetupZoneSigning` | 140 | `resigner.go` | still honours `service.resign: false`, which tdns removed because it silently let signatures expire |
+| `mp_resigner.go` `MPResignerEngine`, `SetupZoneSigning` | 140 | `resigner.go` | still honours `service.resign: false`, which tdns removed because it silently let signatures expire; after #514 both the sign-then-enqueue contract and the `chan *MPZoneData` shape copy an API tdns no longer has (`registerForPeriodicResign`, `chan ResignRequest`) |
 | `signer_keydb.go` + `MPDnssecKeyStore` (`db_schema_hsync.go:217`) + the cache in `hsyncdb.go` | ~790 | `keystore.go` | a parallel table with the same columns plus `propagation_confirmed(_at)`, three extra states (`mpdist`, `mpremove`, `foreign`), its own cache (the June `KeystoreDnskeyCache`, which tdns replaced with the per-zone signing-keys snapshot) |
 | `key_state_worker.go` | 317 | `key_state_worker.go` | no RRSIG strip when a key is removed, no ZSK removal margin from the observed TTL, no `published_at` healing; plus the MP branches (standby keys staged as `mpdist`, retired keys parked as `mpremove`, inventory pushed to agents) |
 | `apihandler_keystore.go` `MPDnssecKeyMgmt`, `RolloverKeyMP` | ~520 | `DnssecKeyMgmt`, `RolloverKey` | same commands (list, add, generate, setstate, rollover, delete, clear) over the other table |
@@ -446,18 +531,47 @@ exactly the three places where the MP fork's branches would have to go.
 
   ```go
   type KeyLifecycleHooks struct {
-      StagedState  func(zd *ZoneData) string           // "published" today; "mpdist" for MP zones
-      RetiredState func(zd *ZoneData) string           // "removed" today; "mpremove" for MP zones
-      MayPromote   func(zd *ZoneData, keyid uint16) bool // published→active gate
+      // The state a newly staged key starts in: "published" today, "mpdist"
+      // for an MP zone. Keys in this state count as "in the pipeline" for
+      // standby maintenance.
+      StagedState  func(zd *ZoneData) string
+      // The state a retired key moves to once its margin has passed:
+      // "removed" today, "mpremove" for an MP zone.
+      RetiredState func(zd *ZoneData) string
+      // Whether a published key may become active now. MP: propagation
+      // confirmed by the peers and the DNSKEY TTL elapsed.
+      MayPromote   func(zd *ZoneData, keyid uint16) bool
+      // Whether EnsureActiveDnssecKeys may mint a key of this role because
+      // the active set is short. MP: only for a zone with no key of that
+      // role in any state; a zone whose keys are all staged or gated waits.
+      MayGenerate  func(zd *ZoneData, role string) bool
+      // After every committed state change (the KEYSTATE inventory push).
       OnStateChange func(zone string, keyid uint16, from, to string)
   }
   func RegisterKeyLifecycleHooks(h KeyLifecycleHooks)
   ```
 
-  Consulted at four sites: `GenerateAndStageKey` (`keystore.go:1315`),
-  `transitionRetiredToRemoved`, the promotion path of
-  `EnsureActiveDnssecKeys` (`sign.go`, the `published` keys branch), and
-  `UpdateDnssecKeyState` after its commit. Nil hooks mean today's behaviour.
+  Consulted at six sites, all in the keystore and the worker:
+  `GenerateAndStageKey` (`keystore.go:1315`) for the staged state;
+  `maintainStandbyKeys`, whose `OptMultiProvider` skip is lifted and whose
+  "already in the pipeline" test becomes `published` ∪ `StagedState(zd)`;
+  `transitionPublishedToStandby`, a global walk that reaches MP keys today
+  and needs nothing beyond the `OnStateChange` it gets through
+  `UpdateDnssecKeyState`, named here so nobody adds a skip;
+  `transitionRetiredToRemoved` for the retired state;
+  `EnsureActiveDnssecKeys` for `MayPromote` on its published branch and
+  `MayGenerate` before either `GenerateKeypair`; and `UpdateDnssecKeyState`
+  after its commit. Nil hooks mean today's behaviour. tdns-mp registers them
+  in its `MainInit` before tdns's, like the zone-option handlers, so they are
+  in place before any refresh.
+
+  `MayGenerate` is the hook the first version of this plan lacked (review
+  A1). Without it a zone whose keys were all `mpdist` would have tdns mint an
+  active pair beside them on the first signing publish. Today's MP code mints
+  in that same situation (`EnsureActiveDnssecKeysMP`, the `len(dak.KSKs) ==
+  0` branch after its gate), so the hook does not preserve MP behaviour, it
+  tightens it: the bootstrap mint is allowed only for a zone with no keys at
+  all, and MP may refuse even that and generate on its own terms.
   The alternative of keying these branches on `OptMultiProvider` inside tdns
   is smaller but puts the MP protocol's states into tdns; the hooks keep tdns
   ignorant of what `mpdist` means.
@@ -468,27 +582,48 @@ exactly the three places where the MP fork's branches would have to go.
 
 **tdns-mp (M-2S, replaces M-2).**
 
-- Keys live in `DnssecKeyStore`. `mp_signer.go`'s loop and
-  `PublishDnskeyRRs`, `mp_resigner.go`, `signer_keydb.go` except
-  `GetKeyInventory` and the three propagation functions (rewritten over the
-  side table, ~100 lines), `apihandler_keystore.go`, the MP key cache and the
-  `MPDnssecKeyStore` schema are deleted. `MPZoneData.SignZone` becomes mode
-  selection plus `zd.SignZone(kdb, force)`; `SetupZoneSigning` feeds
-  `conf.Internal.ResignQ`, and the tdns `ResignerEngine` that
-  `StartMPSigner` already starts re-signs MP zones. The MP `KeyStateWorker`
-  is replaced by the hooks implementation (~80 lines) and the KEYSTATE
-  handler's transitions call tdns's `UpdateDnssecKeyState`.
-  `extractRemoteDNSKEYs` writes `foreign` rows through `kdb`.
+- Keys live in `DnssecKeyStore`, and tdns-mp has no signing code left. The
+  first sign of a signer zone is tdns's own: `MPPreRefresh` switches
+  `inline-signing` on before the first publish, the policy binds through the
+  zone's `dnssecpolicy:`, and `signOnceAfterPolicyBind` signs and flips
+  Ready. Every later refresh signs its staged scope in the refresh publish
+  (C1). Renewal is tdns's `ResignerEngine`, which `StartMPSigner` already
+  runs; tdns registers only zones whose config carries a signing option
+  (`parseconfig.go:1496`) and MP enables it dynamically, so MP's
+  `OnFirstLoad` sends `ResignRequest{Zd, ResignPeriodic}` on
+  `conf.Internal.ResignQ` for each zone it switched on. A key-state change is
+  tdns's worker's own `ResignKeyStateChanged`. Deleted whole: `mp_signer.go`
+  (`MPZoneData.SignZone`, `PublishDnskeyRRs`) and `mp_resigner.go`
+  (`MPResignerEngine`, `SetupZoneSigning`: copies of an API #514 removed).
+  Deleted except `GetKeyInventory` and the three propagation functions
+  (rewritten over the side table, ~100 lines): `signer_keydb.go`. Also
+  deleted: `apihandler_keystore.go`, the MP key cache and the
+  `MPDnssecKeyStore` schema. The MP `KeyStateWorker` becomes the hooks
+  implementation (~80 lines); the KEYSTATE handler's transitions call tdns's
+  `UpdateDnssecKeyState`.
+- Foreign keys are found where they arrive. `extractRemoteDNSKEYs` moves
+  from the signing loop into `MPPreRefresh`: it reads the incoming zone's
+  DNSKEY RRset through `RRsetForAnalysis(new_zd, …)` and writes or deletes
+  `foreign` rows through `kdb`; mode 2 keeps no rows, and whatever DNSKEYs the
+  upstream carried are dropped by the publish, which rebuilds the RRset from
+  the keystore. A refresh collects its dynamic RRs before the pre-refresh
+  callbacks (`zone_utils.go:123`), so a foreign key found in this refresh is
+  served from the next publish; when the set changed, MP sends
+  `ResignRequest{ResignKeyStateChanged}` so that publish is now.
 - `tdns-mpcli signer keystore …` becomes tdns's `keystore dnssec` subtree,
   which mpcli already mounts (#36); the signer's `/keystore` route points at
   tdns's handler. Foreign keys then show in the ordinary key listing.
 - `cmd/mpsigner` adopts `algs.list` and genalgs like every tdns binary,
   which is the fix trial item E was waiting for.
-- *Migration, one-shot.* `migrateHsyncSchema` (`db_schema_hsync.go:348`)
-  copies `MPDnssecKeyStore` rows into `DnssecKeyStore` (its columns are a
-  superset apart from the two propagation ones, which go to the side
-  table), renames the old table, and rewrites `keyrr` for the codepoint
-  renumbering in the same pass. The fleet needs a flag day for the re-pin
+- *Migration, one-shot and fail-closed.* `migrateHsyncSchema`
+  (`db_schema_hsync.go:348`) copies `MPDnssecKeyStore` rows into
+  `DnssecKeyStore` (its columns are a superset apart from the two
+  propagation ones, which go to the side table), rewrites `keyrr` for the
+  codepoint renumbering in the same pass and re-parses every rewritten
+  record, compares row counts, renames the old table and keeps it until a
+  second start finds nothing to do, and refuses to start on any mismatch. No
+  row may arrive as `active` unless it left as `active`; a `foreign` row
+  never has a private half. The fleet needs a flag day for the re-pin
   regardless (trial items C and E); this joins it rather than adding one.
 - The agent needs nothing: the KEYSTATE inventory carries state names on
   the wire (`mp_wire_payloads.go:222`), and they do not change.
@@ -497,13 +632,14 @@ exactly the three places where the MP fork's branches would have to go.
 
 | | T-C key source (§2.3) | T-S keystore merge (this section) |
 |---|---|---|
-| tdns change | ~150 lines; an interface consulted in `EnsureActiveDnssecKeys`, `publishDnskeyRRsLocked`, `CollectDynamicRRs` and stored into the signing-keys snapshot | ~100 lines; two SQL predicates and a hooks struct consulted in the worker, one promotion site and one post-commit call |
+| tdns change | ~150 lines; an interface consulted in `EnsureActiveDnssecKeys`, `publishDnskeyRRsLocked`, `CollectDynamicRRs` and stored into the signing-keys snapshot | ~200 lines; two SQL predicates and a hooks struct consulted at six sites in the keystore and worker, the generation gate among them |
 | where the tdns change sits | in the signing path | in the keystore and worker; the signing path is untouched |
-| tdns-mp change | +150 (the source), −500 (`SignZone`, `PublishDnskeyRRs`, resigner); ~1,700 lines of fork stay, each still drifting | +250 (hooks, inventory, migration), −2,000 |
+| tdns-mp change | +150 (the source), −500 (`SignZone`, `PublishDnskeyRRs`, the resigner, which #514 forces out either way); ~1,700 lines of fork stay, each still drifting | +300 (hooks, inventory, foreign-key discovery in the pre-refresh, migration), −2,200 |
+| sizing | 1 day tdns, 1 day tdns-mp | 1½–2 days tdns, 2–3 days tdns-mp (review B1) |
 | what MP zones gain | tdns's signing loop and publish | the same, plus the signing-keys snapshot, RRSIG stripping on key removal, the ZSK removal margin, algorithm reconciliation, standby maintenance, the tdns CLI, genalgs |
 | two key stores in one database | yes, permanently, with two workers over them (as today) | no |
 | migration | none | one-shot, on the flag day the re-pin already needs |
-| risk | low; nothing existing moves | tdns's generic transitions now run on MP keys, bounded to three functions behind hooks; a migration that must be right once |
+| risk | low; nothing existing moves | tdns's generic transitions now run on MP keys, bounded to the six hook sites; the generation gate must be right or 1.4 moves into tdns (review A1); a migration that must be right once |
 | fixes item E | no | yes |
 
 #### 2.4.6 What it does not do
@@ -526,39 +662,57 @@ path rather than inside it; and it retires forks that are already wrong in
 ways the lab has not yet noticed (a removed key's RRSIGs are never stripped;
 `service.resign: false` still disables renewal on an mpsigner). The cost is
 the migration and a larger tdns-mp diff, both of which coincide with a flag
-day that is coming anyway. T-C remains the fallback if the flag day is
-pushed out: it is compatible with a later T-S, but everything it adds is
-then deleted.
+day that is coming anyway.
+
+The external review agreed with the destination and rejected T-S as first
+specified, because its hook list did not reach key generation, standby
+maintenance or the published→standby walk (A1–A3). Those are in T-S2 now,
+which is the condition the review set for preferring T-S over T-C. T-C
+remains the fallback if the flag day is pushed out: it is compatible with a
+later T-S, but everything it adds is then deleted.
 
 ## 3. tdns-mp side
 
-Two PRs. M-1 re-pins to the tdns commit that carries T-A and T-B and does
-everything except the signer; M-2 re-pins to the commit that carries T-C and
-does the signer. Splitting keeps each lab run answering one question.
+Two PRs. M-1 re-pins the combiner, the agent and the auditor to the tdns
+commit that carries T-A and T-B and does everything except the signer. The
+mpsigner does not re-pin until M-2, which needs the key seam: on a tdns with
+#514 an mpsigner without it serves a Ready zone signed with minted keys
+(§1.4). Splitting keeps each lab run answering one question.
 
 ### 3.1 M-1: served-zone sites, one publish per logical change
 
 | site | today | becomes |
 |---|---|---|
-| `combiner_utils.go:163`, `:165` | `existingOwnerData.RRtypes.Set(rrtype, …)` | `mpzd.StageRRset(ownerName, merged|newRRset)`; read the current RRset through `RRsetForAnalysis` (draft or live) instead of `mpzd.Data.Get` |
+| `combiner_utils.go:163`, `:165` | `existingOwnerData.RRtypes.Set(rrtype, …)` | `s.SetRRset(ownerName, merged|newRRset)` inside one `StageBatch`; read the current RRset through `s.RRset` instead of `mpzd.Data.Get` |
 | `:170` | `mpzd.Data.Set(ownerName, existingOwnerData)` | deleted; staging is per RRset |
-| `:746`, `:747` (`InjectSignatureTXT`) | append onto the served TXT slice, `Data.Set` | build the new RRset from a copy (`cloneRRset` is unexported: `append([]dns.RR(nil), existing.RRs...)`), `StageRRset` |
-| `:762`, `:763` (`restoreUpstreamRRset`) | `zoneOd.RRtypes.Set`, `Data.Set` | `StageRRset(owner, upstream rrset)` |
-| `:807` (`cleanupRemovedRRtype`) | `od.RRtypes.Delete`, `Data.Set` | `StageDelete(owner, rrtype)`; `StageOwnerDelete(owner)` when it was the owner's last type |
-| `config.go:173` (start-up combine) | no publish | `BumpSerialOnly()` after `CombineWithLocalChanges` and `InjectSignatureTXT` when either changed anything |
-| `hsync_utils.go:1398` (pre-refresh combine on `new_zd`) | writes `new_zd.Data` and works | same code, now through `StageRRset`'s draft branch; no publish (the refresh publish is the publish) |
-| `apihandler_combiner.go:215`, `combiner_msg_handler.go:287` | `go zd.NotifyDownstreams()` after the bump | deleted; publish notifies |
+| `:746`, `:747` (`InjectSignatureTXT`) | append onto the served TXT slice, `Data.Set` | build the new RRset with `CloneRRset` before appending, `s.SetRRset` |
+| `:762`, `:763` (`restoreUpstreamRRset`) | `zoneOd.RRtypes.Set`, `Data.Set` | `s.SetRRset(owner, upstream rrset)` |
+| `:807` (`cleanupRemovedRRtype`) | `od.RRtypes.Delete`, `Data.Set` | `s.Delete(owner, rrtype)`; `s.DeleteOwner(owner)` when it was the owner's last type |
+| `config.go:173` (start-up combine) | no publish | one `StageBatch` whose callback runs the combine and the TXT injection; publishes when either changed anything |
+| `hsync_utils.go:1398` (pre-refresh combine on `new_zd`) | writes `new_zd.Data` and works | the same `StageBatch`, which on a draft writes `Data` and publishes nothing (the refresh publish is the publish) |
+| `apihandler_combiner.go:215`, `combiner_msg_handler.go:287` | `go zd.NotifyDownstreams()` after the bump | deleted; the function no longer exists after #514, and publish notifies (tdns-mp#46) |
 
-The rule for every runtime path in the 1.3 table: stage all of a logical
-change, then exactly one `BumpSerialOnly()`, guarded by "something changed".
-The three rows marked "verify" in 1.3 get their publish call if they lack
-one. `publishSync` on an empty working set still bumps the serial, so the
-guard is not optional.
+The rule for every runtime path in the 1.3 table: one `StageBatch` per
+logical change, its callback staging everything and returning whether
+anything changed. The three rows marked "verify" in 1.3 get theirs if they
+lack one. A bare `BumpSerialOnly` on an empty working set still bumps the
+serial, so the guard inside the batch is not optional.
 
-Between the stages and the publish, a refresh on the same zone replaces the
-working set (`applyRefreshReplacementLocked`). The contributions are not
-lost: the pre-refresh combine re-applies them into `new_zd`. Documented, not
-guarded against.
+Under `StageBatch` a refresh cannot interleave: it waits for `zd.mu`. The
+first version of this plan documented the interleaving instead of guarding
+it; the review (A4) showed that a refresh arriving between two per-call
+stages costs an extra serial, and that D1's exact count would flake in the
+lab. Guarded now. The callback must not take `zd.mu` itself, so
+`CombineWithLocalChanges` copies what it needs from `CombinerData` under
+`mpzd`'s own lock first and stages outside it, as its `OnFirstLoad` caller
+already arranges.
+
+M-1 also carries the agent's and combiner's share of the #514 re-pin
+(tdns-mp#46): `SignZone(ctx, …)` in `SetupAgentAutoZone`; `SetupZoneSigning`
+replaced by a `ResignRequest{Zd, ResignPeriodic}` send **and**
+`tdns.ResignerEngine` started in `StartMPAgent`, because today nothing in the
+agent reads `ResignQ` and its auto zone is signed once and never renewed
+(#46 item 2); and the two `NotifyDownstreams` deletions above.
 
 ### 3.2 M-1: readers and the two workarounds
 
@@ -579,10 +733,13 @@ guarded against.
 
 ### 3.3 M-2: the signer (T-C variant; see §2.4.4 for M-2S)
 
-What follows is the signer step if the key source (T-C) is chosen. Under the
-recommended T-S the step is M-2S, listed in §2.4.4: the same deletion of the
-signing loop, plus the keystore fork, the MP resigner, the MP key-state
-worker and the MP keystore API, plus the one-shot key migration.
+Either way this is the mpsigner's first re-pin past #514, and either way
+`SetupZoneSigning` and `MPResignerEngine` go in it (review A7, tdns-mp#46):
+the API they copy no longer exists. Under the recommended T-S the step is
+M-2S, listed in §2.4.4: no signing code left in tdns-mp, the keystore fork,
+the MP key-state worker and the MP keystore API deleted, the one-shot key
+migration. What follows is the step if the key source (T-C) is chosen
+instead.
 
 - `mpKeySource{hdb *HsyncDB}` implements `tdns.ZoneKeySource`. `ActiveKeys`
   is `EnsureActiveDnssecKeysMP` minus its final `zd.PublishDnskeyRRs(dak)`
@@ -593,19 +750,20 @@ worker and the MP keystore API, plus the one-shot key migration.
   deduplicated. `SetKeySource` is called where a zone becomes a signer zone
   (`MPPreRefresh`, where inline-signing is switched on) and at startup for
   zones already so.
-- `MPZoneData.SignZone` becomes: mode selection as today
-  (`extractRemoteDNSKEYs` for mode 4, `SetRemoteDNSKEYs(nil)` for mode 2),
-  then `return mpzd.ZoneData.SignZone(hdb.KeyDB, force)`. Lines 48–158 of
-  `mp_signer.go` — `EnsureActiveDnssecKeysMP`'s call, the NSEC call, the
-  owner loop, `BumpSerial` — are deleted; so is `MPZoneData.PublishDnskeyRRs`.
-  tdns's loop already does what the MP loop did and more (occluded names,
-  delegation handling, ZONEMD, the TTL clamp, canonical NSEC order).
-- `SetupZoneSigning` and `MPResignerEngine` keep their shape and call the
-  new `SignZone`. Retiring the MP resigner for tdns's is a later cleanup
-  (§6, Q4).
-- `extractRemoteDNSKEYs` keeps reading the live apex through `GetOwner`: it
-  runs post-Ready (from `OnFirstLoad` and the resigner). A foreign key the
-  upstream signer withdraws disappears on the next refresh-then-resign.
+- `MPZoneData.SignZone` and `PublishDnskeyRRs` are deleted; tdns signs the
+  zone on first load, on every refresh and on renewal exactly as under M-2S
+  (§2.4.4, first bullet), asking the source for keys. `extractRemoteDNSKEYs`
+  moves into `MPPreRefresh` as under M-2S, keeping `RemoteDNSKEYs` on
+  `MPZoneData` for the source's `DnskeyRRs` instead of writing rows.
+- `SetupZoneSigning` and `MPResignerEngine` are deleted (Q4, required):
+  MP's `OnFirstLoad` sends `ResignRequest{Zd, ResignPeriodic}`, tdns's
+  `ResignerEngine` renews. The MP key-state worker stays and sends
+  `ResignRequest{Zd, ResignKeyStateChanged}` on a change, with a bounded
+  wait instead of today's drop-when-full: after #514 a dropped key-state
+  trigger is not repaired by the periodic pass, which renews by age (#46
+  item 3).
+- `SetKeySource` is called from the `multi-provider` zone-option handler
+  (§2.3, startup order), not from `MPPreRefresh`.
 - Invalidate: every MP key-state change that today calls
   `mpDnskeyCacheDelete` (`signer_keydb.go`) is where the source's answer
   changes; nothing else to do, since tdns asks the source on every sign and
@@ -636,26 +794,30 @@ commit carrying its prerequisites, by the trial's script (`sed` on every
 go.mod + `go mod tidy`; the `replace (...)` block form needs a second pass).
 tdns main moves daily; a re-pin that lands a week after its tdns PR pays for
 a week of drift. M-1 should merge within days of T-A and T-B; the
-2026-07-21 drift recipe is the fallback if it does not.
+2026-07-21 drift recipe is the fallback if it does not. The next re-pin is
+onto a tdns with #514: tdns-mp#46 lists its six compile-level edits and the
+three that need more than a signature fix; the agent's and combiner's share
+is in M-1 (§3.1), the signer's in M-2 (§3.3).
 
 ## 4. Order and sizing
 
 | step | depends on | estimate | gate |
 |---|---|---|---|
-| T-A readers + staging + `StopPublisher` | — | ½ day | tdns tests, `make check` |
-| T-B first-load post-refresh deferral | — | ½ day | tdns tests |
-| T-C key source, or T-S states + hooks (§2.4) | — | 1 day | tdns tests incl. signature verification; under T-S also a worker test with hooks set |
-| M-1 re-pin, readers, combiner, gate, workarounds out | T-A, T-B merged | 1½ days | `make check`, `make test-race`, lab D0–D1 (§5.3) 71/0 comms unchanged |
-| M-2 (key source) or M-2S (fork retired, keys migrated) | T-C or T-S merged, M-1 merged | 1 day / 2 days | lab D0–D3; under M-2S also the migration test |
+| T-A readers + staging + `StageBatch` + `CloneRRset` + `StopPublisher` | — | ¾ day | tdns tests, `make check` |
+| T-B first-load post-refresh deferral, at the Ready flip | — | ½ day | tdns tests, on a signing and an unsigned zone |
+| T-C key source, or T-S states + hooks incl. the generation gate (§2.4) | — | 1 day / 1½–2 days | tdns tests incl. signature verification; under T-S also worker tests with hooks set and a "no mint while staged keys exist" test |
+| M-1 combiner, agent, auditor: re-pin past #514 (#46's share), readers, combiner `StageBatch`, gate, workarounds out | T-A, T-B merged | 2 days | `make check`, `make test-race`, lab comms 71/0 cold and warm, D1 (§5.3). **No mpsigner in this re-pin.** |
+| M-2 (key source) or M-2S (fork retired, keys migrated): the mpsigner's re-pin | key seam merged, M-1 merged | 1 day / 2–3 days | lab D0–D4; under M-2S also the migration test |
 | R-1 `mp-comms` data-path verbs and assertions | — (written against M-1/M-2 expectations) | 1 day | runs green on M-2 |
-| R-2 `mp-policy-matrix` F/G scenarios | tdns#616 (JWK) and the IMR forwarding the README asks for | ½ day | runs green on M-2 |
+| R-2 `mp-policy-matrix` F/G scenarios | the rig's own tdns pin moved to a main with #616 and IMR forwarding, both merged | ½ day | runs green on M-2 |
 
 T-A, T-B and the key-seam PR are independent of each other and can be three
 PRs in the same week; CodeRabbit's one review per hour in johanix/tdns sets
-the pace. Total about seven working days plus two lab afternoons with T-C,
-about eight with T-S. Slices over a big
-bang: each tdns PR is reviewable in one sitting, and each tdns-mp PR has one
-lab question to answer.
+the pace. Total about eight working days plus two lab afternoons with T-C,
+nine to ten with T-S. Slices over a big bang: each tdns PR is reviewable in
+one sitting, and each tdns-mp PR has one lab question to answer. The one
+hard ordering rule: the mpsigner does not re-pin onto a tdns with #514 until
+the key seam is merged.
 
 ## 5. Tests
 
@@ -680,15 +842,29 @@ In package `tdnsmp`, so only exported tdns API: a zone from `ReadZoneData` +
   `restoreUpstreamRRset` for NS restores the upstream set. Same sequence on a
   draft (a zone with `Data` and no snapshot) → `RRsetForAnalysis` sees the
   result, `InstallInitialSnapshot` serves it.
-- **Signer, mode 2 (M-2).** MP policy, `mpKeySource` over the temp store;
-  `SignZone`; assert: DNSKEY RRset is exactly the MP active keys; every RRset
-  including SOA and NSEC has RRSIGs that verify against it; delegations are
-  not signed; serial advanced once; `DnssecKeyStore` has no row for the zone.
-  A second `SignZone` without `force`: serial unchanged or plus one, DNSKEY
-  set identical.
-- **Signer, mode 4 (M-2).** Two foreign DNSKEYs in the apex before signing;
-  after `SignZone` the served DNSKEY set is local ∪ foreign, local RRSIGs
-  verify, and `MPDnssecKeyStore` holds the foreign keys as `foreign`.
+- **Signer, mode 2.** MP policy; `SignZone(ctx, …)` and then a refresh
+  from file (the publish-path sign); assert after each: DNSKEY RRset is
+  exactly the MP active keys; every RRset including SOA and NSEC has RRSIGs
+  that verify against it; delegations are not signed; serial advanced once.
+  Under T-C: `DnssecKeyStore` has no row for the zone. Under T-S: every row
+  for the zone in `DnssecKeyStore` was written by the test or the migration
+  and none by the generation fallback (`creator` column), also when the
+  zone's keys are all `mpdist` at the time of the sign. A second sign
+  without `force`: serial unchanged or plus one, DNSKEY set identical.
+- **Signer, mode 4.** Two foreign DNSKEYs in the incoming apex before the
+  refresh; after it the served DNSKEY set is local ∪ foreign, local RRSIGs
+  verify, no RRSIG is by a foreign key, and the store holds the foreign keys
+  as `foreign` (T-S: in `DnssecKeyStore`, with no private half).
+- **Combiner versus refresh (M-1).** Start a `StageBatch` whose callback
+  blocks; trigger a refresh of the same zone; release the callback; assert
+  one serial for the combine, the refresh's publish after it, and the
+  contributions served by both.
+- **Bare bump (M-1).** No production path calls `BumpSerialOnly` without a
+  preceding stage: a test that greps the tree is crude but adequate, given
+  that `StageBatch` is the only publish the combiner uses after M-1.
+- **Analysis readers are not the serve path (T-A).** `GetOwner` still
+  refuses a not-Ready zone that `OwnerForAnalysis` reads, and neither reader
+  appears in `queryresponder.go` or the transfer path.
 - **Key migration (M-2S only).** A database with `MPDnssecKeyStore` rows
   in every state, including `foreign` and a `propagation_confirmed` key,
   and a `keyrr` at an old codepoint; after `InitHsyncTables` the rows are in
@@ -698,8 +874,8 @@ In package `tdnsmp`, so only exported tdns API: a zone from `ReadZoneData` +
 - **First load (M-1).** A zone with pre-refresh and post-refresh callbacks
   registered; first load from file; the post-refresh callback observes
   `Ready` and a readable HSYNC3 RRset. (The tdns test in T-B covers the
-  mechanism; this one covers `PostRefresh` → `ApplyHsyncDiff` registering a
-  peer.)
+  mechanism on both zone kinds; this one covers `PostRefresh` →
+  `ApplyHsyncDiff` registering a peer.)
 
 ### 5.3 The lab data path (R-1, labstuff `mp-comms`)
 
@@ -718,7 +894,9 @@ convention. `T` is the rig's operation timeout.
   show as its own or as foreign; the SOA's RRSIG is by a key in the set. For
   each downstream provider: its served DNSKEY RRset and RRSIGs equal its
   upstream signer's (the loopback rig's static assertion A, on real hosts).
-  This is the assertion 1.4 predicts fails on #43.
+  This is the assertion 1.4 predicts fails on any mpsigner without the key
+  seam; on a tdns with #514 it fails as a Ready zone that validates against
+  minted keys, not as an unsigned apex.
 - **D1 — NS add and delete by an agent** (`nsmgmt=agent` cells, each
   provider in turn): `tdns-mpcli <provider>-agent zone addrr` of an NS under
   the provider's suffix; within `T` the combiner of every provider serves it,
@@ -745,38 +923,46 @@ convention. `T` is the rig's operation timeout.
   `refusing to swap in an apex-less snapshot`.
 
 Ordering: M-1 must keep comms at 71/0 cold and warm and pass D1 (the
-combiner) while D0's signature checks are expected red until M-2; the rig
-reports them, the M-1 gate excludes them by name. M-2's gate is D0–D4 green.
+combiner). The mpsigner is not part of M-1, so D0 is out of M-1's scope
+rather than red: the rig runs it against the June-pinned signer and reports
+it for information. M-2's gate is D0–D4 green.
 
 ### 5.4 The loopback rig (R-2, `tests/mp-policy-matrix`)
 
 The matrix already has NS add/delete (C), the foreign-NS negative (D) and
 the DNSKEY API gate (E). Add **F. signatures validate** (D0's check per cell
 and signer, from AXFR on the signer's port) and **G. DNSKEY roll** (D2 and
-D3 on `p2s2a`/`p3s2a`). It cannot converge until tdns#616 (tdns-auth answers
-JWK) is merged and the pinned tdns has IMR forwarding; the rig's README
-records both. Until then the lab rig is the data-path gate.
+D3 on `p2s2a`/`p3s2a`). Both things its README waited for are on `main` now:
+tdns#616 (tdns-auth answers JWK) and IMR forwarding (#433, #445, #464). The
+rig pins its own tdns and `setup.sh` refuses any other commit, so R-2 starts
+by moving that pin to the tdns M-1 re-pins to. Until R-2 lands the lab rig
+is the data-path gate.
 
 ## 6. Open questions for Johan
 
 Each with the recommendation the plan is written to.
 
 1. **First-load ordering: O1, O2 or O3 (§2.2)?** Recommend O1, deferring a
-   first load's post-refresh callbacks to the Ready flip. It is the only
-   option that removes the asymmetry for every consumer. O3 is the fallback.
+   first load's post-refresh callbacks to the Ready flip, which after #514
+   is the sign in `signOnceAfterPolicyBind` for a signer and
+   `InstallInitialSnapshot` for everything else. It is the only option that
+   removes the asymmetry for every consumer. O3 is the fallback.
 2. **Key seam: T-S keystore merge (§2.4), K2 key source or K1 snapshot
-   install (§2.3)?** Recommend T-S: it reuses the signer core instead of
-   feeding a fork of it, and its migration lands on the flag day the re-pin
-   needs anyway. K2 is the fallback if that flag day is deferred; K1 is
-   rejected either way.
+   install (§2.3)?** Recommend T-S with the generation gate and the two
+   worker sites designed into T-S2 (§2.4.4), which is the condition the
+   review set for it: it reuses the signer core instead of feeding a fork
+   of it, and its migration lands on the flag day the re-pin needs anyway.
+   K2 is the fallback if that flag day is deferred; K1 is rejected either
+   way.
 3. **Under T-S: lifecycle hooks (T-S2) or `OptMultiProvider` branches inside
    tdns?** Recommend the hooks. They keep tdns ignorant of what the MP
    states mean, at the cost of one registration call. (Under K2 the
    question is instead whether tdns stores the source's keys into the
    signing-keys snapshot; recommend yes, tdns owns that snapshot.)
-4. **Retire `MPResignerEngine` in favour of tdns's `ResignerEngine`?** Under
-   T-S it goes in M-2S, since the MP signing loop it schedules is deleted
-   in the same change. Under K2, later, as its own small PR.
+4. **Retire `MPResignerEngine` in favour of tdns's `ResignerEngine`?**
+   Required in M-2 or M-2S, not later (review A7, tdns-mp#46): the API it
+   copies, `SetupZoneSigning` and a `ResignQ` of zones, no longer exists
+   after #514, so the re-pin cannot keep it.
 5. **Draft semantics: keep `new_zd.Data` as the draft that `StageRRset`
    writes, or have tdns's refresh build its working set from `new_zd`'s own
    working set?** Recommend the former. It is what the refresh publish
@@ -790,20 +976,53 @@ Each with the recommendation the plan is written to.
    README's scope statement gets a dated amendment.
 8. **Gate marker: per-site `mp-private:` comments (recommended) or a
    per-file allowlist?** Per-site, for the reason in §3.4.
-9. **M-1 before the key seam lands means the lab signer stays wrong for a
-   few days (1.4).** Acceptable? The fleet runs the June pin; only the lab
-   sees main. Recommend yes, with D0 red and named in M-1's PR.
+9. **May the mpsigner re-pin before the key seam lands?** No, withdrawn
+   (review, tdns-mp#46 item 4): on a tdns with #514 an mpsigner without the
+   seam serves a Ready zone signed with minted keys, which is worse than
+   the pre-#514 unsigned apex the first version accepted as "D0 red". The
+   combiner, agent and auditor re-pin in M-1 as planned; the signer waits
+   for M-2.
 10. **Under T-S: fold the key migration, the codepoint renumbering (trial
     item E) and the config-key migration (item C) into one flag day?**
     Recommend yes: one migration tool, one fleet cycle, one rollback point.
-    Each of the three rewrites the same deployments.
+    Each of the three rewrites the same deployments. Under T-C, no: item E
+    stays its own mpsigner fix.
+11. **Batched staging as a `StageBatch` closure (recommended) or as
+    exported `*Locked` staging functions plus a locked publish?** The
+    closure: it cannot be misused by calling the locking wrapper while the
+    lock is held, and its `Stager` gives the read-your-own-writes view that
+    the per-call form lacks.
 
 ## 7. Out of scope, deliberately
 
 tdns-transport (nothing there touches zone data); the config-key migration
 (trial item C) and, under T-C only, the mpsigner codepoint renumbering
 (item E; under T-S it is part of M-2S); JWK
-(tdns#616); the IMR lame-delegation backoff (`fix/imr-servfail-backoff`);
-the 80 s cold start (its own handover); the non-signer serial bump the
-matrix README records; a non-Ready zone's readability for anything but the
-callbacks above.
+(tdns#616, merged); the IMR lame-delegation backoff (tdns#617, merged); the
+80 s cold start (its own handover, tdns-mp#45); the non-signer serial bump
+the matrix README records; a non-Ready zone's readability for anything but
+the callbacks above.
+
+## 8. The external review, and where this plan differs from it
+
+`reviews/2026-09-11-tdns-mp-PR44-bmp-snapshot-plan-review.md` reviewed the
+second version of this document against tdns `fe83b216`. Its verdict: adopt
+the publication design (T-A, O1, M-1); do not take T-S as then specified;
+rewrite for #514 before implementing. Every finding, and what this version
+does with it:
+
+| finding | disposition |
+|---|---|
+| A1 `EnsureActiveDnssecKeys` mints when the active set is short; T-S did not hook it | Taken: `MayGenerate` in T-S2 (§2.4.4). One correction: MP's own `EnsureActiveDnssecKeysMP` mints in the same situation today, so the gap was in the specification, not a regression T-S would have introduced; the hook tightens MP's behaviour. |
+| A2 `maintainStandbyKeys` skips MP zones and does not count `mpdist` | Taken: skip lifted, pipeline = `published` ∪ `StagedState` (§2.4.4). |
+| A3 `transitionPublishedToStandby` is a global walk | Taken: named as a hook site; it needs only `OnStateChange` (§2.4.4). |
+| A4 a refresh between per-call stages and the publish | Taken: `StageBatch` holds `zd.mu` across a logical change (§2.1, §3.1). One correction: the interleaving costs an extra serial; "a second sign" would need the combiner's zone to sign its own content, which it does not. |
+| A5 the key source must exist before the first refresh | Taken: installed from the zone-option handler (§2.3, §3.3); the T-S analogue is hook registration before `MainInit`. |
+| A6 O1's landing site is the Ready flip, not `InstallInitialSnapshot` | Taken (§2.2). The first version was written against `d1eec102`, where Install was the flip; #514 moved it for signing zones. |
+| A7 M-2 named APIs #514 removed | Taken: §3.3 and §2.4.4 rewritten for `SignZone(ctx, …)`, `ResignRequest`, `registerForPeriodicResign`; `MPResignerEngine` goes in M-2 either way (Q4). |
+| B1 T-S was undersized | Taken (§2.4.5, §4). |
+| B2 one flag day only under T-S | Taken (Q10). |
+| B3 T-B must not reopen the unsigned-serve window | Taken, stated in §2.2. |
+| C1 export `CloneRRset` | Taken (§2.1). |
+| "IMR forwarding is still the remaining matrix gate" | Not so: #433, #445 and #464 are on `main`. The rig's gate is its own tdns pin (§5.4). |
+| "T-C until T-S is completed" | The review offered two ways to close: recommend T-C, or keep T-S and design A1–A3 into it. This version takes the second (Q2); Johan's stated preference for reusing the signer core is the reason. |
