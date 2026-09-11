@@ -19,7 +19,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *HsyncDB) func(w http.ResponseWriter, r *http.Request) {
+// ctx is the daemon's lifecycle context, for work a request starts that must
+// outlive the request (the async bootstrap) but not the daemon.
+func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.ZoneRefresher, hdb *HsyncDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -654,10 +656,10 @@ func (conf *Config) APIagent(refreshZoneCh chan<- tdns.ZoneRefresher, hdb *Hsync
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			// The request context ends with this handler; the bootstrap runs
-			// async and only uses ctx to abort its IMR wait at shutdown, so it
-			// gets a background context here.
-			go conf.ParentSyncAfterKeyPublication(context.Background(), amp.Zone, string(amp.Zone), keyid, algorithm)
+			// The bootstrap runs async, past the end of this request, so not
+			// r.Context(); the lifecycle ctx stops its IMR wait and retries
+			// at shutdown.
+			go conf.ParentSyncAfterKeyPublication(ctx, amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
