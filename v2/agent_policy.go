@@ -31,7 +31,7 @@ func (ar *AgentRepo) Get(agentId AgentId) (*OwnerData, bool) {
 }
 
 func (ar *AgentRepo) Set(agentId AgentId, ownerData *OwnerData) {
-	ar.Data.Set(agentId, ownerData)
+	ar.Data.Set(agentId, ownerData) // mp-private: AgentRepo, keyed by agent id, not zone data
 }
 
 func (zdr *ZoneDataRepo) Get(zone ZoneName) (*AgentRepo, bool) {
@@ -307,7 +307,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						delRR.Header().Class = dns.ClassINET
 						cur_rrset.Delete(delRR)
 						zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, delRR.String())
-						nod.RRtypes.Set(rrtype, cur_rrset)
+						nod.RRtypes.Set(rrtype, cur_rrset) // mp-private: agent repo owner record, not zone data
 						changed = true
 					}
 				case dns.ClassINET:
@@ -334,7 +334,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 							}
 						}
 					}
-					nod.RRtypes.Set(rrtype, cur_rrset)
+					nod.RRtypes.Set(rrtype, cur_rrset) // mp-private: agent repo owner record, not zone data
 				}
 			}
 			rrset, ok = nod.RRtypes.Get(rrtype)
@@ -390,7 +390,7 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 					changed = true
 				}
 			}
-			nod.RRtypes.Set(rrtype, curRRset)
+			nod.RRtypes.Set(rrtype, curRRset) // mp-private: agent repo owner record, not zone data
 
 		case "delete":
 			curRRset, exists := nod.RRtypes.Get(rrtype)
@@ -420,7 +420,7 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 					nod.RRtypes.Delete(rrtype)
 					zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
 				} else {
-					nod.RRtypes.Set(rrtype, curRRset)
+					nod.RRtypes.Set(rrtype, curRRset) // mp-private: agent repo owner record, not zone data
 				}
 			}
 
@@ -505,7 +505,7 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 				}
 			}
 		}
-		nod.RRtypes.Set(rrtype, newRRset)
+		nod.RRtypes.Set(rrtype, newRRset) // mp-private: agent repo owner record, not zone data
 		msg = fmt.Sprintf("Replaced %s %s RRset for agent %q: %d RRs",
 			synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId, len(newRRs))
 		lgAgent.Info(msg)
