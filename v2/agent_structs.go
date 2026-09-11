@@ -5,7 +5,6 @@
 package tdnsmp
 
 import (
-	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -78,20 +77,16 @@ type Agent struct {
 	LastState     time.Time  // When state last changed
 	ErrorMsg      string     // Error message if state is error
 	DeferredTasks []DeferredAgentTask
+	// meta is the transitional MP-side sidecar (A3d): per-mechanism crypto
+	// holding pen, en route to transport.Peer at E1. Reached via
+	// ensureCrypto/cryptoFor; lazily allocated.
+	meta *agentMeta
 }
 
 type AgentDetails struct {
 	Addrs             []string
 	Port              uint16
 	BaseUri           string
-	UriRR             *dns.URI
-	Host              string
-	KeyRR             *dns.KEY
-	JWKData           string
-	KeyAlgorithm      string
-	TlsaRR            *dns.TLSA
-	Endpoint          string
-	ContactInfo       string
 	State             AgentState
 	LatestError       string
 	LatestErrorTime   time.Time
@@ -103,77 +98,6 @@ type AgentDetails struct {
 	ReceivedBeats     uint32
 	LatestSBeat       time.Time
 	LatestRBeat       time.Time
-}
-
-func (a *Agent) IsAnyTransportOperational() bool {
-	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
-		return true
-	}
-	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
-		return true
-	}
-	return false
-}
-
-func agentTransportParticipating(state AgentState) bool {
-	return state >= AgentStateKnown
-}
-
-// agentStatePriority ranks a transport's state for EffectiveState: a
-// transport that carries traffic outranks one still being introduced,
-// whatever the enum order says. 0 means the state does not count.
-func agentStatePriority(s AgentState) int {
-	switch s {
-	case AgentStateOperational:
-		return 6
-	case AgentStateLegacy:
-		return 5
-	case AgentStateDegraded:
-		return 4
-	case AgentStateInterrupted:
-		return 3
-	case AgentStateIntroduced:
-		return 2
-	case AgentStateKnown:
-		return 1
-	}
-	return 0
-}
-
-func (a *Agent) EffectiveState() AgentState {
-	a.Mu.RLock()
-	defer a.Mu.RUnlock()
-	best := AgentState(0)
-	bestPriority := 0
-	consider := func(enabled bool, details *AgentDetails) {
-		if !enabled || details == nil || !agentTransportParticipating(details.State) {
-			return
-		}
-		if p := agentStatePriority(details.State); p > bestPriority {
-			bestPriority = p
-			best = details.State
-		}
-	}
-	consider(a.ApiMethod, a.ApiDetails)
-	consider(a.DnsMethod, a.DnsDetails)
-	if best != 0 {
-		return best
-	}
-	return a.State
-}
-
-func (a *Agent) apiState() AgentState {
-	if a.ApiDetails != nil {
-		return a.ApiDetails.State
-	}
-	return 0
-}
-
-func (a *Agent) dnsState() AgentState {
-	if a.DnsDetails != nil {
-		return a.DnsDetails.State
-	}
-	return 0
 }
 
 // APIMechanismState satisfies transport.AgentLike. Returns a snapshot
@@ -280,13 +204,17 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
+	// *hsync.Registry is the single peer map + protocol methods (decision B,
+	// docs/2026-05-30 §A3). A3d.1 embeds the SAME instance owned by
+	// HsyncEngine (wired at engine construction). AgentRegistry.S stays
+	// dual-mapped alongside it until A3d.4; the embedded registry's own S is
+	// reached via ar.Registry.S. The outer S/mu (depth 0) shadow the
+	// embedded ones, so all existing ar.S/ar.mu usage is unchanged.
+	*hsync.Registry
 	S                     core.ConcurrentMap[AgentId, *Agent]
-	RegularS              map[AgentId]*Agent
-	RemoteAgents          map[ZoneName][]AgentId
 	mu                    sync.RWMutex
 	LocalAgent            *MultiProviderConf
 	LocateInterval        int
-	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
 	LeaderElectionManager *LeaderElectionManager
@@ -444,6 +372,15 @@ type KeystateInfo struct {
 	Timestamp string `json:"timestamp,omitempty"`
 }
 
+// AgentRegistryDump is the debug-only serialization of the agent registry for
+// the dump-agentregistry command (the live registry's peer map is not directly
+// JSON-encodable). Not a live registry store.
+type AgentRegistryDump struct {
+	Agents         map[AgentId]*Agent
+	LocalAgent     *MultiProviderConf
+	LocateInterval int
+}
+
 type AgentMgmtResponse struct {
 	Identity       AgentId
 	Status         string
@@ -454,7 +391,7 @@ type AgentMgmtResponse struct {
 	AgentConfig    MultiProviderConf
 	RfiType        string
 	RfiResponse    map[AgentId]*RfiData
-	AgentRegistry  *AgentRegistry
+	AgentRegistry  *AgentRegistryDump
 	ZoneDataRepo   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
 	KeystateStatus map[ZoneName]KeystateInfo `json:"keystate_status,omitempty"`
 	Msg            string

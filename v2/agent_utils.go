@@ -5,17 +5,11 @@
 package tdnsmp
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/url"
-	"slices"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
-	"github.com/johanix/tdns-transport/v2/transport"
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -38,18 +32,16 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	agent.Zones[zone] = true
 	agent.Mu.Unlock()
 
-	ar.AddRemoteAgent(zone, agent)
 	ar.S.Set(identity, agent)
 }
 
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
+	members := participantFQDNSetForApex(zoneApex(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		agent.Mu.RLock()
-		if _, exists := agent.Zones[zone]; exists {
+		if members[dns.Fqdn(string(agent.Identity))] {
 			agents = append(agents, agent)
 		}
-		agent.Mu.RUnlock()
 	}
 	return agents
 }
@@ -58,40 +50,43 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 // OPERATIONAL and LEGACY states based on zone count.
 // This should be called after HSYNC changes to keep agent state synchronized with zone membership.
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
+	// Derive the shared-zone set (zones where both we and this agent are
+	// participants) without holding agent.Mu — zone-data access must not nest
+	// under the agent lock. LEGACY is now defined as derived participations == 0.
+	shared := ar.sharedParticipantZones(agent.Identity)
+	zoneCount := len(shared)
+	identity := agent.Identity
+
+	// State transition under the peer mutex only — released before any transport
+	// call (lock order: AgentRegistry.mu -> peer mutex -> transport.PeerRegistry
+	// -> transport.Peer; never hold the peer mutex across a transport call).
 	agent.Mu.Lock()
-	defer agent.Mu.Unlock()
-
-	zoneCount := len(agent.Zones)
 	oldState := agent.State
-
-	// State transitions based on zone count
 	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
 		// Transition to LEGACY when zones go to zero
 		agent.State = AgentStateLegacy
 		agent.LastState = time.Now()
 		lgAgent.Info("agent transitioned to LEGACY (no shared zones)",
-			"agent", agent.Identity, "from", AgentStateToString[oldState])
+			"agent", identity, "from", AgentStateToString[oldState])
 	} else if zoneCount > 0 && oldState == AgentStateLegacy {
 		// Transition back to OPERATIONAL when zones are re-added
 		agent.State = AgentStateOperational
 		agent.LastState = time.Now()
 		lgAgent.Info("agent transitioned LEGACY to OPERATIONAL",
-			"agent", agent.Identity, "zones", zoneCount)
+			"agent", identity, "zones", zoneCount)
 	}
+	agent.Mu.Unlock()
 
-	// Sync zones to peer in PeerRegistry (updates cached SharedZones)
+	// Sync the derived shared zones to the transport peer (atomic replace under
+	// the transport.Peer lock; no peer mutex held here).
 	if ar.TransportManager != nil {
-		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(agent.Identity))
-
-		// Clear existing shared zones
-		peer.SharedZones = make(map[string]*transport.ZoneRelation)
-
-		// Re-add all zones from agent
-		for zone := range agent.Zones {
-			peer.AddSharedZone(string(zone), "", "")
+		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(identity))
+		zoneStrs := make([]string, len(shared))
+		for i, zone := range shared {
+			zoneStrs[i] = string(zone)
 		}
-
-		lgAgent.Debug("synced zones to peer", "zones", zoneCount, "peer", agent.Identity)
+		peer.ReplaceSharedZones(zoneStrs)
+		lgAgent.Debug("synced zones to peer", "zones", zoneCount, "peer", identity)
 	}
 }
 
@@ -117,390 +112,17 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
 		S:                    core.NewStringer[AgentId, *Agent](),
-		RemoteAgents:         make(map[ZoneName][]AgentId),
 		LocalAgent:           mp,
 		LocateInterval:       li,
-		helloContexts:        make(map[AgentId]context.CancelFunc),
 		ProviderGroupManager: NewProviderGroupManager(mp.Identity),
 		GossipStateTable:     NewGossipStateTable(mp.Identity),
 	}
 }
 
-// LocateAgent is completely asynchronous with no return values
-//
-// DEPRECATED: This function has critical concurrency issues (see docs/locateagent-review-findings.md).
-// It will be replaced by the refactored discovery mechanism using common helpers from
-// agent_discovery_common.go. Keep this implementation for backward compatibility until
-// the migration is complete.
-func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
-	lgAgent.Debug("looking up agent", "agent", remoteid)
-
-	// Skip if this is our own identity
-	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
-		lgAgent.Debug("skipping self-identification", "agent", remoteid)
-		return
-	}
-
-	// Check if we already know this agent and it's operational
-	agent, exists := ar.S.Get(remoteid)
-	if exists {
-		if zonename != "" {
-			ar.AddZoneToAgent(remoteid, zonename)
-		}
-
-		// If the agent exists in the registry, then it is at least in the state "needed".
-		// That implies that either there is already a LocateAgent() running, or one has
-		// already completed. In neither case do we need a new LocateAgent(), so we just return.
-		return
-	}
-
-	lgAgent.Debug("looking up agent for zone", "agent", remoteid, "zone", zonename)
-
-	// Initialize agent if needed
-	agent = &Agent{
-		Identity: remoteid,
-		PeerID:   string(remoteid),
-		// Details:   map[string]AgentDetails{},
-		ApiDetails: &AgentDetails{},
-		DnsDetails: &AgentDetails{},
-		Zones:      make(map[ZoneName]bool),
-		State:      AgentStateNeeded,
-		LastState:  time.Now(),
-	}
-
-	agent.Mu.Lock()
-	agent.ApiDetails.State = AgentStateNeeded
-	agent.DnsDetails.State = AgentStateNeeded
-	agent.ApiDetails.ContactInfo = "none"
-	agent.DnsDetails.ContactInfo = "none"
-	agent.Mu.Unlock()
-
-	ar.S.Set(remoteid, agent)
-
-	go func() {
-		// Create a loop that continues until agent is known
-		for {
-			// Do agent lookup
-			resolverAddress := viper.GetString("resolver.address")
-			lgAgent.Debug("using resolver", "address", resolverAddress)
-			resolvers := []string{resolverAddress}
-			timeout := 2 * time.Second
-			retries := 3
-
-			// Only look up URI if we don't have it
-			agent.Mu.RLock()
-			tmpniluri := agent.ApiDetails.UriRR == nil
-			agent.Mu.RUnlock()
-			if tmpniluri {
-				go func() {
-					qname := string("_https._tcp." + remoteid)
-					rrset, err := tdns.RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
-					if err != nil {
-						lgAgent.Error("URI query failed", "qname", qname, "err", err)
-						return
-					}
-
-					if rrset == nil {
-						lgAgent.Debug("no URI record found", "qname", qname)
-						return
-					}
-
-					for _, rr := range rrset.RRs {
-						if u, ok := rr.(*dns.URI); ok {
-							lgAgent.Debug("URI record found", "record", u.String())
-							agent.Mu.Lock()
-							agent.ApiDetails.UriRR = u
-							agent.ApiDetails.BaseUri = u.Target
-							agent.ApiDetails.ContactInfo = "partial"
-							agent.Mu.Unlock()
-						}
-					}
-				}()
-			}
-
-			agent.Mu.RLock()
-			tmpniluri = agent.DnsDetails.UriRR == nil
-			agent.Mu.RUnlock()
-			if tmpniluri {
-				go func() {
-					qname := string("_dns._tcp." + remoteid)
-					rrset, err := tdns.RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
-					if err != nil {
-						lgAgent.Error("URI query failed", "qname", qname, "err", err)
-						return
-					}
-
-					if rrset == nil {
-						lgAgent.Debug("no URI record found", "qname", qname)
-						return
-					}
-
-					for _, rr := range rrset.RRs {
-						if u, ok := rr.(*dns.URI); ok {
-							lgAgent.Debug("URI record found", "agent", agent.Identity, "record", u.String())
-							agent.Mu.Lock()
-							agent.DnsDetails.UriRR = u
-							agent.DnsDetails.BaseUri = u.Target
-							agent.DnsDetails.ContactInfo = "partial"
-							agent.Mu.Unlock()
-						}
-					}
-				}()
-			}
-
-			// Only proceed with SVCB if we have URI
-			agent.Mu.RLock()
-			tmpniluri = agent.ApiDetails.UriRR == nil
-			tmpaddrs := agent.ApiDetails.Addrs
-			agent.Mu.RUnlock()
-			if tmpniluri && len(tmpaddrs) == 0 {
-				go func() {
-					_, addrs, port, targetName, err := FetchSVCB(agent.ApiDetails.BaseUri, resolvers, timeout, retries)
-					if err != nil {
-						lgAgent.Error("SVCB fetch failed", "baseuri", agent.ApiDetails.BaseUri, "err", err)
-						return
-					}
-
-					agent.Mu.Lock()
-					agent.ApiDetails.Addrs = addrs
-					agent.ApiDetails.Port = port
-					agent.ApiDetails.Host = targetName
-					agent.Mu.Unlock()
-				}()
-			}
-
-			agent.Mu.RLock()
-			tmpniluri = agent.DnsDetails.UriRR == nil
-			tmpaddrs = agent.DnsDetails.Addrs
-			agent.Mu.RUnlock()
-			if tmpniluri && len(tmpaddrs) == 0 {
-				go func() {
-					_, addrs, port, targetName, err := FetchSVCB(agent.DnsDetails.BaseUri, resolvers, timeout, retries)
-					if err != nil {
-						lgAgent.Error("SVCB fetch failed", "baseuri", agent.DnsDetails.BaseUri, "err", err)
-						return
-					}
-
-					agent.Mu.Lock()
-					agent.DnsDetails.Addrs = addrs
-					agent.DnsDetails.Port = port
-					agent.DnsDetails.Host = targetName
-					agent.Mu.Unlock()
-				}()
-			}
-
-			// Only proceed with KEY if we have the target name
-			agent.Mu.RLock()
-			tmpnilkey := agent.DnsDetails.KeyRR == nil
-			tmphost := agent.DnsDetails.Host
-			agent.Mu.RUnlock()
-			if tmpnilkey && tmphost != "" {
-				go func() {
-					// Look up KEY (legacy)
-					rrset, err := tdns.RecursiveDNSQueryWithServers(dns.Fqdn(tmphost), dns.TypeKEY, timeout, retries, resolvers)
-					if err != nil {
-						lgAgent.Error("KEY query failed", "err", err)
-						return
-					}
-
-					if rrset == nil {
-						lgAgent.Debug("no KEY record found", "host", tmphost)
-						return
-					}
-
-					for _, rr := range rrset.RRs {
-						if k, ok := rr.(*dns.KEY); ok {
-							lgAgent.Debug("KEY record found", "agent", agent.Identity, "record", k.String())
-							agent.Mu.Lock()
-							agent.DnsDetails.KeyRR = k
-							agent.DnsMethod = true
-							agent.Mu.Unlock()
-						}
-					}
-				}()
-			}
-
-			// Only proceed with TLSA if we have the target name
-			agent.Mu.RLock()
-			tmpniltlsa := agent.ApiDetails.TlsaRR == nil
-			tmpport := agent.ApiDetails.Port
-			tmphost = agent.ApiDetails.Host
-			agent.Mu.RUnlock()
-			if tmpniltlsa && tmphost != "" {
-				go func() {
-					// Look up TLSA
-					tlsaName := fmt.Sprintf("_%d._tcp.%s", tmpport, tmphost)
-					rrset, err := tdns.RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
-					if err != nil {
-						lgAgent.Error("TLSA query failed", "err", err)
-						return
-					}
-
-					if rrset == nil {
-						lgAgent.Debug("no TLSA record found", "name", tlsaName)
-						return
-					}
-
-					for _, rr := range rrset.RRs {
-						if t, ok := rr.(*dns.TLSA); ok {
-							lgAgent.Debug("TLSA record found", "agent", agent.Identity, "record", t.String())
-							agent.Mu.Lock()
-							agent.ApiDetails.TlsaRR = t
-							agent.ApiMethod = true
-							agent.Mu.Unlock()
-						}
-					}
-				}()
-			}
-
-			// Check if API transport details are complete
-			agent.Mu.Lock()
-
-			if agent.ApiDetails.UriRR != nil && agent.ApiDetails.TlsaRR != nil && len(agent.ApiDetails.Addrs) > 0 {
-				agent.ApiDetails.ContactInfo = "complete"
-				agent.ApiDetails.State = AgentStateKnown
-				agent.ApiMethod = true
-				lgAgent.Info("API transport details complete", "agent", remoteid)
-			}
-
-			if agent.DnsDetails.UriRR != nil && agent.DnsDetails.KeyRR != nil && len(agent.DnsDetails.Addrs) > 0 {
-				agent.DnsDetails.ContactInfo = "complete"
-				agent.DnsDetails.State = AgentStateKnown
-				agent.DnsMethod = true
-				lgAgent.Info("DNS transport details complete", "agent", remoteid)
-			}
-			agent.Mu.Unlock()
-
-			// Update agent state based on available methods
-			agent.Mu.RLock()
-			tmpstate := agent.ApiDetails.State
-			agent.Mu.RUnlock()
-			if tmpstate == AgentStateKnown {
-				agent.Mu.Lock()
-				agent.State = AgentStateKnown
-				agent.LastState = time.Now()
-				agent.Mu.Unlock()
-
-				err := agent.NewAgentSyncApiClient(ar.LocalAgent)
-				if err != nil {
-					lgAgent.Error("failed to create API client", "agent", remoteid, "err", err)
-					agent.Mu.Lock()
-					agent.State = AgentStateError
-					agent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
-					agent.LastState = time.Now()
-					agent.Mu.Unlock()
-				} else if agent.Api != nil {
-					agent.Api.ApiClient.Debug = false // disable debug logging for API client
-				}
-
-				// Agent is now known, update and exit the loop
-				ar.S.Set(remoteid, agent)
-				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
-
-				if ar.TransportManager != nil && ar.TransportManager.OnPeerDiscovered != nil {
-					// Bite E: invocation site resolves the peer; the
-					// callback receives a non-nil *Peer. Use
-					// GetOrCreate because discovery completion is
-					// typically the first time a peer materialises
-					// for this agent.
-					peer := ar.TransportManager.PeerRegistry.GetOrCreate(agent.PeerID)
-					ar.TransportManager.OnPeerDiscovered(peer)
-				}
-
-				// If we're in known state and have a zone, try to send hello
-				if zonename != "" {
-					ar.AddZoneToAgent(remoteid, zonename)
-
-					// Create a new context for this hello retrier
-					ctx, cancel := context.WithCancel(context.Background())
-
-					// Store the cancel function
-					ar.mu.Lock()
-					if existingCancel, exists := ar.helloContexts[remoteid]; exists {
-						existingCancel() // Cancel any existing hello retrier
-					}
-					ar.helloContexts[remoteid] = cancel
-					ar.mu.Unlock()
-
-					// Start the hello retrier with the new context
-					go ar.HelloRetrierNG(ctx, agent)
-				}
-
-				return
-			} else {
-				// Agent is not yet known, update and sleep before retrying
-				ar.S.Set(remoteid, agent)
-				lgAgent.Debug("remote agent not operational, will retry", "agent", remoteid, "interval", ar.LocateInterval)
-				time.Sleep(time.Duration(ar.LocateInterval) * time.Second)
-				// Loop will continue
-			}
-		}
-	}()
-}
-
-func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
-	retries int) (*dns.SVCB, []string, uint16, string, error) {
-	parsedUri, err := url.Parse(baseurl)
-	if err != nil {
-		lgAgent.Error("failed to parse URI target", "url", baseurl, "err", err)
-		return nil, nil, 0, "", err
-	}
-
-	targetName, _, err := net.SplitHostPort(parsedUri.Host)
-	if err != nil {
-		targetName = parsedUri.Host
-	}
-
-	rrset, err := tdns.RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeSVCB, timeout, retries, resolvers)
-	if err != nil {
-		lgAgent.Error("SVCB query failed", "err", err)
-		return nil, nil, 0, "", err
-	}
-
-	// Process SVCB response
-	if rrset == nil {
-		lgAgent.Warn("SVCB response contained zero RRs", "target", targetName)
-		return nil, nil, 0, "", fmt.Errorf("response to %s SVCB contained zero RRs", targetName)
-	}
-
-	var addrs []string
-	var port uint16
-	var svcbrr *dns.SVCB
-
-	if len(rrset.RRs) == 0 {
-		return nil, nil, 0, "", fmt.Errorf("response to %s SVCB contained zero RRs", targetName)
-	}
-
-	for _, rr := range rrset.RRs {
-		if svcb, ok := rr.(*dns.SVCB); ok {
-			lgAgent.Debug("SVCB record found", "target", targetName, "record", svcb.String())
-			svcbrr = svcb
-			// Process SVCB record (addresses and port)
-			for _, kv := range svcb.Value {
-				switch kv.Key() {
-				case dns.SVCB_IPV4HINT:
-					ipv4Hints := kv.(*dns.SVCBIPv4Hint)
-					for _, ip := range ipv4Hints.Hint {
-						addrs = append(addrs, ip.String())
-					}
-				case dns.SVCB_IPV6HINT:
-					ipv6Hints := kv.(*dns.SVCBIPv6Hint)
-					for _, ip := range ipv6Hints.Hint {
-						addrs = append(addrs, ip.String())
-					}
-				case dns.SVCB_PORT:
-					tmpPort := kv.(*dns.SVCBPort)
-					port = uint16(tmpPort.Port)
-				}
-			}
-		}
-	}
-	return svcbrr, addrs, port, targetName, nil
-}
-
-// MarkAgentAsNeeded creates a placeholder agent in NEEDED state.
-// The agent will be discovered asynchronously by DiscoveryRetrierNG in HsyncEngine.
-// This is the new recommended pattern for agent discovery triggered by HSYNC updates.
+// MarkAgentAsNeeded marks a remote agent as NEEDED by delegating to the hsync
+// engine's NG discovery path (HsyncEngine.MarkNeeded), which drives discovery
+// and hello. No-op if no HsyncEngine is wired (the legacy in-process discovery
+// fallback was retired with A3d's legacy-path retirement).
 func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
 	if ar.HsyncEngine != nil {
 		var task *hsync.DeferredTask
@@ -514,173 +136,17 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 		ar.HsyncEngine.MarkNeeded(hsync.PeerID(remoteid), hsync.ZoneName(zonename), task)
 		return
 	}
-	// Skip self-identification
-	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
-		lgAgent.Debug("skipping self-identification", "agent", remoteid)
-		return
-	}
-
-	// Check if agent already exists
-	agent, exists := ar.S.Get(remoteid)
-	if exists {
-		// Already discovered - just associate zone
-		if zonename != "" {
-			ar.AddZoneToAgent(remoteid, zonename)
-		}
-		if deferredTask != nil {
-			agent.Mu.Lock()
-			agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
-			agent.Mu.Unlock()
-			ar.S.Set(remoteid, agent)
-		}
-		lgAgent.Debug("agent already exists", "agent", remoteid,
-			"apiState", AgentStateToString[agent.ApiDetails.State],
-			"dnsState", AgentStateToString[agent.DnsDetails.State],
-			"ptr", fmt.Sprintf("%p", agent))
-		return
-	}
-
-	// Create placeholder agent in NEEDED state
-	agent = &Agent{
-		Identity:   remoteid,
-		PeerID:     string(remoteid),
-		ApiDetails: &AgentDetails{State: AgentStateNeeded},
-		DnsDetails: &AgentDetails{State: AgentStateNeeded},
-		Zones:      make(map[ZoneName]bool),
-		State:      AgentStateNeeded,
-		LastState:  time.Now(),
-	}
-
-	// Only discover transports we ourselves support.
-	if ar.MPTransport != nil {
-		agent.DnsMethod = ar.MPTransport.isTransportSupported("dns")
-		agent.ApiMethod = ar.MPTransport.isTransportSupported("api")
-	} else {
-		agent.DnsMethod = true
-	}
-
-	if zonename != "" {
-		agent.Zones[zonename] = true
-	}
-
-	if deferredTask != nil {
-		agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
-	}
-
-	ar.S.Set(remoteid, agent)
-	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename, "ptr", fmt.Sprintf("%p", agent))
-
-	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
-	var imr *Imr
-	if ar.MPTransport != nil && ar.MPTransport.getImrEngine != nil {
-		imr = ar.MPTransport.getImrEngine()
-	}
-	if imr != nil {
-		lgAgent.Debug("triggering immediate discovery", "agent", remoteid)
-		go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
-	} else {
-		lgAgent.Debug("IMR not ready, will be discovered by DiscoveryRetrierNG", "agent", remoteid)
-	}
 }
 
-// attemptDiscovery performs a single discovery attempt for an agent.
-// Called by DiscoveryRetrierNG for agents in NEEDED state.
-func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, discoverDNS bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	lgAgent.Debug("attempting discovery", "agent", agent.Identity, "api", discoverAPI, "dns", discoverDNS)
-
-	result := &AgentDiscoveryResult{Identity: string(agent.Identity)}
-
-	if discoverAPI {
-		imr.DiscoverAgentAPI(ctx, string(agent.Identity), result)
-	}
-	if discoverDNS {
-		imr.DiscoverAgentDNS(ctx, string(agent.Identity), result)
-	}
-
-	// Check if we got anything useful from the transports we discovered
-	if result.APIUri == "" && result.DNSUri == "" {
-		agent.Mu.Lock()
-		agent.ApiDetails.DiscoveryFailures++
-		failures := agent.ApiDetails.DiscoveryFailures
-		agent.ApiDetails.LatestError = "no contact endpoints found"
-		agent.ApiDetails.LatestErrorTime = time.Now()
-		agent.Mu.Unlock()
-
-		if failures >= discoveryFailureFlushThreshold && imr.Cache != nil {
-			identity := string(agent.Identity)
-			removed, err := imr.Cache.FlushDomain(identity, false)
-			if err == nil && removed > 0 {
-				lgAgent.Info("flushed IMR cache for stuck discovery", "agent", agent.Identity, "removed", removed, "after_failures", failures)
-			}
-			agent.Mu.Lock()
-			agent.ApiDetails.DiscoveryFailures = 0
-			agent.Mu.Unlock()
-		} else {
-			lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found", "failures", failures)
-		}
-		ar.fireOnDiscoveryFailed(agent, fmt.Errorf("no contact endpoints found (failures=%d)", failures))
+// RediscoverAgent forces a fresh discovery pass for an already-known agent via
+// the NG engine (the `peer reset` path). Unlike MarkAgentAsNeeded, it re-drives
+// discovery even when the peer already exists. No-op if no HsyncEngine.
+func (ar *AgentRegistry) RediscoverAgent(id AgentId) {
+	if ar.HsyncEngine == nil {
+		lgAgent.Warn("RediscoverAgent called with no HsyncEngine; discovery not triggered", "agent", id)
 		return
 	}
-
-	// Register discovered agent
-	if ar.MPTransport != nil {
-		err := ar.MPTransport.RegisterDiscoveredAgent(result)
-		if err != nil {
-			agent.Mu.Lock()
-			agent.ApiDetails.LatestError = err.Error()
-			agent.ApiDetails.LatestErrorTime = time.Now()
-			agent.Mu.Unlock()
-			lgAgent.Warn("registration failed, will retry", "agent", agent.Identity, "err", err)
-			ar.fireOnDiscoveryFailed(agent, fmt.Errorf("registration failed: %w", err))
-			return
-		}
-	}
-
-	// SUCCESS: Discovery complete. Contact info updated.
-	agent.Mu.Lock()
-	agent.ApiDetails.DiscoveryFailures = 0
-	agent.Mu.Unlock()
-
-	lgAgent.Info("discovery successful", "agent", agent.Identity,
-		"apiState", AgentStateToString[agent.ApiDetails.State],
-		"dnsState", AgentStateToString[agent.DnsDetails.State])
-
-	agent.Mu.RLock()
-	apiUseful := agent.ApiMethod && agent.ApiDetails.State >= AgentStateKnown
-	dnsUseful := agent.DnsMethod && agent.DnsDetails.State >= AgentStateKnown
-	apiNeedsHello := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
-	dnsNeedsHello := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
-	agent.Mu.RUnlock()
-
-	if !apiUseful && !dnsUseful {
-		lgAgent.Debug("no transports at KNOWN or beyond, skipping HelloRetrierNG", "agent", agent.Identity)
-		return
-	}
-
-	if !apiNeedsHello && !dnsNeedsHello {
-		lgAgent.Debug("already past KNOWN state, no Hello needed", "agent", agent.Identity,
-			"apiState", AgentStateToString[agent.ApiDetails.State],
-			"dnsState", AgentStateToString[agent.DnsDetails.State])
-		return
-	}
-
-	// Cancel any existing HelloRetrierNG for this agent before starting a new one
-	ar.mu.Lock()
-	if existingCancel, exists := ar.helloContexts[agent.Identity]; exists {
-		lgAgent.Debug("cancelling existing Hello retry loop", "agent", agent.Identity)
-		existingCancel()
-	}
-	ar.mu.Unlock()
-
-	helloCtx, helloCancel := context.WithCancel(context.Background())
-	ar.mu.Lock()
-	ar.helloContexts[agent.Identity] = helloCancel
-	ar.mu.Unlock()
-	go ar.HelloRetrierNG(helloCtx, agent)
-	lgAgent.Debug("started Hello retry loop", "agent", agent.Identity)
+	ar.HsyncEngine.Rediscover(hsync.PeerID(id))
 }
 
 // fireOnDiscoveryFailed invokes the TransportManager's
@@ -738,43 +204,9 @@ func AgentToString(a *Agent) string {
 	return string(a.Identity)
 }
 
-// AddRemoteAgent adds an agent to the list of remote agents for a zone
-func (ar *AgentRegistry) AddRemoteAgent(zonename ZoneName, agent *Agent) {
-	ar.mu.Lock()
-	defer ar.mu.Unlock()
-	if ar.RemoteAgents[zonename] == nil {
-		ar.RemoteAgents[zonename] = make([]AgentId, 0)
-	}
-	if !slices.Contains(ar.RemoteAgents[zonename], agent.Identity) {
-		ar.RemoteAgents[zonename] = append(ar.RemoteAgents[zonename], agent.Identity)
-	}
-}
-
-// RemoveRemoteAgent removes an agent from the list of remote agents for a zone
-func (ar *AgentRegistry) RemoveRemoteAgent(zonename ZoneName, identity AgentId) {
-	ar.mu.Lock()
-	defer ar.mu.Unlock()
-
-	// Remove from remoteAgents
-	agentids := ar.RemoteAgents[zonename]
-	for i, a := range agentids {
-		if a == identity {
-			ar.RemoteAgents[zonename] = append(agentids[:i], agentids[i+1:]...)
-			break
-		}
-	}
-
-	// Clean up zone association in agent
-	if agent, exists := ar.S.Get(identity); exists {
-		agent.Mu.Lock()
-		delete(agent.Zones, zonename)
-		agent.Mu.Unlock()
-		ar.S.Set(identity, agent)
-	}
-}
-
-// GetRemoteAgents returns a list of remote agents for a zone. It does not
-// check if the agents are operational, or try to get missing information.
+// GetZoneAgentData returns the zone's member agents, derived from the HSYNC3
+// RRset and HSYNCPARAM roles. It does not check whether the agents are
+// operational, or try to fetch missing information.
 func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, error) {
 	var zad = &ZoneAgentData{
 		ZoneName: zonename,
@@ -782,9 +214,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	agents := []*Agent{}
 
-	ar.mu.RLock()
-	defer ar.mu.RUnlock()
-	lgAgent.Debug("getting zone agent data", "zone", zonename, "remoteAgents", len(ar.RemoteAgents[zonename]))
+	lgAgent.Debug("getting zone agent data", "zone", zonename)
 
 	zd, exists := Zones.Get(string(zonename))
 	if !exists {
@@ -810,7 +240,8 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		hsyncStrs[i] = rr.String()
 	}
 
-	// Build label->Identity map so we can resolve Upstream labels to FQDNs
+	// Build label->Identity map so we can resolve Upstream labels to FQDNs.
+	// Kept complete (all HSYNC3 records) so Upstream resolution still works.
 	labelToIdentity := map[string]string{}
 	for _, rr := range hsyncRRset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
@@ -818,6 +249,15 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				labelToIdentity[h3.Label] = h3.Identity
 			}
 		}
+	}
+
+	// Membership is HSYNCPARAM-derived: only identities with a HSYNCPARAM
+	// role are zone members / distribution recipients. An identity present
+	// in HSYNC3 but granted no role is not included.
+	participantList, _ := zoneParticipants(apex)
+	participantSet := make(map[string]struct{}, len(participantList))
+	for _, id := range participantList {
+		participantSet[id] = struct{}{}
 	}
 
 	for _, rr := range hsyncRRset.RRs {
@@ -829,6 +269,11 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 					continue // don't add ourselves to the list of agents
 				} else if labelToIdentity[hsync3.Upstream] == ar.LocalAgent.Identity {
 					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync3.Identity))
+				}
+				// Skip identities with no HSYNCPARAM role — they have an
+				// HSYNC3 mapping but are not members of this zone.
+				if _, isParticipant := participantSet[hsync3.Identity]; !isParticipant {
+					continue
 				}
 				// Found an HSYNC3 record, try to locate the agent
 				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
@@ -855,15 +300,29 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	lgAgent.Warn("TODO: cleanup not yet implemented", "zone", zonename)
 }
 
-// UpdateAgents updates the registry based on the HSYNC3 records in the request.
-func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate, msgQs *MsgQs) error {
+// reattachHsyncMemberAdds re-homes the per-add CONFIG RFI deferred tasks and the
+// membership-change election kick that used to live in UpdateAgents. It is driven
+// by the member-add set ApplyHsyncDiff already computed (HSYNCPARAM-gated), so a
+// role-less identity neither triggers an RFI nor kicks an election. The plain
+// "remote agent, no relationship" discovery is already handled by ApplyHsyncDiff's
+// MarkNeeded; this only attaches the upstream/downstream RFI tasks.
+func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName, added []hsync.PeerID, localAdded bool) {
+	if len(added) == 0 && !localAdded {
+		return
+	}
+	ourId := AgentId(ar.LocalAgent.Identity)
 
-	var updatedIdentities = map[AgentId]bool{}
-	var affectedIdentities = map[AgentId]bool{}
+	var synchedDataUpdateQ chan *SynchedDataUpdate
+	var msgQs *MsgQs
+	if conf.InternalMp.MsgQs != nil {
+		synchedDataUpdateQ = conf.InternalMp.MsgQs.SynchedDataUpdate
+		msgQs = conf.InternalMp.MsgQs
+	}
 
-	// Build label->Identity map from the full zone HSYNC3 RRset (not just the delta).
-	// Using only HsyncAdds would miss unchanged records and break upstream resolution.
+	// Build label->Identity and Identity->record from the zone's full current
+	// HSYNC3 RRset (the delta alone would miss unchanged upstream records).
 	labelToIdentity := map[string]string{}
+	recByIdentity := map[AgentId]*core.HSYNC3{}
 	if zd, exists := Zones.Get(string(zonename)); exists {
 		if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
 			if hsync3RRset, ok := apex.RRtypes.Get(core.TypeHSYNC3); ok {
@@ -871,6 +330,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					if prr, ok := rr.(*dns.PrivateRR); ok {
 						if h3, ok := prr.Data.(*core.HSYNC3); ok {
 							labelToIdentity[h3.Label] = h3.Identity
+							recByIdentity[AgentId(h3.Identity)] = h3
 						}
 					}
 				}
@@ -878,157 +338,84 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 		}
 	}
 
-	lgAgent.Debug("UpdateAgents: identity resolution", "zone", zonename, "ourId", ourId, "labelToIdentity", labelToIdentity, "hsyncAdds", len(req.SyncStatus.HsyncAdds))
-
-	// First pass: Check if WE are in this zone's HSYNC3 RRset
-	weAreInHSYNC := false
-	for _, id := range labelToIdentity {
-		if AgentId(id) == ourId {
-			weAreInHSYNC = true
-			break
-		}
-	}
-
-	if !weAreInHSYNC {
-		lgAgent.Debug("we are not in HSYNC3 RRset, ignoring remote agents", "zone", zonename)
-		return nil
-	}
-
-	// Handle new HSYNC3 records
-	for _, rr := range req.SyncStatus.HsyncAdds {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				lgAgent.Debug("analysing HSYNC3", "zone", zonename, "hsync3", hsync3.String())
-
-				updatedIdentities[AgentId(hsync3.Identity)] = true
-				affectedIdentities[AgentId(hsync3.Identity)] = true
-				upstreamIdentity := AgentId(labelToIdentity[hsync3.Upstream])
-				if AgentId(hsync3.Identity) == ourId {
-					// We're the Target
-					if hsync3.Upstream == "." {
-						lgAgent.Debug("we are target but upstream is '.', no sync needed", "zone", zonename)
-						continue
-					}
-
-					if upstreamIdentity == "" {
-						lgAgent.Warn("cannot resolve upstream label to identity, skipping", "zone", zonename, "upstream", hsync3.Upstream)
-						continue
-					}
-
-					// Need to sync with Upstream - mark as needed for discovery
-					ar.MarkAgentAsNeeded(upstreamIdentity, zonename,
-						&DeferredAgentTask{
-							Precondition: func() bool {
-								if agent, exists := ar.S.Get(upstreamIdentity); exists {
-									return agent.ApiDetails.State == AgentStateOperational
-								}
-								return false
-							},
-							Action: func() (bool, error) {
-								lgAgent.Info("executing deferred RFI for upstream data", "upstream", hsync3.Upstream, "zone", zonename)
-								amp := AgentMgmtPost{
-									MessageType: AgentMsgRfi,
-									RfiType:     "CONFIG",
-									RfiSubtype:  "upstream",
-									Zone:        zonename,
-									Upstream:    upstreamIdentity,
-								}
-
-								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
-								return true, nil
-							},
-							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync3.Upstream),
-						})
-				} else if upstreamIdentity == ourId {
-					// Need to sync with downstream agents - mark as needed for discovery
-					ar.MarkAgentAsNeeded(AgentId(hsync3.Identity), zonename,
-						&DeferredAgentTask{
-							Precondition: func() bool {
-								if agent, exists := ar.S.Get(AgentId(hsync3.Identity)); exists {
-									return agent.State == AgentStateOperational
-								}
-								return false
-							},
-							Action: func() (bool, error) {
-								lgAgent.Info("executing deferred RFI for downstream data", "downstream", hsync3.Identity, "zone", zonename)
-								amp := AgentMgmtPost{
-									MessageType: AgentMsgRfi,
-									RfiType:     "CONFIG",
-									RfiSubtype:  "downstream",
-									Zone:        zonename,
-									Downstream:  AgentId(hsync3.Identity),
-								}
-
-								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
-								return true, nil
-							},
-							Desc: fmt.Sprintf("RFI for downstream data from %q", hsync3.Identity),
-						})
-
-				} else {
-					lgAgent.Debug("HSYNC3 is for a remote agent, analysing", "zone", zonename, "agent", hsync3.Identity)
-					ar.MarkAgentAsNeeded(AgentId(hsync3.Identity), zonename, nil)
-				}
+	// If our own record was (re)added and we have an upstream, request its config.
+	if localAdded {
+		if h3 := recByIdentity[ourId]; h3 != nil && h3.Upstream != "." {
+			upstreamIdentity := AgentId(labelToIdentity[h3.Upstream])
+			if upstreamIdentity == "" {
+				lgAgent.Warn("cannot resolve upstream label to identity, skipping", "zone", zonename, "upstream", h3.Upstream)
+			} else {
+				upstreamLabel := h3.Upstream
+				ar.MarkAgentAsNeeded(upstreamIdentity, zonename, &DeferredAgentTask{
+					Precondition: func() bool {
+						if agent, exists := ar.S.Get(upstreamIdentity); exists {
+							return agent.ApiDetails.State == AgentStateOperational
+						}
+						return false
+					},
+					Action: func() (bool, error) {
+						lgAgent.Info("executing deferred RFI for upstream data", "upstream", upstreamLabel, "zone", zonename)
+						amp := AgentMgmtPost{
+							MessageType: AgentMsgRfi,
+							RfiType:     "CONFIG",
+							RfiSubtype:  "upstream",
+							Zone:        zonename,
+							Upstream:    upstreamIdentity,
+						}
+						ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
+						return true, nil
+					},
+					Desc: fmt.Sprintf("RFI for upstream data from %q", upstreamLabel),
+				})
 			}
 		}
 	}
 
-	// Handle removed HSYNC3 records
-	for _, rr := range req.SyncStatus.HsyncRemoves {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				affectedIdentities[AgentId(hsync3.Identity)] = true
-				if updatedIdentities[AgentId(hsync3.Identity)] {
-					lgAgent.Debug("not removing agent, HSYNC3 RR changed", "zone", zonename, "agent", hsync3.Identity)
-					continue
-				}
-				if AgentId(hsync3.Identity) == ourId {
-					lgAgent.Info("we are no longer part of the HSYNC3 RRset, cleaning up", "zone", zonename, "identity", hsync3.Identity)
-					ar.CleanupZoneRelationships(zonename)
-				} else {
-					lgAgent.Info("agent no longer in HSYNC3 RRset, cleaning up", "zone", zonename, "agent", hsync3.Identity)
-					ar.RemoveRemoteAgent(zonename, AgentId(hsync3.Identity))
-				}
-			}
+	// For each member add whose upstream is us, request its config (downstream).
+	for _, pid := range added {
+		id := AgentId(pid)
+		h3 := recByIdentity[id]
+		if h3 == nil {
+			continue
 		}
+		if AgentId(labelToIdentity[h3.Upstream]) != ourId {
+			continue
+		}
+		downstreamId := id
+		ar.MarkAgentAsNeeded(downstreamId, zonename, &DeferredAgentTask{
+			Precondition: func() bool {
+				if agent, exists := ar.S.Get(downstreamId); exists {
+					return agent.State == AgentStateOperational
+				}
+				return false
+			},
+			Action: func() (bool, error) {
+				lgAgent.Info("executing deferred RFI for downstream data", "downstream", downstreamId, "zone", zonename)
+				amp := AgentMgmtPost{
+					MessageType: AgentMsgRfi,
+					RfiType:     "CONFIG",
+					RfiSubtype:  "downstream",
+					Zone:        zonename,
+					Downstream:  downstreamId,
+				}
+				ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
+				return true, nil
+			},
+			Desc: fmt.Sprintf("RFI for downstream data from %q", downstreamId),
+		})
 	}
 
-	// Recompute shared zones for all affected agents and handle OPERATIONAL <-> LEGACY transitions
-	for identity := range affectedIdentities {
-		if agent, exists := ar.S.Get(identity); exists && identity != ourId {
-			ar.RecomputeSharedZonesAndSyncState(agent)
-		}
-	}
-
-	// Trigger leader election if HSYNC3 RRset changed and we have a leader election manager.
-	if len(updatedIdentities) > 0 && ar.LeaderElectionManager != nil {
+	// Membership changed (HSYNC3 identity add) — kick a leader election.
+	if ar.LeaderElectionManager != nil {
 		lem := ar.LeaderElectionManager
-		configured := lem.configuredPeers(zonename)
-		if configured == 0 {
+		if lem.configuredPeers(zonename) == 0 {
 			lem.StartElection(zonename, 0)
 		} else if ar.ProviderGroupManager != nil {
-			pg := ar.ProviderGroupManager.GetGroupForZone(zonename)
-			if pg != nil {
+			if pg := ar.ProviderGroupManager.GetGroupForZone(zonename); pg != nil {
 				lem.DeferGroupElection(pg.GroupHash)
 			}
 		}
 	}
-
-	// Recompute provider groups when HSYNC3 or HSYNCPARAM changed.
-	// HSYNC3 changes are signalled by len(updatedIdentities) > 0
-	// (populated from HsyncAdds). HSYNCPARAM-only edits produce no
-	// HsyncAdds but still must trigger a recompute because
-	// VotingMembers is derived from HSYNCPARAM.signers/servers.
-	paramChanged := req.SyncStatus != nil && req.SyncStatus.ParamChanged
-	if (len(updatedIdentities) > 0 || paramChanged) && ar.ProviderGroupManager != nil {
-		ar.ProviderGroupManager.RecomputeGroups()
-		groups := ar.ProviderGroupManager.GetGroups()
-		for _, pg := range groups {
-			lgAgent.Info("provider group updated", "group", pg.Name, "hash", pg.GroupHash[:8], "members", len(pg.Members), "voting", len(pg.VotingMembers), "zones", len(pg.Zones))
-		}
-	}
-
-	return nil
 }
 
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {

@@ -77,6 +77,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		lgAgent.Warn("failed to initialize signer as peer, continuing without signer peer registration", "err", err)
 	}
 
+	// The hsync engine is constructed before RefreshEngine starts (its Run
+	// starts further down, with the other agent engines): the first zone
+	// load reports every HSYNC3 record as an addition, and PostRefresh
+	// applies that diff only when AgentRegistry.HsyncEngine is already set
+	// (NewHsyncDataEngine sets it). Same order as the auditor since #39.
+	dataEngine := NewHsyncDataEngine(conf)
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
@@ -117,7 +124,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		count := 0
 		for _, agent := range zad.Agents {
-			if agent.Identity != AgentId(mp.Identity) && agent.IsAnyTransportOperational() {
+			if agent.Identity != AgentId(mp.Identity) && ar.isAgentOperational(agent.Identity) {
 				count++
 			}
 		}
@@ -125,20 +132,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 
 	// Wire configured peers counter — elections require ALL configured peers.
+	// Quorum is the participant count minus ourselves, not the raw HSYNC3 count:
+	// a role-less identity must not inflate the quorum.
 	lem.SetConfiguredPeersFunc(func(zone ZoneName) int {
-		zd, exists := Zones.Get(string(zone))
-		if !exists || zd == nil {
-			return 0
-		}
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil || apex == nil {
-			return 0
-		}
-		hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-		if !exists {
-			return 0
-		}
-		count := len(hsync3RRset.RRs) - 1
+		count := len(ParticipantsForZone(zone)) - 1
 		if count < 0 {
 			count = 0
 		}
@@ -254,7 +251,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					if agent.Identity == AgentId(ar.LocalAgent.Identity) {
 						continue
 					}
-					if !agent.IsAnyTransportOperational() {
+					if !ar.isAgentOperational(agent.Identity) {
 						continue
 					}
 					lgAgent.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.Identity)
@@ -348,8 +345,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return nil
 	})
 
-	// Agent-specific engines
-	dataEngine := NewHsyncDataEngine(conf)
+	// Agent-specific engines (the hsync data engine itself was constructed
+	// above, before RefreshEngine)
 	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
 		dataEngine.Run(ctx, conf.InternalMp.MsgQs)
 	})

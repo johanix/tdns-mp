@@ -27,6 +27,7 @@ func NewAuditorEngine(conf *Config, stateManager *AuditStateManager) *AuditorEng
 	engine := newAuditorHsyncEngine(conf)
 	if ar := conf.InternalMp.AgentRegistry; ar != nil {
 		ar.HsyncEngine = engine
+		ar.Registry = engine.Registry() // A3d.1: embed the engine's single peer map
 	}
 	return &AuditorEngine{
 		core:         engine,
@@ -211,7 +212,7 @@ func providerBeatMeta(ar *AgentRegistry, zone ZoneName, identity string) (label,
 		return "", "", false
 	}
 	if agent, ok := ar.S.Get(AgentId(identity)); ok {
-		gossipState = AgentStateToString[agent.EffectiveState()]
+		gossipState = AgentStateToString[ar.effectiveAgentState(agent.Identity)]
 	}
 	if zone == "" {
 		return label, gossipState, isSigner

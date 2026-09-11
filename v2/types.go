@@ -61,6 +61,64 @@ type CombinerEditResponse struct {
 	Current  map[string]map[string][]string `json:"current,omitempty"` // agent → rrtype → []rr
 }
 
+// CombinerConfigPost / CombinerConfigResponse drive
+// /combiner/config, the runtime-introspection endpoint that
+// returns combiner-side multi-provider config. Useful for
+// operator sanity checks of what the running combiner thinks
+// its config says (as opposed to what's on disk).
+type CombinerConfigPost struct {
+	Command string `json:"command"` // currently: "status"
+	Verbose bool   `json:"verbose,omitempty"`
+}
+
+// CombinerConfigResponse mirrors the subset of MultiProviderConf
+// that is meaningful for an operator inspecting a running
+// combiner. Secrets (private key paths content, JOSE pub key file
+// contents) are excluded by design.
+type CombinerConfigResponse struct {
+	Time     time.Time `json:"time"`
+	Error    bool      `json:"error"`
+	ErrorMsg string    `json:"error_msg,omitempty"`
+	Msg      string    `json:"msg,omitempty"`
+
+	// Identity and role.
+	Identity string `json:"identity,omitempty"`
+	Role     string `json:"role,omitempty"`
+	Active   bool   `json:"active"`
+
+	// Parsed combiner-side option flags. Keys are the option's
+	// canonical lower-case name (matches combiner-options: list in
+	// the YAML config).
+	CombinerOptions []string `json:"combiner_options,omitempty"`
+
+	// CHUNK transport configuration.
+	ChunkMode    string `json:"chunk_mode,omitempty"`
+	ChunkMaxSize int    `json:"chunk_max_size,omitempty"`
+
+	// Number of declared agents. Verbose mode populates the
+	// per-agent list below.
+	AgentCount int `json:"agent_count"`
+
+	// === Verbose mode only (-v) ===
+
+	// AgentIdentities lists the FQDN of each configured agent peer.
+	// JOSE public-key paths are omitted; only identities are
+	// exposed.
+	AgentIdentities []string `json:"agent_identities,omitempty"`
+
+	// ProtectedNamespaces guards combiner zones against namespace
+	// intrusion by remote agents.
+	ProtectedNamespaces []string `json:"protected_namespaces,omitempty"`
+
+	// SyncApiListen is the combiner's sync-API listen address(es)
+	// for inbound HELLO/BEAT/PING over HTTPS.
+	SyncApiListen []string `json:"sync_api_listen,omitempty"`
+
+	// ProviderZones declares provider-owned zones where agents may
+	// edit signal records. Names only; allowed-rrtypes omitted.
+	ProviderZones []string `json:"provider_zones,omitempty"`
+}
+
 type CombinerDebugPost struct {
 	Command string                 `json:"command"`
 	Zone    string                 `json:"zone,omitempty"`

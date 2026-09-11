@@ -32,6 +32,8 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
+var lgConfig = tdns.Logger("config")
+
 // RegisterMpConfigParser installs the PostParseConfigHook that
 // parses the multi-provider: block and installs the result with
 // conf.SetMpConfig. Call from tdnsmp.MainInit before
@@ -50,6 +52,9 @@ func (conf *Config) RegisterMpConfigParser() {
 		mp, err := parseMultiProvider(configMap)
 		if err != nil {
 			return fmt.Errorf("multi-provider config parse: %w", err)
+		}
+		if err := ValidateMPConfig(mp); err != nil {
+			return fmt.Errorf("multi-provider config validation: %w", err)
 		}
 		conf.SetMpConfig(mp)
 		return nil
@@ -128,7 +133,10 @@ func normalizeMultiProviderIdentities(mp *MultiProviderConf) {
 
 // parseMultiProviderOptions decodes the string-list option fields
 // (combiner_options, signer_options, agent_options) into typed
-// option-set maps on the MultiProviderConf.
+// option-set maps on the MultiProviderConf. Unknown options are
+// logged at Warn level and otherwise ignored — quiet-failure on a
+// typo'd option name is the kind of misconfiguration the operator
+// will only notice when behaviour silently isn't what they expected.
 func parseMultiProviderOptions(mp *MultiProviderConf) {
 	mp.CombinerOptions = map[CombinerOption]bool{}
 	for _, raw := range mp.CombinerOptionsStrs {
@@ -138,6 +146,8 @@ func parseMultiProviderOptions(mp *MultiProviderConf) {
 		}
 		if co, ok := StringToCombinerOption[opt]; ok {
 			mp.CombinerOptions[co] = true
+		} else {
+			lgConfig.Warn("unknown combiner option, ignoring", "option", opt)
 		}
 	}
 	if mp.AddSignature && !mp.CombinerOptions[CombinerOptAddSignature] {
@@ -152,6 +162,8 @@ func parseMultiProviderOptions(mp *MultiProviderConf) {
 		}
 		if so, ok := StringToSignerOption[opt]; ok {
 			mp.SignerOptions[so] = true
+		} else {
+			lgConfig.Warn("unknown signer option, ignoring", "option", opt)
 		}
 	}
 
@@ -163,6 +175,8 @@ func parseMultiProviderOptions(mp *MultiProviderConf) {
 		}
 		if ao, ok := StringToAgentOption[opt]; ok {
 			mp.AgentOptions[ao] = true
+		} else {
+			lgConfig.Warn("unknown agent option, ignoring", "option", opt)
 		}
 	}
 }

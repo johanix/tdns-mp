@@ -300,6 +300,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 				Zones:      make(map[ZoneName]bool),
 				State:      AgentStateKnown,
 				LastState:  time.Now(),
+				meta:       &agentMeta{Crypto: map[string]*mechCrypto{}},
 			}
 		}
 
@@ -307,11 +308,11 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		// Re-discovery must not regress an OPERATIONAL or INTRODUCED transport.
 		if result.APIUri != "" {
 			agent.ApiDetails.BaseUri = result.APIUri
-			agent.ApiDetails.ContactInfo = "complete"
+			peer.SetMechanismContactInfo("API", "complete")
 			if agent.ApiDetails.State <= AgentStateNeeded {
 				agent.ApiDetails.State = AgentStateKnown
 			}
-			agent.ApiDetails.TlsaRR = result.TLSA
+			agent.ensureCrypto("API").TlsaRR = result.TLSA
 			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
 		} else {
@@ -321,7 +322,7 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 		}
 		if result.DNSUri != "" {
 			agent.DnsDetails.BaseUri = result.DNSUri
-			agent.DnsDetails.ContactInfo = "complete"
+			peer.SetMechanismContactInfo("DNS", "complete")
 			if agent.DnsDetails.State <= AgentStateNeeded {
 				agent.DnsDetails.State = AgentStateKnown
 			}
@@ -338,13 +339,15 @@ func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResul
 				agent.DnsDetails.Port = port
 			}
 
-			// Store JWK data if available (preferred)
+			// Store JWK data if available (preferred). Crypto now lives on the
+			// transitional agentMeta sidecar (A3d.3), en route to transport @ E1.
+			dnsCrypto := agent.ensureCrypto("DNS")
 			if result.JWKData != "" {
-				agent.DnsDetails.JWKData = result.JWKData
-				agent.DnsDetails.KeyAlgorithm = result.KeyAlgorithm
+				dnsCrypto.JWKData = result.JWKData
+				dnsCrypto.KeyAlgorithm = result.KeyAlgorithm
 			}
 			// Store KEY record if using legacy fallback
-			agent.DnsDetails.KeyRR = result.LegacyKeyRR
+			dnsCrypto.KeyRR = result.LegacyKeyRR
 			agent.DnsDetails.Addrs = result.DNSAddresses
 			agent.DnsMethod = true
 		} else {

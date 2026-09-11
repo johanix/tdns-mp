@@ -10,11 +10,17 @@ import (
 	"github.com/miekg/dns"
 )
 
-// ZoneView exposes HSYNC3 data for one zone.
+// ZoneView exposes one MP zone to the engine.
 type ZoneView interface {
 	ZoneName() string
 	HSYNC3() []dns.RR
 	IsMultiProvider() bool
+	// Participants returns the identities that hold a membership-conferring
+	// HSYNCPARAM role in this zone (resolved via the zone's ON HSYNC3
+	// label→identity map). HSYNC3 alone is just an identity↔label mapping
+	// and confers no membership, so the host must derive this from
+	// HSYNCPARAM — the engine treats it as the authoritative member set.
+	Participants() []PeerID
 }
 
 // ZoneLookup enumerates MP zones for reconcile and hello validation.
@@ -71,6 +77,12 @@ type HostCallbacks struct {
 	OnElectionGossip   func(groupHash string, state GroupElectionState)
 	OnLocalRemoved     func(zone ZoneName)
 	BeforeHeartbeats   func()
+	// OnHsyncMembersAdded fires after ApplyHsyncDiff has registered member
+	// adds for a zone, carrying the (HSYNCPARAM-gated, non-local) added
+	// identities and whether the local identity was itself added. The agent
+	// uses it to re-home the upstream/downstream CONFIG RFI deferred tasks and
+	// the membership-change election kick that used to live in UpdateAgents.
+	OnHsyncMembersAdded func(zone ZoneName, added []PeerID, localAdded bool)
 }
 
 // PeerHooks are optional callbacks when registry peers change.
@@ -89,4 +101,10 @@ type Deps struct {
 	Elections         ElectionStateLookup
 	Host              HostCallbacks
 	PeerHooks         PeerHooks
+	// GateOnLocalPresence makes ApplyHsyncDiff mirror the legacy weAreInHSYNC
+	// abort: when the local identity is absent from the zone's current HSYNC3
+	// RRset, skip remote add/remove processing and the group recompute (a
+	// local-remove RR still fires OnLocalRemoved). Set by the agent; the
+	// auditor observes zones it is not a member of, so it leaves this false.
+	GateOnLocalPresence bool
 }

@@ -26,13 +26,16 @@ func TestIdentitiesFromRRset(t *testing.T) {
 
 func TestApplyHsyncDiff_addAndRemove(t *testing.T) {
 	tb := &mockTransport{}
+	zone := ZoneName("customer.test.")
+	// fox must be a participant for the add to register (adds fail closed without
+	// a zone view, and exclude non-participants).
+	zoneRR := mustHSYNC3RR(t, "fox", "fox.agent.example.")
 	e := NewEngine(Deps{
 		LocalID:   "self.example.",
 		Transport: tb,
-		Zones:     mapZoneLookup{},
+		Zones:     mapZoneLookup{string(zone): {zone: string(zone), rrs: []dns.RR{zoneRR}}},
 	}, DefaultConfig())
 
-	zone := ZoneName("customer.test.")
 	addRR := mustHSYNC3RR(t, "fox", "fox.agent.example.")
 	e.ApplyHsyncDiff(zone, HsyncDiff{Adds: []dns.RR{addRR}})
 	if _, ok := e.registry.S.Get(PeerID("fox.agent.example.")); !ok {
@@ -58,6 +61,7 @@ func mustHSYNC3RR(t *testing.T, label, identity string) *dns.PrivateRR {
 	return &dns.PrivateRR{
 		Hdr: dns.RR_Header{Name: "customer.test.", Rrtype: core.TypeHSYNC3, Class: dns.ClassINET, Ttl: 300},
 		Data: &core.HSYNC3{
+			State:    1, // ON
 			Label:    label,
 			Identity: identity,
 			Upstream: ".",

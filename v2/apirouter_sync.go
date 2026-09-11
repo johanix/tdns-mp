@@ -88,14 +88,14 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
-			tlsaRR := apiDetails.TlsaRR
-			if tlsaRR == nil {
+			apiCrypto := agent.cryptoFor("API")
+			if apiCrypto == nil || apiCrypto.TlsaRR == nil {
 				lgApi.Warn(apiName+": no TLSA record for client", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			if err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw); err != nil {
+			if err := tdns.VerifyCertAgainstTlsaRR(apiCrypto.TlsaRR, clientCert.Raw); err != nil {
 				lgApi.Warn(apiName+": certificate verification failed", "clientId", clientId, "err", err)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return

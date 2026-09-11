@@ -2,16 +2,22 @@ module github.com/johanix/tdns-mp/v2
 
 go 1.25.2
 
+// tdns-transport/v2 is replaced locally because the transport-redesign
+// branch changes are not yet published. tdns/v2 is consumed from its
+// published version (no replace). Revert the transport replace before
+// publishing.
+replace github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2
+
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417
-	github.com/johanix/tdns/v2 v2.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/cache v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/cli v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/core v0.0.0-20260527163406-77a5c2ba5166
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260527163406-77a5c2ba5166
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260525200107-82d768a23456
+	github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/cli v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/core v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260611090745-44755a2166f9
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -66,9 +72,4 @@ require (
 )
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
-
-// tdns-transport is consumed from the sibling checkout while the
-// transport-redesign-v1-C branch of tdns-transport is unmerged; this
-// part of the stack builds against its commit e956f6ab (2026-05-09).
-replace github.com/johanix/tdns-transport/v2 => ../../tdns-transport/v2
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d

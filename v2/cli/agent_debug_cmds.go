@@ -205,18 +205,18 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 		}
 
 		// dump.P(amr.AgentRegistry)
-		if len(amr.AgentRegistry.RegularS) == 0 {
+		if len(amr.AgentRegistry.Agents) == 0 {
 			fmt.Printf("No agent registry data in response from agent %q", amr.Identity)
 			os.Exit(1)
 		}
 
-		if len(amr.AgentRegistry.RegularS) > 0 {
+		if len(amr.AgentRegistry.Agents) > 0 {
 			var agentNames []AgentId
-			for _, agent := range amr.AgentRegistry.RegularS {
+			for _, agent := range amr.AgentRegistry.Agents {
 				agentNames = append(agentNames, agent.Identity)
 			}
 			fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
-			for _, agent := range amr.AgentRegistry.RegularS {
+			for _, agent := range amr.AgentRegistry.Agents {
 				err := PrintHsyncAgent(agent, false)
 				if err != nil {
 					log.Printf("Error printing agent: %v", err)
@@ -259,12 +259,12 @@ var DebugAgentRegistryCmd = &cobra.Command{
 			PeerID:   "local",
 		})
 
-		ar.AddRemoteAgent("agent.example.com", &Agent{
+		ar.S.Set("agent.example.com", &Agent{
 			Identity: "agent.example.com",
 			PeerID:   "agent.example.com",
 		})
 
-		ar.AddRemoteAgent("agent.example.org", &Agent{
+		ar.S.Set("agent.example.org", &Agent{
 			Identity: "agent.example.org",
 			PeerID:   "agent.example.org",
 		})

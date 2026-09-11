@@ -584,11 +584,11 @@ func (lem *LeaderElectionManager) DeferElection(zone ZoneName) {
 }
 
 // NotifyPeerOperational is called when a peer becomes operational.
-func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones map[ZoneName]bool) {
+func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones []ZoneName) {
 	var candidates []ZoneName
 
 	lem.mu.RLock()
-	for zone := range peerZones {
+	for _, zone := range peerZones {
 		if lem.pendingElections[zone] {
 			candidates = append(candidates, zone)
 			continue
@@ -1178,7 +1178,7 @@ func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, rec
 		if AgentId(agent.Identity) == AgentId(ar.LocalAgent.Identity) {
 			continue // don't send to ourselves
 		}
-		if !agent.IsAnyTransportOperational() {
+		if !ar.isAgentOperational(agent.Identity) {
 			lgElect.Debug("skipping non-operational agent", "agent", agent.Identity)
 			continue
 		}
@@ -1372,9 +1372,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 				}
 				status.Peers = append(status.Peers, PeerSyncInfo{
 					Identity:    agent.Identity,
-					State:       string(agent.EffectiveState()),
+					State:       string(ar.effectiveAgentState(agent.Identity)),
 					Transport:   transportStr,
-					Operational: agent.IsAnyTransportOperational(),
+					Operational: ar.isAgentOperational(agent.Identity),
 				})
 			}
 		}

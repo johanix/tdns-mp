@@ -495,7 +495,8 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
 	if agent.ApiDetails == nil {
 		return fmt.Errorf("agent %s: ApiDetails not initialized", agent.Identity)
 	}
-	if !agent.ApiMethod || agent.ApiDetails.TlsaRR == nil {
+	apiCrypto := agent.cryptoFor("API")
+	if !agent.ApiMethod || apiCrypto == nil || apiCrypto.TlsaRR == nil {
 		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
 	}
 
@@ -536,7 +537,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
 				return fmt.Errorf("unexpected certificate common name %q (should have been %s)", cert.Subject.CommonName, agent.Identity)
 			}
 
-			err = tdns.VerifyCertAgainstTlsaRR(agent.ApiDetails.TlsaRR, rawCert)
+			err = tdns.VerifyCertAgainstTlsaRR(apiCrypto.TlsaRR, rawCert)
 			if err != nil {
 				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 			}

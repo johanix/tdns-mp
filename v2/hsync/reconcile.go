@@ -18,7 +18,16 @@ func (e *Engine) ReconcileZone(zone ZoneName) (added, removed int, err error) {
 		return 0, 0, nil
 	}
 	localIdentity := string(e.deps.LocalID)
-	expected := IdentitiesFromRRset(zv.HSYNC3(), localIdentity)
+	// Membership is HSYNCPARAM-derived (resolved by the host via
+	// ZoneView.Participants); HSYNC3 alone is just an identity↔label
+	// mapping and does not confer membership.
+	expected := make(map[PeerID]struct{})
+	for _, id := range zv.Participants() {
+		if localIdentity != "" && string(id) == localIdentity {
+			continue
+		}
+		expected[id] = struct{}{}
+	}
 
 	var toRemove []PeerID
 	for _, peer := range e.registry.GetPeersForZone(zone) {

@@ -11,7 +11,6 @@ import (
 	"fmt"
 
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -91,11 +90,11 @@ func (tm *MPTransportBridge) isAuthorizedPeer(senderID string) bool {
 	return false
 }
 
-// isInHSYNC checks if senderID is in the HSYNC3 RRset for the specified zone.
-// This represents implicit authorization - we're both listed in the same HSYNC3 RRset,
-// indicating operational need to communicate for this zone.
-//
-// This mirrors the logic in EvaluateHello() from hsync_hello.go:160-211.
+// isInHSYNC checks whether senderID and our own identity are both participants
+// (HSYNCPARAM role-holders) in the specified zone. Membership is derived, not raw
+// HSYNC3 co-presence: an identity listed in HSYNC3 but granted no role is NOT
+// authorized — this is the admission boundary where role-less/OFF identities are
+// rejected.
 func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, string) {
 	if zone == "" {
 		return false, "empty zone name"
@@ -111,45 +110,19 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 		return false, fmt.Sprintf("we don't know about zone %q", zone)
 	}
 
-	// Check if zone has HSYNC3 RRset
-	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
-	if err != nil {
-		return false, fmt.Sprintf("error retrieving HSYNC3 RRset: %v", err)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return false, fmt.Sprintf("zone %q apex unavailable", zone)
 	}
-	if hsyncRR == nil {
-		return false, fmt.Sprintf("zone %q has no HSYNC3 RRset", zone)
+	members := participantFQDNSetForApex(apex)
+	if !members[dns.Fqdn(tm.LocalID)] {
+		return false, fmt.Sprintf("our identity %q is not a participant in zone %s", tm.LocalID, zone)
 	}
-
-	// Check if both our identity and sender are in HSYNC3 RRset
-	foundMe := false
-	foundSender := false
-	localFQDN := dns.Fqdn(tm.LocalID)
-	senderFQDN := dns.Fqdn(senderID)
-	for _, rr := range hsyncRR.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				id := dns.Fqdn(hsync3.Identity)
-				if id == localFQDN {
-					foundMe = true
-				}
-				if id == senderFQDN {
-					foundSender = true
-				}
-				if foundMe && foundSender {
-					break
-				}
-			}
-		}
+	if !members[dns.Fqdn(senderID)] {
+		return false, fmt.Sprintf("sender %q is not a participant in zone %s", senderID, zone)
 	}
 
-	if !foundMe {
-		return false, fmt.Sprintf("our identity %q not in HSYNC3 RRset for zone %s", tm.LocalID, zone)
-	}
-	if !foundSender {
-		return false, fmt.Sprintf("sender %q not in HSYNC3 RRset for zone %s", senderID, zone)
-	}
-
-	lgAgent.Debug("both identities found in HSYNC3", "local", tm.LocalID, "sender", senderID, "zone", zone)
+	lgAgent.Debug("both identities are participants", "local", tm.LocalID, "sender", senderID, "zone", zone)
 	return true, ""
 }
 
@@ -170,38 +143,19 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		if !exists {
 			continue
 		}
-
-		// Check if zone has HSYNC3 RRset
-		hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
-		if err != nil || hsyncRR == nil {
-			continue // No HSYNC3 for this zone, try next
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil || apex == nil {
+			continue
 		}
-
-		// Check if both our identity and sender are in HSYNC3 RRset
-		foundMe := false
-		foundSender := false
-		for _, rr := range hsyncRR.RRs {
-			if prr, ok := rr.(*dns.PrivateRR); ok {
-				if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-					id := dns.Fqdn(hsync3.Identity)
-					if id == localFQDN {
-						foundMe = true
-					}
-					if id == senderFQDN {
-						foundSender = true
-					}
-				}
-			}
-		}
-
-		// If we found both in this zone's HSYNC3, authorize
-		if foundMe && foundSender {
-			lgAgent.Debug("both identities found in HSYNC3 (any-zone check)",
+		members := participantFQDNSetForApex(apex)
+		// Both our identity and the sender must be participants in this zone.
+		if members[localFQDN] && members[senderFQDN] {
+			lgAgent.Debug("both identities are participants (any-zone check)",
 				"local", tm.LocalID, "sender", senderID, "zone", zoneName)
 			return true, zoneName
 		}
 	}
 
-	// Not found in any shared HSYNC3
+	// Not a shared participant in any zone
 	return false, ""
 }

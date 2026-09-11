@@ -18,6 +18,10 @@ type MPZoneInfo struct {
 	ParentSync string            `json:"parentsync"`
 	Suffix     string            `json:"suffix,omitempty"`
 	Options    []tdns.ZoneOption `json:"options"`
+	// ZoneError is the zone's active error message (e.g. a failed inbound
+	// transfer), empty when healthy. The CLI renders the Options cell as
+	// "ERROR" when set; the full message is in `zone list`.
+	ZoneError string `json:"zone_error,omitempty"`
 }
 
 // MPListResponse is returned by /zone/mplist.

@@ -75,6 +75,12 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		}
 		sort.Strings(opts)
 		optStr := "[" + strings.Join(opts, " ") + "]"
+		// A zone with an active error (e.g. a failed inbound transfer) has no
+		// usable participant data; flag it in the Options cell. Full message
+		// is in `zone list`.
+		if info.ZoneError != "" {
+			optStr = "ERROR"
+		}
 		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
 			zname, servers, signers, auditors, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
 	}

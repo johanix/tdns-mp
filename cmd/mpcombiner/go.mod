@@ -4,9 +4,13 @@ go 1.25.2
 
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
+// tdns-transport/v2 replaced locally (redesign branch unpublished).
+// tdns/v2 consumed from its published version. Revert before publishing.
+replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20260527163406-77a5c2ba5166
+	github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9
 	github.com/mattn/go-sqlite3 v1.14.16
 )
 
@@ -22,10 +26,10 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260509170846-e956f6abe417 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20260527163406-77a5c2ba5166 // indirect
-	github.com/johanix/tdns/v2/core v0.0.0-20260527163406-77a5c2ba5166 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260527163406-77a5c2ba5166 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260525200107-82d768a23456 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9 // indirect
+	github.com/johanix/tdns/v2/core v0.0.0-20260611090745-44755a2166f9 // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260611090745-44755a2166f9 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
@@ -53,9 +57,4 @@ require (
 )
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
-
-// tdns-transport is consumed from the sibling checkout while the
-// transport-redesign-v1-C branch of tdns-transport is unmerged; this
-// part of the stack builds against its commit e956f6ab (2026-05-09).
-replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d

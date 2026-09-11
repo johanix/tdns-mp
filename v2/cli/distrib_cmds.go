@@ -85,6 +85,38 @@ var combinerDistribPeersCmd = &cobra.Command{
 	},
 }
 
+var AuditorDistribCmd = &cobra.Command{
+	Use:   "distrib",
+	Short: "Manage distributions",
+	Long:  `Commands for managing distributions created by this auditor, including listing distributions and purging completed distributions.`,
+}
+
+var auditorDistribListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all distributions from this auditor",
+	Run: func(cmd *cobra.Command, args []string) {
+		listDistributions(cmd, "auditor")
+	},
+}
+
+var auditorDistribPurgeCmd = &cobra.Command{
+	Use:   "purge [--force]",
+	Short: "Delete distributions",
+	Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
+	Run: func(cmd *cobra.Command, args []string) {
+		purgeDistributions(cmd, "auditor")
+	},
+}
+
+var auditorDistribPeersCmd = &cobra.Command{
+	Use:   "peers",
+	Short: "List all known peer agents with working keys",
+	Long:  "Show all recipient agents that this auditor has established keys with and can send distributions to.",
+	Run: func(cmd *cobra.Command, args []string) {
+		ListDistribPeers(cmd, "auditor")
+	},
+}
+
 var agentDistribOpCmd = &cobra.Command{
 	Use:   "op [operation]",
 	Short: "Run an operation toward a peer",
@@ -857,4 +889,10 @@ func init() {
 	combinerDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 	combinerDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
 	combinerDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+
+	// Register distrib commands under auditor
+	AuditorDistribCmd.AddCommand(auditorDistribListCmd, auditorDistribPurgeCmd, auditorDistribPeersCmd)
+	auditorDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	auditorDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
+	auditorDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 }

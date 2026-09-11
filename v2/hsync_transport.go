@@ -713,9 +713,16 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
+			// Scope agent.Mu to just the DnsDetails field access — the
+			// outbound hello/beat send paths and CheckState write these
+			// same fields under agent.Mu, so the bare writes here were a
+			// data race. Release before NotifyPeerOperational (an election
+			// call) to honor the no-registry-lock-across-callback rule.
+			agent.Mu.Lock()
 			wasOperational := agent.DnsDetails.State == AgentStateOperational
 			agent.DnsDetails.State = AgentStateOperational
 			agent.DnsDetails.LastContactTime = time.Now()
+			agent.Mu.Unlock()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
 
 			// When a peer first becomes operational, check if all configured peers
@@ -723,7 +730,8 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
 				// NotifyPeerOperational handles both deferred elections and
 				// new elections — it checks configured vs operational counts.
-				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(agent.Zones)
+				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(
+					tm.agentRegistry.sharedParticipantZones(agent.Identity))
 			}
 		}
 	}
@@ -1438,7 +1446,21 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 // that genuinely need a fresh state pull (currently only the
 // OnPeerDiscovered closure at discovery completion).
 func (tm *MPTransportBridge) GetOrCreatePeer(agent *Agent) *transport.Peer {
-	return tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
+	// Config-only infra peers (combiner, signer) are never discovered
+	// via DNS, so their transport address has no source other than the
+	// agent record. Discovered peers already carry a discovery address
+	// and are left untouched. Bite H dropped this copy along with the
+	// (genuinely redundant) per-send state refresh; only the address —
+	// which non-discovered peers cannot get any other way — is restored.
+	if peer.CurrentAddress() == nil && agent.DnsDetails != nil && len(agent.DnsDetails.Addrs) > 0 {
+		peer.SetDiscoveryAddress(&transport.Address{
+			Host:      agent.DnsDetails.Addrs[0],
+			Port:      agent.DnsDetails.Port,
+			Transport: "udp",
+		})
+	}
+	return peer
 }
 
 // SyncPeerFromAgent returns the transport.Peer for this agent and
@@ -1455,7 +1477,7 @@ func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 	// Sync API details
 	if agent.ApiDetails != nil {
 		peer.APIEndpoint = agent.ApiDetails.BaseUri
-		if agent.ApiDetails.TlsaRR != nil {
+		if ac := agent.cryptoFor("API"); ac != nil && ac.TlsaRR != nil {
 			// Store TLSA for TLS verification
 			peer.TLSARecord = []byte{} // Would need to serialize TLSA
 		}

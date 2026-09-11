@@ -346,6 +346,9 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				peerType = "signer"
 			}
 
+			// LEGACY == derived participations == 0 (not stored agent.Zones).
+			zeroParticipations := len(ar.sharedParticipantZones(agent.Identity)) == 0
+
 			// Add API transport entry when this mechanism is in use
 			if agent.ApiMethod && agent.ApiDetails != nil {
 				key := agentIDFqdn + ":API"
@@ -353,13 +356,17 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 
 					effectiveState := agent.ApiDetails.State
-					if !isCombiner && !isSigner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
 					apiAddr := agent.ApiDetails.BaseUri
 					if apiAddr == "" {
 						apiAddr = "-"
+					}
+					hasTLSA := false
+					if ac := agent.cryptoFor("API"); ac != nil {
+						hasTLSA = ac.TlsaRR != nil
 					}
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
@@ -371,15 +378,15 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						APIUri:      agent.ApiDetails.BaseUri,
 						Port:        agent.ApiDetails.Port,
 						Addresses:   agent.ApiDetails.Addrs,
-						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
+						HasTLSA:     hasTLSA,
 						State:       AgentStateToString[effectiveState],
-						ContactInfo: agent.ApiDetails.ContactInfo,
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.ApiDetails.HelloTime
 					}
 					if conf.InternalMp.TransportManager != nil {
 						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							peerInfo.ContactInfo = peer.MechanismContactInfo("API")
 							s := peer.Stats.GetDetailedStats()
 							peerInfo.HelloSent = s.HelloSent
 							peerInfo.HelloReceived = s.HelloReceived
@@ -411,13 +418,21 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 
 					effectiveState := agent.DnsDetails.State
-					if !isCombiner && !isSigner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+					if !isCombiner && !isSigner && zeroParticipations && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
 					dnsAddr := agent.DnsDetails.BaseUri
 					if dnsAddr == "" {
 						dnsAddr = "-"
+					}
+					// Crypto now lives on the agentMeta sidecar (A3d.3).
+					var jwkData, keyAlgorithm string
+					var hasKEY bool
+					if dc := agent.cryptoFor("DNS"); dc != nil {
+						jwkData = dc.JWKData
+						keyAlgorithm = dc.KeyAlgorithm
+						hasKEY = dc.KeyRR != nil
 					}
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
@@ -429,18 +444,18 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						DNSUri:       agent.DnsDetails.BaseUri,
 						Port:         agent.DnsDetails.Port,
 						Addresses:    agent.DnsDetails.Addrs,
-						JWKData:      agent.DnsDetails.JWKData,
-						KeyAlgorithm: agent.DnsDetails.KeyAlgorithm,
-						HasJWK:       agent.DnsDetails.JWKData != "",
-						HasKEY:       agent.DnsDetails.KeyRR != nil,
+						JWKData:      jwkData,
+						KeyAlgorithm: keyAlgorithm,
+						HasJWK:       jwkData != "",
+						HasKEY:       hasKEY,
 						State:        AgentStateToString[effectiveState],
-						ContactInfo:  agent.DnsDetails.ContactInfo,
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.DnsDetails.HelloTime
 					}
 					if conf.InternalMp.TransportManager != nil {
 						if peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							peerInfo.ContactInfo = peer.MechanismContactInfo("DNS")
 							s := peer.Stats.GetDetailedStats()
 							peerInfo.HelloSent = s.HelloSent
 							peerInfo.HelloReceived = s.HelloReceived
@@ -590,6 +605,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 		agent.Mu.RLock()
 		identity := agent.Identity
 		state := agent.State
+		agent.Mu.RUnlock()
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {
@@ -598,16 +614,12 @@ func listPeerSharedZones(conf *Config) []interface{} {
 				combinerID = "combiner"
 			}
 			if dns.Fqdn(string(identity)) == dns.Fqdn(combinerID) {
-				agent.Mu.RUnlock()
 				return
 			}
 		}
 
-		zoneNames := make([]ZoneName, 0, len(agent.Zones))
-		for zoneName := range agent.Zones {
-			zoneNames = append(zoneNames, zoneName)
-		}
-		agent.Mu.RUnlock()
+		// Shared zones are derived from participants, not stored agent.Zones.
+		zoneNames := conf.InternalMp.AgentRegistry.sharedParticipantZones(identity)
 
 		zoneDetails := make([]map[string]interface{}, 0, len(zoneNames))
 		for _, zoneName := range zoneNames {
@@ -635,7 +647,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 	return data
 }
 
-// listAgentsForZone returns peer agents that share a specific zone
+// listAgentsForZone returns peer agents that are participants in a specific zone
 func listAgentsForZone(conf *Config, zoneName string) []string {
 	agents := make([]string, 0)
 	mp := conf.MpConfig()
@@ -644,11 +656,9 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		return agents
 	}
 
+	members := participantFQDNSetForApex(zoneApex(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
-		agent.Mu.RLock()
-		hasZone := agent.Zones[ZoneName(zoneName)]
 		identity := agent.Identity
-		agent.Mu.RUnlock()
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {
@@ -661,7 +671,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 			}
 		}
 
-		if hasZone {
+		if members[dns.Fqdn(string(identity))] {
 			agents = append(agents, string(identity))
 		}
 	})

@@ -85,35 +85,7 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", amp.Zone)
 
 		case "hsync-peer-status":
-			if hdb == nil {
-				resp.Error = true
-				resp.ErrorMsg = "HsyncDB not configured"
-				return
-			}
-
-			state := ""
-			if amp.AgentId != "" {
-				peer, err := hdb.GetPeer(string(amp.AgentId))
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error getting peer: %v", err)
-					return
-				}
-				if peer != nil {
-					resp.HsyncPeers = []*HsyncPeerInfo{PeerRecordToInfo(peer)}
-				}
-			} else {
-				peers, err := hdb.ListPeers(state)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error listing peers: %v", err)
-					return
-				}
-				for _, peer := range peers {
-					resp.HsyncPeers = append(resp.HsyncPeers, PeerRecordToInfo(peer))
-				}
-			}
-			resp.Msg = fmt.Sprintf("Found %d peers", len(resp.HsyncPeers))
+			resp.Msg = "Found 0 peers"
 
 		case "hsync-sync-ops":
 			if hdb == nil {

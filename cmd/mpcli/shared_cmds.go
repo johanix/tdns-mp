@@ -84,4 +84,5 @@ func init() {
 	mpcli.AuditorCmd.AddCommand(cli.NewZoneCmd("auditor", mpcli.AuditorZoneMPListCmd))
 	mpcli.AuditorCmd.AddCommand(cli.NewKeystoreCmd("auditor"))
 	mpcli.AuditorCmd.AddCommand(cli.NewTruststoreCmd("auditor"))
+	mpcli.AuditorCmd.AddCommand(mpcli.AuditorDistribCmd)
 }

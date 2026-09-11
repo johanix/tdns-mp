@@ -332,55 +332,103 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							resp.ErrorMsg = "TransportManager not available"
 						}
 					} else if !resp.Error && synchedDataUpdate.OriginatingDistID != "" {
-						// Data already present and no error — verify in repo and
-						// send immediate ACCEPTED so the originating agent can
-						// transition from PENDING to ACCEPTED.
+						// No-op: the update's desired post-state already holds
+						// (adds already present, deletes already absent). Send a
+						// positive confirmation so the originating agent can
+						// transition PENDING->ACCEPTED (adds) and
+						// PendingRemoval->Removed (deletes). Without this an
+						// idempotent re-send strands the sender in PENDING.
 						zone := synchedDataUpdate.Zone
 						agentId := synchedDataUpdate.AgentId
 						if agentRepo, ok := zdr.Repo.Get(zone); ok {
 							if nod, ok := agentRepo.Get(agentId); ok {
-								var appliedRecords []string
-								if synchedDataUpdate.Update != nil {
-									for _, rrset := range synchedDataUpdate.Update.RRsets {
-										for _, rr := range rrset.RRs {
-											repoRRset, exists := nod.RRtypes.Get(rr.Header().Rrtype)
-											if !exists {
+								var appliedRecords, removedRecords []string
+								// inRepo reports whether an RR (in ClassINET form)
+								// is present in the agent's repo.
+								inRepo := func(rrStr string, rrtype uint16) bool {
+									repoRRset, exists := nod.RRtypes.Get(rrtype)
+									if !exists {
+										return false
+									}
+									for _, repoRR := range repoRRset.RRs {
+										if repoRR.String() == rrStr {
+											return true
+										}
+									}
+									return false
+								}
+								// A no-op confirmation reports the desired post-state:
+								// add/replace records already present -> Applied;
+								// delete records already absent -> Removed (the sender
+								// tracks removals in ClassINET form). The modern edit
+								// path is Operations (apihandler_agent.go emits a
+								// "replace"), which takes precedence in ProcessUpdate;
+								// the legacy class-overloaded RRsets/RRs form is only a
+								// fallback.
+								if upd := synchedDataUpdate.Update; upd != nil && len(upd.Operations) > 0 {
+									for _, op := range upd.Operations {
+										rrtype, ok := dns.StringToType[op.RRtype]
+										if !ok {
+											continue
+										}
+										for _, rrStr := range op.Records {
+											rr, err := dns.NewRR(rrStr)
+											if err != nil {
 												continue
 											}
-											rrStr := rr.String()
-											for _, repoRR := range repoRRset.RRs {
-												if repoRR.String() == rrStr {
-													appliedRecords = append(appliedRecords, rrStr)
-													break
+											s := rr.String()
+											switch op.Operation {
+											case "add", "replace":
+												if inRepo(s, rrtype) {
+													appliedRecords = append(appliedRecords, s)
+												}
+											case "delete":
+												if !inRepo(s, rrtype) {
+													removedRecords = append(removedRecords, s)
 												}
 											}
 										}
 									}
-									for _, rr := range synchedDataUpdate.Update.RRs {
-										repoRRset, exists := nod.RRtypes.Get(rr.Header().Rrtype)
-										if !exists {
-											continue
-										}
-										rrStr := rr.String()
-										for _, repoRR := range repoRRset.RRs {
-											if repoRR.String() == rrStr {
-												appliedRecords = append(appliedRecords, rrStr)
-												break
+								} else if upd != nil {
+									// Legacy class-overloaded form (no Operations).
+									confirm := func(rr dns.RR) {
+										switch rr.Header().Class {
+										case dns.ClassINET:
+											s := rr.String()
+											if inRepo(s, rr.Header().Rrtype) {
+												appliedRecords = append(appliedRecords, s)
+											}
+										case dns.ClassNONE:
+											m := dns.Copy(rr)
+											m.Header().Class = dns.ClassINET
+											s := m.String()
+											if !inRepo(s, rr.Header().Rrtype) {
+												removedRecords = append(removedRecords, s)
 											}
 										}
 									}
+									for _, rrset := range upd.RRsets {
+										for _, rr := range rrset.RRs {
+											confirm(rr)
+										}
+									}
+									for _, rr := range upd.RRs {
+										confirm(rr)
+									}
 								}
-								if len(appliedRecords) > 0 && msgQs.OnRemoteConfirmationReady != nil {
-									lgEngine.Info("remote update already accepted, sending immediate confirmation",
-										"zone", zone, "agent", agentId, "records", len(appliedRecords),
+								if (len(appliedRecords) > 0 || len(removedRecords) > 0) && msgQs.OnRemoteConfirmationReady != nil {
+									lgEngine.Info("remote update already in desired state, sending immediate confirmation",
+										"zone", zone, "agent", agentId,
+										"applied", len(appliedRecords), "removed", len(removedRecords),
 										"originDistID", synchedDataUpdate.OriginatingDistID)
 									msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 										OriginatingSender: string(agentId),
 										Zone:              zone,
 										Status:            "ok",
-										Message:           "data already present at remote agent",
+										Message:           "desired state already present at remote agent",
 										AppliedRecords:    appliedRecords,
+										RemovedRecords:    removedRecords,
 									})
 								}
 							}

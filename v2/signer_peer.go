@@ -64,7 +64,6 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational,
 			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),
-			Host:            host,
 			Port:            uint16(port),
 			Addrs:           []string{host},
 			HelloTime:       time.Now(),
