@@ -9,7 +9,7 @@ where the code did not move and restated where #514 moved it. Line numbers
 drift; re-locate by symbol.
 **Reads with:** tdns `docs/2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 (the model; its §9 defined B-MP and is corrected below), the re-pin trial
-review of 2026-09-10 (§G) and the lab-run log of 2026-09-11, both in the
+review of 2026-09-10 (§G) and the deployment log of 2026-09-11, both in the
 project's `reviews/` directory.
 **Amended the same evening:** §2.4 evaluates making tdns-signer the core of
 tdns-mpsigner, as Johan asked after the first version, and the
@@ -46,7 +46,7 @@ Three small tdns PRs come first, then two tdns-mp PRs, then the test rigs:
 | T-C or T-S | the key seam: a per-zone key source (§2.3) **or** MP keys in tdns's keystore with three states and lifecycle hooks, generation included (§2.4, recommended) | 1 day / 1½–2 days |
 | M-1 | re-pin of the combiner, agent and auditor only; readers, combiner staging, gate, both workarounds deleted | 2 days + lab |
 | M-2 or M-2S | the mpsigner's re-pin, and its first past #514: through the key source (M-2) or with the signer fork retired and its keys migrated (M-2S, recommended) | 1 day / 2–3 days + lab |
-| R-1 | `mp-comms` gains data-path assertions | 1 day |
+| R-1 | the multi-host rig gains data-path assertions | 1 day |
 | R-2 | `mp-policy-matrix` gains signature validation and a DNSKEY roll | ½ day |
 
 The decisions Johan is asked to make are in §6. The two that shape the code
@@ -58,7 +58,7 @@ tdns's signer core carry multi-provider zones).
 
 All four items are read from the code. Items 1 and 2 were seen in the lab and
 are worked around in #43; items 3 and 4 have not been observed because the
-`mp-comms` rig asserts only communications. Item 4 goes further than the
+multi-host rig asserts only communications. Item 4 goes further than the
 trial's §G, and #514 made items 2 and 4 worse than the first version of this
 plan said.
 
@@ -825,9 +825,9 @@ is in M-1 (§3.1), the signer's in M-2 (§3.3).
 | T-A readers + staging + `StageBatch` + `CloneRRset` + `StopPublisher` | — | ¾ day | tdns tests, `make check` |
 | T-B first-load post-refresh deferral, at the Ready flip | — | ½ day | tdns tests, on a signing and an unsigned zone |
 | T-C key source, or T-S states + hooks incl. the generation gate (§2.4) | — | 1 day / 1½–2 days | tdns tests incl. signature verification; under T-S also worker tests with hooks set and a "no mint while staged keys exist" test |
-| M-1 combiner, agent, auditor: re-pin past #514 (#46's share), readers, combiner `StageBatch`, gate, workarounds out | T-A, T-B merged | 2 days | `make check`, `make test-race`, lab comms 71/0 cold and warm, D1 (§5.3). **No mpsigner in this re-pin.** |
+| M-1 combiner, agent, auditor: re-pin past #514 (#46's share), readers, combiner `StageBatch`, gate, workarounds out | T-A, T-B merged | 2 days | `make check`, `make test-race`, the multi-host rig's communications checks all green after a cold start and a warm restart, D1 (§5.3). **No mpsigner in this re-pin.** |
 | M-2 (key source) or M-2S (fork retired, keys migrated): the mpsigner's re-pin | key seam merged, M-1 merged | 1 day / 2–3 days | lab D0–D4; under M-2S also the migration test |
-| R-1 `mp-comms` data-path verbs and assertions | — (written against M-1/M-2 expectations) | 1 day | runs green on M-2 |
+| R-1 the multi-host rig's data-path assertions | — (written against M-1/M-2 expectations) | 1 day | runs green on M-2 |
 | R-2 `mp-policy-matrix` F/G scenarios | the rig's own tdns pin moved to a main with #616 and IMR forwarding, both merged | ½ day | runs green on M-2 |
 
 T-A, T-B and the key-seam PR are independent of each other and can be three
@@ -900,19 +900,20 @@ In package `tdnsmp`, so only exported tdns API: a zone from `ReadZoneData` +
   mechanism on both zone kinds; this one covers `PostRefresh` →
   `ApplyHsyncDiff` registering a peer.)
 
-### 5.3 The lab data path (R-1, labstuff `mp-comms`)
+### 5.3 The lab data path (R-1, the multi-host rig)
 
-`mp-comms` (labstuff#492) asserts communications only; its README says data
-mutations are out of scope. R-1 adds a `data` verb group that runs after
-`converge` and is part of `all`. Cells: `p3s1a` (one signer, mode 2),
-`p3s3a` (three signers, mode 4), `p3s1e` (`parentsync=agent`, so delegation
-change also flows). Every assertion is one `PASS`/`FAIL` line, the rig's
-convention. `T` is the rig's operation timeout.
+The multi-host rig that tested #43 lives outside this repository and asserts
+communications only: discovery, gossip, elections. R-1 adds a data-path
+group that runs once the rig has converged. Cells, in the matrix's naming
+(§5.4): one with a single signer (mode 2), one with three signers (mode 4),
+one with `parentsync=agent` so that delegation change also flows. Every
+assertion is one `PASS`/`FAIL` line, the convention both rigs share. `T` is
+the rig's operation timeout.
 
 - **D0 — served zones validate, before any mutation.** For each cell and each
   signer: AXFR the zone from the signer's `tdns-mpsigner`; every RRSIG in it
   verifies against the DNSKEY RRset in the same transfer (`dnssec-verify` or
-  `ldns-verify-zone`, whichever the master has; `lib.sh` picks); the DNSKEY
+  `ldns-verify-zone`, whichever the driving host has); the DNSKEY
   RRset contains no key the signer's `tdns-mpcli signer` key listing does not
   show as its own or as foreign; the SOA's RRSIG is by a key in the set. For
   each downstream provider: its served DNSKEY RRset and RRSIGs equal its
@@ -928,16 +929,16 @@ convention. `T` is the rig's operation timeout.
   combiner's serial advanced by exactly one per accepted edit (one publish
   per logical change — read the serial before and after); an IXFR from the
   signer at the previous serial returns a delta, not a full zone; `delrr`
-  reverses all of it. Also the start-up combine: restart one combiner
-  (`warm` restarts only agents and the auditor today; add `restart-combiner`)
-  and assert the previously added NS is served straight after the restart,
-  not after the next refresh.
-- **D2 — DNSKEY roll by a signer** (`p3s1a`): roll the ZSK with the signer's
+  reverses all of it. Also the start-up combine: restart one combiner (the
+  rig's warm restart covers only agents and the auditor today) and assert the
+  previously added NS is served straight after the restart, not after the
+  next refresh.
+- **D2 — DNSKEY roll by a signer** (the single-signer cell): roll the ZSK with the signer's
   rollover verb (`RolloverKeyMP` behind `tdns-mpcli signer`); within `T` the
   new DNSKEY is served, RRSIGs verify against the new set, the old key is
   gone after the retire step; the agent's `SYNC-DNSKEY-RRSET` propagated the
   change: every other provider's combiner serves the new DNSKEY.
-- **D3 — multi-signer merge** (`p3s3a`): each signer serves a DNSKEY RRset
+- **D3 — multi-signer merge** (the three-signer cell): each signer serves a DNSKEY RRset
   equal to the union of the three signers' keys; each signer's RRSIGs verify
   against its own keys within that set; a D2 roll on one signer appears in
   the other two signers' served DNSKEY RRsets within `T`.
@@ -945,8 +946,8 @@ convention. `T` is the rig's operation timeout.
   `serial mirror drift`, `refusing to publish` and
   `refusing to swap in an apex-less snapshot`.
 
-Ordering: M-1 must keep comms at 71/0 cold and warm and pass D1 (the
-combiner). The mpsigner is not part of M-1, so D0 is out of M-1's scope
+Ordering: M-1 must keep every communications check green after a cold start
+and a warm restart, and pass D1 (the combiner). The mpsigner is not part of M-1, so D0 is out of M-1's scope
 rather than red: the rig runs it against the June-pinned signer and reports
 it for information. M-2's gate is D0–D4 green.
 
@@ -994,9 +995,9 @@ Each with the recommendation the plan is written to.
 6. **Add `Publish()` as a name for `BumpSerialOnly()`?** Cosmetic; recommend
    yes, in T-A, so the MP call sites read as what they do. `BumpSerialOnly`
    stays.
-7. **Where do the lab data-path assertions live: extend `mp-comms` or a
-   sibling rig?** Recommend extending: same topology, same cells, and the
-   README's scope statement gets a dated amendment.
+7. **Where do the lab data-path assertions live: extend the multi-host rig
+   or a sibling?** Recommend extending: same topology, same cells, and the
+   rig's scope statement gets a dated amendment.
 8. **Gate marker: per-site `mp-private:` comments (recommended) or a
    per-file allowlist?** Per-site, for the reason in §3.4.
 9. **May the mpsigner re-pin before the key seam lands?** No, withdrawn
