@@ -112,7 +112,7 @@ func (hdb *HsyncDB) APIkeystoreMP(conf *Config) func(w http.ResponseWriter, r *h
 						}
 					}
 				} else {
-					resp, err = hdb.KeyDB.DnssecKeyMgmt(tx, kp)
+					resp, err = hdb.KeyDB.DnssecKeyMgmt(r.Context(), tx, kp)
 					if err != nil {
 						lgApi.Error("DnssecKeyMgmt failed", "err", err)
 						resp = &tdns.KeystoreResponse{
@@ -157,7 +157,6 @@ INSERT OR REPLACE INTO MPDnssecKeyStore (zonename, state, keyid, flags, algorith
 SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`
 	)
 
-	kdb := hdb.KeyDB
 	var err error
 	var resp = tdns.KeystoreResponse{Time: time.Now()}
 	var res sql.Result
@@ -243,10 +242,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// ownerName, not kp.Keyname) so stale cache entries cannot hide
 		// the fresh DB row. Keep kp.Keyname deletes too in case callers
 		// primed the cache with that form.
-		delete(kdb.KeystoreDnskeyCache, ownerName+"+"+kp.State)
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(ownerName, kp.State))
-		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, kp.State))
+		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(ownerName, kp.State), mpDnssecCacheKey(kp.Keyname, kp.State))
 
 	case "generate":
 		_, msg, genErr := hdb.GenerateKeypairMP(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
@@ -256,8 +252,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.ErrorMsg = genErr.Error()
 		}
 		resp.Msg = msg
-		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, kp.State))
+		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(kp.Keyname, kp.State))
 		if genErr != nil {
 			return &resp, genErr
 		}
@@ -282,11 +277,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
 		}
 		if oldState != "" && oldState != kp.State {
-			delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+oldState)
-			delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, oldState))
+			hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(kp.Keyname, oldState))
 		}
-		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, kp.State))
+		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(kp.Keyname, kp.State))
 
 	case "rollover":
 		keytype := kp.KeyType
@@ -328,10 +321,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			return &resp, fmt.Errorf("no rows updated for key %d in zone %s", kp.Keyid, kp.Zone)
 		}
 		resp.Msg = fmt.Sprintf("Key %s (keyid %d) transitioned to %s", kp.Keyname, kp.Keyid, targetState)
-		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+state)
-		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+targetState)
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, state))
-		delete(hdb.KeystoreDnskeyCache, mpDnssecCacheKey(kp.Keyname, targetState))
+		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(kp.Keyname, state), mpDnssecCacheKey(kp.Keyname, targetState))
 
 	case "clear":
 		if kp.Zone == "" {
@@ -346,27 +336,10 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			return &resp, err
 		}
 		count, _ := result.RowsAffected()
-		var keysToDelete []string
-		for key := range kdb.KeystoreDnskeyCache {
-			if strings.HasPrefix(key, kp.Zone+"+") {
-				keysToDelete = append(keysToDelete, key)
-			}
-		}
-		for _, key := range keysToDelete {
-			delete(kdb.KeystoreDnskeyCache, key)
-		}
-		// Purge MP-cache entries for this zone as well. The MP cache
-		// key format is produced by mpDnssecCacheKey; its zone prefix
-		// ends at the second "+".
-		var hdbKeysToDelete []string
-		for key := range hdb.KeystoreDnskeyCache {
-			if strings.HasPrefix(key, kp.Zone+"+mpdnssec+") {
-				hdbKeysToDelete = append(hdbKeysToDelete, key)
-			}
-		}
-		for _, key := range hdbKeysToDelete {
-			delete(hdb.KeystoreDnskeyCache, key)
-		}
+		// Purge the MP key cache for this zone. tdns's own signing-key
+		// snapshot is built from DnssecKeyStore, which this path does not
+		// touch, so there is nothing to invalidate on the tdns side.
+		hdb.mpDnskeyCachePurgeZone(kp.Zone)
 		lgSigner.Info("all MP DNSSEC keys cleared", "zone", kp.Zone, "count", count)
 
 		zd, zoneExists := tdns.Zones.Get(kp.Zone)

@@ -6,9 +6,9 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20260910112125-84101cd8d52a
-	github.com/johanix/tdns/v2/cli v0.0.0-20260910112125-84101cd8d52a
-	github.com/johanix/tdns/v2/core v0.0.0-20260910112125-84101cd8d52a
+	github.com/johanix/tdns/v2 v2.0.0-20260911111736-d1eec10219b7
+	github.com/johanix/tdns/v2/cli v0.0.0-20260911111736-d1eec10219b7
+	github.com/johanix/tdns/v2/core v0.0.0-20260911111736-d1eec10219b7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
 )
@@ -29,8 +29,8 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
 	github.com/johanix/tdns-transport/v2 v2.0.0-20260910214138-5a13b2cb7198 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20260910112125-84101cd8d52a // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260910112125-84101cd8d52a // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260911111736-d1eec10219b7 // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260911111736-d1eec10219b7 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
@@ -42,7 +42,7 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
-	github.com/quic-go/quic-go v0.58.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/spf13/afero v1.9.5 // indirect
@@ -50,16 +50,15 @@ require (
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
-	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/term v0.41.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
-	golang.org/x/tools v0.43.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
@@ -69,4 +68,7 @@ require (
 )
 
 // Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+
+// scratch/modern-repin: the re-pinned tdns-transport worktree next to this tree.
+replace github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2

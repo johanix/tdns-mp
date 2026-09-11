@@ -46,7 +46,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// inbound messages.
 	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
 	if imrActive {
-		if err := conf.Config.InitImrEngine(true); err != nil {
+		if err := conf.Config.InitImrEngine(ctx, true); err != nil {
 			return fmt.Errorf("IMR initialization failed: %w", err)
 		}
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
@@ -84,7 +84,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
-		return tdns.Notifier(ctx, conf.Config.Internal.NotifyQ)
+		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
 
 	// Reliable message queue for outbound BEATs/HELLOs.

@@ -22,5 +22,5 @@ import (
 )
 
 func init() {
-	algs.Register(205, qruov_q31_l3.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(205, qruov_q31_l3.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true}, algs.Facts{})
 }

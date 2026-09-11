@@ -134,12 +134,12 @@ func writePeerListResponse(conf *Config, w http.ResponseWriter, respTime time.Ti
 		}
 	}
 
-	// Zones with OptDelSyncChild (parentsync=agent) — empty on
+	// Zones with OptParentSync (parentsync=agent) — empty on
 	// auditor; populated on agent. Worth showing both, with the
 	// empty-list-on-auditor case being a legitimate (true) answer.
 	var parentsyncZones []string
 	for _, zn := range Zones.Keys() {
-		if zd, ok := Zones.Get(zn); ok && zd.Options[tdns.OptDelSyncChild] {
+		if zd, ok := Zones.Get(zn); ok && zd.Options[tdns.OptParentSync] {
 			parentsyncZones = append(parentsyncZones, zn)
 		}
 	}

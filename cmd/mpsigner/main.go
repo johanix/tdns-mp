@@ -25,9 +25,23 @@ import (
 // Pure-Go PQ algorithms (CIRCL-backed) — always registered, so the
 // signer can sign with and report them via "keystore dnssec
 // algorithms". The liboqs-backed ones are not wired into mpsigner.
+//
+// tdns/v2 algorithms.Register now also takes the role capabilities
+// (ForKSK/ForZSK, enforced by the DNSSEC policy check in large_ksk.go)
+// and the static Facts. Both are copied from dnssec-algorithms
+// registry/registry.go, which tdns's own binaries consume through the
+// tdns-genalgs generator (cmdv2/genalgs + a per-app algs.list). NOTE:
+// the codepoints below are tdns-mp's historical assignments and no
+// longer match that registry (it has 200=MLDSA65, 202=SLHDSA128S);
+// renumbering is a flag day for keys already in MPDnssecKeyStore and
+// is deliberately NOT done here.
 func init() {
-	algs.Register(199, mldsa44.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(200, slhdsa128s.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(199, mldsa44.New(),
+		algs.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true},
+		algs.Facts{PubKeyBytes: 1312, SigBytes: 2420, SecKeyBytes: 2560, SecurityLevel: 2, Maturity: "final", Description: "ML-DSA-44 (FIPS 204), lattice"})
+	algs.Register(200, slhdsa128s.New(),
+		algs.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true},
+		algs.Facts{PubKeyBytes: 32, SigBytes: 7856, SecKeyBytes: 64, SecurityLevel: 1, Maturity: "final", Description: "SLH-DSA-SHA2-128s (FIPS 205), hash-based; tiny keys, large slow signatures"})
 }
 
 func main() {

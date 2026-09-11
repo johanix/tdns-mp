@@ -22,5 +22,5 @@ import (
 )
 
 func init() {
-	algs.Register(204, sqisign1.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(204, sqisign1.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true}, algs.Facts{})
 }

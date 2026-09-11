@@ -96,7 +96,7 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 				return
 			}
 
-			if err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw); err != nil {
+			if err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert); err != nil {
 				lgApi.Warn(apiName+": certificate verification failed", "clientId", clientId, "err", err)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return

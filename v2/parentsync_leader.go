@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -1226,7 +1227,7 @@ func Sig0KeyOwnerName(zone, nameserver string) string {
 }
 
 // GetParentSyncStatus computes the current parent sync status for a zone on demand.
-func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *Imr, ar *AgentRegistry) ParentSyncStatus {
+func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *Imr, ar *AgentRegistry, schemes []string) ParentSyncStatus {
 	status := ParentSyncStatus{
 		Zone:        zone,
 		LastChecked: time.Now(),
@@ -1350,10 +1351,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 					Port:   drr.Port,
 				})
 			}
-			activeScheme, _, err := zd.BestSyncScheme(context.Background(), imr.Imr)
-			if err == nil {
-				status.ActiveScheme = activeScheme
-			}
+			status.ActiveScheme = pickActiveSyncScheme(schemes, dsyncRes.Rdata)
 		}
 	}
 
@@ -1401,4 +1399,35 @@ func PublishKeyToCombiner(zone ZoneName, keyRR dns.RR, tm *MPTransportBridge) (s
 		}},
 	}
 	return tm.EnqueueForCombiner(zone, update, "")
+}
+
+// pickActiveSyncScheme returns the first configured child scheme, in
+// preference order, that the parent advertises through DSYNC, or "" when
+// none matches. It mirrors the selection walk of tdns's former
+// ZoneData.BestSyncScheme, which tdns 6fd0a688 removed as dead code on the
+// tdns side; the parentsync status report is its remaining consumer.
+func pickActiveSyncScheme(schemes []string, rdata []*core.DSYNC) string {
+	for _, scheme := range schemes {
+		switch strings.ToLower(scheme) {
+		case "update":
+			for _, drr := range rdata {
+				if drr.Scheme == core.SchemeUpdate {
+					return "UPDATE"
+				}
+			}
+		case "notify":
+			for _, drr := range rdata {
+				if drr.Scheme == core.SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
+					return "NOTIFY"
+				}
+			}
+		case "api":
+			for _, drr := range rdata {
+				if drr.Scheme == core.SchemeAPI {
+					return "API"
+				}
+			}
+		}
+	}
+	return ""
 }

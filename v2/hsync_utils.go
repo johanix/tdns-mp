@@ -1186,10 +1186,6 @@ func (mpzd *MPZoneData) weAreASigner(mp *MultiProviderConf) (bool, error) {
 
 func (mpzd *MPZoneData) PrintOwnerNames() error {
 	switch mpzd.ZoneStore {
-	case tdns.SliceZone:
-		for _, owner := range mpzd.Owners {
-			fmt.Printf("Owner: %s\n", owner.Name)
-		}
 	case tdns.MapZone:
 		for _, owner := range mpzd.Data.Keys() {
 			fmt.Printf("Owner: %s\n", owner)
@@ -1259,7 +1255,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	analysis := &ZoneRefreshAnalysis{}
 
 	// Delegation change detection
-	if mpzd.Options[tdns.OptDelSyncChild] {
+	if mpzd.Options[tdns.OptParentSync] {
 		var err error
 		analysis.DelegationChanged, analysis.DelegationStatus, err = mpzd.DelegationDataChangedNG(new_zd)
 		if err != nil {
@@ -1422,7 +1418,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	mpzd.MP.RefreshAnalysis = nil // clear after use
 
 	// Delegation sync notification
-	if analysis.DelegationChanged && mpzd.Options[tdns.OptDelSyncChild] {
+	if analysis.DelegationChanged && mpzd.Options[tdns.OptParentSync] {
 		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", mpzd.ZoneName)
 		mpzd.DelegationSyncQ <- tdns.DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
@@ -1465,11 +1461,11 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 				}
 			}
 			// Detect parentsync=agent dynamically from HSYNCPARAM
-			if !mpzd.Options[tdns.OptDelSyncChild] {
+			if !mpzd.Options[tdns.OptParentSync] {
 				hp := mpzd.getHSYNCPARAM()
 				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
 					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
-					mpzd.Options[tdns.OptDelSyncChild] = true
+					mpzd.Options[tdns.OptParentSync] = true
 				}
 			}
 		case AppTypeMPAuditor:

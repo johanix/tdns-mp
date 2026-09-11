@@ -119,10 +119,10 @@ func (mz *MPZones) IterBuffered() <-chan MPZoneTuple {
 
 // IterCb calls fn for each zone, wrapping the value in *MPZoneData.
 func (mz *MPZones) IterCb(fn func(key string, v *MPZoneData)) {
-	tdns.Zones.IterCb(func(key string, zd *tdns.ZoneData) {
-		mpzd := mz.getOrCreate(key, zd)
-		fn(key, mpzd)
-	})
+	for item := range tdns.Zones.IterBuffered() {
+		mpzd := mz.getOrCreate(item.Key, item.Val)
+		fn(item.Key, mpzd)
+	}
 }
 
 // Set stores a pre-populated *MPZoneData in the cache. Used by

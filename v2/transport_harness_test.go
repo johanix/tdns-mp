@@ -219,12 +219,22 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 		ZoneName:  zoneName,
 		ZoneStore: tdns.MapZone,
 		ZoneType:  tdns.Primary,
-		Data:      core.NewCmap[tdns.OwnerData](),
+		Data:      core.NewNameMap[tdns.OwnerData](),
 		Options:   make(map[tdns.ZoneOption]bool),
 		Ready:     true,
 	}
 
 	apex := tdns.NewOwnerData(zoneName)
+	// tdns serves from a published snapshot (zone_snapshot.go) and
+	// InstallInitialSnapshot refuses an apex without data, so give the
+	// seeded zone a minimal SOA.
+	apex.RRtypes.Set(dns.TypeSOA, core.RRset{RRs: []dns.RR{&dns.SOA{
+		Hdr:     dns.RR_Header{Name: zoneName, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600},
+		Ns:      "ns." + zoneName,
+		Mbox:    "hostmaster." + zoneName,
+		Serial:  1,
+		Refresh: 7200, Retry: 1800, Expire: 604800, Minttl: 3600,
+	}}})
 	if len(identities) > 0 {
 		rrset := core.RRset{}
 		for _, ident := range identities {
@@ -250,6 +260,9 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 		apex.RRtypes.Set(core.TypeHSYNC3, rrset)
 	}
 	zd.Data.Set(zoneName, *apex)
+	// GetOwner/GetRRset read the published snapshot, not zd.Data, since
+	// tdns's zone_snapshot rework; publish what was just seeded.
+	zd.InstallInitialSnapshot()
 
 	tdns.Zones.Set(zoneName, zd)
 
@@ -283,6 +296,8 @@ func addHSYNCPARAMServers(t *testing.T, zd *tdns.ZoneData, serverLabels ...strin
 	}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
 	zd.Data.Set(zd.ZoneName, *apex)
+	// Re-baseline the published snapshot from the updated working set.
+	zd.InstallInitialSnapshot()
 	Zones.Invalidate(zd.ZoneName)
 }
 

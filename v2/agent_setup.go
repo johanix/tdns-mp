@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
@@ -54,10 +55,20 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 		mpzd.SyncQ = conf.InternalMp.SyncQ
 	}
 
-	// Check for local notify configuration and set downstream targets
+	// Check for local notify configuration and set downstream targets.
+	// tdns keeps the NOTIFY targets in zd.Notify ([]PeerConf) and uses
+	// zd.Downstreams as the provide-xfr ACL (empty => deny); before the
+	// re-pin Downstreams WAS the notify list and transfers were not
+	// ACL-gated per zone, so the notified secondaries are also granted
+	// transfer access here to keep the auto zone transferable.
 	if len(mp.Local.Notify) > 0 {
-		zd.Downstreams = tdns.NormalizeAddresses(mp.Local.Notify)
-		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "downstreams", zd.Downstreams)
+		for _, addr := range tdns.NormalizeAddresses(mp.Local.Notify) {
+			zd.Notify = append(zd.Notify, tdns.PeerConf{Addr: addr, Key: tdns.NOKEY})
+			if prefix := hostPrefix(addr); prefix != "" {
+				zd.Downstreams = append(zd.Downstreams, tdns.AclEntry{Prefix: prefix, Key: tdns.NOKEY})
+			}
+		}
+		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "notify", zd.Notify, "downstreams", zd.Downstreams)
 	}
 
 	// Agent auto zone needs to be signed
@@ -481,4 +492,22 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *Mu
 
 	lgAgent.Info("published JWK record", "name", publishname)
 	return nil
+}
+
+// hostPrefix turns a notify address (host or host:port) into the single-host
+// CIDR that AclEntry.Prefix requires (ValidateACL rejects a bare IP).
+// Returns "" when the host is not an IP literal.
+func hostPrefix(addr string) string {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return ""
+	}
+	if ip.Is4() {
+		return ip.String() + "/32"
+	}
+	return ip.String() + "/128"
 }
