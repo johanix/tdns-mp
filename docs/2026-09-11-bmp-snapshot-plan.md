@@ -11,6 +11,9 @@ Line numbers are anchors at those commits and drift; re-locate by symbol.
 (the model; its §9 defined B-MP and is corrected below), the re-pin trial
 review of 2026-09-10 (§G) and the lab-run log of 2026-09-11, both in the
 project's `reviews/` directory.
+**Amended the same evening:** §2.4 evaluates making tdns-signer the core of
+tdns-mpsigner, as Johan asked after the first version, and the
+recommendation for the key seam changed to it (§0, §4, §6 Q2 updated).
 **Supersedes:** §9 of the 2026-07-02 doc. Its claim that `MPZoneData` gets the
 staging receivers "for free" by embedding is wrong: they are unexported and do
 not promote across packages. T-A below carries the dated amendment.
@@ -31,15 +34,16 @@ Three small tdns PRs come first, then two tdns-mp PRs, then the test rigs:
 |---|---|---|
 | T-A | export the analysis readers, a draft-aware staging API, `StopPublisher` | ½ day |
 | T-B | a first load runs its post-refresh callbacks once the zone is Ready | ½ day |
-| T-C | a per-zone key source, so publish and `SignZone` sign with the zone's keys | 1 day |
+| T-C or T-S | the key seam: a per-zone key source (§2.3) **or** MP keys in tdns's keystore with three states and lifecycle hooks (§2.4, recommended) | 1 day |
 | M-1 | re-pin; readers, combiner staging, gate, both workarounds deleted | 1½ days + lab |
-| M-2 | re-pin; the signer uses tdns's `SignZone` through the key source; MP loop deleted | 1 day + lab |
+| M-2 or M-2S | re-pin; the signer uses tdns's `SignZone`: through the key source (M-2) or with the signer fork retired and its keys migrated (M-2S, recommended) | 1–2 days + lab |
 | R-1 | `mp-comms` gains data-path assertions | 1 day |
 | R-2 | `mp-policy-matrix` gains signature validation and a DNSKEY roll | ½ day |
 
 The decisions Johan is asked to make are in §6. The two that shape the code
 are the first-load ordering (§2.2, recommended: defer the callbacks) and the
-key seam (§2.3, recommended: an interface on `ZoneData`).
+key seam (§2.3 and §2.4, recommended: retire tdns-mp's keystore fork and let
+tdns's signer core carry multi-provider zones).
 
 ## 1. What is wrong on tdns main today
 
@@ -166,7 +170,8 @@ the lab data-path run (§5.3, D0) must establish; neither is acceptable.
 The trial's §G asked tdns to export a `dak`-taking staged `SignZone` and a
 `PublishDnskeyRRs` that accepts foreign keys. Those two exports would fix
 steps 1–4 and leave step 5 in place: the SOA re-sign lives inside publish and
-resolves keys on its own. The fix has to be a per-zone key seam (§2.3).
+resolves keys on its own. The fix has to be a key seam: either tdns asks the zone for its keys
+(§2.3) or the zone's keys live where tdns already looks (§2.4).
 
 ### 1.5 Mutator inventory at `b955faf`
 
@@ -190,7 +195,8 @@ they reuse tdns's `OwnerData` type and one of them names its field `Data`.
 
 ## 2. tdns side
 
-Three PRs, each reviewable alone. T-A and T-B unblock M-1; T-C unblocks M-2.
+Three PRs, each reviewable alone. T-A and T-B unblock M-1; the key seam
+(T-C in §2.3, or T-S in §2.4, the recommended one) unblocks M-2.
 Every tdns change here is app-neutral: tdns-auth's behaviour does not change
 unless a caller opts in (a key source set, a callback registered).
 
@@ -361,6 +367,169 @@ republishes the source's set.
 CodeRabbit hour matters here. Behaviour for a zone without a source is
 identical, which the existing signing tests already pin.
 
+### 2.4 The tdns-signer alternative: retire the signer fork instead of feeding it
+
+Johan's question, after the first version of this plan: tdns now has
+`tdns-signer`, snapshot-aware and compliant; can it be adapted, as in
+extended, to be the internal core of `tdns-mpsigner`, so that the signer's
+complexity is reused rather than re-implemented? Evaluated here against §2.3.
+
+#### 2.4.1 What tdns-signer is
+
+`cmdv2/signer/main.go` is tdns-auth built as a second binary: ~90 lines that
+set `AppTypeAuth`, call `MainInit`, `SetupAPIRouter`, a SIGHUP watcher and
+`StartAuth`. It adds nothing to `v2/`; a bump-on-the-wire signer is a
+`type: secondary` zone with `inline-signing`, which tdns-auth has always
+supported. Its only substance of its own is `algs.list`, from which
+`tdns-genalgs` generates the algorithm registrations.
+
+So "the core of tdns-signer" is `tdns/v2`, and `cmd/mpsigner/main.go` is
+already the same skeleton: the same four calls, with `StartMPSigner` in place
+of `StartAuth` (a hand-picked subset of the same engines plus the MP ones,
+`start_signer.go:23`) and a hand-written algorithm `init()` in place of
+genalgs. Go cannot import a `main` package, and tdns cannot import tdns-mp,
+so "extend tdns-signer" can only mean one of two things: give `tdns/v2` the
+hook points the MP signer needs so that tdns-mpsigner differs from
+tdns-signer by nothing but its `multi-provider:` block, or move tdns-mp into
+tdns, which is out of scope. The rest of this section is about the first.
+
+#### 2.4.2 Where tdns-mpsigner forks the core today
+
+Everything below is a copy of something in `tdns/v2`, taken when tdns-mp was
+split out and not kept current. Sizes at `b955faf`.
+
+| fork | lines | copied from | drift since the copy |
+|---|---|---|---|
+| `mp_signer.go` `SignZone`, `PublishDnskeyRRs` | 359 | pre-snapshot `sign.go` | everything in 1.4; no occluded-name, delegation, ZONEMD, TTL-clamp or canonical-NSEC handling |
+| `mp_resigner.go` `MPResignerEngine`, `SetupZoneSigning` | 140 | `resigner.go` | still honours `service.resign: false`, which tdns removed because it silently let signatures expire |
+| `signer_keydb.go` + `MPDnssecKeyStore` (`db_schema_hsync.go:217`) + the cache in `hsyncdb.go` | ~790 | `keystore.go` | a parallel table with the same columns plus `propagation_confirmed(_at)`, three extra states (`mpdist`, `mpremove`, `foreign`), its own cache (the June `KeystoreDnskeyCache`, which tdns replaced with the per-zone signing-keys snapshot) |
+| `key_state_worker.go` | 317 | `key_state_worker.go` | no RRSIG strip when a key is removed, no ZSK removal margin from the observed TTL, no `published_at` healing; plus the MP branches (standby keys staged as `mpdist`, retired keys parked as `mpremove`, inventory pushed to agents) |
+| `apihandler_keystore.go` `MPDnssecKeyMgmt`, `RolloverKeyMP` | ~520 | `DnssecKeyMgmt`, `RolloverKey` | same commands (list, add, generate, setstate, rollover, delete, clear) over the other table |
+| `cmd/mpsigner` algorithm registration (`main.go` init + three tag-gated files) | ~115 | genalgs | codepoints no longer match the registry (trial item E); a DNSKEY mpsigner emits at 200 is a different algorithm to every tdns binary |
+
+About 2,200 lines. What is not a fork, and stays under either alternative:
+the HSYNC-driven role (`MPPreRefresh` switching `inline-signing` and
+multi-signer mode per zone), `extractRemoteDNSKEYs` (which DNSKEYs in the
+incoming zone are another signer's), the KEYSTATE protocol with the agent
+(`signer_msg_handler.go`: answer an inventory RFI; on a `propagated` signal
+move `mpdist`→`published` and `mpremove`→`removed`; push the inventory when a
+state changes), the propagation gate before a key may go active
+(`canPromoteMultiProviderMP`, `signer_keydb.go:479`), and the transport
+(`signer_transport.go`, `signer_peer.go`, `signer_chunk_handler.go`).
+
+#### 2.4.3 What tdns already does for multi-provider zones
+
+`multi-provider` is a tdns zone option (`OptMultiProvider`), and tdns's key
+automation already treats it: `rolloverAutomatedForAllZones`,
+`rolloverZsksForAllZones` and `promoteStandbyKskBootstrapAll` skip every
+zone that carries it (`ksk_rollover_automated.go`, `zsk_rollover.go`). The
+parent-facing machinery, which in a multi-provider setup belongs to the
+agent and the combiner, therefore stays inert for MP zones without any new
+gate. tdns's worker does not skip them in its generic transitions
+(`published`→`standby`, `retired`→`removed`, standby maintenance): those are
+exactly the three places where the MP fork's branches would have to go.
+
+#### 2.4.4 The change list under this alternative
+
+**tdns (T-S, replaces T-C).**
+
+- *T-S1, three states.* `foreign` (a DNSKEY published but not generated
+  here; no private half; never signs), `mpdist` (staged for pre-publication,
+  served, awaiting peer confirmation) and `mpremove` (withdrawn from the
+  RRset, awaiting peer confirmation of the removal). `FetchZoneDnskeysSql`
+  (`ops_dnskey.go`, shared with `CollectDynamicRRs`) gains `mpdist` and
+  `foreign`. `UpdateDnssecKeyStateTx` already passes unknown states through
+  its `switch` default; nothing else in tdns names states by list. Zones
+  that never use the three see no change.
+- *T-S2, key lifecycle hooks.* One registration in the style of
+  `RegisterZoneOptionHandler`:
+
+  ```go
+  type KeyLifecycleHooks struct {
+      StagedState  func(zd *ZoneData) string           // "published" today; "mpdist" for MP zones
+      RetiredState func(zd *ZoneData) string           // "removed" today; "mpremove" for MP zones
+      MayPromote   func(zd *ZoneData, keyid uint16) bool // published→active gate
+      OnStateChange func(zone string, keyid uint16, from, to string)
+  }
+  func RegisterKeyLifecycleHooks(h KeyLifecycleHooks)
+  ```
+
+  Consulted at four sites: `GenerateAndStageKey` (`keystore.go:1315`),
+  `transitionRetiredToRemoved`, the promotion path of
+  `EnsureActiveDnssecKeys` (`sign.go`, the `published` keys branch), and
+  `UpdateDnssecKeyState` after its commit. Nil hooks mean today's behaviour.
+  The alternative of keying these branches on `OptMultiProvider` inside tdns
+  is smaller but puts the MP protocol's states into tdns; the hooks keep tdns
+  ignorant of what `mpdist` means.
+- *T-S3, nothing for the propagation columns.* They are MP protocol state;
+  they go into an MP-owned side table in `HsyncDB`, keyed by zone and key
+  id, so tdns's schema does not change.
+- T-A and T-B stay as they are.
+
+**tdns-mp (M-2S, replaces M-2).**
+
+- Keys live in `DnssecKeyStore`. `mp_signer.go`'s loop and
+  `PublishDnskeyRRs`, `mp_resigner.go`, `signer_keydb.go` except
+  `GetKeyInventory` and the three propagation functions (rewritten over the
+  side table, ~100 lines), `apihandler_keystore.go`, the MP key cache and the
+  `MPDnssecKeyStore` schema are deleted. `MPZoneData.SignZone` becomes mode
+  selection plus `zd.SignZone(kdb, force)`; `SetupZoneSigning` feeds
+  `conf.Internal.ResignQ`, and the tdns `ResignerEngine` that
+  `StartMPSigner` already starts re-signs MP zones. The MP `KeyStateWorker`
+  is replaced by the hooks implementation (~80 lines) and the KEYSTATE
+  handler's transitions call tdns's `UpdateDnssecKeyState`.
+  `extractRemoteDNSKEYs` writes `foreign` rows through `kdb`.
+- `tdns-mpcli signer keystore …` becomes tdns's `keystore dnssec` subtree,
+  which mpcli already mounts (#36); the signer's `/keystore` route points at
+  tdns's handler. Foreign keys then show in the ordinary key listing.
+- `cmd/mpsigner` adopts `algs.list` and genalgs like every tdns binary,
+  which is the fix trial item E was waiting for.
+- *Migration, one-shot.* `migrateHsyncSchema` (`db_schema_hsync.go:348`)
+  copies `MPDnssecKeyStore` rows into `DnssecKeyStore` (its columns are a
+  superset apart from the two propagation ones, which go to the side
+  table), renames the old table, and rewrites `keyrr` for the codepoint
+  renumbering in the same pass. The fleet needs a flag day for the re-pin
+  regardless (trial items C and E); this joins it rather than adding one.
+- The agent needs nothing: the KEYSTATE inventory carries state names on
+  the wire (`mp_wire_payloads.go:222`), and they do not change.
+
+#### 2.4.5 Comparison
+
+| | T-C key source (§2.3) | T-S keystore merge (this section) |
+|---|---|---|
+| tdns change | ~150 lines; an interface consulted in `EnsureActiveDnssecKeys`, `publishDnskeyRRsLocked`, `CollectDynamicRRs` and stored into the signing-keys snapshot | ~100 lines; two SQL predicates and a hooks struct consulted in the worker, one promotion site and one post-commit call |
+| where the tdns change sits | in the signing path | in the keystore and worker; the signing path is untouched |
+| tdns-mp change | +150 (the source), −500 (`SignZone`, `PublishDnskeyRRs`, resigner); ~1,700 lines of fork stay, each still drifting | +250 (hooks, inventory, migration), −2,000 |
+| what MP zones gain | tdns's signing loop and publish | the same, plus the signing-keys snapshot, RRSIG stripping on key removal, the ZSK removal margin, algorithm reconciliation, standby maintenance, the tdns CLI, genalgs |
+| two key stores in one database | yes, permanently, with two workers over them (as today) | no |
+| migration | none | one-shot, on the flag day the re-pin already needs |
+| risk | low; nothing existing moves | tdns's generic transitions now run on MP keys, bounded to three functions behind hooks; a migration that must be right once |
+| fixes item E | no | yes |
+
+#### 2.4.6 What it does not do
+
+It does not make tdns-signer multi-provider aware, and it does not make the
+two daemons one binary: tdns cannot depend on tdns-mp. tdns-mpsigner stays a
+tdns-mp binary whose main is tdns-signer's plus the MP block; after M-2S the
+list of things it does that tdns-signer does not is the list in the last
+paragraph of 2.4.2, and nothing else. `AppTypeMPSigner` stays (tdns's
+auth-only safety gates stand down for it today, as for any derived app;
+tdns#558 is the path to changing that, and it is unrelated to this plan).
+`StartMPSigner` keeps its explicit engine list; with the MP worker gone,
+the tdns `KeyStateWorker` in that list is the only one.
+
+#### 2.4.7 Recommendation
+
+T-S over T-C. It reuses the part of the signer that is actually complex,
+which was the point of the question; it changes tdns outside the signing
+path rather than inside it; and it retires forks that are already wrong in
+ways the lab has not yet noticed (a removed key's RRSIGs are never stripped;
+`service.resign: false` still disables renewal on an mpsigner). The cost is
+the migration and a larger tdns-mp diff, both of which coincide with a flag
+day that is coming anyway. T-C remains the fallback if the flag day is
+pushed out: it is compatible with a later T-S, but everything it adds is
+then deleted.
+
 ## 3. tdns-mp side
 
 Two PRs. M-1 re-pins to the tdns commit that carries T-A and T-B and does
@@ -408,7 +577,12 @@ guarded against.
   `GetOwner`: they read served zones and, after T-B, run when the zone is
   Ready.
 
-### 3.3 M-2: the signer
+### 3.3 M-2: the signer (T-C variant; see §2.4.4 for M-2S)
+
+What follows is the signer step if the key source (T-C) is chosen. Under the
+recommended T-S the step is M-2S, listed in §2.4.4: the same deletion of the
+signing loop, plus the keystore fork, the MP resigner, the MP key-state
+worker and the MP keystore API, plus the one-shot key migration.
 
 - `mpKeySource{hdb *HsyncDB}` implements `tdns.ZoneKeySource`. `ActiveKeys`
   is `EnsureActiveDnssecKeysMP` minus its final `zd.PublishDnskeyRRs(dak)`
@@ -470,15 +644,16 @@ a week of drift. M-1 should merge within days of T-A and T-B; the
 |---|---|---|---|
 | T-A readers + staging + `StopPublisher` | — | ½ day | tdns tests, `make check` |
 | T-B first-load post-refresh deferral | — | ½ day | tdns tests |
-| T-C key source | — | 1 day | tdns tests incl. signature verification |
+| T-C key source, or T-S states + hooks (§2.4) | — | 1 day | tdns tests incl. signature verification; under T-S also a worker test with hooks set |
 | M-1 re-pin, readers, combiner, gate, workarounds out | T-A, T-B merged | 1½ days | `make check`, `make test-race`, lab D0–D1 (§5.3) 71/0 comms unchanged |
-| M-2 re-pin, signer through the key source | T-C merged, M-1 merged | 1 day | lab D0–D3 |
+| M-2 (key source) or M-2S (fork retired, keys migrated) | T-C or T-S merged, M-1 merged | 1 day / 2 days | lab D0–D3; under M-2S also the migration test |
 | R-1 `mp-comms` data-path verbs and assertions | — (written against M-1/M-2 expectations) | 1 day | runs green on M-2 |
 | R-2 `mp-policy-matrix` F/G scenarios | tdns#616 (JWK) and the IMR forwarding the README asks for | ½ day | runs green on M-2 |
 
-T-A, T-B and T-C are independent of each other and can be three PRs in the
-same week; CodeRabbit's one review per hour in johanix/tdns sets the pace.
-Total about seven working days plus two lab afternoons. Slices over a big
+T-A, T-B and the key-seam PR are independent of each other and can be three
+PRs in the same week; CodeRabbit's one review per hour in johanix/tdns sets
+the pace. Total about seven working days plus two lab afternoons with T-C,
+about eight with T-S. Slices over a big
 bang: each tdns PR is reviewable in one sitting, and each tdns-mp PR has one
 lab question to answer.
 
@@ -514,6 +689,12 @@ In package `tdnsmp`, so only exported tdns API: a zone from `ReadZoneData` +
 - **Signer, mode 4 (M-2).** Two foreign DNSKEYs in the apex before signing;
   after `SignZone` the served DNSKEY set is local ∪ foreign, local RRSIGs
   verify, and `MPDnssecKeyStore` holds the foreign keys as `foreign`.
+- **Key migration (M-2S only).** A database with `MPDnssecKeyStore` rows
+  in every state, including `foreign` and a `propagation_confirmed` key,
+  and a `keyrr` at an old codepoint; after `InitHsyncTables` the rows are in
+  `DnssecKeyStore` with the same states, the propagation flags are in the
+  side table, the codepoint is rewritten, the old table is renamed, and a
+  second start changes nothing.
 - **First load (M-1).** A zone with pre-refresh and post-refresh callbacks
   registered; first load from file; the post-refresh callback observes
   `Ready` and a readable HSYNC3 RRset. (The tdns test in T-B covers the
@@ -583,16 +764,19 @@ Each with the recommendation the plan is written to.
 1. **First-load ordering: O1, O2 or O3 (§2.2)?** Recommend O1, deferring a
    first load's post-refresh callbacks to the Ready flip. It is the only
    option that removes the asymmetry for every consumer. O3 is the fallback.
-2. **Key seam: K2 interface or K1 snapshot install (§2.3)?** Recommend K2.
-   One explicit seam that every key-resolving site tests the same way; a
-   fake source makes the tdns test self-contained.
-3. **Does T-C's `EnsureActiveDnssecKeys` store the source's keys into the
-   signing-keys snapshot, or does the source push them?** Recommend the
-   former: tdns owns that snapshot and already refreshes it on every sign;
-   a second writer from another package is the G3 design's own warning.
-4. **Retire `MPResignerEngine` in favour of tdns's `ResignerEngine` in M-2,
-   or later?** Recommend later, as its own small PR once M-2 has run in the
-   lab: M-2 should change what signs, not what schedules signing.
+2. **Key seam: T-S keystore merge (§2.4), K2 key source or K1 snapshot
+   install (§2.3)?** Recommend T-S: it reuses the signer core instead of
+   feeding a fork of it, and its migration lands on the flag day the re-pin
+   needs anyway. K2 is the fallback if that flag day is deferred; K1 is
+   rejected either way.
+3. **Under T-S: lifecycle hooks (T-S2) or `OptMultiProvider` branches inside
+   tdns?** Recommend the hooks. They keep tdns ignorant of what the MP
+   states mean, at the cost of one registration call. (Under K2 the
+   question is instead whether tdns stores the source's keys into the
+   signing-keys snapshot; recommend yes, tdns owns that snapshot.)
+4. **Retire `MPResignerEngine` in favour of tdns's `ResignerEngine`?** Under
+   T-S it goes in M-2S, since the MP signing loop it schedules is deleted
+   in the same change. Under K2, later, as its own small PR.
 5. **Draft semantics: keep `new_zd.Data` as the draft that `StageRRset`
    writes, or have tdns's refresh build its working set from `new_zd`'s own
    working set?** Recommend the former. It is what the refresh publish
@@ -606,14 +790,19 @@ Each with the recommendation the plan is written to.
    README's scope statement gets a dated amendment.
 8. **Gate marker: per-site `mp-private:` comments (recommended) or a
    per-file allowlist?** Per-site, for the reason in §3.4.
-9. **M-1 before T-C lands means the lab signer stays wrong for a few days
-   (1.4).** Acceptable? The fleet runs the June pin; only the lab sees main.
-   Recommend yes, with D0 red and named in M-1's PR.
+9. **M-1 before the key seam lands means the lab signer stays wrong for a
+   few days (1.4).** Acceptable? The fleet runs the June pin; only the lab
+   sees main. Recommend yes, with D0 red and named in M-1's PR.
+10. **Under T-S: fold the key migration, the codepoint renumbering (trial
+    item E) and the config-key migration (item C) into one flag day?**
+    Recommend yes: one migration tool, one fleet cycle, one rollback point.
+    Each of the three rewrites the same deployments.
 
 ## 7. Out of scope, deliberately
 
-tdns-transport (nothing there touches zone data); the mpsigner codepoint
-renumbering and the config-key migration (trial items E and C); JWK
+tdns-transport (nothing there touches zone data); the config-key migration
+(trial item C) and, under T-C only, the mpsigner codepoint renumbering
+(item E; under T-S it is part of M-2S); JWK
 (tdns#616); the IMR lame-delegation backoff (`fix/imr-servfail-backoff`);
 the 80 s cold start (its own handover); the non-signer serial bump the
 matrix README records; a non-Ready zone's readability for anything but the
