@@ -5,7 +5,7 @@ go 1.25.2
 replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260610050337-d454ac920e5f
+	github.com/johanix/dnssec-algorithms v0.0.0-20260706125906-0101974d6755
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
 	github.com/johanix/tdns/v2 v2.0.0-20260911111736-d1eec10219b7
 	github.com/mattn/go-sqlite3 v1.14.16

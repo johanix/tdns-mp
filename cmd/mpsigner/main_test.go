@@ -10,9 +10,12 @@ import (
 	algs "github.com/johanix/tdns/v2/algorithms"
 )
 
-// MLDSA44 is registered at 18, the DNSSEC algorithm number IANA assigned it.
-func TestMLDSA44Codepoint(t *testing.T) {
-	if n, ok := algs.AlgorithmNumber("MLDSA44"); !ok || n != 18 {
-		t.Fatalf("MLDSA44 registered at %d (known=%v), want 18", n, ok)
+// The registrations come from tdns-genalgs and the registry, so MLDSA44 is
+// at the registry's codepoint, the one every tdns binary uses: a DNSKEY this
+// signer emits means the same algorithm to the servers it signs for. Needs
+// the generated files (make generate).
+func TestMLDSA44IsAtTheRegistryCodepoint(t *testing.T) {
+	if n, ok := algs.AlgorithmNumber("MLDSA44"); !ok || n != 199 {
+		t.Fatalf("MLDSA44 registered at %d (known=%v), want the registry's 199", n, ok)
 	}
 }

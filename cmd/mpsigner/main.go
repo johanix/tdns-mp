@@ -14,37 +14,14 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/johanix/dnssec-algorithms/mldsa44"
-	"github.com/johanix/dnssec-algorithms/slhdsa128s"
-
 	tdnsmp "github.com/johanix/tdns-mp/v2"
 	tdns "github.com/johanix/tdns/v2"
-	algs "github.com/johanix/tdns/v2/algorithms"
 )
 
-// Pure-Go PQ algorithms (CIRCL-backed) — always registered, so the
-// signer can sign with and report them via "keystore dnssec
-// algorithms". The liboqs-backed ones are not wired into mpsigner.
-//
-// tdns/v2 algorithms.Register now also takes the role capabilities
-// (ForKSK/ForZSK, enforced by the DNSSEC policy check in large_ksk.go)
-// and the static Facts. Both are copied from dnssec-algorithms
-// registry/registry.go, which tdns's own binaries consume through the
-// tdns-genalgs generator (cmdv2/genalgs + a per-app algs.list).
-//
-// MLDSA44 is at 18, the codepoint IANA assigned it (it was tdns-mp's
-// private 199). SLHDSA128S is still at tdns-mp's historical 200, which no
-// longer matches that registry (it has 200=MLDSA65, 202=SLHDSA128S).
-// Keys already in an MPDnssecKeyStore keep the number they were minted
-// with.
-func init() {
-	algs.Register(18, mldsa44.New(),
-		algs.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true},
-		algs.Facts{PubKeyBytes: 1312, SigBytes: 2420, SecKeyBytes: 2560, SecurityLevel: 2, Maturity: "final", Description: "ML-DSA-44 (FIPS 204), lattice"})
-	algs.Register(200, slhdsa128s.New(),
-		algs.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true},
-		algs.Facts{PubKeyBytes: 32, SigBytes: 7856, SecKeyBytes: 64, SecurityLevel: 1, Maturity: "final", Description: "SLH-DSA-SHA2-128s (FIPS 205), hash-based; tiny keys, large slow signatures"})
-}
+// Algorithm registrations are generated: tdns-genalgs reads algs.list and
+// emits registered_algs.go and metadata_algs.go beside this file (build
+// artifacts, not committed), the same way every tdns binary gets its
+// algorithms. See cmd/mpsigner/algs.list.
 
 func main() {
 	tdns.Globals.App.Type = tdnsmp.AppTypeMPSigner
