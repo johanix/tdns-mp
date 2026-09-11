@@ -16,30 +16,41 @@ import (
 )
 
 // combinerPeerCmd is the prefix for combiner commands regarding peers.
-var combinerPeerCmd = &cobra.Command{
-	Use:   "peer",
-	Short: "Commands to the combiner regarding peers",
-	Long:  `Commands that instruct the combiner to perform an action toward a peer agent (e.g. ping, resync).`,
+func newCombinerPeerCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "peer",
+		Short: "Commands to the combiner regarding peers",
+		Long:  `Commands that instruct the combiner to perform an action toward a peer agent (e.g. ping, resync).`,
+	}
+	c.AddCommand(newCombinerPeerListCmd(kind))
+	c.AddCommand(newCombinerPeerResyncCmd(kind))
+	addPeerLeaves(c, kind)
+	return c
 }
 
-var combinerPeerListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all known peer agents",
-	Long: `Show all peer agents that this combiner knows about.
+func newCombinerPeerListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List all known peer agents",
+		Long: `Show all peer agents that this combiner knows about.
 Displays both DNS and API transports independently with their current state.
 
 Example:
   tdns-cliv2 combiner peer list
   tdns-cliv2 combiner peer list --verbose`,
-	Run: func(cmd *cobra.Command, args []string) {
-		ListDistribPeers(cmd, "combiner")
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			ListDistribPeers(cmd, "combiner")
+		},
+	}
+	c.Flags().Bool("verbose", false, "Show detailed per-peer statistics")
+	return c
 }
 
-var combinerPeerResyncCmd = &cobra.Command{
-	Use:   "resync",
-	Short: "Ask agents to re-send all zone data to the combiner",
-	Long: `Send an RFI SYNC to configured agents, requesting them to re-send all their
+func newCombinerPeerResyncCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "resync",
+		Short: "Ask agents to re-send all zone data to the combiner",
+		Long: `Send an RFI SYNC to configured agents, requesting them to re-send all their
 local zone data. Useful after combiner restart when in-memory agent contributions
 are lost.
 
@@ -49,33 +60,27 @@ Example:
   tdns-cliv2 combiner peer resync
   tdns-cliv2 combiner peer resync --zone=whisky.dnslab.
   tdns-cliv2 combiner peer resync --agent=agent.alpha.dnslab.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-		agentID, _ := cmd.Flags().GetString("agent")
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
+			agentID, _ := cmd.Flags().GetString("agent")
 
-		resp, err := SendCombinerDebugCmd(CombinerDebugPost{
-			Command: "agent-resync",
-			Zone:    zone,
-			AgentID: agentID,
-		})
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			resp, err := SendCombinerDebugCmd(cmd, CombinerDebugPost{
+				Command: "agent-resync",
+				Zone:    zone,
+				AgentID: agentID,
+			})
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		if resp.Error {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", resp.ErrorMsg)
-			return
-		}
-		fmt.Print(resp.Msg)
-	},
-}
-
-func init() {
-	combinerPeerCmd.AddCommand(combinerPeerListCmd)
-	combinerPeerCmd.AddCommand(combinerPeerResyncCmd)
-	CombinerCmd.AddCommand(combinerPeerCmd)
-
-	combinerPeerListCmd.Flags().Bool("verbose", false, "Show detailed per-peer statistics")
-	combinerPeerResyncCmd.Flags().String("zone", "", "Resync only this zone (default: all zones)")
-	combinerPeerResyncCmd.Flags().String("agent", "", "Resync only this agent (default: all agents)")
+			if resp.Error {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", resp.ErrorMsg)
+				return
+			}
+			fmt.Print(resp.Msg)
+		},
+	}
+	c.Flags().String("zone", "", "Resync only this zone (default: all zones)")
+	c.Flags().String("agent", "", "Resync only this agent (default: all agents)")
+	return c
 }

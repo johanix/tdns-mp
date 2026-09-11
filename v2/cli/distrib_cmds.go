@@ -18,117 +18,171 @@ import (
 	"github.com/spf13/cobra"
 
 	tdns "github.com/johanix/tdns/v2"
-	tdnscli "github.com/johanix/tdns/v2/cli"
 )
 
-var AgentDistribCmd = &cobra.Command{
-	Use:   "distrib",
-	Short: "Manage distributions",
-	Long:  `Commands for managing distributions created by this agent, including listing distributions and purging completed distributions.`,
+func newAgentDistribCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "distrib",
+		Short: "Manage distributions",
+		Long:  `Commands for managing distributions created by this agent, including listing distributions and purging completed distributions.`,
+	}
+	c.AddCommand(newAgentDistribListCmd(kind), newAgentDistribPurgeCmd(kind), newAgentDistribPeersCmd(kind), newAgentDistribOpCmd(kind), newAgentDistribDiscoverCmd(kind))
+	return c
 }
 
-var CombinerDistribCmd = &cobra.Command{
-	Use:   "distrib",
-	Short: "Manage distributions",
-	Long:  `Commands for managing distributions created by this combiner, including listing distributions and purging completed distributions.`,
+func newCombinerDistribCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "distrib",
+		Short: "Manage distributions",
+		Long:  `Commands for managing distributions created by this combiner, including listing distributions and purging completed distributions.`,
+	}
+	c.AddCommand(newCombinerDistribListCmd(kind), newCombinerDistribPurgeCmd(kind), newCombinerDistribPeersCmd(kind))
+	return c
 }
 
-var agentDistribListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all distributions from this agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		listDistributions(cmd, "agent")
-	},
+func newAgentDistribListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List all distributions from this agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			listDistributions(cmd, "agent")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var combinerDistribListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all distributions from this combiner",
-	Run: func(cmd *cobra.Command, args []string) {
-		listDistributions(cmd, "combiner")
-	},
+func newCombinerDistribListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List all distributions from this combiner",
+		Run: func(cmd *cobra.Command, args []string) {
+			listDistributions(cmd, "combiner")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var agentDistribPurgeCmd = &cobra.Command{
-	Use:   "purge [--force]",
-	Short: "Delete distributions",
-	Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
-	Run: func(cmd *cobra.Command, args []string) {
-		purgeDistributions(cmd, "agent")
-	},
+func newAgentDistribPurgeCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "purge [--force]",
+		Short: "Delete distributions",
+		Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
+		Run: func(cmd *cobra.Command, args []string) {
+			purgeDistributions(cmd, "agent")
+		},
+	}
+	c.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
+	return c
 }
 
-var agentDistribPeersCmd = &cobra.Command{
-	Use:   "peers",
-	Short: "List all known peer agents with working keys",
-	Long:  "Show all recipient agents that this agent has established keys with and can send distributions to.",
-	Run: func(cmd *cobra.Command, args []string) {
-		ListDistribPeers(cmd, "agent")
-	},
+func newAgentDistribPeersCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "peers",
+		Short: "List all known peer agents with working keys",
+		Long:  "Show all recipient agents that this agent has established keys with and can send distributions to.",
+		Run: func(cmd *cobra.Command, args []string) {
+			ListDistribPeers(cmd, "agent")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var combinerDistribPurgeCmd = &cobra.Command{
-	Use:   "purge [--force]",
-	Short: "Delete distributions",
-	Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
-	Run: func(cmd *cobra.Command, args []string) {
-		purgeDistributions(cmd, "combiner")
-	},
+func newCombinerDistribPurgeCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "purge [--force]",
+		Short: "Delete distributions",
+		Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
+		Run: func(cmd *cobra.Command, args []string) {
+			purgeDistributions(cmd, "combiner")
+		},
+	}
+	c.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
+	return c
 }
 
-var combinerDistribPeersCmd = &cobra.Command{
-	Use:   "peers",
-	Short: "List all known peer agents with working keys",
-	Long:  "Show all recipient agents that this combiner has established keys with and can send distributions to.",
-	Run: func(cmd *cobra.Command, args []string) {
-		ListDistribPeers(cmd, "combiner")
-	},
+func newCombinerDistribPeersCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "peers",
+		Short: "List all known peer agents with working keys",
+		Long:  "Show all recipient agents that this combiner has established keys with and can send distributions to.",
+		Run: func(cmd *cobra.Command, args []string) {
+			ListDistribPeers(cmd, "combiner")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var AuditorDistribCmd = &cobra.Command{
-	Use:   "distrib",
-	Short: "Manage distributions",
-	Long:  `Commands for managing distributions created by this auditor, including listing distributions and purging completed distributions.`,
+func newAuditorDistribCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "distrib",
+		Short: "Manage distributions",
+		Long:  `Commands for managing distributions created by this auditor, including listing distributions and purging completed distributions.`,
+	}
+	c.AddCommand(newAuditorDistribListCmd(kind), newAuditorDistribPurgeCmd(kind), newAuditorDistribPeersCmd(kind))
+	return c
 }
 
-var auditorDistribListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all distributions from this auditor",
-	Run: func(cmd *cobra.Command, args []string) {
-		listDistributions(cmd, "auditor")
-	},
+func newAuditorDistribListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List all distributions from this auditor",
+		Run: func(cmd *cobra.Command, args []string) {
+			listDistributions(cmd, "auditor")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var auditorDistribPurgeCmd = &cobra.Command{
-	Use:   "purge [--force]",
-	Short: "Delete distributions",
-	Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
-	Run: func(cmd *cobra.Command, args []string) {
-		purgeDistributions(cmd, "auditor")
-	},
+func newAuditorDistribPurgeCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "purge [--force]",
+		Short: "Delete distributions",
+		Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
+		Run: func(cmd *cobra.Command, args []string) {
+			purgeDistributions(cmd, "auditor")
+		},
+	}
+	c.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
+	return c
 }
 
-var auditorDistribPeersCmd = &cobra.Command{
-	Use:   "peers",
-	Short: "List all known peer agents with working keys",
-	Long:  "Show all recipient agents that this auditor has established keys with and can send distributions to.",
-	Run: func(cmd *cobra.Command, args []string) {
-		ListDistribPeers(cmd, "auditor")
-	},
+func newAuditorDistribPeersCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "peers",
+		Short: "List all known peer agents with working keys",
+		Long:  "Show all recipient agents that this auditor has established keys with and can send distributions to.",
+		Run: func(cmd *cobra.Command, args []string) {
+			ListDistribPeers(cmd, "auditor")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var agentDistribOpCmd = &cobra.Command{
-	Use:   "op [operation]",
-	Short: "Run an operation toward a peer",
-	Long:  `Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping (use --dns or --api for combiner ping).`,
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		runDistribOp(cmd, args[0])
-	},
+func newAgentDistribOpCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "op [operation]",
+		Short: "Run an operation toward a peer",
+		Long:  `Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping (use --dns or --api for combiner ping).`,
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			runDistribOp(cmd, args[0])
+		},
+	}
+	c.Flags().StringP("to", "t", "", "Recipient identity (e.g. combiner, agent.delta.dnslab.)")
+	c.MarkFlagRequired("to")
+	c.Flags().Bool("dns", false, "For ping: use CHUNK-based DNS ping (default)")
+	c.Flags().Bool("api", false, "For ping: use HTTPS API ping")
+	return c
 }
 
 func listDistributions(cmd *cobra.Command, component string) {
-	api, err := tdnscli.GetApiClient(component, true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -332,7 +386,7 @@ func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiCl
 func purgeDistributions(cmd *cobra.Command, component string) {
 	force, _ := cmd.Flags().GetBool("force")
 
-	api, err := tdnscli.GetApiClient(component, true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -364,12 +418,11 @@ func purgeDistributions(cmd *cobra.Command, component string) {
 }
 
 func runDistribOp(cmd *cobra.Command, operation string) {
-	// agentDistribOpCmd is only registered under AgentDistribCmd; role is fixed.
 	to, err := cmd.Flags().GetString("to")
 	if err != nil || to == "" {
 		log.Fatalf("--to is required (e.g. --to combiner or --to agent.delta.dnslab.)")
 	}
-	api, err := tdnscli.GetApiClient("agent", true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -415,9 +468,9 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 }
 
 func ListDistribPeers(cmd *cobra.Command, component string) {
-	// component ("agent" | "combiner") is both the role for the API client
-	// and the URL-path segment for the endpoint below.
-	api, err := tdnscli.GetApiClient(component, true)
+	// component is the daemon kind, i.e. the URL-path segment of the
+	// endpoint below; the target instance comes from cmd's tree.
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -788,10 +841,11 @@ func getUint64Value(m map[string]interface{}, key string) uint64 {
 }
 
 // agentDistribDiscoverCmd performs DNS-based discovery of an agent's contact information
-var agentDistribDiscoverCmd = &cobra.Command{
-	Use:   "discover <agent-identity>",
-	Short: "Discover and register agent contact information via DNS",
-	Long: `Performs DNS-based discovery of an agent's contact information and registers it.
+func newAgentDistribDiscoverCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "discover <agent-identity>",
+		Short: "Discover and register agent contact information via DNS",
+		Long: `Performs DNS-based discovery of an agent's contact information and registers it.
 
 Looks up URI, KEY, TLSA, and A/AAAA records to discover:
   - API endpoint (_https._tcp.<identity> URI)
@@ -806,16 +860,17 @@ with 'distrib op' commands.
 Example:
   tdns-cliv2 agent distrib discover agent.delta.dnslab.
   tdns-cliv2 agent distrib discover provider.example.com`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		agentIdentity := args[0]
-		runAgentDiscover(agentIdentity)
-	},
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			agentIdentity := args[0]
+			runAgentDiscover(cmd, agentIdentity)
+		},
+	}
+	return c
 }
 
-func runAgentDiscover(agentIdentity string) {
-	// agentDistribDiscoverCmd is only registered under AgentDistribCmd; role is fixed.
-	api, err := tdnscli.GetApiClient("agent", true)
+func runAgentDiscover(cmd *cobra.Command, agentIdentity string) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -871,28 +926,4 @@ func runAgentDiscover(agentIdentity string) {
 			fmt.Println("  Warning: Partial discovery (some DNS records missing)")
 		}
 	}
-}
-
-func init() {
-	// Register distrib commands under agent
-	AgentDistribCmd.AddCommand(agentDistribListCmd, agentDistribPurgeCmd, agentDistribPeersCmd, agentDistribOpCmd, agentDistribDiscoverCmd)
-	agentDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	agentDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
-	agentDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	agentDistribOpCmd.Flags().StringP("to", "t", "", "Recipient identity (e.g. combiner, agent.delta.dnslab.)")
-	agentDistribOpCmd.MarkFlagRequired("to")
-	agentDistribOpCmd.Flags().Bool("dns", false, "For ping: use CHUNK-based DNS ping (default)")
-	agentDistribOpCmd.Flags().Bool("api", false, "For ping: use HTTPS API ping")
-
-	// Register distrib commands under combiner
-	CombinerDistribCmd.AddCommand(combinerDistribListCmd, combinerDistribPurgeCmd, combinerDistribPeersCmd)
-	combinerDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	combinerDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
-	combinerDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-
-	// Register distrib commands under auditor
-	AuditorDistribCmd.AddCommand(auditorDistribListCmd, auditorDistribPurgeCmd, auditorDistribPeersCmd)
-	auditorDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	auditorDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
-	auditorDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 }

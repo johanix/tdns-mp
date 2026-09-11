@@ -22,379 +22,432 @@ import (
 
 var myIdentity, notifyRRtype, rfitype, rfisubtype string
 
-var DebugAgentCmd = &cobra.Command{
-	Use:   "debug",
-	Short: "TDNS-AGENT debugging commands",
+// debugAgentLeaves are the mp-specific leaves of the agent "debug"
+// subtree. They are handed to tdns's NewDebugCmd as extras, so that one
+// "debug" command carries both tdns's leaves (lav, rrset, show-ta, ...)
+// and these. Until 2026-09 the mp leaves sat under a second "debug"
+// command attached directly to the agent root, which shadowed tdns's.
+func debugAgentLeaves(kind string) []*cobra.Command {
+	return []*cobra.Command{
+		newDebugAgentSendNotifyCmd(kind),
+		newDebugAgentSendRfiCmd(kind),
+		newDebugAgentDumpAgentRegistryCmd(kind),
+		newDebugAgentDumpZoneDataRepoCmd(kind),
+		newDebugAgentShowSyncedDataCmd(kind),
+		newDebugAgentShowCombinerDataCmd(kind),
+		newDebugAgentSendSyncToCmd(kind),
+		newDebugAgentRegistryCmd(kind),
+		newDebugAgentSyncStateCmd(kind),
+		newDebugAgentResyncCmd(kind),
+		newDebugAgentShowKeyInventoryCmd(kind),
+		newDebugAgentQueueStatusCmd(kind),
+	}
 }
 
-var DebugAgentSendNotifyCmd = &cobra.Command{
-	Use:   "send-notify",
-	Short: "Tell agent to send a NOTIFY message to the other agents",
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename", "identity")
+func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "send-notify",
+		Short: "Tell agent to send a NOTIFY message to the other agents",
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename", "identity")
 
-		notifyRRtype = strings.ToUpper(notifyRRtype)
-		if notifyRRtype != "NS" && notifyRRtype != "DNSKEY" {
-			log.Fatalf("Error: RR type must be either NS or DNSKEY (is %q)", notifyRRtype)
-		}
+			notifyRRtype = strings.ToUpper(notifyRRtype)
+			if notifyRRtype != "NS" && notifyRRtype != "DNSKEY" {
+				log.Fatalf("Error: RR type must be either NS or DNSKEY (is %q)", notifyRRtype)
+			}
 
-		if dnsRecord == "" {
-			log.Fatalf("Error: DNS record is required")
-		}
+			if dnsRecord == "" {
+				log.Fatalf("Error: DNS record is required")
+			}
 
-		var rr dns.RR
-		var err error
+			var rr dns.RR
+			var err error
 
-		if rr, err = dns.NewRR(dnsRecord); err != nil {
-			log.Fatalf("Error: Invalid DNS record (did not parse): %v", err)
-		}
+			if rr, err = dns.NewRR(dnsRecord); err != nil {
+				log.Fatalf("Error: Invalid DNS record (did not parse): %v", err)
+			}
 
-		rrs := []string{rr.String()}
+			rrs := []string{rr.String()}
 
-		rrtype := dns.StringToType[notifyRRtype]
-		if rrtype == 0 {
-			log.Fatalf("Error: Invalid RR type: %s", notifyRRtype)
-		}
+			rrtype := dns.StringToType[notifyRRtype]
+			if rrtype == 0 {
+				log.Fatalf("Error: Invalid RR type: %s", notifyRRtype)
+			}
 
-		req := AgentMgmtPost{
-			Command:     "send-notify",
-			MessageType: AgentMsgNotify,
-			RRType:      rrtype,
-			Zone:        ZoneName(tdns.Globals.Zonename),
-			AgentId:     AgentId(string(tdns.Globals.AgentId)),
-			RRs:         rrs,
-		}
+			req := AgentMgmtPost{
+				Command:     "send-notify",
+				MessageType: AgentMsgNotify,
+				RRType:      rrtype,
+				Zone:        ZoneName(tdns.Globals.Zonename),
+				AgentId:     AgentId(string(tdns.Globals.AgentId)),
+				RRs:         rrs,
+			}
 
-		_, err = SendAgentDebugCmd(req, true)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-	},
+			_, err = SendAgentDebugCmd(cmd, req, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+		},
+	}
+	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
+	c.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
+	c.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
+	return c
 }
 
-var DebugAgentSendRfiCmd = &cobra.Command{
-	Use:   "send-rfi",
-	Short: "Tell agent to send an RFI message to another agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename", "identity")
+func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "send-rfi",
+		Short: "Tell agent to send an RFI message to another agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename", "identity")
 
-		rfitype = strings.ToUpper(rfitype)
-		validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
-		if !validRfiTypes[rfitype] {
-			log.Fatalf("Error: RFI type must be one of CONFIG, SYNC, AUDIT, or EDITS (is %q)", rfitype)
-		}
+			rfitype = strings.ToUpper(rfitype)
+			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
+			if !validRfiTypes[rfitype] {
+				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC, AUDIT, or EDITS (is %q)", rfitype)
+			}
 
-		if rfitype == "CONFIG" && rfisubtype == "" {
-			log.Fatalf("Error: CONFIG RFI requires --subtype (upstream, downstream, sig0key)")
-		}
-		rfisubtype = strings.ToLower(rfisubtype)
+			if rfitype == "CONFIG" && rfisubtype == "" {
+				log.Fatalf("Error: CONFIG RFI requires --subtype (upstream, downstream, sig0key)")
+			}
+			rfisubtype = strings.ToLower(rfisubtype)
 
-		req := AgentMgmtPost{
-			Command:     "send-rfi",
-			MessageType: AgentMsgRfi,
-			RfiType:     rfitype,
-			RfiSubtype:  rfisubtype,
-			Zone:        ZoneName(tdns.Globals.Zonename),
-			AgentId:     AgentId(string(tdns.Globals.AgentId)),
-		}
+			req := AgentMgmtPost{
+				Command:     "send-rfi",
+				MessageType: AgentMsgRfi,
+				RfiType:     rfitype,
+				RfiSubtype:  rfisubtype,
+				Zone:        ZoneName(tdns.Globals.Zonename),
+				AgentId:     AgentId(string(tdns.Globals.AgentId)),
+			}
 
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			amr, err := SendAgentDebugCmd(cmd, req, false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
 
-		fmt.Printf("Result from %s RFI message sent to agent %q:\n", amr.RfiType, amr.Identity)
-		if amr.Msg != "" {
-			fmt.Printf("%s\n", amr.Msg)
-		}
-		if len(amr.RfiResponse) > 0 {
-			switch {
-			case rfitype == "CONFIG" && (rfisubtype == "upstream" || rfisubtype == "downstream"):
-				var out []string
-				if tdns.Globals.ShowHeaders {
-					out = append(out, "Zone|Provider|Where|XFR src|XFR dst|XFR auth")
-				}
-				for aid, rfidata := range amr.RfiResponse {
-					if rfidata.Error {
-						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-						continue
+			fmt.Printf("Result from %s RFI message sent to agent %q:\n", amr.RfiType, amr.Identity)
+			if amr.Msg != "" {
+				fmt.Printf("%s\n", amr.Msg)
+			}
+			if len(amr.RfiResponse) > 0 {
+				switch {
+				case rfitype == "CONFIG" && (rfisubtype == "upstream" || rfisubtype == "downstream"):
+					var out []string
+					if tdns.Globals.ShowHeaders {
+						out = append(out, "Zone|Provider|Where|XFR src|XFR dst|XFR auth")
 					}
-					if len(rfidata.ZoneXfrSrcs) > 0 {
-						out = append(out, fmt.Sprintf("%s|%s|upstream|%v|%v|%v", tdns.Globals.Zonename, aid, rfidata.ZoneXfrSrcs, "", rfidata.ZoneXfrAuth))
-					}
-					if len(rfidata.ZoneXfrDsts) > 0 {
-						out = append(out, fmt.Sprintf("%s|%s|downstream|%v|%v|%v", tdns.Globals.Zonename, aid, "", rfidata.ZoneXfrDsts, rfidata.ZoneXfrAuth))
-					}
-				}
-				if len(out) > 0 {
-					fmt.Printf("%s\n", columnize.SimpleFormat(out))
-				}
-
-			case rfitype == "CONFIG":
-				for aid, rfidata := range amr.RfiResponse {
-					if rfidata.Error {
-						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-					} else {
-						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
-						for k, v := range rfidata.ConfigData {
-							fmt.Printf("    %s: %s\n", k, v)
+					for aid, rfidata := range amr.RfiResponse {
+						if rfidata.Error {
+							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+							continue
+						}
+						if len(rfidata.ZoneXfrSrcs) > 0 {
+							out = append(out, fmt.Sprintf("%s|%s|upstream|%v|%v|%v", tdns.Globals.Zonename, aid, rfidata.ZoneXfrSrcs, "", rfidata.ZoneXfrAuth))
+						}
+						if len(rfidata.ZoneXfrDsts) > 0 {
+							out = append(out, fmt.Sprintf("%s|%s|downstream|%v|%v|%v", tdns.Globals.Zonename, aid, "", rfidata.ZoneXfrDsts, rfidata.ZoneXfrAuth))
 						}
 					}
-				}
-
-			case rfitype == "SYNC":
-				for aid, rfidata := range amr.RfiResponse {
-					if rfidata.Error {
-						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-					} else {
-						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+					if len(out) > 0 {
+						fmt.Printf("%s\n", columnize.SimpleFormat(out))
 					}
-				}
 
-			case rfitype == "AUDIT":
-				for aid, rfidata := range amr.RfiResponse {
-					if rfidata.Error {
-						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-					} else {
-						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
-						if rfidata.AuditData != nil {
-							auditJSON, err := json.MarshalIndent(rfidata.AuditData, "    ", "  ")
-							if err != nil {
-								fmt.Printf("    Error formatting audit data: %v\n", err)
-							} else {
-								fmt.Printf("    Audit data:\n    %s\n", string(auditJSON))
+				case rfitype == "CONFIG":
+					for aid, rfidata := range amr.RfiResponse {
+						if rfidata.Error {
+							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+						} else {
+							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+							for k, v := range rfidata.ConfigData {
+								fmt.Printf("    %s: %s\n", k, v)
 							}
 						}
 					}
-				}
 
-			case rfitype == "EDITS":
-				for aid, rfidata := range amr.RfiResponse {
-					if rfidata.Error {
-						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-					} else {
-						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+				case rfitype == "SYNC":
+					for aid, rfidata := range amr.RfiResponse {
+						if rfidata.Error {
+							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+						} else {
+							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+						}
+					}
+
+				case rfitype == "AUDIT":
+					for aid, rfidata := range amr.RfiResponse {
+						if rfidata.Error {
+							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+						} else {
+							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+							if rfidata.AuditData != nil {
+								auditJSON, err := json.MarshalIndent(rfidata.AuditData, "    ", "  ")
+								if err != nil {
+									fmt.Printf("    Error formatting audit data: %v\n", err)
+								} else {
+									fmt.Printf("    Audit data:\n    %s\n", string(auditJSON))
+								}
+							}
+						}
+					}
+
+				case rfitype == "EDITS":
+					for aid, rfidata := range amr.RfiResponse {
+						if rfidata.Error {
+							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+						} else {
+							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+						}
 					}
 				}
+			} else {
+				fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)
 			}
-		} else {
-			fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)
-		}
-	},
+		},
+	}
+	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
+	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
+	c.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
+	return c
 }
 
-var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
-	Use:   "dump-agentregistry",
-	Short: "Dump the agent registry",
-	Run: func(cmd *cobra.Command, args []string) {
-		req := AgentMgmtPost{
-			Command: "dump-agentregistry",
-		}
-
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		// dump.P(amr.AgentRegistry)
-		if len(amr.AgentRegistry.Agents) == 0 {
-			fmt.Printf("No agent registry data in response from agent %q", amr.Identity)
-			os.Exit(1)
-		}
-
-		if len(amr.AgentRegistry.Agents) > 0 {
-			var agentNames []AgentId
-			for _, agent := range amr.AgentRegistry.Agents {
-				agentNames = append(agentNames, agent.ID)
+func newDebugAgentDumpAgentRegistryCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "dump-agentregistry",
+		Short: "Dump the agent registry",
+		Run: func(cmd *cobra.Command, args []string) {
+			req := AgentMgmtPost{
+				Command: "dump-agentregistry",
 			}
-			fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
-			for _, agent := range amr.AgentRegistry.Agents {
-				err := PrintHsyncAgent(agent, false)
-				if err != nil {
-					log.Printf("Error printing agent: %v", err)
+
+			amr, err := SendAgentDebugCmd(cmd, req, false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
+
+			// dump.P(amr.AgentRegistry)
+			if len(amr.AgentRegistry.Agents) == 0 {
+				fmt.Printf("No agent registry data in response from agent %q", amr.Identity)
+				os.Exit(1)
+			}
+
+			if len(amr.AgentRegistry.Agents) > 0 {
+				var agentNames []AgentId
+				for _, agent := range amr.AgentRegistry.Agents {
+					agentNames = append(agentNames, agent.ID)
 				}
-				fmt.Println()
+				fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
+				for _, agent := range amr.AgentRegistry.Agents {
+					err := PrintHsyncAgent(agent, false)
+					if err != nil {
+						log.Printf("Error printing agent: %v", err)
+					}
+					fmt.Println()
+				}
+			} else {
+				fmt.Printf("No remote agents found in the agent registry data from agent %q", amr.Identity)
 			}
-		} else {
-			fmt.Printf("No remote agents found in the agent registry data from agent %q", amr.Identity)
-		}
-	},
+		},
+	}
+	return c
 }
 
-var DebugAgentShowSyncedDataCmd = &cobra.Command{
-	Use:   "show-synced-data",
-	Short: "Show synchronized data from peer agents (moved to: agent zone edits list)",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("This command has moved to: agent zone edits list")
-		fmt.Println("Usage: tdns-cliv2 agent zone edits list [--zone <zone>]")
-	},
+func newDebugAgentShowSyncedDataCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "show-synced-data",
+		Short: "Show synchronized data from peer agents (moved to: agent zone edits list)",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("This command has moved to: agent zone edits list")
+			fmt.Println("Usage: tdns-cliv2 agent zone edits list [--zone <zone>]")
+		},
+	}
+	c.Flags().String("zone", "", "Filter by specific zone")
+	return c
 }
 
 // Keep the old command name as alias for compatibility
-var DebugAgentDumpZoneDataRepoCmd = &cobra.Command{
-	Use:    "dump-zonedatarepo",
-	Short:  "Dump the zone data repo (deprecated: use show-synced-data)",
-	Hidden: true,
-	Run:    DebugAgentShowSyncedDataCmd.Run,
+func newDebugAgentDumpZoneDataRepoCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:    "dump-zonedatarepo",
+		Short:  "Dump the zone data repo (deprecated: use show-synced-data)",
+		Hidden: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("This command has moved to: agent zone edits list")
+			fmt.Println("Usage: tdns-cliv2 agent zone edits list [--zone <zone>]")
+		},
+	}
+	return c
 }
 
-var DebugAgentRegistryCmd = &cobra.Command{
-	Use:   "agentregistry",
-	Short: "Test the agent registry",
-	Run: func(cmd *cobra.Command, args []string) {
-		conf := &tdnsmp.Config{Config: &tdns.Config{}}
-		conf.InternalMp.MpConfig = &tdnsmp.MultiProviderConf{Identity: "local"}
-		ar := conf.NewAgentRegistry()
-		ar.LocateInterval = 10
-		ar.S.Set("local", tdnsmp.NewAgent("local"))
-		ar.S.Set("agent.example.com", tdnsmp.NewAgent("agent.example.com"))
-		ar.S.Set("agent.example.org", tdnsmp.NewAgent("agent.example.org"))
+func newDebugAgentRegistryCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "agentregistry",
+		Short: "Test the agent registry",
+		Run: func(cmd *cobra.Command, args []string) {
+			conf := &tdnsmp.Config{Config: &tdns.Config{}}
+			conf.SetMpConfig(&tdnsmp.MultiProviderConf{Identity: "local"})
+			ar := conf.NewAgentRegistry()
+			ar.LocateInterval = 10
+			ar.S.Set("local", tdnsmp.NewAgent("local"))
+			ar.S.Set("agent.example.com", tdnsmp.NewAgent("agent.example.com"))
+			ar.S.Set("agent.example.org", tdnsmp.NewAgent("agent.example.org"))
 
-		fmt.Printf("Agent registry:\ntype=%T\n", ar.S)
-		fmt.Printf("Agent registry:\n%d shards\n", ar.S.NumShards())
-		for item := range ar.S.IterBuffered() {
-			// agent, _ := item.Val.(*Agent)
-			fmt.Printf("Agent registry:\n%s\n", item.Key)
-			fmt.Printf("Agent registry:\n%+v\n", item.Val)
-		}
-	},
+			fmt.Printf("Agent registry:\ntype=%T\n", ar.S)
+			fmt.Printf("Agent registry:\n%d shards\n", ar.S.NumShards())
+			for item := range ar.S.IterBuffered() {
+				// agent, _ := item.Val.(*Agent)
+				fmt.Printf("Agent registry:\n%s\n", item.Key)
+				fmt.Printf("Agent registry:\n%+v\n", item.Val)
+			}
+		},
+	}
+	return c
 }
 
-var DebugAgentSyncStateCmd = &cobra.Command{
-	Use:   "sync-state",
-	Short: "Show sync state for a zone",
-	Long: `Display the current synchronization state for a zone.
+func newDebugAgentSyncStateCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "sync-state",
+		Short: "Show sync state for a zone",
+		Long: `Display the current synchronization state for a zone.
 
 Example:
   tdns-cliv2 debug agent sync-state --zone example.com`,
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
 
-		req := AgentMgmtPost{
-			Command: "hsync-sync-state",
-			Zone:    ZoneName(tdns.Globals.Zonename),
-		}
+			req := AgentMgmtPost{
+				Command: "hsync-sync-state",
+				Zone:    ZoneName(tdns.Globals.Zonename),
+			}
 
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			amr, err := SendAgentDebugCmd(cmd, req, false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
 
-		fmt.Printf("Sync State for zone %s:\n", tdns.Globals.Zonename)
-		fmt.Printf("%s\n", amr.Msg)
+			fmt.Printf("Sync State for zone %s:\n", tdns.Globals.Zonename)
+			fmt.Printf("%s\n", amr.Msg)
 
-		if amr.Data != nil {
-			if dataMap, ok := amr.Data.(map[string]interface{}); ok {
-				if zdr, ok := dataMap["zone_data_repo"]; ok {
-					dump.P(zdr)
+			if amr.Data != nil {
+				if dataMap, ok := amr.Data.(map[string]interface{}); ok {
+					if zdr, ok := dataMap["zone_data_repo"]; ok {
+						dump.P(zdr)
+					}
 				}
 			}
-		}
-	},
+		},
+	}
+	return c
 }
 
-var DebugAgentShowCombinerDataCmd = &cobra.Command{
-	Use:   "show-combiner-data",
-	Short: "Show combiner's local modifications store",
-	Long: `Display the combiner's stored local modifications that are applied to zones.
+func newDebugAgentShowCombinerDataCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "show-combiner-data",
+		Short: "Show combiner's local modifications store",
+		Long: `Display the combiner's stored local modifications that are applied to zones.
 Data is sorted by: zone → RRtype → RRs
 
 Example:
   tdns-cliv2 debug agent show-combiner-data
   tdns-cliv2 debug agent show-combiner-data --zone example.com`,
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
 
-		req := AgentMgmtPost{
-			Command: "show-combiner-data",
-		}
-		if zone != "" {
-			req.Zone = ZoneName(zone)
-		}
-
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		if amr.Data == nil {
-			fmt.Printf("No combiner data available\n")
-			return
-		}
-
-		dataMap, ok := amr.Data.(map[string]interface{})
-		if !ok {
-			fmt.Printf("Invalid combiner data format\n")
-			return
-		}
-
-		combinerData, ok := dataMap["combiner_data"].(map[string]interface{})
-		if !ok || len(combinerData) == 0 {
-			fmt.Printf("No local modifications stored in combiner\n")
-			return
-		}
-
-		fmt.Printf("Combiner Local Modifications\n")
-		fmt.Printf("=============================\n\n")
-
-		for zoneName, ownerMapInterface := range combinerData {
-			fmt.Printf("Zone: %s\n", zoneName)
-			fmt.Printf("────────────────────────────────────────\n")
-
-			ownerMap, ok := ownerMapInterface.(map[string]interface{})
-			if !ok || len(ownerMap) == 0 {
-				fmt.Printf("  (no modifications)\n\n")
-				continue
+			req := AgentMgmtPost{
+				Command: "show-combiner-data",
+			}
+			if zone != "" {
+				req.Zone = ZoneName(zone)
 			}
 
-			for ownerName, rrTypeMapInterface := range ownerMap {
-				fmt.Printf("  Owner: %s\n", ownerName)
+			amr, err := SendAgentDebugCmd(cmd, req, false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-				rrTypeMap, ok := rrTypeMapInterface.(map[string]interface{})
-				if !ok || len(rrTypeMap) == 0 {
-					fmt.Printf("    (no RRsets)\n")
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
+
+			if amr.Data == nil {
+				fmt.Printf("No combiner data available\n")
+				return
+			}
+
+			dataMap, ok := amr.Data.(map[string]interface{})
+			if !ok {
+				fmt.Printf("Invalid combiner data format\n")
+				return
+			}
+
+			combinerData, ok := dataMap["combiner_data"].(map[string]interface{})
+			if !ok || len(combinerData) == 0 {
+				fmt.Printf("No local modifications stored in combiner\n")
+				return
+			}
+
+			fmt.Printf("Combiner Local Modifications\n")
+			fmt.Printf("=============================\n\n")
+
+			for zoneName, ownerMapInterface := range combinerData {
+				fmt.Printf("Zone: %s\n", zoneName)
+				fmt.Printf("────────────────────────────────────────\n")
+
+				ownerMap, ok := ownerMapInterface.(map[string]interface{})
+				if !ok || len(ownerMap) == 0 {
+					fmt.Printf("  (no modifications)\n\n")
 					continue
 				}
 
-				for rrTypeStr, rrStringsInterface := range rrTypeMap {
-					rrStrings, ok := rrStringsInterface.([]interface{})
-					if !ok {
+				for ownerName, rrTypeMapInterface := range ownerMap {
+					fmt.Printf("  Owner: %s\n", ownerName)
+
+					rrTypeMap, ok := rrTypeMapInterface.(map[string]interface{})
+					if !ok || len(rrTypeMap) == 0 {
+						fmt.Printf("    (no RRsets)\n")
 						continue
 					}
 
-					fmt.Printf("    %s (%d records):\n", rrTypeStr, len(rrStrings))
-					for _, rrInterface := range rrStrings {
-						if rrStr, ok := rrInterface.(string); ok {
-							fmt.Printf("      %s\n", rrStr)
+					for rrTypeStr, rrStringsInterface := range rrTypeMap {
+						rrStrings, ok := rrStringsInterface.([]interface{})
+						if !ok {
+							continue
+						}
+
+						fmt.Printf("    %s (%d records):\n", rrTypeStr, len(rrStrings))
+						for _, rrInterface := range rrStrings {
+							if rrStr, ok := rrInterface.(string); ok {
+								fmt.Printf("      %s\n", rrStr)
+							}
 						}
 					}
+					fmt.Printf("\n")
 				}
-				fmt.Printf("\n")
 			}
-		}
-	},
+		},
+	}
+	c.Flags().String("zone", "", "Filter by specific zone")
+	return c
 }
 
-var DebugAgentSendSyncToCmd = &cobra.Command{
-	Use:   "send-sync-to <RR> [<RR>...]",
-	Short: "Send a SYNC message to a remote agent (real transport)",
-	Long: `Create and send a real SYNC message to a specified remote agent.
+func newDebugAgentSendSyncToCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "send-sync-to <RR> [<RR>...]",
+		Short: "Send a SYNC message to a remote agent (real transport)",
+		Long: `Create and send a real SYNC message to a specified remote agent.
 Uses the actual transport (CHUNK NOTIFY + fallback).
 RRs are validated before sending.
 
@@ -404,101 +457,109 @@ Example:
     --zone example.com. \
     "example.com. 3600 IN NS ns1.provider-a.example.com." \
     "example.com. 3600 IN NS ns2.provider-a.example.com."`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		toAgent, _ := cmd.Flags().GetString("to")
-		if toAgent == "" {
-			log.Fatalf("Error: --to agent ID is required")
-		}
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			toAgent, _ := cmd.Flags().GetString("to")
+			if toAgent == "" {
+				log.Fatalf("Error: --to agent ID is required")
+			}
 
-		zone, _ := cmd.Flags().GetString("zone")
-		if zone == "" {
-			log.Fatalf("Error: --zone is required")
-		}
+			zone, _ := cmd.Flags().GetString("zone")
+			if zone == "" {
+				log.Fatalf("Error: --zone is required")
+			}
 
-		// Validate all RRs by parsing them
-		var validRRs []string
-		for _, rrStr := range args {
-			rr, err := dns.NewRR(rrStr)
+			// Validate all RRs by parsing them
+			var validRRs []string
+			for _, rrStr := range args {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					log.Fatalf("Error: Invalid DNS record %q: %v", rrStr, err)
+				}
+				validRRs = append(validRRs, rr.String())
+			}
+
+			req := AgentMgmtPost{
+				Command: "send-sync-to",
+				Zone:    ZoneName(zone),
+				AgentId: AgentId(toAgent),
+				RRs:     validRRs,
+			}
+
+			amr, err := SendAgentDebugCmd(cmd, req, false)
 			if err != nil {
-				log.Fatalf("Error: Invalid DNS record %q: %v", rrStr, err)
+				log.Fatalf("Error: %v", err)
 			}
-			validRRs = append(validRRs, rr.String())
-		}
 
-		req := AgentMgmtPost{
-			Command: "send-sync-to",
-			Zone:    ZoneName(zone),
-			AgentId: AgentId(toAgent),
-			RRs:     validRRs,
-		}
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
 
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			fmt.Printf("SYNC sent successfully:\n")
+			fmt.Printf("  To: %s\n", toAgent)
+			fmt.Printf("  Zone: %s\n", zone)
+			fmt.Printf("  Records: %d\n", len(validRRs))
+			fmt.Printf("\n%s\n", amr.Msg)
 
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		fmt.Printf("SYNC sent successfully:\n")
-		fmt.Printf("  To: %s\n", toAgent)
-		fmt.Printf("  Zone: %s\n", zone)
-		fmt.Printf("  Records: %d\n", len(validRRs))
-		fmt.Printf("\n%s\n", amr.Msg)
-
-		// Show additional details if available
-		if amr.Data != nil {
-			if dataMap, ok := amr.Data.(map[string]interface{}); ok {
-				if corrID, ok := dataMap["distribution_id"]; ok {
-					fmt.Printf("  Distribution ID: %v\n", corrID)
-				}
-				if status, ok := dataMap["status"]; ok {
-					fmt.Printf("  Status: %v\n", status)
+			// Show additional details if available
+			if amr.Data != nil {
+				if dataMap, ok := amr.Data.(map[string]interface{}); ok {
+					if corrID, ok := dataMap["distribution_id"]; ok {
+						fmt.Printf("  Distribution ID: %v\n", corrID)
+					}
+					if status, ok := dataMap["status"]; ok {
+						fmt.Printf("  Status: %v\n", status)
+					}
 				}
 			}
-		}
-	},
+		},
+	}
+	c.Flags().String("to", "", "Target agent ID")
+	c.Flags().String("zone", "", "Zone name")
+	return c
 }
 
-var DebugAgentResyncCmd = &cobra.Command{
-	Use:   "resync",
-	Short: "Re-send all local changes to combiner and remote agents",
-	Long: `Re-send all locally stored synced data for a zone to the combiner and
+func newDebugAgentResyncCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "resync",
+		Short: "Re-send all local changes to combiner and remote agents",
+		Long: `Re-send all locally stored synced data for a zone to the combiner and
 all remote agents. Use this when the combiner or remote agents have lost
 state and need to be brought back in sync.
 
 Example:
   tdns-cliv2 agent debug resync --zone whisky.dnslab.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
 
-		req := AgentMgmtPost{
-			Command: "resync",
-			Zone:    ZoneName(tdns.Globals.Zonename),
-		}
+			req := AgentMgmtPost{
+				Command: "resync",
+				Zone:    ZoneName(tdns.Globals.Zonename),
+			}
 
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
+			amr, err := SendAgentDebugCmd(cmd, req, false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
 
-		fmt.Printf("Resync for zone %s:\n", tdns.Globals.Zonename)
-		if amr.Msg != "" {
-			fmt.Printf("  %s\n", amr.Msg)
-		}
-	},
+			fmt.Printf("Resync for zone %s:\n", tdns.Globals.Zonename)
+			if amr.Msg != "" {
+				fmt.Printf("  %s\n", amr.Msg)
+			}
+		},
+	}
+	return c
 }
 
-var DebugAgentShowKeyInventoryCmd = &cobra.Command{
-	Use:   "show-key-inventory",
-	Short: "Show DNSKEY inventory received from signer (KEYSTATE)",
-	Long: `Display the last KEYSTATE inventory received from the signer for a zone.
+func newDebugAgentShowKeyInventoryCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "show-key-inventory",
+		Short: "Show DNSKEY inventory received from signer (KEYSTATE)",
+		Long: `Display the last KEYSTATE inventory received from the signer for a zone.
 Shows all keys reported by the signer's KeyDB with their state
 (created, published, standby, active, retired, foreign).
 
@@ -506,251 +567,223 @@ Keys marked "foreign" are from other providers' signers.
 
 Example:
   tdns-cliv2 agent debug show-key-inventory --zone whisky.dnslab.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
 
-		req := AgentMgmtPost{
-			Command: "show-key-inventory",
-			Zone:    ZoneName(tdns.Globals.Zonename),
-		}
-
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		if amr.Data == nil {
-			fmt.Println(amr.Msg)
-			return
-		}
-
-		// Parse the Data field as KeyInventorySnapshot
-		dataBytes, err := json.Marshal(amr.Data)
-		if err != nil {
-			log.Fatalf("Failed to marshal inventory data: %v", err)
-		}
-		var snapshot tdnsmp.KeyInventorySnapshot
-		if err := json.Unmarshal(dataBytes, &snapshot); err != nil {
-			log.Fatalf("Failed to parse inventory data: %v", err)
-		}
-
-		fmt.Printf("DNSKEY Inventory for zone %s\n", snapshot.Zone)
-		fmt.Printf("Received: %s from %s\n", snapshot.Received.Format("2006-01-02 15:04:05"), snapshot.SenderID)
-		fmt.Printf("────────────────────────────────────────\n")
-
-		if len(snapshot.Inventory) == 0 {
-			fmt.Printf("  (no keys)\n")
-			return
-		}
-
-		out := []string{"KeyTag|Algorithm|Flags|State|Role|Key data"}
-		for _, entry := range snapshot.Inventory {
-			role := "local"
-			if entry.State == "foreign" {
-				role = "REMOTE"
+			req := AgentMgmtPost{
+				Command: "show-key-inventory",
+				Zone:    ZoneName(tdns.Globals.Zonename),
 			}
-			algStr := dns.AlgorithmToString[entry.Algorithm]
-			if algStr == "" {
-				algStr = fmt.Sprintf("ALG%d", entry.Algorithm)
-			}
-			flagDesc := "ZSK"
-			if entry.Flags&0x0001 != 0 {
-				flagDesc = "KSK"
-			}
-			keyData := truncatePubKey(entry.KeyRR)
-			out = append(out, fmt.Sprintf("%d|%s|%d (%s)|%s|%s|%s",
-				entry.KeyTag, algStr, entry.Flags, flagDesc, entry.State, role, keyData))
-		}
-		fmt.Println(columnize.SimpleFormat(out))
-	},
-}
 
-var DebugAgentQueueStatusCmd = &cobra.Command{
-	Use:   "queue-status",
-	Short: "Show reliable message queue status and pending messages",
-	Run: func(cmd *cobra.Command, args []string) {
-		req := AgentMgmtPost{
-			Command: "queue-status",
-		}
-
-		_, buf, err := func() (*AgentMgmtResponse, []byte, error) {
-			// The /agent/debug endpoint is served only by the agent daemon
-			// regardless of which debug tree this is invoked from.
-			api, err := tdnscli.GetApiClient("agent", true)
+			amr, err := SendAgentDebugCmd(cmd, req, false)
 			if err != nil {
-				return nil, nil, fmt.Errorf("error getting API client: %w", err)
+				log.Fatalf("Error: %v", err)
 			}
-			_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
-			return nil, buf, err
-		}()
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
 
-		var resp map[string]interface{}
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
 
-		if errVal, ok := resp["error"].(bool); ok && errVal {
-			if errMsg, ok := resp["error_msg"].(string); ok {
-				log.Fatalf("Error: %s", errMsg)
+			if amr.Data == nil {
+				fmt.Println(amr.Msg)
+				return
 			}
-			log.Fatalf("Error in response")
-		}
 
-		if msg, ok := resp["msg"].(string); ok && msg != "" {
-			fmt.Println(msg)
-		}
+			// Parse the Data field as KeyInventorySnapshot
+			dataBytes, err := json.Marshal(amr.Data)
+			if err != nil {
+				log.Fatalf("Failed to marshal inventory data: %v", err)
+			}
+			var snapshot tdnsmp.KeyInventorySnapshot
+			if err := json.Unmarshal(dataBytes, &snapshot); err != nil {
+				log.Fatalf("Failed to parse inventory data: %v", err)
+			}
 
-		data, ok := resp["data"].(map[string]interface{})
-		if !ok {
-			fmt.Println("No queue data available")
-			return
-		}
+			fmt.Printf("DNSKEY Inventory for zone %s\n", snapshot.Zone)
+			fmt.Printf("Received: %s from %s\n", snapshot.Received.Format("2006-01-02 15:04:05"), snapshot.SenderID)
+			fmt.Printf("────────────────────────────────────────\n")
 
-		// Display stats summary
-		if stats, ok := data["stats"].(map[string]interface{}); ok {
-			fmt.Println("\nQueue Statistics:")
-			if v, ok := stats["total_pending"].(float64); ok {
-				fmt.Printf("  Pending:   %d\n", int(v))
+			if len(snapshot.Inventory) == 0 {
+				fmt.Printf("  (no keys)\n")
+				return
 			}
-			if v, ok := stats["total_delivered"].(float64); ok {
-				fmt.Printf("  Delivered: %d\n", int(v))
-			}
-			if v, ok := stats["total_failed"].(float64); ok {
-				fmt.Printf("  Failed:    %d\n", int(v))
-			}
-			if v, ok := stats["total_expired"].(float64); ok {
-				fmt.Printf("  Expired:   %d\n", int(v))
-			}
-			if byState, ok := stats["by_state"].(map[string]interface{}); ok && len(byState) > 0 {
-				fmt.Printf("  By state:  ")
-				first := true
-				for state, count := range byState {
-					if !first {
-						fmt.Printf(", ")
-					}
-					fmt.Printf("%s=%d", state, int(count.(float64)))
-					first = false
+
+			out := []string{"KeyTag|Algorithm|Flags|State|Role|Key data"}
+			for _, entry := range snapshot.Inventory {
+				role := "local"
+				if entry.State == "foreign" {
+					role = "REMOTE"
 				}
-				fmt.Println()
+				algStr := dns.AlgorithmToString[entry.Algorithm]
+				if algStr == "" {
+					algStr = fmt.Sprintf("ALG%d", entry.Algorithm)
+				}
+				flagDesc := "ZSK"
+				if entry.Flags&0x0001 != 0 {
+					flagDesc = "KSK"
+				}
+				keyData := truncatePubKey(entry.KeyRR)
+				out = append(out, fmt.Sprintf("%d|%s|%d (%s)|%s|%s|%s",
+					entry.KeyTag, algStr, entry.Flags, flagDesc, entry.State, role, keyData))
 			}
-		}
-
-		// Display pending messages
-		messages, ok := data["messages"].([]interface{})
-		if !ok || len(messages) == 0 {
-			fmt.Println("\nNo pending messages")
-			return
-		}
-
-		fmt.Printf("\nPending Messages (%d):\n", len(messages))
-
-		verbose := false
-		if v, err := cmd.Flags().GetBool("verbose"); err == nil {
-			verbose = v
-		}
-
-		if verbose {
-			for _, mRaw := range messages {
-				m, ok := mRaw.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				fmt.Println()
-				fmt.Printf("  Distribution ID: %s\n", getStringValue(m, "distribution_id"))
-				fmt.Printf("  Recipient:       %s (%s)\n", getStringValue(m, "recipient_id"), getStringValue(m, "recipient_type"))
-				fmt.Printf("  Zone:            %s\n", getStringValue(m, "zone"))
-				fmt.Printf("  State:           %s\n", getStringValue(m, "state"))
-				fmt.Printf("  Priority:        %s\n", getStringValue(m, "priority"))
-				fmt.Printf("  Attempts:        %s\n", getStringValue(m, "attempt_count"))
-				fmt.Printf("  Age:             %s\n", getStringValue(m, "age"))
-				fmt.Printf("  Created:         %s\n", getStringValue(m, "created_at"))
-				fmt.Printf("  Expires:         %s\n", getStringValue(m, "expires_at"))
-				fmt.Printf("  Next attempt:    %s\n", getStringValue(m, "next_attempt"))
-				if lastAttempt := getStringValue(m, "last_attempt"); lastAttempt != "" {
-					fmt.Printf("  Last attempt:    %s\n", lastAttempt)
-				}
-				if lastErr := getStringValue(m, "last_error"); lastErr != "" {
-					fmt.Printf("  Last error:      %s\n", lastErr)
-				}
-			}
-		} else {
-			var rows []string
-			rows = append(rows, "DistID | Recipient | Type | Zone | State | Attempts | Age | Error")
-			for _, mRaw := range messages {
-				m, ok := mRaw.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				distID := getStringValue(m, "distribution_id")
-				if len(distID) > 16 {
-					distID = distID[:16] + "..."
-				}
-				lastErr := getStringValue(m, "last_error")
-				if len(lastErr) > 30 {
-					lastErr = lastErr[:30] + "..."
-				}
-				attempts := "0"
-				if v, ok := m["attempt_count"].(float64); ok {
-					attempts = fmt.Sprintf("%d", int(v))
-				}
-				rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s | %s",
-					distID,
-					getStringValue(m, "recipient_id"),
-					getStringValue(m, "recipient_type"),
-					getStringValue(m, "zone"),
-					getStringValue(m, "state"),
-					attempts,
-					getStringValue(m, "age"),
-					lastErr,
-				))
-			}
-			if len(rows) > 1 {
-				output := columnize.SimpleFormat(rows)
-				fmt.Println(output)
-			}
-		}
-	},
+			fmt.Println(columnize.SimpleFormat(out))
+		},
+	}
+	return c
 }
 
-// DebugAgentCmd and its children are attached to the agent debug tree
-// by mpcli/shared_cmds.go via cli.NewDebugCmd("agent", DebugAgentCmd).
-func init() {
-	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
-	DebugAgentCmd.AddCommand(DebugAgentSendRfiCmd)
-	DebugAgentCmd.AddCommand(DebugAgentDumpAgentRegistryCmd)
-	DebugAgentCmd.AddCommand(DebugAgentDumpZoneDataRepoCmd)
-	DebugAgentCmd.AddCommand(DebugAgentShowSyncedDataCmd)
-	DebugAgentCmd.AddCommand(DebugAgentShowCombinerDataCmd)
-	DebugAgentCmd.AddCommand(DebugAgentSendSyncToCmd)
-	DebugAgentCmd.AddCommand(DebugAgentRegistryCmd)
-	DebugAgentCmd.AddCommand(DebugAgentSyncStateCmd)
-	DebugAgentCmd.AddCommand(DebugAgentResyncCmd)
-	DebugAgentCmd.AddCommand(DebugAgentShowKeyInventoryCmd)
-	DebugAgentCmd.AddCommand(DebugAgentQueueStatusCmd)
+func newDebugAgentQueueStatusCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "queue-status",
+		Short: "Show reliable message queue status and pending messages",
+		Run: func(cmd *cobra.Command, args []string) {
+			req := AgentMgmtPost{
+				Command: "queue-status",
+			}
 
-	DebugAgentQueueStatusCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details for each message)")
+			_, buf, err := func() (*AgentMgmtResponse, []byte, error) {
+				// The /agent/debug endpoint is served only by the agent daemon
+				// regardless of which debug tree this is invoked from.
+				api, err := GetApiClientForCmd(cmd, true)
+				if err != nil {
+					return nil, nil, fmt.Errorf("error getting API client: %w", err)
+				}
+				_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
+				return nil, buf, err
+			}()
+			if err != nil {
+				log.Fatalf("API request failed: %v", err)
+			}
 
-	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
-	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
-	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
+			var resp map[string]interface{}
+			if err := json.Unmarshal(buf, &resp); err != nil {
+				log.Fatalf("Failed to parse response: %v", err)
+			}
 
-	// New command flags
-	DebugAgentShowSyncedDataCmd.Flags().String("zone", "", "Filter by specific zone")
-	DebugAgentShowCombinerDataCmd.Flags().String("zone", "", "Filter by specific zone")
-	DebugAgentSendSyncToCmd.Flags().String("to", "", "Target agent ID")
-	DebugAgentSendSyncToCmd.Flags().String("zone", "", "Zone name")
-	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
-	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")
+			if errVal, ok := resp["error"].(bool); ok && errVal {
+				if errMsg, ok := resp["error_msg"].(string); ok {
+					log.Fatalf("Error: %s", errMsg)
+				}
+				log.Fatalf("Error in response")
+			}
+
+			if msg, ok := resp["msg"].(string); ok && msg != "" {
+				fmt.Println(msg)
+			}
+
+			data, ok := resp["data"].(map[string]interface{})
+			if !ok {
+				fmt.Println("No queue data available")
+				return
+			}
+
+			// Display stats summary
+			if stats, ok := data["stats"].(map[string]interface{}); ok {
+				fmt.Println("\nQueue Statistics:")
+				if v, ok := stats["total_pending"].(float64); ok {
+					fmt.Printf("  Pending:   %d\n", int(v))
+				}
+				if v, ok := stats["total_delivered"].(float64); ok {
+					fmt.Printf("  Delivered: %d\n", int(v))
+				}
+				if v, ok := stats["total_failed"].(float64); ok {
+					fmt.Printf("  Failed:    %d\n", int(v))
+				}
+				if v, ok := stats["total_expired"].(float64); ok {
+					fmt.Printf("  Expired:   %d\n", int(v))
+				}
+				if byState, ok := stats["by_state"].(map[string]interface{}); ok && len(byState) > 0 {
+					fmt.Printf("  By state:  ")
+					first := true
+					for state, count := range byState {
+						if !first {
+							fmt.Printf(", ")
+						}
+						fmt.Printf("%s=%d", state, int(count.(float64)))
+						first = false
+					}
+					fmt.Println()
+				}
+			}
+
+			// Display pending messages
+			messages, ok := data["messages"].([]interface{})
+			if !ok || len(messages) == 0 {
+				fmt.Println("\nNo pending messages")
+				return
+			}
+
+			fmt.Printf("\nPending Messages (%d):\n", len(messages))
+
+			verbose := false
+			if v, err := cmd.Flags().GetBool("verbose"); err == nil {
+				verbose = v
+			}
+
+			if verbose {
+				for _, mRaw := range messages {
+					m, ok := mRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					fmt.Println()
+					fmt.Printf("  Distribution ID: %s\n", getStringValue(m, "distribution_id"))
+					fmt.Printf("  Recipient:       %s (%s)\n", getStringValue(m, "recipient_id"), getStringValue(m, "recipient_type"))
+					fmt.Printf("  Zone:            %s\n", getStringValue(m, "zone"))
+					fmt.Printf("  State:           %s\n", getStringValue(m, "state"))
+					fmt.Printf("  Priority:        %s\n", getStringValue(m, "priority"))
+					fmt.Printf("  Attempts:        %s\n", getStringValue(m, "attempt_count"))
+					fmt.Printf("  Age:             %s\n", getStringValue(m, "age"))
+					fmt.Printf("  Created:         %s\n", getStringValue(m, "created_at"))
+					fmt.Printf("  Expires:         %s\n", getStringValue(m, "expires_at"))
+					fmt.Printf("  Next attempt:    %s\n", getStringValue(m, "next_attempt"))
+					if lastAttempt := getStringValue(m, "last_attempt"); lastAttempt != "" {
+						fmt.Printf("  Last attempt:    %s\n", lastAttempt)
+					}
+					if lastErr := getStringValue(m, "last_error"); lastErr != "" {
+						fmt.Printf("  Last error:      %s\n", lastErr)
+					}
+				}
+			} else {
+				var rows []string
+				rows = append(rows, "DistID | Recipient | Type | Zone | State | Attempts | Age | Error")
+				for _, mRaw := range messages {
+					m, ok := mRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					distID := getStringValue(m, "distribution_id")
+					if len(distID) > 16 {
+						distID = distID[:16] + "..."
+					}
+					lastErr := getStringValue(m, "last_error")
+					if len(lastErr) > 30 {
+						lastErr = lastErr[:30] + "..."
+					}
+					attempts := "0"
+					if v, ok := m["attempt_count"].(float64); ok {
+						attempts = fmt.Sprintf("%d", int(v))
+					}
+					rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s | %s",
+						distID,
+						getStringValue(m, "recipient_id"),
+						getStringValue(m, "recipient_type"),
+						getStringValue(m, "zone"),
+						getStringValue(m, "state"),
+						attempts,
+						getStringValue(m, "age"),
+						lastErr,
+					))
+				}
+				if len(rows) > 1 {
+					output := columnize.SimpleFormat(rows)
+					fmt.Println(output)
+				}
+			}
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details for each message)")
+	return c
 }
 
 // truncatePubKey extracts the public key from a DNSKEY RR string and
@@ -776,8 +809,8 @@ func truncatePubKey(keyrr string) string {
 	return pub[:10] + "..." + pub[len(pub)-5:]
 }
 
-func SendAgentDebugCmd(req AgentMgmtPost, printJson bool) (*AgentMgmtResponse, error) {
-	api, err := tdnscli.GetApiClient("agent", true)
+func SendAgentDebugCmd(cmd *cobra.Command, req AgentMgmtPost, printJson bool) (*AgentMgmtResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

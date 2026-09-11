@@ -20,90 +20,106 @@ import (
 
 var dnsRecord string
 
-var AgentCmd = &cobra.Command{
-	Use:   "agent",
-	Short: "TDNS Agent commands",
+func newAgentLocalCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "local",
+		Short: "TDNS Agent local commands",
+	}
+	c.AddCommand(newAgentLocalConfigCmd(kind))
+	c.AddCommand(newAgentLocalZoneDataCmd(kind))
+	return c
 }
 
-var agentLocalCmd = &cobra.Command{
-	Use:   "local",
-	Short: "TDNS Agent local commands",
+func newAgentLocalZoneDataCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "zonedata",
+		Short: "TDNS Agent local zone data commands (adding or removing local data about zones)",
+	}
+	c.AddCommand(newAgentLocalZoneDataAddRRCmd(kind))
+	c.AddCommand(newAgentLocalZoneDataRemoveRRCmd(kind))
+	c.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
+	return c
 }
 
-var agentLocalZoneDataCmd = &cobra.Command{
-	Use:   "zonedata",
-	Short: "TDNS Agent local zone data commands (adding or removing local data about zones)",
+func newAgentLocalConfigCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "config",
+		Short: "Show details of the local agent config",
+		Run: func(cmd *cobra.Command, args []string) {
+			// agentLocalConfigCmd is only under mpcli.AgentCmd → role "agent".
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
+
+			req := AgentMgmtPost{
+				Command: "config",
+			}
+
+			_, buf, err := api.RequestNG("POST", "/agent", req, true)
+			if err != nil {
+				log.Fatalf("API request failed: %v", err)
+			}
+
+			var amr AgentMgmtResponse
+			if err := json.Unmarshal(buf, &amr); err != nil {
+				log.Fatalf("Failed to parse response: %v", err)
+			}
+
+			if amr.Error {
+				log.Fatalf("API error: %s", amr.ErrorMsg)
+			}
+
+			var prettyYaml bytes.Buffer
+			err = yaml.NewEncoder(&prettyYaml).Encode(amr.AgentConfig)
+			if err != nil {
+				log.Fatalf("Failed to parse response: %v", err)
+			}
+			fmt.Printf("Agent config for %q:\n%s\n", amr.AgentConfig.Identity, prettyYaml.String())
+		},
+	}
+	return c
 }
 
-var agentLocalConfigCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Show details of the local agent config",
-	Run: func(cmd *cobra.Command, args []string) {
-		// agentLocalConfigCmd is only under mpcli.AgentCmd → role "agent".
-		api, err := tdnscli.GetApiClient("agent", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+func newAgentLocalZoneDataAddRRCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "add-rr",
+		Short: "Add a new local DNS record for an existing zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
 
-		req := AgentMgmtPost{
-			Command: "config",
-		}
-
-		_, buf, err := api.RequestNG("POST", "/agent", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var amr AgentMgmtResponse
-		if err := json.Unmarshal(buf, &amr); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("API error: %s", amr.ErrorMsg)
-		}
-
-		var prettyYaml bytes.Buffer
-		err = yaml.NewEncoder(&prettyYaml).Encode(amr.AgentConfig)
-		if err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-		fmt.Printf("Agent config for %q:\n%s\n", amr.AgentConfig.Identity, prettyYaml.String())
-	},
+			err := VerifyAndSendLocalDNSRecord(cmd, tdns.Globals.Zonename, dnsRecord, "add-rr")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	return c
 }
 
-var agentLocalZoneDataAddRRCmd = &cobra.Command{
-	Use:   "add-rr",
-	Short: "Add a new local DNS record for an existing zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
+func newAgentLocalZoneDataRemoveRRCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "remove-rr",
+		Short: "Remove a local DNS record for an existing zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
 
-		err := VerifyAndSendLocalDNSRecord(tdns.Globals.Zonename, dnsRecord, "add-rr")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-	},
+			err := VerifyAndSendLocalDNSRecord(cmd, tdns.Globals.Zonename, dnsRecord, "remove-rr")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	return c
 }
 
-var agentLocalZoneDataRemoveRRCmd = &cobra.Command{
-	Use:   "remove-rr",
-	Short: "Remove a local DNS record for an existing zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
-
-		err := VerifyAndSendLocalDNSRecord(tdns.Globals.Zonename, dnsRecord, "remove-rr")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-	},
-}
-
-var agentDiscoverCmd = &cobra.Command{
-	Use:   "discover <agent-identity>",
-	Short: "Trigger DNS discovery for a remote agent",
-	Long: `Discover a remote agent by querying DNS for its URI, JWK, TLSA, and SVCB records.
+func newAgentDiscoverCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "discover <agent-identity>",
+		Short: "Trigger DNS discovery for a remote agent",
+		Long: `Discover a remote agent by querying DNS for its URI, JWK, TLSA, and SVCB records.
 This triggers async discovery which will:
 1. Query DNS for agent metadata (URI, JWK, TLSA, SVCB)
 2. Register the agent in PeerRegistry
@@ -112,183 +128,182 @@ This triggers async discovery which will:
 
 Example:
   tdns-cli agent discover agent2.example.com`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		agentIdentity := args[0]
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			agentIdentity := args[0]
 
-		amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
-			Command: "discover",
-			AgentId: AgentId(agentIdentity),
-		})
+			amr, err := SendAgentMgmtCmd(cmd, &AgentMgmtPost{
+				Command: "discover",
+				AgentId: AgentId(agentIdentity),
+			})
 
-		if err != nil {
-			fmt.Printf("Error sending discover command: %v\n", err)
-			os.Exit(1)
-		}
+			if err != nil {
+				fmt.Printf("Error sending discover command: %v\n", err)
+				os.Exit(1)
+			}
 
-		if amr.Error {
-			fmt.Printf("Error from agent %q: %s\n", amr.Identity, amr.ErrorMsg)
-			os.Exit(1)
-		}
+			if amr.Error {
+				fmt.Printf("Error from agent %q: %s\n", amr.Identity, amr.ErrorMsg)
+				os.Exit(1)
+			}
 
-		fmt.Printf("%s\n", amr.Msg)
-		fmt.Printf("\nDiscovery is asynchronous. Use 'tdns-cli agent hsync agentstatus %s' to check status.\n", agentIdentity)
-	},
+			fmt.Printf("%s\n", amr.Msg)
+			fmt.Printf("\nDiscovery is asynchronous. Use 'tdns-cli agent hsync agentstatus %s' to check status.\n", agentIdentity)
+		},
+	}
+	return c
 }
 
-var agentPeerCmd = &cobra.Command{
-	Use:   "peer",
-	Short: "Peer agent commands (list, ping, zones, resync)",
+func newAgentPeerCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "peer",
+		Short: "Peer agent commands (list, ping, zones, resync)",
+	}
+	c.AddCommand(newAgentPeerListCmd(kind))
+	c.AddCommand(newAgentPeerZonesCmd(kind))
+	c.AddCommand(newAgentPeerZoneCmd(kind))
+	c.AddCommand(newAgentPeerResyncCmd(kind))
+	addPeerLeaves(c, kind)
+	return c
 }
 
-var agentPeerListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all known peer agents",
-	Long: `Show all peer agents that this agent has discovered and established communication with.
+func newAgentPeerListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List all known peer agents",
+		Long: `Show all peer agents that this agent has discovered and established communication with.
 Displays both API and DNS transports independently with their current state.
 
 This shows all peers regardless of transport type - both API (TLS) and DNS (JOSE) transports
 are displayed as separate entries to show their independent states.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		ListDistribPeers(cmd, "agent")
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			ListDistribPeers(cmd, "agent")
+		},
+	}
+	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	return c
 }
 
-var agentPeerZonesCmd = &cobra.Command{
-	Use:   "zones",
-	Short: "List shared zones for each peer agent",
-	Long: `Show which zones are shared with each peer agent.
+func newAgentPeerZonesCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "zones",
+		Short: "List shared zones for each peer agent",
+		Long: `Show which zones are shared with each peer agent.
 Displays agent identity and their shared zones in a compact format.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		listPeerZones(cmd, "agent")
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			listPeerZones(cmd, "agent")
+		},
+	}
+	return c
 }
 
-var agentPeerZoneCmd = &cobra.Command{
-	Use:   "zone --zone <zonename>",
-	Short: "List peer agents for a specific zone",
-	Long: `Show which peer agents share a specific zone with us.
+func newAgentPeerZoneCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "zone --zone <zonename>",
+		Short: "List peer agents for a specific zone",
+		Long: `Show which peer agents share a specific zone with us.
 Displays all agents that have the specified zone in their shared zones list.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		zoneName, _ := cmd.Flags().GetString("zone")
-		if zoneName == "" {
-			log.Fatal("--zone flag is required")
-		}
-		listAgentsForZone(cmd, "agent", zoneName)
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			zoneName, _ := cmd.Flags().GetString("zone")
+			if zoneName == "" {
+				log.Fatal("--zone flag is required")
+			}
+			listAgentsForZone(cmd, "agent", zoneName)
+		},
+	}
+	c.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
+	return c
 }
 
 var resyncPush, resyncPull, resyncFull bool
 
-var agentPeerResyncCmd = &cobra.Command{
-	Use:   "resync",
-	Short: "Re-synchronize zone data with peers and combiner",
-	Long: `Re-synchronize zone data between this agent, its peers, and the combiner.
+func newAgentPeerResyncCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "resync",
+		Short: "Re-synchronize zone data with peers and combiner",
+		Long: `Re-synchronize zone data between this agent, its peers, and the combiner.
 
 Modes:
   --push   Re-send all local data to combiner and remote agents
   --pull   Request all remote agents to re-send their data (RFI SYNC)
   --full   Both push and pull (default if no flag specified)`,
-	Run: func(cmd *cobra.Command, args []string) {
-		tdnscli.PrepArgs("zonename")
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
 
-		// Default to --full if no flag specified
-		if !resyncPush && !resyncPull && !resyncFull {
-			resyncFull = true
-		}
-
-		zone := ZoneName(tdns.Globals.Zonename)
-
-		// Refresh key inventory from signer before resync
-		fmt.Printf("Refreshing key inventory for zone %s...\n", zone)
-		keyReq := &AgentMgmtPost{Command: "refresh-keys", Zone: zone}
-		keyResp, err := SendAgentMgmtCmd(keyReq)
-		if err != nil {
-			fmt.Printf("Warning: failed to refresh key inventory: %v\n", err)
-		} else if keyResp.Error {
-			fmt.Printf("Warning: key inventory refresh failed: %s\n", keyResp.ErrorMsg)
-		} else {
-			fmt.Printf("%s\n", keyResp.Msg)
-		}
-
-		// Pull first: fetch remote data so we have the complete picture
-		if resyncPull || resyncFull {
-			fmt.Printf("Resync pull: requesting peers to re-send data for zone %s...\n", zone)
-			req := &AgentMgmtPost{
-				Command:     "send-rfi",
-				MessageType: AgentMsgRfi,
-				RfiType:     "SYNC",
-				Zone:        zone,
+			// Default to --full if no flag specified
+			if !resyncPush && !resyncPull && !resyncFull {
+				resyncFull = true
 			}
-			amr, err := SendAgentMgmtCmd(req)
+
+			zone := ZoneName(tdns.Globals.Zonename)
+
+			// Refresh key inventory from signer before resync
+			fmt.Printf("Refreshing key inventory for zone %s...\n", zone)
+			keyReq := &AgentMgmtPost{Command: "refresh-keys", Zone: zone}
+			keyResp, err := SendAgentMgmtCmd(cmd, keyReq)
 			if err != nil {
-				fmt.Printf("Error sending resync pull: %v\n", err)
-				os.Exit(1)
+				fmt.Printf("Warning: failed to refresh key inventory: %v\n", err)
+			} else if keyResp.Error {
+				fmt.Printf("Warning: key inventory refresh failed: %s\n", keyResp.ErrorMsg)
+			} else {
+				fmt.Printf("%s\n", keyResp.Msg)
 			}
-			if amr.Error {
-				fmt.Printf("Resync pull error: %s\n", amr.ErrorMsg)
-				os.Exit(1)
-			}
-			fmt.Printf("Resync pull: %s\n", amr.Msg)
-			for agentId, rfiData := range amr.RfiResponse {
-				if rfiData.Error {
-					fmt.Printf("  %s: error: %s\n", agentId, rfiData.ErrorMsg)
-				} else {
-					fmt.Printf("  %s: %s\n", agentId, rfiData.Msg)
+
+			// Pull first: fetch remote data so we have the complete picture
+			if resyncPull || resyncFull {
+				fmt.Printf("Resync pull: requesting peers to re-send data for zone %s...\n", zone)
+				req := &AgentMgmtPost{
+					Command:     "send-rfi",
+					MessageType: AgentMsgRfi,
+					RfiType:     "SYNC",
+					Zone:        zone,
+				}
+				amr, err := SendAgentMgmtCmd(cmd, req)
+				if err != nil {
+					fmt.Printf("Error sending resync pull: %v\n", err)
+					os.Exit(1)
+				}
+				if amr.Error {
+					fmt.Printf("Resync pull error: %s\n", amr.ErrorMsg)
+					os.Exit(1)
+				}
+				fmt.Printf("Resync pull: %s\n", amr.Msg)
+				for agentId, rfiData := range amr.RfiResponse {
+					if rfiData.Error {
+						fmt.Printf("  %s: error: %s\n", agentId, rfiData.ErrorMsg)
+					} else {
+						fmt.Printf("  %s: %s\n", agentId, rfiData.Msg)
+					}
 				}
 			}
-		}
 
-		// Push second: re-send local data to combiner and remote agents
-		if resyncPush || resyncFull {
-			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
-			req := &AgentMgmtPost{Command: "resync", Zone: zone}
-			amr, err := SendAgentMgmtCmd(req)
-			if err != nil {
-				fmt.Printf("Error sending resync push: %v\n", err)
-				os.Exit(1)
+			// Push second: re-send local data to combiner and remote agents
+			if resyncPush || resyncFull {
+				fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
+				req := &AgentMgmtPost{Command: "resync", Zone: zone}
+				amr, err := SendAgentMgmtCmd(cmd, req)
+				if err != nil {
+					fmt.Printf("Error sending resync push: %v\n", err)
+					os.Exit(1)
+				}
+				if amr.Error {
+					fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
+					os.Exit(1)
+				}
+				fmt.Printf("Resync push: %s\n", amr.Msg)
 			}
-			if amr.Error {
-				fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
-				os.Exit(1)
-			}
-			fmt.Printf("Resync push: %s\n", amr.Msg)
-		}
-	},
+		},
+	}
+	c.Flags().BoolVar(&resyncPush, "push", false, "Re-send local data to combiner and peers")
+	c.Flags().BoolVar(&resyncPull, "pull", false, "Request peers to re-send their data (RFI SYNC)")
+	c.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
+	return c
 }
 
-func init() {
-	AgentCmd.AddCommand(agentLocalCmd)
-	AgentCmd.AddCommand(agentDiscoverCmd)
-	AgentCmd.AddCommand(agentPeerCmd)
-	AgentCmd.AddCommand(DebugAgentCmd) // Add debug commands under agent
-
-	// Add subcommands under "agent peer"
-	agentPeerCmd.AddCommand(agentPeerListCmd)
-	agentPeerCmd.AddCommand(agentPeerZonesCmd)
-	agentPeerCmd.AddCommand(agentPeerZoneCmd)
-	agentPeerCmd.AddCommand(agentPeerResyncCmd)
-
-	agentLocalCmd.AddCommand(agentLocalConfigCmd)
-	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
-	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataAddRRCmd)
-	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataRemoveRRCmd)
-
-	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
-	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
-	agentPeerListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	agentPeerZoneCmd.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
-
-	agentPeerResyncCmd.Flags().BoolVar(&resyncPush, "push", false, "Re-send local data to combiner and peers")
-	agentPeerResyncCmd.Flags().BoolVar(&resyncPull, "pull", false, "Request peers to re-send their data (RFI SYNC)")
-	agentPeerResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
-}
-
-// SendAgentMgmtCmd POSTs an AgentMgmtPost to the agent daemon's /agent
-// endpoint. Every caller in this package sits under mpcli.AgentCmd, so
-// the role is fixed rather than inferred from the Cobra tree.
-func SendAgentMgmtCmd(req *AgentMgmtPost) (*AgentMgmtResponse, error) {
-	api, err := tdnscli.GetApiClient("agent", true)
+// SendAgentMgmtCmd POSTs an AgentMgmtPost to the /agent endpoint of the
+// agent instance cmd's tree targets.
+func SendAgentMgmtCmd(cmd *cobra.Command, req *AgentMgmtPost) (*AgentMgmtResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -306,7 +321,7 @@ func SendAgentMgmtCmd(req *AgentMgmtPost) (*AgentMgmtResponse, error) {
 	return &amr, nil
 }
 
-func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
+func VerifyAndSendLocalDNSRecord(cmd *cobra.Command, zonename, dnsRecord, op string) error {
 	if dnsRecord == "" {
 		return fmt.Errorf("error: DNS record is required")
 	}
@@ -323,16 +338,16 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 	// Map CLI command to API command
 	var apiCmd string
-	switch cmd {
+	switch op {
 	case "add-rr":
 		apiCmd = "add-rr"
 	case "remove-rr":
 		apiCmd = "del-rr"
 	default:
-		return fmt.Errorf("invalid command: %s", cmd)
+		return fmt.Errorf("invalid command: %s", op)
 	}
 
-	amr, err := SendAgentMgmtCmd(&AgentMgmtPost{
+	amr, err := SendAgentMgmtCmd(cmd, &AgentMgmtPost{
 		Command: apiCmd,
 		Zone:    ZoneName(dns.Fqdn(zonename)),
 		RRs:     []string{rr.String()},
@@ -352,9 +367,10 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	return nil
 }
 
-// listPeerZones shows shared zones for each peer agent
+// listPeerZones shows shared zones for each peer agent. component is the
+// daemon kind (URL path segment); the target instance comes from cmd.
 func listPeerZones(cmd *cobra.Command, component string) {
-	api, err := tdnscli.GetApiClient(component, true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -418,7 +434,7 @@ func listPeerZones(cmd *cobra.Command, component string) {
 
 // listAgentsForZone shows which peer agents share a specific zone
 func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
-	api, err := tdnscli.GetApiClient(component, true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

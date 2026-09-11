@@ -6,9 +6,9 @@
  * Owned by tdns-mp since Bite 9a of the MP config cutover (the
  * struct moved here from tdns/v2). Bite 9b completed the migration
  * by deleting the parallel definition + parse from tdns. Runtime
- * source of truth: conf.InternalMp.MpConfig, populated by
- * RegisterMpConfigParser's PostParseConfigHook on conf.Config
- * (the underlying *tdns.Config). Accessors: conf.MpConfig() and
+ * source of truth: the parse RegisterMpConfigParser's
+ * PostParseConfigHook (on conf.Config, the underlying *tdns.Config)
+ * installs with conf.SetMpConfig. Accessors: conf.MpConfig() and
  * WiredMpConfig().
  */
 package tdnsmp

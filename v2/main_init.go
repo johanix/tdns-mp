@@ -90,8 +90,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// wiredMpConfig is set by RegisterMpConfigParser's hook during
 	// tdns.ParseConfig (inside conf.Config.MainInit above), so the
 	// two accessors should be live by the time we get here.
-	if err := verifyMpConfigAccessors(conf); err != nil {
-		return err
+	// A config without a multi-provider: block is legitimate here (the
+	// role-specific init below is skipped for it); the accessor check
+	// only applies when there is a block.
+	if conf.MpConfig() != nil {
+		if err := verifyMpConfigAccessors(conf); err != nil {
+			return err
+		}
 	}
 
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad

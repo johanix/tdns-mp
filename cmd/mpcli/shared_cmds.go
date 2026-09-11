@@ -6,6 +6,13 @@
  *   signer   → mpsigner API
  *   combiner → mpcombiner API
  *   agent    → agent API
+ *   auditor  → mpauditor API
+ *
+ * Each prefix is one tree built by a factory in tdns-mp/v2/cli/trees.go.
+ * The same factories build the per-instance trees that wireInstances()
+ * (root.go) adds for apiservers entries carrying a role:, so
+ * `tdns-mpcli agent ...` and `tdns-mpcli p2-agent ...` offer the same
+ * commands by construction.
  */
 package main
 
@@ -20,69 +27,15 @@ func init() {
 	rootCmd.AddCommand(cli.VersionCmd)
 	rootCmd.AddCommand(mpconfigure.Cmd)
 
-	// Signer commands (from tdns/v2/cli, under "signer" prefix)
-	rootCmd.AddCommand(mpcli.SignerCmd)
-	mpcli.SignerCmd.AddCommand(cli.NewPingCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.NewStopCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.NewDaemonCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.NewDebugCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.NewConfigCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.NewZoneCmd("signer", mpcli.SignerZoneMPListCmd))
-	mpcli.SignerCmd.AddCommand(cli.NewKeystoreCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.NewTruststoreCmd("signer"))
-	mpcli.SignerCmd.AddCommand(cli.ReportCmd)
-	mpcli.SignerCmd.AddCommand(cli.AuthCmd)
-	mpcli.SignerCmd.AddCommand(mpcli.RootKeysCmd)
-	mpcli.SignerCmd.AddCommand(mpcli.JwtCmd)
+	// Signer. The canonical tree also carries four package-level commands
+	// that an instance tree cannot (a *cobra.Command has one parent): tdns's
+	// ReportCmd and AuthCmd, and this package's RootKeysCmd and JwtCmd. Kept
+	// here so nothing an operator could type before is gone.
+	signer := mpcli.NewSignerTree("signer", "signer")
+	signer.AddCommand(cli.ReportCmd, cli.AuthCmd, mpcli.RootKeysCmd, mpcli.JwtCmd)
+	rootCmd.AddCommand(signer)
 
-	// Combiner commands (from tdns-mp/v2/cli)
-	// Note: combiner has its own zone management (combiner_edits_cmds.go)
-	// so we don't add cli.ZoneCmd here to avoid duplicate "zone" commands.
-	rootCmd.AddCommand(mpcli.CombinerCmd)
-	mpcli.CombinerCmd.AddCommand(cli.NewPingCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(cli.NewStopCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(cli.NewDaemonCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(cli.NewDebugCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(cli.NewConfigCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(mpcli.NewKeysCmd("combiner"))
-	mpcli.CombinerCmd.AddCommand(mpcli.CombinerDistribCmd)
-	mpcli.CombinerCmd.AddCommand(mpcli.CombinerTransactionCmd)
-
-	// Agent commands (from tdns-mp/v2/cli)
-	rootCmd.AddCommand(mpcli.AgentCmd)
-	mpcli.AgentCmd.AddCommand(cli.NewPingCmd("agent"))
-	mpcli.AgentCmd.AddCommand(cli.NewStopCmd("agent"))
-	mpcli.AgentCmd.AddCommand(cli.NewDaemonCmd("agent"))
-	mpcli.AgentCmd.AddCommand(cli.NewDebugCmd("agent", mpcli.DebugAgentCmd))
-	mpcli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
-	mpcli.AgentCmd.AddCommand(cli.NewKeystoreCmd("agent"))
-	mpcli.AgentCmd.AddCommand(cli.NewTruststoreCmd("agent"))
-	mpcli.AgentCmd.AddCommand(mpcli.NewKeysCmd("agent"))
-	mpcli.AgentCmd.AddCommand(mpcli.AgentDistribCmd)
-	mpcli.AgentCmd.AddCommand(mpcli.AgentTransactionCmd)
-	// Standard zone commands from tdns (list, reload, etc.)
-	// MP-specific zone subcommands (mplist, addrr, delrr, edits)
-	// are added to cli.AgentZoneCmd via tdns-mp/v2/cli init()
-	mpcli.AgentCmd.AddCommand(cli.AgentZoneCmd)
-
-	// Auditor commands (from tdns-mp/v2/cli). Standard daemon
-	// commands plus the Phase C eventlog/zones/observations
-	// subcommands (registered in auditor_cmds.go init()). Auditor
-	// also gets gossip + peer subtrees because it participates in
-	// the HSYNC3 protocol the same way agents do.
-	rootCmd.AddCommand(mpcli.AuditorCmd)
-	mpcli.AuditorCmd.AddCommand(cli.NewPingCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewStopCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewDaemonCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewDebugCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewConfigCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(mpcli.NewGossipCmd("auditor"))
-	auditorPeerCmd := mpcli.NewPeerCmd("auditor")
-	auditorPeerCmd.AddCommand(mpcli.NewAuditorPeerListCmd())
-	auditorPeerCmd.AddCommand(mpcli.NewAuditorPeerZonesCmd())
-	mpcli.AuditorCmd.AddCommand(auditorPeerCmd)
-	mpcli.AuditorCmd.AddCommand(cli.NewZoneCmd("auditor", mpcli.AuditorZoneMPListCmd))
-	mpcli.AuditorCmd.AddCommand(cli.NewKeystoreCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(cli.NewTruststoreCmd("auditor"))
-	mpcli.AuditorCmd.AddCommand(mpcli.AuditorDistribCmd)
+	rootCmd.AddCommand(mpcli.NewCombinerTree("combiner", "combiner"))
+	rootCmd.AddCommand(mpcli.NewAgentTree("agent", "agent"))
+	rootCmd.AddCommand(mpcli.NewAuditorTree("auditor", "auditor"))
 }

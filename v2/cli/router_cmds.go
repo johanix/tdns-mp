@@ -2,10 +2,10 @@
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
  * CLI commands for DNS message router introspection.
- * Available under all MP roles (agent, combiner, signer).
- * Each role gets its own cobra.Command instances (cobra
- * disallows sharing); all of them funnel through the shared
- * runRouterXxx(role, args) workers which POST to /router.
+ * Available under agent, combiner and signer trees. Each tree gets
+ * its own cobra.Command instances from newRouterCmd (cobra disallows
+ * sharing); all of them funnel through the shared runRouterXxx(cmd,
+ * args) workers which POST to /router on the instance the tree targets.
  */
 
 package cli
@@ -18,14 +18,13 @@ import (
 	"strings"
 
 	tdnsmp "github.com/johanix/tdns-mp/v2"
-	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/spf13/cobra"
 )
 
-// SendRouterCommand posts a RouterPost to the /router endpoint of
-// the role-selected API client and returns the parsed response.
-func SendRouterCommand(role string, req tdnsmp.RouterPost) (*tdnsmp.RouterResponse, error) {
-	api, err := tdnscli.GetApiClient(role, true)
+// SendRouterCommand posts a RouterPost to the /router endpoint of the
+// instance cmd's tree targets and returns the parsed response.
+func SendRouterCommand(cmd *cobra.Command, req tdnsmp.RouterPost) (*tdnsmp.RouterResponse, error) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %v", err)
 	}
@@ -45,8 +44,8 @@ func SendRouterCommand(role string, req tdnsmp.RouterPost) (*tdnsmp.RouterRespon
 
 // --- Shared implementation functions ---
 
-func runRouterList(role string, args []string) {
-	resp, err := SendRouterCommand(role, tdnsmp.RouterPost{
+func runRouterList(cmd *cobra.Command, args []string) {
+	resp, err := SendRouterCommand(cmd, tdnsmp.RouterPost{
 		Command: "router-list",
 	})
 	if err != nil {
@@ -120,8 +119,8 @@ func runRouterList(role string, args []string) {
 	}
 }
 
-func runRouterDescribe(role string, args []string) {
-	resp, err := SendRouterCommand(role, tdnsmp.RouterPost{
+func runRouterDescribe(cmd *cobra.Command, args []string) {
+	resp, err := SendRouterCommand(cmd, tdnsmp.RouterPost{
 		Command: "router-describe",
 	})
 	if err != nil {
@@ -140,8 +139,8 @@ func runRouterDescribe(role string, args []string) {
 
 var routerMetricsDetailed bool
 
-func runRouterMetrics(role string, args []string) {
-	resp, err := SendRouterCommand(role, tdnsmp.RouterPost{
+func runRouterMetrics(cmd *cobra.Command, args []string) {
+	resp, err := SendRouterCommand(cmd, tdnsmp.RouterPost{
 		Command:  "router-metrics",
 		Detailed: routerMetricsDetailed,
 	})
@@ -161,7 +160,7 @@ func runRouterMetrics(role string, args []string) {
 		log.Fatalf("Unexpected metrics format")
 	}
 
-	header := fmt.Sprintf("DNS Message Router - Metrics (%s)", role)
+	header := fmt.Sprintf("DNS Message Router - Metrics (%s)", RoleForCmd(cmd))
 	printMetricsBlock(header, metrics)
 
 	if unhandled, ok := metrics["unhandled_types"].(map[string]interface{}); ok && len(unhandled) > 0 {
@@ -243,8 +242,8 @@ func toInt(v interface{}) int {
 	}
 }
 
-func runRouterWalk(role string, args []string) {
-	resp, err := SendRouterCommand(role, tdnsmp.RouterPost{
+func runRouterWalk(cmd *cobra.Command, args []string) {
+	resp, err := SendRouterCommand(cmd, tdnsmp.RouterPost{
 		Command: "router-walk",
 	})
 	if err != nil {
@@ -304,7 +303,7 @@ func runRouterWalk(role string, args []string) {
 	fmt.Printf("Total handlers: %d\n", len(walkResults))
 }
 
-func runRouterReset(role string, args []string) {
+func runRouterReset(cmd *cobra.Command, args []string) {
 	fmt.Print("This will reset all router metrics. Continue? [y/N]: ")
 	var response string
 	fmt.Scanln(&response)
@@ -315,7 +314,7 @@ func runRouterReset(role string, args []string) {
 		os.Exit(0)
 	}
 
-	resp, err := SendRouterCommand(role, tdnsmp.RouterPost{
+	resp, err := SendRouterCommand(cmd, tdnsmp.RouterPost{
 		Command: "router-reset",
 	})
 	if err != nil {
@@ -328,125 +327,43 @@ func runRouterReset(role string, args []string) {
 	fmt.Println("Router metrics reset successfully.")
 }
 
-// --- Cobra shells (3 roles × 5 commands = 15) ---
-
-var (
-	agentRouterCmd = &cobra.Command{
+// newRouterCmd builds the "router" subtree for a daemon of the given kind.
+// One definition; each tree gets its own instantiation (cobra disallows
+// sharing a command between parents). The target instance is read from
+// the tree by the workers above.
+func newRouterCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
 		Use:   "router",
 		Short: "DNS message router introspection commands",
 	}
-	agentRouterListCmd = &cobra.Command{
-		Use:   "list",
-		Short: "List all registered message handlers",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterList("agent", args) },
-	}
-	agentRouterDescribeCmd = &cobra.Command{
-		Use:   "describe",
-		Short: "Show detailed router state",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe("agent", args) },
-	}
-	agentRouterMetricsCmd = &cobra.Command{
+	metrics := &cobra.Command{
 		Use:   "metrics",
 		Short: "Show router metrics (use --detailed for per-peer breakdown)",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("agent", args) },
+		Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics(cmd, args) },
 	}
-	agentRouterWalkCmd = &cobra.Command{
-		Use:   "walk",
-		Short: "Walk all handlers with visitor pattern",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterWalk("agent", args) },
-	}
-	agentRouterResetCmd = &cobra.Command{
-		Use:   "reset",
-		Short: "Reset router metrics",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterReset("agent", args) },
-	}
-
-	combinerRouterCmd = &cobra.Command{
-		Use:   "router",
-		Short: "DNS message router introspection commands",
-	}
-	combinerRouterListCmd = &cobra.Command{
-		Use:   "list",
-		Short: "List all registered message handlers",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterList("combiner", args) },
-	}
-	combinerRouterDescribeCmd = &cobra.Command{
-		Use:   "describe",
-		Short: "Show detailed router state",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe("combiner", args) },
-	}
-	combinerRouterMetricsCmd = &cobra.Command{
-		Use:   "metrics",
-		Short: "Show router metrics (use --detailed for per-peer breakdown)",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("combiner", args) },
-	}
-	combinerRouterWalkCmd = &cobra.Command{
-		Use:   "walk",
-		Short: "Walk all handlers with visitor pattern",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterWalk("combiner", args) },
-	}
-	combinerRouterResetCmd = &cobra.Command{
-		Use:   "reset",
-		Short: "Reset router metrics",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterReset("combiner", args) },
-	}
-
-	signerRouterCmd = &cobra.Command{
-		Use:   "router",
-		Short: "DNS message router introspection commands",
-	}
-	signerRouterListCmd = &cobra.Command{
-		Use:   "list",
-		Short: "List all registered message handlers",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterList("signer", args) },
-	}
-	signerRouterDescribeCmd = &cobra.Command{
-		Use:   "describe",
-		Short: "Show detailed router state",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe("signer", args) },
-	}
-	signerRouterMetricsCmd = &cobra.Command{
-		Use:   "metrics",
-		Short: "Show router metrics (use --detailed for per-peer breakdown)",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterMetrics("signer", args) },
-	}
-	signerRouterWalkCmd = &cobra.Command{
-		Use:   "walk",
-		Short: "Walk all handlers with visitor pattern",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterWalk("signer", args) },
-	}
-	signerRouterResetCmd = &cobra.Command{
-		Use:   "reset",
-		Short: "Reset router metrics",
-		Run:   func(cmd *cobra.Command, args []string) { runRouterReset("signer", args) },
-	}
-)
-
-func init() {
-	// Agent tree
-	AgentCmd.AddCommand(agentRouterCmd)
-	agentRouterCmd.AddCommand(agentRouterListCmd)
-	agentRouterCmd.AddCommand(agentRouterDescribeCmd)
-	agentRouterCmd.AddCommand(agentRouterMetricsCmd)
-	agentRouterCmd.AddCommand(agentRouterWalkCmd)
-	agentRouterCmd.AddCommand(agentRouterResetCmd)
-	agentRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
-
-	// Combiner tree
-	CombinerCmd.AddCommand(combinerRouterCmd)
-	combinerRouterCmd.AddCommand(combinerRouterListCmd)
-	combinerRouterCmd.AddCommand(combinerRouterDescribeCmd)
-	combinerRouterCmd.AddCommand(combinerRouterMetricsCmd)
-	combinerRouterCmd.AddCommand(combinerRouterWalkCmd)
-	combinerRouterCmd.AddCommand(combinerRouterResetCmd)
-	combinerRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
-
-	// Signer tree
-	SignerCmd.AddCommand(signerRouterCmd)
-	signerRouterCmd.AddCommand(signerRouterListCmd)
-	signerRouterCmd.AddCommand(signerRouterDescribeCmd)
-	signerRouterCmd.AddCommand(signerRouterMetricsCmd)
-	signerRouterCmd.AddCommand(signerRouterWalkCmd)
-	signerRouterCmd.AddCommand(signerRouterResetCmd)
-	signerRouterMetricsCmd.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
+	metrics.Flags().BoolVar(&routerMetricsDetailed, "detailed", false, "Show per-peer breakdown")
+	c.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all registered message handlers",
+			Run:   func(cmd *cobra.Command, args []string) { runRouterList(cmd, args) },
+		},
+		&cobra.Command{
+			Use:   "describe",
+			Short: "Show detailed router state",
+			Run:   func(cmd *cobra.Command, args []string) { runRouterDescribe(cmd, args) },
+		},
+		metrics,
+		&cobra.Command{
+			Use:   "walk",
+			Short: "Walk all handlers with visitor pattern",
+			Run:   func(cmd *cobra.Command, args []string) { runRouterWalk(cmd, args) },
+		},
+		&cobra.Command{
+			Use:   "reset",
+			Short: "Reset router metrics",
+			Run:   func(cmd *cobra.Command, args []string) { runRouterReset(cmd, args) },
+		},
+	)
+	return c
 }

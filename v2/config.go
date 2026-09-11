@@ -10,6 +10,7 @@ import (
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"sync/atomic"
 )
 
 // Config wraps a pointer to the tdns.Config (typically &tdns.Conf)
@@ -27,7 +28,17 @@ type Config struct {
 // accessors. Returns nil if no multi-provider: block is present in
 // the config (or if ParseConfig has not yet run).
 func (conf *Config) MpConfig() *MultiProviderConf {
-	return conf.InternalMp.MpConfig
+	return conf.InternalMp.mpConfig.Load()
+}
+
+// SetMpConfig installs the tdns-mp-side parse as the runtime MP config
+// and mirrors it into the package-level WiredMpConfig(). The config
+// parser hook calls it on every ParseConfig, including reloads, while
+// the refresh callbacks read MpConfig() concurrently; the atomic pointer
+// is what keeps that from being a data race.
+func (conf *Config) SetMpConfig(mp *MultiProviderConf) {
+	conf.InternalMp.mpConfig.Store(mp)
+	wiredMpConfig.Store(mp)
 }
 
 // RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
@@ -201,12 +212,10 @@ type InternalMpConf struct {
 	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
 	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
 
-	// MpConfig is the tdns-mp-side parse of the multi-provider: config
-	// block, populated by RegisterMpConfigParser (registered as
-	// PostParseConfigHook on the underlying tdns.Config). Runtime
-	// accessors read this via conf.MpConfig() and WiredMpConfig().
-	// Nil if no multi-provider: block is present.
-	//
-	// Type defined in multi_provider_conf.go.
-	MpConfig *MultiProviderConf
+	// mpConfig is the tdns-mp-side parse of the multi-provider: config
+	// block, installed by SetMpConfig from the config parser hook
+	// (RegisterMpConfigParser) on every parse. Read through
+	// conf.MpConfig(); an atomic pointer because reloads store it while
+	// runtime goroutines read it.
+	mpConfig atomic.Pointer[MultiProviderConf]
 }

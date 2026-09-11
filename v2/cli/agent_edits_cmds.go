@@ -14,21 +14,25 @@ import (
 	"strings"
 	"time"
 
-	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
-var agentZoneEditsCmd = &cobra.Command{
-	Use:   "edits",
-	Short: "Agent edit/sync status commands",
+func newAgentZoneEditsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "edits",
+		Short: "Agent edit/sync status commands",
+	}
+	c.AddCommand(newAgentZoneEditsListCmd(kind))
+	return c
 }
 
-var agentZoneEditsListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "Show synchronized data and tracking state",
-	Long: `Display the agent's SynchedDataEngine state showing contributions from all peer agents.
+func newAgentZoneEditsListCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "Show synchronized data and tracking state",
+		Long: `Display the agent's SynchedDataEngine state showing contributions from all peer agents.
 
 Without --zone: summary view sorted by zone → source agent → RRtype → RRs
 With --zone:    detailed per-RR tracking state and outbound queue status
@@ -36,24 +40,27 @@ With --zone:    detailed per-RR tracking state and outbound queue status
 Example:
   tdns-cliv2 agent zone edits list
   tdns-cliv2 agent zone edits list --zone example.com`,
-	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
+		Run: func(cmd *cobra.Command, args []string) {
+			zone, _ := cmd.Flags().GetString("zone")
 
-		if zone != "" {
-			showDetailedZoneStatus(dns.Fqdn(zone))
-		} else {
-			showSyncedDataSummary()
-		}
-	},
+			if zone != "" {
+				showDetailedZoneStatus(cmd, dns.Fqdn(zone))
+			} else {
+				showSyncedDataSummary(cmd)
+			}
+		},
+	}
+	c.Flags().String("zone", "", "Show detailed status for a specific zone")
+	return c
 }
 
 // showSyncedDataSummary displays a zone→agent→rrtype hierarchy.
-func showSyncedDataSummary() {
+func showSyncedDataSummary(cmd *cobra.Command) {
 	req := AgentMgmtPost{
 		Command: "dump-zonedatarepo",
 	}
 
-	amr, err := SendAgentDebugCmd(req, false)
+	amr, err := SendAgentDebugCmd(cmd, req, false)
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
@@ -132,14 +139,14 @@ func showSyncedDataSummary() {
 
 // showDetailedZoneStatus displays per-RR tracking state in table format
 // and outbound queue status for a single zone.
-func showDetailedZoneStatus(zone string) {
+func showDetailedZoneStatus(cmd *cobra.Command, zone string) {
 	// 1. Get per-RR tracking data
 	req := AgentMgmtPost{
 		Command: "dump-zonedatarepo",
 		Zone:    ZoneName(zone),
 	}
 
-	amr, err := SendAgentDebugCmd(req, false)
+	amr, err := SendAgentDebugCmd(cmd, req, false)
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
@@ -261,17 +268,17 @@ func showDetailedZoneStatus(zone string) {
 	}
 
 	// 2. Get outbound queue status
-	showQueueStatusForZone(zone)
+	showQueueStatusForZone(cmd, zone)
 }
 
 // showQueueStatusForZone fetches the reliable message queue status
 // and displays only messages pertaining to the specified zone.
-func showQueueStatusForZone(zone string) {
+func showQueueStatusForZone(cmd *cobra.Command, zone string) {
 	queueReq := AgentMgmtPost{
 		Command: "queue-status",
 	}
 
-	api, err := tdnscli.GetApiClient("agent", true)
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Printf("Warning: could not get API client for queue status: %v", err)
 		return
@@ -352,10 +359,3 @@ func showQueueStatusForZone(zone string) {
 }
 
 // truncateDNSKEY is defined in combiner_edits_cmds.go (shared by both agent and combiner edit display)
-
-func init() {
-	tdnscli.AgentZoneCmd.AddCommand(agentZoneEditsCmd)
-	agentZoneEditsCmd.AddCommand(agentZoneEditsListCmd)
-
-	agentZoneEditsListCmd.Flags().String("zone", "", "Show detailed status for a specific zone")
-}

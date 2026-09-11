@@ -33,7 +33,8 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// registry unset, and the auditor engine below dereferences it.
 	// Refuse to start instead of panicking.
 	ar := conf.InternalMp.AgentRegistry
-	if conf.MpConfig() == nil || ar == nil {
+	mp := conf.MpConfig()
+	if mp == nil || ar == nil {
 		return fmt.Errorf("auditor startup: multi-provider configuration missing (no agent registry)")
 	}
 
@@ -160,8 +161,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// peers. Auditors must accept these; refusing them would break
 	// the protocol's expectation that every HSYNC3 member is
 	// reachable.
-	mp := conf.MpConfig()
-	if mp != nil && len(mp.Api.Addresses.Listen) > 0 {
+	if len(mp.Api.Addresses.Listen) > 0 {
 		syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 		if err != nil {
 			lgAuditor.Error("failed to set up sync API router", "err", err)

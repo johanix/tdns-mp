@@ -54,12 +54,14 @@ func APIgossip(ar *AgentRegistry, lem *LeaderElectionManager) func(w http.Respon
 				resp.ErrorMsg = "gossip state table not available"
 				return
 			}
-			zone := dns.Fqdn(gp.Zone)
+			// dns.Fqdn("") is ".", so validate the raw value first.
+			zone := strings.TrimSpace(gp.Zone)
 			if zone == "" {
 				resp.Error = true
 				resp.ErrorMsg = "zone is required"
 				return
 			}
+			zone = dns.Fqdn(zone)
 			pg, groupHash, err := providerGroupForGossipZone(ar, zone)
 			if err != nil {
 				resp.Error = true

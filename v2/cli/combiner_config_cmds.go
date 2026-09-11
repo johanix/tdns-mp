@@ -13,54 +13,61 @@ import (
 	"log"
 	"strings"
 
-	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/spf13/cobra"
 )
 
 var combinerConfigVerbose bool
 
-var combinerConfigCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Runtime introspection of the combiner's multi-provider config",
+func newCombinerConfigCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "config",
+		Short: "Runtime introspection of the combiner's multi-provider config",
+	}
+	c.AddCommand(newCombinerConfigStatusCmd(kind))
+	return c
 }
 
-var combinerConfigStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show the running combiner's effective multi-provider config",
-	Long: `Show the running combiner's effective multi-provider config.
+func newCombinerConfigStatusCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "status",
+		Short: "Show the running combiner's effective multi-provider config",
+		Long: `Show the running combiner's effective multi-provider config.
 
 Use -v to include the agent-identity list, protected namespaces,
 sync-api listen addresses, and provider zones.
 
 Sensitive paths (private key locations, JOSE pubkey paths) are
 intentionally not exposed via this endpoint.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		api, err := tdnscli.GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+		Run: func(cmd *cobra.Command, args []string) {
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		req := CombinerConfigPost{
-			Command: "status",
-			Verbose: combinerConfigVerbose,
-		}
+			req := CombinerConfigPost{
+				Command: "status",
+				Verbose: combinerConfigVerbose,
+			}
 
-		_, buf, err := api.RequestNG("POST", "/combiner/config", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
+			_, buf, err := api.RequestNG("POST", "/combiner/config", req, true)
+			if err != nil {
+				log.Fatalf("API request failed: %v", err)
+			}
 
-		var resp CombinerConfigResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
+			var resp CombinerConfigResponse
+			if err := json.Unmarshal(buf, &resp); err != nil {
+				log.Fatalf("Failed to parse response: %v", err)
+			}
 
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
-		}
+			if resp.Error {
+				log.Fatalf("API error: %s", resp.ErrorMsg)
+			}
 
-		renderCombinerConfig(&resp, combinerConfigVerbose)
-	},
+			renderCombinerConfig(&resp, combinerConfigVerbose)
+		},
+	}
+	c.Flags().BoolVarP(&combinerConfigVerbose, "verbose", "v", false, "include agent identities, protected namespaces, listen addresses, provider zones")
+	return c
 }
 
 func renderCombinerConfig(r *CombinerConfigResponse, verbose bool) {
@@ -108,11 +115,4 @@ func renderCombinerConfig(r *CombinerConfigResponse, verbose bool) {
 			fmt.Printf("    - %s\n", z)
 		}
 	}
-}
-
-func init() {
-	combinerConfigStatusCmd.Flags().BoolVarP(&combinerConfigVerbose, "verbose", "v", false,
-		"include agent identities, protected namespaces, listen addresses, provider zones")
-	combinerConfigCmd.AddCommand(combinerConfigStatusCmd)
-	CombinerCmd.AddCommand(combinerConfigCmd)
 }

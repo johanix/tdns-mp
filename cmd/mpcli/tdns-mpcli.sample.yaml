@@ -9,6 +9,15 @@
 #   mpcli signer ping    → tdns-mpsigner
 #   mpcli combiner ping  → tdns-combiner
 #   mpcli agent ping     → tdns-agent
+#
+# A SECOND (third, ...) instance of a daemon kind gets an entry with a
+# "role:" field. Its "name" becomes both the command word and the lookup
+# key, and it offers the same command set as the built-in word:
+#   mpcli p2-agent ping  → the entry named p2-agent (role: agent)
+# See the commented entry at the end of apiservers below.
+#
+# The config file: --config, else $TDNS_MPCLI_CONFIG, else
+# /etc/tdns/tdns-mpcli.yaml.
 
 # Pull in shared algorithm enrichment data so that
 # `signer keystore dnssec algorithms` prints the rich table (sizes,
@@ -36,6 +45,20 @@ apiservers:
      baseurl:      https://127.0.0.1:8087/api/v1
      apikey:       change-me-to-something-secret
      authmethod:   X-API-Key
+
+   # A second agent instance, addressed as "mpcli p2-agent ...".
+   # role: picks the command tree (agent | combiner | signer | auditor);
+   # the name must not be one of those four words, nor "version",
+   # "configure", "help" or "completion". config_file: lets
+   # "p2-agent config check" and "p2-agent keys" find the daemon's own
+   # config; command: is what "p2-agent daemon start" runs.
+   # - name:         p2-agent
+   #   role:         agent
+   #   baseurl:      https://127.0.0.1:7254/api/v1
+   #   apikey:       change-me-to-something-secret
+   #   authmethod:   X-API-Key
+   #   config_file:  /etc/tdns/p2/tdns-mpagent.yaml
+   #   command:      /usr/local/libexec/tdns-mpagent
 
 log:
    file:   /var/log/tdns/tdns-mpcli.log
