@@ -30,13 +30,15 @@ import (
 // (ForKSK/ForZSK, enforced by the DNSSEC policy check in large_ksk.go)
 // and the static Facts. Both are copied from dnssec-algorithms
 // registry/registry.go, which tdns's own binaries consume through the
-// tdns-genalgs generator (cmdv2/genalgs + a per-app algs.list). NOTE:
-// the codepoints below are tdns-mp's historical assignments and no
-// longer match that registry (it has 200=MLDSA65, 202=SLHDSA128S);
-// renumbering is a flag day for keys already in MPDnssecKeyStore and
-// is deliberately NOT done here.
+// tdns-genalgs generator (cmdv2/genalgs + a per-app algs.list).
+//
+// MLDSA44 is at 18, the codepoint IANA assigned it (it was tdns-mp's
+// private 199). SLHDSA128S is still at tdns-mp's historical 200, which no
+// longer matches that registry (it has 200=MLDSA65, 202=SLHDSA128S).
+// Keys already in an MPDnssecKeyStore keep the number they were minted
+// with.
 func init() {
-	algs.Register(199, mldsa44.New(),
+	algs.Register(18, mldsa44.New(),
 		algs.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true},
 		algs.Facts{PubKeyBytes: 1312, SigBytes: 2420, SecKeyBytes: 2560, SecurityLevel: 2, Maturity: "final", Description: "ML-DSA-44 (FIPS 204), lattice"})
 	algs.Register(200, slhdsa128s.New(),
