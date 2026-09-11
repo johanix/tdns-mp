@@ -10,13 +10,13 @@ import "time"
 
 // GossipPost is the request body for /gossip.
 type GossipPost struct {
-	Command   string `json:"command"`
-	GroupName string `json:"group_name,omitempty"`
+	Command string `json:"command"`
+	Zone    string `json:"zone,omitempty"`
 }
 
 // GossipResponse is the response body for /gossip.
-// Data carries the per-command payload (list of groups or state matrix
-// for one group); the CLI formats it via type assertion.
+// Data carries the per-command payload (state matrix for one zone);
+// the CLI formats it via type assertion.
 type GossipResponse struct {
 	Time     time.Time   `json:"time"`
 	Error    bool        `json:"error"`

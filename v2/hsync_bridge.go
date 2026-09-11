@@ -270,13 +270,14 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 
 func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 	ar := conf.InternalMp.AgentRegistry
+	mp := conf.MpConfig()
 	cfg := hsync.DefaultConfig()
-	if bi := conf.Config.MultiProvider.Remote.BeatInterval; bi > 0 {
+	if bi := mp.Remote.BeatInterval; bi > 0 {
 		cfg.BeatInterval = time.Duration(bi) * time.Second
 	}
 	deps := hsync.Deps{
-		LocalID:           hsync.PeerID(conf.Config.MultiProvider.Identity),
-		LocalBeatInterval: conf.Config.MultiProvider.Remote.BeatInterval,
+		LocalID:           hsync.PeerID(mp.Identity),
+		LocalBeatInterval: mp.Remote.BeatInterval,
 		Zones:             mpZoneLookup{},
 		Transport:         &mpHsyncBridge{ar: ar, tm: conf.InternalMp.MPTransport},
 		Gossip:            newAgentGossipPort(ar),

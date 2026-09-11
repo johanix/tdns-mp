@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,49 @@ func TestSnapshotGossip_includesAllStateReporters(t *testing.T) {
 	}
 	if len(got[0].Rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(got[0].Rows))
+	}
+}
+
+func TestSnapshotGossipForZone_singleMatrix(t *testing.T) {
+	ar := &AgentRegistry{
+		ProviderGroupManager: NewProviderGroupManager("auditor.example."),
+		GossipStateTable:     NewGossipStateTable("auditor.example."),
+	}
+	hash := "abc123"
+	zone := ZoneName("customer.mptest.")
+	ar.ProviderGroupManager.mu.Lock()
+	ar.ProviderGroupManager.Groups[hash] = &ProviderGroup{
+		GroupHash: hash,
+		Members:   []string{"agent.a.example.", "agent.b.example."},
+		Zones:     []ZoneName{zone},
+	}
+	ar.ProviderGroupManager.mu.Unlock()
+	ar.GossipStateTable.mu.Lock()
+	ar.GossipStateTable.States[hash] = map[string]*MemberState{
+		"agent.a.example.": {Identity: "agent.a.example.", Zones: []string{string(zone)}},
+	}
+	// Unrelated group that shares a member identity must not appear.
+	ar.GossipStateTable.States["other"] = map[string]*MemberState{
+		"agent.a.example.": {Identity: "agent.a.example.", Zones: []string{"other.zone."}},
+		"agent.c.example.": {Identity: "agent.c.example.", Zones: []string{"other.zone."}},
+	}
+	ar.GossipStateTable.mu.Unlock()
+
+	got := SnapshotGossipForZone(ar, string(zone))
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 matrix for zone", len(got))
+	}
+	if got[0].GroupHash != hash {
+		t.Fatalf("group hash = %q, want %q", got[0].GroupHash, hash)
+	}
+	// Exactly the group's members as reporters (the silent agent.b gets an
+	// empty row), and nothing from the unrelated group agent.a also sits in.
+	var reporters []string
+	for _, r := range got[0].Rows {
+		reporters = append(reporters, r.Reporter)
+	}
+	if want := []string{"agent.a.example.", "agent.b.example."}; !slices.Equal(reporters, want) {
+		t.Fatalf("reporters = %v, want %v (no leakage from the other group)", reporters, want)
 	}
 }
 

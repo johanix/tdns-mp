@@ -21,6 +21,7 @@ type AuditZoneState struct {
 	Auditors     map[string]*AuditProviderState
 	LastRefresh  time.Time
 	ZoneSerial   uint32
+	ConfigErrors []string // HSYNC/HSYNCPARAM zone-file errors; reset on zone refresh
 	Observations []AuditObservation
 }
 

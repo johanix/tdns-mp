@@ -339,7 +339,7 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 		if !((h3exists && hpExists) || h1exists || h2exists) {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", mpzd.ZoneName)
 		}
-		var mpConf *tdns.MultiProviderConf
+		var mpConf *MultiProviderConf
 		if mpzd.MP != nil {
 			mpConf = mpzd.MP.MultiProvider
 		}

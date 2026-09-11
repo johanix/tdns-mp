@@ -51,19 +51,20 @@ type auditorWebServer struct {
 // WebData is the single struct passed to every full-page render.
 // Pages and fragments use only the subset they need.
 type WebData struct {
-	Title        string
-	User         string
-	Now          time.Time
-	Error        string
-	Zone         string
-	Zones        []AuditZoneSummary
-	ZoneDetail   *AuditZoneSummary
-	Providers    []AuditProviderSummary
-	Auditors     []AuditProviderSummary
-	Events       []AuditEvent
-	Observations []AuditObservation
-	Gossip       []GossipMatrixDTO
-	MPView       *ZoneMPViewDTO
+	Title            string
+	User             string
+	Now              time.Time
+	Error            string
+	Zone             string
+	Zones            []AuditZoneSummary
+	ZoneDetail       *AuditZoneSummary
+	Providers        []AuditProviderSummary
+	Auditors         []AuditProviderSummary
+	Events           []AuditEvent
+	Observations     []AuditObservation
+	Gossip           []GossipMatrixDTO
+	MPView           *ZoneMPViewDTO
+	ZoneConfigErrors []string
 }
 
 func formatAgo(t time.Time) string {
@@ -128,6 +129,25 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 				return "(none)"
 			}
 			return strings.Join(labels, ", ")
+		},
+		"gossipColumnPeer": func(m GossipMatrixDTO, col string) string {
+			if m.LabelToIdentity != nil {
+				if id := m.LabelToIdentity[col]; id != "" {
+					return id
+				}
+			}
+			return col
+		},
+		"gossipColumnTitle": func(m GossipMatrixDTO, col string, zone string) string {
+			if zone != "" {
+				if m.LabelToIdentity != nil {
+					if id := m.LabelToIdentity[col]; id != "" {
+						return id
+					}
+				}
+				return col
+			}
+			return col
 		},
 		"hasRole": func(b bool) string {
 			if b {
@@ -370,10 +390,14 @@ func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *htt
 
 func (s *auditorWebServer) fragmentGossipMatrix(w http.ResponseWriter, r *http.Request) {
 	zone := r.URL.Query().Get("zone")
-	data := s.buildGossipData(r)
 	if zone != "" {
+		data := s.baseWebData(r, "")
+		data.Zone = zone
 		data.Gossip = SnapshotGossipForZone(s.conf.InternalMp.AgentRegistry, zone)
+		s.render(w, "gossip-matrix-inner", data)
+		return
 	}
+	data := s.buildGossipData(r)
 	s.render(w, "gossip-matrix-inner", data)
 }
 
@@ -403,27 +427,50 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 	d.MPView = SnapshotZoneMPView(zone, sm, ar, local)
 	d.Gossip = SnapshotGossipForZone(ar, zone)
 	if sm != nil {
+		d.ZoneConfigErrors = sm.SnapshotZoneConfigErrors(zone)
+	} else {
+		d.ZoneConfigErrors = CheckZoneHSYNCConfig(zone)
+	}
+	if sm != nil {
 		if zs := sm.GetZone(zone); zs != nil {
 			snap := zs.Snapshot(local)
 			d.ZoneDetail = &snap
 			d.Providers = snap.Providers
 			d.Auditors = s.finishAuditorSummaries(zone, snap.Auditors)
-		} else if d.MPView != nil {
+		}
+	}
+	if d.MPView != nil {
+		if d.ZoneDetail == nil {
 			d.ZoneDetail = &AuditZoneSummary{
-				Zone:         zone,
+				Zone:          zone,
 				AuditorCount:  len(d.MPView.Auditors),
 				Servers:       d.MPView.Servers,
 				Signers:       d.MPView.Signers,
 				AuditorLabels: d.MPView.Auditors,
-				NSmgmt:       d.MPView.NSmgmt,
-				ParentSync:   d.MPView.ParentSync,
+				NSmgmt:        d.MPView.NSmgmt,
+				ParentSync:    d.MPView.ParentSync,
 			}
 			d.Auditors = DeclaredAuditorIdentities(zone)
 			markLocalAuditors(local, d.Auditors)
 			d.Auditors = s.finishAuditorSummaries(zone, d.Auditors)
 		}
+		applyMPViewToZoneSummary(d.ZoneDetail, d.MPView)
 	}
 	return d
+}
+
+// applyMPViewToZoneSummary sets declared role counts from HSYNCPARAM.
+func applyMPViewToZoneSummary(z *AuditZoneSummary, mp *ZoneMPViewDTO) {
+	if z == nil || mp == nil {
+		return
+	}
+	z.ProviderCount = len(mp.Servers)
+	z.AuditorCount = len(mp.Auditors)
+	z.Servers = mp.Servers
+	z.Signers = mp.Signers
+	z.AuditorLabels = mp.Auditors
+	z.NSmgmt = mp.NSmgmt
+	z.ParentSync = mp.ParentSync
 }
 
 func (s *auditorWebServer) buildEventLogData(r *http.Request, zone string, limit int) *WebData {
@@ -555,15 +602,15 @@ func (s *auditorWebServer) RegisterRoutes(mux *http.ServeMux) {
 //
 //	audit.web.enabled         (bool, default false)
 //	audit.web.addresses       ([]string, default ["127.0.0.1:8099"])
-//	audit.web.cert_file       (string)
-//	audit.web.key_file        (string)
+//	audit.web.certfile        (string)
+//	audit.web.keyfile         (string)
 //	audit.web.auth.mode       ("basic"|"none", default "basic")
 //	audit.web.auth.idle_timeout (duration, default 30m)
 //	audit.web.auth.users      ([]{name, password_hash})
 //
 // Bind safety: with auth.mode="none", refuses non-loopback addresses.
 // HTTPS is mandatory unless explicitly disabled by setting both
-// cert_file and key_file to "" — this is intended for local-only
+// certfile and keyfile to "" — this is intended for local-only
 // lab use behind a TLS-terminating proxy.
 func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 	if !viper.GetBool("audit.web.enabled") {
@@ -625,8 +672,8 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 		return fmt.Errorf("audit.web.auth.mode must be \"basic\" or \"none\", got %q", mode)
 	}
 
-	certFile := viper.GetString("audit.web.cert_file")
-	keyFile := viper.GetString("audit.web.key_file")
+	certFile := viper.GetString("audit.web.certfile")
+	keyFile := viper.GetString("audit.web.keyfile")
 	useHTTPS := certFile != "" && keyFile != ""
 
 	// Plain HTTP with basic auth would send the login POST and the
@@ -635,7 +682,7 @@ func (conf *Config) StartAuditorWebServer(ctx context.Context) error {
 	// Loopback no-auth is acceptable because there is nothing to
 	// protect.
 	if mode == "basic" && !useHTTPS {
-		return errors.New("audit.web.auth.mode=\"basic\" requires HTTPS (set audit.web.cert_file and audit.web.key_file)")
+		return errors.New("audit.web.auth.mode=\"basic\" requires HTTPS (set audit.web.certfile and audit.web.keyfile)")
 	}
 
 	ws, err := newAuditorWebServer(conf, auth, useHTTPS)

@@ -32,6 +32,15 @@ stable, the struct can be deleted from tdns entirely.
 In tdns-mp/v2: **~156 accessor sites across 34 files**, in two access
 shapes:
 
+> **Validation update (2026-05-27):** Site counts re-measured after
+> Bite 1 landed. Actual: **137 sites across 19 files** (counting only
+> `conf.*MultiProvider` reads — not type declarations, not struct
+> literals). The plan's original ~156/34 was higher because it
+> double-counted some files and included files with zero relevant
+> sites. See "Per-bite site counts" below. Direction is unchanged;
+> the bite boundaries still hold.
+
+
 - `conf.Config.MultiProvider.X` when `conf` is `*tdnsmp.Config`
 - `conf.MultiProvider.X` when `conf` is `*tdns.Config`
 
@@ -112,60 +121,142 @@ should be renamed to `wiredMpConfig` to align.)
 No call-site changes yet. Just adds the accessors and a sanity
 check that they return the expected value at boot.
 
-### Bite 2: combiner-only sites
+### Bite 2: combiner-only sites — 31 sites, 6 files
 Convert all 100% combiner-only call sites:
 
-    combiner_chunk.go
-    combiner_crypto.go
-    combiner_msg_handler.go
-    combiner_peer.go
-    combiner_utils.go
-    start_combiner.go
+    combiner_chunk.go        ( 1)
+    combiner_crypto.go       ( 3)
+    combiner_msg_handler.go  ( 3)
+    combiner_peer.go         (18)
+    combiner_utils.go        ( 5)
+    start_combiner.go        ( 1)
 
 Self-contained. Runtime testable on the operator's mpcombiner alone.
 
-### Bite 3: signer-only sites
+### Bite 3: signer-only sites — 22 sites, 3 files
 Same shape:
 
-    signer_keydb.go
-    signer_msg_handler.go
-    signer_peer.go
-    signer_transport.go
+    signer_msg_handler.go    ( 3)
+    signer_peer.go           (18)
+    signer_transport.go      ( 1)
 
-### Bite 4: agent-only sites
-    agent_setup.go
-    agent_structs.go
-    agent_utils.go
-    apihandler_agent.go
-    apihandler_agent_distrib.go
-    apihandler_agent_hsync.go
-    apihandler_peer.go
-    start_agent.go
+(signer_keydb.go was in the original plan but has zero MP-config
+sites; dropped.)
 
-### Bite 5: auditor-only sites
-    start_auditor.go
-    apihandler_imr.go (auditor-relevant parts)
+### Bite 4: agent-only sites — 68 sites, 7 files
+**Note:** agent_setup.go alone is 42 sites — the largest single file
+in the cutover. Consider splitting Bite 4 into 4a (agent_setup.go)
+and 4b (the rest) if review burden warrants.
 
-### Bite 6: shared / multi-role sites
+    agent_setup.go             (42)
+    agent_utils.go             ( 5)
+    apihandler_agent.go        ( 9)
+    apihandler_agent_distrib.go( 4)
+    apihandler_agent_hsync.go  ( 1)
+    apihandler_peer.go         ( 1)
+    start_agent.go             ( 6)
+
+(agent_structs.go was in the original plan but has zero MP-config
+sites; dropped.)
+
+### Bite 5: auditor-only sites — 2 sites, 2 files
+
+    start_auditor.go         ( 1)
+    apihandler_imr.go        ( 1)
+
+### Bite 6: shared / multi-role sites — 41 sites, 9 files
 Whatever remains:
 
-    apihandler_combiner.go
-    apihandler_transaction.go
-    hsync_utils.go
-    hsyncengine.go
-    key_state_worker.go
-    keys_cmd.go
-    main_init.go
-    mp_extension.go
-    syncheddataengine.go
-    config_validate.go
-    cli/agent_debug_cmds.go
-    transport_harness_test.go
+    apihandler_combiner.go    ( 5)
+    apihandler_transaction.go ( 1)
+    config_validate.go        (18)
+    hsyncengine.go            ( 1)
+    key_state_worker.go       ( 1)
+    keys_cmd.go               ( 2)
+    main_init.go              ( 5)
+    syncheddataengine.go      ( 3)
+    config.go                 ( 3 — including the new MpConfig() method's
+                                  one internal read, which is fine to keep)
 
-### Bite 7: `*tdns.Config` call sites
-The ~12 hardest sites. For each, decide (a)/(b)/(c) from above
-and apply. Some may be in tdns-mp helper functions that should
-take `*tdnsmp.Config` to begin with.
+Files dropped from the original plan list (zero MP-config sites):
+hsync_utils.go, cli/agent_debug_cmds.go, transport_harness_test.go
+(the test has one `&tdns.MultiProviderConf{...}` literal, not a
+config read — leave it alone; it's exercising the type, which stays
+in tdns until Bite 9).
+
+mp_extension.go was already touched in Bite 1 and contains only
+type declarations and the `wiredMpConfig` assignment — no further
+work needed here.
+
+**Out of scope for Bite 6:** `cli/configure/parse.go` has 8 lines
+matching `y.MultiProvider.X`, but `y` is a local YAML-unmarshal
+struct (`mpagentYAML`, `mpsignerYAML`, etc.), not a
+`*tdns.MultiProviderConf`. Different code path, not part of the
+cutover.
+
+`shadow_mp_config.go` reads `conf.Config.MultiProvider` to do the
+shadow comparison — that's exactly what it should do until Bite 8
+removes the comparison entirely. Leave it.
+
+**Per-bite site counts (validated 2026-05-27):**
+
+| Bite | Scope          | Files | Sites |
+|------|----------------|-------|-------|
+| 2    | combiner-only  |   6   |  31   |
+| 3    | signer-only    |   3   |  22   |
+| 4    | agent-only     |   7   |  68   |
+| 5    | auditor-only   |   2   |   2   |
+| 6    | shared         |   9   |  41   |
+| **Total** |           | **27** | **164** |
+
+(Total exceeds the bite breakdown by ~27 because some files contain
+both `conf.Config.MultiProvider.X` shape sites and bare
+`conf.MultiProvider.X` shape sites, counted separately. The bare-
+shape sites all get handled within their owning bite where the
+function signature change is local — Bite 7 only catches the
+genuine `*tdns.Config` call sites that can't be locally converted.)
+
+### Bite 7: `*tdns.Config` call sites (revised 2026-05-27)
+After the bite-6 review, the deferred-to-Bite-7 backlog turned out
+to split into two camps:
+
+**(7a) Convert in Bite 7 — change signatures (option (a)/(b)):**
+Three crypto-init helpers, all called from `tdnsmp.MainInit` with
+`conf.Config`. Change signature `*tdns.Config` → `*tdnsmp.Config`;
+body reads `conf.MpConfig()`. All callers are in MainInit *after*
+the shadow parser has run, so `conf.InternalMp.MpConfig` is
+populated.
+
+    combiner_crypto.go  InitCombinerCrypto  ( 3 sites)
+    signer_transport.go initSignerCrypto    ( 1 site)
+    main_init.go        initAgentCrypto     ( 1 site, but uses a
+                                              local `mp` so 1 edit)
+
+**(7b) Defer to Bite 9 — see review notes below:**
+- `config_validate.go` (18 sites). Validators are wired via
+  `tdns.PostValidateConfigHook`, which fires *during*
+  `tdns.ValidateConfig`, which runs *before* the
+  `PostParseConfigHook` that populates `conf.InternalMp.MpConfig`.
+  Switching them to `conf.MpConfig()` would read nil at validation
+  time. They correctly validate the tdns-side parse today; when
+  Bite 9 moves `MultiProviderConf` *into* tdns-mp, the validators
+  move with it and will validate the (then-only) tdns-mp struct.
+  No-op until then.
+- `keys_cmd.go` `getKeysPrivKeyPath` (2 sites). `LoadConfigForKeys`
+  does a plain `yaml.Unmarshal` into a bare `tdns.Config`; it does
+  NOT call `ParseConfig`, so the shadow parser never runs.
+  Switching to `conf.MpConfig()` would read nil. When Bite 9 moves
+  the struct, `LoadConfigForKeys` needs a focused YAML decoder
+  targeting `*tdnsmp.MultiProviderConf`, and `getKeysPrivKeyPath`
+  takes `*tdnsmp.Config` then.
+- `main_init.go` line 82 `wiredMpConfig = conf.MultiProvider`. The
+  literal bridge between the two structs. Goes away in Bite 9 when
+  there is no tdns-side parse to copy from.
+
+**Net Bite 7 scope after review: 5 sites in 3 files.**
+Each is a signature change plus a body swap to `conf.MpConfig()`,
+plus updating the 3 callers in MainInit to pass `conf` instead of
+`conf.Config`.
 
 ### Bite 8: delete the shadow comparison
 Once all accessors are cut over, the comparison in

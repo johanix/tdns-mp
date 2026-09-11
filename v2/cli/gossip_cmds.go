@@ -3,10 +3,7 @@
  *
  * CLI commands for the /gossip endpoint.
  * Consolidated from the old agent-only agent_gossip_cmds.go; now
- * exposed under all MP roles (agent/combiner/signer). The CLI
- * workers gate non-agent roles with an "not applicable" message
- * because gossip is an agent-only protocol in practice — even
- * though the server-side handler is role-agnostic.
+ * exposed under all MP roles (agent/combiner/signer/auditor).
  */
 package cli
 
@@ -19,6 +16,7 @@ import (
 
 	tdnsmp "github.com/johanix/tdns-mp/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
+	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
@@ -57,85 +55,19 @@ func gossipRoleGuard(role string) bool {
 	return true
 }
 
-func runGossipGroupList(role string) {
+func runGossipZoneState(role, zone string) {
 	if gossipRoleGuard(role) {
 		return
 	}
 
-	resp, err := SendGossipCommand(role, tdnsmp.GossipPost{
-		Command: "gossip-group-list",
-	})
-	if err != nil {
-		log.Fatalf("Request failed: %v", err)
+	if zone == "" {
+		log.Fatal("--zone flag is required")
 	}
-	if resp.Error {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.ErrorMsg)
-		os.Exit(1)
-	}
-
-	groups, ok := resp.Data.([]interface{})
-	if !ok || len(groups) == 0 {
-		fmt.Println("No provider groups found.")
-		return
-	}
-
-	// Print header
-	fmt.Printf("%-12s %-40s %s\n", "GROUP", "MEMBERS", "ZONES")
-	fmt.Printf("%-12s %-40s %s\n", "-----", "-------", "-----")
-
-	for _, g := range groups {
-		entry, ok := g.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		name, _ := entry["name"].(string)
-		zoneCount := 0
-		if zc, ok := entry["zone_count"].(float64); ok {
-			zoneCount = int(zc)
-		}
-
-		// Format members
-		var memberStrs []string
-		if members, ok := entry["members"].([]interface{}); ok {
-			for _, m := range members {
-				if s, ok := m.(string); ok {
-					memberStrs = append(memberStrs, s)
-				}
-			}
-		}
-		membersStr := strings.Join(memberStrs, ", ")
-
-		// Format sample zones
-		var sampleStrs []string
-		if samples, ok := entry["sample_zones"].([]interface{}); ok {
-			for _, s := range samples {
-				if str, ok := s.(string); ok {
-					sampleStrs = append(sampleStrs, str)
-				}
-			}
-		}
-		zonesStr := strings.Join(sampleStrs, " ")
-		if zoneCount > len(sampleStrs) {
-			zonesStr += fmt.Sprintf(" (+%d more)", zoneCount-len(sampleStrs))
-		}
-
-		fmt.Printf("%-12s %-40s %s\n", name, membersStr, zonesStr)
-	}
-}
-
-func runGossipGroupState(role, groupName string) {
-	if gossipRoleGuard(role) {
-		return
-	}
-
-	if groupName == "" {
-		log.Fatal("--group flag is required")
-	}
+	zone = dns.Fqdn(zone)
 
 	resp, err := SendGossipCommand(role, tdnsmp.GossipPost{
-		Command:   "gossip-group-state",
-		GroupName: groupName,
+		Command: "gossip-zone-state",
+		Zone:    zone,
 	})
 	if err != nil {
 		log.Fatalf("Request failed: %v", err)
@@ -151,12 +83,9 @@ func runGossipGroupState(role, groupName string) {
 		return
 	}
 
-	// Print header
-	groupNameStr, _ := data["group_name"].(string)
-	groupHash, _ := data["group_hash"].(string)
-	fmt.Printf("Group: %s (hash: %s)\n", groupNameStr, groupHash)
+	zoneStr, _ := data["zone"].(string)
+	fmt.Printf("Zone: %s\n", zoneStr)
 
-	// Print election state
 	if el, ok := data["election"].(map[string]interface{}); ok {
 		status, _ := el["status"].(string)
 		switch status {
@@ -178,7 +107,6 @@ func runGossipGroupState(role, groupName string) {
 	}
 	fmt.Println()
 
-	// Get members list
 	var members []string
 	if mlist, ok := data["members"].([]interface{}); ok {
 		for _, m := range mlist {
@@ -193,17 +121,8 @@ func runGossipGroupState(role, groupName string) {
 		return
 	}
 
-	// Compute short names by stripping the longest label-aligned
-	// common suffix from the member identities. For
-	// [agent.hare.mp.axfr.net., agent.fox.mp.axfr.net.] the shared
-	// tail .mp.axfr.net. is removed, leaving agent.hare and
-	// agent.fox — the parts that distinguish them. Falls back to
-	// the full identity for any member that would otherwise become
-	// empty (e.g. an identity that is exactly the common suffix of
-	// another member).
 	shortNames := shortenMemberNames(members)
 
-	// Determine column width
 	colWidth := 14
 	for _, sn := range shortNames {
 		if len(sn)+2 > colWidth {
@@ -211,14 +130,12 @@ func runGossipGroupState(role, groupName string) {
 		}
 	}
 
-	// Print column headers
 	fmt.Printf("%-20s", "REPORTER / PEER")
 	for _, m := range members {
 		fmt.Printf("%-*s", colWidth, shortNames[m])
 	}
 	fmt.Printf("%-6s\n", "AGE")
 
-	// Print matrix rows
 	matrix, _ := data["matrix"].([]interface{})
 	for _, row := range matrix {
 		r, ok := row.(map[string]interface{})
@@ -228,10 +145,6 @@ func runGossipGroupState(role, groupName string) {
 		reporter, _ := r["reporter"].(string)
 		age, _ := r["age"].(string)
 		peerStates, _ := r["peer_states"].(map[string]interface{})
-		// beat_interval is the reporter's own configured local
-		// heartbeat interval in seconds. Zero or missing for old
-		// agents that don't gossip the field; in that case we show
-		// nothing rather than "(0s beats)".
 		beatInterval := 0
 		if v, ok := r["beat_interval"].(float64); ok {
 			beatInterval = int(v)
@@ -256,28 +169,18 @@ func runGossipGroupState(role, groupName string) {
 }
 
 // shortenMemberNames returns a map from full identity to a display
-// form with the longest label-aligned common suffix removed. The
-// suffix split is label-aligned so we never cut a label in half
-// (so [agent.hare.mp.axfr.net., agent.fox.mp.axfr.net.] strips
-// .mp.axfr.net. — not, say, .e.net.). Any member that would map to
-// the empty string keeps its full identity instead, which covers
-// single-member groups and the strict-suffix edge case
-// (e.g. agent.example. vs sub.agent.example.).
+// form with the longest label-aligned common suffix removed.
 func shortenMemberNames(members []string) map[string]string {
 	out := make(map[string]string, len(members))
 	if len(members) == 0 {
 		return out
 	}
 
-	// Split each identity into labels (no trailing-dot empty label).
 	labelLists := make([][]string, len(members))
 	for i, m := range members {
 		labelLists[i] = strings.Split(strings.TrimSuffix(m, "."), ".")
 	}
 
-	// Walk the shortest member from the right; stop at the first
-	// label position that differs across the set. The remaining
-	// prefix (labels[0:keep]) is what's distinctive.
 	shortest := len(labelLists[0])
 	for _, ll := range labelLists[1:] {
 		if len(ll) < shortest {
@@ -318,35 +221,24 @@ func shortenMemberNames(members []string) map[string]string {
 // under multiple parents (one per role) without sharing
 // cobra-internal state.
 func NewGossipCmd(role string) *cobra.Command {
-	var groupStateName string
+	var zoneName string
 
 	gossipCmd := &cobra.Command{
 		Use:   "gossip",
 		Short: "Gossip protocol commands",
 	}
-	groupCmd := &cobra.Command{
-		Use:   "group",
-		Short: "Provider group commands",
-	}
-	listCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all provider groups this peer belongs to",
-		Run:   func(cmd *cobra.Command, args []string) { runGossipGroupList(role) },
-	}
 	stateCmd := &cobra.Command{
 		Use:   "state",
-		Short: "Show gossip state matrix for a provider group",
-		Long: `Display the NxN state matrix for a provider group.
+		Short: "Show gossip state matrix for a zone",
+		Long: `Display the N×N state matrix for the provider group serving a zone.
 Each row is a reporting peer; each column shows that reporter's
 view of another peer's state. A healthy group shows OPERATIONAL
 in every non-diagonal cell.`,
-		Run: func(cmd *cobra.Command, args []string) { runGossipGroupState(role, groupStateName) },
+		Run: func(cmd *cobra.Command, args []string) { runGossipZoneState(role, zoneName) },
 	}
-	stateCmd.Flags().StringVar(&groupStateName, "group", "", "Provider group name or hash (required)")
+	stateCmd.Flags().StringVar(&zoneName, "zone", "", "Zone name (required)")
 
-	groupCmd.AddCommand(listCmd)
-	groupCmd.AddCommand(stateCmd)
-	gossipCmd.AddCommand(groupCmd)
+	gossipCmd.AddCommand(stateCmd)
 	return gossipCmd
 }
 

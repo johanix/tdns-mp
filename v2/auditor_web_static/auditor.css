@@ -36,6 +36,17 @@ h2 {
   line-height: 1.2;
 }
 
+.audit-zone-config-error {
+  color: #b00020;
+  background: #ffeaea;
+  border: 1px solid #e8a0a0;
+  padding: 0.75rem 1rem;
+  margin: 0 0 1rem;
+  border-radius: 4px;
+  font-size: 22px;
+  line-height: 1.4;
+}
+
 .audit-row-local {
   background: #f4f8ff;
 }

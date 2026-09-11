@@ -22,6 +22,7 @@ import (
 )
 
 func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) error {
+	mp := conf.MpConfig()
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
@@ -100,7 +101,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		leaderTTL = 60 * time.Minute
 	}
 	lem := NewLeaderElectionManager(
-		AgentId(conf.Config.MultiProvider.Identity), leaderTTL,
+		AgentId(mp.Identity), leaderTTL,
 		func(zone ZoneName, rfiType string, records map[string][]string) error {
 			return ar.broadcastElectToZone(zone, rfiType, records)
 		},
@@ -116,7 +117,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		count := 0
 		for _, agent := range zad.Agents {
-			if agent.Identity != AgentId(conf.Config.MultiProvider.Identity) && agent.IsAnyTransportOperational() {
+			if agent.Identity != AgentId(mp.Identity) && agent.IsAnyTransportOperational() {
 				count++
 			}
 		}
@@ -162,7 +163,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				if zd.Options[tdns.OptDelSyncChild] {
 					return // already set via static config
 				}
-				mp := conf.Config.MultiProvider
+				mp := conf.MpConfig()
 				if mp == nil {
 					return
 				}
@@ -367,9 +368,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		lgAgent.Info("starting agent-to-agent sync engine",
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
 		return tdns.APIdispatcherNG(conf.Config, syncrtr,
-			conf.Config.MultiProvider.Api.Addresses.Listen,
-			conf.Config.MultiProvider.Api.CertFile,
-			conf.Config.MultiProvider.Api.KeyFile,
+			mp.Api.Addresses.Listen,
+			mp.Api.CertFile,
+			mp.Api.KeyFile,
 			conf.Config.Internal.APIStopCh)
 	})
 

@@ -34,7 +34,8 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// registry unset, and the auditor engine below dereferences it.
 	// Refuse to start instead of panicking.
 	ar := conf.InternalMp.AgentRegistry
-	if conf.Config.MultiProvider == nil || ar == nil {
+	mp := conf.MpConfig()
+	if mp == nil || ar == nil {
 		return fmt.Errorf("auditor startup: multi-provider configuration missing (no agent registry)")
 	}
 
@@ -80,6 +81,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	stateManager := NewAuditStateManager()
 	stateManager.LocalIdentity = conf.Config.LocalIdentity()
 	conf.InternalMp.AuditStateManager = stateManager
+	ar.AuditState = stateManager
 	auditorEngine := NewAuditorEngine(conf, stateManager)
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
@@ -96,11 +98,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 
 	// Provider group recomputation hook. HSYNC changes reach RecomputeGroups
 	// through the hsync engine's OnHsync3Changed callback; the one-shot
-	// OnFirstLoad below covers the first load, and the AppTypeMPAuditor
-	// branch in MPZoneData.PostRefresh re-runs it on every zone transfer.
-	// RecomputeGroups is a pure function of zone data and does not require
-	// SharedZones / LocateAgent.
+	// OnFirstLoad below covers the first load, and PostRefresh re-runs it
+	// on every zone transfer. RecomputeGroups is a pure function of zone
+	// data and does not require SharedZones.
 	if ar != nil && ar.ProviderGroupManager != nil {
+		pgm := ar.ProviderGroupManager
 		for _, zoneName := range conf.Config.Internal.AllZones {
 			mpzd, exists := Zones.Get(zoneName)
 			if !exists {
@@ -109,13 +111,14 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 			if !mpzd.Options[tdns.OptMultiProvider] {
 				continue
 			}
-			pgm := ar.ProviderGroupManager
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				lgAuditor.Debug("OnFirstLoad: recomputing provider groups", "zone", zd.ZoneName)
 				pgm.RecomputeGroups()
+				stateManager.RefreshZoneHSYNCConfig(zd.ZoneName)
 			})
+			stateManager.RefreshZoneHSYNCConfig(zoneName)
 		}
-		ar.ProviderGroupManager.RecomputeGroups()
+		pgm.RecomputeGroups()
 	}
 
 	// Phase B: persistent event log.
@@ -161,8 +164,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// peers. Auditors must accept these; refusing them would break
 	// the protocol's expectation that every HSYNC3 member is
 	// reachable.
-	mp := conf.Config.MultiProvider
-	if mp != nil && len(mp.Api.Addresses.Listen) > 0 {
+	if len(mp.Api.Addresses.Listen) > 0 {
 		syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 		if err != nil {
 			lgAuditor.Error("failed to set up sync API router", "err", err)

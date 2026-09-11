@@ -11,6 +11,8 @@
 package tdnsmp
 
 import (
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -18,9 +20,46 @@ import (
 	"github.com/miekg/dns"
 )
 
-// wiredMultiProvider is set once from MainInit after config parse; EnsureMP
-// copies it onto each *MPState so lazy-created MPZoneData wrappers see it.
-var wiredMultiProvider *tdns.MultiProviderConf
+// wiredMpConfig is set by RegisterMpConfigParser's hook during
+// tdns.ParseConfig (SetMpConfig mirrors it here at the moment the
+// parse completes). EnsureMP copies it onto each *MPState
+// so lazy-created MPZoneData wrappers see it. It is exposed via
+// WiredMpConfig() for callers that do not have a *tdnsmp.Config in
+// hand.
+//
+// Concurrency: ParseConfig runs again on SIGHUP / "config reload-zones"
+// while runtime goroutines are reading wiredMpConfig. Use an atomic
+// pointer so writes during reload don't race with reads from those
+// goroutines.
+var wiredMpConfig atomic.Pointer[MultiProviderConf]
+
+// WiredMpConfig returns the MP config wired in by the config parser.
+// Returns nil before ParseConfig has run or when no multi-provider:
+// block is present in the config.
+func WiredMpConfig() *MultiProviderConf {
+	return wiredMpConfig.Load()
+}
+
+// verifyMpConfigAccessors sanity-checks the two MpConfig accessors
+// added in bite 1 of the MP config cutover. Runs once at boot, right
+// after wiredMpConfig is assigned. Both accessors must return non-nil
+// and the conf-method accessor must return the shadow parse.
+//
+// The accessors are not yet read by any runtime call site (that lands
+// in subsequent bites); this just proves they wire up correctly before
+// any call site depends on them.
+func verifyMpConfigAccessors(conf *Config) error {
+	if WiredMpConfig() == nil {
+		return fmt.Errorf("WiredMpConfig() returned nil after MainInit")
+	}
+	if conf.MpConfig() == nil {
+		return fmt.Errorf("conf.MpConfig() returned nil after MainInit")
+	}
+	if conf.MpConfig() != WiredMpConfig() {
+		return fmt.Errorf("conf.MpConfig() and WiredMpConfig() disagree")
+	}
+	return nil
+}
 
 // MPState holds all multi-provider runtime state for a zone.
 // Same fields as tdns.ZoneMPExtension plus RemoteDNSKEYs
@@ -28,7 +67,7 @@ var wiredMultiProvider *tdns.MultiProviderConf
 type MPState struct {
 	CombinerData         *core.ConcurrentMap[string, OwnerData]
 	UpstreamData         *core.ConcurrentMap[string, OwnerData]
-	MultiProvider        *tdns.MultiProviderConf
+	MultiProvider        *MultiProviderConf
 	MPdata               *MPdata
 	AgentContributions   map[string]map[string]map[uint16]core.RRset
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
@@ -49,7 +88,7 @@ func (mpzd *MPZoneData) EnsureMP() {
 		mpzd.MP = &MPState{}
 	}
 	if mpzd.MP.MultiProvider == nil {
-		mpzd.MP.MultiProvider = wiredMultiProvider
+		mpzd.MP.MultiProvider = wiredMpConfig.Load()
 	}
 	if mpzd.MPOptions == nil {
 		mpzd.MPOptions = make(map[tdns.ZoneOption]bool)

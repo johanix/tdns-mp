@@ -75,7 +75,7 @@ func msgQsSynchedDataUpdate(conf *Config) chan *SynchedDataUpdate {
 }
 
 func (e *HsyncDataEngine) runAgentOnly(ctx context.Context, msgQs *MsgQs) {
-	ourID := AgentId(e.conf.Config.MultiProvider.Identity)
+	ourID := AgentId(e.conf.MpConfig().Identity)
 	registry := e.conf.InternalMp.AgentRegistry
 	syncQ := e.conf.InternalMp.SyncQ
 	synchedDataUpdateQ := msgQs.SynchedDataUpdate

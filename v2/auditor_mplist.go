@@ -145,22 +145,41 @@ func (mpzd *MPZoneData) hsync3RecordsByLabel() map[string]core.HSYNC3 {
 	return out
 }
 
-func collectZoneMemberLabels(info MPZoneInfo, hsync3 map[string]core.HSYNC3) []string {
+// declaredRoleLabels returns HSYNCPARAM servers/signers/auditors labels only.
+func declaredRoleLabels(info MPZoneInfo) []string {
 	seen := make(map[string]bool)
+	var out []string
 	for _, list := range [][]string{info.Servers, info.Signers, info.Auditors} {
 		for _, lbl := range list {
-			seen[normalizeHSYNC3Label(lbl)] = true
+			lbl = normalizeHSYNC3Label(lbl)
+			if lbl == "" || seen[lbl] {
+				continue
+			}
+			seen[lbl] = true
+			out = append(out, lbl)
 		}
-	}
-	for lbl := range hsync3 {
-		seen[lbl] = true
-	}
-	out := make([]string, 0, len(seen))
-	for lbl := range seen {
-		out = append(out, lbl)
 	}
 	slices.Sort(out)
 	return out
+}
+
+// zoneGossipMatrixColumns returns HSYNCPARAM role labels and their HSYNC3
+// identities for gossip matrix columns. Labels are not deduplicated by
+// identity (cpt and fox may both point at the same agent).
+func zoneGossipMatrixColumns(zone string) ([]string, map[string]string) {
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return nil, nil
+	}
+	labels := declaredRoleLabels(MPZoneInfoFromMPZoneData(mpzd))
+	byLabel := mpzd.hsync3IdentitiesByLabel()
+	l2i := make(map[string]string, len(labels))
+	for _, lbl := range labels {
+		if id := byLabel[lbl]; id != "" {
+			l2i[lbl] = id
+		}
+	}
+	return labels, l2i
 }
 
 // SnapshotZoneMPView builds mplist-style HSYNCPARAM data plus a row per
@@ -199,7 +218,7 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 		localIdentity = dns.Fqdn(localIdentity)
 	}
 
-	for _, label := range collectZoneMemberLabels(info, hsync3) {
+	for _, label := range declaredRoleLabels(info) {
 		row := ZoneMemberRoleDTO{
 			Label:   label,
 			Server:  labelInRoleList(info.Servers, label),

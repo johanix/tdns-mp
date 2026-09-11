@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width">
-  <title>Sign in — TDNS Auditor</title>
-  <link rel="stylesheet" href="/web/static/auditor.css?v=7">
+  <title>Sign in — TDNS Multi-Provider Auditor</title>
+  <link rel="stylesheet" href="/web/static/auditor.css?v=9">
   <meta http-equiv="Cache-Control" content="no-store">
 </head>
 <body class="audit-ui">
   <main class="audit-main">
     <article style="max-width: 28rem; margin: 2rem auto;">
-      <header><strong>TDNS Auditor</strong></header>
+      <header><strong>TDNS Multi-Provider Auditor</strong></header>
       <h3>Sign in</h3>
       {{if .Error}}<article class="audit-error">{{.Error}}</article>{{end}}
       <form method="POST" action="/web/login">

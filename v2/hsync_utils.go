@@ -830,7 +830,7 @@ func ValidateHsyncRRset(zd *tdns.ZoneData) (bool, error) {
 // HSYNC3 records. For roles with a single identity (agent, auditor) this is
 // mp.Identity. For roles managing multiple agents (combiner, signer) it is the
 // configured agent identities from mp.Agents.
-func ourHsyncIdentities(mp *tdns.MultiProviderConf) []string {
+func ourHsyncIdentities(mp *MultiProviderConf) []string {
 	var ids []string
 	if mp == nil {
 		return ids
@@ -1067,7 +1067,7 @@ func (mpzd *MPZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel str
 //	signed and we are not a signer), auditors may not.
 //
 // If guard 1-3 fails, zd.MP.MPdata is set to nil.
-func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
+func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
 	mpzd.EnsureMP()
 	// Guard 1: static config must declare this as an MP zone
 	if !mpzd.Options[tdns.OptMultiProvider] {
@@ -1171,7 +1171,7 @@ func (mpzd *MPZoneData) populateMPdata(mp *tdns.MultiProviderConf) {
 
 // weAreASigner is a convenience wrapper that checks provider membership first,
 // then signer status.
-func (mpzd *MPZoneData) weAreASigner(mp *tdns.MultiProviderConf) (bool, error) {
+func (mpzd *MPZoneData) weAreASigner(mp *MultiProviderConf) (bool, error) {
 	ids := ourHsyncIdentities(mp)
 	matched, label, err := mpzd.matchHsyncIdentity(ids)
 	if err != nil {
@@ -1254,7 +1254,7 @@ func (mpzd *MPZoneData) snapshotUpstreamData(src *tdns.ZoneData) {
 // For agents: also performs KEYSTATE RFI to signer (blocking).
 // Stores results in zd.MP.RefreshAnalysis for post-refresh callbacks.
 // For combiners: snapshots upstream data and adds contributions to new_zd.
-func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *tdns.MultiProviderConf) {
+func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs, mp *MultiProviderConf) {
 	mpzd.EnsureMP()
 	analysis := &ZoneRefreshAnalysis{}
 
@@ -1410,6 +1410,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
 func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
+	if tdns.Globals.App.Type == AppTypeMPAuditor && mpzd.Options[tdns.OptMultiProvider] {
+		if tm != nil && tm.agentRegistry != nil && tm.agentRegistry.AuditState != nil {
+			tm.agentRegistry.AuditState.RefreshZoneHSYNCConfig(mpzd.ZoneName)
+		}
+	}
 	if mpzd.MP == nil || mpzd.MP.RefreshAnalysis == nil {
 		return
 	}

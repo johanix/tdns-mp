@@ -194,13 +194,12 @@ tdns-mpcli auditor peer list
 tdns-mpcli auditor peer ping --id agent.alpha.example.
 tdns-mpcli auditor peer reset --id agent.alpha.example.
 
-tdns-mpcli auditor gossip group list
-tdns-mpcli auditor gossip group state --group g_3a8f1c
+tdns-mpcli auditor gossip state --zone customer.mptest.
 ```
 
 Behaviour matches the agent equivalents documented in
 [Operation and Debugging](operation-and-debugging.md).
-In particular `gossip group state` is the way to see
+In particular `gossip state --zone` is the way to see
 the matrix *from the auditor's vantage point* — useful
 when the auditor disagrees with what the agents think
 about each other.

@@ -586,5 +586,5 @@ customer.zone.        secondary  MapZone  false  false  [delegation-sync-child m
 tdns-mpcli agent peer list
 
 # Gossip state (if multiple providers configured)
-tdns-mpcli agent gossip group list
+tdns-mpcli agent gossip state --zone customer.mptest.
 ```

@@ -82,7 +82,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 		switch req.Command {
 		case "list":
 			// List all distributions from this agent
-			senderID := string(conf.Config.MultiProvider.Identity)
+			senderID := string(conf.MpConfig().Identity)
 			infos := cache.List(senderID)
 
 			summaries := make([]*DistributionSummary, 0, len(infos))
@@ -292,7 +292,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 // ListKnownPeers returns all peers that have working keys established
 func ListKnownPeers(conf *Config) []PeerInfo {
 	var peers []PeerInfo
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 
 	// For combiners: list all configured agents
 	if mp != nil && len(mp.Agents) > 0 {
@@ -580,7 +580,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 // listPeerSharedZones returns shared zones for each peer agent
 func listPeerSharedZones(conf *Config) []interface{} {
 	data := make([]interface{}, 0)
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 
 	if conf.InternalMp.AgentRegistry == nil {
 		return data
@@ -638,7 +638,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 // listAgentsForZone returns peer agents that share a specific zone
 func listAgentsForZone(conf *Config, zoneName string) []string {
 	agents := make([]string, 0)
-	mp := conf.Config.MultiProvider
+	mp := conf.MpConfig()
 
 	if conf.InternalMp.AgentRegistry == nil {
 		return agents

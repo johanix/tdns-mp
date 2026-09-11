@@ -397,13 +397,15 @@ func (m *AuditStateManager) SnapshotAllAuditors() []AuditProviderSummary {
 // state matrix. Rows are members reporting (their own MemberState);
 // columns are peers; cells are state strings.
 type GossipMatrixDTO struct {
-	GroupHash string            `json:"group_hash"`
-	GroupName string            `json:"group_name,omitempty"`
-	Members   []string          `json:"members"`
-	Rows      []GossipMemberRow `json:"rows"`
-	Election  GossipElectionDTO `json:"election,omitempty"`
-	ZoneCount int               `json:"zone_count"`
-	Zones     []string          `json:"zones,omitempty"`
+	GroupHash       string            `json:"group_hash"`
+	GroupName       string            `json:"group_name,omitempty"`
+	Members         []string          `json:"members"`
+	ColumnLabels    []string          `json:"column_labels,omitempty"`
+	LabelToIdentity map[string]string `json:"label_to_identity,omitempty"`
+	Rows            []GossipMemberRow `json:"rows"`
+	Election        GossipElectionDTO `json:"election,omitempty"`
+	ZoneCount       int               `json:"zone_count"`
+	Zones           []string          `json:"zones,omitempty"`
 }
 
 // GossipMemberRow is one member's report of their view of all peers.
@@ -484,56 +486,23 @@ func SnapshotGossip(ar *AgentRegistry) []GossipMatrixDTO {
 	}
 	gst.mu.RUnlock()
 
-	now := time.Now()
 	out := make([]GossipMatrixDTO, 0, len(snaps))
 	for _, g := range snaps {
-		// The inner States map is written by the inbound beat path under
-		// gst.mu; the union must range over it with the lock still held.
-		gst.mu.RLock()
-		states := gst.States[g.hash]
-		members := unionGossipMembers(g.members, states)
-		gst.mu.RUnlock()
-
-		dto := GossipMatrixDTO{
+		pg := &ProviderGroup{
 			GroupHash: g.hash,
-			Members:   members,
-			ZoneCount: len(g.zones),
+			Name:      g.name,
+			Members:   g.members,
+			Zones:     g.zones,
 		}
-		if g.name != "" {
-			dto.GroupName = g.name
+		if dto := snapshotGossipMatrix(ar, pg, g.hash, ""); dto != nil {
+			out = append(out, *dto)
 		}
-		for _, z := range g.zones {
-			dto.Zones = append(dto.Zones, string(z))
-		}
-		gst.mu.RLock()
-		if states != nil {
-			reported := make(map[string]bool, len(states))
-			for reporter, ms := range states {
-				reported[reporter] = true
-				dto.Rows = append(dto.Rows, gossipMemberRow(reporter, ms, now))
-			}
-			for _, member := range members {
-				if reported[member] {
-					continue
-				}
-				dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
-			}
-		}
-		if elec := gst.Elections[g.hash]; elec != nil {
-			dto.Election = GossipElectionDTO{
-				Leader:       elec.Leader,
-				Term:         elec.Term,
-				LeaderExpiry: elec.LeaderExpiry,
-			}
-		}
-		gst.mu.RUnlock()
-		slices.SortFunc(dto.Rows, func(a, b GossipMemberRow) int {
-			return strings.Compare(a.Reporter, b.Reporter)
-		})
-		out = append(out, dto)
 	}
 	slices.SortFunc(out, func(a, b GossipMatrixDTO) int {
-		return strings.Compare(a.GroupHash, b.GroupHash)
+		if len(a.Zones) > 0 && len(b.Zones) > 0 {
+			return strings.Compare(a.Zones[0], b.Zones[0])
+		}
+		return strings.Compare(strings.Join(a.Members, ","), strings.Join(b.Members, ","))
 	})
 	return out
 }
@@ -576,37 +545,86 @@ func gossipMemberRow(reporter string, ms *MemberState, now time.Time) GossipMemb
 	return row
 }
 
-// SnapshotGossipForZone returns gossip matrices for groups tied to zone
-// (listed in the group or any member is an apex HSYNC3 identity).
+// SnapshotGossipForZone returns the gossip matrix for the single provider
+// group that serves zone (same resolution as gossip-zone-state API).
 func SnapshotGossipForZone(ar *AgentRegistry, zone string) []GossipMatrixDTO {
-	all := SnapshotGossip(ar)
 	if zone == "" {
-		return all
+		return SnapshotGossip(ar)
 	}
-	zone = dns.Fqdn(zone)
-	ids := zoneMemberIdentities(zone)
-	var out []GossipMatrixDTO
-	for _, g := range all {
-		if gossipGroupMatchesZone(g, zone, ids) {
-			out = append(out, g)
-		}
+	pg, hash, err := providerGroupForGossipZone(ar, dns.Fqdn(zone))
+	if err != nil {
+		return nil
 	}
-	return out
+	dto := snapshotGossipMatrix(ar, pg, hash, zone)
+	if dto == nil {
+		return nil
+	}
+	return []GossipMatrixDTO{*dto}
 }
 
-func gossipGroupMatchesZone(g GossipMatrixDTO, zone string, zoneIDs map[string]bool) bool {
-	for _, z := range g.Zones {
-		if dns.Fqdn(z) == zone {
-			return true
+// snapshotGossipMatrix builds one gossip matrix DTO for a provider group.
+// When zone is set, columns are HSYNCPARAM role labels (multiple labels
+// may share one HSYNC3 identity); otherwise columns are member identities.
+func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone string) *GossipMatrixDTO {
+	if ar == nil || ar.GossipStateTable == nil || pg == nil {
+		return nil
+	}
+	gst := ar.GossipStateTable
+	now := time.Now()
+	// Everything read from the state table is read under gst.mu: the
+	// inbound beat path writes the inner map under the same lock, and a
+	// concurrent range over it is a fatal runtime error, not a race report.
+	gst.mu.RLock()
+	states := gst.States[groupHash]
+	haveStates := states != nil
+	members := unionGossipMembers(pg.Members, states)
+	rows := make([]GossipMemberRow, 0, len(states))
+	reported := make(map[string]bool, len(states))
+	for reporter, ms := range states {
+		reported[reporter] = true
+		rows = append(rows, gossipMemberRow(reporter, ms, now))
+	}
+	var elec *GroupElectionState
+	if e := gst.Elections[groupHash]; e != nil {
+		cp := *e
+		elec = &cp
+	}
+	gst.mu.RUnlock()
+
+	dto := &GossipMatrixDTO{
+		GroupHash: pg.GroupHash,
+		GroupName: pg.Name,
+		ZoneCount: len(pg.Zones),
+	}
+	if zone != "" {
+		dto.ColumnLabels, dto.LabelToIdentity = zoneGossipMatrixColumns(zone)
+	} else {
+		dto.Members = members
+	}
+	for _, z := range pg.Zones {
+		dto.Zones = append(dto.Zones, string(z))
+	}
+	if haveStates {
+		dto.Rows = append(dto.Rows, rows...)
+	}
+	// A declared member that has not reported gossip still gets a row, in
+	// both the group view and the zone view: a silent member is exactly
+	// what the matrix exists to show.
+	for _, member := range members {
+		if reported[member] {
+			continue
+		}
+		dto.Rows = append(dto.Rows, GossipMemberRow{Reporter: member})
+	}
+	if elec != nil {
+		dto.Election = GossipElectionDTO{
+			Leader:       elec.Leader,
+			Term:         elec.Term,
+			LeaderExpiry: elec.LeaderExpiry,
 		}
 	}
-	if len(zoneIDs) == 0 {
-		return false
-	}
-	for _, m := range g.Members {
-		if zoneIDs[dns.Fqdn(m)] {
-			return true
-		}
-	}
-	return false
+	slices.SortFunc(dto.Rows, func(a, b GossipMemberRow) int {
+		return strings.Compare(a.Reporter, b.Reporter)
+	})
+	return dto
 }

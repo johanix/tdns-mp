@@ -153,7 +153,8 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 // retired→mpremove, mpdist→published) so agents learn about the change and can
 // distribute it to remote agents.
 func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
-	if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
+	mp := conf.MpConfig()
+	if mp == nil || len(mp.Agents) == 0 {
 		return
 	}
 	tm := conf.InternalMp.MPTransport
@@ -161,7 +162,7 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 		lgSigner.Warn("pushKeystateInventoryToAllAgents: no TransportManager", "zone", zone)
 		return
 	}
-	for _, agent := range conf.MultiProvider.Agents {
+	for _, agent := range mp.Agents {
 		if agent.Identity == "" {
 			continue
 		}
@@ -221,7 +222,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 
 	// Build and send KEYSTATE inventory
 	req := &transport.KeystateRequest{
-		SenderID:     conf.MultiProvider.Identity,
+		SenderID:     conf.MpConfig().Identity,
 		Zone:         zone,
 		Signal:       "inventory",
 		KeyInventory: inventory,

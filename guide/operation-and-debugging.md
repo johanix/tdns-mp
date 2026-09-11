@@ -139,7 +139,7 @@ the N×N matrix shows OPERATIONAL.
 ### 3.1 List groups
 
 ```
-$ tdns-mpcli agent gossip group list
+$ tdns-mpcli agent gossip state --zone customer.mptest.
 
 GROUP        MEMBERS                                                            ZONES
 -----        -------                                                            -----
@@ -154,7 +154,7 @@ plus a count of any others.
 ### 3.2 The gossip matrix
 
 ```
-$ tdns-mpcli agent gossip group state --group g_3a8f1c
+$ tdns-mpcli agent gossip state --zone customer.mptest.
 
 Group: g_3a8f1c (hash: 3a8f1c2b0e9d4f...)
 Leader: agent.alpha.example. (term 4, expires in 47m12s)
@@ -315,7 +315,7 @@ When something is wrong, walk down the stack:
 3. For each peer not OPERATIONAL: **`agent peer ping
    --id <them>`** and **`agent peer apiping --id <them>`**
    to isolate transport vs API.
-4. **`agent gossip group state --group <g>`** — does the
+4. **`agent gossip state --zone <zone>`** — does the
    matrix agree the group is healthy?
 5. **`combiner zone mplist`** — is the zone loaded with
    the expected MP options on every combiner?
