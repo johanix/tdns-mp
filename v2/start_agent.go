@@ -17,6 +17,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 )
@@ -182,6 +183,27 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
 						lgAgent.Error("SetupZoneSync failed in MP OnFirstLoad", "zone", zd.ZoneName, "err", err)
 					}
+				}
+			})
+		}
+		// Peers and provider groups, once the zone is Ready. The HSYNC diff
+		// PostRefresh applies on the first load runs before tdns marks the
+		// zone Ready (tdns sets Ready only when the first load completes), so
+		// ApplyHsyncDiff cannot read the zone view and registers nobody, and
+		// RecomputeGroups skips the zone. The peers would wait for the
+		// periodic ReconcileZone (60 s) and the groups for an HSYNC3 change.
+		// Must run before the election callback, which looks the zone's group
+		// up.
+		if mpzd.Options[tdns.OptMultiProvider] {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				if ar.HsyncEngine != nil {
+					if _, _, err := ar.HsyncEngine.ReconcileZone(hsync.ZoneName(zd.ZoneName)); err != nil {
+						lgAgent.Warn("OnFirstLoad: reconciling zone peers failed", "zone", zd.ZoneName, "err", err)
+					}
+				}
+				if ar.ProviderGroupManager != nil {
+					lgAgent.Debug("OnFirstLoad: recomputing provider groups", "zone", zd.ZoneName)
+					ar.ProviderGroupManager.RecomputeGroups()
 				}
 			})
 		}
