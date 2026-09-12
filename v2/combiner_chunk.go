@@ -1046,6 +1046,17 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 			if !parseOk && len(parsedRRs) == 0 && len(op.Records) > 0 {
 				continue
 			}
+			// The agent's guard, on the combiner's side of the same queue:
+			// the agent forwards a peer's REPLACEs to its combiner in the
+			// order it applied them, and the queue can still deliver an
+			// older one after a newer one. The newest origin wins here too.
+			if stale, applied := staleCombinerReplace(req, zonename, rrtype); stale {
+				lgCombiner.Warn("ignored a stale REPLACE: older than the one applied",
+					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
+					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
+					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+				continue
+			}
 
 			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
 				senderIsLocal := localAgents[req.SenderID]
@@ -1498,6 +1509,35 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 	}
 
 	return false, ""
+}
+
+// combinerReplaceOrigins records, per (zone, sender, rrtype), where the
+// REPLACE last applied came from: the delivering agent's enqueue time and
+// distribution id. In memory only; a restart re-hydrates contributions and
+// the peers re-announce.
+var combinerReplaceOrigins = struct {
+	mu sync.Mutex
+	m  map[string]replaceOrigin
+}{m: map[string]replaceOrigin{}}
+
+// staleCombinerReplace answers whether a REPLACE is older than the one last
+// applied for the same (zone, sender, rrtype) -- an earlier time, or the same
+// time and a lower distribution id -- and records it as the newest when it
+// is not. A request without a time is never stale.
+func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
+	if req.Timestamp.IsZero() {
+		return false, replaceOrigin{}
+	}
+	key := zonename + "|" + req.SenderID + "|" + dns.TypeToString[rrtype]
+	combinerReplaceOrigins.mu.Lock()
+	defer combinerReplaceOrigins.mu.Unlock()
+	if cur, ok := combinerReplaceOrigins.m[key]; ok {
+		if cur.Time.After(req.Timestamp) || (cur.Time.Equal(req.Timestamp) && cur.DistID > req.DistributionID) {
+			return true, cur
+		}
+	}
+	combinerReplaceOrigins.m[key] = replaceOrigin{Time: req.Timestamp, DistID: req.DistributionID}
+	return false, replaceOrigin{}
 }
 
 // checkContentPolicy applies content-based policy checks to a parsed RR.
