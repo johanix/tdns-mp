@@ -1,11 +1,12 @@
 # Transport redesign: leftovers, warts, and a cleanup plan
 
-Date: 2026-09-12, revision 5. Status: APPROVED 2026-09-12 by the operator,
-with these decisions: the API mechanism is a peer of DNS (step 5 as
-written); the tdns-mp branch is cut from the tip of PR #50, which pins the
-tip of tdns #622; the HPKE primitive layer is kept and the rest of the HPKE
-code goes (step 7); the rig runs use the lab. Implementation starts from
-this revision on one feature branch per repository.
+Date: 2026-09-12, revision 6 (2026-09-13). Status: APPROVED 2026-09-12 by
+the operator, with these decisions: the API mechanism is a peer of DNS
+(step 5 as written); the tdns-mp branch is cut from the tip of PR #50,
+which pins the tip of tdns #622; the HPKE primitive layer is kept and the
+rest of the HPKE code goes (step 7); the rig runs use the lab. IMPLEMENTED
+2026-09-12/13 from r5 on `cleanup/transport-leftovers` in both
+repositories (tdns-transport #13, tdns-mp #53); section 8 is the record.
 
 Revision history:
 
@@ -18,9 +19,13 @@ Revision history:
 - r4 (`0478c3c`): after the third pass (verdict "approve"), step 1 is
   transport-only as its header says; tdns-mp's switch to the typed
   accessors rides in step 2.
-- r5 (this text): approved. Step 7's HPKE deletion narrowed to what the
+- r5 (`829c35a`): approved. Step 7's HPKE deletion narrowed to what the
   coming COSE-HPKE work will not reuse; the operator's decisions recorded
   in the status line.
+- r6 (this text): the implementation record, section 8: what landed per
+  step and where it differed, the finding that the HTTPS mechanism had
+  never worked end to end, F3 measured and the rule that replaces its
+  target, the rig runs. Sections 1 to 7 are as approved.
 
 Code examined, in detached read-only worktrees under `tdns-project/fbreak/`:
 tdns-mp `b8bba004` (tip of PR #50), tdns-transport `c619f2a` (main), tdns
@@ -456,3 +461,112 @@ adds them as named steps:
   residual: step 1 claimed the accessors were used from both repositories
   while its header said transport only; r4 keeps step 1 transport-only and
   moves the tdns-mp call-site switch into step 2.
+
+## 8. Implementation record, 2026-09-12/13 (revision 6)
+
+Implemented unattended from r5 on `cleanup/transport-leftovers` in both
+repositories (tdns-transport PR #13, tdns-mp PR #53; the tdns-mp branch is
+cut from PR #50's tip `32e0ed9`, pinning tdns `c750b9eb`). One commit per
+step per repository, each pinning tdns-mp to the transport commit it needs.
+
+| Step | tdns-transport | tdns-mp | As planned, and what differed |
+|---|---|---|---|
+| 1 pipeline | `b1a6c34` | `e492b54` | The three middleware and their tests deleted; `RouterConfig` trimmed; the context's typed accessors in `message_context.go`. Differed: tdns-mp needed a four-line follow-up (it set the deleted `RouterConfig` fields); the dispatch gate reads the "message_type" key, kept as `SetHandledType`/`HandledType`; `cmd/transport-exercise` failed on main before this step (its discovery check ran without payload crypto) and now configures a JOSE `PayloadCrypto`. |
+| 2 parser, verb field | `08eb74b` | `ccb75c7` | `ParseApp` required; `IncomingMessage.Type` gone; the exercise's own parser proves a second consumer. As planned. |
+| 3 C4b | `7674ab4` | none | `wire_own.go` with the goldens byte-identical. Kept the empty `tlsa` object in the hello (F1 drops it). |
+| 4 F2b | `12fc38a` | `7ef9ab3` + `0dc04c8` | First commit: `ChunkStore` and `ServeChunkQueries` in transport, the manifest's `envelope` field, tdns-mp's serve side deleted. The second commit (the sniff removal) is the declared one-release-later delta and is not on the branch. |
+| 5 API mechanism | `7d3678e` | `8e1573f` + `26332f8` | See the finding below. `ReplySink`, `RouteAPIPayload`, `IncomingMessage.Mechanism`; tdns-mp's four endpoints enter the pipeline through `api_receive.go`; `SendApi*`, `EvaluateHello` (the same participant policy as the pipeline's `isInHSYNC`) and the endpoints' verb switches deleted; the bridge builds the handler and the router for every mechanism. |
+| 6 engine mirrors | none | `9c0e5d2` | Gossip types aliased to `hsync`, converters deleted, `hsync.PeerState` deleted, one `InboundHandler`. Differed: no `Engine.IsLegacy`; LEGACY stays derived in `agent_view.go` because it needs the registry's participant view. |
+| 7 crypto seam | `f32e048` | `c9165a4` | `crypto.Backend` grew `Envelope`, `PublicFromPrivate`, `EncryptAndSign`, `DecryptAndVerify`; the cross-decrypt gate `crypto_seam_test.go` with fixtures; per the operator's decision the HPKE primitive layer (`hpke/hpke.go` and its tests) stays and the stub backend, its transport plumbing and the unused half of `distrib` go (36 files). tdns-mp: `mp_crypto.go` with the `crypto_backend` key. |
+| 8 F2, F3 | `d6141c4` | `06d7361` | F3: 58 identifiers and two types unexported under the rule below; the import-boundary gate `imports_test.go`. F2: the `Agent.State` shadow retired for `AgentInfo` (L6), the `hsync-peer-status` stub deleted (L2), W22, W23, `agent_utils.go:94`. L2's document items were already done on the branch base; there is no `init.go` in tdns-mp `v2/` (the receive-path guide is in `mp_verbs.go`, re-read in step 2). |
+
+### 8.1 Finding: the HTTPS mechanism had never worked end to end
+
+Step 5's golden commit showed that transport's `APITransport` posted a
+snake_case body (`sender_id`, `message_type`) that no tdns-mp endpoint ever
+decoded: the endpoints read the PascalCase `Agent*Post` structs, and every
+tdns-mp `SendApi*` sender was dead because `agent.Api` was never
+constructed. The mechanism therefore had no working sender-receiver pair
+before this step, in either direction. Resolution, within step 5's
+INVARIANT: transport's hello, beat and ping over HTTPS post the DNS wire
+structs of step 3 byte for byte (`testdata/golden-wire`), an application
+message's payload goes verbatim to `/msg`, and the receiver's reply object
+(`testdata/golden-api`, locked before the change) is the confirmation.
+`SendApp` keeps the sync-family gate on `/msg` because that is what every
+receiver in the field accepts there. An HTTPS beat carries no beat
+interval (the wire struct has none); the receiver reports the default.
+
+### 8.2 F3, measured
+
+Non-test files of package `transport`, exported: 65 types, 21 functions,
+114 methods, 12 constants and variables (before step 8: 67, 33, 146, 12).
+The r5 target "under 30 types" predates any count and is withdrawn; the
+rule that replaces it: **an identifier is exported when a consumer
+(tdns-mp, `cmd/transport-exercise`) references it, implements it
+(`ReplySink`, `ChunkStore`), or needs it for the error contract
+(`TransportError`, `NewTransportError`, `Unwrap`).** What remains exported
+and unreferenced is the `Peer`, `PeerRegistry` and `TransportManager` API
+that pairs with methods tdns-mp does use (the `SetMechanism*` setters with
+their getters); a later pass may take those. `imports_test.go` is the
+"no MP-coupled imports" gate: the package imports `tdns/v2` (the resolver,
+`imr.go`), `tdns/v2/core` and `tdns/v2/edns0`, and its own `crypto` and
+`distrib`.
+
+### 8.3 Rig runs
+
+Three runs of the operator's comms rig in the lab (the rig of 2026-09-11,
+with two knobs added for these runs: the mechanisms the daemons enable and
+the chunk mode), each a cold start of three providers and an auditor from
+the cleanup arm (tdns-mp `06d7361`, tdns-transport `d6141c4`, tdns
+`c750b9eb`), 2026-09-12 22:04 to 22:25 UTC:
+
+| Run | Configuration | Converged | verify | data |
+|---|---|---|---|---|
+| 1 | DNS only, payload in the NOTIFY (the default) | ~10 s | 74 PASS / 0 FAIL | not run |
+| 2 | DNS only, chunk mode query (step 4) | ~10 s | 74 / 0 | D0 to D8: 189 PASS / 0 FAIL |
+| 3 | API and DNS (step 5) | ~10 s | 74 / 0 | not run |
+
+Run 1 is the baseline: the same result the branch base gave. Run 2 is step
+4's evidence: every hello, beat, sync and update travelled the labelled
+query-mode chain (the sender's `ServeChunkQueries`, the manifest's
+`envelope` field) and the data path passed in full. One observation: at
+the cold start the combiner's and signer's first manifest fetch was refused
+because the agent's listener was not up when its first NOTIFY went out;
+the reliable queue's retry cleared it. The same order holds for the DNS
+mechanism's inline payload and predates this work.
+
+Run 3 is step 5's evidence, and a finding. With both mechanisms on,
+one provider's HTTPS hellos to the other two providers and to the auditor
+were all accepted: each receiver logged the hello entering the pipeline
+with mechanism API, and each shows that peer's API mechanism INTRODUCED. Every HTTPS beat after
+that was refused by the receivers' mTLS gate ("no TLSA record for
+client"): the rig's identity zones have no DS in their parent zones, and those
+none in the lab's top-level zone, so the resolver reports their TLSA as
+unvalidated and transport's discovery, which requires validation, never
+pins the client's certificate. The DNS mechanism carried everything, as
+run 1. This is not a regression of the cleanup: before step 5 no HTTPS
+message reached a receiver at all. What it needs is either a DNSSEC chain
+for the identity zones in the lab or a decision on the validation
+requirement; neither was made unattended. A second observation from the
+same run: a hello received over a mechanism marks that mechanism
+INTRODUCING on the receiver (as for DNS), and the receiver then sends no
+hello of its own over it (the hello gate wants KNOWN), so the beat alone
+has to take it to OPERATIONAL; with the beat refused, it stays INTRODUCED.
+The rig's verify read two `peer list` rows per identity as one state and
+failed the auditor's three checks at first; the parser is fixed and the
+in-place re-verify gave 74 / 0.
+
+The rig's logs and results are kept with the rig, under the run names
+`cleanup1`, `cleanup2` and `cleanup3`; the two knobs are on a branch of the
+rig's repository.
+
+### 8.4 Left after this implementation
+
+- Step 4's second commit: the sniff fallback in `fetchChunkViaQuery` and
+  `payload_sniff_test.go`, one release after the first commit is deployed
+  fleet-wide.
+- F1 (`Gossip` to `AppData`, and the hello's empty `tlsa` object), L5, L7:
+  unchanged, out of scope as section 6 says.
+- The mpsigner module's `TestMLDSA44IsAtTheRegistryCodepoint` needs the
+  gitignored tdns-genalgs output on the build host; not a regression of
+  this work.

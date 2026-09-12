@@ -1080,3 +1080,24 @@ Binding rules of this plan (pre-crypto sender authorization in transport,
 the opaque-message vocabulary, the two peer stores, INVARIANT unless
 declared, goldens regenerated only on a declared break) carry into the
 cleanup plan unchanged; its section 2 restates them.
+
+---
+
+# Amendment 2026-09-13 — the cleanup plan executed
+
+The leftovers cleanup plan (`docs/2026-09-12-transport-leftovers-and-cleanup-plan.md`,
+r5 approved, r6 the implementation record) was implemented on
+`cleanup/transport-leftovers` in both repositories (tdns-transport #13,
+tdns-mp #53). The rows of the 2026-08-24 table and the 2026-09-12 section B
+that this changes:
+
+| Item | Now |
+|---|---|
+| C4b (transport-own hello/beat/ping structs, byte-locked) | DONE, cleanup step 3: tdns-transport `7674ab4`, `wire_own.go`, goldens unchanged. |
+| C5 end state "authorization middleware removed" | DONE, cleanup step 1: tdns-transport `b1a6c34`; the pipeline authorizes twice (sender, then zone) and the router runs statistics and logging only. |
+| F2 (docs and cleanup; the `hsync-peer-status` stub) | DONE, cleanup step 8: tdns-mp `06d7361`; the stub is deleted, the `Agent.State` DTO shadow (D2 leftover 3) is replaced by `AgentInfo` built at response time. |
+| F2b (transport owns the whole chunk chain; label the query-mode payload) | First commit DONE, cleanup step 4: tdns-transport `12fc38a`, tdns-mp `0dc04c8`; the manifest carries `envelope`, the sniff fallback stays one release. |
+| F3 (exported surface; no MP-coupled imports) | DONE as a rule, cleanup step 8: tdns-transport `d6141c4`; 65 types / 21 functions / 114 methods exported, the rule "exported = referenced or implemented by a consumer" recorded in the cleanup plan §8.2, `imports_test.go` the gate. "Under 30 types" withdrawn. |
+| The API mechanism | Operator decision 2026-09-12: a peer of DNS. Cleanup step 5 found it had never worked end to end (dialect mismatch, dead senders) and made it work through the one receive pipeline: tdns-transport `7d3678e`, tdns-mp `26332f8`. |
+| HPKE | The primitive layer stays, the stub backend and unused `distrib` half are gone (cleanup step 7, tdns-transport `f32e048`); the seam for COSE and HPKE is `crypto.Backend`. |
+| F1, D1 follow-up, PR #34 round items, F0 | Unchanged. |
