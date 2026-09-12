@@ -159,9 +159,10 @@ type MPTransportBridgeConfig struct {
 	// is stamped as LivenessInterval on every discovered agent peer (D2).
 	// Zero keeps transport's default.
 	BeatInterval uint32
-	// ChunkMode: "edns0" or "query"; when "query", agent stores payload and sends NOTIFY without EDNS0; receiver fetches via CHUNK query
-	ChunkMode         string
-	ChunkPayloadStore ChunkPayloadStore
+	// ChunkMode: "edns0" or "query"; when "query", the transport keeps the
+	// payload's records and answers CHUNK queries for them, and the NOTIFY
+	// is sent without an EDNS0 payload.
+	ChunkMode string
 	// ChunkQueryEndpoint: for query mode, address (host:port) where agent answers CHUNK queries
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0 option 65005); when false, receiver uses static config (e.g. combiner.agents[].address)
@@ -297,12 +298,6 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			ChunkMaxSize:               cfg.ChunkMaxSize,
 			PayloadCrypto:              cfg.PayloadCrypto,
 		}
-		if cfg.ChunkPayloadStore != nil {
-			store := cfg.ChunkPayloadStore
-			dnsCfg.ChunkPayloadGet = func(qname string) ([]byte, uint8, bool) { return store.Get(qname) }
-			dnsCfg.ChunkPayloadSet = func(qname string, payload []byte, format uint8) { store.Set(qname, payload, format) }
-			dnsCfg.ChunkPayloadSetChunks = func(qname string, chunks []*core.CHUNK) { store.SetChunks(qname, chunks) }
-		}
 		if cfg.DistributionCache != nil {
 			cache := cfg.DistributionCache
 			dnsCfg.DistributionAdd = func(qname string, senderID string, receiverID string, operation string, distributionID string, payloadSize int) {
@@ -336,6 +331,13 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			dnsCfg.DistributionMarkCompleted = func(qname string) { cache.MarkCompleted(qname) }
 		}
 		tm.DNSTransport = transport.NewDNSTransport(dnsCfg)
+		if cfg.ChunkMode == "query" {
+			// F2b: the transport owns the whole chunk chain; it serves the
+			// records it stored when the receiver asks for them.
+			if err := tm.DNSTransport.ServeChunkQueries(); err != nil {
+				return nil, fmt.Errorf("serve CHUNK queries: %w", err)
+			}
+		}
 
 		// Create CHUNK NOTIFY handler
 		tm.ChunkHandler = transport.NewChunkNotifyHandler(

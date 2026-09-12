@@ -1434,8 +1434,6 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 		lgCombiner.Info("registering CHUNK handler", "localID", localID)
 	}
 
-	handler.FetchChunkQuery = fetchChunkPayloadViaQuery
-
 	err := tdns.RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *tdns.DnsNotifyRequest) error {
 		return handler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
 	})

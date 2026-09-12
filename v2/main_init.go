@@ -259,7 +259,8 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	}
 	conf.InternalMp.CombinerState = signerState
 
-	// Wire chunk handler into TM
+	// Wire chunk handler into TM; the transport fetches query-mode records
+	signerState.ChunkHandler().Transport = tm.DNSTransport
 	tm.ChunkHandler = signerState.ChunkHandler()
 
 	// Initialize signer router
@@ -449,7 +450,8 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 		return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
 	})
 
-	// Wire chunk handler into TM
+	// Wire chunk handler into TM; the transport fetches query-mode records
+	combinerState.ChunkHandler().Transport = tm.DNSTransport
 	tm.ChunkHandler = combinerState.ChunkHandler()
 
 	// Initialize combiner router
@@ -524,7 +526,6 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkStore ChunkPayloadStore
 	var chunkQueryEndpoint string
 	var chunkQueryEndpointInNotify bool
 	if chunkMode == "query" {
@@ -533,11 +534,6 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
 		}
 		chunkQueryEndpointInNotify = (cep == "include")
-		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
-		conf.InternalMp.ChunkPayloadStore = chunkStore
-		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
-			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
-		}
 		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
 	}
 
@@ -571,7 +567,6 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		AgentRegistry:              conf.InternalMp.AgentRegistry,
 		MsgQs:                      conf.InternalMp.MsgQs,
 		ChunkMode:                  chunkMode,
-		ChunkPayloadStore:          chunkStore,
 		ChunkQueryEndpoint:         chunkQueryEndpoint,
 		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
@@ -645,7 +640,6 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkStore ChunkPayloadStore
 	var chunkQueryEndpoint string
 	var chunkQueryEndpointInNotify bool
 	if chunkMode == "query" {
@@ -654,11 +648,6 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 			return fmt.Errorf("auditor.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
 		}
 		chunkQueryEndpointInNotify = (cep == "include")
-		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
-		conf.InternalMp.ChunkPayloadStore = chunkStore
-		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
-			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
-		}
 		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
 	}
 
@@ -681,7 +670,6 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		AgentRegistry:              conf.InternalMp.AgentRegistry,
 		MsgQs:                      conf.InternalMp.MsgQs,
 		ChunkMode:                  chunkMode,
-		ChunkPayloadStore:          chunkStore,
 		ChunkQueryEndpoint:         chunkQueryEndpoint,
 		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
