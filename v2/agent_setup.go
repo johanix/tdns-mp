@@ -5,6 +5,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	tdns "github.com/johanix/tdns/v2"
@@ -27,7 +29,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) {
+func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*tdns.ZoneData, error) {
 	lgAgent.Info("creating a minimal auto zone", "zone", zonename)
 
 	mp := conf.MpConfig()
@@ -89,14 +91,22 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*tdns.ZoneData, error) 
 		zd.DnssecPolicy = &tmp
 	}
 
-	_, err = zd.SignZone(conf.Config.Internal.KeyDB, true)
+	_, err = zd.SignZone(ctx, conf.Config.Internal.KeyDB, true)
 	if err != nil {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
 	}
 
-	err = zd.SetupZoneSigning(conf.Config.Internal.ResignQ)
-	if err != nil {
-		return nil, fmt.Errorf("SetupAgentAutoZone: failed to set up zone signing: %v", err)
+	// Renewal. tdns registers a zone for periodic re-signing when its config
+	// carries a signing option; this zone has none (it is built here), so it
+	// is put on the resigner's watchlist explicitly. The engine that reads
+	// this queue is started in StartMPAgent; without it the zone was signed
+	// once and never renewed.
+	if q := conf.Config.Internal.ResignQ; q != nil {
+		select {
+		case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
+		case <-time.After(5 * time.Second):
+			return nil, fmt.Errorf("SetupAgentAutoZone: timeout registering zone %q for periodic re-signing", zd.ZoneName)
+		}
 	}
 
 	return zd, nil
@@ -259,7 +269,7 @@ func (conf *Config) publishDnsTransport(zd *tdns.ZoneData) error {
 	return nil
 }
 
-func (conf *Config) SetupAgent(all_zones []string) error {
+func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	lgAgent.Debug("SetupAgent enter", "zones", all_zones)
 
 	mp := conf.MpConfig()
@@ -278,7 +288,7 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 	// Create auto zone for agent identity if needed
 	if isAutoZone {
 		var err error
-		autoZd, err = conf.SetupAgentAutoZone(mp.Identity)
+		autoZd, err = conf.SetupAgentAutoZone(ctx, mp.Identity)
 		if err != nil {
 			return fmt.Errorf("SetupAgent: failed to create auto zone for agent identity %q: %v",
 				mp.Identity, err)

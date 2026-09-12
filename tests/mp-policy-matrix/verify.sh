@@ -154,6 +154,96 @@ scenario_dnskey_gate() {
 	done
 }
 
+# ---------------------------------------------------------------- signatures
+# zone_validator: the first of dnssec-verify (BIND) and ldns-verify-zone on
+# PATH; both check every RRSIG in a zone file against the DNSKEY RRset in
+# the same file, which is what F asks.
+zone_validator() {
+	if command -v dnssec-verify >/dev/null 2>&1; then echo dnssec-verify
+	elif command -v ldns-verify-zone >/dev/null 2>&1; then echo ldns-verify-zone
+	fi
+}
+# axfr <port> <zone> <file> : the zone as the server transfers it; 0 when
+# the transfer returned records
+axfr() {
+	$DIG +norec +noall +answer +onesoa +time=5 +tries=1 @127.0.0.1 -p "$1" "$2" AXFR 2>/dev/null > "$3"
+	[ -s "$3" ] && grep -q 'SOA' "$3"
+}
+# validate_zone <zone> <file> : 0 when every RRSIG in the file validates
+# against the DNSKEY RRset in the same file; 2 when no validator is on PATH.
+# The validator's own words are left in $RIG/.validate.out for the note.
+validate_zone() {
+	case "$(zone_validator)" in
+		dnssec-verify)    dnssec-verify -o "$1" "$2" > "$RIG/.validate.out" 2>&1 ;;
+		ldns-verify-zone) ldns-verify-zone "$2" > "$RIG/.validate.out" 2>&1 ;;
+		*) return 2 ;;
+	esac
+}
+# signer_validates <zone> <provider> : the F check for one signer (sh has no
+# local variables; sv_ prefixes keep the caller's loop variables intact)
+signer_validates() {
+	sv_port=$(port "$2" signer_dns); sv_f="$RIG/.axfr.$2.$$"
+	if ! axfr "$sv_port" "$1" "$sv_f"; then FAIL "$1 $2: AXFR from the signer on port $sv_port"; rm -f "$sv_f"; return 1; fi
+	validate_zone "$1" "$sv_f"; sv_rc=$?
+	case "$sv_rc" in
+		0) PASS "$1 $2: every RRSIG in the signer's AXFR validates against the DNSKEY RRset in it" ;;
+		2) FAIL "$1 $2: no zone validator on PATH (dnssec-verify or ldns-verify-zone)" ;;
+		*) FAIL "$1 $2: the signer's AXFR does not validate"; note "$(head -3 "$RIG/.validate.out" | tr '\n' '|')" ;;
+	esac
+	rm -f "$sv_f"; [ "$sv_rc" = 0 ]
+}
+scenario_signatures() {
+	echo "F. signatures validate: every RRSIG in a signer's AXFR verifies against the DNSKEY RRset in the same transfer"
+	for z in $(cells); do
+		[ "$(cell_field "$z" 3)" -ge 1 ] || continue
+		for p in $(cell_signers "$z"); do signer_validates "$z" "$p"; done
+	done
+}
+
+# ---------------------------------------------------------------- DNSKEY roll
+# dnskey_union <zone> : the union of every signer's served DNSKEY RRset
+dnskey_union() { for du_p in $(cell_signers "$1"); do served "$du_p" "$1" DNSKEY; done | sort -u; }
+# signers_serve_union <zone> : every signer serves that union
+signers_serve_union() {
+	ssu_u=$(dnskey_union "$1")
+	for ssu_p in $(cell_signers "$1"); do [ "$(served "$ssu_p" "$1" DNSKEY)" = "$ssu_u" ] || return 1; done
+	return 0
+}
+# has_standby_zsk <zone> <provider> : the signer's keystore lists a standby
+# ZSK (flags 256) for the zone -- what a roll promotes. The key-state worker
+# stages one, the peers confirm it, and it becomes standby after the
+# propagation delay; the match on the listing is deliberately loose.
+has_standby_zsk() { mp "$2-signer" keystore dnssec list 2>/dev/null | grep -F "$1" | grep -i standby | grep -qw 256; }
+# rolled_sig <zone> <provider> <old tags> : www's A is signed by another key now
+rolled_sig() { [ "$(rrsig_tags "$(port "$2" signer_dns)" "www.$1" A)" != "$3" ]; }
+scenario_dnskey_roll() {
+	echo "G. ZSK roll on a two-signer cell: the new key served and signing, the union of DNSKEYs on every signer"
+	for z in $(cells); do
+		[ "$(cell_field "$z" 3)" -ge 2 ] || continue
+		[ "$(cell_nsmgmt "$z")" = agent ] || continue
+		set -- $(cell_signers "$z"); roller=$1
+		before_keys=$(served "$roller" "$z" DNSKEY)
+		before_sig=$(rrsig_tags "$(port "$roller" signer_dns)" "www.$z" A)
+		if ! wait_until "$OP_TIMEOUT" has_standby_zsk "$z" "$roller"; then
+			FAIL "$z $roller: no standby ZSK to roll to within ${OP_TIMEOUT}s"
+			note "$(mp "$roller-signer" keystore dnssec list 2>&1 | grep -F "$z" | tr '\n' '|')"
+			continue
+		fi
+		out=$(mp "$roller-signer" keystore dnssec rollover -z "$z" --keytype ZSK 2>&1); rc=$?
+		assert_eq "$z $roller: ZSK rollover accepted by the API" 0 "$rc"
+		[ "$rc" = 0 ] || { note "$out"; continue; }
+		if wait_until "$OP_TIMEOUT" rolled_sig "$z" "$roller" "$before_sig"; then PASS "$z $roller: www A signed by the new ZSK"
+		else FAIL "$z $roller: www A still signed by the old ZSK after ${OP_TIMEOUT}s"; fi
+		if [ "$(served "$roller" "$z" DNSKEY)" != "$before_keys" ]; then PASS "$z $roller: the served DNSKEY RRset changed with the roll"
+		else FAIL "$z $roller: the served DNSKEY RRset is unchanged after the roll"; fi
+		signer_validates "$z" "$roller"
+		if wait_until "$OP_TIMEOUT" signers_serve_union "$z"; then PASS "$z: every signer serves the union of the signers' DNSKEYs after the roll"
+		else FAIL "$z: the signers disagree on the DNSKEY RRset ${OP_TIMEOUT}s after the roll"
+			for q in $(cell_signers "$z"); do note "$q serves: $(served "$q" "$z" DNSKEY | tr '\n' '|')"; done; fi
+		for p in $(cell_signers "$z"); do [ "$p" = "$roller" ] || signer_validates "$z" "$p"; done
+	done
+}
+
 verify_all() {
 	need_seeded
 	pass=0; fail=0
@@ -161,6 +251,8 @@ verify_all() {
 	scenario_ns_add_del
 	scenario_ns_foreign
 	scenario_dnskey_gate "bpBab9QZnVpFGFZoBh5sCSUVbEKEVeXrOqTiUUl54CY="
+	scenario_signatures
+	scenario_dnskey_roll
 	echo
 	echo "$pass passed, $fail failed"
 	[ "$fail" = 0 ]
@@ -174,7 +266,9 @@ scenario() {
 		ns)      scenario_ns_add_del ;;
 		foreign) scenario_ns_foreign ;;
 		dnskey)  scenario_dnskey_gate "bpBab9QZnVpFGFZoBh5sCSUVbEKEVeXrOqTiUUl54CY=" ;;
-		*) echo "scenarios: static ns foreign dnskey" >&2; exit 2 ;;
+		sigs)    scenario_signatures ;;
+		roll)    scenario_dnskey_roll ;;
+		*) echo "scenarios: static ns foreign dnskey sigs roll" >&2; exit 2 ;;
 	esac
 	echo; echo "$pass passed, $fail failed"; [ "$fail" = 0 ]
 }

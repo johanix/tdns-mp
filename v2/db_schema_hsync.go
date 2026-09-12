@@ -18,6 +18,7 @@ package tdnsmp
 import (
 	"database/sql"
 	"fmt"
+	"github.com/miekg/dns"
 	"log"
 	"time"
 )
@@ -213,22 +214,15 @@ var HsyncTables = map[string]string{
 		UNIQUE(zone, sender_id, owner, rrtype, rr)
 	)`,
 
-	// MPDnssecKeyStore holds DNSSEC keys for tdns-mp signer/agent (MP states and propagation columns).
-	"MPDnssecKeyStore": `CREATE TABLE IF NOT EXISTS 'MPDnssecKeyStore' (
-		id                        INTEGER PRIMARY KEY,
-		zonename                  TEXT,
-		state                     TEXT,
-		keyid                     INTEGER,
-		flags                     INTEGER,
-		algorithm                 TEXT,
-		creator                   TEXT,
-		privatekey                TEXT,
-		keyrr                     TEXT,
-		comment                   TEXT,
-		propagation_confirmed     INTEGER DEFAULT 0,
-		propagation_confirmed_at  TEXT DEFAULT '',
-		published_at              TEXT DEFAULT '',
-		retired_at                TEXT DEFAULT '',
+	// MPKeyPropagation is the MP protocol state beside tdns's DnssecKeyStore,
+	// where the signer's keys live: whether the peers have confirmed a key's
+	// propagation, which gates its promotion to active. Keyed by zone and
+	// key id like the keystore row it describes.
+	"MPKeyPropagation": `CREATE TABLE IF NOT EXISTS 'MPKeyPropagation' (
+		zonename      TEXT NOT NULL,
+		keyid         INTEGER NOT NULL,
+		confirmed     INTEGER DEFAULT 0,
+		confirmed_at  TEXT DEFAULT '',
 		UNIQUE (zonename, keyid)
 	)`,
 }
@@ -271,11 +265,6 @@ var HsyncIndexes = []string{
 	// CombinerContributions indexes
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
-
-	// MPDnssecKeyStore indexes (state filter is hot path for
-	// GetDnssecKeysByState / foreign-key fetches).
-	`CREATE INDEX IF NOT EXISTS idx_mp_dnskey_state ON MPDnssecKeyStore(state)`,
-	`CREATE INDEX IF NOT EXISTS idx_mp_dnskey_zone_state ON MPDnssecKeyStore(zonename, state)`,
 }
 
 // validTableName checks that a table name contains only safe characters.
@@ -315,9 +304,178 @@ func dbColumnExists(db *sql.DB, table, column string) bool {
 	return false
 }
 
-// migrateHsyncSchema applies schema migrations for existing databases.
-// Currently handles the correlation_id → distribution_id rename (M41).
-func (hdb *HsyncDB) migrateHsyncSchema() {
+// dbTableExists reports whether a table exists.
+func dbTableExists(db *sql.DB, table string) bool {
+	if !validTableName(table) {
+		return false
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// mpsignerCodepointToRegistry maps the algorithm numbers the signer's
+// hand-written registrations used, up to the last release that carried them,
+// to the registry codepoints every tdns binary uses now that mpsigner's
+// registrations come from tdns-genalgs. Keys in the old store were minted
+// under the left-hand numbers; the migration rewrites them. A number not in
+// this table (the classical algorithms) is unchanged.
+var mpsignerCodepointToRegistry = map[uint8]uint8{
+	18:  199, // MLDSA44
+	200: 202, // SLHDSA128S
+	201: 203, // FALCON512
+	202: 205, // MAYO1
+	203: 209, // SNOVA24_5_4
+	204: 212, // SQISIGN1
+	205: 213, // QRUOV_Q31_L3 (no longer linked; migrated, not usable)
+	209: 204, // FALCON1024
+	// 206 MAYO2, 207 MAYO3, 208 MAYO5, 210 SNOVA37_17_2, 211 SNOVA25_8_3:
+	// the same number on both sides.
+}
+
+// migratedMPKeystoreTable is where the old key table is parked after its rows
+// have moved: kept for one start, dropped by the next.
+const migratedMPKeystoreTable = "MPDnssecKeyStore_migrated"
+
+// migrateMPKeystore moves the signer's keys from the retired MPDnssecKeyStore
+// into tdns's DnssecKeyStore, where tdns signs with them, one-shot and
+// fail-closed.
+//
+// Every row is copied with its state, timestamps and private half; its
+// propagation columns go to the MPKeyPropagation side table; its DNSKEY is
+// rewritten for the registry codepoint the algorithm has now, which changes
+// the key tag and therefore the key id, and re-parsed. A foreign row keeps
+// no private half. No row arrives active unless it left active: states are
+// copied verbatim. The rows inserted are counted against the rows read, and
+// on any mismatch, unparsable record or insert failure the whole transaction
+// rolls back and the daemon refuses to start: a signer that came up on half
+// its keys would serve a bogus zone. When the copy is verified the old table
+// is renamed, so the next start finds nothing to migrate and drops it.
+func (hdb *HsyncDB) migrateMPKeystore() error {
+	if !dbTableExists(hdb.DB, "MPDnssecKeyStore") {
+		if dbTableExists(hdb.DB, migratedMPKeystoreTable) {
+			// The start after the migration: it came up on the new store,
+			// so the parked copy has served its purpose.
+			if _, err := hdb.DB.Exec("DROP TABLE " + migratedMPKeystoreTable); err != nil {
+				lgSigner.Warn("dropping the migrated MP key table failed; leaving it", "table", migratedMPKeystoreTable, "err", err)
+			} else {
+				lgSigner.Info("dropped the migrated MP key table", "table", migratedMPKeystoreTable)
+			}
+		}
+		return nil
+	}
+	if !dbTableExists(hdb.DB, "DnssecKeyStore") {
+		return fmt.Errorf("MP key migration: DnssecKeyStore does not exist yet; the KeyDB must be initialized first")
+	}
+
+	type oldRow struct {
+		zonename, state, algorithm, creator, privatekey, keyrr, comment string
+		keyid, flags, confirmed                                         int
+		confirmedAt, publishedAt, retiredAt                             string
+	}
+	rows, err := hdb.DB.Query(`SELECT zonename, state, keyid, flags, COALESCE(algorithm,''), COALESCE(creator,''), COALESCE(privatekey,''), COALESCE(keyrr,''), COALESCE(comment,''),
+		COALESCE(propagation_confirmed,0), COALESCE(propagation_confirmed_at,''), COALESCE(published_at,''), COALESCE(retired_at,'') FROM MPDnssecKeyStore`)
+	if err != nil {
+		return fmt.Errorf("MP key migration: reading MPDnssecKeyStore: %w", err)
+	}
+	var old []oldRow
+	for rows.Next() {
+		var r oldRow
+		if err := rows.Scan(&r.zonename, &r.state, &r.keyid, &r.flags, &r.algorithm, &r.creator, &r.privatekey, &r.keyrr, &r.comment,
+			&r.confirmed, &r.confirmedAt, &r.publishedAt, &r.retiredAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("MP key migration: scanning MPDnssecKeyStore: %w", err)
+		}
+		old = append(old, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("MP key migration: reading MPDnssecKeyStore: %w", err)
+	}
+
+	tx, err := hdb.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("MP key migration: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	inserted := 0
+	for _, r := range old {
+		rr, err := dns.NewRR(r.keyrr)
+		if err != nil {
+			return fmt.Errorf("MP key migration: zone %s key %d: keyrr does not parse: %w", r.zonename, r.keyid, err)
+		}
+		dnskey, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			return fmt.Errorf("MP key migration: zone %s key %d: keyrr is not a DNSKEY", r.zonename, r.keyid)
+		}
+		oldAlg := dnskey.Algorithm
+		if newAlg, renumbered := mpsignerCodepointToRegistry[oldAlg]; renumbered && newAlg != oldAlg {
+			dnskey.Algorithm = newAlg
+		}
+		keyrr := dnskey.String()
+		if _, err := dns.NewRR(keyrr); err != nil {
+			return fmt.Errorf("MP key migration: zone %s key %d: rewritten keyrr does not parse: %w", r.zonename, r.keyid, err)
+		}
+		keyid := dnskey.KeyTag()
+		privatekey := r.privatekey
+		if r.state == DnskeyStateForeign && privatekey != "" {
+			lgSigner.Warn("MP key migration: a foreign key carried a private half; dropped", "zone", r.zonename, "keyid", r.keyid)
+			privatekey = ""
+		}
+		if r.algorithm != "" {
+			if _, known := dns.StringToAlgorithm[r.algorithm]; !known {
+				lgSigner.Warn("MP key migration: algorithm is not linked into this binary; the key is migrated but cannot sign here",
+					"zone", r.zonename, "keyid", keyid, "algorithm", r.algorithm)
+			}
+		}
+		res, err := tx.Exec(`INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, comment, published_at, retired_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.zonename, r.state, keyid, r.flags, r.algorithm, r.creator, privatekey, keyrr, r.comment, r.publishedAt, r.retiredAt)
+		if err != nil {
+			return fmt.Errorf("MP key migration: zone %s key %d (was %d): insert into DnssecKeyStore: %w", r.zonename, keyid, r.keyid, err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("MP key migration: zone %s key %d: insert affected %d rows, want 1", r.zonename, keyid, n)
+		}
+		inserted++
+		if r.confirmed != 0 {
+			if _, err := tx.Exec(`INSERT INTO MPKeyPropagation (zonename, keyid, confirmed, confirmed_at) VALUES (?, ?, 1, ?)
+				ON CONFLICT(zonename, keyid) DO UPDATE SET confirmed=1, confirmed_at=excluded.confirmed_at`,
+				r.zonename, keyid, r.confirmedAt); err != nil {
+				return fmt.Errorf("MP key migration: zone %s key %d: propagation record: %w", r.zonename, keyid, err)
+			}
+		}
+		if keyid != uint16(r.keyid) || dnskey.Algorithm != oldAlg {
+			lgSigner.Info("MP key migration: key renumbered", "zone", r.zonename, "old_keyid", r.keyid, "new_keyid", keyid,
+				"old_alg", oldAlg, "new_alg", dnskey.Algorithm, "state", r.state)
+		}
+	}
+	if inserted != len(old) {
+		return fmt.Errorf("MP key migration: %d rows read, %d inserted; refusing to start", len(old), inserted)
+	}
+	if _, err := tx.Exec("ALTER TABLE MPDnssecKeyStore RENAME TO " + migratedMPKeystoreTable); err != nil {
+		return fmt.Errorf("MP key migration: renaming the old table: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("MP key migration: commit: %w", err)
+	}
+	committed = true
+	lgSigner.Info("MP key migration: keys moved into DnssecKeyStore", "keys", inserted, "old_table", migratedMPKeystoreTable)
+	return nil
+}
+
+// migrateHsyncSchema applies schema migrations for existing databases: the
+// correlation_id → distribution_id rename (M41), and the move of the
+// signer's keys into tdns's keystore (fail-closed, see migrateMPKeystore).
+func (hdb *HsyncDB) migrateHsyncSchema() error {
 	migrations := []struct {
 		table  string
 		oldCol string
@@ -336,6 +494,7 @@ func (hdb *HsyncDB) migrateHsyncSchema() {
 			}
 		}
 	}
+	return hdb.migrateMPKeystore()
 }
 
 // InitHsyncTables initializes the HSYNC tables in the KeyDB.
@@ -344,15 +503,19 @@ func (hdb *HsyncDB) InitHsyncTables() error {
 	hdb.Lock()
 	defer hdb.Unlock()
 
-	// Migrate existing tables before creating new ones
-	hdb.migrateHsyncSchema()
-
 	// Create tables
 	for name, schema := range HsyncTables {
 		_, err := hdb.DB.Exec(schema)
 		if err != nil {
 			return fmt.Errorf("failed to create table %s: %w", name, err)
 		}
+	}
+
+	// Migrate existing data. After the tables, because the key migration
+	// writes into MPKeyPropagation, which may be new; before the indexes for
+	// the same reason the rename wants the old table gone first.
+	if err := hdb.migrateHsyncSchema(); err != nil {
+		return err
 	}
 
 	// Create indexes

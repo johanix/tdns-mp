@@ -23,7 +23,7 @@ sh run.sh verify             # one PASS/FAIL per assertion; non-zero exit on fai
 sh run.sh stop               # removes the redirect too; or: clean (stop + remove $RIG)
 ```
 
-`sh run.sh scenario static|ns|foreign|dnskey` runs one group.
+`sh run.sh scenario static|ns|foreign|dnskey|sigs|roll` runs one group.
 `CELLS="p2s1a.rig.test. p3s2o.rig.test." sh setup.sh` seeds a subset.
 
 Requirements: `python3`, `openssl`, `dig`, `nc`; the five mp binaries built
@@ -106,6 +106,19 @@ checks. Adding a cell is one line.
   has no gate in the code today (design doc §10 F2): the rig asserts no
   provider serves it and stays red until a suffix rule exists.
 - **E. DNSKEY gate** — a non-signer's `addrr DNSKEY` is refused at the API.
+- **F. signatures validate** — for every signed cell and every signer of
+  it: the zone as the signer transfers it (AXFR on the signer's port)
+  validates with `dnssec-verify` or `ldns-verify-zone`, whichever is on
+  PATH, so every RRSIG verifies against the DNSKEY RRset in the same
+  transfer. Red with a clear line when neither validator is installed.
+- **G. ZSK roll** — on the two-signer `nsmgmt=agent` cells: the first
+  signer rolls its ZSK (`keystore dnssec rollover`, once its keystore lists
+  a standby ZSK to roll to); within `OP_TIMEOUT` its `www` A is signed by
+  the new key, its served DNSKEY RRset changed, its AXFR still validates
+  (F), and every signer of the cell serves the union of the signers'
+  DNSKEYs; the other signers' AXFRs validate too. Written against the
+  post-B-MP signer, whose keys live in tdns's keystore and whose standby
+  keys arrive through the peers' propagation confirmation.
 
 ## Known reds and gaps
 
@@ -118,7 +131,10 @@ checks. Adding a cell is one line.
   "downstream of pN serves pN's RRSIG over SOA" is red for every
   downstream provider until that is fixed in the daemon. Found on the
   rig's first run.
-- Key rollover scenarios (design §4.3) are not in this rig yet.
+- G rolls a ZSK only; a KSK roll and the removal of the rolled-out key
+  (retired, then withdrawn once the peers confirm) are not asserted yet.
+- F and G were added with B-MP and have not been run yet; the pin they
+  wait for is the one `cmd/mpcli/go.mod` carries after that re-pin.
 - Propagation to a downstream provider is NOTIFY-driven only from the
   signing provider's signer (the rig configures those NOTIFYs); a change
   still takes one combiner→signer→agent hop per provider, so `OP_TIMEOUT`

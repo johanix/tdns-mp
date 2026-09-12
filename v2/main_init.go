@@ -25,6 +25,12 @@ import (
 // DNS infrastructure setup to tdns.MainInit, then adds MP components
 // (TransportManager, crypto, CHUNK handler, peer registration).
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
+	// The key lifecycle hooks, before tdns's MainInit: they must be in place
+	// before any zone's first refresh, and they are what makes tdns's
+	// keystore and key-state worker run the multi-provider key protocol for
+	// zones that carry the option (signer_keydb.go).
+	RegisterMPKeyLifecycleHooks(conf)
+
 	// Register MP zone option handler before ParseZones runs inside MainInit.
 	tdns.RegisterZoneOptionHandler(tdns.OptMultiProvider, func(zname string, options map[tdns.ZoneOption]bool) {
 		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, zname)
@@ -102,9 +108,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Second pass: populate MPdata on MP zones and attach OnFirstLoad
 	// callbacks. Safe because OnFirstLoad fires later in RefreshEngine,
 	// not during ParseZones.
-	mpResignQ := make(chan *MPZoneData, 10)
-	go MPResignerEngine(ctx, mpResignQ)
-
 	conf.ForEachMPZone(func(zd *MPZoneData) {
 		zd.Lock()
 		zd.EnsureMP()
@@ -119,20 +122,26 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 		zd.Unlock()
 
-		// MP signing OnFirstLoad: after zone load, if HSYNC analysis
-		// has dynamically enabled OptInlineSigning, set up signing
-		// via the MP ResignerEngine (not the tdns one).
-		if zd.FirstZoneLoad {
+		// The signer's zones sign through tdns: MPPreRefresh switches
+		// inline-signing on before the first publish, the policy binds
+		// through the zone's dnssecpolicy, signOnceAfterPolicyBind signs
+		// and flips Ready, every refresh signs its staged scope, and the
+		// ResignerEngine renews. tdns registers only zones whose config
+		// carries a signing option, and MP switches it on dynamically, so
+		// a zone it switched on is put on the resigner's watchlist here.
+		if tdns.Globals.App.Type == AppTypeMPSigner && zd.FirstZoneLoad {
 			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if zd.Options[tdns.OptInlineSigning] {
-					mpzd, ok := Zones.Get(zd.ZoneName)
-					if !ok {
-						return
-					}
-					if err := mpzd.SetupZoneSigning(mpResignQ); err != nil {
-						lg.Error("MP SetupZoneSigning failed in OnFirstLoad",
-							"zone", zd.ZoneName, "error", err)
-					}
+				if !zd.Options[tdns.OptInlineSigning] {
+					return
+				}
+				q := conf.Config.Internal.ResignQ
+				if q == nil {
+					return
+				}
+				select {
+				case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
+				case <-time.After(5 * time.Second):
+					lg.Error("timeout registering zone for periodic re-signing", "zone", zd.ZoneName)
 				}
 			})
 		}

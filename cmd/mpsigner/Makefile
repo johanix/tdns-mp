@@ -4,6 +4,12 @@ GO:= CGO_ENABLED=1 go
 
 include ../../utils/Makefile.common
 
+# Shared ALGREPO cache (cmd/algs-env.mk) + per-app C-library env
+# (algs-libs.mk). Written by tdns-genalgs; -include so a fresh tree is OK
+# until genalgs has been run once with --algrepo.
+-include ../algs-env.mk
+-include algs-libs.mk
+
 .PHONY: clean install
 
 install:

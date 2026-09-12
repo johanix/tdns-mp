@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/core"
 )
 
 // MPZoneData embeds *tdns.ZoneData. All core ZoneData fields and
@@ -35,41 +34,13 @@ type MPZoneData struct {
 	SyncQ     chan SyncRequest
 }
 
-// GetOwner and GetRRset shadow the promoted tdns.ZoneData methods, which read
-// the zone's published snapshot. A zone that has only just been transferred
-// in -- the new_zd that MPPreRefresh analyses -- holds its data in Data and
-// has no snapshot yet, so every tdns read of it came back empty (and
-// GetRRset panics at an empty apex). Until the zone is published these read
-// Data; once it is, they are exactly tdns's.
-func (mpzd *MPZoneData) readsData() bool {
-	zd := mpzd.ZoneData
-	return zd != nil && zd.Ready && zd.ZoneStore == tdns.MapZone && zd.Data != nil && !zd.HasPublishedData()
-}
-
-func (mpzd *MPZoneData) GetOwner(qname string) (*tdns.OwnerData, error) {
-	if !mpzd.readsData() {
-		return mpzd.ZoneData.GetOwner(qname)
-	}
-	owner, ok := mpzd.Data.Get(qname)
-	if !ok {
-		return nil, nil
-	}
-	return &owner, nil
-}
-
-func (mpzd *MPZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
-	if !mpzd.readsData() {
-		return mpzd.ZoneData.GetRRset(qname, rrtype)
-	}
-	owner, _ := mpzd.GetOwner(qname)
-	if owner == nil || owner.RRtypes == nil {
-		return nil, nil
-	}
-	if rrset, ok := owner.RRtypes.Get(rrtype); ok {
-		return &rrset, nil
-	}
-	return nil, nil
-}
+// Reads of zone data go through the promoted tdns methods. GetOwner and
+// GetRRset read the published snapshot and gate on Ready: the serve path.
+// Anything that runs on a zone that may not have published yet -- the
+// incoming new_zd the pre-refresh analysis inspects -- reads through
+// OwnerForAnalysis and RRsetForAnalysis, which fall back to Data there.
+// The shadow that used to make GetOwner read Data on such a zone is gone
+// with them.
 
 // MPZoneTuple is the iteration element returned by IterBuffered.
 type MPZoneTuple struct {

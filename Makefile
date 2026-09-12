@@ -50,10 +50,32 @@ bump-johanix-deps:
 
 # Run the Go test suite (transport-boundary harness + SDE/API regression
 # tests). GOROOT is taken from the environment, as with the build.
-test:
+test: check
 	cd v2 && CGO_ENABLED=1 go test -cover ./...
 
 # Same, with the race detector. Slower, but catches concurrency
 # regressions in the engines/handlers.
-test-race:
+test-race: check
 	cd v2 && CGO_ENABLED=1 go test -race ./...
+
+# check-no-mutators is tdns's gate over this tree: no direct write into a
+# zone's owner store outside the staging API. The served zone is a projection
+# of the combiner's state, written through tdns.StageBatch; a Set that lands
+# in zone data any other way is lost or serves half a change. The sites that
+# write MP-private stores (agent repos, SDE node records, CombinerData,
+# UpstreamData) carry a trailing "mp-private:" comment naming what they write,
+# per site rather than per file so a new Set in the same file is not covered
+# by accident.
+check-no-mutators:
+	@violations=$$(grep -RnE '\.(RRtypes\.Set|Data\.Set)\(' v2 cmd --include='*.go' \
+		| grep -v '_test\.go' \
+		| grep -v 'mp-private:' || true); \
+	if [ -n "$$violations" ]; then \
+		echo "mutator Set() calls outside the staging API:"; \
+		echo "$$violations"; \
+		exit 1; \
+	fi
+
+check: check-no-mutators
+
+.PHONY: check check-no-mutators
