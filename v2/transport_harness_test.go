@@ -4,7 +4,8 @@
  * Scope: scenarios 1-7 of docs/2026-04-23-transport-boundary-test-harness.md.
  * PR-1 covers the harness skeleton plus scenarios 1 and 6; remaining
  * scenarios (and the EDNS(0) chunk-mode variant of scenario 1) follow
- * in PR-2.
+ * in PR-2. Scenario 6 drives the HTTPS entry of the receive pipeline
+ * since cleanup step 5 (api_receive_test.go has the helper).
  *
  * Package choice: same-package (`package tdnsmp`) so tests can call
  * unexported helpers like routeIncomingMessage and look at
@@ -71,10 +72,6 @@ type integEnvConfig struct {
 	// scenario 1.
 	ChunkMode string
 
-	// SkipBridge, when true, builds Registry+MsgQs but no MPTransportBridge.
-	// Used by scenario 6, which only needs EvaluateHello on the registry.
-	SkipBridge bool
-
 	// AuthorizeAllPeers, when true, configures the bridge's
 	// AuthorizedPeers callback to authorize every identity it sees.
 	// Required for scenarios that drive Router.Route directly through
@@ -85,8 +82,8 @@ type integEnvConfig struct {
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
-// with its own AgentRegistry, MsgQs, and (unless SkipBridge) an
-// MPTransportBridge pointing at the shared control zone. No real
+// with its own AgentRegistry, MsgQs, and an MPTransportBridge pointing
+// at the shared control zone. No real
 // network is started; scenarios drive bridges via the production
 // callbacks (e.g. routeIncomingMessage) directly.
 func newIntegEnv(t *testing.T, cfg *integEnvConfig) *integEnv {
@@ -117,7 +114,7 @@ func newIntegEnv(t *testing.T, cfg *integEnvConfig) *integEnv {
 	return env
 }
 
-// newPeer constructs a single peer's Registry, MsgQs and (optionally)
+// newPeer constructs a single peer's Registry, MsgQs and
 // MPTransportBridge. The bridge is configured for the common scenarios:
 // dns transport on, control zone set, no payload crypto, no chunk
 // payload store. Scenarios that bypass the wire (1, 4, 5, 7) drive the
@@ -158,10 +155,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		Registry: registry,
 		MsgQs:    msgQs,
 	}
-	if cfg != nil && cfg.SkipBridge {
-		return pe
-	}
-
 	authorizedPeers := func() []string { return nil }
 	if cfg != nil && cfg.AuthorizeAllPeers {
 		// Match the FQDN of the *other* peer. The harness has only two
@@ -187,6 +180,10 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		ChunkMode:           chunkMode,
 		SupportedMechanisms: []string{"api", "dns"},
 		AuthorizedPeers:     authorizedPeers,
+		// Zone-peer authorization reads the seeded zones the way
+		// production reads tdns.Zones (scenario 6).
+		GetZone:      tdns.Zones.Get,
+		GetZoneNames: tdns.Zones.Keys,
 	}
 	bridge, err := NewMPTransportBridge(bridgeCfg)
 	if err != nil {

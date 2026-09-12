@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -428,24 +427,31 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 
-			myIdentity := AgentId(mp.Identity)
-			helloMsg := &AgentHelloPost{
-				MessageType: AgentMsgHello,
-				MyIdentity:  myIdentity,
+			if conf.InternalMp.MPTransport == nil {
+				resp.Error = true
+				resp.ErrorMsg = "no transport manager"
+				return
 			}
-
-			ahr, err := agent.SendApiHello(helloMsg)
+			// Every eligible mechanism, through the transport (cleanup step 5:
+			// the application keeps no API sender of its own).
+			hctx, hcancel := context.WithTimeout(ctx, 15*time.Second)
+			ahr, err := conf.InternalMp.MPTransport.SendHelloWithFallback(hctx, agent, nil)
+			hcancel()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("HELLO to %s failed: %v", amp.AgentId, err)
 				return
 			}
-			if ahr.Error {
+			if ahr == nil || !ahr.Accepted {
+				reason := "not accepted"
+				if ahr != nil {
+					reason = ahr.RejectReason
+				}
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("HELLO rejected by %s: %s", amp.AgentId, ahr.ErrorMsg)
+				resp.ErrorMsg = fmt.Sprintf("HELLO rejected by %s: %s", amp.AgentId, reason)
 				return
 			}
-			resp.Msg = fmt.Sprintf("HELLO to %s succeeded: %s (time: %s)", amp.AgentId, ahr.Msg, ahr.Time.Format(time.RFC3339))
+			resp.Msg = fmt.Sprintf("HELLO to %s succeeded (time: %s)", amp.AgentId, ahr.Timestamp.Format(time.RFC3339))
 
 		case "refresh-keys":
 			zd.RequestAndWaitForKeyInventory(r.Context(), conf.InternalMp.MPTransport)
@@ -1170,273 +1176,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)
-		}
-	}
-}
-
-func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
-	if conf.InternalMp.MsgQs.Beat == nil {
-		lgApi.Error("AgentBeatQ channel is not set, cannot forward heartbeats, fatal")
-		os.Exit(1)
-	}
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentBeatResponse{
-			Time: time.Now(),
-			Msg:  "Hi there!",
-		}
-		decoder := json.NewDecoder(r.Body)
-		var abp AgentBeatPost
-		err := decoder.Decode(&abp)
-
-		defer func() {
-			w.Header().Set("Content-Type", "application/json")
-			err := json.NewEncoder(w).Encode(resp)
-			if err != nil {
-				lgApi.Error("error encoding beat response", "err", err)
-			}
-		}()
-
-		if err != nil {
-			lgApi.Warn("error decoding beat post", "err", err)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
-			return
-		}
-
-		resp.YourIdentity = abp.MyIdentity
-		resp.MyIdentity = AgentId(conf.MpConfig().Identity)
-
-		switch abp.MessageType {
-		case AgentMsgBeat:
-			resp.Status = "ok"
-			conf.InternalMp.MsgQs.Beat <- &AgentMsgReport{
-				Transport:    "API",
-				MessageType:  abp.MessageType,
-				Identity:     abp.MyIdentity,
-				BeatInterval: abp.MyBeatInterval,
-				Msg:          &abp,
-			}
-
-		default:
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %q from %s", AgentMsgToString[abp.MessageType], abp.MyIdentity)
-		}
-	}
-}
-
-// This is the agent-to-agent sync API hello handler.
-func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
-	if conf.InternalMp.MsgQs.Hello == nil {
-		lgApi.Error("HelloQ channel is not set, cannot forward HELLO msgs, fatal")
-		os.Exit(1)
-	}
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		lgApi.Debug("received /hello request", "from", r.RemoteAddr)
-		decoder := json.NewDecoder(r.Body)
-		var ahp AgentHelloPost
-		err := decoder.Decode(&ahp)
-
-		resp := AgentHelloResponse{
-			Time:       time.Now(),
-			MyIdentity: AgentId(conf.MpConfig().Identity),
-		}
-
-		defer func() {
-			w.Header().Set("Content-Type", "application/json")
-			err := json.NewEncoder(w).Encode(resp)
-			if err != nil {
-				lgApi.Error("error encoding hello response", "err", err)
-			}
-		}()
-
-		if err != nil {
-			lgApi.Warn("error decoding /hello post", "err", err)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
-			return
-		}
-
-		// Cannot use ahp.MyIdentity until we know that the JSON unmarshalling has succeeded.
-		resp.YourIdentity = ahp.MyIdentity
-
-		needed, errmsg, err := conf.InternalMp.AgentRegistry.EvaluateHello(&ahp)
-		if err != nil {
-			lgApi.Warn("error evaluating hello", "err", err)
-			resp.Error = true
-			resp.ErrorMsg = errmsg
-			return
-		}
-
-		if needed {
-			lgApi.Info("hello accepted, HSYNC RRset includes both identities", "zone", ahp.Zone)
-			resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
-				ahp.MyIdentity, conf.MpConfig().Identity, ahp.Zone)
-		} else {
-			lgApi.Warn("hello rejected, HSYNC RRset does not include both identities", "zone", ahp.Zone)
-			resp.Error = true
-			resp.ErrorMsg = errmsg
-			return
-		}
-
-		switch ahp.MessageType {
-		case AgentMsgHello:
-			resp.Status = "ok" // important
-
-			// END.0: inbound API hello accepted → INTRODUCING on the canonical
-			// transport.Peer API mechanism (symmetric with the inbound DNS path
-			// in routeHelloMessage). Guarded against regressing an already
-			// OPERATIONAL-or-better mechanism. Top-level peer.State is NOT
-			// written on inbound receipt (discovery-phase marker only).
-			if conf.InternalMp.TransportManager != nil {
-				peer := conf.InternalMp.TransportManager.PeerRegistry.GetOrCreate(dns.Fqdn(string(ahp.MyIdentity)))
-				peer.LastHelloReceived = time.Now()
-				if raw, ok := peer.MechanismRawState("API"); !ok || raw < transport.PeerStateIntroducing {
-					peer.SetMechanismState("API", transport.PeerStateIntroducing, "API hello accepted and authorized")
-				}
-				peer.SetMechanismLastHelloRecv("API", peer.LastHelloReceived)
-			}
-
-			conf.InternalMp.MsgQs.Hello <- &AgentMsgReport{
-				Transport:   "API",
-				MessageType: ahp.MessageType,
-				Identity:    ahp.MyIdentity,
-				Msg:         &ahp,
-			}
-
-		default:
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %q from %s", AgentMsgToString[ahp.MessageType], ahp.MyIdentity)
-		}
-	}
-}
-
-// APIsyncPing is the HSYNC peer ping handler on the sync API router (/sync/ping).
-func (conf *Config) APIsyncPing() func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentPingResponse{
-			Time:       time.Now(),
-			MyIdentity: AgentId(conf.MpConfig().Identity),
-		}
-		decoder := json.NewDecoder(r.Body)
-		var app AgentPingPost
-		err := decoder.Decode(&app)
-
-		defer func() {
-			w.Header().Set("Content-Type", "application/json")
-			if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
-				lgApi.Error("error encoding ping response", "err", encErr)
-			}
-		}()
-
-		if err != nil {
-			lgApi.Warn("error decoding /sync/ping post", "err", err)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
-			return
-		}
-
-		if app.Nonce == "" {
-			resp.Error = true
-			resp.ErrorMsg = "ping nonce must not be empty"
-			return
-		}
-
-		resp.YourIdentity = app.MyIdentity
-		resp.Nonce = app.Nonce
-		resp.Status = "ok"
-
-		if conf.InternalMp.MsgQs != nil && conf.InternalMp.MsgQs.Ping != nil {
-			conf.InternalMp.MsgQs.Ping <- &AgentMsgReport{
-				Transport:   "API",
-				MessageType: AgentMsgPing,
-				Identity:    app.MyIdentity,
-				Msg:         &app,
-			}
-		}
-	}
-}
-
-func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
-	if conf.InternalMp.MsgQs.Msg == nil {
-		lgApi.Error("msgQ channel is not set, cannot forward API msgs, fatal")
-		os.Exit(1)
-	}
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentMsgResponse{
-			Time: time.Now(),
-			Msg:  "Hi there!",
-		}
-		decoder := json.NewDecoder(r.Body)
-		var amp AgentMsgPost
-		err := decoder.Decode(&amp)
-
-		defer func() {
-			w.Header().Set("Content-Type", "application/json")
-			lgApi.Debug("encoding msg response", "resp", resp)
-			respData, err := json.Marshal(resp)
-			if err != nil {
-				lgApi.Error("error marshaling msg response", "err", err)
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Error marshaling response: %v", err)
-				respData, _ = json.Marshal(resp) // Attempt to marshal the error response
-			}
-			lgApi.Debug("msg response data", "data", string(respData))
-			_, err = w.Write(respData)
-			if err != nil {
-				lgApi.Error("error writing msg response", "err", err)
-			}
-		}()
-
-		if err != nil {
-			lgApi.Warn("error decoding /msg post", "err", err)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
-			return
-		}
-
-		lgApi.Debug("received /msg request", "messageType", amp.MessageType, "from", r.RemoteAddr, "originator", amp.OriginatorID)
-
-		switch amp.MessageType {
-		case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
-			resp.Status = "ok"
-			var cresp = make(chan *AgentMsgResponse, 1)
-
-			select {
-			case conf.InternalMp.MsgQs.Msg <- &AgentMsgPostPlus{
-				AgentMsgPost: amp,
-				Response:     cresp,
-			}:
-				select {
-				case r := <-cresp:
-					lgApi.Debug("received response from msg handler", "resp", r)
-					if r.Error {
-						lgApi.Warn("error processing message", "originator", amp.OriginatorID, "err", r.ErrorMsg)
-						resp.Error = true
-						resp.ErrorMsg = r.ErrorMsg
-						resp.Status = "error"
-					} else {
-						resp = *r
-						resp.Status = "ok"
-					}
-					return
-
-				case <-time.After(2 * time.Second):
-					lgApi.Warn("no response received for message within timeout", "originator", amp.OriginatorID)
-					resp.Error = true
-					resp.ErrorMsg = "No response received within timeout period"
-				}
-			default:
-				lgApi.Warn("msg response channel is blocked, skipping message", "originator", amp.OriginatorID)
-				resp.Error = true
-				resp.ErrorMsg = "Msg channel is blocked"
-			}
-
-		default:
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", AgentMsgToString[amp.MessageType], amp.OriginatorID)
 		}
 	}
 }

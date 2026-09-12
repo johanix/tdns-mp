@@ -339,148 +339,151 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			}
 		}
 
-		// Create CHUNK NOTIFY handler
-		tm.ChunkHandler = transport.NewChunkNotifyHandler(
-			cfg.ControlZone,
-			cfg.LocalID,
-			tm.DNSTransport,
-		)
-		tm.ChunkHandler.ParseApp = parseAppPayload // C5: the application parses its own payloads
-		// Attach router to handler for new routing path
-		tm.ChunkHandler.Router = tm.Router
-
-		// In chunk_mode=query without EDNS0 CHUNK_QUERY_ENDPOINT, use configured peer address (e.g. agent.peers)
-		tm.ChunkHandler.GetPeerAddress = func(senderID string) (string, bool) {
-			peer, ok := tm.PeerRegistry.Get(senderID)
-			if !ok || peer.CurrentAddress() == nil {
-				return "", false
-			}
-			addr := peer.CurrentAddress()
-			return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
-		}
-
-		// DoS mitigation: Check authorization BEFORE expensive operations (decryption, query fetch)
-		tm.ChunkHandler.IsPeerAuthorized = func(senderID string, zone string) (bool, string) {
-			return tm.IsPeerAuthorized(senderID, zone)
-		}
-
-		// Wire confirmation callback for reliable message queue and per-RR tracking
-		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
-
-			// Stop retrying on any definitive answer (success, failure, rejected, or ignored).
-			// Only keep retrying for transient states (pending, partial).
-			if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected || status == transport.ConfirmIgnored) {
-				tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
-			}
-
-			// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
-			var rejItems []RejectedItemInfo
-			for _, ri := range rejected {
-				rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
-			}
-			tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), rejItems)
-
-			// Forward per-RR detail to SynchedDataEngine
-			if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
-				detail := &ConfirmationDetail{
-					DistributionID: distributionID,
-					Zone:           ZoneName(zone),
-					Source:         senderID,
-					Status:         status.String(),
-					AppliedRecords: applied,
-					RemovedRecords: removed,
-					RejectedItems:  rejItems,
-					IgnoredRecords: ignored,
-					Truncated:      truncated,
-					Timestamp:      time.Now(),
-				}
-				select {
-				case tm.msgQs.Confirmation <- detail:
-				default:
-					lgTransport.Warn("confirmation channel full, dropping detail", "distributionID", distributionID)
-				}
-			}
-		}
-
-		// Wire remote confirmation callback (two-phase protocol: Phase 7).
-		// When this agent's combiner confirms a sync that originated from another agent,
-		// send the final confirmation NOTIFY back to the originating agent.
-		if tm.msgQs != nil {
-			tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
-				go tm.sendRemoteConfirmation(detail)
-			}
-		}
-
-		// Trigger discovery when we receive messages from authorized but undiscovered peers.
-		// This is the "discovery kick" (Phase 4 gossip): when a beat arrives from a sender
-		// whose verification key we don't have, flush IMR cache for that identity's discovery
-		// names and retry. This unsticks the UNKNOWN→KNOWN transition when cached NXDOMAIN
-		// is blocking discovery.
-		tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
-			lgTransport.Info("discovery kick: flushing IMR cache and triggering discovery", "peer", peerID)
-
-			// Flush IMR cache for this peer's discovery names before re-discovery
-			if tm.getImrEngine != nil {
-				if removed := flushDiscoveryCache(tm.getImrEngine(), peerID); removed > 0 {
-					lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
-				}
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			err := tm.DiscoverAndRegisterAgent(ctx, peerID)
-			if err != nil {
-				lgTransport.Warn("discovery incomplete for peer", "peer", peerID, "err", err)
-			} else {
-				lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
-			}
-		}
-
-		// Provide gossip for beat responses: when we receive a beat,
-		// include our gossip state in the response so peers get
-		// bidirectional state exchange on every beat round-trip.
-		tm.ChunkHandler.GossipForPeer = func(peerID string) json.RawMessage {
-			if tm.agentRegistry == nil || tm.agentRegistry.GossipStateTable == nil || tm.agentRegistry.ProviderGroupManager == nil {
-				return nil
-			}
-			gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
-				peerID, tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
-			if len(gossipMsgs) == 0 {
-				return nil
-			}
-			data, _ := json.Marshal(gossipMsgs)
-			return data
-		}
-
-		// Initialize router with handlers and middleware
-		// Authorization and crypto are not router concerns: RouteViaRouter
-		// runs them before the router is entered (cleanup plan, step 1).
-		routerCfg := &transport.RouterConfig{
-			PeerRegistry:  tm.PeerRegistry,
-			VerboseStats:  false, // Set to true for verbose statistics logging
-			Confirmations: true,
-		}
-		lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
-		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
-			return nil, fmt.Errorf("router initialization: %w", err)
-		}
-		if tm.role == "" {
-			tm.role = roleAgent
-		}
-		// A half-registered verb table would look like a live process with
-		// no application receive path; refuse to construct instead (the
-		// signer and combiner already fail main_init on the same errors).
-		if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
-			return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
-		}
-
 		lgTransport.Info("DNS transport enabled")
 	} else if cfg.ControlZone == "" {
 		lgTransport.Info("DNS transport not configured (no control zone)")
 	} else {
 		lgTransport.Info("DNS transport disabled by configuration")
+	}
+
+	// The receive pipeline and the router serve both mechanisms (cleanup
+	// step 5): a NOTIFY(CHUNK) enters through RouteViaRouter, an HTTPS
+	// request through RouteAPIPayload, and one verb table answers both.
+	// Without DNS the handler has no transport and fetches nothing by query.
+	tm.ChunkHandler = transport.NewChunkNotifyHandler(
+		cfg.ControlZone,
+		cfg.LocalID,
+		tm.DNSTransport,
+	)
+	tm.ChunkHandler.ParseApp = parseAppPayload // C5: the application parses its own payloads
+	// Attach router to handler for new routing path
+	tm.ChunkHandler.Router = tm.Router
+
+	// In chunk_mode=query without EDNS0 CHUNK_QUERY_ENDPOINT, use configured peer address (e.g. agent.peers)
+	tm.ChunkHandler.GetPeerAddress = func(senderID string) (string, bool) {
+		peer, ok := tm.PeerRegistry.Get(senderID)
+		if !ok || peer.CurrentAddress() == nil {
+			return "", false
+		}
+		addr := peer.CurrentAddress()
+		return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
+	}
+
+	// DoS mitigation: Check authorization BEFORE expensive operations (decryption, query fetch)
+	tm.ChunkHandler.IsPeerAuthorized = func(senderID string, zone string) (bool, string) {
+		return tm.IsPeerAuthorized(senderID, zone)
+	}
+
+	// Wire confirmation callback for reliable message queue and per-RR tracking
+	tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
+		zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
+		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
+
+		// Stop retrying on any definitive answer (success, failure, rejected, or ignored).
+		// Only keep retrying for transient states (pending, partial).
+		if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected || status == transport.ConfirmIgnored) {
+			tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
+		}
+
+		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
+		var rejItems []RejectedItemInfo
+		for _, ri := range rejected {
+			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
+		}
+		tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), rejItems)
+
+		// Forward per-RR detail to SynchedDataEngine
+		if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
+			detail := &ConfirmationDetail{
+				DistributionID: distributionID,
+				Zone:           ZoneName(zone),
+				Source:         senderID,
+				Status:         status.String(),
+				AppliedRecords: applied,
+				RemovedRecords: removed,
+				RejectedItems:  rejItems,
+				IgnoredRecords: ignored,
+				Truncated:      truncated,
+				Timestamp:      time.Now(),
+			}
+			select {
+			case tm.msgQs.Confirmation <- detail:
+			default:
+				lgTransport.Warn("confirmation channel full, dropping detail", "distributionID", distributionID)
+			}
+		}
+	}
+
+	// Wire remote confirmation callback (two-phase protocol: Phase 7).
+	// When this agent's combiner confirms a sync that originated from another agent,
+	// send the final confirmation NOTIFY back to the originating agent.
+	if tm.msgQs != nil {
+		tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
+			go tm.sendRemoteConfirmation(detail)
+		}
+	}
+
+	// Trigger discovery when we receive messages from authorized but undiscovered peers.
+	// This is the "discovery kick" (Phase 4 gossip): when a beat arrives from a sender
+	// whose verification key we don't have, flush IMR cache for that identity's discovery
+	// names and retry. This unsticks the UNKNOWN→KNOWN transition when cached NXDOMAIN
+	// is blocking discovery.
+	tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
+		lgTransport.Info("discovery kick: flushing IMR cache and triggering discovery", "peer", peerID)
+
+		// Flush IMR cache for this peer's discovery names before re-discovery
+		if tm.getImrEngine != nil {
+			if removed := flushDiscoveryCache(tm.getImrEngine(), peerID); removed > 0 {
+				lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := tm.DiscoverAndRegisterAgent(ctx, peerID)
+		if err != nil {
+			lgTransport.Warn("discovery incomplete for peer", "peer", peerID, "err", err)
+		} else {
+			lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
+		}
+	}
+
+	// Provide gossip for beat responses: when we receive a beat,
+	// include our gossip state in the response so peers get
+	// bidirectional state exchange on every beat round-trip.
+	tm.ChunkHandler.GossipForPeer = func(peerID string) json.RawMessage {
+		if tm.agentRegistry == nil || tm.agentRegistry.GossipStateTable == nil || tm.agentRegistry.ProviderGroupManager == nil {
+			return nil
+		}
+		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+			peerID, tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
+		if len(gossipMsgs) == 0 {
+			return nil
+		}
+		data, _ := json.Marshal(gossipMsgs)
+		return data
+	}
+
+	// Initialize router with handlers and middleware
+	// Authorization and crypto are not router concerns: RouteViaRouter
+	// runs them before the router is entered (cleanup plan, step 1).
+	routerCfg := &transport.RouterConfig{
+		PeerRegistry:  tm.PeerRegistry,
+		VerboseStats:  false, // Set to true for verbose statistics logging
+		Confirmations: true,
+	}
+	lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
+	if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
+		return nil, fmt.Errorf("router initialization: %w", err)
+	}
+	if tm.role == "" {
+		tm.role = roleAgent
+	}
+	// A half-registered verb table would look like a live process with
+	// no application receive path; refuse to construct instead (the
+	// signer and combiner already fail main_init on the same errors).
+	if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
+		return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
 	}
 
 	// Phase 2.6: the discovery-completion callback is now LIVE — transport's
@@ -637,15 +640,15 @@ func (tm *MPTransportBridge) RegisterChunkNotifyHandler() error {
 // ctx is intentionally unused: kept in the signature for API stability and future use.
 func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	if tm.ChunkHandler == nil {
-		lgTransport.Info("DNS transport not configured, skipping incoming message router")
+		lgTransport.Info("no receive pipeline, skipping incoming message router")
 		return
 	}
 
 	// Register RouteToCallback middleware on the Router.
-	// When a message arrives via CHUNK NOTIFY, the Router runs the handler
-	// chain (auth, crypto, parse) and then calls our callback with the
-	// parsed IncomingMessage. The callback dispatches to typed MsgQs
-	// channels based on message type.
+	// When a message arrives, over either mechanism, the Router runs the
+	// handler chain and then calls our callback with the parsed
+	// IncomingMessage. The callback dispatches to typed MsgQs channels
+	// based on message type.
 	//
 	// Each message type fans out directly to its own MsgQs channel; the
 	// single IncomingChan this replaced was deleted (C3.0).
@@ -654,6 +657,15 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	}))
 
 	lgTransport.Info("incoming message router registered via RouteToCallback")
+}
+
+// messageMechanism is the mechanism a message arrived on, as the pipeline
+// stamped it; a message from an older pipeline that stamped none is DNS.
+func messageMechanism(msg *transport.IncomingMessage) string {
+	if msg.Mechanism != "" {
+		return msg.Mechanism
+	}
+	return transport.MechanismDNS
 }
 
 // routeHelloMessage routes a hello message to the hello channel.
@@ -675,12 +687,13 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	// marker (NEEDED/KNOWN/ERROR), set only by the discovery paths; INTRODUCING
 	// is a per-mechanism fact. (Marker model; mirrors the truth-fix rule that
 	// inbound receipt must not assert top-level state.)
+	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastHelloReceived = time.Now()
-	if raw, ok := peer.MechanismRawState("DNS"); !ok || raw < transport.PeerStateIntroducing {
-		peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted and authorized")
+	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
+		peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
 	}
-	peer.SetMechanismLastHelloRecv("DNS", peer.LastHelloReceived)
+	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
 
 	// For an unknown (but authorized) sender, trigger discovery so we can beat
 	// back. Contact timestamps live on transport.Peer above — the AgentDetails
@@ -709,6 +722,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	// StateManager.GetOrCreateZone) gate on zone != "", and without
 	// it the auditor never records a per-zone provider entry.
 	report := &AgentMsgReport{
+		Transport:      mech,
 		MessageType:    AgentMsgHello,
 		Identity:       AgentId(senderID),
 		DistributionID: msg.DistributionID,
@@ -724,7 +738,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	select {
 	case tm.msgQs.Hello <- report:
-		lgTransport.Debug("routed DNS hello to hsyncengine", "sender", senderID, "state", "INTRODUCING", "distributionID", msg.DistributionID)
+		lgTransport.Debug("routed hello to hsyncengine", "mechanism", mech, "sender", senderID, "state", "INTRODUCING", "distributionID", msg.DistributionID)
 	default:
 		lgTransport.Warn("hello channel full, dropping message", "sender", senderID)
 	}
@@ -752,9 +766,10 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// SendBeatWithFallback). So we update LastBeatRecv evidence but do
 	// not touch the connection state. The election trigger likewise
 	// lives on the outbound success edge, not here.
+	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+	peer.SetMechanismLastBeatRecv(mech, peer.LastBeatReceived)
 
 	// Inbound-liveness evidence lives on transport.Peer above (Phase 2: the
 	// AgentDetails telemetry mirror is gone; the NG beat-age scanner it once
@@ -798,7 +813,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// and HELLOs happen once per handshake while beats happen
 	// continuously.
 	report := &AgentMsgReport{
-		Transport:      "DNS",
+		Transport:      mech,
 		MessageType:    AgentMsgBeat,
 		Identity:       AgentId(senderID),
 		BeatInterval:   beatInterval,
@@ -815,7 +830,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 
 	select {
 	case tm.msgQs.Beat <- report:
-		lgTransport.Debug("routed DNS beat to hsyncengine", "sender", senderID, "state", "OPERATIONAL", "distributionID", distributionID)
+		lgTransport.Debug("routed beat to hsyncengine", "mechanism", mech, "sender", senderID, "state", "OPERATIONAL", "distributionID", distributionID)
 	default:
 		lgTransport.Warn("beat channel full, dropping message", "sender", senderID)
 	}
@@ -831,11 +846,13 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	// Record inbound liveness ONLY (a received ping proves they can reach
 	// us, not that we can reach them). State is set by the outbound beat
 	// path, not here.
+	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastBeatReceived = time.Now()
-	peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+	peer.SetMechanismLastBeatRecv(mech, peer.LastBeatReceived)
 
 	report := &AgentMsgReport{
+		Transport:      mech,
 		MessageType:    AgentMsgPing,
 		Identity:       AgentId(senderID),
 		DistributionID: msg.DistributionID,

@@ -8737,9 +8737,9 @@ long: |
     - Base64-encoded JWT (starts with eyJ...)
     - Raw CHUNK RDATA
 flags: |
-      --backend string       Crypto backend: jose, hpke, auto (default: auto) (default "auto")
+      --backend string       Crypto backend: jose, auto (default: auto) (default "auto")
       --decrypt              Decrypt JWE payload (requires --decrypt-key)
-      --decrypt-key string   Private key file for decryption (JWK JSON for JOSE, hex for HPKE)
+      --decrypt-key string   Private key file for decryption (JWK JSON)
       --output string        Output format: text, json (default: text) (default "text")
   -v, --verbose              Verbose output (show all headers)
       --verify               Verify JWS signature (requires --verify-key)

@@ -1,78 +1,14 @@
 package tdnsmp
 
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"time"
-)
-
+// HeartbeatHandler consumes the beat reports the transport bridge routes
+// to MsgQs.Beat. Since cleanup step 5 the same routeBeatMessage produces
+// the report for a beat carried by either mechanism, and it merges the
+// beat's gossip; nothing is left for the handler but the record.
 func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 	switch report.MessageType {
 	case AgentMsgBeat:
-		lgAgent.Debug("received BEAT", "from", report.Identity)
-		// Phase 2: inbound-beat evidence (LastBeatRecv, Stats) is recorded on
-		// transport.Peer at the router/handler; the AgentDetails telemetry
-		// mirror is gone. report.BeatInterval (the NG liveness param) was a
-		// write-only Stage-D leftover.
-
-		// Process gossip from API beat (DNS beats process gossip in routeBeatMessage)
-		if report.Transport == "API" && ar.GossipStateTable != nil {
-			if abp, ok := report.Msg.(*AgentBeatPost); ok && len(abp.Gossip) > 0 {
-				for i := range abp.Gossip {
-					ar.GossipStateTable.MergeGossip(&abp.Gossip[i])
-				}
-				lgAgent.Debug("merged gossip from incoming API beat", "sender", report.Identity, "groups", len(abp.Gossip))
-
-				if ar.ProviderGroupManager != nil {
-					ar.ProviderGroupManager.mu.RLock()
-					noGroups := len(ar.ProviderGroupManager.Groups) == 0
-					ar.ProviderGroupManager.mu.RUnlock()
-					if noGroups {
-						ar.ProviderGroupManager.RecomputeGroups()
-					}
-					for i := range abp.Gossip {
-						pg := ar.ProviderGroupManager.GetGroup(abp.Gossip[i].GroupHash)
-						if pg != nil {
-							ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
-						}
-					}
-				}
-			}
-		}
-
+		lgAgent.Debug("received BEAT", "from", report.Identity, "mechanism", report.Transport)
 	default:
 		lgAgent.Warn("unknown message type in HeartbeatHandler", "type", AgentMsgToString[report.MessageType])
 	}
-}
-
-func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) {
-	if agent == nil {
-		return nil, fmt.Errorf("agent is nil")
-	}
-	if agent.Api == nil {
-		return nil, fmt.Errorf("no API client configured for agent %s", agent.ID)
-	}
-
-	// Create a context with a 2-second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	// Use the context with the RequestNG function
-	status, resp, err := agent.Api.ApiClient.RequestNGWithContext(ctx, "POST", "/beat", msg, false)
-	if err != nil {
-		return nil, fmt.Errorf("HTTPS beat failed: %v", err)
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("HTTPS beat returned status %d (%s)", status, http.StatusText(status))
-	}
-
-	var abr AgentBeatResponse
-	err = json.Unmarshal(resp, &abr)
-	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling BEAT response: %v", err)
-	}
-
-	return &abr, nil
 }

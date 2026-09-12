@@ -2,9 +2,7 @@ package tdnsmp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -474,25 +472,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					syncMsg = syncResp.Message
 				}
 			} else {
-				amr, err := agent.SendApiMsg(&AgentMsgPost{
-					MessageType:  AgentMsgNotify,
-					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.ID,
-					Zone:         msg.Zone,
-					Records:      groupRRStringsByOwner(msg.RRs),
-					Time:         time.Now(),
-				})
-				if err != nil {
-					syncErr = err
-					syncFailed = true
-					syncMsg = err.Error()
-				} else {
-					syncMsg = amr.Msg
-					syncFailed = amr.Error
-					if amr.ErrorMsg != "" {
-						syncMsg = amr.ErrorMsg
-					}
-				}
+				syncErr = fmt.Errorf("no transport manager")
+				syncFailed = true
+				syncMsg = syncErr.Error()
 			}
 
 			if syncErr != nil {
@@ -700,50 +682,36 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 	}
 }
 
-// sendRfiToAgent sends an RFI message to a remote agent using the best available
-// transport. DNS is tried first (primary transport), with API as fallback.
+// sendRfiToAgent sends an RFI message to a remote agent through the
+// transport manager, which picks the mechanism and falls back to the other
+// (cleanup step 5: the application keeps no API sender of its own).
 func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
-	// Capture any DNS-transport failure so the final error preserves the real
-	// cause (e.g. an upstream REFUSED from the peer's zone-auth gate) instead
-	// of collapsing it into a misleading "no transport available".
-	var dnsErr error
-	// Try DNS transport first via TransportManager (primary transport)
-	if ar.TransportManager != nil {
-		peer := ar.MPTransport.GetOrCreatePeer(agent)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
+	if ar.TransportManager == nil || ar.MPTransport == nil {
+		return nil, fmt.Errorf("no transport available for agent %q (no transport manager)", agent.ID)
+	}
+	peer := ar.MPTransport.GetOrCreatePeer(agent)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-		syncReq := &PeerSyncRequest{
-			SenderID:    ar.LocalAgent.Identity,
-			Zone:        string(msg.Zone),
-			Records:     msg.Records,
-			Timestamp:   time.Now(),
-			MessageType: string(msg.MessageType),
-			RfiType:     msg.RfiType,
-			RfiSubtype:  msg.RfiSubtype,
-		}
-
-		syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
-		if err == nil {
-			return &AgentMsgResponse{
-				Status: string(syncResp.Status),
-				Msg:    syncResp.Message,
-				Zone:   msg.Zone,
-			}, nil
-		}
-		dnsErr = err
-		lgConnRetryEngine.Warn("DNS transport failed, trying API", "agent", agent.ID, "err", err)
+	syncReq := &PeerSyncRequest{
+		SenderID:    ar.LocalAgent.Identity,
+		Zone:        string(msg.Zone),
+		Records:     msg.Records,
+		Timestamp:   time.Now(),
+		MessageType: string(msg.MessageType),
+		RfiType:     msg.RfiType,
+		RfiSubtype:  msg.RfiSubtype,
 	}
 
-	// Fall back to API transport (synchronous request-response)
-	if agent.Api != nil {
-		return agent.SendApiMsg(msg)
+	syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
+	if err != nil {
+		return nil, fmt.Errorf("send to agent %q failed: %w", agent.ID, err)
 	}
-
-	if dnsErr != nil {
-		return nil, fmt.Errorf("send to agent %q failed and no API fallback: %w", agent.ID, dnsErr)
-	}
-	return nil, fmt.Errorf("no transport available for agent %q (no DNS transport manager, no API client)", agent.ID)
+	return &AgentMsgResponse{
+		Status: string(syncResp.Status),
+		Msg:    syncResp.Message,
+		Zone:   msg.Zone,
+	}, nil
 }
 
 // XXX: Not used at the moment.
@@ -777,27 +745,4 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	case <-time.After(1 * time.Second): // Don't block forever
 		lgEngine.Warn("STATUS response timed out")
 	}
-}
-
-func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (*AgentMsgResponse, error) {
-	if agent.Api == nil {
-		return nil, fmt.Errorf("no API client configured for agent %q", agent.ID)
-	}
-
-	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/msg", msg, false)
-	if err != nil {
-		return nil, fmt.Errorf("API msg failed: %v", err)
-	}
-
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("API msg returned status %d (%s)", status, http.StatusText(status))
-	}
-
-	var amr AgentMsgResponse
-	err = json.Unmarshal(resp, &amr)
-	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling message response: %v", err)
-	}
-
-	return &amr, nil
 }
