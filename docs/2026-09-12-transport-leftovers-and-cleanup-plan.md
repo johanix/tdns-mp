@@ -1,7 +1,11 @@
 # Transport redesign: leftovers, warts, and a cleanup plan
 
-Date: 2026-09-12, revision 4. Status: PROPOSAL, awaiting the operator's
-decision that it is in force. Nothing has been implemented.
+Date: 2026-09-12, revision 5. Status: APPROVED 2026-09-12 by the operator,
+with these decisions: the API mechanism is a peer of DNS (step 5 as
+written); the tdns-mp branch is cut from the tip of PR #50, which pins the
+tip of tdns #622; the HPKE primitive layer is kept and the rest of the HPKE
+code goes (step 7); the rig runs use the lab. Implementation starts from
+this revision on one feature branch per repository.
 
 Revision history:
 
@@ -11,9 +15,12 @@ Revision history:
 - r3 (`fb4be1a`): the amendment folded into the body after the re-review
   (verdict "approve"), so that every step reads correctly on its own. The
   r2 amendment section is gone; its content is in the steps it corrected.
-- r4 (this text): after the third pass (verdict "approve"), step 1 is
+- r4 (`0478c3c`): after the third pass (verdict "approve"), step 1 is
   transport-only as its header says; tdns-mp's switch to the typed
   accessors rides in step 2.
+- r5 (this text): approved. Step 7's HPKE deletion narrowed to what the
+  coming COSE-HPKE work will not reuse; the operator's decisions recorded
+  in the status line.
 
 Code examined, in detached read-only worktrees under `tdns-project/fbreak/`:
 tdns-mp `b8bba004` (tip of PR #50), tdns-transport `c619f2a` (main), tdns
@@ -334,10 +341,22 @@ The change:
   the backend comes from `crypto.GetBackend(conf.CryptoBackend)` with the
   default `jose`. The `long_term_jose_*` configuration keys stay until the
   COSE work renames them.
-- Delete `crypto/hpke`, `hpke/` and the unused half of `distrib` from main.
-  Git history keeps them, and the COSE-HPKE design will reshape the HPKE
-  backend anyway; carrying a stub that imports go-jose and describes a
-  "Phase 4" that never came is a liability, not a head start.
+- HPKE: keep the primitive layer, drop the design that wrapped it. The
+  coming work is COSE-HPKE, where HPKE is the recipient algorithm inside a
+  COSE envelope, not a peer backend of JOSE; what it will call is the
+  CIRCL wrapper in `hpke/hpke_wrapper.go` (X25519 + HKDF-SHA256 +
+  AES-256-GCM, base and auth mode, zero-key rejection) and its tests.
+  Those stay, with a package comment saying they are the HPKE primitive
+  for that work and have no caller yet. Everything that encoded the old
+  design goes: `crypto/hpke` (the stub backend, first recipient only,
+  go-jose signing, and its test suite that pins the stub), `hpke/edns0.go`
+  (the ephemeral key as an EDNS0 option; in COSE-HPKE it travels inside
+  the envelope), `hpke/rrtypes.go` (KMREQ names from the key-distribution
+  era), `hpke/types.go`, `hpke/utils.go` and `hpke/test_inline.go`. Git
+  history keeps them.
+- Delete the unused half of `distrib`: the tracker, the store and its
+  schema, the JWT manifest, `TransportEncoder` and the confirmation types.
+  The manifest split and reassembly stay.
 
 Resolves W16, W17, W18, W19, W20. Wire: identical, proven by the
 cross-decrypt gate and the receive goldens.
