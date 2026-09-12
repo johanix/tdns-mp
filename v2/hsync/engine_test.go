@@ -179,17 +179,17 @@ func TestRediscover_triggersDiscoveryForExistingPeer(t *testing.T) {
 	}
 }
 
-func TestEngine_dispatchRoutesSyncHandler(t *testing.T) {
+func TestEngine_dispatchRoutesHandler(t *testing.T) {
 	var got bool
 	e := NewEngine(Deps{LocalID: "local.example.", Transport: &mockTransport{}}, DefaultConfig())
-	e.SetSyncHandler(func(msg *InboundMsg) {
+	e.SetHandler(func(msg *InboundMsg) {
 		if msg != nil && msg.Originator == "peer.example." {
 			got = true
 		}
 	})
-	e.dispatchByType(&InboundMsg{Originator: "peer.example.", MessageType: MsgNotify})
+	e.onMsg(&InboundMsg{Originator: "peer.example.", MessageType: MsgNotify})
 	if !got {
-		t.Fatal("sync handler not invoked")
+		t.Fatal("handler not invoked")
 	}
 }
 

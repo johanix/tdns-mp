@@ -22,30 +22,11 @@ type ZoneName string
 // ZoneName = hsync.ZoneName alias, E1.a).
 func (zn ZoneName) String() string { return string(zn) }
 
-// PeerState is the HSYNC peer lifecycle state.
-type PeerState uint8
-
-const (
-	PeerStateNeeded PeerState = iota + 1
-	PeerStateKnown
-	PeerStateIntroduced
-	PeerStateOperational
-	PeerStateLegacy
-	PeerStateDegraded
-	PeerStateInterrupted
-	PeerStateError
-)
-
-var StateToString = map[PeerState]string{
-	PeerStateNeeded:      "NEEDED",
-	PeerStateKnown:       "KNOWN",
-	PeerStateIntroduced:  "INTRODUCED",
-	PeerStateOperational: "OPERATIONAL",
-	PeerStateLegacy:      "LEGACY",
-	PeerStateDegraded:    "DEGRADED",
-	PeerStateInterrupted: "INTERRUPTED",
-	PeerStateError:       "ERROR",
-}
+// Connection state is transport.PeerState, read from the canonical
+// transport.Peer through mechPeerState (transport_peer.go); the engine has
+// no state vocabulary of its own (cleanup plan, step 6). LEGACY is not a
+// state but a fact the application derives (an established peer that
+// shares no participant zone), in one place: tdnsmp's agent view.
 
 // AgentMsg mirrors core.AgentMsg for inbound dispatch.
 type AgentMsg = core.AgentMsg
@@ -76,7 +57,6 @@ type Peer struct {
 	DnsMethod   bool
 	IsInfraPeer bool
 	Zones       map[ZoneName]bool
-	State       PeerState
 	LastState   time.Time
 	Deferred    []DeferredTask
 }
@@ -88,7 +68,6 @@ func NewPeer(id PeerID) *Peer {
 		ApiMethod:   false,
 		DnsMethod:   false,
 		Zones:       make(map[ZoneName]bool),
-		State:       PeerStateNeeded,
 		LastState:   time.Now(),
 	}
 }
