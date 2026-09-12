@@ -1,0 +1,23 @@
+%
+% Standalone wrapper for the two drawings in
+% 2026-09-12-mp-functional-breakdown-drawings.tex.
+%
+%   pdflatex 2026-09-12-mp-functional-breakdown-standalone.tex
+%
+% One page per drawing. The deck version just \input's the drawings file
+% and calls \mpbreakdownlayers / \mpbreakdownmsgpath inside a frame.
+%
+\documentclass[varwidth=false, border=6mm]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning, fit, calc}
+\standaloneenv{tikzpicture}
+
+\input{2026-09-12-mp-functional-breakdown-drawings.tex}
+
+\begin{document}
+\mpbreakdownlayers
+\mpbreakdownmsgpath
+\end{document}
