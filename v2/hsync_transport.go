@@ -453,14 +453,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		}
 
 		// Initialize router with handlers and middleware
+		// Authorization and crypto are not router concerns: RouteViaRouter
+		// runs them before the router is entered (cleanup plan, step 1).
 		routerCfg := &transport.RouterConfig{
-			TransportManager:             tm,
-			PeerRegistry:                 tm.PeerRegistry,
-			PayloadCrypto:                cfg.PayloadCrypto,
-			TriggerDiscoveryOnMissingKey: true,
-			AllowUnencrypted:             false,
-			VerboseStats:                 false, // Set to true for verbose statistics logging
-			Confirmations:                true,
+			PeerRegistry:  tm.PeerRegistry,
+			VerboseStats:  false, // Set to true for verbose statistics logging
+			Confirmations: true,
 		}
 		lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
 		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {

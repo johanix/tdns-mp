@@ -270,13 +270,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	// application verbs from the MP verb table.
 	signerRouter := transport.NewDNSMessageRouter()
 	signerRouterCfg := &transport.RouterConfig{
-		TransportManager: tm,
-		PeerRegistry:     tm.PeerRegistry,
-		AllowUnencrypted: true,
-	}
-	if signerPayloadCrypto != nil {
-		signerRouterCfg.PayloadCrypto = signerPayloadCrypto
-		signerRouterCfg.AllowUnencrypted = false
+		PeerRegistry: tm.PeerRegistry,
 	}
 	if err := transport.InitializeRouter(signerRouter, signerRouterCfg); err != nil {
 		return fmt.Errorf("InitializeRouter (signer): %w", err)
@@ -466,11 +460,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	// application verbs (rfi, status-update, update) from the MP verb table.
 	combinerRouter := transport.NewDNSMessageRouter()
 	combinerRouterCfg := &transport.RouterConfig{
-		TransportManager: tm,
-		PeerRegistry:     tm.PeerRegistry,
-	}
-	if combinerPayloadCrypto != nil {
-		combinerRouterCfg.PayloadCrypto = combinerPayloadCrypto
+		PeerRegistry: tm.PeerRegistry,
 	}
 	if err := transport.InitializeRouter(combinerRouter, combinerRouterCfg); err != nil {
 		return fmt.Errorf("InitializeRouter (combiner): %w", err)

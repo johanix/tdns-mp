@@ -46,9 +46,6 @@ func buildDispatchContext(t *testing.T, tm *MPTransportBridge, senderHint, distI
 	ctx.PeerID = senderHint
 	ctx.ChunkPayload = payload
 	ctx.RemoteAddr = "127.0.0.1:0"
-	ctx.ChunkCrypted = false
-	ctx.SignatureValid = true
-	ctx.SignatureReason = "decrypted_by_router"
 	ctx.Data["local_id"] = tm.LocalID
 	if tm.DNSTransport != nil {
 		ctx.Data["transport"] = tm.DNSTransport
