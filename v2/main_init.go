@@ -10,12 +10,10 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -201,7 +199,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var signerPayloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initSignerCrypto(conf)
+		pc, err := newPayloadCrypto(mp, roleSigner)
 		if err != nil {
 			return fmt.Errorf("failed to initialize signer crypto: %w", err)
 		}
@@ -261,7 +259,8 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	}
 	conf.InternalMp.CombinerState = signerState
 
-	// Wire chunk handler into TM
+	// Wire chunk handler into TM; the transport fetches query-mode records
+	signerState.ChunkHandler().Transport = tm.DNSTransport
 	tm.ChunkHandler = signerState.ChunkHandler()
 
 	// Initialize signer router
@@ -270,13 +269,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	// application verbs from the MP verb table.
 	signerRouter := transport.NewDNSMessageRouter()
 	signerRouterCfg := &transport.RouterConfig{
-		TransportManager: tm,
-		PeerRegistry:     tm.PeerRegistry,
-		AllowUnencrypted: true,
-	}
-	if signerPayloadCrypto != nil {
-		signerRouterCfg.PayloadCrypto = signerPayloadCrypto
-		signerRouterCfg.AllowUnencrypted = false
+		PeerRegistry: tm.PeerRegistry,
 	}
 	if err := transport.InitializeRouter(signerRouter, signerRouterCfg); err != nil {
 		return fmt.Errorf("InitializeRouter (signer): %w", err)
@@ -354,11 +347,11 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	// Initialize combiner crypto for decrypting agent payloads
 	var secureWrapper *transport.SecurePayloadWrapper
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		var err error
-		secureWrapper, err = InitCombinerCrypto(conf)
+		pc, err := newPayloadCrypto(mp, roleCombiner)
 		if err != nil {
 			return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 		}
+		secureWrapper = transport.NewSecurePayloadWrapper(pc)
 	}
 
 	// Register CHUNK handler
@@ -457,7 +450,8 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 		return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
 	})
 
-	// Wire chunk handler into TM
+	// Wire chunk handler into TM; the transport fetches query-mode records
+	combinerState.ChunkHandler().Transport = tm.DNSTransport
 	tm.ChunkHandler = combinerState.ChunkHandler()
 
 	// Initialize combiner router
@@ -466,11 +460,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	// application verbs (rfi, status-update, update) from the MP verb table.
 	combinerRouter := transport.NewDNSMessageRouter()
 	combinerRouterCfg := &transport.RouterConfig{
-		TransportManager: tm,
-		PeerRegistry:     tm.PeerRegistry,
-	}
-	if combinerPayloadCrypto != nil {
-		combinerRouterCfg.PayloadCrypto = combinerPayloadCrypto
+		PeerRegistry: tm.PeerRegistry,
 	}
 	if err := transport.InitializeRouter(combinerRouter, combinerRouterCfg); err != nil {
 		return fmt.Errorf("InitializeRouter (combiner): %w", err)
@@ -536,7 +526,6 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkStore ChunkPayloadStore
 	var chunkQueryEndpoint string
 	var chunkQueryEndpointInNotify bool
 	if chunkMode == "query" {
@@ -545,18 +534,13 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
 		}
 		chunkQueryEndpointInNotify = (cep == "include")
-		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
-		conf.InternalMp.ChunkPayloadStore = chunkStore
-		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
-			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
-		}
 		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
 	}
 
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var payloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initAgentCrypto(conf)
+		pc, err := newPayloadCrypto(mp, roleAgent)
 		if err != nil {
 			return fmt.Errorf("failed to initialize agent crypto: %w", err)
 		}
@@ -583,7 +567,6 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		AgentRegistry:              conf.InternalMp.AgentRegistry,
 		MsgQs:                      conf.InternalMp.MsgQs,
 		ChunkMode:                  chunkMode,
-		ChunkPayloadStore:          chunkStore,
 		ChunkQueryEndpoint:         chunkQueryEndpoint,
 		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
@@ -657,7 +640,6 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkStore ChunkPayloadStore
 	var chunkQueryEndpoint string
 	var chunkQueryEndpointInNotify bool
 	if chunkMode == "query" {
@@ -666,17 +648,12 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 			return fmt.Errorf("auditor.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
 		}
 		chunkQueryEndpointInNotify = (cep == "include")
-		chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
-		conf.InternalMp.ChunkPayloadStore = chunkStore
-		if err := RegisterChunkQueryHandler(chunkStore); err != nil {
-			return fmt.Errorf("RegisterChunkQueryHandler: %w", err)
-		}
 		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
 	}
 
 	var payloadCrypto *transport.PayloadCrypto
 	if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
-		pc, err := initAgentCrypto(conf)
+		pc, err := newPayloadCrypto(mp, roleAuditor)
 		if err != nil {
 			return fmt.Errorf("failed to initialize auditor crypto: %w", err)
 		}
@@ -693,7 +670,6 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		AgentRegistry:              conf.InternalMp.AgentRegistry,
 		MsgQs:                      conf.InternalMp.MsgQs,
 		ChunkMode:                  chunkMode,
-		ChunkPayloadStore:          chunkStore,
 		ChunkQueryEndpoint:         chunkQueryEndpoint,
 		ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 		ChunkMaxSize:               mp.Dns.ChunkMaxSize,
@@ -756,68 +732,4 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 		return host
 	}
 	return net.JoinHostPort(host, strconv.Itoa(int(port)))
-}
-
-// initAgentCrypto initializes PayloadCrypto for the agent from MultiProviderConf.
-// Loads the agent's JOSE private key and the combiner's public key (if configured).
-func initAgentCrypto(conf *Config) (*transport.PayloadCrypto, error) {
-	mp := conf.MpConfig()
-	if mp == nil {
-		return nil, fmt.Errorf("multi-provider config is not set")
-	}
-
-	backend := jose.NewBackend()
-
-	privKeyPath := strings.TrimSpace(mp.LongTermJosePrivKey)
-	privKeyData, err := os.ReadFile(privKeyPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("private key file not found: %q: %w", privKeyPath, err)
-		}
-		return nil, fmt.Errorf("read private key %q: %w", privKeyPath, err)
-	}
-	privKeyData = StripKeyFileComments(privKeyData)
-
-	privKey, err := backend.ParsePrivateKey(privKeyData)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-
-	joseBackend, ok := backend.(*jose.Backend)
-	if !ok {
-		return nil, fmt.Errorf("backend is not JOSE")
-	}
-	pubKey, err := joseBackend.PublicFromPrivate(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("derive public key: %w", err)
-	}
-
-	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
-		Backend: backend,
-		Enabled: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create PayloadCrypto: %w", err)
-	}
-
-	pc.SetLocalKeys(privKey, pubKey)
-
-	// Load combiner's public key if configured
-	if mp.Combiner != nil && strings.TrimSpace(mp.Combiner.LongTermJosePubKey) != "" {
-		combinerPubKeyPath := strings.TrimSpace(mp.Combiner.LongTermJosePubKey)
-		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("initAgentCrypto: failed to read combiner public key %q: %w", combinerPubKeyPath, err)
-		}
-		combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
-		combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
-		if err != nil {
-			return nil, fmt.Errorf("initAgentCrypto: failed to parse combiner public key: %w", err)
-		}
-		combinerPeerID := dns.Fqdn(mp.Combiner.Identity)
-		pc.AddPeerKey(combinerPeerID, combinerPubKey)
-		pc.AddPeerVerificationKey(combinerPeerID, combinerPubKey)
-	}
-
-	return pc, nil
 }

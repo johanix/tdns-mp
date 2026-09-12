@@ -5,7 +5,6 @@
 package tdnsmp
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -88,10 +87,9 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 	}
 }
 
-// MarkAgentAsNeeded marks a remote agent as NEEDED by delegating to the hsync
-// engine's NG discovery path (HsyncEngine.MarkNeeded), which drives discovery
-// and hello. No-op if no HsyncEngine is wired (the legacy in-process discovery
-// fallback was retired with A3d's legacy-path retirement).
+// MarkAgentAsNeeded hands a remote agent to the hsync engine
+// (HsyncEngine.MarkNeeded), which drives its discovery and hello. Without an
+// engine there is nothing to hand it to.
 func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
 	if ar.HsyncEngine != nil {
 		var task *hsync.DeferredTask
@@ -247,24 +245,14 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 				// Found an HSYNC3 record, try to locate the agent
 				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
 				if err != nil {
-					// Transient DTO placeholder — never stored in ar.S, so the
-					// throwaway hsync.Peer allocation is fine (E1.b).
+					// A placeholder for an agent the registry does not have;
+					// never stored in ar.S, so the throwaway hsync.Peer
+					// allocation is fine (E1.b). agentInfo reports it as ERROR.
 					agent = &Agent{
 						Peer:     hsync.NewPeer(AgentId(hsync3.Identity)),
-						State:    AgentStateError,
 						ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
 					}
 					agent.LastState = time.Now()
-				} else {
-					// E1.b: the marshaled State shadow used to be refreshed by
-					// the bridge's per-hello/beat wrapper-replace (from the NG
-					// store, itself stale post-D2.5). Stamp it from the
-					// canonical transport.Peer store at DTO-build time instead
-					// — the same source `peer list` and `gossip state` read.
-					st := ar.effectiveAgentState(agent.ID)
-					agent.Mu.Lock()
-					agent.State = st
-					agent.Mu.Unlock()
 				}
 				agents = append(agents, agent)
 			}
@@ -415,36 +403,38 @@ func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.Mu.Unlock()
 }
 
-func (agent *Agent) MarshalJSON() ([]byte, error) {
-	// Create a temporary struct without non-JSON-friendly fields
-	type AgentJSON struct {
-		Identity    AgentId
-		InitialZone ZoneName
-		ApiMethod   bool
-		DnsMethod   bool
-		Zones       map[ZoneName]bool
-		State       AgentState
-		LastState   time.Time
-		ErrorMsg    string
+// agentInfo builds the management API's report of an agent: the view's
+// fields and the state the transport's per-mechanism store derives now. An
+// agent the registry does not hold (a placeholder from GetZoneAgentData)
+// is reported as ERROR with the reason it carries.
+func (ar *AgentRegistry) agentInfo(agent *Agent) *AgentInfo {
+	state := ar.effectiveAgentState(agent.ID)
+	if _, held := ar.S.Get(agent.ID); !held && agent.ErrorMsg != "" {
+		state = AgentStateError
 	}
-
 	agent.Mu.RLock()
+	defer agent.Mu.RUnlock()
 	zones := make(map[ZoneName]bool, len(agent.Zones))
 	for k, v := range agent.Zones {
 		zones[k] = v
 	}
-	aj := AgentJSON{
+	return &AgentInfo{
 		Identity:    agent.ID,
 		InitialZone: agent.InitialZone,
 		ApiMethod:   agent.ApiMethod,
 		DnsMethod:   agent.DnsMethod,
 		Zones:       zones,
-		State:       agent.State,
+		State:       state,
 		LastState:   agent.LastState,
 		ErrorMsg:    agent.ErrorMsg,
 	}
-	agent.Mu.RUnlock()
+}
 
-	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.ID)
-	return json.Marshal(aj)
+// zoneAgentInfo is the report of a zone's agents.
+func (ar *AgentRegistry) zoneAgentInfo(zad *ZoneAgentData) *ZoneAgentInfo {
+	info := &ZoneAgentInfo{ZoneName: zad.ZoneName, MyUpstream: zad.MyUpstream, MyDownstreams: zad.MyDownstreams}
+	for _, agent := range zad.Agents {
+		info.Agents = append(info.Agents, ar.agentInfo(agent))
+	}
+	return info
 }

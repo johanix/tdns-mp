@@ -33,9 +33,7 @@ func (e *HsyncDataEngine) Run(ctx context.Context, msgQs *MsgQs) {
 	if e == nil || e.core == nil || msgQs == nil {
 		return
 	}
-	e.core.SetSyncHandler(e.onSyncMessage)
-	e.core.SetElectionHandler(e.onElectionMessage)
-	e.core.SetKeyStateHandler(e.onKeyStateMessage)
+	e.core.SetHandler(e.onSyncMessage)
 
 	ar := e.conf.InternalMp.AgentRegistry
 	helloCh := adaptHelloReports(ctx, msgQs.Hello, nil, nil, ar)
@@ -58,14 +56,6 @@ func (e *HsyncDataEngine) onSyncMessage(msg *hsync.InboundMsg) {
 		registry := e.conf.InternalMp.AgentRegistry
 		registry.MsgHandler(amp, msgQsSynchedDataUpdate(e.conf), e.conf.InternalMp.MsgQs.SynchedDataCmd)
 	}
-}
-
-func (e *HsyncDataEngine) onElectionMessage(msg *hsync.InboundMsg) {
-	e.onSyncMessage(msg)
-}
-
-func (e *HsyncDataEngine) onKeyStateMessage(msg *hsync.InboundMsg) {
-	e.onSyncMessage(msg)
 }
 
 func msgQsSynchedDataUpdate(conf *Config) chan *SynchedDataUpdate {

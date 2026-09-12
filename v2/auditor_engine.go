@@ -42,8 +42,7 @@ func (e *AuditorEngine) Run(ctx context.Context, msgQs *MsgQs) {
 	if e == nil || e.core == nil || msgQs == nil {
 		return
 	}
-	e.core.SetSyncHandler(e.onInboundMsg)
-	e.core.SetElectionHandler(e.onInboundMsg)
+	e.core.SetHandler(e.onInboundMsg)
 
 	ar := e.conf.InternalMp.AgentRegistry
 	helloCh := adaptHelloReports(ctx, msgQs.Hello, e.stateManager, e.auditLog, ar)
@@ -284,7 +283,7 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 				if abp, ok := report.Msg.(*AgentBeatPost); ok {
 					gossip := make([]hsync.GossipMessage, len(abp.Gossip))
 					for i := range abp.Gossip {
-						gossip[i] = gossipMessageToHsync(&abp.Gossip[i])
+						gossip[i] = abp.Gossip[i]
 					}
 					msg = &hsync.BeatPost{
 						MessageType: hsync.MsgBeat,
@@ -337,39 +336,5 @@ func adaptInboundMsgs(ctx context.Context, in <-chan *AgentMsgPostPlus) <-chan *
 			}
 		}
 	}()
-	return out
-}
-
-func gossipMessageToHsync(m *GossipMessage) hsync.GossipMessage {
-	if m == nil {
-		return hsync.GossipMessage{}
-	}
-	out := hsync.GossipMessage{
-		GroupHash: m.GroupHash,
-		GroupName: hsync.GroupNameProposal{
-			GroupHash:  m.GroupName.GroupHash,
-			Name:       m.GroupName.Name,
-			Proposer:   m.GroupName.Proposer,
-			ProposedAt: m.GroupName.ProposedAt,
-		},
-		Election: hsync.GroupElectionState{
-			Leader:       m.Election.Leader,
-			Term:         m.Election.Term,
-			LeaderExpiry: m.Election.LeaderExpiry,
-		},
-		Members: make(map[string]*hsync.MemberState, len(m.Members)),
-	}
-	for id, ms := range m.Members {
-		if ms == nil {
-			continue
-		}
-		out.Members[id] = &hsync.MemberState{
-			Identity:     ms.Identity,
-			PeerStates:   ms.PeerStates,
-			Zones:        ms.Zones,
-			Timestamp:    ms.Timestamp,
-			BeatInterval: ms.BeatInterval,
-		}
-	}
 	return out
 }

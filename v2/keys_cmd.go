@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/johanix/tdns-transport/v2/crypto"
-	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	tdns "github.com/johanix/tdns/v2"
 	"gopkg.in/yaml.v3"
 )
@@ -56,7 +55,10 @@ func RunKeysCmd(mp *MultiProviderConf, args []string) error {
 		return fmt.Errorf("missing subcommand (generate or show)")
 	}
 
-	backend := jose.NewBackend()
+	backend, err := cryptoBackend(mp)
+	if err != nil {
+		return err
+	}
 
 	switch args[0] {
 	case "generate":
@@ -109,7 +111,7 @@ func runKeysGenerate(mp *MultiProviderConf, backend crypto.Backend, args []strin
 		return fmt.Errorf("write %s: %w", pubPath, err)
 	}
 
-	fmt.Printf("Generated JOSE keypair:\n  private: %s\n  public:  %s\n", privPath, pubPath)
+	fmt.Printf("Generated %s keypair:\n  private: %s\n  public:  %s\n", backend.Name(), privPath, pubPath)
 	return nil
 }
 
@@ -133,12 +135,7 @@ func runKeysShow(mp *MultiProviderConf, backend crypto.Backend, args []string) e
 		return fmt.Errorf("parse private key: %w", err)
 	}
 
-	// PublicFromPrivate is JOSE-specific; use type assertion
-	joseBackend, ok := backend.(*jose.Backend)
-	if !ok {
-		return fmt.Errorf("derive public key: backend is not JOSE")
-	}
-	pubKey, err := joseBackend.PublicFromPrivate(privKey)
+	pubKey, err := backend.PublicFromPrivate(privKey)
 	if err != nil {
 		return fmt.Errorf("derive public key: %w", err)
 	}

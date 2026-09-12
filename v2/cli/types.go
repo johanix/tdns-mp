@@ -24,6 +24,7 @@ type ZoneName = tdnsmp.ZoneName
 type AgentMgmtPost = tdnsmp.AgentMgmtPost
 type AgentMgmtResponse = tdnsmp.AgentMgmtResponse
 type Agent = tdnsmp.Agent
+type AgentInfo = tdnsmp.AgentInfo
 
 var AgentStateToString = tdnsmp.AgentStateToString
 

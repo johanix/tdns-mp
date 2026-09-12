@@ -1,8 +1,6 @@
 /*
- * Type definitions for gossip protocol, provider groups, and
- * leader election subsystems.
- * Copied from tdns/v2/gossip.go, provider_groups.go,
- * parentsync_leader.go.
+ * Type definitions for the gossip protocol, provider groups and leader
+ * election: the state table, the group manager and their messages.
  */
 
 package tdnsmp
@@ -10,36 +8,26 @@ package tdnsmp
 import (
 	"sync"
 	"time"
+
+	"github.com/johanix/tdns-mp/v2/hsync"
 )
 
-// --- From gossip.go ---
+// --- Gossip wire types: defined once in package hsync (cleanup step 6) ---
 
-// GossipMessage carries gossip state for one provider group.
-// Included in beats between agents that share group membership.
-type GossipMessage struct {
-	GroupHash string                  `json:"group_hash"`
-	GroupName GroupNameProposal       `json:"group_name"`
-	Members   map[string]*MemberState `json:"members"` // key: provider identity
-	Election  GroupElectionState      `json:"election"`
-}
+// GossipMessage carries gossip state for one provider group. Included in
+// beats between agents that share group membership.
+type GossipMessage = hsync.GossipMessage
 
 // MemberState is one member's view of all other members in the group.
-// Only the member itself updates its own MemberState (sets Timestamp).
-// Other agents propagate it via gossip without modification.
-type MemberState struct {
-	Identity     string            `json:"identity"`
-	PeerStates   map[string]string `json:"peer_states"`             // key: peer identity, value: state string
-	Zones        []string          `json:"zones"`                   // zones this member serves in this group
-	Timestamp    time.Time         `json:"timestamp"`               // set by the member itself
-	BeatInterval uint32            `json:"beat_interval,omitempty"` // member's configured local beatinterval in seconds; zero from old agents that don't report it
-}
+// Only the member itself updates its own MemberState (sets Timestamp);
+// other agents propagate it via gossip without modification.
+type MemberState = hsync.MemberState
 
 // GroupElectionState carries election state for a provider group.
-type GroupElectionState struct {
-	Leader       string    `json:"leader,omitempty"` // identity of current leader
-	Term         uint32    `json:"term,omitempty"`
-	LeaderExpiry time.Time `json:"leader_expiry,omitempty"`
-}
+type GroupElectionState = hsync.GroupElectionState
+
+// GroupNameProposal is a name proposed by a provider for a group.
+type GroupNameProposal = hsync.GroupNameProposal
 
 // GossipStateTable manages the NxN state matrix for all provider groups.
 // Each entry is a MemberState keyed by (groupHash, memberIdentity).
@@ -84,14 +72,6 @@ type ProviderGroup struct {
 	// selection MUST use VotingMembers, not Members.
 	VotingMembers []string
 	NameProposal  *GroupNameProposal // our proposal for this group's name
-}
-
-// GroupNameProposal is a name proposed by a provider for a group.
-type GroupNameProposal struct {
-	GroupHash  string    `json:"group_hash"`
-	Name       string    `json:"name"`
-	Proposer   string    `json:"proposer"`    // provider identity that chose the name
-	ProposedAt time.Time `json:"proposed_at"` // when the name was chosen
 }
 
 // ProviderGroupManager manages provider group computation and naming.

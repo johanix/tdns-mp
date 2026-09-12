@@ -69,7 +69,6 @@ func parseAppPayload(distributionID string, payload []byte, sourceAddr string) (
 		zone = fields.Zones[0]
 	}
 	return &transport.IncomingMessage{
-		Type:           msgType,
 		TypeToken:      msgType,
 		DistributionID: distributionID,
 		SenderID:       senderID,

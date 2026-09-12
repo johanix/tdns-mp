@@ -1,6 +1,6 @@
 /*
- * Message queue types and message structs for multi-provider communication.
- * Copied from tdns/v2/config.go during agent extraction.
+ * The message queues the engines and handlers exchange work through, and
+ * the messages that ride on them.
  */
 
 package tdnsmp

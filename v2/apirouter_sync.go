@@ -2,7 +2,8 @@
  * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
  * Sync API routers for agent-to-agent and agent-to-combiner
- * HTTPS communication (mutual TLS with TLSA verification).
+ * HTTPS communication (mutual TLS with TLSA verification). The endpoints
+ * are the transport's receive pipeline (api_receive.go).
  */
 package tdnsmp
 
@@ -23,15 +24,15 @@ func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, erro
 	})
 
 	sr := r.PathPrefix("/api/v1").Subrouter()
-	sr.HandleFunc("/hello", conf.APIhello()).Methods("POST")
+	sr.HandleFunc("/hello", conf.apiSyncEndpoint(apiEndpointHello)).Methods("POST")
 
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(conf.tlsaVerificationMiddleware("AgentSyncApi"))
 
 	secureRouter.HandleFunc("/ping", tdns.APIping(conf.Config)).Methods("POST")
-	secureRouter.HandleFunc("/sync/ping", conf.APIsyncPing()).Methods("POST")
-	secureRouter.HandleFunc("/beat", conf.APIbeat()).Methods("POST")
-	secureRouter.HandleFunc("/msg", conf.APImsg()).Methods("POST")
+	secureRouter.HandleFunc("/sync/ping", conf.apiSyncEndpoint(apiEndpointPing)).Methods("POST")
+	secureRouter.HandleFunc("/beat", conf.apiSyncEndpoint(apiEndpointBeat)).Methods("POST")
+	secureRouter.HandleFunc("/msg", conf.apiSyncEndpoint(apiEndpointMsg)).Methods("POST")
 
 	return r, nil
 }
@@ -44,15 +45,15 @@ func (conf *Config) SetupCombinerSyncRouter(ctx context.Context) (*mux.Router, e
 	})
 
 	sr := r.PathPrefix("/api/v1").Subrouter()
-	sr.HandleFunc("/hello", conf.APIhello()).Methods("POST")
+	sr.HandleFunc("/hello", conf.apiSyncEndpoint(apiEndpointHello)).Methods("POST")
 
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(conf.tlsaVerificationMiddleware("CombinerSyncApi"))
 
 	secureRouter.HandleFunc("/ping", tdns.APIping(conf.Config)).Methods("POST")
-	secureRouter.HandleFunc("/sync/ping", conf.APIsyncPing()).Methods("POST")
-	secureRouter.HandleFunc("/beat", conf.APIbeat()).Methods("POST")
-	secureRouter.HandleFunc("/msg", conf.APImsg()).Methods("POST")
+	secureRouter.HandleFunc("/sync/ping", conf.apiSyncEndpoint(apiEndpointPing)).Methods("POST")
+	secureRouter.HandleFunc("/beat", conf.apiSyncEndpoint(apiEndpointBeat)).Methods("POST")
+	secureRouter.HandleFunc("/msg", conf.apiSyncEndpoint(apiEndpointMsg)).Methods("POST")
 
 	return r, nil
 }

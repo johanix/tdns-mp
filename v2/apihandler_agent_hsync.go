@@ -17,9 +17,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// APIagentHsync handles /agent/hsync requests. The 6 supported
-// commands are: hsync-zonestatus, hsync-peer-status, hsync-sync-ops,
-// hsync-confirmations, hsync-transport-events, hsync-metrics.
+// APIagentHsync handles /agent/hsync requests: hsync-zonestatus,
+// hsync-sync-ops, hsync-confirmations, hsync-transport-events and
+// hsync-metrics.
 func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
@@ -76,16 +76,14 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 			}
 			resp.HsyncRRs = hsyncStrs
 
-			resp.ZoneAgentData, err = conf.InternalMp.AgentRegistry.GetZoneAgentData(amp.Zone)
+			zad, err := conf.InternalMp.AgentRegistry.GetZoneAgentData(amp.Zone)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error getting remote agents: %v", err)
 				return
 			}
+			resp.ZoneAgentData = conf.InternalMp.AgentRegistry.zoneAgentInfo(zad)
 			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", amp.Zone)
-
-		case "hsync-peer-status":
-			resp.Msg = "Found 0 peers"
 
 		case "hsync-sync-ops":
 			if hdb == nil {

@@ -94,117 +94,100 @@ func TestTransportBoundary_ChunkToMsg(t *testing.T) {
 	}
 }
 
-// TestTransportBoundary_HelloRejection exercises the policy layer of
-// EvaluateHello: a hello whose zone is unknown, has no HSYNC3, or
-// excludes the caller must be rejected. The transport layer never
-// sees these helloes; rejection happens in MP code before any
-// transport-state transition.
+// TestTransportBoundary_HelloRejection exercises the hello admission
+// policy: a hello whose zone is unknown, has no HSYNC participants, or
+// excludes the sender must be refused. The hello enters through the
+// pipeline's HTTPS entry (cleanup step 5: the endpoint has no policy of
+// its own any more); the policy is the zone-peer authorization every
+// message meets, and a refused hello reaches no MP queue.
 //
 // This is scenario 6 from the harness doc. It deliberately does not
 // rely on any HandleSync path; that is scenario 5 (PR-2).
 func TestTransportBoundary_HelloRejection(t *testing.T) {
+	// The default harness authorizes no peer by configuration, so the
+	// HSYNC-derived participant policy decides.
 	t.Run("UnknownZone", func(t *testing.T) {
-		env := newIntegEnv(t, &integEnvConfig{SkipBridge: true})
+		env := newIntegEnv(t, nil)
 		// No zone seeded.
-		ahp := &AgentHelloPost{
-			MessageType:  AgentMsgHello,
-			MyIdentity:   AgentId(env.Alice.Identity),
-			YourIdentity: AgentId(env.Bob.Identity),
-			Zone:         ZoneName("nonexistent.example."),
+		resp := postAPIHello(t, env.Bob, env.Alice.Identity, "nonexistent.example.")
+		if !resp.Error {
+			t.Errorf("expected a refusal; got %+v", resp)
 		}
-		needed, errmsg, err := env.Bob.Registry.EvaluateHello(ahp)
-		if err != nil {
-			t.Fatalf("EvaluateHello returned err: %v", err)
+		if !strings.Contains(resp.ErrorMsg, "not authorized") {
+			t.Errorf("ErrorMsg %q does not say not authorized", resp.ErrorMsg)
 		}
-		if needed {
-			t.Errorf("expected needed=false; got true (errmsg=%q)", errmsg)
-		}
-		if !strings.Contains(errmsg, "don't know about zone") {
-			t.Errorf("errmsg %q does not mention unknown zone", errmsg)
+		if _, ok := recvWithin(env.Bob.MsgQs.Hello, 100*time.Millisecond); ok {
+			t.Error("a refused hello must not reach MsgQs.Hello")
 		}
 	})
 
 	t.Run("NoHSYNC3", func(t *testing.T) {
-		env := newIntegEnv(t, &integEnvConfig{SkipBridge: true})
+		env := newIntegEnv(t, nil)
 		const zone = "no-hsync3.example."
 		// Zone exists but has no HSYNC3 RRset.
 		seedZoneWithHSYNC3(t, zone) // identities=nil -> no HSYNC3
-		ahp := &AgentHelloPost{
-			MessageType:  AgentMsgHello,
-			MyIdentity:   AgentId(env.Alice.Identity),
-			YourIdentity: AgentId(env.Bob.Identity),
-			Zone:         ZoneName(zone),
+		resp := postAPIHello(t, env.Bob, env.Alice.Identity, zone)
+		if !resp.Error {
+			t.Errorf("expected a refusal; got %+v", resp)
 		}
-		needed, errmsg, err := env.Bob.Registry.EvaluateHello(ahp)
-		if err != nil {
-			t.Fatalf("EvaluateHello returned err: %v", err)
-		}
-		if needed {
-			t.Errorf("expected needed=false; got true (errmsg=%q)", errmsg)
-		}
-		if !strings.Contains(errmsg, "no HSYNC participants") {
-			t.Errorf("errmsg %q does not mention missing HSYNC participants", errmsg)
+		if _, ok := recvWithin(env.Bob.MsgQs.Hello, 100*time.Millisecond); ok {
+			t.Error("a refused hello must not reach MsgQs.Hello")
 		}
 	})
 
 	t.Run("SenderNotInHSYNC3", func(t *testing.T) {
-		env := newIntegEnv(t, &integEnvConfig{SkipBridge: true})
+		env := newIntegEnv(t, nil)
 		const zone = "exclusive.example."
-		// HSYNC3 exists, includes Bob (the local agent for the
-		// EvaluateHello call) but excludes Alice. Alice's hello
-		// must be rejected.
+		// HSYNC3 exists, includes Bob (the receiver) but excludes
+		// Alice. Alice's hello must be refused.
 		seedZoneWithHSYNC3(t, zone, env.Bob.Identity)
-		ahp := &AgentHelloPost{
-			MessageType:  AgentMsgHello,
-			MyIdentity:   AgentId(env.Alice.Identity),
-			YourIdentity: AgentId(env.Bob.Identity),
-			Zone:         ZoneName(zone),
+		resp := postAPIHello(t, env.Bob, env.Alice.Identity, zone)
+		if !resp.Error {
+			t.Errorf("expected a refusal; got %+v", resp)
 		}
-		needed, errmsg, err := env.Bob.Registry.EvaluateHello(ahp)
-		if err != nil {
-			t.Fatalf("EvaluateHello returned err: %v", err)
-		}
-		if needed {
-			t.Errorf("expected needed=false; got true (errmsg=%q)", errmsg)
-		}
-		if !strings.Contains(errmsg, "do not include both") {
-			t.Errorf("errmsg %q does not mention participants missing both identities", errmsg)
+		if _, ok := recvWithin(env.Bob.MsgQs.Hello, 100*time.Millisecond); ok {
+			t.Error("a refused hello must not reach MsgQs.Hello")
 		}
 	})
 
 	// A2 security regression: an identity present in HSYNC3 but holding no
-	// HSYNCPARAM role is not a participant and must be rejected at HELLO, while a
+	// HSYNCPARAM role is not a participant and must be refused at HELLO, while a
 	// role-holding member is accepted.
 	t.Run("RoleLessRejected", func(t *testing.T) {
-		env := newIntegEnv(t, &integEnvConfig{SkipBridge: true})
+		env := newIntegEnv(t, nil)
 		const zone = "rolegated.example."
-		bob := dns.Fqdn(env.Bob.Identity)       // local (evaluator)
+		bob := dns.Fqdn(env.Bob.Identity)       // local (receiver)
 		alice := dns.Fqdn(env.Alice.Identity)   // member
 		const roleless = "auden.agent.example." // in HSYNC3, no role
 
 		zd := seedZoneWithHSYNC3(t, zone, bob, alice, roleless)
 		addHSYNCPARAMServers(t, zd, shortLabel(bob), shortLabel(alice))
+		// The production seam: RouteToCallback -> routeIncomingMessage.
+		env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
 
-		// Member HELLO accepted.
-		ok, msg, err := env.Bob.Registry.EvaluateHello(&AgentHelloPost{
-			MyIdentity: AgentId(alice), YourIdentity: AgentId(bob), Zone: ZoneName(zone),
-		})
-		if err != nil {
-			t.Fatalf("EvaluateHello(member) err: %v", err)
+		// Member HELLO accepted, and routed.
+		resp := postAPIHello(t, env.Bob, alice, zone)
+		if resp.Error || resp.Status != "ok" {
+			t.Fatalf("member HELLO should be accepted, got %+v", resp)
 		}
+		if string(resp.MyIdentity) != bob || string(resp.YourIdentity) != alice {
+			t.Errorf("reply names %q/%q, want %q/%q", resp.MyIdentity, resp.YourIdentity, bob, alice)
+		}
+		r, ok := recvWithin(env.Bob.MsgQs.Hello, integTestTimeout)
 		if !ok {
-			t.Fatalf("member HELLO should be accepted, rejected: %q", msg)
+			t.Fatal("accepted hello did not reach MsgQs.Hello")
+		}
+		if string(r.Identity) != alice || r.Transport != transport.MechanismAPI || string(r.Zone) != zone {
+			t.Errorf("hello report: %+v", *r)
 		}
 
-		// Role-less HELLO rejected.
-		ok, _, err = env.Bob.Registry.EvaluateHello(&AgentHelloPost{
-			MyIdentity: AgentId(roleless), YourIdentity: AgentId(bob), Zone: ZoneName(zone),
-		})
-		if err != nil {
-			t.Fatalf("EvaluateHello(role-less) err: %v", err)
+		// Role-less HELLO refused.
+		resp = postAPIHello(t, env.Bob, roleless, zone)
+		if !resp.Error {
+			t.Errorf("role-less identity must be refused at HELLO, got %+v", resp)
 		}
-		if ok {
-			t.Errorf("role-less identity must be rejected at HELLO, got accepted")
+		if _, ok := recvWithin(env.Bob.MsgQs.Hello, 100*time.Millisecond); ok {
+			t.Error("a refused hello must not reach MsgQs.Hello")
 		}
 
 		// ParticipantsForZone excludes the role-less identity.
@@ -213,9 +196,6 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 			if dns.Fqdn(string(p)) == dns.Fqdn(roleless) {
 				t.Errorf("participants must exclude role-less identity %q; got %v", roleless, parts)
 			}
-		}
-		if len(parts) != 2 {
-			t.Errorf("expected 2 participants (bob, alice); got %d: %v", len(parts), parts)
 		}
 	})
 }

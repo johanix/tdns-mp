@@ -139,8 +139,8 @@ func (e *Engine) retryPendingDiscoveries() {
 		peer.Mu.RUnlock()
 		apiState := mechPeerState(e, id, TransportAPI)
 		dnsState := mechPeerState(e, id, TransportDNS)
-		apiNeeded := apiMethod && apiState == PeerStateNeeded
-		dnsNeeded := dnsMethod && dnsState == PeerStateNeeded
+		apiNeeded := apiMethod && needsDiscovery(apiState)
+		dnsNeeded := dnsMethod && needsDiscovery(dnsState)
 
 		if apiNeeded || dnsNeeded {
 			sem := e.discoverySem()
@@ -157,8 +157,8 @@ func (e *Engine) retryPendingDiscoveries() {
 		// Hello started here — attemptDiscovery is the only other launcher, and
 		// it didn't run for this peer. startHelloRetrier is idempotent (no-op if
 		// a retrier is already running, so engine-discovered peers don't restart).
-		apiNeedsHello := apiMethod && apiState == PeerStateKnown
-		dnsNeedsHello := dnsMethod && dnsState == PeerStateKnown
+		apiNeedsHello := apiMethod && needsHello(apiState)
+		dnsNeedsHello := dnsMethod && needsHello(dnsState)
 		if apiNeedsHello || dnsNeedsHello {
 			e.startHelloRetrier(peer)
 		}
@@ -203,10 +203,10 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	peer.Mu.RUnlock()
 	apiState := mechPeerState(e, id, TransportAPI)
 	dnsState := mechPeerState(e, id, TransportDNS)
-	apiUseful := apiMethod && apiState >= PeerStateKnown
-	dnsUseful := dnsMethod && dnsState >= PeerStateKnown
-	apiNeedsHello := apiMethod && apiState == PeerStateKnown
-	dnsNeedsHello := dnsMethod && dnsState == PeerStateKnown
+	apiUseful := apiMethod && pastDiscovery(apiState)
+	dnsUseful := dnsMethod && pastDiscovery(dnsState)
+	apiNeedsHello := apiMethod && needsHello(apiState)
+	dnsNeedsHello := dnsMethod && needsHello(dnsState)
 
 	if !apiUseful && !dnsUseful {
 		return
