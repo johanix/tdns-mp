@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -431,19 +430,18 @@ func AgentJWKKeyPrep(zd *tdns.ZoneData, publishname string, hdb *HsyncDB, mp *Mu
 	// Strip comments from key file
 	privKeyData = tdns.StripKeyFileComments(privKeyData)
 
-	// Use JOSE backend to parse the key
-	backend := jose.NewBackend()
+	// The configured backend parses the key
+	backend, err := cryptoBackend(mp)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: %w", err)
+	}
 	privKey, err := backend.ParsePrivateKey(privKeyData)
 	if err != nil {
-		return fmt.Errorf("AgentJWKKeyPrep: failed to parse JOSE private key: %w", err)
+		return fmt.Errorf("AgentJWKKeyPrep: failed to parse private key: %w", err)
 	}
 
 	// Derive public key from private key
-	joseBackend, ok := backend.(*jose.Backend)
-	if !ok {
-		return fmt.Errorf("AgentJWKKeyPrep: backend is not JOSE")
-	}
-	josePubKey, err := joseBackend.PublicFromPrivate(privKey)
+	josePubKey, err := backend.PublicFromPrivate(privKey)
 	if err != nil {
 		return fmt.Errorf("AgentJWKKeyPrep: failed to derive public key: %w", err)
 	}
