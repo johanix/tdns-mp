@@ -1,6 +1,6 @@
 # Transport redesign: leftovers, warts, and a cleanup plan
 
-Date: 2026-09-12, revision 3. Status: PROPOSAL, awaiting the operator's
+Date: 2026-09-12, revision 4. Status: PROPOSAL, awaiting the operator's
 decision that it is in force. Nothing has been implemented.
 
 Revision history:
@@ -8,9 +8,12 @@ Revision history:
 - r1 (PR #52, `665e66d`): initial inventory and plan.
 - r2 (`e4a1bac`): a dated amendment after the external review (verdict
   "request changes"): three holds and six residuals, all accepted.
-- r3 (this text): the amendment folded into the body after the re-review
+- r3 (`fb4be1a`): the amendment folded into the body after the re-review
   (verdict "approve"), so that every step reads correctly on its own. The
   r2 amendment section is gone; its content is in the steps it corrected.
+- r4 (this text): after the third pass (verdict "approve"), step 1 is
+  transport-only as its header says; tdns-mp's switch to the typed
+  accessors rides in step 2.
 
 Code examined, in detached read-only worktrees under `tdns-project/fbreak/`:
 tdns-mp `b8bba004` (tip of PR #50), tdns-transport `c619f2a` (main), tdns
@@ -157,8 +160,9 @@ fetch, check envelope, decrypt, parse, authorize zone, route, respond.
 - Delete `transport.DnsNotifyRequest`.
 - Add typed accessors for the `ctx.Data` keys that cross the seam
   (`IncomingOf(ctx)`, `SetResponse(ctx, payload, rcode)`, and so on) and
-  use them from both repositories. The keys and their values are unchanged,
-  so this is an API addition, not a wire change.
+  use them inside transport. The keys and their values are unchanged, so
+  this is an API addition, not a wire change, and tdns-mp keeps working on
+  the string keys until step 2 switches its call sites.
 - Rewrite `doc.go`.
 
 Resolves W1, W2, W5, W6 (as far as typing goes), W9.
@@ -182,8 +186,7 @@ router tests, rewritten where they asserted the middleware;
 `transport-exercise`'s middleware check is rewritten against a
 user-supplied middleware.
 
-Size: small but not mechanical. The typed accessors are used from both
-repositories.
+Size: small but not mechanical.
 
 ### Step 2: one parser, one verb field (tdns-transport and tdns-mp; INVARIANT)
 
@@ -199,12 +202,16 @@ repositories.
   `HandlePing` read `Token()`. Check the tests that construct
   `IncomingMessage` or read `Type` (`app_message_test.go` and the dispatch
   test) in the same commit.
+- Switch tdns-mp's `ctx.Data` reads and writes (`mp_verb_handlers.go`,
+  `combiner_chunk.go`, `hsync_transport.go`) to the step 1 accessors. This
+  is the tdns-mp half of step 1's addition; it lands here because this step
+  already has a tdns-mp commit.
 
 Resolves W3, W4. Wire: identical bytes; the parsing rules are pinned by
 `mp_chunk_parse_test.go` and the receive goldens.
 
 Size: small but not mechanical; making `ParseApp` required touches every
-role's wiring.
+role's wiring, and the accessor switch touches every verb handler.
 
 ### Step 3, C4b: transport-own verb structs move home (tdns-transport; INVARIANT)
 
@@ -362,8 +369,8 @@ makes stale in its own commit. What is left for this step:
 
 | Step | Repos | Wire | Depends on | Hand-edited lines, rough | Whole files deleted |
 |---|---|---|---|---|---|
-| 1 pipeline | transport | INVARIANT | none | ~270 | ~890 (middleware and its test) |
-| 2 parser and verb field | transport, mp | INVARIANT | 1 | ~160 | 0 |
+| 1 pipeline | transport | INVARIANT | none | ~230 | ~890 (middleware and its test) |
+| 2 parser, verb field, accessor switch | transport, mp | INVARIANT | 1 | ~200 | 0 |
 | 3 verb structs (C4b) | transport | INVARIANT | 2 | ~160 | 0 |
 | 4 F2b | transport, mp | INVARIANT, then one declared delta | 1 | ~330 plus ~280 moved | ~60 |
 | 5 API mechanism | mp, transport | INVARIANT | 1, 2, operator decision | ~850 | 0 |
@@ -424,6 +431,9 @@ adds them as named steps:
   its own.
 - 2026-09-12, re-review of r2: "approve", ready to implement from step 1
   once the proposal is in force. Non-blocking residuals: the split between
-  body and amendment (this revision removes it), the step 7 wrap must be
-  paired on both directions (now stated in the step), and the L5 row (now
-  corrected).
+  body and amendment (r3 removed it), the step 7 wrap must be paired on
+  both directions (stated in the step), and the L5 row (corrected).
+- 2026-09-12, third pass on r3: "approve", no new hold. One non-blocking
+  residual: step 1 claimed the accessors were used from both repositories
+  while its header said transport only; r4 keeps step 1 transport-only and
+  moves the tdns-mp call-site switch into step 2.
