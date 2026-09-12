@@ -313,3 +313,104 @@ Step 6 can go whenever the engine is next touched.
 - The two beat loops, pending the W15 decision.
 - The `Confirm` method on the `Transport` interface next to `SendApp`:
   confirm is transport-own and stays typed.
+
+## Amendment 2026-09-12: after the external review
+
+An external review of this document (kept in the operator's review
+directory outside the repository, dated 2026-09-12) confirmed the inventory
+and the order of steps 1 to 3, and returned "request changes" on three holds
+and six residuals. Every hold was re-verified in the code at the commits
+named at the top before this amendment was written. The body above is left
+as written; where this amendment and the body disagree, the amendment is
+binding.
+
+### Hold 1: step 7's wire claim was wrong
+
+The facts. `PayloadCrypto.EncryptAndSignPayload` (`transport/crypto.go`)
+produces `base64.StdEncoding(JWS(JWE(payload)))`; the outer standard-base64
+layer is on the wire. `jose.Backend.EncryptAndSign` (`crypto/jose/backend.go`)
+produces the raw JWS compact serialization, and its `DecryptAndVerify` parses
+raw JWS, while the live `DecryptAndVerifyPayload` base64-decodes first. The
+two paths do not produce the same bytes, and the sentence in step 7 that says
+they do is withdrawn.
+
+Step 7, corrected:
+
+- The outer standard-base64 wrap is part of the wire and stays. Whether it
+  lives in `PayloadCrypto` or becomes part of what a backend's `Envelope`
+  contract promises is an implementation choice; the bytes a receiver sees
+  do not change.
+- Because JWE encryption is randomised (content key and IV), byte identity
+  cannot be asserted on freshly produced ciphertext. The INVARIANT gate is
+  therefore a cross-decrypt test written before the refactor: a ciphertext
+  captured from the current path with checked-in test keys must decrypt
+  through the new path, a ciphertext from the new path must decrypt through
+  the current path, and the produced bytes must pass a structural check
+  (standard base64 outside, a three-part JWS, a JWE inside with the same
+  protected headers). `mechanism_crypto_test.go` round-trips only and is not
+  sufficient on its own.
+- The rest of step 7 stands: one backend selected by configuration, one
+  key-loading helper, `Envelope()` and `PublicFromPrivate` on the interface,
+  the Format byte taken from the wrapper, and the deletions.
+
+### Hold 2: step 1's behaviour claim, narrowed
+
+"Behaviour: none changes" holds for the production DNS path, which is
+`RouteViaRouter` followed by `Router.Route`. It does not hold for a caller
+that invokes `Router.Route` directly: `dns_message_router_test.go` and
+`cmd/transport-exercise` do. After step 1 a router is a verb table with
+statistics, logging, the response wrapper and the callback; it no longer
+authorizes or decrypts, and a consumer that wants those must go through
+`RouteViaRouter`. `RouterConfig.AllowUnencrypted` and
+`TriggerDiscoveryOnMissingKey` were already inert on the DNS path; deleting
+them removes a false promise, which is a visible change for anyone who
+believed the flags worked.
+
+### Hold 3: L5 was half stale
+
+The unlocked reads of `agent.ApiMethod` and `DnsMethod` on the send path
+were fixed on 2026-09-10 in the PR #34 review round: `SendHelloWithFallback`
+and `SendBeatWithFallback` read them under `agent.Mu.RLock`, and the engine's
+`agentNeedsHello` and `retryPendingDiscoveries` do the same. L5 now reads:
+the discovery-versus-beat race test, open and unscheduled (see below).
+
+### Residuals 4 to 6
+
+- **Step 3 is C4b.** The v4 plan's "Left" list names it: transport-own
+  hello, beat and ping send structs, byte-locked. Until `core/messages.go`
+  moves (section 4), the tags are owned by transport and the tdns copies are
+  read-only mirrors; the send and receive goldens are the drift detector.
+- **L1, L7 and the race test are out of scope of this cleanup.** They stay
+  on the v4 "Left" list. L7's source is the PR #34 review round, kept in the
+  operator's review directory outside the repository by design, not in git.
+- **L8.** The v4 "Current state" section already says the envelope label
+  landed; only the 2026-09-10 deviations block says it was not added. The
+  v4 amendment appended alongside this one reconciles the two.
+
+### Step notes adopted from the review
+
+- **Step 5** is two commits: first, goldens that pin today's HTTP bodies
+  (none exist); second, the reroute onto `Router.Route`. The election
+  broadcast through `SendAll` is a rig gate, not a hope.
+- **Step 6** can run in parallel with steps 1 to 3. LEGACY is already
+  derived in `agent_view.go` (an established peer with zero participations);
+  `IsLegacy()` restates that. The CLI's state strings stay identical.
+- **Step 8** is not a bundle at the end: each step corrects the documents
+  it makes stale when it lands. The v4 amendment is done now.
+- **Sizing.** "One afternoon" for steps 1 to 3 is withdrawn. They are small
+  but not mechanical: the typed `ctx.Data` accessors are used from both
+  repositories, and making `ParseApp` required touches every role's wiring.
+
+### Order after the review
+
+1. Steps 1, 2, 3, in that order.
+2. Step 6, whenever.
+3. Step 4, when query mode is next touched.
+4. Step 7, only with the cross-decrypt test in place first.
+5. Step 5, only after the operator's answer on the API mechanism and with
+   today's bodies golden.
+6. F1, L7 and the race test: not part of this cleanup unless added as
+   named steps.
+
+Execution of any step still waits for the operator's decision on the
+proposal; this amendment changes the text, not the status.

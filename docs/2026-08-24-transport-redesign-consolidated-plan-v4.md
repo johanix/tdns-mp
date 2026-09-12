@@ -1039,3 +1039,44 @@ log (hosts, commands, captures) is kept outside the repo by design.
 2. The espresso/yabba election churn (~300/day, 54-min period) predates
    this work and is untouched.
 3. Two NetBSD nodes had no ntpd (88 s skew each way); enabled 2026-09-09.
+
+# Amendment 2026-09-12 — reconciliation, and the leftovers cleanup plan
+
+Code re-verified at tdns-mp `b8bba004` (PR #50 head) / tdns-transport
+`c619f2a` (main). Corrections to earlier text, then the hand-off of the
+remaining items to `docs/2026-09-12-transport-leftovers-and-cleanup-plan.md`.
+
+## A. Corrections
+
+| Where | Text says | Fact (2026-09-12) |
+|---|---|---|
+| 09-10 amendment, "Deviations", C5 | "The envelope label is not added; its carrier … needs a decision." | Landed later the same day: tdns-transport `97a1c8a`, on the CHUNK Format byte, merged to main in #7 (`5a13b2c`). "Current state (2026-09-10)" above is right; the deviation line is superseded. |
+| 09-10 amendment, "Deviations", D1 | "the 08-25 finding-3 note (unlocked bool reads of agent.ApiMethod/DnsMethod on the send path) still applies to those wrappers." | Fixed 2026-09-10 in the #34 review round: `SendHelloWithFallback` and `SendBeatWithFallback` read the flags under `agent.Mu.RLock`; `hsync/hello.go` and `hsync/discovery.go` likewise. "Current state" is right. What remains of the D1 follow-up is the discovery-versus-beat race test, open and unscheduled. |
+| C5, "Peer-level authz middleware stays in transport for transport-own verbs; the app-verb middleware is removed." | Planned end state. | Not executed, and not recorded in the 09-10 deviations. `NewAuthorizationMiddleware` is still installed for every verb (`router_init.go:63`), so authorization runs three times per message; `NewSignatureMiddleware` (`router_init.go:74`) always short-circuits because `RouteViaRouter` decrypts first; `NewDecryptionMiddleware` has no caller. Since the 09-10 deviation kept both callback checks in `RouteViaRouter`, the middleware has no remaining job for any verb. End state is now "remove", cleanup plan step 1. |
+| "Current state", first paragraph | "`main` is untouched; there are no PRs; the go.mod local replaces are still in place." | Stale since 2026-09-10/11: tdns-transport #7 merged (`5a13b2c`, then #8 `c619f2a`); tdns-mp #39, #40, #41, #42 and #34 merged in that order (main `56b4fbb` at #34), then #44, #43, #45, #52. tdns-mp pins the published tdns-transport; no sibling replace. |
+
+## B. The remaining items, and where they now live
+
+| v4 item | Disposition |
+|---|---|
+| C4b (transport-own hello/beat/ping send structs, byte-locked) | Cleanup plan **step 3**, named C4b there. |
+| F1 (`Gossip` → `AppData`, the declared wire break) | Unchanged; outside the cleanup plan. |
+| F2 (docs and cleanup; the `hsync-peer-status` stub) | Cleanup plan **step 8**, done as each step lands rather than bundled. |
+| F2b (transport owns the whole chunk chain; label the query-mode payload) | Cleanup plan **step 4**, with the carrier proposal (an `envelope` field in the manifest metadata) and the two-commit shape. |
+| F3 (exported surface) | Cleanup plan **step 8**; count again after steps 1, 3 and 7. |
+| D1 follow-up: discovery-versus-beat race test | Open, unscheduled; listed in the cleanup plan as out of scope. |
+| PR #34 review-round items (`peer reset` and an established mechanism's transport state; the `hsync.Registry` zone index, END.4) | Open, unscheduled; source is the operator's review directory outside the repository. |
+| F0 (tdns re-pin) | Separate project by operator decision; unchanged. |
+
+The cleanup plan also carries the warts this plan never listed (three
+parsers of the MP field conventions, `IncomingMessage.Type` next to
+`TypeToken`, the API mechanism's receive side outside the router, the
+engine's mirrored types, the crypto wrapper's JOSE shape, the dormant HPKE
+and unused `distrib` code). Its 2026-09-12 amendment records the external
+review's holds, one of which corrected its step 7: the outer standard-base64
+wrap in `PayloadCrypto` is part of the wire and stays.
+
+Binding rules of this plan (pre-crypto sender authorization in transport,
+the opaque-message vocabulary, the two peer stores, INVARIANT unless
+declared, goldens regenerated only on a declared break) carry into the
+cleanup plan unchanged; its section 2 restates them.
