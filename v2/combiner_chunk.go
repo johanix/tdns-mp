@@ -1406,9 +1406,8 @@ func NewCombinerSyncHandler() transport.MessageHandlerFunc {
 		if err != nil {
 			return fmt.Errorf("failed to marshal pending ack: %w", err)
 		}
-		ctx.Data["response"] = ackPayload
-
-		ctx.Data["message_type"] = "update"
+		ctx.SetResponsePayload(ackPayload)
+		ctx.SetHandledType("update")
 
 		return nil
 	}

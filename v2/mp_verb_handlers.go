@@ -4,11 +4,14 @@
  * Application verb handlers (transport redesign, Stage C3).
  *
  * These are the per-verb receive handlers that lived in
- * tdns-transport/transport/handlers.go until C3, moved verbatim: they
- * validate the payload, stash the parsed message in ctx.Data for the
- * RouteToCallback seam, and prepare the inline confirmation the sender
- * reads from the DNS response. The verb table in mp_verbs.go registers
- * them on the router per role and dispatches the callback.
+ * tdns-transport/transport/handlers.go until C3: they validate the
+ * payload, store the parsed message on the context for the RouteToCallback
+ * seam, and prepare the inline confirmation the sender reads from the DNS
+ * response. The verb table in mp_verbs.go registers them on the router per
+ * role and dispatches the callback. The context is read and written through
+ * transport's typed accessors (cleanup plan, steps 1 and 2); the parsed
+ * message is always present, RouteViaRouter stores it before the router is
+ * entered.
  *
  * Do not add MP business logic here; that stays in the route* functions
  * (hsync_transport.go) which the table calls after the handler.
@@ -51,28 +54,23 @@ func handleAppSync(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 		}
 		payloadBytes, err := json.Marshal(errorPayload)
 		if err == nil {
-			ctx.Data["response"] = payloadBytes
-			ctx.Data["response_rcode"] = dns.RcodeRefused
+			ctx.SetResponsePayload(payloadBytes)
+			ctx.SetResponseRcode(dns.RcodeRefused)
 		}
 		return fmt.Errorf("LEGACY agent %s cannot send sync messages (zero shared zones)", ctx.PeerID)
 	}
 
-	// Get the pre-parsed message from context (set by agent RouteViaRouter)
-	syncMsg, ok := ctx.Data["incoming_message"].(*transport.IncomingMessage)
+	// The parsed message, stored by RouteViaRouter before the router was entered.
+	syncMsg, ok := ctx.Incoming()
 	if !ok {
-		syncMsg = transport.ParseIncomingMessage(ctx.ChunkPayload)
-		if syncMsg == nil {
-			return fmt.Errorf("failed to parse sync payload")
-		}
+		return fmt.Errorf("sync handler: no parsed message in context")
 	}
 
-	if syncMsg.Type != "sync" {
-		return fmt.Errorf("invalid message type for sync handler: %s", syncMsg.Type)
+	if syncMsg.Token() != "sync" {
+		return fmt.Errorf("invalid message type for sync handler: %s", syncMsg.Token())
 	}
 
-	// Store for routing to hsyncengine
-	ctx.Data["message_type"] = "sync"
-	ctx.Data["incoming_message"] = syncMsg
+	ctx.SetHandledType("sync")
 
 	// Create sync acknowledgment response — format must match extractConfirmFromResponse
 	ack := map[string]interface{}{
@@ -88,7 +86,7 @@ func handleAppSync(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 		// Don't return error - ack failure shouldn't prevent sync processing
 	} else {
 		// Store acknowledgment in context for response middleware
-		ctx.Data["response"] = ackPayload
+		ctx.SetResponsePayload(ackPayload)
 		lgTransport.Debug("sync acknowledgment prepared", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 	}
 
@@ -100,22 +98,17 @@ func handleAppSync(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing RFI", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by agent RouteViaRouter)
-	rfiMsg, ok := ctx.Data["incoming_message"].(*transport.IncomingMessage)
+	// The parsed message, stored by RouteViaRouter before the router was entered.
+	rfiMsg, ok := ctx.Incoming()
 	if !ok {
-		rfiMsg = transport.ParseIncomingMessage(ctx.ChunkPayload)
-		if rfiMsg == nil {
-			return fmt.Errorf("failed to parse rfi payload")
-		}
+		return fmt.Errorf("rfi handler: no parsed message in context")
 	}
 
-	if rfiMsg.Type != "rfi" {
-		return fmt.Errorf("invalid message type for rfi handler: %s", rfiMsg.Type)
+	if rfiMsg.Token() != "rfi" {
+		return fmt.Errorf("invalid message type for rfi handler: %s", rfiMsg.Token())
 	}
 
-	// Store for routing to hsyncengine
-	ctx.Data["message_type"] = "rfi"
-	ctx.Data["incoming_message"] = rfiMsg
+	ctx.SetHandledType("rfi")
 
 	// Create RFI acknowledgment response — format must match extractConfirmFromResponse
 	ack := map[string]interface{}{
@@ -129,7 +122,7 @@ func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	if err != nil {
 		lgTransport.Error("failed to marshal rfi acknowledgment", "err", err)
 	} else {
-		ctx.Data["response"] = ackPayload
+		ctx.SetResponsePayload(ackPayload)
 		lgTransport.Debug("RFI acknowledgment prepared", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 	}
 
@@ -180,14 +173,13 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 	}
 
 	// Store for processing by the recipient (signer or agent)
-	ctx.Data["message_type"] = "keystate"
-	ctx.Data["incoming_message"] = &transport.IncomingMessage{
-		Type:      "keystate",
+	ctx.SetHandledType("keystate")
+	ctx.SetIncoming(&transport.IncomingMessage{
 		TypeToken: "keystate",
 		SenderID:  keystate.GetSenderID(),
 		Zone:      keystate.Zone,
 		Payload:   ctx.ChunkPayload,
-	}
+	})
 
 	// Create confirmation response using standard "confirm" type so sendNotifyWithPayload
 	// can extract it via extractConfirmFromResponse
@@ -211,7 +203,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 	}
 
 	// Store confirmation in context for response middleware
-	ctx.Data["response"] = payloadBytes
+	ctx.SetResponsePayload(payloadBytes)
 
 	if keystate.Signal == "inventory" {
 		lgTransport.Info("keystate inventory received", "peer", ctx.PeerID, "zone", keystate.Zone, "keys", len(keystate.KeyInventory))
@@ -248,14 +240,13 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 	}
 
 	// Store for processing by the agent
-	ctx.Data["message_type"] = "edits"
-	ctx.Data["incoming_message"] = &transport.IncomingMessage{
-		Type:      "edits",
+	ctx.SetHandledType("edits")
+	ctx.SetIncoming(&transport.IncomingMessage{
 		TypeToken: "edits",
 		SenderID:  edits.GetSenderID(),
 		Zone:      edits.Zone,
 		Payload:   ctx.ChunkPayload,
-	}
+	})
 
 	// Create confirmation response using standard "confirm" type
 	confirmPayload := struct {
@@ -277,7 +268,7 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		return fmt.Errorf("failed to marshal edits confirmation: %w", err)
 	}
 
-	ctx.Data["response"] = payloadBytes
+	ctx.SetResponsePayload(payloadBytes)
 
 	lgTransport.Info("edits received", "peer", ctx.PeerID, "zone", edits.Zone, "agents", len(edits.AgentRecords))
 	return nil
@@ -305,14 +296,13 @@ func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error
 		return fmt.Errorf("config message missing zone")
 	}
 
-	ctx.Data["message_type"] = "config"
-	ctx.Data["incoming_message"] = &transport.IncomingMessage{
-		Type:      "config",
+	ctx.SetHandledType("config")
+	ctx.SetIncoming(&transport.IncomingMessage{
 		TypeToken: "config",
 		SenderID:  config.GetSenderID(),
 		Zone:      config.Zone,
 		Payload:   ctx.ChunkPayload,
-	}
+	})
 
 	confirmPayload := struct {
 		Type           string `json:"type"`
@@ -333,7 +323,7 @@ func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error
 		return fmt.Errorf("failed to marshal config confirmation: %w", err)
 	}
 
-	ctx.Data["response"] = payloadBytes
+	ctx.SetResponsePayload(payloadBytes)
 
 	lgTransport.Info("config received", "peer", ctx.PeerID, "zone", config.Zone, "subtype", config.Subtype)
 	return nil
@@ -361,14 +351,13 @@ func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		return fmt.Errorf("audit message missing zone")
 	}
 
-	ctx.Data["message_type"] = "audit"
-	ctx.Data["incoming_message"] = &transport.IncomingMessage{
-		Type:      "audit",
+	ctx.SetHandledType("audit")
+	ctx.SetIncoming(&transport.IncomingMessage{
 		TypeToken: "audit",
 		SenderID:  audit.GetSenderID(),
 		Zone:      audit.Zone,
 		Payload:   ctx.ChunkPayload,
-	}
+	})
 
 	confirmPayload := struct {
 		Type           string `json:"type"`
@@ -389,7 +378,7 @@ func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		return fmt.Errorf("failed to marshal audit confirmation: %w", err)
 	}
 
-	ctx.Data["response"] = payloadBytes
+	ctx.SetResponsePayload(payloadBytes)
 
 	lgTransport.Info("audit received", "peer", ctx.PeerID, "zone", audit.Zone)
 	return nil
@@ -418,14 +407,13 @@ func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext)
 		return fmt.Errorf("status-update message missing zone")
 	}
 
-	ctx.Data["message_type"] = "status-update"
-	ctx.Data["incoming_message"] = &transport.IncomingMessage{
-		Type:      "status-update",
+	ctx.SetHandledType("status-update")
+	ctx.SetIncoming(&transport.IncomingMessage{
 		TypeToken: "status-update",
 		SenderID:  statusUpdate.GetSenderID(),
 		Zone:      statusUpdate.Zone,
 		Payload:   ctx.ChunkPayload,
-	}
+	})
 
 	confirmPayload := struct {
 		Type           string `json:"type"`
@@ -446,7 +434,7 @@ func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext)
 		return fmt.Errorf("failed to marshal status-update confirmation: %w", err)
 	}
 
-	ctx.Data["response"] = payloadBytes
+	ctx.SetResponsePayload(payloadBytes)
 
 	lgTransport.Info("status-update received", "peer", ctx.PeerID, "zone", statusUpdate.Zone, "subtype", statusUpdate.SubType)
 	return nil
@@ -456,22 +444,17 @@ func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext)
 func handleAppRelocate(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing relocate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by agent RouteViaRouter)
-	relocateMsg, ok := ctx.Data["incoming_message"].(*transport.IncomingMessage)
+	// The parsed message, stored by RouteViaRouter before the router was entered.
+	relocateMsg, ok := ctx.Incoming()
 	if !ok {
-		relocateMsg = transport.ParseIncomingMessage(ctx.ChunkPayload)
-		if relocateMsg == nil {
-			return fmt.Errorf("failed to parse relocate payload")
-		}
+		return fmt.Errorf("relocate handler: no parsed message in context")
 	}
 
-	if relocateMsg.Type != "relocate" {
-		return fmt.Errorf("invalid message type for relocate handler: %s", relocateMsg.Type)
+	if relocateMsg.Token() != "relocate" {
+		return fmt.Errorf("invalid message type for relocate handler: %s", relocateMsg.Token())
 	}
 
-	// Store for routing to hsyncengine
-	ctx.Data["message_type"] = "relocate"
-	ctx.Data["incoming_message"] = relocateMsg
+	ctx.SetHandledType("relocate")
 
 	lgTransport.Debug("relocate processed", "peer", ctx.PeerID)
 	return nil

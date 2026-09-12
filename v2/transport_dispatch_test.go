@@ -39,7 +39,7 @@ func buildDispatchContext(t *testing.T, tm *MPTransportBridge, senderHint, distI
 		t.Fatalf("parseAppPayload: %v", err)
 	}
 	im.TransportSender = senderHint
-	msgType := transport.MessageType(im.Type)
+	msgType := transport.MessageType(im.Token())
 
 	ctx := transport.NewMessageContext(new(dns.Msg), "127.0.0.1:0")
 	ctx.DistributionID = distID
@@ -367,7 +367,7 @@ func TestTransportDispatch_PerVerb(t *testing.T) {
 						t.Errorf("ctx.Data[message_type] = %q, want %q", mt, tc.verb)
 					}
 					im, _ := ctx.Data["incoming_message"].(*transport.IncomingMessage)
-					if im == nil || im.Type != tc.verb || im.TypeToken != tc.verb || im.Token() != tc.verb {
+					if im == nil || im.TypeToken != tc.verb || im.Token() != tc.verb {
 						t.Errorf("ctx.Data[incoming_message] = %+v, want Type/TypeToken %q (C1 seam)", im, tc.verb)
 					}
 				}

@@ -35,8 +35,8 @@ func TestParseAppPayload(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if m.Type != tc.wantType || m.TypeToken != tc.wantType || m.Token() != tc.wantType {
-				t.Errorf("type: %q/%q, want %q", m.Type, m.TypeToken, tc.wantType)
+			if m.TypeToken != tc.wantType || m.Token() != tc.wantType {
+				t.Errorf("type: %q, want %q", m.TypeToken, tc.wantType)
 			}
 			if m.SenderID != tc.wantSender || m.Zone != tc.wantZone || m.Nonce != tc.wantNonce || m.DistributionID != "d1" {
 				t.Errorf("fields: sender=%q zone=%q nonce=%q dist=%q", m.SenderID, m.Zone, m.Nonce, m.DistributionID)

@@ -347,7 +347,6 @@ func makeSyncIncomingMessage(t *testing.T, senderID, receiverID, zone, distribut
 		t.Fatalf("marshal sync payload: %v", err)
 	}
 	return &transport.IncomingMessage{
-		Type:            "sync",
 		TypeToken:       "sync",
 		DistributionID:  distributionID,
 		SenderID:        senderID,
@@ -410,7 +409,6 @@ func buildSyncMessageContext(t *testing.T, tm *MPTransportBridge, senderID, rece
 		t.Fatalf("marshal sync payload: %v", err)
 	}
 	im := &transport.IncomingMessage{
-		Type:            "sync",
 		TypeToken:       "sync",
 		DistributionID:  distributionID,
 		SenderID:        senderID,
