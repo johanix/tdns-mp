@@ -243,7 +243,7 @@ func newDebugAgentDumpAgentRegistryCmd(kind string) *cobra.Command {
 			if len(amr.AgentRegistry.Agents) > 0 {
 				var agentNames []AgentId
 				for _, agent := range amr.AgentRegistry.Agents {
-					agentNames = append(agentNames, agent.ID)
+					agentNames = append(agentNames, agent.Identity)
 				}
 				fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
 				for _, agent := range amr.AgentRegistry.Agents {

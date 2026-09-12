@@ -337,15 +337,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = fmt.Sprintf("error getting agent info: %v", err)
 				return
 			}
-			// The response marshals the Agent, and MarshalJSON serializes the
-			// State shadow (stamped only at GetZoneAgentData time). Stamp it
-			// from the canonical transport.Peer store first (2026-08-25
-			// review, finding 1).
-			st := conf.InternalMp.AgentRegistry.effectiveAgentState(agent.ID)
-			agent.Mu.Lock()
-			agent.State = st
-			agent.Mu.Unlock()
-			resp.Agents = []*Agent{agent}
+			resp.Agents = []*AgentInfo{conf.InternalMp.AgentRegistry.agentInfo(agent)}
 			resp.Msg = fmt.Sprintf("Data for remote agent %q", amp.AgentId)
 
 		case "discover":
@@ -398,13 +390,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 
-			// Stamp the marshaled State shadow from the canonical store before
-			// returning the Agent (2026-08-25 review, finding 1).
-			agent.Mu.Lock()
-			agent.State = st
-			agent.Mu.Unlock()
-
-			resp.Agents = []*Agent{agent}
+			resp.Agents = []*AgentInfo{conf.InternalMp.AgentRegistry.agentInfo(agent)}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
 
 		case "hsync-send-hello":
@@ -874,11 +860,10 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 			lgApi.Debug("dump-agentregistry", "numShards", ar.S.NumShards())
 
-			regs := map[AgentId]*Agent{}
+			regs := map[AgentId]*AgentInfo{}
 			for _, key := range keys {
 				if agent, exists := ar.S.Get(key); exists {
-					tmp := tdns.SanitizeForJSON(agent)
-					regs[key] = tmp.(*Agent)
+					regs[key] = ar.agentInfo(agent)
 				}
 			}
 			resp.AgentRegistry = &AgentRegistryDump{

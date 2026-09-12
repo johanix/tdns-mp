@@ -791,22 +791,6 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
-=== tdns-mpcli agent hsync peers
-use: peers
-short: Show HSYNC peer status from database
-long: |
-  Display the status of HSYNC peers stored in the database.
-  Shows peer state, transport details, and heartbeat statistics.
-flags: |
-  -p, --peer string   Filter by peer ID
-inherited: |
-      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
-  -d, --debug           debug output
-  -H, --headers         show headers
-  -Z, --pzone string    parent zone name
-  -v, --verbose         verbose output
-  -z, --zone string     zone name
-
 === tdns-mpcli agent hsync query
 use: query
 short: Query HSYNC RRset for a zone via DNS

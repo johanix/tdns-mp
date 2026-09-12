@@ -53,12 +53,8 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	}
 
 	// Create an agent entry for the combiner. Connection state/telemetry live
-	// on transport.Peer (DNS mechanism seeded OPERATIONAL below); the State
-	// shadow is only the DTO display initial value (Phase 2).
-	combinerAgent := &Agent{
-		Peer:  hsync.NewPeer(combinerID),
-		State: AgentStateOperational,
-	}
+	// on transport.Peer (DNS mechanism seeded OPERATIONAL below).
+	combinerAgent := &Agent{Peer: hsync.NewPeer(combinerID)}
 	combinerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
 	// Capability/role flags promote from the embedded hsync.Peer (E1.a) — the
 	// engine reads them there (e.g. beat.go's IsInfraPeer skip).

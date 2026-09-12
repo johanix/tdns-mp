@@ -71,8 +71,10 @@ var AgentMsgToString = core.AgentMsgToString
 // `agent.ApiDetails`/`agent.DnsDetails` still RESOLVE — to the embedded
 // hsync.Peer's *hsync.PeerDetails (the retired NG store). Do not reintroduce
 // readers/writers through those names; the hsync.PeerDetails deletion (Stage
-// D / Phase 3) removes the trap. Only State (AgentState vs hsync.PeerState)
-// still shadows the embed, as the DTO display field.
+// D / Phase 3) removes the trap. The Agent carries no state of its own: an
+// agent's state is derived from the transport's per-mechanism store
+// (effectiveAgentState) whenever it is needed, and reported through
+// AgentInfo (cleanup step 8).
 //
 // Access notes after the embed:
 //   - agent.ID (was agent.Identity / agent.PeerID) — type AgentId (= hsync.PeerID)
@@ -83,13 +85,27 @@ type Agent struct {
 
 	InitialZone ZoneName
 	Api         *AgentApi
-	State       AgentState // shadows hsync.Peer.State (AgentState vs hsync.PeerState); DTO display field, stamped from effectiveAgentState; retires with the DTO rework
-	ErrorMsg    string     // Error message if state is error
+	ErrorMsg    string // why the registry could not complete this agent, if it could not
+}
+
+// AgentInfo is what the management API reports about a remote agent: the
+// registry view's identity, zones and capability flags, and the state
+// derived from the transport's per-mechanism store when the report is
+// built. Its field names are the wire the CLI has always read.
+type AgentInfo struct {
+	Identity    AgentId
+	InitialZone ZoneName
+	ApiMethod   bool
+	DnsMethod   bool
+	Zones       map[ZoneName]bool
+	State       AgentState
+	LastState   time.Time
+	ErrorMsg    string
 }
 
 // NewAgent allocates an Agent view over a fresh thin hsync.Peer with the given
-// identity (E1.a). Callers set the MP-only shadow fields (State/meta) and the
-// promoted capability flags as needed.
+// identity (E1.a). Callers set the MP-only fields and the promoted
+// capability flags as needed.
 func NewAgent(id AgentId) *Agent {
 	return &Agent{Peer: hsync.NewPeer(id)}
 }
@@ -359,7 +375,7 @@ type KeystateInfo struct {
 // the dump-agentregistry command (the live registry's peer map is not directly
 // JSON-encodable). Not a live registry store.
 type AgentRegistryDump struct {
-	Agents         map[AgentId]*Agent
+	Agents         map[AgentId]*AgentInfo
 	LocalAgent     *MultiProviderConf
 	LocateInterval int
 }
@@ -368,8 +384,8 @@ type AgentMgmtResponse struct {
 	Identity       AgentId
 	Status         string
 	Time           time.Time
-	Agents         []*Agent
-	ZoneAgentData  *ZoneAgentData
+	Agents         []*AgentInfo
+	ZoneAgentData  *ZoneAgentInfo
 	HsyncRRs       []string
 	AgentConfig    MultiProviderConf
 	RfiType        string

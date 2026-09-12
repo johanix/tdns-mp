@@ -1590,20 +1590,12 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		}
 	}
 
-	// Read the canonical transport.Peer store rather than the Agent.State
-	// shadow. The shadow is written under agent.Mu by GetZoneAgentData and by
-	// the display surfaces (peer zones / hsync-agentstatus / hsync-locate),
-	// while this send path holds no lock on agent at all — a torn-read hazard
-	// on a string field, and one that `peer zones` on a converged fleet would
-	// provoke (2026-08-25 review, finding 3). The nil-registry branch is
-	// harness-only: no display surface exists to race with, and agent.Mu is
-	// the embedded peer mutex, so RLocking it here would risk recursive-RLock
-	// writer starvation.
+	// The state we report in the beat is what the transport's per-mechanism
+	// store derives (effectiveAgentState); without a registry (the harness)
+	// there is none to report.
 	var beatState AgentState
 	if tm.agentRegistry != nil {
 		beatState = tm.agentRegistry.effectiveAgentState(agent.ID)
-	} else {
-		beatState = agent.State
 	}
 
 	req := &transport.BeatRequest{

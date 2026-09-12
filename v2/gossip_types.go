@@ -1,8 +1,6 @@
 /*
- * Type definitions for gossip protocol, provider groups, and
- * leader election subsystems.
- * Copied from tdns/v2/gossip.go, provider_groups.go,
- * parentsync_leader.go.
+ * Type definitions for the gossip protocol, provider groups and leader
+ * election: the state table, the group manager and their messages.
  */
 
 package tdnsmp

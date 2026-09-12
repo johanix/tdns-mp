@@ -56,12 +56,8 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	}
 
 	// Create an agent entry for the signer. Connection state/telemetry live
-	// on transport.Peer (DNS mechanism seeded OPERATIONAL below); the State
-	// shadow is only the DTO display initial value (Phase 2).
-	signerAgent := &Agent{
-		Peer:  hsync.NewPeer(signerID),
-		State: AgentStateOperational,
-	}
+	// on transport.Peer (DNS mechanism seeded OPERATIONAL below).
+	signerAgent := &Agent{Peer: hsync.NewPeer(signerID)}
 	signerAgent.LastState = time.Now() // promoted from hsync.Peer (E1.a)
 	// Capability/role flags promote from the embedded hsync.Peer (E1.a).
 	signerAgent.DnsMethod = true   // Signer uses DNS transport (CHUNK)
