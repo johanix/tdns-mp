@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -17,6 +18,27 @@ const (
 	MaxOperationsPerUpdate = 1000 // Maximum operations in a single update
 	MaxRecordsPerOwner     = 500  // Maximum records per owner per RRtype in a single operation
 )
+
+// noteReplaceOrigin answers whether a remote REPLACE is older than the one
+// last applied for the same (zone, agent, rrtype), and records it as the
+// newest when it is not. Older = an earlier originating time, or the same
+// second (the wire carries seconds) and a lower distribution id, which the
+// sender hands out in increasing order.
+func (zdr *ZoneDataRepo) noteReplaceOrigin(u *SynchedDataUpdate, rrtype uint16) (bool, replaceOrigin) {
+	key := string(u.Zone) + "|" + string(u.AgentId) + "|" + dns.TypeToString[rrtype]
+	zdr.mu.Lock()
+	defer zdr.mu.Unlock()
+	if cur, ok := zdr.lastReplace[key]; ok {
+		if cur.Time.After(u.OriginatingTime) || (cur.Time.Equal(u.OriginatingTime) && cur.DistID > u.OriginatingDistID) {
+			return true, cur
+		}
+	}
+	if zdr.lastReplace == nil {
+		zdr.lastReplace = make(map[string]replaceOrigin)
+	}
+	zdr.lastReplace[key] = replaceOrigin{Time: u.OriginatingTime, DistID: u.OriginatingDistID}
+	return false, replaceOrigin{}
+}
 
 // --- AgentRepo and ZoneDataRepo helper methods ---
 
@@ -436,6 +458,23 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, nod *OwnerData, rrtype uint16, op core.RROperation) (bool, string) {
 	var changed bool
 	var msg string
+
+	// A remote REPLACE is the sender's whole set as of when it sent it.
+	// Retries reorder: the peer rejects what arrives before it holds the
+	// zone, and the sender's queue retries those in no particular order,
+	// so an older set can arrive after a newer one has been applied and
+	// would roll it back (seen: a signer's standby ZSK vanishing from
+	// every other signer's DNSKEY RRset). The newest origin wins.
+	if synchedDataUpdate.UpdateType == "remote" && !synchedDataUpdate.OriginatingTime.IsZero() {
+		if stale, applied := zdr.noteReplaceOrigin(synchedDataUpdate, rrtype); stale {
+			msg = fmt.Sprintf("Ignored a stale REPLACE of %s %s from agent %q: originated %s (%s), one from %s (%s) is already applied",
+				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId,
+				synchedDataUpdate.OriginatingTime.UTC().Format(time.RFC3339), synchedDataUpdate.OriginatingDistID,
+				applied.Time.UTC().Format(time.RFC3339), applied.DistID)
+			lgAgent.Warn(msg)
+			return false, msg
+		}
+	}
 
 	// Parse all new RRs
 	var newRRs []dns.RR
