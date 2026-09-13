@@ -39,7 +39,6 @@ func newHsyncCmd(kind string) *cobra.Command {
 		Long:  `Query HSYNC state stored in the agent's KeyDB and AgentRegistry.`,
 	}
 	c.AddCommand(newHsyncZoneStatusCmd(kind))
-	c.AddCommand(newHsyncPeerStatusCmd(kind))
 	c.AddCommand(newHsyncSyncOpsCmd(kind))
 	c.AddCommand(newHsyncConfirmationsCmd(kind))
 	c.AddCommand(newHsyncTransportEventsCmd(kind))
@@ -102,7 +101,7 @@ func newHsyncZoneStatusCmd(kind string) *cobra.Command {
 			if resp.ZoneAgentData != nil && len(resp.ZoneAgentData.Agents) > 0 {
 				fmt.Printf("\n%s Remote Agents:\n", tdns.Globals.Zonename)
 				for _, agent := range resp.ZoneAgentData.Agents {
-					if agent.ID == resp.Identity {
+					if agent.Identity == resp.Identity {
 						continue
 					}
 					if err := PrintHsyncAgent(agent, true); err != nil {
@@ -116,78 +115,6 @@ func newHsyncZoneStatusCmd(kind string) *cobra.Command {
 		},
 	}
 	c.Flags().StringVarP(&hsyncTransport, "transport", "T", "", "Transport to show, default both api and dns")
-	return c
-}
-
-func newHsyncPeerStatusCmd(kind string) *cobra.Command {
-	c := &cobra.Command{
-		Use:   "peers",
-		Short: "Show HSYNC peer status from database",
-		Long: `Display the status of HSYNC peers stored in the database.
-Shows peer state, transport details, and heartbeat statistics.`,
-		Run: func(cmd *cobra.Command, args []string) {
-			resp, err := SendAgentHsyncCommand(cmd, &AgentMgmtPost{
-				Command: "hsync-peer-status",
-				AgentId: AgentId(hsyncPeerID),
-			})
-			if err != nil {
-				log.Fatalf("Error: %v", err)
-			}
-
-			if len(resp.HsyncPeers) == 0 {
-				fmt.Println("No peers found in database")
-				return
-			}
-
-			fmt.Printf("HSYNC Peers (%d):\n\n", len(resp.HsyncPeers))
-
-			var lines []string
-			if tdns.Globals.ShowHeaders {
-				lines = append(lines, "Peer ID|State|Preferred|API|DNS|Last Contact|Beats Sent|Beats Recv")
-			}
-			for _, peer := range resp.HsyncPeers {
-				apiStatus := "N"
-				if peer.APIAvailable {
-					apiStatus = "Y"
-				}
-				dnsStatus := "N"
-				if peer.DNSAvailable {
-					dnsStatus = "Y"
-				}
-				lastContact := "never"
-				if !peer.LastContactAt.IsZero() {
-					lastContact = peer.LastContactAt.Format("2006-01-02 15:04:05")
-				}
-				lines = append(lines, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%d",
-					peer.PeerID,
-					peer.State,
-					peer.PreferredTransport,
-					apiStatus,
-					dnsStatus,
-					lastContact,
-					peer.BeatsSent,
-					peer.BeatsReceived))
-			}
-			fmt.Println(columnize.SimpleFormat(lines))
-
-			if tdns.Globals.Verbose && len(resp.HsyncPeers) > 0 {
-				fmt.Printf("\nDetailed peer information:\n")
-				for _, peer := range resp.HsyncPeers {
-					fmt.Printf("\n  Peer: %s\n", peer.PeerID)
-					fmt.Printf("    State: %s (%s)\n", peer.State, peer.StateReason)
-					fmt.Printf("    Discovery: %s at %s\n", peer.DiscoverySource, peer.DiscoveryTime.Format(time.RFC3339))
-					if peer.APIAvailable {
-						fmt.Printf("    API Endpoint: %s:%d\n", peer.APIHost, peer.APIPort)
-					}
-					if peer.DNSAvailable {
-						fmt.Printf("    DNS Endpoint: %s:%d\n", peer.DNSHost, peer.DNSPort)
-					}
-					fmt.Printf("    Beat interval: %ds\n", peer.BeatInterval)
-				}
-			}
-		},
-	}
-	c.Flags().StringVarP(&hsyncPeerID, "peer", "p", "", "Filter by peer ID")
 	return c
 }
 
@@ -438,7 +365,7 @@ func newHsyncLocateCmd(kind string) *cobra.Command {
 
 			if len(amr.Agents) > 0 {
 				agent := amr.Agents[0]
-				fmt.Printf("Located agent: %s\n", agent.ID)
+				fmt.Printf("Located agent: %s\n", agent.Identity)
 				if err := PrintHsyncAgent(agent, false); err != nil {
 					log.Printf("Error printing agent: %v", err)
 				}
@@ -573,10 +500,9 @@ func PrintHsyncRRs(agentid AgentId, rrs []string) {
 	fmt.Println(columnize.SimpleFormat(lines))
 }
 
-// PrintHsyncAgent prints a remote agent's transports and key material.
-// Modeled on the older PrintAgent helper that lived in tdns/v2/cli.
-func PrintHsyncAgent(agent *Agent, showZones bool) error {
-	fmt.Printf("Remote agent %q: state: %s\n", agent.ID, AgentStateToString[agent.State])
+// PrintHsyncAgent prints the management API's report of a remote agent.
+func PrintHsyncAgent(agent *AgentInfo, showZones bool) error {
+	fmt.Printf("Remote agent %q: state: %s\n", agent.Identity, AgentStateToString[agent.State])
 
 	if showZones {
 		var zones []string
@@ -586,11 +512,7 @@ func PrintHsyncAgent(agent *Agent, showZones bool) error {
 		fmt.Printf(" * Zones shared with this agent: %v\n", zones)
 	}
 
-	// Phase 2 (operator-decided): the per-transport State/error/heartbeat
-	// block is dropped — it was dead over the wire since END.0
-	// (Agent.MarshalJSON never serialized AgentDetails, so the details==nil
-	// guard always skipped it). Per-transport state and addresses live in
-	// `peer list` / `peer list -v` (transport.Peer). Note that
-	// `hsync-peer-status` is a stub that always reports "Found 0 peers".
+	// Per-mechanism state and addresses are `peer list` / `peer list -v`
+	// (transport.Peer).
 	return nil
 }

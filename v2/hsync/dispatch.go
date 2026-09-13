@@ -10,7 +10,7 @@ type MsgChannels struct {
 	Msg   <-chan *InboundMsg
 }
 
-// InboundMsg is a generic application message for role-specific handlers.
+// InboundMsg is a generic application message for the host's handler.
 type InboundMsg struct {
 	MessageType AgentMsg
 	Originator  PeerID
@@ -18,37 +18,8 @@ type InboundMsg struct {
 	Payload     interface{}
 }
 
-// SyncHandler processes inbound zone-data sync messages (agent only).
-type SyncHandler func(msg *InboundMsg)
-
-// ElectionHandler processes inbound election messages.
-type ElectionHandler func(msg *InboundMsg)
-
-// KeyStateHandler processes inbound keystate messages.
-type KeyStateHandler func(msg *InboundMsg)
-
-func (e *Engine) dispatchByType(msg *InboundMsg) {
-	if msg == nil {
-		return
-	}
-	// Election and keystate subtypes are routed by embedding role at wire-in time.
-	if e.onElection != nil && isElectionMsg(msg.MessageType) {
-		e.onElection(msg)
-		return
-	}
-	if e.onKeyState != nil && isKeyStateMsg(msg.MessageType) {
-		e.onKeyState(msg)
-		return
-	}
-	if e.onSync != nil {
-		e.onSync(msg)
-	}
-}
-
-func isElectionMsg(_ AgentMsg) bool {
-	return false
-}
-
-func isKeyStateMsg(_ AgentMsg) bool {
-	return false
-}
+// InboundHandler receives every application message the engine is fed.
+// The engine does not dispatch by message class (cleanup plan, step 6: the
+// election and key-state slots it once had were never reached); the host
+// looks at MessageType itself.
+type InboundHandler func(msg *InboundMsg)

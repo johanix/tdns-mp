@@ -204,7 +204,6 @@ type InternalMpConf struct {
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
 	LeaderElectionManager *LeaderElectionManager
-	ChunkPayloadStore     ChunkPayloadStore
 	MPZoneNames           []string
 	DistributionCache     *DistributionCache
 	AuditStateManager     *AuditStateManager

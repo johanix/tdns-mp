@@ -13,8 +13,8 @@ const (
 )
 
 // mechPeerState reads the RAW (non-decayed) per-mechanism connection state of
-// the peer from the canonical transport.Peer store and maps it into the hsync
-// PeerState vocabulary the engine's send-decision gates speak.
+// the peer from the canonical transport.Peer store; the engine's send-decision
+// gates speak transport's vocabulary through the predicates below.
 //
 // transport.Peer is the SOLE functional connection-state store (END.0). The
 // engine's Hello/Beat/discovery gates read it through here instead of the
@@ -29,48 +29,50 @@ const (
 // Absence (peer or mechanism not yet in the transport registry) maps to NEEDED:
 // a peer with no transport entry is exactly one that still needs discovery, so
 // the "needs discovery" gate stays correct.
-func mechPeerState(e *Engine, peerID PeerID, mech string) PeerState {
+func mechPeerState(e *Engine, peerID PeerID, mech string) transport.PeerState {
 	if e == nil || e.deps.Transport == nil {
-		return PeerStateNeeded
+		return transport.PeerStateNeeded
 	}
 	reg := e.deps.Transport.PeerRegistry()
 	if reg == nil {
-		return PeerStateNeeded
+		return transport.PeerStateNeeded
 	}
 	p, ok := reg.Get(string(peerID))
 	if !ok || p == nil {
-		return PeerStateNeeded
+		return transport.PeerStateNeeded
 	}
 	st, ok := p.MechanismRawState(mech)
 	if !ok {
-		return PeerStateNeeded
+		return transport.PeerStateNeeded
 	}
-	return transportToHsyncState(st)
+	return st
 }
 
-// transportToHsyncState maps a transport.PeerState to the hsync PeerState enum.
-// transport has transient DISCOVERING/INTRODUCING and no LEGACY (an MP overlay
-// concept); the engine has no transient equivalents, so DISCOVERING folds to
-// NEEDED and INTRODUCING to INTRODUCED.
-func transportToHsyncState(s transport.PeerState) PeerState {
-	switch s {
-	case transport.PeerStateNeeded, transport.PeerStateDiscovering:
-		return PeerStateNeeded
-	case transport.PeerStateKnown:
-		return PeerStateKnown
-	case transport.PeerStateIntroducing:
-		return PeerStateIntroduced
-	case transport.PeerStateOperational:
-		return PeerStateOperational
-	case transport.PeerStateDegraded:
-		return PeerStateDegraded
-	case transport.PeerStateInterrupted:
-		return PeerStateInterrupted
-	case transport.PeerStateError:
-		return PeerStateError
-	default:
-		return PeerStateNeeded
-	}
+// The gates, in transport's vocabulary. The retired hsync enum folded
+// transport's transient DISCOVERING into NEEDED and INTRODUCING into
+// INTRODUCED; these predicates keep those folds so no gate changes its
+// answer.
+
+// needsDiscovery: the mechanism has not been discovered (NEEDED, or a
+// discovery that never completed).
+func needsDiscovery(s transport.PeerState) bool {
+	return s == transport.PeerStateNeeded || s == transport.PeerStateDiscovering
+}
+
+// pastDiscovery: the mechanism is usable, discovery is behind it.
+func pastDiscovery(s transport.PeerState) bool {
+	return !needsDiscovery(s)
+}
+
+// needsHello: discovered, not yet introduced.
+func needsHello(s transport.PeerState) bool {
+	return s == transport.PeerStateKnown
+}
+
+// introduced: the hello handshake is in progress and not yet confirmed by
+// a beat round trip.
+func introduced(s transport.PeerState) bool {
+	return s == transport.PeerStateIntroducing
 }
 
 // beatOutboundSequence returns the outbound beat sequence for the peer from
@@ -100,11 +102,11 @@ func (e *Engine) beatOutboundSequence(peerID PeerID) uint64 {
 }
 
 // transportReady reports whether a mechanism state is past the Hello handshake
-// (INTRODUCED or any active state) — i.e. beat-eligible.
-func transportReady(state PeerState) bool {
+// (INTRODUCING or any active state) — i.e. beat-eligible.
+func transportReady(state transport.PeerState) bool {
 	switch state {
-	case PeerStateIntroduced, PeerStateOperational, PeerStateLegacy,
-		PeerStateDegraded, PeerStateInterrupted:
+	case transport.PeerStateIntroducing, transport.PeerStateOperational,
+		transport.PeerStateDegraded, transport.PeerStateInterrupted:
 		return true
 	}
 	return false

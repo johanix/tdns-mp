@@ -18,7 +18,6 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 
-	"github.com/johanix/tdns-transport/v2/crypto"
 	josecrypto "github.com/johanix/tdns-transport/v2/crypto/jose"
 	"github.com/johanix/tdns/v2/core"
 )
@@ -131,8 +130,8 @@ func init() {
 	jwtInspectCmd.Flags().Bool("verify", false, "Verify JWS signature (requires --verify-key)")
 	jwtInspectCmd.Flags().String("verify-key", "", "Public key file for signature verification (JWK JSON or PEM)")
 	jwtInspectCmd.Flags().Bool("decrypt", false, "Decrypt JWE payload (requires --decrypt-key)")
-	jwtInspectCmd.Flags().String("decrypt-key", "", "Private key file for decryption (JWK JSON for JOSE, hex for HPKE)")
-	jwtInspectCmd.Flags().String("backend", "auto", "Crypto backend: jose, hpke, auto (default: auto)")
+	jwtInspectCmd.Flags().String("decrypt-key", "", "Private key file for decryption (JWK JSON)")
+	jwtInspectCmd.Flags().String("backend", "auto", "Crypto backend: jose, auto (default: auto)")
 	jwtInspectCmd.Flags().String("output", "text", "Output format: text, json (default: text)")
 	jwtInspectCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show all headers)")
 }
@@ -495,14 +494,11 @@ func decryptJWE(jwe *jose.JSONWebEncryption, keyFile string, backendName string)
 		return nil, fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	// Auto-detect backend if needed
+	// Auto-detect backend if needed: a JWK JSON file is a JOSE key.
 	if backendName == "auto" {
-		// Check if file looks like JWK JSON
 		var jwk jose.JSONWebKey
 		if err := json.Unmarshal(keyData, &jwk); err == nil {
 			backendName = "jose"
-		} else {
-			backendName = "hpke"
 		}
 	}
 
@@ -518,26 +514,6 @@ func decryptJWE(jwe *jose.JSONWebEncryption, keyFile string, backendName string)
 		plaintext, err := joseBackend.Decrypt(privKey, []byte(jwe.FullSerialize()))
 		if err != nil {
 			return nil, fmt.Errorf("JWE decryption failed: %v", err)
-		}
-
-		return plaintext, nil
-	} else if backendName == "hpke" {
-		// HPKE backend - use crypto abstraction layer
-		backend, err := crypto.GetBackend("hpke")
-		if err != nil {
-			return nil, fmt.Errorf("HPKE backend not available: %v", err)
-		}
-
-		// Parse HPKE private key (raw 32 bytes for X25519)
-		privKey, err := backend.ParsePrivateKey(keyData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse HPKE private key: %v", err)
-		}
-
-		// Use the crypto backend's Decrypt method
-		plaintext, err := backend.Decrypt(privKey, []byte(jwe.FullSerialize()))
-		if err != nil {
-			return nil, fmt.Errorf("HPKE JWE decryption failed: %v", err)
 		}
 
 		return plaintext, nil

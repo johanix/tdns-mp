@@ -60,7 +60,7 @@ func TestTransportDispatch_RoleTables(t *testing.T) {
 
 	newRoleRouter := func(role string) *transport.DNSMessageRouter {
 		r := transport.NewDNSMessageRouter()
-		if err := transport.InitializeRouter(r, &transport.RouterConfig{TransportManager: env.Bob.Bridge, PeerRegistry: env.Bob.Bridge.PeerRegistry}); err != nil {
+		if err := transport.InitializeRouter(r, &transport.RouterConfig{PeerRegistry: env.Bob.Bridge.PeerRegistry}); err != nil {
 			t.Fatal(err)
 		}
 		if err := env.Bob.Bridge.RegisterAppVerbs(r, role); err != nil {

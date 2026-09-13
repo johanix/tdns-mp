@@ -21,8 +21,8 @@ func (e *Engine) agentNeedsHello(peer *Peer) bool {
 	apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
 	id := peer.ID
 	peer.Mu.RUnlock()
-	apiNeeds := apiMethod && mechPeerState(e, id, TransportAPI) == PeerStateKnown
-	dnsNeeds := dnsMethod && mechPeerState(e, id, TransportDNS) == PeerStateKnown
+	apiNeeds := apiMethod && needsHello(mechPeerState(e, id, TransportAPI))
+	dnsNeeds := dnsMethod && needsHello(mechPeerState(e, id, TransportDNS))
 	return apiNeeds || dnsNeeds
 }
 
@@ -95,8 +95,8 @@ func (e *Engine) fastBeatAttempts(ctx context.Context, peer *Peer) {
 		apiMethod, dnsMethod := peer.ApiMethod, peer.DnsMethod
 		id := peer.ID
 		peer.Mu.RUnlock()
-		apiIntro := apiMethod && mechPeerState(e, id, TransportAPI) == PeerStateIntroduced
-		dnsIntro := dnsMethod && mechPeerState(e, id, TransportDNS) == PeerStateIntroduced
+		apiIntro := apiMethod && introduced(mechPeerState(e, id, TransportAPI))
+		dnsIntro := dnsMethod && introduced(mechPeerState(e, id, TransportDNS))
 		return apiIntro || dnsIntro
 	}
 	if !needsBeat() {

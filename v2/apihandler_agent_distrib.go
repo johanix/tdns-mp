@@ -652,14 +652,9 @@ func listPeerSharedZones(conf *Config) []interface{} {
 		identity := agent.ID
 		agent.Mu.RUnlock()
 
-		// The State shadow's only stamp is GetZoneAgentData, so this column
-		// froze once E1.b removed the per-beat refresh. Read the canonical
-		// transport.Peer store — the same source `peer list` and gossip use —
-		// and re-stamp the shadow (2026-08-25 review, finding 1).
+		// The state the transport's per-mechanism store derives: the same
+		// source `peer list` and gossip read.
 		state := conf.InternalMp.AgentRegistry.effectiveAgentState(identity)
-		agent.Mu.Lock()
-		agent.State = state
-		agent.Mu.Unlock()
 
 		// Skip combiner
 		if mp != nil && mp.Combiner != nil {

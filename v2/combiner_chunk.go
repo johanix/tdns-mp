@@ -1406,9 +1406,8 @@ func NewCombinerSyncHandler() transport.MessageHandlerFunc {
 		if err != nil {
 			return fmt.Errorf("failed to marshal pending ack: %w", err)
 		}
-		ctx.Data["response"] = ackPayload
-
-		ctx.Data["message_type"] = "update"
+		ctx.SetResponsePayload(ackPayload)
+		ctx.SetHandledType("update")
 
 		return nil
 	}
@@ -1434,8 +1433,6 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	} else {
 		lgCombiner.Info("registering CHUNK handler", "localID", localID)
 	}
-
-	handler.FetchChunkQuery = fetchChunkPayloadViaQuery
 
 	err := tdns.RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *tdns.DnsNotifyRequest) error {
 		return handler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)

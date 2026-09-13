@@ -570,3 +570,99 @@ rig's repository.
 - The mpsigner module's `TestMLDSA44IsAtTheRegistryCodepoint` needs the
   gitignored tdns-genalgs output on the build host; not a regression of
   this work.
+
+## 9. Amendment 2026-09-13 (evening): after the reviews
+
+Three reviews followed the implementation: CodeRabbit on both PRs, an
+external review of the implementation, and its re-review after both mains
+moved (verdict: merge both, transport first or together). This section
+records what they changed, a deviation section 8 did not state, and two
+corrections to section 8. Sections 1 to 8 stand as written.
+
+### 9.1 Commits after section 8
+
+| Repository | Commit | What |
+|---|---|---|
+| tdns-mp | `30cba08` | `main` merged in after PR #50 landed; conflicts only in the `go.mod`/`go.sum` pins. |
+| tdns-mp | `fc13f6c` | tdns pinned at `main` `ff814c71` for the resolver fixes; the mpcli command-tree golden regenerated for tdns help text only. |
+| tdns-transport | `0c3016f` | Review fixes. A payload that is not JOSE-wrapped is refused while payload crypto is on, whether labelled none or unlabelled (this predates the cleanup). The HTTPS mechanism posts only to https endpoints and follows no redirect, and discovery skips a non-https API URI. A reply is an acceptance only with Status "ok". A hello no longer reports the requested zones as confirmed. The pipeline no longer answers a second time after the reply wrapper answered. Expired chunks are swept on write. |
+| tdns-mp | `8b6b368` | Review fixes. Each HTTPS endpoint takes only its own verbs again (`/hello` hello, `/beat` beat, `/sync/ping` ping, `/msg` sync, update, rfi); since step 5 any verb posted to `/hello`, the route without the TLSA middleware, was routed. The CHUNK NOTIFY handler is registered only when the DNS mechanism is on. The manual hello reports an already-introduced peer as such. An RFI the agent did not accept is an error, not "ok". |
+| tdns-mp | `0a648d1` | tdns-transport pinned at `0c3016f`. |
+| tdns-mp | `b4ab5be` | `cmd/mpsigner/go.mod` requires restored; they were lost by tidying without the generated algorithm files. |
+
+Not changed after review, with reasons: a hello nonce on the wire (a
+declared wire change for every receiver; the HTTPS mechanism has TLS);
+requester authentication for CHUNK queries (it predates the cleanup and is a
+design question; under payload crypto the payloads are JWE to the
+recipient); the beat interval (9.3).
+
+### 9.2 Deviation: step 5 does not bind the sender to the client certificate
+
+Step 5 said the HTTPS entry takes the peer's identity from the client
+certificate, with the TLSA middleware as the authorization before anything
+else. It does not. `/hello` sits outside the TLSA middleware, as it did
+before step 5. `/beat`, `/sync/ping` and `/msg` pass the middleware, which
+verifies the client certificate against the TLSA of the identity the
+certificate names. `RouteAPIPayload` then authorizes the sender the JSON
+body names, not the certificate's. A client holding a valid certificate for
+one agent can therefore name another agent in the body, and passes if that
+agent is authorized. The endpoints before step 5 had the same shape; the DNS
+mechanism binds the sender to the NOTIFY query name before any cryptography.
+Binding the transport sender to the certificate, as the query name is bound
+for DNS, is follow-up work rather than a leftover of this plan.
+
+### 9.3 Corrections to section 8
+
+- **8.1, the beat interval.** "An HTTPS beat carries no beat interval (the
+  wire struct has none); the receiver reports the default" is wrong.
+  `BeatPost` has `MyBeatInterval`, and every beat, over DNS and HTTPS alike,
+  sends 0: step 3 kept the DNS beat byte-identical, and `BeatRequest` carries
+  no interval to put there. The receiver substitutes 30
+  (`routeBeatMessage`). The auditor records that 30 and shows it as the
+  peer's beat interval in its gossip view, whatever interval the peer uses. A
+  peer's liveness uses the receiver's own configured interval, not the
+  received one. Sending the real interval changes the beat golden, a
+  declared wire change; it is left for F1.
+- **8, step 5, `EvaluateHello`.** It and the pipeline apply the same policy
+  only to a hello that names a zone: both require both identities to be
+  participants (`isInHSYNC`). The pipeline's full admission is
+  `IsPeerAuthorized`, which also admits configured peers and LEGACY peers,
+  and for a hello without a zone a participant of any shared zone; the old
+  endpoint rejected a hello without a zone. The HTTPS hello is therefore
+  broader at those edges and now matches DNS. The HTTPS beat is stricter
+  than the old endpoint, which checked no participation at all.
+
+### 9.4 Rig runs on the review fixes
+
+The same rig and runs as 8.3, cold starts from tdns-mp `0a648d1` (`b4ab5be`
+changes only mpsigner's `go.mod`), tdns-transport `0c3016f` and tdns
+`ff814c71`, with the rig's primaries built from the same tdns, 2026-09-13
+18:13 to 18:33 UTC:
+
+| Run | Configuration | Converged | verify | data |
+|---|---|---|---|---|
+| 1 | DNS only | ~10 s | 74 PASS / 0 FAIL | D0 to D8: 189 PASS / 0 FAIL |
+| 2 | DNS only, chunk mode query | ~10 s | 74 / 0 | not run |
+| 3 | API and DNS | ~20 s | 74 / 0 | not run |
+
+Runs 1 and 2 logged no refused plaintext payload, no forgery warning and no
+refused verb on any daemon host: every payload that crossed DNS was
+encrypted and accepted. In run 3 the HTTPS hellos were accepted and routed,
+and no request was refused for its verb or as non-https. The HTTPS beats
+were refused by the receivers' TLSA check, as in 8.3, because the identity
+zones in that lab have no DNSSEC chain.
+
+### 9.5 Left after the reviews
+
+- **`KeyDB.DSEngine`.** tdns `ff814c71` (tdns #624) queues CDS work for it,
+  and tdns-mp does not start it. A delegation sync that changes DS through
+  the NOTIFY scheme, and the KSK rollover's DS push for zones that are not
+  multi-provider, would each wait 30 s and fail. The rig does not exercise
+  either path. A separate PR stacked on #53 starts it in the agent and the
+  signer.
+- **9.2's certificate binding.**
+- **Stale comments.** `RouteViaRouter` still says "with middleware", the
+  route functions mention `AuthorizationMiddleware`, and `envelope.go`
+  mentions `FetchChunkQuery`.
+- **W15.** The two beat loops are still undecided.
+- **As 8.4.** Step 4's second commit, F1, L5 and L7.

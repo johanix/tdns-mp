@@ -229,6 +229,14 @@ type ZoneAgentData struct {
 	MyDownstreams []AgentId
 }
 
+// ZoneAgentInfo is ZoneAgentData as the management API reports it.
+type ZoneAgentInfo struct {
+	ZoneName      ZoneName
+	Agents        []*AgentInfo
+	MyUpstream    AgentId
+	MyDownstreams []AgentId
+}
+
 // --- From zone_utils.go ---
 
 type HsyncStatus struct {

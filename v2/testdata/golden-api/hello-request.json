@@ -1,0 +1,1 @@
+{"MessageType":"hello","MyIdentity":"a.example.","YourIdentity":"b.example.","tlsa":{"Hdr":{"Name":"","Rrtype":0,"Class":0,"Ttl":0,"Rdlength":0},"Usage":0,"Selector":0,"MatchingType":0,"Certificate":""},"Zone":"z.example.","Time":"2026-01-02T03:04:05Z"}

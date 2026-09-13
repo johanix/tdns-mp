@@ -29,6 +29,11 @@ type MultiProviderConf struct {
 	Identity string `yaml:"identity"`
 	// LongTermJosePrivKey: path to JOSE private key for secure CHUNK.
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	// CryptoBackend: the payload-crypto backend that wraps CHUNK payloads
+	// ("jose", the default and the only one registered today). Names a
+	// backend in tdns-transport's registry; the key file paths above are
+	// read by that backend.
+	CryptoBackend string `yaml:"crypto_backend" mapstructure:"crypto_backend"`
 	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK).
 	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
 	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.

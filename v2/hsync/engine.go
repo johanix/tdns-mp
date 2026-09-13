@@ -14,9 +14,7 @@ type Engine struct {
 	deps        Deps
 	cfg         Config
 	registry    *Registry
-	onSync      SyncHandler
-	onElection  ElectionHandler
-	onKeyState  KeyStateHandler
+	onMsg       InboundHandler
 	discSem     chan struct{}
 	discSemOnce sync.Once
 }
@@ -48,9 +46,8 @@ func (e *Engine) Registry() *Registry {
 	return e.registry
 }
 
-func (e *Engine) SetSyncHandler(h SyncHandler)         { e.onSync = h }
-func (e *Engine) SetElectionHandler(h ElectionHandler) { e.onElection = h }
-func (e *Engine) SetKeyStateHandler(h KeyStateHandler) { e.onKeyState = h }
+// SetHandler installs the host's handler for application messages.
+func (e *Engine) SetHandler(h InboundHandler) { e.onMsg = h }
 
 // Run owns the protocol select loop until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context, ch MsgChannels) {
@@ -76,8 +73,8 @@ func (e *Engine) Run(ctx context.Context, ch MsgChannels) {
 			}
 
 		case msg, ok := <-ch.Msg:
-			if ok && msg != nil {
-				e.dispatchByType(msg)
+			if ok && msg != nil && e.onMsg != nil {
+				e.onMsg(msg)
 			}
 
 		case <-beatTicker.C:

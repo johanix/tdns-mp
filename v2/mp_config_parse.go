@@ -88,6 +88,9 @@ func parseMultiProvider(configMap map[string]interface{}) (*MultiProviderConf, e
 	normalizeMultiProviderIdentities(&mp)
 	normalizeSyncengineIntervals(&mp)
 	parseMultiProviderOptions(&mp)
+	if strings.TrimSpace(mp.CryptoBackend) == "" {
+		mp.CryptoBackend = DefaultCryptoBackend
+	}
 	return &mp, nil
 }
 

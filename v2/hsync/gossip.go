@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// The gossip wire types have one definition, here (cleanup plan, step 6);
+// package tdnsmp aliases them. The JSON tags are the wire.
+
 // GossipMessage carries gossip state for one provider group.
 type GossipMessage struct {
 	GroupHash string                  `json:"group_hash"`
@@ -37,23 +40,4 @@ type GroupNameProposal struct {
 	Name       string    `json:"name"`
 	Proposer   string    `json:"proposer"`
 	ProposedAt time.Time `json:"proposed_at"`
-}
-
-func deepCopyMemberState(src *MemberState) *MemberState {
-	dst := &MemberState{
-		Identity:     src.Identity,
-		Timestamp:    src.Timestamp,
-		BeatInterval: src.BeatInterval,
-	}
-	if src.PeerStates != nil {
-		dst.PeerStates = make(map[string]string, len(src.PeerStates))
-		for k, v := range src.PeerStates {
-			dst.PeerStates[k] = v
-		}
-	}
-	if src.Zones != nil {
-		dst.Zones = make([]string, len(src.Zones))
-		copy(dst.Zones, src.Zones)
-	}
-	return dst
 }

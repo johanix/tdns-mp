@@ -24,7 +24,7 @@ func (g *agentGossipPort) MergeGossip(msg *hsync.GossipMessage) {
 	if g == nil || g.gst == nil || msg == nil {
 		return
 	}
-	g.gst.MergeGossip(hsyncGossipToMp(msg))
+	g.gst.MergeGossip(msg)
 }
 
 func (g *agentGossipPort) CheckGroupState(groupHash string, members []string) {
@@ -55,39 +55,6 @@ func (g *agentGossipPort) SetOnGroupDegraded(fn func(groupHash string)) {
 
 func (g *agentGossipPort) SetOnElectionUpdate(fn func(groupHash string, state hsync.GroupElectionState)) {
 	if g != nil && g.gst != nil {
-		g.gst.SetOnElectionUpdate(func(groupHash string, state GroupElectionState) {
-			fn(groupHash, hsyncElectionToHsync(state))
-		})
+		g.gst.SetOnElectionUpdate(fn)
 	}
-}
-
-func hsyncGossipToMp(msg *hsync.GossipMessage) *GossipMessage {
-	if msg == nil {
-		return nil
-	}
-	out := &GossipMessage{
-		GroupHash: msg.GroupHash,
-		GroupName: GroupNameProposal(msg.GroupName),
-		Election:  GroupElectionState(msg.Election),
-	}
-	if msg.Members != nil {
-		out.Members = make(map[string]*MemberState, len(msg.Members))
-		for k, v := range msg.Members {
-			if v == nil {
-				continue
-			}
-			out.Members[k] = &MemberState{
-				Identity:     v.Identity,
-				PeerStates:   v.PeerStates,
-				Zones:        v.Zones,
-				Timestamp:    v.Timestamp,
-				BeatInterval: v.BeatInterval,
-			}
-		}
-	}
-	return out
-}
-
-func hsyncElectionToHsync(state GroupElectionState) hsync.GroupElectionState {
-	return hsync.GroupElectionState(state)
 }
