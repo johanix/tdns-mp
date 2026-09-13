@@ -707,8 +707,16 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 	if err != nil {
 		return nil, fmt.Errorf("send to agent %q failed: %w", agent.ID, err)
 	}
+	// Delivered is not accepted: like the notify path, anything but success
+	// is a failure the caller must not record as "ok".
+	if syncResp == nil {
+		return nil, fmt.Errorf("send to agent %q: no response", agent.ID)
+	}
+	if syncResp.Status != agenttransport.ConfirmSuccess {
+		return nil, fmt.Errorf("agent %q answered %s: %s", agent.ID, syncResp.Status, syncResp.Message)
+	}
 	return &AgentMsgResponse{
-		Status: string(syncResp.Status),
+		Status: syncResp.Status.String(),
 		Msg:    syncResp.Message,
 		Zone:   msg.Zone,
 	}, nil

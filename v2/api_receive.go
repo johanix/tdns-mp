@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -39,6 +40,18 @@ const (
 	apiEndpointPing
 	apiEndpointMsg
 )
+
+// endpointVerbs are the verbs each endpoint takes, as before the endpoints
+// entered the pipeline. The endpoints sit behind different middleware
+// (/hello is reachable before the peer's TLSA is known), so the endpoint,
+// not the body, decides what may enter through it. /msg takes the sync
+// family the HTTPS sender posts there.
+var endpointVerbs = map[apiEndpointKind][]string{
+	apiEndpointHello: {"hello"},
+	apiEndpointBeat:  {"beat"},
+	apiEndpointPing:  {"ping"},
+	apiEndpointMsg:   {"sync", "update", "rfi"},
+}
 
 // maxAPIBody bounds a request body; a DNS-carried payload is bounded by
 // the message size, an HTTPS-carried one is bounded here.
@@ -63,10 +76,21 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			_ = sink.fail(fmt.Sprintf("Invalid request: %v", err))
 			return
 		}
-		// The sender the body names, for the reply, before the pipeline
-		// decides anything about it.
-		if im, perr := parseAppPayload("", body, r.RemoteAddr); perr == nil && im != nil {
-			sink.your = AgentId(im.SenderID)
+		// The verb and the sender the body names, before the pipeline
+		// decides anything about it: the sender for the reply, the verb to
+		// hold the body to what this endpoint takes.
+		im, perr := parseAppPayload("", body, r.RemoteAddr)
+		if perr != nil || im == nil {
+			lgApi.Warn("unparseable sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "err", perr)
+			_ = sink.fail("Invalid request format")
+			return
+		}
+		sink.your = AgentId(im.SenderID)
+		if !slices.Contains(endpointVerbs[kind], im.Token()) {
+			lgApi.Warn("sync API request refused: this endpoint does not take the verb",
+				"path", r.URL.Path, "from", r.RemoteAddr, "verb", im.Token(), "sender", im.SenderID)
+			_ = sink.fail(fmt.Sprintf("message type %q is not accepted on %s", im.Token(), r.URL.Path))
+			return
 		}
 		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your)
 		if err := handler.RouteAPIPayload(r.Context(), body, r.RemoteAddr, sink); err != nil {
