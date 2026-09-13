@@ -9,6 +9,7 @@
 | Rev | Date | Change |
 |---|---|---|
 | r1 | 2026-09-13 | First version. Problem statement, the decisions taken so far, the model, the parties that touch the parent, staging, open questions. |
+| r2 | 2026-09-13 | Review. published and standby are different: published = in the DNSKEY RRset, not yet propagated; standby = propagated; no DS for a published key except under multi-DS. The `ds` column now depends on the DS model (§3.4), with a finding that tdns's DS rule counts published keys in every model. ds-published (multi-DS only) added; the policy may keep zero or more standby keys. Q6 rewritten. The protocol change (§5) and the propagation-gate bug (§1.1) agreed. |
 
 ---
 
@@ -45,7 +46,7 @@ Each new tdns component that reads key state has to ask what to do about these s
 **Multi-provider zones get no policy-driven key management.** Automated ZSK and KSK rollovers skip them (`zsk_rollover.go:502`, `ksk_rollover_automated.go:1949`). Key lifetimes are not honoured. Standby counts come from the global kasp settings, not the zone's policy (`key_state_worker.go:18-63`). A rollover happens only when an operator runs one.
 
 **tdns-mp's own key protocol has gaps (code reading):**
-- A key moves mpdist → published on *any* confirmation, including the immediate "pending" confirmation a relaying agent sends on receipt. The confirmation callback hands every status to the DNSKEY propagation tracker (tdns-mp `hsync_transport.go:393`), which marks the agent confirmed whatever the status (`:2089-2093`). A key can be promoted before any other provider's combiner has applied it.
+- A key moves mpdist → published on *any* confirmation, including the immediate "pending" confirmation a relaying agent sends on receipt. The confirmation callback hands every status to the DNSKEY propagation tracker (tdns-mp `hsync_transport.go:393`), which marks the agent confirmed whatever the status (`:2089-2093`). A key can be promoted before any other provider's combiner has applied it. Agreed 2026-09-13 as a likely bug, to fix.
 - With no remote agents, or after a "rejected", a key stays in mpdist forever (`syncheddataengine.go:222-229`; `signer_msg_handler.go:105-124`).
 
 **The DS side for multi-provider zones barely exists (code reading):**
@@ -121,7 +122,7 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string,
 func insertKeyRowTx(tx *Tx, row KeyRow) error
 ```
 
-- **tdns's own states** get their flags from one table (§3.4), so tdns callers keep passing only a state.
+- **tdns's own states** get their flags from one table keyed by DS model and state (§3.4), so tdns callers keep passing only a state; the zone's model is known where they run.
 - **An owner** passes its state and the flags explicitly.
 - **Post-commit effects** (snapshot republish, anything that replaces `OnStateChange`) stay in the wrapper that owns the transaction.
 - **A CI grep gate**, like the existing `Data.Set` mutator gate, fails the build on any other `SET state` or `INSERT` on the table.
@@ -146,39 +147,54 @@ func insertKeyRowTx(tx *Tx, row KeyRow) error
 
 ### 3.4 Flags per state
 
-**tdns's own states** (this table also drives the migration's backfill):
+The terms follow tdns's key state machine:
+- **published:** the key is in the DNSKEY RRset, and that RRset has not yet propagated.
+- **standby:** the DNSKEY RRset carrying the key has propagated fully. The policy may keep zero or more standby keys.
+- **ds-published:** multi-DS only. The DS is placed at the parent before the DNSKEY is published. Only tdns's key state worker uses this state.
 
-| state | include | sign | ds |
-|---|---|---|---|
-| created | 0 | 0 | see below |
-| ds-published | 0 | 0 | 1 |
-| published | 1 | 0 | 1 |
-| standby | 1 | 0 | 1 |
-| active | 1 | 1 | 1 (0 for the old head of an algorithm rollover) |
-| retired | 1 | 0 | see below |
-| removed | 0 | 0 | 0 |
+`ds` therefore depends on the zone's DS model as well as on the state:
+- **Double-signature rollover, and zones without automated rollover:** a KSK gets no DS while it is published, only once it is standby.
+- **Multi-DS:** the DS goes up first.
+
+The state machine that owns the zone knows the model and sets `ds` at the transitions, so the readers of the column never need to know the model.
+
+**tdns's own states:**
+
+| state | include | sign | ds, multi-DS | ds, double-signature and none |
+|---|---|---|---|---|
+| created | 0 | 0 | 0 | 0 |
+| ds-published | 0 | 0 | 1 | not used |
+| published | 1 | 0 | 1 (placed at ds-published) | **0** |
+| standby | 1 | 0 | 1 | 1 |
+| active | 1 | 1 | 1 (0 for the old head of an algorithm rollover) | 1 |
+| retired | 1 | 0 | 1 until the rollover withdraws it | 0 once its DS is withdrawn |
+| removed | 0 | 0 | 0 | 0 |
+
+A migration cannot know a zone's model, because it runs before policies load (`db.go:122-123`). Hence open question Q5.
+
+**Finding for tdns zones (code reading).** `dsBelongsAtParent` counts a published KSK as having its DS in every model (`ds_intent.go:36-38`, `:55`). It follows the multi-DS order, created → ds-published → published → standby → active. DS intent mainly serves zones without automated rollover, and for those the DS engine then publishes a CDS for a key whose DNSKEY RRset has not propagated.
 
 tdns has four definitions of "this key has a DS" today:
-- `dsBelongsAtParent`: ds-published, published, standby, active.
-- The multi-ds rollover target: created through retired, minus the old head.
-- `CountKskWithDSAtParent`: ds-published through retired.
-- The rollover status label: ds-published is "DS", published through retired is "DS+DNSKEY".
+- `dsBelongsAtParent`
+- the multi-DS rollover target: created through retired, minus the old head
+- `CountKskWithDSAtParent`: ds-published through retired
+- the rollover status label
 
-The difference sits in `created` and `retired`, and it depends on the zone's DS model. A migration cannot know the model, because it runs before policies load (`db.go:122-123`). Hence open question Q5.
+The `ds` column replaces all four.
 
-**tdns-mp's states for a multi-provider zone** (proposal):
+**tdns-mp's states for a multi-provider zone** (proposal; no multi-DS, see Q6):
 
 | state | include | sign | ds (KSK) |
 |---|---|---|---|
 | created | 0 | 0 | 0 |
-| mpdist | 1 | 0 | 0: not yet confirmed by every provider |
-| published | 1 | 0 | 1 under a pre-published-DS policy (Q6) |
-| standby | 1 | 0 | 1 (usable in an emergency roll) |
+| mpdist | 1 | 0 | 0: in this provider's RRset, not yet confirmed by every provider |
+| published | 1 | 0 | 0: confirmed by every provider, not yet propagated |
+| standby | 1 | 0 | 1 |
 | active | 1 | 1 | 1 |
-| retired | 1 | 0 | 1 until the DS withdrawal starts |
+| retired | 1 | 0 | 0 once its DS is withdrawn |
 | mpremove | 0 | 0 | 0 |
 | removed | 0 | 0 | 0 |
-| foreign | 1 | 0 | 1 only for a KSK of a signing provider whose own state for that key is published, standby, active or retired |
+| foreign | 1 | 0 | 1 only for a KSK of a signing provider whose own state for that key is standby or active, or retired with its DS not yet withdrawn |
 
 A ZSK has `ds=0` in every state.
 
@@ -248,15 +264,19 @@ The DS engine never talks to the parent. It writes CDS into the zone through the
 
 ## 5. What tdns-mp's state machine takes over
 
-1. **Standby keys per the zone's policy:** counts, and when to mint.
-2. **Timers:** published → standby, and the withdrawal margin before a key leaves the RRset.
+1. **Standby keys per the zone's policy:** zero or more, and when to mint.
+2. **Timers:** published → standby once the DNSKEY RRset has propagated, and the withdrawal margin before a key leaves the RRset.
 3. **Rollover scheduling from the ZSK and KSK lifetimes,** for ZSK and KSK in multi-provider form.
-4. **Promotion to `sign=1` behind a real propagation gate:** every signing provider has applied the key, and the DNSKEY TTL has elapsed. That replaces "any confirmation".
+4. **Real gates on the way in:**
+   - mpdist → published only when every signing provider has applied the key. That replaces "any confirmation".
+   - published → standby only when the DNSKEY RRset has propagated.
+   - Only a standby KSK gets `ds=1`.
+   - Only a standby key is promoted to `sign=1`.
 5. **Withdrawal:** set `ds=0`, wait for the parent, set `sign=0`, keep `include=1` for the margin, ask tdns to strip the key's RRSIGs, set `include=0`.
 6. **Foreign rows** that record the provider and the provider's state for the key, so `ds` can follow D4.
 7. **The DS set for the zone** (D4), handed to the syncher on the node that may send.
 
-**Protocol change.** Today DNSKEYs travel between providers as bare records: no provider identity and no state (`hsyncengine.go:62-73`). Foreign rows store neither (`signer_keydb.go:328`). Only a signer and its own agent exchange key states (the key inventory). D4 needs each provider's DNSKEYs to carry, per key, the provider and either its state or its `ds` intent. This is a change to what goes on the wire between providers; §7 Q9.
+**Protocol change.** Today DNSKEYs travel between providers as bare records: no provider identity and no state (`hsyncengine.go:62-73`). Foreign rows store neither (`signer_keydb.go:328`). Only a signer and its own agent exchange key states (the key inventory). D4 needs each provider's DNSKEYs to carry, per key, the provider and either its state or its `ds` intent. This is a change to what goes on the wire between providers; §7 Q9. Agreed 2026-09-13: it must be fixed.
 
 **tdns-mp code that becomes the owner's answers:**
 
@@ -295,7 +315,7 @@ S3 is the large step. It can land behind a per-zone switch, so one test zone mov
 | Q3 | Which process publishes a multi-provider zone's CDS? | The signer. It holds the rows: own keys and foreign rows. Today the combiner synthesizes CDS from a DNSKEY set that lacks the provider's own keys. |
 | Q4 | Which keystore API verbs work on an owned zone? | The store verbs (add, generate with an explicit state and flags, delete, purge) work. The lifecycle verbs listed in §3.5 are refused. |
 | Q5 | How is `ds` backfilled for existing rows? | Leave it `NULL` until the zone's owner writes it; readers treat `NULL` as unknown. For tdns zones, the first key state worker or rollover pass fills it in. |
-| Q6 | In a multi-provider zone, does a published or standby KSK carry `ds=1` (DS before the key goes active)? | Follow the zone's policy, the same way tdns's multi-ds model does; the state machine reads it. |
+| Q6 | Does the multi-DS scheme (DS placed before the DNSKEY, state ds-published) apply to multi-provider zones? | Not in this design. A multi-provider KSK gets its DS at standby, once every provider's DNSKEY RRset carrying it has propagated. Multi-DS across providers would first need the providers to agree on a shared DS pipeline. |
 | Q7 | Who strips a departing key's RRSIGs? | The owner decides when; tdns exports the strip and the resign trigger. |
 | Q8 | Is `OnStateChange` still needed? | No. tdns-mp makes its own transitions and knows when state changes. API writes to owned zones are limited to store verbs (Q4); if an inventory push is wanted after those, tdns-mp's API wrapper does it. |
 | Q9 | How does the protocol change in §5 reach providers that run an older tdns-mp? | Add fields to the DNSKEY distribution payload; older receivers ignore unknown JSON fields. The `ds` column cannot follow D4 for a provider that does not send them yet. Such a provider's keys get `ds=NULL` and block the DS set, rather than being guessed. |
