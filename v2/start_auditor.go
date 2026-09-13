@@ -22,7 +22,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
 
-	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -94,11 +93,12 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
 	}
 
-	// Provider group recomputation hook. HSYNC changes reach RecomputeGroups
-	// through the hsync engine's OnHsync3Changed callback; the one-shot
-	// OnFirstLoad below covers the first load, and PostRefresh re-runs it
-	// on every zone transfer. RecomputeGroups is a pure function of zone
-	// data and does not require SharedZones.
+	// Provider group recomputation. HSYNC changes reach RecomputeGroups
+	// through the hsync engine's OnHsync3Changed callback, and PostRefresh
+	// applies the HSYNC diff on every zone transfer -- a first load
+	// included, since tdns runs a first load's post-refresh callbacks once
+	// the zone is Ready. RecomputeGroups is a pure function of zone data and
+	// does not require SharedZones.
 	if ar != nil && ar.ProviderGroupManager != nil {
 		pgm := ar.ProviderGroupManager
 		for _, zoneName := range conf.Config.Internal.AllZones {
@@ -109,22 +109,6 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 			if !mpzd.Options[tdns.OptMultiProvider] {
 				continue
 			}
-			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				// PostRefresh's ApplyHsyncDiff on the first load runs before
-				// tdns marks the zone Ready, so it cannot read the zone view
-				// and registers nobody (the agent has the same callback,
-				// start_agent.go). Without this the auditor found its peers
-				// only at the first periodic ReconcileZone, one
-				// ReconcileInterval (60 s by default) after start.
-				if ar.HsyncEngine != nil {
-					if _, _, err := ar.HsyncEngine.ReconcileZone(hsync.ZoneName(zd.ZoneName)); err != nil {
-						lgAuditor.Warn("OnFirstLoad: reconciling zone peers failed", "zone", zd.ZoneName, "err", err)
-					}
-				}
-				lgAuditor.Debug("OnFirstLoad: recomputing provider groups", "zone", zd.ZoneName)
-				pgm.RecomputeGroups()
-				stateManager.RefreshZoneHSYNCConfig(zd.ZoneName)
-			})
 			stateManager.RefreshZoneHSYNCConfig(zoneName)
 		}
 		pgm.RecomputeGroups()
@@ -212,7 +196,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// addresses, TLSA, KEY) so peers can discover us via DNS. Same
 	// shape as the agent's SetupAgent. Must run after
 	// ZoneUpdaterEngine is started.
-	if err := conf.SetupAgent(conf.Config.Internal.AllZones); err != nil {
+	if err := conf.SetupAgent(ctx, conf.Config.Internal.AllZones); err != nil {
 		lgAuditor.Error("SetupAgent failed", "err", err)
 	}
 

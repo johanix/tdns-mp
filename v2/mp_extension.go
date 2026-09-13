@@ -12,6 +12,7 @@ package tdnsmp
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -78,6 +79,20 @@ type MPState struct {
 	KeystateError        string
 	KeystateTime         time.Time
 	RefreshAnalysis      *ZoneRefreshAnalysis
+
+	// pendingCleanups are the (owner, rrtype) pairs a contribution change may
+	// have emptied: the next CombineWithLocalChanges restores or deletes what
+	// no agent contributes any more. Its own mutex, because MPZoneData.Lock
+	// is the zone's lock and the batch that consumes this list holds that.
+	cleanupMu       sync.Mutex
+	pendingCleanups []ownerRRtype
+	// combineMu serialises "copy the state, then project it" in
+	// CombineWithLocalChanges. The copy is taken outside the zone's lock,
+	// so without this two concurrent combines could publish out of order:
+	// one copying a state without a contribution, another copying and
+	// publishing with it, then the first publishing its older copy over it.
+	// Never held with the zone's lock already held.
+	combineMu sync.Mutex
 }
 
 // EnsureMP initializes the MP extension if nil. Callers that hold

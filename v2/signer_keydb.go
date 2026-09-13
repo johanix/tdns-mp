@@ -1,8 +1,19 @@
 /*
  * Copyright (c) Johan Stenstam, <johani@johani.org>
  *
- * Local copies of KeyDB signer functions, adapted from tdns/v2/keystore.go.
- * These operate on *tdns.KeyDB but live in tdns-mp to avoid cross-package calls.
+ * The signer's key seam.
+ *
+ * The keys live in tdns's DnssecKeyStore and tdns signs with them: the first
+ * sign after the policy binds, every refresh's staged scope, the renewals of
+ * its ResignerEngine, the standby maintenance and the timed transitions of
+ * its key-state worker. What is MP's is the protocol between the states:
+ * mpdist (a new key, served ahead of its promotion, awaiting the peers'
+ * confirmation that it has propagated), mpremove (a retired key withdrawn
+ * from the RRset, awaiting confirmation of the withdrawal), foreign (another
+ * signer's DNSKEY, served here and never signing), and the propagation
+ * record that gates a key's promotion to active. tdns learns the states
+ * through its key lifecycle hooks (RegisterMPKeyLifecycleHooks) and attaches
+ * no meaning to them beyond served or not served.
  */
 package tdnsmp
 
@@ -15,711 +26,355 @@ import (
 	"github.com/miekg/dns"
 )
 
-// GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
-// If zone is empty, returns keys across all zones.
-func GetDnssecKeysByState(hdb *HsyncDB, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
-	var query string
-	var args []interface{}
+// KeyInventoryItem and DnssecKeyWithTimestamps are tdns's: the inventory the
+// KEYSTATE protocol carries is read from DnssecKeyStore.
+type KeyInventoryItem = tdns.KeyInventoryItem
+type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
 
-	if zone == "" {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM MPDnssecKeyStore WHERE state=?`
-		args = []interface{}{state}
-	} else {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM MPDnssecKeyStore WHERE zonename=? AND state=?`
-		args = []interface{}{zone, state}
+// RegisterMPKeyLifecycleHooks installs the hooks that make tdns's keystore
+// and key-state worker run the multi-provider key protocol for zones that
+// carry the multi-provider option. Registered before tdns's MainInit, so the
+// hooks are in place before any zone's first refresh. Zones without the
+// option get tdns's defaults from every hook.
+//
+// The KeyDB is looked up at call time: it does not exist yet when this
+// registers.
+func RegisterMPKeyLifecycleHooks(conf *Config) {
+	isMP := func(zd *tdns.ZoneData) bool {
+		return zd != nil && zd.Options[tdns.OptMultiProvider]
 	}
-
-	rows, err := hdb.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("GetDnssecKeysByState: query failed: %w", err)
+	keyDB := func() *tdns.KeyDB {
+		if conf == nil || conf.Config == nil {
+			return nil
+		}
+		return conf.Config.Internal.KeyDB
 	}
-	defer rows.Close()
-
-	var entries []DnssecKeyWithTimestamps
-	for rows.Next() {
-		var zonename, algorithm, st, keyrr, publishedAtStr, retiredAtStr string
-		var keyid, flags int
-		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &retiredAtStr); err != nil {
-			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
-		}
-
-		alg, ok := dns.StringToAlgorithm[algorithm]
-		if !ok {
-			lgSigner.Warn("GetDnssecKeysByState: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
-			continue
-		}
-		entry := DnssecKeyWithTimestamps{
-			ZoneName:  zonename,
-			KeyTag:    uint16(keyid),
-			Algorithm: alg,
-			Flags:     uint16(flags),
-			State:     st,
-			KeyRR:     keyrr,
-		}
-
-		if publishedAtStr != "" {
-			if t, err := time.Parse(time.RFC3339, publishedAtStr); err == nil {
-				entry.PublishedAt = &t
+	tdns.RegisterKeyLifecycleHooks(tdns.KeyLifecycleHooks{
+		// A new standby key is served first and promoted only once the
+		// peers confirm it has propagated.
+		StagedState: func(zd *tdns.ZoneData) string {
+			if isMP(zd) {
+				return DnskeyStateMpdist
 			}
-		}
-		if retiredAtStr != "" {
-			if t, err := time.Parse(time.RFC3339, retiredAtStr); err == nil {
-				entry.RetiredAt = &t
+			return ""
+		},
+		// A retired key leaves the RRset and waits for the peers to confirm
+		// the withdrawal before it is removed.
+		RetiredState: func(zd *tdns.ZoneData) string {
+			if isMP(zd) {
+				return DnskeyStateMpremove
 			}
-		}
-
-		entries = append(entries, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("GetDnssecKeysByState: rows iteration failed: %w", err)
-	}
-
-	return entries, nil
+			return ""
+		},
+		// The propagation gate: confirmed by the peers, and the DNSKEY TTL
+		// elapsed since.
+		MayPromote: func(zd *tdns.ZoneData, keyid uint16) bool {
+			if !isMP(zd) {
+				return true
+			}
+			hdb := NewHsyncDB(keyDB())
+			if hdb == nil {
+				return false
+			}
+			return canPromoteMultiProviderMP(hdb, zd.ZoneName, keyid)
+		},
+		// tdns may mint an active key only for a zone with no key of that
+		// role at all (the bootstrap); a zone whose keys are staged or gated
+		// waits for them. Removed and foreign rows do not count: the former
+		// are history, the latter are not ours.
+		MayGenerate: func(zd *tdns.ZoneData, role string) bool {
+			if !isMP(zd) {
+				return true
+			}
+			kdb := keyDB()
+			if kdb == nil {
+				return false
+			}
+			n, err := countOwnKeysOfRole(kdb, zd.ZoneName, role)
+			if err != nil {
+				lgSigner.Error("MayGenerate: counting keys failed; not generating", "zone", zd.ZoneName, "role", role, "err", err)
+				return false
+			}
+			return n == 0
+		},
+		// Every committed change is pushed to the agents as a fresh
+		// inventory. Off the caller's goroutine: the caller may hold a
+		// zone's lock (the publish path resolves keys under it), and the
+		// push is network I/O with a timeout per agent.
+		OnStateChange: func(zone string, keyid uint16, from, to string) {
+			if tdns.Globals.App.Type != AppTypeMPSigner {
+				return
+			}
+			zd, ok := tdns.Zones.Get(zone)
+			if !ok || !isMP(zd) {
+				return
+			}
+			lgSigner.Info("key state changed; pushing the inventory to the agents", "zone", zone, "keyid", keyid, "from", from, "to", to)
+			go pushKeystateInventoryToAllAgents(conf, zone)
+		},
+	})
 }
 
-// UpdateDnssecKeyState transitions a DNSSEC key to a new state and sets the
-// appropriate lifecycle timestamp. When transitioning to "published", sets
-// published_at. When transitioning to "retired", sets retired_at.
-// Invalidates the cache for both old and new states.
-func UpdateDnssecKeyState(hdb *HsyncDB, zonename string, keyid uint16, newstate string) error {
-	tx, err := hdb.Begin("UpdateDnssecKeyState")
-	if err != nil {
-		return fmt.Errorf("error beginning transaction: %v", err)
-	}
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
-
-	// Get the current state so we can invalidate the right cache entry
-	var oldstate string
-	err = tx.QueryRow(`SELECT state FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&oldstate)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
-		}
-		return fmt.Errorf("error querying MPDnssecKeyStore: %v", err)
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	var res sql.Result
-	switch newstate {
-	case tdns.DnskeyStatePublished:
-		res, err = tx.Exec(`UPDATE MPDnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
-			newstate, now, zonename, keyid)
-	case tdns.DnskeyStateRetired:
-		res, err = tx.Exec(`UPDATE MPDnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
-			newstate, now, zonename, keyid)
-	default:
-		res, err = tx.Exec(`UPDATE MPDnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
-			newstate, zonename, keyid)
-	}
-
-	if err != nil {
-		return fmt.Errorf("error updating MPDnssecKeyStore: %v", err)
-	}
-
-	rowsAffected, _ := res.RowsAffected()
-	if rowsAffected == 0 {
-		err = fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
-		return err
-	}
-
-	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zonename, oldstate), mpDnssecCacheKey(zonename, newstate))
-
-	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
-	return nil
-}
-
-// GenerateAndStageKey generates a new DNSSEC key and transitions it to the
-// appropriate initial state (mpdist for MP zones, published otherwise).
-func GenerateAndStageKey(hdb *HsyncDB, zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
-	pkc, _, err := hdb.GenerateKeypairMP(zone, creator, tdns.DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
-	if err != nil {
-		return 0, fmt.Errorf("GenerateAndStageKey: key generation failed: %w", err)
-	}
-
-	keyid := pkc.KeyId
-
-	var targetState string
-	if isMultiProvider {
-		targetState = DnskeyStateMpdist
+// countOwnKeysOfRole counts the zone's own keys of a role in any state but
+// removed. A KSK is any key with the SEP bit, revoked ones (flags 385)
+// included; a ZSK is flags 256.
+func countOwnKeysOfRole(kdb *tdns.KeyDB, zone, role string) (int, error) {
+	var n int
+	var err error
+	if role == "ZSK" {
+		err = kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND flags=256 AND state NOT IN (?, ?)`,
+			zone, tdns.DnskeyStateRemoved, DnskeyStateForeign).Scan(&n)
 	} else {
-		targetState = tdns.DnskeyStatePublished
+		err = kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND (flags & 1) = 1 AND state NOT IN (?, ?)`,
+			zone, tdns.DnskeyStateRemoved, DnskeyStateForeign).Scan(&n)
 	}
-
-	if err := UpdateDnssecKeyState(hdb, zone, keyid, targetState); err != nil {
-		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", targetState, err)
-	}
-
-	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", targetState, "mp", isMultiProvider)
-	return keyid, nil
+	return n, err
 }
 
-// GetKeyInventory returns the complete DNSKEY inventory for a zone.
+// GetKeyInventory returns the complete DNSKEY inventory for a zone -- every
+// key in every state, foreign ones included -- from DnssecKeyStore.
 func GetKeyInventory(hdb *HsyncDB, zonename string) ([]KeyInventoryItem, error) {
-	const inventorySql = `SELECT keyid, flags, algorithm, state, COALESCE(keyrr, '') FROM MPDnssecKeyStore WHERE zonename=?`
-
-	rows, err := hdb.Query(inventorySql, zonename)
-	if err != nil {
-		return nil, fmt.Errorf("GetKeyInventory: query failed for zone %s: %w", zonename, err)
-	}
-	defer rows.Close()
-
-	var entries []KeyInventoryItem
-	for rows.Next() {
-		var keyid, flags int
-		var algorithm string
-		var state, keyrr string
-		if err := rows.Scan(&keyid, &flags, &algorithm, &state, &keyrr); err != nil {
-			return nil, fmt.Errorf("GetKeyInventory: scan failed: %w", err)
-		}
-		alg, ok := dns.StringToAlgorithm[algorithm]
-		if !ok {
-			lgSigner.Warn("GetKeyInventory: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
-			continue
-		}
-		entries = append(entries, KeyInventoryItem{
-			KeyTag:    uint16(keyid),
-			Algorithm: alg,
-			Flags:     uint16(flags),
-			State:     state,
-			KeyRR:     keyrr,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("GetKeyInventory: rows iteration failed: %w", err)
-	}
-
-	return entries, nil
+	return tdns.GetKeyInventory(hdb.KeyDB, zonename)
 }
 
-// SetPropagationConfirmed marks a DNSKEY as propagation-confirmed in the keystore.
-func SetPropagationConfirmed(hdb *HsyncDB, zonename string, keyid uint16) error {
-	const updateSql = `UPDATE MPDnssecKeyStore SET propagation_confirmed=1, propagation_confirmed_at=? WHERE zonename=? AND keyid=?`
+// --- Propagation: the MP-owned side table ---------------------------------
+//
+// Whether the peers have confirmed a key's propagation is MP protocol state,
+// kept beside tdns's keystore rather than in it, keyed by zone and key id.
 
+func keyState(hdb *HsyncDB, zonename string, keyid uint16) (string, bool, error) {
+	var state string
+	err := hdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&state)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return state, true, nil
+}
+
+// SetPropagationConfirmed records that the peers confirmed a DNSKEY's
+// propagation.
+func SetPropagationConfirmed(hdb *HsyncDB, zonename string, keyid uint16) error {
+	if _, found, err := keyState(hdb, zonename, keyid); err != nil {
+		return fmt.Errorf("SetPropagationConfirmed: %w", err)
+	} else if !found {
+		return fmt.Errorf("SetPropagationConfirmed: key %d not found in zone %s", keyid, zonename)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := hdb.Exec(updateSql, now, zonename, keyid)
+	_, err := hdb.Exec(`INSERT INTO MPKeyPropagation (zonename, keyid, confirmed, confirmed_at) VALUES (?, ?, 1, ?)
+		ON CONFLICT(zonename, keyid) DO UPDATE SET confirmed=1, confirmed_at=excluded.confirmed_at`, zonename, keyid, now)
 	if err != nil {
 		return fmt.Errorf("SetPropagationConfirmed: %w", err)
 	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("SetPropagationConfirmed: key %d not found in zone %s", keyid, zonename)
-	}
-
-	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zonename, tdns.DnskeyStatePublished))
 	lgSigner.Info("key marked as propagation confirmed", "keyid", keyid, "zone", zonename)
 	return nil
 }
 
-// TransitionMpdistToPublished transitions a key from mpdist to published state.
-// If the key is not in mpdist state, this is a no-op (returns nil).
-func TransitionMpdistToPublished(hdb *HsyncDB, zonename string, keyid uint16) error {
-	var currentState string
-	err := hdb.QueryRow(`SELECT state FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return fmt.Errorf("TransitionMpdistToPublished: query failed: %w", err)
-	}
-
-	if currentState != DnskeyStateMpdist {
-		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
-		return nil
-	}
-
-	if err := UpdateDnssecKeyState(hdb, zonename, keyid, tdns.DnskeyStatePublished); err != nil {
-		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
-	}
-
-	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
-	return nil
-}
-
-// TransitionMpremoveToRemoved transitions a key from mpremove to removed state.
-// If the key is not in mpremove state, this is a no-op (returns nil).
-func TransitionMpremoveToRemoved(hdb *HsyncDB, zonename string, keyid uint16) error {
-	var currentState string
-	err := hdb.QueryRow(`SELECT state FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return fmt.Errorf("TransitionMpremoveToRemoved: query failed: %w", err)
-	}
-
-	if currentState != DnskeyStateMpremove {
-		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
-		return nil
-	}
-
-	if err := UpdateDnssecKeyState(hdb, zonename, keyid, tdns.DnskeyStateRemoved); err != nil {
-		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
-	}
-
-	lgSigner.Info("key transitioned mpremove->removed", "zone", zonename, "keyid", keyid)
-	return nil
-}
-
-func mpDnssecCacheKey(zonename, state string) string {
-	return zonename + "+mpdnssec+" + state
-}
-
-// GenerateKeypairMP stores generated KEY/DNSKEY material in MPDnssecKeyStore.
-func (hdb *HsyncDB) GenerateKeypairMP(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *tdns.Tx) (*tdns.PrivateKeyCache, string, error) {
-	pkc, err := tdns.GenerateKeyMaterial(owner, rrtype, alg, keytype)
-	if err != nil {
-		return nil, "", err
-	}
-
-	const (
-		addMPDnssecKeySql = `
-INSERT OR REPLACE INTO MPDnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	)
-
-	localtx := false
-	if tx == nil {
-		tx, err = hdb.Begin("GenerateKeypairMP")
-		if err != nil {
-			return nil, "", err
-		}
-		localtx = true
-	}
-	defer func() {
-		if localtx {
-			if err != nil {
-				tx.Rollback()
-			} else {
-				tx.Commit()
-			}
-		}
-	}()
-
-	if state == "" {
-		state = tdns.DnskeyStateActive
-	}
-
-	switch rrtype {
-	case dns.TypeDNSKEY:
-		flags := 257
-		if keytype == "ZSK" {
-			flags = 256
-		}
-		_, err = tx.Exec(addMPDnssecKeySql, owner, state, pkc.KeyId,
-			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
-	default:
-		return nil, "", fmt.Errorf("GenerateKeypairMP: unsupported rrtype %d", rrtype)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-
-	return pkc, fmt.Sprintf("Generated new %s %s with keyid %d (initial state: %s)", owner, dns.TypeToString[rrtype], pkc.KeyId, state), nil
-}
-
-// GetDnssecKeysMP returns DNSSEC keys from MPDnssecKeyStore (tdns-mp signer table).
-func GetDnssecKeysMP(hdb *HsyncDB, zonename, state string) (*tdns.DnssecKeys, error) {
-	const fetchSql = `
-SELECT keyid, flags, algorithm, privatekey, keyrr FROM MPDnssecKeyStore WHERE zonename=? AND state=?`
-
-	cacheKey := mpDnssecCacheKey(zonename, state)
-	if state == tdns.DnskeyStateActive {
-		if dak, ok := hdb.mpDnskeyCacheGet(cacheKey); ok {
-			return dak, nil
-		}
-	}
-
-	var dk tdns.DnssecKeys
-
-	rows, err := hdb.Query(fetchSql, zonename, state)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var algorithm, privatekey, keyrrstr, logmsg string
-	var flags, keyid int
-	var keysfound bool
-
-	for rows.Next() {
-		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return &dk, nil
-			}
-			return nil, err
-		}
-
-		keysfound = true
-
-		_, alg, bindFormat, err := tdns.ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
-		if err != nil {
-			return nil, err
-		}
-
-		pkc, err := tdns.PrepareKeyCache(bindFormat, keyrrstr)
-		if err != nil {
-			return nil, err
-		}
-
-		if pkc.Algorithm != alg {
-			return nil, fmt.Errorf("algorithm mismatch for key %s: stored=%d parsed=%d", keyrrstr, alg, pkc.Algorithm)
-		}
-
-		if (flags & 0x0001) != 0 {
-			dk.KSKs = append(dk.KSKs, pkc)
-			logmsg += fmt.Sprintf("%d (KSK) ", keyid)
-		} else {
-			dk.ZSKs = append(dk.ZSKs, pkc)
-			logmsg += fmt.Sprintf("%d (ZSK) ", keyid)
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if !keysfound {
-		return &dk, nil
-	}
-
-	if len(dk.KSKs) == 0 {
-		return &dk, nil
-	}
-
-	// Note: dk.ZSKs may legitimately be empty for a zone that has
-	// only KSKs. EnsureActiveDnssecKeysMP + PublishDnskeyRRs are
-	// responsible for generating any required ZSKs.
-
-	lgSigner.Debug("GetDnssecKeysMP returned keys", "zone", zonename, "state", state, "keys", logmsg)
-
-	hdb.mpDnskeyCacheSet(cacheKey, &dk)
-
-	return &dk, nil
-}
-
-// PromoteDnssecKeyMP updates key state in MPDnssecKeyStore.
-func PromoteDnssecKeyMP(hdb *HsyncDB, zonename string, keyid uint16, oldstate, newstate string) (err error) {
-	const getSql = `SELECT state FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`
-	const updateSql = `UPDATE MPDnssecKeyStore SET state=? WHERE zonename=? AND keyid=? AND state=?`
-
-	tx, err := hdb.Begin("PromoteDnssecKeyMP")
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			if commitErr := tx.Commit(); commitErr != nil {
-				err = fmt.Errorf("commit failed: %w", commitErr)
-			}
-		}
-	}()
-
-	var currentState string
-	err = tx.QueryRow(getSql, zonename, keyid).Scan(&currentState)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
-		}
-		return err
-	}
-
-	if currentState != oldstate {
-		return fmt.Errorf("key with keyid %d in zone %s is not in state %s", keyid, zonename, oldstate)
-	}
-
-	res, err := tx.Exec(updateSql, newstate, zonename, keyid, oldstate)
-	if err != nil {
-		return err
-	}
-
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
-	}
-
-	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zonename, oldstate), mpDnssecCacheKey(zonename, newstate))
-
-	return nil
-}
-
 func getDnssecKeyPropagationMP(hdb *HsyncDB, zonename string, keyid uint16) (bool, time.Time, error) {
-	const querySql = `SELECT propagation_confirmed, propagation_confirmed_at FROM MPDnssecKeyStore WHERE zonename=? AND keyid=?`
-
 	var confirmed int
 	var confirmedAtStr string
-	err := hdb.QueryRow(querySql, zonename, keyid).Scan(&confirmed, &confirmedAtStr)
+	err := hdb.QueryRow(`SELECT confirmed, confirmed_at FROM MPKeyPropagation WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&confirmed, &confirmedAtStr)
+	if err == sql.ErrNoRows {
+		return false, time.Time{}, nil
+	}
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, time.Time{}, fmt.Errorf("key %d not found in zone %s", keyid, zonename)
-		}
 		return false, time.Time{}, err
 	}
-
-	var confirmedAt time.Time
-	if confirmedAtStr != "" {
-		confirmedAt, _ = time.Parse(time.RFC3339, confirmedAtStr)
+	if confirmed == 0 {
+		return false, time.Time{}, nil
 	}
-	return confirmed != 0, confirmedAt, nil
+	// A confirmation whose time does not parse is not a confirmation: the
+	// zero time would make the TTL look long elapsed and open the gate.
+	confirmedAt, perr := time.Parse(time.RFC3339, confirmedAtStr)
+	if perr != nil {
+		return false, time.Time{}, fmt.Errorf("propagation confirmed_at %q for key %d in zone %s does not parse: %w", confirmedAtStr, keyid, zonename, perr)
+	}
+	return true, confirmedAt, nil
 }
 
+// canPromoteMultiProviderMP is the promotion gate: propagation confirmed by
+// the peers, and the DNSKEY TTL elapsed since the confirmation.
 func canPromoteMultiProviderMP(hdb *HsyncDB, zonename string, keyid uint16) bool {
 	confirmed, confirmedAt, err := getDnssecKeyPropagationMP(hdb, zonename, keyid)
 	if err != nil {
 		lgSigner.Error("error checking propagation for multi-provider promotion", "keyid", keyid, "zone", zonename, "err", err)
 		return false
 	}
-
 	if !confirmed {
 		lgSigner.Debug("propagation not yet confirmed", "keyid", keyid, "zone", zonename)
 		return false
 	}
-
 	elapsed := time.Since(confirmedAt)
 	if elapsed < tdns.DefaultDnskeyTTL {
 		lgSigner.Debug("propagation confirmed but TTL not expired", "keyid", keyid, "zone", zonename, "elapsed", elapsed.Truncate(time.Second), "ttl", tdns.DefaultDnskeyTTL)
 		return false
 	}
-
 	lgSigner.Info("key eligible for multi-provider promotion", "keyid", keyid, "zone", zonename, "elapsed", elapsed.Truncate(time.Second), "ttl", tdns.DefaultDnskeyTTL)
 	return true
 }
 
-func refreshActiveDnssecKeysMP(zd *tdns.ZoneData, hdb *HsyncDB, context string) (*tdns.DnssecKeys, error) {
-	hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
-	dak, err := GetDnssecKeysMP(hdb, zd.ZoneName, tdns.DnskeyStateActive)
+// TransitionMpdistToPublished moves a key the peers confirmed from mpdist to
+// published, through tdns's keystore. A key in any other state is left alone.
+func TransitionMpdistToPublished(hdb *HsyncDB, zonename string, keyid uint16) error {
+	state, found, err := keyState(hdb, zonename, keyid)
 	if err != nil {
-		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "context", context, "err", err)
-		return nil, err
+		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
 	}
-	return dak, nil
+	if !found || state != DnskeyStateMpdist {
+		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist, no-op", "zone", zonename, "keyid", keyid, "state", state)
+		return nil
+	}
+	if err := tdns.UpdateDnssecKeyState(hdb.KeyDB, zonename, keyid, tdns.DnskeyStatePublished); err != nil {
+		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
+	}
+	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
+	return nil
 }
 
-// EnsureActiveDnssecKeysMP mirrors tdns.EnsureActiveDnssecKeys using MPDnssecKeyStore.
-func EnsureActiveDnssecKeysMP(mpzd *MPZoneData, hdb *HsyncDB) (*tdns.DnssecKeys, error) {
-	zd := mpzd.ZoneData
-	if !zd.Options[tdns.OptOnlineSigning] && !zd.Options[tdns.OptInlineSigning] {
-		return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: zone %s does not allow signing", zd.ZoneName)
-	}
-
-	dak, err := GetDnssecKeysMP(hdb, zd.ZoneName, tdns.DnskeyStateActive)
+// TransitionMpremoveToRemoved moves a key whose withdrawal the peers
+// confirmed from mpremove to removed, through tdns's keystore, and drops its
+// propagation record.
+func TransitionMpremoveToRemoved(hdb *HsyncDB, zonename string, keyid uint16) error {
+	state, found, err := keyState(hdb, zonename, keyid)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
 	}
-
-	if len(dak.KSKs) > 0 && len(dak.ZSKs) > 0 {
-		hasRealZSK := false
-		for _, zsk := range dak.ZSKs {
-			if zsk.DnskeyRR.Flags == 256 {
-				hasRealZSK = true
-				break
-			}
-		}
-		if hasRealZSK {
-			return dak, nil
-		}
+	if !found || state != DnskeyStateMpremove {
+		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove, no-op", "zone", zonename, "keyid", keyid, "state", state)
+		return nil
 	}
-
-	lgSigner.Info("no active DNSSEC keys available, will generate new keys", "zone", zd.ZoneName)
-
-	dpk, err := GetDnssecKeysMP(hdb, zd.ZoneName, tdns.DnskeyStatePublished)
-	if err != nil {
-		return nil, err
+	if err := tdns.UpdateDnssecKeyState(hdb.KeyDB, zonename, keyid, tdns.DnskeyStateRemoved); err != nil {
+		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
 	}
-
-	if len(dpk.KSKs) > 0 || len(dpk.ZSKs) > 0 {
-		lgSigner.Info("published DNSSEC keys available for promotion", "zone", zd.ZoneName)
-
-		var promotedKskKeyId uint16
-		multiProviderGating := zd.Options[tdns.OptMultiProvider]
-
-		if len(dpk.KSKs) > 0 {
-			promotedKskKeyId = dpk.KSKs[0].KeyId
-			if multiProviderGating {
-				if !canPromoteMultiProviderMP(hdb, zd.ZoneName, promotedKskKeyId) {
-					lgSigner.Info("KSK not yet eligible for promotion (multi-provider gating)", "zone", zd.ZoneName, "keyid", promotedKskKeyId)
-					promotedKskKeyId = 0
-					goto skipKskPromotionMP
-				}
-			}
-			err = PromoteDnssecKeyMP(hdb, zd.ZoneName, promotedKskKeyId, tdns.DnskeyStatePublished, tdns.DnskeyStateActive)
-			if err != nil {
-				return nil, err
-			}
-			lgSigner.Info("promoted published KSK to active", "zone", zd.ZoneName, "keyid", promotedKskKeyId)
-		}
-	skipKskPromotionMP:
-
-		if len(dpk.ZSKs) > 0 && (len(dpk.KSKs) == 0 || dpk.ZSKs[0].KeyId != promotedKskKeyId) {
-			zskKeyId := dpk.ZSKs[0].KeyId
-			if multiProviderGating {
-				if !canPromoteMultiProviderMP(hdb, zd.ZoneName, zskKeyId) {
-					lgSigner.Info("ZSK not yet eligible for promotion (multi-provider gating)", "zone", zd.ZoneName, "keyid", zskKeyId)
-					goto skipZskPromotionMP
-				}
-			}
-			err = PromoteDnssecKeyMP(hdb, zd.ZoneName, zskKeyId, tdns.DnskeyStatePublished, tdns.DnskeyStateActive)
-			if err != nil {
-				return nil, err
-			}
-			lgSigner.Info("promoted published ZSK to active", "zone", zd.ZoneName, "keyid", zskKeyId)
-		}
-	skipZskPromotionMP:
-
-		dak, err = GetDnssecKeysMP(hdb, zd.ZoneName, tdns.DnskeyStateActive)
-		if err != nil {
-			return nil, err
-		}
+	if _, err := hdb.Exec(`DELETE FROM MPKeyPropagation WHERE zonename=? AND keyid=?`, zonename, keyid); err != nil {
+		lgSigner.Warn("TransitionMpremoveToRemoved: dropping the propagation record failed", "zone", zonename, "keyid", keyid, "err", err)
 	}
-
-	if len(dak.KSKs) == 0 {
-		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
-		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
-		if err != nil {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: KSK: %w", err)
-		}
-		lgSigner.Info("generated KSK", "msg", msg)
-		dak, err = refreshActiveDnssecKeysMP(zd, hdb, "after KSK generation")
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	realZSKCount := 0
-	for _, zsk := range dak.ZSKs {
-		if zsk.DnskeyRR.Flags == 256 {
-			realZSKCount++
-		}
-	}
-
-	if realZSKCount == 0 {
-		hdb.mpDnskeyCacheDelete(mpDnssecCacheKey(zd.ZoneName, tdns.DnskeyStateActive))
-		_, msg, err := hdb.GenerateKeypairMP(zd.ZoneName, "ensure-active-keys", tdns.DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil)
-		if err != nil {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: ZSK: %w", err)
-		}
-		lgSigner.Info("generated ZSK", "msg", msg)
-		dak, err = refreshActiveDnssecKeysMP(zd, hdb, "after ZSK generation")
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if len(dak.KSKs) == 0 {
-		return nil, fmt.Errorf("EnsureActiveDnssecKeysMP: no active KSK for zone %s", zd.ZoneName)
-	}
-
-	dak, err = refreshActiveDnssecKeysMP(zd, hdb, "before publishing")
-	if err != nil {
-		return nil, err
-	}
-
-	err = zd.PublishDnskeyRRs(dak)
-	if err != nil {
-		lgSigner.Warn("failed to publish DNSKEY RRs", "zone", zd.ZoneName, "err", err)
-	}
-
-	return dak, nil
+	lgSigner.Info("key transitioned mpremove->removed", "zone", zonename, "keyid", keyid)
+	return nil
 }
 
-// RolloverKeyMP performs manual rollover using MPDnssecKeyStore.
-func RolloverKeyMP(hdb *HsyncDB, zonename string, keytype string, tx *tdns.Tx) (uint16, uint16, error) {
-	var expectedFlags uint16
-	switch keytype {
-	case "ZSK":
-		expectedFlags = 256
-	case "KSK", "CSK":
-		expectedFlags = 257
-	default:
-		return 0, 0, fmt.Errorf("invalid keytype %q, must be ZSK or KSK", keytype)
-	}
+// --- Foreign keys -----------------------------------------------------------
 
-	activeKeys, err := GetDnssecKeysByState(hdb, zonename, tdns.DnskeyStateActive)
+// syncForeignDNSKEYs records the other signers' DNSKEYs found in an incoming
+// zone as foreign rows, served but never signing, and drops the rows for keys
+// that are gone. In single-signer mode no foreign row is kept: whatever
+// DNSKEYs the upstream carried are dropped by the publish, which rebuilds the
+// RRset from the keystore. Reports whether the set changed.
+func (mpzd *MPZoneData) syncForeignDNSKEYs(incoming *tdns.ZoneData, multiSigner bool) (bool, error) {
+	kdb := mpzd.KeyDB
+	if kdb == nil {
+		return false, nil
+	}
+	zone := mpzd.ZoneName
+
+	existing := map[uint16]bool{}
+	rows, err := kdb.Query(`SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state=?`, zone, DnskeyStateForeign)
 	if err != nil {
-		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
+		return false, fmt.Errorf("syncForeignDNSKEYs: zone %s: query foreign keys: %w", zone, err)
 	}
-
-	var activeKey *DnssecKeyWithTimestamps
-	for i, k := range activeKeys {
-		if k.Flags == expectedFlags {
-			activeKey = &activeKeys[i]
-			break
+	for rows.Next() {
+		var keyid int
+		if err := rows.Scan(&keyid); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("syncForeignDNSKEYs: zone %s: scan: %w", zone, err)
 		}
+		existing[uint16(keyid)] = true
 	}
-	if activeKey == nil {
-		return 0, 0, fmt.Errorf("no active %s found for zone %s", keytype, zonename)
-	}
+	rows.Close()
 
-	standbyKeys, err := GetDnssecKeysByState(hdb, zonename, tdns.DnskeyStateStandby)
+	local := map[uint16]bool{}
+	rows, err = kdb.Query(`SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state!=?`, zone, DnskeyStateForeign)
 	if err != nil {
-		return 0, 0, fmt.Errorf("error getting standby keys: %w", err)
+		return false, fmt.Errorf("syncForeignDNSKEYs: zone %s: query local keys: %w", zone, err)
 	}
-
-	var standbyKey *DnssecKeyWithTimestamps
-	for i, k := range standbyKeys {
-		if k.Flags == expectedFlags {
-			standbyKey = &standbyKeys[i]
-			break
+	for rows.Next() {
+		var keyid int
+		if err := rows.Scan(&keyid); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("syncForeignDNSKEYs: zone %s: scan: %w", zone, err)
 		}
+		local[uint16(keyid)] = true
 	}
-	if standbyKey == nil {
-		return 0, 0, fmt.Errorf("no standby %s available for rollover in zone %s", keytype, zonename)
-	}
+	rows.Close()
 
-	localtx := false
-	if tx == nil {
-		tx, err = hdb.Begin("RolloverKeyMP")
-		if err != nil {
-			return 0, 0, fmt.Errorf("error beginning transaction: %w", err)
-		}
-		localtx = true
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	var txErr error
-
-	defer func() {
-		if localtx {
-			if txErr != nil {
-				tx.Rollback()
-			} else {
-				tx.Commit()
+	var remote []dns.RR
+	current := map[uint16]*dns.DNSKEY{}
+	if multiSigner && incoming != nil {
+		if rs, _ := incoming.RRsetForAnalysis(zone, dns.TypeDNSKEY); rs != nil {
+			for _, rr := range rs.RRs {
+				dnskey, ok := rr.(*dns.DNSKEY)
+				if !ok {
+					continue
+				}
+				if kt := dnskey.KeyTag(); !local[kt] {
+					remote = append(remote, dns.Copy(rr))
+					current[kt] = dnskey
+				}
 			}
 		}
-	}()
-
-	_, txErr = tx.Exec(`UPDATE MPDnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
-		tdns.DnskeyStateActive, zonename, standbyKey.KeyTag)
-	if txErr != nil {
-		return 0, 0, fmt.Errorf("standby→active transition failed: %w", txErr)
 	}
 
-	_, txErr = tx.Exec(`UPDATE MPDnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
-		tdns.DnskeyStateRetired, now, zonename, activeKey.KeyTag)
-	if txErr != nil {
-		return 0, 0, fmt.Errorf("active→retired transition failed: %w", txErr)
+	changed := false
+	for kt, dnskey := range current {
+		if existing[kt] {
+			continue
+		}
+		alg := dns.AlgorithmToString[dnskey.Algorithm]
+		if alg == "" {
+			alg = fmt.Sprintf("%d", dnskey.Algorithm)
+		}
+		res, err := kdb.Exec(`INSERT OR IGNORE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, 'foreign', '', ?)`,
+			zone, DnskeyStateForeign, kt, dnskey.Flags, alg, dnskey.String())
+		if err != nil {
+			lgSigner.Error("failed to persist foreign DNSKEY", "zone", zone, "keytag", kt, "err", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed = true
+			lgSigner.Info("persisted new foreign DNSKEY", "zone", zone, "keytag", kt, "flags", dnskey.Flags, "algorithm", alg)
+		}
 	}
+	for kt := range existing {
+		if _, still := current[kt]; still {
+			continue
+		}
+		if _, err := kdb.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=? AND state=?`, zone, kt, DnskeyStateForeign); err != nil {
+			lgSigner.Error("failed to delete stale foreign DNSKEY", "zone", zone, "keytag", kt, "err", err)
+			continue
+		}
+		changed = true
+		lgSigner.Info("removed stale foreign DNSKEY", "zone", zone, "keytag", kt)
+	}
+	mpzd.SetRemoteDNSKEYs(remote)
+	return changed, nil
+}
 
-	hdb.mpDnskeyCacheDelete(
-		mpDnssecCacheKey(zonename, tdns.DnskeyStateActive),
-		mpDnssecCacheKey(zonename, tdns.DnskeyStateStandby),
-		mpDnssecCacheKey(zonename, tdns.DnskeyStateRetired))
+// triggerResign asks tdns's resigner to bring a zone's signatures and its
+// DNSKEY RRset into line after a key-state change. A bounded wait rather
+// than a drop: the periodic pass renews signatures by age, so a dropped
+// request is not repaired by the next pass.
+func triggerResign(conf *Config, zoneName string) {
+	if conf == nil || conf.Config == nil {
+		return
+	}
+	sendResignRequest(conf.Config.Internal.ResignQ, zoneName)
+}
 
-	lgSigner.Info("key rollover completed (MP)", "zone", zonename, "keytype", keytype,
-		"old_active", activeKey.KeyTag, "new_active", standbyKey.KeyTag)
-
-	return activeKey.KeyTag, standbyKey.KeyTag, nil
+func sendResignRequest(q chan tdns.ResignRequest, zoneName string) {
+	if q == nil {
+		return
+	}
+	zd, exists := tdns.Zones.Get(zoneName)
+	if !exists {
+		lgSigner.Warn("zone not found for re-sign trigger", "zone", zoneName)
+		return
+	}
+	select {
+	case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignKeyStateChanged}:
+		lgSigner.Debug("triggered re-sign", "zone", zoneName)
+	case <-time.After(10 * time.Second):
+		lgSigner.Error("ResignQ full for 10s, re-sign request lost", "zone", zoneName)
+	}
 }

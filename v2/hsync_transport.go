@@ -922,6 +922,16 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		}
 	}
 
+	// The sender's time: the RFC3339 Time the payload carries (the sender's
+	// enqueue time, stable across its retries); the legacy unix-seconds
+	// Timestamp is only there when nothing else is. Without either, epoch
+	// zero, and the ordering guard falls back to distribution ids alone.
+	sentAt := time.Unix(payload.Timestamp, 0)
+	if payload.Time != "" {
+		if t, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
+			sentAt = t
+		}
+	}
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
@@ -930,7 +940,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Zone:           ZoneName(zone),
 			Records:        records,
 			Operations:     payload.GetOperations(),
-			Time:           time.Unix(payload.Timestamp, 0),
+			Time:           sentAt,
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
 			RfiSubtype:     payload.RfiSubtype,     // Include RfiSubtype for CONFIG RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent

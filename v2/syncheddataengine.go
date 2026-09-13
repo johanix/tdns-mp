@@ -49,7 +49,7 @@ func (zdr *ZoneDataRepo) AddConfirmedRR(zone ZoneName, agentID AgentId, rr dns.R
 		}
 	}
 	cur.Add(rr)
-	nod.RRtypes.Set(rrtype, cur)
+	nod.RRtypes.Set(rrtype, cur) // mp-private: SDE node record, not zone data
 
 	// Add tracking entry as RRStateAccepted
 	ts := zdr.getOrCreateTracking(zone, agentID, rrtype)
@@ -1409,5 +1409,5 @@ func (zdr *ZoneDataRepo) deleteRRFromRepo(zone ZoneName, agent AgentId, rrtype u
 		return
 	}
 	curRRset.Delete(rr)
-	nod.RRtypes.Set(rrtype, curRRset)
+	nod.RRtypes.Set(rrtype, curRRset) // mp-private: SDE node record, not zone data
 }

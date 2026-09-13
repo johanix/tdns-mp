@@ -58,7 +58,8 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})
-	// tdns KeyStateWorker for non-MP zone key lifecycle
+	// tdns KeyStateWorker: every signing zone's key lifecycle, the
+	// multi-provider zones' through the lifecycle hooks.
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
@@ -72,9 +73,9 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
 		func() { SignerMsgHandler(ctx, conf, conf.InternalMp.MsgQs) })
 
-	// MP KeyStateWorker for MP zone key lifecycle
-	tdns.StartEngine(&tdns.Globals.App, "MPKeyStateWorker",
-		func() error { return KeyStateWorker(ctx, conf) })
+	// No MP key-state worker: tdns's KeyStateWorker above runs the
+	// multi-provider key protocol through the lifecycle hooks
+	// (RegisterMPKeyLifecycleHooks).
 
 	return nil
 }

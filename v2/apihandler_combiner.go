@@ -53,11 +53,18 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 
 		switch cp.Command {
 		case "add":
-			_, err := mpzd.AddCombinerDataNG("", cp.Data)
+			changed, err := mpzd.AddCombinerDataNG("", cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 				return
+			}
+			if changed {
+				if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("added, but publishing the combiner state failed: %v", err)
+					return
+				}
 			}
 			resp.Msg = fmt.Sprintf("Added local RRsets for zone %s", cp.Zone)
 
@@ -209,12 +216,8 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				combinerSendConfirmation(tm, confirmTarget, syncResp)
 			}
 
-			// Notify downstream servers about the zone change.
-			if syncResp.Status != "error" {
-				if zd, ok := Zones.Get(dns.Fqdn(rec.Zone)); ok && len(zd.Downstreams) > 0 {
-					go zd.NotifyDownstreams()
-				}
-			}
+			// No NOTIFY here: the publish CombinerProcessUpdate makes is the
+			// one that notifies downstreams, once per version.
 
 			resp.Msg = fmt.Sprintf("Edit #%d approved and applied for zone %s (status=%s, applied=%d, rejected=%d)",
 				cp.EditID, rec.Zone, syncResp.Status, len(syncResp.AppliedRecords), len(syncResp.RejectedItems))
@@ -446,6 +449,14 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			lgApi.Info("purged contributions", "zone", zone, "origin", cp.Origin, "removed", removed, "from", r.RemoteAddr)
+			if removed > 0 {
+				if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+					lgApi.Warn("publishing the combiner state after the purge failed", "zone", zone, "err", err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("purged %d RR(s) attributed to origin %q, but publishing the combined zone failed: %v", removed, cp.Origin, err)
+					return
+				}
+			}
 			if removed == 0 {
 				resp.Msg = fmt.Sprintf("Origin %q had no contributions in zone %s — nothing to purge", cp.Origin, zone)
 			} else {

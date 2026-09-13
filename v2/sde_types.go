@@ -22,11 +22,16 @@ type SynchedDataUpdate struct {
 	AgentId           AgentId
 	UpdateType        string // "local" or "remote"
 	Update            *ZoneUpdate
-	OriginatingDistID string   // Distribution ID from the originating agent (for remote updates)
-	Force             bool     // Bypass dedup check (always send even if RR already present)
-	SkipCombiner      bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
-	DnskeyKeyTags     []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
-	Response          chan *AgentMsgResponse
+	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
+	// OriginatingTime is when the originating agent enqueued a remote
+	// update: the wire timestamp, stable across the sender's retries. With
+	// OriginatingDistID it orders REPLACEs from one agent (see
+	// ZoneDataRepo.lastReplace).
+	OriginatingTime time.Time
+	Force           bool     // Bypass dedup check (always send even if RR already present)
+	SkipCombiner    bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
+	DnskeyKeyTags   []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
+	Response        chan *AgentMsgResponse
 }
 
 type SynchedDataResponse struct {
@@ -60,6 +65,19 @@ type ZoneDataRepo struct {
 	Tracking              map[ZoneName]map[AgentId]map[uint16]*TrackedRRset
 	mu                    sync.Mutex
 	PendingRemoteConfirms map[string]*PendingRemoteConfirmation
+	// lastReplace records, per (zone, agent, rrtype), where the REPLACE
+	// last applied came from: the originating agent's enqueue time and
+	// distribution id. A REPLACE carries the sender's whole set, so one
+	// that was sent earlier but arrives later -- the retry of a message
+	// the peer had rejected while it did not yet hold the zone -- must not
+	// roll the set back to what it was. Keyed under mu; in memory only:
+	// after a restart the peers re-announce.
+	lastReplace map[string]replaceOrigin
+}
+
+type replaceOrigin struct {
+	Time   time.Time
+	DistID string
 }
 
 type PendingRemoteConfirmation struct {

@@ -218,26 +218,6 @@ type RejectedEditRecord struct {
 	Reason         string              `json:"reason"`
 }
 
-// Signer / keystore inventory types
-type KeyInventoryItem struct {
-	KeyTag    uint16
-	Algorithm uint8
-	Flags     uint16
-	State     string // "created","mpdist","published","standby","active","retired","removed","foreign"
-	KeyRR     string // Full DNSKEY RR string (public key data, no private key)
-}
-
-type DnssecKeyWithTimestamps struct {
-	ZoneName    string
-	KeyTag      uint16
-	Algorithm   uint8
-	Flags       uint16
-	State       string
-	KeyRR       string
-	PublishedAt *time.Time
-	RetiredAt   *time.Time
-}
-
 // KeyInventorySnapshot stores a complete key inventory received from the signer.
 type KeyInventorySnapshot struct {
 	SenderID  string

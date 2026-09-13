@@ -168,9 +168,11 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 		p.ZoneSigned = zd.MP.MPdata.ZoneSigned
 		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
 	}
-	// Extract NSmgmt and ParentSync from HSYNCPARAM
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
+	// Extract NSmgmt and ParentSync from HSYNCPARAM. The analysis reader,
+	// because this runs on the incoming zone during the pre-refresh combine
+	// as well as on a live zone.
+	apex, err := zd.OwnerForAnalysis(zd.ZoneName)
+	if err != nil || apex == nil {
 		return p
 	}
 	hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
@@ -503,10 +505,8 @@ func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, se
 		}
 	}
 	if changed {
-		if bumperResp, err := mpzd.BumpSerialOnly(); err != nil {
-			lgCombiner.Error("combinerNotifyDelegationChange: BumpSerialOnly failed", "zone", zonename, "err", err)
-		} else {
-			lgCombiner.Debug("combinerNotifyDelegationChange: serial bumped", "zone", zonename, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("combinerNotifyDelegationChange: publishing the combiner state failed", "zone", zonename, "err", err)
 		}
 	}
 
@@ -589,7 +589,9 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	}
 
 	if len(instr.Locations) == 0 {
-		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil); err != nil {
+			lgCombiner.Error("publish instruction: retracting the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
+		}
 		if storedInstr != nil {
 			for _, ns := range storedInstr.PublishedNS {
 				publishSignalKeyToProvider(zone, ns, senderID, nil)
@@ -617,9 +619,13 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 			}
 			parsedRRs = append(parsedRRs, rr)
 		}
-		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
+		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, parsedRRs); err != nil {
+			lgCombiner.Error("publish instruction: applying the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
+		}
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
-		mpzd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil); err != nil {
+			lgCombiner.Error("publish instruction: retracting the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
+		}
 	}
 
 	var publishedNS []string
@@ -728,10 +734,8 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		return
 	}
 	if changed {
-		if bumperResp, err := mpzd.BumpSerialOnly(); err != nil {
-			lgCombiner.Error("BumpSerialOnly failed for provider zone", "zone", providerZone, "err", err)
-		} else {
-			lgCombiner.Debug("provider zone serial bumped", "zone", providerZone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("publishing the combiner state failed for provider zone", "zone", providerZone, "err", err)
 		}
 	}
 	lgCombiner.Info("_signal KEY applied to provider zone", "zone", providerZone, "owner", ownerName, "keys", len(parsedRRs), "changed", changed)
@@ -841,6 +845,7 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 		return
 	}
 
+	anyChanged := false
 	for _, entry := range myEntries {
 		var parsedRRs []dns.RR
 		for _, rrStr := range entry.KEYRRs {
@@ -857,7 +862,14 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 			continue
 		}
 		if changed {
+			anyChanged = true
 			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", mpzd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
+		}
+	}
+	// One publish for the whole re-apply.
+	if anyChanged {
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			lgCombiner.Error("startup re-apply: publishing the combiner state failed", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
 }
@@ -1034,6 +1046,17 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 			if !parseOk && len(parsedRRs) == 0 && len(op.Records) > 0 {
 				continue
 			}
+			// The agent's guard, on the combiner's side of the same queue:
+			// the agent forwards a peer's REPLACEs to its combiner in the
+			// order it applied them, and the queue can still deliver an
+			// older one after a newer one. The newest origin wins here too.
+			if stale, applied := staleCombinerReplace(req, zonename, rrtype); stale {
+				lgCombiner.Warn("ignored a stale REPLACE: older than the one applied",
+					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
+					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
+					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+				continue
+			}
 
 			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
 				senderIsLocal := localAgents[req.SenderID]
@@ -1195,12 +1218,15 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 	}
 
 	resp.DataChanged = dataChanged
+	// One publish for the whole update, however many operations it carried:
+	// the contribution functions above changed only the combiner's state.
 	if dataChanged {
-		bumperResp, err := mpzd.BumpSerialOnly()
-		if err != nil {
-			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
-		} else {
-			lgCombiner.Info("serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+			// Persisted, not served: say so, rather than acknowledge an edit
+			// the zone does not carry.
+			lgCombiner.Error("publishing the combiner state failed", "zone", req.Zone, "err", err)
+			resp.Status = "partial"
+			resp.Message = fmt.Sprintf("%s; publishing the combined zone failed: %v", resp.Message, err)
 		}
 	}
 
@@ -1483,6 +1509,35 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 	}
 
 	return false, ""
+}
+
+// combinerReplaceOrigins records, per (zone, sender, rrtype), where the
+// REPLACE last applied came from: the delivering agent's enqueue time and
+// distribution id. In memory only; a restart re-hydrates contributions and
+// the peers re-announce.
+var combinerReplaceOrigins = struct {
+	mu sync.Mutex
+	m  map[string]replaceOrigin
+}{m: map[string]replaceOrigin{}}
+
+// staleCombinerReplace answers whether a REPLACE is older than the one last
+// applied for the same (zone, sender, rrtype) -- an earlier time, or the same
+// time and a lower distribution id -- and records it as the newest when it
+// is not. A request without a time is never stale.
+func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
+	if req.Timestamp.IsZero() {
+		return false, replaceOrigin{}
+	}
+	key := zonename + "|" + req.SenderID + "|" + dns.TypeToString[rrtype]
+	combinerReplaceOrigins.mu.Lock()
+	defer combinerReplaceOrigins.mu.Unlock()
+	if cur, ok := combinerReplaceOrigins.m[key]; ok {
+		if cur.Time.After(req.Timestamp) || (cur.Time.Equal(req.Timestamp) && cur.DistID > req.DistributionID) {
+			return true, cur
+		}
+	}
+	combinerReplaceOrigins.m[key] = replaceOrigin{Time: req.Timestamp, DistID: req.DistributionID}
+	return false, replaceOrigin{}
 }
 
 // checkContentPolicy applies content-based policy checks to a parsed RR.
