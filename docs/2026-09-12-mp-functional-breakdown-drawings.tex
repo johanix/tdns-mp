@@ -1,0 +1,173 @@
+%
+% Johan Stenstam, johan.stenstam@internetstiftelsen.se
+%
+% Two drawings for docs/2026-09-12-mp-functional-breakdown.md:
+%
+%   \mpbreakdownlayers   the functional blocks of tdns, tdns-transport and
+%                        tdns-mp, one dashed band per repository
+%   \mpbreakdownmsgpath  the path of one application message from the
+%                        sender's verb table to the receiver's engine queue
+%
+% Colours: light blue = tdns (as in dsync-drawings.tex), iis ocean-light =
+% tdns-transport, iis lemon-light = tdns-mp.
+%
+% \input this file into a deck that already defines \prt and the iis
+% colours; \providecolor and \providecommand below only fill in what is
+% missing, so the standalone wrapper compiles too. Needs the tikz libraries
+% positioning, fit and calc.
+%
+
+\providecolor{light blue}{rgb}{0.8,1,1}
+\providecolor{iis ocean-light}{HTML}{a7d8fd}
+\providecolor{iis lemon-light}{HTML}{ffe696}
+\providecolor{iis concrete}{HTML}{d8d8d8}
+\providecommand{\prt}[1]{\textbf{\texttt{#1}}}
+
+\tikzset{
+  mpblk/.style={draw=black, rectangle, text width=3.35cm, minimum height=9mm,
+    align=center, line width=0.8pt, inner sep=2pt, font=\tiny},
+  mpblk-mp/.style={mpblk, fill=iis lemon-light},
+  mpblk-tp/.style={mpblk, fill=iis ocean-light},
+  mpblk-td/.style={mpblk, fill=light blue},
+  mpblk-other/.style={mpblk, fill=iis concrete, rounded corners=1pt},
+  mpband/.style={draw=black, dashed, rounded corners=2pt, inner xsep=2.5mm, inner ysep=3mm},
+  mpdep/.style={->, blue, line width=0.4mm},
+  mpflow/.style={->, black, line width=0.4mm},
+  mpwire/.style={->, blue, line width=0.4mm, dashed},
+}
+
+%--------------------------------------------------------------------------
+% Drawing 1: the block map, one band per repository
+%--------------------------------------------------------------------------
+\newcommand{\mpbreakdownlayers}{%
+  \begin{tikzpicture}[x=3.65cm, y=1.2cm]
+
+    % --- tdns-mp: two rows of four ---------------------------------------
+    \node[mpblk-mp] (mp1) at (0,0)
+      {four roles as binaries\\\prt{cmd/*}, \prt{start\_*.go}, \prt{main\_init.go}};
+    \node[mpblk-mp] (mp2) at (1,0)
+      {application verbs, wire payloads\\\prt{mp\_verbs}, \prt{mp\_wire\_payloads}, \prt{mp\_send}};
+    \node[mpblk-mp] (mp3) at (2,0)
+      {HSYNC engine and bridge\\\prt{hsync/}, \prt{hsync\_bridge}, \prt{hsync\_transport}};
+    \node[mpblk-mp] (mp4) at (3,0)
+      {gossip, provider groups, election\\\prt{gossip}, \prt{provider\_groups}, \prt{parentsync\_leader}};
+    \node[mpblk-mp] (mp5) at (0,-1)
+      {synched data engine\\\prt{syncheddataengine}, \prt{agent\_policy}, \prt{hsyncengine}};
+    \node[mpblk-mp] (mp6) at (1,-1)
+      {combiner\\\prt{combiner\_chunk}, \prt{combiner\_utils}, \prt{db\_combiner\_*}};
+    \node[mpblk-mp] (mp7) at (2,-1)
+      {signer key lifecycle\\\prt{signer\_keydb}, \prt{signer\_msg\_handler}};
+    \node[mpblk-mp] (mp8) at (3,-1)
+      {mgmt API, CLI, config, DB, auditor\\\prt{apihandler\_*}, \prt{cli/}, \prt{db\_hsync}, \prt{auditor\_*}};
+    \node[mpband, fit=(mp1) (mp4) (mp5) (mp8),
+      label={[anchor=south west, font=\scriptsize\bfseries, inner sep=1pt]north west:tdns-mp}] (mpband) {};
+
+    % --- tdns-transport: two rows of four --------------------------------
+    \node[mpblk-tp] (tp1) at (0,-2.7)
+      {crypto backends\\\prt{crypto/} registry, \prt{crypto/jose}, \prt{crypto/hpke}};
+    \node[mpblk-tp] (tp2) at (1,-2.7)
+      {payload wrapping,\\envelope label\\\prt{transport/crypto}, \prt{envelope}};
+    \node[mpblk-tp] (tp3) at (2,-2.7)
+      {message router and middleware\\\prt{dns\_message\_router}, \prt{router\_init}, \prt{handlers}};
+    \node[mpblk-tp] (tp4) at (3,-2.7)
+      {peer registry, discovery\\\prt{peer}, \prt{discovery}, \prt{imr}};
+    \node[mpblk-tp] (tp5) at (0,-3.7)
+      {DNS mechanism\\\mbox{NOTIFY(CHUNK)}, query mode\\\prt{dns}, \prt{chunk\_notify\_handler}};
+    \node[mpblk-tp] (tp6) at (1,-3.7)
+      {API mechanism: HTTPS\\\prt{api}, \prt{app\_message}};
+    \node[mpblk-tp] (tp7) at (2,-3.7)
+      {manager, reliable queue\\\prt{manager}, \prt{reliable\_message\_queue}};
+    \node[mpblk-tp] (tp8) at (3,-3.7)
+      {chunk manifests\\\prt{distrib/}};
+    \node[mpband, fit=(tp1) (tp4) (tp5) (tp8),
+      label={[anchor=south west, font=\scriptsize\bfseries, inner sep=1pt]north west:tdns-transport}] (tpband) {};
+
+    % --- tdns: two rows of four ------------------------------------------
+    \node[mpblk-td] (td1) at (0,-5.4)
+      {DNS engine, NOTIFY and query dispatch\\\prt{DnsEngine}, \prt{registration.go}};
+    \node[mpblk-td] (td2) at (1,-5.4)
+      {RR types CHUNK, JWK, HSYNC3, HSYNCPARAM\\\prt{core/rr\_*}, \prt{jwk\_helpers}};
+    \node[mpblk-td] (td3) at (2,-5.4)
+      {EDNS0 CHUNK option\\\prt{edns0/edns0\_chunk}};
+    \node[mpblk-td] (td4) at (3,-5.4)
+      {IMR: recursive lookups\\\prt{Imr}};
+    \node[mpblk-td] (td5) at (0,-6.4)
+      {zone refresh, staging\\\prt{OnZonePre/PostRefresh}, \prt{StageBatch}};
+    \node[mpblk-td] (td6) at (1,-6.4)
+      {keystore, signing, key lifecycle hooks\\\prt{KeyStateWorker}, \prt{ResignerEngine}};
+    \node[mpblk-td] (td7) at (2,-6.4)
+      {config parse hooks, engines\\\prt{PostParseConfigHook}, \prt{StartEngine}};
+    \node[mpblk-td] (td8) at (3,-6.4)
+      {delegation sync\\\prt{DSYNC}, \prt{DelegationSyncher}};
+    \node[mpband, fit=(td1) (td4) (td5) (td8),
+      label={[anchor=south west, font=\scriptsize\bfseries, inner sep=1pt]north west:tdns}] (tdband) {};
+
+    % --- dependency arrows, one direction only ---------------------------
+    \draw[mpdep] ($(mpband.south) + (-1.2cm,0)$) -- ($(tpband.north) + (-1.2cm,0)$)
+      node[midway, right, font=\tiny] {imports \prt{transport}, \prt{crypto/jose}};
+    \draw[mpdep] ($(tpband.south) + (-1.2cm,0)$) -- ($(tdband.north) + (-1.2cm,0)$)
+      node[midway, right, font=\tiny] {imports \prt{core}, \prt{edns0}, \prt{Imr}, \prt{RegisterNotifyHandler}};
+    \draw[mpdep] (mpband.east) -- ++(0.6cm,0) |- (tdband.east)
+      node[pos=0.25, right, font=\tiny, align=left] {imports \prt{v2}, \prt{core},\\\prt{cli}, \prt{edns0}};
+  \end{tikzpicture}%
+}
+
+%--------------------------------------------------------------------------
+% Drawing 2: one application message, sender column and receiver column
+%--------------------------------------------------------------------------
+\newcommand{\mpbreakdownmsgpath}{%
+  \begin{tikzpicture}[x=1cm, y=1.1cm,
+      pth/.style={mpblk, text width=5.3cm, minimum height=9mm}]
+
+    % --- sender, top to bottom -------------------------------------------
+    \node[pth, fill=iis lemon-light] (s1) at (0,1)
+      {verb table builds the carrier\\\prt{mp\_send.go}: \prt{AppMessage\{Scope, TypeToken, Payload\}}};
+    \node[pth, fill=iis ocean-light] (s2) at (0,0)
+      {pick mechanism, fall back, retry until confirmed\\\prt{TransportManager.Send}, \prt{ReliableMessageQueue}};
+    \node[pth, fill=iis ocean-light] (s3) at (0,-1)
+      {build the NOTIFY, register the pending confirmation\\\prt{DNSTransport.sendNotifyWithPayload}};
+    \node[pth, fill=iis ocean-light] (s4) at (0,-2)
+      {encrypt for the peer, sign with our key\\\prt{SecurePayloadWrapper.WrapOutgoing} $\to$ \prt{crypto/jose}};
+    \node[pth, fill=light blue] (s5) at (0,-3)
+      {payload into the EDNS0 CHUNK option, Format = envelope\\\prt{edns0.CreateChunkOption}};
+    \node[pth, fill=iis concrete, rounded corners=1pt] (s6) at (0,-4)
+      {NOTIFY(CHUNK) on the wire\\\prt{dns.Client} to the peer's DNS endpoint};
+
+    \foreach \a/\b in {s1/s2, s2/s3, s3/s4, s4/s5, s5/s6}
+      \draw[mpflow] (\a.south) -- (\b.north);
+
+    % --- receiver, bottom to top -----------------------------------------
+    \node[pth, fill=light blue] (r1) at (7.8,-4)
+      {tdns receives it, dispatches by qtype\\\prt{NotifyHandler} $\to$ \prt{RegisterNotifyHandler(CHUNK)}};
+    \node[pth, fill=iis ocean-light] (r2) at (7.8,-3)
+      {qname $\to$ distribution id and sender; envelope check\\\prt{ChunkNotifyHandler.RouteViaRouter}};
+    \node[pth, fill=iis lemon-light] (r3) at (7.8,-2)
+      {is this sender allowed? (config list or HSYNC3)\\\prt{IsPeerAuthorized}, before any crypto};
+    \node[pth, fill=iis ocean-light] (r4) at (7.8,-1)
+      {verify with the sender's key only, then decrypt\\\prt{UnwrapIncomingFromPeerEnvelope} $\to$ \prt{crypto/jose}};
+    \node[pth, fill=iis lemon-light] (r5) at (7.8,0)
+      {read verb, originator, zone, nonce\\\prt{parseAppPayload} $\to$ \prt{IncomingMessage}};
+    \node[pth, fill=iis ocean-light] (r6) at (7.8,1)
+      {middleware chain, then the verb's handler; inline confirmation\\\prt{DNSMessageRouter.Route} $\to$ \prt{handleApp<Verb>}};
+    \node[pth, fill=iis lemon-light] (r7) at (7.8,2)
+      {hand to the engine's queue\\\prt{RouteToCallback} $\to$ \prt{routeIncomingMessage} $\to$ \prt{MsgQs}};
+
+    \foreach \a/\b in {r1/r2, r2/r3, r3/r4, r4/r5, r5/r6, r6/r7}
+      \draw[mpflow] (\a.north) -- (\b.south);
+
+    % --- the wire and the confirmation back ------------------------------
+    \draw[mpwire] (s6.east) -- (r1.west)
+      node[midway, above, font=\tiny] {NOTIFY(CHUNK)};
+    \draw[mpwire] (r6.west) -- ++(-1.1,0) |- (s3.east)
+      node[pos=0.5, left, font=\tiny, rotate=90, anchor=south, xshift=-0.55cm, yshift=0.1cm] {response: inline confirmation};
+
+    % --- column titles and legend ----------------------------------------
+    \node[anchor=south, font=\scriptsize\bfseries] at ($(s1.north) + (0,0.15)$) {sender};
+    \node[anchor=south, font=\scriptsize\bfseries] at ($(r7.north) + (0,0.15)$) {receiver};
+
+    \node[mpblk-mp, text width=1.7cm, minimum height=5mm] (lg1) at (0.9,-5.3) {tdns-mp};
+    \node[mpblk-tp, text width=1.7cm, minimum height=5mm] (lg2) at (3.1,-5.3) {tdns-transport};
+    \node[mpblk-td, text width=1.7cm, minimum height=5mm] (lg3) at (5.3,-5.3) {tdns};
+    \node[mpblk-other, text width=1.7cm, minimum height=5mm] (lg4) at (7.5,-5.3) {the wire};
+  \end{tikzpicture}%
+}
