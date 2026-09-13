@@ -543,10 +543,13 @@ func hostPrefix(addr string) string {
 	return ip.String() + "/128"
 }
 
-// syncIdentityDelegation asks the delegation syncher for one explicit sync of
-// the identity zone's delegation (its DS at the parent) once the resolver
-// the syncher discovers the parent's DSYNC records with is ready. The zone
-// updater re-syncs on any later key change. The parent is the name one
+// syncIdentityDelegation brings the parent's DS for the identity zone in
+// line with the zone's keys through the schemes the parent advertises. It
+// waits for the resolver the syncher discovers the parent's DSYNC records
+// with, then asks for an explicit sync and repeats until the parent agrees
+// or the attempts run out: right after a cold start the parent may not yet
+// see the zone at its nameservers and refuses a DS it cannot check. The
+// zone updater re-syncs on any later key change. The parent is the name one
 // label up: an identity zone is delegated from the zone it sits in.
 func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
 	if !conf.Config.Internal.ImrReady.Wait(ctx) {
@@ -555,10 +558,40 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 	if labels := dns.SplitDomainName(zd.ZoneName); len(labels) > 1 {
 		zd.SetParent(dns.Fqdn(strings.Join(labels[1:], ".")))
 	}
-	select {
-	case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
-		Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd}:
-		lgAgent.Info("identity zone: delegation sync requested", "zone", zd.ZoneName, "parent", zd.GetParent())
-	case <-ctx.Done():
+	const attempts = 12
+	const interval = 15 * time.Second
+	for attempt := 1; attempt <= attempts; attempt++ {
+		resp := make(chan tdns.DelegationSyncStatus, 1)
+		select {
+		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
+			Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd, Response: resp}:
+		case <-ctx.Done():
+			return
+		}
+		var st tdns.DelegationSyncStatus
+		select {
+		case st = <-resp:
+		case <-time.After(time.Minute):
+			lgAgent.Warn("identity zone: no answer to the delegation sync request", "zone", zd.ZoneName, "attempt", attempt)
+		case <-ctx.Done():
+			return
+		}
+		switch {
+		case st.InSync:
+			lgAgent.Info("identity zone: delegation in sync with the parent", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt)
+			return
+		case !st.Error && st.Rcode == dns.RcodeSuccess && st.Msg != "":
+			// Sent and accepted; the next round's analysis confirms it.
+			lgAgent.Info("identity zone: delegation sent to the parent", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "msg", st.Msg)
+		default:
+			lgAgent.Warn("identity zone: delegation sync not accepted yet", "zone", zd.ZoneName, "parent", zd.GetParent(),
+				"attempt", attempt, "rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "msg", st.Msg)
+		}
+		select {
+		case <-time.After(interval):
+		case <-ctx.Done():
+			return
+		}
 	}
+	lgAgent.Error("identity zone: delegation sync gave up", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempts", attempts)
 }
