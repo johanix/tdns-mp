@@ -95,6 +95,19 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
 	}
 
+	// With a parentsync: block configured the identity zone is a child of
+	// its parent like any other zone this daemon is primary for: it
+	// publishes CDS from its keys and hands its DS to the parent through the
+	// schemes the parent advertises (DSYNC). Without one it stays an island
+	// whose TLSA no validating resolver will trust.
+	if len(conf.Config.ParentSync.Schemes) > 0 {
+		zd.Options[tdns.OptParentSync] = true
+		if err := zd.PublishCdsRRs(); err != nil {
+			lgAgent.Warn("identity zone: could not publish CDS", "zone", zonename, "err", err)
+		}
+		go conf.syncIdentityDelegation(ctx, zd)
+	}
+
 	// Renewal. tdns registers a zone for periodic re-signing when its config
 	// carries a signing option; this zone has none (it is built here), so it
 	// is put on the resigner's watchlist explicitly. The engine that reads
@@ -528,4 +541,24 @@ func hostPrefix(addr string) string {
 		return ip.String() + "/32"
 	}
 	return ip.String() + "/128"
+}
+
+// syncIdentityDelegation asks the delegation syncher for one explicit sync of
+// the identity zone's delegation (its DS at the parent) once the resolver
+// the syncher discovers the parent's DSYNC records with is ready. The zone
+// updater re-syncs on any later key change. The parent is the name one
+// label up: an identity zone is delegated from the zone it sits in.
+func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
+	if !conf.Config.Internal.ImrReady.Wait(ctx) {
+		return
+	}
+	if labels := dns.SplitDomainName(zd.ZoneName); len(labels) > 1 {
+		zd.SetParent(dns.Fqdn(strings.Join(labels[1:], ".")))
+	}
+	select {
+	case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
+		Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd}:
+		lgAgent.Info("identity zone: delegation sync requested", "zone", zd.ZoneName, "parent", zd.GetParent())
+	case <-ctx.Done():
+	}
 }

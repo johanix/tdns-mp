@@ -74,8 +74,10 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
-				// Only the elected leader sends DDNS to the parent
-				if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+				// Only the elected leader of a multi-provider zone sends to the
+				// parent; a zone this daemon is primary for alone (its
+				// identity zone) has no election to wait for.
+				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
 					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						continue
@@ -116,8 +118,10 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 
-				// Only the elected leader sends DDNS to the parent
-				if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+				// Only the elected leader of a multi-provider zone sends to the
+				// parent; a zone this daemon is primary for alone (its
+				// identity zone) has no election to wait for.
+				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
 					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
