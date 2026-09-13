@@ -12,7 +12,10 @@
 package tdnsmp
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +23,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -56,9 +60,17 @@ func apiEndpointsServer(t *testing.T, receiver *peerEnv) *httptest.Server {
 	mux.HandleFunc("/api/v1/beat", conf.apiSyncEndpoint(apiEndpointBeat))
 	mux.HandleFunc("/api/v1/sync/ping", conf.apiSyncEndpoint(apiEndpointPing))
 	mux.HandleFunc("/api/v1/msg", conf.apiSyncEndpoint(apiEndpointMsg))
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// apiSender is an HTTPS sender for local that trusts the test receiver.
+func apiSender(srv *httptest.Server, local string) *transport.APITransport {
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return transport.NewAPITransport(&transport.APITransportConfig{
+		LocalID: local, DefaultTimeout: integTestTimeout, TLSConfig: &tls.Config{RootCAs: pool}})
 }
 
 func TestAPIReceive_SenderToPipeline(t *testing.T) {
@@ -72,7 +84,7 @@ func TestAPIReceive_SenderToPipeline(t *testing.T) {
 	// The production seam: RouteToCallback -> routeIncomingMessage.
 	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
 	srv := apiEndpointsServer(t, env.Bob)
-	tr := transport.NewAPITransport(&transport.APITransportConfig{LocalID: alice, DefaultTimeout: integTestTimeout})
+	tr := apiSender(srv, alice)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
 	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
@@ -141,7 +153,7 @@ func TestAPIReceive_BadBody(t *testing.T) {
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
 	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
 	srv := apiEndpointsServer(t, env.Bob)
-	res, err := http.Post(srv.URL+"/api/v1/beat", "application/json", nil)
+	res, err := srv.Client().Post(srv.URL+"/api/v1/beat", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,5 +167,79 @@ func TestAPIReceive_BadBody(t *testing.T) {
 	}
 	if _, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
 		t.Error("an unparseable body must not reach MsgQs.Beat")
+	}
+}
+
+// Each endpoint takes its own verbs: a beat or a sync posted to /hello (the
+// route without the TLSA middleware), or a hello posted to /beat, is refused
+// before the pipeline and reaches no queue.
+func TestAPIReceive_EndpointTakesOnlyItsVerbs(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
+	const zone = "api-verbs.example."
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	zd := seedZoneWithHSYNC3(t, zone, bob, alice)
+	addHSYNCPARAMServers(t, zd, shortLabel(bob), shortLabel(alice))
+	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
+	srv := apiEndpointsServer(t, env.Bob)
+
+	beat, _ := json.Marshal(&transport.BeatPost{MessageType: transport.VerbBeat, MyIdentity: alice, YourIdentity: bob, Zones: []string{zone}, Time: time.Now()})
+	sync, _ := json.Marshal(&AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(alice), YourIdentity: AgentId(bob),
+		Zone: ZoneName(zone), Records: map[string][]string{zone: {zone + " 3600 IN TXT \"verbs\""}}, Time: time.Now()})
+	hello, _ := json.Marshal(&transport.HelloPost{MessageType: transport.VerbHello, MyIdentity: alice, YourIdentity: bob, Zone: zone, Time: time.Now()})
+
+	for _, c := range []struct {
+		path string
+		body []byte
+	}{{"/api/v1/hello", beat}, {"/api/v1/hello", sync}, {"/api/v1/beat", hello}, {"/api/v1/msg", beat}} {
+		res, err := srv.Client().Post(srv.URL+c.path, "application/json", bytes.NewReader(c.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply map[string]interface{}
+		err = json.NewDecoder(res.Body).Decode(&reply)
+		res.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply["Error"] != true {
+			t.Errorf("%s took a body it must refuse: %v", c.path, reply)
+		}
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
+		t.Error("a refused beat reached MsgQs.Beat")
+	}
+	if _, ok := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); ok {
+		t.Error("a refused sync reached MsgQs.Msg")
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Hello, 100*time.Millisecond); ok {
+		t.Error("a refused hello reached MsgQs.Hello")
+	}
+}
+
+// A bridge without the DNS mechanism registers no CHUNK NOTIFY handler, and
+// still has the receive pipeline for the HTTPS entry.
+func TestBridge_WithoutDNSRegistersNoChunkNotifyHandler(t *testing.T) {
+	id := "api-only.agent.example."
+	mp := &MultiProviderConf{Identity: id}
+	registry := &AgentRegistry{
+		S: core.NewStringer[AgentId, *Agent](), LocalAgent: mp, LocateInterval: 30,
+		ProviderGroupManager: NewProviderGroupManager(id), GossipStateTable: NewGossipStateTable(id),
+	}
+	bridge, err := NewMPTransportBridge(&MPTransportBridgeConfig{
+		Role: roleAgent, LocalID: id, ControlZone: integControlZone, APITimeout: time.Second, DNSTimeout: time.Second,
+		AgentRegistry: registry, MsgQs: &MsgQs{}, ChunkMode: "edns0", SupportedMechanisms: []string{"api"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge.DNSTransport != nil || bridge.ChunkHandler == nil {
+		t.Fatalf("DNSTransport=%v ChunkHandler=%v, want no DNS transport and a receive pipeline", bridge.DNSTransport, bridge.ChunkHandler)
+	}
+	if err := bridge.RegisterChunkNotifyHandler(); err == nil {
+		t.Fatal("RegisterChunkNotifyHandler must refuse without a DNS transport")
+	}
+	if err := bridge.Start(context.Background()); err != nil {
+		t.Fatalf("Start without DNS: %v", err)
 	}
 }

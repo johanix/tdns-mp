@@ -6,12 +6,12 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260912215740-d6141c4623e2
-	github.com/johanix/tdns/v2 v2.0.0-20260912115911-c750b9eb217e
-	github.com/johanix/tdns/v2/cache v0.0.0-20260912115911-c750b9eb217e
-	github.com/johanix/tdns/v2/cli v0.0.0-20260912115911-c750b9eb217e
-	github.com/johanix/tdns/v2/core v0.0.0-20260912115911-c750b9eb217e
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260912115911-c750b9eb217e
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260913175418-0c3016fe6666
+	github.com/johanix/tdns/v2 v2.0.0-20260913151425-ff814c71aa25
+	github.com/johanix/tdns/v2/cache v0.0.0-20260913151425-ff814c71aa25
+	github.com/johanix/tdns/v2/cli v0.0.0-20260913151425-ff814c71aa25
+	github.com/johanix/tdns/v2/core v0.0.0-20260913151425-ff814c71aa25
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260913151425-ff814c71aa25
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible

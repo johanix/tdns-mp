@@ -225,10 +225,10 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 func TestTransportBoundary_SyncFallback(t *testing.T) {
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
 
-	// Stand up an httptest server that always 500s. APITransport's
-	// HTTP client will see a 500 and produce a retryable
-	// *TransportError, prompting the manager to try the fallback.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Stand up an HTTPS test server that always 500s, whose certificate
+	// the sender does not trust: the request fails either way with a
+	// retryable *TransportError, prompting the manager to try the fallback.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "scenario 2: forced failure", http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)

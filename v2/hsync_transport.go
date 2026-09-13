@@ -618,7 +618,7 @@ func (tm *MPTransportBridge) isTransportSupported(mechanism string) bool {
 // RegisterChunkNotifyHandler registers the CHUNK NOTIFY handler with tdns.
 // This should be called during agent initialization.
 func (tm *MPTransportBridge) RegisterChunkNotifyHandler() error {
-	if tm.ChunkHandler == nil {
+	if tm.ChunkHandler == nil || tm.DNSTransport == nil {
 		return fmt.Errorf("DNS transport not configured (no control zone)")
 	}
 
@@ -2308,10 +2308,20 @@ func (tm *MPTransportBridge) Start(ctx context.Context) error {
 	case roleSigner, roleCombiner:
 		// Chunk handler and router were built and registered at init.
 	default:
-		// Without the CHUNK NOTIFY handler the process has no DNS receive
-		// path; the callers (StartMPAgent, StartMPAuditor) fail startup.
-		if err := tm.RegisterChunkNotifyHandler(); err != nil {
-			return fmt.Errorf("CHUNK NOTIFY handler (%s): %w", tm.role, err)
+		// The CHUNK NOTIFY handler is the DNS mechanism's receive path and
+		// nothing else: without DNS it is not registered, so no NOTIFY(CHUNK)
+		// is answered (the handler object still serves the HTTPS entry). DNS
+		// enabled but not configured fails startup (StartMPAgent,
+		// StartMPAuditor).
+		switch {
+		case tm.DNSTransport != nil:
+			if err := tm.RegisterChunkNotifyHandler(); err != nil {
+				return fmt.Errorf("CHUNK NOTIFY handler (%s): %w", tm.role, err)
+			}
+		case tm.isTransportSupported("dns"):
+			return fmt.Errorf("CHUNK NOTIFY handler (%s): the DNS mechanism is enabled but not configured (no control zone)", tm.role)
+		default:
+			lgTransport.Info("DNS mechanism not enabled: no CHUNK NOTIFY handler", "role", tm.role)
 		}
 	}
 	tm.StartIncomingMessageRouter(ctx)

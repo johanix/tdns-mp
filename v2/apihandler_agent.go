@@ -428,13 +428,14 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = fmt.Sprintf("HELLO to %s failed: %v", amp.AgentId, err)
 				return
 			}
-			if ahr == nil || !ahr.Accepted {
-				reason := "not accepted"
-				if ahr != nil {
-					reason = ahr.RejectReason
-				}
+			if ahr == nil {
+				// No mechanism needed a hello: the peer is already introduced.
+				resp.Msg = fmt.Sprintf("HELLO to %s not needed: already introduced", amp.AgentId)
+				return
+			}
+			if !ahr.Accepted {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("HELLO rejected by %s: %s", amp.AgentId, reason)
+				resp.ErrorMsg = fmt.Sprintf("HELLO rejected by %s: %s", amp.AgentId, ahr.RejectReason)
 				return
 			}
 			resp.Msg = fmt.Sprintf("HELLO to %s succeeded (time: %s)", amp.AgentId, ahr.Timestamp.Format(time.RFC3339))
