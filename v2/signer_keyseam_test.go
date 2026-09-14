@@ -1,13 +1,19 @@
 package tdnsmp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -332,13 +338,7 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 // second start changes nothing but drops the parked copy.
 func TestMPKeystoreMigration(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
-	// The old table, as the last release created it.
-	if _, err := kdb.DB.Exec(`CREATE TABLE 'MPDnssecKeyStore' (
-		id INTEGER PRIMARY KEY, zonename TEXT, state TEXT, keyid INTEGER, flags INTEGER, algorithm TEXT, creator TEXT,
-		privatekey TEXT, keyrr TEXT, comment TEXT, propagation_confirmed INTEGER DEFAULT 0, propagation_confirmed_at TEXT DEFAULT '',
-		published_at TEXT DEFAULT '', retired_at TEXT DEFAULT '', UNIQUE (zonename, keyid))`); err != nil {
-		t.Fatalf("create old table: %v", err)
-	}
+	createOldMPKeystore(t, kdb)
 	const zone = "migrate.example."
 	type row struct {
 		state, role string
@@ -479,6 +479,319 @@ func TestMPKeystoreMigration(t *testing.T) {
 	}
 	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename='bad.example.'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("the refused migration left %d rows behind", n)
+	}
+}
+
+// createOldMPKeystore creates the retired key table as the last release did.
+func createOldMPKeystore(t *testing.T, kdb *tdns.KeyDB) {
+	t.Helper()
+	if _, err := kdb.DB.Exec(`CREATE TABLE 'MPDnssecKeyStore' (
+		id INTEGER PRIMARY KEY, zonename TEXT, state TEXT, keyid INTEGER, flags INTEGER, algorithm TEXT, creator TEXT,
+		privatekey TEXT, keyrr TEXT, comment TEXT, propagation_confirmed INTEGER DEFAULT 0, propagation_confirmed_at TEXT DEFAULT '',
+		published_at TEXT DEFAULT '', retired_at TEXT DEFAULT '', UNIQUE (zonename, keyid))`); err != nil {
+		t.Fatalf("create old table: %v", err)
+	}
+}
+
+// insertOldMPKey adds a row to the old table, its key id, flags and
+// algorithm taken from keyrr.
+func insertOldMPKey(t *testing.T, kdb *tdns.KeyDB, zone, state, creator, keyrr, privatekey string, confirmed bool) {
+	t.Helper()
+	rr, err := dns.NewRR(keyrr)
+	if err != nil {
+		t.Fatalf("old row keyrr %q: %v", keyrr, err)
+	}
+	dnskey := rr.(*dns.DNSKEY)
+	c := 0
+	if confirmed {
+		c = 1
+	}
+	if _, err := kdb.DB.Exec(`INSERT INTO MPDnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, propagation_confirmed, propagation_confirmed_at, published_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		zone, state, dnskey.KeyTag(), dnskey.Flags, dns.AlgorithmToString[dnskey.Algorithm], creator, privatekey, keyrr, c, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"); err != nil {
+		t.Fatalf("insert old row: %v", err)
+	}
+}
+
+type mpStoredKey struct {
+	state, creator, privatekey, keyrr string
+}
+
+func mpStoredKeyOf(t *testing.T, kdb *tdns.KeyDB, zone string, keyid uint16) mpStoredKey {
+	t.Helper()
+	var k mpStoredKey
+	if err := kdb.DB.QueryRow(`SELECT state, COALESCE(creator,''), COALESCE(privatekey,''), COALESCE(keyrr,'') FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).
+		Scan(&k.state, &k.creator, &k.privatekey, &k.keyrr); err != nil {
+		t.Fatalf("stored key %d: %v", keyid, err)
+	}
+	return k
+}
+
+func mpZoneKeyCount(t *testing.T, kdb *tdns.KeyDB, zone string) int {
+	t.Helper()
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=?`, zone).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	return n
+}
+
+// respaced returns keyrr with its separators swapped between tabs and
+// spaces: the same record, a different string.
+func respaced(t *testing.T, keyrr string) string {
+	t.Helper()
+	fields := strings.Fields(keyrr)
+	out := strings.Join(fields, " ")
+	if out == keyrr {
+		out = strings.Join(fields, "\t")
+	}
+	if out == keyrr {
+		t.Fatalf("cannot respace %q", keyrr)
+	}
+	return out
+}
+
+// sameTagOtherKey returns a copy of k with other public key bytes and the
+// same key tag. The tag sums the RDATA bytes with even and odd positions
+// weighted apart, so swapping two bytes two positions apart keeps it.
+func sameTagOtherKey(t *testing.T, k *dns.DNSKEY) *dns.DNSKEY {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(k.PublicKey)
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	for j := 0; j+2 < len(raw); j++ {
+		if raw[j] == raw[j+2] {
+			continue
+		}
+		raw[j], raw[j+2] = raw[j+2], raw[j]
+		other := dns.Copy(k).(*dns.DNSKEY)
+		other.PublicKey = base64.StdEncoding.EncodeToString(raw)
+		if other.KeyTag() != k.KeyTag() || other.PublicKey == k.PublicKey {
+			t.Fatalf("no same-tag key: tag %d, want %d", other.KeyTag(), k.KeyTag())
+		}
+		return other
+	}
+	t.Fatal("no two bytes two positions apart differ")
+	return nil
+}
+
+// seedForeignCopies generates an active KSK and ZSK in DnssecKeyStore and
+// records each in the old table as the pre-cutover signer did: a foreign
+// row with no private half, its keyrr spaced differently. The ZSK's row
+// carries a propagation confirmation. It returns the stored rows by key id.
+func seedForeignCopies(t *testing.T, kdb *tdns.KeyDB, zone string) map[uint16]mpStoredKey {
+	t.Helper()
+	stored := map[uint16]mpStoredKey{}
+	for _, role := range []string{"KSK", "ZSK"} {
+		keyid := mpGenKey(t, kdb, zone, tdns.DnskeyStateActive, role)
+		k := mpStoredKeyOf(t, kdb, zone, keyid)
+		insertOldMPKey(t, kdb, zone, DnskeyStateForeign, "foreign", respaced(t, k.keyrr), "", role == "ZSK")
+		stored[keyid] = k
+	}
+	return stored
+}
+
+// A foreign row that copies a key DnssecKeyStore already holds, as the
+// pre-cutover signer left them, is skipped: the migration completes, the
+// stored key stays single and untouched, and the copy's confirmation is
+// dropped.
+func TestMPKeystoreMigrationSkipsForeignCopies(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	createOldMPKeystore(t, kdb)
+	const zone = "copies.example."
+	stored := seedForeignCopies(t, kdb, zone)
+
+	if err := NewHsyncDB(kdb).InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+	if dbTableExists(kdb.DB, "MPDnssecKeyStore") || !dbTableExists(kdb.DB, migratedMPKeystoreTable) {
+		t.Fatal("the old table was not parked under its migrated name")
+	}
+	if n := mpZoneKeyCount(t, kdb, zone); n != len(stored) {
+		t.Fatalf("%d rows in DnssecKeyStore, want the %d stored keys", n, len(stored))
+	}
+	for keyid, before := range stored {
+		after := mpStoredKeyOf(t, kdb, zone, keyid)
+		if after.state != tdns.DnskeyStateActive || after.privatekey == "" {
+			t.Errorf("key %d: state %q, private half %v; want active with its private half", keyid, after.state, after.privatekey != "")
+		}
+		if after != before {
+			t.Errorf("key %d changed: state %q -> %q, creator %q -> %q", keyid, before.state, after.state, before.creator, after.creator)
+		}
+	}
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM MPKeyPropagation WHERE zonename=?`, zone).Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d propagation records (err=%v), want 0: a skipped row's confirmation is dropped", n, err)
+	}
+}
+
+// A taken key id refuses the start unless the row is a foreign copy: a
+// foreign row with other key material under a colliding tag refuses, and so
+// does a non-foreign row carrying the same key. Both tables are left as they
+// were.
+func TestMPKeystoreMigrationRefusesTakenKeyIDs(t *testing.T) {
+	cases := []struct {
+		name, state string
+		otherKey    bool
+	}{
+		{"foreign row with a different key under the same tag", DnskeyStateForeign, true},
+		{"active row with the same key", tdns.DnskeyStateActive, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			kdb := newMPTestKeyDB(t)
+			createOldMPKeystore(t, kdb)
+			const zone = "taken.example."
+			keyid := mpGenKey(t, kdb, zone, tdns.DnskeyStateActive, "ZSK")
+			before := mpStoredKeyOf(t, kdb, zone, keyid)
+			rr, err := dns.NewRR(before.keyrr)
+			if err != nil {
+				t.Fatalf("stored keyrr: %v", err)
+			}
+			mpkey, privatekey := rr.(*dns.DNSKEY), before.privatekey
+			if c.otherKey {
+				mpkey = sameTagOtherKey(t, mpkey)
+			}
+			if c.state == DnskeyStateForeign {
+				privatekey = ""
+			}
+			insertOldMPKey(t, kdb, zone, c.state, "old", mpkey.String(), privatekey, false)
+
+			err = NewHsyncDB(kdb).InitHsyncTables()
+			if err == nil {
+				t.Fatal("the migration did not refuse")
+			}
+			for _, s := range []string{before.state, c.state} {
+				if !strings.Contains(err.Error(), strconv.Quote(s)) {
+					t.Errorf("the error does not name state %q: %v", s, err)
+				}
+			}
+			if !dbTableExists(kdb.DB, "MPDnssecKeyStore") || dbTableExists(kdb.DB, migratedMPKeystoreTable) {
+				t.Fatal("the refused migration renamed the old table")
+			}
+			var old int
+			if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM MPDnssecKeyStore`).Scan(&old); err != nil || old != 1 {
+				t.Errorf("%d rows left in the old table (err=%v), want 1", old, err)
+			}
+			if n := mpZoneKeyCount(t, kdb, zone); n != 1 {
+				t.Fatalf("%d rows in DnssecKeyStore after the refusal, want 1", n)
+			}
+			if after := mpStoredKeyOf(t, kdb, zone, keyid); after != before {
+				t.Error("the refused migration changed the stored key")
+			}
+		})
+	}
+}
+
+// A mixed table: foreign copies beside the signer's own keys and another
+// signer's, in two zones. Every unrelated row moves with its state, the
+// copies are skipped, and the log's counts add up to the rows read.
+func TestMPKeystoreMigrationMixedTable(t *testing.T) {
+	var logbuf bytes.Buffer
+	saved := lgSigner
+	lgSigner = slog.New(slog.NewJSONHandler(&logbuf, nil))
+	t.Cleanup(func() { lgSigner = saved })
+
+	kdb := newMPTestKeyDB(t)
+	createOldMPKeystore(t, kdb)
+	const zone, otherZone = "mixed.example.", "other.example."
+	stored := seedForeignCopies(t, kdb, zone)
+
+	type zoneKey struct {
+		zone  string
+		keyid uint16
+	}
+	type unrelatedRow struct {
+		state     string
+		confirmed bool
+	}
+	unrelated := map[zoneKey]unrelatedRow{}
+	taken := map[zoneKey]bool{}
+	for keyid := range stored {
+		taken[zoneKey{zone, keyid}] = true
+	}
+	// A generated key whose tag collides with one already in the zone is
+	// drawn again: a collision is the refusal case, not this one.
+	add := func(zone, state, role string, confirmed bool) {
+		for {
+			pkc, err := tdns.GenerateKeyMaterial(zone, dns.TypeDNSKEY, dns.ED25519, role)
+			if err != nil {
+				t.Fatalf("GenerateKeyMaterial: %v", err)
+			}
+			id := zoneKey{zone, pkc.DnskeyRR.KeyTag()}
+			if taken[id] {
+				continue
+			}
+			taken[id] = true
+			privatekey := pkc.PrivateKey
+			if state == DnskeyStateForeign {
+				privatekey = ""
+			}
+			insertOldMPKey(t, kdb, zone, state, "old", pkc.DnskeyRR.String(), privatekey, confirmed)
+			unrelated[id] = unrelatedRow{state, confirmed}
+			return
+		}
+	}
+	add(zone, tdns.DnskeyStateActive, "KSK", true)
+	add(zone, DnskeyStateMpdist, "ZSK", true)
+	add(zone, DnskeyStateForeign, "ZSK", false)
+	add(otherZone, tdns.DnskeyStateActive, "ZSK", true)
+
+	if err := NewHsyncDB(kdb).InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+	if n := mpZoneKeyCount(t, kdb, zone); n != len(stored)+3 {
+		t.Errorf("%d rows for %s, want %d stored and 3 moved", n, zone, len(stored))
+	}
+	if n := mpZoneKeyCount(t, kdb, otherZone); n != 1 {
+		t.Errorf("%d rows for %s, want 1", n, otherZone)
+	}
+	confirmed := 0
+	for id, u := range unrelated {
+		if got := mpStoredKeyOf(t, kdb, id.zone, id.keyid); got.state != u.state || got.creator != "old" {
+			t.Errorf("zone %s key %d: state %q creator %q, want %q from the old table", id.zone, id.keyid, got.state, got.creator, u.state)
+		}
+		if u.confirmed {
+			confirmed++
+		}
+	}
+	for keyid, before := range stored {
+		if after := mpStoredKeyOf(t, kdb, zone, keyid); after != before {
+			t.Errorf("stored key %d changed", keyid)
+		}
+	}
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM MPKeyPropagation WHERE confirmed=1`).Scan(&n); err != nil || n != confirmed {
+		t.Errorf("%d confirmed propagation records (err=%v), want %d", n, err, confirmed)
+	}
+
+	var summary map[string]any
+	skipLines, dropLines := 0, 0
+	for _, line := range bytes.Split(bytes.TrimSpace(logbuf.Bytes()), []byte("\n")) {
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		switch rec["msg"] {
+		case "MP key migration: foreign key already in DnssecKeyStore; skipped":
+			skipLines++
+		case "MP key migration: a skipped foreign key carried a propagation confirmation; dropped":
+			dropLines++
+		case "MP key migration: keys moved into DnssecKeyStore":
+			summary = rec
+		}
+	}
+	if summary == nil {
+		t.Fatalf("no summary line in the log:\n%s", logbuf.String())
+	}
+	keys, _ := summary["keys"].(float64)
+	skipped, _ := summary["skipped"].(float64)
+	if int(keys) != len(unrelated) || int(skipped) != len(stored) || int(keys+skipped) != len(unrelated)+len(stored) {
+		t.Errorf("summary keys=%v skipped=%v, want keys=%d skipped=%d of %d rows read", keys, skipped, len(unrelated), len(stored), len(unrelated)+len(stored))
+	}
+	if skipLines != len(stored) || dropLines != 1 {
+		t.Errorf("%d skip lines and %d dropped-confirmation lines, want %d and 1", skipLines, dropLines, len(stored))
 	}
 }
 
