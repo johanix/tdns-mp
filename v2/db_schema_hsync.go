@@ -348,8 +348,19 @@ const migratedMPKeystoreTable = "MPDnssecKeyStore_migrated"
 // rewritten for the registry codepoint the algorithm has now, which changes
 // the key tag and therefore the key id, and re-parsed. A foreign row keeps
 // no private half. No row arrives active unless it left active: states are
-// copied verbatim. The rows inserted are counted against the rows read, and
-// on any mismatch, unparsable record or insert failure the whole transaction
+// copied verbatim.
+//
+// The one row not copied is a foreign row whose key DnssecKeyStore already
+// holds under the same key id with the same DNSKEY RDATA. The pre-cutover
+// signer kept its keys apart from tdns's keystore, found the keystore's own
+// keys in the zone's DNSKEY RRset and recorded them as foreign; such a row
+// carries nothing the stored one lacks, so it is skipped and logged, and a
+// propagation confirmation on it is dropped with it. Any other row whose key
+// id is taken, a non-foreign row or a different key under a colliding tag,
+// refuses the start.
+//
+// The rows inserted and skipped are counted against the rows read, and on
+// any mismatch, unparsable record or insert failure the whole transaction
 // rolls back and the daemon refuses to start: a signer that came up on half
 // its keys would serve a bogus zone. When the copy is verified the old table
 // is renamed, so the next start finds nothing to migrate and drops it.
@@ -406,7 +417,7 @@ func (hdb *HsyncDB) migrateMPKeystore() error {
 		}
 	}()
 
-	inserted := 0
+	inserted, skipped := 0, 0
 	for _, r := range old {
 		rr, err := dns.NewRR(r.keyrr)
 		if err != nil {
@@ -429,6 +440,36 @@ func (hdb *HsyncDB) migrateMPKeystore() error {
 		if r.state == DnskeyStateForeign && privatekey != "" {
 			lgSigner.Warn("MP key migration: a foreign key carried a private half; dropped", "zone", r.zonename, "keyid", r.keyid)
 			privatekey = ""
+		}
+		var storedState, storedKeyrr string
+		err = tx.QueryRow(`SELECT state, COALESCE(keyrr,'') FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, r.zonename, keyid).Scan(&storedState, &storedKeyrr)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("MP key migration: zone %s key %d (was %d): looking up DnssecKeyStore: %w", r.zonename, keyid, r.keyid, err)
+		}
+		if err == nil {
+			material := "a different DNSKEY under the same key id"
+			same := false
+			if storedRR, perr := dns.NewRR(storedKeyrr); perr != nil {
+				material = "a DNSKEY that cannot be compared: the stored keyrr does not parse"
+			} else if stored, ok := storedRR.(*dns.DNSKEY); !ok {
+				material = "a DNSKEY that cannot be compared: the stored keyrr is not a DNSKEY"
+			} else if sameDNSKEYRdata(stored, dnskey) {
+				material = "the same DNSKEY"
+				same = true
+			}
+			if r.state != DnskeyStateForeign || !same {
+				return fmt.Errorf("MP key migration: zone %s key %d (was %d): DnssecKeyStore already holds this key id in state %q, and the MP row in state %q carries %s; refusing to start",
+					r.zonename, keyid, r.keyid, storedState, r.state, material)
+			}
+			// The confirmation is dropped, not written to MPKeyPropagation:
+			// it gates the promotion of the signer's own staged keys, and
+			// this row was never one of them.
+			if r.confirmed != 0 {
+				lgSigner.Warn("MP key migration: a skipped foreign key carried a propagation confirmation; dropped", "zone", r.zonename, "keyid", keyid)
+			}
+			lgSigner.Info("MP key migration: foreign key already in DnssecKeyStore; skipped", "zone", r.zonename, "keyid", keyid, "old_keyid", r.keyid, "stored_state", storedState)
+			skipped++
+			continue
 		}
 		if r.algorithm != "" {
 			if _, known := dns.StringToAlgorithm[r.algorithm]; !known {
@@ -458,8 +499,8 @@ func (hdb *HsyncDB) migrateMPKeystore() error {
 				"old_alg", oldAlg, "new_alg", dnskey.Algorithm, "state", r.state)
 		}
 	}
-	if inserted != len(old) {
-		return fmt.Errorf("MP key migration: %d rows read, %d inserted; refusing to start", len(old), inserted)
+	if inserted+skipped != len(old) {
+		return fmt.Errorf("MP key migration: %d rows read, %d inserted, %d skipped; refusing to start", len(old), inserted, skipped)
 	}
 	if _, err := tx.Exec("ALTER TABLE MPDnssecKeyStore RENAME TO " + migratedMPKeystoreTable); err != nil {
 		return fmt.Errorf("MP key migration: renaming the old table: %w", err)
@@ -468,8 +509,18 @@ func (hdb *HsyncDB) migrateMPKeystore() error {
 		return fmt.Errorf("MP key migration: commit: %w", err)
 	}
 	committed = true
-	lgSigner.Info("MP key migration: keys moved into DnssecKeyStore", "keys", inserted, "old_table", migratedMPKeystoreTable)
+	lgSigner.Info("MP key migration: keys moved into DnssecKeyStore", "keys", inserted, "skipped", skipped, "old_table", migratedMPKeystoreTable)
 	return nil
+}
+
+// sameDNSKEYRdata compares two DNSKEYs on RDATA -- flags, protocol,
+// algorithm, public key -- ignoring owner, TTL and how the stored text was
+// spaced: parsing joins the public key into one string.
+func sameDNSKEYRdata(a, b *dns.DNSKEY) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Flags == b.Flags && a.Protocol == b.Protocol && a.Algorithm == b.Algorithm && a.PublicKey == b.PublicKey
 }
 
 // migrateHsyncSchema applies schema migrations for existing databases: the
