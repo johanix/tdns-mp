@@ -18,9 +18,11 @@ package tdnsmp
 import (
 	"database/sql"
 	"fmt"
-	"github.com/miekg/dns"
 	"log"
 	"time"
+
+	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // HsyncTables defines the database tables for HSYNC functionality.
@@ -477,14 +479,15 @@ func (hdb *HsyncDB) migrateMPKeystore() error {
 					"zone", r.zonename, "keyid", keyid, "algorithm", r.algorithm)
 			}
 		}
-		res, err := tx.Exec(`INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, comment, published_at, retired_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			r.zonename, r.state, keyid, r.flags, r.algorithm, r.creator, privatekey, keyrr, r.comment, r.publishedAt, r.retiredAt)
-		if err != nil {
+		// Through tdns's one insert, on this same transaction, so the row
+		// carries pub and sign from its state the moment the migration
+		// commits; nothing is left for a later backfill to repair.
+		if err := tdns.InsertKeyRowTx(&tdns.Tx{Tx: tx, KeyDB: hdb.KeyDB}, tdns.KeyRow{
+			Zone: r.zonename, State: r.state, Keyid: keyid, Flags: uint16(r.flags),
+			Algorithm: r.algorithm, Creator: r.creator, PrivateKey: privatekey, KeyRR: keyrr,
+			Comment: r.comment, PublishedAt: r.publishedAt, RetiredAt: r.retiredAt,
+		}); err != nil {
 			return fmt.Errorf("MP key migration: zone %s key %d (was %d): insert into DnssecKeyStore: %w", r.zonename, keyid, r.keyid, err)
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return fmt.Errorf("MP key migration: zone %s key %d: insert affected %d rows, want 1", r.zonename, keyid, n)
 		}
 		inserted++
 		if r.confirmed != 0 {

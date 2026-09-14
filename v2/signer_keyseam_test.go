@@ -229,7 +229,7 @@ func TestSignerStagedKeysGateTheSignUntilConfirmed(t *testing.T) {
 	if got := mpKeyState(t, kdb, mpzd.ZoneName, zsk); got != tdns.DnskeyStateRetired {
 		t.Fatalf("a retired key was moved by the mpremove transition: %s", got)
 	}
-	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`, DnskeyStateMpremove, mpzd.ZoneName, zsk); err != nil {
+	if err := tdns.UpdateDnssecKeyState(kdb, mpzd.ZoneName, zsk, DnskeyStateMpremove); err != nil {
 		t.Fatalf("park the key: %v", err)
 	}
 	if err := TransitionMpremoveToRemoved(hdb, mpzd.ZoneName, zsk); err != nil {
@@ -399,6 +399,12 @@ func TestMPKeystoreMigration(t *testing.T) {
 	var n int
 	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=?`, zone).Scan(&n); err != nil || n != len(rows) {
 		t.Fatalf("%d rows in DnssecKeyStore after the migration (err=%v), want %d", n, err, len(rows))
+	}
+	// The migration inserts through tdns's write function: every row has
+	// its pub and sign the moment the migration commits.
+	var unset int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND (pub IS NULL OR sign IS NULL)`, zone).Scan(&unset); err != nil || unset != 0 {
+		t.Fatalf("%d migrated rows without pub/sign (err=%v), want 0", unset, err)
 	}
 	states := map[string]int{}
 	rs, err := kdb.DB.Query(`SELECT state, keyid, keyrr, privatekey FROM DnssecKeyStore WHERE zonename=?`, zone)
