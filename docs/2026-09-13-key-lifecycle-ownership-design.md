@@ -17,6 +17,7 @@
 | r5 | 2026-09-14 | The review of r3/r4 approved the plan and cleared S1a to start. It asked for four rules before S3 and S5, all added. For an owned zone, CDS publication and the agent's DS answer stay on today's path until S5, the step the parent sees (§6). The signer pushes the inventory whenever `pub`, `sign` or `ds` changes (§4.1, Q8). The agent's DS engine never publishes CDS for an owned zone (§4.1). S1b's one-time `ds` pass leaves the old head of an in-flight algorithm rollover at `ds=0` (§6). §4.1 corrected: `CollectDynamicRRs` does not restore CDS today, and making it do so is S5 work. |
 | r6 | 2026-09-14 | §8 risk assessment per step, and §9 the size of the change in lines of code for tdns and tdns-mp, estimated from measured file sizes and call-site counts. |
 | r7 | 2026-09-14 | §8 points to the companion test plan, `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`. It designs the tests for R1–R13 before implementation. |
+| r8 | 2026-09-14 | Amendment 1 appended: the `ds` column as S1b implemented it. The §3.4 table becomes per model, `created` under multi-DS carries `ds=1` from creation, `retired` flips at different moments in the two models, the write functions resolve `ds` themselves, and two of the four state-based DS readers switch in S1b; CDS synthesis and the pipeline counts wait for S5 and S4. |
 
 ---
 
@@ -493,3 +494,55 @@ The estimates below are in lines of Go, rounded, for production code and tests s
 
 - **tdns's part is mechanical, and nets to almost zero.** Code moves from lifecycle special cases to columns, and S4 deletes what S1a–S2 make unnecessary.
 - **tdns-mp's part is dominated by S3,** roughly three quarters of its new code: a new subsystem a quarter to two fifths the size of tdns's own key machine.
+
+---
+
+## Amendment 1 (2026-09-14): the `ds` column as S1b implemented it
+
+Decided by Johan on 2026-09-14 when S1b's tests were written (progress log, "S1b pre-read" and "Johan's decisions"). This amends §3.4 and §6; the text above is left as it was.
+
+### A1.1 The `ds` table is per DS model
+
+The §3.4 table gave one `ds` per state with the model as a footnote. S1b writes the column from a table indexed by the zone's DS model as well as the state (`keyrow_ds.go`, `dsFlagFor`), for a KSK:
+
+| state | multi-DS | none, double-signature |
+|---|---|---|
+| created | **1** | 0 |
+| ds-published | 1 | 1 (the state does not occur outside multi-DS) |
+| published | 1 | 0 |
+| standby | 1 | 1 |
+| active | 1, and 0 for the old head of an in-flight algorithm rollover | 1 |
+| retired | 1 until the withdraw phase removes the key | 0 |
+| removed | 0 | 0 |
+
+A ZSK is 0 in every state. The three multi-provider states, and every key of a multi-provider zone (`OptMultiProvider`), stay `NULL` until the owner writes them (S3).
+
+Two rows changed against §3.4:
+
+- **`created` under multi-DS is 1 from creation.** The engine mints a created KSK precisely to push its DS on the next tick, and today's rollover target includes every created SEP key. Marking at creation keeps the multi-DS target identical to today's at every moment; marking one tick later, at the push, would have needed an extra allowed difference in T1b.2 and a special flag write. §3.4's "placed at ds-published" reads as the parent's confirmation, not the intent.
+- **`retired` flips at a different moment in the two models.** §3.4 said `retired` is the state in which `ds` flips, with the write at the withdrawal. Under none and double-signature the withdrawal is the retirement itself, as `DSIntentForZone` classified it before the column: `ds=0` from the transition to retired. Under multi-DS the retired key keeps its DS until the withdraw phase removes the key, as the rollover target and `CountKskWithDSAtParent` counted it: `ds=0` at the transition to removed. No same-state `ds` write exists for retired; the two transitions carry it.
+
+`ds-published` is 1 in every model: its DS was placed. `published` outside multi-DS is 0 (tdns #635, the finding in §3.4).
+
+### A1.2 The write functions resolve `ds`
+
+§3.4 said the owning state machine sets `ds` at the transitions. S1b puts that in the two write functions rather than at the ~24 call sites: `setKeyRowTx` and `insertKeyRowTx` resolve `ds` for every row whose caller leaves it open, from the loaded zone's bound policy (its DS model), the key's SEP bit and the zone's rollover row (the old head of an in-flight algorithm rollover gets 0, from the spawn, and back at an abort). A caller that passes `ds` explicitly is honoured: that is how an owner writes.
+
+A zone that is not loaded, or whose policy is not bound yet, gets `NULL`, and the one-time pass (`FillDsForZone`, `NULL`-gated) fills it when the policy binds and at every key state worker tick. The pass logs where its answer differs from what `dsBelongsAtParent` derived from the state, with four expected kinds: a published KSK outside multi-DS (#635), the algorithm rollover's old head, and a created or retired KSK under multi-DS (the two rows above). Anything else is logged as an error.
+
+### A1.3 Which readers switched in S1b
+
+§3.4 listed four definitions of "this key has a DS" that the column replaces. S1b switches two:
+
+- `DSIntentForZone`: the answer is the column. One SEP row with `ds` unset makes the intent unknown; the special cases for the foreign, mpremove and mpdist states are that one rule now. Every consumer of the intent, the DS engine and the delegation syncher, follows.
+- the rollover target (`loadTargetKSKsForRollover`): `ds=1` rows. Its own old-head filter stays as a second line: the row's `ds` is already 0.
+
+Two wait:
+
+- **CDS synthesis** (`SynthesizeCdsRRs`) is unchanged. Inside tdns every CDS write goes through the DS engine; the function's only callers are tdns-mp's combiner and delegation sync, for multi-provider zones, whose `ds` is `NULL` until S3. r5 keeps an owned zone's CDS on today's path until S5, and S5 removes the combiner's synthesis. Switching it in S1b would have published no CDS for those zones.
+- `CountKskWithDSAtParent` and the rollover status label stay on state. They are the multi-DS pipeline's own counts, the pipeline writes the rows they count, and under A1.1 the column and the states agree for them. They follow when the state-based readers go (S4, T4.3).
+
+### A1.4 The transition window, S1b to S3
+
+A multi-provider zone whose keystore holds only its own provider's rows (a single signing provider, no foreign rows) had a known DS intent before S1b. From S1b until the owner writes `ds` (S3), its intent is unknown, so tdns's DS engine and syncher leave its CDS and the parent alone. A zone with foreign rows was unknown already; the end-to-end test's multi-provider zones all have several providers.
+
