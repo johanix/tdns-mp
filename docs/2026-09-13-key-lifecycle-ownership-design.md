@@ -1,6 +1,7 @@
 # Key lifecycle ownership: tdns-mp runs the key state machine of multi-provider zones
 
-**Status:** proposal, under review (r3 answers the 2026-09-13 plan review; r5 answers the 2026-09-14 review of r3/r4)
+**Status:** proposal, under review (r3 answers the 2026-09-13 plan review; r5 answers the 2026-09-14 review of r3/r4; r6 adds the risk assessment and the size of the change; r7 points to the test plan)
+**Test plan:** `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`
 **Repos:** tdns-mp (owner of the multi-provider state machine), tdns (keystore, signer, delegation sync, DS engine)
 **Read at:** tdns `ff814c71`, tdns-mp `fb3b1bf` (code unchanged at `10c8053`)
 **Related:** tdns-mp #55 (starts the DS engine), #57 (propagation gate), #58 (DNSKEY distribution without provider or state); tdns #635 (DS intent counts published keys)
@@ -14,6 +15,8 @@
 | r3 | 2026-09-14 | Answers to the plan review. §4 names the two paths to the parent: the signer serves CDS from `ds=1` rows the way it serves its DNSKEYs, and the leader agent gets the DS set from its signer's key inventory through an owner DS-intent provider. S1 is split so that CDS never follows an unfilled column. The ownership marker is decided: `OptMultiProvider` plus a registered owner. `setstate` without flags is refused on an owned zone. S3 includes tdns-mp's replacement commands and rules for a provider with no other signers and for a rejected key. S4 waits until no hook remains. The signer runs the DS engine. `retired` is described as the state in which `ds` flips. S5 is a fleet cut. tdns's delegation-sync setup never runs for the tdns-mp agent. |
 | r4 | 2026-09-14 | The `include` column is renamed `pub` (publish the key in the DNSKEY RRset). The keystore commands that show keys, such as `list`, add the three columns `pub`, `sign` and `ds`. |
 | r5 | 2026-09-14 | The review of r3/r4 approved the plan and cleared S1a to start. It asked for four rules before S3 and S5, all added. For an owned zone, CDS publication and the agent's DS answer stay on today's path until S5, the step the parent sees (§6). The signer pushes the inventory whenever `pub`, `sign` or `ds` changes (§4.1, Q8). The agent's DS engine never publishes CDS for an owned zone (§4.1). S1b's one-time `ds` pass leaves the old head of an in-flight algorithm rollover at `ds=0` (§6). §4.1 corrected: `CollectDynamicRRs` does not restore CDS today, and making it do so is S5 work. |
+| r6 | 2026-09-14 | §8 risk assessment per step, and §9 the size of the change in lines of code for tdns and tdns-mp, estimated from measured file sizes and call-site counts. |
+| r7 | 2026-09-14 | §8 points to the companion test plan, `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`. It designs the tests for R1–R13 before implementation. |
 
 ---
 
@@ -395,3 +398,98 @@ Each step builds, passes tests and leaves the system working.
 | Q8 | Is `OnStateChange` still needed? | Not as a tdns hook. tdns-mp makes its own transitions, and its post-commit wrapper pushes the inventory whenever `pub`, `sign` or `ds` changes (§4.1). API writes to owned zones are limited to store verbs (Q4); tdns-mp's API wrapper pushes the inventory after those. |
 | Q9 | How does the protocol change in §5 reach providers that run an older tdns-mp? | Add fields to the DNSKEY distribution payload; older receivers ignore unknown JSON fields. A provider that does not send them yet leaves its keys at `ds=NULL`, which blocks the DS set rather than guessing it. S5 is therefore a fleet cut (§6). |
 | Q10 | What happens to a key another provider rejects? | Proposal in §5 item 6: stay in mpdist, surface the rejection, and let a tdns-mp command retry or withdraw the key. The alternative is an automatic retreat to created or deletion, which hides the problem. The 2026-09-14 review agrees. Q10 stays open until the S3 command exists. |
+
+---
+
+## 8. Risk assessment
+
+Summary:
+- **The largest risk is S3.** tdns-mp's state machine is the biggest piece of new code, and its failures are validation failures seen by resolvers.
+- **Next come S1b and S5.** Both change what the parent sees: the DS set and where CDS comes from.
+- **S1a, S2 and S4 are behaviour-neutral or removal steps.** Their risks are checkable before merge.
+
+Impact and likelihood are judgements, not measurements.
+
+The tests that catch these risks are designed before implementation, in the companion test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`. Its §6 maps each risk to its tests.
+
+| # | Step | Risk | Impact | Likelihood | Mitigation and detection |
+|---|---|---|---|---|---|
+| R1 | S1a | A wrong `pub`/`sign` backfill, or a reader missed in the switch. A zone then signs with the wrong keys or serves the wrong DNSKEY RRset, and validation fails. | High | Low | S1a is meant to change nothing, so check that. At startup, for every zone, compare the signing set and the served DNSKEY set computed the old way (from state) with the new way (from the columns). Refuse to start on a mismatch while S1a is the running code. Tests cover every tdns state, including the old head of an algorithm rollover. Run the automated KSK and ZSK rollover tests end to end before merging. |
+| R2 | S1a | An older binary on a migrated database writes key rows without `pub`/`sign`. After rolling forward again, those keys would neither publish nor sign. | High | Low | The columns are nullable, so older binaries keep working. The backfill is NULL-gated (`db.go` `dbMigrateData` pattern) and runs on every open, so NULL flags are derived from state again. |
+| R3 | S1a | A write to `state` outside the one write function leaves the flags stale: raw SQL, or a later contributor. | Medium | Medium | The CI grep gate. The startup comparison in R1 catches it in test runs. Optionally, an SQLite trigger that refuses a state change leaving the flags NULL. |
+| R4 | S1b | A wrong `ds` reaches the parent: a CDS withdrawn, or a DS placed too early. The parent drops or changes the DS, and the zone goes insecure or bogus. | High | Low–medium | `NULL` leaves the served CDS and the parent alone. Before the readers switch, the one-time pass logs how its `ds` differs from today's DS intent. The expected differences are published KSKs outside multi-DS (tdns #635) and the old head of an algorithm rollover. Consider one release in which the pass only computes and logs. End-to-end KSK rollover runs for none, multi-DS and algorithm rollover. |
+| R5 | S2 | A lifecycle path missing from the skip list acts on an owned zone. tdns and tdns-mp then both manage its keys, with conflicting transitions. | High for that zone | Medium | A test that runs every key state worker and rollover tick, and every lifecycle API verb, on an owned zone and asserts that nothing is written. S2 ships with no owner registered. `Owns` then moves one zone at a time. |
+| R6 | S3 | Bugs in tdns-mp's new state machine. They either leave keys stuck (no rollover happens) or promote a key too early. An early key signs before every provider serves its DNSKEY, so resolvers that reach another provider fail validation. | High | Medium | Roll out per zone through `Owns`; S3 changes nothing the parent sees (§6). Real propagation gates (#57). Manual rollovers first, and lifetime-driven rollovers for a zone only once manual ones pass there. The multi-provider scenario tests gain key generation and rollover checks: the KEY-GEN and KEY-ROLL rows of `docs/2026-09-10-mp-scenario-test-rigs-design.md`. Reuse tdns's stateless timing helpers where they can be exported, rather than deriving them again. |
+| R7 | S3 | Operators lose tools on owned zones: tdns refuses rollover and policy commands before tdns-mp's replacements exist or match. | Medium | Low | S3 is not done without the replacement commands. tdns's refusal message names the tdns-mp command. |
+| R8 | S4 | The hooks are deleted while a multi-provider zone still depends on them, and that zone's key handling breaks. | High | Low | S4 is gated on no hook registration and every multi-provider zone owned, not on a date. |
+| R9 | S5 | The fleet cut. While a signing provider lacks the protocol change, the DS set is unknown and multi-provider DS updates stop. A forgotten node blocks KSK rollovers indefinitely. | Medium: no outage, no parent change | Medium | The agent reports which provider blocks the DS set, and a rollover waits rather than proceeding. A fleet checklist for the upgrade. |
+| R10 | S5 | Letting delegation-sync setup run for the tdns-mp agent (the `AppTypeMPAgent` condition) switches on code that has never run for multi-provider zones: SIG(0) key generation and publication, and syncs towards the parent. | Medium: parent-visible KEY and UPDATE traffic | Medium | An end-to-end test with parentsync=agent zones before any deployment. Setup follows the zone's explicit configuration only. |
+| R11 | S5 | CDS moves from the combiner to the signer. During the cutover a zone serves CDS from two sources, or from none, and a parent that scans CDS sees a deletion. | High | Low–medium | A provider deploys both halves together: `CollectDynamicRRs` restores the signer's CDS in the same release that turns combiner synthesis off. `NULL` `ds` leaves the served CDS alone. Watch the post-refresh apex CDS log (`zone_utils.go:2210-2217`) during the cutover. |
+| R12 | all | Other key work lands in the same files: DS engine step 2 (S6), #635, the KSK algorithm rollover follow-ups, and changes such as tdns-mp #63. The result is merge conflicts and semantic drift. | Medium | High | Keep S1a first and small. Land S6 after S1b. Merge main forward at each step and run the rollover tests again. |
+| R13 | S1a, S5 | Output changes break goldens, test-harness parsers or scripts: key listings gain three columns, and the key inventory and DNSKEY distribution gain JSON fields. | Low | Medium | Update the goldens in the same PR. JSON changes only add fields. |
+
+---
+
+## 9. Size of the change
+
+The estimates below are in lines of Go, rounded, for production code and tests separately. They are built from the sizes and call-site counts measured at tdns `514db197` and tdns-mp `4da1d92`. Ranges are wide where the design leaves implementation choices open, above all S3.
+
+**What was measured:**
+
+- **tdns, key state machine** (`ksk_rollover_*`, `zsk_rollover*`, `key_state_worker`, `key_lifecycle_hooks`): 11,837 production lines in 35 files; 2,513 test lines.
+- **tdns, keystore, signing keys and DS content** (`keystore*`, `signing_keys_snapshot`, `ops_dnskey`, `ops_cds`, `ds_intent`, `ds_engine`): 6,526 production lines; 3,389 test lines.
+- **tdns, call sites** (non-test):
+
+  | call | count |
+  |---|---|
+  | `UpdateDnssecKeyState` | 14 |
+  | `UpdateDnssecKeyStateTx` | 7 |
+  | `PromoteDnssecKey` | 3 |
+  | `GenerateKeypair` | 17 |
+  | `DnskeyStateActive` | 61 |
+  | SQL `state='active'` / `state=?` | 24 |
+  | lifecycle hook calls | 13 |
+  | `OptMultiProvider` | 15 |
+  | `DSIntentForZone` | 5 |
+
+- **tdns-mp** (production lines per file): `signer_keydb.go` 380, `signer_msg_handler.go` 246, `db_schema_hsync.go` 654, `combiner_chunk.go` 1,592, `delegation_sync.go` 236, `parentsync_leader.go` 1,433. Inside those files, the multi-provider key protocol is small:
+
+  | function | lines |
+  |---|---|
+  | hook registration | 75 |
+  | `syncForeignDNSKEYs` | 88 |
+  | `LocalDnskeysFromKeystate` | 92 |
+  | `ProcessDnskeyConfirmation` | 59 |
+  | combiner CDS synthesis | 90 |
+  | combiner DNSKEY gate | 54 |
+
+  Key tests: `signer_keyseam_test.go`, 824 lines.
+
+**Estimate per step:**
+
+| Step | Repo | Production | Tests | Basis |
+|---|---|---|---|---|
+| S1a | tdns | +350 / −150 | +500 to +800 | schema and migration ~60; the write functions ~150; converging the seven writers ~150 changed; the signing, DNSKEY and inventory readers ~100 changed; listings ~60; grep gate ~30 |
+| S1a | tdns-mp | +60 | +100 | the temporary flag table for its states; listing columns |
+| S1b | tdns | +400 / −250 | +600 to +900 | `ds` at the ~24 transition writes ~150; the one-time pass ~120; DS intent, DS engine, rollover target, CDS synthesis, counts and labels switched to `ds` ~200 changed |
+| S2 | tdns | +300 / −50 | +300 to +500 | owner registration ~100; skips at ~20 sites ~80; API refusals ~60; DS-intent provider ~40; exports ~20 |
+| S3 | tdns-mp | +3,000 to +5,000 / −200 | +3,000 to +5,000 | See below. |
+| S4 | tdns | −400 to −600 | −200 to −400 | `key_lifecycle_hooks.go` (181) and its 13 call sites; the multi-provider constants and state names; the multi-provider cases in DS intent; `DSModelMultiProvider` |
+| S5 | tdns-mp | +900 to +1,500 / −300 | +1,000 to +1,500 | DNSKEY distribution fields, foreign rows with provider and state, schema ~350; DS set ~250; inventory flags and push ~120; DS-intent provider on the agent ~150; the MP syncher shrinking to a gate ~−150/+100; combiner CDS synthesis removed −90; setup for the MP agent ~50 |
+| S5 | tdns | +80 / −10 | +150 | CDS in `CollectDynamicRRs`; the app-type condition |
+| S6 | tdns | −600 to −900 net | ~500 changed | the rollover engine's parent pushes (`ksk_rollover_ds_push.go` 748, `_notify` 187, `_api` 197, `_schemes` 361) folded into the syncher |
+
+**How the S3 estimate was built:**
+- **Components:** policy-driven standby maintenance, ZSK and KSK rollover in multi-provider form, propagation gates, withdrawal and timers: 2,000–3,500 lines. The replacement commands, CLI and API: 500–800. Ownership and flag writes: ~200. Rules for a zone with no other signer and for a rejected key: ~100.
+- **Comparison:** tdns's machine for single-provider zones is 11.8k lines, and includes multi-DS and algorithm rollover. The multi-provider machine has no multi-DS (Q6) but adds cross-provider gates.
+- **Tests:** planned at about 1:1 with production, above tdns's own 0.2:1 for its machine, because this code is R6.
+
+**Totals, S1a–S5 (S6 excluded):**
+
+| Repo | Production | Tests |
+|---|---|---|
+| tdns | about +1,150 / −900 to −1,050, net +100 to +300 | +1,150 to +2,150 |
+| tdns-mp | about +4,000 to +6,500 / −500 | +4,100 to +6,600 |
+
+- **tdns's part is mechanical, and nets to almost zero.** Code moves from lifecycle special cases to columns, and S4 deletes what S1a–S2 make unnecessary.
+- **tdns-mp's part is dominated by S3,** roughly three quarters of its new code: a new subsystem a quarter to two fifths the size of tdns's own key machine.
