@@ -49,6 +49,16 @@ func RegisterMPKeyLifecycleHooks(conf *Config) {
 		}
 		return conf.Config.Internal.KeyDB
 	}
+	// The flags of the states this application stages keys into (design
+	// §3.4): served but not signing while distributed to the peers or
+	// foreign, neither once parked for removal. tdns carries the same
+	// entries while it still names these states; registering them here is
+	// what keeps them when it stops.
+	tdns.RegisterKeyStateFlags(map[string]tdns.KeyRowFlags{
+		DnskeyStateMpdist:   {Pub: true},
+		DnskeyStateForeign:  {Pub: true},
+		DnskeyStateMpremove: {},
+	})
 	tdns.RegisterKeyLifecycleHooks(tdns.KeyLifecycleHooks{
 		// A new standby key is served first and promoted only once the
 		// peers confirm it has propagated.
@@ -325,16 +335,15 @@ func (mpzd *MPZoneData) syncForeignDNSKEYs(incoming *tdns.ZoneData, multiSigner 
 		if alg == "" {
 			alg = fmt.Sprintf("%d", dnskey.Algorithm)
 		}
-		res, err := kdb.Exec(`INSERT OR IGNORE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, 'foreign', '', ?)`,
-			zone, DnskeyStateForeign, kt, dnskey.Flags, alg, dnskey.String())
-		if err != nil {
+		// Through tdns's one insert, so the row carries pub from its state
+		// and is served; a raw insert would leave the key out of the RRset
+		// until the next open.
+		if err := insertForeignKeyRow(kdb, zone, kt, dnskey, alg); err != nil {
 			lgSigner.Error("failed to persist foreign DNSKEY", "zone", zone, "keytag", kt, "err", err)
 			continue
 		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			changed = true
-			lgSigner.Info("persisted new foreign DNSKEY", "zone", zone, "keytag", kt, "flags", dnskey.Flags, "algorithm", alg)
-		}
+		changed = true
+		lgSigner.Info("persisted new foreign DNSKEY", "zone", zone, "keytag", kt, "flags", dnskey.Flags, "algorithm", alg)
 	}
 	for kt := range existing {
 		if _, still := current[kt]; still {
@@ -377,4 +386,22 @@ func sendResignRequest(q chan tdns.ResignRequest, zoneName string) {
 	case <-time.After(10 * time.Second):
 		lgSigner.Error("ResignQ full for 10s, re-sign request lost", "zone", zoneName)
 	}
+}
+
+// insertForeignKeyRow stores another provider's DNSKEY as a foreign row: served,
+// never signing, no private half. Its own transaction, since the caller holds
+// none.
+func insertForeignKeyRow(kdb *tdns.KeyDB, zone string, keytag uint16, dnskey *dns.DNSKEY, alg string) error {
+	tx, err := kdb.Begin("insertForeignKeyRow")
+	if err != nil {
+		return err
+	}
+	if err := tdns.InsertKeyRowTx(tx, tdns.KeyRow{
+		Zone: zone, State: DnskeyStateForeign, Keyid: keytag, Flags: dnskey.Flags,
+		Algorithm: alg, Creator: "foreign", KeyRR: dnskey.String(),
+	}); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

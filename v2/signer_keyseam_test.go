@@ -229,7 +229,7 @@ func TestSignerStagedKeysGateTheSignUntilConfirmed(t *testing.T) {
 	if got := mpKeyState(t, kdb, mpzd.ZoneName, zsk); got != tdns.DnskeyStateRetired {
 		t.Fatalf("a retired key was moved by the mpremove transition: %s", got)
 	}
-	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`, DnskeyStateMpremove, mpzd.ZoneName, zsk); err != nil {
+	if err := tdns.UpdateDnssecKeyState(kdb, mpzd.ZoneName, zsk, DnskeyStateMpremove); err != nil {
 		t.Fatalf("park the key: %v", err)
 	}
 	if err := TransitionMpremoveToRemoved(hdb, mpzd.ZoneName, zsk); err != nil {

@@ -18,9 +18,10 @@ package tdnsmp
 import (
 	"database/sql"
 	"fmt"
-	"github.com/miekg/dns"
 	"log"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // HsyncTables defines the database tables for HSYNC functionality.
@@ -509,6 +510,14 @@ func (hdb *HsyncDB) migrateMPKeystore() error {
 		return fmt.Errorf("MP key migration: commit: %w", err)
 	}
 	committed = true
+	// The rows were inserted with the old column list, without pub and
+	// sign; derive them from the states now, as every open does for rows
+	// that lack them, rather than serve nothing until the next start.
+	if hdb.KeyDB != nil {
+		if _, err := hdb.KeyDB.BackfillKeyRowFlags(); err != nil {
+			return fmt.Errorf("MP key migration: deriving the key columns from the states: %w", err)
+		}
+	}
 	lgSigner.Info("MP key migration: keys moved into DnssecKeyStore", "keys", inserted, "skipped", skipped, "old_table", migratedMPKeystoreTable)
 	return nil
 }
