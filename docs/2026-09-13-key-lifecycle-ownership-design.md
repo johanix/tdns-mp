@@ -1,6 +1,6 @@
 # Key lifecycle ownership: tdns-mp runs the key state machine of multi-provider zones
 
-**Status:** proposal, under review (r3 answers the 2026-09-13 plan review; r5 answers the 2026-09-14 review of r3/r4; r6 adds the risk assessment and the size of the change; r7 points to the test plan)
+**Status:** under implementation. **S1a implemented and merged** 2026-09-14 (tdns #650 → 2af063dc, tdns-mp #66 → f11db7a). **S1b implemented and merged** 2026-09-14 (tdns #656 → b37e32ab, tdns-mp #67), as Amendment 1 describes it. S2–S6 not started. The Status column of the §6 table is kept current; the design text is not rewritten after implementation (dated amendments at the end).
 **Test plan:** `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`
 **Repos:** tdns-mp (owner of the multi-provider state machine), tdns (keystore, signer, delegation sync, DS engine)
 **Read at:** tdns `ff814c71`, tdns-mp `fb3b1bf` (code unchanged at `10c8053`)
@@ -17,6 +17,8 @@
 | r5 | 2026-09-14 | The review of r3/r4 approved the plan and cleared S1a to start. It asked for four rules before S3 and S5, all added. For an owned zone, CDS publication and the agent's DS answer stay on today's path until S5, the step the parent sees (§6). The signer pushes the inventory whenever `pub`, `sign` or `ds` changes (§4.1, Q8). The agent's DS engine never publishes CDS for an owned zone (§4.1). S1b's one-time `ds` pass leaves the old head of an in-flight algorithm rollover at `ds=0` (§6). §4.1 corrected: `CollectDynamicRRs` does not restore CDS today, and making it do so is S5 work. |
 | r6 | 2026-09-14 | §8 risk assessment per step, and §9 the size of the change in lines of code for tdns and tdns-mp, estimated from measured file sizes and call-site counts. |
 | r7 | 2026-09-14 | §8 points to the companion test plan, `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`. It designs the tests for R1–R13 before implementation. |
+| r8 | 2026-09-14 | Amendment 1 appended: the `ds` column as S1b implemented it. The §3.4 table becomes per model, `created` under multi-DS carries `ds=1` from creation, `retired` flips at different moments in the two models, the write functions resolve `ds` themselves, and two of the four state-based DS readers switch in S1b; CDS synthesis and the pipeline counts wait for S5 and S4. |
+| r9 | 2026-09-14 | Status marks: the header states which steps are implemented, and the §6 staging table gains a Status column (S1a merged, S1b implemented and under merge, S2–S6 not started); §9 gains the measured sizes of the implemented steps. |
 
 ---
 
@@ -361,15 +363,15 @@ In a multi-provider zone, the rows live on the signer: its own keys plus the for
 
 Each step builds, passes tests and leaves the system working.
 
-| Step | Repo | Change | Behaviour |
-|---|---|---|---|
-| S1a | tdns | The columns, the one write function with its grep gate, and a migration that fills `pub` and `sign` from state. The readers of `pub` and `sign` switch. **`ds` stays `NULL`**: CDS, DS intent and the rollover target keep today's rules. Backfill example: the old head of an in-flight algorithm rollover is active, so `pub=1, sign=1`; its `ds` is written in S1b. tdns-mp's states get `pub`/`sign` from a temporary table that tdns-mp registers. | Unchanged |
-| S1b | tdns | tdns's state machine writes `ds` at its transitions, per DS model. A one-time pass after policies load fills `ds` for existing rows of tdns zones. The pass applies the algorithm-rollover exclusion: the old head of an in-flight algorithm rollover is active but gets `ds=0`, so active does not always mean `ds=1`. Then the `ds` readers switch: DS intent, the DS engine, the rollover target, CDS. A zone with any SEP row whose `ds` is `NULL` keeps its served CDS and leaves the parent alone. | Fixes tdns #635 |
-| S2 | tdns | Owner registration (`Owns`, DS-intent provider); the lifecycle skips and API refusals for owned zones (§3.5); the exports. No owner registered yet. | Unchanged |
-| S3 | tdns-mp | Its own policy-driven state machine, writing state and all four columns. The real gates (#57), the rules for a zone with no other signer and for a rejected key, and the replacement commands. It registers as owner, rolling out zone by zone through `Owns`, and stops using the hooks for the zones it owns. The signer and agent run the DS engine (#55). | The key management of the owned zones moves to tdns-mp |
-| S4 | tdns | Delete the hooks, the multi-provider constants and state names, the multi-provider DS intent cases and `DSModelMultiProvider`. **Gated on no remaining hook registration and every multi-provider zone owned**, not on a date. | Unchanged |
-| S5 | tdns-mp | Provider and state on DNSKEY distribution, and foreign rows with both (#58). The DS set (D4). Arrow 1: the signer's CDS from `ds` rows, restored by `CollectDynamicRRs` after every transfer; the combiner stops synthesizing CDS. Arrow 2: inventory flags pushed on every flag change, the DS-intent provider on the agent, the leader gate on tdns's syncher. Delegation-sync setup that runs for the multi-provider agent. | Multi-provider DS towards the parent works as D4 says |
-| S6 | tdns | DS engine design step 2: the rollover engine's parent pushes move into the syncher. | Independent of S1–S5 |
+| Step | Repo | Change | Behaviour | Status |
+|---|---|---|---|---|
+| S1a | tdns | The columns, the one write function with its grep gate, and a migration that fills `pub` and `sign` from state. The readers of `pub` and `sign` switch. **`ds` stays `NULL`**: CDS, DS intent and the rollover target keep today's rules. Backfill example: the old head of an in-flight algorithm rollover is active, so `pub=1, sign=1`; its `ds` is written in S1b. tdns-mp's states get `pub`/`sign` from a temporary table that tdns-mp registers. | Unchanged | **Implemented, merged 2026-09-14.** tdns #650 (2af063dc), tdns-mp #66 (f11db7a). |
+| S1b | tdns | tdns's state machine writes `ds` at its transitions, per DS model. A one-time pass after policies load fills `ds` for existing rows of tdns zones. The pass applies the algorithm-rollover exclusion: the old head of an in-flight algorithm rollover is active but gets `ds=0`, so active does not always mean `ds=1`. Then the `ds` readers switch: DS intent, the DS engine, the rollover target, CDS. A zone with any SEP row whose `ds` is `NULL` keeps its served CDS and leaves the parent alone. | Fixes tdns #635 | **Implemented, merged 2026-09-14.** tdns #656 (b37e32ab), tdns-mp #67; as Amendment 1: DS intent and the rollover target switched, CDS synthesis waits for S5, the pipeline counts for S4. Closes tdns #635. |
+| S2 | tdns | Owner registration (`Owns`, DS-intent provider); the lifecycle skips and API refusals for owned zones (§3.5); the exports. No owner registered yet. | Unchanged | Not started. |
+| S3 | tdns-mp | Its own policy-driven state machine, writing state and all four columns. The real gates (#57), the rules for a zone with no other signer and for a rejected key, and the replacement commands. It registers as owner, rolling out zone by zone through `Owns`, and stops using the hooks for the zones it owns. The signer and agent run the DS engine (#55). | The key management of the owned zones moves to tdns-mp | Not started. |
+| S4 | tdns | Delete the hooks, the multi-provider constants and state names, the multi-provider DS intent cases and `DSModelMultiProvider`. **Gated on no remaining hook registration and every multi-provider zone owned**, not on a date. | Unchanged | Not started. |
+| S5 | tdns-mp | Provider and state on DNSKEY distribution, and foreign rows with both (#58). The DS set (D4). Arrow 1: the signer's CDS from `ds` rows, restored by `CollectDynamicRRs` after every transfer; the combiner stops synthesizing CDS. Arrow 2: inventory flags pushed on every flag change, the DS-intent provider on the agent, the leader gate on tdns's syncher. Delegation-sync setup that runs for the multi-provider agent. | Multi-provider DS towards the parent works as D4 says | Not started. |
+| S6 | tdns | DS engine design step 2: the rollover engine's parent pushes move into the syncher. | Independent of S1–S5 | Not started. |
 
 **S3 is the large step.** `Owns` lets one test zone move to tdns-mp's machine before all multi-provider zones do.
 
@@ -479,6 +481,14 @@ The estimates below are in lines of Go, rounded, for production code and tests s
 | S5 | tdns | +80 / −10 | +150 | CDS in `CollectDynamicRRs`; the app-type condition |
 | S6 | tdns | −600 to −900 net | ~500 changed | the rollover engine's parent pushes (`ksk_rollover_ds_push.go` 748, `_notify` 187, `_api` 197, `_schemes` 361) folded into the syncher |
 
+**Measured, for the implemented steps (production / tests, added / removed):**
+
+| Step | Repo | Estimated | Measured | Note |
+|---|---|---|---|---|
+| S1a | tdns | +350 / −150; tests +500 to +800 | **+1,075 / −321**; tests +1,584 / −6, fixtures and goldens +537 | Over the S7 line (1.5 × the estimate). The invariant checker with its API and CLI verb, the R1 startup comparison and the owner entry points (about 550 lines) were not in the estimate; accepted by the stop decision of 2026-09-14. |
+| S1a | tdns-mp | +60; tests +100 | +45 / −15; tests +64 / −1 | Re-pins excluded. |
+| S1b | tdns | +400 / −250; tests +600 to +900 | **+390 / −37**; tests +930 | Removals are lower than estimated because the state-derived rule stays as the pass's reference until S4. |
+
 **How the S3 estimate was built:**
 - **Components:** policy-driven standby maintenance, ZSK and KSK rollover in multi-provider form, propagation gates, withdrawal and timers: 2,000–3,500 lines. The replacement commands, CLI and API: 500–800. Ownership and flag writes: ~200. Rules for a zone with no other signer and for a rejected key: ~100.
 - **Comparison:** tdns's machine for single-provider zones is 11.8k lines, and includes multi-DS and algorithm rollover. The multi-provider machine has no multi-DS (Q6) but adds cross-provider gates.
@@ -493,3 +503,57 @@ The estimates below are in lines of Go, rounded, for production code and tests s
 
 - **tdns's part is mechanical, and nets to almost zero.** Code moves from lifecycle special cases to columns, and S4 deletes what S1a–S2 make unnecessary.
 - **tdns-mp's part is dominated by S3,** roughly three quarters of its new code: a new subsystem a quarter to two fifths the size of tdns's own key machine.
+
+---
+
+## Amendment 1 (2026-09-14): the `ds` column as S1b implemented it
+
+Decided by Johan on 2026-09-14 when S1b's tests were written (progress log, "S1b pre-read" and "Johan's decisions"). This amends §3.4 and §6; the text above is left as it was.
+
+### A1.1 The `ds` table is per DS model
+
+The §3.4 table gave one `ds` per state with the model as a footnote. S1b writes the column from a table indexed by the zone's DS model as well as the state (`keyrow_ds.go`, `dsFlagFor`), for a KSK:
+
+| state | multi-DS | none, double-signature |
+|---|---|---|
+| created | **1** | 0 |
+| ds-published | 1 | 1 (the state does not occur outside multi-DS) |
+| published | 1 | 0 |
+| standby | 1 | 1 |
+| active | 1, and 0 for the old head of an in-flight algorithm rollover | 1 |
+| retired | 1 until the withdraw phase removes the key | 0 |
+| removed | 0 | 0 |
+
+A ZSK is 0 in every state. The three multi-provider states, and every key of a multi-provider zone (`OptMultiProvider`), stay `NULL` until the owner writes them (S3).
+
+Two rows changed against §3.4:
+
+- **`created` under multi-DS is 1 from creation.** The engine mints a created KSK precisely to push its DS on the next tick, and today's rollover target includes every created SEP key. Marking at creation keeps the multi-DS target identical to today's at every moment; marking one tick later, at the push, would have needed an extra allowed difference in T1b.2 and a special flag write. §3.4's "placed at ds-published" reads as the parent's confirmation, not the intent.
+- **`retired` flips at a different moment in the two models.** §3.4 said `retired` is the state in which `ds` flips, with the write at the withdrawal. Under none and double-signature the withdrawal is the retirement itself, as `DSIntentForZone` classified it before the column: `ds=0` from the transition to retired. Under multi-DS the retired key keeps its DS until the withdraw phase removes the key, as the rollover target and `CountKskWithDSAtParent` counted it: `ds=0` at the transition to removed. No same-state `ds` write exists for retired; the two transitions carry it.
+
+`ds-published` is 1 in every model: its DS was placed. `published` outside multi-DS is 0 (tdns #635, the finding in §3.4).
+
+### A1.2 The write functions resolve `ds`
+
+§3.4 said the owning state machine sets `ds` at the transitions. S1b puts that in the two write functions rather than at the ~24 call sites: `setKeyRowTx` and `insertKeyRowTx` resolve `ds` for every row whose caller leaves it open, from the loaded zone's bound policy (its DS model), the key's SEP bit and the zone's rollover row (the old head of an in-flight algorithm rollover gets 0, from the spawn, and back at an abort). A caller that passes `ds` explicitly is honoured: that is how an owner writes.
+
+A zone that is not loaded, or whose policy is not bound yet, gets `NULL`, and the one-time pass (`FillDsForZone`, `NULL`-gated) fills it when the policy binds and at every key state worker tick. The pass logs where its answer differs from what `dsBelongsAtParent` derived from the state, with four expected kinds: a published KSK outside multi-DS (#635), the algorithm rollover's old head, and a created or retired KSK under multi-DS (the two rows above). Anything else is logged as an error.
+
+A policy bind that changes the zone's DS model is not a transition, and the rows written under the old model carry its answers (a published KSK is 1 under multi-DS and 0 under none). So every bind ends with a reconcile (`reconcileDsAfterBind`): when the old and the new policy imply different models, `ds` is re-resolved for every row of the zone in one of tdns's own states (`RefreshDsForZone`); otherwise only rows with `ds` unset are filled. Rows in an owner's states are never rewritten. Found by review of the S1b pull request.
+
+### A1.3 Which readers switched in S1b
+
+§3.4 listed four definitions of "this key has a DS" that the column replaces. S1b switches two:
+
+- `DSIntentForZone`: the answer is the column. One SEP row with `ds` unset makes the intent unknown; the special cases for the foreign, mpremove and mpdist states are that one rule now. Every consumer of the intent, the DS engine and the delegation syncher, follows.
+- the rollover target (`loadTargetKSKsForRollover`): `ds=1` rows. Its own old-head filter stays as a second line: the row's `ds` is already 0.
+
+Two wait:
+
+- **CDS synthesis** (`SynthesizeCdsRRs`) is unchanged. Inside tdns every CDS write goes through the DS engine; the function's only callers are tdns-mp's combiner and delegation sync, for multi-provider zones, whose `ds` is `NULL` until S3. r5 keeps an owned zone's CDS on today's path until S5, and S5 removes the combiner's synthesis. Switching it in S1b would have published no CDS for those zones.
+- `CountKskWithDSAtParent` and the rollover status label stay on state. They are the multi-DS pipeline's own counts, the pipeline writes the rows they count, and under A1.1 the column and the states agree for them. They follow when the state-based readers go (S4, T4.3).
+
+### A1.4 The transition window, S1b to S3
+
+A multi-provider zone whose keystore holds only its own provider's rows (a single signing provider, no foreign rows) had a known DS intent before S1b. From S1b until the owner writes `ds` (S3), its intent is unknown, so tdns's DS engine and syncher leave its CDS and the parent alone. A zone with foreign rows was unknown already; the end-to-end test's multi-provider zones all have several providers.
+
