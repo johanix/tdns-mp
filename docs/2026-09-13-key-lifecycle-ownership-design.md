@@ -1,6 +1,7 @@
 # Key lifecycle ownership: tdns-mp runs the key state machine of multi-provider zones
 
-**Status:** proposal, under review (r3 answers the 2026-09-13 plan review; r5 answers the 2026-09-14 review of r3/r4; r6 adds the risk assessment and the size of the change)
+**Status:** proposal, under review (r3 answers the 2026-09-13 plan review; r5 answers the 2026-09-14 review of r3/r4; r6 adds the risk assessment and the size of the change; r7 points to the test plan)
+**Test plan:** `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`
 **Repos:** tdns-mp (owner of the multi-provider state machine), tdns (keystore, signer, delegation sync, DS engine)
 **Read at:** tdns `ff814c71`, tdns-mp `fb3b1bf` (code unchanged at `10c8053`)
 **Related:** tdns-mp #55 (starts the DS engine), #57 (propagation gate), #58 (DNSKEY distribution without provider or state); tdns #635 (DS intent counts published keys)
@@ -15,6 +16,7 @@
 | r4 | 2026-09-14 | The `include` column is renamed `pub` (publish the key in the DNSKEY RRset). The keystore commands that show keys, such as `list`, add the three columns `pub`, `sign` and `ds`. |
 | r5 | 2026-09-14 | The review of r3/r4 approved the plan and cleared S1a to start. It asked for four rules before S3 and S5, all added. For an owned zone, CDS publication and the agent's DS answer stay on today's path until S5, the step the parent sees (§6). The signer pushes the inventory whenever `pub`, `sign` or `ds` changes (§4.1, Q8). The agent's DS engine never publishes CDS for an owned zone (§4.1). S1b's one-time `ds` pass leaves the old head of an in-flight algorithm rollover at `ds=0` (§6). §4.1 corrected: `CollectDynamicRRs` does not restore CDS today, and making it do so is S5 work. |
 | r6 | 2026-09-14 | §8 risk assessment per step, and §9 the size of the change in lines of code for tdns and tdns-mp, estimated from measured file sizes and call-site counts. |
+| r7 | 2026-09-14 | §8 points to the companion test plan, `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`. It designs the tests for R1–R13 before implementation. |
 
 ---
 
@@ -407,6 +409,8 @@ Summary:
 - **S1a, S2 and S4 are behaviour-neutral or removal steps.** Their risks are checkable before merge.
 
 Impact and likelihood are judgements, not measurements.
+
+The tests that catch these risks are designed before implementation, in the companion test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`. Its §6 maps each risk to its tests.
 
 | # | Step | Risk | Impact | Likelihood | Mitigation and detection |
 |---|---|---|---|---|---|
