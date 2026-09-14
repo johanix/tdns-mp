@@ -530,6 +530,8 @@ Two rows changed against §3.4:
 
 A zone that is not loaded, or whose policy is not bound yet, gets `NULL`, and the one-time pass (`FillDsForZone`, `NULL`-gated) fills it when the policy binds and at every key state worker tick. The pass logs where its answer differs from what `dsBelongsAtParent` derived from the state, with four expected kinds: a published KSK outside multi-DS (#635), the algorithm rollover's old head, and a created or retired KSK under multi-DS (the two rows above). Anything else is logged as an error.
 
+A policy bind that changes the zone's DS model is not a transition, and the rows written under the old model carry its answers (a published KSK is 1 under multi-DS and 0 under none). So every bind ends with a reconcile (`reconcileDsAfterBind`): when the old and the new policy imply different models, `ds` is re-resolved for every row of the zone in one of tdns's own states (`RefreshDsForZone`); otherwise only rows with `ds` unset are filled. Rows in an owner's states are never rewritten. Found by review of the S1b pull request.
+
 ### A1.3 Which readers switched in S1b
 
 §3.4 listed four definitions of "this key has a DS" that the column replaces. S1b switches two:
