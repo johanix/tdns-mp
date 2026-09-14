@@ -6,9 +6,9 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20260914181710-bb6f815ccd53
-	github.com/johanix/tdns/v2/cli v0.0.0-20260914181710-bb6f815ccd53
-	github.com/johanix/tdns/v2/core v0.0.0-20260914181710-bb6f815ccd53
+	github.com/johanix/tdns/v2 v2.0.0-20260914184111-52e998dac835
+	github.com/johanix/tdns/v2/cli v0.0.0-20260914184111-52e998dac835
+	github.com/johanix/tdns/v2/core v0.0.0-20260914184111-52e998dac835
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
 )
@@ -29,8 +29,8 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
 	github.com/johanix/tdns-transport/v2 v2.0.0-20260913175418-0c3016fe6666 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20260914181710-bb6f815ccd53 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260914181710-bb6f815ccd53 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260914184111-52e998dac835 // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260914184111-52e998dac835 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
