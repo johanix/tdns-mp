@@ -396,6 +396,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
 		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
 	})
+	// The syncher above and KeyStateWorker ask tdns's DS engine; see
+	// startDSEngine. After ZoneUpdaterEngine, which the engine waits on.
+	startDSEngine(ctx, conf.Config.Internal.KeyDB)
 	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
 		return tdns.NotifyHandler(ctx, conf.Config)
 	})

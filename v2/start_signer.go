@@ -63,6 +63,9 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
+	// KeyStateWorker asks tdns's DS engine for a zone that is not
+	// multi-provider; see startDSEngine. After ZoneUpdaterEngine above.
+	startDSEngine(ctx, kdb)
 
 	// --- MP engines from tdns-mp ---
 	tm := conf.InternalMp.MPTransport
