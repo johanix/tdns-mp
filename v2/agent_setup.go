@@ -233,11 +233,13 @@ func (conf *Config) publishDnsTransport(zd *tdns.ZoneData) error {
 	}
 	lgAgent.Debug("published address records", "agent", identity)
 
-	err = AgentSig0KeyPrep(zd, host, NewHsyncDB(zd.KeyDB))
+	// The SIG(0) key the DSYNC UPDATE scheme signs with. It is named after the
+	// zone, not the transport host, and prepared only for a parentsync child
+	// that may use UPDATE.
+	err = AgentSig0KeyPrep(zd, conf.Config.ParentSync, NewHsyncDB(zd.KeyDB))
 	if err != nil {
-		return fmt.Errorf("publishDnsTransport: failed to publish KEY record: %v", err)
+		return fmt.Errorf("publishDnsTransport: failed to prepare the zone's SIG(0) key: %v", err)
 	}
-	lgAgent.Debug("published KEY record", "agent", identity)
 
 	publishName := "dns." + identity
 	err = AgentJWKKeyPrep(zd, publishName, NewHsyncDB(zd.KeyDB), mp)
@@ -394,14 +396,43 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	return nil
 }
 
-func AgentSig0KeyPrep(zd *tdns.ZoneData, name string, hdb *HsyncDB) error {
-	alg, err := parseKeygenAlgorithm("agent.update.keygen.algorithm", dns.ED25519)
-	if err != nil {
-		lgAgent.Error("parseKeygenAlgorithm failed", "zone", zd.ZoneName, "err", err)
+// AgentSig0KeyPrep makes sure an identity zone holds the SIG(0) key that the
+// DSYNC UPDATE scheme signs with, and publishes its KEY. The key is named after
+// the zone: SendDelegationUpdate and the parent-side bootstrap both look it up
+// under the zone name. It is prepared only for a parentsync child that may use
+// UPDATE; any other zone has no use for it. The algorithm is
+// parentsync.update.keygen.algorithm, the one DelegationSyncSetup generates with.
+func AgentSig0KeyPrep(zd *tdns.ZoneData, ps tdns.ParentSyncConf, hdb *HsyncDB) error {
+	if !identityZoneUsesUpdate(zd, ps.Schemes) {
+		return nil
+	}
+	alg := keygenAlgorithm(ps.Update.Keygen.Algorithm, dns.ED25519)
+	if err := zd.Sig0KeyPreparation(zd.ZoneName, alg, hdb.KeyDB); err != nil {
 		return err
 	}
+	lgAgent.Debug("identity zone: SIG(0) key prepared", "zone", zd.ZoneName)
+	return nil
+}
 
-	return zd.Sig0KeyPreparation(name, alg, hdb.KeyDB)
+// identityZoneUsesUpdate reports whether the zone is a parentsync child that
+// may reach its parent through the UPDATE scheme, and so needs its SIG(0) key.
+func identityZoneUsesUpdate(zd *tdns.ZoneData, schemes []string) bool {
+	return zd.Options[tdns.OptParentSync] && slices.ContainsFunc(schemes, func(s string) bool {
+		return strings.EqualFold(s, "update")
+	})
+}
+
+// keygenAlgorithm maps a configured algorithm name to its number. An empty name
+// means the default; an unknown one is reported and replaced by it.
+func keygenAlgorithm(name string, defaultAlg uint8) uint8 {
+	if name == "" {
+		return defaultAlg
+	}
+	if alg := dns.StringToAlgorithm[strings.ToUpper(name)]; alg != 0 {
+		return alg
+	}
+	lgAgent.Warn("unknown keygen algorithm, using default", "algorithm", name, "default", dns.AlgorithmToString[defaultAlg])
+	return defaultAlg
 }
 
 // parseKeygenAlgorithm reads a DNS algorithm from a viper config key.
@@ -557,6 +588,20 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 	}
 	if labels := dns.SplitDomainName(zd.ZoneName); len(labels) > 1 {
 		zd.SetParent(dns.Fqdn(strings.Join(labels[1:], ".")))
+	}
+	// The UPDATE scheme signs with the zone's own SIG(0) key, and a parent
+	// accepts that key only after the bootstrap in DelegationSyncSetup. tdns
+	// queues that setup for the zones it loads (SetupZoneSync), but not for an
+	// identity zone: it is not multi-provider, and this daemon builds it
+	// itself. So it is queued here, ahead of the first sync; the syncher
+	// handles requests in order.
+	if identityZoneUsesUpdate(zd, conf.Config.ParentSync.Schemes) {
+		select {
+		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
+			Command: "DELEGATION-SYNC-SETUP", ZoneName: zd.ZoneName, ZoneData: zd}:
+		case <-ctx.Done():
+			return
+		}
 	}
 	const attempts = 12
 	const interval = 15 * time.Second
