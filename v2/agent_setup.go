@@ -25,7 +25,6 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*tdns.ZoneData, error) {
@@ -431,16 +430,14 @@ func keygenAlgorithm(name string, defaultAlg uint8) uint8 {
 	return defaultAlg
 }
 
-// parseKeygenAlgorithm reads a DNS algorithm from a viper config key.
-// Replicated from tdns (unexported).
-func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
-	algstr := viper.GetString(configKey)
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		lgAgent.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "configKey", configKey, "default", dns.AlgorithmToString[defaultAlg])
-		alg = defaultAlg
-	}
-	return alg, nil
+// parentSyncKeygenAlgorithm is parentsync.update.keygen.algorithm for a SIG(0)
+// keypair generated where no ParentSyncConf is in hand: leader election, when
+// no peer has the zone's key. It reads the installed parentsync: block, which
+// tdns folds a deprecated delegationsync.child: into and swaps in on reload.
+// The viper key it replaces, delegationsync.child.update.keygen.algorithm,
+// found the deprecated spelling only.
+func parentSyncKeygenAlgorithm() uint8 {
+	return keygenAlgorithm(tdns.ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 }
 
 // AgentJWKKeyPrep publishes a JWK record for the agent's JOSE/HPKE long-term public keys.
