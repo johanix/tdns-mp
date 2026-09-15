@@ -44,8 +44,9 @@ type renderCtx struct {
 	Layout fsLayout
 	Paths  rolePaths
 
-	// *Dns* bind 0.0.0.0 because the DNS engine serves external
-	// clients and the local interface IP isn't known here.
+	// *Dns* bind the wildcard of InternalIP's address family (0.0.0.0
+	// or ::) because the DNS engine serves external clients and the
+	// local interface IP isn't known here.
 	// *Api* bind InternalIP (127.0.0.1 single-host) — management
 	// API stays loopback-only for now; mpcli reaches it via SSH
 	// tunnel or local invocation.

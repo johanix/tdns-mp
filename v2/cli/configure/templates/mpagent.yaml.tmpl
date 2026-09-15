@@ -95,8 +95,8 @@ service:
    debug:          false
 
 # Where the agent's DNS service listens: zone serving, AXFR, NOTIFY
-# and the MP signaling of multi-provider.dns. 0.0.0.0:<port> = any
-# interface.
+# and the MP signaling of multi-provider.dns. The wildcard of the
+# internal IP's address family (0.0.0.0 or ::) = every interface.
 listeners:
    addresses:      [ '{{.AgentDnsListen}}' ]
    # do53 = classic UDP/TCP; dot, doh and doq also need
