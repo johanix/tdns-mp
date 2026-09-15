@@ -57,9 +57,8 @@ func TestKeygenAlgorithm(t *testing.T) {
 }
 
 const (
-	// The shape tdns-mpcli configure, the sample config and the policy-matrix
-	// rig write: the deprecated delegationsync: wrapper, with keys beside the
-	// algorithm that tdns does not model.
+	// The deprecated spelling, which tdns still accepts: the delegationsync:
+	// wrapper, here with keys beside the algorithm that tdns does not model.
 	deprecatedParentSyncConfig = `delegationsync:
    leader-election-ttl: 60m
    child:
