@@ -929,7 +929,7 @@ short: JOSE keypair for secure CHUNK (generate, show)
 long: |
   Generate a JOSE keypair or display the public key. Uses the server config file (agent or combiner) to get long_term_jose_priv_key path, or --server-config.
 flags: |
-      --server-config string   path to agent/combiner config file (overrides apiservers.*.config_file)
+      --server-config string   path to agent/combiner config file (overrides apiservers.*.config-file)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -948,7 +948,7 @@ inherited: |
   -d, --debug                  debug output
   -H, --headers                show headers
   -Z, --pzone string           parent zone name
-      --server-config string   path to agent/combiner config file (overrides apiservers.*.config_file)
+      --server-config string   path to agent/combiner config file (overrides apiservers.*.config-file)
   -v, --verbose                verbose output
   -z, --zone string            zone name
 
@@ -960,7 +960,7 @@ inherited: |
   -d, --debug                  debug output
   -H, --headers                show headers
   -Z, --pzone string           parent zone name
-      --server-config string   path to agent/combiner config file (overrides apiservers.*.config_file)
+      --server-config string   path to agent/combiner config file (overrides apiservers.*.config-file)
   -v, --verbose                verbose output
   -z, --zone string            zone name
 
@@ -5080,9 +5080,9 @@ inherited: |
 
 === tdns-mpcli auditor zone proxy-key
 use: proxy-key
-short: Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary
+short: Show the parentsync-proxy UPDATE state and the KEY to publish at the primary
 long: |
-  For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+  For a zone with the parentsync-proxy option (a tdns-agent acting as a
   secondary for a DSYNC-unaware primary), report whether the agent can proxy
   DNS UPDATEs to the parent, and print the exact records to serve at the primary
   apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
@@ -5892,7 +5892,7 @@ short: JOSE keypair for secure CHUNK (generate, show)
 long: |
   Generate a JOSE keypair or display the public key. Uses the server config file (agent or combiner) to get long_term_jose_priv_key path, or --server-config.
 flags: |
-      --server-config string   path to agent/combiner config file (overrides apiservers.*.config_file)
+      --server-config string   path to agent/combiner config file (overrides apiservers.*.config-file)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -5911,7 +5911,7 @@ inherited: |
   -d, --debug                  debug output
   -H, --headers                show headers
   -Z, --pzone string           parent zone name
-      --server-config string   path to agent/combiner config file (overrides apiservers.*.config_file)
+      --server-config string   path to agent/combiner config file (overrides apiservers.*.config-file)
   -v, --verbose                verbose output
   -z, --zone string            zone name
 
@@ -5923,7 +5923,7 @@ inherited: |
   -d, --debug                  debug output
   -H, --headers                show headers
   -Z, --pzone string           parent zone name
-      --server-config string   path to agent/combiner config file (overrides apiservers.*.config_file)
+      --server-config string   path to agent/combiner config file (overrides apiservers.*.config-file)
   -v, --verbose                verbose output
   -z, --zone string            zone name
 
@@ -6530,12 +6530,15 @@ use: configure
 short: Interactive bootstrap for tdns-mp config files
 long: |
   Interview the user and emit coordinated configs for
-  tdns-mpagent, tdns-mpsigner, tdns-mpcombiner and tdns-mpcli
-  under /etc/tdns/.
+  tdns-mpagent, tdns-mpsigner, tdns-mpcombiner, tdns-mpcli and,
+  optionally, tdns-mpauditor under /etc/tdns/, plus the example
+  zone mptest.example. that the generated stack loads, signs
+  and serves.
   
-  Safe to re-run: existing values become the prompt defaults.
-  Live servers must be explicitly confirmed before their
-  config is replaced.
+  Safe to re-run: existing values become the prompt defaults,
+  and existing keys, certificates and the example zone file
+  are left alone. Live servers must be explicitly confirmed
+  before their config is replaced.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -8060,9 +8063,9 @@ inherited: |
 
 === tdns-mpcli signer auth zone proxy-key
 use: proxy-key
-short: Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary
+short: Show the parentsync-proxy UPDATE state and the KEY to publish at the primary
 long: |
-  For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+  For a zone with the parentsync-proxy option (a tdns-agent acting as a
   secondary for a DSYNC-unaware primary), report whether the agent can proxy
   DNS UPDATEs to the parent, and print the exact records to serve at the primary
   apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
@@ -10860,9 +10863,9 @@ inherited: |
 
 === tdns-mpcli signer zone proxy-key
 use: proxy-key
-short: Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary
+short: Show the parentsync-proxy UPDATE state and the KEY to publish at the primary
 long: |
-  For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+  For a zone with the parentsync-proxy option (a tdns-agent acting as a
   secondary for a DSYNC-unaware primary), report whether the agent can proxy
   DNS UPDATEs to the parent, and print the exact records to serve at the primary
   apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
