@@ -209,9 +209,37 @@ func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("syncIdentityDelegation did not return after the parent was in sync")
 			}
-			if got := zd.GetParent(); got != "sync.example." {
-				t.Errorf("parent = %q, want sync.example.", got)
+			// The parent is not guessed from the labels: a parent set on the zone
+			// is used as the UPDATE zone as it stands, and the name one label up
+			// need not be a zone cut. tdns resolves it through the resolver.
+			if got := zd.GetParent(); got != "" {
+				t.Errorf("parent = %q, want it left unset for tdns to resolve", got)
 			}
 		})
+	}
+}
+
+// The identity zone becomes a parentsync child only when a scheme is configured
+// and the resolver is running: without it the parent and its DSYNC records
+// cannot be found, and the sync would wait for a readiness that never comes.
+func TestIdentityZoneParentSync(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name    string
+		schemes []string
+		active  *bool
+		want    bool
+	}{
+		{"schemes, imrengine active by default", []string{"notify"}, nil, true},
+		{"schemes, imrengine active", []string{"update"}, &on, true},
+		{"schemes, imrengine off", []string{"update"}, &off, false},
+		{"no schemes", nil, &on, false},
+	} {
+		conf := &Config{Config: &tdns.Config{}}
+		conf.Config.ParentSync.Schemes = tc.schemes
+		conf.Config.Imr.Active = tc.active
+		if got := conf.identityZoneParentSync(); got != tc.want {
+			t.Errorf("%s: identityZoneParentSync = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

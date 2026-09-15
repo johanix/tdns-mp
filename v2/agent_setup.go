@@ -99,13 +99,17 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// its parent like any other zone this daemon is primary for: it
 	// publishes CDS from its keys and hands its DS to the parent through the
 	// schemes the parent advertises (DSYNC). Without one it stays an island
-	// whose TLSA no validating resolver will trust.
-	if len(conf.Config.ParentSync.Schemes) > 0 {
+	// whose TLSA no validating resolver will trust. Finding the parent and its
+	// DSYNC records takes the resolver: with imrengine off the sync could never
+	// start, so the zone stays an island and the log says why.
+	if conf.identityZoneParentSync() {
 		zd.Options[tdns.OptParentSync] = true
 		if err := zd.PublishCdsRRs(); err != nil {
 			lgAgent.Warn("identity zone: could not publish CDS", "zone", zonename, "err", err)
 		}
 		go conf.syncIdentityDelegation(ctx, zd)
+	} else if len(conf.Config.ParentSync.Schemes) > 0 {
+		lgAgent.Warn("identity zone: parentsync is configured but imrengine is not active; the zone's delegation will not be synced", "zone", zonename)
 	}
 
 	// Renewal. tdns registers a zone for periodic re-signing when its config
@@ -574,20 +578,30 @@ func hostPrefix(addr string) string {
 	return ip.String() + "/128"
 }
 
+// identityZoneParentSync reports whether the identity zone acts as a
+// parentsync child: a parentsync: block names at least one scheme, and the
+// resolver that finds the parent and its DSYNC records is running.
+// syncIdentityDelegation waits for that resolver, so starting it without one
+// would wait for a readiness that is never published.
+func (conf *Config) identityZoneParentSync() bool {
+	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
+	return len(conf.Config.ParentSync.Schemes) > 0 && imrActive
+}
+
 // syncIdentityDelegation brings the parent's DS for the identity zone in
 // line with the zone's keys through the schemes the parent advertises. It
 // waits for the resolver the syncher discovers the parent's DSYNC records
 // with, then asks for an explicit sync and repeats until the parent agrees
 // or the attempts run out: right after a cold start the parent may not yet
 // see the zone at its nameservers and refuses a DS it cannot check. The
-// zone updater re-syncs on any later key change. The parent is the name one
-// label up: an identity zone is delegated from the zone it sits in.
+// zone updater re-syncs on any later key change. The parent is not set
+// here: tdns resolves it through the resolver as for any other zone
+// (AnalyseZoneDelegation, via ResolveParentVia), because the name one label
+// up need not be a zone cut and a parent set on the zone is used as the
+// UPDATE zone as it stands.
 func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
 	if !conf.Config.Internal.ImrReady.Wait(ctx) {
 		return
-	}
-	if labels := dns.SplitDomainName(zd.ZoneName); len(labels) > 1 {
-		zd.SetParent(dns.Fqdn(strings.Join(labels[1:], ".")))
 	}
 	// The UPDATE scheme signs with the zone's own SIG(0) key, and a parent
 	// accepts that key only after the bootstrap in DelegationSyncSetup. tdns
