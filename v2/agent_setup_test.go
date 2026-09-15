@@ -148,18 +148,21 @@ func TestAgentSig0KeyPrepSkipsWithoutUpdate(t *testing.T) {
 	}
 }
 
-// With UPDATE among the schemes, syncIdentityDelegation queues the SIG(0) setup
-// (the zone's key and its bootstrap with the parent) ahead of the first explicit
-// sync, because tdns does not queue it for an identity zone. Without UPDATE the
-// first request is the sync itself.
+// With UPDATE among the schemes, syncIdentityDelegation first prepares the
+// zone's SIG(0) key and only then queues the SIG(0) setup (the bootstrap with
+// the parent) ahead of the first explicit sync, because tdns does not queue the
+// setup for an identity zone. The syncher is already running when the identity
+// zone is set up, so a key prepared anywhere else could race the setup into a
+// second key. Without UPDATE there is no key and the first request is the sync.
 func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
+		zone      string
 		schemes   []string
 		wantSetup bool
 	}{
-		{"notify and update", []string{"notify", "update"}, true},
-		{"notify only", []string{"notify"}, false},
+		{"notify and update", "agent.syncupdate.example.", []string{"notify", "update"}, true},
+		{"notify only", "agent.syncnotify.example.", []string{"notify"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conf := &Config{Config: &tdns.Config{}}
@@ -168,10 +171,7 @@ func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
 			conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
 			conf.Config.Internal.ImrReady.Publish()
 			conf.Config.ParentSync.Schemes = tc.schemes
-			zd := &tdns.ZoneData{
-				ZoneName: "agent.sync.example.",
-				Options:  map[tdns.ZoneOption]bool{tdns.OptParentSync: true},
-			}
+			zd, kdb, _ := newIdentityTestZone(t, tc.zone)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -193,6 +193,19 @@ func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
 			}
 
 			r := next()
+			// The key is already in the keystore when the first request arrives:
+			// prepared before anything was queued, so the setup finds it.
+			sak, err := kdb.GetSig0Keys(zd.ZoneName, tdns.Sig0StateActive)
+			if err != nil {
+				t.Fatalf("GetSig0Keys(%s): %v", zd.ZoneName, err)
+			}
+			wantKeys := 0
+			if tc.wantSetup {
+				wantKeys = 1
+			}
+			if len(sak.Keys) != wantKeys {
+				t.Fatalf("active SIG(0) keys for %s when the first request arrived = %d, want %d", zd.ZoneName, len(sak.Keys), wantKeys)
+			}
 			if tc.wantSetup {
 				if r.Command != "DELEGATION-SYNC-SETUP" || r.ZoneData != zd || r.ZoneName != zd.ZoneName {
 					t.Fatalf("first request = %q for %q, want DELEGATION-SYNC-SETUP for %q", r.Command, r.ZoneName, zd.ZoneName)

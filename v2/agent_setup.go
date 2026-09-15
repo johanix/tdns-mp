@@ -237,14 +237,6 @@ func (conf *Config) publishDnsTransport(zd *tdns.ZoneData) error {
 	}
 	lgAgent.Debug("published address records", "agent", identity)
 
-	// The SIG(0) key the DSYNC UPDATE scheme signs with. It is named after the
-	// zone, not the transport host, and prepared only for a parentsync child
-	// that may use UPDATE.
-	err = AgentSig0KeyPrep(zd, conf.Config.ParentSync, NewHsyncDB(zd.KeyDB))
-	if err != nil {
-		return fmt.Errorf("publishDnsTransport: failed to prepare the zone's SIG(0) key: %v", err)
-	}
-
 	publishName := "dns." + identity
 	err = AgentJWKKeyPrep(zd, publishName, NewHsyncDB(zd.KeyDB), mp)
 	if err != nil {
@@ -591,17 +583,27 @@ func (conf *Config) identityZoneParentSync() bool {
 // syncIdentityDelegation brings the parent's DS for the identity zone in
 // line with the zone's keys through the schemes the parent advertises. It
 // waits for the resolver the syncher discovers the parent's DSYNC records
-// with, then asks for an explicit sync and repeats until the parent agrees
-// or the attempts run out: right after a cold start the parent may not yet
-// see the zone at its nameservers and refuses a DS it cannot check. The
-// zone updater re-syncs on any later key change. The parent is not set
-// here: tdns resolves it through the resolver as for any other zone
+// with, prepares the zone's SIG(0) key, then asks for an explicit sync and
+// repeats until the parent agrees or the attempts run out: right after a
+// cold start the parent may not yet see the zone at its nameservers and
+// refuses a DS it cannot check. After the last attempt it gives up. tdns's
+// zone updater re-queues a sync only after an update from outside the
+// daemon, not after the daemon's own key changes, so the delegation then
+// stays as it is until the next start. The parent is not set here: tdns
+// resolves it through the resolver as for any other zone
 // (AnalyseZoneDelegation, via ResolveParentVia), because the name one label
 // up need not be a zone cut and a parent set on the zone is used as the
 // UPDATE zone as it stands.
 func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
 	if !conf.Config.Internal.ImrReady.Wait(ctx) {
 		return
+	}
+	// The zone's SIG(0) key is prepared here, before the setup is queued. The
+	// syncher is already running when the identity zone is set up, so a key
+	// prepared elsewhere while a queued setup runs could leave both generating
+	// one. In this order the setup finds the key and only bootstraps it.
+	if err := AgentSig0KeyPrep(zd, conf.Config.ParentSync, NewHsyncDB(zd.KeyDB)); err != nil {
+		lgAgent.Warn("identity zone: could not prepare the SIG(0) key; the delegation sync setup tries again", "zone", zd.ZoneName, "err", err)
 	}
 	// The UPDATE scheme signs with the zone's own SIG(0) key, and a parent
 	// accepts that key only after the bootstrap in DelegationSyncSetup. tdns
