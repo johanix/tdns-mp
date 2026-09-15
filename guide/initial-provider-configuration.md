@@ -443,8 +443,6 @@ multi-provider:
    local:
       nameservers: [ ns1.alpha.example. ]
       notify:      [ 'PUBSECONDARY:53' ]
-   remote:
-      LocateInterval: 60
    api:
       addresses:
          publish:  []

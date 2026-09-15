@@ -35,10 +35,6 @@ multi-provider:
       # host:port addresses of downstream secondaries that should
       # receive NOTIFY when the identity zone changes.
       notify:        [ {{range $i, $n := .Agent.LocalNotify}}{{if $i}}, {{end}}'{{$n}}'{{end}} ]
-   remote:
-      # Seconds between LocateAgent attempts when a peer is not yet
-      # discovered (i.e. before HELLO has succeeded).
-      LocateInterval: 60
    # Inter-agent zone-transfer endpoints, advertised on demand via
    # CONFIG upstream/downstream requests from peer agents. Empty
    # lists mean "this agent does not act as XFR source/destination

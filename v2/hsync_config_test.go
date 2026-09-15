@@ -102,6 +102,24 @@ func TestParseMultiProviderSyncengineIntervals(t *testing.T) {
 	}
 }
 
+// remote.LocateInterval has timed nothing since LocateAgent was retired, and
+// the generated and sample configs no longer write it. Configs that still carry
+// it load, and it changes none of the engine's timers.
+func TestParseMultiProviderAcceptsRetiredLocateInterval(t *testing.T) {
+	block := map[string]interface{}{
+		"role":     "agent",
+		"identity": "agent.example.",
+		"remote":   map[string]interface{}{"LocateInterval": 60},
+	}
+	mp, err := parseMultiProvider(map[string]interface{}{"multi-provider": block})
+	if err != nil {
+		t.Fatalf("parseMultiProvider: %v", err)
+	}
+	if got, want := hsyncConfigFromMp(mp), hsync.DefaultConfig(); got != want {
+		t.Errorf("engine config = %+v, want the defaults %+v", got, want)
+	}
+}
+
 func TestValidateSyncengineIntervals(t *testing.T) {
 	var mp MultiProviderConf
 	if err := ValidateSyncengineIntervals(&mp); err != nil {

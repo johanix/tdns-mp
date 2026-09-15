@@ -92,6 +92,9 @@ type MultiProviderConf struct {
 		Nameservers []string `yaml:"nameservers,omitempty"`
 	}
 	Remote struct {
+		// LocateInterval timed the retired LocateAgent path and has no
+		// effect: discovery retries are syncengine.intervals.discoveryretry.
+		// Kept so configs that still set it load without complaint.
 		LocateInterval int
 		BeatInterval   uint32
 	}

@@ -24,10 +24,6 @@ multi-provider:
    local:
       nameservers:   [ ]
       notify:        [ ]
-   remote:
-      # Seconds between LocateAgent attempts when a peer is not
-      # yet discovered (i.e. before HELLO has succeeded).
-      LocateInterval: 60
    # Inter-agent zone-transfer endpoints. The auditor never serves
    # zones to other agents, so these stay empty.
    xfr:
