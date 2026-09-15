@@ -311,11 +311,10 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 var ErrZoneNotRun = errors.New("the zone's key lifecycle is not run by tdns-mp")
 
 // bindPolicyForOwner binds a policy to an owned zone on the owner's behalf:
-// tdns's SetZonePolicyForOwner (tdns #664). Until the module pin carries
-// it, the binding reports what is missing; a test may substitute it.
-var bindPolicyForOwner = func(ctx context.Context, zd *tdns.ZoneData, kdb *tdns.KeyDB, policyName string) (string, error) {
-	return "", errors.New("policy binding by the owner needs tdns's SetZonePolicyForOwner (tdns #664); the pinned tdns does not carry it yet")
-}
+// tdns's SetZonePolicyForOwner (the mechanism fields applied by tdns, the
+// owner's fields changing with the binding; a change of mode, algorithm or
+// DS model refused). A variable so a test can stand in for it.
+var bindPolicyForOwner = tdns.SetZonePolicyForOwner
 
 // KeyLifecycleKey is one key row as the operator sees it.
 type KeyLifecycleKey struct {

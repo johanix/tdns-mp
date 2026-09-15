@@ -20,6 +20,8 @@ func TestAPIsignerKey(t *testing.T) {
 	conf.Config.Internal.KeyDB = kdb
 	conf.SetMpConfig(&MultiProviderConf{Identity: "signer.example."})
 	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	tdns.RegisterKeyLifecycleOwner(owner)
+	t.Cleanup(func() { tdns.RegisterKeyLifecycleOwner(nil) })
 	e := NewKeyLifecycleEngine(conf, owner)
 	conf.InternalMp.KeyLifecycleOwner, conf.InternalMp.KeyLifecycle = owner, e
 	mpzd := signerTestZone(t, "apikey.owned.example.", kdb)
@@ -96,10 +98,12 @@ func TestAPIsignerKey(t *testing.T) {
 		t.Errorf("status after the cancel: rollovers %v, want none", st.Rollovers)
 	}
 
-	// policy-set: the binding is tdns's (SetZonePolicyForOwner); here a
-	// stand-in that changes the bound policy, and the driver's policy
-	// follows on the same call
-	refused(SignerKeyPost{Command: "policy-set", Zone: mpzd.ZoneName, Policy: "longer"}, "SetZonePolicyForOwner")
+	// policy-set: the binding is tdns's (SetZonePolicyForOwner): a policy
+	// tdns does not know is refused by it, on an owned zone; then a stand-in
+	// that changes the bound policy, and the driver's policy follows on the
+	// same call
+	refused(SignerKeyPost{Command: "policy-set", Zone: mpzd.ZoneName, Policy: "longer"}, "does not exist")
+	refused(SignerKeyPost{Command: "policy-set", Zone: "apikey.plain.example.", Policy: "longer"}, "not run by tdns-mp")
 	saved := bindPolicyForOwner
 	t.Cleanup(func() { bindPolicyForOwner = saved })
 	var bound string

@@ -7,7 +7,7 @@ require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/tdns-transport/v2 v2.0.0-20260913175418-0c3016fe6666
-	github.com/johanix/tdns/v2 v2.0.0-20260915165529-5971d64b414d
+	github.com/johanix/tdns/v2 v2.0.0-20260915211437-7bd16bce6784
 	github.com/johanix/tdns/v2/cache v0.0.0-20260915165529-5971d64b414d
 	github.com/johanix/tdns/v2/cli v0.0.0-20260915165529-5971d64b414d
 	github.com/johanix/tdns/v2/core v0.0.0-20260915165529-5971d64b414d
