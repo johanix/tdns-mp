@@ -8,8 +8,7 @@ multi-provider:
    # When false, the signer accepts traffic but does not sign zones.
    # Used to retire a signer from a multi-signer setup gracefully.
    active:    true
-   # FQDN identity of this signer; appears in HSYNCPARAM.signers
-   # to declare it as a signing provider for a zone.
+   # FQDN identity of this signer.
    identity:  {{.Signer.Identity}}
    long_term_jose_priv_key:  {{.Paths.SignerJosePriv}}
 
@@ -17,7 +16,7 @@ multi-provider:
    # match an agent's identity FQDN; address is where to dial it.
    agents:
       - identity:               {{.Agent.Identity}}
-        address:                {{.AgentDnsDial}}
+        address:                '{{.AgentDnsDial}}'
         long_term_jose_pub_key: {{.Paths.AgentJosePub}}
 
    # Optional HTTPS sync API (alternative to NOTIFY+CHUNK for
@@ -25,7 +24,7 @@ multi-provider:
    # primary mechanism.
    # syncapi:
    #    addresses:
-   #       listen:     [ 127.0.0.1:8991 ]
+   #       listen:     [ '127.0.0.1:8991' ]
    #    certfile:      {{.Paths.SignerCert}}
    #    keyfile:       {{.Paths.SignerKey}}
 
@@ -33,91 +32,82 @@ service:
    name:           TDNS-MPSIGNER
    verbose:        true
    debug:          false
-   # When true the ResignerEngine periodically re-signs zones to
-   # refresh RRSIG validity. False means re-sign only on explicit
-   # triggers (key state changes, ZONEMD updates, etc.).
-   resign:         true
 
-# Top-level DNS server (zone serving + AXFR + NOTIFY responder).
-dnsengine:
-   # Bind addresses. The signer typically binds both its high port
-   # (for MP signaling) and 53 (for client queries).
-   addresses:      [ {{.SignerDnsListen}}, {{.SignerDnsListen53}} ]
+# Where the signer's DNS service listens: its high port for the
+# local roles, and 53 for everyone else.
+listeners:
+   addresses:      [ '{{.SignerDnsListen}}', '{{.SignerDnsListen53}}' ]
    transports:     [ do53 ]
 
+authengine:
+   # Keep the SOA serial served to the agent across restarts, so the
+   # agent never sees it go backwards.
+   outbound-soa-serial:  persist
+
 apiserver:
-   addresses:      [ {{.SignerApiListen}} ]
+   addresses:      [ '{{.SignerApiListen}}' ]
    apikey:         {{.Signer.ApiKey}}
    certfile:       {{.Paths.SignerCert}}
    keyfile:        {{.Paths.SignerKey}}
 
-# Periodic re-signing schedule for the signer.
-resignerengine:
-   # Seconds between re-sign passes. Each pass checks every signed
-   # zone for RRSIG headroom against KASP.propagation_delay.
-   interval:       300
-   # How key material for newly-introduced zones is provisioned.
-   keygen:
-      mode:        internal   # internal | external (HSM, etc.)
-      algorithm:   ED25519
-
-# Key and Signing Policy: knobs that drive the KeyStateWorker's
-# automatic state transitions and standby-key maintenance.
-kasp:
-   # How long to wait for DNSKEY changes to propagate before
-   # advancing key state (published -> standby, retired -> removed).
-   propagation_delay:  1h
-   # How often the KeyStateWorker runs its checks.
-   check_interval:     1m
-   # Number of standby ZSKs to keep ready per zone. KeyStateWorker
-   # generates new ones when the count drops below this.
-   standby_zsk_count:  1
-   # Same for KSKs. 0 = no standby KSKs (manual rollover only).
-   standby_ksk_count:  0
-
-# Named DNSSEC policies. Zones reference one via dnssecpolicy:.
-dnssecpolicies:
-   default:
-      algorithm:  ED25519
-      # Key Signing Key parameters.
-      ksk:
-         lifetime:      forever   # "forever" | "none" | Go duration
-         sigvalidity:   168h      # RRSIG validity window
-      # Zone Signing Key parameters.
-      zsk:
-         lifetime:      forever
-         sigvalidity:   2h
-      # Combined Signing Key (single key for everything). lifetime=
-      # "none" disables CSK mode in this policy.
-      csk:
-         lifetime:      none
-         sigvalidity:   168h
+dnssec:
+   # Key and Signing Policy: drives the key-state worker's automatic
+   # transitions and standby-key maintenance.
+   kasp:
+      # How long to wait for DNSKEY changes to propagate before
+      # advancing key state (published -> standby, retired -> removed).
+      # Short, for a testbed.
+      propagation-delay:  5m
+      # How often the key-state worker runs its checks.
+      check-interval:     1m
+      # Standby ZSKs to keep ready per zone.
+      standby-zsk-count:  1
+      # Same for KSKs. 0 = no standby KSKs.
+      standby-ksk-count:  0
+   # Named DNSSEC policies. Zones reference one via dnssecpolicy:.
+   policies:
+      default:
+         algorithm:   ED25519
+         ksk:
+            lifetime:  forever   # "forever" | Go duration
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none      # "none": separate KSK and ZSK
+         # RRSIG validity: dnskey for the DNSKEY RRset, ds for DS
+         # RRsets, default for everything else. Short, for a testbed.
+         # tdns refuses a validity at or below 2 x (largest served TTL
+         # + kasp.propagation-delay) and warns below 4 x.
+         sigvalidity:
+            default:   6h
+            dnskey:    6h
+            ds:        6h
 
 db:
-   file:  /var/lib/tdns/tdns-mpsigner.db
+   file:  {{.Layout.DbDir}}/tdns-mpsigner.db
 
 log:
-   file:   /var/log/tdns/tdns-mpsigner.log
+   file:   {{.Layout.LogDir}}/tdns-mpsigner.log
    level:  info
 
 # If the templates: and zones: sections grow large, move them to a
 # separate YAML file and pull it in via a top-level "include:" entry.
 templates:
-   - name:           mptest
+   - name:           mpzone
      type:           secondary
      store:          map
-     # Signer pulls zone data from the combiner (which itself pulls
-     # from the customer's authoritative primary or accepts UPDATEs).
-     primary:        {{.CombinerDnsDial}}
-     options:
-        - multi-provider
-     # Policy applied if HSYNCPARAM puts this signer in the active
-     # signers set; otherwise this signer just relays unsigned data.
+     # The signer pulls zone data from the local combiner.
+     primaries:      [ { addr: '{{.CombinerDnsDial}}', key: NOKEY } ]
+     options:        [ multi-provider ]
+     # Policy applied if HSYNCPARAM puts this provider in the signers
+     # set; otherwise this signer serves the zone unsigned.
      dnssecpolicy:   default
-     # After re-signing, NOTIFY the agent so it pulls the new
-     # serial and serves the freshly-signed zone.
-     notify:         [ {{.AgentDnsDial}} ]
+     # After signing, NOTIFY the agent so it pulls the new serial.
+     notify:         [ { addr: '{{.AgentDnsDial}}', key: NOKEY } ]
+     # Who may transfer the signed zone: the local roles.
+     downstreams:    [ { prefix: '{{.InternalPrefix}}', key: NOKEY } ]
 
 zones:
-   - name:            example.test.
-     template:        mptest
+   # The example zone. A customer zone is added the same way.
+   - name:           {{.ExampleZone}}
+     template:       mpzone

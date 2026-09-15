@@ -18,19 +18,26 @@ every MP daemon it can talk to:
 
 ```yaml
 apiservers:
-   - name:    tdns-agent
-     baseurl: https://127.0.0.1:7054/api/v1
+   - name:        tdns-mpagent          # the "agent" command word
+     baseurl:     https://127.0.0.1:7054/api/v1
+     apikey:      ...
+     authmethod:  X-API-Key
+     config-file: /etc/tdns/tdns-mpagent.yaml    # for "agent config check", "agent keys"
+     command:     /usr/local/libexec/tdns-mpagent # for "agent daemon start"
+   - name:        tdns-mpcombiner       # "combiner"
+     baseurl:     https://127.0.0.1:7055/api/v1
      ...
-   - name:    tdns-combiner
-     baseurl: https://127.0.0.1:7055/api/v1
+   - name:        tdns-mpsigner         # "signer"
+     baseurl:     https://127.0.0.1:7053/api/v1
      ...
-   - name:    tdns-signer
-     baseurl: https://127.0.0.1:7053/api/v1
-     ...
-   - name:    tdns-auditor    # if present
-     baseurl: https://127.0.0.1:7056/api/v1
+   - name:        tdns-mpauditor        # "auditor", if present
+     baseurl:     https://127.0.0.1:7056/api/v1
      ...
 ```
+
+The `name` of each entry is the lookup key of a built-in
+command word; an entry under any other name without a
+`role:` is not reachable from those words.
 
 `tdns-mpcli configure` generates this automatically; see
 [Quickstart](quickstart.md).
@@ -51,7 +58,7 @@ same command set as the built-in word for that role:
 
 ```yaml
 apiservers:
-   - name:    tdns-agent            # the built-in "agent" word
+   - name:    tdns-mpagent          # the built-in "agent" word
      baseurl: https://127.0.0.1:7054/api/v1
      ...
    - name:        p2-agent          # "tdns-mpcli p2-agent ..."
@@ -59,7 +66,7 @@ apiservers:
      baseurl:     https://127.0.0.1:7254/api/v1
      apikey:      ...
      authmethod:  X-API-Key
-     config_file: /etc/tdns/p2/tdns-mpagent.yaml   # for "config check", "keys"
+     config-file: /etc/tdns/p2/tdns-mpagent.yaml   # for "config check", "keys"
      command:     /usr/local/libexec/tdns-mpagent  # for "daemon start"
    - name:        p2-signer
      role:        signer

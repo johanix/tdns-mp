@@ -15,7 +15,7 @@ The four phases:
 
 1. **One provider stands alone.** Generate configs,
    start the daemons, verify the three local roles can
-   talk to each other.
+   talk to each other and carry the example zone.
 2. **Add a customer zone.** Configure the zone on
    combiner, signer and agent. Verify each role has
    loaded it and parsed the HSYNCPARAM.
@@ -36,8 +36,10 @@ problems compound.
 ## Phase 1 — One Provider Stands Alone
 
 Goal: combiner, signer and agent are running on this
-host, with TLS, JOSE keys and API keys generated, and
-the three roles can talk to each other.
+host, with TLS, JOSE keys and API keys generated, the
+three roles can talk to each other, and the example zone
+`mptest.example.` flows from the combiner through the
+signer to the agent.
 
 ### 1.1 Generate the configs
 
@@ -50,16 +52,19 @@ public IP, internal IP, identities for each role). On
 re-runs the existing values become defaults.
 
 The command writes `/etc/tdns/{tdns-mpcombiner,
-tdns-mpsigner, tdns-mpagent, tdns-mpcli}.yaml` plus the
-matching zone include files, generates JOSE keypairs
-and TLS certs that are missing, and assigns API keys.
+tdns-mpsigner, tdns-mpagent, tdns-mpcli}.yaml` (plus
+`tdns-mpauditor.yaml` if you asked for an auditor) and
+the example zone file
+`/etc/tdns/zones/mptest.example.zone`, generates JOSE
+keypairs and TLS certs that are missing, and assigns API
+keys. See [Quickstart](quickstart.md) for details.
 
 ### 1.2 Start the daemons
 
 ```sh
-sudo tdns-mpcombiner --config /etc/tdns/tdns-mpcombiner.yaml &
-sudo tdns-mpsigner   --config /etc/tdns/tdns-mpsigner.yaml &
-sudo tdns-mpagent    --config /etc/tdns/tdns-mpagent.yaml &
+sudo /usr/local/libexec/tdns-mpcombiner --config /etc/tdns/tdns-mpcombiner.yaml &
+sudo /usr/local/libexec/tdns-mpsigner   --config /etc/tdns/tdns-mpsigner.yaml &
+sudo /usr/local/libexec/tdns-mpagent    --config /etc/tdns/tdns-mpagent.yaml &
 ```
 
 Order does not matter; each daemon retries until its
@@ -71,56 +76,75 @@ Each daemon responds to a management `ping`:
 
 ```
 $ tdns-mpcli combiner ping
-pong: combiner.alpha.example. (uptime 12s)
+TLS pong from tdns-mpcombiner @ <hostname>: pings: 1, pongs: 1, uptime: 0m16s, ...
 
 $ tdns-mpcli signer ping
-pong: signer.alpha.example. (uptime 11s)
+TLS pong from tdns-mpsigner @ <hostname>: pings: 1, pongs: 1, uptime: 0m17s, ...
 
 $ tdns-mpcli agent ping
-pong: agent.alpha.example. (uptime 10s)
+TLS pong from tdns-mpagent @ <hostname>: pings: 1, pongs: 1, uptime: 0m17s, ...
 ```
 
-Then verify that the three roles have *discovered* each
-other. The combiner and signer are configured with the
-local agent's identity + JOSE pubkey, and vice versa —
-so they should show each other in their peer lists
-immediately:
+Every role has loaded the example zone, and the signer
+signs it:
 
 ```
-$ tdns-mpcli combiner peer list
-IDENTITY                  TRANSPORT  STATE         LAST SEEN
-agent.alpha.example.      api        OPERATIONAL   3s ago
+$ tdns-mpcli combiner zone list
+mptest.example.  primary  ready  false  false  [multi-provider on-conflict-db-wins]
 
-$ tdns-mpcli signer peer list
-IDENTITY                  TRANSPORT  STATE         LAST SEEN
-agent.alpha.example.      api        OPERATIONAL   4s ago
+$ tdns-mpcli signer zone list
+mptest.example.  secondary  ready  false  false  [inline-signing multi-provider on-conflict-db-wins]
 
+$ tdns-mpcli agent zone list
+agent.alpha.example.  primary    ready  false  false  [allow-updates automatic-zone online-signing]
+mptest.example.       secondary  ready  false  false  [multi-provider on-conflict-db-wins]
+```
+
+Then verify that the roles have *found* each other. The
+combiner and signer are configured with the local
+agent's identity and JOSE public key, and the agent with
+theirs, so the agent reaches both over the DNS
+transport:
+
+```
 $ tdns-mpcli agent peer list
-IDENTITY                  TRANSPORT  STATE         LAST SEEN
-combiner.alpha.example.   api        OPERATIONAL   5s ago
-signer.alpha.example.     api        OPERATIONAL   5s ago
+Found 2 peer(s) with working keys
+Identity                 Type      Transport  Address                Crypto  State
+combiner.alpha.example.  combiner  DNS        dns://127.0.0.1:8055/  JOSE    OPERATIONAL
+signer.alpha.example.    signer    DNS        dns://127.0.0.1:8053/  JOSE    OPERATIONAL
+
+$ tdns-mpcli combiner peer list
+Found 1 peer(s) with working keys
+Identity              Type   Transport  Address         Crypto  State
+agent.alpha.example.  agent  -          127.0.0.1:8054  JOSE    -
 ```
+
+(With an auditor in the example zone, the agent's list
+also shows the auditor, NEEDED until the agent and the
+auditor can look up each other's identity zones through
+the public DNS.)
 
 Finally, exercise the encrypted transport in both
 directions:
 
 ```
 $ tdns-mpcli combiner peer ping --id agent.alpha.example.
-pong from agent.alpha.example. (rtt 4ms)
+ping ok (dns transport): agent.alpha.example. echoed nonce ... rtt=1.374ms
 
 $ tdns-mpcli agent peer ping --id combiner.alpha.example.
-pong from combiner.alpha.example. (rtt 3ms)
+ping ok (dns transport): combiner.alpha.example. echoed nonce ... rtt=836µs
 
 $ tdns-mpcli signer peer ping --id agent.alpha.example.
-pong from agent.alpha.example. (rtt 4ms)
+ping ok (dns transport): agent.alpha.example. echoed nonce ... rtt=588µs
 
 $ tdns-mpcli agent peer ping --id signer.alpha.example.
-pong from signer.alpha.example. (rtt 3ms)
+ping ok (dns transport): signer.alpha.example. echoed nonce ... rtt=931µs
 ```
 
-**Pass condition.** Each `peer list` shows the expected
-peers as OPERATIONAL on the `api` transport. Each
-`peer ping` returns a pong in both directions.
+**Pass condition.** Every role lists `mptest.example.`,
+the agent's `peer list` shows the combiner and signer
+OPERATIONAL, and each `peer ping` returns `ping ok` in
+both directions.
 
 If a peer is stuck in NEEDED or UNKNOWN:
 
@@ -148,50 +172,47 @@ NOTIFYing every provider's combiner — see
 [Customer Zone Setup](customer-zone-setup.md) for the
 zone-owner side.
 
-### 2.1 Add a zone directive to each role
+### 2.1 Add a zone entry to each role
 
-The customer zone needs a zone entry in each of
-combiner, signer and agent. Using `example.com.` as
-the example:
+The customer zone needs an entry in the `zones:` list of
+each of `tdns-mpcombiner.yaml`, `tdns-mpsigner.yaml` and
+`tdns-mpagent.yaml`. The generated configs define a
+template, `mpzone`, with everything the local plumbing
+needs: the map store, the `multi-provider` option, the
+signer's primary (the combiner) and DNSSEC policy, the
+agent's primary (the signer), the NOTIFYs between them
+and the transfer ACLs for the local roles. Using
+`example.com.` as the example:
 
-**Combiner** (`/etc/tdns/mpcombiner-zones.yaml`):
-
-```yaml
-zones:
-   - name:      example.com.
-     type:      secondary
-     primary:   ZONE-OWNER-ADDR:53
-     options:   [ multi-provider ]
-```
-
-The `primary` is the zone owner's auth server. Always
-include `multi-provider` in the options.
-
-**Signer** (`/etc/tdns/mpsigner-zones.yaml`):
+**Combiner:**
 
 ```yaml
 zones:
-   - name:      example.com.
-     type:      secondary
-     primary:   COMBINER-ADDR:8055
-     options:   [ multi-provider ]
+   - name:        example.com.
+     template:    mpzone
+     type:        secondary
+     primaries:   [ { addr: 'ZONE-OWNER-ADDR:53', key: NOKEY } ]
 ```
 
-The signer's primary is the local combiner.
+`primaries` is the zone owner's authoritative server,
+which must allow this combiner to transfer the zone.
+`key:` names a TSIG key instead of `NOKEY` where the
+transfer is authenticated.
 
-**Agent** (`/etc/tdns/mpagent-zones.yaml`):
+**Signer** and **agent:**
 
 ```yaml
 zones:
-   - name:      example.com.
-     type:      secondary
-     primary:   COMBINER-ADDR:8055
-     options:   [ multi-provider ]
+   - name:        example.com.
+     template:    mpzone
 ```
 
-The agent also reads the zone (from the combiner), so
-it can parse HSYNC3 / HSYNCPARAM and discover peer
-agents.
+The agent also reads the zone (from the signer), so it
+can parse HSYNC3 / HSYNCPARAM and discover peer agents.
+
+The example zone `mptest.example.` can stay, or be
+removed from all three configs once a customer zone is
+in place.
 
 Reload each daemon after editing (`SIGHUP`, or restart).
 
@@ -201,17 +222,14 @@ Reload each daemon after editing (`SIGHUP`, or restart).
 
 ```
 $ tdns-mpcli combiner zone list
-ZONE                       TYPE       STORE   FROZEN  DIRTY  OPTIONS
-example.com.               secondary  MapZone false   false  [multi-provider]
+example.com.  secondary  ready  false  false  [multi-provider on-conflict-db-wins]
 
 $ tdns-mpcli signer zone list
-ZONE                       TYPE       STORE   FROZEN  DIRTY  OPTIONS
-example.com.               secondary  MapZone false   false  [multi-provider online-signing]
+example.com.  secondary  ready  false  false  [inline-signing multi-provider on-conflict-db-wins]
 
 $ tdns-mpcli agent zone list
-ZONE                       TYPE       STORE   FROZEN  DIRTY  OPTIONS
-agent.alpha.example.       primary    MapZone false   false  [allow-updates automatic-zone online-signing]
-example.com.               secondary  MapZone false   false  [multi-provider]
+agent.alpha.example.  primary    ready  false  false  [allow-updates automatic-zone online-signing]
+example.com.          secondary  ready  false  false  [multi-provider on-conflict-db-wins]
 ```
 
 ### 2.3 Verification gate
@@ -223,47 +241,35 @@ single command for "did the multi-provider setup
 land?":
 
 ```
-$ tdns-mpcli combiner zone mplist
-ZONE          ROLE        SIGNERS         SERVERS                NSMGMT  EDITS
-example.com.  provider    alpha           alpha,bravo,charlie    agent   ALLOW
-
-$ tdns-mpcli signer zone mplist
-ZONE          ROLE        SIGNERS         SERVERS                NSMGMT  EDITS
-example.com.  signer      alpha           alpha,bravo,charlie    agent   ALLOW
-
 $ tdns-mpcli agent zone mplist
-ZONE          ROLE        SIGNERS         SERVERS                NSMGMT  EDITS
-example.com.  provider    alpha           alpha,bravo,charlie    agent   ALLOW
+Zone          Servers              Signers  Auditors  NSmgmt  ParentSync  Suffix  Options
+example.com.  alpha,bravo,charlie  alpha              agent   agent               [multi-provider on-conflict-db-wins]
 ```
 
-The `EDITS` column reflects the dynamic option:
-
-- `ALLOW` — this provider is in HSYNCPARAM and may
-  contribute (signer or unsigned zone). `OptAllowEdits`
-  is set.
-- `DISALLOW` — this provider is listed in HSYNCPARAM
-  but not as a signer of a signed zone.
-  `OptMPDisallowEdits` is set; contributions are
-  persisted but not applied. (Expected for bravo and
-  charlie in this example.)
-- `NOT-LISTED` — our identity does not appear in HSYNC3
-  at all. The zone is refused. This is a configuration
-  mismatch — investigate before continuing.
+The Options column carries the dynamic options. A
+provider that is listed in HSYNCPARAM but is not a
+signer of a signed zone gets `mp-disallow-edits`: its
+contributions are persisted but not applied. (Expected
+for bravo and charlie in this example.) A provider whose
+identity does not appear in HSYNC3 at all refuses the
+zone — a configuration mismatch to investigate before
+continuing.
 
 **Pass condition.** Every role shows the zone in `zone
 list` and `zone mplist` returns sensible HSYNCPARAM
-data with `EDITS` in the expected state. The signer
-will additionally show `online-signing` in the zone
-options once it has signed at least once.
+data with the expected options. The signer shows
+`inline-signing` once it has taken over the zone's
+signing.
 
 If the zone never appears: the zone owner is not
 NOTIFYing this combiner, or the combiner is not
 allowed to AXFR from the zone owner. See
 [Customer Zone Setup §3](customer-zone-setup.md#3-notify-and-zone-transfer-to-the-combiners).
 
-If `mplist` shows the wrong roles or `NOT-LISTED`: the
-HSYNC3 / HSYNCPARAM records in the customer zone do
-not match this provider's identity. Inspect with:
+If `mplist` shows the wrong roles, or the zone is
+refused: the HSYNC3 / HSYNCPARAM records in the customer
+zone do not match this provider's identity. Inspect
+with:
 
 ```
 $ dog @<combiner-addr>:8055 example.com. HSYNC3
@@ -326,7 +332,7 @@ HSYNC3 RRsets: every distinct set of identities is one
 group. List them:
 
 ```
-$ tdns-mpcli agent gossip state --zone customer.mptest.
+$ tdns-mpcli agent gossip state --zone example.com.
 
 GROUP        MEMBERS                                                              ZONES
 -----        -------                                                              -----
@@ -348,7 +354,7 @@ group: each row is one reporter's view of every other
 member's state.
 
 ```
-$ tdns-mpcli agent gossip state --zone customer.mptest.
+$ tdns-mpcli agent gossip state --zone example.com.
 
 Group: g_3a8f1c (hash: 3a8f1c2b0e9d4f...)
 Leader: agent.alpha.example. (term 4, expires in 47m12s)

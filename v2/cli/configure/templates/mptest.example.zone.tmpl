@@ -1,0 +1,23 @@
+; {{.ExampleZone}} -- the example multi-provider zone.
+;
+; Written once by `tdns-mpcli configure` and never overwritten, so edit it
+; freely. tdns-mpcombiner loads it in place of a zone owner's primary,
+; tdns-mpsigner signs it, and tdns-mpagent{{if .Auditor.Identity}} and tdns-mpauditor{{end}} pull it. After an edit,
+; bump the SOA serial and run `tdns-mpcli combiner zone reload -z {{.ExampleZone}}`.
+;
+; HSYNC3 names the parties to the zone, one record each; HSYNCPARAM gives
+; them their roles by label. This provider ("{{.ProviderLabel}}") is the only
+; server and the only signer.
+$TTL 300
+{{.ExampleZone}}      IN SOA  ns1.{{.ExampleZone}} hostmaster.{{.ExampleZone}} 1 3600 600 604800 300
+{{.ExampleZone}}      IN NS   ns1.{{.ExampleZone}}
+ns1.{{.ExampleZone}}  IN {{.PublicIPRRType}} {{.Global.PublicIP}}
+
+{{.ExampleZone}}      IN HSYNC3  ON {{.ProviderLabel}} {{.Agent.Identity}} .
+{{- if .Auditor.Identity}}
+{{.ExampleZone}}      IN HSYNC3  ON {{.AuditorLabel}} {{.Auditor.Identity}} .
+{{- end}}
+{{.ExampleZone}}      IN HSYNCPARAM servers="{{.ProviderLabel}}" signers="{{.ProviderLabel}}" nsmgmt="owner" parentsync="owner"{{if .Auditor.Identity}} auditors="{{.AuditorLabel}}"{{end}}
+
+www.{{.ExampleZone}}  IN {{.PublicIPRRType}} {{.Global.PublicIP}}
+{{.ExampleZone}}      IN TXT  "tdns-mp example zone"
