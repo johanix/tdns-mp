@@ -1,15 +1,40 @@
-# TDNS MP Signer Configuration
+# TDNS MP Signer Configuration (sample)
 #
-# The mpsigner binary provides the multi-provider DNSSEC signing
-# role. It uses tdns for DNS infrastructure (zone serving, refresh,
-# NOTIFY, query handling) and adds MP-specific engines (KEYSTATE
-# signaling, key state management, CHUNK transport).
+# tdns-mpsigner is the multi-provider DNSSEC signer: a tdns
+# authoritative server that pulls the combined zone from the combiner,
+# signs it when HSYNCPARAM makes this provider a signer, and serves it.
+# It also runs the MP key-state protocol with the agent (KEYSTATE over
+# CHUNK).
 #
-# This config is similar to tdns-auth.yaml but with role: signer
-# and multi-provider.active: true.
+# `tdns-mpcli configure` writes a config of this shape for a single-host
+# testbed, together with keys, certificates and an example zone. This
+# sample documents the same keys plus optional ones, on the same port
+# layout: signer DNS 8053 and 53, management API 7053; combiner DNS
+# 8055; agent DNS 8054.
 
-include:
-   - mpsigner-zones.yaml
+multi-provider:
+   role:      signer
+   # false: accept traffic but sign nothing (retiring a signer).
+   active:    true
+   identity:  signer.alpha.example.
+   long_term_jose_priv_key:  /etc/tdns/keys/signer.jose.priv.json
+
+   # chunk_mode:           edns0      # edns0 (default) | query
+   # chunk_query_endpoint: include    # include | none; needed with chunk_mode: query
+
+   # The local agent.
+   agents:
+      - identity:               agent.alpha.example.
+        address:                '127.0.0.1:8054'
+        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
+
+   # HTTPS sync API for inbound HELLO/BEAT/PING from the agent, as an
+   # alternative to NOTIFY+CHUNK.
+   # syncapi:
+   #    addresses:
+   #       listen:     [ '127.0.0.1:8991' ]
+   #    certfile:      /etc/tdns/certs/signer.crt
+   #    keyfile:       /etc/tdns/certs/signer.key
 
 service:
    name:           TDNS-MPSIGNER
@@ -17,65 +42,53 @@ service:
    debug:          false
    # Optional clamps on the SOA Refresh value used for secondary
    # zones. Both default in code (min 60s, max 8h) when unset.
-   # Primaries are not affected (they reload from file on SIGHUP).
    # minrefresh:     60       # seconds, floor for SOA Refresh
    # maxrefresh:     1800     # seconds, ceiling for SOA Refresh
 
-dnsengine:
-   addresses:      [ 127.0.0.1:8053 ]
+listeners:
+   # The high port for the local roles, 53 for everyone else.
+   addresses:      [ '0.0.0.0:8053', '0.0.0.0:53' ]
+   transports:     [ do53 ]
 
-resignerengine:
-   interval:       300
-   keygen:
-      mode:        internal
-      algorithm:   ED25519
+authengine:
+   # Keep the SOA serial served to the agent across restarts.
+   outbound-soa-serial:  persist
 
 apiserver:
-   addresses:      [ 127.0.0.1:8088 ]
+   addresses:      [ '127.0.0.1:7053' ]
    apikey:         change-me-to-something-secret
+   certfile:       /etc/tdns/certs/signer.crt
+   keyfile:        /etc/tdns/certs/signer.key
 
-# Key and Signing Policy (KASP)
-kasp:
-   propagation_delay:  1h
-   check_interval:     1m
-   standby_zsk_count:  1
-   standby_ksk_count:  0
+# Seconds between re-signing passes (clamped to 60..3600; 60 when
+# unset).
+# resignerengine:
+#    interval:     300
 
-dnssecpolicies:
-   default:
-      algorithm:  ED25519
-      ksk:
-         lifetime:      forever
-         sigvalidity:   168h
-      zsk:
-         lifetime:      forever
-         sigvalidity:   2h
-
-# Multi-provider DNSSEC configuration
-# The signer signs zones and communicates with the co-located
-# agent via CHUNK transport.
-multi-provider:
-   role:      signer
-   active:    true
-   identity:  signer.provider.example.
-   long_term_jose_priv_key:  /etc/tdns/keys/signer.jose.priv.json
-
-   # chunk_mode: edns0 (default) or query
-   # chunk_mode:           query
-   # chunk_query_endpoint: include
-
-   # Agent peers (typically just the local agent)
-   agents:
-      - identity:               agent.provider.example.
-        address:                127.0.0.1:8055
-        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
-
-   # Sync API for inbound HELLO/BEAT/PING from agent
-   syncapi:
-      addresses:
-         listen:     [ 127.0.0.1:8991 ]
-      certfile:      /etc/tdns/certs/servers/signer.crt
-      keyfile:       /etc/tdns/certs/servers/signer.key
+dnssec:
+   # Key and Signing Policy for the key-state worker.
+   kasp:
+      propagation-delay:  5m     # before published -> standby, retired -> removed
+      check-interval:     1m
+      standby-zsk-count:  1
+      standby-ksk-count:  0
+   policies:
+      default:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         # Testbed values: dnskey for the DNSKEY RRset, ds for DS
+         # RRsets, default for everything else. Each must exceed
+         # 2 x (largest served TTL + kasp.propagation-delay); tdns
+         # warns below 4 x.
+         sigvalidity:
+            default:   6h
+            dnskey:    6h
+            ds:        6h
 
 db:
    file:  /var/lib/tdns/tdns-mpsigner.db
@@ -85,7 +98,20 @@ log:
    level:  info
    # subsystems:
    #    transport:  debug
-   #    combiner:   debug
+   #    signer:     debug
 
-common:
-   command:  /usr/local/libexec/tdns-mpsigner
+# Zones can live in a separate file pulled in with a top-level
+# "include:" entry.
+templates:
+   - name:           mpzone
+     type:           secondary
+     store:          map
+     primaries:      [ { addr: '127.0.0.1:8055', key: NOKEY } ]
+     options:        [ multi-provider ]
+     dnssecpolicy:   default
+     notify:         [ { addr: '127.0.0.1:8054', key: NOKEY } ]
+     downstreams:    [ { prefix: '127.0.0.1/32', key: NOKEY } ]
+
+zones:
+   - name:           mptest.example.
+     template:       mpzone

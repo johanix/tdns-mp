@@ -84,41 +84,62 @@ key, and sends it directly to the parent's UPDATE receiver.
 **SIG(0) Key Bootstrap:**
 
 Before the parent will accept signed UPDATEs, it must trust
-the child's SIG(0) key. The bootstrap flow is:
+the child's SIG(0) key. The agents run the bootstrap for a
+zone that has the `parentsync` zone option and whose
+HSYNCPARAM record says `parentsync="agent"`. The flow is:
 
 1. The elected leader agent generates a SIG(0) keypair (or
    uses an existing one) and sends a Publish instruction to
    the combiner.
 2. The combiner publishes the KEY record at the zone apex
-   and optionally at `_signal` names under each NS target
-   in provider zones (see section 2).
-3. The agent sends a self-signed UPDATE containing the KEY
-   RR to the parent's UPDATE receiver.
-4. The parent verifies the key via consistent-lookup: it
-   queries all of the child's nameservers and checks that
-   they all return the same KEY record.
-5. Once verified, the parent marks the key as trusted and
-   begins accepting signed UPDATEs from that key.
-6. The agent polls the parent's KeyState EDNS(0) option to
-   confirm trust has been established, then proceeds with
-   the actual delegation sync.
+   and at `_signal` names under each NS target in provider
+   zones (see section 3).
+3. The agent sends a KeyState EDNS(0) inquiry to the
+   parent. If the parent already trusts the key, the agent
+   goes on to step 6.
+4. If the parent does not know the key, the agent selects
+   a bootstrap method: the strongest method that is both
+   in the parent's SVCB bootstrap advertisement and in its
+   own `parentsync.update.bootstrap.methods`. It then sends
+   a self-signed UPDATE containing the KEY RR to the
+   parent's UPDATE receiver. When the method is `manual`,
+   no UPDATE is sent and an operator at the parent has to
+   act.
+5. The parent verifies the key under the delegation policy
+   bound to the parent zone: it looks for the KEY where the
+   policy's `mechanisms` point (`at-apex`, `at-ns`) and,
+   with `require-dnssec`, accepts it only if it is
+   DNSSEC-validated there (see section 2.4).
+6. The agent polls the parent's KeyState until the key is
+   trusted, then compares the delegation data with the
+   parent and syncs any difference.
 
-**Agent configuration** (in tdns-agent.yaml):
+**Agent configuration** (in tdns-mpagent.yaml):
 
 ```yaml
-delegationsync:
-   leader-election-ttl: 60m
-   child:
-      schemes: [ update ]
-      update:
-         keygen:
-            mode:      internal
-            algorithm: ED25519
+parentsync:
+   schemes:     [ notify, update ]
+   update:
+      keygen:
+         algorithm:  ED25519
+
+# How long an elected leader holds the role; 60m is the
+# default.
+# delegationsync:
+#    leader-election-ttl: 60m
 ```
 
-The `mode: internal` setting means the agent generates SIG(0)
-keys internally. The `algorithm` controls which algorithm is
-used.
+`parentsync.schemes` lists the schemes the agent uses
+towards the parent, in order of preference (section 1.4).
+`parentsync.update.keygen.algorithm` is the algorithm of the
+SIG(0) keys that sign the UPDATEs. `tdns-mpcli configure`
+writes this `parentsync:` block.
+
+The other `parentsync:` keys (`update.bootstrap.methods`,
+`update.allow-insecure`, `api`) are described in
+[tdns-agent configuration](../../tdns/guide/config-tdns-agent.md).
+How the bootstrap method is negotiated is in
+[tdns special features §1.5](../../tdns/guide/special-features.md#15-child-pushing-changes).
 
 ### 1.3 The NOTIFY Scheme (Child Side)
 
@@ -138,114 +159,201 @@ and applies the changes.
    (CSYNC or CDS) to the parent's NOTIFY receiver address
    (from the DSYNC RRset).
 4. The parent's scanner queries the child for the published
-   records, validates them (DNSSEC if available), and applies
-   the changes to the parent zone.
+   records, authenticates them under the parent zone's
+   delegation policy (section 2.3), and applies the changes
+   to the parent zone.
 
 ### 1.4 Scheme Selection
 
-The agent selects the best scheme by intersecting the parent's
-advertised schemes (from the DSYNC RRset) with its own
-configured schemes (`delegationsync.child.schemes`). UPDATE is
-preferred over NOTIFY when both are available, as it is more
-immediate and does not require a scanner on the parent side.
+The agent considers its configured schemes
+(`parentsync.schemes`: `notify`, `update`, `api`) in the
+order listed, and uses those the parent advertises in its
+DSYNC RRset. An empty list means nothing is sent. UPDATE is
+immediate and needs no scanner on the parent side; list it
+first to prefer it.
 
 
 ## 2. Parent-Side Configuration
 
 ### 2.1 Automatic DSYNC Publication
 
-When tdns-auth is configured as a parent zone primary with
-`delegation-sync-parent` in the zone options, it automatically
-publishes DSYNC RRsets based on the `delegationsync.parent`
-configuration:
+When tdns-auth is the primary for a parent zone with the
+`childsync` zone option, it publishes DSYNC RRsets based on
+the top-level `childsync:` block:
 
 ```yaml
-delegationsync:
-   parent:
-      schemes: [ notify, update ]
-      notify:
-         types:      [ CDS, CSYNC ]
-         port:       5354
-         target:     notifications.{ZONENAME}
-         addresses:  [ 198.51.100.1 ]
-      update:
-         types:      [ ANY ]
-         port:       5354
-         target:     updates.{ZONENAME}
-         addresses:  [ 198.51.100.1 ]
-         keygen:
-            mode:      internal
-            algorithm: ED25519
+childsync:
+   schemes: [ notify, update ]
+   notify:
+      types:      [ CDS, CSYNC ]
+      port:       5354
+      target:     notifications.{ZONENAME}
+      addresses:  [ 198.51.100.1 ]
+   update:
+      types:      [ ANY ]
+      port:       5354
+      target:     updates.{ZONENAME}
+      addresses:  [ 198.51.100.1 ]
+      keygen:
+         algorithm: ED25519
 ```
 
 The `{ZONENAME}` template is expanded at runtime to the actual
 zone name. The server creates DSYNC RRs at `_dsync.<zone>.`
 and publishes A/AAAA glue records for the target names.
+Each `port` must be one that the `listeners:` block listens
+on.
+
+For the UPDATE target the server also publishes an SVCB
+record advertising the SIG(0) bootstrap methods, derived
+from the zone's delegation policy (section 2.4). It keeps a
+SIG(0) key of its own, of `keygen.algorithm`, to sign
+KeyState responses. The `api` scheme, for children that
+cannot sign DNS messages, is described in
+[tdns special features §1.7](../../tdns/guide/special-features.md#17-the-dsync-api-scheme-https-for-children-that-cannot-sign).
 
 ### 2.2 UPDATE Receiver
 
-The tdns-agent (or tdns-auth) can act as the UPDATE receiver.
-When it receives a SIG(0)-signed UPDATE for a child delegation:
+tdns-auth acts as the UPDATE receiver. A tdns-agent that is
+a secondary of the parent zone can do the same with the
+`childsync-proxy` zone option; see
+[Agent fronting a parent zone](../../tdns/guide/childsync-proxy.md).
+When the receiver gets a SIG(0)-signed UPDATE for a child
+delegation:
 
 1. It validates the SIG(0) signature against its truststore.
-2. It applies local policy (allowed RR types, rate limits).
+2. It checks the update against the zone's
+   `updatepolicy.child` (which names and RR types a child
+   may change).
 3. It writes the delegation data via a delegation backend.
 
-**Delegation backends** control where and how the data is
-stored:
+**Delegation backends** say where the delegation state is
+kept (`store: sqlite | direct | external-db`) and how it
+reaches the parent zone (`writer: none | zonefile | ddns`).
+The one-word `type:` names are shorthand for a pair:
 
-- **direct** -- Modifies the in-memory zone directly. Used
-  when the receiving server is the authoritative primary.
-- **db** -- Stores delegation data in a SQLite database.
-  Used when the receiver is not the zone primary.
+- **direct** -- Modifies the in-memory zone directly and
+  rewrites its zone file. Used when the receiving server
+  is the primary and owns the zone's data.
+- **db** -- Stores delegation data in a SQLite database
+  without touching the served zone. The change is served
+  once something rebuilds the zone.
 - **zonefile** -- Stores in the database and generates
-  per-child zone file fragments in a directory. Supports
-  an optional notify-command (e.g., `rndc reload`) to
+  per-child zone file fragments in `directory`. Supports
+  an optional `notify-command` (e.g., `rndc reload`) to
   trigger the actual primary to reload.
+- **upstream** -- Stores in the database and sends the
+  change to the parent zone's primary as a TSIG-signed
+  DNS UPDATE.
+- **external-db** -- Stores delegation data in a shared
+  MariaDB database for a provisioning system to read.
 
-Backend configuration:
+`db` and `direct` are predefined and need no entry. Other
+backends are declared in `delegationbackends:`:
 
 ```yaml
-delegation-backends:
+delegationbackends:
    - name:       files-example
      type:       zonefile
-     directory:  /var/lib/tdns/delegations/example
+     directory:  /var/lib/tdns/delegations/example.com
 ```
+
+The store/writer axes are described in
+[Agent fronting a parent zone](../../tdns/guide/childsync-proxy.md).
 
 Zones reference backends by name:
 
 ```yaml
 zones:
-   - name:     example.com.
-     options:  [ delegation-sync-parent ]
-     delegation-backend: files-example
+   - name:              example.com.
+     type:              primary
+     zonefile:          /etc/tdns/zones/example.com.zone
+     options:
+        - childsync
+        - allow-child-updates
+        - on-conflict-zonefile-wins
+     delegationbackend: files-example
+     delegationpolicy:  default
+     updatepolicy:
+        child:
+           type:     selfsub
+           rrtypes:  [ NS, A, AAAA, DS, KEY ]
 ```
+
+`allow-child-updates` needs a `delegationbackend:` and an
+`updatepolicy.child` type other than `none`. A primary whose
+backend is not `direct` must also set
+`on-conflict-zonefile-wins`: the default,
+`on-conflict-db-wins`, contradicts a zone file generated
+elsewhere, and the zone is refused at startup.
+`delegationpolicy:` names an entry in `childsync.policies:`
+(section 2.4).
 
 ### 2.3 NOTIFY Receiver
 
-The tdns-agent can also act as the NOTIFY receiver for
-generalized NOTIFY messages. When it receives a NOTIFY(CDS)
-or NOTIFY(CSYNC), it triggers the configured scanner to
-query the child zone and process the published records.
+tdns-auth (or a tdns-agent with `childsync-proxy`) also acts
+as the NOTIFY receiver for generalized NOTIFY messages. When
+it receives a NOTIFY(CDS) or NOTIFY(CSYNC) for a type the
+zone advertises, it triggers the scanner to query the child
+zone and process the published records.
+
+What the scanner accepts is decided by the zone's delegation
+policy (section 2.4). With `require-dnssec: true`, the
+records copied from the child must be DNSSEC-validated. See
+[tdns special features §1.3](../../tdns/guide/special-features.md#13-parent-the-generalized-notify-scanner).
 
 ### 2.4 Key Trust Management
 
 When a child sends a self-signed UPDATE containing its SIG(0)
-KEY, the parent must verify the key before trusting it. The
-verification method is controlled by the keybootstrap config:
+KEY, the parent must verify the key before trusting it. How
+it verifies is set by the delegation policy bound to the
+parent zone. Policies are named under `childsync.policies:`,
+and a zone selects one with `delegationpolicy:`:
 
 ```yaml
-keybootstrap:
-   consistent-lookup:
-      iterations:  3
-      interval:    60
-      nameservers: all
+childsync:
+   policies:
+      default:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          false
+            allow-unvalidated-upload: false
+            retry:
+               max-attempts: 5
+               interval:     10s
 ```
 
-This configures the parent to query all of the child's
-nameservers 3 times at 60-second intervals. If the KEY is
-consistently present at all nameservers across all
-iterations, it is accepted as trusted.
+- `mechanisms` -- where the parent looks for the child's
+  KEY: `at-apex` at the child apex, `at-ns` at
+  `_sig0key.<child>._signal.<ns>` for the child's
+  nameservers. An empty list means no automatic
+  verification.
+- `require-dnssec` -- the KEY found must be
+  DNSSEC-validated. When false, finding the KEY where
+  `mechanisms` point is enough.
+- `manual` -- a new key needs an operator to trust it:
+  KeyState answers and rejected UPDATEs tell the child
+  that manual bootstrap is required, and the parent
+  advertises `manual`.
+- `allow-unvalidated-upload` -- whether a child may upload
+  its KEY in an UPDATE signed by that not-yet-trusted key.
+- `retry` -- how many lookups the parent makes
+  (`max-attempts`) and the delay between them
+  (`interval`).
+
+The values shown are the built-in `default` policy, used
+when the config defines no policy by that name. A zone that
+omits `delegationpolicy:` binds `default`; a name that does
+not resolve quarantines the zone.
+
+The parent advertises its policy in the bootstrap SVCB
+record at the UPDATE target: `at-apex`/`at-ns` when
+`require-dnssec` is true, `unsigned` when it is false and
+`mechanisms` is not empty, and `manual` when that flag is
+set. The child selects its method from that advertisement
+(section 1.2). See
+[tdns special features §1.2](../../tdns/guide/special-features.md#12-parent-the-update-receiver).
 
 
 ## 3. Provider Zones
@@ -400,8 +508,9 @@ Key properties:
   concurrent overlapping elections.
 - Election results propagate to non-participating agents via
   the gossip protocol.
-- The leader has a configurable TTL (default 60 minutes).
-  Re-election is triggered automatically before expiry.
+- The leader has a TTL, `delegationsync.leader-election-ttl`
+  (default 60m). Re-election is triggered automatically
+  before expiry.
 - If the group degrades (a member becomes unreachable), the
   leader is invalidated immediately.
 

@@ -14,6 +14,7 @@ package configure
 import (
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -24,12 +25,15 @@ var Cmd = &cobra.Command{
 	Use:   "configure",
 	Short: "Interactive bootstrap for tdns-mp config files",
 	Long: `Interview the user and emit coordinated configs for
-tdns-mpagent, tdns-mpsigner, tdns-mpcombiner and tdns-mpcli
-under /etc/tdns/.
+tdns-mpagent, tdns-mpsigner, tdns-mpcombiner, tdns-mpcli and,
+optionally, tdns-mpauditor under /etc/tdns/, plus the example
+zone mptest.example. that the generated stack loads, signs
+and serves.
 
-Safe to re-run: existing values become the prompt defaults.
-Live servers must be explicitly confirmed before their
-config is replaced.`,
+Safe to re-run: existing values become the prompt defaults,
+and existing keys, certificates and the example zone file
+are left alone. Live servers must be explicitly confirmed
+before their config is replaced.`,
 	RunE: runConfigureCmd,
 }
 
@@ -58,7 +62,7 @@ func runConfigureCmd(cmd *cobra.Command, args []string) error {
 		},
 
 		GenerateMaterial: func(state any) error {
-			return generateMissingMaterial(state.(CoordinatedValues))
+			return generateMissingMaterial(state.(CoordinatedValues), defaultLayout)
 		},
 	})
 }
@@ -114,9 +118,9 @@ func liveTargetsFor(cv CoordinatedValues) []LiveTarget {
 	return targets
 }
 
-// generateMissingMaterial generates any missing JOSE keypairs and
-// TLS certs. Existing files are left untouched.
-func generateMissingMaterial(cv CoordinatedValues) error {
+// generateMissingMaterial generates any missing JOSE keypairs, TLS
+// certs and the example zone file. Existing files are left untouched.
+func generateMissingMaterial(cv CoordinatedValues, l fsLayout) error {
 	paths := makeRolePaths(cv.Global.KeysDir, cv.Global.CertsDir)
 
 	roles := []struct {
@@ -157,6 +161,14 @@ func generateMissingMaterial(cv CoordinatedValues) error {
 			fmt.Printf("  generated %s TLS cert/key\n    cert: %s\n    key:  %s\n",
 				role.label, role.certFile, role.keyFile)
 		}
+	}
+
+	zoneGen, err := ensureExampleZone(cv, l, os.Stdout)
+	if err != nil {
+		return fmt.Errorf("example zone: %w", err)
+	}
+	if zoneGen {
+		fmt.Printf("  generated example zone %s\n    file: %s\n", exampleZone, l.exampleZoneFile())
 	}
 	return nil
 }

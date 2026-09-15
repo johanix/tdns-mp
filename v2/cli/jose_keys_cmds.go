@@ -30,7 +30,7 @@ func NewKeysCmd(kind string) *cobra.Command {
 		Long:  `Generate a JOSE keypair or display the public key. Uses the server config file (agent or combiner) to get long_term_jose_priv_key path, or --server-config.`,
 	}
 	c.PersistentFlags().StringVar(&keysServerConfig, "server-config", "",
-		"path to agent/combiner config file (overrides apiservers.*.config_file)")
+		"path to agent/combiner config file (overrides apiservers.*.config-file)")
 
 	generate := &cobra.Command{
 		Use:   "generate",
@@ -66,7 +66,7 @@ func runKeysCommand(kind string, cmd *cobra.Command, subcommand string, args []s
 		}
 	}
 	if serverConfigPath == "" {
-		log.Fatalf("No server config: set apiservers.*.config_file in tdns-cli config for %s, or use --server-config",
+		log.Fatalf("No server config: set apiservers.*.config-file in tdns-cli config for %s, or use --server-config",
 			tdnscli.GetClientKeyFromParent(RoleForCmd(cmd)))
 	}
 

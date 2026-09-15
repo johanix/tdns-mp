@@ -5,14 +5,14 @@ package tdnsmp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"io"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -37,26 +37,236 @@ func TestHostPrefix(t *testing.T) {
 	}
 }
 
-// An absent algorithm is the default and not a problem; only a name that is
-// set and is not an algorithm is.
-func TestKeygenAlgorithm(t *testing.T) {
+// The identity zone needs its SIG(0) key only as a parentsync child that may
+// reach its parent by UPDATE; the scheme name is matched case-insensitively.
+func TestIdentityZoneUsesUpdate(t *testing.T) {
+	parentsync := map[tdns.ZoneOption]bool{tdns.OptParentSync: true}
 	for _, tc := range []struct {
-		algstr string
-		want   uint8
-		wantOK bool
+		name    string
+		options map[tdns.ZoneOption]bool
+		schemes []string
+		want    bool
 	}{
-		{"", dns.ED25519, true},
-		{"ED25519", dns.ED25519, true},
-		{"ecdsap256sha256", dns.ECDSAP256SHA256, true},
-		{"NOSUCHALG", dns.ED25519, false},
+		{"parentsync, update", parentsync, []string{"update"}, true},
+		{"parentsync, notify and UPDATE", parentsync, []string{"notify", "UPDATE"}, true},
+		{"parentsync, notify only", parentsync, []string{"notify"}, false},
+		{"parentsync, no schemes", parentsync, nil, false},
+		{"no parentsync, update", nil, []string{"update"}, false},
 	} {
-		if got, ok := keygenAlgorithm(tc.algstr, dns.ED25519); got != tc.want || ok != tc.wantOK {
-			t.Errorf("keygenAlgorithm(%q) = %d, %v; want %d, %v", tc.algstr, got, ok, tc.want, tc.wantOK)
+		zd := &tdns.ZoneData{ZoneName: "agent.example.", Options: tc.options}
+		if got := identityZoneUsesUpdate(zd, tc.schemes); got != tc.want {
+			t.Errorf("%s: identityZoneUsesUpdate = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// newIdentityTestZone builds a parentsync identity zone the way
+// SetupAgentAutoZone does, on a real keystore whose UpdateQ is buffered so the
+// records posted for publication can be read back.
+func newIdentityTestZone(t *testing.T, name string) (*tdns.ZoneData, *tdns.KeyDB, chan tdns.UpdateRequest) {
+	t.Helper()
+	kdb := newMPTestKeyDB(t)
+	q := make(chan tdns.UpdateRequest, 8)
+	kdb.UpdateQ = q
+	zd, err := kdb.CreateAutoZone(name, nil, []string{"ns1.example."})
+	if err != nil {
+		t.Fatalf("CreateAutoZone(%s): %v", name, err)
+	}
+	zd.Options[tdns.OptParentSync] = true
+	return zd, kdb, q
+}
+
+// publishedKEYs drains q and returns the KEY records posted, by owner name.
+func publishedKEYs(q chan tdns.UpdateRequest) map[string][]*dns.KEY {
+	out := map[string][]*dns.KEY{}
+	for {
+		select {
+		case ur := <-q:
+			for _, rr := range ur.Actions {
+				if k, ok := rr.(*dns.KEY); ok {
+					out[k.Header().Name] = append(out[k.Header().Name], k)
+				}
+			}
+		default:
+			return out
+		}
+	}
+}
+
+// The DSYNC UPDATE scheme signs with the SIG(0) key named after the zone
+// (SendDelegationUpdate looks it up under zd.ZoneName), so that is the key
+// AgentSig0KeyPrep generates and publishes, at the apex, and not at dns.<zone>.
+func TestAgentSig0KeyPrepNamesKeyAfterZone(t *testing.T) {
+	zd, kdb, q := newIdentityTestZone(t, "agent.keyname.example.")
+	ps := tdns.ParentSyncConf{Schemes: []string{"notify", "update"}}
+	ps.Update.Keygen.Algorithm = "ED25519"
+
+	if err := AgentSig0KeyPrep(zd, ps, NewHsyncDB(kdb)); err != nil {
+		t.Fatalf("AgentSig0KeyPrep: %v", err)
+	}
+
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, tdns.Sig0StateActive)
+	if err != nil {
+		t.Fatalf("GetSig0Keys(%s): %v", zd.ZoneName, err)
+	}
+	if len(sak.Keys) != 1 {
+		t.Fatalf("active SIG(0) keys for %s = %d, want 1", zd.ZoneName, len(sak.Keys))
+	}
+	if got := sak.Keys[0].KeyRR.Algorithm; got != dns.ED25519 {
+		t.Errorf("key algorithm = %d, want ED25519 (%d)", got, dns.ED25519)
+	}
+	host := "dns." + zd.ZoneName
+	if hsak, err := kdb.GetSig0Keys(host, tdns.Sig0StateActive); err != nil {
+		t.Fatalf("GetSig0Keys(%s): %v", host, err)
+	} else if len(hsak.Keys) != 0 {
+		t.Errorf("active SIG(0) keys for %s = %d, want 0", host, len(hsak.Keys))
+	}
+
+	published := publishedKEYs(q)
+	if len(published[zd.ZoneName]) != 1 {
+		t.Fatalf("KEY RRs posted at %s = %d, want 1", zd.ZoneName, len(published[zd.ZoneName]))
+	}
+	if got, want := published[zd.ZoneName][0].KeyTag(), sak.Keys[0].KeyRR.KeyTag(); got != want {
+		t.Errorf("published keytag = %d, keystore keytag = %d", got, want)
+	}
+	if n := len(published[host]); n != 0 {
+		t.Errorf("KEY RRs posted at %s = %d, want 0", host, n)
+	}
+}
+
+// Without UPDATE among the schemes nothing is ever signed with the key, so none
+// is generated or published.
+func TestAgentSig0KeyPrepSkipsWithoutUpdate(t *testing.T) {
+	zd, kdb, q := newIdentityTestZone(t, "agent.notifyonly.example.")
+	ps := tdns.ParentSyncConf{Schemes: []string{"notify"}}
+
+	if err := AgentSig0KeyPrep(zd, ps, NewHsyncDB(kdb)); err != nil {
+		t.Fatalf("AgentSig0KeyPrep: %v", err)
+	}
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, tdns.Sig0StateActive)
+	if err != nil {
+		t.Fatalf("GetSig0Keys(%s): %v", zd.ZoneName, err)
+	}
+	if len(sak.Keys) != 0 {
+		t.Errorf("active SIG(0) keys for %s = %d, want 0", zd.ZoneName, len(sak.Keys))
+	}
+	if published := publishedKEYs(q); len(published) != 0 {
+		t.Errorf("KEY RRs posted = %v, want none", published)
+	}
+}
+
+// With UPDATE among the schemes, syncIdentityDelegation first prepares the
+// zone's SIG(0) key and only then queues the SIG(0) setup (the bootstrap with
+// the parent) ahead of the first explicit sync, because tdns does not queue the
+// setup for an identity zone. The syncher is already running when the identity
+// zone is set up, so a key prepared anywhere else could race the setup into a
+// second key. Without UPDATE there is no key and the first request is the sync.
+func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		zone      string
+		schemes   []string
+		wantSetup bool
+	}{
+		{"notify and update", "agent.syncupdate.example.", []string{"notify", "update"}, true},
+		{"notify only", "agent.syncnotify.example.", []string{"notify"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := &Config{Config: &tdns.Config{}}
+			q := make(chan tdns.DelegationSyncRequest, 4)
+			conf.Config.Internal.DelegationSyncQ = q
+			conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+			conf.Config.Internal.ImrReady.Publish()
+			conf.Config.ParentSync.Schemes = tc.schemes
+			zd, kdb, _ := newIdentityTestZone(t, tc.zone)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				conf.syncIdentityDelegation(ctx, zd)
+				close(done)
+			}()
+
+			next := func() tdns.DelegationSyncRequest {
+				t.Helper()
+				select {
+				case r := <-q:
+					return r
+				case <-time.After(5 * time.Second):
+					t.Fatal("no delegation sync request queued")
+					return tdns.DelegationSyncRequest{}
+				}
+			}
+
+			r := next()
+			// The key is already in the keystore when the first request arrives:
+			// prepared before anything was queued, so the setup finds it.
+			sak, err := kdb.GetSig0Keys(zd.ZoneName, tdns.Sig0StateActive)
+			if err != nil {
+				t.Fatalf("GetSig0Keys(%s): %v", zd.ZoneName, err)
+			}
+			wantKeys := 0
+			if tc.wantSetup {
+				wantKeys = 1
+			}
+			if len(sak.Keys) != wantKeys {
+				t.Fatalf("active SIG(0) keys for %s when the first request arrived = %d, want %d", zd.ZoneName, len(sak.Keys), wantKeys)
+			}
+			if tc.wantSetup {
+				if r.Command != "DELEGATION-SYNC-SETUP" || r.ZoneData != zd || r.ZoneName != zd.ZoneName {
+					t.Fatalf("first request = %q for %q, want DELEGATION-SYNC-SETUP for %q", r.Command, r.ZoneName, zd.ZoneName)
+				}
+				r = next()
+			}
+			if r.Command != "EXPLICIT-SYNC-DELEGATION" || r.Response == nil {
+				t.Fatalf("request = %q (response channel %v), want EXPLICIT-SYNC-DELEGATION with a response channel", r.Command, r.Response != nil)
+			}
+			r.Response <- tdns.DelegationSyncStatus{InSync: true}
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("syncIdentityDelegation did not return after the parent was in sync")
+			}
+			// The parent is not guessed from the labels: a parent set on the zone
+			// is used as the UPDATE zone as it stands, and the name one label up
+			// need not be a zone cut. tdns resolves it through the resolver.
+			if got := zd.GetParent(); got != "" {
+				t.Errorf("parent = %q, want it left unset for tdns to resolve", got)
+			}
+		})
+	}
+}
+
+// The identity zone becomes a parentsync child only when a scheme is configured
+// and the resolver is running: without it the parent and its DSYNC records
+// cannot be found, and the sync would wait for a readiness that never comes.
+func TestIdentityZoneParentSync(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name    string
+		schemes []string
+		active  *bool
+		want    bool
+	}{
+		{"schemes, imrengine active by default", []string{"notify"}, nil, true},
+		{"schemes, imrengine active", []string{"update"}, &on, true},
+		{"schemes, imrengine off", []string{"update"}, &off, false},
+		{"no schemes", nil, &on, false},
+	} {
+		conf := &Config{Config: &tdns.Config{}}
+		conf.Config.ParentSync.Schemes = tc.schemes
+		conf.Config.Imr.Active = tc.active
+		if got := conf.identityZoneParentSync(); got != tc.want {
+			t.Errorf("%s: identityZoneParentSync = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
 
 const (
+	keygenWarning = `"msg":"unknown keygen algorithm, using default"`
+
 	// The deprecated spelling, which tdns still accepts: the delegationsync:
 	// wrapper, here with keys beside the algorithm that tdns does not model.
 	deprecatedParentSyncConfig = `delegationsync:
@@ -76,11 +286,13 @@ const (
 `
 )
 
-// installParentSync runs a config file through the tdns steps that produce
-// ParentSyncConfig(): the daemon's raw loader, a decode on the yaml tags, the
-// fold of the deprecated delegationsync: wrapper and the install. The previous
-// blocks are put back when the test ends.
-func installParentSync(t *testing.T, config string) {
+// installParentSync runs a config file through the tdns steps that produce the
+// parentsync: block: the daemon's raw loader, a decode on the yaml tags, the
+// fold of the deprecated delegationsync: wrapper and the install that
+// ParentSyncConfig() reads. It returns the folded block, which the agent hands
+// AgentSig0KeyPrep as conf.Config.ParentSync. The previous blocks are put back
+// when the test ends.
+func installParentSync(t *testing.T, config string) tdns.ParentSyncConf {
 	t.Helper()
 	prevCS, prevPS := *tdns.ChildSyncConfig(), *tdns.ParentSyncConfig()
 	t.Cleanup(func() { _ = tdns.SetDelegationSyncConfig(prevCS, prevPS) })
@@ -107,6 +319,7 @@ func installParentSync(t *testing.T, config string) {
 	if err := tdns.SetDelegationSyncConfig(conf.ChildSync, conf.ParentSync); err != nil {
 		t.Fatalf("SetDelegationSyncConfig: %v", err)
 	}
+	return conf.ParentSync
 }
 
 // captureAgentLog points lgAgent at a buffer for the rest of the test.
@@ -119,13 +332,41 @@ func captureAgentLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// The agent's SIG(0) algorithm comes from the parentsync: block in either
-// spelling. It used to be read from agent.update.keygen.algorithm, which no
-// config writes, so every start warned and every configured algorithm was
-// ignored.
+// An absent algorithm is the default and not a problem; only a name that is
+// set and is not an algorithm is, and the warning names it.
+func TestKeygenAlgorithm(t *testing.T) {
+	logbuf := captureAgentLog(t)
+	for _, tc := range []struct {
+		algstr   string
+		want     uint8
+		wantWarn bool
+	}{
+		{"", dns.ED25519, false},
+		{"ED25519", dns.ED25519, false},
+		{"ecdsap256sha256", dns.ECDSAP256SHA256, false},
+		{"NOSUCHALG", dns.ED25519, true},
+	} {
+		logbuf.Reset()
+		if got := keygenAlgorithm(tc.algstr, dns.ED25519); got != tc.want {
+			t.Errorf("keygenAlgorithm(%q) = %s, want %s", tc.algstr, dns.AlgorithmToString[got], dns.AlgorithmToString[tc.want])
+		}
+		log := logbuf.String()
+		if warned := strings.Contains(log, keygenWarning); warned != tc.wantWarn {
+			t.Errorf("keygenAlgorithm(%q): warned = %v, want %v; log: %s", tc.algstr, warned, tc.wantWarn, log)
+		}
+		if tc.wantWarn && !strings.Contains(log, tc.algstr) {
+			t.Errorf("keygenAlgorithm(%q): the warning does not name the value; log: %s", tc.algstr, log)
+		}
+	}
+}
+
+// Leader election generates a zone's SIG(0) key where no ParentSyncConf is in
+// hand, and takes the algorithm from the installed parentsync: block in either
+// spelling. It used to read the viper key
+// delegationsync.child.update.keygen.algorithm, which a parentsync: block never
+// sets.
 func TestParentSyncKeygenAlgorithm(t *testing.T) {
 	logbuf := captureAgentLog(t)
-	const warning = `"msg":"unknown keygen algorithm, using default"`
 
 	for _, tc := range []struct {
 		name     string
@@ -145,75 +386,51 @@ func TestParentSyncKeygenAlgorithm(t *testing.T) {
 			if got := parentSyncKeygenAlgorithm(); got != tc.want {
 				t.Errorf("algorithm = %s, want %s", dns.AlgorithmToString[got], dns.AlgorithmToString[tc.want])
 			}
-			log := logbuf.String()
-			if warned := strings.Contains(log, warning); warned != tc.wantWarn {
-				t.Errorf("warned = %v, want %v; log: %s", warned, tc.wantWarn, log)
-			}
-			if tc.wantWarn && !strings.Contains(log, "NOSUCHALG") {
-				t.Errorf("the warning does not name the configured value; log: %s", log)
+			if warned := strings.Contains(logbuf.String(), keygenWarning); warned != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log: %s", warned, tc.wantWarn, logbuf.String())
 			}
 		})
 	}
 }
 
-// The configured algorithm reaches the key AgentSig0KeyPrep generates and the
-// KEY RR it publishes, not only the resolver.
+// The configured algorithm, in either spelling, is the algorithm of the key
+// AgentSig0KeyPrep generates and of the KEY it publishes. ED25519 is also the
+// default, so the cases use other algorithms.
 func TestAgentSig0KeyPrepUsesParentSyncAlgorithm(t *testing.T) {
-	installParentSync(t, fmt.Sprintf(parentSyncConfig, "ECDSAP256SHA256"))
+	for _, tc := range []struct {
+		name   string
+		zone   string
+		config string
+		want   uint8
+	}{
+		{"parentsync", "agent.keygen-parentsync.example.", fmt.Sprintf(parentSyncConfig, "ECDSAP256SHA256"), dns.ECDSAP256SHA256},
+		{"deprecated delegationsync.child", "agent.keygen-delegationsync.example.", fmt.Sprintf(deprecatedParentSyncConfig, "ECDSAP384SHA384"), dns.ECDSAP384SHA384},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := installParentSync(t, tc.config)
+			zd, kdb, q := newIdentityTestZone(t, tc.zone)
 
-	const zone = "agent.example."
-	name := "dns." + zone
-	kdb := newMPTestKeyDB(t)
-	kdb.UpdateQ = make(chan tdns.UpdateRequest, 1)
-	zd := &tdns.ZoneData{
-		ZoneName:  zone,
-		ZoneStore: tdns.MapZone,
-		ZoneType:  tdns.Primary,
-		Logger:    log.New(io.Discard, "", 0),
-		Options:   map[tdns.ZoneOption]bool{tdns.OptParentSync: true},
-		KeyDB:     kdb,
-	}
-	zonetext := fmt.Sprintf("%[1]s 3600 IN SOA ns1.%[1]s hostmaster.%[1]s 1 7200 1800 604800 7200\n"+
-		"%[1]s 3600 IN NS ns1.%[1]s\nns1.%[1]s 3600 IN A 192.0.2.1\n", zone)
-	if _, _, err := zd.ReadZoneData(zonetext, true); err != nil {
-		t.Fatalf("ReadZoneData: %v", err)
-	}
-	// What the refresh engine does after a first load: publish the snapshot
-	// GetOwner reads, which also marks the zone Ready.
-	zd.InstallInitialSnapshot()
-	t.Cleanup(zd.StopPublisher)
-	if !zd.Ready {
-		t.Fatal("zone not Ready after InstallInitialSnapshot")
-	}
+			if err := AgentSig0KeyPrep(zd, ps, NewHsyncDB(kdb)); err != nil {
+				t.Fatalf("AgentSig0KeyPrep: %v", err)
+			}
 
-	if err := AgentSig0KeyPrep(zd, name, NewHsyncDB(kdb)); err != nil {
-		t.Fatalf("AgentSig0KeyPrep: %v", err)
-	}
-
-	sak, err := kdb.GetSig0Keys(name, tdns.Sig0StateActive)
-	if err != nil {
-		t.Fatalf("GetSig0Keys: %v", err)
-	}
-	if len(sak.Keys) != 1 {
-		t.Fatalf("%d active SIG(0) keys for %s, want 1", len(sak.Keys), name)
-	}
-	if got := sak.Keys[0].KeyRR.Algorithm; got != dns.ECDSAP256SHA256 {
-		t.Errorf("stored key algorithm = %s, want ECDSAP256SHA256", dns.AlgorithmToString[got])
-	}
-
-	select {
-	case req := <-kdb.UpdateQ:
-		if len(req.Actions) != 1 {
-			t.Fatalf("published %d RRs, want the one KEY", len(req.Actions))
-		}
-		key, ok := req.Actions[0].(*dns.KEY)
-		if !ok {
-			t.Fatalf("published %T, want *dns.KEY", req.Actions[0])
-		}
-		if key.Algorithm != dns.ECDSAP256SHA256 {
-			t.Errorf("published KEY algorithm = %s, want ECDSAP256SHA256", dns.AlgorithmToString[key.Algorithm])
-		}
-	default:
-		t.Fatal("no KEY publication was queued")
+			sak, err := kdb.GetSig0Keys(zd.ZoneName, tdns.Sig0StateActive)
+			if err != nil {
+				t.Fatalf("GetSig0Keys(%s): %v", zd.ZoneName, err)
+			}
+			if len(sak.Keys) != 1 {
+				t.Fatalf("active SIG(0) keys for %s = %d, want 1", zd.ZoneName, len(sak.Keys))
+			}
+			if got := sak.Keys[0].KeyRR.Algorithm; got != tc.want {
+				t.Errorf("stored key algorithm = %s, want %s", dns.AlgorithmToString[got], dns.AlgorithmToString[tc.want])
+			}
+			keys := publishedKEYs(q)[zd.ZoneName]
+			if len(keys) != 1 {
+				t.Fatalf("KEY RRs posted at %s = %d, want 1", zd.ZoneName, len(keys))
+			}
+			if got := keys[0].Algorithm; got != tc.want {
+				t.Errorf("published KEY algorithm = %s, want %s", dns.AlgorithmToString[got], dns.AlgorithmToString[tc.want])
+			}
+		})
 	}
 }

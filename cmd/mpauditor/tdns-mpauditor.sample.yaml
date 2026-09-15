@@ -1,31 +1,29 @@
-# TDNS MP Auditor Configuration
+# TDNS MP Auditor Configuration (sample)
 #
-# The mpauditor binary provides a read-only multi-provider observer.
-# It participates in the HSYNC3 protocol — receiving BEATs, HELLOs,
-# PINGs, and SYNC/UPDATE/RFI messages, and joining gossip — but
-# never contributes zone data.
+# tdns-mpauditor is a read-only multi-provider observer. It takes part
+# in the HSYNC3 protocol — receiving BEATs, HELLOs, PINGs and
+# SYNC/UPDATE/RFI messages, and joining gossip — but never contributes
+# zone data. It has no combiner or signer of its own.
 #
-# This config is similar to tdns-mpagent.yaml, with role: auditor
-# in place of role: agent. The auditor does not communicate with a
-# combiner or signer as infra peers (it has no zone data to
-# contribute), so those sections are absent.
-
-include:
-   - mpauditor-zones.yaml
+# `tdns-mpcli configure` writes a config of this shape for a single-host
+# testbed. This sample documents the same keys plus optional ones, on
+# the same port layout: auditor DNS 8056, management API 7056, sync
+# API 9056; combiner DNS 8055.
 
 multi-provider:
    role:           auditor
-   identity:       audit.provider.example.
-   # Active transport mechanisms: "api" and/or "dns"
+   identity:       auditor.alpha.example.
    supported_mechanisms: [ dns ]
-   # Secure CHUNK comms with peers (optional)
    long_term_jose_priv_key: /etc/tdns/keys/auditor.jose.priv.json
-   # Authorized peer agents (also discovered via DNS HSYNC3)
+   # Agent identities authorized to communicate with the auditor, in
+   # addition to those found through HSYNC3.
    # authorized_peers:
-   #    - agent.provider1.example.
-   #    - agent.provider2.example.
+   #    - agent.alpha.example.
+   #    - agent.bravo.example.
+   # The auditor's identity zone, created and signed at startup.
    local:
-      notify:        []
+      nameservers:   [ ]
+      notify:        [ ]
    remote:
       LocateInterval: 60
    xfr:
@@ -37,27 +35,26 @@ multi-provider:
          auth:       []
    api:
       addresses:
-         publish:    [ 10.1.0.1 ]
-         listen:     [ 127.0.0.1:8999 ]
+         publish:    []
+         listen:     [ '127.0.0.1:9056' ]
       baseurl:       https://api.{TARGET}:{PORT}/api/v1
-      port:          8999
+      port:          9056
       certfile:      /etc/tdns/certs/auditor.crt
       keyfile:       /etc/tdns/certs/auditor.key
    dns:
       addresses:
-         publish:    [ 10.1.0.1 ]
-         listen:     [ 127.0.0.1:8998 ]
+         publish:    [ 198.51.100.1 ]
+         listen:     [ '0.0.0.0:8056' ]
       baseurl:       dns://dns.{TARGET}:{PORT}/
-      port:          8998
-      # chunk_mode:           edns0
-      # chunk_mode:           query
-      # chunk_query_endpoint: include
+      port:          8056
+      # chunk_mode:           edns0      # edns0 (default) | query
+      # chunk_query_endpoint: include    # include | none; needed with chunk_mode: query
    syncengine:
       intervals:
-         beatinterval:       30
-         helloretry:         15
-         discoveryretry:     15
-         reconcile:          60
+         beatinterval:        30
+         helloretry:          15
+         discoveryretry:      15
+         reconcile:           60
          hello_fast_attempts: 3
          hello_fast_interval: 2
 
@@ -65,42 +62,42 @@ service:
    name:           TDNS-MPAUDITOR
    verbose:        true
    debug:          false
-   # Optional clamps on the SOA Refresh value used for secondary
-   # zones. Both default in code (min 60s, max 8h) when unset.
-   # Primaries are not affected (they reload from file on SIGHUP).
-   # minrefresh:     60       # seconds, floor for SOA Refresh
-   # maxrefresh:     1800     # seconds, ceiling for SOA Refresh
 
-dnsengine:
-   addresses:      [ 127.0.0.1:5357 ]
+listeners:
+   addresses:      [ '0.0.0.0:8056' ]
+   transports:     [ do53 ]
 
 apiserver:
-   addresses:      [ 127.0.0.1:8987 ]
+   addresses:      [ '127.0.0.1:7056' ]
    apikey:         change-me-to-something-secret
-
-validator:
-   active:         true
-   verbose:        false
-   debug:          false
-   dnskey:
-      trusted:
-         file:     /etc/tdns/trust-anchors.yaml
-   sig0:
-      trusted:
-         file:     /etc/tdns/sig0-keys.yaml
-
-resolver:
-   address:        8.8.8.8:53
-
-db:
-   file:  /var/lib/tdns/tdns-mpauditor.db
+   certfile:       /etc/tdns/certs/auditor.crt
+   keyfile:        /etc/tdns/certs/auditor.key
 
 imrengine:
    active:         true
-   root-hints:     /etc/tdns/root.hints
-   addresses:      [ 127.0.0.1:5453 ]
-   transports:     [ do53 ]
-   require_dnssec_validation: true
+   require-dnssec-validation: true
+
+# The policy the auditor signs its identity zone with (testbed values;
+# see tdns-mpagent.sample.yaml).
+dnssec:
+   kasp:
+      propagation-delay:  5m
+   policies:
+      default:
+         algorithm:   ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:   6h
+            dnskey:    6h
+            ds:        6h
+
+db:
+   file:  /var/lib/tdns/tdns-mpauditor.db
 
 log:
    file:   /var/log/tdns/tdns-mpauditor.log
@@ -108,9 +105,6 @@ log:
    # subsystems:
    #    transport:  debug
    #    auditor:    info
-
-common:
-   command:  /usr/local/libexec/tdns-mpauditor
 
 audit:
    event_log:
@@ -120,7 +114,7 @@ audit:
    detector_interval:   30s    # how often detectors run (default: 30s)
    web:
       enabled:          false           # web dashboard off by default
-      addresses:        [ 127.0.0.1:8099 ]
+      addresses:        [ '127.0.0.1:8099' ]
       certfile:         ""              # set both cert and key for HTTPS
       keyfile:          ""              # empty cert+key disables HTTPS (lab only)
       auth:
@@ -128,7 +122,21 @@ audit:
          idle_timeout:  30m             # session expires after this much inactivity
          users_file:    /etc/tdns/tdns-auditor-users.yaml
          #   Manage with:
-         #     mpcli auditor web user create --name <name>
-         #     mpcli auditor web user list
-         #     mpcli auditor web user delete --name <name>
-         #     mpcli auditor web user reload   # apply changes to running auditor
+         #     tdns-mpcli auditor web user create --name <name>
+         #     tdns-mpcli auditor web user list
+         #     tdns-mpcli auditor web user delete --name <name>
+         #     tdns-mpcli auditor web user reload   # apply changes to running auditor
+
+# Zones can live in a separate file pulled in with a top-level
+# "include:" entry.
+templates:
+   - name:           mpzone
+     type:           secondary
+     store:          map
+     # The auditor observes each zone as a combiner holds it.
+     primaries:      [ { addr: '127.0.0.1:8055', key: NOKEY } ]
+     options:        [ multi-provider ]
+
+zones:
+   - name:           mptest.example.
+     template:       mpzone
