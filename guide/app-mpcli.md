@@ -81,7 +81,7 @@ tdns-mpcli p2-signer keystore dnssec list -z example.com.
 
 Rules: `role:` is one of `agent`, `combiner`, `signer`,
 `auditor`; the name must not be one of those four, nor
-`version`, `configure`, `help` or `completion`, nor an
+`version`, `configure`, `show-cmds`, `help` or `completion`, nor an
 earlier entry's name — a collision is reported on stderr
 and that entry is ignored, nothing else changes. Entries
 without `role:` behave exactly as before, so an existing
@@ -105,13 +105,23 @@ small set of role-agnostic commands.
 ```
 tdns-mpcli
 ├── configure               -- interactive bootstrap (see Quickstart)
-├── ping                    -- ping any one role (--role agent|signer|...)
+├── show-cmds               -- list every command below, one per line
 ├── version
 ├── agent     {...}         -- agent-targeted commands
 ├── signer    {...}         -- signer-targeted commands
 ├── combiner  {...}         -- combiner-targeted commands
 └── auditor   {...}         -- auditor-targeted commands (if running)
 ```
+
+`show-cmds` lists the whole subtree below the command it
+hangs off, one full invocation path per line, so the
+output is greppable and each line can be run as-is. It
+exists on every command with subcommands — `tdns-mpcli
+agent show-cmds`, `tdns-mpcli signer keystore show-cmds`
+— and is shown in `-h` at the top and under each role
+word. `--desc` adds each command's short description,
+`--depth N` stops N levels down, and `--all` includes
+hidden and deprecated commands. It needs no config file.
 
 The four role sub-trees share several common shapes:
 
