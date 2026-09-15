@@ -71,8 +71,11 @@ func TestTransitionTableMatchesTheDocument(t *testing.T) {
 		{"T3'", KeyStateMpdist, KeyStatePublished, EvDistributed},
 		{"T4", KeyStateMpdist, KeyStateMpdist, EvPending},
 		{"T5", KeyStateMpdist, KeyStateMpdist, EvRejected},
-		{"T6", KeyStateMpdist, KeyStateMpdist, CmdRetry},
+		{"T6", "*", "*", CmdRetry},
+		{"T6'", "*", "*", EvResend},
 		{"T7", KeyStateMpdist, KeyStateMpremove, CmdWithdraw},
+		{"T7'", KeyStatePublished, KeyStateMpremove, CmdWithdraw},
+		{"T7''", KeyStateStandby, KeyStateMpremove, CmdWithdraw},
 		{"T8", KeyStatePublished, KeyStateStandby, EvPropagated},
 		{"T9", KeyStateStandby, KeyStateActive, EvPromote},
 		{"T10", KeyStateActive, KeyStateRetired, EvSuccessorActive},
@@ -179,6 +182,29 @@ func TestTransitionGuards(t *testing.T) {
 	if st, _ := Next(KeyView{State: KeyStateMpdist}, EvRejected, two); st != KeyStateMpdist {
 		t.Errorf("rejected left mpdist for %s (P8)", st)
 	}
+	// a rejection sticks: an applied from everyone, the rejecter included,
+	// does not move the key
+	rej := ZoneView{OtherSigners: []string{"p2", "p3"}, Applied: map[string]bool{"p2": true, "p3": true}, Rejected: map[string]bool{"p3": true}, Now: now}
+	if st, _ := Next(k, EvApplied, rej); st != KeyStateMpdist {
+		t.Errorf("applied by all after a rejection: %s, want mpdist (P8)", st)
+	}
+	if st, tr := Next(k, EvResend, rej); st != KeyStateMpdist || tr != nil {
+		t.Errorf("a resend after a rejection: row %v, want none (the operator decides)", tr)
+	}
+	waiting := ZoneView{OtherSigners: []string{"p2", "p3"}, Applied: map[string]bool{"p2": true}, Now: now}
+	if st, tr := Next(k, EvResend, waiting); st != KeyStateMpdist || tr == nil || tr.ID != "T6'" {
+		t.Errorf("a resend with a confirmation outstanding: row %v, want T6'", tr)
+	}
+	// the operator's retry and withdraw reach a served key a joiner rejected
+	if st, tr := Next(KeyView{State: KeyStateStandby}, CmdRetry, rej); st != KeyStateStandby || tr == nil || tr.ID != "T6" {
+		t.Errorf("retry on a standby key with a record: row %v, want T6", tr)
+	}
+	if st, tr := Next(KeyView{State: KeyStateStandby}, CmdWithdraw, rej); st != KeyStateMpremove || tr == nil {
+		t.Errorf("withdraw of a standby key: %s via %v, want mpremove", st, tr)
+	}
+	if st, _ := Next(KeyView{State: KeyStateActive}, CmdWithdraw, rej); st != KeyStateActive {
+		t.Errorf("withdraw of an active key: %s, want unchanged (a rollover is the way)", st)
+	}
 
 	pub := KeyView{State: KeyStatePublished, SEP: true, PublishedAt: now.Add(-time.Hour)}
 	z := ZoneView{PropagationDelay: 30 * time.Minute, ServedDnskeyTTL: time.Hour, Now: now}
@@ -199,6 +225,17 @@ func TestTransitionGuards(t *testing.T) {
 	}
 	if st, _ := Next(KeyView{State: KeyStatePublished}, EvPromote, ZoneView{}); st != KeyStatePublished {
 		t.Errorf("a published key promoted: %s, want published (P1)", st)
+	}
+	// a signer that joined has not applied the standby yet: not promoted;
+	// nor when it rejected it
+	joiner := ZoneView{OtherSigners: []string{"p4"}, Applied: map[string]bool{}}
+	if st, _ := Next(sb, EvPromote, joiner); st != KeyStateStandby {
+		t.Errorf("promoted while a joiner's confirmation is outstanding: %s, want standby (P1)", st)
+	}
+	joiner.Applied["p4"] = true
+	joiner.Rejected = map[string]bool{"p4": true}
+	if st, _ := Next(sb, EvPromote, joiner); st != KeyStateStandby {
+		t.Errorf("promoted over a joiner's rejection: %s, want standby (P8)", st)
 	}
 
 	ret := KeyView{State: KeyStateRetired, SEP: true, RetiredAt: now.Add(-2 * time.Hour)}

@@ -1,6 +1,6 @@
 # The multi-provider key lifecycle as a transition table
 
-**Status:** proposal, under review (r1). The spec of S3's state machine, written before its code, as §3.4's table was for S1b (design `docs/2026-09-13-key-lifecycle-ownership-design.md`, test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md` T3.1).
+**Status:** proposal, under review (r4). The spec of S3's state machine, written before its code, as §3.4's table was for S1b (design `docs/2026-09-13-key-lifecycle-ownership-design.md`, test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md` T3.1).
 **Scope:** one provider's view of one owned zone: its own keys, and what it records of the other providers' keys. tdns keeps the keystore, signs from `sign=1`, serves `pub=1`, publishes CDS and pushes DS from the owner's DS intent (from S5). tdns-mp writes state and the three columns at every transition, through tdns's write function.
 
 ## Revision history
@@ -8,6 +8,9 @@
 | Rev | Date | Change |
 |---|---|---|
 | r1 | 2026-09-15 | First version, from design §3.4 (tdns-mp's states), §5, tdns-mp #57 and #58, and the machine tdns-mp runs through the hooks today (mpdist, mpremove, foreign, the propagation record). |
+| r2 | 2026-09-15 | T9's guard admits a same-algorithm rollover: the active key retires in the same step, so P5 holds after it. Found by the driver's rollover test. |
+| r3 | 2026-09-15 | From the harness's seeded runs: a rejection sticks to a distribution (G1, P8); E12, a resend timer, with T6' (P6 under message loss); E10 catches a joining signer up with a record it must confirm before the key may sign (T9), and its rejection of a served key is reported and left to the operator's retry or withdraw (T6, T7', T7''); the distributions in flight are persisted, so a restart resumes them and never re-sends a rejected one (T15). |
+| r4 | 2026-09-15 | From more seeded runs (T3.3): a rejection sticks to a served key's record too, so a standby key a signer that joined rejected is not promoted (T9, P1) until retried or withdrawn; a retry on a key being removed sends the removal again (T6); an answer to a key's distribution that arrives after its removal went out is stale and refused (§3, after the table). |
 
 ## 1. States and columns
 
@@ -40,6 +43,7 @@ The columns are the design's §3.4 table for tdns-mp's states. A ZSK has `ds=0` 
 | E9 | removal applied | every signing provider confirmed the removal |
 | E10 | signers changed | the zone's HSYNCPARAM signers set changed: a signing provider joined or left |
 | E11 | restart | the process starts and reloads the keystore |
+| E12 | resend | a distribution has waited for confirmations longer than the policy's resend interval |
 | C1 | retry | command: distribute a stuck key again |
 | C2 | withdraw | command: give up on a key |
 | C3 | rollover now / cancel | command |
@@ -52,23 +56,27 @@ Each row: the state a key is in, the event, the guard that must hold, the next s
 |---|---|---|---|---|---|
 | T1 | — | E1 mint | fewer keys of the role in created..standby than the policy's standby count, or a lifetime due, or no active key of the role | created (0,0,0) | key generated through tdns's keystore (`GenerateKeypair` with the state and columns named) |
 | T2 | created | E2 distributed | the key is in this provider's served RRset | mpdist (1,0,0) | the distribution recorded with the set of signing providers expected to confirm |
-| T3 | mpdist | E3 applied | every signing provider other than this one has confirmed applied (G1) | published (1,0,0) | `published_at` stamped |
+| T3 | mpdist | E3 applied | every signing provider other than this one has confirmed applied, and none rejected (G1) | published (1,0,0) | `published_at` stamped |
 | T3' | mpdist | E2 distributed | no other signing provider (G2, §5.5) | published (1,0,0) | as T3, at once |
 | T4 | mpdist | E3 with status pending | — | mpdist | nothing (P9) |
 | T5 | mpdist | E4 rejected | — | mpdist | the rejection recorded and surfaced: log, zone status, CLI (P8); no automatic retreat |
-| T6 | mpdist | C1 retry | — | mpdist | distributed again; the expected set recomputed from the current signers |
+| T6 | any key with a distribution in flight | C1 retry | — | same | a fresh distribution: the expected set recomputed from the current signers, the rejection forgotten. On a key already serving it is the record a signer that joined must confirm; on a key in mpremove it is the removal sent again |
+| T6' | any state with a distribution in flight | E12 resend | a confirmation is outstanding and nobody rejected | same | the distribution sent again (a removal, or a served key a joiner has yet to apply, included); the confirmations received stay |
 | T7 | mpdist | C2 withdraw | — | mpremove (0,0,0) | the removal distributed |
+| T7', T7'' | published, standby | C2 withdraw | — | mpremove (0,0,0) | a served key given up on, a signer that joined having rejected it, say: the removal distributed. An active key is not withdrawn; it is rolled |
 | T8 | published | E5 propagated | (G3) | standby (1,0, KSK 1) | a KSK's `ds=1` is what puts its DS into the zone's DS set (D4) |
-| T9 | standby | E6 promote | the key is standby (P1, P2); no other key of the role and algorithm is active on this provider, unless an algorithm rollover is in flight (P5) | active (1,1, KSK 1) | the previous active key of the role goes T10; resign asked of tdns |
+| T9 | standby | E6 promote | the key is standby (P1, P2); its distribution is complete: every signer expected has applied it (a signer that joined since included) and none rejected it; and no other key of the role and algorithm is active on this provider, or the promotion is a rollover (requested or due: the active key goes T10 in the same step), or an algorithm rollover is in flight (P5) | active (1,1, KSK 1) | the previous active key of the role goes T10; resign asked of tdns |
 | T10 | active | E6 promote (of its successor) | — | retired (1,0, KSK 1) | `retired_at` stamped |
 | T11 | retired (KSK) | E7 DS gone, after the owner set `ds=0` on entering retired | — | retired (1,0,0) | the DS withdrawal is the first thing that happens in retired: `ds=0` on entry (the DS set shrinks, the parent follows), then wait for E7 |
 | T12 | retired | E8 margin | a KSK's DS is gone (E7 seen) | mpremove (0,0,0) | tdns asked to strip the key's RRSIGs, then the removal distributed |
 | T13 | mpremove | E9 removal applied | every signing provider confirmed (G1) | removed (0,0,0) | the propagation record dropped |
 | T13' | mpremove | E2 | no other signing provider (G2) | removed | as T13, at once |
-| T14 | mpdist, mpremove | E10 signers changed | — | same | the expected set recomputed; T3/T13 re-evaluated against it |
-| T15 | any | E11 restart | — | same | in-flight distributions (mpdist, mpremove) re-sent; timers re-armed from the stamps (P4) |
+| T14 | mpdist, mpremove | E10 signers changed | — | same | the expected set recomputed; T3/T13 re-evaluated against it. A signer that joined gets this provider's served keys again (what a REPLACE of the local DNSKEYs carries) |
+| T15 | any | E11 restart | — | same | the distributions in flight are read back from `MPKeyDistribution` (who must confirm, who has, who rejected): what is outstanding is sent again, a rejected one waits for the operator (P8); timers re-armed from the row stamps (P4) |
 | T16 | — | C3 rollover now | a standby key of the role exists | — | E6 for that key |
 | T17 | — | C3 cancel | a rollover is requested and not yet fired | — | the request cleared |
+
+A confirmation answers the distribution in flight for the key, and one kind of distribution is in flight at a time: the key's, or its removal. An answer to the key's distribution that arrives after its removal went out (a slow signer, a duplicate on the wire) is stale: refused, the removal's record untouched. A rejection on a served key's record stays on it as it does in mpdist (G1): the record is not dropped when everyone else applied, so T9 does not promote a standby key a signer that joined rejected, and T6' does not resend it; the operator's retry (T6) or withdraw (T7'') resolves it.
 
 Foreign rows are not driven by this table. They follow the other providers' distributions: a DNSKEY arriving with its provider's state (#58) is upserted as `foreign` with `pub=1`, `sign=0`, and `ds` per §1; a DNSKEY the provider no longer sends is deleted; a foreign row whose provider stops signing the zone (E10) gets `ds=0`.
 
@@ -81,9 +89,9 @@ Foreign rows are not driven by this table. They follow the other providers' dist
 | P3 a foreign KSK has `ds=1` only if its provider signs and holds it standby, active or retired-not-withdrawn | §1's foreign row, from the provider's state on the wire (#58); NULL when the provider does not say |
 | P4 no key lost | every state has a way out; T15 re-sends what was in flight |
 | P5 one `sign=1` per role and algorithm per provider, except during an algorithm rollover | T9's guard |
-| P6 a started rollover completes within its policy's bound under fair delivery | every wait is a bounded timer (T8, T12) or a confirmation that fair delivery brings (T3, T13) |
+| P6 a started rollover completes within its policy's bound under fair delivery | every wait is a bounded timer (T8, T12) or a confirmation that fair delivery brings (T3, T13); a lost distribution is sent again on the resend timer (T6') |
 | P7 no other signing provider: mpdist → published at once | T3', T13' |
-| P8 a rejected key stays in mpdist, is reported, never promoted | T5; no row leaves mpdist on E4 |
+| P8 a rejected key stays in mpdist, is reported, never promoted | T5; no row leaves mpdist on E4; the rejection sticks to the distribution (G1), so a later applied from the rejecter does not lift it, only C1 |
 | P9 pending never counts as applied | T4 |
 
 ## 5. What this replaces
@@ -106,3 +114,5 @@ Foreign rows are not driven by this table. They follow the other providers' dist
 | O1 | Where does the DNSKEY TTL for E5 come from on a multi-provider zone: this provider's served TTL, or the largest among the providers? | the largest the inventory reports; this provider's until the others report (#58) |
 | O2 | E7 on a zone whose DS the parent never had (the zone is being signed for the first time): wait forever? | E7 is satisfied at once when the parent serves no DS for the key |
 | O3 | Does a signing provider that leaves (E10) while a key is in mpremove still owe a confirmation? | no: the expected set is the current signers |
+| O4 | An algorithm rollover by the machine: T9's guard admits a key of the policy's new algorithm beside the active one (P5's exception), but no row mints one, and T10 retires the old key as soon as the new one signs, which is not the conservative order (new DS at the parent before the old signatures go). S3's scenarios (test plan T3.4) do not ask for one; the owner's policy binding refuses an algorithm change so nothing pretends. | a later step: T1 mints a key of the policy's algorithm when the active one differs; T10 waits for the new KSK's DS at the parent; the old algorithm's keys withdraw together |
+| O5 | The confirmations arrive aggregated: the agent tracks a distribution per remote agent and sends one "propagated" once every one confirmed (tdns-mp #57), so the signer's engine records every other signer as applied on that one signal, and a rejection as one from "peers". The machine wants them per provider (E3 per signer). | S3 fixes the agent's count (only a final applied status counts, #57 item 1); per-provider confirmations come with the DNSKEY distribution carrying provider and state (#58, S5) |

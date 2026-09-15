@@ -220,6 +220,23 @@ var HsyncTables = map[string]string{
 	// where the signer's keys live: whether the peers have confirmed a key's
 	// propagation, which gates its promotion to active. Keyed by zone and
 	// key id like the keystore row it describes.
+	// MPKeyDistribution is a key's distribution in flight, kept by the key
+	// lifecycle driver (mp_key_lifecycle_driver.go): who must confirm, who
+	// has, and whether anyone rejected. A restart resumes from it: what is
+	// outstanding is sent again, a rejected distribution waits for the
+	// operator. Comma-separated provider lists.
+	"MPKeyDistribution": `CREATE TABLE IF NOT EXISTS 'MPKeyDistribution' (
+		zonename  TEXT NOT NULL,
+		keyid     INTEGER NOT NULL,
+		removal   INTEGER DEFAULT 0,
+		sent_at   TEXT DEFAULT '',
+		expected  TEXT DEFAULT '',
+		applied   TEXT DEFAULT '',
+		pending   TEXT DEFAULT '',
+		rejected  TEXT DEFAULT '',
+		reason    TEXT DEFAULT '',
+		UNIQUE (zonename, keyid)
+	)`,
 	"MPKeyPropagation": `CREATE TABLE IF NOT EXISTS 'MPKeyPropagation' (
 		zonename      TEXT NOT NULL,
 		keyid         INTEGER NOT NULL,

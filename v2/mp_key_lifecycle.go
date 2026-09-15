@@ -48,6 +48,7 @@ const (
 	EvRemovalApplied  KeyEvent = "removal-applied"  // E9
 	EvSignersChanged  KeyEvent = "signers-changed"  // E10
 	EvRestart         KeyEvent = "restart"          // E11
+	EvResend          KeyEvent = "resend"           // E12: a distribution unconfirmed for too long
 	CmdRetry          KeyEvent = "retry"            // C1
 	CmdWithdraw       KeyEvent = "withdraw"         // C2
 )
@@ -126,8 +127,11 @@ type ZoneView struct {
 	ServedDnskeyTTL  time.Duration
 	Margin           time.Duration
 	// ActiveOfRoleAndAlg reports another active key of the key's role and
-	// algorithm on this provider; AlgRollInFlight lifts P5's one-per-role rule.
+	// algorithm on this provider. RolloverRequested says the promotion is a
+	// rollover, requested or due: the active key retires in the same step.
+	// AlgRollInFlight lifts P5's one-per-role rule for the roll's duration.
 	ActiveOfRoleAndAlg bool
+	RolloverRequested  bool
 	AlgRollInFlight    bool
 	// StandbyCount is the policy's standby count for the key's role, and
 	// InPipeline how many keys of the role are in created..standby.
@@ -139,14 +143,49 @@ type ZoneView struct {
 }
 
 // allOtherSignersApplied is G1: every other signing provider has sent a
-// final confirmation that it applied the key.
+// final confirmation that it applied the key, and none rejected it. A
+// rejection sticks to the distribution: an "applied" from the same
+// provider for the same distribution does not lift it, only a retry (C1)
+// starts a distribution without it.
 func allOtherSignersApplied(z ZoneView) bool {
+	if len(z.Rejected) > 0 {
+		return false
+	}
 	for _, p := range z.OtherSigners {
 		if !z.Applied[p] {
 			return false
 		}
 	}
 	return true
+}
+
+// distributionIncomplete: the key's distribution has not been applied by
+// every signer expected, or someone rejected it. What keeps a key from
+// signing (T9): a rejection is never promoted over (P8).
+func distributionIncomplete(z ZoneView) bool {
+	if len(z.Rejected) > 0 {
+		return true
+	}
+	for _, p := range z.OtherSigners {
+		if !z.Applied[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmationsOutstanding: a signer expected to confirm has not, and
+// nobody rejected (a rejection waits for the operator, not a resend).
+func confirmationsOutstanding(z ZoneView) bool {
+	if len(z.Rejected) > 0 {
+		return false
+	}
+	for _, p := range z.OtherSigners {
+		if !z.Applied[p] {
+			return true
+		}
+	}
+	return false
 }
 
 // Transition is one row of the table: from state, on event, if guard, to
@@ -171,14 +210,17 @@ var KeyLifecycleTable = []Transition{
 	{"T3'", KeyStateMpdist, EvDistributed, func(k KeyView, z ZoneView) bool { return len(z.OtherSigners) == 0 }, KeyStatePublished, "no other signing provider: at once"},
 	{"T4", KeyStateMpdist, EvPending, nil, KeyStateMpdist, "nothing: pending is not applied (P9)"},
 	{"T5", KeyStateMpdist, EvRejected, nil, KeyStateMpdist, "the rejection recorded and surfaced; no automatic retreat (P8)"},
-	{"T6", KeyStateMpdist, CmdRetry, nil, KeyStateMpdist, "distributed again; the expected set recomputed"},
+	{"T6", "*", CmdRetry, nil, "*", "a fresh distribution: the expected set recomputed from the current signers, the rejection forgotten"},
+	{"T6'", "*", EvResend, func(k KeyView, z ZoneView) bool { return confirmationsOutstanding(z) }, "*", "a distribution in flight sent again, whatever the key's state; the confirmations received stay"},
 	{"T7", KeyStateMpdist, CmdWithdraw, nil, KeyStateMpremove, "the removal distributed"},
+	{"T7'", KeyStatePublished, CmdWithdraw, nil, KeyStateMpremove, "a served key given up on: the removal distributed"},
+	{"T7''", KeyStateStandby, CmdWithdraw, nil, KeyStateMpremove, "as T7'"},
 	{"T8", KeyStatePublished, EvPropagated, func(k KeyView, z ZoneView) bool {
 		return !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
 	}, KeyStateStandby, "a KSK's ds=1 puts its DS into the zone's DS set"},
 	{"T9", KeyStateStandby, EvPromote, func(k KeyView, z ZoneView) bool {
-		return !z.ActiveOfRoleAndAlg || z.AlgRollInFlight
-	}, KeyStateActive, "the previous active key of the role retires; resign asked of tdns"},
+		return (!z.ActiveOfRoleAndAlg || z.RolloverRequested || z.AlgRollInFlight) && !distributionIncomplete(z)
+	}, KeyStateActive, "the previous active key of the role retires in the same step; resign asked of tdns"},
 	{"T10", KeyStateActive, EvSuccessorActive, nil, KeyStateRetired, "retired_at stamped; a KSK's ds withdrawal starts: ds=0"},
 	{"T11", KeyStateRetired, EvDSGone, nil, KeyStateRetired, "the parent no longer serves the DS; noted for T12"},
 	{"T12", KeyStateRetired, EvMargin, func(k KeyView, z ZoneView) bool {
@@ -189,7 +231,7 @@ var KeyLifecycleTable = []Transition{
 	}, KeyStateMpremove, "tdns asked to strip the key's RRSIGs; the removal distributed"},
 	{"T13", KeyStateMpremove, EvRemovalApplied, func(k KeyView, z ZoneView) bool { return allOtherSignersApplied(z) }, KeyStateRemoved, "the propagation record dropped"},
 	{"T13'", KeyStateMpremove, EvDistributed, func(k KeyView, z ZoneView) bool { return len(z.OtherSigners) == 0 }, KeyStateRemoved, "no other signing provider: at once"},
-	{"T14a", KeyStateMpdist, EvSignersChanged, nil, KeyStateMpdist, "the expected set recomputed; T3 re-evaluated"},
+	{"T14a", KeyStateMpdist, EvSignersChanged, nil, KeyStateMpdist, "the expected set recomputed; T3 re-evaluated; a signer that joined gets this provider's served keys again"},
 	{"T14b", KeyStateMpremove, EvSignersChanged, nil, KeyStateMpremove, "the expected set recomputed; T13 re-evaluated"},
 	{"T15", "*", EvRestart, nil, "*", "in-flight distributions re-sent; timers re-armed from the stamps (P4)"},
 }
