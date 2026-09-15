@@ -159,6 +159,8 @@ github.com/johanix/tdns/v2 v2.0.0-20260914193251-b37e32ab9087 h1:f4IA7BireG6/SKz
 github.com/johanix/tdns/v2 v2.0.0-20260914193251-b37e32ab9087/go.mod h1:OfjEMkZvXjR5at7MqtglNiHHikIXxSAQ2paRtwnh/4k=
 github.com/johanix/tdns/v2 v2.0.0-20260915163423-49df2c3a9228 h1:/65i3/C85/+vHs0OtEKLUpTp2LsBy9WmWsCysTHSby4=
 github.com/johanix/tdns/v2 v2.0.0-20260915163423-49df2c3a9228/go.mod h1:OfjEMkZvXjR5at7MqtglNiHHikIXxSAQ2paRtwnh/4k=
+github.com/johanix/tdns/v2 v2.0.0-20260915165529-5971d64b414d h1:ZNmaZsrNIejqR2DFQ14cLXvtr+v1K/I8HiXmTrd38cc=
+github.com/johanix/tdns/v2 v2.0.0-20260915165529-5971d64b414d/go.mod h1:OfjEMkZvXjR5at7MqtglNiHHikIXxSAQ2paRtwnh/4k=
 github.com/johanix/tdns/v2/cache v0.0.0-20260914153052-2af063dcb365 h1:1hit6v054OFBrYjtjMmdFHhRRT5V5i61pAQsETwO4ac=
 github.com/johanix/tdns/v2/cache v0.0.0-20260914153052-2af063dcb365/go.mod h1:RceAj+WkiM1eltthyx8W+9plAxfhGCCsbbyt9BTJk7w=
 github.com/johanix/tdns/v2/cache v0.0.0-20260914181710-bb6f815ccd53 h1:pjqcjNw6wye8w/5nWKxKSBZuwSUVDSj5P4sD7YLeCDg=
@@ -169,6 +171,8 @@ github.com/johanix/tdns/v2/cache v0.0.0-20260914193251-b37e32ab9087 h1:QM897Mlan
 github.com/johanix/tdns/v2/cache v0.0.0-20260914193251-b37e32ab9087/go.mod h1:RceAj+WkiM1eltthyx8W+9plAxfhGCCsbbyt9BTJk7w=
 github.com/johanix/tdns/v2/cache v0.0.0-20260915163423-49df2c3a9228 h1:wpPz0IKy3WcC+IhWJy2JxZR9jwVjfsrggrHMsYQzBOo=
 github.com/johanix/tdns/v2/cache v0.0.0-20260915163423-49df2c3a9228/go.mod h1:RceAj+WkiM1eltthyx8W+9plAxfhGCCsbbyt9BTJk7w=
+github.com/johanix/tdns/v2/cache v0.0.0-20260915165529-5971d64b414d h1:mSGTMSNiNxzJHisdP9m7FKDH0h6oIRp1CcAENHPLmno=
+github.com/johanix/tdns/v2/cache v0.0.0-20260915165529-5971d64b414d/go.mod h1:RceAj+WkiM1eltthyx8W+9plAxfhGCCsbbyt9BTJk7w=
 github.com/johanix/tdns/v2/core v0.0.0-20260914153052-2af063dcb365 h1:vJAxVWO8p1LvNtO5n33BDZWS2MfrkZn2wwus+4/tro4=
 github.com/johanix/tdns/v2/core v0.0.0-20260914153052-2af063dcb365/go.mod h1:zE18P/6FjVjdIl43gaqH6dVNaIZAkQMiW9N1lO7JtEg=
 github.com/johanix/tdns/v2/core v0.0.0-20260914181710-bb6f815ccd53 h1:thorniQvFBvevLFM963m/sJWXllJIwcW2MXAZl83byw=
@@ -179,6 +183,8 @@ github.com/johanix/tdns/v2/core v0.0.0-20260914193251-b37e32ab9087 h1:dkx3vZm4nU
 github.com/johanix/tdns/v2/core v0.0.0-20260914193251-b37e32ab9087/go.mod h1:zE18P/6FjVjdIl43gaqH6dVNaIZAkQMiW9N1lO7JtEg=
 github.com/johanix/tdns/v2/core v0.0.0-20260915163423-49df2c3a9228 h1:vb1ULt4bE/bb0iNi9QTBCjG0LbExyQ+dyy9SeTpBq/c=
 github.com/johanix/tdns/v2/core v0.0.0-20260915163423-49df2c3a9228/go.mod h1:zE18P/6FjVjdIl43gaqH6dVNaIZAkQMiW9N1lO7JtEg=
+github.com/johanix/tdns/v2/core v0.0.0-20260915165529-5971d64b414d h1:c67omCgxNpHrVykIAyxVY4Xr09W0eRziiuybd1jOUVs=
+github.com/johanix/tdns/v2/core v0.0.0-20260915165529-5971d64b414d/go.mod h1:zE18P/6FjVjdIl43gaqH6dVNaIZAkQMiW9N1lO7JtEg=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20260914153052-2af063dcb365 h1:4iCz6fdoyTyN+xtu/usaBJPMee4fc/lyAL1bcSRlXcY=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20260914153052-2af063dcb365/go.mod h1:oWrfluZXxftvv6KegytlvA734K91PCQqrCKKNasVXOc=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20260914181710-bb6f815ccd53 h1:zTqQ8m8nGsZ6DDNgmGITcpDU6StUfj5X2KgFhfNHlAU=
@@ -189,6 +195,8 @@ github.com/johanix/tdns/v2/edns0 v0.0.0-20260914193251-b37e32ab9087 h1:U1liapHXV
 github.com/johanix/tdns/v2/edns0 v0.0.0-20260914193251-b37e32ab9087/go.mod h1:oWrfluZXxftvv6KegytlvA734K91PCQqrCKKNasVXOc=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20260915163423-49df2c3a9228 h1:Fm9IKFBQmR0O6ytrdTN62OKVNBs1VokMlS7IPhzL5nM=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20260915163423-49df2c3a9228/go.mod h1:oWrfluZXxftvv6KegytlvA734K91PCQqrCKKNasVXOc=
+github.com/johanix/tdns/v2/edns0 v0.0.0-20260915165529-5971d64b414d h1:ZIRIXtYX3ywzDRGaHPuZDq6MO9TbuX9KJqicCLg+ZTQ=
+github.com/johanix/tdns/v2/edns0 v0.0.0-20260915165529-5971d64b414d/go.mod h1:oWrfluZXxftvv6KegytlvA734K91PCQqrCKKNasVXOc=
 github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1:6v2b51hI/fHJwM22ozAgKL4VKDeJcHhJFhtBdhmNjmU=
 github.com/jstemmer/go-junit-report v0.9.1/go.mod h1:Brl9GWCQeLvo8nXZwPNNblvFj/XSXhF0NWZEnDohbsk=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
