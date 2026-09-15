@@ -77,8 +77,15 @@ type MultiProviderConf struct {
 	// === Signer-specific fields ===
 
 	// SignerOptions: list of signer-specific option strings parsed at startup.
-	SignerOptionsStrs []string              `yaml:"signer-options" mapstructure:"signer-options"`
-	SignerOptions     map[SignerOption]bool `yaml:"-" mapstructure:"-"`
+	// KeyLifecycleZones are the multi-provider zones whose key lifecycle
+	// tdns-mp's own state machine runs (key lifecycle ownership, S3), taken
+	// zone by zone; the others keep tdns's machine through the hooks.
+	// KeyLifecycleResend is how long a key distribution may wait for the
+	// peers' confirmations before it is sent again (default 10m).
+	KeyLifecycleZones  []string              `yaml:"key-lifecycle-zones" mapstructure:"key-lifecycle-zones"`
+	KeyLifecycleResend string                `yaml:"key-lifecycle-resend" mapstructure:"key-lifecycle-resend"`
+	SignerOptionsStrs  []string              `yaml:"signer-options" mapstructure:"signer-options"`
+	SignerOptions      map[SignerOption]bool `yaml:"-" mapstructure:"-"`
 
 	// === Agent-specific fields ===
 

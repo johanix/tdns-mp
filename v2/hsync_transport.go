@@ -2078,18 +2078,31 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	agentID := AgentId(source)
 
 	// Check for rejection
-	if len(rejectedItems) > 0 {
+	if len(rejectedItems) > 0 || status == transport.ConfirmRejected.String() {
 		prop.Rejected = true
 		if prop.RejectionMsg == "" {
-			prop.RejectionMsg = rejectedItems[0].Reason
+			if len(rejectedItems) > 0 {
+				prop.RejectionMsg = rejectedItems[0].Reason
+			} else {
+				prop.RejectionMsg = "rejected by " + source
+			}
 		}
 		lgTransport.Warn("DNSKEY confirmation rejected", "zone", prop.Zone, "distributionID", distID, "agent", source, "reason", prop.RejectionMsg)
 	}
 
-	// Mark this agent as confirmed
+	// An agent counts as confirmed only on the final status that means it
+	// applied the distribution (tdns-mp #57): the immediate "pending" of a
+	// relaying agent, and "partial", "failed" and "ignored", are not that;
+	// the key waits (the signer's resend timer sends again). A rejection
+	// is counted so the signer hears it once everyone answered.
 	if _, expected := prop.ExpectedAgents[agentID]; expected {
-		prop.ExpectedAgents[agentID] = true
-		lgTransport.Info("DNSKEY confirmation received", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status)
+		switch status {
+		case transport.ConfirmSuccess.String(), transport.ConfirmRejected.String():
+			prop.ExpectedAgents[agentID] = true
+			lgTransport.Info("DNSKEY confirmation received", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status)
+		default:
+			lgTransport.Info("DNSKEY confirmation not final; still waiting", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status)
+		}
 	}
 
 	// Check if all agents have confirmed

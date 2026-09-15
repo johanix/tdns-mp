@@ -28,6 +28,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// keystore and key-state worker run the multi-provider key protocol for
 	// zones that carry the option (signer_keydb.go).
 	RegisterMPKeyLifecycleHooks(conf)
+	// The key lifecycle owner, beside the hooks: it owns nothing until the
+	// signer takes the zones its config names (key-lifecycle-zones), and a
+	// zone it does not own keeps the hooks (the rollout, zone by zone).
+	conf.InternalMp.KeyLifecycleOwner = RegisterMPKeyLifecycleOwner(conf)
+	conf.InternalMp.KeyLifecycle = NewKeyLifecycleEngine(conf, conf.InternalMp.KeyLifecycleOwner)
 
 	// Register MP zone option handler before ParseZones runs inside MainInit.
 	tdns.RegisterZoneOptionHandler(tdns.OptMultiProvider, func(zname string, options map[tdns.ZoneOption]bool) {
