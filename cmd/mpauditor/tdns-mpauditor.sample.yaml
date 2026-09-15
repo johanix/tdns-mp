@@ -24,8 +24,6 @@ multi-provider:
    local:
       nameservers:   [ ]
       notify:        [ ]
-   remote:
-      LocateInterval: 60
    xfr:
       outgoing:
          addresses:  []
