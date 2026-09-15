@@ -203,6 +203,17 @@ func WireInstanceTrees(root *cobra.Command, entries []instanceEntry) []string {
 				e.Name, existing.Name()))
 			continue
 		}
+		// show-cmds is attached AFTER instance wiring -- it walks the tree and
+		// gives every node with children its own copy, so it has to see the
+		// instance trees. That means findChild above cannot see it, and an
+		// instance called "show-cmds" would collide with a command that does
+		// not exist yet. Reserve the name explicitly.
+		if e.Name == tdnscli.ShowCmdsName {
+			warnings = append(warnings, fmt.Sprintf(
+				"apiservers entry %q: name is reserved -- entry ignored (choose another name)",
+				e.Name))
+			continue
+		}
 
 		// The instance is addressed by its own name at both levels: the
 		// command word IS the role IS the clientKey. One name for the
