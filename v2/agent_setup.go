@@ -95,6 +95,23 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
 	}
 
+	// With a parentsync: block configured the identity zone is a child of
+	// its parent like any other zone this daemon is primary for: it
+	// publishes CDS from its keys and hands its DS to the parent through the
+	// schemes the parent advertises (DSYNC). Without one it stays an island
+	// whose TLSA no validating resolver will trust. Finding the parent and its
+	// DSYNC records takes the resolver: with imrengine off the sync could never
+	// start, so the zone stays an island and the log says why.
+	if conf.identityZoneParentSync() {
+		zd.Options[tdns.OptParentSync] = true
+		if err := zd.PublishCdsRRs(); err != nil {
+			lgAgent.Warn("identity zone: could not publish CDS", "zone", zonename, "err", err)
+		}
+		go conf.syncIdentityDelegation(ctx, zd)
+	} else if len(conf.Config.ParentSync.Schemes) > 0 {
+		lgAgent.Warn("identity zone: parentsync is configured but imrengine is not active; the zone's delegation will not be synced", "zone", zonename)
+	}
+
 	// Renewal. tdns registers a zone for periodic re-signing when its config
 	// carries a signing option; this zone has none (it is built here), so it
 	// is put on the resigner's watchlist explicitly. The engine that reads
@@ -219,12 +236,6 @@ func (conf *Config) publishDnsTransport(zd *tdns.ZoneData) error {
 		}
 	}
 	lgAgent.Debug("published address records", "agent", identity)
-
-	err = AgentSig0KeyPrep(zd, host, NewHsyncDB(zd.KeyDB))
-	if err != nil {
-		return fmt.Errorf("publishDnsTransport: failed to publish KEY record: %v", err)
-	}
-	lgAgent.Debug("published KEY record", "agent", identity)
 
 	publishName := "dns." + identity
 	err = AgentJWKKeyPrep(zd, publishName, NewHsyncDB(zd.KeyDB), mp)
@@ -381,14 +392,43 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	return nil
 }
 
-func AgentSig0KeyPrep(zd *tdns.ZoneData, name string, hdb *HsyncDB) error {
-	alg, err := parseKeygenAlgorithm("agent.update.keygen.algorithm", dns.ED25519)
-	if err != nil {
-		lgAgent.Error("parseKeygenAlgorithm failed", "zone", zd.ZoneName, "err", err)
+// AgentSig0KeyPrep makes sure an identity zone holds the SIG(0) key that the
+// DSYNC UPDATE scheme signs with, and publishes its KEY. The key is named after
+// the zone: SendDelegationUpdate and the parent-side bootstrap both look it up
+// under the zone name. It is prepared only for a parentsync child that may use
+// UPDATE; any other zone has no use for it. The algorithm is
+// parentsync.update.keygen.algorithm, the one DelegationSyncSetup generates with.
+func AgentSig0KeyPrep(zd *tdns.ZoneData, ps tdns.ParentSyncConf, hdb *HsyncDB) error {
+	if !identityZoneUsesUpdate(zd, ps.Schemes) {
+		return nil
+	}
+	alg := keygenAlgorithm(ps.Update.Keygen.Algorithm, dns.ED25519)
+	if err := zd.Sig0KeyPreparation(zd.ZoneName, alg, hdb.KeyDB); err != nil {
 		return err
 	}
+	lgAgent.Debug("identity zone: SIG(0) key prepared", "zone", zd.ZoneName)
+	return nil
+}
 
-	return zd.Sig0KeyPreparation(name, alg, hdb.KeyDB)
+// identityZoneUsesUpdate reports whether the zone is a parentsync child that
+// may reach its parent through the UPDATE scheme, and so needs its SIG(0) key.
+func identityZoneUsesUpdate(zd *tdns.ZoneData, schemes []string) bool {
+	return zd.Options[tdns.OptParentSync] && slices.ContainsFunc(schemes, func(s string) bool {
+		return strings.EqualFold(s, "update")
+	})
+}
+
+// keygenAlgorithm maps a configured algorithm name to its number. An empty name
+// means the default; an unknown one is reported and replaced by it.
+func keygenAlgorithm(name string, defaultAlg uint8) uint8 {
+	if name == "" {
+		return defaultAlg
+	}
+	if alg := dns.StringToAlgorithm[strings.ToUpper(name)]; alg != 0 {
+		return alg
+	}
+	lgAgent.Warn("unknown keygen algorithm, using default", "algorithm", name, "default", dns.AlgorithmToString[defaultAlg])
+	return defaultAlg
 }
 
 // parseKeygenAlgorithm reads a DNS algorithm from a viper config key.
@@ -528,4 +568,91 @@ func hostPrefix(addr string) string {
 		return ip.String() + "/32"
 	}
 	return ip.String() + "/128"
+}
+
+// identityZoneParentSync reports whether the identity zone acts as a
+// parentsync child: a parentsync: block names at least one scheme, and the
+// resolver that finds the parent and its DSYNC records is running.
+// syncIdentityDelegation waits for that resolver, so starting it without one
+// would wait for a readiness that is never published.
+func (conf *Config) identityZoneParentSync() bool {
+	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
+	return len(conf.Config.ParentSync.Schemes) > 0 && imrActive
+}
+
+// syncIdentityDelegation brings the parent's DS for the identity zone in
+// line with the zone's keys through the schemes the parent advertises. It
+// waits for the resolver the syncher discovers the parent's DSYNC records
+// with, prepares the zone's SIG(0) key, then asks for an explicit sync and
+// repeats until the parent agrees or the attempts run out: right after a
+// cold start the parent may not yet see the zone at its nameservers and
+// refuses a DS it cannot check. After the last attempt it gives up. tdns's
+// zone updater re-queues a sync only after an update from outside the
+// daemon, not after the daemon's own key changes, so the delegation then
+// stays as it is until the next start. The parent is not set here: tdns
+// resolves it through the resolver as for any other zone
+// (AnalyseZoneDelegation, via ResolveParentVia), because the name one label
+// up need not be a zone cut and a parent set on the zone is used as the
+// UPDATE zone as it stands.
+func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
+	if !conf.Config.Internal.ImrReady.Wait(ctx) {
+		return
+	}
+	// The zone's SIG(0) key is prepared here, before the setup is queued. The
+	// syncher is already running when the identity zone is set up, so a key
+	// prepared elsewhere while a queued setup runs could leave both generating
+	// one. In this order the setup finds the key and only bootstraps it.
+	if err := AgentSig0KeyPrep(zd, conf.Config.ParentSync, NewHsyncDB(zd.KeyDB)); err != nil {
+		lgAgent.Warn("identity zone: could not prepare the SIG(0) key; the delegation sync setup tries again", "zone", zd.ZoneName, "err", err)
+	}
+	// The UPDATE scheme signs with the zone's own SIG(0) key, and a parent
+	// accepts that key only after the bootstrap in DelegationSyncSetup. tdns
+	// queues that setup for the zones it loads (SetupZoneSync), but not for an
+	// identity zone: it is not multi-provider, and this daemon builds it
+	// itself. So it is queued here, ahead of the first sync; the syncher
+	// handles requests in order.
+	if identityZoneUsesUpdate(zd, conf.Config.ParentSync.Schemes) {
+		select {
+		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
+			Command: "DELEGATION-SYNC-SETUP", ZoneName: zd.ZoneName, ZoneData: zd}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	const attempts = 12
+	const interval = 15 * time.Second
+	for attempt := 1; attempt <= attempts; attempt++ {
+		resp := make(chan tdns.DelegationSyncStatus, 1)
+		select {
+		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
+			Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd, Response: resp}:
+		case <-ctx.Done():
+			return
+		}
+		var st tdns.DelegationSyncStatus
+		select {
+		case st = <-resp:
+		case <-time.After(time.Minute):
+			lgAgent.Warn("identity zone: no answer to the delegation sync request", "zone", zd.ZoneName, "attempt", attempt)
+		case <-ctx.Done():
+			return
+		}
+		switch {
+		case st.InSync:
+			lgAgent.Info("identity zone: delegation in sync with the parent", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt)
+			return
+		case !st.Error && st.Rcode == dns.RcodeSuccess && st.Msg != "":
+			// Sent and accepted; the next round's analysis confirms it.
+			lgAgent.Info("identity zone: delegation sent to the parent", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "msg", st.Msg)
+		default:
+			lgAgent.Warn("identity zone: delegation sync not accepted yet", "zone", zd.ZoneName, "parent", zd.GetParent(),
+				"attempt", attempt, "rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "msg", st.Msg)
+		}
+		select {
+		case <-time.After(interval):
+		case <-ctx.Done():
+			return
+		}
+	}
+	lgAgent.Error("identity zone: delegation sync gave up", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempts", attempts)
 }

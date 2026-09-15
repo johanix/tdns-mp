@@ -182,6 +182,15 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		})
 	}
 
+	// Delegation sync for the auditor's identity zone (its DS at its
+	// parent): tdns's own syncher, since the auditor has no cells to elect
+	// a leader for.
+	if kdb != nil && conf.Config.Internal.DelegationSyncQ != nil {
+		tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
+			return kdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf.Config)
+		})
+	}
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuthQueryEngine", func() {
 		tdns.AuthQueryEngine(ctx, conf.Config.Internal.AuthQueryQ)
 	})
