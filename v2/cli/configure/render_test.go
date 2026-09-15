@@ -248,8 +248,8 @@ func decodeMpcli(t *testing.T, name string, body []byte) mpcliFile {
 	return f
 }
 
-// listensOn reports whether conf's listeners bind dial's port on its host
-// or on every interface.
+// listensOn reports whether conf's listeners bind dial's port on its host,
+// or on the wildcard of its address family.
 func listensOn(t *testing.T, conf *tdns.Config, dial string) bool {
 	t.Helper()
 	host, port, err := net.SplitHostPort(dial)
@@ -261,7 +261,14 @@ func listensOn(t *testing.T, conf *tdns.Config, dial string) bool {
 		if err != nil {
 			t.Fatalf("listener not host:port: %q", a)
 		}
-		if lport == port && (lhost == host || lhost == "0.0.0.0" || lhost == "::") {
+		if lport != port {
+			continue
+		}
+		wildcard := "0.0.0.0"
+		if isIPv6(host) {
+			wildcard = "::"
+		}
+		if lhost == host || lhost == wildcard {
 			return true
 		}
 	}

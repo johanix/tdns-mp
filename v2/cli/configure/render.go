@@ -176,8 +176,14 @@ func makeRenderCtx(cv CoordinatedValues, l fsLayout) renderCtx {
 	hpInternal := func(port int) string {
 		return net.JoinHostPort(internal, strconv.Itoa(port))
 	}
+	// The wildcard follows the family of InternalIP, which every role
+	// dials: an IPv4 wildcard does not accept an IPv6 connection.
+	wildcard := "0.0.0.0"
+	if isIPv6(internal) {
+		wildcard = "::"
+	}
 	hpAny := func(port int) string {
-		return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+		return net.JoinHostPort(wildcard, strconv.Itoa(port))
 	}
 	prefix, rrtype := internal+"/32", "A"
 	if isIPv6(internal) {

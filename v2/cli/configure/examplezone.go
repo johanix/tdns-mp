@@ -11,13 +11,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // ensureExampleZone writes the example zone's zone file if it is absent
 // and reports whether it did. An existing file belongs to the operator
-// and is left alone; when it no longer names this run's agent (or
-// auditor) the combiner would serve a zone that leaves them out, so a
-// warning says so.
+// and is left alone; when none of its HSYNC3 records names this run's
+// agent (or auditor) the combiner would serve a zone that leaves them
+// out, so a warning says so.
 func ensureExampleZone(cv CoordinatedValues, l fsLayout, w io.Writer) (bool, error) {
 	path := l.exampleZoneFile()
 	existing, err := ReadFileIfExists(path)
@@ -25,8 +28,13 @@ func ensureExampleZone(cv CoordinatedValues, l fsLayout, w io.Writer) (bool, err
 		return false, err
 	}
 	if existing != "" {
+		named, err := hsync3Identities(existing, path)
+		if err != nil {
+			fmt.Fprintf(w, "  WARNING: %s does not parse as a zone file: %v\n", path, err)
+			return false, nil
+		}
 		for _, id := range []string{cv.Agent.Identity, cv.Auditor.Identity} {
-			if id != "" && !strings.Contains(strings.ToLower(existing), strings.ToLower(id)) {
+			if id != "" && !named[dns.CanonicalName(id)] {
 				fmt.Fprintf(w, "  WARNING: %s has no HSYNC3 record for %s; add one, or remove the file and re-run to regenerate it\n", path, id)
 			}
 		}
@@ -52,4 +60,21 @@ func ensureExampleZone(cv CoordinatedValues, l fsLayout, w io.Writer) (bool, err
 		return false, fmt.Errorf("close %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// hsync3Identities parses a zone file and returns the identities its
+// HSYNC3 records name, in canonical form.
+func hsync3Identities(zone, path string) (map[string]bool, error) {
+	ids := map[string]bool{}
+	zp := dns.NewZoneParser(strings.NewReader(zone), exampleZone, path)
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		prr, isPrivate := rr.(*dns.PrivateRR)
+		if !isPrivate {
+			continue
+		}
+		if h, isHsync3 := prr.Data.(*core.HSYNC3); isHsync3 {
+			ids[dns.CanonicalName(h.Identity)] = true
+		}
+	}
+	return ids, zp.Err()
 }
