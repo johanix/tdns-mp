@@ -49,16 +49,28 @@ var lgConfig = tdns.Logger("config")
 // tdns.ParseConfig and land in the logfile.
 func (conf *Config) RegisterMpConfigParser() {
 	conf.Config.Internal.PostParseConfigHook = func(c *tdns.Config, configMap map[string]interface{}) error {
-		mp, err := parseMultiProvider(configMap)
+		mp, err := ParseMultiProviderConfig(configMap)
 		if err != nil {
-			return fmt.Errorf("multi-provider config parse: %w", err)
-		}
-		if err := ValidateMPConfig(mp); err != nil {
-			return fmt.Errorf("multi-provider config validation: %w", err)
+			return err
 		}
 		conf.SetMpConfig(mp)
 		return nil
 	}
+}
+
+// ParseMultiProviderConfig decodes and validates the multi-provider:
+// block of a raw config map, exactly as the daemons' config parser hook
+// does. Returns nil, nil when the map has no such block. Exported for
+// callers that check a config offline (tdns-mpcli configure's tests).
+func ParseMultiProviderConfig(configMap map[string]interface{}) (*MultiProviderConf, error) {
+	mp, err := parseMultiProvider(configMap)
+	if err != nil {
+		return nil, fmt.Errorf("multi-provider config parse: %w", err)
+	}
+	if err := ValidateMPConfig(mp); err != nil {
+		return nil, fmt.Errorf("multi-provider config validation: %w", err)
+	}
+	return mp, nil
 }
 
 // parseMultiProvider decodes the multi-provider: subtree of the

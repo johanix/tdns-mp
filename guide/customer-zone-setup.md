@@ -230,8 +230,24 @@ information the providers give the zone owner during
 onboarding.
 
 If the zone owner's primary is itself tdns-auth, the
-equivalent configuration uses the `notify` and
-`allow-transfer` zone options.
+equivalent is the zone's `notify:` and `downstreams:`
+lists:
+
+```yaml
+zones:
+   - name:        example.com.
+     type:        primary
+     zonefile:    /etc/tdns/zones/example.com.zone
+     notify:      [ { addr: '198.51.100.10:8055', key: NOKEY },
+                    { addr: '198.51.100.20:8055', key: NOKEY },
+                    { addr: '198.51.100.30:8055', key: NOKEY } ]
+     downstreams: [ { prefix: '198.51.100.10/32', key: NOKEY },
+                    { prefix: '198.51.100.20/32', key: NOKEY },
+                    { prefix: '198.51.100.30/32', key: NOKEY } ]
+```
+
+`key:` names a TSIG key instead of `NOKEY` where the
+transfers are authenticated.
 
 ## 4. Forcing a Refresh
 
@@ -246,7 +262,7 @@ tdns-cli auth zone bump -z example.com.
 
 This increments the SOA serial (and the optional epoch
 field, if the zone uses one) and sends NOTIFY to all
-configured `also-notify` targets. Each combiner will see
+of the zone's notify targets. Each combiner will see
 the new serial, request an AXFR/IXFR, reload the zone,
 and re-evaluate HSYNC3/HSYNCPARAM (which may change
 options for that zone).

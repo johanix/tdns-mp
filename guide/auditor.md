@@ -85,7 +85,9 @@ The simplest path is `tdns-mpcli configure`: when asked
 "Also generate a tdns-mpauditor config?" answer yes,
 provide an auditor identity, and the same interview
 produces a `/etc/tdns/tdns-mpauditor.yaml` config plus
-JOSE keypair and TLS cert.
+JOSE keypair and TLS cert. The generated example zone
+`mptest.example.` then lists the auditor in its HSYNC3
+and HSYNCPARAM records, and the auditor observes it.
 
 Start it like the other daemons:
 
@@ -93,10 +95,10 @@ Start it like the other daemons:
 sudo tdns-mpauditor --config /etc/tdns/tdns-mpauditor.yaml &
 ```
 
-The auditor uses the same management API conventions as
-the agent (HTTPS on its own port; default `7056`), and
-the mpcli config gets an `mpauditor` entry pointing at
-it.
+The auditor listens for DNS (its identity zone, observed
+zones and MP signaling) on port `8056` and serves its
+management API over HTTPS on `7056`; the mpcli config
+gets a `tdns-mpauditor` entry pointing at it.
 
 ## 4. CLI Surface
 

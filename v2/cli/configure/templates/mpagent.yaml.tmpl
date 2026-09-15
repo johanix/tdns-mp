@@ -8,9 +8,8 @@ multi-provider:
    # FQDN identity of this agent; appears in HSYNC3 records and
    # in CHUNK/HELLO/BEAT/PING signatures.
    identity:       {{.Agent.Identity}}
-   # Active transport mechanisms ("api", "dns"). Currently only
-   # "dns" (NOTIFY+CHUNK over DNS) is fully implemented; the "api"
-   # HTTPS transport is partial and not production-ready.
+   # Active transport mechanisms ("api", "dns"). "dns" (NOTIFY+CHUNK
+   # over DNS) is the one in use; the "api" HTTPS transport is partial.
    supported_mechanisms: [ dns ]
    # Path to this agent's long-term JOSE private key (P-256) used
    # to sign outbound CHUNK envelopes and authenticate to peers.
@@ -20,22 +19,22 @@ multi-provider:
    # combiner replies.
    combiner:
       identity:                {{.Combiner.Identity}}
-      address:                 {{.CombinerDnsDial}}
+      address:                 '{{.CombinerDnsDial}}'
       long_term_jose_pub_key:  {{.Paths.CombinerJosePub}}
    # Signer peer: where this agent fetches DNSKEY state (KEYSTATE
    # RFI) and verifies signer-signed responses.
    signer:
       identity:                {{.Signer.Identity}}
-      address:                 {{.SignerDnsDial}}
+      address:                 '{{.SignerDnsDial}}'
       long_term_jose_pub_key:  {{.Paths.SignerJosePub}}
-   # Local zone (auto-created at startup as the agent's identity
-   # zone, e.g. agent.example.).
+   # The agent's identity zone (e.g. agent.example.), created and
+   # signed by the agent at startup.
    local:
-      # FQDNs published as NS RDATA in the auto-created agent zone.
+      # FQDNs published as NS RDATA in the identity zone.
       nameservers:   [ {{range $i, $ns := .Agent.LocalNameservers}}{{if $i}}, {{end}}{{$ns}}{{end}} ]
       # host:port addresses of downstream secondaries that should
-      # receive NOTIFY when the agent zone changes.
-      notify:        [ {{range $i, $n := .Agent.LocalNotify}}{{if $i}}, {{end}}{{$n}}{{end}} ]
+      # receive NOTIFY when the identity zone changes.
+      notify:        [ {{range $i, $n := .Agent.LocalNotify}}{{if $i}}, {{end}}'{{$n}}'{{end}} ]
    remote:
       # Seconds between LocateAgent attempts when a peer is not yet
       # discovered (i.e. before HELLO has succeeded).
@@ -44,7 +43,7 @@ multi-provider:
    # CONFIG upstream/downstream requests from peer agents. Empty
    # lists mean "this agent does not act as XFR source/destination
    # for peer agents" — fine for setups where secondaries pull from
-   # the agent's own dnsengine instead.
+   # the agent's own DNS service instead.
    xfr:
       outgoing:
          addresses:  []
@@ -52,139 +51,129 @@ multi-provider:
       incoming:
          addresses:  []
          auth:       []
-   # api:
-   #    addresses:
-   #       # IP that peers should use to reach this agent's API.
-   #       publish:    [ 127.0.0.1 ]
-   #       # host:port the API server binds. 0.0.0.0:<port> for any
-   #       # interface; specific IP to restrict.
-   #       listen:     [ 127.0.0.1:8999 ]
-   #    # URL template peers use to construct API calls. {TARGET}
-   #    # and {PORT} are substituted at runtime.
-   #    baseurl:       https://api.{TARGET}:{PORT}/api/v1
-   #    port:          8999
-   #    certfile:      {{.Paths.AgentCert}}
-   #    keyfile:       {{.Paths.AgentKey}}
-   # DNS endpoint (NOTIFY+CHUNK signaling). Distinct from the
-   # top-level dnsengine: block; this is the address peers should
-   # use to reach this agent for MP traffic.
+   # HTTPS endpoint of the "api" transport. The agent always starts
+   # its agent-to-agent sync API on these addresses; with publish
+   # empty (and no "api" in supported_mechanisms) it is not
+   # advertised to peers.
+   api:
+      addresses:
+         publish:    []
+         listen:     [ '{{.AgentSyncApiListen}}' ]
+      baseurl:       https://api.{TARGET}:{PORT}/api/v1
+      port:          {{.AgentSyncApiPort}}
+      certfile:      {{.Paths.AgentCert}}
+      keyfile:       {{.Paths.AgentKey}}
+   # DNS endpoint (NOTIFY+CHUNK signaling): the address peers use to
+   # reach this agent for MP traffic. The listen address must be one
+   # the listeners: block below binds.
    dns:
       addresses:
          # Externally-reachable IP advertised to peers.
-         publish:    [ {{.Global.PublicIP}} ]
-         # host:port the signaling DNS service binds (must match
-         # the agent's dnsengine.addresses port).
-         listen:     [ {{.AgentDnsListen}} ]
+         publish:    [ '{{.Global.PublicIP}}' ]
+         listen:     [ '{{.AgentDnsListen}}' ]
       # URL template published as a DNS URI RR in the agent's
-      # auto-created identity zone. Remote agents fetch this URI
-      # during their LocateAgent discovery to learn how to reach
-      # this agent for MP signaling. {TARGET} and {PORT} are
-      # substituted at publication time.
+      # identity zone. Remote agents fetch this URI during their
+      # LocateAgent discovery to learn how to reach this agent for
+      # MP signaling. {TARGET} and {PORT} are substituted at
+      # publication time.
       baseurl:       dns://dns.{TARGET}:{PORT}/
       port:          {{.AgentDnsPort}}
-   # Tuning knobs for the gossip + discovery loops. Defaults are
-   # sane for production; lower values are useful for testbeds.
+   # Timers of the gossip + discovery loops, in seconds. These are
+   # the defaults; lower values are useful for testbeds.
    syncengine:
       intervals:
-         beatinterval:       30   # seconds between BEATs
-         helloretry:         15   # seconds between HELLO retries (steady)
-         discoveryretry:     15   # seconds between LocateAgent retries
-         hello_fast_attempts: 3   # initial fast HELLO attempts before backoff
-         hello_fast_interval: 2   # seconds between the first N HELLO attempts
+         beatinterval:        30   # between BEATs
+         helloretry:          15   # between HELLO retries (steady)
+         discoveryretry:      15   # between LocateAgent retries
+         reconcile:           60   # between full peer reconciliations
+         hello_fast_attempts: 3    # initial fast HELLO attempts before backoff
+         hello_fast_interval: 2    # between the first N HELLO attempts
 
 service:
    name:           TDNS-MPAGENT
    verbose:        true
    debug:          false
 
-# Top-level DNS server (zone serving + AXFR + NOTIFY responder).
-# This is the agent's actual DNS service; multi-provider.dns above
-# only declares the public-facing endpoint info.
-dnsengine:
-   # Bind addresses. 0.0.0.0:<port> = any interface.
-   addresses:      [ {{.AgentDnsListen}} ]
-   # DNS transports enabled. do53 = classic UDP/TCP; also valid:
-   # dot, doh, doq (require certfile/keyfile).
+# Where the agent's DNS service listens: zone serving, AXFR, NOTIFY
+# and the MP signaling of multi-provider.dns. 0.0.0.0:<port> = any
+# interface.
+listeners:
+   addresses:      [ '{{.AgentDnsListen}}' ]
+   # do53 = classic UDP/TCP; dot, doh and doq also need
+   # listeners.certfile/keyfile.
    transports:     [ do53 ]
 
 # Management API (used by tdns-mpcli for control/inspection).
 apiserver:
-   addresses:      [ {{.AgentApiListen}} ]
+   addresses:      [ '{{.AgentApiListen}}' ]
    # Pre-shared key for X-API-Key auth; matches mpcli's config.
    apikey:         {{.Agent.ApiKey}}
    certfile:       {{.Paths.AgentCert}}
    keyfile:        {{.Paths.AgentKey}}
 
-# Parent-zone delegation sync (for zones the agent is authoritative
-# for that have a parent it can send updates to).
-delegationsync:
-   # How long a leader-elected agent retains the role.
-   leader-election-ttl: 60m
-   child:
-      # Methods the child agent will use to propagate delegation
-      # changes to the parent: NOTIFY(CDS/CSYNC) and/or DDNS UPDATE.
-      schemes:     [ notify, update ]
-      update:
-         # Per-zone SIG(0) key material for signing parent UPDATEs.
-         keygen:
-            mode:       internal
-            algorithm:  ED25519
+# Delegation sync towards the parent of a customer zone whose
+# HSYNCPARAM makes the agents responsible for it (parentsync="agent").
+parentsync:
+   # NOTIFY(CDS/CSYNC) and/or DNS UPDATE, in order of preference.
+   schemes:     [ notify, update ]
+   update:
+      keygen:
+         # Algorithm of the SIG(0) keys that sign the UPDATEs.
+         algorithm:  ED25519
 
-# DNSKEY bootstrap (RFC 8078 trust-anchor publication via parent).
-keybootstrap:
-   consistent-lookup:
-      iterations:  3
-      interval:    60   # seconds between iterations
-      nameservers: all  # which NS to query for consistency check
-
-# Internal recursive resolver used for IMR-driven lookups
-# (e.g. parent DSYNC discovery, agent identity validation).
+# Internal resolver used for agent discovery (URI, SVCB and JWK
+# records under remote agents' identities).
 imrengine:
    active:         true
-   root-hints:     /etc/tdns/root.hints
-   transports:     [ do53 ]
-   # If true, IMR responses must validate DNSSEC; bogus = SERVFAIL.
-   require_dnssec_validation: true
+   # Security-sensitive lookups (TLSA and the like) must validate.
+   require-dnssec-validation: true
 
-# Named DNSSEC policies. Zones reference one via dnssecpolicy:.
-dnssecpolicies:
-   default:
-      algorithm:   ED25519
-      # Key Signing Key parameters.
-      ksk:
-         lifetime:      forever   # "forever" | "none" | Go duration
-         sigvalidity:   168h      # RRSIG validity window
-      # Zone Signing Key parameters.
-      zsk:
-         lifetime:      forever
-         sigvalidity:   2h
-      # Combined Signing Key (single key for everything). lifetime=
-      # "none" disables CSK mode in this policy.
-      csk:
-         lifetime:      none
-         sigvalidity:   168h
+# The policy the agent signs its identity zone with.
+dnssec:
+   kasp:
+      # Short, for a testbed; see sigvalidity below.
+      propagation-delay:  5m
+   policies:
+      default:
+         algorithm:   ED25519
+         ksk:
+            lifetime:  forever   # "forever" | Go duration
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none      # "none": separate KSK and ZSK
+         # RRSIG validity: dnskey for the DNSKEY RRset, ds for DS
+         # RRsets, default for everything else. Short, for a testbed.
+         # tdns refuses a validity at or below 2 x (largest served TTL
+         # + kasp.propagation-delay) and warns below 4 x; the identity
+         # zone is served with a 1h TTL.
+         sigvalidity:
+            default:   6h
+            dnskey:    6h
+            ds:        6h
 
 db:
-   file:  /var/lib/tdns/tdns-mpagent.db
+   file:  {{.Layout.DbDir}}/tdns-mpagent.db
 
 log:
-   file:   /var/log/tdns/tdns-mpagent.log
+   file:   {{.Layout.LogDir}}/tdns-mpagent.log
    level:  info
 
 # If the templates: and zones: sections grow large, move them to a
 # separate YAML file and pull it in via a top-level "include:" entry.
 templates:
-   - name:           mptest
+   - name:           mpzone
      type:           secondary
      # Where zone data is held: "map" (in-memory map) is the right
-     # choice for MP zones; "slice" and "xfr" exist for other modes.
+     # choice for MP zones.
      store:          map
-     primary:        {{.SignerDnsDial}}
-     # Zone-level options. "multi-provider" enables the MP pipeline
-     # (HSYNC3 evaluation, combiner edits, signer KEYSTATE, etc.).
-     options:
-        - multi-provider
+     # The agent pulls the signed zone from the local signer.
+     primaries:      [ { addr: '{{.SignerDnsDial}}', key: NOKEY } ]
+     # "multi-provider" enables the MP pipeline (HSYNC3 evaluation,
+     # combiner edits, signer KEYSTATE, etc.).
+     options:        [ multi-provider ]
 
 zones:
-   - name:            example.test.
-     template:        mptest
+   # The example zone. A customer zone is added the same way.
+   - name:           {{.ExampleZone}}
+     template:       mpzone

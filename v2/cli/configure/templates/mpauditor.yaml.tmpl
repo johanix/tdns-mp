@@ -9,19 +9,18 @@
 # Multi-provider config: auditor's identity and signaling endpoint.
 multi-provider:
    role:           auditor
-   # FQDN identity of this auditor; appears in HSYNC3 records when
-   # the auditor publishes its presence, and in signed signaling
-   # envelopes.
+   # FQDN identity of this auditor; appears in HSYNC3 records and in
+   # signed signaling envelopes.
    identity:       {{.Auditor.Identity}}
-   # Active transport mechanisms. Currently only "dns" (NOTIFY+
-   # CHUNK over DNS) is fully implemented; "api" is partial.
+   # Active transport mechanisms. "dns" (NOTIFY+CHUNK over DNS) is
+   # the one in use; "api" is partial.
    supported_mechanisms: [ dns ]
    # Path to this auditor's long-term JOSE private key (P-256)
    # used to sign outbound CHUNK envelopes and authenticate to
    # peers.
    long_term_jose_priv_key: {{.Paths.AuditorJosePriv}}
-   # The auditor has no auto-created identity zone in the usual
-   # sense, but the local block is still required by the parser.
+   # The auditor's identity zone, created and signed at startup like
+   # the agent's.
    local:
       nameservers:   [ ]
       notify:        [ ]
@@ -38,67 +37,93 @@ multi-provider:
       incoming:
          addresses:  []
          auth:       []
+   # HTTPS endpoint of the "api" transport. The auditor always starts
+   # its sync API on these addresses; with publish empty it is not
+   # advertised to peers.
+   api:
+      addresses:
+         publish:    []
+         listen:     [ '{{.AuditorSyncApiListen}}' ]
+      baseurl:       https://api.{TARGET}:{PORT}/api/v1
+      port:          {{.AuditorSyncApiPort}}
+      certfile:      {{.Paths.AuditorCert}}
+      keyfile:       {{.Paths.AuditorKey}}
    # DNS endpoint advertised to peers during discovery.
    dns:
       addresses:
          # Externally-reachable IP advertised to peers.
-         publish:    [ {{.Global.PublicIP}} ]
-         # host:port the signaling DNS service binds (must match
-         # the auditor's dnsengine.addresses port).
-         listen:     [ {{.AuditorDnsListen}} ]
+         publish:    [ '{{.Global.PublicIP}}' ]
+         # Must be an address the listeners: block below binds.
+         listen:     [ '{{.AuditorDnsListen}}' ]
       # URL template published as a DNS URI RR for remote agents
       # to learn how to reach this auditor for MP signaling.
       # {TARGET} and {PORT} are substituted at publication time.
       baseurl:       dns://dns.{TARGET}:{PORT}/
       port:          {{.AuditorDnsPort}}
-   # Tuning knobs for the gossip + discovery loops. Defaults are
-   # sane for production; lower values are useful for testbeds.
+   # Timers of the gossip + discovery loops, in seconds. These are
+   # the defaults; lower values are useful for testbeds.
    syncengine:
       intervals:
-         beatinterval:       30   # seconds between BEATs
-         helloretry:         15   # seconds between HELLO retries (steady)
-         discoveryretry:     15   # seconds between LocateAgent retries
-         hello_fast_attempts: 3   # initial fast HELLO attempts before backoff
-         hello_fast_interval: 2   # seconds between the first N HELLO attempts
+         beatinterval:        30   # between BEATs
+         helloretry:          15   # between HELLO retries (steady)
+         discoveryretry:      15   # between LocateAgent retries
+         reconcile:           60   # between full peer reconciliations
+         hello_fast_attempts: 3    # initial fast HELLO attempts before backoff
+         hello_fast_interval: 2    # between the first N HELLO attempts
 
 service:
    name:           TDNS-MPAUDITOR
    verbose:        true
    debug:          false
 
-# Top-level DNS server (signaling endpoint only; no zone serving).
-dnsengine:
-   # Bind addresses. 0.0.0.0:<port> = any interface.
-   addresses:      [ {{.AuditorDnsListen}} ]
-   # DNS transports enabled. do53 = classic UDP/TCP.
+# Where the auditor's DNS service listens: its identity zone, the
+# zones it observes and MP signaling.
+listeners:
+   addresses:      [ '{{.AuditorDnsListen}}' ]
    transports:     [ do53 ]
 
 # Management API (used by tdns-mpcli for control/inspection).
 apiserver:
-   addresses:      [ {{.AuditorApiListen}} ]
+   addresses:      [ '{{.AuditorApiListen}}' ]
    # Pre-shared key for X-API-Key auth; matches mpcli's config.
    apikey:         {{.Auditor.ApiKey}}
    certfile:       {{.Paths.AuditorCert}}
    keyfile:        {{.Paths.AuditorKey}}
 
-# Internal recursive resolver used for IMR-driven lookups
-# (e.g. agent discovery via HSYNC3 records published in remote
-# provider zones).
+# Internal resolver used for peer discovery (HSYNC3 parties' URI,
+# SVCB and JWK records).
 imrengine:
    active:         true
-   root-hints:     /etc/tdns/root.hints
-   transports:     [ do53 ]
-   # If true, IMR responses must validate DNSSEC; bogus = SERVFAIL.
-   require_dnssec_validation: true
+   # Security-sensitive lookups (TLSA and the like) must validate.
+   require-dnssec-validation: true
+
+# The policy the auditor signs its identity zone with (the same
+# testbed values as the agent's).
+dnssec:
+   kasp:
+      propagation-delay:  5m
+   policies:
+      default:
+         algorithm:   ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:   6h
+            dnskey:    6h
+            ds:        6h
 
 db:
-   file:  /var/lib/tdns/tdns-mpauditor.db
+   file:  {{.Layout.DbDir}}/tdns-mpauditor.db
 
 log:
-   file:   /var/log/tdns/tdns-mpauditor.log
+   file:   {{.Layout.LogDir}}/tdns-mpauditor.log
    level:  info
 
-# Auditor-specific knobs.
+# Auditor-specific knobs (read by tdns-mpauditor itself).
 audit:
    event_log:
       # How long observed events are retained.
@@ -116,10 +141,24 @@ audit:
    # HTTPS (or set both empty for a loopback-only HTTP fallback).
    web:
       enabled:          false
-      addresses:        [ 127.0.0.1:8099 ]
+      addresses:        [ '127.0.0.1:8099' ]
       certfile:         ""
       keyfile:          ""
       auth:
          mode:          basic
          idle_timeout:  30m
-         users_file:    /etc/tdns/tdns-auditor-users.yaml
+         users_file:    {{.Layout.ConfigDir}}/tdns-auditor-users.yaml
+
+templates:
+   - name:           mpzone
+     type:           secondary
+     store:          map
+     # The auditor observes the zone as the combiner holds it.
+     primaries:      [ { addr: '{{.CombinerDnsDial}}', key: NOKEY } ]
+     options:        [ multi-provider ]
+
+zones:
+   # The example zone. Every zone the auditor observes is added the
+   # same way.
+   - name:           {{.ExampleZone}}
+     template:       mpzone

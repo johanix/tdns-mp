@@ -3,9 +3,10 @@
  *
  * mpcli configure subpackage: interview flow.
  *
- * Six prompts total:
- *   global:  keys dir, certs dir, public IP
- *   roles:   identity per agent/signer/combiner
+ * Prompts:
+ *   global:      keys dir, certs dir, public IP, internal IP
+ *   identities:  agent, signer, combiner, and optionally auditor
+ *   agent zone:  NS names and NOTIFY targets of the agent's identity zone
  *
  * Port assignment is deterministic (see constants below) and
  * shown as a table. The user accepts or proceeds and edits
@@ -39,11 +40,13 @@ const (
 	combinerDnsPort = 8055
 	combinerApiPort = 7055
 
-	agentDnsPort = 8054
-	agentApiPort = 7054
+	agentDnsPort     = 8054
+	agentApiPort     = 7054
+	agentSyncApiPort = 9054
 
-	auditorDnsPort = 8056
-	auditorApiPort = 7056
+	auditorDnsPort     = 8056
+	auditorApiPort     = 7056
+	auditorSyncApiPort = 9056
 )
 
 // runInterview walks the minimum prompt set. `current` seeds
@@ -54,7 +57,7 @@ func runInterview(p *Prompter, current CoordinatedValues) CoordinatedValues {
 	fmt.Fprintln(p.Out, "\n=== Global ===")
 	out.Global.KeysDir = p.Ask("keys directory", OrDefault(current.Global.KeysDir, defaultKeysDir), AbsDir)
 	out.Global.CertsDir = p.Ask("certs directory", OrDefault(current.Global.CertsDir, defaultCertsDir), AbsDir)
-	out.Global.PublicIP = p.Ask("public IP (advertised in certs, mpcli base URLs, example zone notify/primary)", OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
+	out.Global.PublicIP = p.Ask("public IP (advertised to peers, in TLS certs and in the example zone)", OrDefault(current.Global.PublicIP, defaultPublicIP), ipLiteral)
 
 	// InternalIP is what each role binds and what the roles dial each other on.
 	// On a same-host deployment 127.0.0.1 is correct; on AWS EC2 / multi-host
@@ -93,6 +96,8 @@ func runInterview(p *Prompter, current CoordinatedValues) CoordinatedValues {
 	out.Agent.LocalNotify = parseHostPortList(notifyAns)
 
 	showPortTable(p.Out, out.Auditor.Identity != "")
+	fmt.Fprintf(p.Out, "\nExample zone: %s, this provider's label %q\n  (zone file %s, written only if absent)\n",
+		exampleZone, providerLabel(out.Agent.Identity), defaultLayout.exampleZoneFile())
 	if !p.AskYesNo("\nAccept these defaults?", true) {
 		fmt.Fprintln(p.Out, "OK — these defaults will be used now; edit the generated configs afterwards to change them.")
 	}
@@ -161,11 +166,11 @@ func ipLiteral(s string) error {
 // when the auditor role was opted into in the interview.
 func showPortTable(w io.Writer, withAuditor bool) {
 	fmt.Fprintln(w, "\nPort layout (same-box defaults):")
-	fmt.Fprintf(w, "   %-17s %-12s %s\n", "role", "DNS", "mgmt API")
-	fmt.Fprintf(w, "   %-17s %-12s %d\n", "tdns-mpsigner", fmt.Sprintf("%d, %d", signerDnsPort, signerDns53Port), signerApiPort)
-	fmt.Fprintf(w, "   %-17s %-12d %d\n", "tdns-mpcombiner", combinerDnsPort, combinerApiPort)
-	fmt.Fprintf(w, "   %-17s %-12d %d\n", "tdns-mpagent", agentDnsPort, agentApiPort)
+	fmt.Fprintf(w, "   %-17s %-12s %-10s %s\n", "role", "DNS", "mgmt API", "sync API")
+	fmt.Fprintf(w, "   %-17s %-12s %-10d %s\n", "tdns-mpsigner", fmt.Sprintf("%d, %d", signerDnsPort, signerDns53Port), signerApiPort, "-")
+	fmt.Fprintf(w, "   %-17s %-12d %-10d %s\n", "tdns-mpcombiner", combinerDnsPort, combinerApiPort, "-")
+	fmt.Fprintf(w, "   %-17s %-12d %-10d %d\n", "tdns-mpagent", agentDnsPort, agentApiPort, agentSyncApiPort)
 	if withAuditor {
-		fmt.Fprintf(w, "   %-17s %-12d %d\n", "tdns-mpauditor", auditorDnsPort, auditorApiPort)
+		fmt.Fprintf(w, "   %-17s %-12d %-10d %d\n", "tdns-mpauditor", auditorDnsPort, auditorApiPort, auditorSyncApiPort)
 	}
 }
