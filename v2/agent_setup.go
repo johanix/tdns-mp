@@ -25,7 +25,6 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*tdns.ZoneData, error) {
@@ -382,25 +381,39 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 }
 
 func AgentSig0KeyPrep(zd *tdns.ZoneData, name string, hdb *HsyncDB) error {
-	alg, err := parseKeygenAlgorithm("agent.update.keygen.algorithm", dns.ED25519)
-	if err != nil {
-		lgAgent.Error("parseKeygenAlgorithm failed", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-
-	return zd.Sig0KeyPreparation(name, alg, hdb.KeyDB)
+	return zd.Sig0KeyPreparation(name, parentSyncKeygenAlgorithm(), hdb.KeyDB)
 }
 
-// parseKeygenAlgorithm reads a DNS algorithm from a viper config key.
-// Replicated from tdns (unexported).
-func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
-	algstr := viper.GetString(configKey)
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		lgAgent.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "configKey", configKey, "default", dns.AlgorithmToString[defaultAlg])
-		alg = defaultAlg
+// parentSyncKeygenAlgorithm is the algorithm of a SIG(0) keypair the agent
+// generates: parentsync.update.keygen.algorithm, ED25519 when it is not set.
+//
+// Read from the parsed parentsync: block, not through viper. viper holds the
+// config as written, so a viper key finds one spelling of the setting at most:
+// agent.update.keygen.algorithm was written by no config at all, and
+// delegationsync.child.update.keygen.algorithm misses the top-level
+// parentsync: block. tdns folds the deprecated spelling into
+// ParentSyncConfig() and swaps the block in on reload.
+func parentSyncKeygenAlgorithm() uint8 {
+	algstr := tdns.ParentSyncConfig().Update.Keygen.Algorithm
+	alg, ok := keygenAlgorithm(algstr, dns.ED25519)
+	if !ok {
+		lgAgent.Warn("unknown keygen algorithm, using default", "algorithm", algstr,
+			"configKey", "parentsync.update.keygen.algorithm", "default", dns.AlgorithmToString[alg])
 	}
-	return alg, nil
+	return alg
+}
+
+// keygenAlgorithm resolves a keygen algorithm name to its code. An empty name
+// is an absent setting and yields defaultAlg with ok true; ok is false only for
+// a name that is set but is not an algorithm.
+func keygenAlgorithm(algstr string, defaultAlg uint8) (alg uint8, ok bool) {
+	if algstr == "" {
+		return defaultAlg, true
+	}
+	if alg = dns.StringToAlgorithm[strings.ToUpper(algstr)]; alg == 0 {
+		return defaultAlg, false
+	}
+	return alg, true
 }
 
 // AgentJWKKeyPrep publishes a JWK record for the agent's JOSE/HPKE long-term public keys.

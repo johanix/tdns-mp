@@ -286,10 +286,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		// Step c: no peer has the key — generate a new keypair
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
 		{
-			alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
-			if err != nil {
-				return fmt.Errorf("onLeaderElected: parseKeygenAlgorithm: %v", err)
-			}
+			alg := parentSyncKeygenAlgorithm()
 			kp := tdns.KeystorePost{
 				Command:    "sig0-mgmt",
 				SubCommand: "generate",
