@@ -106,3 +106,40 @@ func testDnskeyRR(t *testing.T, zone string, flags uint16) *dns.DNSKEY {
 	}
 	return k
 }
+
+// The tracker keeps each key's result per agent: a distribution of two
+// keys where one is applied and the other rejected ends with one key
+// propagated and one rejected, not both rejected; an agent that answered
+// for one key only has not answered.
+func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
+	a := testDnskeyRR(t, "z.example.", 257)
+	b := testDnskeyRR(t, "z.example.", 256)
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
+	// a partial that applied a and says nothing of b: a1 has not answered
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{a.String()}, nil)
+	p := tm.pendingDnskeyPropagations["d1"]
+	if p == nil || p.ExpectedAgents["a1"] {
+		t.Fatalf("an answer for one key of two counted as the agent's answer: %+v", p)
+	}
+	if p.Results["a1"][a.KeyTag()] != "applied" || p.Results["a1"][b.KeyTag()] != "" {
+		t.Errorf("results after the partial: %v", p.Results["a1"])
+	}
+	// then a partial that rejected b: a1 has answered, a applied, b rejected
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), nil, []RejectedItemInfo{{Record: b.String(), Reason: "no ZSKs here"}})
+	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+		t.Fatal("every key answered by every agent, the propagation is still pending")
+	}
+	// the results that went to the signer are per key: a propagated, b
+	// rejected (the send itself needs a transport; the split is what the
+	// tracker decided)
+	if p.Results["a1"][a.KeyTag()] != "applied" || p.Results["a1"][b.KeyTag()] != "rejected" {
+		t.Errorf("final results: %v, want a applied, b rejected", p.Results["a1"])
+	}
+	// a whole rejection rejects every key it did not apply
+	tm.TrackDnskeyPropagation("z.example.", "d2", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
+	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, []RejectedItemInfo{{Record: a.String(), Reason: "policy"}})
+	if p := tm.pendingDnskeyPropagations["d2"]; p != nil {
+		t.Errorf("a whole rejection left the propagation pending: %+v", p.Results)
+	}
+}

@@ -2030,9 +2030,12 @@ type PendingDnskeyPropagation struct {
 	KeyTags        []uint16         // DNSKEY key tags being propagated
 	Removed        map[uint16]bool  // those of KeyTags the distribution removes
 	ExpectedAgents map[AgentId]bool // Agents we're waiting for (true = confirmed)
-	Rejected       bool             // True if any agent rejected
-	RejectionMsg   string           // First rejection reason
-	CreatedAt      time.Time
+	// Results is each agent's answer per key: "applied" or "rejected"; an
+	// agent has answered once every key has one.
+	Results      map[AgentId]map[uint16]string
+	Rejected     bool   // True if any agent rejected
+	RejectionMsg string // First rejection reason
+	CreatedAt    time.Time
 }
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
@@ -2082,17 +2085,20 @@ func dnskeyKeyTagsOf(records []string) map[uint16]bool {
 }
 
 // ProcessDnskeyConfirmation reads what a remote agent's confirmation says
-// about the DNSKEYs being propagated (tdns-mp #57, design §5.4): the agent
-// counts as having applied the distribution when every key of it is among
-// the records applied (or removed, for a removal), whatever the status
-// says beside that (success, or a partial that applied our keys and
-// rejected someone else's); it counts as having rejected it when a key of
-// it is among the rejected items, or the whole answer is a rejection
-// (status rejected, or failed with rejected items: the combiner's "error"
-// for an all-rejected update). Pending, and a partial that says nothing
-// about our keys, leave the propagation waiting; the signer's resend timer
-// sends again. Once every expected agent answered, KEYSTATE "propagated"
-// or "rejected" goes to the signer with the distribution's send time.
+// about each DNSKEY being propagated (tdns-mp #57, design §5.4), per key:
+// applied when the key is among the records applied (or removed, for a
+// removal), whatever the status says beside that (success, or a partial
+// that applied ours and rejected someone else's); rejected when the key is
+// among the rejected items, or the whole answer is a rejection (status
+// rejected, or failed with rejected items: the combiner's "error" for an
+// all-rejected update), which rejects every key of the distribution the
+// answer does not apply. A plain success naming no record (a relay's
+// summary) applies every key. Pending, and a partial that says nothing
+// about a key, leave that key waiting; the signer's resend timer sends
+// again. An agent has answered once every key has a result from it. Once
+// every expected agent answered, each key's result goes to the signer:
+// "rejected" when any agent rejected it, else "propagated" (or "removed"
+// for a key the distribution removed), with the distribution's send time.
 // Returns true if the confirmation was for a DNSKEY propagation.
 func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo) bool {
 	tm.dnskeyPropMu.Lock()
@@ -2106,87 +2112,92 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	if _, expected := prop.ExpectedAgents[agentID]; !expected {
 		return true
 	}
+	if prop.Results == nil {
+		prop.Results = map[AgentId]map[uint16]string{}
+	}
+	results := prop.Results[agentID]
+	if results == nil {
+		results = map[uint16]string{}
+		prop.Results[agentID] = results
+	}
 
 	var rejectedRecords []string
 	for _, ri := range rejectedItems {
 		rejectedRecords = append(rejectedRecords, ri.Record)
 	}
 	rejectedTags, doneTags := dnskeyKeyTagsOf(rejectedRecords), dnskeyKeyTagsOf(done)
-	ours := func(tags map[uint16]bool) (any, all bool) {
-		all = true
-		for _, kt := range prop.KeyTags {
-			if tags[kt] {
-				any = true
-			} else {
-				all = false
-			}
-		}
-		return any, all && len(prop.KeyTags) > 0
-	}
-	rejectedOurs, _ := ours(rejectedTags)
-	_, appliedAll := ours(doneTags)
 	wholeRejection := status == transport.ConfirmRejected.String() || (status == transport.ConfirmFailed.String() && len(rejectedItems) > 0)
-
-	switch {
-	case rejectedOurs || wholeRejection:
-		prop.Rejected = true
-		if prop.RejectionMsg == "" {
-			if len(rejectedItems) > 0 {
-				prop.RejectionMsg = rejectedItems[0].Reason
-			} else {
-				prop.RejectionMsg = "rejected by " + source
-			}
+	plainSuccess := status == transport.ConfirmSuccess.String() && len(done) == 0
+	reason := "rejected by " + source
+	if len(rejectedItems) > 0 {
+		reason = rejectedItems[0].Reason
+	}
+	for _, kt := range prop.KeyTags {
+		if results[kt] != "" {
+			continue // a key's first final answer from an agent stands
 		}
+		switch {
+		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
+			results[kt] = "rejected"
+			prop.Rejected = true
+			if prop.RejectionMsg == "" {
+				prop.RejectionMsg = reason
+			}
+			lgTransport.Warn("DNSKEY confirmation rejected a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "reason", reason)
+		case doneTags[kt] || plainSuccess:
+			results[kt] = "applied"
+			lgTransport.Info("DNSKEY confirmation applied a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status)
+		}
+	}
+	if len(results) == len(prop.KeyTags) && len(prop.KeyTags) > 0 {
 		prop.ExpectedAgents[agentID] = true
-		lgTransport.Warn("DNSKEY confirmation rejected", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status, "reason", prop.RejectionMsg)
-	case appliedAll || (status == transport.ConfirmSuccess.String() && len(done) == 0):
-		// applied: every key of ours among the applied records, or a plain
-		// success that lists nothing (a relay's summary)
-		prop.ExpectedAgents[agentID] = true
-		lgTransport.Info("DNSKEY confirmation received", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status)
-	default:
-		lgTransport.Info("DNSKEY confirmation not final for our keys; still waiting", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status)
+	} else {
+		lgTransport.Info("DNSKEY confirmation not final for every key; still waiting", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
 	}
 
-	// Check if all agents have confirmed
+	// Check if all agents have answered
 	for _, confirmed := range prop.ExpectedAgents {
 		if !confirmed {
 			return true // Still waiting for more confirmations
 		}
 	}
 
-	// All agents answered — send KEYSTATE to signer
+	// All agents answered — each key's result to the signer
 	lgTransport.Info("all agents answered the DNSKEY propagation", "zone", prop.Zone, "distributionID", distID, "agents", len(prop.ExpectedAgents), "rejected", prop.Rejected)
-
-	// Send KEYSTATE asynchronously (don't hold the mutex)
 	zone := prop.Zone
-	keyTags := prop.KeyTags
-	removed := prop.Removed
-	rejected := prop.Rejected
-	rejectionMsg := prop.RejectionMsg
 	sentAt := prop.CreatedAt
-	delete(tm.pendingDnskeyPropagations, distID)
-
-	go func() {
-		if rejected {
-			tm.sendKeystateToSigner(zone, keyTags, "rejected", rejectionMsg, sentAt)
-			return
-		}
-		// the kind of distribution each key's answer is about travels as the
-		// signal: "propagated" for a key sent, "removed" for a key removed
-		var added, gone []uint16
-		for _, kt := range keyTags {
-			if removed[kt] {
-				gone = append(gone, kt)
-			} else {
-				added = append(added, kt)
+	rejectionMsg := prop.RejectionMsg
+	var propagated, removed, rejected []uint16
+	for _, kt := range prop.KeyTags {
+		anyRejected := false
+		for _, r := range prop.Results {
+			if r[kt] == "rejected" {
+				anyRejected = true
 			}
 		}
-		if len(added) > 0 {
-			tm.sendKeystateToSigner(zone, added, "propagated", "all remote agents confirmed", sentAt)
+		switch {
+		case anyRejected:
+			rejected = append(rejected, kt)
+		case prop.Removed[kt]:
+			removed = append(removed, kt)
+		default:
+			propagated = append(propagated, kt)
 		}
-		if len(gone) > 0 {
-			tm.sendKeystateToSigner(zone, gone, "removed", "all remote agents confirmed the removal", sentAt)
+	}
+	delete(tm.pendingDnskeyPropagations, distID)
+
+	// Send KEYSTATE asynchronously (don't hold the mutex); the kind of
+	// distribution each key's answer is about travels as the signal:
+	// "propagated" for a key sent, "removed" for a key removed
+	go func() {
+		if len(rejected) > 0 {
+			tm.sendKeystateToSigner(zone, rejected, "rejected", rejectionMsg, sentAt)
+		}
+		if len(propagated) > 0 {
+			tm.sendKeystateToSigner(zone, propagated, "propagated", "all remote agents confirmed", sentAt)
+		}
+		if len(removed) > 0 {
+			tm.sendKeystateToSigner(zone, removed, "removed", "all remote agents confirmed the removal", sentAt)
 		}
 	}()
 

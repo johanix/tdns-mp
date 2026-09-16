@@ -475,3 +475,106 @@ func TestDriverAddsTheLastSentColumnToAnOlderTable(t *testing.T) {
 		t.Errorf("records read from the older table: %+v", d)
 	}
 }
+
+// CodeRabbit on #76: a signer added to an in-flight record's expected
+// set gets the distribution again at once, not at the next resend.
+func TestDriverResendsToASignerAddedInFlight(t *testing.T) {
+	r := newDriverRig(t, "joiner.owned.example.", driverPolicy, "p2")
+	r.tick("mint")
+	sends := len(r.wire.distributions())
+	r.wire.mu.Lock()
+	r.wire.signers = []string{"p2", "p3"}
+	r.wire.mu.Unlock()
+	if err := r.l.SignersChanged(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(r.wire.distributions()); got != sends+2 {
+		t.Errorf("after a signer joined mid-flight %d distributions, want %d (both keys sent again)", got, sends+2)
+	}
+	for _, d := range r.l.InFlight() {
+		if len(d.Expected) != 2 {
+			t.Errorf("record %d expects %v, want p2 and p3", d.KeyId, d.Expected)
+		}
+	}
+}
+
+// CodeRabbit on #76: a rejection with no record in flight is refused, not
+// a crash; a driver whose persistence cannot be created reports it.
+func TestDriverRefusesWhatItCannotDo(t *testing.T) {
+	r := newDriverRig(t, "refuse.owned.example.", driverPolicy, "p2")
+	r.tick("mint")
+	ksk := r.keysIn(KeyStateMpdist, "KSK")[0]
+	// a key in mpdist whose record is gone (a restore that could not read
+	// it): a rejection has nothing to reject, and says so
+	r.l.mu.Lock()
+	delete(r.l.dist, ksk)
+	r.l.mu.Unlock()
+	if _, _, err := r.l.Apply(ksk, EvRejected); err == nil {
+		t.Error("a rejection with no distribution in flight was applied")
+	}
+	kdb := newMPTestKeyDB(t)
+	kdb.DB.Close()
+	l := NewZoneKeyLifecycle("closed.owned.example.", kdb, &fakeClock{t: time.Now()}, driverPolicy, newFakeWire("p2"))
+	if err := l.Ready(); err == nil {
+		t.Error("a driver whose table could not be created says it is ready")
+	}
+	if err := l.Tick(); err == nil {
+		t.Error("a driver that is not ready ticked")
+	}
+}
+
+// CodeRabbit on #76: the engine checks a cached driver's zone again each
+// time: a zone released drops out; one this provider stopped signing is
+// released; a driver that could not restore is not cached but the zone
+// stays claimed for signals.
+func TestEngineRevalidatesCachedDrivers(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}})
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	mpzd := signerTestZone(t, "cache.owned.example.", kdb)
+	zoneSignedBy(t, mpzd, "agent.us.example.", "p2")
+	owner.Take(mpzd.ZoneName)
+	if e.driver(mpzd.ZoneName) == nil {
+		t.Fatal("no driver for the owned zone")
+	}
+	owner.Release(mpzd.ZoneName)
+	if e.driver(mpzd.ZoneName) != nil {
+		t.Error("a released zone still has its cached driver")
+	}
+	if e.Signal(mpzd.ZoneName, 1, "propagated", "", time.Time{}) {
+		t.Error("a signal for a released zone was claimed")
+	}
+	owner.Take(mpzd.ZoneName)
+	if e.driver(mpzd.ZoneName) == nil {
+		t.Fatal("no driver after taking the zone again")
+	}
+	// the zone's signers change: this provider is no longer one
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}}}}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
+	mpzd.Data.Set(mpzd.ZoneName, *apex)
+	mpzd.InstallInitialSnapshot()
+	if e.driver(mpzd.ZoneName) != nil {
+		t.Error("a zone this provider stopped signing still has its cached driver")
+	}
+	if owner.Owns(mpzd.ZoneData) {
+		t.Error("a zone this provider stopped signing is still owned")
+	}
+
+	// configured zones: a zone not loaded, one with no policy, one that is
+	// not multi-provider are not taken; a proper one is
+	plain := signerTestZone(t, "plain.config.example.", kdb)
+	plain.ZoneData.Options[tdns.OptMultiProvider] = false
+	nopol := signerTestZone(t, "nopol.config.example.", kdb)
+	nopol.ZoneData.DnssecPolicy = nil
+	good := signerTestZone(t, "good.config.example.", kdb)
+	conf.MpConfig().KeyLifecycleZones = []string{"missing.config.example.", plain.ZoneName, nopol.ZoneName, good.ZoneName}
+	e.TakeConfiguredZones()
+	zones := owner.Zones()
+	if len(zones) != 1 || zones[0] != good.ZoneName {
+		t.Errorf("zones taken from the configuration: %v, want only %s", zones, good.ZoneName)
+	}
+}

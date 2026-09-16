@@ -254,37 +254,60 @@ func NewKeyLifecycleEngine(conf *Config, owner *MPKeyLifecycleOwner) *KeyLifecyc
 
 // driver returns the zone's driver, made on first use once the zone is
 // loaded with a policy; nil while it is not.
+// driver returns the zone's driver, or nil when the zone is not one the
+// machine runs. A cached driver is checked again each time: a zone
+// released, or a zone this provider no longer signs (its HSYNCPARAM
+// changed), drops out of the cache, the latter released too. A driver
+// that could not restore its persisted state is not cached: the next call
+// tries again (owned returns whether the zone is owned even then, so a
+// signal for it is not handed to tdns's path).
 func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
+	l, _ := e.driverState(zone)
+	return l
+}
+
+func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owned bool) {
 	zone = dns.Fqdn(zone)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if l := e.zones[zone]; l != nil {
-		return l
-	}
 	zd, ok := tdns.Zones.Get(zone)
-	if !ok || zd == nil || zd.DnssecPolicy == nil || !e.owner.Owns(zd) {
-		return nil
+	if !ok || zd == nil || !e.owner.Owns(zd) {
+		delete(e.zones, zone)
+		return nil, false
+	}
+	if !e.wire.IsSigner(zone) {
+		// taken but not a signer of the zone (no HSYNC identity of ours
+		// among its HSYNCPARAM signers): the machine would mint keys the
+		// zone never carries. Released, so nobody's keys go unmanaged:
+		// tdns's own machine runs them again.
+		lgSigner.Error("key lifecycle: this provider is not one of the zone's signers; the zone is released to tdns's key machine", "zone", zone)
+		delete(e.zones, zone)
+		e.owner.Release(zone)
+		return nil, false
+	}
+	if l := e.zones[zone]; l != nil {
+		return l, true
+	}
+	if zd.DnssecPolicy == nil {
+		lgSigner.Error("key lifecycle: the zone has no DNSSEC policy; nothing to run its keys by", "zone", zone)
+		return nil, true
 	}
 	kdb := e.conf.Config.Internal.KeyDB
 	if kdb == nil {
-		return nil
+		return nil, true
 	}
-	if !e.wire.IsSigner(zone) {
-		// taken by configuration but not a signer of the zone (no HSYNC
-		// identity of ours among its HSYNCPARAM signers): the machine would
-		// mint keys the zone never carries. Released, so nobody's keys go
-		// unmanaged: tdns's own machine runs them again.
-		lgSigner.Error("key lifecycle: this provider is not one of the zone's signers; the zone is released to tdns's key machine", "zone", zone)
-		e.owner.Release(zone)
-		return nil
-	}
-	l := NewZoneKeyLifecycle(zone, kdb, RealClock, policyFor(e.conf, zd), e.wire)
+	l = NewZoneKeyLifecycle(zone, kdb, RealClock, policyFor(e.conf, zd), e.wire)
 	l.Log = func(msg string, kv ...any) { lgSigner.Info(msg, kv...) }
+	if err := l.Ready(); err != nil {
+		lgSigner.Error("key lifecycle: the driver cannot run; trying again next time", "zone", zone, "err", err)
+		return nil, true
+	}
 	if err := l.Reload(); err != nil {
-		lgSigner.Error("key lifecycle: reload failed", "zone", zone, "err", err)
+		lgSigner.Error("key lifecycle: restoring the distributions in flight failed; trying again next time", "zone", zone, "err", err)
+		return nil, true
 	}
 	e.zones[zone] = l
-	return l
+	return l, true
 }
 
 // Signal routes a KEYSTATE signal from an agent to the zone's driver:
@@ -292,9 +315,16 @@ func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
 // aggregates them), "rejected" one rejection. Reports whether the zone is
 // owned, so the caller can keep today's path for one that is not.
 func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message string, at time.Time) bool {
-	l := e.driver(zone)
-	if l == nil {
+	l, owned := e.driverState(zone)
+	if !owned {
 		return false
+	}
+	if l == nil {
+		// owned, but the driver is not running yet: the signal is claimed
+		// (tdns's path must not act on an owned zone) and dropped; the
+		// signer's resend timer brings the answer again
+		lgSigner.Warn("key lifecycle: signal dropped, the zone's driver is not running", "zone", zone, "keytag", keytag, "signal", signal)
+		return true
 	}
 	// the signal names the kind of distribution it answers: "propagated"
 	// a key's, "removed" its removal (the agent of the same release); a
@@ -349,12 +379,21 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 		return
 	}
 	for _, z := range mp.KeyLifecycleZones {
-		if zd, ok := tdns.Zones.Get(dns.Fqdn(z)); ok && zd != nil && !zd.Options[tdns.OptMultiProvider] {
-			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", dns.Fqdn(z))
+		zone := dns.Fqdn(z)
+		zd, ok := tdns.Zones.Get(zone)
+		switch {
+		case !ok || zd == nil:
+			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not loaded; not taken", "zone", zone)
+			continue
+		case !zd.Options[tdns.OptMultiProvider]:
+			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", zone)
+			continue
+		case zd.DnssecPolicy == nil:
+			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone with no DNSSEC policy; not taken", "zone", zone)
 			continue
 		}
-		e.owner.Take(z)
-		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", dns.Fqdn(z))
+		e.owner.Take(zone)
+		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", zone)
 	}
 }
 
