@@ -79,6 +79,13 @@ type integEnvConfig struct {
 	// routeIncomingMessage directly and bypasses the middleware
 	// chain, so the default (no authorized peers) is fine there.
 	AuthorizeAllPeers bool
+
+	// ControlZoneIsIdentity gives each peer its own identity as control
+	// zone, as production does. A receiver reads the sender from the
+	// NOTIFY qname under the sender's control zone, so a scenario that
+	// sends over the wire needs it; with the shared zone every sender is
+	// integControlZone and is refused.
+	ControlZoneIsIdentity bool
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -168,10 +175,14 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		authorizedPeers = func() []string { return []string{alice, bob} }
 	}
 
+	controlZone := integControlZone
+	if cfg != nil && cfg.ControlZoneIsIdentity {
+		controlZone = identity
+	}
 	bridgeCfg := &MPTransportBridgeConfig{
 		Role:                roleAgent,
 		LocalID:             identity,
-		ControlZone:         integControlZone,
+		ControlZone:         controlZone,
 		APITimeout:          2 * time.Second,
 		DNSTimeout:          2 * time.Second,
 		AgentRegistry:       registry,

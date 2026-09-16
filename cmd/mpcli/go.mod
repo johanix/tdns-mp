@@ -28,7 +28,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260526195409-65f546532819 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20260913175418-0c3016fe6666 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20260916101406-dfb9a41ec8ca // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20260914193251-b37e32ab9087 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20260914193251-b37e32ab9087 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect

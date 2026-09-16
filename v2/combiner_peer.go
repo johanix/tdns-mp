@@ -77,7 +77,7 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 			Port:      uint16(port),
 			Transport: "udp",
 		})
-		cpeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port)
+		cpeer.DNSEndpoint = dnsEndpointURI(host, port)
 		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
 		// agent beat interval. Match the decay thresholds to it, else a
 		// healthy combiner false-decays to INTERRUPTED ~5 min after each
