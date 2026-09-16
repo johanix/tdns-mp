@@ -78,8 +78,9 @@ func (conf *Config) APIsingerDistrib() func(w http.ResponseWriter, r *http.Reque
 					"state":       peer.GetState().String(),
 				}
 				if addr := peer.CurrentAddress(); addr != nil {
-					peerMaps[i]["address"] = fmt.Sprintf("dns://%s:%d/", addr.Host, addr.Port)
-					peerMaps[i]["dns_uri"] = fmt.Sprintf("dns://%s:%d/", addr.Host, addr.Port)
+					uri := dnsEndpointURI(addr.Host, int(addr.Port))
+					peerMaps[i]["address"] = uri
+					peerMaps[i]["dns_uri"] = uri
 					peerMaps[i]["port"] = addr.Port
 					peerMaps[i]["addresses"] = []string{addr.Host}
 				}

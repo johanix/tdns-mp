@@ -60,7 +60,7 @@ apiservers:
    # A second agent instance, addressed as "tdns-mpcli p2-agent ...".
    # role: picks the command tree (agent | combiner | signer | auditor);
    # the name must not be one of those four words, nor "version",
-   # "configure", "help" or "completion".
+   # "configure", "show-cmds", "help" or "completion".
    # - name:         p2-agent
    #   role:         agent
    #   baseurl:      https://127.0.0.1:7254/api/v1

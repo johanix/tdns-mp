@@ -108,7 +108,8 @@ func TestInstanceTreeMatchesCanonicalTree(t *testing.T) {
 // TestInstanceWiringFromConfig: a config with one role: entry per kind
 // yields one instance word per kind; a name that collides with a built-in
 // role, with an existing command, or with an earlier entry is refused with
-// a message that says which; an entry without a name is skipped.
+// a message that says which; the name show-cmds, which is attached only
+// after wiring, is refused as reserved; an entry without a name is skipped.
 func TestInstanceWiringFromConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "tdns-mpcli.yaml")
@@ -157,6 +158,11 @@ func TestInstanceWiringFromConfig(t *testing.T) {
      baseurl: https://127.0.0.1:1/api/v1
      apikey: x
      authmethod: X-API-Key
+   - name: show-cmds
+     role: agent
+     baseurl: https://127.0.0.1:1/api/v1
+     apikey: x
+     authmethod: X-API-Key
    - role: agent
      baseurl: https://127.0.0.1:1/api/v1
      apikey: x
@@ -172,8 +178,8 @@ func TestInstanceWiringFromConfig(t *testing.T) {
 	root.InitDefaultCompletionCmd()
 
 	entries := mpcli.EarlyApiServers(cfg)
-	if len(entries) != 10 {
-		t.Fatalf("EarlyApiServers: got %d entries, want 10", len(entries))
+	if len(entries) != 11 {
+		t.Fatalf("EarlyApiServers: got %d entries, want 11", len(entries))
 	}
 	warnings := mpcli.WireInstanceTrees(root, entries)
 
@@ -192,6 +198,7 @@ func TestInstanceWiringFromConfig(t *testing.T) {
 		`apiservers entry "version": name collides with the existing "version" command`,
 		`apiservers entry "p2-agent": name collides with an earlier apiservers entry with the same name`,
 		`apiservers entry "nobody": role "imr" has no command tree`,
+		`apiservers entry "show-cmds": name is reserved`,
 		`apiservers entry with role but no name`,
 	}
 	for _, w := range wantWarnings {

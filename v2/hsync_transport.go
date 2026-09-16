@@ -360,14 +360,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	tm.ChunkHandler.Router = tm.Router
 
 	// In chunk_mode=query without EDNS0 CHUNK_QUERY_ENDPOINT, use configured peer address (e.g. agent.peers)
-	tm.ChunkHandler.GetPeerAddress = func(senderID string) (string, bool) {
-		peer, ok := tm.PeerRegistry.Get(senderID)
-		if !ok || peer.CurrentAddress() == nil {
-			return "", false
-		}
-		addr := peer.CurrentAddress()
-		return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
-	}
+	tm.ChunkHandler.GetPeerAddress = peerAddressLookup(tm.PeerRegistry)
 
 	// DoS mitigation: Check authorization BEFORE expensive operations (decryption, query fetch)
 	tm.ChunkHandler.IsPeerAuthorized = func(senderID string, zone string) (bool, string) {
@@ -2266,6 +2259,29 @@ func parseHostPort(addr string, defaultPort uint16) (string, uint16) {
 		return host, uint16(port)
 	}
 	return host, defaultPort
+}
+
+// dnsEndpointURI is the dns:// URI of a peer's DNS endpoint. An IPv6
+// host is bracketed ("dns://[::1]:8055/").
+func dnsEndpointURI(host string, port int) string {
+	return "dns://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/"
+}
+
+// peerAddressLookup is the GetPeerAddress callback: the host:port a
+// query-mode receiver dials to fetch a sender's CHUNK records, from the
+// sender's current address in reg.
+func peerAddressLookup(reg *transport.PeerRegistry) func(senderID string) (string, bool) {
+	return func(senderID string) (string, bool) {
+		peer, ok := reg.Get(senderID)
+		if !ok {
+			return "", false
+		}
+		addr := peer.CurrentAddress()
+		if addr == nil {
+			return "", false
+		}
+		return net.JoinHostPort(addr.Host, strconv.Itoa(int(addr.Port))), true
+	}
 }
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).

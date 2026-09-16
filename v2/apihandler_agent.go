@@ -868,9 +868,8 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			resp.AgentRegistry = &AgentRegistryDump{
-				Agents:         regs,
-				LocalAgent:     ar.LocalAgent,
-				LocateInterval: ar.LocateInterval,
+				Agents:     regs,
+				LocalAgent: ar.LocalAgent,
 			}
 
 		case "dump-zonedatarepo":

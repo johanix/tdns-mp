@@ -307,7 +307,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
-			agentPeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port) // S2 display
+			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
 			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
@@ -432,7 +432,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
-			agentPeer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port) // S2 display
+			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
 			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
@@ -446,14 +446,7 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 	}
 
 	// Wire GetPeerAddress callback for chunk_mode=query fallback
-	combinerState.SetGetPeerAddress(func(senderID string) (string, bool) {
-		peer, ok := tm.PeerRegistry.Get(senderID)
-		if !ok || peer.CurrentAddress() == nil {
-			return "", false
-		}
-		addr := peer.CurrentAddress()
-		return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
-	})
+	combinerState.SetGetPeerAddress(peerAddressLookup(tm.PeerRegistry))
 
 	// Wire chunk handler into TM; the transport fetches query-mode records
 	combinerState.ChunkHandler().Transport = tm.DNSTransport
