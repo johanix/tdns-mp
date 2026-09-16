@@ -2122,7 +2122,12 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	}
 	rejectedTags, doneTags := dnskeyKeyTagsOf(rejectedRecords), dnskeyKeyTagsOf(done)
 	wholeRejection := status == transport.ConfirmRejected.String() || (status == transport.ConfirmFailed.String() && len(rejectedItems) > 0)
-	plainSuccess := status == transport.ConfirmSuccess.String() && len(done) == 0
+	// a success covers every key of the distribution: the peer lists in
+	// done what it changed, and a key it did not list was already there
+	// (a distribution that carries the zone's whole served set, as the
+	// first one after the agent's local set was reset does, gets a done
+	// list of the new keys only; lab run 2026-09-16, finding 5)
+	success := status == transport.ConfirmSuccess.String()
 	// "ignored" is a final answer too: a provider that does not sign the
 	// zone applies no DNSKEY of ours (its combiner serves the zone as it
 	// gets it from the signer), and says so. It is not an obstacle to the
@@ -2144,9 +2149,9 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 				prop.RejectionMsg = reason
 			}
 			lgTransport.Warn("DNSKEY confirmation rejected a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "reason", reason)
-		case doneTags[kt] || plainSuccess:
+		case doneTags[kt] || success:
 			results[kt] = "applied"
-			lgTransport.Info("DNSKEY confirmation applied a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status)
+			lgTransport.Info("DNSKEY confirmation applied a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "listed", doneTags[kt])
 		case ignored:
 			results[kt] = "ignored"
 			lgTransport.Info("DNSKEY confirmation: the peer does not apply our keys (not a signer); answered", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt)

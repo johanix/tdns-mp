@@ -166,3 +166,38 @@ func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
 		t.Error("ignored answers made the propagation rejected")
 	}
 }
+
+// Found on the lab (2026-09-16, finding 5): the first distribution after
+// the agent's local set was reset carries the zone's whole served set, and
+// the peers list in done only the key that was new to them. The tracker
+// waited for the other keys' results for good, and the signer's resend was
+// a no-op (nothing changed). A success covers every key of the
+// distribution: a key the peer did not list was already there.
+func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
+	ksk, zsk, standby, retired := testDnskeyRR(t, "z.example.", 257), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256)
+	tags := []uint16{ksk.KeyTag(), zsk.KeyTag(), standby.KeyTag(), retired.KeyTag()}
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation("z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), []string{standby.String()}, nil)
+	p := tm.pendingDnskeyPropagations["d1"]
+	if p == nil || !p.ExpectedAgents["a1"] {
+		t.Fatalf("a success listing the one new key did not count as the agent's answer for every key: %+v", p)
+	}
+	for _, kt := range tags {
+		if p.Results["a1"][kt] != "applied" {
+			t.Errorf("key %d after the success: %q, want applied", kt, p.Results["a1"][kt])
+		}
+	}
+	// a partial answer still says which keys it covers
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPartial.String(), []string{standby.String()}, nil)
+	if p.ExpectedAgents["a2"] {
+		t.Error("a partial answer listing one key was taken as the answer for every key")
+	}
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil)
+	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+		t.Error("both peers answered success, the propagation is still pending")
+	}
+	if p.Rejected {
+		t.Error("successes made the propagation rejected")
+	}
+}
