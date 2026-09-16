@@ -153,6 +153,8 @@ github.com/johanix/tdns-transport/v2 v2.0.0-20260915142028-74e3f65cd131 h1:GZIkA
 github.com/johanix/tdns-transport/v2 v2.0.0-20260915142028-74e3f65cd131/go.mod h1:Bn6Xy+rjTqHKMOdCgRgPmVlGzZrCae62rLnK+dTLPjM=
 github.com/johanix/tdns-transport/v2 v2.0.0-20260916100855-6bbcb915fcb5 h1:CHNPgS4Se3im0Iu0latRBoPNrgab/2mAXwHVTfHKU0I=
 github.com/johanix/tdns-transport/v2 v2.0.0-20260916100855-6bbcb915fcb5/go.mod h1:Bn6Xy+rjTqHKMOdCgRgPmVlGzZrCae62rLnK+dTLPjM=
+github.com/johanix/tdns-transport/v2 v2.0.0-20260916101406-dfb9a41ec8ca h1:fDQBfSMWIBZcjYz4ql96cAKqdsMwII3JBxT3TyRZeZo=
+github.com/johanix/tdns-transport/v2 v2.0.0-20260916101406-dfb9a41ec8ca/go.mod h1:Bn6Xy+rjTqHKMOdCgRgPmVlGzZrCae62rLnK+dTLPjM=
 github.com/johanix/tdns/v2 v2.0.0-20260914153052-2af063dcb365 h1:D6fjqwVE8o5wUHqy/vTkykBG9taWbGyRGSyn3FV/7kU=
 github.com/johanix/tdns/v2 v2.0.0-20260914153052-2af063dcb365/go.mod h1:OfjEMkZvXjR5at7MqtglNiHHikIXxSAQ2paRtwnh/4k=
 github.com/johanix/tdns/v2 v2.0.0-20260914181710-bb6f815ccd53 h1:ukfLj2Z5MV40ZD6bQ7EiRa4msJYKgCHEa+ck48adVRk=

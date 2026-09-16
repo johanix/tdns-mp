@@ -101,3 +101,31 @@ func TestPeerPing_IPv6StaticPeer(t *testing.T) {
 		t.Fatal("ping did not reach the combiner's MsgQs.Ping")
 	}
 }
+
+// When DNS cannot deliver a ping and the peer has no API endpoint, the
+// error names both mechanisms. Before tdns-transport #20 it carried only
+// the API miss, which hid why DNS failed.
+func TestPeerPing_BothTransportsFailNamesBoth(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	address := ln.Addr().String()
+	ln.Close() // nothing listens: the DNS dial is refused
+
+	env := newIntegEnv(t, nil)
+	bob := dns.Fqdn(env.Bob.Identity)
+	conf := &Config{}
+	conf.InternalMp.TransportManager = env.Alice.Bridge.TransportManager
+	conf.InternalMp.mpConfig.Store(&MultiProviderConf{Role: "agent", Combiner: &PeerConf{Identity: bob, Address: address}})
+
+	resp := doPeerPing(conf, bob, false)
+	if !resp.Error {
+		t.Fatalf("ping to %s with nothing listening succeeded: %s", address, resp.Msg)
+	}
+	for _, want := range []string{"all transports failed", "DNS", "API", "no API endpoint configured"} {
+		if !strings.Contains(resp.ErrorMsg, want) {
+			t.Errorf("error lacks %q: %s", want, resp.ErrorMsg)
+		}
+	}
+}
