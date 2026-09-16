@@ -131,7 +131,8 @@ type ZoneView struct {
 	// rollover, requested or due: the active key retires in the same step.
 	// AlgRollInFlight lifts P5's one-per-role rule for the roll's duration.
 	ActiveOfRoleAndAlg bool
-	RolloverRequested  bool
+	RolloverRequested  bool // the promotion under way is a rollover (T9)
+	RolloverPending    bool // a rollover of the role has been requested and not fired (C3, T1)
 	AlgRollInFlight    bool
 	// StandbyCount is the policy's standby count for the key's role, and
 	// InPipeline how many keys of the role are in created..standby.
@@ -203,7 +204,7 @@ type Transition struct {
 // whose from, event and guard match wins; no row means "no change".
 var KeyLifecycleTable = []Transition{
 	{"T1", "", EvMint, func(k KeyView, z ZoneView) bool {
-		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole
+		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole || (z.RolloverPending && z.InPipeline == 0)
 	}, KeyStateCreated, "minted through tdns's keystore, state and columns named"},
 	{"T2", KeyStateCreated, EvDistributed, nil, KeyStateMpdist, "the distribution recorded with the signing providers expected to confirm"},
 	{"T3", KeyStateMpdist, EvApplied, func(k KeyView, z ZoneView) bool { return allOtherSignersApplied(z) }, KeyStatePublished, "published_at stamped"},

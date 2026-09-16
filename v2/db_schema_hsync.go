@@ -226,6 +226,7 @@ var HsyncTables = map[string]string{
 		keyid     INTEGER NOT NULL,
 		removal   INTEGER DEFAULT 0,
 		sent_at   TEXT DEFAULT '',
+		last_sent TEXT DEFAULT '',
 		expected  TEXT DEFAULT '',
 		applied   TEXT DEFAULT '',
 		pending   TEXT DEFAULT '',

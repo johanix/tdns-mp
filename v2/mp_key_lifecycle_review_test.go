@@ -264,3 +264,167 @@ func TestHookPushesOnlyForZonesTdnsRuns(t *testing.T) {
 		t.Fatal("the hook did not push for the zone tdns runs")
 	}
 }
+
+// The re-review's N8: a resend keeps the record's first send time, so the
+// answer a slow signer gives to the first send still counts after E12; a
+// confirmation older than the first send by more than the tolerance is
+// stale; one a little earlier (the agent's clock, its tracking after the
+// push) counts; the resend timer runs from the last send; and all of it
+// survives a restart.
+func TestDriverResendKeepsTheFirstSendTime(t *testing.T) {
+	pol := driverPolicy
+	pol.ResendAfter = 30 * time.Minute
+	r := newDriverRig(t, "resend.owned.example.", pol, "p2")
+	r.tick("mint")
+	ksk := r.keysIn(KeyStateMpdist, "KSK")[0]
+	var first DistributionStatus
+	for _, d := range r.l.InFlight() {
+		if d.KeyId == ksk {
+			first = d
+		}
+	}
+	sends := len(r.wire.distributions())
+	r.clock.Advance(pol.ResendAfter + time.Second)
+	r.tick("resend due")
+	if len(r.wire.distributions()) != sends+2 {
+		t.Fatalf("after the resend timer %d distributions, want %d (both keys sent again)", len(r.wire.distributions()), sends+2)
+	}
+	for _, d := range r.l.InFlight() {
+		if d.KeyId == ksk && !d.SentAt.Equal(first.SentAt) {
+			t.Errorf("the resend moved the first send time %s to %s", first.SentAt, d.SentAt)
+		}
+	}
+	r.tick("right after the resend")
+	if len(r.wire.distributions()) != sends+2 {
+		t.Errorf("a tick right after the resend sent again: %d distributions, want %d (the timer runs from the last send)", len(r.wire.distributions()), sends+2)
+	}
+	// the agent's answer to the first send: its tracking began just after
+	// the push, on its own clock, a little behind ours
+	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", first.SentAt.Add(-30*time.Second)); err != nil || to != KeyStatePublished {
+		t.Errorf("the answer to the first send after a resend: to=%s err=%v, want published", to, err)
+	}
+	// a removal's record refuses the answer to a distribution from before
+	// it: the key is given up on while published (T7')
+	if _, to, err := r.l.Apply(ksk, CmdWithdraw); err != nil || to != KeyStateMpremove {
+		t.Fatalf("withdraw: to=%s err=%v", to, err)
+	}
+	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", first.SentAt); !errors.Is(err, ErrStaleConfirmation) {
+		t.Errorf("the old distribution's answer against the removal's record: err=%v, want ErrStaleConfirmation", err)
+	}
+	if st := r.state(ksk); st != KeyStateMpremove {
+		t.Errorf("the stale answer moved the key to %s", st)
+	}
+	// a restart keeps both times
+	before := r.l.InFlight()
+	l2 := NewZoneKeyLifecycle(r.l.Zone, r.kdb, r.clock, pol, r.wire)
+	if err := l2.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	after := l2.InFlight()
+	// persisted to the second
+	if len(after) != len(before) || !after[0].SentAt.Equal(before[0].SentAt.Truncate(time.Second)) || after[0].KeyId != before[0].KeyId {
+		t.Errorf("after a restart the records are %+v, want %+v", after, before)
+	}
+	if _, _, err := l2.ConfirmAllAt(ksk, "applied", "", first.SentAt); !errors.Is(err, ErrStaleConfirmation) {
+		t.Errorf("after a restart the old answer is taken: err=%v", err)
+	}
+}
+
+// N9: a zone taken by configuration that this provider does not sign is
+// released, so tdns's own machine runs its keys rather than nobody.
+func TestEngineReleasesAZoneThisProviderDoesNotSign(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}})
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	mpzd := signerTestZone(t, "notours.owned.example.", kdb)
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2"}}}}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
+	mpzd.Data.Set(mpzd.ZoneName, *apex)
+	mpzd.InstallInitialSnapshot()
+	owner.Take(mpzd.ZoneName)
+	if !owner.Owns(mpzd.ZoneData) {
+		t.Fatal("not owned after Take")
+	}
+	if e.driver(mpzd.ZoneName) != nil {
+		t.Error("a driver for a zone this provider does not sign")
+	}
+	if owner.Owns(mpzd.ZoneData) {
+		t.Error("still owned after the engine found this provider is not a signer; tdns's machine would not run it either")
+	}
+}
+
+// N10: a key whose step fails does not stop the zone's tick: the strip a
+// retired key needs keeps failing, and the standby the policy wants is
+// still minted; the tick reports the failure.
+func TestDriverTickGoesOnPastAFailingKey(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyKSK = 1
+	r := newDriverRig(t, "goeson.owned.example.", pol, "p2")
+	r.tick("mint")
+	for _, k := range append(r.keysIn(KeyStateMpdist, "KSK"), r.keysIn(KeyStateMpdist, "ZSK")...) {
+		if _, _, err := r.l.Confirm(k, "p2", "applied", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("propagated")
+	a := r.keysIn(KeyStateActive, "KSK")[0]
+	r.wire.parentDS[a] = true
+	b := r.keysIn(KeyStateMpdist, "KSK")[0]
+	if _, _, err := r.l.Confirm(b, "p2", "applied", ""); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("standby propagated")
+	r.wire.parentDS[b] = true
+	r.l.RequestRollover("KSK")
+	r.tick("roll")
+	if st := r.state(a); st != KeyStateRetired {
+		t.Fatalf("old KSK %s, want retired", st)
+	}
+	r.wire.parentDS[a] = false
+	// the strip keeps failing at the margin; the roll left the pipeline
+	// empty, so the tick has a standby to mint beside the failing key
+	r.wire.mu.Lock()
+	r.wire.stripErr = errors.New("the signer is busy")
+	r.wire.mu.Unlock()
+	r.clock.Advance(pol.Margin + time.Second)
+	if err := r.l.Tick(); err == nil {
+		t.Error("a tick with a failing strip reported no error")
+	}
+	if st := r.state(a); st != KeyStateRetired {
+		t.Errorf("the old KSK is %s after the failed strip, want still retired", st)
+	}
+	if n := len(r.keysIn(KeyStateMpdist, "KSK")); n != 1 {
+		t.Errorf("the standby was not minted beside the failing key: %d in mpdist, want 1", n)
+	}
+	r.wire.mu.Lock()
+	r.wire.stripErr = nil
+	r.wire.mu.Unlock()
+	r.tick("the strip works again")
+	if st := r.state(a); st == KeyStateRetired {
+		t.Error("the old KSK is still retired once the strip works")
+	}
+}
+
+// N6: the table's mint row knows a rollover pending with nothing in the
+// pipeline, as Tick does (T16 with a standby count of 0).
+func TestMintRowMintsForARolloverPending(t *testing.T) {
+	steady := ZoneView{StandbyCount: 0, InPipeline: 0}
+	if _, row := Next(KeyView{}, EvMint, steady); row != nil {
+		t.Errorf("a steady zone with no standby wanted mints (row %s)", row.ID)
+	}
+	pending := steady
+	pending.RolloverPending = true
+	if next, row := Next(KeyView{}, EvMint, pending); row == nil || row.ID != "T1" || next != KeyStateCreated {
+		t.Errorf("a rollover pending with nothing in the pipeline: row %v next %q, want T1 to created", row, next)
+	}
+	pending.InPipeline = 1
+	if _, row := Next(KeyView{}, EvMint, pending); row != nil {
+		t.Errorf("a rollover pending with a key already in the pipeline mints again (row %s)", row.ID)
+	}
+}

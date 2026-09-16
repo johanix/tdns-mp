@@ -62,7 +62,8 @@ type Wire interface {
 // who has.
 type distribution struct {
 	Removal  bool
-	SentAt   time.Time
+	SentAt   time.Time // when the distribution first went out: what a confirmation must not predate
+	LastSent time.Time // the last send (a resend included): what the resend timer runs from
 	Expected map[string]bool
 	Applied  map[string]bool
 	Pending  map[string]bool
@@ -212,6 +213,7 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 	}
 	z.NoActiveOfRole = active == 0
 	z.RolloverRequested = l.rolling == role
+	z.RolloverPending = l.rolls[role]
 	z.AlgRollInFlight = l.algRollInFlight(role, all)
 	return z
 }
@@ -364,7 +366,9 @@ func (l *ZoneKeyLifecycle) resend(keyid uint16) {
 	if d == nil {
 		return
 	}
-	d.SentAt = l.Clock.Now()
+	// the confirmations received stay (T6'), and so does the first send
+	// time: the answer a slow signer gives to the first send is not stale
+	d.LastSent = l.Clock.Now()
 	l.saveDist(keyid)
 	if d.Removal {
 		l.Wire.DistributeRemoval(l.Zone, keyid)
@@ -374,7 +378,8 @@ func (l *ZoneKeyLifecycle) resend(keyid uint16) {
 }
 
 func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal bool) {
-	d := &distribution{Removal: removal, SentAt: l.Clock.Now(), Expected: map[string]bool{}, Applied: map[string]bool{}, Pending: map[string]bool{}, Rejected: map[string]bool{}}
+	now := l.Clock.Now()
+	d := &distribution{Removal: removal, SentAt: now, LastSent: now, Expected: map[string]bool{}, Applied: map[string]bool{}, Pending: map[string]bool{}, Rejected: map[string]bool{}}
 	for _, p := range l.Wire.OtherSigners(l.Zone) {
 		d.Expected[p] = true
 	}
@@ -410,12 +415,30 @@ func (l *ZoneKeyLifecycle) ConfirmKind(keyid uint16, provider, status, reason st
 	return l.confirmLocked(keyid, provider, status, reason, &removal)
 }
 
+// StaleTolerance is how much earlier than the record's first send a
+// confirmation's time may be and still count: the agent stamps the time
+// it started tracking, on its own clock, after the signer's push; the
+// tolerance covers that latency and a modest skew between the two hosts.
+// A confirmation earlier than that answers a distribution that went out
+// before this record's (the key's own after its removal, say) and is
+// refused; a skew beyond it is logged as such.
+const StaleTolerance = 2 * time.Minute
+
+func (d *distribution) lastSent() time.Time {
+	if d.LastSent.IsZero() {
+		return d.SentAt
+	}
+	return d.LastSent
+}
+
 // ConfirmAllAt is the aggregated confirmation the agent sends today (one
 // "propagated" once every remote agent applied a distribution, table §6
 // O5): it counts for every signer the record in flight expects, not for
-// whoever signs now. A confirmation of a distribution sent before the
-// record's was is stale and refused (ErrStaleConfirmation); at is the
-// zero time when the sender does not say.
+// whoever signs now. at is when the agent started tracking the
+// distribution it answers, the zero time when the sender does not say; a
+// confirmation older than the record's first send by more than
+// StaleTolerance is stale and refused (ErrStaleConfirmation). A resend
+// keeps the first send time, so the answer to the first send still counts.
 func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at time.Time) (from, to string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -423,8 +446,9 @@ func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at 
 	if d == nil {
 		return "", "", fmt.Errorf("key %d of %s has no distribution in flight", keyid, l.Zone)
 	}
-	if !at.IsZero() && at.Before(d.SentAt) {
-		return "", "", fmt.Errorf("key %d of %s: a confirmation from %s of a distribution older than the one in flight (%s): %w", keyid, l.Zone, at.Format(time.RFC3339), d.SentAt.Format(time.RFC3339), ErrStaleConfirmation)
+	if !at.IsZero() && at.Before(d.SentAt.Add(-StaleTolerance)) {
+		return "", "", fmt.Errorf("key %d of %s: a confirmation from %s of a distribution older than the one in flight (sent %s; or the agent's clock is more than %s behind): %w",
+			keyid, l.Zone, at.Format(time.RFC3339), d.SentAt.Format(time.RFC3339), StaleTolerance, ErrStaleConfirmation)
 	}
 	expected := setList(d.Expected)
 	if len(expected) == 0 {
@@ -520,7 +544,7 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 				continue
 			}
 			if k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateActive || k.State == KeyStateRetired {
-				d := &distribution{SentAt: l.Clock.Now(), Expected: map[string]bool{}, Applied: map[string]bool{}, Pending: map[string]bool{}, Rejected: map[string]bool{}}
+				d := &distribution{SentAt: l.Clock.Now(), LastSent: l.Clock.Now(), Expected: map[string]bool{}, Applied: map[string]bool{}, Pending: map[string]bool{}, Rejected: map[string]bool{}}
 				for p := range joiners {
 					d.Expected[p] = true
 				}
@@ -609,29 +633,37 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	if err != nil {
 		return err
 	}
+	// a key whose step fails (a strip the signer refuses, say) is logged and
+	// left for the next tick; the others, and the minting below, go on
+	var errs []error
+	fail := func(keyid uint16, what string, err error) {
+		l.logf("key lifecycle: a tick step failed; the key waits for the next tick", "zone", l.Zone, "keyid", keyid, "step", what, "err", err)
+		errs = append(errs, err)
+	}
 	for _, keyid := range keytagsOf(all) {
 		k := all[keyid]
 		// E12: a distribution in flight that has waited too long, whatever
 		// the key's state (a joiner's record on a served key included)
-		if d := l.dist[keyid]; d != nil && l.Policy.ResendAfter > 0 && !l.Clock.Now().Before(d.SentAt.Add(l.Policy.ResendAfter)) {
+		if d := l.dist[keyid]; d != nil && l.Policy.ResendAfter > 0 && !l.Clock.Now().Before(d.lastSent().Add(l.Policy.ResendAfter)) {
 			if _, _, err := l.applyLocked(keyid, EvResend); err != nil {
-				return err
+				fail(keyid, "resend", err)
+				continue
 			}
 		}
 		switch k.State {
 		case KeyStateCreated:
 			if _, _, err := l.applyLocked(keyid, EvDistributed); err != nil {
-				return err
+				fail(keyid, "distribute", err)
 			}
 		case KeyStatePublished:
 			if _, _, err := l.applyLocked(keyid, EvPropagated); err != nil {
-				return err
+				fail(keyid, "propagated", err)
 			}
 		case KeyStateRetired:
 			if k.Flags&dns.SEP != 0 && !l.dsGone[keyid] {
 				if present, known := l.Wire.ParentServesDS(l.Zone, keyid); known && !present {
 					if _, _, err := l.applyLocked(keyid, EvDSGone); err != nil {
-						return err
+						fail(keyid, "ds gone", err)
 					}
 				} else if k.RetiredAt != nil && !l.reported[keyid] && !l.Clock.Now().Before(k.RetiredAt.Add(3*l.Policy.Margin)) {
 					// E7 has not come: until S5 withdraws the DS at the parent,
@@ -641,7 +673,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 				}
 			}
 			if _, _, err := l.applyLocked(keyid, EvMargin); err != nil {
-				return err
+				fail(keyid, "margin", err)
 			}
 		}
 	}
@@ -707,7 +739,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Reload is the restart (T15): distributions for keys in mpdist and
@@ -832,17 +864,17 @@ func (l *ZoneKeyLifecycle) saveDist(keyid uint16) {
 	if d.Removal {
 		removal = 1
 	}
-	if _, err := l.KDB.DB.Exec(`INSERT INTO MPKeyDistribution (zonename, keyid, removal, sent_at, expected, applied, pending, rejected, reason)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(zonename, keyid) DO UPDATE SET removal=excluded.removal, sent_at=excluded.sent_at, expected=excluded.expected,
+	if _, err := l.KDB.DB.Exec(`INSERT INTO MPKeyDistribution (zonename, keyid, removal, sent_at, last_sent, expected, applied, pending, rejected, reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(zonename, keyid) DO UPDATE SET removal=excluded.removal, sent_at=excluded.sent_at, last_sent=excluded.last_sent, expected=excluded.expected,
 		applied=excluded.applied, pending=excluded.pending, rejected=excluded.rejected, reason=excluded.reason`,
-		l.Zone, int(keyid), removal, d.SentAt.UTC().Format(time.RFC3339), joinSet(d.Expected), joinSet(d.Applied), joinSet(d.Pending), joinSet(d.Rejected), d.Reason); err != nil {
+		l.Zone, int(keyid), removal, d.SentAt.UTC().Format(time.RFC3339), d.lastSent().UTC().Format(time.RFC3339), joinSet(d.Expected), joinSet(d.Applied), joinSet(d.Pending), joinSet(d.Rejected), d.Reason); err != nil {
 		l.logf("key lifecycle: saving the distribution failed", "zone", l.Zone, "keyid", keyid, "err", err)
 	}
 }
 
 func (l *ZoneKeyLifecycle) loadDists() error {
-	rows, err := l.KDB.DB.Query(`SELECT keyid, removal, sent_at, expected, applied, pending, rejected, reason FROM MPKeyDistribution WHERE zonename=?`, l.Zone)
+	rows, err := l.KDB.DB.Query(`SELECT keyid, removal, sent_at, last_sent, expected, applied, pending, rejected, reason FROM MPKeyDistribution WHERE zonename=?`, l.Zone)
 	if err != nil {
 		return fmt.Errorf("read the distributions of %s: %w", l.Zone, err)
 	}
@@ -850,12 +882,13 @@ func (l *ZoneKeyLifecycle) loadDists() error {
 	l.dist = map[uint16]*distribution{}
 	for rows.Next() {
 		var keyid, removal int
-		var sentAt, expected, applied, pending, rejected, reason string
-		if err := rows.Scan(&keyid, &removal, &sentAt, &expected, &applied, &pending, &rejected, &reason); err != nil {
+		var sentAt, lastSent, expected, applied, pending, rejected, reason string
+		if err := rows.Scan(&keyid, &removal, &sentAt, &lastSent, &expected, &applied, &pending, &rejected, &reason); err != nil {
 			return err
 		}
 		d := &distribution{Removal: removal != 0, Expected: splitSet(expected), Applied: splitSet(applied), Pending: splitSet(pending), Rejected: splitSet(rejected), Reason: reason}
 		d.SentAt, _ = time.Parse(time.RFC3339, sentAt)
+		d.LastSent, _ = time.Parse(time.RFC3339, lastSent)
 		l.dist[uint16(keyid)] = d
 	}
 	return rows.Err()

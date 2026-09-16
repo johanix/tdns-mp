@@ -259,8 +259,10 @@ func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
 	if !e.wire.IsSigner(zone) {
 		// taken by configuration but not a signer of the zone (no HSYNC
 		// identity of ours among its HSYNCPARAM signers): the machine would
-		// mint keys the zone never carries; say so, do nothing
-		lgSigner.Error("key lifecycle: this provider is not one of the zone's signers; not running its keys", "zone", zone)
+		// mint keys the zone never carries. Released, so nobody's keys go
+		// unmanaged: tdns's own machine runs them again.
+		lgSigner.Error("key lifecycle: this provider is not one of the zone's signers; the zone is released to tdns's key machine", "zone", zone)
+		e.owner.Release(zone)
 		return nil
 	}
 	l := NewZoneKeyLifecycle(zone, kdb, RealClock, policyFor(e.conf, zd), e.wire)
