@@ -143,3 +143,26 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 		t.Errorf("a whole rejection left the propagation pending: %+v", p.Results)
 	}
 }
+
+// A provider that does not sign the zone answers "ignored" to a DNSKEY
+// distribution: it applies no key of ours and serves the zone as the
+// signer gives it. That is a final answer, and the key is propagated once
+// every peer answered; the lab's single-signer cells depend on it.
+func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 256)
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmIgnored.String(), nil, nil)
+	p := tm.pendingDnskeyPropagations["d1"]
+	if p == nil || !p.ExpectedAgents["a1"] || p.Rejected || p.Results["a1"][ours.KeyTag()] != "ignored" {
+		t.Fatalf("an ignored answer did not count as the agent's answer: %+v", p)
+	}
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmIgnored.String(), nil, nil)
+	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+		t.Error("both peers answered ignored, the propagation is still pending")
+	}
+	if p.Rejected {
+		t.Error("ignored answers made the propagation rejected")
+	}
+}
