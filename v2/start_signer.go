@@ -8,6 +8,7 @@ package tdnsmp
 
 import (
 	"context"
+	"time"
 
 	"github.com/gorilla/mux"
 	tdns "github.com/johanix/tdns/v2"
@@ -60,9 +61,20 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	})
 	// tdns KeyStateWorker: every signing zone's key lifecycle, the
 	// multi-provider zones' through the lifecycle hooks.
+	// tdns-mp's own key state machine for the zones the config names;
+	// tdns's worker skips those (an owned zone), and runs the rest. Taken
+	// before the worker starts, so its first sweep never sees them unowned.
+	if e := conf.InternalMp.KeyLifecycle; e != nil {
+		e.TakeConfiguredZones()
+	}
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
+	if e := conf.InternalMp.KeyLifecycle; e != nil {
+		tdns.StartEngineNoError(&tdns.Globals.App, "KeyLifecycleEngine", func() {
+			e.Run(ctx, 30*time.Second)
+		})
+	}
 
 	// --- MP engines from tdns-mp ---
 	tm := conf.InternalMp.MPTransport

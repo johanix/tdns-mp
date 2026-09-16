@@ -123,6 +123,7 @@ func goldenWirePayloads() []struct {
 				State: "active",
 				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA==",
 			}},
+			Time:      "2023-11-14T22:13:26Z",
 			Timestamp: 1700000006, Type: "keystate",
 			SenderID: "legacy-sender.example.",
 		}},

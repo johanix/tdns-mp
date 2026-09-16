@@ -39,6 +39,9 @@ type DnssecKeyWithTimestamps = tdns.DnssecKeyWithTimestamps
 //
 // The KeyDB is looked up at call time: it does not exist yet when this
 // registers.
+// inventoryPush is the hook's push, a variable so a test can count it.
+var inventoryPush = pushKeystateInventoryToAllAgents
+
 func RegisterMPKeyLifecycleHooks(conf *Config) {
 	isMP := func(zd *tdns.ZoneData) bool {
 		return zd != nil && zd.Options[tdns.OptMultiProvider]
@@ -119,8 +122,13 @@ func RegisterMPKeyLifecycleHooks(conf *Config) {
 			if !ok || !isMP(zd) {
 				return
 			}
+			// an owned zone's machine pushes its own (Wire.Distribute and
+			// DistributeRemoval); the hook is for the zones tdns still runs
+			if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.Owns(zd) {
+				return
+			}
 			lgSigner.Info("key state changed; pushing the inventory to the agents", "zone", zone, "keyid", keyid, "from", from, "to", to)
-			go pushKeystateInventoryToAllAgents(conf, zone)
+			go inventoryPush(conf, zone)
 		},
 	})
 }
