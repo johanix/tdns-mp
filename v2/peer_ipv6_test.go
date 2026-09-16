@@ -24,7 +24,11 @@ func serveDNS(t *testing.T, ctx context.Context, ln net.Listener, receiver *peer
 		_ = receiver.Bridge.ChunkHandler.RouteViaRouter(ctx, r.Question[0].Name, r, w)
 	})}
 	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
 }
 
 func TestDNSEndpointURI(t *testing.T) {
