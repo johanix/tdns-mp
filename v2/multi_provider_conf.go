@@ -94,7 +94,7 @@ type MultiProviderConf struct {
 	Remote struct {
 		// LocateInterval timed the retired LocateAgent path and has no
 		// effect: discovery retries are syncengine.intervals.discoveryretry.
-		// Kept so configs that still set it load without complaint.
+		// It stays so the retired key is named here, beside its replacement.
 		LocateInterval int
 		BeatInterval   uint32
 	}
