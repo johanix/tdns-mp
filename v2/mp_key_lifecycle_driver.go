@@ -79,12 +79,13 @@ type ZoneKeyLifecycle struct {
 	Wire   Wire
 	Log    func(msg string, kv ...any)
 
-	mu      sync.Mutex
-	dist    map[uint16]*distribution
-	dsGone  map[uint16]bool
-	rolls   map[string]bool // a rollover requested, by role
-	rolling string          // the role whose promotion is a rollover, while it is applied
-	known   map[string]bool // the other signers last seen, for the joiners
+	mu       sync.Mutex
+	dist     map[uint16]*distribution
+	dsGone   map[uint16]bool
+	rolls    map[string]bool // a rollover requested, by role
+	reported map[uint16]bool // retired KSKs reported as waiting on the parent
+	rolling  string          // the role whose promotion is a rollover, while it is applied
+	known    map[string]bool // the other signers last seen, for the joiners
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -101,7 +102,7 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 		kdb.DB.Exec(HsyncTables["MPKeyDistribution"])
 	}
 	return &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
-		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, known: known}
+		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known}
 }
 
 func (l *ZoneKeyLifecycle) logf(msg string, kv ...any) {
@@ -289,6 +290,14 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	if next == k.State {
 		return k.State, next, nil
 	}
+	if next == KeyStateMpremove {
+		// the RRSIGs go before the row does: a strip that fails leaves the
+		// row where it was, so the next tick tries again (nothing is left
+		// in mpremove with no removal in flight)
+		if err := l.Wire.Strip(l.Zone, keyid); err != nil {
+			return k.State, k.State, fmt.Errorf("strip the RRSIGs of key %d: %w", keyid, err)
+		}
+	}
 	if err := l.write(k, next, kv.SEP); err != nil {
 		return k.State, k.State, err
 	}
@@ -323,9 +332,6 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	case KeyStateRetired:
 		l.Wire.Resign(l.Zone)
 	case KeyStateMpremove:
-		if err := l.Wire.Strip(l.Zone, keyid); err != nil {
-			return k.State, next, fmt.Errorf("strip the RRSIGs of key %d: %w", keyid, err)
-		}
 		delete(l.dsGone, keyid)
 		l.startDistribution(keyid, true)
 		if len(l.dist[keyid].Expected) == 0 {
@@ -402,6 +408,38 @@ func (l *ZoneKeyLifecycle) ConfirmKind(keyid uint16, provider, status, reason st
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.confirmLocked(keyid, provider, status, reason, &removal)
+}
+
+// ConfirmAllAt is the aggregated confirmation the agent sends today (one
+// "propagated" once every remote agent applied a distribution, table §6
+// O5): it counts for every signer the record in flight expects, not for
+// whoever signs now. A confirmation of a distribution sent before the
+// record's was is stale and refused (ErrStaleConfirmation); at is the
+// zero time when the sender does not say.
+func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at time.Time) (from, to string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	d := l.dist[keyid]
+	if d == nil {
+		return "", "", fmt.Errorf("key %d of %s has no distribution in flight", keyid, l.Zone)
+	}
+	if !at.IsZero() && at.Before(d.SentAt) {
+		return "", "", fmt.Errorf("key %d of %s: a confirmation from %s of a distribution older than the one in flight (%s): %w", keyid, l.Zone, at.Format(time.RFC3339), d.SentAt.Format(time.RFC3339), ErrStaleConfirmation)
+	}
+	expected := setList(d.Expected)
+	if len(expected) == 0 {
+		// nobody to wait for (T3', T13')
+		return l.applyLocked(keyid, EvDistributed)
+	}
+	for _, p := range expected {
+		if from, to, err = l.confirmLocked(keyid, p, status, reason, nil); err != nil {
+			return from, to, err
+		}
+		if l.dist[keyid] == nil {
+			break // the distribution completed on that confirmation
+		}
+	}
+	return from, to, nil
 }
 
 func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason string, removal *bool) (from, to string, err error) {
@@ -595,6 +633,11 @@ func (l *ZoneKeyLifecycle) Tick() error {
 					if _, _, err := l.applyLocked(keyid, EvDSGone); err != nil {
 						return err
 					}
+				} else if k.RetiredAt != nil && !l.reported[keyid] && !l.Clock.Now().Before(k.RetiredAt.Add(3*l.Policy.Margin)) {
+					// E7 has not come: until S5 withdraws the DS at the parent,
+					// nothing in S3 does, so the operator hears it (design §5.7)
+					l.reported[keyid] = true
+					l.Wire.Report(l.Zone, keyid, "retired KSK waits for the parent to drop its DS; the withdrawal towards the parent is S5's (it stays published meanwhile)")
 				}
 			}
 			if _, _, err := l.applyLocked(keyid, EvMargin); err != nil {
@@ -623,7 +666,9 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			case KeyStateActive:
 				active++
 				kk := k
-				if oldest == nil || (k.ActiveAt != nil && oldest.ActiveAt != nil && k.ActiveAt.Before(*oldest.ActiveAt)) {
+				// the oldest by active_at; a key with no stamp counts as the
+				// oldest, so a missing stamp never hides a due rollover
+				if oldest == nil || oldest.ActiveAt != nil && (k.ActiveAt == nil || k.ActiveAt.Before(*oldest.ActiveAt)) {
 					oldest = &kk
 				}
 			}
@@ -633,7 +678,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		if role == "KSK" {
 			want, lifetime = l.Policy.StandbyKSK, l.Policy.KSKLifetime
 		}
-		due := lifetime > 0 && oldest != nil && oldest.ActiveAt != nil && !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime))
+		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
 		// T9: promote for a rollover requested or due, or a role without an active key
 		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due) {
 			sort.Slice(standbys, func(i, j int) bool { return standbys[i].KeyTag < standbys[j].KeyTag })
@@ -649,8 +694,10 @@ func (l *ZoneKeyLifecycle) Tick() error {
 				due = false
 			}
 		}
-		// T1: mint what is missing, and send it on its way (T2) at once
-		if pipeline < want || (active == 0 && pipeline == 0) || (due && pipeline == 0) {
+		// T1: mint what is missing, and send it on its way (T2) at once; a
+		// rollover requested with nothing in the pipeline (T16 with a standby
+		// count of 0, the default for KSKs) mints the key it will promote
+		if pipeline < want || (active == 0 && pipeline == 0) || (due && pipeline == 0) || (l.rolls[role] && pipeline == 0) {
 			keyid, err := l.Mint(role)
 			if err != nil {
 				return err

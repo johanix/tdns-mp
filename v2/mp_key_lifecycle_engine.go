@@ -38,10 +38,26 @@ func (w *signerWire) mpzd(zone string) *MPZoneData {
 }
 
 // OtherSigners: the zone's HSYNCPARAM signers minus this provider's label.
+// Nothing when this provider is not one of the signers: the machine must
+// not run there (IsSigner), and never waits on itself.
 func (w *signerWire) OtherSigners(zone string) []string {
+	others, ok := w.signers(zone)
+	if !ok {
+		return nil
+	}
+	return others
+}
+
+// IsSigner reports whether this provider is one of the zone's signers.
+func (w *signerWire) IsSigner(zone string) bool {
+	_, ok := w.signers(zone)
+	return ok
+}
+
+func (w *signerWire) signers(zone string) ([]string, bool) {
 	mpzd := w.mpzd(zone)
 	if mpzd == nil {
-		return nil
+		return nil, false
 	}
 	mp := w.conf.MpConfig()
 	if mp == nil {
@@ -50,37 +66,47 @@ func (w *signerWire) OtherSigners(zone string) []string {
 	return otherSignerLabels(mpzd, mp)
 }
 
-func otherSignerLabels(mpzd *MPZoneData, mp *MultiProviderConf) []string {
+// otherSignerLabels: the other signers, and whether this provider is a
+// signer at all (its HSYNC identity matched, and its label is listed).
+func otherSignerLabels(mpzd *MPZoneData, mp *MultiProviderConf) ([]string, bool) {
 	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil || apex == nil {
-		return nil
+		return nil, false
 	}
 	rrset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM)
 	if !ok || len(rrset.RRs) == 0 {
-		return nil
+		return nil, false
 	}
 	prr, ok := rrset.RRs[0].(*dns.PrivateRR)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	hp, ok := prr.Data.(*core.HSYNCPARAM)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	ourLabel := ""
 	if mp != nil {
 		if _, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(mp)); err == nil {
-			ourLabel = label
+			ourLabel = trimDot(label)
 		}
 	}
+	if ourLabel == "" {
+		return nil, false
+	}
 	var out []string
+	listed := false
 	for _, s := range hp.GetSigners() {
-		if trimDot(s) == trimDot(ourLabel) {
+		if trimDot(s) == ourLabel {
+			listed = true
 			continue
 		}
 		out = append(out, trimDot(s))
 	}
-	return out
+	if !listed {
+		return nil, false
+	}
+	return out, true
 }
 
 func trimDot(s string) string {
@@ -94,10 +120,11 @@ func trimDot(s string) string {
 // through its agents, which distribute the DNSKEY RRset and confirm back
 // with a KEYSTATE signal per key; a removal is a push without the key.
 func (w *signerWire) Distribute(zone string, keyid uint16) {
-	pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+	// off the driver's lock: the push is network I/O with its own timeouts
+	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
 }
 func (w *signerWire) DistributeRemoval(zone string, keyid uint16) {
-	pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
 }
 
 // ParentServesDS asks the resolver for the zone's DS RRset.
@@ -106,7 +133,8 @@ func (w *signerWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
 	if imr == nil {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// bounded: it runs under the driver's lock on the signer's tick
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	rrset, err := imr.DefaultRRsetFetcher(ctx, dns.Fqdn(zone), dns.TypeDS)
 	if err != nil {
@@ -157,6 +185,10 @@ func (w *signerWire) Report(zone string, keyid uint16, what string) {
 // the resend interval from the multi-provider config.
 func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 	pol := LifecyclePolicy{KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519, PropagationDelay: time.Hour, Margin: time.Hour, ResendAfter: 10 * time.Minute}
+	// The withdrawal margin (E8: the RRSIGs a retired key made have left the
+	// caches) is the owner's, not the clamp's (Q1: the clamp is mechanism).
+	// The kasp has no retire-safety field yet; until it does, the margin is
+	// the propagation delay, set below with it.
 	if zd != nil && zd.DnssecPolicy != nil {
 		p := zd.DnssecPolicy
 		pol.KSKAlgorithm, pol.ZSKAlgorithm = p.KSKAlgorithm, p.ZSKAlgorithm
@@ -169,12 +201,10 @@ func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 		if lifetimeSchedules(p.ZSK.Lifetime) {
 			pol.ZSKLifetime = time.Duration(p.ZSK.Lifetime) * time.Second
 		}
-		if p.Clamping.Margin > 0 {
-			pol.Margin = p.Clamping.Margin
-		}
 	}
 	if conf != nil && conf.Config != nil {
 		pol.PropagationDelay = conf.Config.KaspPropagationDelay()
+		pol.Margin = pol.PropagationDelay
 		kasp := conf.Config.Dnssec.Kasp
 		pol.StandbyZSK, pol.StandbyKSK = 1, 0
 		if kasp.StandbyZskCount > 0 {
@@ -226,6 +256,13 @@ func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
 	if kdb == nil {
 		return nil
 	}
+	if !e.wire.IsSigner(zone) {
+		// taken by configuration but not a signer of the zone (no HSYNC
+		// identity of ours among its HSYNCPARAM signers): the machine would
+		// mint keys the zone never carries; say so, do nothing
+		lgSigner.Error("key lifecycle: this provider is not one of the zone's signers; not running its keys", "zone", zone)
+		return nil
+	}
 	l := NewZoneKeyLifecycle(zone, kdb, RealClock, policyFor(e.conf, zd), e.wire)
 	l.Log = func(msg string, kv ...any) { lgSigner.Info(msg, kv...) }
 	if err := l.Reload(); err != nil {
@@ -239,7 +276,7 @@ func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
 // "propagated" is every expected signer's applied confirmation (the agent
 // aggregates them), "rejected" one rejection. Reports whether the zone is
 // owned, so the caller can keep today's path for one that is not.
-func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message string) bool {
+func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message string, at time.Time) bool {
 	l := e.driver(zone)
 	if l == nil {
 		return false
@@ -247,16 +284,9 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	var err error
 	switch signal {
 	case "propagated":
-		for _, p := range l.Wire.OtherSigners(l.Zone) {
-			if _, _, err = l.Confirm(keytag, p, "applied", ""); err != nil {
-				break
-			}
-		}
-		if len(l.Wire.OtherSigners(l.Zone)) == 0 {
-			_, _, err = l.Apply(keytag, EvDistributed)
-		}
+		_, _, err = l.ConfirmAllAt(keytag, "applied", "", at)
 	case "rejected":
-		_, _, err = l.Confirm(keytag, "peers", "rejected", message)
+		_, _, err = l.ConfirmAllAt(keytag, "rejected", message, at)
 	default:
 		return true
 	}
@@ -298,6 +328,10 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 		return
 	}
 	for _, z := range mp.KeyLifecycleZones {
+		if zd, ok := tdns.Zones.Get(dns.Fqdn(z)); ok && zd != nil && !zd.Options[tdns.OptMultiProvider] {
+			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", dns.Fqdn(z))
+			continue
+		}
 		e.owner.Take(z)
 		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", dns.Fqdn(z))
 	}

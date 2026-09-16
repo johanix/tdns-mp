@@ -86,6 +86,7 @@ type DnsKeystatePayload struct {
 	Signal       string              `json:"Signal"`                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
 	Message      string              `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
+	Time         string              `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
 	Timestamp    int64               `json:"timestamp"`              // Unix timestamp
 
 	// Legacy fields (fallback)

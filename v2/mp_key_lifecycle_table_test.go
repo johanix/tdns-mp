@@ -60,6 +60,9 @@ func TestKeyStateColumnsFollowTheTable(t *testing.T) {
 }
 
 // The document's §3, row by row: from, event, to.
+// T16 (rollover now) and T17 (cancel) are the document's procedural rows:
+// RequestRollover/CancelRollover and Tick's promote-or-mint, tested by the
+// driver's rollover tests (with and without a standby configured).
 func TestTransitionTableMatchesTheDocument(t *testing.T) {
 	doc := []struct {
 		id, from, to string

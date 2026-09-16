@@ -23,7 +23,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func newSignerKeyCmd(kind string) *cobra.Command {
+func newSignerKeyCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "key",
 		Short: "The key lifecycle of a zone tdns-mp runs",

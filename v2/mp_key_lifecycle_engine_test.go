@@ -5,7 +5,6 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -19,20 +18,21 @@ func TestSignerWireOtherSignersAndPolicy(t *testing.T) {
 	if err != nil || apex == nil {
 		t.Fatalf("apex: %v", err)
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2", "p3"}}}}
-	prr := &dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
-	mpzd.Data.Set(mpzd.ZoneName, *apex)
-	mpzd.InstallInitialSnapshot()
-
-	// with no identity of ours matched, every signer is another signer
-	got := otherSignerLabels(mpzd, &MultiProviderConf{})
-	if len(got) != 3 {
-		t.Errorf("other signers with no label of ours: %v, want p1 p2 p3", got)
-	}
+	zoneSignedBy(t, mpzd, "agent.us.example.", "p1", "p2", "p3")
 
 	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}})
 	conf.Config.Internal.KeyDB = kdb
+	// with no identity of ours among the signers this provider is not a
+	// signer of the zone: no other signers to wait for, and the engine
+	// does not run the zone (it would wait on itself otherwise)
+	if got, ok := otherSignerLabels(mpzd, &MultiProviderConf{}); ok || len(got) != 0 {
+		t.Errorf("with no label of ours: %v ok=%v, want none and not a signer", got, ok)
+	}
+	if got, ok := otherSignerLabels(mpzd, conf.MpConfig()); !ok || len(got) != 3 {
+		t.Errorf("as a signer: %v ok=%v, want p1 p2 p3", got, ok)
+	}
+
 	conf.Config.Dnssec.Kasp.PropagationDelay = "45m"
 	conf.Config.Dnssec.Kasp.StandbyKskCount = 2
 	pol := policyFor(conf, mpzd.ZoneData)
@@ -52,10 +52,10 @@ func TestSignerWireOtherSignersAndPolicy(t *testing.T) {
 		t.Errorf("resend %s, want the 10m default", pol.ResendAfter)
 	}
 	mpzd.DnssecPolicy.KSK.Lifetime = 30 * 86400
-	mpzd.DnssecPolicy.Clamping.Margin = 2 * time.Hour
+	mpzd.DnssecPolicy.Clamping.Margin = 2 * time.Hour // the clamp is mechanism (Q1): not the withdrawal margin
 	pol = policyFor(conf, mpzd.ZoneData)
-	if pol.KSKLifetime != 30*24*time.Hour || pol.Margin != 2*time.Hour {
-		t.Errorf("KSK lifetime %s margin %s, want 720h and 2h from the policy", pol.KSKLifetime, pol.Margin)
+	if pol.KSKLifetime != 30*24*time.Hour || pol.Margin != 45*time.Minute {
+		t.Errorf("KSK lifetime %s margin %s, want 720h from the policy and 45m (the propagation delay, until the kasp has a retire safety)", pol.KSKLifetime, pol.Margin)
 	}
 
 	// the engine: a zone not taken has no driver; a taken one gets one
@@ -68,10 +68,10 @@ func TestSignerWireOtherSignersAndPolicy(t *testing.T) {
 	if e.driver(mpzd.ZoneName) == nil {
 		t.Error("no driver for a taken zone")
 	}
-	if !e.Signal(mpzd.ZoneName, 4711, "propagated", "") {
+	if !e.Signal(mpzd.ZoneName, 4711, "propagated", "", time.Time{}) {
 		t.Error("a signal for an owned zone was not claimed by the engine")
 	}
-	if e.Signal("other.example.", 4711, "propagated", "") {
+	if e.Signal("other.example.", 4711, "propagated", "", time.Time{}) {
 		t.Error("a signal for a zone not owned was claimed")
 	}
 }

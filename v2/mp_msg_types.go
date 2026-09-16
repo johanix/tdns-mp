@@ -5,6 +5,8 @@
 
 package tdnsmp
 
+import "time"
+
 // MsgQs aggregates channels for agent-to-agent communication.
 // Each role (agent, combiner, signer) uses only the channels
 // it needs; unused channels are nil.
@@ -40,6 +42,7 @@ type KeystateSignalMsg struct {
 	KeyTag   uint16
 	Signal   string
 	Message  string
+	At       time.Time // when the distribution the signal answers was sent; zero when the sender does not say
 }
 
 type EditsResponseMsg struct {

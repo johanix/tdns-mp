@@ -148,7 +148,7 @@ func NewSignerTree(use, role string) *cobra.Command {
 	c.AddCommand(
 		signerKeystoreCmd(role),
 		tdnscli.NewTruststoreCmd(role),
-		newSignerKeyCmd(kind),
+		newSignerKeyCmd(),
 	)
 	return c
 }

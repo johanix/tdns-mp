@@ -1,6 +1,6 @@
 # The multi-provider key lifecycle as a transition table
 
-**Status:** proposal, under review (r4). The spec of S3's state machine, written before its code, as §3.4's table was for S1b (design `docs/2026-09-13-key-lifecycle-ownership-design.md`, test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md` T3.1).
+**Status:** proposal, under review (r5). The spec of S3's state machine, written before its code, as §3.4's table was for S1b (design `docs/2026-09-13-key-lifecycle-ownership-design.md`, test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md` T3.1).
 **Scope:** one provider's view of one owned zone: its own keys, and what it records of the other providers' keys. tdns keeps the keystore, signs from `sign=1`, serves `pub=1`, publishes CDS and pushes DS from the owner's DS intent (from S5). tdns-mp writes state and the three columns at every transition, through tdns's write function.
 
 ## Revision history
@@ -11,6 +11,7 @@
 | r2 | 2026-09-15 | T9's guard admits a same-algorithm rollover: the active key retires in the same step, so P5 holds after it. Found by the driver's rollover test. |
 | r3 | 2026-09-15 | From the harness's seeded runs: a rejection sticks to a distribution (G1, P8); E12, a resend timer, with T6' (P6 under message loss); E10 catches a joining signer up with a record it must confirm before the key may sign (T9), and its rejection of a served key is reported and left to the operator's retry or withdraw (T6, T7', T7''); the distributions in flight are persisted, so a restart resumes them and never re-sends a rejected one (T15). |
 | r4 | 2026-09-15 | From more seeded runs (T3.3): a rejection sticks to a served key's record too, so a standby key a signer that joined rejected is not promoted (T9, P1) until retried or withdrawn; a retry on a key being removed sends the removal again (T6); an answer to a key's distribution that arrives after its removal went out is stale and refused (§3, after the table). |
+| r5 | 2026-09-16 | From the S3 review: T1 also mints for a rollover requested with nothing in the pipeline (T16 with a standby count of 0, the default for KSKs); the RRSIGs are stripped before the row enters mpremove, so a strip that fails leaves the row where it was; an aggregated confirmation counts for the signers the record expects, and one that answers a distribution sent before the record's is stale; a retired KSK whose DS the parent goes on serving is reported after three margins (the withdrawal at the parent is S5's); the withdrawal margin is the owner's, not the clamp's; the machine runs multi-provider zones this provider signs, no other. |
 
 ## 1. States and columns
 
@@ -54,7 +55,7 @@ Each row: the state a key is in, the event, the guard that must hold, the next s
 
 | # | from | event | guard | to | side effects |
 |---|---|---|---|---|---|
-| T1 | — | E1 mint | fewer keys of the role in created..standby than the policy's standby count, or a lifetime due, or no active key of the role | created (0,0,0) | key generated through tdns's keystore (`GenerateKeypair` with the state and columns named) |
+| T1 | — | E1 mint | fewer keys of the role in created..standby than the policy's standby count, or a lifetime due, or no active key of the role, or a rollover requested (C3) with no key of the role in created..standby | created (0,0,0) | key generated through tdns's keystore (`GenerateKeypair` with the state and columns named) |
 | T2 | created | E2 distributed | the key is in this provider's served RRset | mpdist (1,0,0) | the distribution recorded with the set of signing providers expected to confirm |
 | T3 | mpdist | E3 applied | every signing provider other than this one has confirmed applied, and none rejected (G1) | published (1,0,0) | `published_at` stamped |
 | T3' | mpdist | E2 distributed | no other signing provider (G2, §5.5) | published (1,0,0) | as T3, at once |

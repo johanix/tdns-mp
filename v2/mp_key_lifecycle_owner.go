@@ -57,8 +57,10 @@ func (o *MPKeyLifecycleOwner) Zones() []string {
 	return out
 }
 
+// Owns: taken, and a multi-provider zone (tdns asks the same; a zone that
+// is not one keeps tdns's machine, whatever the configuration says).
 func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
-	if zd == nil {
+	if zd == nil || !zd.Options[tdns.OptMultiProvider] {
 		return false
 	}
 	o.mu.RLock()
@@ -79,7 +81,10 @@ func (o *MPKeyLifecycleOwner) Command(verb string) string {
 	case "clear", "policy-cleanup", "reset", "unstick":
 		return "tdns-mpcli signer key withdraw"
 	case "setstate", "generate":
-		return "tdns-mpcli signer key retry"
+		// the store verbs still work on an owned zone when they name the
+		// columns (design Q4); what they must not do is shape a row by
+		// tdns's table
+		return "tdns-mpcli signer keystore dnssec " + verb + " with pub, sign and ds named"
 	case "alg-rollover":
 		return "tdns-mpcli signer key policy (the KSK algorithm)"
 	}

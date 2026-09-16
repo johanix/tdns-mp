@@ -4,51 +4,101 @@ import (
 	"testing"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/miekg/dns"
 )
 
-// tdns-mp #57 item 1: an agent counts as having applied a DNSKEY
-// distribution only on the final applied status; a relaying agent's
-// immediate "pending" (and partial, failed, ignored) leave the propagation
-// waiting. A rejection is final and surfaces once everyone answered.
-func TestProcessDnskeyConfirmationCountsOnlyApplied(t *testing.T) {
+// tdns-mp #57 and the S3 review's B3: what a remote agent's confirmation
+// says about the keys being propagated. Applied when every key of ours is
+// among the applied records (a plain success, or a partial that applied
+// ours and rejected someone else's); rejected when a key of ours is among
+// the rejected items or the whole answer is a rejection (the combiner's
+// "error" for an all-rejected update arrives as failed with rejected
+// items); pending, and a partial that says nothing about our keys, leave
+// the propagation waiting.
+func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 257)
+	theirs := testDnskeyRR(t, "z.example.", 257)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{4711}, []AgentId{"a1", "a2"})
+	track := func(dist string) {
+		tm.TrackDnskeyPropagation("z.example.", dist, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
+	}
 	waiting := func(dist, step string) {
 		t.Helper()
 		if _, ok := tm.pendingDnskeyPropagations[dist]; !ok {
 			t.Fatalf("%s: the propagation was resolved", step)
 		}
 	}
-	if !tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil) {
+	resolved := func(dist, step string) {
+		t.Helper()
+		if _, ok := tm.pendingDnskeyPropagations[dist]; ok {
+			t.Fatalf("%s: the propagation is still pending", step)
+		}
+	}
+	rej := func(rr *dns.DNSKEY, why string) []RejectedItemInfo {
+		return []RejectedItemInfo{{Record: rr.String(), Reason: why}}
+	}
+
+	track("d1")
+	if !tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil) {
 		t.Fatal("not recognised as a DNSKEY propagation")
 	}
 	waiting("d1", "a1 pending")
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPending.String(), nil)
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPending.String(), nil, nil)
 	waiting("d1", "both pending (P9)")
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), nil)
-	waiting("d1", "a1 partial")
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), nil)
-	waiting("d1", "a1 applied, a2 pending")
-	if p := tm.pendingDnskeyPropagations["d1"]; !p.ExpectedAgents["a1"] || p.ExpectedAgents["a2"] {
-		t.Errorf("confirmed: a1 %v a2 %v, want a1 only", p.ExpectedAgents["a1"], p.ExpectedAgents["a2"])
+	// a partial that applied someone else's key and says nothing of ours
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(theirs, "not that one"))
+	waiting("d1", "a1 partial about another key")
+	if p := tm.pendingDnskeyPropagations["d1"]; p.ExpectedAgents["a1"] || p.Rejected {
+		t.Errorf("a partial about another key counted: confirmed=%v rejected=%v", p.ExpectedAgents["a1"], p.Rejected)
 	}
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil)
-	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
-		t.Error("everyone applied, the propagation is still pending")
+	// a partial that applied ours and rejected theirs: applied
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{ours.String()}, rej(theirs, "not that one"))
+	waiting("d1", "a1 applied ours, a2 pending")
+	if p := tm.pendingDnskeyPropagations["d1"]; !p.ExpectedAgents["a1"] || p.Rejected {
+		t.Errorf("a partial that applied ours: confirmed=%v rejected=%v, want confirmed, not rejected", p.ExpectedAgents["a1"], p.Rejected)
 	}
-	if tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil) {
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	resolved("d1", "everyone applied")
+	if tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil) {
 		t.Error("a confirmation after the propagation resolved was taken as one")
 	}
 
-	// a rejection is final: it resolves the propagation as rejected
-	tm.TrackDnskeyPropagation("z.example.", "d2", []uint16{4712}, []AgentId{"a1", "a2"})
-	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmRejected.String(), []RejectedItemInfo{{Record: "DNSKEY", Reason: "policy forbids"}})
+	// the combiner's all-rejected answer: failed with our key rejected
+	track("d2")
+	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, rej(ours, "policy forbids"))
 	waiting("d2", "a1 rejected, a2 not heard")
-	if p := tm.pendingDnskeyPropagations["d2"]; !p.Rejected || p.RejectionMsg != "policy forbids" {
-		t.Errorf("rejection not recorded: %+v", p)
+	if p := tm.pendingDnskeyPropagations["d2"]; !p.Rejected || p.RejectionMsg != "policy forbids" || !p.ExpectedAgents["a1"] {
+		t.Errorf("rejection not recorded as a final answer: %+v", p)
 	}
-	tm.ProcessDnskeyConfirmation("d2", "a2", transport.ConfirmSuccess.String(), nil)
-	if _, ok := tm.pendingDnskeyPropagations["d2"]; ok {
-		t.Error("everyone answered (one rejected), the propagation is still pending")
+	tm.ProcessDnskeyConfirmation("d2", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	resolved("d2", "everyone answered, one rejected")
+
+	// a partial that rejected ours while applying theirs: rejected
+	track("d3")
+	tm.ProcessDnskeyConfirmation("d3", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(ours, "bad flags"))
+	if p := tm.pendingDnskeyPropagations["d3"]; !p.Rejected || p.RejectionMsg != "bad flags" {
+		t.Errorf("a partial that rejected ours: %+v, want rejected", p)
 	}
+
+	// a failure that names no rejected item (a transport error) is not an answer
+	track("d4")
+	tm.ProcessDnskeyConfirmation("d4", "a1", transport.ConfirmFailed.String(), nil, nil)
+	if p := tm.pendingDnskeyPropagations["d4"]; p.Rejected || p.ExpectedAgents["a1"] {
+		t.Errorf("a failure naming nothing counted: %+v", p)
+	}
+
+	// a removal: the record shows up among the removed ones
+	track("d5")
+	tm.ProcessDnskeyConfirmation("d5", "a1", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d5", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	resolved("d5", "a removal applied everywhere")
+}
+
+func testDnskeyRR(t *testing.T, zone string, flags uint16) *dns.DNSKEY {
+	t.Helper()
+	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600}, Flags: flags, Protocol: 3, Algorithm: dns.ED25519}
+	if _, err := k.Generate(256); err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
