@@ -134,7 +134,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 	registry := &AgentRegistry{
 		S:                    core.NewStringer[AgentId, *Agent](),
 		LocalAgent:           mp,
-		LocateInterval:       30,
 		ProviderGroupManager: NewProviderGroupManager(identity),
 		GossipStateTable:     NewGossipStateTable(identity),
 	}

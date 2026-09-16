@@ -310,8 +310,6 @@ multi-provider:
       # NS of the auto-created identity zone; the world server slaves it
       nameservers:   [ {WORLD} ]
       notify:        [ 127.0.0.1:{WORLD_DNS} ]
-   remote:
-      LocateInterval: 30
    xfr:
       outgoing:
          addresses:  [ 127.0.0.1:{P['signer_dns']} ]
@@ -550,8 +548,6 @@ multi-provider:
    local:
       nameservers:   [ {WORLD} ]
       notify:        [ 127.0.0.1:{WORLD_DNS} ]
-   remote:
-      LocateInterval: 30
    xfr:
       outgoing:
          addresses:  []

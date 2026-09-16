@@ -11,7 +11,6 @@ import (
 	"github.com/johanix/tdns-mp/v2/hsync"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
@@ -69,19 +68,10 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		return nil
 	}
 
-	li := viper.GetInt("agent.remote.locateinterval")
-	if li <= 10 {
-		li = 10
-	}
-	if li > 300 {
-		li = 300
-	}
-
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
 		S:                    core.NewStringer[AgentId, *Agent](),
 		LocalAgent:           mp,
-		LocateInterval:       li,
 		ProviderGroupManager: NewProviderGroupManager(mp.Identity),
 		GossipStateTable:     NewGossipStateTable(mp.Identity),
 	}

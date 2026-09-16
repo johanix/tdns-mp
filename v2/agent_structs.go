@@ -213,7 +213,6 @@ type AgentRegistry struct {
 	*hsync.Registry
 	S                     core.ConcurrentMap[AgentId, *Agent]
 	LocalAgent            *MultiProviderConf
-	LocateInterval        int
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
 	LeaderElectionManager *LeaderElectionManager
@@ -375,9 +374,8 @@ type KeystateInfo struct {
 // the dump-agentregistry command (the live registry's peer map is not directly
 // JSON-encodable). Not a live registry store.
 type AgentRegistryDump struct {
-	Agents         map[AgentId]*AgentInfo
-	LocalAgent     *MultiProviderConf
-	LocateInterval int
+	Agents     map[AgentId]*AgentInfo
+	LocalAgent *MultiProviderConf
 }
 
 type AgentMgmtResponse struct {

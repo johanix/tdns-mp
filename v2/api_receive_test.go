@@ -223,7 +223,7 @@ func TestBridge_WithoutDNSRegistersNoChunkNotifyHandler(t *testing.T) {
 	id := "api-only.agent.example."
 	mp := &MultiProviderConf{Identity: id}
 	registry := &AgentRegistry{
-		S: core.NewStringer[AgentId, *Agent](), LocalAgent: mp, LocateInterval: 30,
+		S: core.NewStringer[AgentId, *Agent](), LocalAgent: mp,
 		ProviderGroupManager: NewProviderGroupManager(id), GossipStateTable: NewGossipStateTable(id),
 	}
 	bridge, err := NewMPTransportBridge(&MPTransportBridgeConfig{
