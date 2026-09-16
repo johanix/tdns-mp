@@ -128,3 +128,81 @@ func TestCombinerNoLongerSynthesizesCDS(t *testing.T) {
 		t.Error("combiner data held CDS after the KSK change")
 	}
 }
+
+// T5.4: a ds flip with no state change (another provider's key, once #58
+// says its DS belongs at the parent) goes out like every other write: the
+// inventory is pushed, the DS engine woken, and the DS set changes.
+func TestForeignDSWriteIsAChangeLikeAnyOther(t *testing.T) {
+	r := newDriverRig(t, "foreignds.owned.example.", driverPolicy, "p2")
+	foreign := testDnskey(t, r.l.Zone, 257)
+	if err := insertForeignKeyRow(r.kdb, r.l.Zone, foreign.KeyTag(), foreign, "ED25519"); err != nil {
+		t.Fatal(err)
+	}
+	before := r.wire.changes
+	if err := r.l.SetForeignDS(foreign.KeyTag(), true); err != nil {
+		t.Fatal(err)
+	}
+	if r.wire.changes != before+1 {
+		t.Errorf("a ds-only write reported %d changes, want 1", r.wire.changes-before)
+	}
+	if st := mpKeyState(t, r.kdb, r.l.Zone, foreign.KeyTag()); st != DnskeyStateForeign {
+		t.Errorf("the foreign row's state changed to %s", st)
+	}
+	in, err := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256)
+	if err != nil || !in.Known || len(in.Set) != 1 || in.Set[0].(*dns.DS).KeyTag != foreign.KeyTag() {
+		t.Errorf("the DS set after the foreign row's ds=1: known=%v set=%v err=%v", in.Known, in.Set, err)
+	}
+	own := testDnskey(t, r.l.Zone, 257)
+	if err := insertForeignKeyRow(r.kdb, r.l.Zone, own.KeyTag(), own, "ED25519"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.l.SetForeignDS(own.KeyTag(), false); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256); !in.Known || len(in.Set) != 1 {
+		t.Errorf("a foreign row with ds=0 said: known=%v set=%v, want known with one DS", in.Known, in.Set)
+	}
+	if err := r.l.SetForeignDS(9, true); err == nil {
+		t.Error("a ds write on a key that is not there was accepted")
+	}
+}
+
+// S5 review S2 and S4: the MP syncher's DNSKEY-derived CDS is not for an
+// owned zone, and delegation-sync setup on a multi-provider zone is the
+// leader's; S3: the combiner's ksk-changed hint is the DS set when known,
+// nothing otherwise.
+func TestSyncherGatesForOwnedAndMultiProviderZones(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	conf.InternalMp.KeyLifecycleOwner = owner
+	zd := &tdns.ZoneData{ZoneName: "gate.example.", Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true, tdns.OptParentSync: true}}
+	if !syncherPublishesDNSKEYCDS(conf, zd) {
+		t.Error("a zone tdns runs, with parentsync: the syncher's CDS should be published")
+	}
+	owner.Take(zd.ZoneName)
+	if syncherPublishesDNSKEYCDS(conf, zd) {
+		t.Error("an owned zone: the syncher's DNSKEY-derived CDS should not be published")
+	}
+	zd.Options[tdns.OptParentSync] = false
+	if syncherPublishesDNSKEYCDS(conf, zd) {
+		t.Error("no parentsync: no CDS")
+	}
+	// setup: no election manager, anything goes; with one, the leader only
+	if !mpSetupAllowed(conf, zd) {
+		t.Error("with no election manager the setup is refused")
+	}
+	lem := NewLeaderElectionManager("agent.us.example.", time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
+	conf.InternalMp.LeaderElectionManager = lem
+	if mpSetupAllowed(conf, zd) {
+		t.Error("a multi-provider zone with no leader elected: the setup ran")
+	}
+	plain := &tdns.ZoneData{ZoneName: "plain.example.", Options: map[tdns.ZoneOption]bool{tdns.OptParentSync: true}}
+	if !mpSetupAllowed(conf, plain) {
+		t.Error("a zone tdns runs alone is gated on a leader")
+	}
+	// the combiner's hint: nothing without a keystore that knows the DS set
+	if hint := combinerDSHint(&MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: "hint.example."}}, "hint.example."); hint != nil {
+		t.Errorf("a combiner with no keystore hinted %v", hint)
+	}
+}

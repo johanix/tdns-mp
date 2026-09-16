@@ -384,6 +384,30 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	return nil
 }
 
+// SetForeignDS writes another provider's key's ds column (design §1 P3:
+// its DS belongs at the parent while its provider signs the zone and holds
+// it standby, active or retired-not-withdrawn), the row's state and other
+// columns untouched, and tells the surroundings like every other write:
+// the inventory goes out and the DS engine wakes, with no state change
+// (T5.4). What #58 learns from the wire arrives here.
+func (l *ZoneKeyLifecycle) SetForeignDS(keyid uint16, ds bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var state string
+	if err := l.KDB.DB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, l.Zone, int(keyid)).Scan(&state); err != nil {
+		return fmt.Errorf("foreign key %d of %s: %w", keyid, l.Zone, err)
+	}
+	if state != DnskeyStateForeign {
+		return fmt.Errorf("key %d of %s is %s, not a foreign row", keyid, l.Zone, state)
+	}
+	cols := tdns.KeyRowFlags{Pub: true, DS: sql.NullBool{Bool: ds, Valid: true}}
+	if err := tdns.UpdateKeyRowFrom(l.KDB, l.Zone, keyid, DnskeyStateForeign, DnskeyStateForeign, cols); err != nil {
+		return fmt.Errorf("ds of foreign key %d of %s: %w", keyid, l.Zone, err)
+	}
+	l.Wire.KeysChanged(l.Zone)
+	return nil
+}
+
 // resend sends a distribution in flight again, keeping the confirmations
 // it has.
 func (l *ZoneKeyLifecycle) resend(keyid uint16) {

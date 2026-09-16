@@ -509,16 +509,8 @@ func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, se
 	}
 
 	var dsRecords []string
-	if kskChanged && apex != nil {
-		for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
-			if dk, ok := rr.(*dns.DNSKEY); ok {
-				if dk.Flags&dns.SEP != 0 {
-					if ds := dk.ToDS(dns.SHA256); ds != nil {
-						dsRecords = append(dsRecords, ds.String())
-					}
-				}
-			}
-		}
+	if kskChanged {
+		dsRecords = combinerDSHint(mpzd, zonename)
 	}
 
 	if nsChanged {
@@ -1579,4 +1571,24 @@ func checkNSNamespacePolicy(rr dns.RR, protectedNamespaces []string) string {
 		}
 	}
 	return ""
+}
+
+// combinerDSHint is what a ksk-changed STATUS-UPDATE tells the leader
+// about the DS set: the zone's DS intent when this node knows it, nothing
+// otherwise. The DS of every served SEP key was the pre-S5 rule; it put
+// mpdist and foreign keys in front of the parent (design D4), and the
+// leader's own DS intent is the source now (arrow 2).
+func combinerDSHint(mpzd *MPZoneData, zonename string) []string {
+	if mpzd == nil || mpzd.KeyDB == nil {
+		return nil
+	}
+	in, err := tdns.DSIntentForZone(mpzd.KeyDB, zonename, dns.SHA256)
+	if err != nil || !in.Known {
+		return nil
+	}
+	var out []string
+	for _, rr := range in.Set {
+		out = append(out, rr.String())
+	}
+	return out
 }

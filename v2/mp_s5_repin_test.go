@@ -6,7 +6,6 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // T5.1: the keystate app message carries the inventory's columns and the
@@ -48,5 +47,4 @@ func TestMPAgentGetsDelegationSyncSetup(t *testing.T) {
 	if err := mpzd.ZoneData.SetupZoneSync(q); err != nil {
 		t.Errorf("an unregistered app type: err=%v, want the zone skipped", err)
 	}
-	_ = dns.Fqdn
 }

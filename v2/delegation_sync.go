@@ -42,6 +42,13 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			switch ds.Command {
 
 			case "DELEGATION-SYNC-SETUP":
+				// on a multi-provider zone the setup (a SIG(0) key, published
+				// and sent to the parent) is the leader's, like the sync it
+				// serves; a peer that is elected later runs it then (R10)
+				if !mpSetupAllowed(conf, zd) {
+					lg.Info("DelegationSyncher: not the delegation sync leader, skipping the setup", "zone", ds.ZoneName)
+					continue
+				}
 				err = zd.DelegationSyncSetup(ctx, hdb.KeyDB)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request", "zone", ds.ZoneName, "err", err)
@@ -174,8 +181,10 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					}
 				}
 
-				// Publish CDS records from current DNSKEYs if zone has delegation sync
-				if zd.Options[tdns.OptParentSync] {
+				// Publish CDS records from current DNSKEYs if zone has delegation
+				// sync; not for an owned zone, whose CDS is its DS set's, served
+				// by the signer's DS engine (S5, arrow 1)
+				if syncherPublishesDNSKEYCDS(conf, zd) {
 					if err := zd.PublishCdsRRs(); err != nil {
 						lg.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
 					} else {
@@ -237,4 +246,32 @@ func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg
 			}
 		}(peer, agentID)
 	}
+}
+
+// syncherPublishesDNSKEYCDS: the pre-S5 rule, a CDS of every SEP DNSKEY
+// on a DNSKEY change, holds for a zone with delegation sync that tdns's
+// machine runs; an owned zone's CDS is the owner's DS set (arrow 1).
+func syncherPublishesDNSKEYCDS(conf *Config, zd *tdns.ZoneData) bool {
+	if zd == nil || !zd.Options[tdns.OptParentSync] {
+		return false
+	}
+	if conf != nil {
+		if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.Owns(zd) {
+			return false
+		}
+	}
+	return true
+}
+
+// mpSetupAllowed: delegation-sync setup on a multi-provider zone runs on
+// the elected leader only; a zone tdns runs alone is not gated.
+func mpSetupAllowed(conf *Config, zd *tdns.ZoneData) bool {
+	if zd == nil || !zd.Options[tdns.OptMultiProvider] || conf == nil {
+		return true
+	}
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil {
+		return true
+	}
+	return lem.IsLeader(ZoneName(zd.ZoneName))
 }

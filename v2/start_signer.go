@@ -47,6 +47,12 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
 		return kdb.ZoneUpdaterEngine(ctx)
 	})
+	// tdns's DS engine: the CDS of an owned zone follows its DS set between
+	// transfers too (the machine's KeysChanged wakes it; key lifecycle
+	// ownership design §4.1, arrow 1; tdns-mp #55)
+	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
+		return kdb.DSEngine(ctx)
+	})
 	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
 		return tdns.UpdateHandler(ctx, conf.Config)
 	})
