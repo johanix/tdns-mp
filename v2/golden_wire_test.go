@@ -127,6 +127,7 @@ func goldenWirePayloads() []struct {
 				Pub:   true, Sign: true, DS: &goldenTrue,
 			}},
 			Owned:     true,
+			Time:      "2023-11-14T22:13:26Z",
 			Timestamp: 1700000006, Type: "keystate",
 			SenderID: "legacy-sender.example.",
 		}},

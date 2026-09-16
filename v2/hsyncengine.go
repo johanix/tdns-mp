@@ -43,7 +43,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		// Build RR list for local SDE storage: adds use ClassINET, removes use ClassNONE.
 		// Extract key tags from both adds and removes for DNSKEY propagation tracking.
 		var rrs []dns.RR
-		var keyTags []uint16
+		var keyTags, removedTags []uint16
 		for _, rr := range ds.LocalAdds {
 			rrs = append(rrs, dns.Copy(rr))
 			if dnskey, ok := rr.(*dns.DNSKEY); ok {
@@ -56,6 +56,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			rrs = append(rrs, rrCopy)
 			if dnskey, ok := rr.(*dns.DNSKEY); ok {
 				keyTags = append(keyTags, dnskey.KeyTag())
+				removedTags = append(removedTags, dnskey.KeyTag())
 			}
 		}
 
@@ -92,12 +93,13 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		// DnskeyKeyTags: enables propagation tracking so the agent sends KEYSTATE
 		// "propagated" back to the signer when all remote agents confirm.
 		synchedDataUpdateQ <- &SynchedDataUpdate{
-			Zone:          req.ZoneName,
-			AgentId:       ourId,
-			UpdateType:    "local",
-			Update:        zu,
-			SkipCombiner:  true,
-			DnskeyKeyTags: keyTags,
+			Zone:                 req.ZoneName,
+			AgentId:              ourId,
+			UpdateType:           "local",
+			Update:               zu,
+			SkipCombiner:         true,
+			DnskeyKeyTags:        keyTags,
+			DnskeyRemovedKeyTags: removedTags,
 		}
 
 	default:

@@ -18,13 +18,14 @@ func TestAPIsignerKey(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	conf := &Config{Config: &tdns.Config{}}
 	conf.Config.Internal.KeyDB = kdb
-	conf.SetMpConfig(&MultiProviderConf{Identity: "signer.example."})
+	conf.SetMpConfig(&MultiProviderConf{Identity: "signer.example.", Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}})
 	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
 	tdns.RegisterKeyLifecycleOwner(owner)
 	t.Cleanup(func() { tdns.RegisterKeyLifecycleOwner(nil) })
 	e := NewKeyLifecycleEngine(conf, owner)
 	conf.InternalMp.KeyLifecycleOwner, conf.InternalMp.KeyLifecycle = owner, e
 	mpzd := signerTestZone(t, "apikey.owned.example.", kdb)
+	zoneSignedBy(t, mpzd, "agent.us.example.", "p2")
 	owner.Take(mpzd.ZoneName)
 	signerTestZone(t, "apikey.plain.example.", kdb)
 	handler := conf.APIsignerKey()

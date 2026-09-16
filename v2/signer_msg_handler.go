@@ -103,7 +103,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			}
 
 			// a zone tdns-mp's own state machine runs: the signal is its
-			if e := conf.InternalMp.KeyLifecycle; e != nil && e.Signal(sigMsg.Zone, sigMsg.KeyTag, sigMsg.Signal, sigMsg.Message) {
+			if e := conf.InternalMp.KeyLifecycle; e != nil && e.Signal(sigMsg.Zone, sigMsg.KeyTag, sigMsg.Signal, sigMsg.Message, sigMsg.At) {
 				continue
 			}
 			switch sigMsg.Signal {

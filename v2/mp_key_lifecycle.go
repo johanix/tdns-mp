@@ -131,7 +131,8 @@ type ZoneView struct {
 	// rollover, requested or due: the active key retires in the same step.
 	// AlgRollInFlight lifts P5's one-per-role rule for the roll's duration.
 	ActiveOfRoleAndAlg bool
-	RolloverRequested  bool
+	RolloverRequested  bool // the promotion under way is a rollover (T9)
+	RolloverPending    bool // a rollover of the role has been requested and not fired (C3, T1)
 	AlgRollInFlight    bool
 	// StandbyCount is the policy's standby count for the key's role, and
 	// InPipeline how many keys of the role are in created..standby.
@@ -203,7 +204,7 @@ type Transition struct {
 // whose from, event and guard match wins; no row means "no change".
 var KeyLifecycleTable = []Transition{
 	{"T1", "", EvMint, func(k KeyView, z ZoneView) bool {
-		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole
+		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole || (z.RolloverPending && z.InPipeline == 0)
 	}, KeyStateCreated, "minted through tdns's keystore, state and columns named"},
 	{"T2", KeyStateCreated, EvDistributed, nil, KeyStateMpdist, "the distribution recorded with the signing providers expected to confirm"},
 	{"T3", KeyStateMpdist, EvApplied, func(k KeyView, z ZoneView) bool { return allOtherSignersApplied(z) }, KeyStatePublished, "published_at stamped"},
@@ -212,7 +213,7 @@ var KeyLifecycleTable = []Transition{
 	{"T5", KeyStateMpdist, EvRejected, nil, KeyStateMpdist, "the rejection recorded and surfaced; no automatic retreat (P8)"},
 	{"T6", "*", CmdRetry, nil, "*", "a fresh distribution: the expected set recomputed from the current signers, the rejection forgotten"},
 	{"T6'", "*", EvResend, func(k KeyView, z ZoneView) bool { return confirmationsOutstanding(z) }, "*", "a distribution in flight sent again, whatever the key's state; the confirmations received stay"},
-	{"T7", KeyStateMpdist, CmdWithdraw, nil, KeyStateMpremove, "the removal distributed"},
+	{"T7", KeyStateMpdist, CmdWithdraw, nil, KeyStateMpremove, "the key's RRSIGs stripped first (a strip that fails leaves the row where it is), then the removal distributed"},
 	{"T7'", KeyStatePublished, CmdWithdraw, nil, KeyStateMpremove, "a served key given up on: the removal distributed"},
 	{"T7''", KeyStateStandby, CmdWithdraw, nil, KeyStateMpremove, "as T7'"},
 	{"T8", KeyStatePublished, EvPropagated, func(k KeyView, z ZoneView) bool {

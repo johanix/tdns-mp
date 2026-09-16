@@ -87,6 +87,7 @@ type DnsKeystatePayload struct {
 	Message      string              `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
 	Owned        bool                `json:"Owned,omitempty"`        // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time         string              `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
 	Timestamp    int64               `json:"timestamp"`              // Unix timestamp
 
 	// Legacy fields (fallback)

@@ -40,7 +40,8 @@ type fakeWire struct {
 	resigns   int
 	reports   []string
 	ttl       time.Duration
-	changes   int // KeysChanged calls
+	changes   int   // KeysChanged calls
+	stripErr  error // what Strip returns
 }
 
 func newFakeWire(signers ...string) *fakeWire {
@@ -72,6 +73,9 @@ func (w *fakeWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
 func (w *fakeWire) Strip(zone string, keyid uint16) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.stripErr != nil {
+		return w.stripErr
+	}
 	w.stripped = append(w.stripped, keyid)
 	return nil
 }
@@ -624,6 +628,21 @@ func TestOwnedZoneParentViewFollowsTheColumns(t *testing.T) {
 	}
 	resign("margin")
 	check("old KSK leaving: out of the served RRset", []uint16{b}, []uint16{b, c})
+
+	// another provider's KSK arrives with nothing said about its DS (until
+	// #58, S5): the DS set is unknown, the parent left alone; the served
+	// CDS is what it was
+	foreign := testDnskeyRR(t, r.l.Zone, 257)
+	if err := insertForeignKeyRow(r.kdb, r.l.Zone, foreign.KeyTag(), foreign, "ED25519"); err != nil {
+		t.Fatal(err)
+	}
+	in, err := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256)
+	if err != nil || in.Known {
+		t.Errorf("with a foreign SEP row whose ds is unknown: known=%v err=%v, want unknown (C2)", in.Known, err)
+	}
+	if rrs, err := r.zd.SynthesizeCdsRRs(); err != nil || tags(rrs) != sorted([]uint16{b, c}) {
+		t.Errorf("served CDS with the foreign row present: %v err=%v, want unchanged", rrs, err)
+	}
 }
 
 // T3.7, the owned side of the mixed rollout: the machine on an owned zone
