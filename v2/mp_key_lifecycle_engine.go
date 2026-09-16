@@ -343,7 +343,14 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	default:
 		return true
 	}
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrNoDistribution):
+		// the key was distributed by someone else (tdns's own key state
+		// worker before the take, another provider) or the answer is a
+		// late duplicate: nothing of ours to apply it to, and nothing wrong
+		lgSigner.Debug("key lifecycle: signal about a key not distributed here", "zone", zone, "keytag", keytag, "signal", signal, "err", err)
+	default:
 		lgSigner.Warn("key lifecycle: signal not applied", "zone", zone, "keytag", keytag, "signal", signal, "err", err)
 	}
 	return true

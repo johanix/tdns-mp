@@ -446,6 +446,12 @@ func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal bool) {
 // went out, or the other way round).
 var ErrStaleConfirmation = errors.New("the confirmation is for a distribution no longer in flight")
 
+// ErrNoDistribution: a confirmation of a key that has no distribution in
+// flight here (the key was distributed by someone else, tdns's own key
+// state worker before the zone was taken for one, or the answer is a
+// late duplicate); nothing to apply it to.
+var ErrNoDistribution = errors.New("no distribution in flight")
+
 // Confirm records a provider's confirmation of the key's distribution in
 // flight, whichever kind it is: status applied, pending or rejected (with
 // a reason), and feeds the event.
@@ -503,7 +509,7 @@ func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at 
 	defer l.mu.Unlock()
 	d := l.dist[keyid]
 	if d == nil {
-		return "", "", fmt.Errorf("key %d of %s has no distribution in flight", keyid, l.Zone)
+		return "", "", fmt.Errorf("key %d of %s: %w", keyid, l.Zone, ErrNoDistribution)
 	}
 	if removal != nil && *removal != d.Removal {
 		return "", "", fmt.Errorf("key %d of %s: an answer about the key's %s while its %s is in flight: %w", keyid, l.Zone, kindName(*removal), kindName(d.Removal), ErrStaleConfirmation)
@@ -531,7 +537,7 @@ func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at 
 func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason string, removal *bool) (from, to string, err error) {
 	d := l.dist[keyid]
 	if d == nil {
-		return "", "", fmt.Errorf("key %d of %s has no distribution in flight", keyid, l.Zone)
+		return "", "", fmt.Errorf("key %d of %s: %w", keyid, l.Zone, ErrNoDistribution)
 	}
 	if removal != nil && *removal != d.Removal {
 		return "", "", fmt.Errorf("key %d of %s: %w", keyid, l.Zone, ErrStaleConfirmation)
@@ -826,6 +832,9 @@ func (l *ZoneKeyLifecycle) Reload() error {
 	for _, p := range l.Wire.OtherSigners(l.Zone) {
 		l.known[p] = true
 	}
+	if err := l.adopt(all); err != nil {
+		return err
+	}
 	if err := l.loadDists(); err != nil {
 		return err
 	}
@@ -843,6 +852,40 @@ func (l *ZoneKeyLifecycle) Reload() error {
 			}
 			l.resend(keyid)
 		}
+	}
+	return nil
+}
+
+// adopt gives an own row the store shaped without the design's columns
+// (a key tdns minted before the zone was taken: its ds is NULL, so the
+// zone's DS intent is unknown and no CDS is served; lab run 2026-09-16,
+// finding 3) the columns its state prescribes. A retired KSK is adopted
+// as not withdrawn: its DS stays at the parent until the machine
+// withdraws it, which is the harmless reading of a DS status nobody
+// recorded.
+func (l *ZoneKeyLifecycle) adopt(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
+	inv, err := tdns.GetKeyInventory(l.KDB, l.Zone)
+	if err != nil {
+		return fmt.Errorf("inventory of %s: %w", l.Zone, err)
+	}
+	changed := false
+	for _, it := range inv {
+		k, own := all[it.KeyTag]
+		if !own || it.DS != nil {
+			continue
+		}
+		cols, ok := KeyStateColumns(k.State, k.Flags&dns.SEP != 0, false)
+		if !ok {
+			continue
+		}
+		if err := tdns.UpdateKeyRowFrom(l.KDB, l.Zone, k.KeyTag, k.State, k.State, cols); err != nil {
+			return fmt.Errorf("adopt key %d of %s (%s): %w", k.KeyTag, l.Zone, k.State, err)
+		}
+		l.logf("key lifecycle: adopted a key row with no ds column", "keytag", k.KeyTag, "role", roleOf(k.Flags), "state", k.State, "ds", cols.DS.Bool)
+		changed = true
+	}
+	if changed {
+		l.Wire.KeysChanged(l.Zone)
 	}
 	return nil
 }

@@ -2,6 +2,8 @@ package tdnsmp
 
 import (
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -614,5 +616,93 @@ func TestConfiguredZoneIsTakenOnceItsPolicyIsBound(t *testing.T) {
 	}
 	if _, w := e.waiting["missing.take.example."]; !w {
 		t.Error("the zone not loaded is not waiting")
+	}
+}
+
+// Found on the lab (2026-09-16, finding 3): keys tdns minted before the
+// zone was taken carry no ds column, so the zone's DS intent is unknown
+// and no CDS is served. The driver adopts such rows on Reload: each gets
+// the columns its state prescribes, and a retired KSK is adopted as not
+// withdrawn.
+func TestReloadAdoptsRowsShapedWithoutColumns(t *testing.T) {
+	r := newDriverRig(t, "adopt.owned.example.", driverPolicy, "p2")
+	legacy := func(state, role string) uint16 {
+		pkc, _, err := r.kdb.GenerateKeypair(r.l.Zone, "ensure-active", state, dns.TypeDNSKEY, dns.ED25519, role, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkc.KeyId
+	}
+	ksk, zsk, old := legacy(KeyStateActive, "KSK"), legacy(KeyStateActive, "ZSK"), legacy(KeyStateRetired, "KSK")
+	for _, k := range []uint16{ksk, zsk, old} {
+		if got := r.cols(k); got[2:] != "NULL" {
+			t.Fatalf("key %d minted the legacy way has columns %s, want ds NULL", k, got)
+		}
+	}
+	if intent, err := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256); err != nil || intent.Known {
+		t.Fatalf("DS intent before the adoption known=%v err=%v, want unknown", intent.Known, err)
+	}
+	if err := r.l.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	r.check("adopted")
+	for k, want := range map[uint16]string{ksk: "111", zsk: "110", old: "101"} {
+		if got := r.cols(k); got != want {
+			t.Errorf("key %d after the adoption: columns %s, want %s", k, got, want)
+		}
+	}
+	for k, want := range map[uint16]string{ksk: KeyStateActive, zsk: KeyStateActive, old: KeyStateRetired} {
+		if got := r.state(k); got != want {
+			t.Errorf("key %d after the adoption: state %s, want %s unchanged", k, got, want)
+		}
+	}
+	intent, err := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256)
+	if err != nil || !intent.Known || len(intent.Set) != 2 {
+		t.Fatalf("DS intent after the adoption known=%v set=%d err=%v, want the two KSKs", intent.Known, len(intent.Set), err)
+	}
+	if r.wire.changes == 0 {
+		t.Error("the adoption did not tell the surroundings that the keys changed")
+	}
+	if err := r.l.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.cols(old); got != "101" {
+		t.Errorf("a second Reload changed the retired KSK's columns to %s", got)
+	}
+}
+
+// Found on the lab (2026-09-16, finding 4): a signal about a key this
+// machine did not distribute (tdns's key state worker distributed it
+// before the take) is answered with a warning on every tick's worth of
+// signals. It is nothing of ours and nothing wrong: debug, not a warning.
+func TestSignalAboutAKeyNotDistributedHereIsNotAWarning(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}, KeyLifecycleZones: []string{"quiet.owned.example."}})
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	mpzd := signerTestZone(t, "quiet.owned.example.", kdb)
+	zoneSignedBy(t, mpzd, "agent.us.example.", "p2")
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 1 {
+		t.Fatalf("zone not taken: %v", z)
+	}
+	var logbuf strings.Builder
+	saved := lgSigner
+	lgSigner = slog.New(slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lgSigner = saved })
+	if !e.Signal("quiet.owned.example.", 4711, "propagated", "", time.Now()) {
+		t.Fatal("the signal was not taken as the owned zone's")
+	}
+	if !strings.Contains(logbuf.String(), `"level":"DEBUG"`) || strings.Contains(logbuf.String(), `"level":"WARN"`) {
+		t.Errorf("a signal about a key not distributed here logged:\n%s", logbuf.String())
+	}
+	logbuf.Reset()
+	if !e.Signal("quiet.owned.example.", 4711, "rejected", "no", time.Now()) {
+		t.Fatal("the rejection was not taken as the owned zone's")
+	}
+	if strings.Contains(logbuf.String(), `"level":"WARN"`) {
+		t.Errorf("a rejection of a key not distributed here logged a warning:\n%s", logbuf.String())
 	}
 }
