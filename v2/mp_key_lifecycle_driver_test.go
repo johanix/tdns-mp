@@ -40,6 +40,7 @@ type fakeWire struct {
 	resigns   int
 	reports   []string
 	ttl       time.Duration
+	changes   int // KeysChanged calls
 }
 
 func newFakeWire(signers ...string) *fakeWire {
@@ -75,6 +76,7 @@ func (w *fakeWire) Strip(zone string, keyid uint16) error {
 	return nil
 }
 func (w *fakeWire) Resign(zone string)                        { w.mu.Lock(); defer w.mu.Unlock(); w.resigns++ }
+func (w *fakeWire) KeysChanged(zone string)                   { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
 func (w *fakeWire) ServedDnskeyTTL(zone string) time.Duration { return w.ttl }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {
 	w.mu.Lock()
@@ -662,5 +664,33 @@ func TestOwnedZoneDriverUsesNoHooks(t *testing.T) {
 	}
 	if asked["OnStateChange"] == 0 {
 		t.Error("no state-change notification fired; the peers learn a key's state from it")
+	}
+}
+
+// T5.4 (the signer's half): the machine tells its surroundings after every
+// key row write, state or column, so the signer's inventory push follows
+// every change; a tick that writes nothing pushes nothing.
+func TestDriverPushesTheInventoryOnEveryWrite(t *testing.T) {
+	r := newDriverRig(t, "push.owned.example.", driverPolicy, "p2")
+	r.tick("mint") // two keys minted and distributed: created -> mpdist, twice
+	if r.wire.changes != 2 {
+		t.Errorf("after the mint %d changes reported, want 2 (one per key)", r.wire.changes)
+	}
+	r.tick("nothing to do")
+	if r.wire.changes != 2 {
+		t.Errorf("a tick that wrote nothing reported %d changes, want still 2", r.wire.changes)
+	}
+	for _, k := range append(r.keysIn(KeyStateMpdist, "KSK"), r.keysIn(KeyStateMpdist, "ZSK")...) {
+		if _, _, err := r.l.Confirm(k, "p2", "applied", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.wire.changes != 4 {
+		t.Errorf("after both keys were published %d changes reported, want 4", r.wire.changes)
+	}
+	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("propagated") // published -> standby -> active for both: four writes
+	if r.wire.changes != 8 {
+		t.Errorf("after the promotion %d changes reported, want 8", r.wire.changes)
 	}
 }

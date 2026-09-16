@@ -123,12 +123,19 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	if !exists {
 		return
 	}
-	zd.SetLastKeyInventory(&KeyInventorySnapshot{
+	snap := &KeyInventorySnapshot{
 		SenderID:  inventoryMsg.SenderID,
 		Zone:      inventoryMsg.Zone,
 		Inventory: inventoryMsg.Inventory,
+		Owned:     inventoryMsg.Owned,
 		Received:  time.Now(),
-	})
+	}
+	zd.SetLastKeyInventory(snap)
+	// the agent's DS-intent provider answers from the latest inventory
+	// (design §4.1, arrow 2)
+	if o := e.conf.InternalMp.KeyLifecycleOwner; o != nil {
+		o.SetInventory(inventoryMsg.Zone, snap)
+	}
 	changed, ds, err := zd.LocalDnskeysFromKeystate()
 	if err != nil || !changed {
 		return

@@ -490,20 +490,10 @@ func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, se
 			}
 		}
 	}
-	if kskChanged {
-		cdsRRs, err := mpzd.SynthesizeCdsRRs()
-		if err != nil {
-			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
-		} else if len(cdsRRs) > 0 {
-			_, _, cdsChanged, err := mpzd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
-			if err != nil {
-				lgCombiner.Error("combinerNotifyDelegationChange: CDS replace failed", "zone", zonename, "err", err)
-			} else {
-				lgCombiner.Info("combinerNotifyDelegationChange: CDS published", "zone", zonename, "changed", cdsChanged)
-				changed = changed || cdsChanged
-			}
-		}
-	}
+	// The combiner synthesizes no CDS: the signer serves the CDS of the
+	// zone's DS set from its key rows (key lifecycle ownership design §4.1,
+	// arrow 1; S5), and a CDS of every served SEP key would put mpdist and
+	// foreign keys in front of the parent.
 	if changed {
 		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: publishing the combiner state failed", "zone", zonename, "err", err)

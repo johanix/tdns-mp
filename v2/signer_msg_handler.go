@@ -199,15 +199,11 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 
 	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
 
-	// Convert KeyInventoryItem → KeyInventoryEntry
-	inventory := make([]KeyInventoryEntry, len(items))
-	for i, item := range items {
-		inventory[i] = KeyInventoryEntry{
-			KeyTag:    item.KeyTag,
-			Algorithm: item.Algorithm,
-			Flags:     item.Flags,
-			State:     item.State,
-			KeyRR:     item.KeyRR,
+	inventory := inventoryEntriesOf(items)
+	owned := false
+	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
+		if zd, ok := tdns.Zones.Get(zone); ok && zd != nil {
+			owned = o.Owns(zd)
 		}
 	}
 
@@ -230,6 +226,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 		Zone:         zone,
 		Signal:       "inventory",
 		KeyInventory: inventory,
+		Owned:        owned,
 		Timestamp:    time.Now(),
 	}
 
@@ -247,4 +244,44 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 
 	lgSigner.Info("KEYSTATE inventory sent", "zone", zone, "agent", agentID, "keys", len(inventory))
 	return nil
+}
+
+// inventoryEntriesOf is the wire form of the key inventory: the row's
+// state and its columns per key (S5, T5.1).
+func inventoryEntriesOf(items []KeyInventoryItem) []KeyInventoryEntry {
+	out := make([]KeyInventoryEntry, len(items))
+	for i, item := range items {
+		out[i] = KeyInventoryEntry{KeyTag: item.KeyTag, Algorithm: item.Algorithm, Flags: item.Flags, State: item.State, KeyRR: item.KeyRR,
+			Pub: item.Pub, Sign: item.Sign, DS: item.DS}
+	}
+	return out
+}
+
+// inventoryItemsOf reads the wire form back. An entry without ds comes
+// from a sender that predates the columns: the columns are then what the
+// state implies, and ds stays unknown (T5.2).
+func inventoryItemsOf(entries []KeyInventoryEntry) []KeyInventoryItem {
+	out := make([]KeyInventoryItem, len(entries))
+	for i, e := range entries {
+		it := KeyInventoryItem{KeyTag: e.KeyTag, Algorithm: e.Algorithm, Flags: e.Flags, State: e.State, KeyRR: e.KeyRR, Pub: e.Pub, Sign: e.Sign, DS: e.DS}
+		if e.DS == nil {
+			it.Pub, it.Sign = impliedColumns(e.State)
+		}
+		out[i] = it
+	}
+	return out
+}
+
+// impliedColumns are pub and sign as the state implied them before the
+// columns travelled (tdns's table of S1b, plus tdns-mp's states): what an
+// entry from an older sender means.
+func impliedColumns(state string) (pub, sign bool) {
+	switch state {
+	case tdns.DnskeyStateActive:
+		return true, true
+	case tdns.DnskeyStatePublished, tdns.DnskeyStateDsPublished, tdns.DnskeyStateStandby, tdns.DnskeyStateRetired,
+		DnskeyStateMpdist, DnskeyStateForeign:
+		return true, false
+	}
+	return false, false
 }

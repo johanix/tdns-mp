@@ -223,6 +223,7 @@ type KeyInventorySnapshot struct {
 	SenderID  string
 	Zone      string
 	Inventory []KeyInventoryItem
+	Owned     bool // the signer's own state machine runs the zone's keys (S3): the DS set's source (S5)
 	Received  time.Time
 }
 

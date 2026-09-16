@@ -22,12 +22,35 @@ type MPKeyLifecycleOwner struct {
 	mu    sync.RWMutex
 	owned map[string]bool
 	keyDB func() *tdns.KeyDB
+	// inv is the agent's side: the signer's latest inventory per zone. A
+	// zone the signer runs is owned here too, and its DS set is read from
+	// the inventory rather than a keystore the agent does not have
+	// (design §4.1, arrow 2).
+	inv map[string]*KeyInventorySnapshot
 }
 
 // NewMPKeyLifecycleOwner: keyDB is looked up at call time, since the
 // keystore does not exist when the owner registers.
 func NewMPKeyLifecycleOwner(keyDB func() *tdns.KeyDB) *MPKeyLifecycleOwner {
-	return &MPKeyLifecycleOwner{owned: map[string]bool{}, keyDB: keyDB}
+	return &MPKeyLifecycleOwner{owned: map[string]bool{}, keyDB: keyDB, inv: map[string]*KeyInventorySnapshot{}}
+}
+
+// SetInventory records the signer's latest inventory for a zone on the
+// agent; nil forgets it.
+func (o *MPKeyLifecycleOwner) SetInventory(zone string, snap *KeyInventorySnapshot) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if snap == nil {
+		delete(o.inv, dns.Fqdn(zone))
+		return
+	}
+	o.inv[dns.Fqdn(zone)] = snap
+}
+
+func (o *MPKeyLifecycleOwner) inventoryOf(zone string) *KeyInventorySnapshot {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.inv[dns.Fqdn(zone)]
 }
 
 func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
@@ -63,7 +86,11 @@ func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
 	}
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.owned[dns.Fqdn(zd.ZoneName)]
+	if o.owned[dns.Fqdn(zd.ZoneName)] {
+		return true
+	}
+	snap := o.inv[dns.Fqdn(zd.ZoneName)]
+	return snap != nil && snap.Owned
 }
 
 // Command names the tdns-mpcli command that replaces a tdns lifecycle verb
@@ -90,13 +117,23 @@ func (o *MPKeyLifecycleOwner) Command(verb string) string {
 // row with ds=1, own and foreign alike (D4). A SEP row whose ds is unset
 // makes the answer unknown: nobody has decided that key's DS yet.
 func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DSIntent, error) {
-	kdb := o.keyDB()
-	if kdb == nil || zd == nil {
+	if zd == nil {
 		return tdns.DSIntent{}, nil
 	}
-	inv, err := tdns.GetKeyInventory(kdb, zd.ZoneName)
-	if err != nil {
-		return tdns.DSIntent{}, fmt.Errorf("DSIntent: inventory of %s: %w", zd.ZoneName, err)
+	var inv []tdns.KeyInventoryItem
+	if snap := o.inventoryOf(zd.ZoneName); snap != nil {
+		// the agent: the signer's inventory, own and foreign rows alike
+		inv = snap.Inventory
+	} else {
+		kdb := o.keyDB()
+		if kdb == nil {
+			return tdns.DSIntent{}, nil
+		}
+		var err error
+		inv, err = tdns.GetKeyInventory(kdb, zd.ZoneName)
+		if err != nil {
+			return tdns.DSIntent{}, fmt.Errorf("DSIntent: inventory of %s: %w", zd.ZoneName, err)
+		}
 	}
 	var set []dns.RR
 	seen := false

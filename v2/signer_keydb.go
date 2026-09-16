@@ -119,6 +119,10 @@ func RegisterMPKeyLifecycleHooks(conf *Config) {
 			if !ok || !isMP(zd) {
 				return
 			}
+			// an owned zone's machine pushes on every change of its own
+			if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.Owns(zd) {
+				return
+			}
 			lgSigner.Info("key state changed; pushing the inventory to the agents", "zone", zone, "keyid", keyid, "from", from, "to", to)
 			go pushKeystateInventoryToAllAgents(conf, zone)
 		},

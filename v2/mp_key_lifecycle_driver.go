@@ -56,6 +56,10 @@ type Wire interface {
 	ServedDnskeyTTL(zone string) time.Duration
 	// Report surfaces something an operator must see: a rejected key.
 	Report(zone string, keyid uint16, what string)
+	// KeysChanged tells the surroundings a key row changed (state or any
+	// of pub, sign, ds): the signer pushes a fresh inventory to its
+	// agents on every change (design §4.1, arrow 2).
+	KeysChanged(zone string)
 }
 
 // distribution is one key's distribution in flight: who must confirm, and
@@ -348,6 +352,7 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	if err := tdns.UpdateKeyRowFrom(l.KDB, l.Zone, k.KeyTag, state, k.State, cols); err != nil {
 		return fmt.Errorf("key %d of %s %s -> %s: %w", k.KeyTag, l.Zone, k.State, state, err)
 	}
+	l.Wire.KeysChanged(l.Zone)
 	return nil
 }
 

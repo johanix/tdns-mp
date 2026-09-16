@@ -37,6 +37,8 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite golden wire testdata files")
 
+var goldenTrue = true
+
 // goldenWirePayloads returns fully-populated instances of every wire payload
 // type (all fields set, including omitempty ones, so every tag is locked).
 // Values are deterministic and distinctive so a swapped tag is caught.
@@ -122,7 +124,9 @@ func goldenWirePayloads() []struct {
 				KeyTag: 12345, Algorithm: 15, Flags: 257,
 				State: "active",
 				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA==",
+				Pub:   true, Sign: true, DS: &goldenTrue,
 			}},
+			Owned:     true,
 			Timestamp: 1700000006, Type: "keystate",
 			SenderID: "legacy-sender.example.",
 		}},

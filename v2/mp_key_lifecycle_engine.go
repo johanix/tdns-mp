@@ -145,6 +145,12 @@ func (w *signerWire) ServedDnskeyTTL(zone string) time.Duration {
 	return tdns.DefaultDnskeyTTL
 }
 
+// KeysChanged: a fresh inventory to every agent, on every column change,
+// not only a state change (design §4.1, arrow 2).
+func (w *signerWire) KeysChanged(zone string) {
+	pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+}
+
 func (w *signerWire) Report(zone string, keyid uint16, what string) {
 	lgSigner.Warn("key lifecycle: needs the operator", "zone", zone, "keyid", keyid, "what", what)
 	if mpzd := w.mpzd(zone); mpzd != nil {
