@@ -1029,22 +1029,11 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		return
 	}
 
-	// Convert KeyInventoryEntry → KeyInventoryItem for the channel
-	items := make([]KeyInventoryItem, len(payload.KeyInventory))
-	for i, e := range payload.KeyInventory {
-		items[i] = KeyInventoryItem{
-			KeyTag:    e.KeyTag,
-			Algorithm: e.Algorithm,
-			Flags:     e.Flags,
-			State:     e.State,
-			KeyRR:     e.KeyRR,
-		}
-	}
-
 	inventoryMsg := &KeystateInventoryMsg{
 		SenderID:  senderID,
 		Zone:      payload.Zone,
-		Inventory: items,
+		Inventory: inventoryItemsOf(payload.KeyInventory),
+		Owned:     payload.Owned,
 	}
 
 	// If there's a pending RFI request waiting for this zone's inventory,
@@ -1052,7 +1041,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	if ch, ok := tm.getKeystateRfi(payload.Zone); ok {
 		select {
 		case ch <- inventoryMsg:
-			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(items))
+			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
 		default:
 			lgTransport.Warn("keystateRfiChan full, dropping inventory", "sender", senderID)
 		}
@@ -1061,7 +1050,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 
 	select {
 	case tm.msgQs.KeystateInventory <- inventoryMsg:
-		lgTransport.Info("routed KEYSTATE inventory to agent", "sender", senderID, "zone", payload.Zone, "keys", len(items))
+		lgTransport.Info("routed KEYSTATE inventory to agent", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
 	default:
 		lgTransport.Warn("KeystateInventory channel full, dropping inventory", "sender", senderID)
 	}

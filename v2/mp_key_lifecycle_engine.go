@@ -173,6 +173,19 @@ func (w *signerWire) ServedDnskeyTTL(zone string) time.Duration {
 	return tdns.DefaultDnskeyTTL
 }
 
+// KeysChanged: a fresh inventory to every agent, on every column change,
+// not only a state change (design §4.1, arrow 2).
+func (w *signerWire) KeysChanged(zone string) {
+	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+	// and the CDS follows a ds column change the served DNSKEY RRset does
+	// not show (arrow 1): tdns's DS engine is woken
+	if kdb := w.conf.Config.Internal.KeyDB; kdb != nil {
+		if zd, ok := tdns.Zones.Get(dns.Fqdn(zone)); ok && zd != nil {
+			kdb.KeysChanged(zd)
+		}
+	}
+}
+
 func (w *signerWire) Report(zone string, keyid uint16, what string) {
 	lgSigner.Warn("key lifecycle: needs the operator", "zone", zone, "keyid", keyid, "what", what)
 	if mpzd := w.mpzd(zone); mpzd != nil {

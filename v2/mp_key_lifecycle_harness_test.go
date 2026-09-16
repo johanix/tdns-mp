@@ -439,7 +439,9 @@ func standbyOf(h *mpHarness, p *hProvider, role string) []uint16 {
 // invariants and P1-P9; after a fair drain, nothing in flight and every
 // signing provider with an active KSK and ZSK (P4, P6).
 func TestHarnessPropertyRuns(t *testing.T) {
-	seeds := 24
+	// CP4 asks for at least 200 seeded sequences per property in CI (and
+	// 5,000 before a merge, run as a soak); -short keeps a handful
+	seeds := 200
 	if testing.Short() {
 		seeds = 4
 	}

@@ -122,8 +122,9 @@ func RegisterMPKeyLifecycleHooks(conf *Config) {
 			if !ok || !isMP(zd) {
 				return
 			}
-			// an owned zone's machine pushes its own (Wire.Distribute and
-			// DistributeRemoval); the hook is for the zones tdns still runs
+			// an owned zone's machine pushes its own (Wire.KeysChanged after
+			// every key row write; Distribute and DistributeRemoval); the hook
+			// is for the zones tdns still runs
 			if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.Owns(zd) {
 				return
 			}

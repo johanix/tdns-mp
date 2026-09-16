@@ -1,8 +1,9 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * MP signer startup: StartMPSigner calls tdns.StartAuth for
- * DNS engines, then starts MP-specific engines on top.
+ * MP signer startup: StartMPSigner starts the tdns engines the signer
+ * needs one by one (the DS engine among them; it does not call
+ * tdns.StartAuth), then tdns-mp's own engines on top.
  */
 package tdnsmp
 
@@ -46,6 +47,12 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	})
 	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
 		return kdb.ZoneUpdaterEngine(ctx)
+	})
+	// tdns's DS engine: the CDS of an owned zone follows its DS set between
+	// transfers too (the machine's KeysChanged wakes it; key lifecycle
+	// ownership design §4.1, arrow 1; tdns-mp #55)
+	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
+		return kdb.DSEngine(ctx)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
 		return tdns.UpdateHandler(ctx, conf.Config)

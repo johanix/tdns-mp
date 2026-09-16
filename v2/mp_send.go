@@ -81,6 +81,9 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 			Flags:     e.Flags,
 			State:     e.State,
 			KeyRR:     e.KeyRR,
+			Pub:       e.Pub,
+			Sign:      e.Sign,
+			DS:        e.DS,
 		})
 	}
 	payload := &core.AgentKeystatePost{
@@ -93,6 +96,7 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 		Signal:       req.Signal,
 		Message:      req.Message,
 		KeyInventory: coreInventory,
+		Owned:        req.Owned,
 		Time:         req.Timestamp,
 	}
 	b, err := json.Marshal(payload)

@@ -88,6 +88,7 @@ type PeerKeystateRequest struct {
 	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
 	Message      string              // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
+	Owned        bool                // the sender's own state machine runs the zone's keys (S3)
 	Timestamp    time.Time           // Request timestamp
 }
 

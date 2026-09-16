@@ -86,6 +86,7 @@ type DnsKeystatePayload struct {
 	Signal       string              `json:"Signal"`                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
 	Message      string              `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
+	Owned        bool                `json:"Owned,omitempty"`        // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
 	Time         string              `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
 	Timestamp    int64               `json:"timestamp"`              // Unix timestamp
 
@@ -222,6 +223,13 @@ type KeyInventoryEntry struct {
 	Flags     uint16 `json:"flags"`
 	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
+	// The row's columns beside the state (S5, T5.1): served, signing, and
+	// whether its DS belongs at the parent. A sender that predates them
+	// sends none: ds is then nil, and pub and sign are what the state
+	// implies.
+	Pub  bool  `json:"pub,omitempty"`
+	Sign bool  `json:"sign,omitempty"`
+	DS   *bool `json:"ds,omitempty"`
 }
 
 // ParseSyncPayload parses a sync message payload.
