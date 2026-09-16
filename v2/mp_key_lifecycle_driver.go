@@ -101,6 +101,9 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 	}
 	if kdb != nil {
 		kdb.DB.Exec(HsyncTables["MPKeyDistribution"])
+		// a table created before last_sent existed gains the column (the
+		// error for a column already there is the expected one)
+		kdb.DB.Exec(`ALTER TABLE MPKeyDistribution ADD COLUMN last_sent TEXT DEFAULT ''`)
 	}
 	return &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
 		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known}
@@ -424,6 +427,13 @@ func (l *ZoneKeyLifecycle) ConfirmKind(keyid uint16, provider, status, reason st
 // refused; a skew beyond it is logged as such.
 const StaleTolerance = 2 * time.Minute
 
+func kindName(removal bool) string {
+	if removal {
+		return "removal"
+	}
+	return "distribution"
+}
+
 func (d *distribution) lastSent() time.Time {
 	if d.LastSent.IsZero() {
 		return d.SentAt
@@ -439,12 +449,18 @@ func (d *distribution) lastSent() time.Time {
 // confirmation older than the record's first send by more than
 // StaleTolerance is stale and refused (ErrStaleConfirmation). A resend
 // keeps the first send time, so the answer to the first send still counts.
-func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at time.Time) (from, to string, err error) {
+// removal says which kind of distribution the confirmation answers when
+// the sender names it (nil when it does not): an answer of the other kind
+// than the record's is stale too.
+func (l *ZoneKeyLifecycle) ConfirmAllAt(keyid uint16, status, reason string, at time.Time, removal *bool) (from, to string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	d := l.dist[keyid]
 	if d == nil {
 		return "", "", fmt.Errorf("key %d of %s has no distribution in flight", keyid, l.Zone)
+	}
+	if removal != nil && *removal != d.Removal {
+		return "", "", fmt.Errorf("key %d of %s: an answer about the key's %s while its %s is in flight: %w", keyid, l.Zone, kindName(*removal), kindName(d.Removal), ErrStaleConfirmation)
 	}
 	if !at.IsZero() && at.Before(d.SentAt.Add(-StaleTolerance)) {
 		return "", "", fmt.Errorf("key %d of %s: a confirmation from %s of a distribution older than the one in flight (sent %s; or the agent's clock is more than %s behind): %w",

@@ -2039,6 +2039,7 @@ type PendingDnskeyPropagation struct {
 	Zone           ZoneName
 	DistributionID string
 	KeyTags        []uint16         // DNSKEY key tags being propagated
+	Removed        map[uint16]bool  // those of KeyTags the distribution removes
 	ExpectedAgents map[AgentId]bool // Agents we're waiting for (true = confirmed)
 	Rejected       bool             // True if any agent rejected
 	RejectionMsg   string           // First rejection reason
@@ -2047,7 +2048,7 @@ type PendingDnskeyPropagation struct {
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
 // Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
-func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
+func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags, removedTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2055,11 +2056,16 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string
 	for _, a := range agents {
 		expected[a] = false // false = not yet confirmed
 	}
+	removed := map[uint16]bool{}
+	for _, kt := range removedTags {
+		removed[kt] = true
+	}
 
 	tm.pendingDnskeyPropagations[distID] = &PendingDnskeyPropagation{
 		Zone:           zone,
 		DistributionID: distID,
 		KeyTags:        keyTags,
+		Removed:        removed,
 		ExpectedAgents: expected,
 		CreatedAt:      time.Now(),
 	}
@@ -2166,6 +2172,7 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	// Send KEYSTATE asynchronously (don't hold the mutex)
 	zone := prop.Zone
 	keyTags := prop.KeyTags
+	removed := prop.Removed
 	rejected := prop.Rejected
 	rejectionMsg := prop.RejectionMsg
 	sentAt := prop.CreatedAt
@@ -2174,8 +2181,23 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	go func() {
 		if rejected {
 			tm.sendKeystateToSigner(zone, keyTags, "rejected", rejectionMsg, sentAt)
-		} else {
-			tm.sendKeystateToSigner(zone, keyTags, "propagated", "all remote agents confirmed", sentAt)
+			return
+		}
+		// the kind of distribution each key's answer is about travels as the
+		// signal: "propagated" for a key sent, "removed" for a key removed
+		var added, gone []uint16
+		for _, kt := range keyTags {
+			if removed[kt] {
+				gone = append(gone, kt)
+			} else {
+				added = append(added, kt)
+			}
+		}
+		if len(added) > 0 {
+			tm.sendKeystateToSigner(zone, added, "propagated", "all remote agents confirmed", sentAt)
+		}
+		if len(gone) > 0 {
+			tm.sendKeystateToSigner(zone, gone, "removed", "all remote agents confirmed the removal", sentAt)
 		}
 	}()
 

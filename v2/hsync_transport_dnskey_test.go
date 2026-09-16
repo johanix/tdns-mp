@@ -20,7 +20,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	theirs := testDnskeyRR(t, "z.example.", 257)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	track := func(dist string) {
-		tm.TrackDnskeyPropagation("z.example.", dist, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
+		tm.TrackDnskeyPropagation("z.example.", dist, []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
 	}
 	waiting := func(dist, step string) {
 		t.Helper()
@@ -87,8 +87,12 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 		t.Errorf("a failure naming nothing counted: %+v", p)
 	}
 
-	// a removal: the record shows up among the removed ones
-	track("d5")
+	// a removal: the record shows up among the removed ones, and the
+	// tracker knows the key was removed (its answer goes out as "removed")
+	tm.TrackDnskeyPropagation("z.example.", "d5", []uint16{ours.KeyTag()}, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
+	if p := tm.pendingDnskeyPropagations["d5"]; !p.Removed[ours.KeyTag()] {
+		t.Errorf("the removed key is not marked removed in the tracker: %+v", p)
+	}
 	tm.ProcessDnskeyConfirmation("d5", "a1", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
 	tm.ProcessDnskeyConfirmation("d5", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
 	resolved("d5", "a removal applied everywhere")

@@ -173,7 +173,7 @@ func TestDriverConfirmAllAtFollowsTheRecord(t *testing.T) {
 	r.tick("mint")
 	ksk := r.keysIn(KeyStateMpdist, "KSK")[0]
 	sent := r.l.InFlight()[0].SentAt
-	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", sent.Add(-time.Hour)); !errors.Is(err, ErrStaleConfirmation) {
+	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", sent.Add(-time.Hour), nil); !errors.Is(err, ErrStaleConfirmation) {
 		t.Errorf("a confirmation of an older distribution: err=%v, want ErrStaleConfirmation", err)
 	}
 	if st := r.state(ksk); st != KeyStateMpdist {
@@ -184,7 +184,7 @@ func TestDriverConfirmAllAtFollowsTheRecord(t *testing.T) {
 	r.wire.mu.Lock()
 	r.wire.signers = []string{"p2"}
 	r.wire.mu.Unlock()
-	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", sent); err != nil || to != KeyStatePublished {
+	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", sent, nil); err != nil || to != KeyStatePublished {
 		t.Errorf("the confirmation by the record: to=%s err=%v, want published", to, err)
 	}
 	// alone: the confirmation of a key with nobody expected publishes it
@@ -198,7 +198,7 @@ func TestDriverConfirmAllAtFollowsTheRecord(t *testing.T) {
 	if st := r.state(zsk); st != KeyStatePublished {
 		t.Errorf("alone after the signers left, the ZSK is %s, want published", st)
 	}
-	if _, _, err := r.l.ConfirmAllAt(ksk, "rejected", "late", time.Time{}); err == nil {
+	if _, _, err := r.l.ConfirmAllAt(ksk, "rejected", "late", time.Time{}, nil); err == nil {
 		t.Error("a rejection of a key with no distribution in flight was taken")
 	}
 }
@@ -300,7 +300,7 @@ func TestDriverResendKeepsTheFirstSendTime(t *testing.T) {
 	}
 	// the agent's answer to the first send: its tracking began just after
 	// the push, on its own clock, a little behind ours
-	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", first.SentAt.Add(-30*time.Second)); err != nil || to != KeyStatePublished {
+	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", first.SentAt.Add(-30*time.Second), nil); err != nil || to != KeyStatePublished {
 		t.Errorf("the answer to the first send after a resend: to=%s err=%v, want published", to, err)
 	}
 	// a removal's record refuses the answer to a distribution from before
@@ -308,7 +308,7 @@ func TestDriverResendKeepsTheFirstSendTime(t *testing.T) {
 	if _, to, err := r.l.Apply(ksk, CmdWithdraw); err != nil || to != KeyStateMpremove {
 		t.Fatalf("withdraw: to=%s err=%v", to, err)
 	}
-	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", first.SentAt); !errors.Is(err, ErrStaleConfirmation) {
+	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", first.SentAt, nil); !errors.Is(err, ErrStaleConfirmation) {
 		t.Errorf("the old distribution's answer against the removal's record: err=%v, want ErrStaleConfirmation", err)
 	}
 	if st := r.state(ksk); st != KeyStateMpremove {
@@ -325,7 +325,7 @@ func TestDriverResendKeepsTheFirstSendTime(t *testing.T) {
 	if len(after) != len(before) || !after[0].SentAt.Equal(before[0].SentAt.Truncate(time.Second)) || after[0].KeyId != before[0].KeyId {
 		t.Errorf("after a restart the records are %+v, want %+v", after, before)
 	}
-	if _, _, err := l2.ConfirmAllAt(ksk, "applied", "", first.SentAt); !errors.Is(err, ErrStaleConfirmation) {
+	if _, _, err := l2.ConfirmAllAt(ksk, "applied", "", first.SentAt, nil); !errors.Is(err, ErrStaleConfirmation) {
 		t.Errorf("after a restart the old answer is taken: err=%v", err)
 	}
 }
@@ -426,5 +426,52 @@ func TestMintRowMintsForARolloverPending(t *testing.T) {
 	pending.InPipeline = 1
 	if _, row := Next(KeyView{}, EvMint, pending); row != nil {
 		t.Errorf("a rollover pending with a key already in the pipeline mints again (row %s)", row.ID)
+	}
+}
+
+// N13: the signal names the kind of distribution it answers, so an answer
+// about the key's distribution does not complete its removal, nor the
+// other way round, whatever the times say.
+func TestDriverConfirmationOfTheWrongKindIsStale(t *testing.T) {
+	r := newDriverRig(t, "kind.owned.example.", driverPolicy, "p2")
+	r.tick("mint")
+	ksk := r.keysIn(KeyStateMpdist, "KSK")[0]
+	key, removal := false, true
+	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", time.Time{}, &removal); !errors.Is(err, ErrStaleConfirmation) {
+		t.Errorf("a removal's answer against the key's distribution: err=%v, want ErrStaleConfirmation", err)
+	}
+	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", time.Time{}, &key); err != nil || to != KeyStatePublished {
+		t.Fatalf("the key's answer: to=%s err=%v", to, err)
+	}
+	if _, to, err := r.l.Apply(ksk, CmdWithdraw); err != nil || to != KeyStateMpremove {
+		t.Fatalf("withdraw: to=%s err=%v", to, err)
+	}
+	if _, _, err := r.l.ConfirmAllAt(ksk, "applied", "", r.clock.Now(), &key); !errors.Is(err, ErrStaleConfirmation) {
+		t.Errorf("the key's answer right after the withdraw, inside the tolerance: err=%v, want ErrStaleConfirmation by kind", err)
+	}
+	if st := r.state(ksk); st != KeyStateMpremove {
+		t.Errorf("the wrong-kind answer moved the key to %s", st)
+	}
+	if _, to, err := r.l.ConfirmAllAt(ksk, "applied", "", r.clock.Now(), &removal); err != nil || to != KeyStateRemoved {
+		t.Errorf("the removal's answer: to=%s err=%v, want removed", to, err)
+	}
+}
+
+// N14: a distribution table created before last_sent existed gains the
+// column when the driver starts, so a restart reads its records.
+func TestDriverAddsTheLastSentColumnToAnOlderTable(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	if _, err := kdb.DB.Exec(`CREATE TABLE 'MPKeyDistribution' (zonename TEXT NOT NULL, keyid INTEGER NOT NULL, removal INTEGER DEFAULT 0, sent_at TEXT DEFAULT '', expected TEXT DEFAULT '', applied TEXT DEFAULT '', pending TEXT DEFAULT '', rejected TEXT DEFAULT '', reason TEXT DEFAULT '', UNIQUE (zonename, keyid))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kdb.DB.Exec(`INSERT INTO MPKeyDistribution (zonename, keyid, removal, sent_at, expected) VALUES (?, ?, 0, ?, 'p2')`, "old.owned.example.", 4711, "2026-09-16T10:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	l := NewZoneKeyLifecycle("old.owned.example.", kdb, &fakeClock{t: time.Now()}, driverPolicy, newFakeWire("p2"))
+	if err := l.loadDists(); err != nil {
+		t.Fatalf("reading the older table's records: %v", err)
+	}
+	if d := l.InFlight(); len(d) != 1 || d[0].KeyId != 4711 || d[0].SentAt.IsZero() {
+		t.Errorf("records read from the older table: %+v", d)
 	}
 }

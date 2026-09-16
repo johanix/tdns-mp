@@ -213,7 +213,7 @@ var KeyLifecycleTable = []Transition{
 	{"T5", KeyStateMpdist, EvRejected, nil, KeyStateMpdist, "the rejection recorded and surfaced; no automatic retreat (P8)"},
 	{"T6", "*", CmdRetry, nil, "*", "a fresh distribution: the expected set recomputed from the current signers, the rejection forgotten"},
 	{"T6'", "*", EvResend, func(k KeyView, z ZoneView) bool { return confirmationsOutstanding(z) }, "*", "a distribution in flight sent again, whatever the key's state; the confirmations received stay"},
-	{"T7", KeyStateMpdist, CmdWithdraw, nil, KeyStateMpremove, "the removal distributed"},
+	{"T7", KeyStateMpdist, CmdWithdraw, nil, KeyStateMpremove, "the key's RRSIGs stripped first (a strip that fails leaves the row where it is), then the removal distributed"},
 	{"T7'", KeyStatePublished, CmdWithdraw, nil, KeyStateMpremove, "a served key given up on: the removal distributed"},
 	{"T7''", KeyStateStandby, CmdWithdraw, nil, KeyStateMpremove, "as T7'"},
 	{"T8", KeyStatePublished, EvPropagated, func(k KeyView, z ZoneView) bool {

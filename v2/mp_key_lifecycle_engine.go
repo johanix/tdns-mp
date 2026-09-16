@@ -283,12 +283,18 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	if l == nil {
 		return false
 	}
+	// the signal names the kind of distribution it answers: "propagated"
+	// a key's, "removed" its removal (the agent of the same release); a
+	// rejection says nothing of the kind
 	var err error
+	key, removal := false, true
 	switch signal {
 	case "propagated":
-		_, _, err = l.ConfirmAllAt(keytag, "applied", "", at)
+		_, _, err = l.ConfirmAllAt(keytag, "applied", "", at, &key)
+	case "removed":
+		_, _, err = l.ConfirmAllAt(keytag, "applied", "", at, &removal)
 	case "rejected":
-		_, _, err = l.ConfirmAllAt(keytag, "rejected", message, at)
+		_, _, err = l.ConfirmAllAt(keytag, "rejected", message, at, nil)
 	default:
 		return true
 	}

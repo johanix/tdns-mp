@@ -31,7 +31,11 @@ type SynchedDataUpdate struct {
 	Force           bool     // Bypass dedup check (always send even if RR already present)
 	SkipCombiner    bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
 	DnskeyKeyTags   []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
-	Response        chan *AgentMsgResponse
+	// DnskeyRemovedKeyTags are those of DnskeyKeyTags the distribution
+	// removes: their confirmation goes to the signer as "removed", the
+	// others' as "propagated", so the signer knows which kind it answers.
+	DnskeyRemovedKeyTags []uint16
+	Response             chan *AgentMsgResponse
 }
 
 type SynchedDataResponse struct {
