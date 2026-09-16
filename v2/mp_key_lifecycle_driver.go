@@ -85,6 +85,7 @@ type ZoneKeyLifecycle struct {
 	dsGone   map[uint16]bool
 	rolls    map[string]bool // a rollover requested, by role
 	reported map[uint16]bool // retired KSKs reported as waiting on the parent
+	initErr  error           // why the driver cannot run (its persistence missing)
 	rolling  string          // the role whose promotion is a rollover, while it is applied
 	known    map[string]bool // the other signers last seen, for the joiners
 }
@@ -99,15 +100,24 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 	for _, p := range wire.OtherSigners(dns.Fqdn(zone)) {
 		known[p] = true
 	}
-	if kdb != nil {
-		kdb.DB.Exec(HsyncTables["MPKeyDistribution"])
-		// a table created before last_sent existed gains the column (the
-		// error for a column already there is the expected one)
-		kdb.DB.Exec(`ALTER TABLE MPKeyDistribution ADD COLUMN last_sent TEXT DEFAULT ''`)
-	}
-	return &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
+	l := &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
 		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known}
+	if kdb != nil {
+		if _, err := kdb.DB.Exec(HsyncTables["MPKeyDistribution"]); err != nil {
+			// without the table nothing in flight would survive a restart:
+			// the driver refuses to run until it exists (Ready)
+			l.initErr = fmt.Errorf("the MPKeyDistribution table of %s: %w", l.Zone, err)
+		} else {
+			// a table created before last_sent existed gains the column (the
+			// error for a column already there is the expected one)
+			kdb.DB.Exec(`ALTER TABLE MPKeyDistribution ADD COLUMN last_sent TEXT DEFAULT ''`)
+		}
+	}
+	return l
 }
+
+// Ready reports whether the driver can run: its persistence exists.
+func (l *ZoneKeyLifecycle) Ready() error { return l.initErr }
 
 func (l *ZoneKeyLifecycle) logf(msg string, kv ...any) {
 	if l.Log != nil {
@@ -248,6 +258,9 @@ func (l *ZoneKeyLifecycle) algRollInFlight(role string, all map[uint16]tdns.Dnss
 func (l *ZoneKeyLifecycle) Apply(keyid uint16, ev KeyEvent) (from, to string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.initErr != nil {
+		return "", "", l.initErr
+	}
 	return l.applyLocked(keyid, ev)
 }
 
@@ -275,7 +288,11 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	case "T4":
 		return k.State, next, nil
 	case "T5":
-		l.Wire.Report(l.Zone, keyid, "rejected: "+l.dist[keyid].Reason)
+		d := l.dist[keyid]
+		if d == nil {
+			return k.State, k.State, fmt.Errorf("key %d of %s has no distribution in flight to be rejected", keyid, l.Zone)
+		}
+		l.Wire.Report(l.Zone, keyid, "rejected: "+d.Reason)
 		return k.State, next, nil
 	case "T6":
 		// a fresh distribution for the current signers, the rejection gone;
@@ -583,12 +600,20 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 				delete(d.Expected, p)
 			}
 		}
+		added := false
 		for p := range now {
 			if !d.Expected[p] && !d.Applied[p] {
 				d.Expected[p] = true
+				added = true
 			}
 		}
 		l.saveDist(keyid)
+		if added {
+			// a signer now expected must have the distribution to confirm
+			// it: sent again to everyone (the push carries the whole
+			// inventory), the first send time kept
+			l.resend(keyid)
+		}
 		ev := EvSignersChanged
 		if _, _, err := l.applyLocked(keyid, ev); err != nil {
 			return err
@@ -643,6 +668,9 @@ func (l *ZoneKeyLifecycle) CancelRollover(role string) {
 func (l *ZoneKeyLifecycle) Tick() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.initErr != nil {
+		return l.initErr
+	}
 	all, err := l.rows()
 	if err != nil {
 		return err
