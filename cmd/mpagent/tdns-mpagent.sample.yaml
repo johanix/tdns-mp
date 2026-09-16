@@ -39,8 +39,6 @@ multi-provider:
       nameservers:   [ ns1.alpha.example. ]
       # Secondaries of the identity zone, NOTIFYed on every change.
       notify:        [ '192.0.2.10:53' ]
-   remote:
-      LocateInterval: 60
    xfr:
       outgoing:
          addresses:  []

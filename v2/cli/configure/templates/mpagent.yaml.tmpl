@@ -35,10 +35,6 @@ multi-provider:
       # host:port addresses of downstream secondaries that should
       # receive NOTIFY when the identity zone changes.
       notify:        [ {{range $i, $n := .Agent.LocalNotify}}{{if $i}}, {{end}}'{{$n}}'{{end}} ]
-   remote:
-      # Seconds between LocateAgent attempts when a peer is not yet
-      # discovered (i.e. before HELLO has succeeded).
-      LocateInterval: 60
    # Inter-agent zone-transfer endpoints, advertised on demand via
    # CONFIG upstream/downstream requests from peer agents. Empty
    # lists mean "this agent does not act as XFR source/destination
@@ -73,7 +69,7 @@ multi-provider:
          listen:     [ '{{.AgentDnsListen}}' ]
       # URL template published as a DNS URI RR in the agent's
       # identity zone. Remote agents fetch this URI during their
-      # LocateAgent discovery to learn how to reach this agent for
+      # discovery to learn how to reach this agent for
       # MP signaling. {TARGET} and {PORT} are substituted at
       # publication time.
       baseurl:       dns://dns.{TARGET}:{PORT}/
@@ -84,7 +80,7 @@ multi-provider:
       intervals:
          beatinterval:        30   # between BEATs
          helloretry:          15   # between HELLO retries (steady)
-         discoveryretry:      15   # between LocateAgent retries
+         discoveryretry:      15   # between discovery retries
          reconcile:           60   # between full peer reconciliations
          hello_fast_attempts: 3    # initial fast HELLO attempts before backoff
          hello_fast_interval: 2    # between the first N HELLO attempts

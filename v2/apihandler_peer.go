@@ -285,6 +285,6 @@ func peerFromAddress(peerID string, address string) *transport.Peer {
 		Port:      uint16(port),
 		Transport: "udp",
 	})
-	peer.DNSEndpoint = fmt.Sprintf("dns://%s:%d/", host, port) // S2 display
+	peer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
 	return peer
 }

@@ -296,7 +296,6 @@ func newDebugAgentRegistryCmd(kind string) *cobra.Command {
 			conf := &tdnsmp.Config{Config: &tdns.Config{}}
 			conf.SetMpConfig(&tdnsmp.MultiProviderConf{Identity: "local"})
 			ar := conf.NewAgentRegistry()
-			ar.LocateInterval = 10
 			ar.S.Set("local", tdnsmp.NewAgent("local"))
 			ar.S.Set("agent.example.com", tdnsmp.NewAgent("agent.example.com"))
 			ar.S.Set("agent.example.org", tdnsmp.NewAgent("agent.example.org"))
