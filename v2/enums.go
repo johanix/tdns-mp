@@ -56,6 +56,9 @@ func init() {
 
 	tdns.StringToAppType["mpsigner"] = AppTypeMPSigner
 	tdns.StringToAppType["mpagent"] = AppTypeMPAgent
+	// delegation-sync setup runs for the multi-provider agent as for
+	// tdns-agent (key lifecycle ownership design §4.2, S5)
+	tdns.RegisterMultiProviderAgentAppType(AppTypeMPAgent)
 	tdns.StringToAppType["mpcombiner"] = AppTypeMPCombiner
 	tdns.StringToAppType["mpauditor"] = AppTypeMPAuditor
 
