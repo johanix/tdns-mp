@@ -1,8 +1,9 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * MP signer startup: StartMPSigner calls tdns.StartAuth for
- * DNS engines, then starts MP-specific engines on top.
+ * MP signer startup: StartMPSigner starts the tdns engines the signer
+ * needs one by one (the DS engine among them; it does not call
+ * tdns.StartAuth), then tdns-mp's own engines on top.
  */
 package tdnsmp
 

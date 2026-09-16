@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -201,8 +202,30 @@ func TestSyncherGatesForOwnedAndMultiProviderZones(t *testing.T) {
 	if !mpSetupAllowed(conf, plain) {
 		t.Error("a zone tdns runs alone is gated on a leader")
 	}
-	// the combiner's hint: nothing without a keystore that knows the DS set
+	// the combiner's hint: nothing without a keystore that knows the DS
+	// set; with one, the ds=1 KSKs, not every served SEP key
 	if hint := combinerDSHint(&MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: "hint.example."}}, "hint.example."); hint != nil {
 		t.Errorf("a combiner with no keystore hinted %v", hint)
+	}
+	mpzd := signerTestZone(t, "hint.owned.example.", kdb)
+	withDS := mpGenKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateActive, "KSK")
+	withoutDS := mpGenKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateActive, "KSK")
+	if err := tdns.UpdateKeyRow(kdb, mpzd.ZoneName, withDS, tdns.DnskeyStateActive, mustCols(KeyStateActive, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tdns.UpdateKeyRow(kdb, mpzd.ZoneName, withoutDS, tdns.DnskeyStateActive, tdns.KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: false, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	hint := combinerDSHint(mpzd, mpzd.ZoneName)
+	hinted := uint16(0)
+	if len(hint) == 1 {
+		if rr, err := dns.NewRR(hint[0]); err == nil {
+			if ds, ok := rr.(*dns.DS); ok {
+				hinted = ds.KeyTag
+			}
+		}
+	}
+	if len(hint) != 1 || hinted != withDS {
+		t.Errorf("the hint with a keystore: %v, want the one KSK with ds=1 (%d), not the served SEP keys", hint, withDS)
 	}
 }
