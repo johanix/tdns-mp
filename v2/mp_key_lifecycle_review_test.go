@@ -578,3 +578,41 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 		t.Errorf("zones taken from the configuration: %v, want only %s", zones, good.ZoneName)
 	}
 }
+
+// Found on the lab: the configured zones are loaded, and their DNSSEC
+// policy bound, after the engines start, so a take at startup found no
+// policy and refused for good. The take now waits and Run asks again on
+// every tick: a zone not loaded, or loaded without its policy yet, is
+// taken once it is ready; one that is not multi-provider never.
+func TestConfiguredZoneIsTakenOnceItsPolicyIsBound(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}, KeyLifecycleZones: []string{"late.take.example.", "missing.take.example.", "plain.take.example."}})
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	late := signerTestZone(t, "late.take.example.", kdb)
+	pol := late.ZoneData.DnssecPolicy
+	late.ZoneData.DnssecPolicy = nil // not bound yet, as at the signer's start
+	plain := signerTestZone(t, "plain.take.example.", kdb)
+	plain.ZoneData.Options[tdns.OptMultiProvider] = false
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 0 {
+		t.Fatalf("taken before the policy was bound: %v", z)
+	}
+	late.ZoneData.DnssecPolicy = pol
+	e.TakeConfiguredZones() // what Run does on every tick
+	if z := owner.Zones(); len(z) != 1 || z[0] != late.ZoneName {
+		t.Errorf("after the policy was bound: %v, want the late zone taken", z)
+	}
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 1 {
+		t.Errorf("a second take changed the set: %v", z)
+	}
+	if e.refused["plain.take.example."] != true {
+		t.Error("the zone that is not multi-provider is not refused for good")
+	}
+	if _, w := e.waiting["missing.take.example."]; !w {
+		t.Error("the zone not loaded is not waiting")
+	}
+}

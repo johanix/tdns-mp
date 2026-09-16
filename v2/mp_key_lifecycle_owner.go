@@ -82,6 +82,13 @@ func (o *MPKeyLifecycleOwner) Zones() []string {
 
 // Owns: taken, and a multi-provider zone (tdns asks the same; a zone that
 // is not one keeps tdns's machine, whatever the configuration says).
+// taken: taken by name (the loaded zone's options are Owns's business).
+func (o *MPKeyLifecycleOwner) taken(zone string) bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.owned[dns.Fqdn(zone)]
+}
+
 func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
 	if zd == nil || !zd.Options[tdns.OptMultiProvider] {
 		return false
