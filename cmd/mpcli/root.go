@@ -26,7 +26,9 @@ var rootCmd = &cobra.Command{
 	Short: "tdns-mpcli is the CLI tool for tdns multi-provider applications",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		tdns.SetupCliLogging()
-		if isRootKeysCommand(cmd) || isConfigureCommand(cmd) {
+		// keys generate, configure and show-cmds (pure introspection of the
+		// in-memory command tree) need no config or API.
+		if isRootKeysCommand(cmd) || isConfigureCommand(cmd) || cmd.Name() == cli.ShowCmdsName {
 			return
 		}
 		initConfig()
@@ -64,11 +66,19 @@ func wireInstances() {
 
 func Execute() {
 	wireInstances()
+	cli.AttachShowCmds(rootCmd)
 	cobra.CheckErr(rootCmd.Execute())
 }
 
 func ExecuteContext(ctx context.Context) {
+	// Instance trees first, so show-cmds (attached below) sees them: it
+	// introspects the in-memory command tree, and a tree wired afterwards
+	// would be missing from its output.
 	wireInstances()
+	// Attached here rather than from an init(): the command tree is wired up
+	// by init()s spread over several files in two packages, and show-cmds
+	// must not be attached until all of them have run.
+	cli.AttachShowCmds(rootCmd)
 	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
 }
 

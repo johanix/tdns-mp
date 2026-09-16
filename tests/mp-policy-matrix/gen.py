@@ -634,7 +634,7 @@ def mpcli_conf():
                 f"     baseurl:      https://127.0.0.1:{api}/api/v1\n"
                 f"     apikey:       @APIKEY_{key}@\n"
                 f"     authmethod:   X-API-Key\n"
-                f"     config_file:  {cfg}\n"
+                f"     config-file:  {cfg}\n"
                 f"     command:      {cmd}\n\n")
     out = ("# tdns-mpcli config for the rig: the built-in words address provider p1\n"
            "# and the auditor; every daemon is also an instance word (p1-agent ...\n"

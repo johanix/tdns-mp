@@ -15,14 +15,14 @@ multi-provider:
    # dials the agent (e.g. to deliver CHUNK responses).
    agents:
       - identity:               {{.Agent.Identity}}
-        address:                {{.AgentDnsDial}}
+        address:                '{{.AgentDnsDial}}'
         long_term_jose_pub_key: {{.Paths.AgentJosePub}}
 
    # Optional HTTPS sync API (alternative to NOTIFY+CHUNK).
    # Disabled by default — DNS transport is the primary mechanism.
    # syncapi:
    #    addresses:
-   #       listen:     [ 127.0.0.1:8992 ]
+   #       listen:     [ '127.0.0.1:8992' ]
    #    certfile:      {{.Paths.CombinerCert}}
    #    keyfile:       {{.Paths.CombinerKey}}
 
@@ -31,43 +31,52 @@ service:
    verbose:        true
    debug:          false
 
-# Top-level DNS server. The combiner answers AXFR requests from
-# its signer (which is configured as its downstream secondary).
-dnsengine:
-   addresses:      [ {{.CombinerDnsListen}} ]
+# Where the combiner's DNS service listens. The signer (and the
+# auditor) transfer the combined zones from here.
+listeners:
+   addresses:      [ '{{.CombinerDnsListen}}' ]
    transports:     [ do53 ]
 
+authengine:
+   # Keep the SOA serial handed to the signer across restarts, so the
+   # signer never sees it go backwards.
+   outbound-soa-serial:  persist
+
 apiserver:
-   addresses:      [ {{.CombinerApiListen}} ]
+   addresses:      [ '{{.CombinerApiListen}}' ]
    apikey:         {{.Combiner.ApiKey}}
    certfile:       {{.Paths.CombinerCert}}
    keyfile:        {{.Paths.CombinerKey}}
 
 db:
-   file:  /var/lib/tdns/tdns-mpcombiner.db
+   file:  {{.Layout.DbDir}}/tdns-mpcombiner.db
 
 log:
-   file:   /var/log/tdns/tdns-mpcombiner.log
+   file:   {{.Layout.LogDir}}/tdns-mpcombiner.log
    level:  info
 
 # If the templates: and zones: sections grow large, move them to a
 # separate YAML file and pull it in via a top-level "include:" entry.
 templates:
-   - name:           mptest
-     # Combiner is primary for the combined zone — it receives
-     # edits from agents and (optionally) merges them with data
-     # from the customer's authoritative primary.
-     type:           primary
+   - name:           mpzone
      store:          map
-     options:
-        - multi-provider
-     # After combining, NOTIFY the signer so it pulls the new
-     # serial and signs it.
-     notify:         [ {{.SignerDnsDial}} ]
+     options:        [ multi-provider ]
+     # After combining, NOTIFY the local roles that transfer the zone.
+     notify:         [ { addr: '{{.SignerDnsDial}}', key: NOKEY }{{if .Auditor.Identity}}, { addr: '{{.AuditorDnsDial}}', key: NOKEY }{{end}} ]
+     # Who may transfer the combined zone: the local roles.
+     downstreams:    [ { prefix: '{{.InternalPrefix}}', key: NOKEY } ]
 
 zones:
-   - name:            example.test.
-     template:        mptest
-     # Set `primary:` to the customer's authoritative primary
-     # when this combiner pulls a real zone, e.g.:
-     # primary:         203.0.113.53:53
+   # The example zone, loaded from a file that stands in for the zone
+   # owner's primary.
+   - name:           {{.ExampleZone}}
+     template:       mpzone
+     type:           primary
+     zonefile:       {{.Paths.ExampleZoneFile}}
+
+   # A customer zone is a secondary of the zone owner's primary, which
+   # must allow this combiner to transfer the zone and NOTIFY it:
+   # - name:           customer.example.
+   #   template:       mpzone
+   #   type:           secondary
+   #   primaries:      [ { addr: '203.0.113.53:53', key: NOKEY } ]

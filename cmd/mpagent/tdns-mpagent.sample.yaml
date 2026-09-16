@@ -1,38 +1,44 @@
-# TDNS MP Agent Configuration
+# TDNS MP Agent Configuration (sample)
 #
-# The mpagent binary provides the multi-provider DNSSEC agent
-# role. It uses tdns for DNS infrastructure (zone serving, refresh,
-# NOTIFY, query handling, IMR) and adds MP-specific engines
-# (HSYNC sync engine, SDE, heartbeats, discovery, leader election,
-# CHUNK transport, gossip protocol).
+# tdns-mpagent is the multi-provider DNSSEC agent. It uses tdns for DNS
+# infrastructure (zone serving, refresh, NOTIFY, query handling, the
+# internal resolver) and adds the MP engines (HSYNC sync engine, SDE,
+# heartbeats, discovery, leader election, CHUNK transport, gossip).
 #
-# This config is similar to tdns-agent.yaml but runs as a
-# standalone MP application (AppTypeMPAgent).
-
-include:
-   - mpagent-zones.yaml
+# `tdns-mpcli configure` writes a config of this shape for a single-host
+# testbed, together with keys, certificates and an example zone. This
+# sample documents the same keys plus optional ones, on the same port
+# layout: agent DNS 8054, management API 7054, sync API 9054; combiner
+# DNS 8055; signer DNS 8053.
 
 multi-provider:
    role:           agent
-   identity:       agent.provider.example.
-   # Active transport mechanisms: "api" and/or "dns"
+   identity:       agent.alpha.example.
+   # Active transport mechanisms: "api" and/or "dns". "dns" (NOTIFY+CHUNK
+   # over DNS) is the one in use.
    supported_mechanisms: [ dns ]
-   # Secure CHUNK comms with combiner
+   # JOSE key pair that signs and encrypts CHUNK traffic.
    long_term_jose_priv_key: /etc/tdns/keys/agent.jose.priv.json
+   # Payload-crypto backend; "jose" is the default and the only one.
+   # crypto_backend: jose
    combiner:
-      identity:                combiner.provider.example.
-      address:                 10.1.0.4:8055
+      identity:                combiner.alpha.example.
+      address:                 '127.0.0.1:8055'
       long_term_jose_pub_key:  /etc/tdns/keys/combiner.jose.pub.json
    signer:
-      identity:                signer.provider.example.
-      address:                 127.0.0.1:8053
+      identity:                signer.alpha.example.
+      address:                 '127.0.0.1:8053'
       long_term_jose_pub_key:  /etc/tdns/keys/signer.jose.pub.json
-   # Authorized peer agents (discovered via DNS)
+   # Agent identities authorized to communicate with this agent, in
+   # addition to those found through HSYNC3.
    # authorized_peers:
-   #    - agent.other-provider.example.
+   #    - agent.bravo.example.
+   # The agent's identity zone, created and signed at startup.
    local:
-      notify:        []
-      # nameservers: [ ns1.example.org., ns2.example.org. ]
+      # NS RDATA of the identity zone.
+      nameservers:   [ ns1.alpha.example. ]
+      # Secondaries of the identity zone, NOTIFYed on every change.
+      notify:        [ '192.0.2.10:53' ]
    remote:
       LocateInterval: 60
    xfr:
@@ -42,29 +48,33 @@ multi-provider:
       incoming:
          addresses:  []
          auth:       []
+   # HTTPS endpoint of the "api" transport. The agent always starts its
+   # sync API on the listen addresses; publish advertises it to peers.
    api:
       addresses:
-         publish:    [ 10.1.0.1 ]
-         listen:     [ 127.0.0.1:8999 ]
+         publish:    []
+         listen:     [ '127.0.0.1:9054' ]
       baseurl:       https://api.{TARGET}:{PORT}/api/v1
-      port:          8999
+      port:          9054
       certfile:      /etc/tdns/certs/agent.crt
       keyfile:       /etc/tdns/certs/agent.key
+   # DNS endpoint of the "dns" transport. listen must be an address the
+   # listeners: block binds; publish is what peers are told.
    dns:
       addresses:
-         publish:    [ 10.1.0.1 ]
-         listen:     [ 127.0.0.1:8998 ]
+         publish:    [ 198.51.100.1 ]
+         listen:     [ '0.0.0.0:8054' ]
       baseurl:       dns://dns.{TARGET}:{PORT}/
-      port:          8998
-      # chunk_mode:           edns0
-      # chunk_mode:           query
-      # chunk_query_endpoint: include
+      port:          8054
+      # chunk_mode:           edns0      # edns0 (default) | query
+      # chunk_query_endpoint: include    # include | none; needed with chunk_mode: query
+   # Protocol timers in seconds; these are the defaults.
    syncengine:
       intervals:
-         beatinterval:       30
-         helloretry:         15
-         discoveryretry:     15
-         reconcile:          60
+         beatinterval:        30
+         helloretry:          15
+         discoveryretry:      15
+         reconcile:           60
          hello_fast_attempts: 3
          hello_fast_interval: 2
 
@@ -74,80 +84,58 @@ service:
    debug:          false
    # Optional clamps on the SOA Refresh value used for secondary
    # zones. Both default in code (min 60s, max 8h) when unset.
-   # Primaries are not affected (they reload from file on SIGHUP).
    # minrefresh:     60       # seconds, floor for SOA Refresh
    # maxrefresh:     1800     # seconds, ceiling for SOA Refresh
 
-dnsengine:
-   addresses:      [ 127.0.0.1:5357 ]
+listeners:
+   addresses:      [ '0.0.0.0:8054' ]
+   transports:     [ do53 ]
 
 apiserver:
-   addresses:      [ 127.0.0.1:8987 ]
+   addresses:      [ '127.0.0.1:7054' ]
    apikey:         change-me-to-something-secret
+   certfile:       /etc/tdns/certs/agent.crt
+   keyfile:        /etc/tdns/certs/agent.key
 
-validator:
-   active:         true
-   verbose:        false
-   debug:          false
-   dnskey:
-      trusted:
-         file:     /etc/tdns/trust-anchors.yaml
-   sig0:
-      trusted:
-         file:     /etc/tdns/sig0-keys.yaml
+# Leader-election lease for zones whose HSYNCPARAM says
+# parentsync="agent". 60m is the default.
+# delegationsync:
+#    leader-election-ttl: 60m
 
-resolver:
-   address:        8.8.8.8:53
-
-delegationsync:
-   leader-election-ttl: 60m
-   parent:
-      schemes:     [ notify, update ]
-      notify:
-         types:    [ CDS, CSYNC ]
-         port:     5357
-         target:   notifications.{ZONENAME}
-         addresses: [ 127.0.0.1 ]
-      update:
-         types:    [ ANY ]
-         port:     5357
-         target:   updates.{ZONENAME}
-         addresses: [ 127.0.0.1 ]
-         keygen:
-            mode:       internal
-            algorithm:  ED25519
-   child:
-      schemes:     [ notify, update ]
-      update:
-         keygen:
-            mode:       internal
-            algorithm:  ED25519
-
-keybootstrap:
-   consistent-lookup:
-      iterations:  3
-      interval:    60
-      nameservers: all
-
-dnssecpolicies:
-   default:
-      algorithm:   ED25519
-      ksk:
-         lifetime:      forever
-         sigvalidity:   168h
-      zsk:
-         lifetime:      forever
-         sigvalidity:   2h
-
-db:
-   file:  /var/lib/tdns/tdns-mpagent.db
+# Delegation sync towards the parent of a customer zone whose
+# HSYNCPARAM makes the agents responsible for it (parentsync="agent").
+parentsync:
+   schemes:     [ notify, update ]
+   update:
+      keygen:
+         algorithm:  ED25519
 
 imrengine:
    active:         true
-   root-hints:     /etc/tdns/root.hints
-   addresses:      [ 127.0.0.1:5453 ]
-   transports:     [ do53 ]
-   require_dnssec_validation: true
+   require-dnssec-validation: true
+
+# The policy the agent signs its identity zone with. Testbed values:
+# a signature validity must exceed 2 x (largest served TTL +
+# kasp.propagation-delay), and tdns warns below 4 x.
+dnssec:
+   kasp:
+      propagation-delay:  5m
+   policies:
+      default:
+         algorithm:   ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:   6h
+            dnskey:    6h
+            ds:        6h
+
+db:
+   file:  /var/lib/tdns/tdns-mpagent.db
 
 log:
    file:   /var/log/tdns/tdns-mpagent.log
@@ -157,5 +145,16 @@ log:
    #    engine:     debug
    #    agent:      info
 
-common:
-   command:  /usr/local/libexec/tdns-mpagent
+# Zones can live in a separate file pulled in with a top-level
+# "include:" entry.
+templates:
+   - name:           mpzone
+     type:           secondary
+     store:          map
+     # The agent serves the signed zone it pulls from the local signer.
+     primaries:      [ { addr: '127.0.0.1:8053', key: NOKEY } ]
+     options:        [ multi-provider ]
+
+zones:
+   - name:           mptest.example.
+     template:       mpzone

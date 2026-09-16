@@ -18,19 +18,26 @@ every MP daemon it can talk to:
 
 ```yaml
 apiservers:
-   - name:    tdns-agent
-     baseurl: https://127.0.0.1:7054/api/v1
+   - name:        tdns-mpagent          # the "agent" command word
+     baseurl:     https://127.0.0.1:7054/api/v1
+     apikey:      ...
+     authmethod:  X-API-Key
+     config-file: /etc/tdns/tdns-mpagent.yaml    # for "agent config check", "agent keys"
+     command:     /usr/local/libexec/tdns-mpagent # for "agent daemon start"
+   - name:        tdns-mpcombiner       # "combiner"
+     baseurl:     https://127.0.0.1:7055/api/v1
      ...
-   - name:    tdns-combiner
-     baseurl: https://127.0.0.1:7055/api/v1
+   - name:        tdns-mpsigner         # "signer"
+     baseurl:     https://127.0.0.1:7053/api/v1
      ...
-   - name:    tdns-signer
-     baseurl: https://127.0.0.1:7053/api/v1
-     ...
-   - name:    tdns-auditor    # if present
-     baseurl: https://127.0.0.1:7056/api/v1
+   - name:        tdns-mpauditor        # "auditor", if present
+     baseurl:     https://127.0.0.1:7056/api/v1
      ...
 ```
+
+The `name` of each entry is the lookup key of a built-in
+command word; an entry under any other name without a
+`role:` is not reachable from those words.
 
 `tdns-mpcli configure` generates this automatically; see
 [Quickstart](quickstart.md).
@@ -51,7 +58,7 @@ same command set as the built-in word for that role:
 
 ```yaml
 apiservers:
-   - name:    tdns-agent            # the built-in "agent" word
+   - name:    tdns-mpagent          # the built-in "agent" word
      baseurl: https://127.0.0.1:7054/api/v1
      ...
    - name:        p2-agent          # "tdns-mpcli p2-agent ..."
@@ -59,7 +66,7 @@ apiservers:
      baseurl:     https://127.0.0.1:7254/api/v1
      apikey:      ...
      authmethod:  X-API-Key
-     config_file: /etc/tdns/p2/tdns-mpagent.yaml   # for "config check", "keys"
+     config-file: /etc/tdns/p2/tdns-mpagent.yaml   # for "config check", "keys"
      command:     /usr/local/libexec/tdns-mpagent  # for "daemon start"
    - name:        p2-signer
      role:        signer
@@ -74,7 +81,7 @@ tdns-mpcli p2-signer keystore dnssec list -z example.com.
 
 Rules: `role:` is one of `agent`, `combiner`, `signer`,
 `auditor`; the name must not be one of those four, nor
-`version`, `configure`, `help` or `completion`, nor an
+`version`, `configure`, `show-cmds`, `help` or `completion`, nor an
 earlier entry's name — a collision is reported on stderr
 and that entry is ignored, nothing else changes. Entries
 without `role:` behave exactly as before, so an existing
@@ -98,13 +105,23 @@ small set of role-agnostic commands.
 ```
 tdns-mpcli
 ├── configure               -- interactive bootstrap (see Quickstart)
-├── ping                    -- ping any one role (--role agent|signer|...)
+├── show-cmds               -- list every command below, one per line
 ├── version
 ├── agent     {...}         -- agent-targeted commands
 ├── signer    {...}         -- signer-targeted commands
 ├── combiner  {...}         -- combiner-targeted commands
 └── auditor   {...}         -- auditor-targeted commands (if running)
 ```
+
+`show-cmds` lists the whole subtree below the command it
+hangs off, one full invocation path per line, so the
+output is greppable and each line can be run as-is. It
+exists on every command with subcommands — `tdns-mpcli
+agent show-cmds`, `tdns-mpcli signer keystore show-cmds`
+— and is shown in `-h` at the top and under each role
+word. `--desc` adds each command's short description,
+`--depth N` stops N levels down, and `--all` includes
+hidden and deprecated commands. It needs no config file.
 
 The four role sub-trees share several common shapes:
 

@@ -4,7 +4,8 @@ This document is the long-form manual configuration guide
 for the per-provider services (agent, combiner, signer).
 **For most setups you do not need it** — run
 `tdns-mpcli configure` instead, which interviews you for
-a handful of values and generates the same configs
+a handful of values and generates configs of the same
+shape, plus keys, certificates and an example zone,
 automatically. See [Quickstart](quickstart.md).
 
 Read this guide when the `configure` command is not
@@ -16,18 +17,25 @@ generated config and want to understand each field.
 Everything below assumes a single-host deployment where
 all three services run on the same machine, distinguished
 by port. A multi-host deployment uses the same
-configuration shape with different addresses.
+configuration shape with different addresses. The
+annotated sample configs in the source tree
+(`cmd/*/tdns-mp*.sample.yaml`) document further optional
+keys.
 
 ## 1. Overview
 
 | Service    | Binary            | Role     | DNS port | Mgmt API port |
 |------------|-------------------|----------|----------|---------------|
-| Agent      | tdns-mpagent      | agent    | 8054     | 8074          |
-| Combiner   | tdns-mpcombiner   | combiner | 8055     | 8075          |
-| Signer     | tdns-mpsigner       | signer   | 8053, 53 | 8073          |
-| IMR        | tdns-mpimr        | resolver | --       | --            |
+| Agent      | tdns-mpagent      | agent    | 8054     | 7054          |
+| Combiner   | tdns-mpcombiner   | combiner | 8055     | 7055          |
+| Signer     | tdns-mpsigner     | signer   | 8053, 53 | 7053          |
+| Auditor    | tdns-mpauditor    | auditor  | 8056     | 7056          |
 | CLI        | tdns-mpcli        | tool     | --       | --            |
-| dog        | dog             | tool     | --       | --            |
+
+The agent also starts its agent-to-agent sync API on port
+9054 (the auditor on 9056). The auditor is optional; see
+[The Auditor](auditor.md). `dog`, the query tool used
+below, comes with tdns.
 
 The signer should also listen on port 53 so it can interact
 with other authoritative nameservers for zone transfers etc.
@@ -40,7 +48,7 @@ with other authoritative nameservers for zone transfers etc.
                                             v
                                           Signer (:8053, :53)
                                             |
-                                            | KEYSTATE
+                                            | NOTIFY + XFR, KEYSTATE
                                             v
                                           Agent (:8054)
                                             |
@@ -111,6 +119,7 @@ specified in the HSYNCPARAM are:
 - **servers** -- providers that serve the zone via
   authoritative nameservers
 - **signers** -- providers that sign the zone
+- **auditors** -- entities that observe the zone
 - **nsmgmt** -- who is responsible for managing the NS
   RRset for the zone
 - **parentsync** -- who is responsible for synchronizing
@@ -135,6 +144,9 @@ must:
 The address of this server is referred to as `ZONESERVER`
 below -- it must be a different host from where TDNS runs
 (otherwise the zone can only be served to one provider).
+For a single-provider test without such a server, the
+combiner can load the zone from a zone file instead, as
+the example zone `configure` generates does.
 
 Example zone file for `customer.zone.`:
 
@@ -196,17 +208,13 @@ sed -i 's/ZONESERVER/203.0.113.10/g' /etc/tdns/*.yaml
 
 ## 3. Building and Installation
 
-The code is split across three repositories that must be
-cloned next to each other (the build uses `go.mod`
-`replace` directives that reference sibling directories).
+tdns-mp needs Go 1.25 or later. tdns and tdns-transport
+are Go module dependencies, fetched at the versions
+tdns-mp pins.
 
 ```sh
-# Clone all three repos into the same parent directory
-git clone https://github.com/johanix/tdns.git
-git clone https://github.com/johanix/tdns-transport.git
 git clone https://github.com/johanix/tdns-mp.git
 
-# Build (requires Go 1.22+)
 cd tdns-mp/cmd
 make
 
@@ -214,12 +222,18 @@ make
 sudo make install
 # Installs:
 #   /usr/local/bin/tdns-mpcli
-#   /usr/local/bin/dog
 #   /usr/local/libexec/tdns-mpagent
 #   /usr/local/libexec/tdns-mpcombiner
 #   /usr/local/libexec/tdns-mpsigner
-#   /usr/local/libexec/tdns-mpimr
+#   /usr/local/libexec/tdns-mpauditor
 ```
+
+tdns-mpsigner's algorithm registrations are generated
+from `cmd/mpsigner/algs.list` by tdns-genalgs (built from
+tdns's `cmdv2/genalgs`, found on the PATH or in a sibling
+tdns checkout) against a dnssec-algorithms checkout. The
+first build prints the command to run once when the
+generated files are missing.
 
 Create the directory structure:
 
@@ -233,15 +247,16 @@ sudo mkdir -p /var/log/tdns
 
 ### 4.1 Generating Certificates and Keys
 
-TLS certificates (for management API endpoints):
+TLS certificates (for the management API and the agent's
+sync API), one per service:
 
 ```sh
-cd /etc/tdns/certs
-tdns/utils/gen-cert.sh
-# When prompted:
-#   Name: tdns
-#   DNS names: localhost
-#   IP addresses: 127.0.0.1,PUBADDRESS
+for role in agent combiner signer; do
+   sudo openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -subj "/CN=$role.alpha.example" \
+      -addext "subjectAltName=DNS:$role.alpha.example,DNS:localhost,IP:127.0.0.1,IP:PUBADDRESS" \
+      -keyout /etc/tdns/certs/$role.key -out /etc/tdns/certs/$role.crt
+done
 ```
 
 Multi-provider synchronization requires both private
@@ -264,17 +279,11 @@ algorithm definitions.
 JOSE keypairs (for securing CHUNK transport between services):
 
 ```sh
-tdns-mpcli keys generate --jose \
-   --jose-outfile /etc/tdns/keys/agent.jose.private \
-   --jose-pubfile /etc/tdns/keys/agent.jose.pub
-
-tdns-mpcli keys generate --jose \
-   --jose-outfile /etc/tdns/keys/combiner.jose.private \
-   --jose-pubfile /etc/tdns/keys/combiner.jose.pub
-
-tdns-mpcli keys generate --jose \
-   --jose-outfile /etc/tdns/keys/signer.jose.private \
-   --jose-pubfile /etc/tdns/keys/signer.jose.pub
+for role in agent combiner signer; do
+   sudo tdns-mpcli signer keys generate --jose \
+      --jose-outfile /etc/tdns/keys/$role.jose.priv.json \
+      --jose-pubfile /etc/tdns/keys/$role.jose.pub.json
+done
 ```
 
 ### 4.2 Combiner Configuration
@@ -282,31 +291,30 @@ tdns-mpcli keys generate --jose \
 `/etc/tdns/tdns-mpcombiner.yaml`:
 
 ```yaml
-include:
-   - /etc/tdns/mpcombiner-zones.yaml
-
 multi-provider:
    role:         combiner
    identity:     combiner.alpha.example.
-   long_term_jose_priv_key: /etc/tdns/keys/combiner.jose.private
+   long_term_jose_priv_key: /etc/tdns/keys/combiner.jose.priv.json
    agents:
       - identity: agent.alpha.example.
-        address:  PUBADDRESS:8054
-        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub
-
-apiserver:
-   usetls:      true
-   addresses:   [ 127.0.0.1:8075 ]
-   apikey:      change-this-api-key
-   certfile:    /etc/tdns/certs/tdns.crt
-   keyfile:     /etc/tdns/certs/tdns.key
+        address:  '127.0.0.1:8054'
+        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
 
 service:
-   name:       TDNS-COMBINER
+   name:       TDNS-MPCOMBINER
 
-dnsengine:
-   addresses:  [ PUBADDRESS:8055, '127.0.0.1:8055', '[::1]:8055' ]
+listeners:
+   addresses:  [ 'PUBADDRESS:8055', '127.0.0.1:8055' ]
    transports: [ do53 ]
+
+authengine:
+   outbound-soa-serial: persist
+
+apiserver:
+   addresses:   [ '127.0.0.1:7055' ]
+   apikey:      change-this-api-key
+   certfile:    /etc/tdns/certs/combiner.crt
+   keyfile:     /etc/tdns/certs/combiner.key
 
 db:
    file: /var/lib/tdns/tdns-mpcombiner.db
@@ -315,82 +323,74 @@ log:
    file:  /var/log/tdns/tdns-mpcombiner.log
    level: info
 
-common:
-   command: /usr/local/libexec/tdns-mpcombiner
-```
-
-`/etc/tdns/mpcombiner-zones.yaml`:
-
-```yaml
 templates:
-   - name:      mp-combiner
-     type:      secondary
-     store:     map
-     options:   [ allow-edits ]
-     primary:   ZONESERVER:53
-     notify:    [ PUBADDRESS:8053 ]
+   - name:        mpzone
+     store:       map
+     options:     [ multi-provider ]
+     notify:      [ { addr: '127.0.0.1:8053', key: NOKEY } ]
+     downstreams: [ { prefix: '127.0.0.1/32', key: NOKEY } ]
 
 zones:
-   - name:      customer.zone.
-     template:  mp-combiner
+   - name:        customer.zone.
+     template:    mpzone
+     type:        secondary
+     primaries:   [ { addr: 'ZONESERVER:53', key: NOKEY } ]
 ```
 
-### 4.3 Signer Configuration
+`notify` and `primaries` entries name a TSIG key in `key:`
+where transfers are authenticated; `downstreams` lists who
+may transfer the zone from this server.
 
-The signer is a separate instance of `tdns-mpsigner`.
+### 4.3 Signer Configuration
 
 `/etc/tdns/tdns-mpsigner.yaml`:
 
 ```yaml
-include:
-   - /etc/tdns/mpsigner-zones.yaml
-
 multi-provider:
    role:         signer
    active:       true
    identity:     signer.alpha.example.
-   long_term_jose_priv_key: /etc/tdns/keys/signer.jose.private
+   long_term_jose_priv_key: /etc/tdns/keys/signer.jose.priv.json
    agents:
-      - address:  PUBADDRESS:8054
-        identity: agent.alpha.example.
-        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub
+      - identity: agent.alpha.example.
+        address:  '127.0.0.1:8054'
+        long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
 
 service:
-   name:       TDNS-SIGNER
+   name:       TDNS-MPSIGNER
 
-dnsengine:
-   addresses:  [ PUBADDRESS:53, PUBADDRESS:8053, '127.0.0.1:8053', '[::1]:8053' ]
+listeners:
+   addresses:  [ 'PUBADDRESS:53', 'PUBADDRESS:8053', '127.0.0.1:8053' ]
    transports: [ do53 ]
-   certfile:   /etc/tdns/certs/tdns.crt
-   keyfile:    /etc/tdns/certs/tdns.key
 
-resignerengine:
-   interval:   300
-   keygen:
-      mode:      internal
-      algorithm: ED25519
+authengine:
+   outbound-soa-serial: persist
 
 apiserver:
-   addresses:  [ 127.0.0.1:8073 ]
+   addresses:  [ '127.0.0.1:7053' ]
    apikey:     change-this-api-key
-   certfile:   /etc/tdns/certs/tdns.crt
-   keyfile:    /etc/tdns/certs/tdns.key
+   certfile:   /etc/tdns/certs/signer.crt
+   keyfile:    /etc/tdns/certs/signer.key
 
-dnssecpolicies:
-   default:
-      algorithm: ED25519
-      ksk:
-         lifetime:     forever
-         sigvalidity:  168h
-      zsk:
-         lifetime:     forever
-         sigvalidity:  2h
-
-kasp:
-   propagation_delay: 1h
-   check_interval:    1m
-   standby_zsk_count: 1
-   standby_ksk_count: 0
+dnssec:
+   kasp:
+      propagation-delay: 5m
+      check-interval:    1m
+      standby-zsk-count: 1
+      standby-ksk-count: 0
+   policies:
+      default:
+         algorithm: ED25519
+         ksk:
+            lifetime: forever
+         zsk:
+            lifetime: forever
+         csk:
+            lifetime: none
+         sigvalidity:
+            default:  6h
+            dnskey:   6h
+            ds:       6h
 
 db:
    file: /var/lib/tdns/tdns-mpsigner.db
@@ -399,105 +399,135 @@ log:
    file:  /var/log/tdns/tdns-mpsigner.log
    level: info
 
-common:
-   servername: tdns-signer
-   command:    /usr/local/libexec/tdns-mpsigner
-```
-
-`/etc/tdns/mpsigner-zones.yaml`:
-
-```yaml
 templates:
-   - name:      mp-signing
-     type:      secondary
-     primary:   PUBADDRESS:8055
-     notify:    [ PUBADDRESS:8054 ]
-     store:     map
-     options:   [ multi-provider ]
+   - name:         mpzone
+     type:         secondary
+     store:        map
+     primaries:    [ { addr: '127.0.0.1:8055', key: NOKEY } ]
+     options:      [ multi-provider ]
      dnssecpolicy: default
+     notify:       [ { addr: '127.0.0.1:8054', key: NOKEY } ]
+     downstreams:  [ { prefix: '127.0.0.1/32', key: NOKEY } ]
 
 zones:
    - name:      customer.zone.
-     template:  mp-signing
+     template:  mpzone
 ```
+
+The `sigvalidity` values are for a testbed. `dnskey` is
+the validity of the signatures over the DNSKEY RRset, `ds`
+over DS RRsets, `default` over everything else. tdns
+refuses a validity at or below 2 × (largest served TTL +
+`kasp.propagation-delay`) and warns below 4 ×; in
+production use days rather than hours, with a propagation
+delay that matches your secondaries.
 
 ### 4.4 Agent Configuration
 
 `/etc/tdns/tdns-mpagent.yaml`:
 
 ```yaml
-include:
-   - /etc/tdns/mpagent-zones.yaml
-
 multi-provider:
    role:         agent
    identity:     agent.alpha.example.
    supported_mechanisms: [ dns ]
-   long_term_jose_priv_key: /etc/tdns/keys/agent.jose.private
+   long_term_jose_priv_key: /etc/tdns/keys/agent.jose.priv.json
    combiner:
-      address:   PUBADDRESS:8055
-      long_term_jose_pub_key: /etc/tdns/keys/combiner.jose.pub
+      identity:  combiner.alpha.example.
+      address:   '127.0.0.1:8055'
+      long_term_jose_pub_key: /etc/tdns/keys/combiner.jose.pub.json
    signer:
-      address:   PUBADDRESS:8053
-      long_term_jose_pub_key: /etc/tdns/keys/signer.jose.pub
+      identity:  signer.alpha.example.
+      address:   '127.0.0.1:8053'
+      long_term_jose_pub_key: /etc/tdns/keys/signer.jose.pub.json
    local:
-      notify:    [ PUBSECONDARY ]
       nameservers: [ ns1.alpha.example. ]
+      notify:      [ 'PUBSECONDARY:53' ]
    remote:
       LocateInterval: 60
-      BeatInterval:   30
+   api:
+      addresses:
+         publish:  []
+         listen:   [ '127.0.0.1:9054' ]
+      baseurl:     https://api.{TARGET}:{PORT}/api/v1
+      port:        9054
+      certfile:    /etc/tdns/certs/agent.crt
+      keyfile:     /etc/tdns/certs/agent.key
    dns:
       addresses:
          publish:  [ PUBADDRESS ]
-         listen:   [ 127.0.0.1:8054 ]
+         listen:   [ 'PUBADDRESS:8054' ]
       baseurl:     dns://dns.{TARGET}:{PORT}/
       port:        8054
+   syncengine:
+      intervals:
+         beatinterval: 30
 
 service:
-   name:       TDNS-AGENT
+   name:       TDNS-MPAGENT
 
-dnsengine:
-   addresses:  [ PUBADDRESS:8054, 127.0.0.1:8054, '[::1]:8054' ]
+listeners:
+   addresses:  [ 'PUBADDRESS:8054', '127.0.0.1:8054' ]
    transports: [ do53 ]
 
 apiserver:
-   addresses:  [ 127.0.0.1:8074 ]
+   addresses:  [ '127.0.0.1:7054' ]
    apikey:     change-this-api-key
-   certfile:   /etc/tdns/certs/tdns.crt
-   keyfile:    /etc/tdns/certs/tdns.key
+   certfile:   /etc/tdns/certs/agent.crt
+   keyfile:    /etc/tdns/certs/agent.key
+
+parentsync:
+   schemes:    [ notify, update ]
+   update:
+      keygen:
+         algorithm: ED25519
+
+imrengine:
+   active:     true
+   require-dnssec-validation: true
+
+dnssec:
+   kasp:
+      propagation-delay: 5m
+   policies:
+      default:
+         algorithm: ED25519
+         ksk:
+            lifetime: forever
+         zsk:
+            lifetime: forever
+         csk:
+            lifetime: none
+         sigvalidity:
+            default:  6h
+            dnskey:   6h
+            ds:       6h
 
 db:
    file: /var/lib/tdns/tdns-mpagent.db
-
-imrengine:
-   active:      true
-   addresses:   [ '127.0.0.1:5453', '[::1]:5453' ]
-   transports:  [ do53 ]
-   require_dnssec_validation: false
 
 log:
    file:  /var/log/tdns/tdns-mpagent.log
    level: info
 
-common:
-   servername: tdns-agent
-   command:    /usr/local/libexec/tdns-mpagent
-```
-
-`/etc/tdns/mpagent-zones.yaml`:
-
-```yaml
 templates:
-   - name:      mp-secondary
+   - name:      mpzone
      type:      secondary
-     primary:   PUBADDRESS:8055
      store:     map
+     primaries: [ { addr: '127.0.0.1:8053', key: NOKEY } ]
      options:   [ multi-provider ]
 
 zones:
    - name:      customer.zone.
-     template:  mp-secondary
+     template:  mpzone
 ```
+
+The `dns` block is what peers are told about this agent;
+its listen address must be one the `listeners:` block
+binds. The `api` block's listener always starts; with
+`publish` empty and no `api` in `supported_mechanisms` it
+is not advertised. The `dnssec:` policy signs the agent's
+identity zone.
 
 ### 4.5 CLI Configuration
 
@@ -505,27 +535,42 @@ zones:
 
 ```yaml
 apiservers:
-   - name:      tdns-agent
-     baseurl:   https://127.0.0.1:8074/api/v1
-     apikey:    change-this-api-key
-     authmethod: X-API-Key
-     command:   /usr/local/libexec/tdns-mpagent
+   - name:        tdns-mpagent
+     baseurl:     https://127.0.0.1:7054/api/v1
+     apikey:      change-this-api-key
+     authmethod:  X-API-Key
+     config-file: /etc/tdns/tdns-mpagent.yaml
+     command:     /usr/local/libexec/tdns-mpagent
 
-   - name:      tdns-combiner
-     baseurl:   https://127.0.0.1:8075/api/v1
-     apikey:    change-this-api-key
-     authmethod: X-API-Key
-     command:   /usr/local/libexec/tdns-mpcombiner
+   - name:        tdns-mpcombiner
+     baseurl:     https://127.0.0.1:7055/api/v1
+     apikey:      change-this-api-key
+     authmethod:  X-API-Key
+     config-file: /etc/tdns/tdns-mpcombiner.yaml
+     command:     /usr/local/libexec/tdns-mpcombiner
 
-   - name:      tdns-signer
-     baseurl:   https://127.0.0.1:8073/api/v1
-     apikey:    change-this-api-key
-     authmethod: X-API-Key
-     command:   /usr/local/libexec/tdns-mpsigner
+   - name:        tdns-mpsigner
+     baseurl:     https://127.0.0.1:7053/api/v1
+     apikey:      change-this-api-key
+     authmethod:  X-API-Key
+     config-file: /etc/tdns/tdns-mpsigner.yaml
+     command:     /usr/local/libexec/tdns-mpsigner
 
 log:
    file:  /var/log/tdns/tdns-mpcli.log
    level: info
+```
+
+The entry names are the lookup keys of the built-in
+command words (`tdns-mpcli agent ...` uses
+`tdns-mpagent`). See [tdns-mpcli](app-mpcli.md).
+
+Check each daemon config before starting it:
+
+```sh
+tdns-mpcli agent config check --offline
+tdns-mpcli combiner config check --offline
+tdns-mpcli signer config check --offline
 ```
 
 ## 5. Running the Servers
@@ -537,13 +582,13 @@ initiates discovery of remote agents.
 
 ```sh
 # Terminal 1: Combiner
-tdns-mpcombiner --config /etc/tdns/tdns-mpcombiner.yaml
+/usr/local/libexec/tdns-mpcombiner --config /etc/tdns/tdns-mpcombiner.yaml
 
-# Terminal 2: Signer
-tdns-mpsigner --config /etc/tdns/tdns-mpsigner.yaml
+# Terminal 2: Signer (binds port 53, so as root)
+/usr/local/libexec/tdns-mpsigner --config /etc/tdns/tdns-mpsigner.yaml
 
 # Terminal 3: Agent
-tdns-mpagent --config /etc/tdns/tdns-mpagent.yaml
+/usr/local/libexec/tdns-mpagent --config /etc/tdns/tdns-mpagent.yaml
 ```
 
 ## 6. Testing
@@ -579,12 +624,15 @@ dog @127.0.0.1:8055 customer.zone. HSYNCPARAM
 ```sh
 # Zone list
 tdns-mpcli agent zone list
-agent.alpha.example.  primary    MapZone  false  false  [allow-updates automatic-zone online-signing]
-customer.zone.        secondary  MapZone  false  false  [delegation-sync-child multi-provider]
+agent.alpha.example.  primary    ready  false  false  [allow-updates automatic-zone online-signing]
+customer.zone.        secondary  ready  false  false  [multi-provider on-conflict-db-wins]
+
+# HSYNCPARAM as each role reads it
+tdns-mpcli agent zone mplist
 
 # Peer discovery status
 tdns-mpcli agent peer list
 
 # Gossip state (if multiple providers configured)
-tdns-mpcli agent gossip state --zone customer.mptest.
+tdns-mpcli agent gossip state --zone customer.zone.
 ```
