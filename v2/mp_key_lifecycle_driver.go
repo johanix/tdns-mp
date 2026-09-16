@@ -611,13 +611,11 @@ func (l *ZoneKeyLifecycle) Mint(role string) (uint16, error) {
 	if role == "KSK" {
 		alg = l.Policy.KSKAlgorithm
 	}
-	pkc, _, err := l.KDB.GenerateKeypair(l.Zone, "mp-key-lifecycle", KeyStateCreated, dns.TypeDNSKEY, alg, role, nil)
+	// one write: the INSERT carries the state and its columns (design §3.2)
+	cols, _ := KeyStateColumns(KeyStateCreated, role == "KSK", false)
+	pkc, _, err := l.KDB.GenerateKeypairWithColumns(l.Zone, "mp-key-lifecycle", KeyStateCreated, alg, role, cols, nil)
 	if err != nil {
 		return 0, fmt.Errorf("mint a %s for %s: %w", role, l.Zone, err)
-	}
-	cols, _ := KeyStateColumns(KeyStateCreated, role == "KSK", false)
-	if err := tdns.UpdateKeyRow(l.KDB, l.Zone, pkc.KeyId, KeyStateCreated, cols); err != nil {
-		return 0, fmt.Errorf("columns of the new %s %d of %s: %w", role, pkc.KeyId, l.Zone, err)
 	}
 	l.logf("key lifecycle: minted", "zone", l.Zone, "role", role, "keyid", pkc.KeyId)
 	return pkc.KeyId, nil
