@@ -221,6 +221,18 @@ var HsyncTables = map[string]string{
 	// has, and whether anyone rejected. A restart resumes from it: what is
 	// outstanding is sent again, a rejected distribution waits for the
 	// operator. Comma-separated provider lists.
+	// MPForeignKeyState is what the other providers said about their keys
+	// in an owned zone (tdns-mp #58): the provider, the key's state there,
+	// and whether its DS belongs at the parent (NULL: the provider does not
+	// say). The owner writes ds on the foreign key rows from it (P3).
+	"MPForeignKeyState": `CREATE TABLE IF NOT EXISTS 'MPForeignKeyState' (
+		zonename  TEXT NOT NULL,
+		keyid     INTEGER NOT NULL,
+		provider  TEXT NOT NULL,
+		state     TEXT DEFAULT '',
+		ds        INTEGER,
+		UNIQUE (zonename, keyid)
+	)`,
 	"MPKeyDistribution": `CREATE TABLE IF NOT EXISTS 'MPKeyDistribution' (
 		zonename  TEXT NOT NULL,
 		keyid     INTEGER NOT NULL,

@@ -87,11 +87,16 @@ type ZoneKeyLifecycle struct {
 	mu       sync.Mutex
 	dist     map[uint16]*distribution
 	dsGone   map[uint16]bool
-	rolls    map[string]bool // a rollover requested, by role
-	reported map[uint16]bool // retired KSKs reported as waiting on the parent
-	initErr  error           // why the driver cannot run (its persistence missing)
-	rolling  string          // the role whose promotion is a rollover, while it is applied
-	known    map[string]bool // the other signers last seen, for the joiners
+	rolls    map[string]bool        // a rollover requested, by role
+	reported map[uint16]bool        // retired KSKs reported as waiting on the parent
+	initErr  error                  // why the driver cannot run (its persistence missing)
+	rolling  string                 // the role whose promotion is a rollover, while it is applied
+	known    map[string]bool        // the other signers last seen, for the joiners
+	foreign  map[uint16]foreignSaid // what the other providers said about their keys (#58)
+	// another provider's KSK with no ds decided: since when, and whether
+	// the operator has been told (R9)
+	undecidedSince map[uint16]time.Time
+	undecidedTold  map[uint16]bool
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -115,6 +120,9 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 			// a table created before last_sent existed gains the column (the
 			// error for a column already there is the expected one)
 			kdb.DB.Exec(`ALTER TABLE MPKeyDistribution ADD COLUMN last_sent TEXT DEFAULT ''`)
+		}
+		if _, err := kdb.DB.Exec(HsyncTables["MPForeignKeyState"]); err != nil && l.initErr == nil {
+			l.initErr = fmt.Errorf("the MPForeignKeyState table of %s: %w", l.Zone, err)
 		}
 	}
 	return l
@@ -389,7 +397,9 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 // it standby, active or retired-not-withdrawn), the row's state and other
 // columns untouched, and tells the surroundings like every other write:
 // the inventory goes out and the DS engine wakes, with no state change
-// (T5.4). What #58 learns from the wire arrives here.
+// (T5.4). The write of one row by hand; what #58 learns from the wire
+// goes through SetForeignStates and applyForeignLocked, which write the
+// same way.
 func (l *ZoneKeyLifecycle) SetForeignDS(keyid uint16, ds bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -662,7 +672,9 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 			return err
 		}
 	}
-	return nil
+	// a provider that stopped signing: its keys' DS no longer belongs at
+	// the parent (E10); one that started: what it said counts now
+	return l.applyForeignLocked()
 }
 
 // Mint generates a key of the role in created, with its columns.
@@ -715,6 +727,12 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	var errs []error
 	fail := func(keyid uint16, what string, err error) {
 		l.logf("key lifecycle: a tick step failed; the key waits for the next tick", "zone", l.Zone, "keyid", keyid, "step", what, "err", err)
+		errs = append(errs, err)
+	}
+	// another provider's key whose row appeared since its provider's word
+	// came gets its ds now (#58)
+	if err := l.applyForeignLocked(); err != nil {
+		l.logf("key lifecycle: writing ds on the foreign rows failed; next tick", "zone", l.Zone, "err", err)
 		errs = append(errs, err)
 	}
 	for _, keyid := range keytagsOf(all) {
@@ -833,6 +851,12 @@ func (l *ZoneKeyLifecycle) Reload() error {
 		l.known[p] = true
 	}
 	if err := l.adopt(all); err != nil {
+		return err
+	}
+	if err := l.loadForeign(); err != nil {
+		return err
+	}
+	if err := l.applyForeignLocked(); err != nil {
 		return err
 	}
 	if err := l.loadDists(); err != nil {

@@ -5,7 +5,11 @@
 
 package tdnsmp
 
-import "time"
+import (
+	"time"
+
+	core "github.com/johanix/tdns/v2/core"
+)
 
 // MsgQs aggregates channels for agent-to-agent communication.
 // Each role (agent, combiner, signer) uses only the channels
@@ -44,6 +48,9 @@ type KeystateSignalMsg struct {
 	Signal   string
 	Message  string
 	At       time.Time // when the distribution the signal answers was sent; zero when the sender does not say
+	// ForeignKeys: Signal "foreign", what the other providers said about
+	// their keys in the zone (the complete latest set)
+	ForeignKeys []core.ForeignKeyState
 }
 
 type EditsResponseMsg struct {

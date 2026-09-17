@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/johanix/tdns-mp/v2/hsync"
+	"sort"
 	"strings"
 	"time"
 
@@ -228,6 +229,7 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) 
 	// - removed: already removed
 	// Include: published, standby, active, retired, mpdist
 	var newLocalKeys []dns.RR
+	var newStates []core.KeyState
 	for _, entry := range inv.Inventory {
 		switch entry.State {
 		case DnskeyStateForeign, tdns.DnskeyStateCreated, DnskeyStateMpremove, tdns.DnskeyStateRemoved:
@@ -245,13 +247,22 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) 
 			continue
 		}
 		newLocalKeys = append(newLocalKeys, rr)
+		// what this provider says about the key to the others (#58): its
+		// state, and its ds as the signer's row has it (unset when the
+		// row's is: nobody here has decided, so nobody there should)
+		newStates = append(newStates, core.KeyState{KeyTag: entry.KeyTag, State: entry.State, DS: entry.DS})
 	}
+	sort.Slice(newStates, func(i, j int) bool { return newStates[i].KeyTag < newStates[j].KeyTag })
 
 	mpzd.EnsureMP()
 	oldLocalKeys := mpzd.MP.LocalDNSKEYs
+	ds.CurrentKeyStates = newStates
+	ds.StatesChanged = !keyStatesEqual(mpzd.MP.LocalKeyStates, newStates)
+	mpzd.MP.LocalKeyStates = newStates
 
 	// Handle initial case (no previous local keys)
 	if len(oldLocalKeys) == 0 && len(newLocalKeys) == 0 {
+		ds.StatesChanged = false
 		return false, ds, nil
 	}
 	if len(oldLocalKeys) == 0 {
@@ -277,9 +288,25 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) 
 	mpzd.EnsureMP()
 	mpzd.MP.LocalDNSKEYs = newLocalKeys
 
-	mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",
-		mpzd.ZoneName, differ, len(adds), len(removes))
-	return differ, ds, nil
+	mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d, key states changed=%v",
+		mpzd.ZoneName, differ, len(adds), len(removes), ds.StatesChanged)
+	// a state or a ds that changed with the key set as it was goes to the
+	// other providers too: their DS set follows it (#58, D4)
+	return differ || ds.StatesChanged, ds, nil
+}
+
+// keyStatesEqual: the same keys with the same state and ds (both sorted
+// by key tag).
+func keyStatesEqual(a, b []core.KeyState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].KeyTag != b[i].KeyTag || a[i].State != b[i].State || (a[i].DS == nil) != (b[i].DS == nil) || (a[i].DS != nil && *a[i].DS != *b[i].DS) {
+			return false
+		}
+	}
+	return true
 }
 
 // filterLocalDNSKEYs returns only the DNSKEY RRs whose key tag is NOT in remoteKeyTags.

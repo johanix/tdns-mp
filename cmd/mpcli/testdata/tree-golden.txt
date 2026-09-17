@@ -5239,6 +5239,7 @@ long: |
     tdns-cli ... zone update addrr --zone alpha.dnslab. --via api \
         --rr "foo.alpha.dnslab. 3600 IN A 1.2.3.4"
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -5248,7 +5249,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -5286,6 +5286,7 @@ long: |
     tdns-cli ... zone update delname --zone alpha.dnslab. --via api \
         --name foo.alpha.dnslab.
 flags: |
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
       --name string     Owner name
   -S, --server string   Server to send the update to (addr:port)
@@ -5295,7 +5296,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -5310,6 +5310,7 @@ long: |
     tdns-cli ... zone update delrr --zone alpha.dnslab. --via api \
         --rr "foo.alpha.dnslab. IN A 1.2.3.4"
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -5319,7 +5320,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -5333,6 +5333,7 @@ long: |
     tdns-cli ... zone update delrrset --zone alpha.dnslab. --via api \
         --name foo.alpha.dnslab. --type A
 flags: |
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
       --name string     Owner name
   -S, --server string   Server to send the update to (addr:port)
@@ -5343,7 +5344,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -5368,6 +5368,7 @@ long: |
   applied as ONE update — there is no half-applied outcome.
 flags: |
       --file string     Instruction file to apply (required)
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
   -S, --server string   Server to send the update to (addr:port)
       --signer string   Name of signer (key used to sign the update; defaults to --zone)
@@ -5376,7 +5377,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -5399,6 +5399,7 @@ long: |
   To remove an RRset entirely, use delrrset -- replacerrset with no records is an
   error, not a silent delete.
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -5408,7 +5409,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -7152,6 +7152,36 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli signer auth scanner
+use: scanner
+short: Control tdns-auth's built-in CDS/CSYNC scanner
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli signer auth scanner poll
+use: poll [on|off|status|follow-config]
+short: Switch the poll scan of all children on or off, or show whether it is on
+long: |
+  Without an argument, or with "status", shows whether tdns-auth polls the
+  children of its parent zones.
+  
+  "on" and "off" switch polling while tdns-auth runs, overriding
+  scanner.poll.enabled until "follow-config" or a restart; the switch is not
+  persisted. "on" takes effect at the next round, within scanner.interval. "off"
+  also stops a round in progress from starting any more children.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli signer auth zone
 use: zone
 short: Prefix command, not usable by itself
@@ -8222,6 +8252,7 @@ long: |
     tdns-cli ... zone update addrr --zone alpha.dnslab. --via api \
         --rr "foo.alpha.dnslab. 3600 IN A 1.2.3.4"
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -8231,7 +8262,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -8269,6 +8299,7 @@ long: |
     tdns-cli ... zone update delname --zone alpha.dnslab. --via api \
         --name foo.alpha.dnslab.
 flags: |
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
       --name string     Owner name
   -S, --server string   Server to send the update to (addr:port)
@@ -8278,7 +8309,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -8293,6 +8323,7 @@ long: |
     tdns-cli ... zone update delrr --zone alpha.dnslab. --via api \
         --rr "foo.alpha.dnslab. IN A 1.2.3.4"
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -8302,7 +8333,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -8316,6 +8346,7 @@ long: |
     tdns-cli ... zone update delrrset --zone alpha.dnslab. --via api \
         --name foo.alpha.dnslab. --type A
 flags: |
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
       --name string     Owner name
   -S, --server string   Server to send the update to (addr:port)
@@ -8326,7 +8357,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -8351,6 +8381,7 @@ long: |
   applied as ONE update — there is no half-applied outcome.
 flags: |
       --file string     Instruction file to apply (required)
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
   -S, --server string   Server to send the update to (addr:port)
       --signer string   Name of signer (key used to sign the update; defaults to --zone)
@@ -8359,7 +8390,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -8382,6 +8412,7 @@ long: |
   To remove an RRset entirely, use delrrset -- replacerrset with no records is an
   error, not a silent delete.
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -8391,7 +8422,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -11162,6 +11192,7 @@ long: |
     tdns-cli ... zone update addrr --zone alpha.dnslab. --via api \
         --rr "foo.alpha.dnslab. 3600 IN A 1.2.3.4"
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -11171,7 +11202,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -11209,6 +11239,7 @@ long: |
     tdns-cli ... zone update delname --zone alpha.dnslab. --via api \
         --name foo.alpha.dnslab.
 flags: |
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
       --name string     Owner name
   -S, --server string   Server to send the update to (addr:port)
@@ -11218,7 +11249,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -11233,6 +11263,7 @@ long: |
     tdns-cli ... zone update delrr --zone alpha.dnslab. --via api \
         --rr "foo.alpha.dnslab. IN A 1.2.3.4"
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -11242,7 +11273,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -11256,6 +11286,7 @@ long: |
     tdns-cli ... zone update delrrset --zone alpha.dnslab. --via api \
         --name foo.alpha.dnslab. --type A
 flags: |
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
       --name string     Owner name
   -S, --server string   Server to send the update to (addr:port)
@@ -11266,7 +11297,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -11291,6 +11321,7 @@ long: |
   applied as ONE update — there is no half-applied outcome.
 flags: |
       --file string     Instruction file to apply (required)
+      --force           Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string      SIG(0) keyfile to use for signing (.private/.key basename)
   -S, --server string   Server to send the update to (addr:port)
       --signer string   Name of signer (key used to sign the update; defaults to --zone)
@@ -11299,7 +11330,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
@@ -11322,6 +11352,7 @@ long: |
   To remove an RRset entirely, use delrrset -- replacerrset with no records is an
   error, not a silent delete.
 flags: |
+      --force            Apply a nameserver removal even if the parent does not confirm it (--via api only)
   -K, --key string       SIG(0) keyfile to use for signing (.private/.key basename)
       --rr stringArray   Resource record in presentation format (repeatable)
   -S, --server string    Server to send the update to (addr:port)
@@ -11331,7 +11362,6 @@ flags: |
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
-  -F, --force           force operation
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output

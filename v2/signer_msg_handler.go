@@ -102,6 +102,16 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
+			// what the other providers said about their keys (#58): the
+			// owner of the zone's key lifecycle writes ds on their rows
+			// from it; for a zone nobody here owns it has no reader
+			if sigMsg.Signal == "foreign" {
+				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.Foreign(sigMsg.Zone, sigMsg.ForeignKeys) {
+					lgSigner.Debug("KEYSTATE foreign for a zone whose key lifecycle is not run here; dropped", "zone", sigMsg.Zone)
+				}
+				continue
+			}
+
 			// a zone tdns-mp's own state machine runs: the signal is its
 			if e := conf.InternalMp.KeyLifecycle; e != nil && e.Signal(sigMsg.Zone, sigMsg.KeyTag, sigMsg.Signal, sigMsg.Message, sigMsg.At) {
 				continue

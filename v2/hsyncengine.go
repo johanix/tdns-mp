@@ -33,7 +33,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 
 		ds := req.DnskeyStatus
 		totalChanges := len(ds.LocalAdds) + len(ds.LocalRemoves)
-		if totalChanges == 0 {
+		if totalChanges == 0 && !ds.StatesChanged {
 			lgEngine.Debug("DNSKEY changed but no local key changes (remote keys only), ignoring", "zone", req.ZoneName)
 			break
 		}
@@ -71,6 +71,9 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			Operation: "replace",
 			RRtype:    "DNSKEY",
 			Records:   dnskeyRRStrings,
+			// what we say about each key (#58): the other providers write
+			// ds on their rows for our keys from it
+			KeyStates: ds.CurrentKeyStates,
 		}}
 
 		zu := &ZoneUpdate{
@@ -100,6 +103,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			SkipCombiner:         true,
 			DnskeyKeyTags:        keyTags,
 			DnskeyRemovedKeyTags: removedTags,
+			KeyStatesChanged:     ds.StatesChanged,
 		}
 
 	default:

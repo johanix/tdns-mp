@@ -74,6 +74,7 @@ type MPState struct {
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
 	LastKeyInventory     *KeyInventorySnapshot
 	LocalDNSKEYs         []dns.RR
+	LocalKeyStates       []core.KeyState // what was last said about LocalDNSKEYs to the other providers (#58)
 	RemoteDNSKEYs        []dns.RR
 	KeystateOK           bool
 	KeystateError        string

@@ -149,6 +149,8 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 			LocalAdds:        ds.LocalAdds,
 			LocalRemoves:     ds.LocalRemoves,
 			CurrentLocalKeys: ds.CurrentLocalKeys,
+			CurrentKeyStates: ds.CurrentKeyStates,
+			StatesChanged:    ds.StatesChanged,
 		},
 	}, synchedDataUpdateQ, msgQs)
 }

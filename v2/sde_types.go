@@ -35,7 +35,11 @@ type SynchedDataUpdate struct {
 	// removes: their confirmation goes to the signer as "removed", the
 	// others' as "propagated", so the signer knows which kind it answers.
 	DnskeyRemovedKeyTags []uint16
-	Response             chan *AgentMsgResponse
+	// KeyStatesChanged: what this provider says about its keys changed
+	// (a state, a ds) with the DNSKEY set as it was; the REPLACE goes to
+	// the other providers all the same, for the key states it carries.
+	KeyStatesChanged bool
+	Response         chan *AgentMsgResponse
 }
 
 type SynchedDataResponse struct {
@@ -272,4 +276,10 @@ type DnskeyStatus struct {
 	LocalAdds        []dns.RR
 	LocalRemoves     []dns.RR
 	CurrentLocalKeys []dns.RR
+	// CurrentKeyStates is what this provider says about each of
+	// CurrentLocalKeys to the other providers (tdns-mp #58): the key's
+	// state and its ds, from the signer's inventory. StatesChanged: they
+	// differ from what was last sent, though the key set may not.
+	CurrentKeyStates []core.KeyState
+	StatesChanged    bool
 }
