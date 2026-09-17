@@ -124,6 +124,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					}
 					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
 				}
+				// The hydration takes the keys as already distributed, but
+				// not what we say about them (#58): the other providers may
+				// have restarted too, or run a release that now listens.
+				// Forgotten here, so the first inventory after the start
+				// sends the key states with the REPLACE.
+				if zd.MP != nil {
+					zd.MP.LocalKeyStates = nil
+				}
 			}
 		}
 		lgEngine.Info("startup hydration complete")
@@ -179,7 +187,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						resp.ErrorMsg = err.Error()
 						resp.Msg = msg
 					}
-					if change {
+					if change || synchedDataUpdate.KeyStatesChanged {
 						tm := conf.InternalMp.MPTransport
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Generate a single shared distID for combiner + all agents
@@ -285,6 +293,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						resp.ErrorMsg = err.Error()
 					}
 					resp.Msg = msg
+					// what the sending provider says about its keys (#58) goes
+					// to our signer whether or not the DNSKEY set changed
+					if tm := conf.InternalMp.MPTransport; tm != nil && synchedDataUpdate.Update != nil {
+						tm.NoteForeignKeyStates(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations)
+					}
 					if change {
 						// Always forward remote updates to the local combiner for persistence.
 						// The combiner applies or ignores based on its edit policy.

@@ -56,6 +56,10 @@ type MPTransportBridge struct {
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
 	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
 	dnskeyPropMu              sync.Mutex
+	// what the other providers said about their keys, per zone and
+	// sending agent, for our signer (tdns-mp #58)
+	foreignKeyStatesMu sync.Mutex
+	foreignKeyStates   map[ZoneName]map[AgentId][]core.KeyState
 
 	// authorizedPeers returns the list of peer identities authorized via config.
 	// Injected at config time; role-specific (each role provides its own list).
@@ -1006,6 +1010,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 				KeyTag:   payload.KeyTag,
 				Signal:   payload.Signal,
 				Message:  payload.Message,
+
+				ForeignKeys: payload.ForeignKeys,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
@@ -1035,6 +1041,12 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Zone:      payload.Zone,
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
+	}
+	// a signer that runs the zone's key lifecycle gets what the other
+	// providers said about their keys again with every inventory it sends:
+	// it may have restarted, or taken the zone, since the word came
+	if payload.Owned && tm.agentRegistry != nil {
+		go tm.sendForeignKeysToSigner(ZoneName(payload.Zone))
 	}
 
 	// If there's a pending RFI request waiting for this zone's inventory,
@@ -2271,6 +2283,103 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	}()
 
 	return true
+}
+
+// NoteForeignKeyStates records what a provider says about its keys in a
+// DNSKEY operation it sent (tdns-mp #58) and hands the zone's complete
+// latest set on to our signer. An operation without key states (an older
+// release) says nothing: what that provider said before, if anything,
+// stands, and a provider that never said leaves its keys undecided at
+// the signer (Q9).
+func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
+	var states []core.KeyState
+	found := false
+	for _, op := range ops {
+		if op.RRtype == "DNSKEY" && op.KeyStates != nil {
+			states = append(states, op.KeyStates...)
+			found = true
+		}
+	}
+	if !found {
+		return
+	}
+	tm.foreignKeyStatesMu.Lock()
+	if tm.foreignKeyStates == nil {
+		tm.foreignKeyStates = map[ZoneName]map[AgentId][]core.KeyState{}
+	}
+	if tm.foreignKeyStates[zone] == nil {
+		tm.foreignKeyStates[zone] = map[AgentId][]core.KeyState{}
+	}
+	tm.foreignKeyStates[zone][from] = states
+	tm.foreignKeyStatesMu.Unlock()
+	lgTransport.Info("key states received from another provider", "zone", zone, "agent", from, "keys", len(states))
+	go tm.sendForeignKeysToSigner(zone)
+}
+
+// foreignKeysFor is the zone's complete latest set of the other providers'
+// key states, each with its provider's label (the agent's HSYNC3 label in
+// the zone); an agent with no label there is left out, with a warning.
+func (tm *MPTransportBridge) foreignKeysFor(zone ZoneName) []core.ForeignKeyState {
+	tm.foreignKeyStatesMu.Lock()
+	byAgent := map[AgentId][]core.KeyState{}
+	for a, st := range tm.foreignKeyStates[zone] {
+		byAgent[a] = st
+	}
+	tm.foreignKeyStatesMu.Unlock()
+	if len(byAgent) == 0 {
+		return nil
+	}
+	mpzd, ok := Zones.Get(dns.Fqdn(string(zone)))
+	if !ok || mpzd == nil {
+		return nil
+	}
+	agents := make([]string, 0, len(byAgent))
+	for a := range byAgent {
+		agents = append(agents, string(a))
+	}
+	sort.Strings(agents)
+	var out []core.ForeignKeyState
+	for _, a := range agents {
+		matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(a)})
+		if err != nil || !matched {
+			lgTransport.Warn("key states from an agent with no HSYNC3 label in the zone; not handed to the signer", "zone", zone, "agent", a)
+			continue
+		}
+		for _, st := range byAgent[AgentId(a)] {
+			out = append(out, core.ForeignKeyState{Provider: label, KeyState: st})
+		}
+	}
+	return out
+}
+
+// sendForeignKeysToSigner hands our signer what the other providers said
+// about their keys in the zone (KEYSTATE "foreign").
+func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
+	keys := tm.foreignKeysFor(zone)
+	if len(keys) == 0 {
+		return
+	}
+	if tm.signerID == "" || tm.signerAddress == "" || tm.DNSTransport == nil {
+		lgTransport.Debug("no signer to hand the other providers' key states to", "zone", zone)
+		return
+	}
+	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
+	host, port := parseHostPort(tm.signerAddress, 53)
+	peer.SetDiscoveryAddress(&transport.Address{Host: host, Port: port, Transport: "udp"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
+		SenderID:    tm.LocalID,
+		Zone:        string(zone),
+		Signal:      "foreign",
+		ForeignKeys: keys,
+		Timestamp:   time.Now(),
+	})
+	if err != nil {
+		lgTransport.Error("KEYSTATE foreign send to signer failed", "zone", zone, "err", err)
+		return
+	}
+	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "accepted", resp.Accepted, "msg", resp.Message)
 }
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.

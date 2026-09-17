@@ -96,6 +96,7 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 		Signal:       req.Signal,
 		Message:      req.Message,
 		KeyInventory: coreInventory,
+		ForeignKeys:  req.ForeignKeys,
 		Owned:        req.Owned,
 		Time:         req.Timestamp,
 	}

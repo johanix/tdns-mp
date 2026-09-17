@@ -81,15 +81,16 @@ type PeerSyncResponse struct {
 
 // PeerKeystateRequest is a KEYSTATE message (agent↔signer key lifecycle signal).
 type PeerKeystateRequest struct {
-	SenderID     string              // Identity of the sender
-	Zone         string              // Zone this key belongs to (FQDN)
-	KeyTag       uint16              // DNSKEY key tag (unused for inventory)
-	Algorithm    uint8               // DNSKEY algorithm number (unused for inventory)
-	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
-	Message      string              // Optional detail (e.g. rejection reason)
-	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
-	Owned        bool                // the sender's own state machine runs the zone's keys (S3)
-	Timestamp    time.Time           // Request timestamp
+	SenderID     string                 // Identity of the sender
+	Zone         string                 // Zone this key belongs to (FQDN)
+	KeyTag       uint16                 // DNSKEY key tag (unused for inventory)
+	Algorithm    uint8                  // DNSKEY algorithm number (unused for inventory)
+	Signal       string                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
+	Message      string                 // Optional detail (e.g. rejection reason)
+	KeyInventory []KeyInventoryEntry    // Complete key inventory (only when Signal == "inventory")
+	ForeignKeys  []core.ForeignKeyState // what the other providers said about their keys (only when Signal == "foreign")
+	Owned        bool                   // the sender's own state machine runs the zone's keys (S3)
+	Timestamp    time.Time              // Request timestamp
 }
 
 type PeerKeystateResponse struct {

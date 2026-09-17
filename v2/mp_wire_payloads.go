@@ -80,15 +80,16 @@ type DnsKeystatePayload struct {
 	YourIdentity string `json:"YourIdentity"` // Recipient identity
 
 	// KEYSTATE-specific fields
-	Zone         string              `json:"Zone"`                   // Zone this key belongs to (FQDN)
-	KeyTag       uint16              `json:"KeyTag"`                 // DNSKEY key tag (unused for inventory)
-	Algorithm    uint8               `json:"Algorithm"`              // DNSKEY algorithm number (unused for inventory)
-	Signal       string              `json:"Signal"`                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
-	Message      string              `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
-	KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
-	Owned        bool                `json:"Owned,omitempty"`        // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
-	Time         string              `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
-	Timestamp    int64               `json:"timestamp"`              // Unix timestamp
+	Zone         string                 `json:"Zone"`                   // Zone this key belongs to (FQDN)
+	KeyTag       uint16                 `json:"KeyTag"`                 // DNSKEY key tag (unused for inventory)
+	Algorithm    uint8                  `json:"Algorithm"`              // DNSKEY algorithm number (unused for inventory)
+	Signal       string                 `json:"Signal"`                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
+	Message      string                 `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
+	KeyInventory []KeyInventoryEntry    `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
+	ForeignKeys  []core.ForeignKeyState `json:"ForeignKeys,omitempty"`  // Signal "foreign": the other providers' key states
+	Owned        bool                   `json:"Owned,omitempty"`        // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time         string                 `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
+	Timestamp    int64                  `json:"timestamp"`              // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"
