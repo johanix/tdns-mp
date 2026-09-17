@@ -128,8 +128,13 @@ func (w *signerWire) DistributeRemoval(zone string, keyid uint16) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
 }
 
-// ParentServesDS asks the resolver for the zone's DS RRset.
+// ParentServesDS asks the resolver for the zone's DS RRset. The signer starts
+// one when it owns a zone (StartMPSigner); the pointer is read only once the
+// resolver has published it, and without one the answer is unknown.
 func (w *signerWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
+	if !w.conf.Config.Internal.ImrReady.Published() {
+		return false, false
+	}
 	imr := w.conf.Config.Internal.ImrEngine
 	if imr == nil {
 		return false, false

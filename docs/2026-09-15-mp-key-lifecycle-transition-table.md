@@ -1,6 +1,6 @@
 # The multi-provider key lifecycle as a transition table
 
-**Status:** implemented, and kept current with the code (r10): S3's state machine as merged in tdns-mp #76, with the lab findings of #82 (r8), the foreign rows of #83 (r9) and what the leader is asked of #86. It began as the spec of S3's state machine, written before its code, as §3.4's table was for S1b (design `docs/2026-09-13-key-lifecycle-ownership-design.md`, test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md` T3.1).
+**Status:** implemented, and kept current with the code (r11): S3's state machine as merged in tdns-mp #76, with the lab findings of #82 (r8), the foreign rows of #83 (r9) and what the leader is asked of #86. It began as the spec of S3's state machine, written before its code, as §3.4's table was for S1b (design `docs/2026-09-13-key-lifecycle-ownership-design.md`, test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md` T3.1).
 **Scope:** one provider's view of one owned zone: its own keys, and what it records of the other providers' keys. tdns keeps the keystore, signs from `sign=1`, serves `pub=1`, publishes CDS and pushes DS from the owner's DS intent (from S5). tdns-mp writes state and the three columns at every transition, through tdns's write function.
 
 ## Revision history
@@ -17,6 +17,7 @@
 | r8 | 2026-09-17 | From the lab run of S3 and S5's first half and its review (tdns-mp #82): what the agent reads out of a confirmation, E3 and O5. An "ignored" answer is final: from a provider that does not sign the zone it is no obstacle (its combiner applies no key of ours), from a signing provider it is a rejection (the two sides disagree about who signs). A success covers every key of the distribution that is not rejected: the combiner's `ok` says the whole REPLACE is in effect, and the `done` list is the delta, so a key it does not list was already there; a partial answer still counts only the keys it lists. O6: a zone taken with keys tdns minted. |
 | r9 | 2026-09-17 | §3's foreign rows as implemented with tdns-mp #58 (Q9 decided): where a provider's word comes from, the rule that writes `ds` from it, and when it runs. |
 | r10 | 2026-09-17 | Status: implemented, not a proposal. No rule changed. |
+| r11 | 2026-09-17 | E7 names its observer. Found while preparing the testbed run of S5: the machine asked the signer's resolver, and the signer started none, so E7 never came and T11 never fired anywhere. A signer that owns a zone now starts a resolver (tdns-mp #87). No rule changed. |
 
 ## 1. States and columns
 
@@ -44,7 +45,7 @@ The columns are the design's §3.4 table for tdns-mp's states. A ZSK has `ds=0` 
 | E4 | rejected | a signing provider's rejection; also a signing provider's "ignored": its combiner does not take this provider for a signer, so the key is not there (r8) |
 | E5 | propagated | propagation delay plus the served DNSKEY TTL have passed since `published` (the clock is injectable, T3.0) |
 | E6 | promote | the rollover fires: scheduled, or requested now |
-| E7 | DS gone | the parent no longer serves the key's DS (observed) |
+| E7 | DS gone | the parent no longer serves the key's DS: observed by the signer's own resolver, which a signer starts when it owns a zone (`imrengine:` in its config says how it resolves; `active: false` turns it off). No resolver, a resolver not ready yet, or a lookup that fails is "unknown": the key waits, and the machine reports that it needs the operator (r11) |
 | E8 | margin | the withdrawal margin has passed since `retired` lost `sign`: every RRSIG by the key has expired from caches |
 | E9 | removal applied | every signing provider confirmed the removal |
 | E10 | signers changed | the zone's HSYNCPARAM signers set changed: a signing provider joined or left |
