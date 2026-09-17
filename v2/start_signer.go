@@ -51,6 +51,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// tdns's DS engine: the CDS of an owned zone follows its DS set between
 	// transfers too (the machine's KeysChanged wakes it; key lifecycle
 	// ownership design §4.1, arrow 1; tdns-mp #55)
+	ensureDSEngineQueue(kdb)
 	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
 		return kdb.DSEngine(ctx)
 	})
@@ -110,6 +111,19 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// (RegisterMPKeyLifecycleHooks).
 
 	return nil
+}
+
+// ensureDSEngineQueue gives the KeyDB the DS engine's request queue when it
+// has none. tdns makes that queue in its MainInit, and only if the KeyDB
+// exists by then; tdns-mp builds the KeyDB of its roles after that call, so
+// here the queue was never made. Without it tdns's KeysChanged returns before
+// it marks the zone or wakes the engine, silently: the CDS of an owned zone
+// then follows its DS set only when the next transfer from the combiner
+// restores the zone's dynamic records, not when a ds column changes.
+func ensureDSEngineQueue(kdb *tdns.KeyDB) {
+	if kdb != nil && kdb.DSEngineQ == nil {
+		kdb.DSEngineQ = make(chan tdns.DSEngineRequest, 100)
+	}
 }
 
 // signerResolverWanted says whether this signer starts a resolver: it does
