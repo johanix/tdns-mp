@@ -358,7 +358,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// setup said: the sync has other schemes than the one that key is for.
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
 		err := leaderKeySetup(zone)
-		conf.requestDelegationSync(string(zone), "this agent was elected the zone's delegation sync leader")
+		conf.requestDelegationSync(ctx, string(zone), "this agent was elected the zone's delegation sync leader")
 		return err
 	})
 

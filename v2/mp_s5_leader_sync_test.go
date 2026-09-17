@@ -138,12 +138,12 @@ func TestOnlyTheLeaderAsksAndANewLeaderAsksOnce(t *testing.T) {
 	if n := r.requests(t); n != 0 {
 		t.Fatalf("a peer that does not lead asked for %d syncs", n)
 	}
-	if r.conf.requestDelegationSync(z, "test") {
+	if r.conf.requestDelegationSync(context.Background(), z, "test") {
 		t.Error("a request was queued by a peer that does not lead")
 	}
 	// the leadership comes to us: what the election callback asks for
 	r.leader("agent.us.example.")
-	if !r.conf.requestDelegationSync(z, "this agent was elected the zone's delegation sync leader") {
+	if !r.conf.requestDelegationSync(context.Background(), z, "this agent was elected the zone's delegation sync leader") {
 		t.Fatal("the new leader's request was not queued")
 	}
 	if n := r.requests(t); n != 1 {
@@ -152,7 +152,7 @@ func TestOnlyTheLeaderAsksAndANewLeaderAsksOnce(t *testing.T) {
 	// a zone with no queue, or one that is not here, asks for nothing and
 	// does not block
 	r.mpzd.DelegationSyncQ = nil
-	if r.conf.requestDelegationSync(z, "test") || r.conf.requestDelegationSync("absent.sync.example.", "test") {
+	if r.conf.requestDelegationSync(context.Background(), z, "test") || r.conf.requestDelegationSync(context.Background(), "absent.sync.example.", "test") {
 		t.Error("a request was reported queued with nowhere to queue it")
 	}
 }
@@ -172,7 +172,7 @@ func TestAFullSyncQueueDoesNotBlockTheEngine(t *testing.T) {
 	r.leader("agent.us.example.")
 	r.mpzd.DelegationSyncQ = make(chan tdns.DelegationSyncRequest) // nobody reads
 	done := make(chan bool, 1)
-	go func() { done <- r.conf.requestDelegationSync(r.mpzd.ZoneName, "test") }()
+	go func() { done <- r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "test") }()
 	select {
 	case queued := <-done:
 		if queued {
@@ -192,7 +192,7 @@ func TestARequestThatFoundTheQueueFullIsAskedAgain(t *testing.T) {
 	r.leader("agent.us.example.")
 	q := make(chan tdns.DelegationSyncRequest) // no room, and nobody reading yet
 	r.mpzd.DelegationSyncQ = q
-	if r.conf.requestDelegationSync(r.mpzd.ZoneName, "test") {
+	if r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "test") {
 		t.Fatal("a request was reported queued on a queue with no room")
 	}
 	select {
@@ -205,7 +205,7 @@ func TestARequestThatFoundTheQueueFullIsAskedAgain(t *testing.T) {
 	}
 	// the leadership moves away before the retry: nothing is asked for a
 	// zone this agent no longer leads
-	if r.conf.requestDelegationSync(r.mpzd.ZoneName, "test") {
+	if r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "test") {
 		t.Fatal("queued with no room")
 	}
 	r.leader("agent.p2.example.")
@@ -228,7 +228,7 @@ func TestOnlyAParentsyncZoneWithAnOwningSignerAsks(t *testing.T) {
 
 	r.mpzd.Options[tdns.OptParentSync] = false
 	r.inventory(ksk)
-	if r.conf.requestDelegationSync(r.mpzd.ZoneName, "this agent was elected") {
+	if r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "this agent was elected") {
 		t.Error("an election asked for a zone that does not sync with its parent through its agents")
 	}
 	if n := r.requests(t); n != 0 {
@@ -252,12 +252,13 @@ func TestOnlyAParentsyncZoneWithAnOwningSignerAsks(t *testing.T) {
 // The review's N1 and N2: the combiner's hint does not wait for room on
 // the queue either; and a DS set is the same set whatever its TTLs say.
 func TestCombinerHintDoesNotBlockAndTTLsAreNotTheDSSet(t *testing.T) {
+	shortRetries(t, time.Millisecond, 1)
 	r := newLeaderSyncRig(t, "hint.sync.example.")
 	r.leader("agent.us.example.")
 	r.mpzd.DelegationSyncQ = make(chan tdns.DelegationSyncRequest) // nobody reads
 	done := make(chan struct{})
 	go func() {
-		r.e.handleStatusUpdate(&StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
+		r.e.handleStatusUpdate(context.Background(), &StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
 		close(done)
 	}()
 	select {
@@ -278,5 +279,48 @@ func TestCombinerHintDoesNotBlockAndTTLsAreNotTheDSSet(t *testing.T) {
 	}
 	if sameDSIntent(tdns.DSIntent{}, tdns.DSIntent{Known: true}) {
 		t.Error("unknown and known-empty are the same")
+	}
+}
+
+// The re-review's C3 and N3: the combiner's hint goes through the same
+// gate as every other asker (a zone that does not sync with its parent
+// through its agents, or that this agent does not lead, asks for nothing)
+// and is tried again on a full queue; and a retry that comes due after the
+// asking engine has stopped asks for nothing.
+func TestCombinerHintUsesTheGateAndAStoppedEngineAsksNothing(t *testing.T) {
+	shortRetries(t, 20*time.Millisecond, 5)
+	r := newLeaderSyncRig(t, "hintgate.sync.example.")
+	hint := func(ctx context.Context) {
+		r.e.handleStatusUpdate(ctx, &StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
+	}
+	r.leader("agent.p2.example.")
+	hint(context.Background())
+	r.leader("agent.us.example.")
+	r.mpzd.Options[tdns.OptParentSync] = false
+	hint(context.Background())
+	if n := r.requests(t); n != 0 {
+		t.Fatalf("a hint asked for %d syncs on a zone this agent does not lead, or that has no parentsync=agent", n)
+	}
+	r.mpzd.Options[tdns.OptParentSync] = true
+	hint(context.Background())
+	if n := r.requests(t); n != 1 {
+		t.Errorf("the hint on a zone we lead: %d sync requests, want 1", n)
+	}
+	// a full queue: the hint is tried again, unless its engine has stopped
+	q := make(chan tdns.DelegationSyncRequest)
+	r.mpzd.DelegationSyncQ = q
+	ctx, stop := context.WithCancel(context.Background())
+	hint(ctx)
+	stop()
+	select {
+	case req := <-q:
+		t.Errorf("a retry asked after its engine stopped: %+v", req)
+	case <-time.After(200 * time.Millisecond):
+	}
+	hint(context.Background())
+	select {
+	case <-q:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hint was not asked again after the queue was full")
 	}
 }

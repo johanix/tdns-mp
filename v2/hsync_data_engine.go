@@ -86,32 +86,24 @@ func (e *HsyncDataEngine) runAgentOnly(ctx context.Context, msgQs *MsgQs) {
 		case req := <-e.conf.InternalMp.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 		case statusMsg := <-msgQs.StatusUpdate:
-			e.handleStatusUpdate(statusMsg)
+			e.handleStatusUpdate(ctx, statusMsg)
 		case inventoryMsg := <-msgQs.KeystateInventory:
 			e.handleKeystateInventory(ctx, ourID, inventoryMsg, synchedDataUpdateQ, msgQs)
 		}
 	}
 }
 
-func (e *HsyncDataEngine) handleStatusUpdate(statusMsg *StatusUpdateMsg) {
+func (e *HsyncDataEngine) handleStatusUpdate(ctx context.Context, statusMsg *StatusUpdateMsg) {
 	if statusMsg == nil {
 		return
 	}
 	switch statusMsg.SubType {
 	case "ns-changed", "ksk-changed":
-		lem := e.conf.InternalMp.LeaderElectionManager
-		if lem != nil && !lem.IsLeader(ZoneName(statusMsg.Zone)) {
-			return
-		}
-		zd, exists := Zones.Get(statusMsg.Zone)
-		if !exists || zd.DelegationSyncQ == nil {
-			return
-		}
-		// without waiting for room: this is the engine's loop, and the
-		// syncher's queue is the same one the DS set's requests go to
-		if !queueExplicitDelegationSync(zd) {
-			lgEngine.Warn("the delegation sync queue is full; the combiner's hint is dropped, its next one asks again", "zone", statusMsg.Zone, "hint", statusMsg.SubType)
-		}
+		// the combiner's hint that the delegation's data changed: the same
+		// request, through the same gate (parentsync=agent, and this agent
+		// leads), without waiting for room on the syncher's queue and
+		// tried again if there was none
+		e.conf.requestDelegationSync(ctx, statusMsg.Zone, "the combiner's "+statusMsg.SubType+" hint")
 	}
 }
 
@@ -152,7 +144,7 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 		}
 		o.SetInventory(inventoryMsg.Zone, snap)
 		if after, err := o.DSIntent(zd.ZoneData, dns.SHA256); inventoryMsg.Owned && err == nil && after.Known && !sameDSIntent(before, after) {
-			e.conf.requestDelegationSync(inventoryMsg.Zone, "the zone's DS set changed")
+			e.conf.requestDelegationSync(ctx, inventoryMsg.Zone, "the zone's DS set changed")
 		}
 	}
 	changed, ds, err := zd.LocalDnskeysFromKeystate()

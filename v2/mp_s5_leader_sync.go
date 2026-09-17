@@ -13,6 +13,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -37,12 +38,16 @@ var (
 // election manager there is nobody else to be it). The request is an
 // explicit sync: analysis first, an update only for a difference, so
 // asking twice sends once. It does not wait: the callers are engines'
-// loops. Reports whether a request was queued now.
-func (conf *Config) requestDelegationSync(zone string, why string) bool {
-	return conf.requestDelegationSyncAttempt(zone, why, 0)
+// loops. ctx is the asking engine's: a retry that comes due after it has
+// ended asks for nothing. Reports whether a request was queued now.
+func (conf *Config) requestDelegationSync(ctx context.Context, zone string, why string) bool {
+	return conf.requestDelegationSyncAttempt(ctx, zone, why, 0)
 }
 
-func (conf *Config) requestDelegationSyncAttempt(zone string, why string, attempt int) bool {
+func (conf *Config) requestDelegationSyncAttempt(ctx context.Context, zone string, why string, attempt int) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || mpzd.ZoneData == nil || mpzd.DelegationSyncQ == nil {
 		return false
@@ -64,7 +69,7 @@ func (conf *Config) requestDelegationSyncAttempt(zone string, why string, attemp
 		return false
 	}
 	lgEngine.Warn("the delegation sync queue is full; asking again shortly", "zone", zone, "why", why, "attempt", attempt+1, "in", delegationSyncRetryDelay)
-	time.AfterFunc(delegationSyncRetryDelay, func() { conf.requestDelegationSyncAttempt(zone, why, attempt+1) })
+	time.AfterFunc(delegationSyncRetryDelay, func() { conf.requestDelegationSyncAttempt(ctx, zone, why, attempt+1) })
 	return false
 }
 
