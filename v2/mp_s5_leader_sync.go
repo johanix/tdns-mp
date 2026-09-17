@@ -32,6 +32,14 @@ var (
 	delegationSyncRetries    = 5
 )
 
+// delegationSyncRetryPolicy is the delay and the bound of one request's
+// retries, read once when the request is made: the retries run from timer
+// callbacks, which must not read variables a test may be restoring.
+type delegationSyncRetryPolicy struct {
+	delay   time.Duration
+	retries int
+}
+
 // requestDelegationSync asks the delegation syncher to bring the parent in
 // line with the zone, if the zone syncs with its parent through its agents
 // (parentsync=agent) and this agent is the zone's elected leader (with no
@@ -41,10 +49,11 @@ var (
 // loops. ctx is the asking engine's: a retry that comes due after it has
 // ended asks for nothing. Reports whether a request was queued now.
 func (conf *Config) requestDelegationSync(ctx context.Context, zone string, why string) bool {
-	return conf.requestDelegationSyncAttempt(ctx, zone, why, 0)
+	return conf.requestDelegationSyncAttempt(ctx, zone, why, 0,
+		delegationSyncRetryPolicy{delay: delegationSyncRetryDelay, retries: delegationSyncRetries})
 }
 
-func (conf *Config) requestDelegationSyncAttempt(ctx context.Context, zone string, why string, attempt int) bool {
+func (conf *Config) requestDelegationSyncAttempt(ctx context.Context, zone string, why string, attempt int, policy delegationSyncRetryPolicy) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
@@ -64,12 +73,12 @@ func (conf *Config) requestDelegationSyncAttempt(ctx context.Context, zone strin
 		lgEngine.Info("delegation sync requested", "zone", zone, "why", why, "attempt", attempt+1)
 		return true
 	}
-	if attempt >= delegationSyncRetries {
+	if attempt >= policy.retries {
 		lgEngine.Warn("the delegation sync queue stayed full; the request is given up, the next change of the DS set or an election asks again", "zone", zone, "why", why, "attempts", attempt+1)
 		return false
 	}
-	lgEngine.Warn("the delegation sync queue is full; asking again shortly", "zone", zone, "why", why, "attempt", attempt+1, "in", delegationSyncRetryDelay)
-	time.AfterFunc(delegationSyncRetryDelay, func() { conf.requestDelegationSyncAttempt(ctx, zone, why, attempt+1) })
+	lgEngine.Warn("the delegation sync queue is full; asking again shortly", "zone", zone, "why", why, "attempt", attempt+1, "in", policy.delay)
+	time.AfterFunc(policy.delay, func() { conf.requestDelegationSyncAttempt(ctx, zone, why, attempt+1, policy) })
 	return false
 }
 
