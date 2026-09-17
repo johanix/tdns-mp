@@ -22,6 +22,7 @@
 | r10 | 2026-09-15 | Status: S2 implemented and merged (tdns #659); the S1b tdns-mp merge commit added; two S2-review items noted for S3. |
 | r11 | 2026-09-16 | Status: S3 implemented and merged (tdns #664 → 155ea6b7, tdns-mp #76 → 0dffb47), with its named leftovers; S5's first half implemented and merged (tdns #671 → a09e5cde, tdns-mp #80 → 5b56aa4), Q2 and Q9 open for the rest. |
 | r12 | 2026-09-17 | §5 item 4: what counts as "every signing provider has applied the key" on the wire, as the lab run of S3 and S5's first half showed it and tdns-mp #82 implements it (the transition table r8 carries the detail). |
+| r13 | 2026-09-17 | Q2 and Q9 decided by Johan, both as recommended; §5's protocol change (tdns-mp #58) implemented: what a provider says about its keys travels with its DNSKEYs, and the owner writes `ds` on the foreign rows from it (the transition table r9 has the rule). |
 
 ---
 
@@ -351,7 +352,9 @@ In a multi-provider zone, the rows live on the signer: its own keys plus the for
     
     tdns keeps policy set for the mechanism fields (Q1).
 
-**Protocol change (tdns-mp #58).** Today DNSKEYs travel between providers as bare records: no provider identity and no state (`hsyncengine.go:62-73`). Foreign rows store neither (`signer_keydb.go:328`). Only a signer and its own agent exchange key states (the key inventory). D4 needs each provider's DNSKEYs to carry, per key, the provider and either its state or its `ds` intent. This is a change to what goes on the wire between providers; see Q9. Agreed 2026-09-13: it must be fixed.
+**Protocol change (tdns-mp #58; implemented, r13).** What was: DNSKEYs travel between providers as bare records: no provider identity and no state (`hsyncengine.go:62-73`). Foreign rows store neither (`signer_keydb.go:328`). Only a signer and its own agent exchange key states (the key inventory). D4 needs each provider's DNSKEYs to carry, per key, the provider and either its state or its `ds` intent. This is a change to what goes on the wire between providers; see Q9. Agreed 2026-09-13: it must be fixed.
+
+As built: the sending agent's REPLACE of its provider's DNSKEYs carries `key_states`, per key its state and its `ds` (unset when the sender's own row is undecided), taken from its signer's inventory; a change of state or `ds` alone is sent too. The receiving agent records what each provider said and hands its own signer the zone's complete latest set, each key with its provider's HSYNC3 label (KEYSTATE `foreign`), again after every inventory an owning signer sends. The owner of the zone's key lifecycle writes `ds` on the foreign rows from it (P3). An older sender says nothing and an older receiver ignores the field, so mixed fleets work, with the older provider's keys undecided and the zone's DS set unknown until it is upgraded (Q9).
 
 **tdns-mp code that becomes the owner's answers:**
 
@@ -396,14 +399,14 @@ Each step builds, passes tests and leaves the system working.
 | # | Question | Recommendation |
 |---|---|---|
 | Q1 | Which DNSSEC policy fields does tdns still apply to an owned zone? | Signature validity, TTLs and the clamp's signature parameters are mechanism: tdns applies them. Algorithms, lifetimes, standby counts and the rollover method are the owner's, set through tdns-mp's commands (§5). |
-| Q2 | For a multi-provider zone, does tdns's syncher send DS on its own, or only when tdns-mp's gate allows? | Only through the gate: parentsync=agent and the elected leader, with the DS set from the owner's DS-intent provider. tdns-mp's syncher shrinks to that gate. The SIG(0) KEY bootstrap stays in tdns-mp. |
+| Q2 | For a multi-provider zone, does tdns's syncher send DS on its own, or only when tdns-mp's gate allows? | Only through the gate: parentsync=agent and the elected leader, with the DS set from the owner's DS-intent provider. tdns-mp's syncher shrinks to that gate. The SIG(0) KEY bootstrap stays in tdns-mp. **Decided 2026-09-17: as recommended.** |
 | Q3 | Which process publishes a multi-provider zone's CDS, and how does the parent get it? | Answered in §4.1. The signer's DS engine publishes CDS from `ds=1` rows into the zone the signer serves; `CollectDynamicRRs` restores it after each transfer (arrow 1). The combiner stops synthesizing CDS. The leader agent gets the DS set for UPDATE and API from the key inventory (arrow 2). |
 | Q4 | Which keystore API verbs work on an owned zone? | The store verbs work: add, generate with an explicit state and flags, delete, purge, and `setstate` with explicit flags. The lifecycle verbs listed in §3.5, and a bare `setstate`, are refused. |
 | Q5 | How is `ds` filled for existing rows? | Answered in §6. The migration fills only `pub` and `sign`. tdns's state machine writes `ds` once policies are loaded, before anything reads it (S1b). An owner writes `ds` for its zones, and `NULL` leaves the served CDS and the parent alone. |
 | Q6 | Does the multi-DS scheme (DS placed before the DNSKEY, state ds-published) apply to multi-provider zones? | Not in this design. A multi-provider KSK gets its DS at standby, once every provider's DNSKEY RRset carrying it has propagated. Multi-DS across providers would first need the providers to agree on a shared DS pipeline. |
 | Q7 | Who strips a departing key's RRSIGs? | The owner decides when; tdns exports the strip and the resign trigger. |
 | Q8 | Is `OnStateChange` still needed? | Not as a tdns hook. tdns-mp makes its own transitions, and its post-commit wrapper pushes the inventory whenever `pub`, `sign` or `ds` changes (§4.1). API writes to owned zones are limited to store verbs (Q4); tdns-mp's API wrapper pushes the inventory after those. |
-| Q9 | How does the protocol change in §5 reach providers that run an older tdns-mp? | Add fields to the DNSKEY distribution payload; older receivers ignore unknown JSON fields. A provider that does not send them yet leaves its keys at `ds=NULL`, which blocks the DS set rather than guessing it. S5 is therefore a fleet cut (§6). |
+| Q9 | How does the protocol change in §5 reach providers that run an older tdns-mp? | Add fields to the DNSKEY distribution payload; older receivers ignore unknown JSON fields. A provider that does not send them yet leaves its keys at `ds=NULL`, which blocks the DS set rather than guessing it. S5 is therefore a fleet cut (§6). **Decided 2026-09-17: as recommended** (fields added, fleet cut). Implemented as `RROperation.KeyStates` in tdns core (tdns #696) and the agent, signer and driver sides in tdns-mp (`feature/s5-foreign-ds`). |
 | Q10 | What happens to a key another provider rejects? | Proposal in §5 item 6: stay in mpdist, surface the rejection, and let a tdns-mp command retry or withdraw the key. The alternative is an automatic retreat to created or deletion, which hides the problem. The 2026-09-14 review agrees. Q10 stays open until the S3 command exists. |
 
 ---
