@@ -1,9 +1,11 @@
 package tdnsmp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -141,5 +143,171 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, []RejectedItemInfo{{Record: a.String(), Reason: "policy"}})
 	if p := tm.pendingDnskeyPropagations["d2"]; p != nil {
 		t.Errorf("a whole rejection left the propagation pending: %+v", p.Results)
+	}
+}
+
+// A provider that does not sign the zone answers "ignored" to a DNSKEY
+// distribution: it applies no key of ours and serves the zone as the
+// signer gives it. That is a final answer, and the key is propagated once
+// every peer answered; the lab's single-signer cells depend on it.
+func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 256)
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmIgnored.String(), nil, nil)
+	p := tm.pendingDnskeyPropagations["d1"]
+	if p == nil || !p.ExpectedAgents["a1"] || p.Rejected || p.Results["a1"][ours.KeyTag()] != "ignored" {
+		t.Fatalf("an ignored answer did not count as the agent's answer: %+v", p)
+	}
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmIgnored.String(), nil, nil)
+	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+		t.Error("both peers answered ignored, the propagation is still pending")
+	}
+	if p.Rejected {
+		t.Error("ignored answers made the propagation rejected")
+	}
+}
+
+// Found on the lab (2026-09-16, finding 5): the first distribution after
+// the agent's local set was reset carries the zone's whole served set, and
+// the peers list in done only the key that was new to them. The tracker
+// waited for the other keys' results for good, and the signer's resend was
+// a no-op (nothing changed). A success covers every key of the
+// distribution: a key the peer did not list was already there.
+func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
+	ksk, zsk, standby, retired := testDnskeyRR(t, "z.example.", 257), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256)
+	tags := []uint16{ksk.KeyTag(), zsk.KeyTag(), standby.KeyTag(), retired.KeyTag()}
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation("z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), []string{standby.String()}, nil)
+	p := tm.pendingDnskeyPropagations["d1"]
+	if p == nil || !p.ExpectedAgents["a1"] {
+		t.Fatalf("a success listing the one new key did not count as the agent's answer for every key: %+v", p)
+	}
+	for _, kt := range tags {
+		if p.Results["a1"][kt] != "applied" {
+			t.Errorf("key %d after the success: %q, want applied", kt, p.Results["a1"][kt])
+		}
+	}
+	// a partial answer still says which keys it covers
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPartial.String(), []string{standby.String()}, nil)
+	if p.ExpectedAgents["a2"] {
+		t.Error("a partial answer listing one key was taken as the answer for every key")
+	}
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil)
+	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+		t.Error("both peers answered success, the propagation is still pending")
+	}
+	if p.Rejected {
+		t.Error("successes made the propagation rejected")
+	}
+}
+
+// The review of the lab fixes (C1): an ignored answer is no obstacle only
+// from a provider that does not sign the zone. A signing provider that
+// ignores our key does not have it (its combiner does not take us for a
+// signer: the two sides disagree), and design §5.4 wants the key at every
+// signing provider before it is published: that key is rejected, with the
+// reason. When who signs is not known here, an ignored answer counts as it
+// comes (the single-signer cell of the control run).
+func TestDnskeyPropagationOutcomeKnowsWhoSigns(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 256)
+	kt := ours.KeyTag()
+	run := func(signing map[AgentId]bool, a1, a2 string) *PendingDnskeyPropagation {
+		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
+		p := tm.pendingDnskeyPropagations["d1"]
+		p.Signing = signing
+		tm.ProcessDnskeyConfirmation("d1", "a1", a1, nil, nil)
+		tm.ProcessDnskeyConfirmation("d1", "a2", a2, nil, nil)
+		if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+			t.Fatalf("answers %s and %s: the propagation is still pending", a1, a2)
+		}
+		return p
+	}
+	success, ignored := transport.ConfirmSuccess.String(), transport.ConfirmIgnored.String()
+
+	// one signing provider applied, one that does not sign ignored: propagated
+	propagated, _, rejected, _ := run(map[AgentId]bool{"a1": true}, success, ignored).outcome()
+	if len(propagated) != 1 || propagated[0] != kt || len(rejected) != 0 {
+		t.Errorf("signer applied, non-signer ignored: propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+	// the signing provider ignored the key: not propagated, and it says why
+	propagated, _, rejected, msg := run(map[AgentId]bool{"a1": true}, ignored, ignored).outcome()
+	if len(propagated) != 0 || len(rejected) != 1 || !strings.Contains(msg, "a1") || !strings.Contains(msg, "signers") {
+		t.Errorf("a signing provider ignored the key: propagated %v rejected %v msg %q, want it rejected naming a1", propagated, rejected, msg)
+	}
+	// nobody else signs (the single-signer cell): every ignored answer counts
+	propagated, _, rejected, _ = run(map[AgentId]bool{}, ignored, ignored).outcome()
+	if len(propagated) != 1 || len(rejected) != 0 {
+		t.Errorf("no other signer, both ignored: propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+	// who signs is not known here: as it comes
+	propagated, _, rejected, _ = run(nil, ignored, ignored).outcome()
+	if len(propagated) != 1 || len(rejected) != 0 {
+		t.Errorf("signers unknown, both ignored: propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+}
+
+// signingAgents reads who signs from the zone: an agent whose HSYNC3 label
+// is among the HSYNCPARAM signers; nil for a zone that is not here.
+func TestSigningAgentsComeFromTheZone(t *testing.T) {
+	mpzd := trackTestZone(t, "peers.track.example.")
+	got := signingAgents(ZoneName(mpzd.ZoneName), []AgentId{"agent.p2.example.", "agent.p3.example.", "agent.nobody.example."})
+	if got == nil || !got["agent.p2.example."] || got["agent.p3.example."] || got["agent.nobody.example."] || len(got) != 1 {
+		t.Errorf("signing agents %v, want p2's agent alone", got)
+	}
+	if got := signingAgents("absent.track.example.", []AgentId{"agent.p2.example."}); got != nil {
+		t.Errorf("a zone that is not here: %v, want nil (unknown)", got)
+	}
+}
+
+// trackTestZone: a zone signed by us and p2, with p3 a provider that does
+// not sign; the agents are agent.<label>.example.
+func trackTestZone(t *testing.T, name string) *MPZoneData {
+	t.Helper()
+	mpzd := signerTestZone(t, name, newMPTestKeyDB(t))
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("apex: %v", err)
+	}
+	hdr := func(rrtype uint16) dns.RR_Header {
+		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
+	}
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"us", "p2"}}}}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
+	var h3s []dns.RR
+	for _, label := range []string{"us", "p2", "p3"} {
+		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: "agent." + label + ".example.", Upstream: "."}})
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
+	mpzd.Data.Set(mpzd.ZoneName, *apex)
+	mpzd.InstallInitialSnapshot()
+	return mpzd
+}
+
+// The re-review's C4: who signs was read once, when the tracking started;
+// a zone (or its HSYNC data) that was not here yet left it unknown for
+// that distribution, and a signing provider's ignored answer then counted
+// as no obstacle. It is asked again with every answer while unknown.
+func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
+	ours := testDnskeyRR(t, "late.track.example.", 256)
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation("late.track.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"agent.p2.example.", "agent.p3.example."})
+	p := tm.pendingDnskeyPropagations["d1"]
+	if p.Signing != nil {
+		t.Fatalf("the zone is not here yet, and who signs is %v, want unknown", p.Signing)
+	}
+	trackTestZone(t, "late.track.example.")
+	ignored := transport.ConfirmIgnored.String()
+	tm.ProcessDnskeyConfirmation("d1", "agent.p3.example.", ignored, nil, nil)
+	if !p.Signing["agent.p2.example."] || p.Signing["agent.p3.example."] {
+		t.Fatalf("who signs after the zone came: %v, want p2's agent alone", p.Signing)
+	}
+	tm.ProcessDnskeyConfirmation("d1", "agent.p2.example.", ignored, nil, nil)
+	propagated, _, rejected, msg := p.outcome()
+	if len(propagated) != 0 || len(rejected) != 1 || !strings.Contains(msg, "agent.p2.example.") {
+		t.Errorf("the signing provider ignored the key: propagated %v rejected %v msg %q, want it rejected naming p2's agent", propagated, rejected, msg)
 	}
 }

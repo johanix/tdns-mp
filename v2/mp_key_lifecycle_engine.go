@@ -4,8 +4,9 @@
  * The key lifecycle engine of the signer: one driver per owned zone, the
  * Wire over the signer's surroundings, the ticks, and the KEYSTATE signals
  * from the agents routed to the drivers. The owner is registered before
- * tdns's MainInit; the zones named in the config are taken when the signer
- * starts (the S3 rollout, zone by zone).
+ * tdns's MainInit; a zone named in the config is taken once it is loaded
+ * with its DNSSEC policy bound, asked at the signer's start and again on
+ * every tick (the S3 rollout, zone by zone).
  */
 package tdnsmp
 
@@ -241,11 +242,13 @@ func lifetimeSchedules(secs uint32) bool { return secs != 0 && secs != foreverLi
 
 // KeyLifecycleEngine runs the drivers of the owned zones.
 type KeyLifecycleEngine struct {
-	conf  *Config
-	owner *MPKeyLifecycleOwner
-	wire  *signerWire
-	mu    sync.Mutex
-	zones map[string]*ZoneKeyLifecycle
+	conf    *Config
+	owner   *MPKeyLifecycleOwner
+	wire    *signerWire
+	mu      sync.Mutex
+	zones   map[string]*ZoneKeyLifecycle
+	waiting map[string]string // configured zones not ready to take, with why (logged once per reason)
+	refused map[string]bool   // configured zones that are not multi-provider: never taken
 }
 
 func NewKeyLifecycleEngine(conf *Config, owner *MPKeyLifecycleOwner) *KeyLifecycleEngine {
@@ -341,7 +344,14 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	default:
 		return true
 	}
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrNoDistribution):
+		// the key was distributed by someone else (tdns's own key state
+		// worker before the take, another provider) or the answer is a
+		// late duplicate: nothing of ours to apply it to, and nothing wrong
+		lgSigner.Debug("key lifecycle: signal about a key not distributed here", "zone", zone, "keytag", keytag, "signal", signal, "err", err)
+	default:
 		lgSigner.Warn("key lifecycle: signal not applied", "zone", zone, "keytag", keytag, "signal", signal, "err", err)
 	}
 	return true
@@ -359,6 +369,7 @@ func (e *KeyLifecycleEngine) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			e.TakeConfiguredZones() // a configured zone loaded or bound since
 			for _, zone := range e.owner.Zones() {
 				l := e.driver(zone)
 				if l == nil {
@@ -378,20 +389,47 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 	if mp == nil {
 		return
 	}
+	// A configured zone is taken once it is loaded with its DNSSEC policy
+	// bound, which happens after the engines start (the policy binds on
+	// the zone's first load); until then it waits, and Run asks again on
+	// every tick. A zone that is not multi-provider is refused, said once,
+	// and looked at again on every tick: the option may come to it later.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.waiting == nil {
+		e.waiting = map[string]string{}
+	}
 	for _, z := range mp.KeyLifecycleZones {
 		zone := dns.Fqdn(z)
-		zd, ok := tdns.Zones.Get(zone)
-		switch {
-		case !ok || zd == nil:
-			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not loaded; not taken", "zone", zone)
-			continue
-		case !zd.Options[tdns.OptMultiProvider]:
-			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", zone)
-			continue
-		case zd.DnssecPolicy == nil:
-			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone with no DNSSEC policy; not taken", "zone", zone)
+		if e.owner.taken(zone) {
 			continue
 		}
+		zd, ok := tdns.Zones.Get(zone)
+		var why string
+		switch {
+		case !ok || zd == nil:
+			why = "not loaded yet"
+		case !zd.Options[tdns.OptMultiProvider]:
+			if e.refused == nil {
+				e.refused = map[string]bool{}
+			}
+			if !e.refused[zone] {
+				e.refused[zone] = true
+				lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", zone)
+			}
+			continue
+		case zd.DnssecPolicy == nil:
+			why = "its DNSSEC policy is not bound yet"
+		}
+		if why != "" {
+			if e.waiting[zone] != why {
+				e.waiting[zone] = why
+				lgSigner.Info("key lifecycle: key-lifecycle-zones names a zone not ready to take; asking again on every tick", "zone", zone, "why", why)
+			}
+			continue
+		}
+		delete(e.waiting, zone)
+		delete(e.refused, zone)
 		e.owner.Take(zone)
 		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", zone)
 	}

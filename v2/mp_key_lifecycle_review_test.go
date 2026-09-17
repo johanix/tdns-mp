@@ -2,6 +2,8 @@ package tdnsmp
 
 import (
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -576,5 +578,141 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	zones := owner.Zones()
 	if len(zones) != 1 || zones[0] != good.ZoneName {
 		t.Errorf("zones taken from the configuration: %v, want only %s", zones, good.ZoneName)
+	}
+}
+
+// Found on the lab: the configured zones are loaded, and their DNSSEC
+// policy bound, after the engines start, so a take at startup found no
+// policy and refused for good. The take now waits and Run asks again on
+// every tick: a zone not loaded, or loaded without its policy yet, is
+// taken once it is ready; one that is not multi-provider never.
+func TestConfiguredZoneIsTakenOnceItsPolicyIsBound(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}, KeyLifecycleZones: []string{"late.take.example.", "missing.take.example.", "plain.take.example."}})
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	late := signerTestZone(t, "late.take.example.", kdb)
+	pol := late.ZoneData.DnssecPolicy
+	late.ZoneData.DnssecPolicy = nil // not bound yet, as at the signer's start
+	plain := signerTestZone(t, "plain.take.example.", kdb)
+	plain.ZoneData.Options[tdns.OptMultiProvider] = false
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 0 {
+		t.Fatalf("taken before the policy was bound: %v", z)
+	}
+	late.ZoneData.DnssecPolicy = pol
+	e.TakeConfiguredZones() // what Run does on every tick
+	if z := owner.Zones(); len(z) != 1 || z[0] != late.ZoneName {
+		t.Errorf("after the policy was bound: %v, want the late zone taken", z)
+	}
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 1 {
+		t.Errorf("a second take changed the set: %v", z)
+	}
+	if e.refused["plain.take.example."] != true {
+		t.Error("the zone that is not multi-provider is not refused for good")
+	}
+	if _, w := e.waiting["missing.take.example."]; !w {
+		t.Error("the zone not loaded is not waiting")
+	}
+	// the refusal is said once and looked at again: the option given to
+	// the zone later (no restart) lets the next tick take it
+	plain.ZoneData.Options[tdns.OptMultiProvider] = true
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 2 {
+		t.Errorf("after the refused zone became multi-provider: %v, want it taken too", z)
+	}
+	if e.refused["plain.take.example."] {
+		t.Error("the zone is taken and still recorded as refused")
+	}
+}
+
+// Found on the lab (2026-09-16, finding 3): keys tdns minted before the
+// zone was taken carry no ds column, so the zone's DS intent is unknown
+// and no CDS is served. The driver adopts such rows on Reload: each gets
+// the columns its state prescribes, and a retired KSK is adopted as not
+// withdrawn.
+func TestReloadAdoptsRowsShapedWithoutColumns(t *testing.T) {
+	r := newDriverRig(t, "adopt.owned.example.", driverPolicy, "p2")
+	legacy := func(state, role string) uint16 {
+		pkc, _, err := r.kdb.GenerateKeypair(r.l.Zone, "ensure-active", state, dns.TypeDNSKEY, dns.ED25519, role, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkc.KeyId
+	}
+	ksk, zsk, old := legacy(KeyStateActive, "KSK"), legacy(KeyStateActive, "ZSK"), legacy(KeyStateRetired, "KSK")
+	for _, k := range []uint16{ksk, zsk, old} {
+		if got := r.cols(k); got[2:] != "NULL" {
+			t.Fatalf("key %d minted the legacy way has columns %s, want ds NULL", k, got)
+		}
+	}
+	if intent, err := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256); err != nil || intent.Known {
+		t.Fatalf("DS intent before the adoption known=%v err=%v, want unknown", intent.Known, err)
+	}
+	if err := r.l.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	r.check("adopted")
+	for k, want := range map[uint16]string{ksk: "111", zsk: "110", old: "101"} {
+		if got := r.cols(k); got != want {
+			t.Errorf("key %d after the adoption: columns %s, want %s", k, got, want)
+		}
+	}
+	for k, want := range map[uint16]string{ksk: KeyStateActive, zsk: KeyStateActive, old: KeyStateRetired} {
+		if got := r.state(k); got != want {
+			t.Errorf("key %d after the adoption: state %s, want %s unchanged", k, got, want)
+		}
+	}
+	intent, err := tdns.DSIntentForZone(r.kdb, r.l.Zone, dns.SHA256)
+	if err != nil || !intent.Known || len(intent.Set) != 2 {
+		t.Fatalf("DS intent after the adoption known=%v set=%d err=%v, want the two KSKs", intent.Known, len(intent.Set), err)
+	}
+	if r.wire.changes == 0 {
+		t.Error("the adoption did not tell the surroundings that the keys changed")
+	}
+	if err := r.l.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.cols(old); got != "101" {
+		t.Errorf("a second Reload changed the retired KSK's columns to %s", got)
+	}
+}
+
+// Found on the lab (2026-09-16, finding 4): a signal about a key this
+// machine did not distribute (tdns's key state worker distributed it
+// before the take) is answered with a warning on every tick's worth of
+// signals. It is nothing of ours and nothing wrong: debug, not a warning.
+func TestSignalAboutAKeyNotDistributedHereIsNotAWarning(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}, KeyLifecycleZones: []string{"quiet.owned.example."}})
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	mpzd := signerTestZone(t, "quiet.owned.example.", kdb)
+	zoneSignedBy(t, mpzd, "agent.us.example.", "p2")
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 1 {
+		t.Fatalf("zone not taken: %v", z)
+	}
+	var logbuf strings.Builder
+	saved := lgSigner
+	lgSigner = slog.New(slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lgSigner = saved })
+	if !e.Signal("quiet.owned.example.", 4711, "propagated", "", time.Now()) {
+		t.Fatal("the signal was not taken as the owned zone's")
+	}
+	if !strings.Contains(logbuf.String(), `"level":"DEBUG"`) || strings.Contains(logbuf.String(), `"level":"WARN"`) {
+		t.Errorf("a signal about a key not distributed here logged:\n%s", logbuf.String())
+	}
+	logbuf.Reset()
+	if !e.Signal("quiet.owned.example.", 4711, "rejected", "no", time.Now()) {
+		t.Fatal("the rejection was not taken as the owned zone's")
+	}
+	if strings.Contains(logbuf.String(), `"level":"WARN"`) {
+		t.Errorf("a rejection of a key not distributed here logged a warning:\n%s", logbuf.String())
 	}
 }
