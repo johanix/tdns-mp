@@ -1,6 +1,6 @@
 # Key lifecycle ownership: test plan
 
-**Status:** proposal, under review
+**Status:** in use. The tests of S1a, S1b, S2, S3 and S5 are written and run with their steps (see "Status as of 2026-09-17" below); S4's and S6's wait for their steps; of S5 the testbed's part is left.
 **Companion to:** `docs/2026-09-13-key-lifecycle-ownership-design.md` (the design; its §8 risks R1–R13 and §6 steps S1a–S6)
 **Read at:** tdns `514db197`, tdns-mp `4da1d92`
 
@@ -9,6 +9,25 @@
 | Rev | Date | Change |
 |---|---|---|
 | r1 | 2026-09-14 | First version. |
+| r2 | 2026-09-17 | Status: not a proposal any more. A section says, per step, which of these tests exist and have run, where the evidence is, and what is left. No test's definition changed. |
+
+## Status as of 2026-09-17
+
+| Step | Tests | State |
+|---|---|---|
+| S1a, S1b | T1 (the invariant checker), §4.1, §4.2 | Written and run with the steps; merged (tdns #650, #656; tdns-mp #66, #67). The checker runs in every rig and testbed run since (stop criterion S3): 0 violations in all of them. |
+| S2 | §4.3 | Written and run; merged (tdns #659). |
+| S3 | §4.4 | Written and run; merged (tdns #664, tdns-mp #76). The property harness's seeded soak: 5,000 sequences, none failing. On the lab rig (2026-09-16/17): the control, nothing owned, equals the baseline on every build tried (verify 59/0 cold and warm, data 188/0); with one cell owned, the take, the adoption of the keys tdns had minted, a ZSK roll and a KSK roll through the machine, peers applying every distribution, validators never failing. Five findings, each with a test, merged as tdns-mp #82. |
+| S4 | §4.5 | Not started: the step is gated on every multi-provider zone being owned. |
+| S5 | T5.1 | Done: the inventory's goldens (tdns #671, tdns-mp #80) and the DNSKEY operation's and the KEYSTATE `foreign` message's (tdns #696). |
+| S5 | T5.2 | Done at every layer: decode in both directions (tdns #696), the agent ignoring an operation without key states, the signer leaving the row undecided and the DS set unknown (tdns-mp #83). |
+| S5 | T5.3, T5.6, T5.7 | Done (tdns #671, tdns-mp #80). |
+| S5 | T5.4 | The inventory push on every column change and the agent's DS intent: done (#80). The leader's sync following the DS set, a peer that does not lead asking for nothing: done as a request on the syncher's queue (tdns-mp #86). **Left:** the same seen by a parent, on the testbed; there is no fake parent in these tests, and that the UPDATE carries the DS set rests on the syncher's analysis against the DS intent. |
+| S5 | T5.5 | **Left:** a watch on the testbed at the cutover. |
+| S5 | T5.8 | The new leader asks once, and the explicit sync sends only a difference: done as a request (tdns-mp #86). **Left:** a re-election on the testbed. |
+| S6 | §4.7 | Not started: the step waits for a go. |
+
+Evidence (the suite summaries of every merged tree, the soak, the lab runs' outputs and series) is kept with the project's handover notes and progress log.
 
 ---
 
