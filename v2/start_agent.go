@@ -222,7 +222,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 	// When the local agent wins leader election: ensure we have a SIG(0) key,
 	// then publish KEY to combiner and sync to remote agents.
-	lem.SetOnLeaderElected(func(zone ZoneName) error {
+	leaderKeySetup := func(zone ZoneName) error {
 		zd, ok := Zones.Get(string(zone))
 		if !ok || zd == nil {
 			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
@@ -350,6 +350,18 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 
 		return nil
+	}
+	// The new leader also brings the parent in line with the zone (T5.8): a
+	// change the previous leader did not get to send is sent now, and with
+	// nothing to send the explicit sync sends nothing, so a hand-over
+	// neither loses an update nor repeats one. Asked whatever the key
+	// setup said: the sync has other schemes than the one that key is for.
+	lem.SetOnLeaderElected(func(zone ZoneName) error {
+		err := leaderKeySetup(zone)
+		if zd, ok := Zones.Get(string(zone)); ok && zd != nil && zd.Options[tdns.OptParentSync] {
+			conf.requestDelegationSync(string(zone), "this agent was elected the zone's delegation sync leader")
+		}
+		return err
 	})
 
 	// Agent-specific engines (the hsync data engine itself was constructed

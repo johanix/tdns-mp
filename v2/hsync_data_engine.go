@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"github.com/miekg/dns"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -132,9 +133,16 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	}
 	zd.SetLastKeyInventory(snap)
 	// the agent's DS-intent provider answers from the latest inventory
-	// (design §4.1, arrow 2)
+	// (design §4.1, arrow 2); a DS set that is known and not what it was
+	// goes to the parent through the leader's delegation sync, whatever
+	// else did or did not change (T5.4). An unknown set asks for nothing:
+	// the sync leaves the parent's DS alone then anyway.
 	if o := e.conf.InternalMp.KeyLifecycleOwner; o != nil {
+		before, _ := o.DSIntent(zd.ZoneData, dns.SHA256)
 		o.SetInventory(inventoryMsg.Zone, snap)
+		if after, err := o.DSIntent(zd.ZoneData, dns.SHA256); err == nil && after.Known && !sameDSIntent(before, after) {
+			e.conf.requestDelegationSync(inventoryMsg.Zone, "the zone's DS set changed")
+		}
 	}
 	changed, ds, err := zd.LocalDnskeysFromKeystate()
 	if err != nil || !changed {
