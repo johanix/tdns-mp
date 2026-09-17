@@ -60,7 +60,11 @@ type MPTransportBridge struct {
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
 	foreignKeyStates   map[ZoneName]map[AgentId][]core.KeyState
-	foreignSilentSaid  map[ZoneName]string // the silent agents last logged, per zone
+	// onKeyInventory records an inventory that answered this agent's own
+	// request as a pushed one is recorded (Config.noteKeyInventory); set
+	// where the agent's bridge is made.
+	onKeyInventory    func(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg)
+	foreignSilentSaid map[ZoneName]string // the silent agents last logged, per zone
 
 	// authorizedPeers returns the list of peer identities authorized via config.
 	// Injected at config time; role-specific (each role provides its own list).

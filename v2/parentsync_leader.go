@@ -560,6 +560,24 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	le.LeaderExpiry = state.LeaderExpiry
 	le.Active = false
 
+	// An agent that restarts inside its own term learns from its peers that
+	// it leads, and no election is held. It asks what an election's winner
+	// asks (the SIG(0) key, a delegation sync): the DS set may have changed
+	// while it was away, and a sync it had asked for before is gone with
+	// the process. The sync sends only a difference, so asking costs
+	// nothing when there is none.
+	if AgentId(state.Leader) == lem.localID && lem.onLeaderElected != nil && lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroup(groupHash); pg != nil {
+			for _, zone := range pg.Zones {
+				go func(z ZoneName) {
+					if err := lem.onLeaderElected(z); err != nil {
+						lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+					}
+				}(zone)
+			}
+		}
+	}
+
 	// Schedule re-election before leader expires
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()

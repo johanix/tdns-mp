@@ -219,4 +219,8 @@ type InternalMpConf struct {
 	// conf.MpConfig(); an atomic pointer because reloads store it while
 	// runtime goroutines read it.
 	mpConfig atomic.Pointer[MultiProviderConf]
+
+	// delegationSyncFailures: the zones whose last delegation sync failed,
+	// and how often, for the retries (mp_s5_leader_sync.go)
+	delegationSyncFailures delegationSyncFailures
 }
