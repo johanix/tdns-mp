@@ -148,6 +148,14 @@ func TestForeignKeyStatesReachTheRowThroughTheRealPath(t *testing.T) {
 	if len(keys) != 2 || keys[0].Provider != "p2" || keys[1].Provider != "p3" {
 		t.Fatalf("what the agent hands its signer: %+v, want p2's and p3's key with their labels", keys)
 	}
+	// an explicit empty list is a word ("none of my keys"): it replaces
+	// what that agent said before, where an absent field does not
+	probe := &MPTransportBridge{}
+	probe.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", wire(theirs.KeyTag()))
+	probe.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", KeyStates: []core.KeyState{}}})
+	if left := probe.foreignKeysFor(ZoneName(mpzd.ZoneName)); len(left) != 0 {
+		t.Errorf("after an explicit empty list the agent still hands on %+v", left)
+	}
 	// agent -> signer, as the message travels
 	msg, err := keystateAppMessage(&PeerKeystateRequest{SenderID: "agent.us.example.", Zone: mpzd.ZoneName, Signal: "foreign", ForeignKeys: keys, Timestamp: time.Now()}, "signer.us.example.")
 	if err != nil {

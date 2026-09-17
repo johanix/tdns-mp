@@ -13,11 +13,19 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+// foreignStateOmitted stands for a key its provider no longer mentions
+// while it still speaks of others: it has stopped serving the key (a
+// standby withdrawn, a removal under way), so the key's DS does not belong
+// at the parent any more, whatever was said before. The entry stays until
+// the row itself is gone.
+const foreignStateOmitted = "omitted"
 
 // foreignSaid is what a provider said about one of its keys.
 type foreignSaid struct {
@@ -56,6 +64,18 @@ func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
 		}
 		said[k.KeyTag] = foreignSaid{Provider: k.Provider, State: k.State, DS: k.DS}
 	}
+	// the latest word replaces the one before; a key a provider mentioned
+	// before and leaves out now, while it still speaks, is omitted: ds=0
+	speaking := map[string]bool{}
+	for _, s := range said {
+		speaking[s.Provider] = true
+	}
+	no := false
+	for kt, old := range l.foreign {
+		if _, still := said[kt]; !still && speaking[old.Provider] {
+			said[kt] = foreignSaid{Provider: old.Provider, State: foreignStateOmitted, DS: &no}
+		}
+	}
 	if err := l.saveForeign(said); err != nil {
 		return err
 	}
@@ -70,9 +90,6 @@ func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
 // the word), on Reload, and when the signers change (a provider that
 // stops signing: ds=0, E10).
 func (l *ZoneKeyLifecycle) applyForeignLocked() error {
-	if len(l.foreign) == 0 {
-		return nil
-	}
 	inv, err := tdns.GetKeyInventory(l.KDB, l.Zone)
 	if err != nil {
 		return fmt.Errorf("inventory of %s: %w", l.Zone, err)
@@ -82,16 +99,26 @@ func (l *ZoneKeyLifecycle) applyForeignLocked() error {
 		signers[p] = true
 	}
 	changed := false
+	rows := map[uint16]bool{}
 	for _, it := range inv {
 		if it.State != DnskeyStateForeign {
 			continue
 		}
+		rows[it.KeyTag] = true
 		said, ok := l.foreign[it.KeyTag]
-		if !ok {
+		want, decided := false, false
+		if ok {
+			want, decided = foreignDSFor(said, it.Flags&dns.SEP != 0, signers)
+		}
+		if !decided {
+			if it.DS == nil && it.Flags&dns.SEP != 0 {
+				l.noteUndecided(it.KeyTag, said.Provider)
+			}
 			continue
 		}
-		want, decided := foreignDSFor(said, it.Flags&dns.SEP != 0, signers)
-		if !decided || (it.DS != nil && *it.DS == want) {
+		delete(l.undecidedSince, it.KeyTag)
+		delete(l.undecidedTold, it.KeyTag)
+		if it.DS != nil && *it.DS == want {
 			continue
 		}
 		cols := tdns.KeyRowFlags{Pub: true, DS: sql.NullBool{Bool: want, Valid: true}}
@@ -101,10 +128,59 @@ func (l *ZoneKeyLifecycle) applyForeignLocked() error {
 		l.logf("key lifecycle: ds written on another provider's key", "zone", l.Zone, "keytag", it.KeyTag, "provider", said.Provider, "its state", said.State, "ds", want)
 		changed = true
 	}
+	// an omitted key whose row is gone has nothing left to decide
+	dropped := false
+	for kt, s := range l.foreign {
+		if s.State == foreignStateOmitted && !rows[kt] {
+			delete(l.foreign, kt)
+			dropped = true
+		}
+	}
+	for kt := range l.undecidedSince {
+		if !rows[kt] {
+			delete(l.undecidedSince, kt)
+			delete(l.undecidedTold, kt)
+		}
+	}
+	if dropped {
+		if err := l.saveForeign(l.foreign); err != nil {
+			return err
+		}
+	}
 	if changed {
 		l.Wire.KeysChanged(l.Zone)
 	}
 	return nil
+}
+
+// noteUndecided: another provider's KSK nobody has decided the ds of keeps
+// the zone's DS set unknown, so no CDS and no DS change reaches the parent
+// (design R9: a provider left on an older release blocks every KSK
+// change towards the parent). Said once per key, after the word has had
+// three margins to arrive, with the provider when it is known.
+func (l *ZoneKeyLifecycle) noteUndecided(keyid uint16, provider string) {
+	if l.undecidedSince == nil {
+		l.undecidedSince, l.undecidedTold = map[uint16]time.Time{}, map[uint16]bool{}
+	}
+	now := l.Clock.Now()
+	since, seen := l.undecidedSince[keyid]
+	if !seen {
+		l.undecidedSince[keyid] = now
+		return
+	}
+	wait := 3 * l.Policy.Margin
+	if wait <= 0 {
+		wait = 5 * time.Minute
+	}
+	if l.undecidedTold[keyid] || now.Before(since.Add(wait)) {
+		return
+	}
+	l.undecidedTold[keyid] = true
+	who := "a provider that has not been heard from"
+	if provider != "" {
+		who = "provider " + provider + ", which does not say"
+	}
+	l.Wire.Report(l.Zone, keyid, fmt.Sprintf("the KSK of %s whether its DS belongs at the parent: the zone's DS set stays unknown, and no CDS or DS change reaches the parent, until every signing provider runs a release that says", who))
 }
 
 // ForeignStates is what the providers said, by key tag, for the operator.

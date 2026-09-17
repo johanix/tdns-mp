@@ -60,6 +60,7 @@ type MPTransportBridge struct {
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
 	foreignKeyStates   map[ZoneName]map[AgentId][]core.KeyState
+	foreignSilentSaid  map[ZoneName]string // the silent agents last logged, per zone
 
 	// authorizedPeers returns the list of peer identities authorized via config.
 	// Injected at config time; role-specific (each role provides its own list).
@@ -2352,10 +2353,45 @@ func (tm *MPTransportBridge) foreignKeysFor(zone ZoneName) []core.ForeignKeyStat
 	return out
 }
 
+// logSilentAgents says which of the zone's agents have not said anything
+// about their keys (an older release, or not heard from since we
+// started): while one of them signs the zone its KSK stays undecided at
+// our signer and the zone's DS set unknown (design R9). Logged when the
+// set changes, not with every hand-over.
+func (tm *MPTransportBridge) logSilentAgents(zone ZoneName) {
+	all, err := tm.getAllAgentsForZone(zone)
+	if err != nil {
+		return
+	}
+	tm.foreignKeyStatesMu.Lock()
+	defer tm.foreignKeyStatesMu.Unlock()
+	var silent []string
+	for _, a := range all {
+		if _, said := tm.foreignKeyStates[zone][a]; !said {
+			silent = append(silent, string(a))
+		}
+	}
+	sort.Strings(silent)
+	now := strings.Join(silent, " ")
+	if tm.foreignSilentSaid == nil {
+		tm.foreignSilentSaid = map[ZoneName]string{}
+	}
+	if tm.foreignSilentSaid[zone] == now {
+		return
+	}
+	tm.foreignSilentSaid[zone] = now
+	if len(silent) == 0 {
+		lgTransport.Info("every agent of the zone has said what it holds its keys as", "zone", zone)
+		return
+	}
+	lgTransport.Warn("agents that have not said what they hold their keys as; a signing provider among them keeps the zone's DS set unknown", "zone", zone, "agents", silent)
+}
+
 // sendForeignKeysToSigner hands our signer what the other providers said
 // about their keys in the zone (KEYSTATE "foreign").
 func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 	keys := tm.foreignKeysFor(zone)
+	tm.logSilentAgents(zone)
 	if len(keys) == 0 {
 		return
 	}

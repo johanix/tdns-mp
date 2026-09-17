@@ -1,7 +1,10 @@
 package tdnsmp
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -162,5 +165,91 @@ func TestAProviderThatStopsSigningLosesItsDS(t *testing.T) {
 	}
 	if known, tags := dsSetTags(t, r); !known || len(tags) != 1 || !tags[k2] {
 		t.Errorf("the DS set after p3 left: known=%v %v, want p2's KSK alone", known, tags)
+	}
+}
+
+// The review's C1: the latest word replaces the one before. A key its
+// provider mentioned and now leaves out, while it still speaks of others,
+// is one it has stopped serving (a standby withdrawn with its DS still
+// wanted a moment ago): ds=0 until the row itself goes. A provider that is
+// not in the word at all has said nothing new, and its rows stand.
+func TestAKeyItsProviderNoLongerMentionsLosesItsDS(t *testing.T) {
+	yes := true
+	r := newDriverRig(t, "omitted.owned.example.", driverPolicy, "p2", "p3")
+	kept, dropped, others := foreignRow(t, r, 257), foreignRow(t, r, 257), foreignRow(t, r, 257)
+	if err := r.l.SetForeignStates([]core.ForeignKeyState{
+		said("p2", kept, KeyStateActive, &yes), said("p2", dropped, KeyStateStandby, &yes), said("p3", others, KeyStateActive, &yes)}); err != nil {
+		t.Fatal(err)
+	}
+	// p2 speaks again and leaves one key out; p3 is not in this word at all
+	if err := r.l.SetForeignStates([]core.ForeignKeyState{said("p2", kept, KeyStateActive, &yes)}); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[uint16]string{kept: "101", dropped: "100", others: "101"} {
+		if got := r.cols(k); got != want {
+			t.Errorf("key %d: columns %s, want %s", k, got, want)
+		}
+	}
+	// the row goes (the provider's DNSKEY left the zone): nothing is left
+	// to remember about it
+	if _, err := r.kdb.DB.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, r.l.Zone, int(dropped)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, fs := range r.l.ForeignStates() {
+		if fs.KeyTag == dropped {
+			t.Errorf("the omitted key is still remembered after its row went: %+v", fs)
+		}
+	}
+}
+
+// The review's C2 (design R9): a signing provider's KSK nobody has decided
+// the ds of keeps the DS set unknown, silently; the operator is told which
+// provider, once per key, after the word has had three margins to arrive.
+func TestAnUndecidedForeignKSKIsReportedWithItsProvider(t *testing.T) {
+	r := newDriverRig(t, "report.owned.example.", driverPolicy, "p2", "p3")
+	silent, unheard, zsk := foreignRow(t, r, 257), foreignRow(t, r, 257), foreignRow(t, r, 256)
+	if err := r.l.SetForeignStates([]core.ForeignKeyState{said("p3", silent, KeyStateActive, nil)}); err != nil {
+		t.Fatal(err)
+	}
+	r.tick("first look")
+	if len(r.wire.reports) != 0 {
+		t.Fatalf("reported at the first look: %v", r.wire.reports)
+	}
+	r.clock.Advance(3*driverPolicy.Margin + time.Minute)
+	r.tick("three margins on")
+	r.tick("and again")
+	var aboutSilent, aboutUnheard, aboutZSK int
+	for _, rep := range r.wire.reports {
+		switch {
+		case strings.HasPrefix(rep, fmt.Sprintf("%d:", silent)):
+			aboutSilent++
+			if !strings.Contains(rep, "provider p3") {
+				t.Errorf("the report does not name the provider: %s", rep)
+			}
+		case strings.HasPrefix(rep, fmt.Sprintf("%d:", unheard)):
+			aboutUnheard++
+			if !strings.Contains(rep, "not been heard from") {
+				t.Errorf("the report on a key nobody mentioned: %s", rep)
+			}
+		case strings.HasPrefix(rep, fmt.Sprintf("%d:", zsk)):
+			aboutZSK++
+		}
+	}
+	if aboutSilent != 1 || aboutUnheard != 1 || aboutZSK != 0 {
+		t.Errorf("reports: %d about the silent provider's KSK, %d about the unheard one, %d about a ZSK; want 1, 1, 0 (%v)", aboutSilent, aboutUnheard, aboutZSK, r.wire.reports)
+	}
+	// the provider says: decided, and nothing more to report
+	yes := true
+	if err := r.l.SetForeignStates([]core.ForeignKeyState{said("p3", silent, KeyStateActive, &yes), said("p2", unheard, KeyStateActive, &yes)}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(r.wire.reports)
+	r.clock.Advance(3*driverPolicy.Margin + time.Minute)
+	r.tick("decided")
+	if len(r.wire.reports) != before {
+		t.Errorf("reported after the providers said: %v", r.wire.reports[before:])
 	}
 }

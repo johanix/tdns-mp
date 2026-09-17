@@ -93,6 +93,10 @@ type ZoneKeyLifecycle struct {
 	rolling  string                 // the role whose promotion is a rollover, while it is applied
 	known    map[string]bool        // the other signers last seen, for the joiners
 	foreign  map[uint16]foreignSaid // what the other providers said about their keys (#58)
+	// another provider's KSK with no ds decided: since when, and whether
+	// the operator has been told (R9)
+	undecidedSince map[uint16]time.Time
+	undecidedTold  map[uint16]bool
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -393,7 +397,9 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 // it standby, active or retired-not-withdrawn), the row's state and other
 // columns untouched, and tells the surroundings like every other write:
 // the inventory goes out and the DS engine wakes, with no state change
-// (T5.4). What #58 learns from the wire arrives here.
+// (T5.4). The write of one row by hand; what #58 learns from the wire
+// goes through SetForeignStates and applyForeignLocked, which write the
+// same way.
 func (l *ZoneKeyLifecycle) SetForeignDS(keyid uint16, ds bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
