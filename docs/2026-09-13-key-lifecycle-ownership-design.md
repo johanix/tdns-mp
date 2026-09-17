@@ -21,6 +21,7 @@
 | r9 | 2026-09-14 | Status marks: the header states which steps are implemented, and the §6 staging table gains a Status column (S1a merged, S1b implemented and under merge, S2–S6 not started); §9 gains the measured sizes of the implemented steps. |
 | r10 | 2026-09-15 | Status: S2 implemented and merged (tdns #659); the S1b tdns-mp merge commit added; two S2-review items noted for S3. |
 | r11 | 2026-09-16 | Status: S3 implemented and merged (tdns #664 → 155ea6b7, tdns-mp #76 → 0dffb47), with its named leftovers; S5's first half implemented and merged (tdns #671 → a09e5cde, tdns-mp #80 → 5b56aa4), Q2 and Q9 open for the rest. |
+| r12 | 2026-09-17 | §5 item 4: what counts as "every signing provider has applied the key" on the wire, as the lab run of S3 and S5's first half showed it and tdns-mp #82 implements it (the transition table r8 carries the detail). |
 
 ---
 
@@ -335,6 +336,8 @@ In a multi-provider zone, the rows live on the signer: its own keys plus the for
    - published → standby only when the DNSKEY RRset has propagated.
    - Only a standby KSK gets `ds=1`.
    - Only a standby key is promoted to `sign=1`.
+
+   On the wire (r12, tdns-mp #82): the agent asks every HSYNC agent of the zone and sends the signer one aggregated answer per key. A pending answer is no answer. A provider that does not sign the zone answers "ignored" (its combiner applies no key of ours); that is final and no obstacle. A signing provider's "ignored" is a rejection: the two sides disagree about who signs, and the key is not there. A success covers every key of the distribution it does not reject: the combiner's `ok` means the whole REPLACE is in effect and its `done` list is the delta, so an unlisted key was already there; a partial answer counts only the keys it lists.
 5. **A zone with no other signing provider** has nobody to wait for: mpdist → published follows at once.
 6. **A rejected key** (proposal) stays in mpdist, and the rejection is surfaced in the log, the zone's status and the CLI. A tdns-mp command retries the distribution or withdraws the key. There is no automatic retreat.
 7. **Withdrawal:** set `ds=0`, wait for the parent, set `sign=0`, keep `pub=1` for the margin, ask tdns to strip the key's RRSIGs, set `pub=0`.
