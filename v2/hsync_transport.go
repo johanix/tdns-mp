@@ -2392,6 +2392,12 @@ func (tm *MPTransportBridge) logSilentAgents(zone ZoneName) {
 func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 	keys := tm.foreignKeysFor(zone)
 	tm.logSilentAgents(zone)
+	// Nothing to hand over. That is also the case when the last provider
+	// that spoke now says an explicit empty list: the flat set cannot
+	// carry "this provider has spoken and holds no key", so the signer
+	// keeps what it had until the rows go with the provider's DNSKEYs
+	// (transition table section 3). Our own sender never says that: an
+	// empty list is not encoded.
 	if len(keys) == 0 {
 		return
 	}
