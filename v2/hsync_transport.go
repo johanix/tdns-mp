@@ -2170,6 +2170,15 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	if _, expected := prop.ExpectedAgents[agentID]; !expected {
 		return true
 	}
+	// who signs is asked again while it is not known: the zone, or its
+	// HSYNC data, may not have been here yet when the tracking started
+	if prop.Signing == nil {
+		agents := make([]AgentId, 0, len(prop.ExpectedAgents))
+		for a := range prop.ExpectedAgents {
+			agents = append(agents, a)
+		}
+		prop.Signing = signingAgents(prop.Zone, agents)
+	}
 	if prop.Results == nil {
 		prop.Results = map[AgentId]map[uint16]string{}
 	}
@@ -2193,8 +2202,10 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	success := status == transport.ConfirmSuccess.String()
 	// "ignored" is a final answer too: a provider that does not sign the
 	// zone applies no DNSKEY of ours (its combiner serves the zone as it
-	// gets it from the signer), and says so. It is not an obstacle to the
-	// key: neither applied nor rejected, the peer has answered.
+	// gets it from the signer), and says so. From such a provider it is
+	// no obstacle to the key: neither applied nor rejected, the peer has
+	// answered. From a signing provider it rejects the key once every
+	// agent has answered (outcome): the key is not where it must be.
 	ignored := status == transport.ConfirmIgnored.String() && len(rejectedItems) == 0
 	reason := "rejected by " + source
 	if len(rejectedItems) > 0 {
