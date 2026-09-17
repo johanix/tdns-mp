@@ -1,9 +1,11 @@
 package tdnsmp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -199,5 +201,82 @@ func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
 	}
 	if p.Rejected {
 		t.Error("successes made the propagation rejected")
+	}
+}
+
+// The review of the lab fixes (C1): an ignored answer is no obstacle only
+// from a provider that does not sign the zone. A signing provider that
+// ignores our key does not have it (its combiner does not take us for a
+// signer: the two sides disagree), and design §5.4 wants the key at every
+// signing provider before it is published: that key is rejected, with the
+// reason. When who signs is not known here, an ignored answer counts as it
+// comes (the single-signer cell of the control run).
+func TestDnskeyPropagationOutcomeKnowsWhoSigns(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 256)
+	kt := ours.KeyTag()
+	run := func(signing map[AgentId]bool, a1, a2 string) *PendingDnskeyPropagation {
+		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
+		p := tm.pendingDnskeyPropagations["d1"]
+		p.Signing = signing
+		tm.ProcessDnskeyConfirmation("d1", "a1", a1, nil, nil)
+		tm.ProcessDnskeyConfirmation("d1", "a2", a2, nil, nil)
+		if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
+			t.Fatalf("answers %s and %s: the propagation is still pending", a1, a2)
+		}
+		return p
+	}
+	success, ignored := transport.ConfirmSuccess.String(), transport.ConfirmIgnored.String()
+
+	// one signing provider applied, one that does not sign ignored: propagated
+	propagated, _, rejected, _ := run(map[AgentId]bool{"a1": true}, success, ignored).outcome()
+	if len(propagated) != 1 || propagated[0] != kt || len(rejected) != 0 {
+		t.Errorf("signer applied, non-signer ignored: propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+	// the signing provider ignored the key: not propagated, and it says why
+	propagated, _, rejected, msg := run(map[AgentId]bool{"a1": true}, ignored, ignored).outcome()
+	if len(propagated) != 0 || len(rejected) != 1 || !strings.Contains(msg, "a1") || !strings.Contains(msg, "signers") {
+		t.Errorf("a signing provider ignored the key: propagated %v rejected %v msg %q, want it rejected naming a1", propagated, rejected, msg)
+	}
+	// nobody else signs (the single-signer cell): every ignored answer counts
+	propagated, _, rejected, _ = run(map[AgentId]bool{}, ignored, ignored).outcome()
+	if len(propagated) != 1 || len(rejected) != 0 {
+		t.Errorf("no other signer, both ignored: propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+	// who signs is not known here: as it comes
+	propagated, _, rejected, _ = run(nil, ignored, ignored).outcome()
+	if len(propagated) != 1 || len(rejected) != 0 {
+		t.Errorf("signers unknown, both ignored: propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+}
+
+// signingAgents reads who signs from the zone: an agent whose HSYNC3 label
+// is among the HSYNCPARAM signers; nil for a zone that is not here.
+func TestSigningAgentsComeFromTheZone(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	mpzd := signerTestZone(t, "peers.track.example.", kdb)
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("apex: %v", err)
+	}
+	hdr := func(rrtype uint16) dns.RR_Header {
+		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
+	}
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"us", "p2"}}}}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
+	var h3s []dns.RR
+	for label, id := range map[string]string{"us": "agent.us.example.", "p2": "agent.p2.example.", "p3": "agent.p3.example."} {
+		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: id, Upstream: "."}})
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
+	mpzd.Data.Set(mpzd.ZoneName, *apex)
+	mpzd.InstallInitialSnapshot()
+
+	got := signingAgents(ZoneName(mpzd.ZoneName), []AgentId{"agent.p2.example.", "agent.p3.example.", "agent.nobody.example."})
+	if got == nil || !got["agent.p2.example."] || got["agent.p3.example."] || got["agent.nobody.example."] || len(got) != 1 {
+		t.Errorf("signing agents %v, want p2's agent alone", got)
+	}
+	if got := signingAgents("absent.track.example.", []AgentId{"agent.p2.example."}); got != nil {
+		t.Errorf("a zone that is not here: %v, want nil (unknown)", got)
 	}
 }

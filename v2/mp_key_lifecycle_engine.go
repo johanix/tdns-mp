@@ -4,8 +4,9 @@
  * The key lifecycle engine of the signer: one driver per owned zone, the
  * Wire over the signer's surroundings, the ticks, and the KEYSTATE signals
  * from the agents routed to the drivers. The owner is registered before
- * tdns's MainInit; the zones named in the config are taken when the signer
- * starts (the S3 rollout, zone by zone).
+ * tdns's MainInit; a zone named in the config is taken once it is loaded
+ * with its DNSSEC policy bound, asked at the signer's start and again on
+ * every tick (the S3 rollout, zone by zone).
  */
 package tdnsmp
 
@@ -391,7 +392,8 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 	// A configured zone is taken once it is loaded with its DNSSEC policy
 	// bound, which happens after the engines start (the policy binds on
 	// the zone's first load); until then it waits, and Run asks again on
-	// every tick. A zone that is not multi-provider is refused for good.
+	// every tick. A zone that is not multi-provider is refused, said once,
+	// and looked at again on every tick: the option may come to it later.
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.waiting == nil {
@@ -399,7 +401,7 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 	}
 	for _, z := range mp.KeyLifecycleZones {
 		zone := dns.Fqdn(z)
-		if e.owner.taken(zone) || e.refused[zone] {
+		if e.owner.taken(zone) {
 			continue
 		}
 		zd, ok := tdns.Zones.Get(zone)
@@ -411,8 +413,10 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 			if e.refused == nil {
 				e.refused = map[string]bool{}
 			}
-			e.refused[zone] = true
-			lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", zone)
+			if !e.refused[zone] {
+				e.refused[zone] = true
+				lgSigner.Error("key lifecycle: key-lifecycle-zones names a zone that is not multi-provider; tdns keeps its keys", "zone", zone)
+			}
 			continue
 		case zd.DnssecPolicy == nil:
 			why = "its DNSSEC policy is not bound yet"
@@ -425,6 +429,7 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 			continue
 		}
 		delete(e.waiting, zone)
+		delete(e.refused, zone)
 		e.owner.Take(zone)
 		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", zone)
 	}

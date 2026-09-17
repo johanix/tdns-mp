@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2023,9 +2024,13 @@ type PendingDnskeyPropagation struct {
 	KeyTags        []uint16         // DNSKEY key tags being propagated
 	Removed        map[uint16]bool  // those of KeyTags the distribution removes
 	ExpectedAgents map[AgentId]bool // Agents we're waiting for (true = confirmed)
-	// Results is each agent's answer per key: "applied" or "rejected"; an
-	// agent has answered once every key has one.
-	Results      map[AgentId]map[uint16]string
+	// Results is each agent's answer per key: "applied", "rejected" or
+	// "ignored"; an agent has answered once every key has one.
+	Results map[AgentId]map[uint16]string
+	// Signing are those of ExpectedAgents whose provider signs the zone
+	// (its HSYNC identity's label is among the HSYNCPARAM signers); nil
+	// when the zone is not here to ask.
+	Signing      map[AgentId]bool
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
@@ -2052,10 +2057,68 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string
 		KeyTags:        keyTags,
 		Removed:        removed,
 		ExpectedAgents: expected,
+		Signing:        signingAgents(zone, agents),
 		CreatedAt:      time.Now(),
 	}
 
 	lgTransport.Info("tracking DNSKEY propagation", "zone", zone, "distributionID", distID, "agents", len(agents), "keyTags", len(keyTags))
+}
+
+// signingAgents: those of a zone's agents whose provider signs the zone.
+// nil when the zone or its HSYNC data is not here to ask; the tracker then
+// takes every answer as it comes.
+func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
+	mpzd, ok := Zones.Get(dns.Fqdn(string(zone)))
+	if !ok || mpzd == nil || mpzd.getHSYNCPARAM() == nil {
+		return nil
+	}
+	out := map[AgentId]bool{}
+	for _, a := range agents {
+		if matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(string(a))}); err == nil && matched && mpzd.isSigner(label) {
+			out[a] = true
+		}
+	}
+	return out
+}
+
+// outcome: each key's result once every agent has answered. A key any
+// agent rejected is rejected. So is a key a signing provider ignored: its
+// combiner applies no key of ours though HSYNCPARAM names it a signer (the
+// two sides disagree about who signs), so the key is not at a provider
+// whose answers it would sign (design §5.4: every signing provider has
+// applied the key). An ignored answer from a provider that does not sign
+// the zone is no obstacle. When who signs is not known here (Signing nil),
+// an ignored answer counts as it comes.
+func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected []uint16, rejectionMsg string) {
+	rejectionMsg = prop.RejectionMsg
+	agents := make([]string, 0, len(prop.Results))
+	for a := range prop.Results {
+		agents = append(agents, string(a))
+	}
+	sort.Strings(agents)
+	for _, kt := range prop.KeyTags {
+		bad := false
+		for _, a := range agents {
+			switch r := prop.Results[AgentId(a)][kt]; {
+			case r == "rejected":
+				bad = true
+			case r == "ignored" && prop.Signing[AgentId(a)]:
+				bad = true
+				if rejectionMsg == "" {
+					rejectionMsg = fmt.Sprintf("%s ignored the key, though its provider is one of the zone's signers", a)
+				}
+			}
+		}
+		switch {
+		case bad:
+			rejected = append(rejected, kt)
+		case prop.Removed[kt]:
+			removed = append(removed, kt)
+		default:
+			propagated = append(propagated, kt)
+		}
+	}
+	return propagated, removed, rejected, rejectionMsg
 }
 
 // ProcessDnskeyConfirmation checks if a confirmation is for a pending DNSKEY propagation.
@@ -2154,7 +2217,11 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			lgTransport.Info("DNSKEY confirmation applied a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "listed", doneTags[kt])
 		case ignored:
 			results[kt] = "ignored"
-			lgTransport.Info("DNSKEY confirmation: the peer does not apply our keys (not a signer); answered", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt)
+			if prop.Signing[agentID] {
+				lgTransport.Warn("DNSKEY confirmation: a signing provider ignored our key; its combiner does not take it for a signer of the zone", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt)
+			} else {
+				lgTransport.Info("DNSKEY confirmation: the peer does not apply our keys (not a signer); answered", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt)
+			}
 		}
 	}
 	if len(results) == len(prop.KeyTags) && len(prop.KeyTags) > 0 {
@@ -2174,24 +2241,7 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	lgTransport.Info("all agents answered the DNSKEY propagation", "zone", prop.Zone, "distributionID", distID, "agents", len(prop.ExpectedAgents), "rejected", prop.Rejected)
 	zone := prop.Zone
 	sentAt := prop.CreatedAt
-	rejectionMsg := prop.RejectionMsg
-	var propagated, removed, rejected []uint16
-	for _, kt := range prop.KeyTags {
-		anyRejected := false
-		for _, r := range prop.Results {
-			if r[kt] == "rejected" {
-				anyRejected = true
-			}
-		}
-		switch {
-		case anyRejected:
-			rejected = append(rejected, kt)
-		case prop.Removed[kt]:
-			removed = append(removed, kt)
-		default:
-			propagated = append(propagated, kt)
-		}
-	}
+	propagated, removed, rejected, rejectionMsg := prop.outcome()
 	delete(tm.pendingDnskeyPropagations, distID)
 
 	// Send KEYSTATE asynchronously (don't hold the mutex); the kind of

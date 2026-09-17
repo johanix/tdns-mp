@@ -617,6 +617,16 @@ func TestConfiguredZoneIsTakenOnceItsPolicyIsBound(t *testing.T) {
 	if _, w := e.waiting["missing.take.example."]; !w {
 		t.Error("the zone not loaded is not waiting")
 	}
+	// the refusal is said once and looked at again: the option given to
+	// the zone later (no restart) lets the next tick take it
+	plain.ZoneData.Options[tdns.OptMultiProvider] = true
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 2 {
+		t.Errorf("after the refused zone became multi-provider: %v, want it taken too", z)
+	}
+	if e.refused["plain.take.example."] {
+		t.Error("the zone is taken and still recorded as refused")
+	}
 }
 
 // Found on the lab (2026-09-16, finding 3): keys tdns minted before the
