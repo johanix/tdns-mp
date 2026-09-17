@@ -54,6 +54,19 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
 		return kdb.DSEngine(ctx)
 	})
+	// The resolver: the key machine asks it whether the parent still serves
+	// a retired KSK's DS (the transition table's E7). Only a signer that
+	// owns a zone has that question, so only it starts one. ImrEngine
+	// retries its own initialisation; until it has published, and for a
+	// signer without one, the machine's answer is "unknown" and a retired
+	// KSK waits.
+	if want, why := conf.signerResolverWanted(); want {
+		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
+			return conf.Config.ImrEngine(ctx, true)
+		})
+	} else if why != "" {
+		lgSigner.Warn("key lifecycle: no resolver in this signer; a retired KSK of an owned zone will wait for the operator", "why", why)
+	}
 	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
 		return tdns.UpdateHandler(ctx, conf.Config)
 	})
@@ -97,4 +110,19 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// (RegisterMPKeyLifecycleHooks).
 
 	return nil
+}
+
+// signerResolverWanted says whether this signer starts a resolver: it does
+// when its config names a zone whose key lifecycle it runs itself
+// (key-lifecycle-zones), unless imrengine.active turns the resolver off. why
+// is set when an owning signer goes without one.
+func (conf *Config) signerResolverWanted() (want bool, why string) {
+	mp := conf.MpConfig()
+	if mp == nil || len(mp.KeyLifecycleZones) == 0 {
+		return false, ""
+	}
+	if a := conf.Config.Imr.Active; a != nil && !*a {
+		return false, "imrengine.active is false"
+	}
+	return true, ""
 }
