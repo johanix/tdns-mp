@@ -13,44 +13,88 @@
 package tdnsmp
 
 import (
+	"fmt"
 	"sort"
+	"strings"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
+)
+
+// delegationSyncRetryDelay and delegationSyncRetries bound what happens
+// when the syncher's queue is full: the request is tried again after the
+// delay, that many times, and then given up with a warning (the next
+// change of the DS set, or an election, asks anew).
+var (
+	delegationSyncRetryDelay = 30 * time.Second
+	delegationSyncRetries    = 5
 )
 
 // requestDelegationSync asks the delegation syncher to bring the parent in
-// line with the zone, if this agent is the zone's elected leader (with no
+// line with the zone, if the zone syncs with its parent through its agents
+// (parentsync=agent) and this agent is the zone's elected leader (with no
 // election manager there is nobody else to be it). The request is an
 // explicit sync: analysis first, an update only for a difference, so
-// asking twice sends once. It does not wait: the caller is an engine's
-// loop. Reports whether a request was queued.
+// asking twice sends once. It does not wait: the callers are engines'
+// loops. Reports whether a request was queued now.
 func (conf *Config) requestDelegationSync(zone string, why string) bool {
+	return conf.requestDelegationSyncAttempt(zone, why, 0)
+}
+
+func (conf *Config) requestDelegationSyncAttempt(zone string, why string, attempt int) bool {
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || mpzd.ZoneData == nil || mpzd.DelegationSyncQ == nil {
+		return false
+	}
+	if !mpzd.Options[tdns.OptParentSync] {
+		lgEngine.Debug("the zone does not sync with its parent through its agents; no delegation sync asked for", "zone", zone, "why", why)
 		return false
 	}
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil && !lem.IsLeader(ZoneName(zone)) {
 		lgEngine.Debug("not the delegation sync leader; the leader syncs the parent", "zone", zone, "why", why)
 		return false
 	}
+	if queueExplicitDelegationSync(mpzd) {
+		lgEngine.Info("delegation sync requested", "zone", zone, "why", why, "attempt", attempt+1)
+		return true
+	}
+	if attempt >= delegationSyncRetries {
+		lgEngine.Warn("the delegation sync queue stayed full; the request is given up, the next change of the DS set or an election asks again", "zone", zone, "why", why, "attempts", attempt+1)
+		return false
+	}
+	lgEngine.Warn("the delegation sync queue is full; asking again shortly", "zone", zone, "why", why, "attempt", attempt+1, "in", delegationSyncRetryDelay)
+	time.AfterFunc(delegationSyncRetryDelay, func() { conf.requestDelegationSyncAttempt(zone, why, attempt+1) })
+	return false
+}
+
+// queueExplicitDelegationSync puts an explicit sync on the zone's queue
+// without waiting for room.
+func queueExplicitDelegationSync(mpzd *MPZoneData) bool {
 	select {
-	case mpzd.DelegationSyncQ <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zone, ZoneData: mpzd.ZoneData}:
-		lgEngine.Info("delegation sync requested", "zone", zone, "why", why)
+	case mpzd.DelegationSyncQ <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: mpzd.ZoneName, ZoneData: mpzd.ZoneData}:
 		return true
 	default:
-		lgEngine.Warn("the delegation sync queue is full; the request is dropped, the next change asks again", "zone", zone, "why", why)
 		return false
 	}
 }
 
-// sameDSIntent: both unknown, or both known with the same DS records.
+// sameDSIntent: both unknown, or both known with the same DS records, by
+// what a DS is (key tag, algorithm, digest type, digest), not by how the
+// record prints: a TTL is not a change of the DS set.
 func sameDSIntent(a, b tdns.DSIntent) bool {
 	if a.Known != b.Known || len(a.Set) != len(b.Set) {
 		return false
 	}
+	key := func(rr dns.RR) string {
+		if ds, ok := rr.(*dns.DS); ok {
+			return fmt.Sprintf("%d %d %d %s", ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToUpper(ds.Digest))
+		}
+		return rr.String()
+	}
 	as, bs := make([]string, len(a.Set)), make([]string, len(b.Set))
 	for i := range a.Set {
-		as[i], bs[i] = a.Set[i].String(), b.Set[i].String()
+		as[i], bs[i] = key(a.Set[i]), key(b.Set[i])
 	}
 	sort.Strings(as)
 	sort.Strings(bs)

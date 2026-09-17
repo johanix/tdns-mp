@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // Arrow 2's trigger (T5.4's leader half, T5.8): a DS set that changes with
@@ -156,8 +157,17 @@ func TestOnlyTheLeaderAsksAndANewLeaderAsksOnce(t *testing.T) {
 	}
 }
 
+// shortRetries makes the full-queue retry quick for a test, and restores it.
+func shortRetries(t *testing.T, delay time.Duration, retries int) {
+	t.Helper()
+	d, n := delegationSyncRetryDelay, delegationSyncRetries
+	delegationSyncRetryDelay, delegationSyncRetries = delay, retries
+	t.Cleanup(func() { delegationSyncRetryDelay, delegationSyncRetries = d, n })
+}
+
 // The queue is the syncher's; a full one must not stop the engine's loop.
 func TestAFullSyncQueueDoesNotBlockTheEngine(t *testing.T) {
+	shortRetries(t, time.Millisecond, 1)
 	r := newLeaderSyncRig(t, "full.sync.example.")
 	r.leader("agent.us.example.")
 	r.mpzd.DelegationSyncQ = make(chan tdns.DelegationSyncRequest) // nobody reads
@@ -170,5 +180,103 @@ func TestAFullSyncQueueDoesNotBlockTheEngine(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the request blocked on a full queue")
+	}
+}
+
+// The review's C2: a request that found the queue full is asked again
+// shortly, a bounded number of times, so the last change in a burst is
+// not left waiting for the next one.
+func TestARequestThatFoundTheQueueFullIsAskedAgain(t *testing.T) {
+	shortRetries(t, 20*time.Millisecond, 5)
+	r := newLeaderSyncRig(t, "retry.sync.example.")
+	r.leader("agent.us.example.")
+	q := make(chan tdns.DelegationSyncRequest) // no room, and nobody reading yet
+	r.mpzd.DelegationSyncQ = q
+	if r.conf.requestDelegationSync(r.mpzd.ZoneName, "test") {
+		t.Fatal("a request was reported queued on a queue with no room")
+	}
+	select {
+	case req := <-q: // the syncher gets to it
+		if req.Command != "EXPLICIT-SYNC-DELEGATION" || req.ZoneName != r.mpzd.ZoneName {
+			t.Errorf("the retried request: %+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the request was not asked again")
+	}
+	// the leadership moves away before the retry: nothing is asked for a
+	// zone this agent no longer leads
+	if r.conf.requestDelegationSync(r.mpzd.ZoneName, "test") {
+		t.Fatal("queued with no room")
+	}
+	r.leader("agent.p2.example.")
+	select {
+	case req := <-q:
+		t.Errorf("a retry asked for a zone this agent no longer leads: %+v", req)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// The review's C1: both callers go through one gate. A zone that does not
+// sync with its parent through its agents asks for nothing, from an
+// inventory or at an election; nor does an inventory from a signer that
+// does not run the zone's key lifecycle, whose DS set is not the syncher's.
+func TestOnlyAParentsyncZoneWithAnOwningSignerAsks(t *testing.T) {
+	yes := true
+	r := newLeaderSyncRig(t, "gate.sync.example.")
+	r.leader("agent.us.example.")
+	ksk := invItem(t, r.mpzd.ZoneName, 257, KeyStateActive, &yes)
+
+	r.mpzd.Options[tdns.OptParentSync] = false
+	r.inventory(ksk)
+	if r.conf.requestDelegationSync(r.mpzd.ZoneName, "this agent was elected") {
+		t.Error("an election asked for a zone that does not sync with its parent through its agents")
+	}
+	if n := r.requests(t); n != 0 {
+		t.Errorf("a zone without parentsync=agent asked for %d syncs", n)
+	}
+
+	r.mpzd.Options[tdns.OptParentSync] = true
+	next := invItem(t, r.mpzd.ZoneName, 257, KeyStateStandby, &yes)
+	r.e.handleKeystateInventory(context.Background(), "agent.us.example.", &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: r.mpzd.ZoneName, Inventory: []KeyInventoryItem{ksk, next}, Owned: false}, r.sdq, nil)
+	if n := r.requests(t); n != 0 {
+		t.Errorf("an inventory from a signer that does not own the zone's keys asked for %d syncs", n)
+	}
+	// the zone is taken: the same keys, now from an owning signer. The DS
+	// set is the syncher's from here on, so this asks, with no key changed.
+	r.inventory(ksk, next)
+	if n := r.requests(t); n != 1 {
+		t.Errorf("the take, every key as it was: %d sync requests, want 1", n)
+	}
+}
+
+// The review's N1 and N2: the combiner's hint does not wait for room on
+// the queue either; and a DS set is the same set whatever its TTLs say.
+func TestCombinerHintDoesNotBlockAndTTLsAreNotTheDSSet(t *testing.T) {
+	r := newLeaderSyncRig(t, "hint.sync.example.")
+	r.leader("agent.us.example.")
+	r.mpzd.DelegationSyncQ = make(chan tdns.DelegationSyncRequest) // nobody reads
+	done := make(chan struct{})
+	go func() {
+		r.e.handleStatusUpdate(&StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the combiner's hint blocked on a full queue")
+	}
+
+	k := testDnskey(t, r.mpzd.ZoneName, 257)
+	a, b := k.ToDS(dns.SHA256), k.ToDS(dns.SHA256)
+	b.Hdr.Ttl = a.Hdr.Ttl + 300
+	if !sameDSIntent(tdns.DSIntent{Known: true, Set: []dns.RR{a}}, tdns.DSIntent{Known: true, Set: []dns.RR{b}}) {
+		t.Error("a TTL alone made the DS set another set")
+	}
+	other := testDnskey(t, r.mpzd.ZoneName, 257).ToDS(dns.SHA256)
+	if sameDSIntent(tdns.DSIntent{Known: true, Set: []dns.RR{a}}, tdns.DSIntent{Known: true, Set: []dns.RR{other}}) {
+		t.Error("another key's DS is the same set")
+	}
+	if sameDSIntent(tdns.DSIntent{}, tdns.DSIntent{Known: true}) {
+		t.Error("unknown and known-empty are the same")
 	}
 }
