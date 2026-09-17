@@ -1,3 +1,13 @@
+# NOT USED UNDER THIS NAME. The build reads a file called algs.list, and
+# there is none by default: tdns-mpsigner is then built with the classical,
+# built-in DNSSEC algorithms only, tdns-genalgs is not run and no
+# dnssec-algorithms checkout is needed.
+#
+# Rename (or copy) this file to algs.list to declare which PQ-DNSSEC
+# algorithms tdns-mpsigner will include support for: every name listed
+# below is then resolved and linked in at the next build. Trim the list to
+# the algorithms wanted; those backed by a C library need it installed.
+#
 # Algorithms tdns-mpsigner links an implementation for.
 #
 # The same registry, names and codepoints as every tdns binary, resolved by
