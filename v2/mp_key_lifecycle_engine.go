@@ -357,6 +357,25 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	return true
 }
 
+// Foreign hands the zone's driver what the other providers said about
+// their keys (the agent's KEYSTATE "foreign", tdns-mp #58). Reports
+// whether the zone is owned: for one that is not, nobody writes ds on the
+// foreign rows, and the word is dropped.
+func (e *KeyLifecycleEngine) Foreign(zone string, keys []core.ForeignKeyState) bool {
+	l, owned := e.driverState(zone)
+	if !owned {
+		return false
+	}
+	if l == nil {
+		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
+		return true
+	}
+	if err := l.SetForeignStates(keys); err != nil {
+		lgSigner.Error("key lifecycle: recording the other providers' key states failed", "zone", zone, "err", err)
+	}
+	return true
+}
+
 // Run ticks every owned zone until ctx ends.
 func (e *KeyLifecycleEngine) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
