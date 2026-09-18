@@ -325,6 +325,25 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 	return local
 }
 
+// recordRequestedInventory records an inventory that answered this agent's
+// own request as a pushed one is recorded: the snapshot with its Owned mark,
+// the owner's DS intent, and a sync asked of the leader when the DS set is
+// not what it was (Config.noteKeyInventory, through the bridge's hook).
+// Without the hook (a role with no owner) it keeps the snapshot alone.
+func (mpzd *MPZoneData) recordRequestedInventory(ctx context.Context, tm *MPTransportBridge, inv *KeystateInventoryMsg) {
+	if tm != nil && tm.onKeyInventory != nil {
+		tm.onKeyInventory(ctx, mpzd, inv)
+		return
+	}
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{
+		SenderID:  inv.SenderID,
+		Zone:      inv.Zone,
+		Inventory: inv.Inventory,
+		Owned:     inv.Owned,
+		Received:  time.Now(),
+	})
+}
+
 // RequestAndWaitForKeyInventory sends an RFI KEYSTATE to the signer and waits
 // for the inventory response. Uses the inventory to populate zd.RemoteDNSKEYs
 // by matching foreign key tags against the actual DNSKEY RRset in the zone.
@@ -374,13 +393,7 @@ func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *M
 			return
 		}
 
-		// Store the inventory snapshot for diagnostics
-		mpzd.SetLastKeyInventory(&KeyInventorySnapshot{
-			SenderID:  inv.SenderID,
-			Zone:      inv.Zone,
-			Inventory: inv.Inventory,
-			Received:  time.Now(),
-		})
+		mpzd.recordRequestedInventory(ctx, tm, inv)
 
 		// Build set of foreign key tags from the inventory
 		foreignKeyTags := make(map[uint16]bool)

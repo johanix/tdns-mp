@@ -10,8 +10,9 @@
 |---|---|---|
 | r1 | 2026-09-14 | First version. |
 | r2 | 2026-09-17 | Status: not a proposal any more. A section says, per step, which of these tests exist and have run, where the evidence is, and what is left. No test's definition changed. |
+| r3 | 2026-09-18 | Status: T5.4 seen by a parent on the testbed; T5.8's restart cases; what is left of each. No test's definition changed. |
 
-## Status as of 2026-09-17
+## Status as of 2026-09-18
 
 | Step | Tests | State |
 |---|---|---|
@@ -22,9 +23,9 @@
 | S5 | T5.1 | Done: the inventory's goldens (tdns #671, tdns-mp #80) and the DNSKEY operation's and the KEYSTATE `foreign` message's (tdns #696). |
 | S5 | T5.2 | Done at every layer: decode in both directions (tdns #696), the agent ignoring an operation without key states, the signer leaving the row undecided and the DS set unknown (tdns-mp #83). |
 | S5 | T5.3, T5.6, T5.7 | Done (tdns #671, tdns-mp #80). |
-| S5 | T5.4 | The inventory push on every column change and the agent's DS intent: done (#80). The leader's sync following the DS set, a peer that does not lead asking for nothing: done as a request on the syncher's queue (tdns-mp #86). **Left:** the same seen by a parent, on the testbed; there is no fake parent in these tests, and that the UPDATE carries the DS set rests on the syncher's analysis against the DS intent. |
+| S5 | T5.4 | The inventory push on every column change and the agent's DS intent: done (#80). The leader's sync following the DS set, a peer that does not lead asking for nothing: done as a request on the syncher's queue (tdns-mp #86). **Seen by a parent on the testbed** (2026-09-17): the leader's SIG(0) UPDATE carried the three signing providers' DS, and the parent applied them, the served CDS set exactly; the two peers that did not lead sent nothing (the test rig with its parent knob, labstuff #538). Three ways the ask got lost showed first and are closed (tdns-mp #88). **Left:** a `ds`-only change reaching the parent (a KSK roll on the testbed, running), and the case of a leader that does not sign the zone (design r18, open). |
 | S5 | T5.5 | **Left:** a watch on the testbed at the cutover. |
-| S5 | T5.8 | The new leader asks once, and the explicit sync sends only a difference: done as a request (tdns-mp #86). **Left:** a re-election on the testbed. |
+| S5 | T5.8 | The new leader asks once, and the explicit sync sends only a difference: done as a request (tdns-mp #86); a leader that restarts inside its term and learns from its peers that it leads asks too, and the inventory it requests at its start feeds its DS set (tdns-mp #88, from the testbed). **Left:** a re-election on the testbed with a DS at the parent to keep (running). |
 | S6 | §4.7 | Not started: the step waits for a go. |
 
 Evidence (the suite summaries of every merged tree, the soak, the lab runs' outputs and series) is kept with the project's handover notes and progress log.

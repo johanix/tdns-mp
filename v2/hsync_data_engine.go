@@ -5,9 +5,6 @@ package tdnsmp
 
 import (
 	"context"
-	tdns "github.com/johanix/tdns/v2"
-	"github.com/miekg/dns"
-	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
 )
@@ -116,37 +113,7 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	if !exists {
 		return
 	}
-	snap := &KeyInventorySnapshot{
-		SenderID:  inventoryMsg.SenderID,
-		Zone:      inventoryMsg.Zone,
-		Inventory: inventoryMsg.Inventory,
-		Owned:     inventoryMsg.Owned,
-		Received:  time.Now(),
-	}
-	prev := zd.GetLastKeyInventory()
-	zd.SetLastKeyInventory(snap)
-	// the agent's DS-intent provider answers from the latest inventory
-	// (design §4.1, arrow 2); a DS set that is known and not what it was
-	// goes to the parent through the leader's delegation sync, whatever
-	// else did or did not change (T5.4). An unknown set asks for nothing:
-	// the sync leaves the parent's DS alone then anyway.
-	// Only an inventory from a signer that runs the zone's key lifecycle
-	// states the DS set: the syncher's DS intent is the owner's for such a
-	// zone alone, so for any other the request would find nothing to act on.
-	// What the DS set was counts only if the inventory before this one came
-	// from an owning signer too: a zone that has just been taken had no DS
-	// set the syncher would act on, whatever its keys were, so the take asks
-	// for a sync even with every key as it was.
-	if o := e.conf.InternalMp.KeyLifecycleOwner; o != nil {
-		var before tdns.DSIntent
-		if prev != nil && prev.Owned {
-			before, _ = o.DSIntent(zd.ZoneData, dns.SHA256)
-		}
-		o.SetInventory(inventoryMsg.Zone, snap)
-		if after, err := o.DSIntent(zd.ZoneData, dns.SHA256); inventoryMsg.Owned && err == nil && after.Known && !sameDSIntent(before, after) {
-			e.conf.requestDelegationSync(ctx, inventoryMsg.Zone, "the zone's DS set changed")
-		}
-	}
+	e.conf.noteKeyInventory(ctx, zd, inventoryMsg)
 	changed, ds, err := zd.LocalDnskeysFromKeystate()
 	if err != nil || !changed {
 		return
