@@ -37,7 +37,8 @@ type hProvider struct {
 	appliedBy    map[uint16]map[string]bool // key -> providers whose applied confirmation was delivered
 	expectedAt   map[uint16][]string        // key -> the other signers when it was last distributed
 	rejected     map[uint16]bool
-	rejectedLate map[uint16]bool // a joiner's rejection of a key already serving
+	rejectedRR   map[uint16]string // the rejected key's DNSKEY RR: the rejection was the key's, not the tag's
+	rejectedLate map[uint16]bool   // a joiner's rejection of a key already serving
 	minted       map[uint16]bool
 	signed       map[uint16]bool // keys seen with sign=1
 }
@@ -141,7 +142,7 @@ func newMPHarness(t *testing.T, seed uint64, n int, pol LifecyclePolicy) *mpHarn
 		kdb := newMPTestKeyDB(t)
 		zd := signerTestZone(t, zone, kdb)
 		p := &hProvider{id: id, zone: zone, kdb: kdb, zd: zd, appliedBy: map[uint16]map[string]bool{}, expectedAt: map[uint16][]string{},
-			rejected: map[uint16]bool{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{}}
+			rejected: map[uint16]bool{}, rejectedRR: map[uint16]string{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{}}
 		p.wire = &harnessWire{h: h, me: p, fakeWire: *newFakeWire()}
 		p.driver = NewZoneKeyLifecycle(zone, kdb, h.clock, pol, p.wire)
 		pid := id
@@ -211,10 +212,12 @@ func (h *mpHarness) deliver() {
 			if stateBefore == KeyStateMpdist {
 				// a rejection of a key in the pipeline: the machine holds it (P8)
 				from.rejected[m.keyid] = true
+				from.rejectedRR[m.keyid] = m.keyrr
 			} else {
 				// a joiner's rejection of a key already serving is reported,
 				// not retreated from (§5.6): the operator retries or withdraws
 				from.rejectedLate[m.keyid] = true
+				from.rejectedRR[m.keyid] = m.keyrr
 			}
 		}
 	}
@@ -236,6 +239,26 @@ func (h *mpHarness) inventory(p *hProvider) []tdns.KeyInventoryItem {
 		h.t.Fatal(err)
 	}
 	return inv
+}
+
+// isRejected: the key is one a peer rejected. The rejection was the key's,
+// not its tag's: a fresh key of the zone may carry the tag of a rejected
+// key (a 16-bit key tag collision; the seeded runs saw three in sixteen
+// runs, each the replacement minted at the drain for the rejected key it
+// replaced, whose row it took over), and it is not the rejected key.
+func (p *hProvider) isRejected(it tdns.KeyInventoryItem) bool {
+	return p.rejected[it.KeyTag] && samePublicKey(p.rejectedRR[it.KeyTag], it.KeyRR)
+}
+
+func samePublicKey(a, b string) bool {
+	ra, erra := dns.NewRR(a)
+	rb, errb := dns.NewRR(b)
+	if erra != nil || errb != nil {
+		return false
+	}
+	ka, oka := ra.(*dns.DNSKEY)
+	kb, okb := rb.(*dns.DNSKEY)
+	return oka && okb && ka.PublicKey == kb.PublicKey && ka.Algorithm == kb.Algorithm
 }
 
 // checkAll: tdns's key row invariants and P1-P9 on every provider.
@@ -280,12 +303,15 @@ func (h *mpHarness) checkAll(step string) {
 				h.t.Errorf("%s: %s key %d (%s, flags %d) has ds=1 (P2)", step, p.id, it.KeyTag, it.State, it.Flags)
 			}
 			// P8: a rejected key never promoted
-			if p.rejected[it.KeyTag] && (it.Sign || it.State == KeyStateStandby || it.State == KeyStatePublished) {
+			if p.rejected[it.KeyTag] && !p.isRejected(it) {
+				h.t.Logf("%s: %s key %d (%s) carries the tag of a rejected key and is another key: a key tag collision, and the rejected key's row is gone", step, p.id, it.KeyTag, it.State)
+			}
+			if p.isRejected(it) && (it.Sign || it.State == KeyStateStandby || it.State == KeyStatePublished) {
 				h.t.Errorf("%s: %s rejected key %d is %s (P8)", step, p.id, it.KeyTag, it.State)
 			}
 			// P7: alone, never in mpdist or mpremove (a rejected key waits
 			// for the operator whoever is left, P8)
-			if len(p.wire.OtherSigners(p.zone)) == 0 && !p.rejected[it.KeyTag] && (it.State == KeyStateMpdist || it.State == KeyStateMpremove) {
+			if len(p.wire.OtherSigners(p.zone)) == 0 && !p.isRejected(it) && (it.State == KeyStateMpdist || it.State == KeyStateMpremove) {
 				h.t.Errorf("%s: %s alone has key %d in %s (P7)", step, p.id, it.KeyTag, it.State)
 			}
 		}
@@ -400,6 +426,64 @@ func TestHarnessThreeProvidersRollAKSK(t *testing.T) {
 			if it.State == DnskeyStateForeign && it.KeyTag == old {
 				t.Errorf("%s still holds the removed KSK %d as foreign", p.id, old)
 			}
+		}
+	}
+}
+
+// A fresh key of the zone may carry the tag of a rejected key: a 16-bit key
+// tag collision, seen three times in sixteen runs of the seeded runs, each
+// the replacement minted at the drain for the rejected key it replaced,
+// whose row it took over (the store replaces on the unique zone and tag).
+// The fresh key goes published and standby as it should. The harness knew
+// the rejection by tag and called that a promoted rejected key (P8). It
+// knows a rejected key by its material now.
+func TestHarnessKnowsARejectedKeyByItsMaterialNotItsTag(t *testing.T) {
+	h := newMPHarness(t, 3, 2, harnessPolicy)
+	p1 := h.providers[0]
+	h.tickAll("mint") // each provider mints its KSK and ZSK and distributes them
+	var ksk, zsk uint16
+	found := 0
+	for _, it := range h.inventory(p1) {
+		if it.State == KeyStateMpdist {
+			if it.Flags&dns.SEP != 0 {
+				ksk = it.KeyTag
+			} else {
+				zsk = it.KeyTag
+			}
+			found++
+		}
+	}
+	if found != 2 {
+		t.Fatalf("p1 has %d keys in distribution, want its KSK and ZSK", found)
+	}
+	h.answer = func(from, to string, keyid uint16) string {
+		if from == "p1" && keyid == ksk {
+			return "rejected"
+		}
+		return "applied"
+	}
+	h.deliver()
+	if !p1.rejected[ksk] || p1.rejectedRR[ksk] == "" {
+		t.Fatalf("p2's rejection of p1's KSK %d was not recorded with the key", ksk)
+	}
+	// the ZSK, applied and on its way, gets the rejected KSK's mark as a
+	// fresh key with a colliding tag would: the mark names the KSK's
+	// material, which the ZSK is not
+	p1.rejected[zsk] = true
+	p1.rejectedRR[zsk] = p1.rejectedRR[ksk]
+	h.clock.Advance(harnessPolicy.PropagationDelay + time.Hour + time.Second)
+	h.tickAll("propagated")
+	if st := mpKeyState(t, p1.kdb, p1.zone, zsk); st != KeyStateStandby && st != KeyStateActive {
+		t.Fatalf("p1's ZSK %d is %s, want it promoted (standby or active)", zsk, st)
+	}
+	h.checkAll("a fresh key with a rejected tag")
+	if t.Failed() {
+		t.Fatalf("the ZSK %d, another key with a rejected key's tag, was called a promoted rejected key", zsk)
+	}
+	// the rejected KSK itself is still known as rejected, in mpdist
+	for _, it := range h.inventory(p1) {
+		if it.KeyTag == ksk && !p1.isRejected(it) {
+			t.Errorf("the rejected KSK %d is no longer known as rejected", ksk)
 		}
 	}
 }
