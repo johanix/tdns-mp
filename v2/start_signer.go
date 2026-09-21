@@ -31,6 +31,11 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	conf.SetupMPSignerRoutes(ctx, apirouter)
 
 	kdb := conf.Config.Internal.KeyDB
+	// The DS engine's queue, before any engine that can sign a zone: the
+	// refresh engine's first load may sign one and say KeysChanged, which
+	// is a silent no-op while the queue is not there (tdns makes it only
+	// for a KeyDB that exists at its MainInit; this one came after).
+	ensureDSEngineQueue(kdb)
 
 	// --- tdns engines needed by the mpsigner ---
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
@@ -50,8 +55,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	})
 	// tdns's DS engine: the CDS of an owned zone follows its DS set between
 	// transfers too (the machine's KeysChanged wakes it; key lifecycle
-	// ownership design §4.1, arrow 1; tdns-mp #55)
-	ensureDSEngineQueue(kdb)
+	// ownership design §4.1, arrow 1; tdns-mp #55); its queue was made above
 	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
 		return kdb.DSEngine(ctx)
 	})
