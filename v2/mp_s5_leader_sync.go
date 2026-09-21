@@ -177,8 +177,12 @@ func (conf *Config) delegationSyncFailedWith(ctx context.Context, zone string, c
 		delete(f.waiting, zone)
 		f.mu.Unlock()
 		if !conf.requestDelegationSync(ctx, zone, "the last delegation sync failed") {
-			// not the leader any more, the zone gone, or the engine ended:
-			// the chain ends here, and whoever leads now has its own
+			// The ask was not queued now: not the leader any more, the
+			// zone gone, the engine ended, or the syncher's queue full
+			// (the ask retries the queue by itself for a while). This
+			// chain ends here: whoever leads now has its own, and a sync
+			// that fails after a queued retry starts a new chain from the
+			// first delay.
 			conf.delegationSyncSucceeded(zone)
 		}
 	})

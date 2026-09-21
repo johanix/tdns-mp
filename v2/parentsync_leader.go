@@ -91,6 +91,7 @@ func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members [
 		le.Active = false
 		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8])
 		lem.scheduleGroupReelection(le, groupHash, members, zones)
+		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
 		le.mu.Unlock()
 
 		if lem.onLeaderElected != nil {
@@ -448,6 +449,9 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 
 	isUs := agreedWinner == lem.localID
 	lgElect.Info("group leader elected", "group", groupHash[:8], "leader", agreedWinner, "is_us", isUs, "term", term, "zones", len(zones))
+	if isUs {
+		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
+	}
 
 	lem.scheduleGroupReelection(le, groupHash, members, zones)
 	le.mu.Unlock()
@@ -547,27 +551,33 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	le.mu.Lock()
 	defer le.mu.Unlock()
 
-	if uint64(state.Term) <= le.Term {
+	if uint64(state.Term) < le.Term {
 		return
 	}
+	news := uint64(state.Term) > le.Term
+	if news {
+		lgElect.Info("accepted leader from gossip",
+			"group", groupHash[:8], "leader", state.Leader,
+			"term", state.Term, "expiry", state.LeaderExpiry)
 
-	lgElect.Info("accepted leader from gossip",
-		"group", groupHash[:8], "leader", state.Leader,
-		"term", state.Term, "expiry", state.LeaderExpiry)
-
-	le.Leader = AgentId(state.Leader)
-	le.Term = uint64(state.Term)
-	le.LeaderExpiry = state.LeaderExpiry
-	le.Active = false
+		le.Leader = AgentId(state.Leader)
+		le.Term = uint64(state.Term)
+		le.LeaderExpiry = state.LeaderExpiry
+		le.Active = false
+	}
 
 	// An agent that restarts inside its own term learns from its peers that
 	// it leads, and no election is held. It asks what an election's winner
 	// asks (the SIG(0) key, a delegation sync): the DS set may have changed
 	// while it was away, and a sync it had asked for before is gone with
 	// the process. The sync sends only a difference, so asking costs
-	// nothing when there is none.
-	if AgentId(state.Leader) == lem.localID && lem.onLeaderElected != nil && lem.providerGroupMgr != nil {
+	// nothing when there is none. It asks once per term, and only once the
+	// group is known: gossip heard before this agent's groups are
+	// registered asks nothing yet, and the same term's next word asks then.
+	// A term this agent won by election has asked already.
+	if le.Leader == lem.localID && le.askedTerm != le.Term && lem.onLeaderElected != nil && lem.providerGroupMgr != nil {
 		if pg := lem.providerGroupMgr.GetGroup(groupHash); pg != nil {
+			le.askedTerm = le.Term
 			for _, zone := range pg.Zones {
 				go func(z ZoneName) {
 					if err := lem.onLeaderElected(z); err != nil {
@@ -576,6 +586,9 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 				}(zone)
 			}
 		}
+	}
+	if !news {
+		return
 	}
 
 	// Schedule re-election before leader expires

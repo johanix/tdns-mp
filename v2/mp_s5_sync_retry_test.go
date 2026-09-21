@@ -139,6 +139,40 @@ func TestLeadershipLearntFromGossipAsksLikeAnElectionWon(t *testing.T) {
 		t.Errorf("the same term again asked for %s once more", z)
 	case <-time.After(50 * time.Millisecond):
 	}
+
+	// gossip of another group, heard before the group is registered (an
+	// agent that has just started): nothing to ask for yet
+	const other = "fedcba9876543210"
+	lem.ApplyGossipElection(other, GroupElectionState{Leader: "agent.us.example.", Term: 5, LeaderExpiry: expiry})
+	select {
+	case z := <-asked:
+		t.Fatalf("leadership of a group not yet known asked for %s", z)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// the group is registered, and the same term is heard again: asked once
+	pgm.mu.Lock()
+	pgm.Groups[other] = &ProviderGroup{GroupHash: other, Zones: []ZoneName{"other.example."}}
+	pgm.mu.Unlock()
+	lem.ApplyGossipElection(other, GroupElectionState{Leader: "agent.us.example.", Term: 5, LeaderExpiry: expiry})
+	select {
+	case z := <-asked:
+		if z != "other.example." {
+			t.Errorf("asked for %s", z)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the same term, heard once the group was known, asked for nothing")
+	}
+	lem.ApplyGossipElection(other, GroupElectionState{Leader: "agent.us.example.", Term: 5, LeaderExpiry: expiry})
+	select {
+	case z := <-asked:
+		t.Errorf("the same term a third time asked for %s once more", z)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// a peer's same-term claim changes nothing: the accepted leader stands
+	lem.ApplyGossipElection(other, GroupElectionState{Leader: "agent.p2.example.", Term: 5, LeaderExpiry: expiry})
+	if l := lem.groupElections[other].Leader; l != "agent.us.example." {
+		t.Errorf("a same-term claim by a peer replaced the accepted leader: %s", l)
+	}
 }
 
 // An agent that has just started asks its signer for the inventory, and the

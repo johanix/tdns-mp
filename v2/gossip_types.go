@@ -98,6 +98,7 @@ type LeaderElection struct {
 	VoteTimer     *time.Timer
 	ConfirmTimer  *time.Timer
 	ReelectTimer  *time.Timer
+	askedTerm     uint64 // the term in which this agent, leading, last asked what an election's winner asks (once per term)
 }
 
 // LeaderElectionManager coordinates leader election across all zones.
