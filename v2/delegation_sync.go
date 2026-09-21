@@ -122,6 +122,11 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
+					// the leader's sync of a multi-provider zone is asked
+					// again: whatever asked for it will not ask twice
+					if mpLeaderSync(conf, ds) {
+						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
+					}
 					continue
 				}
 
@@ -142,6 +147,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if syncstate.InSync {
 					lg.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
 						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
+					conf.delegationSyncSucceeded(ds.ZoneName)
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
@@ -151,11 +157,18 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				// Not in sync, let's fix that.
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr().Imr)
 				if err != nil {
-					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
 					syncstate.ErrorMsg = err.Error()
 					syncstate.UpdateResult = ur
+					// a refusal that passes by itself (a SIG(0) key the parent
+					// has not finished verifying) must not leave the parent
+					// without the DS set until the keys change again
+					if mpLeaderSync(conf, ds) {
+						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
+					}
 				} else {
+					conf.delegationSyncSucceeded(ds.ZoneName)
 					lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
 					// Notify peer agents that parent sync is done
 					go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)

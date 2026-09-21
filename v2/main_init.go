@@ -601,6 +601,7 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	if err != nil {
 		return fmt.Errorf("transport bridge (agent): %w", err)
 	}
+	tm.onKeyInventory = conf.noteKeyInventory
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager

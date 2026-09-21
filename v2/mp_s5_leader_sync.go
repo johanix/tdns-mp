@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -118,4 +119,135 @@ func sameDSIntent(a, b tdns.DSIntent) bool {
 		}
 	}
 	return true
+}
+
+// A sync that fails is asked again. The parent may refuse the leader's
+// update for a reason that passes by itself: the commonest is a SIG(0) key
+// it knows and has not finished verifying ("known, but not yet trusted"),
+// which is what the first sync after a new key always meets. The syncher
+// used to drop such a request, and then nothing asked again until the DS
+// set changed or an election was held, so the parent stayed without the
+// DS set for as long as the keys stayed as they were.
+//
+// One chain of retries per zone, with growing delays, ended by a sync that
+// succeeds, by losing the leadership, or by the bound (then the next change
+// of the DS set, or an election, asks anew).
+var delegationSyncFailureDelays = []time.Duration{
+	30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute,
+	8 * time.Minute, 15 * time.Minute, 15 * time.Minute, 15 * time.Minute,
+}
+
+type delegationSyncFailures struct {
+	mu      sync.Mutex
+	attempt map[string]int  // zone -> failures seen in this chain
+	waiting map[string]bool // zone -> a retry is scheduled and has not fired
+}
+
+// delegationSyncFailed notes a failed sync of a zone and schedules the next
+// ask, unless one is scheduled already. delays is read once per call: the
+// retry runs from a timer callback.
+func (conf *Config) delegationSyncFailed(ctx context.Context, zone string, cause error) {
+	conf.delegationSyncFailedWith(ctx, zone, cause, delegationSyncFailureDelays)
+}
+
+func (conf *Config) delegationSyncFailedWith(ctx context.Context, zone string, cause error, delays []time.Duration) {
+	f := &conf.InternalMp.delegationSyncFailures
+	f.mu.Lock()
+	if f.attempt == nil {
+		f.attempt, f.waiting = map[string]int{}, map[string]bool{}
+	}
+	if f.waiting[zone] {
+		f.mu.Unlock()
+		return
+	}
+	n := f.attempt[zone]
+	if n >= len(delays) {
+		delete(f.attempt, zone)
+		f.mu.Unlock()
+		lgEngine.Warn("the delegation sync keeps failing; given up until the DS set changes or an election is held", "zone", zone, "failures", n+1, "last", cause)
+		return
+	}
+	f.attempt[zone] = n + 1
+	f.waiting[zone] = true
+	f.mu.Unlock()
+	delay := delays[n]
+	lgEngine.Warn("the delegation sync failed; asking again", "zone", zone, "failure", n+1, "in", delay, "cause", cause)
+	time.AfterFunc(delay, func() {
+		f.mu.Lock()
+		delete(f.waiting, zone)
+		f.mu.Unlock()
+		if !conf.requestDelegationSync(ctx, zone, "the last delegation sync failed") {
+			// The ask was not queued now: not the leader any more, the
+			// zone gone, the engine ended, or the syncher's queue full
+			// (the ask retries the queue by itself for a while). This
+			// chain ends here: whoever leads now has its own, and a sync
+			// that fails after a queued retry starts a new chain from the
+			// first delay.
+			conf.delegationSyncSucceeded(zone)
+		}
+	})
+}
+
+// delegationSyncSucceeded ends a zone's chain of retries: the next failure
+// starts from the first delay again.
+func (conf *Config) delegationSyncSucceeded(zone string) {
+	f := &conf.InternalMp.delegationSyncFailures
+	f.mu.Lock()
+	delete(f.attempt, zone)
+	f.mu.Unlock()
+}
+
+// mpLeaderSync: the request is for a multi-provider zone that syncs with its
+// parent through its agents, which is the sync requestDelegationSync asks
+// for and the one whose failure is asked again.
+func mpLeaderSync(conf *Config, ds tdns.DelegationSyncRequest) bool {
+	return conf != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && ds.ZoneData.Options[tdns.OptParentSync]
+}
+
+// noteKeyInventory records an inventory the zone's signer sent, whichever
+// way it came: pushed by the signer when a key changed, or as the answer to
+// this agent's own request (at its start, at a refresh). Both must feed the
+// same things, and the second did not: its snapshot lost the Owned mark, it
+// never reached the owner, and it asked for nothing. An agent that had
+// restarted therefore had no DS set until the signer's keys next changed,
+// and the sync an election asks for found no opinion about the DS and
+// called the parent in sync.
+//
+// The agent's DS-intent provider answers from the latest inventory (design
+// §4.1, arrow 2); a DS set that is known and not what it was goes to the
+// parent through the leader's delegation sync, whatever else did or did not
+// change (T5.4). An unknown set asks for nothing: the sync leaves the
+// parent's DS alone then anyway. Only an inventory from a signer that runs
+// the zone's key lifecycle states the DS set: the syncher's DS intent is the
+// owner's for such a zone alone, so for any other the request would find
+// nothing to act on. What the DS set was counts only if the inventory before
+// this one came from an owning signer too: a zone that has just been taken
+// had no DS set the syncher would act on, whatever its keys were, so the
+// take asks for a sync even with every key as it was. The same holds for
+// the first inventory after a start: there is no inventory before it.
+func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg) {
+	if conf == nil || zd == nil || msg == nil {
+		return
+	}
+	snap := &KeyInventorySnapshot{
+		SenderID:  msg.SenderID,
+		Zone:      msg.Zone,
+		Inventory: msg.Inventory,
+		Owned:     msg.Owned,
+		Received:  time.Now(),
+	}
+	prev := zd.GetLastKeyInventory()
+	zd.SetLastKeyInventory(snap)
+	o := conf.InternalMp.KeyLifecycleOwner
+	if o == nil {
+		return
+	}
+	var before tdns.DSIntent
+	if prev != nil && prev.Owned {
+		before, _ = o.DSIntent(zd.ZoneData, dns.SHA256)
+	}
+	o.SetInventory(msg.Zone, snap)
+	if after, err := o.DSIntent(zd.ZoneData, dns.SHA256); msg.Owned && err == nil && after.Known && !sameDSIntent(before, after) {
+		conf.requestDelegationSync(ctx, msg.Zone, "the zone's DS set changed")
+	}
 }
