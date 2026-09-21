@@ -31,6 +31,11 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	conf.SetupMPSignerRoutes(ctx, apirouter)
 
 	kdb := conf.Config.Internal.KeyDB
+	// The DS engine's queue, before any engine that can sign a zone: the
+	// refresh engine's first load may sign one and say KeysChanged, which
+	// is a silent no-op while the queue is not there (tdns makes it only
+	// for a KeyDB that exists at its MainInit; this one came after).
+	ensureDSEngineQueue(kdb)
 
 	// --- tdns engines needed by the mpsigner ---
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
@@ -50,10 +55,23 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	})
 	// tdns's DS engine: the CDS of an owned zone follows its DS set between
 	// transfers too (the machine's KeysChanged wakes it; key lifecycle
-	// ownership design §4.1, arrow 1; tdns-mp #55)
+	// ownership design §4.1, arrow 1; tdns-mp #55); its queue was made above
 	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
 		return kdb.DSEngine(ctx)
 	})
+	// The resolver: the key machine asks it whether the parent still serves
+	// a retired KSK's DS (the transition table's E7). Only a signer that
+	// owns a zone has that question, so only it starts one. ImrEngine
+	// retries its own initialisation; until it has published, and for a
+	// signer without one, the machine's answer is "unknown" and a retired
+	// KSK waits.
+	if want, why := conf.signerResolverWanted(); want {
+		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
+			return conf.Config.ImrEngine(ctx, true)
+		})
+	} else if why != "" {
+		lgSigner.Warn("key lifecycle: no resolver in this signer; a retired KSK of an owned zone will wait for the operator", "why", why)
+	}
 	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
 		return tdns.UpdateHandler(ctx, conf.Config)
 	})
@@ -97,4 +115,32 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// (RegisterMPKeyLifecycleHooks).
 
 	return nil
+}
+
+// ensureDSEngineQueue gives the KeyDB the DS engine's request queue when it
+// has none. tdns makes that queue in its MainInit, and only if the KeyDB
+// exists by then; tdns-mp builds the KeyDB of its roles after that call, so
+// here the queue was never made. Without it tdns's KeysChanged returns before
+// it marks the zone or wakes the engine, silently: the CDS of an owned zone
+// then follows its DS set only when the next transfer from the combiner
+// restores the zone's dynamic records, not when a ds column changes.
+func ensureDSEngineQueue(kdb *tdns.KeyDB) {
+	if kdb != nil && kdb.DSEngineQ == nil {
+		kdb.DSEngineQ = make(chan tdns.DSEngineRequest, 100)
+	}
+}
+
+// signerResolverWanted says whether this signer starts a resolver: it does
+// when its config names a zone whose key lifecycle it runs itself
+// (key-lifecycle-zones), unless imrengine.active turns the resolver off. why
+// is set when an owning signer goes without one.
+func (conf *Config) signerResolverWanted() (want bool, why string) {
+	mp := conf.MpConfig()
+	if mp == nil || len(mp.KeyLifecycleZones) == 0 {
+		return false, ""
+	}
+	if a := conf.Config.Imr.Active; a != nil && !*a {
+		return false, "imrengine.active is false"
+	}
+	return true, ""
 }
