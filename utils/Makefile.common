@@ -33,8 +33,18 @@ all: $(PROG)
 version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
+# The go build itself runs in a sub-make (gobuild). This make read
+# algs-libs.mk when it started, before `generate` ran. In an app with no
+# generated files the file did not exist yet, so ALGS_ENV was empty and the
+# build could not find the C libraries (`Package liboqs-go was not found in
+# the pkg-config search path`); a second `make` then worked. The sub-make
+# reads the Makefiles afresh, and with them the algs-libs.mk that `generate`
+# has just written. Same fix as tdns's utils/Makefile.common.
 build: generate
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
+	@$(MAKE) gobuild
+
+gobuild:
 	$(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}
 
 # Algorithm code generation. No algs.list: the classical built-ins only,
@@ -67,4 +77,4 @@ netbsd:
 test:
 	$(GO) test -v -cover
 
-.PHONY: build generate version clean
+.PHONY: build gobuild generate version clean
