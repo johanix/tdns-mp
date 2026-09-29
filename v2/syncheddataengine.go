@@ -294,9 +294,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					}
 					resp.Msg = msg
 					// what the sending provider says about its keys (#58) goes
-					// to our signer whether or not the DNSKEY set changed
-					if tm := conf.InternalMp.MPTransport; tm != nil && synchedDataUpdate.Update != nil {
-						tm.NoteForeignKeyStates(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations)
+					// to our signer whether or not the DNSKEY set changed, and
+					// for a zone our own signer does not own it is the DS set
+					// (Amendment 2)
+					if synchedDataUpdate.Update != nil {
+						conf.noteForeignDistribution(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations)
 					}
 					if change {
 						// Always forward remote updates to the local combiner for persistence.

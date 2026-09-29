@@ -246,8 +246,14 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	if prev != nil && prev.Owned {
 		before, _ = o.DSIntent(zd.ZoneData, dns.SHA256)
 	}
+	computedBefore := conf.computedDSIntentOr(msg.Zone)
 	o.SetInventory(msg.Zone, snap)
 	if after, err := o.DSIntent(zd.ZoneData, dns.SHA256); msg.Owned && err == nil && after.Known && !sameDSIntent(before, after) {
 		conf.requestDelegationSync(ctx, msg.Zone, "the zone's DS set changed")
+	}
+	if !msg.Owned {
+		// our signer signs the zone without owning it: this inventory is
+		// our provider's share of the computed DS set (Amendment 2)
+		conf.noteComputedDSSet(ctx, msg.Zone, computedBefore)
 	}
 }
