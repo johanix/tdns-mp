@@ -233,6 +233,16 @@ var HsyncTables = map[string]string{
 		ds        INTEGER,
 		UNIQUE (zonename, keyid)
 	)`,
+	// MPParentDS is the key lifecycle's note that the parent serves a standby
+	// SEP key's DS: since when, and the DS RRset's TTL then (E13, T17). T9
+	// waits for that TTL to pass (O7); a restart resumes the wait (T15).
+	"MPParentDS": `CREATE TABLE IF NOT EXISTS 'MPParentDS' (
+		zonename    TEXT NOT NULL,
+		keyid       INTEGER NOT NULL,
+		since       TEXT DEFAULT '',
+		ttl_seconds INTEGER DEFAULT 0,
+		UNIQUE (zonename, keyid)
+	)`,
 	"MPKeyDistribution": `CREATE TABLE IF NOT EXISTS 'MPKeyDistribution' (
 		zonename  TEXT NOT NULL,
 		keyid     INTEGER NOT NULL,

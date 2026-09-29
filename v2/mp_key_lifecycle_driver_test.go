@@ -36,6 +36,7 @@ type fakeWire struct {
 	removals  []uint16
 	parentDS  map[uint16]bool // what the parent serves; absent = not served
 	parentOff bool            // the parent cannot be asked
+	parentTTL time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
 	stripped  []uint16
 	resigns   int
 	reports   []string
@@ -62,13 +63,19 @@ func (w *fakeWire) DistributeRemoval(zone string, keyid uint16) {
 	defer w.mu.Unlock()
 	w.removals = append(w.removals, keyid)
 }
-func (w *fakeWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
+func (w *fakeWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.parentOff {
-		return false, false
+		return nil, 0, false
 	}
-	return w.parentDS[keyid], true
+	served := map[uint16]bool{}
+	for tag, on := range w.parentDS {
+		if on {
+			served[tag] = true
+		}
+	}
+	return served, w.parentTTL, true
 }
 func (w *fakeWire) Strip(zone string, keyid uint16) error {
 	w.mu.Lock()

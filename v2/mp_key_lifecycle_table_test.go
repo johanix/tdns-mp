@@ -89,6 +89,7 @@ func TestTransitionTableMatchesTheDocument(t *testing.T) {
 		{"T14a", KeyStateMpdist, KeyStateMpdist, EvSignersChanged},
 		{"T14b", KeyStateMpremove, KeyStateMpremove, EvSignersChanged},
 		{"T15", "*", "*", EvRestart},
+		{"T17", KeyStateStandby, KeyStateStandby, EvDSPresent},
 	}
 	if len(doc) != len(KeyLifecycleTable) {
 		t.Errorf("the table has %d rows, the document %d", len(KeyLifecycleTable), len(doc))
@@ -219,12 +220,41 @@ func TestTransitionGuards(t *testing.T) {
 		t.Errorf("propagated after the delay and TTL: %s, want standby", st)
 	}
 
-	sb := KeyView{State: KeyStateStandby, SEP: true}
-	if st, _ := Next(sb, EvPromote, ZoneView{ActiveOfRoleAndAlg: true}); st != KeyStateStandby {
+	// a standby KSK whose DS the parent has served for longer than the DS
+	// TTL: the parent wait of T9 is met (O7)
+	sb := KeyView{State: KeyStateStandby, SEP: true, DSPresentSince: now.Add(-2 * time.Hour), ParentDSTTL: time.Hour}
+	if st, _ := Next(sb, EvPromote, ZoneView{ActiveOfRoleAndAlg: true, Now: now}); st != KeyStateStandby {
 		t.Errorf("promoted beside an active key of the role and algorithm: %s, want standby (P5)", st)
 	}
-	if st, _ := Next(sb, EvPromote, ZoneView{ActiveOfRoleAndAlg: true, AlgRollInFlight: true}); st != KeyStateActive {
+	if st, _ := Next(sb, EvPromote, ZoneView{ActiveOfRoleAndAlg: true, AlgRollInFlight: true, Now: now}); st != KeyStateActive {
 		t.Errorf("promoted during an algorithm roll: %s, want active", st)
+	}
+	// T9's wait for the parent (O7): nothing seen of the parent, or a DS
+	// served for less than its TTL, keeps a SEP key standby; a parent that
+	// serves no DS for the zone (O2) and a ZSK have nothing to wait for
+	fresh := KeyView{State: KeyStateStandby, SEP: true}
+	if st, _ := Next(fresh, EvPromote, ZoneView{Now: now}); st != KeyStateStandby {
+		t.Errorf("a KSK promoted with nothing seen of the parent: %s, want standby (O7)", st)
+	}
+	if st, _ := Next(fresh, EvPromote, ZoneView{Now: now, ParentServesNoDS: true}); st != KeyStateActive {
+		t.Errorf("a KSK promoted against a parent that serves no DS: %s, want active (O2)", st)
+	}
+	young := KeyView{State: KeyStateStandby, SEP: true, DSPresentSince: now.Add(-30 * time.Minute), ParentDSTTL: time.Hour}
+	if st, _ := Next(young, EvPromote, ZoneView{Now: now}); st != KeyStateStandby {
+		t.Errorf("a KSK promoted before its DS had been served for the DS TTL: %s, want standby (O7)", st)
+	}
+	if st, _ := Next(young, EvPromote, ZoneView{Now: now.Add(31 * time.Minute)}); st != KeyStateActive {
+		t.Errorf("a KSK not promoted after its DS had been served for the DS TTL: %s, want active", st)
+	}
+	if st, _ := Next(KeyView{State: KeyStateStandby}, EvPromote, ZoneView{Now: now}); st != KeyStateActive {
+		t.Errorf("a ZSK made to wait for the parent: %s, want active", st)
+	}
+	// E13, T17: the parent serves a standby KSK's DS; a ZSK has no such note
+	if st, tr := Next(fresh, EvDSPresent, ZoneView{Now: now}); st != KeyStateStandby || tr == nil || tr.ID != "T17" {
+		t.Errorf("DS present on a standby KSK: %s via %v, want standby via T17", st, tr)
+	}
+	if _, tr := Next(KeyView{State: KeyStateStandby}, EvDSPresent, ZoneView{Now: now}); tr != nil {
+		t.Errorf("DS present on a ZSK took row %s, want none", tr.ID)
 	}
 	if st, _ := Next(KeyView{State: KeyStatePublished}, EvPromote, ZoneView{}); st != KeyStatePublished {
 		t.Errorf("a published key promoted: %s, want published (P1)", st)
