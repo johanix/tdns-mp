@@ -110,7 +110,7 @@ type KeyView struct {
 	Withdrawn   bool      // retired KSK: its DS withdrawal has been written (ds=0)
 	DSGone      bool      // retired KSK: the parent no longer serves its DS
 	// DSPresentSince is when the parent was first seen serving the key's
-	// DS, and ParentDSTTL the DS RRset's TTL then (E13, T17); zero until
+	// DS, and ParentDSTTL the DS RRset's TTL then (E13, T18); zero until
 	// then. T9 for a SEP key waits until that TTL has passed since (O7).
 	DSPresentSince time.Time
 	ParentDSTTL    time.Duration
@@ -146,10 +146,13 @@ type ZoneView struct {
 	InPipeline     int
 	LifetimeDue    bool
 	NoActiveOfRole bool
-	// ParentServesNoDS: the parent's last answer was a successful one that
-	// held no DS for the zone at all (the first signing; O2). T9 for a SEP
-	// key has nothing to wait for then. False while the parent is unknown:
-	// no resolver, one not ready, or a lookup that failed is not "no DS".
+	// ParentKnown: the parent was asked on this tick and answered. False
+	// while it is unknown (no resolver, one not ready, or a lookup that
+	// failed), which is not "no DS": a SEP key waits then, whatever an
+	// earlier tick noted (O7). ParentServesNoDS: that answer held no DS for
+	// the zone at all (the first signing; O2), so T9 for a SEP key has
+	// nothing to wait for.
+	ParentKnown      bool
 	ParentServesNoDS bool
 	Now              time.Time
 }
@@ -246,7 +249,7 @@ var KeyLifecycleTable = []Transition{
 	{"T14a", KeyStateMpdist, EvSignersChanged, nil, KeyStateMpdist, "the expected set recomputed; T3 re-evaluated; a signer that joined gets this provider's served keys again"},
 	{"T14b", KeyStateMpremove, EvSignersChanged, nil, KeyStateMpremove, "the expected set recomputed; T13 re-evaluated"},
 	{"T15", "*", EvRestart, nil, "*", "in-flight distributions re-sent; timers re-armed from the stamps (P4)"},
-	{"T17", KeyStateStandby, EvDSPresent, func(k KeyView, z ZoneView) bool { return k.SEP }, KeyStateStandby, "the parent serves the key's DS: since when, and the DS TTL, noted for T9 (O7)"},
+	{"T18", KeyStateStandby, EvDSPresent, func(k KeyView, z ZoneView) bool { return k.SEP }, KeyStateStandby, "the parent serves the key's DS: since when, and the DS TTL, noted for T9 (O7)"},
 }
 
 // Next applies the table to one key: the state after the event, and whether
@@ -256,10 +259,17 @@ var KeyLifecycleTable = []Transition{
 // validator still holds a DS RRset without it when the old key's signatures
 // go (T10, in the same step). A parent that serves no DS for the zone at all
 // has nothing to wait for (O2, the first signing). A ZSK has no DS. The wait
-// holds whatever asked for the promotion. Unknown is not "no DS":
-// ParentServesNoDS is false then, and the key waits.
+// holds whatever asked for the promotion. Unknown is not "no DS", and it is
+// not the TTL having passed either: a parent that could not be asked on
+// this tick keeps the key waiting, however old the note.
 func parentDSWaitMet(k KeyView, z ZoneView) bool {
-	if !k.SEP || z.ParentServesNoDS {
+	if !k.SEP {
+		return true
+	}
+	if !z.ParentKnown {
+		return false
+	}
+	if z.ParentServesNoDS {
 		return true
 	}
 	return !k.DSPresentSince.IsZero() && !z.Now.Before(k.DSPresentSince.Add(k.ParentDSTTL))

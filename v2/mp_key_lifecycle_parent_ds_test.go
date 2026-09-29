@@ -1,12 +1,16 @@
 package tdnsmp
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
-// S5c (design §6; transition table O7, E13, T17): a KSK's promotion waits
+// S5c (design §6; transition table O7, E13, T18): a KSK's promotion waits
 // for the parent. The driver on one provider with the fake wire and the fake
 // clock, as the T3.4 scenarios run.
 
@@ -56,7 +60,7 @@ func TestAKSKIsPromotedOnceTheParentHasServedItsDSForTheTTL(t *testing.T) {
 	r.wire.parentTTL = time.Hour
 	old, _ := bootstrapKSK(t, r)
 	b := rollToStandby(t, r, old)
-	// the parent gets the new DS: seen on this tick and noted (E13, T17),
+	// the parent gets the new DS: seen on this tick and noted (E13, T18),
 	// the promotion still waits for the DS TTL
 	r.wire.parentDS[b] = true
 	r.tick("the parent serves the new DS")
@@ -64,7 +68,7 @@ func TestAKSKIsPromotedOnceTheParentHasServedItsDSForTheTTL(t *testing.T) {
 		t.Fatalf("the new KSK is %s the tick its DS was first seen, want standby for the DS TTL (O7)", st)
 	}
 	if _, ok := r.l.dsPresent[b]; !ok {
-		t.Fatal("the parent's DS was not noted for the new KSK (T17)")
+		t.Fatal("the parent's DS was not noted for the new KSK (T18)")
 	}
 	r.clock.Advance(30 * time.Minute)
 	r.tick("half the DS TTL")
@@ -87,23 +91,59 @@ func TestAKSKIsPromotedOnceTheParentHasServedItsDSForTheTTL(t *testing.T) {
 
 func TestAKSKWaitsWhileTheParentIsUnknown(t *testing.T) {
 	r := newDriverRig(t, "unknown.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
 	old, _ := bootstrapKSK(t, r)
 	b := rollToStandby(t, r, old)
-	// the parent cannot be asked: not "no DS"; the key waits (E7's rule)
+	// the parent serves the new DS, noted; then it cannot be asked any
+	// more: not "no DS", and not the TTL having passed either, however old
+	// the note. The key waits (E7's rule, O7).
+	r.wire.parentDS[b] = true
+	r.tick("the parent serves the new DS")
+	if _, ok := r.l.dsPresent[b]; !ok {
+		t.Fatal("the parent's DS was not noted")
+	}
 	r.wire.parentOff = true
 	r.clock.Advance(2 * time.Hour)
 	r.tick("the resolver is down")
 	if st := r.state(b); st != KeyStateStandby {
-		t.Fatalf("the new KSK is %s with the parent unknown, want standby (O7: unknown is not no DS)", st)
+		t.Fatalf("the new KSK is %s with the parent unknown, want standby (O7: unknown is not no DS, nor the TTL passed)", st)
 	}
-	if _, ok := r.l.dsPresent[b]; ok {
-		t.Fatal("a DS was noted as served while the parent was unknown")
+	if _, ok := r.l.dsPresent[b]; !ok {
+		t.Fatal("the note was lost while the parent was unknown; an unknown answer is not the DS going away")
 	}
 	r.wire.parentOff = false
-	r.wire.parentDS[b] = true
 	r.tick("the resolver is back and the parent serves the DS")
 	if st := r.state(b); st != KeyStateActive {
-		t.Errorf("the new KSK is %s once the parent serves its DS (TTL 0), want active", st)
+		t.Errorf("the new KSK is %s once the parent answers again, its DS served for longer than the TTL, want active", st)
+	}
+}
+
+// S1 of the review: the signer's own lookup must hand the driver a parent
+// that serves no DS as known and empty (O2), and only a lookup that fails
+// as unknown (O7). tdns's RRset fetcher turns a NODATA into an error, so
+// the answer is read here.
+func TestTheSignerReadsTheParentsAnswerForTheDriver(t *testing.T) {
+	ds := func(tag uint16, ttl uint32) dns.RR {
+		return &dns.DS{Hdr: dns.RR_Header{Name: "child.example.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: ttl}, KeyTag: tag, Algorithm: dns.ED25519, DigestType: dns.SHA256, Digest: "00"}
+	}
+	served, ttl, known := parentDSFromAnswer(&core.RRset{RRs: []dns.RR{ds(1, 3600), ds(2, 300)}}, dns.RcodeSuccess, nil)
+	if !known || !served[1] || !served[2] || len(served) != 2 || ttl != 300*time.Second {
+		t.Errorf("two DS: served %v ttl %s known %v, want both, the shortest TTL, known", served, ttl, known)
+	}
+	if served, _, known := parentDSFromAnswer(nil, dns.RcodeSuccess, nil); !known || len(served) != 0 {
+		t.Errorf("NODATA: served %v known %v, want known and empty (O2)", served, known)
+	}
+	if served, _, known := parentDSFromAnswer(&core.RRset{}, dns.RcodeSuccess, nil); !known || len(served) != 0 {
+		t.Errorf("an empty RRset: served %v known %v, want known and empty", served, known)
+	}
+	if served, _, known := parentDSFromAnswer(nil, dns.RcodeNameError, nil); !known || len(served) != 0 {
+		t.Errorf("NXDOMAIN: served %v known %v, want known and empty", served, known)
+	}
+	if _, _, known := parentDSFromAnswer(nil, dns.RcodeServerFailure, nil); known {
+		t.Error("SERVFAIL read as known")
+	}
+	if _, _, known := parentDSFromAnswer(nil, dns.RcodeSuccess, errors.New("timeout")); known {
+		t.Error("a failed lookup read as known")
 	}
 }
 

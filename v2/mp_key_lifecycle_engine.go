@@ -20,6 +20,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -141,10 +142,27 @@ func (w *signerWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool
 	if imr == nil {
 		return nil, 0, false
 	}
-	// bounded: it runs under the driver's lock on the signer's tick
+	// bounded: it runs under the driver's lock on the signer's tick. The
+	// iterative query is asked directly, not through DefaultRRsetFetcher,
+	// which turns a NODATA into an error: a parent that serves no DS must
+	// reach the driver as a known, empty answer (O2), and only a lookup
+	// that fails as unknown (O7).
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	rrset, err := imr.DefaultRRsetFetcher(ctx, dns.Fqdn(zone), dns.TypeDS)
+	qname := dns.Fqdn(zone)
+	servers, ok := imr.Cache.ServersFor(qname, dns.TypeDS)
+	if !ok {
+		return nil, 0, false
+	}
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, qname, dns.TypeDS, servers, false, edns0.PrivacyNone)
+	return parentDSFromAnswer(rrset, rcode, err)
+}
+
+// parentDSFromAnswer reads the parent's answer for the driver: a NOERROR
+// answer with no DS records, or NXDOMAIN, is known and empty; any other
+// rcode, or a lookup that failed, is unknown. The TTL is the shortest among
+// the DS records.
+func parentDSFromAnswer(rrset *core.RRset, rcode int, err error) (map[uint16]bool, time.Duration, bool) {
 	if err != nil {
 		return nil, 0, false
 	}
@@ -160,7 +178,14 @@ func (w *signerWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool
 			}
 		}
 	}
-	return served, ttl, true
+	if len(served) > 0 {
+		return served, ttl, true
+	}
+	switch rcode {
+	case dns.RcodeSuccess, dns.RcodeNameError:
+		return served, 0, true
+	}
+	return nil, 0, false
 }
 
 // ParentServesDS is ParentDS asked about one key.

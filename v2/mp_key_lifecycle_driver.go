@@ -91,13 +91,14 @@ type ZoneKeyLifecycle struct {
 	dist   map[uint16]*distribution
 	dsGone map[uint16]bool
 	// dsPresent: standby SEP keys the parent has been seen serving the DS
-	// of, since when and with what TTL (E13, T17; persisted, T15). T9 waits
+	// of, since when and with what TTL (E13, T18; persisted, T15). T9 waits
 	// for the TTL to pass (O7). parentEmpty and parentTTL are the parent's
 	// last known answer on this tick: no DS for the zone at all (O2), and
 	// the DS RRset's TTL for a stamp. promoteWait and promoteTold: a
 	// standby SEP key the parent wait refused, since when, and whether the
 	// operator has heard (after three margins).
 	dsPresent   map[uint16]dsPresence
+	parentKnown bool
 	parentEmpty bool
 	parentTTL   time.Duration
 	promoteWait map[uint16]time.Time
@@ -231,6 +232,7 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 		PropagationDelay: l.Policy.PropagationDelay,
 		ServedDnskeyTTL:  l.Wire.ServedDnskeyTTL(l.Zone),
 		Margin:           l.Policy.Margin,
+		ParentKnown:      l.parentKnown,
 		ParentServesNoDS: l.parentEmpty,
 		Now:              l.Clock.Now(),
 	}
@@ -341,7 +343,7 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	case "T11":
 		l.dsGone[keyid] = true
 		return k.State, next, nil
-	case "T17":
+	case "T18":
 		l.dsPresent[keyid] = dsPresence{Since: l.Clock.Now(), TTL: l.parentTTL}
 		l.savePresence(keyid)
 		return k.State, next, nil
@@ -774,15 +776,15 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	// published one about to be standby, a retired one for its DS to go (E7).
 	// Not asked: nothing is known of the parent this tick, and a key waits.
 	var served map[uint16]bool
-	parentKnown := false
-	l.parentEmpty = false
+	l.parentKnown, l.parentEmpty = false, false
 	for _, k := range all {
 		if k.Flags&dns.SEP != 0 && (k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateRetired && !l.dsGone[k.KeyTag]) {
-			served, l.parentTTL, parentKnown = l.Wire.ParentDS(l.Zone)
-			l.parentEmpty = parentKnown && len(served) == 0
+			served, l.parentTTL, l.parentKnown = l.Wire.ParentDS(l.Zone)
+			l.parentEmpty = l.parentKnown && len(served) == 0
 			break
 		}
 	}
+	parentKnown := l.parentKnown
 	for _, keyid := range keytagsOf(all) {
 		k := all[keyid]
 		// E12: a distribution in flight that has waited too long, whatever
@@ -1099,7 +1101,7 @@ func (l *ZoneKeyLifecycle) loadDists() error {
 }
 
 // dsPresence: since when the parent has served a standby SEP key's DS, and
-// the DS RRset's TTL then (E13, T17).
+// the DS RRset's TTL then (E13, T18).
 type dsPresence struct {
 	Since time.Time
 	TTL   time.Duration
