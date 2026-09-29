@@ -446,9 +446,10 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		conf.startIdentityParentSync(ctx, autoZd)
 	} else {
 		// A config-defined identity zone publishes its transport records when
-		// it loads, one at a time, as before; the hello is not held for it.
-		conf.InternalMp.IdentityReady.Publish()
-		// Config-defined zone — register OnFirstLoad callbacks (zone not loaded yet)
+		// it loads, one at a time, as before (step 2 is the auto zone). The
+		// hello gate opens from the last of its first-load callbacks, below:
+		// after the zone is served and its records are queued, which is the
+		// best this path knows; whether they are published yet it cannot tell.
 		zdp, ok := Zones.Get(mp.Identity)
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", mp.Identity)
@@ -467,6 +468,10 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 				}
 			})
 		}
+		zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {
+			lgAgent.Info("identity zone loaded and its transport records queued; the first hello may leave", "zone", zd.ZoneName)
+			conf.InternalMp.IdentityReady.Publish()
+		})
 	}
 
 	lgAgent.Debug("SetupAgent exit")

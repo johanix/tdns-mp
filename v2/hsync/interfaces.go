@@ -110,6 +110,6 @@ type Deps struct {
 	// peer. The agent sets it to the publication of its own identity zone: a
 	// hello sent earlier makes the peer look the agent up while its identity
 	// is not there yet (tdns #653). It returns false when ctx ends first, and
-	// the hello is not sent. nil: no wait (the auditor, tests).
+	// the hello is not sent. nil: no wait.
 	HelloReady func(ctx context.Context) bool
 }

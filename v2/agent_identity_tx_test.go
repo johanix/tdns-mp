@@ -5,6 +5,8 @@ package tdnsmp
 
 import (
 	"context"
+	"io"
+	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -318,6 +320,18 @@ func TestTheIdentityZonesParentSyncStartsAfterItsCommit(t *testing.T) {
 	}
 	if cds == nil {
 		t.Error("the identity zone has no CDS after its set-up")
+		// Which of the two silent ways: no SEP key in the published DNSKEY
+		// RRset (nothing to synthesise), or the update's publish refused (a
+		// zone that signs marks itself DnssecError).
+		sep := 0
+		if rrset, err := zd.GetRRset(identityTestZone, dns.TypeDNSKEY); err == nil && rrset != nil {
+			for _, rr := range rrset.RRs {
+				if k, ok := rr.(*dns.DNSKEY); ok && k.Flags&dns.SEP != 0 {
+					sep++
+				}
+			}
+		}
+		t.Logf("  published DNSKEY RRset: %d SEP key(s); zone error=%v type=%v msg=%q", sep, zd.Error, zd.ErrorType, zd.ErrorMsg)
 		for _, line := range strings.Split(logs.String(), "\n") {
 			if strings.Contains(line, "CDS") || strings.Contains(line, "cds") || strings.Contains(line, "refus") {
 				t.Logf("  %s", line)
@@ -342,5 +356,49 @@ func TestTheIdentityZonesParentSyncStartsAfterItsCommit(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("no delegation sync request was queued")
+	}
+}
+
+// A config-defined identity zone is not held (step 2 is the auto zone), but
+// its hello waits too: the gate opens from the last of the zone's first-load
+// callbacks, once the zone is served and its transport records are queued,
+// and not before the zone has loaded at all.
+func TestAConfigDefinedIdentityZoneOpensTheGateWhenItLoads(t *testing.T) {
+	const zone = "agent.config.example."
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = kdb
+	conf.InternalMp.IdentityReady = newIdentityReadiness()
+	mp := &MultiProviderConf{Role: "agent", Identity: zone, SupportedMechanisms: []string{"dns"}}
+	mp.Dns.Addresses.Listen = []string{"127.0.0.1:5300"} // no addresses to publish: no transport callbacks
+	conf.SetMpConfig(mp)
+	zd := &tdns.ZoneData{
+		ZoneName:  zone,
+		ZoneStore: tdns.MapZone,
+		ZoneType:  tdns.Primary,
+		Logger:    log.New(io.Discard, "", 0),
+		Options:   map[tdns.ZoneOption]bool{},
+		KeyDB:     kdb,
+	}
+	tdns.Zones.Set(zone, zd)
+	t.Cleanup(func() { tdns.Zones.Remove(zone) })
+
+	if err := conf.SetupAgent(context.Background(), []string{zone}); err != nil {
+		t.Fatalf("SetupAgent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if conf.InternalMp.IdentityReady.Wait(ctx) {
+		t.Fatal("the hello gate opened before the config-defined identity zone loaded")
+	}
+	zdp, ok := Zones.Get(zone)
+	if !ok || len(zdp.OnFirstLoad) == 0 {
+		t.Fatal("no first-load callback registered on the config-defined identity zone")
+	}
+	for _, cb := range zdp.OnFirstLoad {
+		cb(zd)
+	}
+	if !conf.InternalMp.IdentityReady.Wait(context.Background()) {
+		t.Fatal("the hello gate is still closed after the zone's first-load callbacks")
 	}
 }

@@ -119,7 +119,7 @@ func TestAHelloThatIsNeverAllowedIsNeverSent(t *testing.T) {
 	}
 }
 
-// Without a HelloReady dependency (the auditor, tests) the hello leaves at once.
+// Without a HelloReady dependency the hello leaves at once.
 func TestAHelloWithNoGateLeavesAtOnce(t *testing.T) {
 	c := &helloCounter{d25Transport: newD25Transport()}
 	e := NewEngine(Deps{LocalID: "local.example.", Transport: c}, DefaultConfig())
