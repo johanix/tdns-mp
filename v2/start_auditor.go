@@ -206,7 +206,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// shape as the agent's SetupAgent. Must run after
 	// ZoneUpdaterEngine is started.
 	if err := conf.SetupAgent(ctx, conf.Config.Internal.AllZones); err != nil {
-		lgAuditor.Error("SetupAgent failed", "err", err)
+		// The auditor goes on without an identity peers can find; its hello
+		// gate stays closed, so it introduces itself to nobody.
+		lgAuditor.Error("SetupAgent failed; the identity zone is not published and no hello leaves", "err", err)
 	}
 
 	// Phase D: web dashboard.

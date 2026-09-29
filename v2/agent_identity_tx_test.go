@@ -245,3 +245,36 @@ func typeToString(rrtype uint16) string {
 	}
 	return dns.Type(rrtype).String()
 }
+
+// Both roles that set an identity up through SetupAgent, the agent and the
+// auditor, hold their first hello for it: the gate exists once the role is
+// initialised, before the sync engine that reads it is built, and it is
+// closed until SetupAgent opens it.
+func TestEveryRoleThatSetsUpAnIdentityHasAHelloGate(t *testing.T) {
+	for _, c := range []struct {
+		role string
+		init func(*Config, *MultiProviderConf) error
+	}{
+		{"agent", (*Config).initMPAgent},
+		{"auditor", (*Config).initMPAuditor},
+	} {
+		t.Run(c.role, func(t *testing.T) {
+			conf := &Config{Config: &tdns.Config{}}
+			conf.Config.Internal.StopCh = make(chan struct{})
+			t.Cleanup(func() { close(conf.Config.Internal.StopCh) })
+			mp := &MultiProviderConf{Role: c.role, Identity: c.role + ".gate.example."}
+			conf.SetMpConfig(mp)
+			if err := c.init(conf, mp); err != nil {
+				t.Fatalf("init: %v", err)
+			}
+			if conf.InternalMp.IdentityReady == nil {
+				t.Fatalf("the %s has no hello gate after its initialisation", c.role)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			if conf.InternalMp.IdentityReady.Wait(ctx) {
+				t.Fatalf("the %s's hello gate is open before its identity is published", c.role)
+			}
+		})
+	}
+}
