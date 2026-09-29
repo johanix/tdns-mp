@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,8 +110,8 @@ func notifiesFor(q chan tdns.NotifyRequest, zone string) int {
 // the records are in.
 func TestTheIdentityZoneIsCreatedHeld(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
-	ctx := startIdentityUpdater(t, kdb)
 	conf, notifyq := identityTestConfig(t, kdb)
+	ctx := startIdentityUpdater(t, kdb)
 
 	zd, txid, err := conf.SetupAgentAutoZone(ctx, identityTestZone)
 	if err != nil {
@@ -145,8 +146,8 @@ func TestTheIdentityZoneIsCreatedHeld(t *testing.T) {
 // is open.
 func TestTheIdentityZoneIsPublishedOnce(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
-	ctx := startIdentityUpdater(t, kdb)
 	conf, notifyq := identityTestConfig(t, kdb)
+	ctx := startIdentityUpdater(t, kdb)
 
 	if err := conf.SetupAgent(ctx, nil); err != nil {
 		t.Fatalf("SetupAgent: %v", err)
@@ -202,8 +203,8 @@ func TestTheIdentityZoneIsPublishedOnce(t *testing.T) {
 // itself.
 func TestARefusedCommitFailsTheSetup(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
-	ctx := startIdentityUpdater(t, kdb)
 	conf, _ := identityTestConfig(t, kdb)
+	ctx := startIdentityUpdater(t, kdb)
 
 	zd, _, err := conf.SetupAgentAutoZone(ctx, identityTestZone)
 	if err != nil {
@@ -276,5 +277,70 @@ func TestEveryRoleThatSetsUpAnIdentityHasAHelloGate(t *testing.T) {
 				t.Fatalf("the %s's hello gate is open before its identity is published", c.role)
 			}
 		})
+	}
+}
+
+// The identity zone's parentsync work reads the zone through accessors that
+// need it Ready: the CDS is synthesised from the published apex, and the
+// SIG(0) key preparation reads the apex too. Under the hold there is no
+// snapshot, so both must wait for the commit. Seen on the rig on 2026-09-29:
+// "could not publish CDS ... zone data is not yet ready", the key preparation
+// failing the same way, and the delegation sync setup it had queued ignored.
+func TestTheIdentityZonesParentSyncStartsAfterItsCommit(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	conf, _ := identityTestConfig(t, kdb)
+	ctx := startIdentityUpdater(t, kdb)
+	conf.Config.ParentSync.Schemes = []string{"notify", "update"}
+	conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+	conf.Config.Internal.ImrReady.Publish()
+	syncq := make(chan tdns.DelegationSyncRequest, 8)
+	conf.Config.Internal.DelegationSyncQ = syncq
+	logs := captureAgentLog(t)
+
+	if err := conf.SetupAgent(ctx, nil); err != nil {
+		t.Fatalf("SetupAgent: %v", err)
+	}
+	zd, ok := tdns.Zones.Get(identityTestZone)
+	if !ok {
+		t.Fatal("the identity zone is not registered")
+	}
+
+	// The CDS goes out after the commit, through the queue: a serial of its
+	// own, on a zone that is already complete for discovery.
+	deadline := time.Now().Add(5 * time.Second)
+	var cds *core.RRset
+	for time.Now().Before(deadline) {
+		if rrset, err := zd.GetRRset(identityTestZone, dns.TypeCDS); err == nil && rrset != nil && len(rrset.RRs) > 0 {
+			cds = rrset
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if cds == nil {
+		t.Error("the identity zone has no CDS after its set-up")
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(line, "CDS") || strings.Contains(line, "cds") || strings.Contains(line, "refus") {
+				t.Logf("  %s", line)
+			}
+		}
+	}
+	for _, bad := range []string{"could not publish CDS", "could not prepare the SIG(0) key"} {
+		if strings.Contains(logs.String(), bad) {
+			t.Errorf("the set-up logged %q: parentsync work ran on the held zone", bad)
+		}
+	}
+
+	// The delegation sync setup is queued once the key exists, as before.
+	select {
+	case r := <-syncq:
+		if r.Command != "DELEGATION-SYNC-SETUP" {
+			t.Errorf("first delegation sync request = %q, want DELEGATION-SYNC-SETUP", r.Command)
+		}
+		sak, err := kdb.GetSig0Keys(identityTestZone, tdns.Sig0StateActive)
+		if err != nil || len(sak.Keys) != 1 {
+			t.Errorf("active SIG(0) keys when the setup was queued = %d (err %v), want 1", len(sak.Keys), err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("no delegation sync request was queued")
 	}
 }

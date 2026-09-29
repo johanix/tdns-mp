@@ -113,12 +113,13 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// whose TLSA no validating resolver will trust. Finding the parent and its
 	// DSYNC records takes the resolver: with imrengine off the sync could never
 	// start, so the zone stays an island and the log says why.
+	//
+	// The option is set here; the work starts after the commit
+	// (startIdentityParentSync): the CDS is synthesised from the published
+	// apex and the SIG(0) key preparation reads it too, and a held zone has
+	// no snapshot to read.
 	if conf.identityZoneParentSync() {
 		zd.Options[tdns.OptParentSync] = true
-		if err := zd.PublishCdsRRs(); err != nil {
-			lgAgent.Warn("identity zone: could not publish CDS", "zone", zonename, "err", err)
-		}
-		go conf.syncIdentityDelegation(ctx, zd)
 	} else if len(conf.Config.ParentSync.Schemes) > 0 {
 		lgAgent.Warn("identity zone: parentsync is configured but imrengine is not active; the zone's delegation will not be synced", "zone", zonename)
 	}
@@ -179,6 +180,21 @@ func (conf *Config) commitIdentityZone(ctx context.Context, zd *tdns.ZoneData, t
 	lgAgent.Info("identity zone published as one serial", "zone", zd.ZoneName, "serial", serial)
 	conf.InternalMp.IdentityReady.Publish()
 	return nil
+}
+
+// startIdentityParentSync publishes the identity zone's CDS and starts its
+// delegation sync, once the zone is published: both read the zone's apex
+// through accessors that need it Ready, which a held zone is not. The CDS is
+// a serial of its own, after the one that carries the identity; the parent,
+// not discovery, is what reads it.
+func (conf *Config) startIdentityParentSync(ctx context.Context, zd *tdns.ZoneData) {
+	if !zd.Options[tdns.OptParentSync] {
+		return
+	}
+	if err := zd.PublishCdsRRs(); err != nil {
+		lgAgent.Warn("identity zone: could not publish CDS", "zone", zd.ZoneName, "err", err)
+	}
+	go conf.syncIdentityDelegation(ctx, zd)
 }
 
 // publishApiTransport publishes HTTPS transport records (URI, address, TLSA, SVCB)
@@ -427,6 +443,7 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		if err := conf.commitIdentityZone(ctx, autoZd, autoTx); err != nil {
 			return fmt.Errorf("SetupAgent: %v", err)
 		}
+		conf.startIdentityParentSync(ctx, autoZd)
 	} else {
 		// A config-defined identity zone publishes its transport records when
 		// it loads, one at a time, as before; the hello is not held for it.
