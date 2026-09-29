@@ -27,8 +27,18 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*tdns.ZoneData, error) {
-	lgAgent.Info("creating a minimal auto zone", "zone", zonename)
+// SetupAgentAutoZone creates the agent's identity zone and returns it held:
+// the transaction it returns keeps the zone unpublished (queries SERVFAIL,
+// transfers refused) until SetupAgent has queued every transport record and
+// commits it, so the zone's first serial is the complete identity and never
+// SOA and NS alone (tdns #653). The signing pass below runs under that hold:
+// it stages the keys and the signatures and installs nothing, and the commit's
+// publish is the one that signs and installs the first snapshot.
+//
+// The zone is registered before this returns, so the options, notify targets
+// and transfer ACL set here are set on a registered zone, as before.
+func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*tdns.ZoneData, tdns.TxID, error) {
+	lgAgent.Info("creating a minimal auto zone, held until its records are in", "zone", zonename)
 
 	mp := conf.MpConfig()
 	// The notified secondaries are granted transfer below, and the transfer
@@ -38,27 +48,28 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	notify := tdns.NormalizeAddresses(mp.Local.Notify)
 	for _, addr := range notify {
 		if hostPrefix(addr) == "" {
-			return nil, fmt.Errorf("SetupAgentAutoZone: multi-provider.local.notify entry %q is not an IP address[:port]; the identity zone's transfer ACL needs an address", addr)
+			return nil, "", fmt.Errorf("SetupAgentAutoZone: multi-provider.local.notify entry %q is not an IP address[:port]; the identity zone's transfer ACL needs an address", addr)
 		}
 	}
 
 	var zd *tdns.ZoneData
+	var txid tdns.TxID
 	var err error
 	if len(mp.Local.Nameservers) > 0 {
 		nsNames := make([]string, len(mp.Local.Nameservers))
 		for i, ns := range mp.Local.Nameservers {
 			nsNames[i] = dns.Fqdn(ns)
 		}
-		zd, err = conf.Config.Internal.KeyDB.CreateAutoZone(zonename, nil, nsNames)
+		zd, txid, err = conf.Config.Internal.KeyDB.CreateAutoZoneHeld(zonename, nil, nsNames)
 	} else {
 		addrs, findErr := conf.Config.FindDnsEngineAddrs()
 		if findErr != nil {
-			return nil, fmt.Errorf("SetupAgentAutoZone: failed to find nameserver addresses: %v", findErr)
+			return nil, "", fmt.Errorf("SetupAgentAutoZone: failed to find nameserver addresses: %v", findErr)
 		}
-		zd, err = conf.Config.Internal.KeyDB.CreateAutoZone(zonename, addrs, nil)
+		zd, txid, err = conf.Config.Internal.KeyDB.CreateAutoZoneHeld(zonename, addrs, nil)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
+		return nil, "", fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
 	zd.Options[tdns.OptAllowUpdates] = true
 	// Wire SyncQ on the MPZoneData wrapper (SyncQ moved from tdns.ZoneData to MPZoneData)
@@ -84,14 +95,15 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// Agent auto zone needs to be signed
 	zd.Options[tdns.OptOnlineSigning] = true
 	if tmp, exists := conf.Config.Internal.DnssecPolicies["default"]; !exists {
-		return nil, fmt.Errorf("SetupAgentAutoZone: DnssecPolicy 'default' not defined")
+		return nil, "", fmt.Errorf("SetupAgentAutoZone: DnssecPolicy 'default' not defined")
 	} else {
 		zd.DnssecPolicy = &tmp
 	}
 
+	// Under the hold: keys and signatures are staged, nothing is installed.
 	_, err = zd.SignZone(ctx, conf.Config.Internal.KeyDB, true)
 	if err != nil {
-		return nil, fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
+		return nil, "", fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
 	}
 
 	// With a parentsync: block configured the identity zone is a child of
@@ -101,12 +113,13 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// whose TLSA no validating resolver will trust. Finding the parent and its
 	// DSYNC records takes the resolver: with imrengine off the sync could never
 	// start, so the zone stays an island and the log says why.
+	//
+	// The option is set here; the work starts after the commit
+	// (startIdentityParentSync): the CDS is synthesised from the published
+	// apex and the SIG(0) key preparation reads it too, and a held zone has
+	// no snapshot to read.
 	if conf.identityZoneParentSync() {
 		zd.Options[tdns.OptParentSync] = true
-		if err := zd.PublishCdsRRs(); err != nil {
-			lgAgent.Warn("identity zone: could not publish CDS", "zone", zonename, "err", err)
-		}
-		go conf.syncIdentityDelegation(ctx, zd)
 	} else if len(conf.Config.ParentSync.Schemes) > 0 {
 		lgAgent.Warn("identity zone: parentsync is configured but imrengine is not active; the zone's delegation will not be synced", "zone", zonename)
 	}
@@ -120,11 +133,68 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 		select {
 		case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
 		case <-time.After(5 * time.Second):
-			return nil, fmt.Errorf("SetupAgentAutoZone: timeout registering zone %q for periodic re-signing", zd.ZoneName)
+			return nil, "", fmt.Errorf("SetupAgentAutoZone: timeout registering zone %q for periodic re-signing", zd.ZoneName)
 		}
 	}
 
-	return zd, nil
+	return zd, txid, nil
+}
+
+// identityCommitTimeout bounds the wait for the commit's answer. The commit
+// travels the update queue behind the identity's records and publishes in the
+// updater's goroutine, so the answer follows within the time those take; tdns
+// releases or fails a hold that outlives its own limit of the same length.
+const identityCommitTimeout = 30 * time.Second
+
+// commitIdentityZone commits the identity zone's creation transaction the way
+// its records travelled: through the update queue, behind them, with a Resp.
+// The zone is not Ready, so the commit's publish happens in the updater's
+// goroutine and the answer says whether the first snapshot is installed. On
+// success the gate the first hello waits on opens.
+func (conf *Config) commitIdentityZone(ctx context.Context, zd *tdns.ZoneData, txid tdns.TxID) error {
+	q := conf.Config.Internal.KeyDB.UpdateQ
+	if q == nil {
+		return fmt.Errorf("commitIdentityZone: KeyDB.UpdateQ is nil")
+	}
+	resp := make(chan tdns.ZoneUpdateResult, 1)
+	// The send waits for the queue: a commit that gave up would leave the zone
+	// held and failing closed.
+	select {
+	case q <- tdns.UpdateRequest{Cmd: tdns.UpdateCmdTxCommit, ZoneName: zd.ZoneName, TxID: txid, Resp: resp}:
+	case <-ctx.Done():
+		return fmt.Errorf("commitIdentityZone: %w before the commit of %s was queued", ctx.Err(), zd.ZoneName)
+	}
+	select {
+	case res := <-resp:
+		if res.Err != nil {
+			return fmt.Errorf("identity zone %s was not published: %w", zd.ZoneName, res.Err)
+		}
+	case <-time.After(identityCommitTimeout):
+		return fmt.Errorf("identity zone %s: no answer to its commit within %v", zd.ZoneName, identityCommitTimeout)
+	case <-ctx.Done():
+		return fmt.Errorf("commitIdentityZone: %w while waiting for the commit of %s", ctx.Err(), zd.ZoneName)
+	}
+	zd.Lock()
+	serial := zd.CurrentSerial
+	zd.Unlock()
+	lgAgent.Info("identity zone published as one serial", "zone", zd.ZoneName, "serial", serial)
+	conf.InternalMp.IdentityReady.Publish()
+	return nil
+}
+
+// startIdentityParentSync publishes the identity zone's CDS and starts its
+// delegation sync, once the zone is published: both read the zone's apex
+// through accessors that need it Ready, which a held zone is not. The CDS is
+// a serial of its own, after the one that carries the identity; the parent,
+// not discovery, is what reads it.
+func (conf *Config) startIdentityParentSync(ctx context.Context, zd *tdns.ZoneData) {
+	if !zd.Options[tdns.OptParentSync] {
+		return
+	}
+	if err := zd.PublishCdsRRs(); err != nil {
+		lgAgent.Warn("identity zone: could not publish CDS", "zone", zd.ZoneName, "err", err)
+	}
+	go conf.syncIdentityDelegation(ctx, zd)
 }
 
 // publishApiTransport publishes HTTPS transport records (URI, address, TLSA, SVCB)
@@ -293,11 +363,14 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	// Determine if agent identity zone is an auto zone or a config-defined zone
 	isAutoZone := !slices.Contains(all_zones, mp.Identity)
 	var autoZd *tdns.ZoneData
+	var autoTx tdns.TxID
 
-	// Create auto zone for agent identity if needed
+	// Create auto zone for agent identity if needed. It comes back held, and
+	// is committed below once the transport records are queued. An error exit
+	// between the two ends the daemon's start, so no held zone outlives it.
 	if isAutoZone {
 		var err error
-		autoZd, err = conf.SetupAgentAutoZone(ctx, mp.Identity)
+		autoZd, autoTx, err = conf.SetupAgentAutoZone(ctx, mp.Identity)
 		if err != nil {
 			return fmt.Errorf("SetupAgent: failed to create auto zone for agent identity %q: %v",
 				mp.Identity, err)
@@ -354,7 +427,9 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	}
 
 	if isAutoZone {
-		// Auto zone is already fully populated — publish transport records directly
+		// The records are queued on the held zone, and the commit follows them
+		// through the same queue: the first snapshot has them all, and the
+		// first hello leaves only once it is installed.
 		if wantApi {
 			if err := conf.publishApiTransport(autoZd); err != nil {
 				return fmt.Errorf("SetupAgent: failed to publish API transport: %v", err)
@@ -365,8 +440,16 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 				return fmt.Errorf("SetupAgent: failed to publish DNS transport: %v", err)
 			}
 		}
+		if err := conf.commitIdentityZone(ctx, autoZd, autoTx); err != nil {
+			return fmt.Errorf("SetupAgent: %v", err)
+		}
+		conf.startIdentityParentSync(ctx, autoZd)
 	} else {
-		// Config-defined zone — register OnFirstLoad callbacks (zone not loaded yet)
+		// A config-defined identity zone publishes its transport records when
+		// it loads, one at a time, as before (step 2 is the auto zone). The
+		// hello gate opens from the last of its first-load callbacks, below:
+		// after the zone is served and its records are queued, which is the
+		// best this path knows; whether they are published yet it cannot tell.
 		zdp, ok := Zones.Get(mp.Identity)
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", mp.Identity)
@@ -385,6 +468,10 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 				}
 			})
 		}
+		zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {
+			lgAgent.Info("identity zone loaded and its transport records queued; the first hello may leave", "zone", zd.ZoneName)
+			conf.InternalMp.IdentityReady.Publish()
+		})
 	}
 
 	lgAgent.Debug("SetupAgent exit")

@@ -194,6 +194,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 // migration, both exist — code in tdns-mp reads from here,
 // code in tdns reads from tdns.Config.Internal.
 type InternalMpConf struct {
+	// IdentityReady opens once the agent's identity zone is published; the
+	// sync engine's first hello waits on it (agent_identity_ready.go).
+	IdentityReady         *identityReadiness
 	KeyLifecycle          *KeyLifecycleEngine
 	KeyLifecycleOwner     *MPKeyLifecycleOwner
 	HsyncDB               *HsyncDB
