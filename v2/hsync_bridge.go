@@ -374,6 +374,7 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 		LocalBeatInterval: mp.Remote.BeatInterval,
 		Zones:             mpZoneLookup{},
 		Transport:         &mpHsyncBridge{ar: ar, tm: conf.InternalMp.MPTransport},
+		HelloReady:        conf.InternalMp.IdentityReady.Wait,
 		Gossip:            newAgentGossipPort(ar),
 		ProviderGroups:    pgmHsyncLookup{pgm: ar.ProviderGroupManager},
 		PeerHooks: hsync.PeerHooks{

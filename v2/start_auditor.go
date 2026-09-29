@@ -205,8 +205,12 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// addresses, TLSA, KEY) so peers can discover us via DNS. Same
 	// shape as the agent's SetupAgent. Must run after
 	// ZoneUpdaterEngine is started.
+	// An auditor without an identity peers can find is no peer at all: like
+	// the agent, it does not start without one (its hello gate would never
+	// open, and every distribution to it would wait on a daemon nobody can
+	// reach).
 	if err := conf.SetupAgent(ctx, conf.Config.Internal.AllZones); err != nil {
-		lgAuditor.Error("SetupAgent failed", "err", err)
+		return fmt.Errorf("SetupAgent: %w", err)
 	}
 
 	// Phase D: web dashboard.

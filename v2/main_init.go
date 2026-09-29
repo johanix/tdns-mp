@@ -485,6 +485,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
+	// The first hello waits for the identity zone; SetupAgent opens this.
+	conf.InternalMp.IdentityReady = newIdentityReadiness()
+
 	// Create SyncQ locally (was previously shared from tdns, now owned by tdns-mp)
 	conf.InternalMp.SyncQ = make(chan SyncRequest, 10)
 	// MPZoneNames is populated directly by the OptMultiProvider callback above
@@ -621,6 +624,10 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	}
 
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
+
+	// The auditor sets its identity up through SetupAgent as the agent does,
+	// so its first hello waits for the same gate; SetupAgent opens it.
+	conf.InternalMp.IdentityReady = newIdentityReadiness()
 
 	// MsgQs: auditor consumes Beat/Hello/Ping/Msg/Confirmation/StatusUpdate.
 	conf.InternalMp.MsgQs = NewMsgQs()
