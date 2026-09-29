@@ -16,8 +16,8 @@
   - Arrow 2 (2026-09-17, 23:58 UTC): the parent applied the leader's SIG(0) UPDATE and holds the three providers' DS for a three-signer zone, the served CDS set exactly (T5.4 seen by a parent). Three ways the ask could be lost showed first and are closed (tdns-mp #88, §4.1 r17).
   - The KSK roll (2026-09-18): the machine promoted the standby KSK on the request and retired the old one in the same step, before the parent had the new key's DS, so the rolled provider's DNSKEY RRset was signed by a key with no DS at the parent and the parent refused the DS change every time (an answer that does not validate cannot change a DS it holds); the parent's DS stayed what it was. The conservative order the table's O4 gives an algorithm rollover applies to every KSK roll: T9 for a SEP key waits until the parent serves the key's DS and the DS TTL has passed (table §6 O7). Not changed.
   - **Part three, the testbed's fixes, merged** 2026-09-21 (tdns-mp #87 → 473c474, #88 → 150e5fd).
-- **Open from the testbed, design decisions not taken:**
-  - A leader of a parentsync=agent zone may be a provider that does not sign it, and such a leader has no DS set to sync, since only its own signer's inventory feeds its DS intent and that signer does not own the zone. Either the election is held among the signing providers, or the agent computes the DS set of a zone its signer does not own from what the signing providers' agents said about their keys (§5's key states) and the served DNSKEY RRset (r18).
+- **Open from the testbed:**
+  - **Decided 2026-09-29 (Amendment 2), to implement:** a leader of a parentsync=agent zone may be a provider that does not sign it, and such a leader had no DS set to sync, since only its own signer's inventory fed its DS intent and that signer does not own the zone (r18). Johan chose the second of the two ways out: the election stays as it is, and the agent computes the DS set of a zone its signer does not own from what the signing providers said about their keys (§5's key states, which it already keeps) and the DNSKEY records those distributions carried.
   - T9 for a SEP key waits for the parent's DS and the DS TTL before the old KSK is retired (table §6 O7).
 - **Left of S5 on the testbed:** a `ds`-only change reaching the parent once T9 waits for the DS (O7), the leader that does not sign, and the cutover watch (T5.5).
 - **S4** is gated on every multi-provider zone being owned and no hook registration left; **S6** waits for Johan's go.
@@ -50,6 +50,7 @@
 | r17 | 2026-09-17 | §4.1, what asks for the sync: three ways the ask got lost on the testbed, each closed in tdns-mp #88 (a failed sync is asked again; leadership learnt from gossip asks; a requested inventory feeds the DS intent). Status: arrow 1 with the other providers' KSKs and the leader's UPDATE carrying the DS set both seen on the testbed. No rule changed. |
 | r18 | 2026-09-18 | Status: arrow 2 seen by a parent on the testbed (the three providers' DS applied from the leader's UPDATE). Open: a leader that does not sign the zone has no DS set to sync; two ways out named, none chosen. No rule changed. |
 | r19 | 2026-09-21 | Status, header and §6's S5 row: tdns-mp #87 and #88 merged (→ 473c474, 150e5fd); what the testbed showed and what is left of S5. The header's status paragraph is a list per step and date now, the same facts. Found on the testbed's KSK roll: the machine promotes the new KSK and retires the old one before the parent serves the new DS, and the parent refuses the DS change; a T9 guard for SEP keys proposed (table §6 O7), not changed. No rule changed. |
+| r20 | 2026-09-29 | Amendment 2: the leader that does not sign the zone, decided by Johan as the second way out (the agent computes the DS set from the signing providers' key states; the election unchanged). Status updated; nothing implemented yet. |
 
 ---
 
@@ -592,4 +593,32 @@ Two wait:
 ### A1.4 The transition window, S1b to S3
 
 A multi-provider zone whose keystore holds only its own provider's rows (a single signing provider, no foreign rows) had a known DS intent before S1b. From S1b until the owner writes `ds` (S3), its intent is unknown, so tdns's DS engine and syncher leave its CDS and the parent alone. A zone with foreign rows was unknown already; the end-to-end test's multi-provider zones all have several providers.
+
+## Amendment 2 (2026-09-29): the DS set of a zone the leader's signer does not sign
+
+Decided by Johan on 2026-09-29 (progress log, "Restart review"), from finding 6 of the testbed run of 2026-09-18. This amends §4.1's arrow 2; the text above is left as it was.
+
+### A2.1 What was found
+
+§4.1 has the agent answer the DS intent of an owned zone from its own signer's latest inventory, and says that a peer that does not lead queues nothing because "the leader's own signer gets the same word". That assumed the leader signs the zone. A parentsync=agent zone elects its leader among every provider that serves it, and a provider may serve a zone without signing it. Such a leader's signer does not own the zone, so no inventory it sends is marked `Owned`, the agent's DS intent stays unknown, and the sync an election asks for finds nothing to say and calls the parent in sync. On the testbed a three-provider zone with one signer elected an agent whose provider only served it, and the parent never got the DS.
+
+Two ways out were named in r18: hold the election among the signing providers only, or let the agent compute a DS set itself. Johan chose the second.
+
+### A2.2 The rule
+
+- **The election is unchanged.** Any provider that serves the zone may lead it.
+- **A leader whose own signer owns the zone answers as §4.1 says:** from that signer's inventory, which covers every signing provider's KSKs through the foreign rows. Nothing changes for that case.
+- **A leader whose own signer does not own the zone computes the DS set from what the signing providers said.** Every DNSKEY distribution an agent receives carries, per key, the sending provider's key tag, state and `ds` (§5, tdns-mp #58; `core.KeyState`), and the agent already keeps the latest set per provider (`foreignKeyStates`) to hand on to its signer. The same distributions carry the DNSKEY records. The DS set is every SEP key among them whose provider says `ds=1`, as DS records of the zone's digest type; a key whose provider says `ds=0` is left out.
+- **Unknown while any signing provider has not spoken.** The providers that sign the zone are the ones its HSYNC records mark as signers. If any of them has sent no distribution with key states, or any of its SEP keys has `ds` undecided, the DS intent is unknown and the syncher leaves the parent's DS alone (Q9's rule, as for the signer's own answer). A signing provider that has spoken and listed no keys counts as having spoken: its share of the set is empty (the transition table's C4).
+- **What asks for the sync is unchanged:** the leader asks when the DS set it computes is known and not what it was, and once when it takes the leadership. The inventory hook of §4.1 stays for the owning case; for the computed case the change of the DS set is seen when a distribution with key states arrives, which is where `foreignKeyStates` is written.
+
+### A2.3 What this does not change
+
+- The signer's CDS (arrow 1) still comes from its own `ds` rows, own and foreign; a provider that does not sign serves no CDS and none is expected of it.
+- A leader that signs the zone keeps its own signer's word; the computed set is not consulted then. The two answers agree by construction when every signing provider has spoken, since the signer's foreign rows are written from the same key states.
+- The election, its term and its hand-over (T5.8) are as §4.1 has them.
+
+### A2.4 Tests owed (test plan T5.4)
+
+A unit test on the agent: three providers, one signing, the leader's signer not owning the zone; the DS set is unknown until the signing provider's distribution with key states has arrived, then it is that provider's `ds=1` SEP keys; a `ds` flip in a later distribution changes it and asks for a sync. On the testbed: the case of 2026-09-18 (a one-signer, three-provider zone whose leader does not sign) with the parent getting the DS.
 
