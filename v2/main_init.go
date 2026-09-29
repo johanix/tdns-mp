@@ -485,6 +485,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
+	// The first hello waits for the identity zone; SetupAgent opens this.
+	conf.InternalMp.IdentityReady = newIdentityReadiness()
+
 	// Create SyncQ locally (was previously shared from tdns, now owned by tdns-mp)
 	conf.InternalMp.SyncQ = make(chan SyncRequest, 10)
 	// MPZoneNames is populated directly by the OptMultiProvider callback above

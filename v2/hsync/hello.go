@@ -35,6 +35,11 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 	if !e.agentNeedsHello(peer) {
 		return
 	}
+	// Not before this agent can be found: the first hello to any peer waits
+	// for the identity to be published; every later one passes at once.
+	if e.deps.HelloReady != nil && !e.deps.HelloReady(ctx) {
+		return
+	}
 	fastAttempts := e.cfg.HelloFastAttempts
 	fastInterval := e.cfg.HelloFastSpacing
 

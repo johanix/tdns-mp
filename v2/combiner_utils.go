@@ -388,6 +388,12 @@ func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.B
 	}
 	if changed && resp.NewSerial != resp.OldSerial {
 		lgCombiner.Info("combiner state published", "zone", mpzd.ZoneName, "old", resp.OldSerial, "new", resp.NewSerial)
+	} else if changed {
+		// The batch changed the working set and this call published no new
+		// serial: the publish was refused and the zone serves its last
+		// snapshot, or, once StageBatch asks tdns's publish gate, the publish
+		// is the gate's to make and the serial is not this call's to report.
+		lgCombiner.Debug("combiner state staged, not published by this call", "zone", mpzd.ZoneName, "serial", resp.OldSerial)
 	}
 	return changed, resp, nil
 }
