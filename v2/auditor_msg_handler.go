@@ -207,15 +207,16 @@ func AuditorMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 // failure to persist must never stop the message loop.
 // auditorConfirms sends the auditor's final confirmation of a distribution
 // (#101). The transport answers PENDING on receipt, "forwarding to
-// combiner"; an auditor has no combiner and applies nothing, so the second
-// phase never came, and every sender waited for it: while an auditor was in
-// the fleet no key distributed through the machine reached standby, and no
-// withdrawn key left. The auditor is a participant like any other and its
-// confirmation is part of the record, so it answers, and with the truth:
-// IGNORED, the transport's word for persisted and not applied. The sender's
-// DNSKEY tracker takes that as answered from a non-signer, and its synched
-// data engine as a non-pending answer. It goes the way the agents' own final
-// confirmations go, through OnRemoteConfirmationReady, to the originator.
+// combiner"; an auditor has no combiner, so the second phase never came,
+// and every sender waited for it: while an auditor was in the fleet no key
+// distributed through the machine reached standby, and no withdrawn key
+// left. The auditor is a participant like any other and its confirmation
+// is part of the record, so it answers once its task is done. Its task is
+// the event log, as an agent's is its combiner: the event logged, the
+// distribution is done here, and that is SUCCESS, the records as done. It
+// goes the way the agents' own final confirmations go, through
+// OnRemoteConfirmationReady, to the originator. An auditor never delays or
+// gates a change: it confirms every distribution it receives, at once.
 func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, senderID, zone string) {
 	if msgQs == nil || msgQs.OnRemoteConfirmationReady == nil || msg.DistributionID == "" {
 		return
@@ -231,11 +232,11 @@ func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, senderID, zone string)
 		OriginatingDistID: msg.DistributionID,
 		OriginatingSender: senderID,
 		Zone:              ZoneName(zone),
-		Status:            "IGNORED",
-		Message:           "auditor: recorded, not applied",
-		IgnoredRecords:    recorded,
+		Status:            "SUCCESS",
+		Message:           "auditor: recorded",
+		AppliedRecords:    recorded,
 	})
-	lgAuditor.Info("confirmed to the originator: recorded, not applied", "zone", zone, "originator", senderID, "distrib", msg.DistributionID, "records", len(recorded))
+	lgAuditor.Info("confirmed to the originator: recorded", "zone", zone, "originator", senderID, "distrib", msg.DistributionID, "records", len(recorded))
 }
 
 func logEvent(kdb *tdns.KeyDB, event *AuditEvent) {

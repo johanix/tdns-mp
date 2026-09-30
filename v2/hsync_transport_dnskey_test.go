@@ -313,10 +313,11 @@ func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 }
 
 // #101, the sender's side: an auditor is an expected agent like any other,
-// and its IGNORED is a final answer, so a distribution propagates once the
-// providers and the auditor have answered. Its PENDING alone is not an
-// answer: a sender waits, as it should, for an auditor that has not spoken.
-func TestAnAuditorsIgnoredCompletesPropagation(t *testing.T) {
+// and its SUCCESS, the event logged, is a final answer, so a distribution
+// propagates once the providers and the auditor have answered. Its PENDING
+// alone is not an answer: a sender waits, as it should, for an auditor that
+// has not spoken.
+func TestAnAuditorsSuccessCompletesPropagation(t *testing.T) {
 	ours := testDnskeyRR(t, "z.example.", 257)
 	kt := ours.KeyTag()
 	track := func() *MPTransportBridge {
@@ -334,7 +335,7 @@ func TestAnAuditorsIgnoredCompletesPropagation(t *testing.T) {
 	}
 	// the auditor's final word: propagated
 	p := tm.pendingDnskeyPropagations["d1"]
-	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmIgnored.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
 	if _, still := tm.pendingDnskeyPropagations["d1"]; still {
 		t.Fatal("providers and auditor answered and the propagation is still pending")
 	}

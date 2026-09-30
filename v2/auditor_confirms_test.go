@@ -10,11 +10,10 @@ import (
 )
 
 // #101: the auditor answers a distribution with a final confirmation. The
-// transport says PENDING on receipt; the auditor, which applies nothing,
-// says IGNORED, the transport's word for persisted and not applied, so the
-// sender's trackers have their answer. An RFI, or a message with no
-// distribution ID, gets none.
-func TestTheAuditorConfirmsADistributionAsIgnored(t *testing.T) {
+// transport says PENDING on receipt; the auditor, its event logged, says
+// SUCCESS, its task done, so the sender's trackers have their answer. An
+// RFI, or a message with no distribution ID, gets none.
+func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 	var got []*RemoteConfirmationDetail
 	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4), Hello: make(chan *AgentMsgReport), Beat: make(chan *AgentMsgReport), Ping: make(chan *AgentMsgReport),
 		Confirmation: make(chan *ConfirmationDetail), StatusUpdate: make(chan *StatusUpdateMsg)}
@@ -41,11 +40,11 @@ func TestTheAuditorConfirmsADistributionAsIgnored(t *testing.T) {
 		t.Fatalf("%d confirmations, want 1", len(got))
 	}
 	d := got[0]
-	if d.Status != "IGNORED" || d.OriginatingDistID != "d1" || d.OriginatingSender != "agent.p1.example." || d.Zone != "cell.example." {
-		t.Errorf("confirmation %+v, want IGNORED for d1 to agent.p1.example. for cell.example.", d)
+	if d.Status != "SUCCESS" || d.OriginatingDistID != "d1" || d.OriginatingSender != "agent.p1.example." || d.Zone != "cell.example." {
+		t.Errorf("confirmation %+v, want SUCCESS for d1 to agent.p1.example. for cell.example.", d)
 	}
-	if len(d.IgnoredRecords) != 1 || len(d.AppliedRecords) != 0 {
-		t.Errorf("records: ignored %v applied %v, want the record ignored and nothing applied", d.IgnoredRecords, d.AppliedRecords)
+	if len(d.AppliedRecords) != 1 || len(d.IgnoredRecords) != 0 || len(d.RejectedItems) != 0 {
+		t.Errorf("records: applied %v ignored %v rejected %v, want the record done and nothing else", d.AppliedRecords, d.IgnoredRecords, d.RejectedItems)
 	}
 
 	// an RFI, and a message with no distribution ID: nothing to confirm
