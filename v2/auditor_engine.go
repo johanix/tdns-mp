@@ -100,6 +100,7 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 			DeliveredBy: deliveredBy,
 			EventType:   "rfi",
 			Summary:     fmt.Sprintf("RFI %s from %s", msg.RfiType, senderID),
+			Details:     msg.Describe(),
 		})
 		return
 	}
@@ -126,6 +127,7 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 		RRsAdded:    added,
 		RRsRemoved:  removed,
 		RRtypes:     strings.Join(rrtypes, ","),
+		Details:     msg.Describe(),
 	})
 }
 
@@ -149,6 +151,7 @@ func (e *AuditorEngine) runAux(ctx context.Context, msgQs *MsgQs) {
 				EventType:  "confirm",
 				Summary: fmt.Sprintf("CONFIRM %s from %s (distrib %s)",
 					confirm.Status, confirm.Source, confirm.DistributionID),
+				Details: confirm.Describe(),
 			})
 		case statusMsg := <-msgQs.StatusUpdate:
 			if statusMsg != nil {
@@ -187,6 +190,7 @@ func adaptHelloReports(ctx context.Context, in <-chan *AgentMsgReport,
 					Originator: senderID,
 					EventType:  "hello",
 					Summary:    fmt.Sprintf("HELLO from %s", senderID),
+					Details:    report.Describe(),
 				})
 				select {
 				case out <- &hsync.InboundReport{

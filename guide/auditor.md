@@ -150,8 +150,27 @@ tdns-mpcli auditor eventlog list --since 2026-05-17T08:00:00Z
 tdns-mpcli auditor eventlog list --last 500
 ```
 
-Output is one line per event with timestamp, type,
-zone, originator and a one-line summary.
+Output is one line per event with its ID, timestamp,
+type, zone, originator and a one-line summary.
+
+Each event also records what its message carried: per
+operation its kind and RR type and the records, a
+DNSKEY by key tag with the state and DS verdict its
+sender gave it, the distribution ID, and for a
+confirmation what was applied, removed or rejected.
+The text is the message's standard printable form, the
+same wherever the message is shown:
+
+```sh
+# The details below each event
+tdns-mpcli auditor eventlog list --details
+
+# One event in full, by the ID from the list
+tdns-mpcli auditor eventlog show 1742
+```
+
+Events logged before the details were recorded have
+none.
 
 Clearing the log:
 
