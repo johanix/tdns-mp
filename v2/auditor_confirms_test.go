@@ -1,41 +1,31 @@
 package tdnsmp
 
 import (
-	"context"
 	"testing"
-	"time"
 
-	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns/v2/core"
 )
 
 // #101: the auditor answers a distribution with a final confirmation. The
 // transport says PENDING on receipt; the auditor, its event logged, says
-// SUCCESS, its task done, so the sender's trackers have their answer. An
-// RFI, or a message with no distribution ID, gets none.
+// SUCCESS, its task done, so the sender's trackers have their answer. The
+// path is the one mpauditor runs: the engine's inbound handler and its
+// record of the message. An RFI, or a message with no distribution ID,
+// gets no confirmation.
 func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 	var got []*RemoteConfirmationDetail
-	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4), Hello: make(chan *AgentMsgReport), Beat: make(chan *AgentMsgReport), Ping: make(chan *AgentMsgReport),
-		Confirmation: make(chan *ConfirmationDetail), StatusUpdate: make(chan *StatusUpdateMsg)}
-	done := make(chan struct{}, 8)
-	msgQs.OnRemoteConfirmationReady = func(d *RemoteConfirmationDetail) { got = append(got, d); done <- struct{}{} }
-	conf := &Config{Config: &tdns.Config{}}
-	conf.InternalMp.AgentRegistry = &AgentRegistry{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go AuditorMsgHandler(ctx, conf, msgQs, nil)
+	msgQs := &MsgQs{OnRemoteConfirmationReady: func(d *RemoteConfirmationDetail) { got = append(got, d) }}
+	e := &AuditorEngine{msgQs: msgQs}
 
 	key := testDnskey(t, "cell.example.", 257)
-	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{
+	msg := &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{
 		MessageType: core.AgentMsgNotify, OriginatorID: "agent.p1.example.", DeliveredBy: "agent.p1.example.",
 		Zone: "cell.example.", DistributionID: "d1",
 		Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{key.String()}}},
 	}}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the auditor sent no confirmation for the distribution")
-	}
+	e.onInboundMsg(&hsync.InboundMsg{MessageType: hsync.AgentMsg(msg.MessageType), Originator: hsync.PeerID(msg.OriginatorID), Zone: hsync.ZoneName(msg.Zone), Payload: msg})
+
 	if len(got) != 1 {
 		t.Fatalf("%d confirmations, want 1", len(got))
 	}
@@ -48,12 +38,16 @@ func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 	}
 
 	// an RFI, and a message with no distribution ID: nothing to confirm
-	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgRfi, RfiType: "CONFIG", OriginatorID: "agent.p1.example.", Zone: "cell.example.", DistributionID: "d2"}}
-	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgNotify, OriginatorID: "agent.p1.example.", Zone: "cell.example.",
-		Records: map[string][]string{"cell.example.": {"cell.example. 300 IN A 192.0.2.1"}}}}
-	select {
-	case <-done:
+	e.recordSyncMsg(&AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgRfi, RfiType: "CONFIG", OriginatorID: "agent.p1.example.", Zone: "cell.example.", DistributionID: "d2"}})
+	e.recordSyncMsg(&AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgNotify, OriginatorID: "agent.p1.example.", Zone: "cell.example.",
+		Records: map[string][]string{"cell.example.": {"cell.example. 300 IN A 192.0.2.1"}}}})
+	if len(got) != 1 {
 		t.Fatalf("a confirmation for an RFI or a distribution without ID: %+v", got[len(got)-1])
-	case <-time.After(300 * time.Millisecond):
+	}
+
+	// an engine that was never started has no queues, and confirms nothing
+	(&AuditorEngine{}).recordSyncMsg(msg)
+	if len(got) != 1 {
+		t.Fatal("an engine without queues sent a confirmation")
 	}
 }
