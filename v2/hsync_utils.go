@@ -1304,7 +1304,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// Delegation change detection
 	if mpzd.Options[tdns.OptParentSync] {
 		var err error
-		analysis.DelegationChanged, analysis.DelegationStatus, err = mpzd.DelegationDataChangedNG(new_zd)
+		analysis.DelegationChanged, analysis.DelegationStatus, err = implicitDelegationChange(mpzd, new_zd)
 		if err != nil {
 			lg.Error("DelegationDataChanged failed", "zone", mpzd.ZoneName, "err", err)
 		}
@@ -1458,6 +1458,31 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 
 	// Store analysis for post-refresh callbacks
 	mpzd.MP.RefreshAnalysis = analysis
+}
+
+// implicitDelegationChange is the refresh's implicit delegation-change
+// detection: tdns's diff of the old and new apex, NS, glue and, for a zone
+// tdns runs alone, the DS set it derives from the served SEP keys. For a
+// multi-provider zone that DS dimension is dropped: its DS set is the
+// owner's intent (design §4, S5), ds=1 keys and nothing else, and it reaches
+// the parent through the leader's intent-driven sync alone. A refresh that
+// brings another provider's new KSK, still mpdist at its provider, would
+// otherwise send that key's DS to the parent at once (tdns-mp #112).
+func implicitDelegationChange(mpzd *MPZoneData, new_zd *tdns.ZoneData) (bool, tdns.DelegationSyncStatus, error) {
+	changed, dss, err := mpzd.DelegationDataChangedNG(new_zd)
+	if err != nil || !mpzd.Options[tdns.OptMultiProvider] {
+		return changed, dss, err
+	}
+	return withoutImplicitDS(dss)
+}
+
+// withoutImplicitDS drops the DS dimension of an implicit delegation-change
+// status and says whether what is left, NS and glue, changed.
+func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSyncStatus, error) {
+	dss.DSAdds, dss.DSRemoves, dss.NewDS, dss.NewDSKnown = nil, nil, nil, false
+	changed := len(dss.NsAdds)+len(dss.NsRemoves)+len(dss.AAdds)+len(dss.ARemoves)+len(dss.AAAAAdds)+len(dss.AAAARemoves) > 0
+	dss.InSync = !changed
+	return changed, dss, nil
 }
 
 // PostRefresh runs after the hard flip for all MP roles.
