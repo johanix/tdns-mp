@@ -1,0 +1,11 @@
+{{define "event-details"}}
+{{if .Error}}
+<p class="audit-error">{{.Error}}</p>
+{{else}}{{with .Event}}{{if .Details}}
+<pre class="audit-event-details">{{.Details}}</pre>
+{{else}}
+<p><em>No details were recorded for this event.</em></p>
+{{end}}{{else}}
+<p><em>Event not found.</em></p>
+{{end}}{{end}}
+{{end}}

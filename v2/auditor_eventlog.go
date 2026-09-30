@@ -8,6 +8,8 @@ package tdnsmp
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -92,7 +94,7 @@ func QueryAuditEvents(kdb *tdns.KeyDB, zone string, since time.Time, limit int) 
 	kdb.Lock()
 	defer kdb.Unlock()
 
-	query := `SELECT id, time, zone, originator, delivered_by, event_type, summary, rrs_added, rrs_removed, rrtypes, details FROM AuditEventLog WHERE 1=1`
+	query := `SELECT ` + auditEventColumns + ` FROM AuditEventLog WHERE 1=1`
 	var args []interface{}
 
 	if zone != "" {
@@ -116,10 +118,9 @@ func QueryAuditEvents(kdb *tdns.KeyDB, zone string, since time.Time, limit int) 
 
 	var events []AuditEvent
 	for rows.Next() {
-		var e AuditEvent
-		var timeStr string
-		if err := rows.Scan(&e.ID, &timeStr, &e.Zone, &e.Originator, &e.DeliveredBy, &e.EventType, &e.Summary, &e.RRsAdded, &e.RRsRemoved, &e.RRtypes, &e.Details); err != nil {
-			return nil, fmt.Errorf("scan audit event: %w", err)
+		e, timeStr, err := scanAuditEvent(rows)
+		if err != nil {
+			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, timeStr)
 		if err != nil {
@@ -134,6 +135,41 @@ func QueryAuditEvents(kdb *tdns.KeyDB, zone string, since time.Time, limit int) 
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+const auditEventColumns = `id, time, zone, originator, delivered_by, event_type, summary, rrs_added, rrs_removed, rrtypes, details`
+
+// scanAuditEvent reads one row of auditEventColumns. The time comes back
+// as stored, for the caller to parse.
+func scanAuditEvent(row interface{ Scan(...any) error }) (AuditEvent, string, error) {
+	var e AuditEvent
+	var timeStr string
+	if err := row.Scan(&e.ID, &timeStr, &e.Zone, &e.Originator, &e.DeliveredBy, &e.EventType, &e.Summary, &e.RRsAdded, &e.RRsRemoved, &e.RRtypes, &e.Details); err != nil {
+		return AuditEvent{}, "", fmt.Errorf("scan audit event: %w", err)
+	}
+	return e, timeStr, nil
+}
+
+// GetAuditEvent returns the event with the given id, or nil when there is
+// none.
+func GetAuditEvent(kdb *tdns.KeyDB, id int64) (*AuditEvent, error) {
+	kdb.Lock()
+	defer kdb.Unlock()
+
+	row := kdb.DB.QueryRow(`SELECT `+auditEventColumns+` FROM AuditEventLog WHERE id = ?`, id)
+	e, timeStr, err := scanAuditEvent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	t, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		return nil, fmt.Errorf("audit event %d has an unparseable timestamp %q: %w", id, timeStr, err)
+	}
+	e.Time = t
+	return &e, nil
 }
 
 // ClearAuditEvents deletes events matching the given filters.

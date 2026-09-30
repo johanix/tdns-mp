@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,7 @@ type WebData struct {
 	Providers        []AuditProviderSummary
 	Auditors         []AuditProviderSummary
 	Events           []AuditEvent
+	Event            *AuditEvent // the event-details fragment's one event
 	Observations     []AuditObservation
 	Gossip           []GossipMatrixDTO
 	MPView           *ZoneMPViewDTO
@@ -382,6 +384,21 @@ func (s *auditorWebServer) fragmentEventLogRows(w http.ResponseWriter, r *http.R
 	s.render(w, "eventlog-rows-inner", data)
 }
 
+// fragmentEventDetails renders what one event's message carried, for the
+// row the event log expands under the event.
+func (s *auditorWebServer) fragmentEventDetails(w http.ResponseWriter, r *http.Request) {
+	data := &WebData{User: userFromCtx(r)}
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if kdb := s.conf.Config.Internal.KeyDB; err == nil && kdb != nil {
+		event, qerr := GetAuditEvent(kdb, id)
+		if qerr != nil {
+			data.Error = "query failed: " + qerr.Error()
+		}
+		data.Event = event
+	}
+	s.render(w, "event-details", data)
+}
+
 func (s *auditorWebServer) fragmentObservationList(w http.ResponseWriter, r *http.Request) {
 	zone := r.URL.Query().Get("zone")
 	data := s.buildObservationsData(r, zone)
@@ -580,6 +597,7 @@ func (s *auditorWebServer) registerRoutes(mux *http.ServeMux, wrap func(http.Han
 	mux.HandleFunc("/web/fragment/zone-status", wrap(s.fragmentZoneStatus))
 	mux.HandleFunc("/web/fragment/provider-detail", wrap(s.fragmentProviderDetail))
 	mux.HandleFunc("/web/fragment/eventlog-rows", wrap(s.fragmentEventLogRows))
+	mux.HandleFunc("/web/fragment/event-details", wrap(s.fragmentEventDetails))
 	mux.HandleFunc("/web/fragment/observation-list", wrap(s.fragmentObservationList))
 	mux.HandleFunc("/web/fragment/gossip-matrix", wrap(s.fragmentGossipMatrix))
 
