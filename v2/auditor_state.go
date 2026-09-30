@@ -110,7 +110,9 @@ func (m *AuditStateManager) GetAllZones() map[string]*AuditZoneState {
 	return result
 }
 
-// UpdateProviderBeat updates the provider state on beat receipt.
+// UpdateProviderBeat updates the provider state on beat receipt. An empty
+// label leaves the recorded one: the entry may have been created by a sync
+// that arrived before the zone's roles were known.
 func (zs *AuditZoneState) UpdateProviderBeat(identity, label, gossipState string, isSigner bool) {
 	zs.mu.Lock()
 	defer zs.mu.Unlock()
@@ -118,14 +120,36 @@ func (zs *AuditZoneState) UpdateProviderBeat(identity, label, gossipState string
 	if !ok {
 		ps = &AuditProviderState{
 			Identity:      identity,
-			Label:         label,
 			Contributions: make(map[string]map[uint16]int),
 		}
 		zs.Providers[identity] = ps
 	}
+	if label != "" {
+		ps.Label = label
+	}
 	ps.IsSigner = isSigner
 	ps.GossipState = gossipState
 	ps.LastBeat = time.Now()
+}
+
+// NoteProviderRole records a provider's role in the zone, resolved from the
+// zone when one of its messages arrives (#108): its HSYNC3 label and
+// whether it signs. A beat records the same from the same source.
+func (zs *AuditZoneState) NoteProviderRole(identity, label string, isSigner bool) {
+	zs.mu.Lock()
+	defer zs.mu.Unlock()
+	ps, ok := zs.Providers[identity]
+	if !ok {
+		ps = &AuditProviderState{
+			Identity:      identity,
+			Contributions: make(map[string]map[uint16]int),
+		}
+		zs.Providers[identity] = ps
+	}
+	if label != "" {
+		ps.Label = label
+	}
+	ps.IsSigner = isSigner
 }
 
 // UpdateAuditorBeat updates the auditor state on beat receipt.

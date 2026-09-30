@@ -116,7 +116,14 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 	if e.stateManager != nil && zone != "" && IsProviderIdentity(zone, senderID) {
 		zs := e.stateManager.GetOrCreateZone(zone)
 		zs.UpdateProviderSync(senderID, contributions)
-		detectMsgObservations(zs, senderID, msg, rrtypes)
+		// The sender's role comes from the zone, as a beat's does, not
+		// from whether a beat has arrived yet: a DNSKEY sync can precede
+		// the sender's first beat for the zone (#108). Until the zone's
+		// roles are known there is nothing to judge the sync by.
+		if label, isSigner, known := zoneMemberRole(msg.Zone, senderID); known {
+			zs.NoteProviderRole(senderID, label, isSigner)
+			detectMsgObservations(zs, senderID, msg, rrtypes)
+		}
 	}
 
 	logEvent(e.auditLog, &AuditEvent{
@@ -222,40 +229,56 @@ func providerBeatMeta(ar *AgentRegistry, zone ZoneName, identity string) (label,
 	if agent, ok := ar.S.Get(AgentId(identity)); ok {
 		gossipState = AgentStateToString[ar.effectiveAgentState(agent.ID)]
 	}
+	label, isSigner, _ = zoneMemberRole(zone, identity)
+	return label, gossipState, isSigner
+}
+
+// zoneMemberRole resolves identity's role in zone from the zone's apex as
+// the auditor has it: its HSYNC3 label, and whether HSYNCPARAM lists that
+// label under signers=. known is false while the zone is not loaded and
+// Ready at the auditor, or identity is not an HSYNC3 member of it: there is
+// then no role to judge by, and label and isSigner say nothing. A beat and a
+// sync resolve their sender's role the same way (#108).
+func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, known bool) {
 	if zone == "" {
-		return label, gossipState, isSigner
+		return "", false, false
 	}
 	zd, exists := Zones.Get(dns.Fqdn(string(zone)))
 	if !exists || !zd.Ready {
-		return label, gossipState, isSigner
+		return "", false, false
 	}
 	// Resolve the label the way the zone view does (hsync3IdentitiesByLabel):
 	// inactive members included, identities compared as FQDNs.
-	// UpdateProviderBeat sets the label only when it creates the entry,
-	// so an empty label here would stick for the life of the process.
 	label = zd.hsync3LabelForIdentity(identity)
 	if label == "" {
-		return label, gossipState, isSigner
+		return "", false, false
 	}
 	// A member is a signer only when listed under signers=; a servers=
-	// member serves the zone without signing it.
+	// member serves the zone without signing it. Without an HSYNCPARAM the
+	// zone declares no roles at all.
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
-		return label, gossipState, isSigner
+		return label, false, false
 	}
-	if hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM); ok && len(hpRRset.RRs) > 0 {
-		if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
-			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
-				for _, l := range hp.GetSigners() {
-					if normalizeHSYNC3Label(l) == label {
-						isSigner = true
-						break
-					}
-				}
-			}
+	hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !ok || len(hpRRset.RRs) == 0 {
+		return label, false, false
+	}
+	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
+	if !ok {
+		return label, false, false
+	}
+	hp, ok := prr.Data.(*core.HSYNCPARAM)
+	if !ok {
+		return label, false, false
+	}
+	for _, l := range hp.GetSigners() {
+		if normalizeHSYNC3Label(l) == label {
+			isSigner = true
+			break
 		}
 	}
-	return label, gossipState, isSigner
+	return label, isSigner, true
 }
 
 func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
