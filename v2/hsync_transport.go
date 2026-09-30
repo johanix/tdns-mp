@@ -721,9 +721,9 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	// Convert to AgentMsgReport for the existing hsyncengine.
 	// Use the first shared zone from the payload as the report's
-	// Zone — downstream consumers (e.g. AuditorMsgHandler's
-	// StateManager.GetOrCreateZone) gate on zone != "", and without
-	// it the auditor never records a per-zone provider entry.
+	// Zone. The auditor's hello adapter (adaptHelloReports) writes
+	// it into the hello row of its event log; without it the row
+	// has no zone and a per-zone event query misses it.
 	report := &AgentMsgReport{
 		Transport:      mech,
 		MessageType:    AgentMsgHello,
@@ -809,12 +809,12 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	distributionID := msg.DistributionID
 
 	// Set Zone from the payload's Zones list so downstream consumers
-	// (notably AuditorMsgHandler, which gates StateManager updates on
-	// zone != "") can attribute the beat to its zone. Without this,
-	// the auditor dashboard's provider list stays empty even though
-	// beats are flowing — only HELLO-initiated state entries survive,
-	// and HELLOs happen once per handshake while beats happen
-	// continuously.
+	// (notably the auditor's beat adapter, adaptBeatReports, which
+	// gates StateManager updates on zone != "") can attribute the
+	// beat to its zone. Without this, the auditor dashboard's
+	// provider list stays empty even though beats are flowing — a
+	// hello creates no provider entry, and a sync creates one only
+	// when zone data changes, while beats arrive continuously.
 	report := &AgentMsgReport{
 		Transport:      mech,
 		MessageType:    AgentMsgBeat,
