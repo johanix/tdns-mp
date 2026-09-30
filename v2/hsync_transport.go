@@ -2059,20 +2059,8 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
-	// An auditor receives the distribution like any agent of the zone, and
-	// its event log is the record of it, but it applies no key: its answer
-	// is PENDING with nothing applied, and that is its final word. Waiting
-	// for it held every key in mpdist for as long as an auditor was in the
-	// fleet (#101). Propagation is the serving providers' business: the
-	// auditors are not expected to answer, and an answer from one is not
-	// counted (ProcessDnskeyConfirmation ignores an agent it does not
-	// expect).
-	auditing := auditingAgents(zone, agents)
 	expected := make(map[AgentId]bool, len(agents))
 	for _, a := range agents {
-		if auditing[a] {
-			continue
-		}
 		expected[a] = false // false = not yet confirmed
 	}
 	removed := map[uint16]bool{}
@@ -2090,24 +2078,7 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string
 		CreatedAt:      time.Now(),
 	}
 
-	lgTransport.Info("tracking DNSKEY propagation", "zone", zone, "distributionID", distID, "agents", len(expected), "auditors", len(auditing), "keyTags", len(keyTags))
-}
-
-// auditingAgents: those of a zone's agents that are its auditors (their
-// HSYNC3 label is among the HSYNCPARAM auditors). Empty when the zone or
-// its HSYNC data is not here to ask: then nobody is left out.
-func auditingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
-	out := map[AgentId]bool{}
-	mpzd, ok := Zones.Get(dns.Fqdn(string(zone)))
-	if !ok || mpzd == nil || mpzd.getHSYNCPARAM() == nil {
-		return out
-	}
-	for _, a := range agents {
-		if matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(string(a))}); err == nil && matched && mpzd.isAuditor(label) {
-			out[a] = true
-		}
-	}
-	return out
+	lgTransport.Info("tracking DNSKEY propagation", "zone", zone, "distributionID", distID, "agents", len(agents), "keyTags", len(keyTags))
 }
 
 // signingAgents: those of a zone's agents whose provider signs the zone.

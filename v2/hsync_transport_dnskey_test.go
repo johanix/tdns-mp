@@ -312,70 +312,34 @@ func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 	}
 }
 
-// An auditor receives the distribution and answers PENDING with nothing
-// applied, its final word: it applies no key. Waiting for it held every
-// key in mpdist while an auditor was in the fleet (#101). The tracker
-// expects the serving providers' agents alone; the auditor's answer is
-// not counted, and its event log is the record of the distribution.
-func TestAnAuditorDoesNotGatePropagation(t *testing.T) {
-	mpzd := trackTestZoneWithAuditor(t, "audited.track.example.")
-	zone := ZoneName(mpzd.ZoneName)
-	agents := []AgentId{"agent.p2.example.", "agent.p3.example.", "agent.aud.example."}
-	if got := auditingAgents(zone, agents); len(got) != 1 || !got["agent.aud.example."] {
-		t.Fatalf("auditing agents %v, want the auditor alone", got)
-	}
-	if got := auditingAgents("absent.track.example.", agents); len(got) != 0 {
-		t.Errorf("a zone that is not here: %v, want nobody left out", got)
-	}
-
-	ours := testDnskeyRR(t, mpzd.ZoneName, 257)
+// #101, the sender's side: an auditor is an expected agent like any other,
+// and its IGNORED is a final answer, so a distribution propagates once the
+// providers and the auditor have answered. Its PENDING alone is not an
+// answer: a sender waits, as it should, for an auditor that has not spoken.
+func TestAnAuditorsIgnoredCompletesPropagation(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 257)
 	kt := ours.KeyTag()
-	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation(zone, "d1", []uint16{kt}, nil, agents)
+	track := func() *MPTransportBridge {
+		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
+		tm.ProcessDnskeyConfirmation("d1", "p2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+		tm.ProcessDnskeyConfirmation("d1", "p3", transport.ConfirmIgnored.String(), nil, nil)
+		return tm
+	}
+	// the auditor's receipt alone: still pending
+	tm := track()
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmPending.String(), nil, nil)
+	if _, still := tm.pendingDnskeyPropagations["d1"]; !still {
+		t.Fatal("the auditor's PENDING completed the propagation")
+	}
+	// the auditor's final word: propagated
 	p := tm.pendingDnskeyPropagations["d1"]
-	if _, expected := p.ExpectedAgents["agent.aud.example."]; expected || len(p.ExpectedAgents) != 2 {
-		t.Fatalf("expected agents %v, want the two providers' agents and not the auditor", p.ExpectedAgents)
-	}
-	// the auditor's answer, as it comes: PENDING, nothing applied
-	tm.ProcessDnskeyConfirmation("d1", "agent.aud.example.", transport.ConfirmPending.String(), nil, nil)
-	if _, expected := p.ExpectedAgents["agent.aud.example."]; expected {
-		t.Error("the auditor's answer made it an expected agent")
-	}
-	// the providers answer: the signer applied, the non-signer ignored
-	tm.ProcessDnskeyConfirmation("d1", "agent.p2.example.", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
-	tm.ProcessDnskeyConfirmation("d1", "agent.p3.example.", transport.ConfirmIgnored.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmIgnored.String(), nil, nil)
 	if _, still := tm.pendingDnskeyPropagations["d1"]; still {
-		t.Fatal("both providers answered and the propagation is still pending: the auditor is being waited for")
+		t.Fatal("providers and auditor answered and the propagation is still pending")
 	}
 	propagated, _, rejected, _ := p.outcome()
 	if len(propagated) != 1 || propagated[0] != kt || len(rejected) != 0 {
 		t.Errorf("propagated %v rejected %v, want the key propagated", propagated, rejected)
 	}
-}
-
-// trackTestZoneWithAuditor: trackTestZone plus an auditor, label aud,
-// agent agent.aud.example., named among the HSYNCPARAM auditors.
-func trackTestZoneWithAuditor(t *testing.T, name string) *MPZoneData {
-	t.Helper()
-	mpzd := signerTestZone(t, name, newMPTestKeyDB(t))
-	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	if err != nil || apex == nil {
-		t.Fatalf("apex: %v", err)
-	}
-	hdr := func(rrtype uint16) dns.RR_Header {
-		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
-	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
-		&core.HSYNCPARAMSigners{Signers: []string{"us", "p2"}},
-		&core.HSYNCPARAMAuditors{Auditors: []string{"aud"}},
-	}}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
-	var h3s []dns.RR
-	for _, label := range []string{"us", "p2", "p3", "aud"} {
-		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: "agent." + label + ".example.", Upstream: "."}})
-	}
-	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
-	mpzd.Data.Set(mpzd.ZoneName, *apex)
-	mpzd.InstallInitialSnapshot()
-	return mpzd
 }
