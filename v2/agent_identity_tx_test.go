@@ -308,18 +308,17 @@ func TestTheIdentityZonesParentSyncStartsAfterItsCommit(t *testing.T) {
 	}
 
 	// The CDS goes out after the commit, through the queue: a serial of its
-	// own, on a zone that is already complete for discovery.
-	deadline := time.Now().Add(5 * time.Second)
+	// own, on a zone that is already complete for discovery. The set-up
+	// returns once the zone serves it, and only then starts the delegation
+	// sync: the sync's SIG(0) key preparation and the updater's persisting of
+	// the CDS update each take the key store's one transaction, and whichever
+	// came second was refused.
 	var cds *core.RRset
-	for time.Now().Before(deadline) {
-		if rrset, err := zd.GetRRset(identityTestZone, dns.TypeCDS); err == nil && rrset != nil && len(rrset.RRs) > 0 {
-			cds = rrset
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	if rrset, err := zd.GetRRset(identityTestZone, dns.TypeCDS); err == nil && rrset != nil && len(rrset.RRs) > 0 {
+		cds = rrset
 	}
 	if cds == nil {
-		t.Error("the identity zone has no CDS after its set-up")
+		t.Error("the identity zone serves no CDS when its set-up returns")
 		// Which of the two silent ways: no SEP key in the published DNSKEY
 		// RRset (nothing to synthesise), or the update's publish refused (a
 		// zone that signs marks itself DnssecError).

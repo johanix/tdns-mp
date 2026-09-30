@@ -187,14 +187,35 @@ func (conf *Config) commitIdentityZone(ctx context.Context, zd *tdns.ZoneData, t
 // through accessors that need it Ready, which a held zone is not. The CDS is
 // a serial of its own, after the one that carries the identity; the parent,
 // not discovery, is what reads it.
+//
+// The delegation sync starts only once the zone serves the CDS. Its first
+// step, the SIG(0) key preparation, writes the key store, and the updater
+// persists the CDS update there too; the key store takes one transaction at
+// a time and refuses a second rather than wait for it. With the CDS queued
+// and not waited for, the two ran together and one of them lost: either the
+// update was refused and the zone published no CDS, or no key was generated
+// and the setup was queued without one.
 func (conf *Config) startIdentityParentSync(ctx context.Context, zd *tdns.ZoneData) {
 	if !zd.Options[tdns.OptParentSync] {
 		return
 	}
-	if err := zd.PublishCdsRRs(); err != nil {
+	if err := publishIdentityCds(ctx, zd); err != nil {
 		lgAgent.Warn("identity zone: could not publish CDS", "zone", zd.ZoneName, "err", err)
 	}
 	go conf.syncIdentityDelegation(ctx, zd)
+}
+
+// publishIdentityCds publishes the CDS for the SEP keys of the zone's served
+// DNSKEY RRset, as PublishCdsRRs does, and returns once the zone serves it.
+func publishIdentityCds(ctx context.Context, zd *tdns.ZoneData) error {
+	cds, err := zd.SynthesizeCdsRRs()
+	if err != nil {
+		return err
+	}
+	if len(cds) == 0 {
+		return nil
+	}
+	return zd.PublishCDSAndWait(ctx, zd.KeyDB, cds)
 }
 
 // publishApiTransport publishes HTTPS transport records (URI, address, TLSA, SVCB)
