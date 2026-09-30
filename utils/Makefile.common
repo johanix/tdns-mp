@@ -77,4 +77,70 @@ netbsd:
 test:
 	$(GO) test -v -cover
 
+# --- packages -----------------------------------------------------------
+#
+# Five NetBSD binary packages, one per component: tdns-mpagent, tdns-mpcombiner,
+# tdns-mpsigner and tdns-mpauditor each ship their own daemon under libexec,
+# and tdns-mpcli ships the client under bin. The rules mirror tdns's
+# utils/Makefile.common; see utils/mkpkg.sh for why a package rather than a
+# tarball, and for the pkg_create details that are not obvious.
+#
+# The file lists are exactly the paths each app's OWN "install:" target places
+# under /usr/local. The package is a REAL make target with the app's own built
+# binary AND install as prerequisites: depending on the installed copy alone
+# lets a rebuilt-but-not-installed app ship a stale binary inside a package
+# stamped with today's date, which is what happened once in labstuff. install
+# is phony, so the package is repacked on every "make pkg"; a repack costs
+# seconds, a stale binary reaching a booted host silently cost days.
+#
+# "!=" rather than "$(shell ...)": $(shell) is GNU-make only and under NetBSD's
+# bmake expands to NOTHING, silently, which once produced a full-size
+# VERSIONLESS package. mkpkg.sh refuses such a version; this is the other half.
+# "!=" needs bmake or GNU make 4.0+ (macOS still ships 3.81): build the
+# packages on the NetBSD build host.
+PKGBASEVER!= for f in ../../VERSION ../VERSION VERSION; do if [ -f "$$f" ]; then sed -e 's/^[vV]//' -e 's/[^0-9.].*$$//' "$$f"; break; fi; done 2>/dev/null || echo ""
+PKGDATE!= date +%Y%m%d
+PKGVER=$(PKGBASEVER).$(PKGDATE)
+
+PKG_TDNS_MPAGENT:=tdns-mpagent-$(PKGVER).tgz
+PKG_TDNS_MPCOMBINER:=tdns-mpcombiner-$(PKGVER).tgz
+PKG_TDNS_MPSIGNER:=tdns-mpsigner-$(PKGVER).tgz
+PKG_TDNS_MPAUDITOR:=tdns-mpauditor-$(PKGVER).tgz
+PKG_TDNS_MPCLI:=tdns-mpcli-$(PKGVER).tgz
+
+pkg_tdns_mpagent: $(PKG_TDNS_MPAGENT)
+$(PKG_TDNS_MPAGENT): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-mpagent, the multi-provider agent" \
+	/bin/sh ../../utils/mkpkg.sh tdns-mpagent /usr/local \
+	libexec/tdns-mpagent
+
+pkg_tdns_mpcombiner: $(PKG_TDNS_MPCOMBINER)
+$(PKG_TDNS_MPCOMBINER): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-mpcombiner, the multi-provider zone combiner" \
+	/bin/sh ../../utils/mkpkg.sh tdns-mpcombiner /usr/local \
+	libexec/tdns-mpcombiner
+
+pkg_tdns_mpsigner: $(PKG_TDNS_MPSIGNER)
+$(PKG_TDNS_MPSIGNER): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-mpsigner, the multi-provider DNSSEC signer" \
+	/bin/sh ../../utils/mkpkg.sh tdns-mpsigner /usr/local \
+	libexec/tdns-mpsigner
+
+pkg_tdns_mpauditor: $(PKG_TDNS_MPAUDITOR)
+$(PKG_TDNS_MPAUDITOR): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-mpauditor, the multi-provider auditor" \
+	/bin/sh ../../utils/mkpkg.sh tdns-mpauditor /usr/local \
+	libexec/tdns-mpauditor
+
+pkg_tdns_mpcli: $(PKG_TDNS_MPCLI)
+$(PKG_TDNS_MPCLI): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-mpcli, the multi-provider command-line tool" \
+	/bin/sh ../../utils/mkpkg.sh tdns-mpcli /usr/local \
+	bin/tdns-mpcli
+
 .PHONY: build gobuild generate version clean
