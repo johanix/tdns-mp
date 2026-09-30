@@ -11,6 +11,7 @@
  *   zone                — detail for one zone (req.Zone required)
  *   observations        — recent observations, optionally per zone
  *   eventlog-list       — query event log (zone/since/limit)
+ *   eventlog-show       — one event, with its details (req.ID required)
  *   eventlog-clear      — clear events (zone, older_than, all)
  */
 package tdnsmp
@@ -30,6 +31,7 @@ type AuditPost struct {
 	Limit     int    `json:"limit,omitempty"`
 	OlderThan string `json:"older_than,omitempty"`
 	All       bool   `json:"all,omitempty"`
+	ID        int64  `json:"id,omitempty"`
 }
 
 // AuditResponse is the response body for /api/v1/auditor.
@@ -166,6 +168,26 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeAuditJSON(w, AuditResponse{Status: "ok", Events: events})
+
+		case "eventlog-show":
+			if kdb == nil {
+				writeAuditError(w, "no database configured")
+				return
+			}
+			if req.ID <= 0 {
+				writeAuditError(w, "eventlog-show: an event id is required")
+				return
+			}
+			event, err := GetAuditEvent(kdb, req.ID)
+			if err != nil {
+				writeAuditError(w, "query failed: "+err.Error())
+				return
+			}
+			if event == nil {
+				writeAuditError(w, fmt.Sprintf("no event with id %d", req.ID))
+				return
+			}
+			writeAuditJSON(w, AuditResponse{Status: "ok", Events: []AuditEvent{*event}})
 
 		case "eventlog-clear":
 			if kdb == nil {

@@ -386,10 +386,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
 		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
-		// Stop retrying on any definitive answer (success, failure, rejected, or ignored).
-		// Only keep retrying for transient states (pending, partial).
-		if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected || status == transport.ConfirmIgnored) {
-			tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
+		if tm.ReliableQueue != nil {
+			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -1311,6 +1309,22 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 	})
 
 	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
+}
+
+// settleQueuedMessage tells the reliable queue what a confirmation means
+// for the message it answers. A final word (SUCCESS, FAILED, REJECTED,
+// IGNORED, or PARTIAL: the recipient did what it will do) closes the
+// message, so no resend follows. A PENDING says the recipient has it and
+// is still working: the queue's wait for the final word starts over. The
+// queue sends the message again, same distribution ID, when that wait
+// runs out with no final word (tdns-mp #101).
+func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, senderID string, status transport.ConfirmStatus) {
+	switch status {
+	case transport.ConfirmSuccess, transport.ConfirmFailed, transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmPartial:
+		q.MarkConfirmed(distributionID, senderID)
+	case transport.ConfirmPending:
+		q.MarkPending(distributionID, senderID)
+	}
 }
 
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
