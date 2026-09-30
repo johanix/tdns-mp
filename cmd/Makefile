@@ -50,8 +50,10 @@ install-dirs: check-root
 # installs and packs its own binary, so this needs root for the same reason
 # "install" does. The .tgz files are left in the app directories; publishing
 # is deliberately not a target here, as in tdns: they go into a per-osrelease
-# tree on whichever host serves the packages.
-pkg: check-root install-dirs
+# tree on whichever host serves the packages. version first, so a package
+# built from a fresh checkout carries the commit it was built from rather
+# than "unknown".
+pkg: check-root install-dirs version
 	$(MAKE) -C ./mpsigner/ pkg
 	$(MAKE) -C ./mpcombiner/ pkg
 	$(MAKE) -C ./mpagent/ pkg
