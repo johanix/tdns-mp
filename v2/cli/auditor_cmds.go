@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * Auditor CLI commands. Phase C scope: eventlog list/clear, zones,
+ * Auditor CLI commands. Phase C scope: eventlog list/show/clear, zones,
  * observations subcommands. All call POST /api/v1/auditor on the
  * auditor with a JSON body whose Command field selects the action.
  */
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ func newAuditorEventlogCmd(kind string) *cobra.Command {
 		Use:   "eventlog",
 		Short: "Audit event log commands",
 	}
-	c.AddCommand(newAuditorEventlogListCmd(kind), newAuditorEventlogClearCmd(kind))
+	c.AddCommand(newAuditorEventlogListCmd(kind), newAuditorEventlogShowCmd(kind), newAuditorEventlogClearCmd(kind))
 	return c
 }
 
@@ -65,12 +66,36 @@ func newAuditorEventlogListCmd(kind string) *cobra.Command {
 				fmt.Println("No events found")
 				return
 			}
-			printEvents(resp.Events)
+			details, _ := cmd.Flags().GetBool("details")
+			printEvents(resp.Events, details)
 		},
 	}
 	c.Flags().StringP("zone", "z", "", "filter by zone")
 	c.Flags().String("since", "", "events since (RFC3339)")
 	c.Flags().Int("last", 50, "number of events to show")
+	c.Flags().Bool("details", false, "show what each message carried, below its event")
+	return c
+}
+
+func newAuditorEventlogShowCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "show <id>",
+		Short: "Show one audit event with what its message carried",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			id, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || id <= 0 {
+				log.Fatalf("invalid event id %q: use a number from the ID column of \"eventlog list\"", args[0])
+			}
+			resp, err := callAuditor(cmd, AuditPost{Command: "eventlog-show", ID: id})
+			if err != nil {
+				log.Fatal(err)
+			}
+			for _, e := range resp.Events {
+				printEvent(e)
+			}
+		},
+	}
 	return c
 }
 
@@ -168,18 +193,43 @@ func callAuditor(cmd *cobra.Command, req AuditPost) (*AuditResponse, error) {
 	return &resp, nil
 }
 
-func printEvents(events []AuditEvent) {
-	fmt.Printf("%-20s  %-10s  %-25s  %-25s  %s\n",
-		"Time", "Type", "Zone", "Originator", "Summary")
-	fmt.Printf("%-20s  %-10s  %-25s  %-25s  %s\n",
-		strings.Repeat("-", 20), strings.Repeat("-", 10),
+// printEvents prints one line per event, and with details what the event's
+// message carried, indented below it.
+func printEvents(events []AuditEvent, details bool) {
+	fmt.Printf("%-6s  %-20s  %-10s  %-25s  %-25s  %s\n",
+		"ID", "Time", "Type", "Zone", "Originator", "Summary")
+	fmt.Printf("%-6s  %-20s  %-10s  %-25s  %-25s  %s\n",
+		strings.Repeat("-", 6), strings.Repeat("-", 20), strings.Repeat("-", 10),
 		strings.Repeat("-", 25), strings.Repeat("-", 25),
 		strings.Repeat("-", 40))
 	for _, e := range events {
-		fmt.Printf("%-20s  %-10s  %-25s  %-25s  %s\n",
-			e.Time.Format("2006-01-02 15:04:05"),
+		fmt.Printf("%-6d  %-20s  %-10s  %-25s  %-25s  %s\n",
+			e.ID, e.Time.Format("2006-01-02 15:04:05"),
 			e.EventType, e.Zone, e.Originator, e.Summary)
+		if details && e.Details != "" {
+			for _, l := range strings.Split(e.Details, "\n") {
+				fmt.Printf("        %s\n", l)
+			}
+		}
 	}
+}
+
+// printEvent prints one event in full: its fields, then what its message
+// carried.
+func printEvent(e AuditEvent) {
+	fmt.Printf("Event %d: %s\n", e.ID, e.Summary)
+	fmt.Printf("  time:         %s\n", e.Time.Format("2006-01-02 15:04:05 MST"))
+	fmt.Printf("  type:         %s\n", e.EventType)
+	fmt.Printf("  zone:         %s\n", e.Zone)
+	fmt.Printf("  originator:   %s\n", e.Originator)
+	if e.DeliveredBy != "" && e.DeliveredBy != e.Originator {
+		fmt.Printf("  delivered by: %s\n", e.DeliveredBy)
+	}
+	if e.Details == "" {
+		fmt.Println("\n(no details were recorded for this event)")
+		return
+	}
+	fmt.Printf("\n%s\n", e.Details)
 }
 
 func printZones(zones []AuditZoneSummary) {
