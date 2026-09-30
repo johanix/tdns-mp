@@ -311,3 +311,36 @@ func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 		t.Errorf("the signing provider ignored the key: propagated %v rejected %v msg %q, want it rejected naming p2's agent", propagated, rejected, msg)
 	}
 }
+
+// #101, the sender's side: an auditor is an expected agent like any other,
+// and its SUCCESS, the event logged, is a final answer, so a distribution
+// propagates once the providers and the auditor have answered. Its PENDING
+// alone is not an answer: a sender waits, as it should, for an auditor that
+// has not spoken.
+func TestAnAuditorsSuccessCompletesPropagation(t *testing.T) {
+	ours := testDnskeyRR(t, "z.example.", 257)
+	kt := ours.KeyTag()
+	track := func() *MPTransportBridge {
+		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
+		tm.ProcessDnskeyConfirmation("d1", "p2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+		tm.ProcessDnskeyConfirmation("d1", "p3", transport.ConfirmIgnored.String(), nil, nil)
+		return tm
+	}
+	// the auditor's receipt alone: still pending
+	tm := track()
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmPending.String(), nil, nil)
+	if _, still := tm.pendingDnskeyPropagations["d1"]; !still {
+		t.Fatal("the auditor's PENDING completed the propagation")
+	}
+	// the auditor's final word: propagated
+	p := tm.pendingDnskeyPropagations["d1"]
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	if _, still := tm.pendingDnskeyPropagations["d1"]; still {
+		t.Fatal("providers and auditor answered and the propagation is still pending")
+	}
+	propagated, _, rejected, _ := p.outcome()
+	if len(propagated) != 1 || propagated[0] != kt || len(rejected) != 0 {
+		t.Errorf("propagated %v rejected %v, want the key propagated", propagated, rejected)
+	}
+}

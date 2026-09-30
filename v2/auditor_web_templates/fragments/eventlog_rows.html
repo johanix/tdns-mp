@@ -14,19 +14,32 @@
       <th>-RRs</th>
     </tr>
   </thead>
-  <tbody>
-    {{range .Events}}
-    <tr>
+  {{/* One tbody per event, kept across the periodic refresh (hx-preserve):
+       an event never changes once logged, and an expanded row stays open
+       with its details loaded. A click loads the details once and then
+       shows or hides them. */}}
+  {{range .Events}}
+  <tbody class="audit-event" id="audit-event-{{.ID}}" hx-preserve>
+    <tr{{if .Details}} class="audit-event-row"
+      hx-get="/web/fragment/event-details?id={{.ID}}"
+      hx-target="#audit-event-{{.ID}}-details"
+      hx-trigger="click once"
+      hx-on:click="this.nextElementSibling.hidden = !this.nextElementSibling.hidden"{{end}}>
       <td><small>{{fmtTime .Time}}</small></td>
       <td>{{.Zone}}</td>
       <td><code>{{.EventType}}</code></td>
       <td><small>{{.Originator}}</small></td>
-      <td>{{.Summary}}</td>
+      <td>{{.Summary}}{{if .Details}} <small>details &darr;</small>{{end}}</td>
       <td>{{if .RRsAdded}}+{{.RRsAdded}}{{end}}</td>
       <td>{{if .RRsRemoved}}-{{.RRsRemoved}}{{end}}</td>
     </tr>
+    {{if .Details}}
+    <tr class="audit-event-details-row" hidden>
+      <td colspan="7" id="audit-event-{{.ID}}-details"><em>Loading&hellip;</em></td>
+    </tr>
     {{end}}
   </tbody>
+  {{end}}
 </table>
 {{end}}
 {{end}}

@@ -21,6 +21,7 @@ type AuditorEngine struct {
 	conf         *Config
 	stateManager *AuditStateManager
 	auditLog     *tdns.KeyDB // optional persistent log
+	msgQs        *MsgQs      // set by Run; carries the final confirmation back to a distribution's originator
 }
 
 func NewAuditorEngine(conf *Config, stateManager *AuditStateManager) *AuditorEngine {
@@ -42,6 +43,7 @@ func (e *AuditorEngine) Run(ctx context.Context, msgQs *MsgQs) {
 	if e == nil || e.core == nil || msgQs == nil {
 		return
 	}
+	e.msgQs = msgQs
 	e.core.SetHandler(e.onInboundMsg)
 
 	ar := e.conf.InternalMp.AgentRegistry
@@ -100,6 +102,7 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 			DeliveredBy: deliveredBy,
 			EventType:   "rfi",
 			Summary:     fmt.Sprintf("RFI %s from %s", msg.RfiType, senderID),
+			Details:     msg.Describe(),
 		})
 		return
 	}
@@ -126,7 +129,11 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 		RRsAdded:    added,
 		RRsRemoved:  removed,
 		RRtypes:     strings.Join(rrtypes, ","),
+		Details:     msg.Describe(),
 	})
+	// The event logged, the auditor's task is done: its final word to the
+	// originator (#101).
+	auditorConfirms(e.msgQs, msg, senderID, zone)
 }
 
 func (e *AuditorEngine) runAux(ctx context.Context, msgQs *MsgQs) {
@@ -149,6 +156,7 @@ func (e *AuditorEngine) runAux(ctx context.Context, msgQs *MsgQs) {
 				EventType:  "confirm",
 				Summary: fmt.Sprintf("CONFIRM %s from %s (distrib %s)",
 					confirm.Status, confirm.Source, confirm.DistributionID),
+				Details: confirm.Describe(),
 			})
 		case statusMsg := <-msgQs.StatusUpdate:
 			if statusMsg != nil {
@@ -187,6 +195,7 @@ func adaptHelloReports(ctx context.Context, in <-chan *AgentMsgReport,
 					Originator: senderID,
 					EventType:  "hello",
 					Summary:    fmt.Sprintf("HELLO from %s", senderID),
+					Details:    report.Describe(),
 				})
 				select {
 				case out <- &hsync.InboundReport{
