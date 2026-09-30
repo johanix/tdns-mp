@@ -208,6 +208,50 @@ func TestTheParentWaitSurvivesARestart(t *testing.T) {
 	}
 }
 
+// CodeRabbit on #96: a persisted note whose time cannot be read must not
+// come back as a note with the zero time, which parentDSWaitMet never
+// takes as met; it is dropped, and the next sighting notes the DS afresh.
+func TestAnUnreadableParentDSNoteIsDroppedAtARestart(t *testing.T) {
+	r := newDriverRig(t, "unreadable.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	old, _ := bootstrapKSK(t, r)
+	b := rollToStandby(t, r, old)
+	r.wire.parentDS[b] = true
+	r.tick("the parent serves the new DS")
+	if _, ok := r.l.dsPresent[b]; !ok {
+		t.Fatal("no note of the parent's DS")
+	}
+	if _, err := r.kdb.DB.Exec(`UPDATE MPParentDS SET since='' WHERE zonename=? AND keyid=?`, r.l.Zone, int(b)); err != nil {
+		t.Fatal(err)
+	}
+	r.l = NewZoneKeyLifecycle(r.l.Zone, r.kdb, r.clock, driverPolicy, r.wire)
+	if err := r.l.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := r.l.dsPresent[b]; ok {
+		t.Fatalf("the unreadable note came back as %+v", got)
+	}
+	var rows int
+	if err := r.kdb.DB.QueryRow(`SELECT count(*) FROM MPParentDS WHERE zonename=? AND keyid=?`, r.l.Zone, int(b)).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("the unreadable note is still stored (%d rows, err %v)", rows, err)
+	}
+	// the DS is still served: the next tick notes it afresh, and the wait
+	// runs from now
+	r.tick("the parent still serves the DS")
+	got, ok := r.l.dsPresent[b]
+	if !ok || got.Since.IsZero() || got.TTL != time.Hour {
+		t.Fatalf("after the restart the note is %+v (found %v), want a fresh note with ttl 1h", got, ok)
+	}
+	// the rollover request is not persisted either: asked again after the
+	// TTL since the fresh note, the promotion comes
+	r.clock.Advance(61 * time.Minute)
+	r.l.RequestRollover("KSK")
+	r.tick("the DS TTL since the fresh note passed")
+	if st := r.state(b); st != KeyStateActive {
+		t.Errorf("the new KSK is %s after the DS TTL since the fresh note, want active", st)
+	}
+}
+
 func TestAKSKWaitingOnTheParentIsReportedAfterThreeMargins(t *testing.T) {
 	r := newDriverRig(t, "report.owned.example.", driverPolicy, "p2")
 	old, _ := bootstrapKSK(t, r)
