@@ -1170,9 +1170,16 @@ func (l *ZoneKeyLifecycle) loadPresences(all map[uint16]tdns.DnssecKeyWithTimest
 			stale = append(stale, tag)
 			continue
 		}
-		p := dsPresence{TTL: time.Duration(ttl) * time.Second}
-		p.Since, _ = time.Parse(time.RFC3339, since)
-		l.dsPresent[tag] = p
+		// A note whose time cannot be read is no note: kept, its zero time
+		// would hold the key's wait forever (parentDSWaitMet). Dropped, the
+		// next tick that sees the DS records a fresh one.
+		t, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			l.logf("key lifecycle: the parent's DS note of a key is unreadable and is dropped", "zone", l.Zone, "keyid", tag, "since", since, "err", err)
+			stale = append(stale, tag)
+			continue
+		}
+		l.dsPresent[tag] = dsPresence{Since: t, TTL: time.Duration(ttl) * time.Second}
 	}
 	if err := rows.Err(); err != nil {
 		return err
