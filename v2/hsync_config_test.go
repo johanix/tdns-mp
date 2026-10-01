@@ -21,6 +21,7 @@ func TestHsyncConfigFromMp(t *testing.T) {
 	}
 
 	mp.Remote.BeatInterval = 10
+	mp.Syncengine.Intervals.BeatFastInterval = 1
 	mp.Syncengine.Intervals.HelloRetry = 5
 	mp.Syncengine.Intervals.DiscoveryRetry = 6
 	mp.Syncengine.Intervals.Reconcile = 7
@@ -30,6 +31,7 @@ func TestHsyncConfigFromMp(t *testing.T) {
 		RetryInterval:      6 * time.Second,
 		ReconcileInterval:  7 * time.Second,
 		BeatInterval:       10 * time.Second,
+		BeatIntervalMin:    1 * time.Second,
 		HelloRetryInterval: 5 * time.Second,
 		HelloFastAttempts:  3,
 		HelloFastSpacing:   2 * time.Second,
@@ -59,7 +61,7 @@ func TestParseMultiProviderSyncengineIntervals(t *testing.T) {
 		wantBeat  uint32
 	}{
 		{"documented keys", map[string]interface{}{
-			"beatinterval": 10, "helloretry": 5, "discoveryretry": 6, "reconcile": 7,
+			"beatinterval": 10, "beat_fast_interval": 1, "helloretry": 5, "discoveryretry": 6, "reconcile": 7,
 			"hello_fast_attempts": 3, "hello_fast_interval": 2}, nil, 10},
 		{"remote.beatinterval alone", nil, map[string]interface{}{"beatinterval": 20}, 20},
 		{"documented beatinterval wins", map[string]interface{}{"beatinterval": 10},
@@ -87,12 +89,12 @@ func TestParseMultiProviderSyncengineIntervals(t *testing.T) {
 			}
 			iv := mp.Syncengine.Intervals
 			if tc.name == "documented keys" {
-				if iv.BeatInterval != 10 || iv.HelloRetry != 5 || iv.DiscoveryRetry != 6 || iv.Reconcile != 7 ||
+				if iv.BeatInterval != 10 || iv.BeatFastInterval != 1 || iv.HelloRetry != 5 || iv.DiscoveryRetry != 6 || iv.Reconcile != 7 ||
 					iv.HelloFastAttempts != 3 || iv.HelloFastInterval != 2 {
 					t.Errorf("intervals = %+v", iv)
 				}
 				cfg := hsyncConfigFromMp(mp)
-				if cfg.BeatInterval != 10*time.Second || cfg.HelloRetryInterval != 5*time.Second ||
+				if cfg.BeatInterval != 10*time.Second || cfg.BeatIntervalMin != 1*time.Second || cfg.HelloRetryInterval != 5*time.Second ||
 					cfg.RetryInterval != 6*time.Second || cfg.ReconcileInterval != 7*time.Second ||
 					cfg.HelloFastAttempts != 3 || cfg.HelloFastSpacing != 2*time.Second {
 					t.Errorf("engine config = %+v", cfg)

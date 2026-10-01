@@ -20,7 +20,11 @@ func (e *Engine) heartbeatHandler(report *InboundReport) {
 	e.mergeGossipFromBeat(report)
 }
 
-func (e *Engine) sendHeartbeats() {
+// sendHeartbeats runs one beat round: the host refreshes its gossip rows, and
+// every peer past the hello gets a beat. It returns the engine's view of its
+// peers as the round found it (peersView), which paces the next round.
+func (e *Engine) sendHeartbeats() string {
+	view := e.peersView()
 	if e.deps.Host.BeforeHeartbeats != nil {
 		e.deps.Host.BeforeHeartbeats()
 	} else if e.deps.Gossip != nil && e.deps.ProviderGroups != nil {
@@ -47,6 +51,7 @@ func (e *Engine) sendHeartbeats() {
 			e.runDeferredTasks(p)
 		}(peer)
 	}
+	return view
 }
 
 func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
@@ -54,6 +59,7 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 		return
 	}
 	seq := e.beatOutboundSequence(peer.ID)
+	before := e.peerView(peer.ID)
 
 	// SendBeat (the MP bridge) writes the canonical transport.Peer mechanism
 	// state OPERATIONAL on a successful round-trip — that is now the SOLE
@@ -63,6 +69,11 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	_, _, _ = e.deps.Transport.SendBeat(ctx, peer, seq)
 	e.registry.S.Set(peer.ID, peer)
 	e.storeHook(peer)
+	// A beat that moved the peer (to OPERATIONAL, or back from a decay) is
+	// news the other peers should get soon, in this agent's gossip row.
+	if e.peerView(peer.ID) != before {
+		e.kickBeats()
+	}
 }
 
 func (e *Engine) runDeferredTasks(peer *Peer) {

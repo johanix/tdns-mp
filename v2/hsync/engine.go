@@ -17,6 +17,8 @@ type Engine struct {
 	onMsg       InboundHandler
 	discSem     chan struct{}
 	discSemOnce sync.Once
+	// kick carries changes seen between beat rounds to Run (kickBeats).
+	kick chan struct{}
 }
 
 // NewEngine constructs an Engine. Gossip table may be nil until wired.
@@ -28,6 +30,7 @@ func NewEngine(deps Deps, cfg Config) *Engine {
 		deps:     deps,
 		cfg:      cfg,
 		registry: reg,
+		kick:     make(chan struct{}, 1),
 	}
 	if deps.Gossip != nil && deps.Host.OnGroupOperational != nil {
 		deps.Gossip.SetOnGroupOperational(deps.Host.OnGroupOperational)
@@ -49,13 +52,29 @@ func (e *Engine) Registry() *Registry {
 // SetHandler installs the host's handler for application messages.
 func (e *Engine) SetHandler(h InboundHandler) { e.onMsg = h }
 
-// Run owns the protocol select loop until ctx is cancelled.
+// kickBeats tells Run that a peer's state changed between beat rounds, so
+// that the next round comes soon (beatSchedule.kick). It never blocks: one
+// pending kick covers any number.
+func (e *Engine) kickBeats() {
+	if e == nil || e.kick == nil {
+		return
+	}
+	select {
+	case e.kick <- struct{}{}:
+	default:
+	}
+}
+
+// Run owns the protocol select loop until ctx is cancelled. Beat rounds are
+// paced by a beatSchedule: fast while the view of the peers changes, at the
+// beat interval once it holds still.
 func (e *Engine) Run(ctx context.Context, ch MsgChannels) {
 	go e.runDiscoveryRetry(ctx)
 	go e.runReconcile(ctx)
 
-	beatTicker := time.NewTicker(e.cfg.BeatInterval)
-	defer beatTicker.Stop()
+	sched := newBeatSchedule(e.cfg.BeatIntervalMin, e.cfg.BeatInterval, time.Now())
+	beatTimer := time.NewTimer(sched.untilNext(time.Now()))
+	defer beatTimer.Stop()
 
 	for {
 		select {
@@ -77,8 +96,15 @@ func (e *Engine) Run(ctx context.Context, ch MsgChannels) {
 				e.onMsg(msg)
 			}
 
-		case <-beatTicker.C:
-			e.sendHeartbeats()
+		case <-e.kick:
+			if sched.kick(time.Now()) {
+				beatTimer.Reset(sched.untilNext(time.Now()))
+			}
+
+		case <-beatTimer.C:
+			now := time.Now()
+			sched.roundDone(now, e.sendHeartbeats())
+			beatTimer.Reset(sched.untilNext(time.Now()))
 		}
 	}
 }

@@ -6,10 +6,16 @@ package hsync
 import "time"
 
 // Config holds protocol timing for hsync.Engine.
+//
+// BeatInterval is the steady gap between beat rounds; BeatIntervalMin the
+// fast one the rounds start at, and return to on every change in the
+// engine's view of its peers (beatSchedule). A BeatIntervalMin of zero or at
+// or above BeatInterval keeps every round at BeatInterval.
 type Config struct {
 	RetryInterval      time.Duration
 	ReconcileInterval  time.Duration
 	BeatInterval       time.Duration
+	BeatIntervalMin    time.Duration
 	HelloRetryInterval time.Duration
 	HelloFastAttempts  int
 	HelloFastSpacing   time.Duration
@@ -24,6 +30,7 @@ func DefaultConfig() Config {
 		RetryInterval:      15 * time.Second, // discoveryretry
 		ReconcileInterval:  60 * time.Second, // reconcile
 		BeatInterval:       30 * time.Second, // beatinterval
+		BeatIntervalMin:    2 * time.Second,  // beat_fast_interval
 		HelloRetryInterval: 15 * time.Second, // helloretry
 		HelloFastAttempts:  3,                // hello_fast_attempts
 		HelloFastSpacing:   2 * time.Second,  // hello_fast_interval

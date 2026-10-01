@@ -46,7 +46,55 @@ func NewGossipStateTable(localID string) *GossipStateTable {
 		Names:             make(map[string]*GroupNameProposal),
 		LocalID:           localID,
 		operationalGroups: make(map[string]bool),
+		localWritten:      make(map[string]bool),
 	}
+}
+
+// HoldFirstLocalRows holds back this process's first row of each group until
+// every other member is OPERATIONAL from here, or until the given time,
+// whichever comes first. After that the row is refreshed on every round.
+//
+// The engine's first beat round used to come one beat interval after its
+// start, and that delay hid an agent's half-built row after a restart: by its
+// first round its links were usually up again, so its peers never saw the
+// KNOWN cells, and the group never lost mutual OPERATIONAL. Now that the first
+// rounds come within seconds, the hold keeps that: good news goes out at once,
+// news of a member that is not up yet no sooner than before. Without the hold
+// a restart would degrade the group and invalidate its leader, and the
+// re-election would follow a moment later.
+func (gst *GossipStateTable) HoldFirstLocalRows(until time.Time) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.firstRowHoldUntil = until
+}
+
+// holdFirstLocalRows starts the hold when an engine starts: one beat interval
+// from now, when the first beat round used to come.
+func holdFirstLocalRows(ar *AgentRegistry, beatInterval time.Duration) {
+	if ar == nil || ar.GossipStateTable == nil || beatInterval <= 0 {
+		return
+	}
+	ar.GossipStateTable.HoldFirstLocalRows(time.Now().Add(beatInterval))
+}
+
+// refreshLocalRow writes our row for one group, unless it is held: the first
+// row of the group, in the hold, with a member that is not OPERATIONAL from
+// here. It reports whether it wrote the row.
+func (gst *GossipStateTable) refreshLocalRow(groupHash string, peerStates map[string]string, zones []string, beatInterval uint32, now time.Time) bool {
+	gst.mu.RLock()
+	held := !gst.localWritten[groupHash] && now.Before(gst.firstRowHoldUntil)
+	gst.mu.RUnlock()
+	if held {
+		for _, st := range peerStates {
+			if st != AgentStateToString[AgentStateOperational] {
+				lgGossip.Debug("holding the first local row until every member is OPERATIONAL",
+					"group", shortHash(groupHash), "peerStates", peerStates)
+				return false
+			}
+		}
+	}
+	gst.UpdateLocalState(groupHash, peerStates, zones, beatInterval)
+	return true
 }
 
 // UpdateLocalState updates our own state entry for a group.
@@ -71,6 +119,10 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		Timestamp:    time.Now(),
 		BeatInterval: beatInterval,
 	}
+	if gst.localWritten == nil {
+		gst.localWritten = make(map[string]bool)
+	}
+	gst.localWritten[groupHash] = true
 }
 
 // MergeGossip merges received gossip into the local state table.
@@ -339,6 +391,7 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 	pgm.mu.RLock()
 	defer pgm.mu.RUnlock()
 
+	now := time.Now()
 	for hash, pg := range pgm.Groups {
 		// Build our peer states for this group
 		peerStates := make(map[string]string)
@@ -372,6 +425,6 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 
 		lgGossip.Debug("RefreshLocalStates", "group", shortHash(hash),
 			"localID", gst.LocalID, "peerStates", peerStates, "zones", zones, "beatInterval", beatInterval)
-		gst.UpdateLocalState(hash, peerStates, zones, beatInterval)
+		gst.refreshLocalRow(hash, peerStates, zones, beatInterval, now)
 	}
 }

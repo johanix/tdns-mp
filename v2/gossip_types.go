@@ -47,6 +47,12 @@ type GossipStateTable struct {
 	onElectionUpdate   func(groupHash string, state GroupElectionState)
 	// Track which groups have fired operational callback
 	operationalGroups map[string]bool
+	// firstRowHoldUntil: until then, a group's first local row is written
+	// only once every other member is OPERATIONAL from here
+	// (HoldFirstLocalRows). Zero: no hold.
+	firstRowHoldUntil time.Time
+	// localWritten: the groups this process has written its own row for.
+	localWritten map[string]bool
 }
 
 // --- From provider_groups.go ---
