@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +71,7 @@ func TestTheEventLogRecordsWhatASyncCarried(t *testing.T) {
 	if ev.Details != msg.Describe() {
 		t.Errorf("details = %q, want the message's own description %q", ev.Details, msg.Describe())
 	}
-	wantLines(t, ev.Details, fmt.Sprintf("key %d (KSK): published, DS yes", kskTag), "distribution: d-1")
+	wantLines(t, ev.Details, fmt.Sprintf("key %d (KSK): DS yes, published", kskTag), "distribution: d-1")
 
 	got, err := GetAuditEvent(kdb, ev.ID)
 	if err != nil || got == nil {
@@ -81,6 +82,58 @@ func TestTheEventLogRecordsWhatASyncCarried(t *testing.T) {
 	}
 	if got, err := GetAuditEvent(kdb, ev.ID+1000); got != nil || err != nil {
 		t.Errorf("GetAuditEvent of an id that does not exist = %v, %v; want nil, nil", got, err)
+	}
+}
+
+func dnskeySetSync(t *testing.T, sender string, zskState string) *AgentMsgPostPlus {
+	t.Helper()
+	ksk, kskTag := testDNSKEY(t, 257, testKSKPub)
+	zsk, zskTag := testDNSKEY(t, 256, testZSKPub)
+	return &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{
+		MessageType:  AgentMsgNotify,
+		OriginatorID: AgentId(sender),
+		Zone:         "example.com.",
+		Operations: []core.RROperation{{
+			Operation: "replace", RRtype: "DNSKEY", Records: []string{ksk, zsk},
+			KeyStates: []core.KeyState{
+				{KeyTag: kskTag, State: "active", DS: boolp(true)},
+				{KeyTag: zskTag, State: zskState, DS: boolp(false)},
+			},
+		}},
+	}}
+}
+
+// A provider resends its whole DNSKEY set; the row says what the message
+// carries, and the details show which key changed state since the same
+// sender's previous distribution for the zone.
+func TestTheEventLogShowsWhatChangedSinceTheSendersLastSync(t *testing.T) {
+	kdb := newEventLogTestDB(t)
+	e := &AuditorEngine{auditLog: kdb}
+	e.recordSyncMsg(dnskeySetSync(t, "agent.p1.example.", "published"))
+	e.recordSyncMsg(dnskeySetSync(t, "agent.p1.example.", "standby"))
+	e.recordSyncMsg(dnskeySetSync(t, "agent.p2.example.", "standby"))
+
+	events, err := QueryAuditEvents(kdb, "", time.Time{}, 0)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("QueryAuditEvents = %d events, %v", len(events), err)
+	}
+	slices.SortFunc(events, func(a, b AuditEvent) int { return int(a.ID - b.ID) })
+	_, kskTag := testDNSKEY(t, 257, testKSKPub)
+	_, zskTag := testDNSKEY(t, 256, testZSKPub)
+	for i, ev := range events {
+		if ev.Summary != "replace DNSKEY (2 records)" {
+			t.Errorf("event %d summary = %q, want the operation", i, ev.Summary)
+		}
+	}
+	if strings.Contains(events[0].Details, "(was") || strings.Contains(events[0].Details, "(new)") {
+		t.Errorf("the first sync from a sender shows changes:\n%s", events[0].Details)
+	}
+	wantLines(t, events[1].Details,
+		fmt.Sprintf("key %d (ZSK): DS no, standby (was: published)", zskTag),
+		fmt.Sprintf("key %d (KSK): DS yes, active\n", kskTag),
+	)
+	if strings.Contains(events[2].Details, "(was") {
+		t.Errorf("another sender's sync is compared with the first sender's:\n%s", events[2].Details)
 	}
 }
 
@@ -219,6 +272,7 @@ func TestTheEventLogPageExpandsARowToItsDetails(t *testing.T) {
 		fmt.Sprintf(`hx-get="/web/fragment/event-details?id=%d"`, withID),
 		fmt.Sprintf(`hx-target="#audit-event-%d-details"`, withID),
 		`hx-trigger="click once"`,
+		`<td><code>SYNC</code></td>`,
 		fmt.Sprintf(`<td colspan="7" id="audit-event-%d-details">`, withID),
 		fmt.Sprintf(`<tbody class="audit-event" id="audit-event-%d" hx-preserve>`, withoutID),
 	)

@@ -74,9 +74,9 @@ func TestDescribeSyncShowsEachKeyWithItsState(t *testing.T) {
 		"\n  distribution: d-1\n",
 		"\n  sent: 2026-09-30T12:00:00Z\n",
 		"\n  replace DNSKEY (2 records)\n",
-		fmt.Sprintf("\n    example.com. 3600 DNSKEY 257 3 15 key %d (KSK): published, DS yes\n", kskTag),
-		fmt.Sprintf("\n    example.com. 3600 DNSKEY 256 3 15 key %d (ZSK): active, DS no\n", zskTag),
-		"\n    key 999 (no record in this operation): retired, DS unset\n",
+		fmt.Sprintf("\n    example.com. 3600 DNSKEY 257 3 15 key %d (KSK): DS yes, published\n", kskTag),
+		fmt.Sprintf("\n    example.com. 3600 DNSKEY 256 3 15 key %d (ZSK): DS no, active\n", zskTag),
+		"\n    key 999 (no record in this operation): DS unset, retired\n",
 		"\n  add NS (1 record)\n    example.com. 3600 NS ns1.p1.example.\n",
 		"\n  delete A (1 record)\n    not a record (not parsed)",
 	)
@@ -177,7 +177,7 @@ func TestDescribeTheOtherMessageTypes(t *testing.T) {
 			[]string{"KEYSTATE inventory from signer.p1.example., zone example.com.", "own state machine", "key 4711 (KSK) alg ED25519: active, publish yes, sign yes, DS yes"}},
 		{"keystate signal", (&KeystateSignalMsg{SenderID: "agent.p1.example.", Zone: "example.com.", KeyTag: 4711, Signal: "foreign",
 			ForeignKeys: []core.ForeignKeyState{{Provider: "p2", KeyState: core.KeyState{KeyTag: 815, State: "published"}}}}).Describe(),
-			[]string{`KEYSTATE signal "foreign" from agent.p1.example.`, "\n  key: 4711", "\n    provider p2: key 815: published, DS unset"}},
+			[]string{`KEYSTATE signal "foreign" from agent.p1.example.`, "\n  key: 4711", "\n    provider p2: key 815: DS unset, published"}},
 		{"edits", (&EditsResponseMsg{SenderID: "combiner.p1.example.", Zone: "example.com.",
 			AgentRecords: map[string]map[string][]string{"agent.p1.example.": {"example.com.": {"example.com. 3600 IN NS ns1.p1.example."}}}}).Describe(),
 			[]string{"EDITS from combiner.p1.example.", "\n  agent agent.p1.example. (1 record):\n    example.com. 3600 NS ns1.p1.example."}},
@@ -195,5 +195,71 @@ func TestDescribeTheOtherMessageTypes(t *testing.T) {
 	var none *AgentMsgPost
 	if none.Describe() != "" {
 		t.Error("a nil message has a description")
+	}
+}
+
+// With what the sender said last time, each DNSKEY shows what changed: the
+// news in a resent DNSKEY set is the key whose state moved.
+func TestDescribeSinceShowsWhatChanged(t *testing.T) {
+	ksk, kskTag := testDNSKEY(t, 257, testKSKPub)
+	zsk, zskTag := testDNSKEY(t, 256, testZSKPub)
+	msg := &AgentMsgPost{
+		MessageType:  AgentMsgNotify,
+		OriginatorID: "agent.p1.example.",
+		Zone:         "example.com.",
+		Operations: []core.RROperation{{
+			Operation: "replace", RRtype: "DNSKEY", Records: []string{ksk, zsk},
+			KeyStates: []core.KeyState{
+				{KeyTag: kskTag, State: "active", DS: boolp(true)},
+				{KeyTag: zskTag, State: "standby", DS: boolp(false)},
+			},
+		}},
+	}
+	got := msg.DescribeSince(map[uint16]core.KeyState{
+		zskTag: {KeyTag: zskTag, State: "published", DS: boolp(false)},
+		999:    {KeyTag: 999, State: "retired", DS: boolp(true)},
+	})
+	wantLines(t, got,
+		fmt.Sprintf("key %d (ZSK): DS no, standby (was: published)\n", zskTag),
+		fmt.Sprintf("key %d (KSK): DS yes, active (new)\n", kskTag),
+		"\n    key 999: no longer sent (was: DS yes, retired)",
+	)
+
+	got = msg.DescribeSince(map[uint16]core.KeyState{
+		kskTag: {KeyTag: kskTag, State: "active", DS: boolp(false)},
+		zskTag: {KeyTag: zskTag, State: "standby", DS: boolp(false)},
+	})
+	wantLines(t, got,
+		fmt.Sprintf("key %d (KSK): DS yes (was: no), active\n", kskTag),
+		fmt.Sprintf("key %d (ZSK): DS no, standby", zskTag),
+	)
+	if strings.Contains(got, "standby (was") || strings.Contains(got, "(new)") || strings.Contains(got, "no longer sent") {
+		t.Errorf("an unchanged key is shown as changed:\n%s", got)
+	}
+
+	if msg.DescribeSince(nil) != msg.Describe() {
+		t.Error("DescribeSince(nil) is not Describe")
+	}
+}
+
+// The summary is the message's operations in one line: what a list of
+// messages shows beside the type, the sender and the counts.
+func TestSummaryIsTheOperationHeadings(t *testing.T) {
+	ksk, _ := testDNSKEY(t, 257, testKSKPub)
+	for _, c := range []struct {
+		msg  *AgentMsgPost
+		want string
+	}{
+		{&AgentMsgPost{Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{ksk, ksk, ksk}}}}, "replace DNSKEY (3 records)"},
+		{&AgentMsgPost{Operations: []core.RROperation{
+			{Operation: "replace", RRtype: "DNSKEY", Records: []string{ksk}},
+			{Operation: "delete", RRtype: "NS"},
+		}}, "replace DNSKEY (1 record); delete NS (no records)"},
+		{&AgentMsgPost{Records: map[string][]string{"example.com.": {"example.com. 3600 IN NS ns1.example.", "example.com. 3600 IN NS ns2.example."}}}, "2 records in the legacy form"},
+		{&AgentMsgPost{}, "no records"},
+	} {
+		if got := c.msg.Summary(); got != c.want {
+			t.Errorf("Summary() = %q, want %q", got, c.want)
+		}
 	}
 }
