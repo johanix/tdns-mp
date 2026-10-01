@@ -27,6 +27,24 @@ type MPKeyLifecycleOwner struct {
 	// the inventory rather than a keystore the agent does not have
 	// (design §4.1, arrow 2).
 	inv map[string]*KeyInventorySnapshot
+	// computed is the agent's answer for a multi-provider zone its own
+	// signer does not own: the DS set computed from the signing providers'
+	// key states (design Amendment 2). nil on every other role.
+	computed func(zone string, digest uint8) (tdns.DSIntent, error)
+}
+
+// SetComputedDSSource installs the agent's computed DS set (Amendment 2);
+// the agent's start does this, no other role.
+func (o *MPKeyLifecycleOwner) SetComputedDSSource(f func(zone string, digest uint8) (tdns.DSIntent, error)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.computed = f
+}
+
+func (o *MPKeyLifecycleOwner) computedSource() func(zone string, digest uint8) (tdns.DSIntent, error) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.computed
 }
 
 // NewMPKeyLifecycleOwner: keyDB is looked up at call time, since the
@@ -93,6 +111,26 @@ func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
 	if zd == nil || !zd.Options[tdns.OptMultiProvider] {
 		return false
 	}
+	if o.runsKeys(zd) {
+		return true
+	}
+	// The agent answers the DS intent of a multi-provider zone its own
+	// signer does not own from the signing providers' key states
+	// (Amendment 2), and tdns asks Owns to route DSIntentForZone here. The
+	// agent's keystore holds none of the zone's DNSSEC keys, so the verbs
+	// tdns refuses on an owned zone have nothing there to refuse.
+	return o.computedSource() != nil
+}
+
+// runsKeys: somebody here runs the zone's key lifecycle. Taken (the
+// signer's machine), or the agent's own signer says so with its inventory.
+// This is the answer the pre-S5 CDS rule of the syncher wants
+// (syncherPublishesDNSKEYCDS): a zone whose keys are computed about, not
+// run, keeps that rule.
+func (o *MPKeyLifecycleOwner) runsKeys(zd *tdns.ZoneData) bool {
+	if zd == nil || !zd.Options[tdns.OptMultiProvider] {
+		return false
+	}
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	if o.owned[dns.Fqdn(zd.ZoneName)] {
@@ -133,8 +171,17 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 		return tdns.DSIntent{}, nil
 	}
 	var inv []tdns.KeyInventoryItem
-	if snap := o.inventoryOf(zd.ZoneName); snap != nil {
-		// the agent: the signer's inventory, own and foreign rows alike
+	snap := o.inventoryOf(zd.ZoneName)
+	if computed := o.computedSource(); snap != nil && snap.Owned {
+		// the agent: its own signer's inventory, own and foreign rows alike
+		inv = snap.Inventory
+	} else if computed != nil {
+		// the agent, for a zone its own signer does not own: what the
+		// signing providers said (Amendment 2). An inventory that is not
+		// the owner's covers this provider's keys alone and is not the set;
+		// the computed answer takes it as this provider's share.
+		return computed(zd.ZoneName, digest)
+	} else if snap != nil {
 		inv = snap.Inventory
 	} else {
 		kdb := o.keyDB()

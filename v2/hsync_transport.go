@@ -60,6 +60,10 @@ type MPTransportBridge struct {
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
 	foreignKeyStates   map[ZoneName]map[AgentId][]core.KeyState
+	// the DNSKEY records the same providers' operations carried, under the
+	// same lock: with the key states they are the DS set of a zone our own
+	// signer does not own (design Amendment 2, mp_s5_computed_ds.go)
+	foreignDnskeys map[ZoneName]map[AgentId][]*dns.DNSKEY
 	// onKeyInventory records an inventory that answered this agent's own
 	// request as a pushed one is recorded (Config.noteKeyInventory); set
 	// where the agent's bridge is made.
@@ -2312,17 +2316,43 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // the signer (Q9).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
 	var states []core.KeyState
-	found := false
+	found, records := false, false
 	for _, op := range ops {
-		if op.RRtype == "DNSKEY" && op.KeyStates != nil {
+		if op.RRtype != "DNSKEY" {
+			continue
+		}
+		if op.KeyStates != nil {
 			states = append(states, op.KeyStates...)
 			found = true
 		}
+		if len(op.Records) > 0 || op.Operation == "replace" {
+			records = true
+		}
 	}
-	if !found {
+	if !found && !records {
 		return
 	}
 	tm.foreignKeyStatesMu.Lock()
+	if records {
+		// the records follow the operations whether or not the sender
+		// says anything about its keys: an older release's word is its
+		// records alone
+		if tm.foreignDnskeys == nil {
+			tm.foreignDnskeys = map[ZoneName]map[AgentId][]*dns.DNSKEY{}
+		}
+		if tm.foreignDnskeys[zone] == nil {
+			tm.foreignDnskeys[zone] = map[AgentId][]*dns.DNSKEY{}
+		}
+		for _, op := range ops {
+			if op.RRtype == "DNSKEY" {
+				tm.foreignDnskeys[zone][from] = applyDnskeyRecords(tm.foreignDnskeys[zone][from], op)
+			}
+		}
+	}
+	if !found {
+		tm.foreignKeyStatesMu.Unlock()
+		return
+	}
 	if tm.foreignKeyStates == nil {
 		tm.foreignKeyStates = map[ZoneName]map[AgentId][]core.KeyState{}
 	}
