@@ -25,7 +25,10 @@ type keyStateHistory struct {
 // next returns what sender last said about its keys in zone, nil when that
 // is not known, and records what ops say now. A DNSKEY replace sets the
 // sender's whole set, an add sets the keys it names, and a delete removes
-// the keys its records name. A message without DNSKEY operations changes
+// the keys its records name. A key whose record comes without a state is
+// remembered too, with what the sender said about it before or no state:
+// the next message then knows the key is not new, and a replace that drops
+// it lists it as no longer sent. A message without DNSKEY operations changes
 // nothing. The maps handed out are never written again.
 func (h *keyStateHistory) next(zone, sender string, ops []core.RROperation) map[uint16]core.KeyState {
 	k := strings.ToLower(dns.Fqdn(zone)) + " " + strings.ToLower(dns.Fqdn(sender))
@@ -49,15 +52,18 @@ func (h *keyStateHistory) next(zone, sender string, ops []core.RROperation) map[
 		default:
 			continue
 		}
-		if op.Operation == "delete" {
-			for _, rrstr := range op.Records {
-				if rr, err := dns.NewRR(rrstr); err == nil {
-					if key, ok := rr.(*dns.DNSKEY); ok {
-						delete(next, key.KeyTag())
-					}
-				}
+		for _, tag := range dnskeyTags(op.Records) {
+			if op.Operation == "delete" {
+				delete(next, tag)
+				continue
 			}
-		} else {
+			if ks, ok := cur[tag]; ok {
+				next[tag] = ks
+			} else {
+				next[tag] = core.KeyState{KeyTag: tag}
+			}
+		}
+		if op.Operation != "delete" {
 			for _, ks := range op.KeyStates {
 				next[ks.KeyTag] = ks
 			}
@@ -71,4 +77,17 @@ func (h *keyStateHistory) next(zone, sender string, ops []core.RROperation) map[
 		h.last[k] = cur
 	}
 	return prev
+}
+
+// dnskeyTags returns the key tags of the DNSKEY records among rrs.
+func dnskeyTags(rrs []string) []uint16 {
+	var tags []uint16
+	for _, rrstr := range rrs {
+		if rr, err := dns.NewRR(rrstr); err == nil {
+			if key, ok := rr.(*dns.DNSKEY); ok {
+				tags = append(tags, key.KeyTag())
+			}
+		}
+	}
+	return tags
 }

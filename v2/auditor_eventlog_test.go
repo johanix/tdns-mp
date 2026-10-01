@@ -137,6 +137,39 @@ func TestTheEventLogShowsWhatChangedSinceTheSendersLastSync(t *testing.T) {
 	}
 }
 
+// A DNSKEY record that came without a state is remembered all the same: a
+// sender that sent its keys without states, then with them, has no key
+// called new, and a key it dropped is listed as no longer sent (the
+// external review's C1 on #116).
+func TestAKeySentWithoutAStateIsRemembered(t *testing.T) {
+	kdb := newEventLogTestDB(t)
+	e := &AuditorEngine{auditLog: kdb}
+	ksk, kskTag := testDNSKEY(t, 257, testKSKPub)
+	zsk, zskTag := testDNSKEY(t, 256, testZSKPub)
+	sync := func(records []string, states []core.KeyState) *AgentMsgPostPlus {
+		return &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{
+			MessageType: AgentMsgNotify, OriginatorID: "agent.p1.example.", Zone: "example.com.",
+			Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: records, KeyStates: states}},
+		}}
+	}
+	e.recordSyncMsg(sync([]string{ksk, zsk}, nil))
+	e.recordSyncMsg(sync([]string{ksk}, []core.KeyState{{KeyTag: kskTag, State: "active", DS: boolp(true)}}))
+
+	events, err := QueryAuditEvents(kdb, "", time.Time{}, 0)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("QueryAuditEvents = %d events, %v", len(events), err)
+	}
+	slices.SortFunc(events, func(a, b AuditEvent) int { return int(a.ID - b.ID) })
+	got := events[1].Details
+	wantLines(t, got,
+		fmt.Sprintf("key %d (KSK): DS yes (was: unset), active (was: no state)", kskTag),
+		fmt.Sprintf("key %d: no longer sent (was: DS unset, no state)", zskTag),
+	)
+	if strings.Contains(got, "(new)") {
+		t.Errorf("a key the sender sent before without a state is called new:\n%s", got)
+	}
+}
+
 func TestTheEventLogRecordsWhatAnRfiCarried(t *testing.T) {
 	kdb := newEventLogTestDB(t)
 	e := &AuditorEngine{auditLog: kdb}
