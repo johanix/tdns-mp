@@ -199,9 +199,11 @@ func (conf *Config) computedDSIntent(zone string, digest uint8) (tdns.DSIntent, 
 			}
 			if len(keys) == 0 {
 				// a ZSK, or a key we hold no record of: the latter cannot
-				// be made into a DS, and with ds=1 that leaves the set unknown
-				if st.DS != nil && *st.DS && !dnskeyRecordKnown(share.dnskeys, st.KeyTag) {
-					lgEngine.Debug("computed DS set: a provider says ds=1 for a key it sent no record of; the set is unknown", "zone", zone, "provider", s, "keytag", st.KeyTag)
+				// be made into a DS, so with ds=1 the set is unknown, and
+				// with ds undecided too (it may be a SEP key whose record
+				// has not arrived; only ds=0 is nothing to make a DS of)
+				if (st.DS == nil || *st.DS) && !dnskeyRecordKnown(share.dnskeys, st.KeyTag) {
+					lgEngine.Debug("computed DS set: a provider's key with ds=1 or undecided has no record; the set is unknown", "zone", zone, "provider", s, "keytag", st.KeyTag)
 					return tdns.DSIntent{}, nil
 				}
 				continue

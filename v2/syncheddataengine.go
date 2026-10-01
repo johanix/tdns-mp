@@ -296,8 +296,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// what the sending provider says about its keys (#58) goes
 					// to our signer whether or not the DNSKEY set changed, and
 					// for a zone our own signer does not own it is the DS set
-					// (Amendment 2)
-					if synchedDataUpdate.Update != nil {
+					// (Amendment 2); only from an update the repo took
+					if err == nil && synchedDataUpdate.Update != nil {
 						conf.noteForeignDistribution(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations)
 					}
 					if change {

@@ -253,6 +253,13 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 	if known, _ := r.dsSet(t); known {
 		t.Error("a DS set with a ds=1 key that has no record")
 	}
+	// the same key with ds undecided: it may be a SEP key whose record has
+	// not arrived, and the set stays unknown
+	ops[0].KeyStates[1].DS = nil
+	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p2.example.", ops)
+	if known, _ := r.dsSet(t); known {
+		t.Error("a DS set with an undecided key that has no record")
+	}
 	// the same key with ds=0 is nothing to make a DS of: the set is known
 	ops[0].KeyStates[1].DS = &no
 	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p2.example.", ops)
