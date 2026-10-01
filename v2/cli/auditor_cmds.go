@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * Auditor CLI commands. Phase C scope: eventlog list/clear, zones,
+ * Auditor CLI commands. Phase C scope: eventlog list/show/clear, zones,
  * observations subcommands. All call POST /api/v1/auditor on the
  * auditor with a JSON body whose Command field selects the action.
  */
@@ -10,9 +10,13 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -34,7 +38,7 @@ func newAuditorEventlogCmd(kind string) *cobra.Command {
 		Use:   "eventlog",
 		Short: "Audit event log commands",
 	}
-	c.AddCommand(newAuditorEventlogListCmd(kind), newAuditorEventlogClearCmd(kind))
+	c.AddCommand(newAuditorEventlogListCmd(kind), newAuditorEventlogShowCmd(kind), newAuditorEventlogClearCmd(kind))
 	return c
 }
 
@@ -65,12 +69,36 @@ func newAuditorEventlogListCmd(kind string) *cobra.Command {
 				fmt.Println("No events found")
 				return
 			}
-			printEvents(resp.Events)
+			details, _ := cmd.Flags().GetBool("details")
+			printEvents(os.Stdout, resp.Events, details)
 		},
 	}
 	c.Flags().StringP("zone", "z", "", "filter by zone")
 	c.Flags().String("since", "", "events since (RFC3339)")
 	c.Flags().Int("last", 50, "number of events to show")
+	c.Flags().Bool("details", false, "show what each message carried, below its event")
+	return c
+}
+
+func newAuditorEventlogShowCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "show <id>",
+		Short: "Show one audit event with what its message carried",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			id, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || id <= 0 {
+				log.Fatalf("invalid event id %q: use a number from the ID column of \"eventlog list\"", args[0])
+			}
+			resp, err := callAuditor(cmd, AuditPost{Command: "eventlog-show", ID: id})
+			if err != nil {
+				log.Fatal(err)
+			}
+			for _, e := range resp.Events {
+				printEvent(os.Stdout, e)
+			}
+		},
+	}
 	return c
 }
 
@@ -168,17 +196,69 @@ func callAuditor(cmd *cobra.Command, req AuditPost) (*AuditResponse, error) {
 	return &resp, nil
 }
 
-func printEvents(events []AuditEvent) {
-	fmt.Printf("%-20s  %-10s  %-25s  %-25s  %s\n",
-		"Time", "Type", "Zone", "Originator", "Summary")
-	fmt.Printf("%-20s  %-10s  %-25s  %-25s  %s\n",
-		strings.Repeat("-", 20), strings.Repeat("-", 10),
+// termSafe makes text that came from a peer safe to print on a terminal.
+// An event's zone, originator, summary and details carry what other agents
+// sent (record strings, rejection reasons, messages), and a control
+// character among them would reach the terminal as a command: an escape
+// sequence can retitle the window, move the cursor, or rewrite lines already
+// printed. Control characters (C0, DEL, C1) and Unicode format characters,
+// which include the bidirectional overrides, are shown as escapes instead.
+// A newline is escaped too: callers split multi-line text before printing.
+// Bytes that are not UTF-8 come out as U+FFFD.
+func termSafe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case unicode.IsControl(r) && r < 0x80:
+			fmt.Fprintf(&b, "\\x%02x", r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// printEvents prints one line per event, and with details what the event's
+// message carried, indented below it.
+func printEvents(w io.Writer, events []AuditEvent, details bool) {
+	fmt.Fprintf(w, "%-6s  %-20s  %-10s  %-25s  %-25s  %s\n",
+		"ID", "Time", "Type", "Zone", "Originator", "Summary")
+	fmt.Fprintf(w, "%-6s  %-20s  %-10s  %-25s  %-25s  %s\n",
+		strings.Repeat("-", 6), strings.Repeat("-", 20), strings.Repeat("-", 10),
 		strings.Repeat("-", 25), strings.Repeat("-", 25),
 		strings.Repeat("-", 40))
 	for _, e := range events {
-		fmt.Printf("%-20s  %-10s  %-25s  %-25s  %s\n",
-			e.Time.Format("2006-01-02 15:04:05"),
-			e.EventType, e.Zone, e.Originator, e.Summary)
+		fmt.Fprintf(w, "%-6d  %-20s  %-10s  %-25s  %-25s  %s\n",
+			e.ID, e.Time.Format("2006-01-02 15:04:05"),
+			termSafe(e.EventType), termSafe(e.Zone), termSafe(e.Originator), termSafe(e.Summary))
+		if details && e.Details != "" {
+			for _, l := range strings.Split(e.Details, "\n") {
+				fmt.Fprintf(w, "        %s\n", termSafe(l))
+			}
+		}
+	}
+}
+
+// printEvent prints one event in full: its fields, then what its message
+// carried.
+func printEvent(w io.Writer, e AuditEvent) {
+	fmt.Fprintf(w, "Event %d: %s\n", e.ID, termSafe(e.Summary))
+	fmt.Fprintf(w, "  time:         %s\n", e.Time.Format("2006-01-02 15:04:05 MST"))
+	fmt.Fprintf(w, "  type:         %s\n", termSafe(e.EventType))
+	fmt.Fprintf(w, "  zone:         %s\n", termSafe(e.Zone))
+	fmt.Fprintf(w, "  originator:   %s\n", termSafe(e.Originator))
+	if e.DeliveredBy != "" && e.DeliveredBy != e.Originator {
+		fmt.Fprintf(w, "  delivered by: %s\n", termSafe(e.DeliveredBy))
+	}
+	if e.Details == "" {
+		fmt.Fprintln(w, "\n(no details were recorded for this event)")
+		return
+	}
+	fmt.Fprintln(w)
+	for _, l := range strings.Split(e.Details, "\n") {
+		fmt.Fprintln(w, termSafe(l))
 	}
 }
 

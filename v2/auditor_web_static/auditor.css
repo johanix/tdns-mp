@@ -196,6 +196,24 @@ table[role="grid"] tbody tr:nth-child(even) td {
   background: #f9f9f9;
 }
 
+/* The event log keeps each event in a tbody of its own (see
+   eventlog_rows.html), so it is striped by event, and an event's details
+   row shares its colour. */
+table[role="grid"] tbody.audit-event tr td {
+  background: transparent;
+}
+table[role="grid"] tbody.audit-event:nth-of-type(even) tr td {
+  background: #f9f9f9;
+}
+
+.audit-event-details {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 dl {
   font-size: 22px;
   margin: 0.5rem 0 1rem;

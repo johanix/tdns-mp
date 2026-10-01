@@ -65,6 +65,13 @@ func TestDriverRollsAKSKWithNoStandbyConfigured(t *testing.T) {
 	}
 	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
 	r.tick("the new key propagated")
+	// the parent serves the old key's DS and not the new one's yet: the
+	// promotion waits for the parent (O7, S5c)
+	if st := r.state(b); st != KeyStateStandby {
+		t.Fatalf("the key minted for the roll is %s before the parent serves its DS, want standby (O7)", st)
+	}
+	r.wire.parentDS[b] = true
+	r.tick("the parent serves the new DS")
 	if st := r.state(b); st != KeyStateActive {
 		t.Errorf("the key minted for the roll is %s, want active", st)
 	}
