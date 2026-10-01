@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 func dnskeySyncFrom(t *testing.T, zone, sender string) *AgentMsgPostPlus {
@@ -95,5 +96,59 @@ func TestADNSKEYSyncIsNotJudgedWithoutTheZonesRoles(t *testing.T) {
 				t.Errorf("zone %s: a DNSKEY sync was judged without the zone's roles: %v", zone, got)
 			}
 		}
+	}
+}
+
+// twoLabelZone is a Ready zone where one agent holds two labels: p3, a
+// server that does not sign, and p4, a signer. p1 signs on its own.
+func twoLabelZone(t *testing.T, name string) string {
+	t.Helper()
+	mpzd := signerTestZone(t, name, newMPTestKeyDB(t))
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("apex: %v", err)
+	}
+	hdr := func(rrtype uint16) dns.RR_Header {
+		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
+	}
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+		&core.HSYNCPARAMServers{Servers: []string{"p1", "p3", "p4"}},
+		&core.HSYNCPARAMSigners{Signers: []string{"p1", "p4"}},
+	}}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
+	var h3s []dns.RR
+	for _, m := range [][2]string{{"p1", "agent.p1.example."}, {"p3", "agent.p3.example."}, {"p4", "agent.p3.example."}} {
+		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: m[0], Identity: m[1], Upstream: "."}})
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
+	mpzd.Data.Set(mpzd.ZoneName, *apex)
+	mpzd.InstallInitialSnapshot()
+	mpzd.Ready = true
+	return mpzd.ZoneName
+}
+
+// An agent that holds a signer label and a label that only serves signs the
+// zone, whichever of its labels a lookup meets first; the label recorded is
+// the same every time (the external review's C1 on #111).
+func TestAnAgentWithASignerLabelAmongItsLabelsSigns(t *testing.T) {
+	zone := twoLabelZone(t, "twolabel.audit.example.")
+	for i := 0; i < 50; i++ {
+		label, isSigner, known := zoneMemberRole(ZoneName(zone), "agent.p3.example.")
+		if label != "p3" || !isSigner || !known {
+			t.Fatalf("lookup %d: role = %q signer=%v known=%v; want p3, a signer, known", i, label, isSigner, known)
+		}
+	}
+
+	e := &AuditorEngine{stateManager: NewAuditStateManager()}
+	e.recordSyncMsg(dnskeySyncFrom(t, zone, "agent.p3.example."))
+	zs := e.stateManager.GetZone(zone)
+	if got := nonSignerObservations(zs); len(got) != 0 {
+		t.Errorf("a DNSKEY sync from an agent holding a signer label was flagged: %v", got)
+	}
+	zs.mu.RLock()
+	ps := zs.Providers["agent.p3.example."]
+	zs.mu.RUnlock()
+	if ps == nil || !ps.IsSigner || ps.Label != "p3" {
+		t.Errorf("provider = %+v, want label p3, a signer", ps)
 	}
 }

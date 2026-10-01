@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -234,8 +235,8 @@ func providerBeatMeta(ar *AgentRegistry, zone ZoneName, identity string) (label,
 }
 
 // zoneMemberRole resolves identity's role in zone from the zone's apex as
-// the auditor has it: its HSYNC3 label, and whether HSYNCPARAM lists that
-// label under signers=. known is false while the zone is not loaded and
+// the auditor has it: its HSYNC3 label, and whether HSYNCPARAM lists any of
+// its labels under signers=. known is false while the zone is not loaded and
 // Ready at the auditor, or identity is not an HSYNC3 member of it: there is
 // then no role to judge by, and label and isSigner say nothing. A beat and a
 // sync resolve their sender's role the same way (#108).
@@ -247,12 +248,23 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 	if !exists || !zd.Ready {
 		return "", false, false
 	}
-	// Resolve the label the way the zone view does (hsync3IdentitiesByLabel):
-	// inactive members included, identities compared as FQDNs.
-	label = zd.hsync3LabelForIdentity(identity)
-	if label == "" {
+	// Resolve the labels the way the zone view does (hsync3IdentitiesByLabel):
+	// inactive members included, identities compared as FQDNs. An identity
+	// may hold several labels, one agent serving as two providers: it signs
+	// if any of them is a signer, and the label recorded is the first in
+	// sorted order, not whichever a walk over the map meets first.
+	want := dns.Fqdn(identity)
+	var labels []string
+	for lbl, id := range zd.hsync3IdentitiesByLabel() {
+		if id == want {
+			labels = append(labels, lbl)
+		}
+	}
+	if len(labels) == 0 {
 		return "", false, false
 	}
+	slices.Sort(labels)
+	label = labels[0]
 	// A member is a signer only when listed under signers=; a servers=
 	// member serves the zone without signing it. Without an HSYNCPARAM the
 	// zone declares no roles at all.
@@ -273,7 +285,7 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 		return label, false, false
 	}
 	for _, l := range hp.GetSigners() {
-		if normalizeHSYNC3Label(l) == label {
+		if slices.Contains(labels, normalizeHSYNC3Label(l)) {
 			isSigner = true
 			break
 		}
