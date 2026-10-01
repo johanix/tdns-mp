@@ -320,7 +320,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			}},
 			Publish: &core.PublishInstruction{
 				KEYRRs:    []string{keyRR.String()},
-				Locations: []string{"at-apex", "at-ns"},
+				Locations: publishLocations(zone),
 			},
 		}
 		distID, err := tm.EnqueueForCombiner(zone, zu, "")
