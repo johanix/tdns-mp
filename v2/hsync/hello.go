@@ -56,6 +56,12 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 			return
 		}
 		e.sendHelloToPeer(peer)
+		// An accepted hello moves the peer on at once: beat now, not at the
+		// next attempt's slot.
+		if !e.agentNeedsHello(peer) {
+			e.fastBeatAttempts(ctx, peer)
+			return
+		}
 	}
 
 	if !e.agentNeedsHello(peer) {
@@ -76,6 +82,10 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 			return
 		}
 		e.sendHelloToPeer(peer)
+		if !e.agentNeedsHello(peer) {
+			e.fastBeatAttempts(ctx, peer)
+			return
+		}
 	}
 }
 
