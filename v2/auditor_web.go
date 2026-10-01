@@ -152,6 +152,7 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 			}
 			return col
 		},
+		"upper": strings.ToUpper,
 		"hasRole": func(b bool) string {
 			if b {
 				return "yes"

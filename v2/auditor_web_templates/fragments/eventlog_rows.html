@@ -27,7 +27,7 @@
       hx-on:click="this.nextElementSibling.hidden = !this.nextElementSibling.hidden"{{end}}>
       <td><small>{{fmtTime .Time}}</small></td>
       <td>{{.Zone}}</td>
-      <td><code>{{.EventType}}</code></td>
+      <td><code>{{upper .EventType}}</code></td>
       <td><small>{{.Originator}}</small></td>
       <td>{{.Summary}}{{if .Details}} <small>details &darr;</small>{{end}}</td>
       <td>{{if .RRsAdded}}+{{.RRsAdded}}{{end}}</td>

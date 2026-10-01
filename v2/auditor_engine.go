@@ -23,6 +23,7 @@ type AuditorEngine struct {
 	stateManager *AuditStateManager
 	auditLog     *tdns.KeyDB // optional persistent log
 	msgQs        *MsgQs      // set by Run; carries the final confirmation back to a distribution's originator
+	keyStates    keyStateHistory
 }
 
 func NewAuditorEngine(conf *Config, stateManager *AuditStateManager) *AuditorEngine {
@@ -127,17 +128,21 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 		}
 	}
 
+	// The row's other columns already say the type, the sender and the
+	// counts: its summary says what the message carries. The details show
+	// each key against what the sender said about it last time.
+	prev := e.keyStates.next(zone, senderID, msg.Operations)
 	logEvent(e.auditLog, &AuditEvent{
 		Time:        time.Now(),
 		Zone:        zone,
 		Originator:  senderID,
 		DeliveredBy: deliveredBy,
 		EventType:   string(msg.MessageType),
-		Summary:     fmt.Sprintf("%s from %s: +%d/-%d RRs", msg.MessageType, senderID, added, removed),
+		Summary:     msg.Summary(),
 		RRsAdded:    added,
 		RRsRemoved:  removed,
 		RRtypes:     strings.Join(rrtypes, ","),
-		Details:     msg.Describe(),
+		Details:     msg.DescribeSince(prev),
 	})
 	// The event logged, the auditor's task is done: its final word to the
 	// originator (#101).

@@ -12,6 +12,7 @@ package tdnsmp
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -71,20 +72,46 @@ func countWord(n int, one, many string) string {
 	return fmt.Sprintf("%d %s", n, many)
 }
 
-func describeKeyState(ks core.KeyState) string {
-	state := ks.State
+func stateWord(state string) string {
 	if state == "" {
-		state = "no state"
+		return "no state"
 	}
-	return fmt.Sprintf("%s, DS %s", state, dsWord(ks.DS))
+	return state
+}
+
+// describeKeyState renders what a provider says about one of its keys: its
+// DS verdict, then its state. prev is what the same provider said about its
+// keys in its previous distribution, nil when that is not known. With it, a
+// value that changed has the previous one beside it, "standby (was:
+// published)", and a key the provider did not mention before is "(new)".
+func describeKeyState(ks core.KeyState, prev map[uint16]core.KeyState) string {
+	ds := "DS " + dsWord(ks.DS)
+	state := stateWord(ks.State)
+	if prev != nil {
+		p, ok := prev[ks.KeyTag]
+		switch {
+		case !ok:
+			state += " (new)"
+		default:
+			if dsWord(p.DS) != dsWord(ks.DS) {
+				ds += " (was: " + dsWord(p.DS) + ")"
+			}
+			if p.State != ks.State {
+				state += " (was: " + stateWord(p.State) + ")"
+			}
+		}
+	}
+	return ds + ", " + state
 }
 
 // describeRecord renders one RR string as "owner ttl TYPE rdata". A DNSKEY,
 // CDNSKEY or KEY is named by its flags, protocol, algorithm and key tag
 // rather than its public key. For a DNSKEY, states is what the sender said
-// about its keys: the record then ends with that key's state and DS verdict.
-// states is nil when the operation carried no key states at all.
-func describeRecord(rrstr string, states map[uint16]core.KeyState) string {
+// about its keys: the record then ends with that key's DS verdict and state,
+// and with prev (see describeKeyState) what changed since the sender's
+// previous distribution. states is nil when the operation carried no key
+// states at all.
+func describeRecord(rrstr string, states, prev map[uint16]core.KeyState) string {
 	rr, err := dns.NewRR(rrstr)
 	if err != nil || rr == nil {
 		return rrstr + " (not parsed)"
@@ -118,7 +145,7 @@ func describeRecord(rrstr string, states map[uint16]core.KeyState) string {
 	}
 	if states != nil && h.Rrtype == dns.TypeDNSKEY {
 		if ks, ok := states[tag]; ok {
-			s += ": " + describeKeyState(ks)
+			s += ": " + describeKeyState(ks, prev)
 		} else {
 			s += ": no state sent"
 		}
@@ -129,15 +156,23 @@ func describeRecord(rrstr string, states map[uint16]core.KeyState) string {
 // describeRecords adds one line per RR string, at depth.
 func (t *msgText) describeRecords(depth int, rrs []string) {
 	for _, rr := range rrs {
-		t.add(depth, "%s", describeRecord(rr, nil))
+		t.add(depth, "%s", describeRecord(rr, nil, nil))
 	}
 }
 
-// describeOperation adds an operation: its kind and RR type, then each of
-// its records, a DNSKEY with the state its sender gave it. A key state for a
-// key tag none of the records carries is listed after the records.
-func (t *msgText) describeOperation(depth int, op core.RROperation) {
-	t.add(depth, "%s %s (%s)", op.Operation, op.RRtype, countWord(len(op.Records), "record", "records"))
+// operationHeading is an operation's kind, RR type and record count:
+// "replace DNSKEY (3 records)".
+func operationHeading(op core.RROperation) string {
+	return fmt.Sprintf("%s %s (%s)", op.Operation, op.RRtype, countWord(len(op.Records), "record", "records"))
+}
+
+// describeOperation adds an operation: its heading, then each of its
+// records, a DNSKEY with the state its sender gave it. A key state for a key
+// tag none of the records carries is listed after the records. With prev
+// (see describeKeyState), a DNSKEY replace also lists the keys the sender
+// mentioned before and no longer sends.
+func (t *msgText) describeOperation(depth int, op core.RROperation, prev map[uint16]core.KeyState) {
+	t.add(depth, "%s", operationHeading(op))
 	var states map[uint16]core.KeyState
 	if len(op.KeyStates) > 0 {
 		states = make(map[uint16]core.KeyState, len(op.KeyStates))
@@ -147,7 +182,7 @@ func (t *msgText) describeOperation(depth int, op core.RROperation) {
 	}
 	seen := map[uint16]bool{}
 	for _, rrstr := range op.Records {
-		t.add(depth+1, "%s", describeRecord(rrstr, states))
+		t.add(depth+1, "%s", describeRecord(rrstr, states, prev))
 		if rr, err := dns.NewRR(rrstr); err == nil {
 			if k, ok := rr.(*dns.DNSKEY); ok {
 				seen[k.KeyTag()] = true
@@ -156,16 +191,35 @@ func (t *msgText) describeOperation(depth int, op core.RROperation) {
 	}
 	for _, ks := range op.KeyStates {
 		if !seen[ks.KeyTag] {
-			t.add(depth+1, "key %d (no record in this operation): %s", ks.KeyTag, describeKeyState(ks))
+			t.add(depth+1, "key %d (no record in this operation): %s", ks.KeyTag, describeKeyState(ks, prev))
+		}
+	}
+	if prev != nil && op.Operation == "replace" && strings.EqualFold(op.RRtype, "DNSKEY") {
+		var gone []uint16
+		for tag := range prev {
+			if _, ok := states[tag]; !ok && !seen[tag] {
+				gone = append(gone, tag)
+			}
+		}
+		slices.Sort(gone)
+		for _, tag := range gone {
+			p := prev[tag]
+			t.add(depth+1, "key %d: no longer sent (was: DS %s, %s)", tag, dsWord(p.DS), stateWord(p.State))
 		}
 	}
 }
 
 // Describe renders a sync, update, rfi or status message: who sent it and
 // who delivered it, its distribution, each operation with its records (a
-// DNSKEY with the key state and DS verdict its sender gave it), records in
+// DNSKEY with the DS verdict and key state its sender gave it), records in
 // the legacy per-owner form, and a publish instruction.
-func (m *AgentMsgPost) Describe() string {
+func (m *AgentMsgPost) Describe() string { return m.DescribeSince(nil) }
+
+// DescribeSince is Describe with the key states the sender gave in its
+// previous distribution for the zone beside the ones it gives now: each
+// DNSKEY shows what changed, "DS no, standby (was: published)", and a key
+// that is new or no longer sent says so. A nil prev is Describe.
+func (m *AgentMsgPost) DescribeSince(prev map[uint16]core.KeyState) string {
 	if m == nil {
 		return ""
 	}
@@ -194,7 +248,7 @@ func (m *AgentMsgPost) Describe() string {
 		t.add(1, "zone class: %s", m.ZoneClass)
 	}
 	for _, op := range m.Operations {
-		t.describeOperation(1, op)
+		t.describeOperation(1, op, prev)
 	}
 	if len(m.Records) > 0 {
 		note := ""
@@ -225,6 +279,37 @@ func (m *AgentMsgPost) Describe() string {
 		t.add(1, "no records")
 	}
 	return t.String()
+}
+
+// Summary is what the message carries in one line, for a list that shows
+// its type, sender and record counts beside it: each operation's heading as
+// Describe shows it, "replace DNSKEY (3 records)", joined by "; ".
+func (m *AgentMsgPost) Summary() string {
+	if m == nil {
+		return ""
+	}
+	var parts []string
+	for _, op := range m.Operations {
+		parts = append(parts, operationHeading(op))
+	}
+	if len(m.Records) > 0 && len(m.Operations) == 0 {
+		n := 0
+		for _, rrs := range m.Records {
+			n += len(rrs)
+		}
+		parts = append(parts, countWord(n, "record", "records")+" in the legacy form")
+	}
+	if p := m.Publish; p != nil {
+		if len(p.Locations) == 0 {
+			parts = append(parts, "publish: retract")
+		} else {
+			parts = append(parts, "publish at "+strings.Join(p.Locations, ", "))
+		}
+	}
+	if len(parts) == 0 {
+		return "no records"
+	}
+	return strings.Join(parts, "; ")
 }
 
 // Describe renders a hello, beat or ping: who sent it, over which transport,
@@ -280,7 +365,7 @@ func (c *ConfirmationDetail) Describe() string {
 	if len(c.RejectedItems) > 0 {
 		t.add(1, "rejected (%d):", len(c.RejectedItems))
 		for _, ri := range c.RejectedItems {
-			t.add(2, "%s: %s", describeRecord(ri.Record, nil), ri.Reason)
+			t.add(2, "%s: %s", describeRecord(ri.Record, nil, nil), ri.Reason)
 		}
 	}
 	if len(c.IgnoredRecords) > 0 {
@@ -338,7 +423,7 @@ func (m *KeystateSignalMsg) Describe() string {
 	if len(m.ForeignKeys) > 0 {
 		t.add(1, "foreign keys (%d):", len(m.ForeignKeys))
 		for _, fk := range m.ForeignKeys {
-			t.add(2, "provider %s: key %d: %s", fk.Provider, fk.KeyTag, describeKeyState(fk.KeyState))
+			t.add(2, "provider %s: key %d: %s", fk.Provider, fk.KeyTag, describeKeyState(fk.KeyState, nil))
 		}
 	}
 	return t.String()

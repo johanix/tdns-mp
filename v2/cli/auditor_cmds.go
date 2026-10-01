@@ -232,7 +232,7 @@ func printEvents(w io.Writer, events []AuditEvent, details bool) {
 	for _, e := range events {
 		fmt.Fprintf(w, "%-6d  %-20s  %-10s  %-25s  %-25s  %s\n",
 			e.ID, e.Time.Format("2006-01-02 15:04:05"),
-			termSafe(e.EventType), termSafe(e.Zone), termSafe(e.Originator), termSafe(e.Summary))
+			strings.ToUpper(termSafe(e.EventType)), termSafe(e.Zone), termSafe(e.Originator), termSafe(e.Summary))
 		if details && e.Details != "" {
 			for _, l := range strings.Split(e.Details, "\n") {
 				fmt.Fprintf(w, "        %s\n", termSafe(l))
@@ -246,7 +246,7 @@ func printEvents(w io.Writer, events []AuditEvent, details bool) {
 func printEvent(w io.Writer, e AuditEvent) {
 	fmt.Fprintf(w, "Event %d: %s\n", e.ID, termSafe(e.Summary))
 	fmt.Fprintf(w, "  time:         %s\n", e.Time.Format("2006-01-02 15:04:05 MST"))
-	fmt.Fprintf(w, "  type:         %s\n", termSafe(e.EventType))
+	fmt.Fprintf(w, "  type:         %s\n", strings.ToUpper(termSafe(e.EventType)))
 	fmt.Fprintf(w, "  zone:         %s\n", termSafe(e.Zone))
 	fmt.Fprintf(w, "  originator:   %s\n", termSafe(e.Originator))
 	if e.DeliveredBy != "" && e.DeliveredBy != e.Originator {

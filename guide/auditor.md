@@ -155,11 +155,22 @@ type, zone, originator and a one-line summary.
 
 Each event also records what its message carried: per
 operation its kind and RR type and the records, a
-DNSKEY by key tag with the state and DS verdict its
+DNSKEY by key tag with the DS verdict and state its
 sender gave it, the distribution ID, and for a
 confirmation what was applied, removed or rejected.
 The text is the message's standard printable form, the
-same wherever the message is shown:
+same wherever the message is shown. A sync's one-line
+summary is its operations, e.g. `replace DNSKEY (3
+records)`.
+
+A provider resends its whole DNSKEY set, so the details
+of a sync also show what changed since the same
+sender's previous one for the zone:
+`DS no, standby (was: published)`; a key that is new
+says `(new)`, and one the sender no longer sends is
+listed as such. The auditor remembers this from its
+start: the first sync from each sender after a start
+shows no changes.
 
 ```sh
 # The details below each event
