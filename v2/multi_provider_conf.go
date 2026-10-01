@@ -115,6 +115,7 @@ type MultiProviderConf struct {
 	Syncengine struct {
 		Intervals struct {
 			BeatInterval      int `yaml:"beatinterval" mapstructure:"beatinterval"`
+			BeatFastInterval  int `yaml:"beat_fast_interval" mapstructure:"beat_fast_interval"`
 			HelloRetry        int `yaml:"helloretry" mapstructure:"helloretry"`
 			DiscoveryRetry    int `yaml:"discoveryretry" mapstructure:"discoveryretry"`
 			Reconcile         int `yaml:"reconcile" mapstructure:"reconcile"`

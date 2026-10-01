@@ -8,10 +8,14 @@ import (
 	"time"
 )
 
+// helloHandler takes an inbound hello. The MP bridge has already moved the
+// sender's mechanism to INTRODUCING; what is left is to beat it back soon, so
+// that this side reaches OPERATIONAL too.
 func (e *Engine) helloHandler(report *InboundReport) {
 	if report == nil || report.MessageType != MsgHello {
 		return
 	}
+	e.kickBeats()
 }
 
 func (e *Engine) agentNeedsHello(peer *Peer) bool {
@@ -96,8 +100,12 @@ func (e *Engine) sendHelloToPeer(peer *Peer) {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 	zones := e.registry.sharedZones(peer)
+	before := e.peerView(peer.ID)
 	_ = e.deps.Transport.SendHello(ctx, peer, zones)
 	e.registry.S.Set(peer.ID, peer)
+	if e.peerView(peer.ID) != before {
+		e.kickBeats()
+	}
 }
 
 func (e *Engine) fastBeatAttempts(ctx context.Context, peer *Peer) {
