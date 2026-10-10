@@ -72,7 +72,7 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	// A beat that moved the peer (to OPERATIONAL, or back from a decay) is
 	// news the other peers should get soon, in this agent's gossip row.
 	if e.peerView(peer.ID) != before {
-		e.kickBeats()
+		e.KickBeats()
 	}
 }
 

@@ -8,14 +8,15 @@ import (
 	"time"
 )
 
-// helloHandler takes an inbound hello. The MP bridge has already moved the
-// sender's mechanism to INTRODUCING; what is left is to beat it back soon, so
-// that this side reaches OPERATIONAL too.
+// helloHandler takes an inbound hello and does nothing with it. The host has
+// already moved the sender's mechanism to INTRODUCING, and it is the host that
+// kicks the beat rounds, there, where it can tell a hello that moved the peer
+// from one a peer repeats (KickBeats). By the time the report is here the
+// state reads the same for both.
 func (e *Engine) helloHandler(report *InboundReport) {
 	if report == nil || report.MessageType != MsgHello {
 		return
 	}
-	e.kickBeats()
 }
 
 func (e *Engine) agentNeedsHello(peer *Peer) bool {
@@ -104,7 +105,7 @@ func (e *Engine) sendHelloToPeer(peer *Peer) {
 	_ = e.deps.Transport.SendHello(ctx, peer, zones)
 	e.registry.S.Set(peer.ID, peer)
 	if e.peerView(peer.ID) != before {
-		e.kickBeats()
+		e.KickBeats()
 	}
 }
 

@@ -13,7 +13,8 @@ import (
 )
 
 // The rounds start at the fast interval, double while the view holds still,
-// stop at the beat interval, and start over on a change.
+// stop at the beat interval, and start over on a change. The first round sets
+// the baseline, so the gaps from the start are 2, 4, 8, 16, 30 s.
 func TestBeatScheduleBacksOffAndStartsOver(t *testing.T) {
 	const fast, steady = 2 * time.Second, 30 * time.Second
 	t0 := time.Unix(1_000_000, 0)
@@ -30,11 +31,12 @@ func TestBeatScheduleBacksOffAndStartsOver(t *testing.T) {
 		gaps = append(gaps, gap)
 		now = now.Add(gap)
 	}
-	// The first round sees a view the schedule had not seen: fast again.
-	want := []time.Duration{2, 4, 8, 16, 30, 30, 30}
+	// The first round's view is the baseline, not a change.
+	want := []time.Duration{4 * time.Second, 8 * time.Second, 16 * time.Second,
+		steady, steady, steady, steady}
 	for i, w := range want {
-		if gaps[i] != w*time.Second {
-			t.Fatalf("gaps %v, want %v seconds", gaps, want)
+		if gaps[i] != w {
+			t.Fatalf("gaps %v, want %v", gaps, want)
 		}
 	}
 
@@ -50,7 +52,6 @@ func TestBeatScheduleKick(t *testing.T) {
 	const fast, steady = 2 * time.Second, 30 * time.Second
 	t0 := time.Unix(1_000_000, 0)
 	s := newBeatSchedule(fast, steady, t0)
-	s.roundDone(t0, "v")
 	s.roundDone(t0, "v")
 	s.roundDone(t0, "v") // gap 8 s
 	if got := s.untilNext(t0); got != 8*time.Second {
@@ -76,11 +77,41 @@ func TestBeatScheduleKick(t *testing.T) {
 		t.Errorf("a late kick leaves %v to the next round, want 0", got)
 	}
 
-	// A kick never moves a round later.
+	// A second kick finds the round already due one fast interval after the
+	// last, and never moves it later.
 	s2 := newBeatSchedule(fast, steady, t0)
 	s2.roundDone(t0, "v")
-	if s2.kick(t0) {
-		t.Error("a kick right after a round moved the round due one fast interval later")
+	if !s2.kick(t0) {
+		t.Fatal("setup: the first kick after a round did not move the next one")
+	}
+	if s2.kick(t0.Add(time.Second)) {
+		t.Error("a second kick moved a round that was already due one fast interval after the last")
+	}
+	if got := s2.untilNext(t0); got != fast {
+		t.Errorf("after two kicks the next round is in %v, want %v", got, fast)
+	}
+}
+
+// A kick before the first round, an early hello say, runs that round at once;
+// it is still the baseline.
+func TestBeatScheduleKickBeforeTheFirstRound(t *testing.T) {
+	const fast, steady = 2 * time.Second, 30 * time.Second
+	t0 := time.Unix(1_000_000, 0)
+	s := newBeatSchedule(fast, steady, t0)
+	early := t0.Add(500 * time.Millisecond)
+	if !s.kick(early) {
+		t.Fatal("a kick before the first round did not move it")
+	}
+	if got := s.untilNext(early); got != 0 {
+		t.Errorf("after an early kick the first round is in %v, want now", got)
+	}
+	s.roundDone(early, "v")
+	if got := s.untilNext(early); got != 4*time.Second {
+		t.Errorf("after the kicked first round the gap is %v, want 4s", got)
+	}
+
+	if fixed := newBeatSchedule(0, steady, t0); fixed.kick(early) {
+		t.Error("a kick before the first round moved it on a fixed pace")
 	}
 }
 
@@ -156,15 +187,15 @@ func runEngine(t *testing.T, cfg Config, tb TransportBridge) (*Engine, *roundClo
 }
 
 // The running engine: the first round comes after the fast interval, the gap
-// grows while nothing changes, and an inbound hello brings the next round
-// back to the fast interval.
+// grows while nothing changes, and a kick brings the next round back to the
+// fast interval.
 func TestEngineBeatRoundsAreFastThenSteady(t *testing.T) {
 	const fast, steady = 20 * time.Millisecond, 320 * time.Millisecond
 	cfg := DefaultConfig()
 	cfg.BeatIntervalMin, cfg.BeatInterval = fast, steady
 	cfg.RetryInterval, cfg.ReconcileInterval = time.Hour, time.Hour
 	start := time.Now()
-	_, clock, hello := runEngine(t, cfg, newD25Transport())
+	e, clock, _ := runEngine(t, cfg, newD25Transport())
 
 	rounds := clock.waitFor(t, 5, 3*time.Second)
 	if first := rounds[0].Sub(start); first > steady/2 {
@@ -174,14 +205,34 @@ func TestEngineBeatRoundsAreFastThenSteady(t *testing.T) {
 		t.Errorf("gaps did not grow: %v early, %v later", early, later)
 	}
 
-	// Wait until the pace is steady, then a hello arrives.
+	// Wait until the pace is steady, then a kick arrives.
 	clock.waitFor(t, 7, 3*time.Second)
 	n := len(clock.snapshot())
 	kicked := time.Now()
-	hello <- &InboundReport{MessageType: MsgHello, Identity: "remote.example."}
+	e.KickBeats()
 	after := clock.waitFor(t, n+1, 3*time.Second)
 	if got := after[n].Sub(kicked); got > steady/2 {
-		t.Errorf("the round after an inbound hello came %v later, want about %v", got, fast)
+		t.Errorf("the round after a kick came %v later, want about %v", got, fast)
+	}
+}
+
+// An inbound hello report does not kick the rounds by itself. Whether the
+// hello moved the peer is the host's to know, and a peer that never gets our
+// accept repeats its hello every helloretry: kicking on each one would hold
+// the engine off the beat interval for as long as that lasted.
+func TestEngineAnInboundHelloReportLeavesThePace(t *testing.T) {
+	const fast, steady = 20 * time.Millisecond, 300 * time.Millisecond
+	cfg := DefaultConfig()
+	cfg.BeatIntervalMin, cfg.BeatInterval = fast, steady
+	cfg.RetryInterval, cfg.ReconcileInterval = time.Hour, time.Hour
+	_, clock, hello := runEngine(t, cfg, newD25Transport())
+
+	clock.waitFor(t, 7, 4*time.Second) // steady by now
+	n := len(clock.snapshot())
+	hello <- &InboundReport{MessageType: MsgHello, Identity: "remote.example."}
+	after := clock.waitFor(t, n+2, 4*time.Second)
+	if gap := after[n+1].Sub(after[n]); gap < steady*3/4 {
+		t.Errorf("after an inbound hello report the rounds are %v apart, want the steady %v", gap, steady)
 	}
 }
 

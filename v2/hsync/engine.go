@@ -17,7 +17,7 @@ type Engine struct {
 	onMsg       InboundHandler
 	discSem     chan struct{}
 	discSemOnce sync.Once
-	// kick carries changes seen between beat rounds to Run (kickBeats).
+	// kick carries changes seen between beat rounds to Run (KickBeats).
 	kick chan struct{}
 }
 
@@ -52,10 +52,17 @@ func (e *Engine) Registry() *Registry {
 // SetHandler installs the host's handler for application messages.
 func (e *Engine) SetHandler(h InboundHandler) { e.onMsg = h }
 
-// kickBeats tells Run that a peer's state changed between beat rounds, so
+// KickBeats tells Run that a peer's state changed between beat rounds, so
 // that the next round comes soon (beatSchedule.kick). It never blocks: one
 // pending kick covers any number.
-func (e *Engine) kickBeats() {
+//
+// It is for a change, never for an event that left every state where it was:
+// each kick starts the fast pace over, so a caller that kicked on, say, every
+// hello a peer repeats would hold the engine off the beat interval for as
+// long as the peer kept repeating it. The engine kicks after a hello or a
+// beat it sent moved the peer; the host kicks where an inbound message moved
+// one.
+func (e *Engine) KickBeats() {
 	if e == nil || e.kick == nil {
 		return
 	}

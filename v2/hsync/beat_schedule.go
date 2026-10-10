@@ -41,9 +41,11 @@ func newBeatSchedule(min, max time.Duration, start time.Time) *beatSchedule {
 // fixed reports whether the schedule has no fast pace.
 func (s *beatSchedule) fixed() bool { return s.min >= s.max }
 
-// roundDone records a round that ran at now and saw view.
+// roundDone records a round that ran at now and saw view. The first round has
+// no earlier view to differ from: it sets the baseline, and the gap after it
+// is already the first doubling.
 func (s *beatSchedule) roundDone(now time.Time, view string) {
-	if view != s.view {
+	if view != s.view && !s.last.IsZero() {
 		s.interval = s.min
 	} else {
 		s.interval = min(2*s.interval, s.max)
