@@ -1,6 +1,6 @@
 # Faster convergence of the hsync engine: adaptive beat rounds
 
-**Status:** implemented on branch `feat/hsync-fast-convergence` (four commits, before this document). Not yet run on the testbed; §6 says how to judge it there. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #117 (branch `feat/hsync-fast-convergence`), with Amendment 1 after its review. Not yet run on the testbed; §6 says how to judge it there. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. Where the time went
 
@@ -59,4 +59,12 @@ On the multi-provider test rig, warm start, against a build with `beat_fast_inte
 
 ## Amendments
 
-None yet.
+### Amendment 1 (2026-10-10): after the review of PR #117
+
+**An inbound hello kicks the beat rounds only when it moves the peer.** §2 says the engine kicks itself "on every inbound hello". As first implemented it did, and that broke the rule two bullets below it, that the pace resets on changes and not on states. A peer whose hello arrives but that never gets our accept stays KNOWN and repeats its hello every `helloretry` (15 s). Each repeat started the fast pace over, and since the schedule is one for the whole engine, that one peer held the beats to every peer off `beatinterval` for as long as it went on.
+
+The kick now comes from where the transition is known: `routeHelloMessage` kicks (`MPTransportBridge.kickBeats` → `hsync.Engine.KickBeats`) in the branch that moves the sender's mechanism to INTRODUCING, and nowhere else. The engine's `helloHandler` no longer kicks: by the time the report reaches it, the state reads the same for a first hello and a repeated one. `KickBeats` is exported for this, and its comment says it is for a change, never for an event that left every state where it was.
+
+**The first round is the baseline.** The schedule's view started empty, so the first round always counted as a change, and the gaps from the start were 2, 2, 4, 8, 16, 30 s where §2 says 2, 4, 8, 16, 30. `roundDone` now takes the first round's view as the baseline, and the gaps are as §2 lists them.
+
+**Tests added:** a repeated hello leaves the pace alone, at the engine and through `routeHelloMessage` into a running engine (the first hello there brings the next round to the fast interval); a kick before the first round runs it at once.
