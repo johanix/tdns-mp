@@ -673,6 +673,14 @@ func messageMechanism(msg *transport.IncomingMessage) string {
 	return transport.MechanismDNS
 }
 
+// kickBeats brings the hsync engine's next beat round forward, after an
+// inbound message moved a peer's state (hsync.Engine.KickBeats).
+func (tm *MPTransportBridge) kickBeats() {
+	if tm.agentRegistry != nil && tm.agentRegistry.HsyncEngine != nil {
+		tm.agentRegistry.HsyncEngine.KickBeats()
+	}
+}
+
 // routeHelloMessage routes a hello message to the hello channel.
 func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
@@ -697,6 +705,11 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	peer.LastHelloReceived = time.Now()
 	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
 		peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
+		// The hello moved the peer: beat it back soon, so that this side
+		// reaches OPERATIONAL too. Only here: a hello that finds the mechanism
+		// already introduced changes nothing, and a peer that never gets our
+		// accept repeats its hello every helloretry for as long as that lasts.
+		tm.kickBeats()
 	}
 	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
 

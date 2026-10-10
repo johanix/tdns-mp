@@ -348,6 +348,7 @@ func hsyncConfigFromMp(mp *MultiProviderConf) hsync.Config {
 	}
 	iv := mp.Syncengine.Intervals
 	secs(&cfg.BeatInterval, int(mp.Remote.BeatInterval))
+	secs(&cfg.BeatIntervalMin, iv.BeatFastInterval)
 	secs(&cfg.HelloRetryInterval, iv.HelloRetry)
 	secs(&cfg.RetryInterval, iv.DiscoveryRetry)
 	secs(&cfg.ReconcileInterval, iv.Reconcile)
@@ -364,6 +365,7 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 	cfg := hsyncConfigFromMp(mp)
 	lgEngine.Info("hsync engine intervals",
 		"beat", cfg.BeatInterval,
+		"beat_fast", cfg.BeatIntervalMin,
 		"helloretry", cfg.HelloRetryInterval,
 		"hello_fast_attempts", cfg.HelloFastAttempts,
 		"hello_fast_interval", cfg.HelloFastSpacing,

@@ -50,6 +50,7 @@ multi-provider:
    syncengine:
       intervals:
          beatinterval:        30
+         beat_fast_interval:  2
          helloretry:          15
          discoveryretry:      15
          reconcile:           60

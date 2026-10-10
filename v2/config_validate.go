@@ -59,6 +59,7 @@ func ValidateSyncengineIntervals(mp *MultiProviderConf) error {
 		v    int
 	}{
 		{"beatinterval", iv.BeatInterval},
+		{"beat_fast_interval", iv.BeatFastInterval},
 		{"helloretry", iv.HelloRetry},
 		{"discoveryretry", iv.DiscoveryRetry},
 		{"reconcile", iv.Reconcile},

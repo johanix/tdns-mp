@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// helloHandler takes an inbound hello and does nothing with it. The host has
+// already moved the sender's mechanism to INTRODUCING, and it is the host that
+// kicks the beat rounds, there, where it can tell a hello that moved the peer
+// from one a peer repeats (KickBeats). By the time the report is here the
+// state reads the same for both.
 func (e *Engine) helloHandler(report *InboundReport) {
 	if report == nil || report.MessageType != MsgHello {
 		return
@@ -56,6 +61,12 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 			return
 		}
 		e.sendHelloToPeer(peer)
+		// An accepted hello moves the peer on at once: beat now, not at the
+		// next attempt's slot.
+		if !e.agentNeedsHello(peer) {
+			e.fastBeatAttempts(ctx, peer)
+			return
+		}
 	}
 
 	if !e.agentNeedsHello(peer) {
@@ -76,6 +87,10 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 			return
 		}
 		e.sendHelloToPeer(peer)
+		if !e.agentNeedsHello(peer) {
+			e.fastBeatAttempts(ctx, peer)
+			return
+		}
 	}
 }
 
@@ -86,8 +101,12 @@ func (e *Engine) sendHelloToPeer(peer *Peer) {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 	zones := e.registry.sharedZones(peer)
+	before := e.peerView(peer.ID)
 	_ = e.deps.Transport.SendHello(ctx, peer, zones)
 	e.registry.S.Set(peer.ID, peer)
+	if e.peerView(peer.ID) != before {
+		e.KickBeats()
+	}
 }
 
 func (e *Engine) fastBeatAttempts(ctx context.Context, peer *Peer) {
