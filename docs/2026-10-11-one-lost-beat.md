@@ -1,6 +1,6 @@
 # One lost beat must not degrade a group
 
-**Status:** implemented in tdns-mp PR #124 (branch `fix/123-beat-retry`), for issue #123, with Amendment 1 after its review. Not yet run on the testbed; §5 says what to look for there. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #124 (branch `fix/123-beat-retry`), for issue #123, with Amendment 1 after its review. Run on the testbed 2026-10-11 (Amendment 2). The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -65,3 +65,15 @@ The beats the hello retrier sends after an accepted hello (`fastBeatAttempts`) h
 **One beat back at a time.** §3 gave every hello from an already-introduced peer a beat of its own. A peer whose hellos come faster than a beat returns, a beat that can wait ten seconds on a peer that does not answer, would have had several on their way at once. `BeatPeer` now does nothing while a beat it started to that peer has not returned.
 
 **A retrier that ends picks up a new failure.** A beat could fail in the moment between a retrier's success and its exit. `noteBeatFailed` then saw a retrier still on the books and started none, though the failure opened a new outage, which then had no retries until a beat succeeded again. The retrier's exit (`endBeatRetrier`) now starts the retries when its own outage is over and the peer is failing again. A retrier that ran out of retries starts none, as before.
+
+### Amendment 2 (2026-10-11): on the testbed
+
+Run on a three-agent test rig with a 10 s beat interval, on top of the branch of PR #121. The build was this branch before the two changes of Amendment 1. Read against §5:
+
+**Restarts.** Five restarts of a single agent, its peers left alone: four of a member that did not lead the group, and one of the group's leader inside its term. No agent logged "group lost mutual OPERATIONAL", and no restart cost the group its leader. Each time the restarted agent was back in mutual OPERATIONAL five seconds after the restart. Lease renewals that fell inside one restart's window ran as at any other time.
+
+**The peers' beats.** In three of the restarts a peer's beat fell inside the restart and failed. A beat to the restarted agent was acknowledged one or two seconds after the failure, before that peer's next round.
+
+**The beat back can come too early.** In one of those three the peer processed the returning agent's hello a second after its beat had failed, and beat the agent back at once. The agent was not yet taking beats and refused it. The retry of the failed beat, a second later, was acknowledged. §3 says that either change alone covers a restart: here the beat back alone would have left the peer waiting for its next round.
+
+**An agent left down.** One agent was stopped and left down for a minute. Its peers logged "group lost mutual OPERATIONAL" 13 s after the stop, two beat intervals after their last acknowledged beat to it, as before.
