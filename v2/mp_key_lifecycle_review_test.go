@@ -229,51 +229,6 @@ func TestOwnerNeedsAMultiProviderZone(t *testing.T) {
 	}
 }
 
-// S10: the hook that pushes the inventory on a state change is for the
-// zones tdns still runs; an owned zone's machine pushes on its own.
-func TestHookPushesOnlyForZonesTdnsRuns(t *testing.T) {
-	kdb := newMPTestKeyDB(t)
-	conf := withSignerHooks(t, kdb)
-	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
-	conf.InternalMp.KeyLifecycleOwner = owner
-	oldApp := tdns.Globals.App.Type
-	tdns.Globals.App.Type = AppTypeMPSigner
-	t.Cleanup(func() { tdns.Globals.App.Type = oldApp })
-	pushes := make(chan string, 8)
-	saved := inventoryPush
-	inventoryPush = func(conf *Config, zone string) { pushes <- zone }
-	t.Cleanup(func() { inventoryPush = saved })
-	owned := signerTestZone(t, "owned.hook.example.", kdb)
-	hooked := signerTestZone(t, "hooked.hook.example.", kdb)
-	owner.Take(owned.ZoneName)
-	for _, z := range []*MPZoneData{owned, hooked} {
-		k := mpGenKey(t, kdb, z.ZoneName, tdns.DnskeyStateActive, "KSK")
-		if err := tdns.UpdateKeyRow(kdb, z.ZoneName, k, tdns.DnskeyStateStandby, mustCols(KeyStateStandby, true)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// the generate and the state write each fire the hook: every push is
-	// for the zone tdns runs, none for the owned one
-	n := 0
-	deadline := time.After(2 * time.Second)
-	for done := false; !done; {
-		select {
-		case z := <-pushes:
-			n++
-			if z != hooked.ZoneName {
-				t.Errorf("the hook pushed for %s, want only the zone tdns runs (%s); the owned zone's machine pushes on its own", z, hooked.ZoneName)
-			}
-		case <-deadline:
-			done = true
-		case <-time.After(300 * time.Millisecond):
-			done = n > 0
-		}
-	}
-	if n == 0 {
-		t.Fatal("the hook did not push for the zone tdns runs")
-	}
-}
-
 // The re-review's N8: a resend keeps the record's first send time, so the
 // answer a slow signer gives to the first send still counts after E12; a
 // confirmation older than the first send by more than the tolerance is

@@ -23,14 +23,12 @@ import (
 // DNS infrastructure setup to tdns.MainInit, then adds MP components
 // (TransportManager, crypto, CHUNK handler, peer registration).
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
-	// The key lifecycle hooks, before tdns's MainInit: they must be in place
-	// before any zone's first refresh, and they are what makes tdns's
-	// keystore and key-state worker run the multi-provider key protocol for
-	// zones that carry the option (signer_keydb.go).
-	RegisterMPKeyLifecycleHooks(conf)
-	// The key lifecycle owner, beside the hooks: it owns nothing until the
-	// signer takes the zones its config names (key-lifecycle-zones), and a
-	// zone it does not own keeps the hooks (the rollout, zone by zone).
+	// The key lifecycle owner, before tdns's MainInit so it is in place
+	// before any zone's first refresh: it owns nothing until the signer
+	// takes the zones its config names (key-lifecycle-zones), and tdns's
+	// own machine runs a zone it does not own. tdns-mp registers no key
+	// lifecycle hook with tdns any more (design S4a); the signer's start
+	// refuses a multi-provider zone left off the list instead.
 	conf.InternalMp.KeyLifecycleOwner = RegisterMPKeyLifecycleOwner(conf)
 	conf.InternalMp.KeyLifecycle = NewKeyLifecycleEngine(conf, conf.InternalMp.KeyLifecycleOwner)
 

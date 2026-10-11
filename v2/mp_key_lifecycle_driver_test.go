@@ -652,47 +652,6 @@ func TestOwnedZoneParentViewFollowsTheColumns(t *testing.T) {
 	}
 }
 
-// T3.7, the owned side of the mixed rollout: the machine on an owned zone
-// consults none of the lifecycle hooks tdns's own paths ask (the staged
-// and retired states, may-promote, may-generate); the state-change
-// notification, which is how the peers learn a key's state today, still
-// fires. (tdns's tests cover the other side: a multi-provider zone nobody
-// owns keeps today's paths, hooks included.)
-func TestOwnedZoneDriverUsesNoHooks(t *testing.T) {
-	asked := map[string]int{}
-	tdns.RegisterKeyLifecycleHooks(tdns.KeyLifecycleHooks{
-		StagedState:   func(zd *tdns.ZoneData) string { asked["StagedState"]++; return DnskeyStateMpdist },
-		RetiredState:  func(zd *tdns.ZoneData) string { asked["RetiredState"]++; return DnskeyStateMpremove },
-		MayPromote:    func(zd *tdns.ZoneData, keyid uint16) bool { asked["MayPromote"]++; return false },
-		MayGenerate:   func(zd *tdns.ZoneData, role string) bool { asked["MayGenerate"]++; return false },
-		OnStateChange: func(zone string, keyid uint16, from, to string) { asked["OnStateChange"]++ },
-	})
-	t.Cleanup(func() { tdns.RegisterKeyLifecycleHooks(tdns.KeyLifecycleHooks{}) })
-	pol := driverPolicy
-	pol.StandbyKSK = 1
-	r := newDriverRig(t, "hooks.owned.example.", pol, "p2")
-	r.tick("mint")
-	for _, k := range append(r.keysIn(KeyStateMpdist, "KSK"), r.keysIn(KeyStateMpdist, "ZSK")...) {
-		if _, _, err := r.l.Confirm(k, "p2", "applied", ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
-	r.tick("propagated")
-	r.tick("standby wanted")
-	if len(r.keysIn(KeyStateActive, "KSK")) != 1 || len(r.keysIn(KeyStateActive, "ZSK")) != 1 || len(r.keysIn(KeyStateMpdist, "KSK")) != 1 {
-		t.Fatalf("the machine did not bootstrap: %v", r.keysIn(KeyStateActive, "KSK"))
-	}
-	for _, h := range []string{"StagedState", "RetiredState", "MayPromote", "MayGenerate"} {
-		if asked[h] != 0 {
-			t.Errorf("the machine asked the %s hook %d times (it decides itself)", h, asked[h])
-		}
-	}
-	if asked["OnStateChange"] == 0 {
-		t.Error("no state-change notification fired; the peers learn a key's state from it")
-	}
-}
-
 // T5.4 (the signer's half): the machine tells its surroundings after every
 // key row write, state or column, so the signer's inventory push follows
 // every change; a tick that writes nothing pushes nothing.

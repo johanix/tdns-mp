@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
@@ -23,11 +21,11 @@ import (
 )
 
 // B-MP M-2S: the signer's keys live in tdns's DnssecKeyStore and tdns signs
-// with them; what is MP's is the protocol between the states, run through
-// tdns's key lifecycle hooks. Mode 2 (single signer): no key is minted
-// beside staged ones, a confirmed key is promoted and signs. Mode 4 (several
-// signers): the other signers' keys are foreign rows, served and never
-// signing. And the one-shot, fail-closed migration of the old key table.
+// with them; what is MP's is the protocol between the states, run by
+// tdns-mp's own key machine (mp_key_lifecycle_*_test.go). Here: mode 4
+// (several signers), the other signers' keys are foreign rows, served and
+// never signing. And the one-shot, fail-closed migration of the old key
+// table.
 
 func newMPTestKeyDB(t *testing.T) *tdns.KeyDB {
 	t.Helper()
@@ -75,15 +73,6 @@ func signerTestZone(t *testing.T, name string, kdb *tdns.KeyDB) *MPZoneData {
 		t.Fatal("wrapper not found")
 	}
 	return mpzd
-}
-
-func withSignerHooks(t *testing.T, kdb *tdns.KeyDB) *Config {
-	t.Helper()
-	conf := &Config{Config: &tdns.Config{}}
-	conf.Config.Internal.KeyDB = kdb
-	RegisterMPKeyLifecycleHooks(conf)
-	t.Cleanup(func() { tdns.RegisterKeyLifecycleHooks(tdns.KeyLifecycleHooks{}) })
-	return conf
 }
 
 func mpGenKey(t *testing.T, kdb *tdns.KeyDB, zone, state, role string) uint16 {
@@ -139,108 +128,6 @@ func rrsigTagsOf(t *testing.T, zd *tdns.ZoneData, owner string, rrtype uint16) [
 	return tags
 }
 
-// Mode 2. Keys staged as mpdist are not signed with and nothing is minted
-// beside them; once the peers confirm propagation (the KEYSTATE handler's
-// transitions, here called directly) and the TTL has passed, tdns promotes
-// them and signs.
-func TestSignerStagedKeysGateTheSignUntilConfirmed(t *testing.T) {
-	kdb := newMPTestKeyDB(t)
-	hdb := NewHsyncDB(kdb)
-	if err := hdb.InitHsyncTables(); err != nil {
-		t.Fatalf("InitHsyncTables: %v", err)
-	}
-	withSignerHooks(t, kdb)
-	mpzd := signerTestZone(t, "mode2.example.", kdb)
-	ksk := mpGenKey(t, kdb, mpzd.ZoneName, DnskeyStateMpdist, "KSK")
-	zsk := mpGenKey(t, kdb, mpzd.ZoneName, DnskeyStateMpdist, "ZSK")
-
-	// The first-load publish: unsigned, not Ready, no mint, no fault.
-	mpzd.ZoneData.InstallInitialSnapshot()
-	t.Cleanup(mpzd.ZoneData.StopPublisher)
-	if mpzd.Ready {
-		t.Fatal("a signing zone with only staged keys became Ready")
-	}
-	if _, err := mpzd.ZoneData.SignZone(context.Background(), kdb, false); !errors.Is(err, tdns.ErrKeyGenerationDeferred) {
-		t.Fatalf("SignZone with only staged keys: err=%v, want ErrKeyGenerationDeferred", err)
-	}
-	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "ensure-active-keys"); n != 0 {
-		t.Fatalf("%d keys minted by the generation fallback beside the staged ones", n)
-	}
-	if mpzd.HasError(tdns.DnssecError) {
-		t.Fatalf("DnssecError for a zone that is merely waiting: %s", mpzd.ErrorMsg)
-	}
-
-	// The peers confirm propagation: mpdist -> published, and the gate
-	// opens once the DNSKEY TTL has passed since the confirmation.
-	for _, id := range []uint16{ksk, zsk} {
-		if err := SetPropagationConfirmed(hdb, mpzd.ZoneName, id); err != nil {
-			t.Fatalf("SetPropagationConfirmed(%d): %v", id, err)
-		}
-		if err := TransitionMpdistToPublished(hdb, mpzd.ZoneName, id); err != nil {
-			t.Fatalf("TransitionMpdistToPublished(%d): %v", id, err)
-		}
-		if got := mpKeyState(t, kdb, mpzd.ZoneName, id); got != tdns.DnskeyStatePublished {
-			t.Fatalf("key %d is %s after confirmation, want published", id, got)
-		}
-	}
-	if _, err := mpzd.ZoneData.SignZone(context.Background(), kdb, false); !errors.Is(err, tdns.ErrKeyGenerationDeferred) {
-		t.Fatalf("SignZone before the TTL passed: err=%v, want ErrKeyGenerationDeferred", err)
-	}
-	longAgo := time.Now().Add(-2 * tdns.DefaultDnskeyTTL).UTC().Format(time.RFC3339)
-	if _, err := kdb.DB.Exec(`UPDATE MPKeyPropagation SET confirmed_at=? WHERE zonename=?`, longAgo, mpzd.ZoneName); err != nil {
-		t.Fatalf("age the confirmations: %v", err)
-	}
-	if _, err := mpzd.ZoneData.SignZone(context.Background(), kdb, false); err != nil {
-		t.Fatalf("SignZone after the gate opened: %v", err)
-	}
-	if !mpzd.Ready {
-		t.Fatal("the zone is not Ready after signing with the promoted keys")
-	}
-	for _, id := range []uint16{ksk, zsk} {
-		if got := mpKeyState(t, kdb, mpzd.ZoneName, id); got != tdns.DnskeyStateActive {
-			t.Fatalf("key %d is %s after promotion, want active", id, got)
-		}
-	}
-	served := servedDnskeyTagsOf(t, mpzd.ZoneData)
-	if len(served) != 2 || !served[ksk] || !served[zsk] {
-		t.Fatalf("served DNSKEY RRset %v, want exactly the two promoted keys", served)
-	}
-	for _, tag := range rrsigTagsOf(t, mpzd.ZoneData, "www."+mpzd.ZoneName, dns.TypeA) {
-		if tag != zsk {
-			t.Fatalf("www A signed by %d, want the promoted ZSK %d", tag, zsk)
-		}
-	}
-	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "ensure-active-keys"); n != 0 {
-		t.Fatalf("%d keys minted although the staged ones were promotable", n)
-	}
-
-	// A retired key parks in mpremove, out of the served RRset, and the
-	// peers' confirmation of the withdrawal removes it.
-	newZsk := mpGenKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateStandby, "ZSK")
-	if _, _, err := kdb.RolloverKey(mpzd.ZoneName, "ZSK", nil); err != nil {
-		t.Fatalf("RolloverKey: %v", err)
-	}
-	if got := mpKeyState(t, kdb, mpzd.ZoneName, zsk); got != tdns.DnskeyStateRetired {
-		t.Fatalf("rolled-out ZSK is %s, want retired", got)
-	}
-	if err := TransitionMpremoveToRemoved(hdb, mpzd.ZoneName, zsk); err != nil {
-		t.Fatalf("TransitionMpremoveToRemoved on a retired key: %v", err)
-	}
-	if got := mpKeyState(t, kdb, mpzd.ZoneName, zsk); got != tdns.DnskeyStateRetired {
-		t.Fatalf("a retired key was moved by the mpremove transition: %s", got)
-	}
-	if err := tdns.UpdateDnssecKeyState(kdb, mpzd.ZoneName, zsk, DnskeyStateMpremove); err != nil {
-		t.Fatalf("park the key: %v", err)
-	}
-	if err := TransitionMpremoveToRemoved(hdb, mpzd.ZoneName, zsk); err != nil {
-		t.Fatalf("TransitionMpremoveToRemoved: %v", err)
-	}
-	if got := mpKeyState(t, kdb, mpzd.ZoneName, zsk); got != tdns.DnskeyStateRemoved {
-		t.Fatalf("key is %s after the withdrawal was confirmed, want removed", got)
-	}
-	_ = newZsk
-}
-
 // Mode 4. The other signers' DNSKEYs arrive in the incoming zone; they are
 // kept as foreign rows, served in the DNSKEY RRset, never signing; a key
 // that leaves the incoming zone leaves the store; mode 2 keeps none.
@@ -249,7 +136,6 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 	if err := NewHsyncDB(kdb).InitHsyncTables(); err != nil {
 		t.Fatalf("InitHsyncTables: %v", err)
 	}
-	withSignerHooks(t, kdb)
 	mpzd := signerTestZone(t, "mode4.example.", kdb)
 	ksk := mpGenKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateActive, "KSK")
 	zsk := mpGenKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateActive, "ZSK")
@@ -798,33 +684,5 @@ func TestMPKeystoreMigrationMixedTable(t *testing.T) {
 	}
 	if skipLines != len(stored) || dropLines != 1 {
 		t.Errorf("%d skip lines and %d dropped-confirmation lines, want %d and 1", skipLines, dropLines, len(stored))
-	}
-}
-
-// A confirmation whose timestamp does not parse must not open the gate: the
-// zero time would read as a TTL long elapsed. And a revoked KSK (flags 385)
-// is a KSK for the "no key of that role exists" test.
-func TestSignerGateAndRoleCountEdges(t *testing.T) {
-	kdb := newMPTestKeyDB(t)
-	hdb := NewHsyncDB(kdb)
-	if err := hdb.InitHsyncTables(); err != nil {
-		t.Fatalf("InitHsyncTables: %v", err)
-	}
-	const zone = "edges.example."
-	ksk := mpGenKey(t, kdb, zone, tdns.DnskeyStatePublished, "KSK")
-	if _, err := kdb.DB.Exec(`INSERT INTO MPKeyPropagation (zonename, keyid, confirmed, confirmed_at) VALUES (?, ?, 1, 'not a time')`, zone, ksk); err != nil {
-		t.Fatal(err)
-	}
-	if canPromoteMultiProviderMP(hdb, zone, ksk) {
-		t.Fatal("a confirmation with an unparsable time opened the promotion gate")
-	}
-	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET flags=385 WHERE zonename=? AND keyid=?`, zone, ksk); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := countOwnKeysOfRole(kdb, zone, "KSK"); err != nil || n != 1 {
-		t.Fatalf("a revoked KSK (flags 385) counts %d as a KSK (err=%v), want 1", n, err)
-	}
-	if n, _ := countOwnKeysOfRole(kdb, zone, "ZSK"); n != 0 {
-		t.Fatalf("a KSK counted as a ZSK: %d", n)
 	}
 }

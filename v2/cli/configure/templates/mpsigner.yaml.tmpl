@@ -19,6 +19,14 @@ multi-provider:
         address:                '{{.AgentDnsDial}}'
         long_term_jose_pub_key: {{.Paths.AgentJosePub}}
 
+   # The multi-provider zones whose keys tdns-mp's own key machine runs.
+   # Every multi-provider zone the signer signs (a zone with a dnssecpolicy)
+   # must be listed: the signer refuses to start over one that is not. A customer zone added
+   # below is added here too. While a rollout is under way, zones not
+   # moved yet are allowed through with key-lifecycle-zones-incomplete:
+   # true; such a zone gets tdns's single-signer key machine until listed.
+   key-lifecycle-zones:  [ {{.ExampleZone}} ]
+
    # Optional HTTPS sync API (alternative to NOTIFY+CHUNK for
    # HELLO/BEAT/PING). Disabled by default — DNS transport is the
    # primary mechanism.
