@@ -25,7 +25,7 @@ func TestCombineOnABusyZoneIsServedAtTheCadence(t *testing.T) {
 	q := withMPNotifyQ(t)
 	mpzd := combinerTestZone(t, zone)
 	mpzd.Notify = []tdns.PeerConf{{Addr: "127.0.0.1:5399"}}
-	serial := mpzd.CurrentSerial
+	serial := servedSerial(t, mpzd.ZoneData, zone)
 
 	// The first batch finds the zone idle: the gate publishes in the caller.
 	if _, err := mpzd.AddCombinerData("agent-a", nsContribution(zone, "ns2."+zone)); err != nil {
@@ -37,8 +37,8 @@ func TestCombineOnABusyZoneIsServedAtTheCadence(t *testing.T) {
 	if got := servedNames(t, mpzd.ZoneData, zone, dns.TypeNS); !hasName(got, "ns2."+zone) {
 		t.Fatalf("the first batch was not served at once on an idle zone: %v", got)
 	}
-	if mpzd.CurrentSerial != serial+1 || len(q) != 1 {
-		t.Fatalf("first batch: serial %d (want %d), %d NOTIFYs (want 1)", mpzd.CurrentSerial, serial+1, len(q))
+	if s := servedSerial(t, mpzd.ZoneData, zone); s != serial+1 || len(q) != 1 {
+		t.Fatalf("first batch: serial %d (want %d), %d NOTIFYs (want 1)", s, serial+1, len(q))
 	}
 	<-q
 
@@ -53,8 +53,8 @@ func TestCombineOnABusyZoneIsServedAtTheCadence(t *testing.T) {
 	if got := servedNames(t, mpzd.ZoneData, zone, dns.TypeNS); hasName(got, "ns3."+zone) {
 		t.Fatalf("the second batch was served at once on a busy zone: %v", got)
 	}
-	if mpzd.CurrentSerial != serial+1 || len(q) != 0 {
-		t.Fatalf("second batch published by the caller: serial %d, %d NOTIFYs", mpzd.CurrentSerial, len(q))
+	if s := servedSerial(t, mpzd.ZoneData, zone); s != serial+1 || len(q) != 0 {
+		t.Fatalf("second batch published by the caller: serial %d, %d NOTIFYs", s, len(q))
 	}
 
 	// The gate's publish, one cadence on: the merged set served, one serial,
@@ -69,12 +69,32 @@ func TestCombineOnABusyZoneIsServedAtTheCadence(t *testing.T) {
 	if got := servedNames(t, mpzd.ZoneData, zone, dns.TypeNS); len(got) != 3 {
 		t.Errorf("served NS after the cadence %v, want the upstream plus both contributions", got)
 	}
-	if mpzd.CurrentSerial != serial+2 {
-		t.Errorf("serial %d after the gate's publish, want %d", mpzd.CurrentSerial, serial+2)
+	if s := servedSerial(t, mpzd.ZoneData, zone); s != serial+2 {
+		t.Errorf("serial %d after the gate's publish, want %d", s, serial+2)
 	}
 	select {
 	case <-q:
 	case <-time.After(2 * time.Second):
 		t.Error("no NOTIFY for the gate's publish")
 	}
+}
+
+// servedSerial is the serial of the served SOA, read through the zone's own
+// accessor: the gate's publisher writes CurrentSerial from its goroutine, so
+// a test that waits for that publish must not read the field itself.
+func servedSerial(t *testing.T, zd *tdns.ZoneData, zone string) uint32 {
+	t.Helper()
+	od, err := zd.GetOwner(zone)
+	if err != nil || od == nil {
+		t.Fatalf("GetOwner(%s): %v", zone, err)
+	}
+	rs, ok := od.RRtypes.Get(dns.TypeSOA)
+	if !ok || len(rs.RRs) == 0 {
+		t.Fatalf("no SOA served for %s", zone)
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("the SOA of %s is a %T", zone, rs.RRs[0])
+	}
+	return soa.Serial
 }

@@ -1,6 +1,6 @@
 # Leader lease renewal: one election, not a burst
 
-**Status:** implemented on branch `fix/120-election-renewal`, for issue #120. Not yet run on the testbed; §5 says what to look for there. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendment 3, for issue #125, is implemented in PR #126. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -65,7 +65,34 @@ A short `leader-election-ttl` on the agents shows several renewals in one run.
 
 ## Amendments
 
-### Amendment 1 (2026-10-11): a vote that overtakes the call (issue #125)
+### Amendment 1 (2026-10-11): on the testbed
+
+Run on a three-agent test rig with a 5-minute `leader-election-ttl`: the leader renews 4 min 30 s into the lease, and the fallbacks follow 6 s apart. There were two runs, the first with this branch alone and the second with PR #124 (issue #123) on top.
+
+**Renewals.** Two in each run, read on every agent against §5:
+
+- one "group leader TTL expiring, triggering re-election" line per renewal, on the member that led;
+- no "group election aborted" line;
+- one "group leader elected" line per agent, for the same new term on all three;
+- the term up by one per renewal.
+
+The leader changed at the renewals, which §6 leaves as it is.
+
+**The fallback.** In the second run the leader was restarted 36 s into its term. Back up, it showed itself as the leader of the same term, and it logged no renewal of its own. Six seconds after its renewal time the next member in line logged the "TTL expiring" line, once. The election that member called gave the next term on all three agents in the same second, with no abort.
+
+In the first run the same restart cost the group its mutual OPERATIONAL (issue #123), and with it the leader. The group elected anew when it was back, so there was no lease left for a fallback to renew.
+
+### Amendment 2 (2026-10-11): after the review of PR #121
+
+The review asked for no change. It noted that the per-zone renewal was tested at its guard only, not through its timers.
+
+**The per-zone renewal through its timers.** `v2/parentsync_leader_zone_renewal_test.go` runs a zone's managers, two and three of them, through a renewal: one call, and it is the leader's. With the leader's timer gone in a zone of two, the other member calls, once. With every member at the leader's delay the first of these fails, three runs in four: both members call.
+
+**Two more log lines.** As in §7 for the group, the per-zone `handleCall` and `handleConfirm` read the election's term for a debug line after releasing its lock. The new test found it under `-race`, and the values are now taken under the lock.
+
+**Not changed: a member that has only ever joined.** A per-zone member counts the votes and the confirms against the number of peers it gave its own last call. One that joins a call before it has called an election itself counts against none: it can settle on the first confirm it receives without confirming itself, and the caller then waits out the confirm timeout. Every member calls the zone's election once its peers are operational, so this is a matter of the moments after a start. It is older than this branch and is left for a change of its own.
+
+### Amendment 3 (2026-10-11): a vote that overtakes the call (issue #125)
 
 The test that runs several managers through an election showed one more way an election waits out the 5 s timeout, older than the renewal collision and not removed by §2 or §3. In a group of three or more, another member's VOTE can reach a member before the initiator's CALL does: the two come from different senders, and nothing orders them. `handleGroupVote` dropped a vote for a term the member had not joined; the member then joined on the CALL with one vote short, never held every vote, and confirmed nothing.
 
@@ -73,4 +100,4 @@ A member now keeps a vote for a term newer than the one it is in (`keepEarlyVote
 
 A CONFIRM needs no such care: a member confirms only once it holds every vote, the late member's among them, and that member votes when it joins.
 
-This is implemented on branch `fix/125-early-votes`, stacked on the branch of this design.
+This is implemented in PR #126 (branch `fix/125-early-votes`).

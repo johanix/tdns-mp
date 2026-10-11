@@ -1004,8 +1004,9 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 	le.mu.Lock()
 
 	if le.Active && le.Term >= term {
+		ourTerm := le.Term
 		le.mu.Unlock()
-		lgElect.Debug("ignoring ELECT-CALL with stale term", "zone", zone, "our_term", le.Term, "their_term", term)
+		lgElect.Debug("ignoring ELECT-CALL with stale term", "zone", zone, "our_term", ourTerm, "their_term", term)
 		return
 	}
 
@@ -1083,8 +1084,9 @@ func (lem *LeaderElectionManager) handleConfirm(zone ZoneName, senderID AgentId,
 	le.mu.Lock()
 
 	if !le.Active || le.Term != term {
+		active, ourTerm := le.Active, le.Term
 		le.mu.Unlock()
-		lgElect.Debug("ignoring confirm for inactive/wrong term", "zone", zone, "active", le.Active, "expected", le.Term, "got", term)
+		lgElect.Debug("ignoring confirm for inactive/wrong term", "zone", zone, "active", active, "expected", ourTerm, "got", term)
 		return
 	}
 
