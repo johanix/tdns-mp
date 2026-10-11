@@ -133,6 +133,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 	le.Confirms = make(map[AgentId]AgentId)
 	le.ExpectedPeers = expectedPeers
 	term := le.Term
+	le.takeEarlyVotes(term, false)
 	vote := le.MyVote
 
 	if le.VoteTimer != nil {
@@ -244,6 +245,8 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	}
 	le.Confirms = make(map[AgentId]AgentId)
 	le.ExpectedPeers = len(members) - 1
+	// A vote for this term that got here before the CALL.
+	le.takeEarlyVotes(term, true)
 	vote := le.MyVote
 
 	if le.VoteTimer != nil {
@@ -255,9 +258,14 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	votes, expected := len(le.Votes), le.ExpectedPeers+1
 	allVotes := votes >= expected
 
-	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
-		lem.onGroupVoteTimeout(groupHash, term, members, zones)
-	})
+	// With every vote in there is nothing to time out. The timer is armed
+	// here, under the lock, or not at all: once the lock is released it can
+	// be a newer term's.
+	if !allVotes {
+		le.VoteTimer = time.AfterFunc(5*time.Second, func() {
+			lem.onGroupVoteTimeout(groupHash, term, members, zones)
+		})
+	}
 	le.mu.Unlock()
 
 	// The counts were taken under the lock: a vote can arrive while this logs.
@@ -278,9 +286,6 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 
 	// If we already have all votes, proceed to confirm immediately.
 	if allVotes {
-		if le.VoteTimer != nil {
-			le.VoteTimer.Stop()
-		}
 		go lem.determineAndConfirmGroup(groupHash, term, members, zones)
 	}
 }
@@ -293,6 +298,13 @@ func (lem *LeaderElectionManager) handleGroupVote(le *LeaderElection, groupHash 
 	defer le.mu.Unlock()
 
 	if !le.Active || le.Term != term {
+		if le.keepEarlyVote(term, senderID, vote) {
+			lgElect.Debug("group vote for a term not joined yet, kept for its CALL",
+				"group", groupHash[:8], "from", senderID, "term", term, "our_term", le.Term)
+		} else {
+			lgElect.Debug("ignoring group vote for wrong term",
+				"group", groupHash[:8], "from", senderID, "expected", le.Term, "got", term)
+		}
 		return
 	}
 
@@ -936,6 +948,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 	le.Confirms = make(map[AgentId]AgentId)
 	le.ExpectedPeers = expectedPeers
 	term := le.Term
+	le.takeEarlyVotes(term, false)
 	vote := le.MyVote
 
 	if le.VoteTimer != nil {
@@ -1007,14 +1020,26 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 	le.MyVote = rand.Uint32()
 	le.Votes = map[AgentId]uint32{lem.localID: le.MyVote}
 	le.Confirms = make(map[AgentId]AgentId)
+	// A member that joins counts against the zone's configured peers, as one
+	// that calls does. The count used to be set by a call of one's own only:
+	// a member that had only ever joined counted against no peers, and
+	// settled on the first vote or confirm it received (#129).
+	le.ExpectedPeers = lem.configuredPeers(zone)
+	// A vote for this term that got here before the CALL (keepEarlyVote).
+	// With it the votes can be complete already, which handleVote would have
+	// seen had the vote come after the CALL.
+	le.takeEarlyVotes(term, true)
+	allVotes := len(le.Votes) > 1 && len(le.Votes) >= le.ExpectedPeers+1
 	vote := le.MyVote
 
 	if le.VoteTimer != nil {
 		le.VoteTimer.Stop()
 	}
-	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
-		lem.onVoteTimeout(zone, term)
-	})
+	if !allVotes {
+		le.VoteTimer = time.AfterFunc(5*time.Second, func() {
+			lem.onVoteTimeout(zone, term)
+		})
+	}
 
 	le.mu.Unlock()
 
@@ -1027,6 +1052,10 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 	if err := lem.broadcastFunc(zone, "ELECT-VOTE", voteRecords); err != nil {
 		lgElect.Error("failed to broadcast ELECT-VOTE", "zone", zone, "err", err)
 	}
+
+	if allVotes {
+		go lem.determineAndConfirm(zone, term)
+	}
 }
 
 func (lem *LeaderElectionManager) handleVote(zone ZoneName, senderID AgentId, records map[string][]string) {
@@ -1038,7 +1067,11 @@ func (lem *LeaderElectionManager) handleVote(zone ZoneName, senderID AgentId, re
 	defer le.mu.Unlock()
 
 	if !le.Active || le.Term != term {
-		lgElect.Debug("ignoring vote for wrong term", "zone", zone, "expected", le.Term, "got", term)
+		if le.keepEarlyVote(term, senderID, vote) {
+			lgElect.Debug("vote for a term not joined yet, kept for its CALL", "zone", zone, "from", senderID, "term", term, "our_term", le.Term)
+		} else {
+			lgElect.Debug("ignoring vote for wrong term", "zone", zone, "expected", le.Term, "got", term)
+		}
 		return
 	}
 
@@ -1271,6 +1304,46 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 			lem.DeferElection(zone)
 		}
 	})
+}
+
+// keepEarlyVote keeps a vote that arrived for a term newer than the one this
+// member is in. A member joins a term on the CALL, and the CALL and another
+// member's VOTE come from different senders, with nothing to order them: a
+// VOTE that got here first used to be dropped, the member then never held
+// every vote, and the election waited out the 5 s timeout and ran again
+// (#125). Only the newest such term is kept, one vote per sender. A vote for a
+// term at or below the current one is late, and dropped as before.
+//
+// A CONFIRM needs no such care: a member confirms only once it holds every
+// vote, this member's among them, and this member votes when it joins.
+//
+// It reports whether it kept the vote. Must be called with le.mu held.
+func (le *LeaderElection) keepEarlyVote(term uint64, sender AgentId, vote uint32) bool {
+	if term <= le.Term || term < le.earlyTerm {
+		return false
+	}
+	if term > le.earlyTerm || le.earlyVotes == nil {
+		le.earlyTerm = term
+		le.earlyVotes = make(map[AgentId]uint32)
+	}
+	le.earlyVotes[sender] = vote
+	return true
+}
+
+// takeEarlyVotes adds the votes kept for the term this member has just joined
+// to its votes, and forgets what was kept for this term or an older one. A
+// member that starts a term of its own calls it with apply false: what was
+// kept belongs to an election that start replaces. Must be called with le.mu
+// held, after Votes has been reset for the term.
+func (le *LeaderElection) takeEarlyVotes(term uint64, apply bool) {
+	if apply && le.earlyTerm == term {
+		for id, vote := range le.earlyVotes {
+			le.Votes[id] = vote
+		}
+	}
+	if le.earlyTerm <= term {
+		le.earlyTerm, le.earlyVotes = 0, nil
+	}
 }
 
 // determineWinner picks the agent with the highest vote. Ties broken by lexicographic label.
