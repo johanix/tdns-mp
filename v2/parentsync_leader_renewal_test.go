@@ -22,6 +22,7 @@ import (
 // about the lease renewal, not about that.
 type electionNet struct {
 	group   string
+	zone    ZoneName // set: the election of a zone that no group covers
 	members []string
 	zones   []ZoneName
 	mgrs    map[AgentId]*LeaderElectionManager
@@ -33,12 +34,25 @@ type electionNet struct {
 
 	mu      sync.Mutex
 	elected []AgentId // one entry per onLeaderElected call, the winner
+	calls   []AgentId // one entry per ELECT-CALL broadcast, its sender
 }
 
 type electionMsg struct {
 	to, from AgentId
 	rfiType  string
 	records  map[string][]string
+}
+
+// broadcast is a member's broadcastFunc: it notes who calls an election and
+// queues the message.
+func (n *electionNet) broadcast(from AgentId, rfiType string, records map[string][]string) error {
+	if rfiType == "ELECT-CALL" {
+		n.mu.Lock()
+		n.calls = append(n.calls, from)
+		n.mu.Unlock()
+	}
+	n.send(from, rfiType, records)
+	return nil
 }
 
 // send queues one broadcast for every member but its sender.
@@ -72,12 +86,21 @@ func (n *electionNet) deliver() {
 			msg := n.queue[0]
 			n.queue = n.queue[1:]
 			n.qmu.Unlock()
-			n.mgrs[msg.to].HandleGroupMessage(n.group, msg.from, msg.rfiType, msg.records)
+			n.handle(msg)
 		}
 		if n.closed.Load() {
 			return
 		}
 	}
+}
+
+// handle gives one message to its member: the group's election, or the zone's.
+func (n *electionNet) handle(msg electionMsg) {
+	if n.zone != "" {
+		n.mgrs[msg.to].HandleMessage(n.zone, msg.from, msg.rfiType, msg.records)
+		return
+	}
+	n.mgrs[msg.to].HandleGroupMessage(n.group, msg.from, msg.rfiType, msg.records)
 }
 
 func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electionNet {
@@ -92,8 +115,7 @@ func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electio
 	for _, m := range members {
 		id := AgentId(m)
 		lem := NewLeaderElectionManager(id, ttl, func(_ ZoneName, rfiType string, records map[string][]string) error {
-			n.send(id, rfiType, records)
-			return nil
+			return n.broadcast(id, rfiType, records)
 		})
 		pgm := NewProviderGroupManager(m)
 		pgm.Groups[n.group] = &ProviderGroup{GroupHash: n.group, Members: members, VotingMembers: members, Zones: n.zones}
@@ -106,6 +128,13 @@ func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electio
 		})
 		n.mgrs[id] = lem
 	}
+	n.start(t)
+	return n
+}
+
+// start begins the delivery, and stops it and every member's timers when the
+// test ends.
+func (n *electionNet) start(t *testing.T) {
 	go n.deliver()
 	t.Cleanup(func() {
 		n.closed.Store(true)
@@ -125,12 +154,14 @@ func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electio
 			}
 		}
 	})
-	return n
 }
 
 func (n *electionNet) election(lem *LeaderElectionManager) *LeaderElection {
 	lem.mu.RLock()
 	defer lem.mu.RUnlock()
+	if n.zone != "" {
+		return lem.elections[n.zone]
+	}
 	return lem.groupElections[n.group]
 }
 
@@ -150,6 +181,13 @@ func (n *electionNet) electedCount() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return len(n.elected)
+}
+
+// callers returns who has called an election, in order.
+func (n *electionNet) callers() []AgentId {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]AgentId(nil), n.calls...)
 }
 
 // settledAt reports whether every member has finalized exactly term.
