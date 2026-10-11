@@ -105,6 +105,10 @@ type LeaderElection struct {
 	ConfirmTimer  *time.Timer
 	ReelectTimer  *time.Timer
 	askedTerm     uint64 // the term in which this agent, leading, last asked what an election's winner asks (once per term)
+	// leaderTerm is the term Leader was elected in. Term runs ahead of it
+	// while an election is running and after one that was aborted: the
+	// leader then is still the one of the term before.
+	leaderTerm uint64
 
 	// Votes that arrived for a term this member has not joined yet: a VOTE
 	// can overtake the CALL it answers, since the two come from different
