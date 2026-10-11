@@ -260,8 +260,19 @@ func TestARetrierThatEndsPicksUpANewFailure(t *testing.T) {
 	e.endBeatRetrier(peer, true)
 	s.waitBeats(t, 1, time.Second) // the new outage's first retry, which succeeds
 
-	// The same, but the retrier ran out: no further retries.
-	time.Sleep(3 * fast)
+	// The same, but the retrier ran out: no further retries. The retrier
+	// above must be off the books first: its exit, coming after the setup
+	// below, would see a peer failing again and start the retries anew.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		e.beatMu.Lock()
+		running := e.beatRetrying[peer.ID]
+		e.beatMu.Unlock()
+		if !running {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	n := len(s.beats())
 	e.beatMu.Lock()
 	e.beatRetrying[peer.ID] = true
