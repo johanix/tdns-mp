@@ -54,9 +54,21 @@ func (e *Engine) sendHeartbeats() string {
 	return view
 }
 
+// sendBeatToPeer beats one peer and, when the beat fails, has it retried to
+// that peer without waiting for the next round (beat_retry.go).
 func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	if e.deps.Transport == nil {
 		return
+	}
+	if !e.beatPeerOnce(ctx, peer) {
+		e.noteBeatFailed(peer)
+	}
+}
+
+// beatPeerOnce beats one peer and reports whether the beat was acknowledged.
+func (e *Engine) beatPeerOnce(ctx context.Context, peer *Peer) bool {
+	if e.deps.Transport == nil {
+		return false
 	}
 	seq := e.beatOutboundSequence(peer.ID)
 	before := e.peerView(peer.ID)
@@ -66,7 +78,11 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	// connection-state store (D2.5). The former hsync.PeerDetails.State /
 	// LatestError bookkeeping here was write-only (no live reader) and is
 	// removed; outcome/error telemetry lives on transport.Peer.Stats.
-	_, _, _ = e.deps.Transport.SendBeat(ctx, peer, seq)
+	ack, _, err := e.deps.Transport.SendBeat(ctx, peer, seq)
+	ok := err == nil && ack
+	if ok {
+		e.noteBeatSucceeded(peer)
+	}
 	e.registry.S.Set(peer.ID, peer)
 	e.storeHook(peer)
 	// A beat that moved the peer (to OPERATIONAL, or back from a decay) is
@@ -74,6 +90,7 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 	if e.peerView(peer.ID) != before {
 		e.KickBeats()
 	}
+	return ok
 }
 
 func (e *Engine) runDeferredTasks(peer *Peer) {
