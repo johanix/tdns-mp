@@ -60,7 +60,9 @@ func TestAnElectionRecordWithoutALeaderIsNotStored(t *testing.T) {
 // election the term is already the new one and the leader is not decided: none
 // in a first election, the leader of the term before in a renewal. After an
 // aborted election it stays so, and a member that has invalidated its leader
-// has a term without one.
+// has a term without one. In none of these does it pass on a record it heard
+// from a peer in place of its own word: only a member with no election of its
+// own does that.
 func TestAnUndecidedTermIsNotGossiped(t *testing.T) {
 	members := []string{"a.example.", "b.example."}
 	zones := []ZoneName{"zone.example."}
@@ -87,7 +89,14 @@ func TestAnUndecidedTermIsNotGossiped(t *testing.T) {
 			map[string][]string{"_term": {term}, "_winner": {string(winner)}, "_group": {statusGroup}})
 	}
 
-	// The first election, running.
+	// No election of its own yet: the member passes on what it heard.
+	heard := GroupElectionState{Leader: "b.example.", Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}
+	gst.MergeGossip(&GossipMessage{GroupHash: statusGroup, Election: heard})
+	if got := told(); got.Term != 1 || got.Leader != "b.example." {
+		t.Fatalf("with no election of its own the member told its peer %+v, want what it heard: %+v", got, heard)
+	}
+
+	// The first election, running: nothing, and not the record it heard.
 	lem.StartGroupElection(statusGroup, members, zones)
 	lem.mu.RLock()
 	le := lem.groupElections[statusGroup]
@@ -125,20 +134,18 @@ func TestAnUndecidedTermIsNotGossiped(t *testing.T) {
 	// The renewal, aborted: no vote came.
 	lem.onGroupVoteTimeout(statusGroup, 2, members, zones)
 	if got := told(); got.Term != 0 {
-		t.Fatalf("after an aborted renewal the member told its peer %+v, want nothing of term 2", got)
+		t.Fatalf("after an aborted renewal the member told its peer %+v, want nothing", got)
 	}
 
-	// What the member heard from its peer before stands in for its own word.
-	gst.MergeGossip(&GossipMessage{GroupHash: statusGroup,
-		Election: GroupElectionState{Leader: string(winner), Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}})
-	if got := told(); got.Term != 1 || AgentId(got.Leader) != winner {
-		t.Fatalf("with a decided term heard from the peer, the member told %+v, want term 1 and leader %s", got, winner)
-	}
-
-	// A leader invalidated: a term without a leader.
+	// A leader invalidated: a term without a leader. The record heard from
+	// the peer at the start is still in the table, and names a leader. A
+	// member that has invalidated its leader must not hand that on.
 	lem.InvalidateGroupLeader(statusGroup)
-	if _, ok := lem.GroupElectionForGossip(statusGroup); ok {
-		t.Fatalf("a member that has invalidated its leader has an election to tell")
+	if _, election, _ := gst.GetGroupState(statusGroup); election == nil || election.Leader == "" {
+		t.Fatalf("the table no longer holds the record heard from the peer: %+v", election)
+	}
+	if got := told(); got.Term != 0 {
+		t.Fatalf("with its leader invalidated the member told its peer %+v, want nothing", got)
 	}
 }
 

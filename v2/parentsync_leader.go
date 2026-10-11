@@ -633,34 +633,42 @@ func (lem *LeaderElectionManager) GetGroupElectionState(groupHash string) GroupE
 	}
 }
 
-// GroupElectionForGossip returns the group's election state for outbound
-// gossip, and whether there is one to send: a term that is decided, with its
-// leader.
+// GroupElectionForGossip returns what this member has to tell its peers of
+// the group's election. decided: a term that is decided, with its leader, in
+// state. known: the member has an election of its own for the group, decided
+// or not.
 //
-// The live state is not that at every moment. While an election runs the term
-// is already the new one and the leader is not decided: empty in a first
+// The live state is not a result at every moment. While an election runs the
+// term is already the new one and the leader is not decided: empty in a first
 // election, the leader of the term before, with that term's expiry, in a
 // renewal. After an aborted election it stays so until the retry. And a member
 // that has invalidated its leader has a term without one. A peer stores the
 // first record it gets for a term and keeps it for the term, so one of these,
 // arriving first, stood for the whole lease (#154). None of them is sent.
-func (lem *LeaderElectionManager) GroupElectionForGossip(groupHash string) (GroupElectionState, bool) {
+//
+// A member that is known and not decided tells nothing at all: its caller must
+// not pass on a record heard from a peer in its place, which may name the very
+// leader this member has invalidated.
+func (lem *LeaderElectionManager) GroupElectionForGossip(groupHash string) (state GroupElectionState, decided, known bool) {
 	lem.mu.RLock()
 	le, ok := lem.groupElections[groupHash]
 	lem.mu.RUnlock()
 	if !ok {
-		return GroupElectionState{}, false
+		return GroupElectionState{}, false, false
 	}
 	le.mu.Lock()
 	defer le.mu.Unlock()
-	if le.Active || le.Term == 0 || le.Leader == "" || le.leaderTerm != le.Term {
-		return GroupElectionState{}, false
+	if le.Term == 0 {
+		return GroupElectionState{}, false, false
+	}
+	if le.Active || le.Leader == "" || le.leaderTerm != le.Term {
+		return GroupElectionState{}, false, true
 	}
 	return GroupElectionState{
 		Leader:       string(le.Leader),
 		Term:         uint32(le.Term),
 		LeaderExpiry: le.LeaderExpiry,
-	}, true
+	}, true, true
 }
 
 // ApplyGossipElection updates the LEM with election state received via gossip.

@@ -247,16 +247,20 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 			}
 		}
 
-		// Include election state — prefer live state from LeaderElectionManager,
-		// when it has a decided term to tell (GroupElectionForGossip).
-		electionIncluded := false
+		// Include election state. The member's own word comes first: a term
+		// that is decided (GroupElectionForGossip). With an election of its
+		// own that is not decided it tells nothing, and passes on no record
+		// heard from a peer either: it may have invalidated that very leader.
+		// Only a member with no election of its own passes on what it heard.
+		passOn := true
 		if len(lem) > 0 && lem[0] != nil {
-			if es, ok := lem[0].GroupElectionForGossip(gi.hash); ok {
+			es, decided, known := lem[0].GroupElectionForGossip(gi.hash)
+			if decided {
 				msg.Election = es
-				electionIncluded = true
 			}
+			passOn = !known
 		}
-		if !electionIncluded {
+		if passOn {
 			if el, ok := gst.Elections[gi.hash]; ok {
 				msg.Election = *el
 			}
