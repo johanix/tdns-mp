@@ -1,0 +1,78 @@
+# The election as gossip and the status command tell it
+
+**Status:** implemented in tdns-mp PR #155 (branch `fix/154-gossip-election-status`), for issue #154, with Amendment 1 after its review. Run on two test fleets 2026-10-11 (Amendment 2). The design text is not rewritten after review (dated amendments at the end).
+
+## 1. What was wrong
+
+`gossip zone-state` could report "election invalidated (group degraded, last term N)" for a group whose election was healthy, until the next renewal. The election itself was not affected.
+
+On a test fleet a two-provider group elected its leader at term 1. One provider's status showed the leader, the other's "election invalidated (group degraded, last term 1)". The second provider's log had the leader elected at term 1 and never invalidated, and it joined the renewal 54 minutes later.
+
+Two things combined:
+
+- **The `/gossip` handler had no election manager.** The routes are set up before the role is started, and the manager is created at that start. The handler was given `conf.InternalMp.LeaderElectionManager` at registration, which was nil then, and kept it. It answered from the election record in the gossip table.
+- **The gossip table could hold a wrong record for a term, and kept it.** A member sent its live election state whenever the term was above zero. Inside an election the term is already the new one and the leader is not decided: empty in a first election, the leader of the term before, with that term's expiry, in a renewal. The receiver stored the first record of a term and replaced it only for a higher term. The decided record that followed was of the same term, and was dropped.
+
+A term without a leader is what the status command prints as "election invalidated".
+
+## 2. The handler asks the manager of the moment
+
+`APIgossip` takes the config and reads the agent registry and the election manager when a request comes in, as the agent's other handlers do.
+
+## 3. Only a decided term is told
+
+A member tells its peers of a term only once it is decided (`GroupElectionForGossip`): no election is running, there is a leader, and the leader was elected in that term. The election keeps the term its leader was elected in (`leaderTerm`) to know the last of these: after an aborted renewal the term has moved on and the leader is still the one of the term before.
+
+So a member says nothing of its own in these cases, and passes on what it last heard from a peer, as it did before when it had no state of its own:
+
+| State | Told before | Told now |
+|---|---|---|
+| first election running | term 1, no leader | nothing |
+| renewal running, or aborted | the new term, the old leader and expiry | nothing of the new term |
+| leader invalidated | the term, no leader | nothing |
+| decided | the term and its leader | the same |
+
+## 4. A record without a leader is not stored
+
+`MergeGossip` ignores an election record without a leader. A peer on an older build still sends them.
+
+With §3 and §4 the first record a member stores for a term is that term's result, so `onElectionUpdate` fires for it. Before, an agent that restarted while an election was running could store the undecided record first, and then did not learn that term's leader from gossip.
+
+## 5. Left out
+
+- **A wrong record with a leader, from a peer on an older build.** In a renewal such a peer sends the new term with the old leader. A receiver cannot tell that from a result, and stores it for the term. It ends when every member runs this change.
+- **The status of a zone that no provider group covers.** `gossip zone-state` answers for a zone's group. A single-provider zone has none, and the command has no answer for it, with or without the manager.
+- **What the status command says while an election runs.** With the manager it shows the live state, which for the length of an election is the new term with the old leader, or "invalidated" in a first election.
+
+## 6. Tests
+
+`v2/gossip_election_status_test.go`:
+
+- a record without a leader is not stored, and the result of the same term that follows it is, and is passed on once;
+- a member tells nothing inside a first election, the term and leader once decided, nothing of the new term inside a renewal or after its abort, and nothing with its leader invalidated;
+- the handler, registered before the election manager exists, reports the election the manager holds.
+
+Each fails without its part of the change.
+
+## Amendments
+
+### Amendment 1 (2026-10-11): a member with an election of its own passes nothing on
+
+§3 said that a member with a term that is not decided "passes on what it last heard from a peer, as it did before when it had no state of its own". The review of PR #155 showed what that opened. A member that has invalidated its leader, because the group is degraded, would have passed on the record it once heard from a peer, which names that leader. A member that restarted in the meantime, and has no term of its own, would have taken it and resumed a leader's work, without an election, in a group its peers hold to be degraded. Before this branch such a member sent its live state, a term without a leader, and the record it had heard stayed where it was.
+
+A member with an election of its own for the group now tells its own word or nothing: the decided term, or no election record at all (`GroupElectionForGossip` reports both whether the term is decided and whether the member has an election of its own). Only a member with no election of its own passes on what it has heard, as before this branch. The "told now" column of §3's table stands, with "nothing" meaning nothing of any term.
+
+The test of §6's second line runs the whole outbound path for it: with a record heard from a peer in the table, the member tells nothing inside an election, after an aborted renewal, and with its leader invalidated.
+
+### Amendment 2 (2026-10-11): on the testbed
+
+Run on two test fleets, every agent on this branch with main merged in. A mixed fleet was not run (§5's first item).
+
+**A fleet of five groups, the one that showed the defect.** After a cold start, for every zone that a provider group covers, every provider answered `gossip zone-state` with the same leader and the same term, and none with "election invalidated". The two-provider groups, where one member had answered wrongly before, agreed. The same again half a minute after the first renewal, 54 minutes in: every provider named the same leader, at term 2. Each answer matched the "group leader elected" line in that provider's log. No election was aborted. The zone of a single provider still has no answer, as §5 says.
+
+**A fleet of three agents and an auditor, with a 5-minute lease.** Every member of both groups, one of two members and one of three, answered with the leader and term of its own log at three points: after the cold start, after two renewals of each group, and after the restarts below. The renewals were one election each, with no abort.
+
+- **The leader restarted inside its term.** Five seconds after it was back, its log said "accepted leader from gossip", naming itself and the term it had led. The group held with no election, and the next member in line renewed once, a step after the leader's time. This is the reading that goes through §3: the restarted agent learns its term from what its peers tell, and they tell a decided term.
+- **A member that did not lead, restarted.** No "group lost mutual OPERATIONAL" on its peers, and on its return it took the leader of the current term from gossip.
+
+Over each agent's whole log on that fleet: no "group election aborted", no "not all members voted", no "election invalidated".

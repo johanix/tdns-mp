@@ -42,7 +42,9 @@ type ProviderGroupLookup interface {
 	GetGroup(groupHash string) *ProviderGroupInfo
 }
 
-// ElectionStateLookup supplies live election state for outbound gossip.
+// ElectionStateLookup supplies the live election state of a group. Outbound
+// gossip is not built from it: the host builds that, and tells a peer of a
+// decided term only.
 type ElectionStateLookup interface {
 	GetGroupElectionState(groupHash string) GroupElectionState
 }
