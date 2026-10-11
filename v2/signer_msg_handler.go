@@ -102,11 +102,12 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
-			// what the other providers said about their keys (#58): the
-			// owner of the zone's key lifecycle writes ds on their rows
-			// from it; for a zone nobody here owns it has no reader
+			// what the other providers said about their keys (#58), and
+			// which providers have spoken (S7): the owner of the zone's key
+			// lifecycle writes ds on their rows from it; for a zone nobody
+			// here owns it has no reader
 			if sigMsg.Signal == "foreign" {
-				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.Foreign(sigMsg.Zone, sigMsg.ForeignKeys) {
+				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.ForeignWord(sigMsg.Zone, sigMsg.ForeignKeys, sigMsg.ForeignSpoken) {
 					lgSigner.Debug("KEYSTATE foreign for a zone whose key lifecycle is not run here; dropped", "zone", sigMsg.Zone)
 				}
 				continue

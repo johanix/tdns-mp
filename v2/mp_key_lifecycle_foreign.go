@@ -48,10 +48,44 @@ func foreignDSFor(said foreignSaid, sep bool, signers map[string]bool) (ds bool,
 	return *said.DS && sep && held && signers[said.Provider], true
 }
 
+// ForeignWord hands the zone's driver what the other providers said about
+// their keys and which providers have spoken (the agent's KEYSTATE
+// "foreign", tdns-mp #58 and S7). Reports whether the zone is owned: for
+// one that is not, nobody writes ds on the foreign rows, and the word is
+// dropped. The engine's Foreign is the same hand-over from an agent that
+// does not name the spoken providers.
+func (e *KeyLifecycleEngine) ForeignWord(zone string, keys []core.ForeignKeyState, spoken []string) bool {
+	l, owned := e.driverState(zone)
+	if !owned {
+		return false
+	}
+	if l == nil {
+		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
+		return true
+	}
+	if err := l.SetForeignWord(keys, spoken); err != nil {
+		lgSigner.Error("key lifecycle: recording the other providers' key states failed", "zone", zone, "err", err)
+	}
+	return true
+}
+
 // SetForeignStates records the complete latest set of what the other
 // providers said about their keys in the zone (a provider missing from
 // the set has said nothing), and writes ds on the foreign rows from it.
+// The word of an agent that does not name the providers that have spoken
+// (an older release): a provider speaks only through the keys it lists.
 func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
+	return l.SetForeignWord(keys, nil)
+}
+
+// SetForeignWord is SetForeignStates with the providers that have spoken
+// named (S7): a provider among them whose keys are not in the set has
+// said it holds none, so every key it mentioned before is omitted (ds=0
+// until its row goes), where a provider named nowhere has said nothing
+// new. Nothing is kept of the spoken list between words: the agent names
+// the providers again with every word, and the rows written from it are
+// what the signer keeps.
+func (l *ZoneKeyLifecycle) SetForeignWord(keys []core.ForeignKeyState, spoken []string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.initErr != nil {
@@ -65,10 +99,17 @@ func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
 		said[k.KeyTag] = foreignSaid{Provider: k.Provider, State: k.State, DS: k.DS}
 	}
 	// the latest word replaces the one before; a key a provider mentioned
-	// before and leaves out now, while it still speaks, is omitted: ds=0
+	// before and leaves out now, while it still speaks, is omitted: ds=0.
+	// A provider speaks through the keys it lists, or by name among the
+	// spoken when it lists none
 	speaking := map[string]bool{}
 	for _, s := range said {
 		speaking[s.Provider] = true
+	}
+	for _, p := range spoken {
+		if p != "" {
+			speaking[p] = true
+		}
 	}
 	no := false
 	for kt, old := range l.foreign {

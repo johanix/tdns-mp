@@ -1031,7 +1031,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 				Signal:   payload.Signal,
 				Message:  payload.Message,
 
-				ForeignKeys: payload.ForeignKeys,
+				ForeignKeys:   payload.ForeignKeys,
+				ForeignSpoken: payload.ForeignSpoken,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
@@ -2326,10 +2327,17 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // latest set on to our signer. An operation without key states (an older
 // release) says nothing: what that provider said before, if anything,
 // stands, and a provider that never said leaves its keys undecided at
-// the signer (Q9).
+// the signer (Q9). One exception: a replace of the whole DNSKEY set by no
+// record at all, from a provider whose key states this agent already
+// holds, is that provider's word that it has no key now. A sender that
+// says what it holds its keys as says it with every record it sends, and
+// the wire between providers carries no empty list, so this is the only
+// shape its empty word can take; a provider that never said gets no entry
+// from it. The entry stays, with no key in it: the provider has spoken,
+// and the signer is told so by name (S7, the empty-share clause of A2.2).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
 	var states []core.KeyState
-	found, records := false, false
+	found, records, anyRecord, emptyReplace := false, false, false, false
 	for _, op := range ops {
 		if op.RRtype != "DNSKEY" {
 			continue
@@ -2337,6 +2345,12 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 		if op.KeyStates != nil {
 			states = append(states, op.KeyStates...)
 			found = true
+		}
+		if len(op.Records) > 0 {
+			anyRecord = true
+		}
+		if op.Operation == "replace" && len(op.Records) == 0 {
+			emptyReplace = true
 		}
 		if len(op.Records) > 0 || op.Operation == "replace" {
 			records = true
@@ -2362,9 +2376,19 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 			}
 		}
 	}
+	emptied := false
+	if !found && emptyReplace && !anyRecord {
+		if _, spoke := tm.foreignKeyStates[zone][from]; spoke {
+			found, emptied = true, true
+		}
+	}
 	if !found {
 		tm.foreignKeyStatesMu.Unlock()
 		return
+	}
+	if states == nil {
+		// spoken, and no key: an entry with nothing in it is the record
+		states = []core.KeyState{}
 	}
 	if tm.foreignKeyStates == nil {
 		tm.foreignKeyStates = map[ZoneName]map[AgentId][]core.KeyState{}
@@ -2374,14 +2398,21 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 	}
 	tm.foreignKeyStates[zone][from] = states
 	tm.foreignKeyStatesMu.Unlock()
-	lgTransport.Info("key states received from another provider", "zone", zone, "agent", from, "keys", len(states))
+	if emptied {
+		lgTransport.Info("a provider that had said what it holds its keys as replaced its whole DNSKEY set by none: it has no key now", "zone", zone, "agent", from)
+	} else {
+		lgTransport.Info("key states received from another provider", "zone", zone, "agent", from, "keys", len(states))
+	}
 	go tm.sendForeignKeysToSigner(zone)
 }
 
-// foreignKeysFor is the zone's complete latest set of the other providers'
+// foreignWordFor is the zone's complete latest set of the other providers'
 // key states, each with its provider's label (the agent's HSYNC3 label in
-// the zone); an agent with no label there is left out, with a warning.
-func (tm *MPTransportBridge) foreignKeysFor(zone ZoneName) []core.ForeignKeyState {
+// the zone), and the labels of every provider whose word this agent holds,
+// one whose latest word listed no keys included: the spoken list is how
+// the signer tells such a provider's empty word from silence (S7). An
+// agent with no label in the zone is left out of both, with a warning.
+func (tm *MPTransportBridge) foreignWordFor(zone ZoneName) (keys []core.ForeignKeyState, spoken []string) {
 	tm.foreignKeyStatesMu.Lock()
 	byAgent := map[AgentId][]core.KeyState{}
 	for a, st := range tm.foreignKeyStates[zone] {
@@ -2389,29 +2420,30 @@ func (tm *MPTransportBridge) foreignKeysFor(zone ZoneName) []core.ForeignKeyStat
 	}
 	tm.foreignKeyStatesMu.Unlock()
 	if len(byAgent) == 0 {
-		return nil
+		return nil, nil
 	}
 	mpzd, ok := Zones.Get(dns.Fqdn(string(zone)))
 	if !ok || mpzd == nil {
-		return nil
+		return nil, nil
 	}
 	agents := make([]string, 0, len(byAgent))
 	for a := range byAgent {
 		agents = append(agents, string(a))
 	}
 	sort.Strings(agents)
-	var out []core.ForeignKeyState
 	for _, a := range agents {
 		matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(a)})
 		if err != nil || !matched {
 			lgTransport.Warn("key states from an agent with no HSYNC3 label in the zone; not handed to the signer", "zone", zone, "agent", a)
 			continue
 		}
+		spoken = append(spoken, label)
 		for _, st := range byAgent[AgentId(a)] {
-			out = append(out, core.ForeignKeyState{Provider: label, KeyState: st})
+			keys = append(keys, core.ForeignKeyState{Provider: label, KeyState: st})
 		}
 	}
-	return out
+	sort.Strings(spoken)
+	return keys, spoken
 }
 
 // logSilentAgents says which of the zone's agents have not said anything
@@ -2449,17 +2481,16 @@ func (tm *MPTransportBridge) logSilentAgents(zone ZoneName) {
 }
 
 // sendForeignKeysToSigner hands our signer what the other providers said
-// about their keys in the zone (KEYSTATE "foreign").
+// about their keys in the zone (KEYSTATE "foreign"): the keys, and the
+// providers whose word we hold. A provider whose latest word lists no
+// keys is among the spoken, so the signer learns that its keys are gone
+// and gives their rows ds=0 until they go with its DNSKEYs, instead of
+// keeping what it had (transition table section 3; S7).
 func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
-	keys := tm.foreignKeysFor(zone)
+	keys, spoken := tm.foreignWordFor(zone)
 	tm.logSilentAgents(zone)
-	// Nothing to hand over. That is also the case when the last provider
-	// that spoke now says an explicit empty list: the flat set cannot
-	// carry "this provider has spoken and holds no key", so the signer
-	// keeps what it had until the rows go with the provider's DNSKEYs
-	// (transition table section 3). Our own sender never says that: an
-	// empty list is not encoded.
-	if len(keys) == 0 {
+	// nothing to hand over while nobody has spoken
+	if len(keys) == 0 && len(spoken) == 0 {
 		return
 	}
 	if tm.signerID == "" || tm.signerAddress == "" || tm.DNSTransport == nil {
@@ -2472,17 +2503,18 @@ func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
-		SenderID:    tm.LocalID,
-		Zone:        string(zone),
-		Signal:      "foreign",
-		ForeignKeys: keys,
-		Timestamp:   time.Now(),
+		SenderID:      tm.LocalID,
+		Zone:          string(zone),
+		Signal:        "foreign",
+		ForeignKeys:   keys,
+		ForeignSpoken: spoken,
+		Timestamp:     time.Now(),
 	})
 	if err != nil {
 		lgTransport.Error("KEYSTATE foreign send to signer failed", "zone", zone, "err", err)
 		return
 	}
-	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "accepted", resp.Accepted, "msg", resp.Message)
+	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "spoken", spoken, "accepted", resp.Accepted, "msg", resp.Message)
 }
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.
