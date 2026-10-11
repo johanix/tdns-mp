@@ -1,6 +1,6 @@
 # The election as gossip and the status command tell it
 
-**Status:** implemented on branch `fix/154-gossip-election-status`, for issue #154. Not run on the testbed. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #155 (branch `fix/154-gossip-election-status`), for issue #154, with Amendment 1 after its review. Not run on the testbed. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -56,4 +56,10 @@ Each fails without its part of the change.
 
 ## Amendments
 
-None yet.
+### Amendment 1 (2026-10-11): a member with an election of its own passes nothing on
+
+§3 said that a member with a term that is not decided "passes on what it last heard from a peer, as it did before when it had no state of its own". The review of PR #155 showed what that opened. A member that has invalidated its leader, because the group is degraded, would have passed on the record it once heard from a peer, which names that leader. A member that restarted in the meantime, and has no term of its own, would have taken it and resumed a leader's work, without an election, in a group its peers hold to be degraded. Before this branch such a member sent its live state, a term without a leader, and the record it had heard stayed where it was.
+
+A member with an election of its own for the group now tells its own word or nothing: the decided term, or no election record at all (`GroupElectionForGossip` reports both whether the term is decided and whether the member has an election of its own). Only a member with no election of its own passes on what it has heard, as before this branch. The "told now" column of §3's table stands, with "nothing" meaning nothing of any term.
+
+The test of §6's second line runs the whole outbound path for it: with a record heard from a peer in the table, the member tells nothing inside an election, after an aborted renewal, and with its leader invalidated.
