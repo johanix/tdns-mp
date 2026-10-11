@@ -67,6 +67,17 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 
 // StartGroupElection initiates a leader election for a provider group.
 func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members []string, zones []ZoneName) {
+	lem.startGroupElection(groupHash, members, zones, nil)
+}
+
+// startGroupElection is StartGroupElection, for a caller that is a timer when
+// armed is set: a lease renewal, or the retry after an election that was
+// aborted. Such a timer was armed in a term, and it acts only while the
+// election still stands there: when a newer term is in, or an election is
+// running, another member got there first and this one starts nothing. Without
+// that, every member's renewal and every member's retry minted a term of its
+// own, and a lease renewal was two or three elections in one second (#120).
+func (lem *LeaderElectionManager) startGroupElection(groupHash string, members []string, zones []ZoneName, armed *uint64) {
 	expectedPeers := len(members) - 1 // minus self
 
 	lem.mu.Lock()
@@ -83,6 +94,14 @@ func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members [
 	lem.mu.Unlock()
 
 	le.mu.Lock()
+
+	if armed != nil && (le.Active || le.Term != *armed) {
+		term := le.Term
+		le.mu.Unlock()
+		lgElect.Debug("group election has moved on since this timer was armed, starting none",
+			"group", groupHash[:8], "armed", *armed, "term", term)
+		return
+	}
 
 	// Single agent: self-elect immediately
 	if expectedPeers == 0 {
@@ -233,15 +252,17 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 
 	// Check if we already have all votes (2-member group: initiator's
 	// vote was in the CALL, plus our own).
-	allVotes := len(le.Votes) >= le.ExpectedPeers+1
+	votes, expected := len(le.Votes), le.ExpectedPeers+1
+	allVotes := votes >= expected
 
 	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
 		lem.onGroupVoteTimeout(groupHash, term, members, zones)
 	})
 	le.mu.Unlock()
 
+	// The counts were taken under the lock: a vote can arrive while this logs.
 	lgElect.Info("joining group election", "group", groupHash[:8], "term", term, "from", senderID,
-		"votes", len(le.Votes), "expected", le.ExpectedPeers+1)
+		"votes", votes, "expected", expected)
 
 	// Broadcast our vote to all peers.
 	if len(zones) > 0 {
@@ -329,9 +350,7 @@ func (lem *LeaderElectionManager) onGroupVoteTimeout(groupHash string, term uint
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members voted, retrying",
 			"group", groupHash[:8], "term", term, "votes", collected, "expected", expected)
-		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
-			lem.StartGroupElection(groupHash, members, zones)
-		})
+		lem.retryGroupElection(groupHash, term, members, zones)
 		return
 	}
 	le.mu.Unlock()
@@ -407,9 +426,7 @@ func (lem *LeaderElectionManager) onGroupConfirmTimeout(groupHash string, term u
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members confirmed, retrying",
 			"group", groupHash[:8], "term", term, "confirms", collected, "expected", expected)
-		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
-			lem.StartGroupElection(groupHash, members, zones)
-		})
+		lem.retryGroupElection(groupHash, term, members, zones)
 		return
 	}
 	le.mu.Unlock()
@@ -445,13 +462,9 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 
 	if !consensus || agreedWinner == "" {
 		le.Active = false
-		expectedPeers := le.ExpectedPeers
 		le.mu.Unlock()
 		lgElect.Warn("group election: no consensus, re-electing", "group", groupHash[:8], "term", term)
-		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
-			_ = expectedPeers // avoid unused warning
-			lem.StartGroupElection(groupHash, members, zones)
-		})
+		lem.retryGroupElection(groupHash, term, members, zones)
 		return
 	}
 
@@ -479,16 +492,76 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	}
 }
 
-// scheduleGroupReelection sets up a timer to re-elect at 90% of leader TTL.
-// Must be called with le.mu held.
+// scheduleGroupReelection sets up the timer that renews the lease.
+//
+// One member renews the lease, the leader, at 90% of it. Every other member
+// arms a fallback a step later each, in the order of their identities, for a
+// leader that has no timer (one that restarted inside its term and learnt
+// from gossip that it leads) or whose renewal was lost. A fallback that finds
+// the term renewed starts nothing (startGroupElection). When every member
+// renewed at the same instant, each started the same term, nobody joined
+// anybody, and all aborted after the vote timeout (#120). Must be called
+// with le.mu held.
 func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, groupHash string, members []string, zones []ZoneName) {
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
 	}
-	le.ReelectTimer = time.AfterFunc(lem.leaderTTL*9/10, func() {
+	armed := le.Term
+	delay := lem.renewalDelay(le.Leader, members)
+	le.ReelectTimer = time.AfterFunc(delay, func() {
+		le.mu.Lock()
+		movedOn := le.Active || le.Term != armed
+		le.mu.Unlock()
+		if movedOn {
+			lgElect.Debug("group lease already renewed, or an election is running; this renewal does nothing",
+				"group", groupHash[:8])
+			return
+		}
 		lgElect.Info("group leader TTL expiring, triggering re-election", "group", groupHash[:8])
-		lem.StartGroupElection(groupHash, members, zones)
+		lem.startGroupElection(groupHash, members, zones, &armed)
 	})
+}
+
+// retryGroupElection starts the election again after one that was aborted or
+// found no consensus in term, after a short random delay, and only if no
+// other member's retry got there first (startGroupElection).
+func (lem *LeaderElectionManager) retryGroupElection(groupHash string, term uint64, members []string, zones []ZoneName) {
+	time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+		lem.startGroupElection(groupHash, members, zones, &term)
+	})
+}
+
+// maxRenewalStep is the longest a fallback renewal waits behind the one
+// before it.
+const maxRenewalStep = 10 * time.Second
+
+// renewalDelay is how long after an election this member waits before it
+// renews the lease: the leader 90% of the lease, every other member one step
+// more for each member before it in the order of their identities. The steps
+// fit in the lease's last tenth, so that the last fallback still fires while
+// there is a leader. members is nil for a per-zone election, which does not
+// know its members: there every member that is not the leader waits one step.
+func (lem *LeaderElectionManager) renewalDelay(leader AgentId, members []string) time.Duration {
+	base := lem.leaderTTL * 9 / 10
+	if leader == lem.localID {
+		return base
+	}
+	sorted := slices.Clone(members)
+	slices.Sort(sorted)
+	rank := 1
+	for _, m := range sorted {
+		if AgentId(m) == lem.localID {
+			break
+		}
+		if AgentId(m) != leader {
+			rank++
+		}
+	}
+	step := lem.leaderTTL / 10 / time.Duration(len(members)+2)
+	if step > maxRenewalStep {
+		step = maxRenewalStep
+	}
+	return base + time.Duration(rank)*step
 }
 
 // GetGroupLeader returns the current leader for a provider group.
@@ -809,6 +882,13 @@ func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
 
 // StartElection initiates a new election for a zone.
 func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int) {
+	lem.startElection(zone, expectedPeers, nil)
+}
+
+// startElection is StartElection, for a timer when armed is set, as
+// startGroupElection is for a group: it starts nothing when the zone's
+// election has moved on since the timer was armed.
+func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int, armed *uint64) {
 	if expectedPeers > 0 && lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroupForZone(zone)
 		if pg != nil {
@@ -820,6 +900,14 @@ func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int
 
 	le := lem.getOrCreate(zone)
 	le.mu.Lock()
+
+	if armed != nil && (le.Active || le.Term != *armed) {
+		term := le.Term
+		le.mu.Unlock()
+		lgElect.Debug("election has moved on since this timer was armed, starting none",
+			"zone", zone, "armed", *armed, "term", term)
+		return
+	}
 
 	// Single agent: become leader immediately
 	if expectedPeers == 0 {
@@ -1099,11 +1187,13 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 
 	if !consensus || agreedWinner == "" {
 		le.Active = false
+		expectedPeers := le.ExpectedPeers
 		le.mu.Unlock()
 		lgElect.Warn("no consensus, re-electing", "zone", zone, "term", term)
-		// Re-elect after a short random delay to avoid thundering herd
+		// Re-elect after a short random delay, unless another member's
+		// retry got there first.
 		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
-			lem.StartElection(zone, le.ExpectedPeers)
+			lem.startElection(zone, expectedPeers, &term)
 		})
 		return
 	}
@@ -1128,19 +1218,30 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 	}
 }
 
-// scheduleReelection sets up a timer to re-elect at 90% of the leader TTL.
-// Must be called with le.mu held.
+// scheduleReelection sets up the timer that renews the lease: the leader at
+// 90% of it, every other member a step later as a fallback, and each only
+// while the election still stands in the term the timer was armed in
+// (scheduleGroupReelection has the reasons). Must be called with le.mu held.
 func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
 	}
 	zone := le.Zone
-	le.ReelectTimer = time.AfterFunc(lem.leaderTTL*9/10, func() {
+	armed := le.Term
+	le.ReelectTimer = time.AfterFunc(lem.renewalDelay(le.Leader, nil), func() {
+		le.mu.Lock()
+		movedOn := le.Active || le.Term != armed
+		le.mu.Unlock()
+		if movedOn {
+			lgElect.Debug("lease already renewed, or an election is running; this renewal does nothing", "zone", zone)
+			return
+		}
+
 		configured := lem.configuredPeers(zone)
 
 		if configured == 0 {
 			lgElect.Info("leader TTL expiring, single agent, re-self-electing", "zone", zone)
-			lem.StartElection(zone, 0)
+			lem.startElection(zone, 0, &armed)
 			return
 		}
 
@@ -1161,7 +1262,7 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 		if operational >= configured {
 			lgElect.Info("leader TTL expiring, all peers operational, triggering re-election",
 				"zone", zone, "operational", operational, "configured", configured)
-			lem.StartElection(zone, configured)
+			lem.startElection(zone, configured, &armed)
 		} else {
 			lgElect.Warn("leader TTL expiring, not all configured peers operational — no election, change freeze",
 				"zone", zone, "operational", operational, "configured", configured)
