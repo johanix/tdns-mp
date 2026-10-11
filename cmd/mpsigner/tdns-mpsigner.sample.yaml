@@ -28,6 +28,15 @@ multi-provider:
         address:                '127.0.0.1:8054'
         long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub.json
 
+   # The multi-provider zones whose keys tdns-mp's own key machine runs.
+   # Every multi-provider zone the signer signs (a zone with a dnssecpolicy)
+   # must be listed: there is no other multi-provider key machine, and the
+   # signer refuses to start over a zone that is not. While a rollout is under way, zones not
+   # moved yet are allowed through with the knob below; such a zone gets
+   # tdns's single-signer key machine until it is listed.
+   key-lifecycle-zones:  [ mptest.example. ]
+   # key-lifecycle-zones-incomplete: true
+
    # HTTPS sync API for inbound HELLO/BEAT/PING from the agent, as an
    # alternative to NOTIFY+CHUNK.
    # syncapi:
