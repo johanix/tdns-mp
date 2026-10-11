@@ -19,6 +19,15 @@ type Engine struct {
 	discSemOnce sync.Once
 	// kick carries changes seen between beat rounds to Run (KickBeats).
 	kick chan struct{}
+
+	// beatMu guards the three below (beat_retry.go).
+	beatMu sync.Mutex
+	// runCtx is Run's context, for the beat retriers.
+	runCtx context.Context
+	// beatFailing: the peers whose last beat failed.
+	beatFailing map[PeerID]bool
+	// beatRetrying: the peers a beat retrier is running for.
+	beatRetrying map[PeerID]bool
 }
 
 // NewEngine constructs an Engine. Gossip table may be nil until wired.
@@ -31,6 +40,9 @@ func NewEngine(deps Deps, cfg Config) *Engine {
 		cfg:      cfg,
 		registry: reg,
 		kick:     make(chan struct{}, 1),
+
+		beatFailing:  make(map[PeerID]bool),
+		beatRetrying: make(map[PeerID]bool),
 	}
 	if deps.Gossip != nil && deps.Host.OnGroupOperational != nil {
 		deps.Gossip.SetOnGroupOperational(deps.Host.OnGroupOperational)
@@ -76,6 +88,10 @@ func (e *Engine) KickBeats() {
 // paced by a beatSchedule: fast while the view of the peers changes, at the
 // beat interval once it holds still.
 func (e *Engine) Run(ctx context.Context, ch MsgChannels) {
+	e.beatMu.Lock()
+	e.runCtx = ctx
+	e.beatMu.Unlock()
+
 	go e.runDiscoveryRetry(ctx)
 	go e.runReconcile(ctx)
 

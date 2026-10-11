@@ -681,6 +681,14 @@ func (tm *MPTransportBridge) kickBeats() {
 	}
 }
 
+// beatBack has the hsync engine beat one peer now, outside its rounds
+// (hsync.Engine.BeatPeer).
+func (tm *MPTransportBridge) beatBack(peerID string) {
+	if tm.agentRegistry != nil && tm.agentRegistry.HsyncEngine != nil {
+		tm.agentRegistry.HsyncEngine.BeatPeer(AgentId(peerID))
+	}
+}
+
 // routeHelloMessage routes a hello message to the hello channel.
 func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
@@ -710,6 +718,14 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 		// already introduced changes nothing, and a peer that never gets our
 		// accept repeats its hello every helloretry for as long as that lasts.
 		tm.kickBeats()
+	} else {
+		// The peer is introducing itself again: it restarted, or never got
+		// our accept. Our reading of it is from before, and a beat that
+		// failed while it was away is not sent again before the next round,
+		// by which time the last success may be two intervals old and the
+		// peer reads DEGRADED. One beat back, to this peer alone: not a kick
+		// of the rounds, so a repeated hello still leaves their pace alone.
+		tm.beatBack(senderID)
 	}
 	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
 
