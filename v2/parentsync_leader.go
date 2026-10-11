@@ -616,7 +616,11 @@ func (lem *LeaderElectionManager) InvalidateGroupLeader(groupHash string) {
 	}
 }
 
-// GetGroupElectionState returns the election state for a group (for gossip).
+// GetGroupElectionState returns the live election state for a group: the
+// term the election is in, and the leader it holds, which while an election
+// runs or after an aborted one is still the leader of the term before. It is
+// what the status command shows. Outbound gossip does not use it: a peer must
+// be told a result only (GroupElectionForGossip).
 func (lem *LeaderElectionManager) GetGroupElectionState(groupHash string) GroupElectionState {
 	lem.mu.RLock()
 	le, ok := lem.groupElections[groupHash]
