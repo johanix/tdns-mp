@@ -1,6 +1,6 @@
 # One lost beat must not degrade a group
 
-**Status:** implemented on branch `fix/123-beat-retry`, for issue #123. Not yet run on the testbed; §5 says what to look for there. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #124 (branch `fix/123-beat-retry`), for issue #123, with Amendment 1 after its review. Not yet run on the testbed; §5 says what to look for there. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -60,4 +60,8 @@ The beats the hello retrier sends after an accepted hello (`fastBeatAttempts`) h
 
 ## Amendments
 
-None yet.
+### Amendment 1 (2026-10-11): after the review of PR #124
+
+**One beat back at a time.** §3 gave every hello from an already-introduced peer a beat of its own. A peer whose hellos come faster than a beat returns, a beat that can wait ten seconds on a peer that does not answer, would have had several on their way at once. `BeatPeer` now does nothing while a beat it started to that peer has not returned.
+
+**A retrier that ends picks up a new failure.** A beat could fail in the moment between a retrier's success and its exit. `noteBeatFailed` then saw a retrier still on the books and started none, though the failure opened a new outage, which then had no retries until a beat succeeded again. The retrier's exit (`endBeatRetrier`) now starts the retries when its own outage is over and the peer is failing again. A retrier that ran out of retries starts none, as before.

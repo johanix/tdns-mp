@@ -22,6 +22,8 @@ type scriptedBeats struct {
 	*d25Transport
 	failing  atomic.Bool
 	failOnce atomic.Bool
+	// gate, when set, holds every beat until it is closed.
+	gate chan struct{}
 
 	mu    sync.Mutex
 	calls []time.Time
@@ -35,6 +37,13 @@ func (s *scriptedBeats) SendBeat(ctx context.Context, peer *Peer, sequence uint6
 	s.mu.Lock()
 	s.calls = append(s.calls, time.Now())
 	s.mu.Unlock()
+	if s.gate != nil {
+		select {
+		case <-s.gate:
+		case <-ctx.Done():
+			return false, "", ctx.Err()
+		}
+	}
 	if s.failing.Load() || s.failOnce.CompareAndSwap(true, false) {
 		return false, "", errors.New("connection refused")
 	}
@@ -198,6 +207,70 @@ func TestBeatPeer(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := len(s.beats()); got != 1 {
 		t.Errorf("%d beats for one BeatPeer, want 1", got)
+	}
+}
+
+// A peer whose hellos come faster than a beat returns gets one beat at a time:
+// while one is on its way, BeatPeer does nothing.
+func TestBeatPeerSendsOneBeatAtATime(t *testing.T) {
+	s := newScriptedBeats()
+	s.gate = make(chan struct{})
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(20*time.Millisecond, time.Second))
+	peer := operationalDNSPeer(e, s)
+
+	for i := 0; i < 5; i++ {
+		e.BeatPeer(peer.ID)
+	}
+	s.waitBeats(t, 1, time.Second)
+	time.Sleep(100 * time.Millisecond)
+	if got := len(s.beats()); got != 1 {
+		t.Fatalf("%d beats on their way for five calls, want 1", got)
+	}
+
+	close(s.gate) // the beat returns
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		e.beatMu.Lock()
+		busy := e.beatingBack[peer.ID]
+		e.beatMu.Unlock()
+		if !busy {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, 2, time.Second)
+}
+
+// A beat that fails in the moment between a retrier's success and its exit
+// finds a retrier still on the books and starts none, though it opens a new
+// outage. The retrier's exit starts the retries for it. A retrier that ran out
+// of retries exits and starts none: that outage has had its episode.
+func TestARetrierThatEndsPicksUpANewFailure(t *testing.T) {
+	const fast, steady = 20 * time.Millisecond, 400 * time.Millisecond
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+
+	// A retrier is on the books, its outage over; a new failure was noted.
+	e.beatMu.Lock()
+	e.beatRetrying[peer.ID] = true
+	e.beatFailing[peer.ID] = true
+	e.beatMu.Unlock()
+	e.endBeatRetrier(peer, true)
+	s.waitBeats(t, 1, time.Second) // the new outage's first retry, which succeeds
+
+	// The same, but the retrier ran out: no further retries.
+	time.Sleep(3 * fast)
+	n := len(s.beats())
+	e.beatMu.Lock()
+	e.beatRetrying[peer.ID] = true
+	e.beatFailing[peer.ID] = true
+	e.beatMu.Unlock()
+	e.endBeatRetrier(peer, false)
+	time.Sleep(5 * fast)
+	if got := len(s.beats()); got != n {
+		t.Errorf("%d beat(s) after a retrier ran out of retries, want none", got-n)
 	}
 }
 

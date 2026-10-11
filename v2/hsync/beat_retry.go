@@ -84,11 +84,10 @@ func (e *Engine) beatStillFailing(id PeerID) bool {
 // round's), when the gap reaches the beat interval, when the peer is gone or
 // no longer past its hello, or when the engine stops.
 func (e *Engine) beatRetrier(peer *Peer) {
-	defer func() {
-		e.beatMu.Lock()
-		delete(e.beatRetrying, peer.ID)
-		e.beatMu.Unlock()
-	}()
+	// The outage this retrier was started for is over once a beat has
+	// succeeded, its own or a round's.
+	over := false
+	defer func() { e.endBeatRetrier(peer, over) }()
 	ctx := e.baseCtx()
 	for wait := e.cfg.BeatIntervalMin; wait < e.cfg.BeatInterval; wait *= 2 {
 		select {
@@ -97,6 +96,7 @@ func (e *Engine) beatRetrier(peer *Peer) {
 		case <-time.After(wait):
 		}
 		if !e.beatStillFailing(peer.ID) {
+			over = true
 			return
 		}
 		if _, ok := e.registry.S.Get(peer.ID); !ok || !e.peerAnyTransportReady(peer) {
@@ -106,9 +106,28 @@ func (e *Engine) beatRetrier(peer *Peer) {
 		ok := e.beatPeerOnce(beatCtx, peer)
 		cancel()
 		if ok {
+			over = true
 			e.runDeferredTasks(peer)
 			return
 		}
+	}
+}
+
+// endBeatRetrier takes the peer's retrier off the books. A beat can fail in
+// the moment between this retrier's success and its exit: noteBeatFailed then
+// saw a retrier still running and started none, though the failure opens a new
+// outage. When the old outage is over and the peer is failing again, the
+// retries for the new one start here.
+func (e *Engine) endBeatRetrier(peer *Peer, over bool) {
+	e.beatMu.Lock()
+	delete(e.beatRetrying, peer.ID)
+	again := over && e.beatFailing[peer.ID] && e.fastBeatsOn()
+	if again {
+		e.beatRetrying[peer.ID] = true
+	}
+	e.beatMu.Unlock()
+	if again {
+		go e.beatRetrier(peer)
 	}
 }
 
@@ -118,8 +137,10 @@ func (e *Engine) beatRetrier(peer *Peer) {
 // itself again. Our reading of it is from before, so nothing else would beat
 // it until the next round, and a beat that failed while it was away would by
 // then be two intervals behind the last success. A peer that repeats its hello
-// costs one beat for each, to that peer alone. A peer the engine does not
-// know, or one not past its hello, gets none.
+// costs one beat for each, to that peer alone, and never more than one at a
+// time: while one is on its way a further call does nothing, so hellos that
+// come faster than a beat returns cannot pile beats up. A peer the engine does
+// not know, or one not past its hello, gets none.
 func (e *Engine) BeatPeer(id PeerID) {
 	if e == nil || e.registry == nil {
 		return
@@ -128,7 +149,21 @@ func (e *Engine) BeatPeer(id PeerID) {
 	if !ok || peer.IsInfraPeer || !e.peerAnyTransportReady(peer) {
 		return
 	}
+	e.beatMu.Lock()
+	busy := e.beatingBack[id]
+	if !busy {
+		e.beatingBack[id] = true
+	}
+	e.beatMu.Unlock()
+	if busy {
+		return
+	}
 	go func() {
+		defer func() {
+			e.beatMu.Lock()
+			delete(e.beatingBack, id)
+			e.beatMu.Unlock()
+		}()
 		ctx, cancel := context.WithTimeout(e.baseCtx(), 10*time.Second)
 		defer cancel()
 		e.sendBeatToPeer(ctx, peer)
