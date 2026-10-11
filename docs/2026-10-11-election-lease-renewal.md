@@ -1,6 +1,6 @@
 # Leader lease renewal: one election, not a burst
 
-**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126 and were run on the testbed (Amendment 5). The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126 and were run on the testbed (Amendment 5), before the change of Amendment 6. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -121,3 +121,11 @@ Run on the three-agent test rig of Amendment 1, with a 5-minute `leader-election
 - **Over the whole run**, in every agent's log: no "group election aborted" line, no "not all members voted", and the same nine elected terms of the three-member group on every agent.
 
 What the run does not show: the line of Amendment 3, "group vote for a term not joined yet, kept for its CALL", did not appear. A run cannot put a VOTE ahead of its CALL, so the kept vote rests on its in-process tests. So does the per-zone election of Amendments 3 and 4: every zone on the rig has a provider group and uses the group election.
+
+### Amendment 6 (2026-10-11): the vote timeout of a join, after the review of PR #126
+
+A join that already held every vote armed the vote timeout, released the election's lock, broadcast its vote, and then stopped whatever timer the election had by then. A term the member itself had started during the broadcast had put its own timeout there, and lost it. That election, if its votes never came, was never aborted, and rule 1 then kept every renewal timer from starting another while it stood.
+
+On main only a two-member group joins with every vote. With the kept votes of Amendment 3 a larger group can as well, which is how the review came to it. `handleGroupCall` now arms the timeout only when votes are missing, and decides that under the lock, as the per-zone `handleCall` of Amendment 3 already did.
+
+The testbed run of Amendment 5 was made before this change. It alters what a two-member group does at every join: no timeout is armed where one was armed and stopped. The in-process renewal tests of a two-member group run through that join.
