@@ -1,6 +1,6 @@
 # The election as gossip and the status command tell it
 
-**Status:** implemented in tdns-mp PR #155 (branch `fix/154-gossip-election-status`), for issue #154, with Amendment 1 after its review. Not run on the testbed. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #155 (branch `fix/154-gossip-election-status`), for issue #154, with Amendment 1 after its review. Run on two test fleets 2026-10-11 (Amendment 2). The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -63,3 +63,16 @@ Each fails without its part of the change.
 A member with an election of its own for the group now tells its own word or nothing: the decided term, or no election record at all (`GroupElectionForGossip` reports both whether the term is decided and whether the member has an election of its own). Only a member with no election of its own passes on what it has heard, as before this branch. The "told now" column of §3's table stands, with "nothing" meaning nothing of any term.
 
 The test of §6's second line runs the whole outbound path for it: with a record heard from a peer in the table, the member tells nothing inside an election, after an aborted renewal, and with its leader invalidated.
+
+### Amendment 2 (2026-10-11): on the testbed
+
+Run on two test fleets, every agent on this branch with main merged in. A mixed fleet was not run (§5's first item).
+
+**A fleet of five groups, the one that showed the defect.** After a cold start, for every zone that a provider group covers, every provider answered `gossip zone-state` with the same leader and the same term, and none with "election invalidated". The two-provider groups, where one member had answered wrongly before, agreed. The same again half a minute after the first renewal, 54 minutes in: every provider named the same leader, at term 2. Each answer matched the "group leader elected" line in that provider's log. No election was aborted. The zone of a single provider still has no answer, as §5 says.
+
+**A fleet of three agents and an auditor, with a 5-minute lease.** Every member of both groups, one of two members and one of three, answered with the leader and term of its own log at three points: after the cold start, after two renewals of each group, and after the restarts below. The renewals were one election each, with no abort.
+
+- **The leader restarted inside its term.** Five seconds after it was back, its log said "accepted leader from gossip", naming itself and the term it had led. The group held with no election, and the next member in line renewed once, a step after the leader's time. This is the reading that goes through §3: the restarted agent learns its term from what its peers tell, and they tell a decided term.
+- **A member that did not lead, restarted.** No "group lost mutual OPERATIONAL" on its peers, and on its return it took the leader of the current term from gossip.
+
+Over each agent's whole log on that fleet: no "group election aborted", no "not all members voted", no "election invalidated".
