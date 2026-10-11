@@ -20,6 +20,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -128,33 +129,69 @@ func (w *signerWire) DistributeRemoval(zone string, keyid uint16) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
 }
 
-// ParentServesDS asks the resolver for the zone's DS RRset. The signer starts
-// one when it owns a zone (StartMPSigner); the pointer is read only once the
-// resolver has published it, and without one the answer is unknown.
-func (w *signerWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
+// ParentDS asks the resolver for the zone's DS RRset: the key tags it holds
+// and its TTL. The signer starts a resolver when it owns a zone
+// (StartMPSigner); the pointer is read only once the resolver has published
+// it, and without one, or on a lookup that fails, the answer is unknown,
+// which is not "no DS" (table E7, O7).
+func (w *signerWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) {
 	if !w.conf.Config.Internal.ImrReady.Published() {
-		return false, false
+		return nil, 0, false
 	}
 	imr := w.conf.Config.Internal.ImrEngine
 	if imr == nil {
-		return false, false
+		return nil, 0, false
 	}
-	// bounded: it runs under the driver's lock on the signer's tick
+	// bounded: it runs under the driver's lock on the signer's tick. The
+	// iterative query is asked directly, not through DefaultRRsetFetcher,
+	// which turns a NODATA into an error: a parent that serves no DS must
+	// reach the driver as a known, empty answer (O2), and only a lookup
+	// that fails as unknown (O7).
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	rrset, err := imr.DefaultRRsetFetcher(ctx, dns.Fqdn(zone), dns.TypeDS)
+	qname := dns.Fqdn(zone)
+	servers, ok := imr.Cache.ServersFor(qname, dns.TypeDS)
+	if !ok {
+		return nil, 0, false
+	}
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, qname, dns.TypeDS, servers, false, edns0.PrivacyNone)
+	return parentDSFromAnswer(rrset, rcode, err)
+}
+
+// parentDSFromAnswer reads the parent's answer for the driver: a NOERROR
+// answer with no DS records, or NXDOMAIN, is known and empty; any other
+// rcode, or a lookup that failed, is unknown. The TTL is the shortest among
+// the DS records.
+func parentDSFromAnswer(rrset *core.RRset, rcode int, err error) (map[uint16]bool, time.Duration, bool) {
 	if err != nil {
-		return false, false
+		return nil, 0, false
 	}
-	if rrset == nil {
-		return false, true
-	}
-	for _, rr := range rrset.RRs {
-		if ds, ok := rr.(*dns.DS); ok && ds.KeyTag == keyid {
-			return true, true
+	served := map[uint16]bool{}
+	var ttl time.Duration
+	if rrset != nil {
+		for _, rr := range rrset.RRs {
+			if ds, ok := rr.(*dns.DS); ok {
+				served[ds.KeyTag] = true
+				if t := time.Duration(ds.Hdr.Ttl) * time.Second; ttl == 0 || t < ttl {
+					ttl = t
+				}
+			}
 		}
 	}
-	return false, true
+	if len(served) > 0 {
+		return served, ttl, true
+	}
+	switch rcode {
+	case dns.RcodeSuccess, dns.RcodeNameError:
+		return served, 0, true
+	}
+	return nil, 0, false
+}
+
+// ParentServesDS is ParentDS asked about one key.
+func (w *signerWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
+	served, _, known := w.ParentDS(zone)
+	return served[keyid], known
 }
 
 func (w *signerWire) Strip(zone string, keyid uint16) error {

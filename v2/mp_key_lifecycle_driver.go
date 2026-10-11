@@ -45,9 +45,12 @@ type Wire interface {
 	// come back through ZoneKeyLifecycle.Confirm.
 	Distribute(zone string, keyid uint16)
 	DistributeRemoval(zone string, keyid uint16)
-	// ParentServesDS reports whether the parent serves the key's DS; known
-	// false when the parent could not be asked.
-	ParentServesDS(zone string, keyid uint16) (present, known bool)
+	// ParentDS is the parent's DS RRset for the zone as the signer's own
+	// resolver sees it: the key tags served, and the RRset's TTL. Known is
+	// false when the parent could not be asked (no resolver, one not ready
+	// yet, a lookup that failed), which is not "no DS" (table E7, O7): a
+	// key that waits on the parent keeps waiting then.
+	ParentDS(zone string) (served map[uint16]bool, ttl time.Duration, known bool)
 	// Strip removes every RRSIG by the key from the served zone.
 	Strip(zone string, keyid uint16) error
 	// Resign asks tdns to re-sign the zone.
@@ -84,15 +87,28 @@ type ZoneKeyLifecycle struct {
 	Wire   Wire
 	Log    func(msg string, kv ...any)
 
-	mu       sync.Mutex
-	dist     map[uint16]*distribution
-	dsGone   map[uint16]bool
-	rolls    map[string]bool        // a rollover requested, by role
-	reported map[uint16]bool        // retired KSKs reported as waiting on the parent
-	initErr  error                  // why the driver cannot run (its persistence missing)
-	rolling  string                 // the role whose promotion is a rollover, while it is applied
-	known    map[string]bool        // the other signers last seen, for the joiners
-	foreign  map[uint16]foreignSaid // what the other providers said about their keys (#58)
+	mu     sync.Mutex
+	dist   map[uint16]*distribution
+	dsGone map[uint16]bool
+	// dsPresent: standby SEP keys the parent has been seen serving the DS
+	// of, since when and with what TTL (E13, T18; persisted, T15). T9 waits
+	// for the TTL to pass (O7). parentEmpty and parentTTL are the parent's
+	// last known answer on this tick: no DS for the zone at all (O2), and
+	// the DS RRset's TTL for a stamp. promoteWait and promoteTold: a
+	// standby SEP key the parent wait refused, since when, and whether the
+	// operator has heard (after three margins).
+	dsPresent   map[uint16]dsPresence
+	parentKnown bool
+	parentEmpty bool
+	parentTTL   time.Duration
+	promoteWait map[uint16]time.Time
+	promoteTold map[uint16]bool
+	rolls       map[string]bool        // a rollover requested, by role
+	reported    map[uint16]bool        // retired KSKs reported as waiting on the parent
+	initErr     error                  // why the driver cannot run (its persistence missing)
+	rolling     string                 // the role whose promotion is a rollover, while it is applied
+	known       map[string]bool        // the other signers last seen, for the joiners
+	foreign     map[uint16]foreignSaid // what the other providers said about their keys (#58)
 	// another provider's KSK with no ds decided: since when, and whether
 	// the operator has been told (R9)
 	undecidedSince map[uint16]time.Time
@@ -110,7 +126,8 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 		known[p] = true
 	}
 	l := &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
-		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known}
+		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known,
+		dsPresent: map[uint16]dsPresence{}, promoteWait: map[uint16]time.Time{}, promoteTold: map[uint16]bool{}}
 	if kdb != nil {
 		if _, err := kdb.DB.Exec(HsyncTables["MPKeyDistribution"]); err != nil {
 			// without the table nothing in flight would survive a restart:
@@ -123,6 +140,9 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 		}
 		if _, err := kdb.DB.Exec(HsyncTables["MPForeignKeyState"]); err != nil && l.initErr == nil {
 			l.initErr = fmt.Errorf("the MPForeignKeyState table of %s: %w", l.Zone, err)
+		}
+		if _, err := kdb.DB.Exec(HsyncTables["MPParentDS"]); err != nil && l.initErr == nil {
+			l.initErr = fmt.Errorf("the MPParentDS table of %s: %w", l.Zone, err)
 		}
 	}
 	return l
@@ -189,6 +209,9 @@ func (l *ZoneKeyLifecycle) columnsOf(keyid uint16) (tdns.KeyRowFlags, error) {
 
 func (l *ZoneKeyLifecycle) keyView(k tdns.DnssecKeyWithTimestamps, cols tdns.KeyRowFlags) KeyView {
 	v := KeyView{State: k.State, SEP: k.Flags&dns.SEP != 0, Algorithm: k.Algorithm, DSGone: l.dsGone[k.KeyTag]}
+	if p, ok := l.dsPresent[k.KeyTag]; ok {
+		v.DSPresentSince, v.ParentDSTTL = p.Since, p.TTL
+	}
 	if k.PublishedAt != nil {
 		v.PublishedAt = *k.PublishedAt
 	}
@@ -209,6 +232,8 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 		PropagationDelay: l.Policy.PropagationDelay,
 		ServedDnskeyTTL:  l.Wire.ServedDnskeyTTL(l.Zone),
 		Margin:           l.Policy.Margin,
+		ParentKnown:      l.parentKnown,
+		ParentServesNoDS: l.parentEmpty,
 		Now:              l.Clock.Now(),
 	}
 	if d := l.dist[k.KeyTag]; d != nil {
@@ -318,6 +343,10 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	case "T11":
 		l.dsGone[keyid] = true
 		return k.State, next, nil
+	case "T18":
+		l.dsPresent[keyid] = dsPresence{Since: l.Clock.Now(), TTL: l.parentTTL}
+		l.savePresence(keyid)
+		return k.State, next, nil
 	case "T14a", "T14b", "T15":
 		return k.State, next, nil
 	}
@@ -334,6 +363,13 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	}
 	if err := l.write(k, next, kv.SEP); err != nil {
 		return k.State, k.State, err
+	}
+	if k.State == KeyStateStandby {
+		// the parent wait is standby's: promoted, or withdrawn, it is over
+		delete(l.dsPresent, keyid)
+		delete(l.promoteWait, keyid)
+		delete(l.promoteTold, keyid)
+		l.savePresence(keyid)
 	}
 	switch next {
 	case KeyStateMpdist:
@@ -735,6 +771,20 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		l.logf("key lifecycle: writing ds on the foreign rows failed; next tick", "zone", l.Zone, "err", err)
 		errs = append(errs, err)
 	}
+	// the parent's DS RRset, asked once per tick while a SEP key waits on it:
+	// a standby one for its own DS to be there (E13, then T9's wait, O7), a
+	// published one about to be standby, a retired one for its DS to go (E7).
+	// Not asked: nothing is known of the parent this tick, and a key waits.
+	var served map[uint16]bool
+	l.parentKnown, l.parentEmpty = false, false
+	for _, k := range all {
+		if k.Flags&dns.SEP != 0 && (k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateRetired && !l.dsGone[k.KeyTag]) {
+			served, l.parentTTL, l.parentKnown = l.Wire.ParentDS(l.Zone)
+			l.parentEmpty = l.parentKnown && len(served) == 0
+			break
+		}
+	}
+	parentKnown := l.parentKnown
 	for _, keyid := range keytagsOf(all) {
 		k := all[keyid]
 		// E12: a distribution in flight that has waited too long, whatever
@@ -754,9 +804,22 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			if _, _, err := l.applyLocked(keyid, EvPropagated); err != nil {
 				fail(keyid, "propagated", err)
 			}
+		case KeyStateStandby:
+			// E13: the parent serves the key's DS, noted with the TTL for
+			// T9; a DS that went away again starts the wait afresh
+			if k.Flags&dns.SEP != 0 && parentKnown {
+				if _, seen := l.dsPresent[keyid]; served[keyid] && !seen {
+					if _, _, err := l.applyLocked(keyid, EvDSPresent); err != nil {
+						fail(keyid, "ds present", err)
+					}
+				} else if !served[keyid] && seen {
+					delete(l.dsPresent, keyid)
+					l.savePresence(keyid)
+				}
+			}
 		case KeyStateRetired:
 			if k.Flags&dns.SEP != 0 && !l.dsGone[keyid] {
-				if present, known := l.Wire.ParentServesDS(l.Zone, keyid); known && !present {
+				if parentKnown && !served[keyid] {
 					if _, _, err := l.applyLocked(keyid, EvDSGone); err != nil {
 						fail(keyid, "ds gone", err)
 					}
@@ -819,6 +882,8 @@ func (l *ZoneKeyLifecycle) Tick() error {
 				pipeline--
 				active++
 				due = false
+			} else if k := standbys[0]; k.Flags&dns.SEP != 0 {
+				l.noteParentWait(k, all)
 			}
 		}
 		// T1: mint what is missing, and send it on its way (T2) at once; a
@@ -860,6 +925,9 @@ func (l *ZoneKeyLifecycle) Reload() error {
 		return err
 	}
 	if err := l.loadDists(); err != nil {
+		return err
+	}
+	if err := l.loadPresences(all); err != nil {
 		return err
 	}
 	for _, keyid := range keytagsOf(all) {
@@ -1030,6 +1098,96 @@ func (l *ZoneKeyLifecycle) loadDists() error {
 		l.dist[uint16(keyid)] = d
 	}
 	return rows.Err()
+}
+
+// dsPresence: since when the parent has served a standby SEP key's DS, and
+// the DS RRset's TTL then (E13, T18).
+type dsPresence struct {
+	Since time.Time
+	TTL   time.Duration
+}
+
+// noteParentWait: a standby SEP key's promotion was refused. When the parent
+// wait is what refused it, the first refusal is noted, and the operator
+// hears once after three margins: the DS the leader sends the parent has
+// not been seen served, or was seen too recently (O7).
+func (l *ZoneKeyLifecycle) noteParentWait(k tdns.DnssecKeyWithTimestamps, all map[uint16]tdns.DnssecKeyWithTimestamps) {
+	cols, err := l.columnsOf(k.KeyTag)
+	if err != nil {
+		return
+	}
+	if parentDSWaitMet(l.keyView(k, cols), l.zoneView(k, all)) {
+		return
+	}
+	first, waiting := l.promoteWait[k.KeyTag]
+	if !waiting {
+		l.promoteWait[k.KeyTag] = l.Clock.Now()
+		l.logf("key lifecycle: a standby KSK waits for the parent to serve its DS before it is promoted", "zone", l.Zone, "keyid", k.KeyTag)
+		return
+	}
+	if !l.promoteTold[k.KeyTag] && l.Policy.Margin > 0 && !l.Clock.Now().Before(first.Add(3*l.Policy.Margin)) {
+		l.promoteTold[k.KeyTag] = true
+		l.Wire.Report(l.Zone, k.KeyTag, "standby KSK waits for the parent to serve its DS before it is promoted (O7): the leader's delegation sync carries it once the key has ds=1; if the parent has it, the DS TTL has to pass")
+	}
+}
+
+// savePresence persists the parent's presence note of a key, or its absence.
+func (l *ZoneKeyLifecycle) savePresence(keyid uint16) {
+	if l.KDB == nil {
+		return
+	}
+	p, ok := l.dsPresent[keyid]
+	if !ok {
+		l.KDB.DB.Exec(`DELETE FROM MPParentDS WHERE zonename=? AND keyid=?`, l.Zone, int(keyid))
+		return
+	}
+	if _, err := l.KDB.DB.Exec(`INSERT INTO MPParentDS (zonename, keyid, since, ttl_seconds) VALUES (?, ?, ?, ?)
+		ON CONFLICT(zonename, keyid) DO UPDATE SET since=excluded.since, ttl_seconds=excluded.ttl_seconds`,
+		l.Zone, int(keyid), p.Since.UTC().Format(time.RFC3339), int64(p.TTL/time.Second)); err != nil {
+		l.logf("key lifecycle: saving the parent's DS note failed", "zone", l.Zone, "keyid", keyid, "err", err)
+	}
+}
+
+// loadPresences reads the notes back at a restart (T15); one for a key no
+// longer standby is dropped, its wait being over.
+func (l *ZoneKeyLifecycle) loadPresences(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
+	rows, err := l.KDB.DB.Query(`SELECT keyid, since, ttl_seconds FROM MPParentDS WHERE zonename=?`, l.Zone)
+	if err != nil {
+		return fmt.Errorf("read the parent's DS notes of %s: %w", l.Zone, err)
+	}
+	defer rows.Close()
+	l.dsPresent = map[uint16]dsPresence{}
+	var stale []uint16
+	for rows.Next() {
+		var keyid int
+		var since string
+		var ttl int64
+		if err := rows.Scan(&keyid, &since, &ttl); err != nil {
+			return err
+		}
+		tag := uint16(keyid)
+		if k, ok := all[tag]; !ok || k.State != KeyStateStandby {
+			stale = append(stale, tag)
+			continue
+		}
+		// A note whose time cannot be read is no note: kept, its zero time
+		// would hold the key's wait forever (parentDSWaitMet). Dropped, the
+		// next tick that sees the DS records a fresh one.
+		t, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			l.logf("key lifecycle: the parent's DS note of a key is unreadable and is dropped", "zone", l.Zone, "keyid", tag, "since", since, "err", err)
+			stale = append(stale, tag)
+			continue
+		}
+		l.dsPresent[tag] = dsPresence{Since: t, TTL: time.Duration(ttl) * time.Second}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, tag := range stale {
+		l.savePresence(tag)
+	}
+	return nil
 }
 
 func confirmationsOutstandingFor(d *distribution) bool {

@@ -41,6 +41,17 @@ type hProvider struct {
 	rejectedLate map[uint16]bool   // a joiner's rejection of a key already serving
 	minted       map[uint16]bool
 	signed       map[uint16]bool // keys seen with sign=1
+	// parentServes is what the harness's parent serves for this provider's
+	// zone: the ds=1 SEP keys as of the end of the last tick, one tick
+	// behind the provider's own DS intent, as a real parent is behind the
+	// leader's sync (S5c: T9 waits on it). parentLog is its history, for P10.
+	parentServes map[uint16]bool
+	parentLog    []parentSnap
+}
+
+type parentSnap struct {
+	at     time.Time
+	served map[uint16]bool
 }
 
 type mpHarness struct {
@@ -53,6 +64,7 @@ type mpHarness struct {
 	queue     []hmsg
 	loss, dup float64
 	reorder   bool
+	parentTTL time.Duration // the TTL of the parent's DS RRsets
 	// how a receiver answers a distribution: applied, pending (then applied
 	// on a later delivery), rejected
 	answer func(from, to string, keyid uint16) string
@@ -116,25 +128,78 @@ func (w *harnessWire) send(keyid uint16, removal bool) {
 
 func (w *harnessWire) Distribute(zone string, keyid uint16)        { w.send(keyid, false) }
 func (w *harnessWire) DistributeRemoval(zone string, keyid uint16) { w.send(keyid, true) }
-func (w *harnessWire) ParentServesDS(zone string, keyid uint16) (bool, bool) {
-	// the parent follows the provider's own DS intent with no delay: it
-	// serves exactly the ds=1 KSKs
-	inv, err := tdns.GetKeyInventory(w.me.kdb, w.me.zone)
-	if err != nil {
-		return false, false
+func (w *harnessWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) {
+	// the parent follows the provider's own DS intent one tick behind
+	// (syncParent): it serves exactly the ds=1 KSKs as of the last tick's end
+	served := map[uint16]bool{}
+	for tag := range w.me.parentServes {
+		served[tag] = true
 	}
-	for _, it := range inv {
-		if it.KeyTag == keyid {
-			return it.DS != nil && *it.DS, true
+	return served, w.h.parentTTL, true
+}
+
+// syncParent: the harness's parent takes the provider's DS intent as it is
+// now, which the next tick sees (the leader's sync, one tick late).
+func (h *mpHarness) syncParent(p *hProvider) {
+	served := map[uint16]bool{}
+	for _, it := range h.inventory(p) {
+		if it.Flags&dns.SEP != 0 && it.DS != nil && *it.DS && it.State != DnskeyStateForeign {
+			served[it.KeyTag] = true
 		}
 	}
-	return false, true
+	p.parentServes = served
+	n := len(p.parentLog)
+	if n == 0 || !sameTagSet(p.parentLog[n-1].served, served) {
+		p.parentLog = append(p.parentLog, parentSnap{at: h.clock.Now(), served: served})
+	}
+}
+
+// parentWaitBroken says why a KSK's promotion at the given time broke the
+// parent wait (P10), or "": the parent's snapshot in force then served no
+// DS (O2), or had served the key's DS for at least the TTL. With no
+// snapshot from before that time nothing is known.
+func (p *hProvider) parentWaitBroken(tag uint16, at time.Time, ttl time.Duration) string {
+	i := -1
+	for j, s := range p.parentLog {
+		if !s.at.After(at) {
+			i = j
+		}
+	}
+	if i < 0 {
+		return ""
+	}
+	if len(p.parentLog[i].served) == 0 {
+		return ""
+	}
+	if !p.parentLog[i].served[tag] {
+		return "while the parent served other DS and not this key's"
+	}
+	since := p.parentLog[i].at
+	for j := i - 1; j >= 0 && p.parentLog[j].served[tag]; j-- {
+		since = p.parentLog[j].at
+	}
+	if at.Before(since.Add(ttl)) {
+		return fmt.Sprintf("%s after the parent began serving its DS, before the DS TTL %s", at.Sub(since), ttl)
+	}
+	return ""
+}
+
+func sameTagSet(a, b map[uint16]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 func newMPHarness(t *testing.T, seed uint64, n int, pol LifecyclePolicy) *mpHarness {
 	t.Helper()
 	h := &mpHarness{t: t, rng: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), clock: &fakeClock{t: time.Now()},
-		byID: map[string]*hProvider{}, signing: map[string]bool{}}
+		byID: map[string]*hProvider{}, signing: map[string]bool{}, parentTTL: time.Hour}
 	h.answer = func(from, to string, keyid uint16) string { return "applied" }
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("p%d", i+1)
@@ -142,7 +207,7 @@ func newMPHarness(t *testing.T, seed uint64, n int, pol LifecyclePolicy) *mpHarn
 		kdb := newMPTestKeyDB(t)
 		zd := signerTestZone(t, zone, kdb)
 		p := &hProvider{id: id, zone: zone, kdb: kdb, zd: zd, appliedBy: map[uint16]map[string]bool{}, expectedAt: map[uint16][]string{},
-			rejected: map[uint16]bool{}, rejectedRR: map[uint16]string{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{}}
+			rejected: map[uint16]bool{}, rejectedRR: map[uint16]string{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{}, parentServes: map[uint16]bool{}}
 		p.wire = &harnessWire{h: h, me: p, fakeWire: *newFakeWire()}
 		p.driver = NewZoneKeyLifecycle(zone, kdb, h.clock, pol, p.wire)
 		pid := id
@@ -229,6 +294,7 @@ func (h *mpHarness) tickAll(step string) {
 		if err := p.driver.Tick(); err != nil {
 			h.t.Fatalf("%s: %s tick: %v", step, p.id, err)
 		}
+		h.syncParent(p)
 	}
 }
 
@@ -301,6 +367,18 @@ func (h *mpHarness) checkAll(step string) {
 			// P2: a KSK's ds=1 only in standby, active or retired
 			if it.DS != nil && *it.DS && (it.Flags&dns.SEP == 0 || (it.State != KeyStateStandby && it.State != KeyStateActive && it.State != KeyStateRetired)) {
 				h.t.Errorf("%s: %s key %d (%s, flags %d) has ds=1 (P2)", step, p.id, it.KeyTag, it.State, it.Flags)
+			}
+			// P10: a KSK was promoted only once the parent had served its DS
+			// for the DS TTL, or against a parent that served no DS (O7, O2)
+			if it.Flags&dns.SEP != 0 && it.State == KeyStateActive {
+				var active string
+				if err := p.kdb.DB.QueryRow(`SELECT COALESCE(active_at, '') FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, p.zone, int(it.KeyTag)).Scan(&active); err != nil {
+					h.t.Errorf("%s: %s key %d: active_at: %v", step, p.id, it.KeyTag, err)
+				} else if at, err := time.Parse(time.RFC3339, active); err == nil {
+					if why := p.parentWaitBroken(it.KeyTag, at, h.parentTTL); why != "" {
+						h.t.Errorf("%s: %s key %d promoted at %s %s (P10)", step, p.id, it.KeyTag, at.Format(time.RFC3339), why)
+					}
+				}
 			}
 			// P8: a rejected key never promoted
 			if p.rejected[it.KeyTag] && !p.isRejected(it) {
@@ -399,7 +477,15 @@ func TestHarnessThreeProvidersRollAKSK(t *testing.T) {
 		t.Fatalf("p1 standby KSKs %v, want 1", sb)
 	}
 	old := activeOf(h, p1, "KSK")[0]
+	// the parent has the standby's DS one tick after ds=1; the roll waits
+	// for the DS TTL after that (O7, S5c)
+	step("the parent serves the standby's DS")
 	p1.driver.RequestRollover("KSK")
+	step("roll requested inside the DS TTL")
+	if got := activeOf(h, p1, "KSK"); len(got) != 1 || got[0] != old {
+		t.Fatalf("p1's KSK was promoted before the parent had served its DS for the DS TTL: active %v, old %d (O7)", got, old)
+	}
+	h.clock.Advance(h.parentTTL + time.Second)
 	step("roll")
 	if got := activeOf(h, p1, "KSK"); len(got) != 1 || got[0] == old {
 		t.Fatalf("after the roll p1's active KSK %v (old %d)", got, old)

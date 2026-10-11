@@ -269,7 +269,7 @@ func syncherPublishesDNSKEYCDS(conf *Config, zd *tdns.ZoneData) bool {
 		return false
 	}
 	if conf != nil {
-		if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.Owns(zd) {
+		if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.runsKeys(zd) {
 			return false
 		}
 	}

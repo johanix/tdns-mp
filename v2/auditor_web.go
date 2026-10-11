@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -151,6 +152,7 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 			}
 			return col
 		},
+		"upper": strings.ToUpper,
 		"hasRole": func(b bool) string {
 			if b {
 				return "yes"
@@ -522,7 +524,12 @@ func (s *auditorWebServer) buildObservationsData(r *http.Request, zone string) *
 	d := s.baseWebData(r, "Observations")
 	d.Zone = zone
 	if sm := s.conf.InternalMp.AuditStateManager; sm != nil {
+		// Newest first, as the event log shows its events (#110). The
+		// snapshot is a copy; the API and the CLI keep time order.
 		d.Observations = sm.SnapshotAllObservations(zone)
+		slices.SortStableFunc(d.Observations, func(a, b AuditObservation) int {
+			return b.Time.Compare(a.Time)
+		})
 	}
 	return d
 }

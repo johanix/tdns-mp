@@ -46,6 +46,9 @@ func TestEventPrintersDoNotPassTerminalControls(t *testing.T) {
 			t.Errorf("%s lost the details' lines:\n%s", name, out)
 		}
 	}
+	if !strings.Contains(list.String(), "  SYNC  ") || !strings.Contains(show.String(), "type:         SYNC") {
+		t.Errorf("the event type is not shown in capitals:\n%s\n%s", list.String(), show.String())
+	}
 	if n := strings.Count(list.String(), "\n        "); n != 3 {
 		t.Errorf("list --details printed %d detail lines, want 3:\n%s", n, list.String())
 	}

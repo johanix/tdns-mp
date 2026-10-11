@@ -410,7 +410,12 @@ type GossipMatrixDTO struct {
 
 // GossipMemberRow is one member's report of their view of all peers.
 type GossipMemberRow struct {
-	Reporter         string            `json:"reporter"`
+	Reporter string `json:"reporter"`
+	// Label is the reporter's role label in the zone of a zone view: the
+	// column the reporter is. An identity that holds several labels (one
+	// agent serving as two providers) has them all, in column order. Empty
+	// in the group view, and for a reporter with no label in the zone.
+	Label            string            `json:"label,omitempty"`
 	Timestamp        time.Time         `json:"timestamp,omitempty"`
 	BeatInterval     uint32            `json:"beat_interval,omitempty"`
 	SecondsSinceBeat int64             `json:"seconds_since_beat,omitempty"`
@@ -623,8 +628,50 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 			LeaderExpiry: elec.LeaderExpiry,
 		}
 	}
+	if zone != "" {
+		labelZoneGossipRows(dto)
+		return dto
+	}
 	slices.SortFunc(dto.Rows, func(a, b GossipMemberRow) int {
 		return strings.Compare(a.Reporter, b.Reporter)
 	})
 	return dto
+}
+
+// labelZoneGossipRows names each row of a zone view by the reporter's role
+// label, the inverse of the columns' label-to-identity map, and orders the
+// rows as the columns are ordered, so that each reporter's own cell, where
+// it has no state for itself, falls on the diagonal (#109). A reporter with
+// no label in the zone keeps only its identity and comes after the
+// labelled rows.
+func labelZoneGossipRows(dto *GossipMatrixDTO) {
+	canon := func(id string) string { return strings.ToLower(dns.Fqdn(id)) }
+	labels := make(map[string][]string, len(dto.ColumnLabels))
+	first := make(map[string]int, len(dto.ColumnLabels))
+	for i, lbl := range dto.ColumnLabels {
+		id := dto.LabelToIdentity[lbl]
+		if id == "" {
+			continue
+		}
+		if _, ok := first[canon(id)]; !ok {
+			first[canon(id)] = i
+		}
+		labels[canon(id)] = append(labels[canon(id)], lbl)
+	}
+	for i := range dto.Rows {
+		dto.Rows[i].Label = strings.Join(labels[canon(dto.Rows[i].Reporter)], ", ")
+	}
+	slices.SortFunc(dto.Rows, func(a, b GossipMemberRow) int {
+		ai, aok := first[canon(a.Reporter)]
+		bi, bok := first[canon(b.Reporter)]
+		switch {
+		case aok && bok:
+			return ai - bi
+		case aok:
+			return -1
+		case bok:
+			return 1
+		}
+		return strings.Compare(a.Reporter, b.Reporter)
+	})
 }

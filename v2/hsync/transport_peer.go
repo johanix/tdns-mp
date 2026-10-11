@@ -4,6 +4,9 @@
 package hsync
 
 import (
+	"sort"
+	"strings"
+
 	"github.com/johanix/tdns-transport/v2/transport"
 )
 
@@ -46,6 +49,55 @@ func mechPeerState(e *Engine, peerID PeerID, mech string) transport.PeerState {
 		return transport.PeerStateNeeded
 	}
 	return st
+}
+
+// mechEffectiveState is mechPeerState with the liveness decay applied: an
+// OPERATIONAL mechanism whose beats have stopped succeeding reads DEGRADED or
+// INTERRUPTED, as the gossip matrix shows it. The pace of the beat rounds
+// keys on it (peersView); the send gates do not.
+func mechEffectiveState(e *Engine, peerID PeerID, mech string) transport.PeerState {
+	if e == nil || e.deps.Transport == nil {
+		return transport.PeerStateNeeded
+	}
+	reg := e.deps.Transport.PeerRegistry()
+	if reg == nil {
+		return transport.PeerStateNeeded
+	}
+	p, ok := reg.Get(string(peerID))
+	if !ok || p == nil {
+		return transport.PeerStateNeeded
+	}
+	st, ok := p.MechanismEffectiveState(mech)
+	if !ok {
+		return transport.PeerStateNeeded
+	}
+	return st
+}
+
+// peerView is one peer's mechanism states, decayed, as a string to compare.
+func (e *Engine) peerView(id PeerID) string {
+	return mechEffectiveState(e, id, TransportAPI).String() + "/" + mechEffectiveState(e, id, TransportDNS).String()
+}
+
+// peersView is the engine's view of its peers: every peer that is not
+// infrastructure with its mechanism states, and the provider groups. What
+// the gossip matrix's own row says follows from it. A beat round that finds
+// it changed since the previous round keeps the fast pace (beatSchedule).
+func (e *Engine) peersView() string {
+	var parts []string
+	for _, peer := range e.registry.S.Items() {
+		if peer.IsInfraPeer {
+			continue
+		}
+		parts = append(parts, string(peer.ID)+"="+e.peerView(peer.ID))
+	}
+	if e.deps.ProviderGroups != nil {
+		for _, g := range e.deps.ProviderGroups.Groups() {
+			parts = append(parts, "group="+g.GroupHash)
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
 }
 
 // The gates, in transport's vocabulary. The retired hsync enum folded

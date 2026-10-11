@@ -267,6 +267,14 @@ func TestSigningAgentsComeFromTheZone(t *testing.T) {
 // not sign; the agents are agent.<label>.example.
 func trackTestZone(t *testing.T, name string) *MPZoneData {
 	t.Helper()
+	return providersTestZone(t, name, []string{"us", "p2", "p3"}, []string{"us", "p2"})
+}
+
+// providersTestZone is a multi-provider zone with an HSYNC3 record per
+// label (identity agent.<label>.example.) and the given labels as its
+// HSYNCPARAM signers.
+func providersTestZone(t *testing.T, name string, labels, signers []string) *MPZoneData {
+	t.Helper()
 	mpzd := signerTestZone(t, name, newMPTestKeyDB(t))
 	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil || apex == nil {
@@ -275,10 +283,10 @@ func trackTestZone(t *testing.T, name string) *MPZoneData {
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"us", "p2"}}}}
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	var h3s []dns.RR
-	for _, label := range []string{"us", "p2", "p3"} {
+	for _, label := range labels {
 		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: "agent." + label + ".example.", Upstream: "."}})
 	}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})

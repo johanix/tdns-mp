@@ -60,6 +60,10 @@ type MPTransportBridge struct {
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
 	foreignKeyStates   map[ZoneName]map[AgentId][]core.KeyState
+	// the DNSKEY records the same providers' operations carried, under the
+	// same lock: with the key states they are the DS set of a zone our own
+	// signer does not own (design Amendment 2, mp_s5_computed_ds.go)
+	foreignDnskeys map[ZoneName]map[AgentId][]*dns.DNSKEY
 	// onKeyInventory records an inventory that answered this agent's own
 	// request as a pushed one is recorded (Config.noteKeyInventory); set
 	// where the agent's bridge is made.
@@ -669,6 +673,14 @@ func messageMechanism(msg *transport.IncomingMessage) string {
 	return transport.MechanismDNS
 }
 
+// kickBeats brings the hsync engine's next beat round forward, after an
+// inbound message moved a peer's state (hsync.Engine.KickBeats).
+func (tm *MPTransportBridge) kickBeats() {
+	if tm.agentRegistry != nil && tm.agentRegistry.HsyncEngine != nil {
+		tm.agentRegistry.HsyncEngine.KickBeats()
+	}
+}
+
 // routeHelloMessage routes a hello message to the hello channel.
 func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
@@ -693,6 +705,11 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	peer.LastHelloReceived = time.Now()
 	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
 		peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
+		// The hello moved the peer: beat it back soon, so that this side
+		// reaches OPERATIONAL too. Only here: a hello that finds the mechanism
+		// already introduced changes nothing, and a peer that never gets our
+		// accept repeats its hello every helloretry for as long as that lasts.
+		tm.kickBeats()
 	}
 	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
 
@@ -719,9 +736,9 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	// Convert to AgentMsgReport for the existing hsyncengine.
 	// Use the first shared zone from the payload as the report's
-	// Zone — downstream consumers (e.g. AuditorMsgHandler's
-	// StateManager.GetOrCreateZone) gate on zone != "", and without
-	// it the auditor never records a per-zone provider entry.
+	// Zone. The auditor's hello adapter (adaptHelloReports) writes
+	// it into the hello row of its event log; without it the row
+	// has no zone and a per-zone event query misses it.
 	report := &AgentMsgReport{
 		Transport:      mech,
 		MessageType:    AgentMsgHello,
@@ -807,12 +824,12 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	distributionID := msg.DistributionID
 
 	// Set Zone from the payload's Zones list so downstream consumers
-	// (notably AuditorMsgHandler, which gates StateManager updates on
-	// zone != "") can attribute the beat to its zone. Without this,
-	// the auditor dashboard's provider list stays empty even though
-	// beats are flowing — only HELLO-initiated state entries survive,
-	// and HELLOs happen once per handshake while beats happen
-	// continuously.
+	// (notably the auditor's beat adapter, adaptBeatReports, which
+	// gates StateManager updates on zone != "") can attribute the
+	// beat to its zone. Without this, the auditor dashboard's
+	// provider list stays empty even though beats are flowing — a
+	// hello creates no provider entry, and a sync creates one only
+	// when zone data changes, while beats arrive continuously.
 	report := &AgentMsgReport{
 		Transport:      mech,
 		MessageType:    AgentMsgBeat,
@@ -2312,17 +2329,43 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // the signer (Q9).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
 	var states []core.KeyState
-	found := false
+	found, records := false, false
 	for _, op := range ops {
-		if op.RRtype == "DNSKEY" && op.KeyStates != nil {
+		if op.RRtype != "DNSKEY" {
+			continue
+		}
+		if op.KeyStates != nil {
 			states = append(states, op.KeyStates...)
 			found = true
 		}
+		if len(op.Records) > 0 || op.Operation == "replace" {
+			records = true
+		}
 	}
-	if !found {
+	if !found && !records {
 		return
 	}
 	tm.foreignKeyStatesMu.Lock()
+	if records {
+		// the records follow the operations whether or not the sender
+		// says anything about its keys: an older release's word is its
+		// records alone
+		if tm.foreignDnskeys == nil {
+			tm.foreignDnskeys = map[ZoneName]map[AgentId][]*dns.DNSKEY{}
+		}
+		if tm.foreignDnskeys[zone] == nil {
+			tm.foreignDnskeys[zone] = map[AgentId][]*dns.DNSKEY{}
+		}
+		for _, op := range ops {
+			if op.RRtype == "DNSKEY" {
+				tm.foreignDnskeys[zone][from] = applyDnskeyRecords(tm.foreignDnskeys[zone][from], op)
+			}
+		}
+	}
+	if !found {
+		tm.foreignKeyStatesMu.Unlock()
+		return
+	}
 	if tm.foreignKeyStates == nil {
 		tm.foreignKeyStates = map[ZoneName]map[AgentId][]core.KeyState{}
 	}

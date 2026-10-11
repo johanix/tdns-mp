@@ -38,7 +38,7 @@
     <tbody>
       {{range .Rows}}
       <tr>
-        <td><strong title="{{.Reporter}}">{{shortLabel .Reporter}}</strong></td>
+        <td><strong title="{{.Reporter}}">{{if and $page.Zone .Label}}{{.Label}}{{else}}{{shortLabel .Reporter}}{{end}}</strong></td>
         {{$peers := .PeerStates}}
         {{range $col := $cols}}
           {{$state := index $peers (gossipColumnPeer $matrix $col)}}

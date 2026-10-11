@@ -2972,6 +2972,7 @@ inherited: |
 use: list
 short: List audit events
 flags: |
+      --details        show what each message carried, below its event
       --last int       number of events to show (default 50)
       --since string   events since (RFC3339)
   -z, --zone string    filter by zone
@@ -2981,6 +2982,17 @@ inherited: |
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+
+=== tdns-mpcli auditor eventlog show
+use: show <id>
+short: Show one audit event with what its message carried
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
 
 === tdns-mpcli auditor gossip
 use: gossip
@@ -4315,6 +4327,35 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli auditor zone delegation sync-log
+use: sync-log
+short: Show what this parent received from its children, and what it did with it
+long: |
+  Show the delegation-sync log: one line per UPDATE from a child, per scan a
+  NOTIFY started, per scan a poll started that found something or could not
+  process the child, per NOTIFY refused before any scan, and per DSYNC API write.
+  Newest first.
+  
+  "applied" means the parent's delegation data changed. A change a scan decided
+  on is "queued" or "apply failed" until it has landed.
+  
+  With -z, only that parent; with --child, only that child. The log is kept in
+  memory: it starts empty when the server starts, and holds the most recent
+  childsync.sync-log events (default 10000).
+flags: |
+      --child string   Only this child zone
+      --json           Print the report as JSON
+      --limit int      At most this many events; 0 for all (default 50)
+      --since string   Only events since: a duration back from now (10m) or an RFC 3339 time
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -F, --force           force operation
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli auditor zone delete
 use: delete
 short: Delete a dynamic (API-managed) zone
@@ -4397,11 +4438,21 @@ short: Schedule a manual KSK rollover at the earliest safe moment
 long: |
   Asks the daemon to compute ComputeEarliestRollover and persist
   manual_rollover_* on the zone row. The rollover worker fires
-  AtomicRollover when t_earliest is reached. Rejects the request if a
-  rollover is already in progress or the pipeline has no standby SEP key.
+  AtomicRollover when t_earliest is reached. Rejects the request once
+  that rollover has fired and is in progress, or if the pipeline has no
+  standby SEP key. A repeat while a request is still pending keeps the
+  earlier of the pending and the newly computed time: asking again never
+  delays the roll.
   
   Online-only: scheduling against a stopped daemon is meaningless
   (the manual_rollover_* row would never be read).
+  
+  With --zsk: the next worker tick promotes the oldest standby ZSK. A ZSK
+  reaches standby once it has been published for kasp.propagation-delay
+  plus the served DNSKEY TTL, so it never signs before resolvers can hold
+  it. With no standby yet, the request stays pending and fires when one
+  arrives. A repeat while a request is pending changes nothing; run it
+  again after each promotion to drain the pipeline faster.
 flags: |
   -z, --zone string   Zone
 inherited: |
@@ -4650,7 +4701,8 @@ long: |
   
     auto-rollover asap -z <zone> --zsk
   
-  to promote the next standby now (repeat to accelerate).
+  to promote the next standby now. Run it again after each promotion to
+  drain faster; a repeat while a request is pending changes nothing.
   
   KSK: the auto-rollover engine (rollover.method multi-ds or
   double-signature) carries it as a double-signature rollover: a
@@ -4681,7 +4733,7 @@ inherited: |
 use: policy-reset
 short: Reset a zone's DNSSEC keys to its config policy, per role (dry-run without --confirm)
 long: |
-  Force a zone onto its config dnssec_policy: for each key role whose algorithm no
+  Force a zone onto its config dnssecpolicy: for each key role whose algorithm no
   longer matches config, drop and regenerate that role's keys and re-sign; any
   role whose algorithm is already correct is kept. It also clears the runtime
   override and records the config policy as applied.
@@ -4712,7 +4764,7 @@ short: Set a zone's DNSSEC policy at runtime (persists as an override, not in YA
 long: |
   Apply a DNSSEC policy to a zone in the running server. The change is stored
   as a per-zone override in the keystore and survives restart, but does NOT
-  update the zone's dnssec_policy in the YAML config — update that separately
+  update the zone's dnssecpolicy in the YAML config — update that separately
   to make the new policy the permanent base. If the new policy uses different
   key algorithms, the old keys are retired (their signatures kept until the
   KeyStateWorker removes them) and new keys take over; the zone stays signed
@@ -4849,6 +4901,10 @@ long: |
   
   It is written when an update is published and replayed over the file on load, so
   a restart loses nothing. "zone sync" folds it into the file and empties it.
+  
+  On an inline-signing secondary it is instead applied to every full transfer,
+  where it keeps the zone's own CDS, CDNSKEY and CSYNC. "zone sync" leaves it
+  alone there.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -4886,6 +4942,9 @@ long: |
   purging one needs --force. Prefer "zone sync", which folds the same changes into
   the zone file and loses nothing. A journal that would NOT replay needs no flag:
   its changes are already absent from what the zone serves.
+  
+  On an inline-signing secondary, purging needs --force as well: it takes the
+  zone's own CDS, CDNSKEY and CSYNC out at the next full transfer.
 flags: |
       --force         Discard a journal that would otherwise replay cleanly
       --out string    Write the instruction form to this file instead of stdout
@@ -5112,7 +5171,28 @@ inherited: |
 
 === tdns-mpcli auditor zone parentsync status
 use: status
-short: Show parentsync status for the zone
+short: Show whether a delegation change can reach the parent, and by which scheme
+long: |
+  For a zone with parentsync (a zone syncing its own delegation) or
+  parentsync-proxy (a tdns-agent secondary syncing on behalf of its primary),
+  report whether a delegation change can reach the parent right now, by which
+  scheme, and if not, why not:
+  
+    - the parent, and whether its DSYNC RRset validated;
+    - every scheme in parentsync.schemes, in preference order: usable (with
+      its target) or skipped (with the reason);
+    - detail for the configured schemes: for UPDATE on a parentsync-proxy zone
+      the KEY-bootstrap state and the records to publish at the primary (what
+      "zone proxy-key" used to print), for UPDATE on a parentsync zone its
+      SIG(0) key and what the parent holds for it, for NOTIFY whether the zone
+      publishes CDS and CSYNC, for API whether a credential is configured;
+    - whether the parent's delegation is in sync with the zone, as
+      "parentsync delta" computes it, and the zone's delegation-sync-warning.
+  
+  Nothing on the zone is changed, with one exception: on a parentsync-proxy zone
+  waiting for its KEY to be published, the agent's SIG(0) keypair is generated
+  if it has none -- as the agent's next sync would -- so that there are records
+  to print.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -5141,14 +5221,23 @@ long: |
   For a zone with the parentsync-proxy option (a tdns-agent acting as a
   secondary for a DSYNC-unaware primary), report whether the agent can proxy
   DNS UPDATEs to the parent, and print the exact records to serve at the primary
-  apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
-  in RFC 3597 form for a primary that cannot parse the private type.
+  apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and, until the records
+  are served, the HSYNCPARAM again in RFC 3597 form for a primary that cannot
+  parse the private type.
   
-  The records are printed in every state, so that what the agent holds can be
-  compared against what the primary actually serves — including in ready, where
-  the two are supposed to agree. In foreign-key the KEY found at the apex is
-  listed alongside them. Read-only: no key is generated by running this.
+  The KEY and HSYNCPARAM are printed in every state, so that what the agent
+  holds can be compared against what the primary actually serves — including in
+  ready, where the two are supposed to agree and the RFC 3597 form is left out.
+  In foreign-key the KEY found at the apex is listed alongside them.
   States: update-unsupported / ready / foreign-key / waiting-for-key.
+  
+  It changes nothing on the zone, with one exception: in waiting-for-key, if the
+  agent holds no SIG(0) key for the zone, it generates one -- as the agent's next
+  sync would -- so that there are records to print.
+  
+  Deprecated: "zone parentsync status" prints this report, together with the
+  state of every other configured scheme.
+hidden: true
 flags: |
   -z, --zone string   Zone to report proxy-key state for
 inherited: |
@@ -7340,6 +7429,35 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli signer auth zone delegation sync-log
+use: sync-log
+short: Show what this parent received from its children, and what it did with it
+long: |
+  Show the delegation-sync log: one line per UPDATE from a child, per scan a
+  NOTIFY started, per scan a poll started that found something or could not
+  process the child, per NOTIFY refused before any scan, and per DSYNC API write.
+  Newest first.
+  
+  "applied" means the parent's delegation data changed. A change a scan decided
+  on is "queued" or "apply failed" until it has landed.
+  
+  With -z, only that parent; with --child, only that child. The log is kept in
+  memory: it starts empty when the server starts, and holds the most recent
+  childsync.sync-log events (default 10000).
+flags: |
+      --child string   Only this child zone
+      --json           Print the report as JSON
+      --limit int      At most this many events; 0 for all (default 50)
+      --since string   Only events since: a duration back from now (10m) or an RFC 3339 time
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -F, --force           force operation
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli signer auth zone delete
 use: delete
 short: Delete a dynamic (API-managed) zone
@@ -7422,11 +7540,21 @@ short: Schedule a manual KSK rollover at the earliest safe moment
 long: |
   Asks the daemon to compute ComputeEarliestRollover and persist
   manual_rollover_* on the zone row. The rollover worker fires
-  AtomicRollover when t_earliest is reached. Rejects the request if a
-  rollover is already in progress or the pipeline has no standby SEP key.
+  AtomicRollover when t_earliest is reached. Rejects the request once
+  that rollover has fired and is in progress, or if the pipeline has no
+  standby SEP key. A repeat while a request is still pending keeps the
+  earlier of the pending and the newly computed time: asking again never
+  delays the roll.
   
   Online-only: scheduling against a stopped daemon is meaningless
   (the manual_rollover_* row would never be read).
+  
+  With --zsk: the next worker tick promotes the oldest standby ZSK. A ZSK
+  reaches standby once it has been published for kasp.propagation-delay
+  plus the served DNSKEY TTL, so it never signs before resolvers can hold
+  it. With no standby yet, the request stays pending and fires when one
+  arrives. A repeat while a request is pending changes nothing; run it
+  again after each promotion to drain the pipeline faster.
 flags: |
   -z, --zone string   Zone
 inherited: |
@@ -7675,7 +7803,8 @@ long: |
   
     auto-rollover asap -z <zone> --zsk
   
-  to promote the next standby now (repeat to accelerate).
+  to promote the next standby now. Run it again after each promotion to
+  drain faster; a repeat while a request is pending changes nothing.
   
   KSK: the auto-rollover engine (rollover.method multi-ds or
   double-signature) carries it as a double-signature rollover: a
@@ -7706,7 +7835,7 @@ inherited: |
 use: policy-reset
 short: Reset a zone's DNSSEC keys to its config policy, per role (dry-run without --confirm)
 long: |
-  Force a zone onto its config dnssec_policy: for each key role whose algorithm no
+  Force a zone onto its config dnssecpolicy: for each key role whose algorithm no
   longer matches config, drop and regenerate that role's keys and re-sign; any
   role whose algorithm is already correct is kept. It also clears the runtime
   override and records the config policy as applied.
@@ -7737,7 +7866,7 @@ short: Set a zone's DNSSEC policy at runtime (persists as an override, not in YA
 long: |
   Apply a DNSSEC policy to a zone in the running server. The change is stored
   as a per-zone override in the keystore and survives restart, but does NOT
-  update the zone's dnssec_policy in the YAML config — update that separately
+  update the zone's dnssecpolicy in the YAML config — update that separately
   to make the new policy the permanent base. If the new policy uses different
   key algorithms, the old keys are retired (their signatures kept until the
   KeyStateWorker removes them) and new keys take over; the zone stays signed
@@ -7874,6 +8003,10 @@ long: |
   
   It is written when an update is published and replayed over the file on load, so
   a restart loses nothing. "zone sync" folds it into the file and empties it.
+  
+  On an inline-signing secondary it is instead applied to every full transfer,
+  where it keeps the zone's own CDS, CDNSKEY and CSYNC. "zone sync" leaves it
+  alone there.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -7911,6 +8044,9 @@ long: |
   purging one needs --force. Prefer "zone sync", which folds the same changes into
   the zone file and loses nothing. A journal that would NOT replay needs no flag:
   its changes are already absent from what the zone serves.
+  
+  On an inline-signing secondary, purging needs --force as well: it takes the
+  zone's own CDS, CDNSKEY and CSYNC out at the next full transfer.
 flags: |
       --force         Discard a journal that would otherwise replay cleanly
       --out string    Write the instruction form to this file instead of stdout
@@ -8125,7 +8261,28 @@ inherited: |
 
 === tdns-mpcli signer auth zone parentsync status
 use: status
-short: Show parentsync status for the zone
+short: Show whether a delegation change can reach the parent, and by which scheme
+long: |
+  For a zone with parentsync (a zone syncing its own delegation) or
+  parentsync-proxy (a tdns-agent secondary syncing on behalf of its primary),
+  report whether a delegation change can reach the parent right now, by which
+  scheme, and if not, why not:
+  
+    - the parent, and whether its DSYNC RRset validated;
+    - every scheme in parentsync.schemes, in preference order: usable (with
+      its target) or skipped (with the reason);
+    - detail for the configured schemes: for UPDATE on a parentsync-proxy zone
+      the KEY-bootstrap state and the records to publish at the primary (what
+      "zone proxy-key" used to print), for UPDATE on a parentsync zone its
+      SIG(0) key and what the parent holds for it, for NOTIFY whether the zone
+      publishes CDS and CSYNC, for API whether a credential is configured;
+    - whether the parent's delegation is in sync with the zone, as
+      "parentsync delta" computes it, and the zone's delegation-sync-warning.
+  
+  Nothing on the zone is changed, with one exception: on a parentsync-proxy zone
+  waiting for its KEY to be published, the agent's SIG(0) keypair is generated
+  if it has none -- as the agent's next sync would -- so that there are records
+  to print.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -8154,14 +8311,23 @@ long: |
   For a zone with the parentsync-proxy option (a tdns-agent acting as a
   secondary for a DSYNC-unaware primary), report whether the agent can proxy
   DNS UPDATEs to the parent, and print the exact records to serve at the primary
-  apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
-  in RFC 3597 form for a primary that cannot parse the private type.
+  apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and, until the records
+  are served, the HSYNCPARAM again in RFC 3597 form for a primary that cannot
+  parse the private type.
   
-  The records are printed in every state, so that what the agent holds can be
-  compared against what the primary actually serves — including in ready, where
-  the two are supposed to agree. In foreign-key the KEY found at the apex is
-  listed alongside them. Read-only: no key is generated by running this.
+  The KEY and HSYNCPARAM are printed in every state, so that what the agent
+  holds can be compared against what the primary actually serves — including in
+  ready, where the two are supposed to agree and the RFC 3597 form is left out.
+  In foreign-key the KEY found at the apex is listed alongside them.
   States: update-unsupported / ready / foreign-key / waiting-for-key.
+  
+  It changes nothing on the zone, with one exception: in waiting-for-key, if the
+  agent holds no SIG(0) key for the zone, it generates one -- as the agent's next
+  sync would -- so that there are records to print.
+  
+  Deprecated: "zone parentsync status" prints this report, together with the
+  state of every other configured scheme.
+hidden: true
 flags: |
   -z, --zone string   Zone to report proxy-key state for
 inherited: |
@@ -10268,6 +10434,35 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli signer zone delegation sync-log
+use: sync-log
+short: Show what this parent received from its children, and what it did with it
+long: |
+  Show the delegation-sync log: one line per UPDATE from a child, per scan a
+  NOTIFY started, per scan a poll started that found something or could not
+  process the child, per NOTIFY refused before any scan, and per DSYNC API write.
+  Newest first.
+  
+  "applied" means the parent's delegation data changed. A change a scan decided
+  on is "queued" or "apply failed" until it has landed.
+  
+  With -z, only that parent; with --child, only that child. The log is kept in
+  memory: it starts empty when the server starts, and holds the most recent
+  childsync.sync-log events (default 10000).
+flags: |
+      --child string   Only this child zone
+      --json           Print the report as JSON
+      --limit int      At most this many events; 0 for all (default 50)
+      --since string   Only events since: a duration back from now (10m) or an RFC 3339 time
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -F, --force           force operation
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli signer zone delete
 use: delete
 short: Delete a dynamic (API-managed) zone
@@ -10350,11 +10545,21 @@ short: Schedule a manual KSK rollover at the earliest safe moment
 long: |
   Asks the daemon to compute ComputeEarliestRollover and persist
   manual_rollover_* on the zone row. The rollover worker fires
-  AtomicRollover when t_earliest is reached. Rejects the request if a
-  rollover is already in progress or the pipeline has no standby SEP key.
+  AtomicRollover when t_earliest is reached. Rejects the request once
+  that rollover has fired and is in progress, or if the pipeline has no
+  standby SEP key. A repeat while a request is still pending keeps the
+  earlier of the pending and the newly computed time: asking again never
+  delays the roll.
   
   Online-only: scheduling against a stopped daemon is meaningless
   (the manual_rollover_* row would never be read).
+  
+  With --zsk: the next worker tick promotes the oldest standby ZSK. A ZSK
+  reaches standby once it has been published for kasp.propagation-delay
+  plus the served DNSKEY TTL, so it never signs before resolvers can hold
+  it. With no standby yet, the request stays pending and fires when one
+  arrives. A repeat while a request is pending changes nothing; run it
+  again after each promotion to drain the pipeline faster.
 flags: |
   -z, --zone string   Zone
 inherited: |
@@ -10603,7 +10808,8 @@ long: |
   
     auto-rollover asap -z <zone> --zsk
   
-  to promote the next standby now (repeat to accelerate).
+  to promote the next standby now. Run it again after each promotion to
+  drain faster; a repeat while a request is pending changes nothing.
   
   KSK: the auto-rollover engine (rollover.method multi-ds or
   double-signature) carries it as a double-signature rollover: a
@@ -10634,7 +10840,7 @@ inherited: |
 use: policy-reset
 short: Reset a zone's DNSSEC keys to its config policy, per role (dry-run without --confirm)
 long: |
-  Force a zone onto its config dnssec_policy: for each key role whose algorithm no
+  Force a zone onto its config dnssecpolicy: for each key role whose algorithm no
   longer matches config, drop and regenerate that role's keys and re-sign; any
   role whose algorithm is already correct is kept. It also clears the runtime
   override and records the config policy as applied.
@@ -10665,7 +10871,7 @@ short: Set a zone's DNSSEC policy at runtime (persists as an override, not in YA
 long: |
   Apply a DNSSEC policy to a zone in the running server. The change is stored
   as a per-zone override in the keystore and survives restart, but does NOT
-  update the zone's dnssec_policy in the YAML config — update that separately
+  update the zone's dnssecpolicy in the YAML config — update that separately
   to make the new policy the permanent base. If the new policy uses different
   key algorithms, the old keys are retired (their signatures kept until the
   KeyStateWorker removes them) and new keys take over; the zone stays signed
@@ -10802,6 +11008,10 @@ long: |
   
   It is written when an update is published and replayed over the file on load, so
   a restart loses nothing. "zone sync" folds it into the file and empties it.
+  
+  On an inline-signing secondary it is instead applied to every full transfer,
+  where it keeps the zone's own CDS, CDNSKEY and CSYNC. "zone sync" leaves it
+  alone there.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -10839,6 +11049,9 @@ long: |
   purging one needs --force. Prefer "zone sync", which folds the same changes into
   the zone file and loses nothing. A journal that would NOT replay needs no flag:
   its changes are already absent from what the zone serves.
+  
+  On an inline-signing secondary, purging needs --force as well: it takes the
+  zone's own CDS, CDNSKEY and CSYNC out at the next full transfer.
 flags: |
       --force         Discard a journal that would otherwise replay cleanly
       --out string    Write the instruction form to this file instead of stdout
@@ -11065,7 +11278,28 @@ inherited: |
 
 === tdns-mpcli signer zone parentsync status
 use: status
-short: Show parentsync status for the zone
+short: Show whether a delegation change can reach the parent, and by which scheme
+long: |
+  For a zone with parentsync (a zone syncing its own delegation) or
+  parentsync-proxy (a tdns-agent secondary syncing on behalf of its primary),
+  report whether a delegation change can reach the parent right now, by which
+  scheme, and if not, why not:
+  
+    - the parent, and whether its DSYNC RRset validated;
+    - every scheme in parentsync.schemes, in preference order: usable (with
+      its target) or skipped (with the reason);
+    - detail for the configured schemes: for UPDATE on a parentsync-proxy zone
+      the KEY-bootstrap state and the records to publish at the primary (what
+      "zone proxy-key" used to print), for UPDATE on a parentsync zone its
+      SIG(0) key and what the parent holds for it, for NOTIFY whether the zone
+      publishes CDS and CSYNC, for API whether a credential is configured;
+    - whether the parent's delegation is in sync with the zone, as
+      "parentsync delta" computes it, and the zone's delegation-sync-warning.
+  
+  Nothing on the zone is changed, with one exception: on a parentsync-proxy zone
+  waiting for its KEY to be published, the agent's SIG(0) keypair is generated
+  if it has none -- as the agent's next sync would -- so that there are records
+  to print.
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -11094,14 +11328,23 @@ long: |
   For a zone with the parentsync-proxy option (a tdns-agent acting as a
   secondary for a DSYNC-unaware primary), report whether the agent can proxy
   DNS UPDATEs to the parent, and print the exact records to serve at the primary
-  apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
-  in RFC 3597 form for a primary that cannot parse the private type.
+  apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and, until the records
+  are served, the HSYNCPARAM again in RFC 3597 form for a primary that cannot
+  parse the private type.
   
-  The records are printed in every state, so that what the agent holds can be
-  compared against what the primary actually serves — including in ready, where
-  the two are supposed to agree. In foreign-key the KEY found at the apex is
-  listed alongside them. Read-only: no key is generated by running this.
+  The KEY and HSYNCPARAM are printed in every state, so that what the agent
+  holds can be compared against what the primary actually serves — including in
+  ready, where the two are supposed to agree and the RFC 3597 form is left out.
+  In foreign-key the KEY found at the apex is listed alongside them.
   States: update-unsupported / ready / foreign-key / waiting-for-key.
+  
+  It changes nothing on the zone, with one exception: in waiting-for-key, if the
+  agent holds no SIG(0) key for the zone, it generates one -- as the agent's next
+  sync would -- so that there are records to print.
+  
+  Deprecated: "zone parentsync status" prints this report, together with the
+  state of every other configured scheme.
+hidden: true
 flags: |
   -z, --zone string   Zone to report proxy-key state for
 inherited: |

@@ -354,13 +354,20 @@ func (lem *LeaderElectionManager) determineAndConfirmGroup(groupHash string, ter
 
 	winner := determineWinner(le.Votes)
 	le.Confirms[lem.localID] = winner
+	// The peers' confirms can be in already: a peer confirms the moment it
+	// holds every vote, and its CONFIRM may be handled before this runs. Ours
+	// then completes the set, and nothing else would finalize the election
+	// before the confirm timer did.
+	complete := len(le.Confirms) >= le.ExpectedPeers+1
 
 	if le.ConfirmTimer != nil {
 		le.ConfirmTimer.Stop()
 	}
-	le.ConfirmTimer = time.AfterFunc(5*time.Second, func() {
-		lem.onGroupConfirmTimeout(groupHash, term, members, zones)
-	})
+	if !complete {
+		le.ConfirmTimer = time.AfterFunc(5*time.Second, func() {
+			lem.onGroupConfirmTimeout(groupHash, term, members, zones)
+		})
+	}
 	le.mu.Unlock()
 
 	lgElect.Info("group election: determined winner, broadcasting confirm", "group", groupHash[:8], "winner", winner, "term", term)
@@ -374,6 +381,9 @@ func (lem *LeaderElectionManager) determineAndConfirmGroup(groupHash string, ter
 		if err := lem.broadcastFunc(zones[0], "ELECT-CONFIRM", confirmRecords); err != nil {
 			lgElect.Error("failed to broadcast group ELECT-CONFIRM", "group", groupHash[:8], "err", err)
 		}
+	}
+	if complete {
+		lem.finalizeGroupElection(groupHash, term, members, zones)
 	}
 }
 
@@ -415,7 +425,9 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	}
 
 	le.mu.Lock()
-	if le.Term != term {
+	// Once per term: the last confirm, the own confirm that completes the set
+	// and the confirm timer can each get here, and the first one clears Active.
+	if le.Term != term || !le.Active {
 		le.mu.Unlock()
 		return
 	}
@@ -1013,13 +1025,18 @@ func (lem *LeaderElectionManager) determineAndConfirm(zone ZoneName, term uint64
 
 	winner := determineWinner(le.Votes)
 	le.Confirms[lem.localID] = winner
+	// As in determineAndConfirmGroup: the peers' confirms may be in already,
+	// and ours then completes the set.
+	complete := len(le.Confirms) >= le.ExpectedPeers+1
 
 	if le.ConfirmTimer != nil {
 		le.ConfirmTimer.Stop()
 	}
-	le.ConfirmTimer = time.AfterFunc(5*time.Second, func() {
-		lem.onConfirmTimeout(zone, term)
-	})
+	if !complete {
+		le.ConfirmTimer = time.AfterFunc(5*time.Second, func() {
+			lem.onConfirmTimeout(zone, term)
+		})
+	}
 
 	le.mu.Unlock()
 
@@ -1031,6 +1048,9 @@ func (lem *LeaderElectionManager) determineAndConfirm(zone ZoneName, term uint64
 	}
 	if err := lem.broadcastFunc(zone, "ELECT-CONFIRM", confirmRecords); err != nil {
 		lgElect.Error("failed to broadcast ELECT-CONFIRM", "zone", zone, "err", err)
+	}
+	if complete {
+		lem.finalizeElection(zone, term)
 	}
 }
 
@@ -1060,7 +1080,8 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 	le := lem.getOrCreate(zone)
 	le.mu.Lock()
 
-	if le.Term != term {
+	// Once per term, as finalizeGroupElection.
+	if le.Term != term || !le.Active {
 		le.mu.Unlock()
 		return
 	}

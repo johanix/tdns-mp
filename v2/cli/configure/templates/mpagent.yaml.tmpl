@@ -78,7 +78,8 @@ multi-provider:
    # the defaults; lower values are useful for testbeds.
    syncengine:
       intervals:
-         beatinterval:        30   # between BEATs
+         beatinterval:        30   # between BEATs, once nothing changes
+         beat_fast_interval:  2    # between BEATs after a change, doubling up to beatinterval
          helloretry:          15   # between HELLO retries (steady)
          discoveryretry:      15   # between discovery retries
          reconcile:           60   # between full peer reconciliations

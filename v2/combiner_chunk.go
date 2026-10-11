@@ -612,7 +612,7 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 
 	var publishedNS []string
 	if locSet["at-ns"] {
-		currentNS := mpzd.getAgentNSTargets(senderID, zone)
+		currentNS := mpzd.signalNSTargets(senderID, zone)
 		var prevPublished []string
 		if storedInstr != nil {
 			prevPublished = storedInstr.PublishedNS
@@ -656,7 +656,7 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 		return
 	}
 
-	currentNS := mpzd.getAgentNSTargets(senderID, zone)
+	currentNS := mpzd.signalNSTargets(senderID, zone)
 	prevSet := stringSet(storedInstr.PublishedNS)
 	curSet := stringSet(currentNS)
 
@@ -734,6 +734,43 @@ func findProviderZoneForOwner(ownerName string) string {
 		return ""
 	}
 	return zd.ZoneName
+}
+
+// signalNSTargets: the nameservers this combiner publishes a _signal KEY
+// under for a zone (the at-ns location, RFC 9615's
+// _sig0key.<zone>._signal.<ns>). The parent asks at every NS in the child's
+// delegation (tdns, atNsFindings), and a customer commonly lists its
+// providers' nameservers in its own zone file, so the agent's own NS
+// contributions alone are not the set. It is the zone's apex NS RRset as the
+// combiner serves it, the owner's records and every contribution, narrowed
+// to the names this provider has a provider zone for: a name under another
+// provider's zone is theirs to publish under, and one under no configured
+// zone has nowhere to go (publishSignalKeyToProvider would drop it). The
+// owner's names first, then the sender's contributions, each once.
+func (mpzd *MPZoneData) signalNSTargets(senderID, zone string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		name = dns.Fqdn(name)
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		if findProviderZoneForOwner(Sig0KeyOwnerName(zone, name)) != "" {
+			out = append(out, name)
+		}
+	}
+	if apex, err := mpzd.GetOwner(mpzd.ZoneName); err == nil && apex != nil {
+		for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs {
+			if ns, ok := rr.(*dns.NS); ok {
+				add(ns.Ns)
+			}
+		}
+	}
+	for _, name := range mpzd.getAgentNSTargets(senderID, zone) {
+		add(name)
+	}
+	return out
 }
 
 // getAgentNSTargets returns the NS target names from an agent's contributions for a zone.

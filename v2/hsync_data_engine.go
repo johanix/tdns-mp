@@ -36,6 +36,9 @@ func (e *HsyncDataEngine) Run(ctx context.Context, msgQs *MsgQs) {
 	ar := e.conf.InternalMp.AgentRegistry
 	helloCh := adaptHelloReports(ctx, msgQs.Hello, nil, nil, ar)
 	beatCh := adaptBeatReports(ctx, msgQs.Beat, nil, ar)
+	// The first beat rounds come within seconds of the start; this process's
+	// first gossip rows wait until they carry good news, or one beat interval.
+	holdFirstLocalRows(ar, hsyncConfigFromMp(e.conf.MpConfig()).BeatInterval)
 
 	go e.core.Run(ctx, hsync.MsgChannels{
 		Hello: helloCh,
