@@ -111,3 +111,99 @@ func TestAnInboundHelloKicksTheBeatRoundsOnlyWhenItMovesThePeer(t *testing.T) {
 		t.Errorf("after a repeated hello the rounds are %v apart, want the steady %v", gap, steady)
 	}
 }
+
+// beatRecorder is the hsync bridge with its beats acknowledged and noted.
+type beatRecorder struct {
+	*mpHsyncBridge
+	mu sync.Mutex
+	at []time.Time
+}
+
+func (b *beatRecorder) SendBeat(ctx context.Context, peer *hsync.Peer, sequence uint64) (bool, string, error) {
+	b.mu.Lock()
+	b.at = append(b.at, time.Now())
+	b.mu.Unlock()
+	return true, hsync.TransportDNS, nil
+}
+
+func (b *beatRecorder) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.at)
+}
+
+// A peer that restarts introduces itself again, and its hello finds our
+// mechanism where it was: OPERATIONAL, from before the restart. That hello
+// gets one beat back at once, to that peer, so that a beat that failed while
+// the peer was away is not left two intervals behind the last success (#123).
+// It is not a kick: the rounds keep their pace.
+func TestAHelloFromAnIntroducedPeerGetsOneBeatBack(t *testing.T) {
+	const fast, steady = 20 * time.Millisecond, 300 * time.Millisecond
+	const local, remote = "local.example.", "remote.example."
+
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent]()}
+	tm := &MPTransportBridge{
+		TransportManager: &transport.TransportManager{PeerRegistry: transport.NewPeerRegistry()},
+		agentRegistry:    ar,
+	}
+	ar.S.Set(AgentId(remote), newAgentView(hsync.NewPeer(remote)))
+	held := tm.PeerRegistry.GetOrCreate(remote)
+	held.SetMechanismState(transport.MechanismDNS, transport.PeerStateOperational, "from before the restart")
+	held.SetMechanismLastBeatSent(transport.MechanismDNS, time.Now())
+
+	rec := &beatRecorder{mpHsyncBridge: &mpHsyncBridge{ar: ar, tm: tm}}
+	rounds := &roundTimes{}
+	cfg := hsync.DefaultConfig()
+	cfg.BeatIntervalMin, cfg.BeatInterval = fast, steady
+	cfg.RetryInterval, cfg.ReconcileInterval = time.Hour, time.Hour
+	engine := hsync.NewEngine(hsync.Deps{
+		LocalID:   local,
+		Transport: rec,
+		Host:      hsync.HostCallbacks{BeforeHeartbeats: rounds.tick},
+	}, cfg)
+	ar.HsyncEngine = engine
+	peer := hsync.NewPeer(remote)
+	peer.DnsMethod = true
+	engine.Registry().S.Set(peer.ID, peer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go engine.Run(ctx, hsync.MsgChannels{
+		Hello: make(chan *hsync.InboundReport),
+		Beat:  make(chan *hsync.InboundReport),
+		Msg:   make(chan *hsync.InboundMsg),
+	})
+
+	payload, err := json.Marshal(map[string]any{"type": "hello", "sender_id": remote, "MyIdentity": remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := &transport.IncomingMessage{
+		TypeToken: "hello", SenderID: remote, Payload: payload, Mechanism: transport.MechanismDNS,
+	}
+
+	// At the steady pace, shortly after a round and its beat.
+	n := len(rounds.waitFor(t, 8, 5*time.Second))
+	time.Sleep(steady / 10)
+	before := rec.count()
+	sent := time.Now()
+	tm.routeHelloMessage(hello)
+
+	deadline := time.Now().Add(steady / 2)
+	for rec.count() == before && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if rec.count() != before+1 {
+		t.Fatalf("%d beat(s) within %v of the hello, want one beat back", rec.count()-before, steady/2)
+	}
+	t.Logf("beat back %v after the hello", time.Since(sent))
+
+	// The rounds keep their pace.
+	after := rounds.waitFor(t, n+2, 5*time.Second)
+	if gap := after[n+1].Sub(after[n]); gap < steady*3/4 {
+		t.Errorf("after the beat back the rounds are %v apart, want the steady %v", gap, steady)
+	}
+	if st, _ := held.MechanismRawState(transport.MechanismDNS); st != transport.PeerStateOperational {
+		t.Errorf("the hello left the mechanism at %v, want OPERATIONAL as it was", st)
+	}
+}

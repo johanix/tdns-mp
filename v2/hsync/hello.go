@@ -137,7 +137,8 @@ func (e *Engine) fastBeatAttempts(ctx context.Context, peer *Peer) {
 		if !needsBeat() {
 			return
 		}
-		e.sendBeatToPeer(ctx, peer)
+		// This loop is the retry for these beats; no beat retrier beside it.
+		e.beatPeerOnce(ctx, peer)
 		if !needsBeat() {
 			e.runDeferredTasks(peer)
 			return
