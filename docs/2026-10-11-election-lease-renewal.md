@@ -65,4 +65,12 @@ A short `leader-election-ttl` on the agents shows several renewals in one run.
 
 ## Amendments
 
-None yet.
+### Amendment 1 (2026-10-11): a vote that overtakes the call (issue #125)
+
+The test that runs several managers through an election showed one more way an election waits out the 5 s timeout, older than the renewal collision and not removed by §2 or §3. In a group of three or more, another member's VOTE can reach a member before the initiator's CALL does: the two come from different senders, and nothing orders them. `handleGroupVote` dropped a vote for a term the member had not joined; the member then joined on the CALL with one vote short, never held every vote, and confirmed nothing.
+
+A member now keeps a vote for a term newer than the one it is in (`keepEarlyVote`), the newest such term only and one vote per sender, and counts it when it joins that term on the CALL (`takeEarlyVotes`). A member that starts a term of its own forgets what it kept for it. The per-zone election does the same.
+
+A CONFIRM needs no such care: a member confirms only once it holds every vote, the late member's among them, and that member votes when it joins.
+
+This is implemented on branch `fix/125-early-votes`, stacked on the branch of this design.
