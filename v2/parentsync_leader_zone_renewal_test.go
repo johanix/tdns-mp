@@ -28,10 +28,6 @@ func newZoneElectionNet(t *testing.T, ttl time.Duration, members ...string) *ele
 		})
 		lem.SetConfiguredPeersFunc(peers)
 		lem.SetOperationalPeersFunc(peers)
-		// Every member has called the zone's election before, as each does when
-		// it first sees its peers operational. A member that had only ever
-		// joined would count the votes and the confirms against no peers.
-		lem.getOrCreate(n.zone).ExpectedPeers = len(members) - 1
 		lem.SetOnLeaderElected(func(ZoneName) error {
 			n.mu.Lock()
 			n.elected = append(n.elected, id)

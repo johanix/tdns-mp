@@ -1018,6 +1018,11 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 	le.MyVote = rand.Uint32()
 	le.Votes = map[AgentId]uint32{lem.localID: le.MyVote}
 	le.Confirms = make(map[AgentId]AgentId)
+	// A member that joins counts against the zone's configured peers, as one
+	// that calls does. The count used to be set by a call of one's own only:
+	// a member that had only ever joined counted against no peers, and
+	// settled on the first vote or confirm it received (#129).
+	le.ExpectedPeers = lem.configuredPeers(zone)
 	// A vote for this term that got here before the CALL (keepEarlyVote).
 	// With it the votes can be complete already, which handleVote would have
 	// seen had the vote come after the CALL.
