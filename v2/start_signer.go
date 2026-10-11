@@ -22,6 +22,13 @@ import (
 // explicitly rather than delegating to a tdns Start* function
 // that may change over time.
 func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) error {
+	// The rollout gate first: a multi-provider zone that is not in
+	// key-lifecycle-zones would get tdns's single-signer key machine, so
+	// the signer does not start over one (design S4a).
+	if err := conf.keyLifecycleRolloutGate(); err != nil {
+		return err
+	}
+
 	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
 	// and install hook so new zones added via reload also get them.
 	conf.RegisterMPRefreshCallbacks()
@@ -84,11 +91,11 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})
-	// tdns KeyStateWorker: every signing zone's key lifecycle, the
-	// multi-provider zones' through the lifecycle hooks.
-	// tdns-mp's own key state machine for the zones the config names;
-	// tdns's worker skips those (an owned zone), and runs the rest. Taken
-	// before the worker starts, so its first sweep never sees them unowned.
+	// tdns KeyStateWorker: the key lifecycle of every signing zone tdns-mp
+	// does not own. tdns-mp's own key state machine runs the zones the
+	// config names (every multi-provider zone, the gate above); tdns's
+	// worker skips those (an owned zone), and runs the rest. Taken before
+	// the worker starts, so its first sweep never sees them unowned.
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		e.TakeConfiguredZones()
 	}
@@ -110,9 +117,9 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
 		func() { SignerMsgHandler(ctx, conf, conf.InternalMp.MsgQs) })
 
-	// No MP key-state worker: tdns's KeyStateWorker above runs the
-	// multi-provider key protocol through the lifecycle hooks
-	// (RegisterMPKeyLifecycleHooks).
+	// The multi-provider key protocol is the KeyLifecycleEngine's above;
+	// tdns's KeyStateWorker runs the zones tdns-mp does not own and asks
+	// tdns-mp nothing about them.
 
 	return nil
 }

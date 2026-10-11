@@ -96,12 +96,6 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
-			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
-			if hdb == nil {
-				lgSigner.Error("KeyDB not available for KEYSTATE signal processing")
-				continue
-			}
-
 			// what the other providers said about their keys (#58): the
 			// owner of the zone's key lifecycle writes ds on their rows
 			// from it; for a zone nobody here owns it has no reader
@@ -112,30 +106,17 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
-			// a zone tdns-mp's own state machine runs: the signal is its
+			// a zone tdns-mp's own state machine runs: the signal is its.
+			// For any other zone the signal has no taker: tdns-mp's machine
+			// is the only one that distributes keys to the peers (no hook
+			// stages them through tdns since S4a), and a zone named in the
+			// config but not taken yet is asked again by the resend timer
+			// once its driver runs. Nothing is written to the keystore
+			// behind the machine's back.
 			if e := conf.InternalMp.KeyLifecycle; e != nil && e.Signal(sigMsg.Zone, sigMsg.KeyTag, sigMsg.Signal, sigMsg.Message, sigMsg.At) {
 				continue
 			}
-			switch sigMsg.Signal {
-			case "propagated":
-				if err := SetPropagationConfirmed(hdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
-					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
-					continue
-				}
-				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
-				if err := TransitionMpdistToPublished(hdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
-					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
-				}
-				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
-				if err := TransitionMpremoveToRemoved(hdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
-					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
-				}
-				triggerResign(conf, sigMsg.Zone)
-			case "rejected":
-				lgSigner.Warn("KEYSTATE rejection received", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "reason", sigMsg.Message)
-			default:
-				lgSigner.Debug("Unhandled KEYSTATE signal", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag)
-			}
+			lgSigner.Info("KEYSTATE signal for a zone whose key lifecycle is not run here; dropped", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "sender", sigMsg.SenderID)
 
 		case msg := <-msgQs.Msg:
 			if msg == nil {
@@ -163,9 +144,9 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 }
 
 // pushKeystateInventoryToAllAgents sends the current KEYSTATE inventory to all
-// configured agents. Called after key state changes (rollover, delete, setstate,
-// retired→mpremove, mpdist→published) so agents learn about the change and can
-// distribute it to remote agents.
+// configured agents: the key machine's Distribute, DistributeRemoval and
+// KeysChanged (every key row write, state or column), so the agents learn
+// about the change and distribute it to the peers.
 func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 	mp := conf.MpConfig()
 	if mp == nil || len(mp.Agents) == 0 {
