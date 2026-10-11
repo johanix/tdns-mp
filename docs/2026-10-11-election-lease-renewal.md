@@ -1,6 +1,6 @@
 # Leader lease renewal: one election, not a burst
 
-**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendment 3, for issue #125, is implemented in PR #126. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -101,3 +101,11 @@ A member now keeps a vote for a term newer than the one it is in (`keepEarlyVote
 A CONFIRM needs no such care: a member confirms only once it holds every vote, the late member's among them, and that member votes when it joins.
 
 This is implemented in PR #126 (branch `fix/125-early-votes`).
+
+### Amendment 4 (2026-10-11): a member that joins counts against the zone's peers (issue #129)
+
+Amendment 2 named this and left it. The review of the early-vote change showed it on that change's new path: a per-zone member that had never called an election, joining with one vote kept from before the CALL, held two votes against a count of no peers, and the join settled the election.
+
+The per-zone `handleCall` now sets the count from the zone's configured peers when it joins, as a call of one's own does, and as the group's join does from its member list. A member that joins waits for every vote and every confirm, whether or not it has called before.
+
+The per-zone renewal tests no longer give their members the count by hand. This is implemented in PR #126 with Amendment 3.
