@@ -1,6 +1,6 @@
 # Leader lease renewal: one election, not a burst
 
-**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126 and were run on the testbed (Amendment 5). The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -109,3 +109,15 @@ Amendment 2 named this and left it. The review of the early-vote change showed i
 The per-zone `handleCall` now sets the count from the zone's configured peers when it joins, as a call of one's own does, and as the group's join does from its member list. A member that joins waits for every vote and every confirm, whether or not it has called before.
 
 The per-zone renewal tests no longer give their members the count by hand. This is implemented in PR #126 with Amendment 3.
+
+### Amendment 5 (2026-10-11): Amendments 3 and 4 on the testbed
+
+Run on the three-agent test rig of Amendment 1, with a 5-minute `leader-election-ttl`, at the head of PR #126: main with PR #121 and PR #124, plus Amendments 3 and 4. The readings are those of Amendment 1:
+
+- **First elections.** Both groups, one of two members and one of three, elected in term 1 at their first election, in the same second on every agent.
+- **Renewals.** Two, read against §5: one "TTL expiring" line per renewal, on the member that led, no "group election aborted", the same new term on every agent, and one term per renewal.
+- **The fallback.** The leader was restarted inside its term. The group held, and the next member in line renewed once, a step after the leader's time.
+- **Restarts and a stop.** Four restarts of a member that did not lead: no "group lost mutual OPERATIONAL" on any agent. Left down, it was given up 12 s after the stop.
+- **Over the whole run**, in every agent's log: no "group election aborted" line, no "not all members voted", and the same nine elected terms of the three-member group on every agent.
+
+What the run does not show: the line of Amendment 3, "group vote for a term not joined yet, kept for its CALL", did not appear. A run cannot put a VOTE ahead of its CALL, so the kept vote rests on its in-process tests. So does the per-zone election of Amendments 3 and 4: every zone on the rig has a provider group and uses the group election.
