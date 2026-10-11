@@ -143,4 +143,4 @@ $(PKG_TDNS_MPCLI): $(PROG) install
 	/bin/sh ../../utils/mkpkg.sh tdns-mpcli /usr/local \
 	bin/tdns-mpcli
 
-.PHONY: build gobuild generate version clean
+.PHONY: build gobuild generate version clean pkg_tdns_mpagent pkg_tdns_mpcombiner pkg_tdns_mpsigner pkg_tdns_mpauditor pkg_tdns_mpcli

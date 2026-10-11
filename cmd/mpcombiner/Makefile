@@ -10,7 +10,7 @@ install:
 	install -s -b -c ${PROG} /usr/local/libexec/
 
 # NetBSD binary package; rule and rationale in ../../utils/Makefile.common.
-pkg:	pkg_tdns_mpcombiner
+pkg:	version pkg_tdns_mpcombiner
 
 clean:
 	rm -f $(PROG)

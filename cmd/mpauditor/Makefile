@@ -10,7 +10,7 @@ install:
 	install -s -b -c ${PROG} /usr/local/libexec/
 
 # NetBSD binary package; rule and rationale in ../../utils/Makefile.common.
-pkg:	pkg_tdns_mpauditor
+pkg:	version pkg_tdns_mpauditor
 
 clean:
 	rm -f $(PROG)

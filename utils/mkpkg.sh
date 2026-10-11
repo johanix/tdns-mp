@@ -166,8 +166,8 @@ Installed under $PREFIX.
 Packaged rather than shipped as a bintar so that the machine keeps a record of
 what it is running: pkg_info reports the exact source revision without having
 to run the binary, and pkg_delete can remove it cleanly. A package can also be
-installed into a VM image before first boot, which is what lets tdns-auth start
-from rc.d on a freshly built lab master.
+installed into a VM image before first boot, so a host comes up with the
+daemon in place.
 EOF
 
 cat > "$META/BUILD_INFO" <<EOF

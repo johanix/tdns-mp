@@ -16,7 +16,7 @@ install:
 	install -s -b -c ${PROG} /usr/local/libexec/
 
 # NetBSD binary package; rule and rationale in ../../utils/Makefile.common.
-pkg:	pkg_tdns_mpsigner
+pkg:	version pkg_tdns_mpsigner
 
 clean:
 	rm -f $(PROG)
