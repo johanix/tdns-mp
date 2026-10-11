@@ -142,3 +142,48 @@ func TestSignerRefusesToStartOverAMultiProviderZoneNotInKeyLifecycleZones(t *tes
 		t.Errorf("the signed zone off the list is refused and the unsigned one is not named: %v", err)
 	}
 }
+
+// A zone reload runs the gate again: a reload whose signed multi-provider
+// zones are all listed goes on; one that brings an unlisted zone stops the
+// signer naming the zone, as a start would refuse; the rollout knob turns
+// the stop into the warning.
+func TestAZoneReloadPassesTheGateOrStopsTheSigner(t *testing.T) {
+	var logbuf strings.Builder
+	saved := lgSigner
+	lgSigner = slog.New(slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lgSigner = saved })
+	var stopped []string
+	savedStop := signerStop
+	signerStop = func(_ *Config, reason string) { stopped = append(stopped, reason) }
+	t.Cleanup(func() { signerStop = savedStop })
+
+	reload := func(listed []string, incomplete bool, signed ...string) {
+		logbuf.Reset()
+		stopped = nil
+		conf := &Config{Config: &tdns.Config{}}
+		for _, z := range signed {
+			conf.Config.Zones = append(conf.Config.Zones, tdns.ZoneConf{Name: z, Type: "secondary", DnssecPolicy: "default"})
+		}
+		conf.InternalMp.MPZoneNames = append([]string{}, signed...)
+		conf.SetMpConfig(&MultiProviderConf{Role: "signer", KeyLifecycleZones: listed, KeyLifecycleZonesIncomplete: incomplete})
+		conf.signerZonesReloaded()
+	}
+
+	reload([]string{"a.example."}, false, "a.example.")
+	if len(stopped) != 0 || logbuf.Len() != 0 {
+		t.Errorf("every signed zone listed after the reload: stopped=%v logged=%q, want neither", stopped, logbuf.String())
+	}
+
+	reload([]string{"a.example."}, false, "a.example.", "b.example.")
+	if len(stopped) != 1 || !strings.Contains(stopped[0], "b.example.") || strings.Contains(stopped[0], "a.example.") {
+		t.Errorf("a reload that brought an unlisted signed zone: stopped=%v, want one stop naming b.example. only", stopped)
+	}
+	if !strings.Contains(logbuf.String(), `"level":"ERROR"`) || !strings.Contains(logbuf.String(), "b.example.") {
+		t.Errorf("the stop was not logged as an error naming the zone:\n%s", logbuf.String())
+	}
+
+	reload([]string{"a.example."}, true, "a.example.", "b.example.")
+	if len(stopped) != 0 || !strings.Contains(logbuf.String(), `"level":"WARN"`) || strings.Contains(logbuf.String(), `"level":"ERROR"`) {
+		t.Errorf("the rollout knob on a reload: stopped=%v logged=%q, want a warning and no stop", stopped, logbuf.String())
+	}
+}

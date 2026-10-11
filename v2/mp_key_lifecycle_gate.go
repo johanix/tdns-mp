@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
 
@@ -98,4 +99,32 @@ func (conf *Config) keyLifecycleRolloutGate() error {
 	lgSigner.Error("key lifecycle: every multi-provider zone the signer signs must be in key-lifecycle-zones; the signer refuses to start (set key-lifecycle-zones-incomplete during a rollout)",
 		"zones", missing, "count", len(missing))
 	return fmt.Errorf("key lifecycle: %d multi-provider zone(s) not in key-lifecycle-zones: %s", len(missing), strings.Join(missing, ", "))
+}
+
+// signerStop is how the signer stops itself when a reload fails the gate;
+// a variable so a test can observe the stop instead of exiting.
+var signerStop = func(conf *Config, reason string) { tdns.Shutdowner(conf.Config, reason) }
+
+// signerZonesReloaded is the signer's PostParseZonesHook, run by tdns after
+// a zone reload (SIGHUP, or the API's reload-zones) has parsed the zones:
+// the refresh callbacks for the new zones, as at start; then the rollout
+// gate over the reloaded set; then the take of the zones that
+// key-lifecycle-zones names, at once rather than on the engine's next
+// tick. A reload that brings a multi-provider zone the signer signs and
+// the list does not name fails the way a start does: tdns's
+// single-signer key machine must not run such a zone for the rest of the
+// process's life, and tdns applies a reload before this hook runs, so the
+// signer stops with the zones named, and the next start refuses until
+// the config lists them or sets key-lifecycle-zones-incomplete.
+func (conf *Config) signerZonesReloaded() {
+	conf.RegisterMPRefreshCallbacks()
+	if err := conf.keyLifecycleRolloutGate(); err != nil {
+		lgSigner.Error("key lifecycle: the reload brought a multi-provider zone the signer signs that key-lifecycle-zones does not name; the signer stops, as a start would refuse",
+			"err", err)
+		signerStop(conf, fmt.Sprintf("key lifecycle gate after a zone reload: %v", err))
+		return
+	}
+	if e := conf.InternalMp.KeyLifecycle; e != nil {
+		e.TakeConfiguredZones()
+	}
 }

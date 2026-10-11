@@ -29,10 +29,11 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 		return err
 	}
 
-	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones
-	// and install hook so new zones added via reload also get them.
+	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones, and
+	// install the reload hook: a zone added by a SIGHUP reload gets them
+	// too, passes the same gate, and is taken if listed (signerZonesReloaded).
 	conf.RegisterMPRefreshCallbacks()
-	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
+	conf.Config.Internal.PostParseZonesHook = conf.signerZonesReloaded
 
 	// Register all signer API routes from tdns-mp
 	conf.SetupMPSignerRoutes(ctx, apirouter)
