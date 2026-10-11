@@ -106,6 +106,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 	// Single agent: self-elect immediately
 	if expectedPeers == 0 {
 		le.Leader = lem.localID
+		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 		le.Active = false
 		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8])
@@ -481,6 +482,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	}
 
 	le.Leader = agreedWinner
+	le.leaderTerm = le.Term
 	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 	le.Active = false
 
@@ -614,7 +616,11 @@ func (lem *LeaderElectionManager) InvalidateGroupLeader(groupHash string) {
 	}
 }
 
-// GetGroupElectionState returns the election state for a group (for gossip).
+// GetGroupElectionState returns the live election state for a group: the
+// term the election is in, and the leader it holds, which while an election
+// runs or after an aborted one is still the leader of the term before. It is
+// what the status command shows. Outbound gossip does not use it: a peer must
+// be told a result only (GroupElectionForGossip).
 func (lem *LeaderElectionManager) GetGroupElectionState(groupHash string) GroupElectionState {
 	lem.mu.RLock()
 	le, ok := lem.groupElections[groupHash]
@@ -629,6 +635,44 @@ func (lem *LeaderElectionManager) GetGroupElectionState(groupHash string) GroupE
 		Term:         uint32(le.Term),
 		LeaderExpiry: le.LeaderExpiry,
 	}
+}
+
+// GroupElectionForGossip returns what this member has to tell its peers of
+// the group's election. decided: a term that is decided, with its leader, in
+// state. known: the member has an election of its own for the group, decided
+// or not.
+//
+// The live state is not a result at every moment. While an election runs the
+// term is already the new one and the leader is not decided: empty in a first
+// election, the leader of the term before, with that term's expiry, in a
+// renewal. After an aborted election it stays so until the retry. And a member
+// that has invalidated its leader has a term without one. A peer stores the
+// first record it gets for a term and keeps it for the term, so one of these,
+// arriving first, stood for the whole lease (#154). None of them is sent.
+//
+// A member that is known and not decided tells nothing at all: its caller must
+// not pass on a record heard from a peer in its place, which may name the very
+// leader this member has invalidated.
+func (lem *LeaderElectionManager) GroupElectionForGossip(groupHash string) (state GroupElectionState, decided, known bool) {
+	lem.mu.RLock()
+	le, ok := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if !ok {
+		return GroupElectionState{}, false, false
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	if le.Term == 0 {
+		return GroupElectionState{}, false, false
+	}
+	if le.Active || le.Leader == "" || le.leaderTerm != le.Term {
+		return GroupElectionState{}, false, true
+	}
+	return GroupElectionState{
+		Leader:       string(le.Leader),
+		Term:         uint32(le.Term),
+		LeaderExpiry: le.LeaderExpiry,
+	}, true, true
 }
 
 // ApplyGossipElection updates the LEM with election state received via gossip.
@@ -659,6 +703,7 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 
 		le.Leader = AgentId(state.Leader)
 		le.Term = uint64(state.Term)
+		le.leaderTerm = le.Term
 		le.LeaderExpiry = state.LeaderExpiry
 		le.Active = false
 	}
@@ -924,6 +969,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 	// Single agent: become leader immediately
 	if expectedPeers == 0 {
 		le.Leader = lem.localID
+		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 		le.Active = false
 		lgElect.Info("single agent, self-elected as leader", "zone", zone)
@@ -1234,6 +1280,7 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 	}
 
 	le.Leader = agreedWinner
+	le.leaderTerm = le.Term
 	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 	le.Active = false
 

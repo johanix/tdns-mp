@@ -21,9 +21,17 @@ import (
 )
 
 // APIgossip returns the /gossip handler. Role-agnostic: depends only
-// on the AgentRegistry and LeaderElectionManager passed in.
-func APIgossip(ar *AgentRegistry, lem *LeaderElectionManager) func(w http.ResponseWriter, r *http.Request) {
+// on the config's AgentRegistry and LeaderElectionManager.
+//
+// It reads them when a request comes in. The routes are set up before the
+// role is started, and the election manager is created at that start: a
+// handler given the manager at registration held none for the life of the
+// process, and reported the election from the gossip table alone (#154).
+func APIgossip(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ar := conf.InternalMp.AgentRegistry
+		lem := conf.InternalMp.LeaderElectionManager
+
 		decoder := json.NewDecoder(r.Body)
 		var gp GossipPost
 		if err := decoder.Decode(&gp); err != nil {
