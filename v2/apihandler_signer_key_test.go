@@ -99,10 +99,36 @@ func TestAPIsignerKey(t *testing.T) {
 		t.Errorf("status after the cancel: rollovers %v, want none", st.Rollovers)
 	}
 
+	// policy-algorithm: the owner's algorithm for a role (O4). A name that
+	// is not an algorithm, or one the keystore cannot generate, is refused;
+	// the same algorithm changes nothing; another starts a rollover from the
+	// next tick, and the policy shows it
+	refused(SignerKeyPost{Command: "policy-algorithm", Zone: mpzd.ZoneName, Role: "KSK", Algorithm: "ED25520"}, "not a DNSSEC algorithm name")
+	refused(SignerKeyPost{Command: "policy-algorithm", Zone: mpzd.ZoneName, Role: "KSK", Algorithm: "RSAMD5"}, "the keystore generates")
+	refused(SignerKeyPost{Command: "policy-algorithm", Zone: mpzd.ZoneName, Role: "CSK", Algorithm: "ED25519"}, "KSK or ZSK")
+	refused(SignerKeyPost{Command: "policy-algorithm", Zone: "apikey.plain.example.", Role: "KSK", Algorithm: "ED25519"}, "not run by tdns-mp")
+	if resp := post(SignerKeyPost{Command: "policy-algorithm", Zone: mpzd.ZoneName, Role: "KSK", Algorithm: "ed25519"}); resp.Error || !strings.Contains(resp.Msg, "is ED25519 already") {
+		t.Errorf("policy-algorithm with the algorithm in place: %+v", resp)
+	}
+	if resp := post(SignerKeyPost{Command: "policy-algorithm", Zone: mpzd.ZoneName, Role: "ksk", Algorithm: "ECDSAP256SHA256"}); resp.Error || !strings.Contains(resp.Msg, "the KSK algorithm is ECDSAP256SHA256 (was ED25519)") || !strings.Contains(resp.Msg, "algorithm rollover runs from the next tick") {
+		t.Errorf("policy-algorithm: %+v", resp)
+	}
+	if st := post(SignerKeyPost{Command: "policy", Zone: mpzd.ZoneName}).Status; st == nil || st.Policy.KSKAlgorithm != 13 || st.Policy.ZSKAlgorithm != 15 {
+		t.Errorf("after policy-algorithm: %+v, want the KSK on ECDSAP256SHA256 (13) and the ZSK on ED25519 (15)", st.Policy)
+	}
+	// with no key signing yet there is no rollover to report or cancel: the
+	// cancel clears a request as before
+	if st := post(SignerKeyPost{Command: "status", Zone: mpzd.ZoneName}).Status; st == nil || len(st.AlgorithmRollovers) != 0 {
+		t.Errorf("status with no key signing: algorithm rollovers %+v, want none", st.AlgorithmRollovers)
+	}
+	if resp := post(SignerKeyPost{Command: "rollover-cancel", Zone: mpzd.ZoneName, Role: "KSK"}); resp.Error || !strings.Contains(resp.Msg, "request cleared") {
+		t.Errorf("rollover-cancel with no rollover under way: %+v", resp)
+	}
+
 	// policy-set: the binding is tdns's (SetZonePolicyForOwner): a policy
 	// tdns does not know is refused by it, on an owned zone; then a stand-in
 	// that changes the bound policy, and the driver's policy follows on the
-	// same call
+	// same call; the owner's algorithm stays over the binding (Q1)
 	refused(SignerKeyPost{Command: "policy-set", Zone: mpzd.ZoneName, Policy: "longer"}, "does not exist")
 	refused(SignerKeyPost{Command: "policy-set", Zone: "apikey.plain.example.", Policy: "longer"}, "not run by tdns-mp")
 	saved := bindPolicyForOwner
@@ -120,7 +146,7 @@ func TestAPIsignerKey(t *testing.T) {
 	if bound != mpzd.ZoneName+"=longer" {
 		t.Errorf("the binding was asked for %q", bound)
 	}
-	if st := post(SignerKeyPost{Command: "policy", Zone: mpzd.ZoneName}).Status; st == nil || st.PolicyName != "longer" || st.Policy.KSKLifetime.Hours() != 90*24 {
-		t.Errorf("after policy-set: name %q KSK lifetime %v, want longer and 2160h", st.PolicyName, st.Policy.KSKLifetime)
+	if st := post(SignerKeyPost{Command: "policy", Zone: mpzd.ZoneName}).Status; st == nil || st.PolicyName != "longer" || st.Policy.KSKLifetime.Hours() != 90*24 || st.Policy.KSKAlgorithm != 13 {
+		t.Errorf("after policy-set: name %q KSK lifetime %v algorithm %d, want longer, 2160h and the owner's ECDSAP256SHA256 (13) kept", st.PolicyName, st.Policy.KSKLifetime, st.Policy.KSKAlgorithm)
 	}
 }

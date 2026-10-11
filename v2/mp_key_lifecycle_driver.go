@@ -113,6 +113,15 @@ type ZoneKeyLifecycle struct {
 	// the operator has been told (R9)
 	undecidedSince map[uint16]time.Time
 	undecidedTold  map[uint16]bool
+	// An algorithm rollover (table §6 O4). algorithms are the owner's
+	// algorithms by role, set through the command (design Q1: the
+	// algorithm is the owner's field; tdns's policy binding refuses a
+	// change of it) and persisted (MPOwnerAlgorithm), so a restart keeps a
+	// roll under way; they override the bound policy's in Policy.
+	// successor is the algorithm of the key being promoted while the key
+	// it replaces is retired (T10's guard).
+	algorithms map[string]uint8
+	successor  uint8
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -127,7 +136,7 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 	}
 	l := &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
 		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known,
-		dsPresent: map[uint16]dsPresence{}, promoteWait: map[uint16]time.Time{}, promoteTold: map[uint16]bool{}}
+		dsPresent: map[uint16]dsPresence{}, promoteWait: map[uint16]time.Time{}, promoteTold: map[uint16]bool{}, algorithms: map[string]uint8{}}
 	if kdb != nil {
 		if _, err := kdb.DB.Exec(HsyncTables["MPKeyDistribution"]); err != nil {
 			// without the table nothing in flight would survive a restart:
@@ -143,6 +152,9 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 		}
 		if _, err := kdb.DB.Exec(HsyncTables["MPParentDS"]); err != nil && l.initErr == nil {
 			l.initErr = fmt.Errorf("the MPParentDS table of %s: %w", l.Zone, err)
+		}
+		if _, err := kdb.DB.Exec(HsyncTables["MPOwnerAlgorithm"]); err != nil && l.initErr == nil {
+			l.initErr = fmt.Errorf("the MPOwnerAlgorithm table of %s: %w", l.Zone, err)
 		}
 	}
 	return l
@@ -265,7 +277,42 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 	z.RolloverRequested = l.rolling == role
 	z.RolloverPending = l.rolls[role]
 	z.AlgRollInFlight = l.algRollInFlight(role, all)
+	z.SuccessorAlgorithm = l.successor
+	// the algorithm rollover's view (O4): the policy's algorithm for the
+	// role, whether a key of the role signs with another, the policy's
+	// keys on their way or signing, and whether the KSK side is done
+	z.PolicyAlgorithm = l.policyAlgorithm(role)
+	z.KSKSideDone = true
+	for _, o := range all {
+		if o.State == KeyStateActive && o.Flags&dns.SEP != 0 && o.Algorithm != l.policyAlgorithm("KSK") {
+			z.KSKSideDone = false
+		}
+		if roleOf(o.Flags) != role {
+			continue
+		}
+		if o.State == KeyStateActive && o.Algorithm != z.PolicyAlgorithm {
+			z.AlgRollPending = true
+		}
+		if o.Algorithm == z.PolicyAlgorithm {
+			switch o.State {
+			case KeyStateCreated, KeyStateMpdist, KeyStatePublished, KeyStateStandby, KeyStateActive:
+				z.PolicyAlgKeys++
+				if o.State == KeyStateActive && o.KeyTag != k.KeyTag {
+					z.PolicyAlgActive = true
+				}
+			}
+		}
+	}
 	return z
+}
+
+// policyAlgorithm is the policy's algorithm for the role, the owner's
+// override included (it is in Policy already).
+func (l *ZoneKeyLifecycle) policyAlgorithm(role string) uint8 {
+	if role == "KSK" {
+		return l.Policy.KSKAlgorithm
+	}
+	return l.Policy.ZSKAlgorithm
 }
 
 // algRollInFlight: an active key of the role whose algorithm is not the
@@ -390,15 +437,20 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 		}
 	case KeyStateActive:
 		l.Wire.Resign(l.Zone)
-		// the previous active key of the role retires (T10)
+		// the previous active key of the role retires (T10); during an
+		// algorithm rollover T10's guard keeps the old algorithm's ZSK
+		// signing while a KSK of its algorithm does, and T19 retires it
+		l.successor = k.Algorithm
 		for _, tag := range keytagsOf(all) {
 			o := all[tag]
 			if o.State == KeyStateActive && o.KeyTag != keyid && roleOf(o.Flags) == roleOf(k.Flags) {
 				if _, _, err := l.applyLocked(o.KeyTag, EvSuccessorActive); err != nil {
+					l.successor = 0
 					return k.State, next, err
 				}
 			}
 		}
+		l.successor = 0
 	case KeyStateRetired:
 		l.Wire.Resign(l.Zone)
 	case KeyStateMpremove:
@@ -834,13 +886,36 @@ func (l *ZoneKeyLifecycle) Tick() error {
 				fail(keyid, "margin", err)
 			}
 		}
+		// a key on its way that signs with an algorithm the policy no
+		// longer names is given up on (C2 by the machine, T7 to T7''): it
+		// never signed, so nothing depends on it, and the policy's
+		// algorithm takes its place in the pipeline (O4). A rejected one
+		// goes the same way: its rejection is moot.
+		switch k.State {
+		case KeyStateMpdist, KeyStatePublished, KeyStateStandby:
+			if k.Algorithm != l.policyAlgorithm(roleOf(k.Flags)) {
+				l.logf("key lifecycle: a key of an algorithm the policy no longer names is withdrawn", "zone", l.Zone, "keyid", keyid, "role", roleOf(k.Flags), "state", k.State, "algorithm", dns.AlgorithmToString[k.Algorithm], "policy", dns.AlgorithmToString[l.policyAlgorithm(roleOf(k.Flags))])
+				if _, _, err := l.applyLocked(keyid, CmdWithdraw); err != nil {
+					fail(keyid, "withdraw (algorithm)", err)
+				}
+			}
+		}
 	}
 	for _, role := range []string{"KSK", "ZSK"} {
 		all, err = l.rows()
 		if err != nil {
 			return err
 		}
-		pipeline, active, standbys := 0, 0, []tdns.DnssecKeyWithTimestamps{}
+		// the pipeline and the standbys are the policy's algorithm's: a key
+		// of another algorithm on its way is being withdrawn (above) and is
+		// never promoted. policyKeys counts the policy's algorithm in
+		// created..active, and algPending says the active key signs with
+		// another: an algorithm rollover (O4) mints the policy's algorithm
+		// when nothing of it is on its way or signing, and promotes it once
+		// standby (a KSK once the parent has served its DS for the DS TTL,
+		// T9's wait, O7)
+		alg := l.policyAlgorithm(role)
+		pipeline, policyKeys, active, algPending, standbys := 0, 0, 0, false, []tdns.DnssecKeyWithTimestamps{}
 		var oldest *tdns.DnssecKeyWithTimestamps
 		for _, keyid := range keytagsOf(all) {
 			k := all[keyid]
@@ -849,12 +924,21 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			}
 			switch k.State {
 			case KeyStateCreated, KeyStateMpdist, KeyStatePublished, KeyStateStandby:
+				if k.Algorithm != alg {
+					continue
+				}
 				pipeline++
+				policyKeys++
 				if k.State == KeyStateStandby {
 					standbys = append(standbys, k)
 				}
 			case KeyStateActive:
 				active++
+				if k.Algorithm != alg {
+					algPending = true
+				} else {
+					policyKeys++
+				}
 				kk := k
 				// the oldest by active_at; a key with no stamp counts as the
 				// oldest, so a missing stamp never hides a due rollover
@@ -869,8 +953,9 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			want, lifetime = l.Policy.StandbyKSK, l.Policy.KSKLifetime
 		}
 		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
-		// T9: promote for a rollover requested or due, or a role without an active key
-		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due) {
+		// T9: promote for a rollover requested or due, a role without an
+		// active key, or an algorithm rollover under way
+		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due || algPending) {
 			sort.Slice(standbys, func(i, j int) bool { return standbys[i].KeyTag < standbys[j].KeyTag })
 			l.rolling = role
 			_, to, err := l.applyLocked(standbys[0].KeyTag, EvPromote)
@@ -888,14 +973,34 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		}
 		// T1: mint what is missing, and send it on its way (T2) at once; a
 		// rollover requested with nothing in the pipeline (T16 with a standby
-		// count of 0, the default for KSKs) mints the key it will promote
-		if pipeline < want || (active == 0 && pipeline == 0) || (due && pipeline == 0) || (l.rolls[role] && pipeline == 0) {
+		// count of 0, the default for KSKs) mints the key it will promote; an
+		// algorithm rollover mints the policy's algorithm when no key of it
+		// is on its way or signing (O4)
+		if pipeline < want || (active == 0 && pipeline == 0) || (due && pipeline == 0) || (l.rolls[role] && pipeline == 0) || (algPending && policyKeys == 0) {
 			keyid, err := l.Mint(role)
 			if err != nil {
 				return err
 			}
 			if _, _, err := l.applyLocked(keyid, EvDistributed); err != nil {
 				return err
+			}
+		}
+	}
+	// E14, T19: the old algorithm's ZSK leaves last. Once a ZSK of the
+	// policy's algorithm signs and no KSK of another algorithm than the
+	// policy's does (the old KSK retired on T10, its successor's DS having
+	// been at the parent for the DS TTL), a ZSK that still signs with
+	// another algorithm retires; the guard decides, the event is offered to
+	// every active ZSK of another algorithm than the policy's
+	all, err = l.rows()
+	if err != nil {
+		return err
+	}
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if k.State == KeyStateActive && k.Flags&dns.SEP == 0 && k.Algorithm != l.policyAlgorithm("ZSK") {
+			if _, _, err := l.applyLocked(keyid, EvAlgSuperseded); err != nil {
+				fail(keyid, "algorithm superseded", err)
 			}
 		}
 	}
@@ -914,6 +1019,9 @@ func (l *ZoneKeyLifecycle) Reload() error {
 	l.known = map[string]bool{}
 	for _, p := range l.Wire.OtherSigners(l.Zone) {
 		l.known[p] = true
+	}
+	if err := l.loadAlgorithms(); err != nil {
+		return err
 	}
 	if err := l.adopt(all); err != nil {
 		return err
@@ -1033,10 +1141,228 @@ func (l *ZoneKeyLifecycle) RolloverRequests() []string {
 }
 
 // SetPolicy replaces the policy the driver applies from the next tick on.
+// The owner's algorithms (SetAlgorithm) stay: they are the owner's field,
+// not the bound policy's (design Q1).
 func (l *ZoneKeyLifecycle) SetPolicy(p LifecyclePolicy) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.Policy = p
+	l.applyAlgorithms()
+}
+
+// --- the algorithm rollover (transition table §6 O4) ----------------------------
+
+// SetAlgorithm sets the owner's algorithm for the role, persisted, and
+// returns the one it replaces. A change starts an algorithm rollover from
+// the next tick: a key of the new algorithm is minted, distributed,
+// published and standby as any key; a new KSK is promoted once the parent
+// has served its DS for the DS TTL (T9's wait, O7) and the old KSK retires
+// in that step; the old ZSK keeps signing beside the new one until the KSK
+// side is done (T10's guard, T19); the old keys then leave as any retired
+// key (ds=0, the parent, the margin, the strip). A key of the old
+// algorithm not yet signing is withdrawn. Setting the algorithm back
+// before anything of the new one signs cancels the roll (the new keys are
+// withdrawn); after that it is a rollover back, through the same steps.
+func (l *ZoneKeyLifecycle) SetAlgorithm(role string, alg uint8) (uint8, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if role != "KSK" && role != "ZSK" {
+		return 0, fmt.Errorf("role %q: KSK or ZSK", role)
+	}
+	if alg == 0 {
+		return 0, fmt.Errorf("no algorithm")
+	}
+	old := l.policyAlgorithm(role)
+	l.algorithms[role] = alg
+	l.applyAlgorithms()
+	if err := l.saveAlgorithm(role); err != nil {
+		delete(l.algorithms, role)
+		l.applyAlgorithms()
+		return old, err
+	}
+	l.logf("key lifecycle: the owner's algorithm set", "zone", l.Zone, "role", role, "from", dns.AlgorithmToString[old], "to", dns.AlgorithmToString[alg])
+	return old, nil
+}
+
+// applyAlgorithms puts the owner's algorithms over the bound policy's.
+func (l *ZoneKeyLifecycle) applyAlgorithms() {
+	if a := l.algorithms["KSK"]; a != 0 {
+		l.Policy.KSKAlgorithm = a
+	}
+	if a := l.algorithms["ZSK"]; a != 0 {
+		l.Policy.ZSKAlgorithm = a
+	}
+}
+
+// ErrAlgRollSigns: the algorithm rollover cannot be cancelled, a key of
+// the new algorithm already signs.
+var ErrAlgRollSigns = errors.New("a key of the new algorithm already signs")
+
+// CancelAlgorithmRollover takes the role's algorithm back to the one its
+// active key signs with, which withdraws the new algorithm's keys on the
+// next tick (they are keys of an algorithm the policy no longer names).
+// The rule: a key that does not sign yet can be withdrawn; once a key of
+// the new algorithm signs the roll completes on its own, and the way back
+// is a change of the algorithm once it has, a rollover through the same
+// steps (ErrAlgRollSigns). Returns the algorithms the roll was from and to.
+func (l *ZoneKeyLifecycle) CancelAlgorithmRollover(role string) (from, to uint8, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return 0, 0, err
+	}
+	to = l.policyAlgorithm(role)
+	from, _, ok := l.oldAlgorithmKey(role, all)
+	if !ok {
+		return 0, to, fmt.Errorf("the %s algorithm rollover of %s to %s: no key of another algorithm signs or has signed; nothing to go back to", role, l.Zone, dns.AlgorithmToString[to])
+	}
+	for _, k := range all {
+		if roleOf(k.Flags) == role && k.State == KeyStateActive && k.Algorithm == to {
+			return from, to, fmt.Errorf("the %s algorithm rollover of %s to %s: %w", role, l.Zone, dns.AlgorithmToString[to], ErrAlgRollSigns)
+		}
+	}
+	l.algorithms[role] = from
+	l.applyAlgorithms()
+	if err := l.saveAlgorithm(role); err != nil {
+		return from, to, err
+	}
+	l.logf("key lifecycle: the algorithm rollover cancelled; the keys of the new algorithm are withdrawn", "zone", l.Zone, "role", role, "from", dns.AlgorithmToString[from], "to", dns.AlgorithmToString[to])
+	return from, to, nil
+}
+
+// AlgRolloverStatus is an algorithm rollover of one role as the operator
+// sees it: the algorithm the old key signs with, the policy's, and the
+// step the roll is at, as a sentence.
+type AlgRolloverStatus struct {
+	Role string `json:"role"`
+	From uint8  `json:"from"`
+	To   uint8  `json:"to"`
+	Step string `json:"step"`
+}
+
+// AlgorithmRollovers lists the algorithm rollovers under way: a role whose
+// key signs, or has signed and not yet left, with another algorithm than
+// the policy's.
+func (l *ZoneKeyLifecycle) AlgorithmRollovers() []AlgRolloverStatus {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return nil
+	}
+	var out []AlgRolloverStatus
+	for _, role := range []string{"KSK", "ZSK"} {
+		if st, ok := l.algRolloverOf(role, all); ok {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// oldAlgorithmKey is the role's key of another algorithm than the policy's
+// that signs or has signed and not yet left: the one an algorithm
+// rollover replaces. Its algorithm and state, the furthest along when
+// there are several. A key of another algorithm that never signed (one on
+// its way, withdrawn at the change) is no such key.
+func (l *ZoneKeyLifecycle) oldAlgorithmKey(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) (alg uint8, state string, ok bool) {
+	to := l.policyAlgorithm(role)
+	rank := map[string]int{KeyStateActive: 3, KeyStateRetired: 2, KeyStateMpremove: 1}
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if roleOf(k.Flags) != role || k.Algorithm == to {
+			continue
+		}
+		if k.State != KeyStateActive && k.ActiveAt == nil {
+			continue
+		}
+		if rank[k.State] > rank[state] {
+			alg, state, ok = k.Algorithm, k.State, true
+		}
+	}
+	return alg, state, ok
+}
+
+func (l *ZoneKeyLifecycle) algRolloverOf(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) (AlgRolloverStatus, bool) {
+	to := l.policyAlgorithm(role)
+	st := AlgRolloverStatus{Role: role, To: to}
+	from, oldState, ok := l.oldAlgorithmKey(role, all)
+	if !ok {
+		return st, false
+	}
+	st.From = from
+	var newState string
+	order := map[string]int{KeyStateCreated: 1, KeyStateMpdist: 2, KeyStatePublished: 3, KeyStateStandby: 4, KeyStateActive: 5}
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if roleOf(k.Flags) == role && k.Algorithm == to && order[k.State] > order[newState] {
+			newState = k.State
+		}
+	}
+	role = strings.ToLower(role)
+	switch {
+	case oldState == KeyStateRetired && role == "ksk":
+		st.Step = "the old KSK is retired and its DS withdrawn; it leaves once the parent no longer serves the DS and the withdrawal margin has passed"
+	case oldState == KeyStateRetired:
+		st.Step = "the old ZSK is retired; it leaves once the withdrawal margin has passed"
+	case oldState == KeyStateMpremove:
+		st.Step = "the old " + strings.ToUpper(role) + " has left the DNSKEY RRset; its removal is being confirmed by the other signing providers"
+	case newState == "":
+		st.Step = "a " + strings.ToUpper(role) + " of the new algorithm is minted on the next tick"
+	case newState == KeyStateCreated || newState == KeyStateMpdist:
+		st.Step = "the new " + strings.ToUpper(role) + " is on its way to the other signing providers"
+	case newState == KeyStatePublished:
+		st.Step = "the new " + strings.ToUpper(role) + " is published; waiting for the DNSKEY RRset to propagate"
+	case newState == KeyStateStandby && role == "ksk":
+		st.Step = "the new KSK is standby and its DS is in the zone's DS set; it signs once the parent has served the DS for the DS TTL, and the old KSK retires then"
+	case newState == KeyStateStandby:
+		st.Step = "the new ZSK is standby; it signs from the next tick"
+	case newState == KeyStateActive && role == "zsk":
+		st.Step = "both ZSKs sign; the old one retires once no KSK of the old algorithm signs"
+	default:
+		st.Step = "both " + strings.ToUpper(role) + "s sign"
+	}
+	return st, true
+}
+
+func (l *ZoneKeyLifecycle) saveAlgorithm(role string) error {
+	if l.KDB == nil {
+		return nil
+	}
+	if _, err := l.KDB.DB.Exec(`INSERT INTO MPOwnerAlgorithm (zonename, role, algorithm) VALUES (?, ?, ?)
+		ON CONFLICT(zonename, role) DO UPDATE SET algorithm=excluded.algorithm`, l.Zone, role, int(l.algorithms[role])); err != nil {
+		return fmt.Errorf("saving the owner's %s algorithm of %s: %w", role, l.Zone, err)
+	}
+	return nil
+}
+
+// loadAlgorithms reads the owner's algorithms back at a restart (T15) and
+// puts them over the bound policy's.
+func (l *ZoneKeyLifecycle) loadAlgorithms() error {
+	if l.KDB == nil {
+		return nil
+	}
+	rows, err := l.KDB.DB.Query(`SELECT role, algorithm FROM MPOwnerAlgorithm WHERE zonename=?`, l.Zone)
+	if err != nil {
+		return fmt.Errorf("read the owner's algorithms of %s: %w", l.Zone, err)
+	}
+	defer rows.Close()
+	l.algorithms = map[string]uint8{}
+	for rows.Next() {
+		var role string
+		var alg int
+		if err := rows.Scan(&role, &alg); err != nil {
+			return err
+		}
+		if alg > 0 && alg < 256 {
+			l.algorithms[role] = uint8(alg)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	l.applyAlgorithms()
+	return nil
 }
 
 // --- the distributions in flight, persisted ----------------------------------

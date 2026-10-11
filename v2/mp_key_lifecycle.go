@@ -50,6 +50,7 @@ const (
 	EvRestart         KeyEvent = "restart"          // E11
 	EvResend          KeyEvent = "resend"           // E12: a distribution unconfirmed for too long
 	EvDSPresent       KeyEvent = "ds-present"       // E13: the parent serves the key's DS (O7)
+	EvAlgSuperseded   KeyEvent = "alg-superseded"   // E14: a key of the policy's algorithm signs for the role, and the KSK side of the algorithm rollover is done (O4)
 	CmdRetry          KeyEvent = "retry"            // C1
 	CmdWithdraw       KeyEvent = "withdraw"         // C2
 )
@@ -140,6 +141,25 @@ type ZoneView struct {
 	RolloverRequested  bool // the promotion under way is a rollover (T9)
 	RolloverPending    bool // a rollover of the role has been requested and not fired (C3, T1)
 	AlgRollInFlight    bool
+	// An algorithm rollover (table §6 O4). PolicyAlgorithm is the policy's
+	// algorithm for the key's role. AlgRollPending: a key of the role signs
+	// with another algorithm than the policy's, so the roll has not reached
+	// the old key's retirement yet. PolicyAlgKeys counts the keys of the
+	// role and the policy's algorithm in created..active (T1 mints one when
+	// there is none); PolicyAlgActive says one of them signs. KSKSideDone:
+	// no KSK signs with another algorithm than the policy's KSK algorithm,
+	// so the old algorithm's ZSK may retire (T10's guard, T19): its
+	// signatures are needed as long as a validator may still reach the
+	// zone through the old algorithm's DS. SuccessorAlgorithm, on E6 seen
+	// from the key a promotion replaces, is the promoted key's algorithm:
+	// a same-algorithm successor retires the key as always; 0 when not
+	// stated.
+	PolicyAlgorithm    uint8
+	AlgRollPending     bool
+	PolicyAlgKeys      int
+	PolicyAlgActive    bool
+	KSKSideDone        bool
+	SuccessorAlgorithm uint8
 	// StandbyCount is the policy's standby count for the key's role, and
 	// InPipeline how many keys of the role are in created..standby.
 	StandbyCount   int
@@ -218,8 +238,8 @@ type Transition struct {
 // whose from, event and guard match wins; no row means "no change".
 var KeyLifecycleTable = []Transition{
 	{"T1", "", EvMint, func(k KeyView, z ZoneView) bool {
-		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole || (z.RolloverPending && z.InPipeline == 0)
-	}, KeyStateCreated, "minted through tdns's keystore, state and columns named"},
+		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole || (z.RolloverPending && z.InPipeline == 0) || (z.AlgRollPending && z.PolicyAlgKeys == 0)
+	}, KeyStateCreated, "minted through tdns's keystore, state and columns named; an algorithm rollover mints the policy's algorithm when no key of it is on its way or signing (O4)"},
 	{"T2", KeyStateCreated, EvDistributed, nil, KeyStateMpdist, "the distribution recorded with the signing providers expected to confirm"},
 	{"T3", KeyStateMpdist, EvApplied, func(k KeyView, z ZoneView) bool { return allOtherSignersApplied(z) }, KeyStatePublished, "published_at stamped"},
 	{"T3'", KeyStateMpdist, EvDistributed, func(k KeyView, z ZoneView) bool { return len(z.OtherSigners) == 0 }, KeyStatePublished, "no other signing provider: at once"},
@@ -236,7 +256,9 @@ var KeyLifecycleTable = []Transition{
 	{"T9", KeyStateStandby, EvPromote, func(k KeyView, z ZoneView) bool {
 		return (!z.ActiveOfRoleAndAlg || z.RolloverRequested || z.AlgRollInFlight) && !distributionIncomplete(z) && parentDSWaitMet(k, z)
 	}, KeyStateActive, "the previous active key of the role retires in the same step; resign asked of tdns; a SEP key only once the parent has served its DS for the DS TTL (O7)"},
-	{"T10", KeyStateActive, EvSuccessorActive, nil, KeyStateRetired, "retired_at stamped; a KSK's ds withdrawal starts: ds=0"},
+	{"T10", KeyStateActive, EvSuccessorActive, func(k KeyView, z ZoneView) bool {
+		return k.SEP || z.SuccessorAlgorithm == 0 || k.Algorithm == z.SuccessorAlgorithm || z.KSKSideDone
+	}, KeyStateRetired, "retired_at stamped; a KSK's ds withdrawal starts: ds=0. During an algorithm rollover a ZSK of the old algorithm keeps signing beside its successor while a KSK of the old algorithm still signs (O4): it retires on T19"},
 	{"T11", KeyStateRetired, EvDSGone, nil, KeyStateRetired, "the parent no longer serves the DS; noted for T12"},
 	{"T12", KeyStateRetired, EvMargin, func(k KeyView, z ZoneView) bool {
 		if k.SEP && !k.DSGone {
@@ -250,6 +272,9 @@ var KeyLifecycleTable = []Transition{
 	{"T14b", KeyStateMpremove, EvSignersChanged, nil, KeyStateMpremove, "the expected set recomputed; T13 re-evaluated"},
 	{"T15", "*", EvRestart, nil, "*", "in-flight distributions re-sent; timers re-armed from the stamps (P4)"},
 	{"T18", KeyStateStandby, EvDSPresent, func(k KeyView, z ZoneView) bool { return k.SEP }, KeyStateStandby, "the parent serves the key's DS: since when, and the DS TTL, noted for T9 (O7)"},
+	{"T19", KeyStateActive, EvAlgSuperseded, func(k KeyView, z ZoneView) bool {
+		return !k.SEP && k.Algorithm != z.PolicyAlgorithm && z.PolicyAlgActive && z.KSKSideDone
+	}, KeyStateRetired, "the old algorithm's ZSK leaves last (O4): once a ZSK of the policy's algorithm signs and no KSK of another algorithm than the policy's does, it retires as on T10"},
 }
 
 // Next applies the table to one key: the state after the event, and whether

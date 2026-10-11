@@ -535,6 +535,9 @@ type KeyLifecycleStatus struct {
 	Foreign      []KeyLifecycleKey    `json:"foreign,omitempty"`
 	InFlight     []DistributionStatus `json:"in_flight,omitempty"`
 	Rollovers    []string             `json:"rollovers,omitempty"`
+	// AlgorithmRollovers are the algorithm rollovers under way, by role
+	// (table §6 O4): the old algorithm, the policy's, and the step.
+	AlgorithmRollovers []AlgRolloverStatus `json:"algorithm_rollovers,omitempty"`
 }
 
 // Zones lists the zones tdns-mp's state machine runs.
@@ -555,7 +558,7 @@ func (e *KeyLifecycleEngine) Status(zone string) (*KeyLifecycleStatus, error) {
 		return nil, err
 	}
 	zd, _ := tdns.Zones.Get(l.Zone)
-	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests()}
+	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests(), AlgorithmRollovers: l.AlgorithmRollovers()}
 	if zd != nil {
 		st.PolicyName = zd.DnssecPolicyName
 	}
@@ -615,7 +618,12 @@ func (e *KeyLifecycleEngine) RequestRollover(zone, role string) (string, error) 
 	return fmt.Sprintf("Zone %s: %s rollover requested; the next standby %s is promoted on the next tick (a standby is minted first if none is ready)", l.Zone, r, r), nil
 }
 
-// CancelRollover withdraws a rollover request not yet fired.
+// CancelRollover withdraws a rollover request not yet fired. During an
+// algorithm rollover of the role it takes the algorithm back instead, as
+// long as nothing of the new algorithm signs yet: the new keys are
+// withdrawn on the next tick. Once a key of the new algorithm signs the
+// cancel is refused: the roll completes, and the way back is a change of
+// the algorithm once it has (a rollover through the same steps).
 func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 	l, err := e.driverOf(zone)
 	if err != nil {
@@ -625,8 +633,67 @@ func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	for _, roll := range l.AlgorithmRollovers() {
+		if roll.Role != r {
+			continue
+		}
+		from, to, err := l.CancelAlgorithmRollover(r)
+		if errors.Is(err, ErrAlgRollSigns) {
+			return "", fmt.Errorf("zone %s: the %s algorithm rollover to %s cannot be cancelled: a %s of %s already signs, and the roll completes on its own; to go back, set the %s algorithm to %s again once it has, which is a rollover through the same steps",
+				l.Zone, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[roll.From])
+		}
+		if err != nil {
+			return "", err
+		}
+		l.CancelRollover(r)
+		return fmt.Sprintf("Zone %s: the %s algorithm rollover to %s is cancelled; the %s algorithm is %s again, and the keys of %s not yet signing are withdrawn on the next tick",
+			l.Zone, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[from], dns.AlgorithmToString[to]), nil
+	}
 	l.CancelRollover(r)
 	return fmt.Sprintf("Zone %s: %s rollover request cleared", l.Zone, r), nil
+}
+
+// lifecycleAlgorithm reads an algorithm name for the owner's policy: one
+// tdns's keystore can generate a key of.
+func lifecycleAlgorithm(name string) (uint8, error) {
+	alg, ok := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(name))]
+	if !ok {
+		return 0, fmt.Errorf("algorithm %q is not a DNSSEC algorithm name", name)
+	}
+	switch alg {
+	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384, dns.ED25519, dns.RSASHA256, dns.RSASHA512:
+		return alg, nil
+	}
+	return 0, fmt.Errorf("algorithm %s: the keystore generates ECDSAP256SHA256, ECDSAP384SHA384, ED25519, RSASHA256 and RSASHA512", dns.AlgorithmToString[alg])
+}
+
+// SetAlgorithm changes the owner's algorithm for a role of an owned zone
+// (tdns-mpcli signer key policy --ksk-algorithm, --zsk-algorithm): an
+// algorithm rollover from the next tick (table §6 O4). The bound tdns
+// policy is not touched: tdns's policy binding refuses an algorithm
+// change on an owned zone, the algorithm being the owner's field (Q1).
+func (e *KeyLifecycleEngine) SetAlgorithm(zone, role, algorithm string) (string, error) {
+	l, err := e.driverOf(zone)
+	if err != nil {
+		return "", err
+	}
+	r, err := lifecycleRole(role)
+	if err != nil {
+		return "", err
+	}
+	alg, err := lifecycleAlgorithm(algorithm)
+	if err != nil {
+		return "", err
+	}
+	old, err := l.SetAlgorithm(r, alg)
+	if err != nil {
+		return "", err
+	}
+	if old == alg {
+		return fmt.Sprintf("Zone %s: the %s algorithm is %s already; nothing changes", l.Zone, r, dns.AlgorithmToString[alg]), nil
+	}
+	return fmt.Sprintf("Zone %s: the %s algorithm is %s (was %s); an algorithm rollover runs from the next tick: a %s of %s is minted, distributed and published, it signs beside the old one once standby (a KSK once the parent has served its DS for the DS TTL), and the old algorithm's keys leave after that. signer key status shows the step; signer key rollover cancel takes the algorithm back while nothing of %s signs",
+		l.Zone, r, dns.AlgorithmToString[alg], dns.AlgorithmToString[old], r, dns.AlgorithmToString[alg], dns.AlgorithmToString[alg]), nil
 }
 
 // Retry sends a key's distribution (or removal) again, the rejection

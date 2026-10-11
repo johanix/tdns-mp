@@ -41,6 +41,8 @@ type hProvider struct {
 	rejectedLate map[uint16]bool   // a joiner's rejection of a key already serving
 	minted       map[uint16]bool
 	signed       map[uint16]bool // keys seen with sign=1
+	signing      map[uint16]bool // keys with sign=1 as of the last check, for P11
+	keyInfo      map[uint16]hKeyInfo
 	// parentServes is what the harness's parent serves for this provider's
 	// zone: the ds=1 SEP keys as of the end of the last tick, one tick
 	// behind the provider's own DS intent, as a real parent is behind the
@@ -52,6 +54,13 @@ type hProvider struct {
 type parentSnap struct {
 	at     time.Time
 	served map[uint16]bool
+}
+
+// hKeyInfo is what the harness remembers of a key once seen: its algorithm
+// and role, for P11 after the key has stopped signing.
+type hKeyInfo struct {
+	alg uint8
+	sep bool
 }
 
 type mpHarness struct {
@@ -207,7 +216,8 @@ func newMPHarness(t *testing.T, seed uint64, n int, pol LifecyclePolicy) *mpHarn
 		kdb := newMPTestKeyDB(t)
 		zd := signerTestZone(t, zone, kdb)
 		p := &hProvider{id: id, zone: zone, kdb: kdb, zd: zd, appliedBy: map[uint16]map[string]bool{}, expectedAt: map[uint16][]string{},
-			rejected: map[uint16]bool{}, rejectedRR: map[uint16]string{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{}, parentServes: map[uint16]bool{}}
+			rejected: map[uint16]bool{}, rejectedRR: map[uint16]string{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{},
+			signing: map[uint16]bool{}, keyInfo: map[uint16]hKeyInfo{}, parentServes: map[uint16]bool{}}
 		p.wire = &harnessWire{h: h, me: p, fakeWire: *newFakeWire()}
 		p.driver = NewZoneKeyLifecycle(zone, kdb, h.clock, pol, p.wire)
 		pid := id
@@ -335,11 +345,14 @@ func (h *mpHarness) checkAll(step string) {
 			h.t.Errorf("%s: %s: %v", step, p.id, vs)
 		}
 		signing := map[string]int{}
-		for _, it := range h.inventory(p) {
+		inv := h.inventory(p)
+		policyAlg := map[string]uint8{"KSK": p.driver.Policy.KSKAlgorithm, "ZSK": p.driver.Policy.ZSKAlgorithm}
+		for _, it := range inv {
 			if it.State == DnskeyStateForeign {
 				continue
 			}
 			p.minted[it.KeyTag] = true
+			p.keyInfo[it.KeyTag] = hKeyInfo{alg: it.Algorithm, sep: it.Flags&dns.SEP != 0}
 			role := roleOf(it.Flags)
 			// P1: when a key first signs, every signer it was distributed to
 			// has confirmed applying it
@@ -347,6 +360,11 @@ func (h *mpHarness) checkAll(step string) {
 				signing[fmt.Sprintf("%s/%d", role, it.Algorithm)]++
 				if !p.signed[it.KeyTag] {
 					p.signed[it.KeyTag] = true
+					// O4: a key signs only with the algorithm the policy names
+					// for its role when it is promoted
+					if it.Algorithm != policyAlg[role] {
+						h.t.Errorf("%s: %s key %d (%s) signs with %s, the policy names %s (O4)", step, p.id, it.KeyTag, role, dns.AlgorithmToString[it.Algorithm], dns.AlgorithmToString[policyAlg[role]])
+					}
 					for _, q := range p.expectedAt[it.KeyTag] {
 						if h.signing[q] && !p.appliedBy[it.KeyTag][q] {
 							h.t.Errorf("%s: %s key %d signs but %s never confirmed applying it (P1)", step, p.id, it.KeyTag, q)
@@ -398,6 +416,36 @@ func (h *mpHarness) checkAll(step string) {
 				h.t.Errorf("%s: %s has %d signing keys of %s (P5)", step, p.id, n, k)
 			}
 		}
+		// P11 (O4): the old algorithm's ZSK leaves last. A ZSK that stopped
+		// signing since the last check either has another ZSK of its
+		// algorithm signing (a same-algorithm roll), or no KSK of its
+		// algorithm signs with an algorithm the policy no longer names for
+		// the KSK: a validator that may still reach the zone through the old
+		// algorithm's DS finds the zone's data signed with it.
+		now := map[uint16]bool{}
+		zskSigns := map[uint8]bool{}
+		oldKSKSigns := map[uint8]bool{}
+		for _, it := range inv {
+			if it.State == DnskeyStateForeign || !it.Sign {
+				continue
+			}
+			now[it.KeyTag] = true
+			switch {
+			case it.Flags&dns.SEP == 0:
+				zskSigns[it.Algorithm] = true
+			case it.Algorithm != policyAlg["KSK"]:
+				oldKSKSigns[it.Algorithm] = true
+			}
+		}
+		for tag := range p.signing {
+			if now[tag] {
+				continue
+			}
+			if ki := p.keyInfo[tag]; !ki.sep && !zskSigns[ki.alg] && oldKSKSigns[ki.alg] {
+				h.t.Errorf("%s: %s ZSK %d (%s) stopped signing while a KSK of %s still signs and the policy names another KSK algorithm (P11)", step, p.id, tag, dns.AlgorithmToString[ki.alg], dns.AlgorithmToString[ki.alg])
+			}
+		}
+		p.signing = now
 	}
 }
 
@@ -605,9 +653,10 @@ func standbyOf(h *mpHarness, p *hProvider, role string) []uint16 {
 
 // T3.3: seeded random runs. Events: deliveries with loss, duplication and
 // reordering; answers of pending and rejected; time; rollover requests;
-// a signer leaving or returning; a restart. After every event the
-// invariants and P1-P9; after a fair drain, nothing in flight and every
-// signing provider with an active KSK and ZSK (P4, P6).
+// a signer leaving or returning; a restart; a change of a role's
+// algorithm (O4), back and forth. After every event the invariants and
+// P1-P11; after a fair drain, nothing in flight and every signing
+// provider with an active KSK and ZSK of the policy's algorithms (P4, P6).
 func TestHarnessPropertyRuns(t *testing.T) {
 	// CP4 asks for at least 200 seeded sequences per property in CI (and
 	// 5,000 before a merge, run as a soak); -short keeps a handful
@@ -635,9 +684,27 @@ func TestHarnessPropertyRuns(t *testing.T) {
 			}
 			for ev := 0; ev < 40; ev++ {
 				name := fmt.Sprintf("seed %d event %d", seed, ev)
-				kind := h.rng.IntN(6)
+				kind := h.rng.IntN(7)
 				t.Logf("== %s: kind %d", name, kind)
 				switch kind {
+				case 6:
+					// an algorithm change for one role of one provider: to the
+					// other algorithm, or back (a cancel before the new one
+					// signs, a rollover back after)
+					p := h.providers[h.rng.IntN(n)]
+					role := []string{"KSK", "ZSK"}[h.rng.IntN(2)]
+					cur := p.driver.Policy.ZSKAlgorithm
+					if role == "KSK" {
+						cur = p.driver.Policy.KSKAlgorithm
+					}
+					to := uint8(dns.ECDSAP256SHA256)
+					if cur == to {
+						to = dns.ED25519
+					}
+					t.Logf("%s: %s algorithm %s -> %s", p.id, role, dns.AlgorithmToString[cur], dns.AlgorithmToString[to])
+					if _, err := p.driver.SetAlgorithm(role, to); err != nil {
+						t.Fatalf("%s: %v", name, err)
+					}
 				case 0, 1:
 					h.deliver()
 				case 2:
@@ -689,7 +756,10 @@ func TestHarnessPropertyRuns(t *testing.T) {
 			}
 			h.answer = func(from, to string, keyid uint16) string { return "applied" }
 			h.reorder = false
-			if left := h.drain(12); len(left) != 0 {
+			// an algorithm rollover started by the last events needs the
+			// parent (one tick behind) and the DS TTL, then the margin and
+			// the parent again for the old KSK: more rounds than a key roll
+			if left := h.drain(16); len(left) != 0 {
 				t.Errorf("seed %d: after a fair drain, still in flight: %v (P6)", seed, left)
 			}
 			h.checkAll(fmt.Sprintf("seed %d drained", seed))
@@ -698,9 +768,19 @@ func TestHarnessPropertyRuns(t *testing.T) {
 					continue
 				}
 				for _, role := range []string{"KSK", "ZSK"} {
-					if n := len(activeOf(h, p, role)); n != 1 {
-						t.Errorf("seed %d: %s ends with %d active %s, want 1 (P4)", seed, p.id, n, role)
+					want := p.driver.Policy.ZSKAlgorithm
+					if role == "KSK" {
+						want = p.driver.Policy.KSKAlgorithm
 					}
+					active := activeOf(h, p, role)
+					if len(active) != 1 {
+						t.Errorf("seed %d: %s ends with %d active %s, want 1 (P4)", seed, p.id, len(active), role)
+					} else if got := p.keyInfo[active[0]].alg; got != want {
+						t.Errorf("seed %d: %s ends with its active %s on %s, the policy names %s (O4)", seed, p.id, role, dns.AlgorithmToString[got], dns.AlgorithmToString[want])
+					}
+				}
+				if rolls := p.driver.AlgorithmRollovers(); len(rolls) != 0 {
+					t.Errorf("seed %d: %s ends with an algorithm rollover still reported: %+v", seed, p.id, rolls)
 				}
 			}
 		})
