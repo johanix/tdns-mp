@@ -52,9 +52,10 @@ material is in the topical guides:
 
 - [Architecture](multi-provider-architecture.md)
 - [Synchronization Model](synchronization-model.md)
-- [Making Data Changes](data-changes.md) — `signer
-  keystore rollover` and `signer keystore
-  auto-rollover` commands with examples.
+- [Making Data Changes](data-changes.md) — key
+  rollover: the `signer key` commands for a zone the
+  signer's key machine runs, and `signer keystore
+  dnssec rollover` for the others, with examples.
 - [Operation and Debugging](operation-and-debugging.md)
 - [tdns-auth documentation](../../tdns/guide/) — the
   underlying authoritative server.
