@@ -299,6 +299,9 @@ func (lem *LeaderElectionManager) handleGroupVote(le *LeaderElection, groupHash 
 		if le.keepEarlyVote(term, senderID, vote) {
 			lgElect.Debug("group vote for a term not joined yet, kept for its CALL",
 				"group", groupHash[:8], "from", senderID, "term", term, "our_term", le.Term)
+		} else {
+			lgElect.Debug("ignoring group vote for wrong term",
+				"group", groupHash[:8], "from", senderID, "expected", le.Term, "got", term)
 		}
 		return
 	}
