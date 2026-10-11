@@ -1,6 +1,6 @@
 # Leader lease renewal: one election, not a burst
 
-**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126 and were run on the testbed (Amendment 5), before the change of Amendment 6. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #121 (branch `fix/120-election-renewal`), for issue #120. Run on the testbed 2026-10-11 (Amendment 1) and reviewed (Amendment 2). Amendments 3 and 4, for issues #125 and #129, are implemented in PR #126 and were run on the testbed (Amendment 5), and so was the change of Amendment 6 (Amendment 7). The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -129,3 +129,13 @@ A join that already held every vote armed the vote timeout, released the electio
 On main only a two-member group joins with every vote. With the kept votes of Amendment 3 a larger group can as well, which is how the review came to it. `handleGroupCall` now arms the timeout only when votes are missing, and decides that under the lock, as the per-zone `handleCall` of Amendment 3 already did.
 
 The testbed run of Amendment 5 was made before this change. It alters what a two-member group does at every join: no timeout is armed where one was armed and stopped. The in-process renewal tests of a two-member group run through that join.
+
+### Amendment 7 (2026-10-11): Amendment 6 on the testbed
+
+A second run on the same rig, at the head of PR #126 with the change of Amendment 6, read for what that change touches, the joins of a two-member group:
+
+- **First elections.** Both groups elected in term 1 at their first election, in the same second on every member.
+- **Renewals of both groups**, two each, read against §5: no "group election aborted", one "TTL expiring" line per renewal, on the member that led, the same new term on every member, and one term per renewal. In the two-member group the same member led both times and renewed both times.
+- **Over the whole run**, in every agent's log: no "group election aborted", no "not all members voted", and the same elected terms on every member of each group.
+
+The leader's restart inside its term, the restarts of the other members and the stop were not run again: nothing in them changed after Amendment 5.
