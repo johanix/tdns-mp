@@ -10,14 +10,16 @@ import (
 
 // The owner: a zone it has taken is owned, tdns's lifecycle verbs on it are
 // refused naming the replacement, its DS intent comes from the columns,
-// and a zone it has not taken keeps tdns's hooks (T3.7's half).
+// and a zone it has not taken is tdns's, with no hook of tdns-mp's in the
+// way (T3.7's half, as S4a leaves it).
 func TestOwnerTakesZonesOneByOne(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
-	conf := withSignerHooks(t, kdb)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = kdb
 	owner := RegisterMPKeyLifecycleOwner(conf)
 	t.Cleanup(func() { tdns.RegisterKeyLifecycleOwner(nil) })
 	a := signerTestZone(t, "a.owned.example.", kdb)
-	b := signerTestZone(t, "b.hooked.example.", kdb)
+	b := signerTestZone(t, "b.tdns.example.", kdb)
 	owner.Take(a.ZoneName)
 
 	if !owner.Owns(a.ZoneData) || owner.Owns(b.ZoneData) {
@@ -29,15 +31,20 @@ func TestOwnerTakesZonesOneByOne(t *testing.T) {
 	} else if want := owner.Command("rollover"); !containsStr(err.Error(), want) {
 		t.Errorf("the refusal does not name %q: %v", want, err)
 	}
-	// the zone not taken keeps the hooks: a staged key starts in mpdist
+	// the zone not taken is tdns's: a staged key starts in tdns's own
+	// staged state, published, since tdns-mp registers no hook that would
+	// name mpdist (S4a); nothing of the peers' protocol runs for it
 	k := mpGenKey(t, kdb, b.ZoneName, tdns.DnskeyStateActive, "KSK")
 	_ = k
 	if _, err := tdns.GenerateAndStageKey(kdb, b.ZoneName, "test", dns.ED25519, "ZSK"); err != nil {
-		t.Fatalf("stage a key on the hooked zone: %v", err)
+		t.Fatalf("stage a key on the zone tdns runs: %v", err)
 	}
-	mp, err := tdns.GetDnssecKeysByState(kdb, b.ZoneName, DnskeyStateMpdist)
-	if err != nil || len(mp) != 1 {
-		t.Errorf("the hooked zone's staged key: %d in mpdist (err=%v), want 1", len(mp), err)
+	pub, err := tdns.GetDnssecKeysByState(kdb, b.ZoneName, tdns.DnskeyStatePublished)
+	if err != nil || len(pub) != 1 {
+		t.Errorf("the staged key of the zone tdns runs: %d in published (err=%v), want 1", len(pub), err)
+	}
+	if mp, err := tdns.GetDnssecKeysByState(kdb, b.ZoneName, DnskeyStateMpdist); err != nil || len(mp) != 0 {
+		t.Errorf("the zone tdns runs has %d keys in mpdist (err=%v); no hook stages keys there any more", len(mp), err)
 	}
 	if _, err := tdns.GenerateAndStageKey(kdb, a.ZoneName, "test", dns.ED25519, "ZSK"); err == nil || !errors.Is(err, tdns.ErrZoneOwned) {
 		t.Errorf("staging a key on the owned zone: %v, want ErrZoneOwned", err)

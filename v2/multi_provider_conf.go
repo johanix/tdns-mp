@@ -79,13 +79,22 @@ type MultiProviderConf struct {
 	// SignerOptions: list of signer-specific option strings parsed at startup.
 	// KeyLifecycleZones are the multi-provider zones whose key lifecycle
 	// tdns-mp's own state machine runs (key lifecycle ownership, S3), taken
-	// zone by zone; the others keep tdns's machine through the hooks.
+	// zone by zone. Since S4a every multi-provider zone the signer signs (a
+	// zone config with a DNSSEC policy; a zone it only serves has no keys
+	// here) must be listed: tdns-mp registers no key lifecycle hook with tdns any
+	// more, so a multi-provider zone left off the list would get tdns's
+	// single-signer key machine, which knows nothing of the peers. The
+	// signer refuses to start over such a zone (keyLifecycleRolloutGate),
+	// unless KeyLifecycleZonesIncomplete says the rollout is still under
+	// way: then the zones left off are named in a warning and the signer
+	// starts. The knob is for the rollout period and goes with it.
 	// KeyLifecycleResend is how long a key distribution may wait for the
 	// peers' confirmations before it is sent again (default 10m).
-	KeyLifecycleZones  []string              `yaml:"key-lifecycle-zones" mapstructure:"key-lifecycle-zones"`
-	KeyLifecycleResend string                `yaml:"key-lifecycle-resend" mapstructure:"key-lifecycle-resend"`
-	SignerOptionsStrs  []string              `yaml:"signer-options" mapstructure:"signer-options"`
-	SignerOptions      map[SignerOption]bool `yaml:"-" mapstructure:"-"`
+	KeyLifecycleZones           []string              `yaml:"key-lifecycle-zones" mapstructure:"key-lifecycle-zones"`
+	KeyLifecycleZonesIncomplete bool                  `yaml:"key-lifecycle-zones-incomplete" mapstructure:"key-lifecycle-zones-incomplete"`
+	KeyLifecycleResend          string                `yaml:"key-lifecycle-resend" mapstructure:"key-lifecycle-resend"`
+	SignerOptionsStrs           []string              `yaml:"signer-options" mapstructure:"signer-options"`
+	SignerOptions               map[SignerOption]bool `yaml:"-" mapstructure:"-"`
 
 	// === Agent-specific fields ===
 
