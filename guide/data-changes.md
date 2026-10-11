@@ -113,18 +113,282 @@ their combiners can include the union of DNSKEYs in
 their served zones) and to track when every peer has
 confirmed.
 
-> **Note on automation.** Fully automatic DNSSEC key
-> rollover is already implemented in the upstream tdns
-> codebase (used by standalone tdns-auth deployments).
-> It has not yet been imported into the tdns-mp stack —
-> the multi-signer coordination layer (KEYSTATE-driven
-> propagation, gating on peer confirmation before each
-> key state transition) needs to be wired up first. The
-> code exists; the integration is pending. Until that is
-> done, all MP rollovers are operator-driven via the
-> commands below.
+A signer handles the keys of a multi-provider zone in
+one of two ways:
 
-### 2.1 Manual rollover
+- **The signer's key machine runs them.** The signer
+  generates new keys and rolls them. Before it moves a
+  key on, it waits for the other signing providers and,
+  for a KSK, for the parent. This is switched on per
+  zone (2.1) and described in sections 2.2 to 2.6.
+- **The key machine does not run them.** This is the
+  case for every zone that has not been switched on.
+  The operator rolls the keys with the keystore
+  commands (2.7).
+
+To see which zones the key machine runs on this signer:
+
+```sh
+tdns-mpcli signer key zones
+```
+
+### 2.1 Switching the key machine on for a zone
+
+Add the zone to `key-lifecycle-zones` in the
+`multi-provider:` section of the signer's config
+(`tdns-mpsigner.yaml`) and restart the signer:
+
+```yaml
+multi-provider:
+   role:   signer
+   # identity, keys and agents as before
+   key-lifecycle-zones:
+      - example.com.
+   # Optional: how long a key may wait for the peers'
+   # confirmations before it is sent again. Default 10m.
+   key-lifecycle-resend: 10m
+```
+
+`tdns-mpcli configure` does not write these two keys.
+
+The signer takes a listed zone once the zone is loaded
+and its DNSSEC policy is bound; until then it tries
+again every 30 seconds. The keys the zone already has
+are kept, and the machine runs them from then on. Two
+kinds of zone are left out, each with an error in the
+signer's log:
+
+- a zone without the `multi-provider` option;
+- a zone this provider does not sign (its label is not
+  in the HSYNCPARAM `signers=` list).
+
+The setting belongs to this signer and covers this
+provider's keys for the zone. There is no setting that
+switches the machine on for all zones at once.
+
+A signer with at least one zone listed also starts its
+own resolver. The key machine uses it to ask which DS
+records the parent serves for the zone. Leave it on:
+with `imrengine.active: false` the machine cannot ask
+the parent, and a KSK roll does not complete.
+
+### 2.2 What starts a roll
+
+On a zone the key machine runs, the KSK or the ZSK is
+rolled for one of two reasons.
+
+**Age.** The zone's DNSSEC policy gives each role a
+lifetime (`ksk.lifetime` and `zsk.lifetime`; see
+[Initial Provider Configuration §4.3](initial-provider-configuration.md#43-signer-configuration)).
+When the active key of a role has been active for that
+long, the machine rolls it. The lifetimes the machine
+applies are shown by:
+
+```sh
+tdns-mpcli signer key policy -z example.com.
+```
+
+A role whose lifetime is shown there as `forever` is
+never rolled because of its age.
+
+**A request.**
+
+```sh
+tdns-mpcli signer key rollover -z example.com. --role ZSK
+tdns-mpcli signer key rollover -z example.com. --role KSK
+```
+
+`--role` defaults to KSK. The machine acts on the
+request at its next tick (it ticks every 30 seconds)
+and promotes the next standby key of that role, on the
+conditions in 2.3. If there is no standby key yet the
+request waits for one, and if no key of the role is on
+its way at all the machine first generates one. A
+request that has not been carried out yet can be taken
+back:
+
+```sh
+tdns-mpcli signer key rollover cancel -z example.com. --role KSK
+```
+
+The machine keeps standby keys ready, as many per role
+as `standby-zsk-count` and `standby-ksk-count` under
+`dnssec.kasp` say (1 and 0 when not set). So a ZSK roll
+normally finds a standby key waiting, and a KSK roll
+normally starts by generating one.
+
+### 2.3 What the machine waits for
+
+`signer key status` (2.4) shows the state of every key.
+A new key is `created` and sent out on the same tick.
+After that it goes through the states below, in order.
+The machine moves a key on only when the condition is
+met, so each condition is also a place where a roll can
+stall.
+
+1. **`mpdist`.** The key is in this provider's DNSKEY
+   RRset and has been sent to the other providers
+   through the agents. It stays here until every other
+   signing provider has confirmed that it applied the
+   key. With no other signing provider (the running
+   example, where only alpha signs) there is nobody to
+   wait for.
+2. **`published`.** The key waits for
+   `kasp.propagation-delay` plus the TTL of the DNSKEY
+   RRset.
+3. **`standby`.** The key is ready to take over. For a
+   KSK, its DS is now part of the zone's DS set. The
+   signer publishes that set as CDS, and for a zone
+   that syncs with its parent through its agents the
+   elected leader agent sends the change to the parent
+   (see
+   [Multi-Provider Advanced Topics §1](multi-provider-advanced.md#1-parent-synchronization)).
+   The key stays here until a roll starts (2.2). A ZSK
+   is then promoted at the next tick. A KSK is promoted
+   only once the signer has seen the parent serve the
+   key's DS for as long as the TTL of the DS RRset. If
+   the parent serves no DS at all for the zone, there
+   is nothing to wait for. If the parent cannot be
+   asked, the key waits.
+4. **`active`.** The key signs. The key it replaces
+   becomes `retired` in the same step.
+5. **`retired`.** The key no longer signs but stays in
+   the DNSKEY RRset. A retired KSK's DS is taken out of
+   the zone's DS set at once, and the key waits until
+   the parent no longer serves it. When
+   `kasp.propagation-delay` has passed since the key
+   retired (and, for a KSK, its DS is gone from the
+   parent), the signer removes the key's signatures
+   from the zone and takes the key out of the DNSKEY
+   RRset.
+6. **`mpremove`.** The removal has been sent to the
+   other providers. When every other signing provider
+   has confirmed it, the key is `removed`.
+
+The waits in steps 1 and 6 are how RFC 8901
+multi-signer correctness is enforced: if a peer does
+not answer, the roll stalls rather than de-syncing the
+DNSKEY set.
+
+### 2.4 Watching a roll
+
+```sh
+tdns-mpcli signer key status -z example.com.
+```
+
+This prints:
+
+- The DNSSEC policy bound to the zone, and the other
+  signing providers.
+- One row per key: its `State`, three columns that say
+  what the key does now (`Pub`: it is in the DNSKEY
+  RRset; `Sign`: it signs; `DS`: its DS belongs at the
+  parent, `-` when that is not decided), and the times
+  it was published, became active and retired. The
+  other providers' keys are listed too, in state
+  `foreign`.
+- `Distributions in flight`: every key, or removal of a
+  key, that still waits for confirmations, with the
+  providers expected, applied, pending and rejected,
+  and the reason for a rejection.
+- `Rollover requested`: the roles with a request that
+  has not been carried out yet.
+
+The agent sends the signer one answer for all peers
+together, so this view does not say which peer is
+missing. The agent's own view does:
+
+```sh
+tdns-mpcli agent zone edits list --zone example.com.
+```
+
+The provider's own DNSKEYs are listed there with their
+tracking state. A key that is still PENDING names the
+peers that have not confirmed yet.
+
+### 2.5 When a roll stalls
+
+Find the key in `signer key status` and go by what it
+shows.
+
+- **A key stays in `mpdist` or `mpremove`.** A peer has
+  not answered. The agent reports to the signer only
+  when every other agent of the zone has answered,
+  those of providers that do not sign included, so one
+  unreachable peer holds the key.
+  `agent zone edits list` shows which one. From there
+  it is the same triage as any other peer problem — see
+  [Operation and Debugging §6](operation-and-debugging.md#6-putting-it-together-a-triage-checklist).
+- **A key is listed as rejected.** A peer refused the
+  key, or a signing provider does not take this
+  provider for a signer of the zone. The key stays
+  where it is: the machine undoes nothing by itself,
+  and it never promotes a rejected key. See the two
+  commands below.
+- **A standby KSK is not promoted.** The parent does
+  not serve the key's DS yet, has served it for less
+  than the DS TTL, or could not be asked. Check what
+  the parent serves, that parent synchronization works
+  for the zone, and that the signer's resolver is on.
+- **A retired KSK does not go away.** The parent still
+  serves its DS, or could not be asked.
+- **Another provider's KSK has `-` in the `DS`
+  column.** That provider has not said whether the
+  key's DS belongs at the parent. Until it does, the
+  zone's DS set is unknown, and no CDS and no DS change
+  reaches the parent.
+
+For a rejected key, fix the cause and send the key
+again, or give the key up:
+
+```sh
+tdns-mpcli signer key retry -z example.com. --keyid 56789
+tdns-mpcli signer key withdraw -z example.com. --keyid 56789
+```
+
+`retry` forgets the rejection and sends the key (or its
+removal) to the providers that sign the zone now.
+`withdraw` works on a key in `mpdist`, `published` or
+`standby`: the key leaves the DNSKEY RRset and its
+removal is sent to the peers. An active key is not
+withdrawn; it is rolled.
+
+The signer logs a warning,
+`key lifecycle: needs the operator`, with the zone, the
+key and the reason, when a key is rejected, and when a
+key has waited for the parent, or for another
+provider's word about a DS, for three times
+`kasp.propagation-delay`.
+
+### 2.6 What the key machine does not do
+
+- **Zones that are not listed.** The machine runs only
+  the zones in `key-lifecycle-zones` (2.1).
+- **Algorithm rollover.** The machine does not roll a
+  zone to another algorithm.
+  `signer key policy --set NAME` binds another DNSSEC
+  policy to the zone, and its lifetimes apply from the
+  next tick, but a policy with another algorithm,
+  another mode or another DS model is refused. The
+  binding is not written to the config file, so change
+  the zone's `dnssecpolicy:` there as well.
+- **Sending to the parent.** The machine only asks the
+  parent what it serves. A DS reaches the parent as
+  step 3 of 2.3 says. If it never does, the KSK stays
+  in `standby`.
+- **Per-zone standby counts and waits.** They come from
+  `dnssec.kasp` and are the same for every zone on the
+  signer.
+- **Remembering a request over a restart.** A rollover
+  request that has not been carried out is lost when
+  the signer restarts. Ask again.
+
+### 2.7 Manual rollover
+
+On a zone the key machine does not run, nothing rolls
+the keys by itself: the automatic rollover that
+tdns-auth has for its own zones leaves multi-provider
+zones alone. The operator rolls them:
 
 ```sh
 tdns-mpcli signer keystore dnssec rollover -z example.com. --keytype ZSK
@@ -132,52 +396,44 @@ tdns-mpcli signer keystore dnssec rollover -z example.com. --keytype KSK
 ```
 
 This performs a manual key state advance: standby →
-active, active → retired. The new active key starts
-signing immediately; the retired key stops signing but
-stays published until the operator removes it.
+active, active → retired. The zone is re-signed with
+the new active key; the retired key stops signing but
+stays published. The signer takes a retired ZSK out of
+the DNSKEY RRset by itself when its margin has passed.
 
-Before rolling, you typically generate the standby key:
+The command acts at once. It does not wait for the
+peers and does not look at the parent, so check both
+before a roll: that every peer has the new key
+(`agent zone edits list`, see 2.4) and, for the KSK of
+a zone that has DS records at the parent, that the
+parent already serves the new key's DS.
 
-```sh
-tdns-mpcli signer keystore dnssec generate -z example.com. \
-    --keytype ZSK --state published --algorithm ED25519
-```
-
-Then verify the keystore state before and after the
+The roll needs a key of that type in state `standby`.
+Verify the keystore state before and after the
 rollover with:
 
 ```sh
 tdns-mpcli signer keystore dnssec list -z example.com.
 ```
 
-### 2.2 Watching the rollover propagate
-
-The interesting thing about a multi-provider rollover is
-*propagation* — the new DNSKEY has to reach every
-provider before the old key can be retired. From the
-local agent's view:
+The signer keeps standby ZSKs ready on such a zone too
+(`standby-zsk-count`). A key it generates for that is
+first held in `mpdist`, until the agent reports that
+the peers have confirmed it. If there is no standby
+key, generate a key:
 
 ```sh
-tdns-mpcli agent zone edits list --zone example.com.
+tdns-mpcli signer keystore dnssec generate -z example.com. \
+    --keytype ZSK --state published --algorithm ED25519
 ```
 
-DNSKEY entries appear under `Source: signer.alpha.example.`
-(attribution is preserved through the signer-agent
-KEYSTATE handoff and the agent-agent SYNC). You will see
-the new key go PENDING → ACCEPTED on each peer as their
-combiners confirm receipt.
+The new key starts as `published`; `list` shows when it
+has become a standby key.
 
-The signer's KEYSTATE logic will not proceed to the next
-phase of the rollover (e.g. activating a new ZSK, or
-retiring an old one) until every peer has confirmed.
-This is how RFC 8901 multi-signer correctness is
-enforced: if bravo is offline, alpha's rollover stalls
-rather than de-syncing the DNSKEY set.
-
-If a rollover is stuck, the SDE view shows you exactly
-which peers have not confirmed. From there it is the
-same triage as any other peer problem — see
-[Operation and Debugging §6](operation-and-debugging.md#6-putting-it-together-a-triage-checklist).
+On a zone the key machine runs,
+`keystore dnssec rollover` is refused, with an error
+that points to `signer key rollover`, and
+`keystore dnssec generate` is refused too.
 
 ## 3. Inspecting State
 

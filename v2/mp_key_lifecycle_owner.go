@@ -74,7 +74,7 @@ func (o *MPKeyLifecycleOwner) inventoryOf(zone string) *KeyInventorySnapshot {
 func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
 
 // Take makes the owner run zone's key lifecycle from now on; Release hands
-// it back to tdns's hooks. This is the per-zone rollout of S3.
+// it back to tdns's own machine. This is the per-zone rollout of S3.
 func (o *MPKeyLifecycleOwner) Take(zone string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -226,7 +226,12 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 }
 
 // RegisterMPKeyLifecycleOwner installs the owner with tdns, owning no zone
-// yet; Take moves a zone onto tdns-mp's machine.
+// yet; Take moves a zone onto tdns-mp's machine. It registers the flags of
+// the owner's three states with tdns's flag table as well: a foreign row is
+// inserted through tdns's one insert without naming its columns, and tdns's
+// invariant check wants every state in the store known. tdns carries the
+// same entries only while it still names the states (design S4 drops them
+// with the hooks); this registration is what keeps them after that.
 func RegisterMPKeyLifecycleOwner(conf *Config) *MPKeyLifecycleOwner {
 	o := NewMPKeyLifecycleOwner(func() *tdns.KeyDB {
 		if conf == nil || conf.Config == nil {
@@ -234,6 +239,24 @@ func RegisterMPKeyLifecycleOwner(conf *Config) *MPKeyLifecycleOwner {
 		}
 		return conf.Config.Internal.KeyDB
 	})
+	registerOwnerKeyStateFlags()
 	tdns.RegisterKeyLifecycleOwner(o)
 	return o
 }
+
+// registerOwnerKeyStateFlags tells tdns's keystore what a row in one of the
+// owner's states does (design §3.4): served but not signing while
+// distributed to the peers or foreign, neither once parked for removal.
+// tdns carries no entry for these states itself (S4), and its keystore
+// refuses a row in a state it has no flags for, so the registration is
+// made once at package init, before any keystore opens, in daemons and
+// tests alike; RegisterMPKeyLifecycleOwner repeats it, which is harmless.
+func registerOwnerKeyStateFlags() {
+	tdns.RegisterKeyStateFlags(map[string]tdns.KeyRowFlags{
+		DnskeyStateMpdist:   {Pub: true},
+		DnskeyStateForeign:  {Pub: true},
+		DnskeyStateMpremove: {},
+	})
+}
+
+func init() { registerOwnerKeyStateFlags() }
