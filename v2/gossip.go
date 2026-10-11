@@ -151,8 +151,10 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 		}
 	}
 
-	// Merge election state (higher term wins)
-	if msg.Election.Term > 0 {
+	// Merge election state (higher term wins). A record without a leader is
+	// no election's result. Stored, it would stand for its term and keep out
+	// the result that follows it, which is of the same term (#154).
+	if msg.Election.Term > 0 && msg.Election.Leader != "" {
 		existing := gst.Elections[groupHash]
 		if existing == nil || msg.Election.Term > existing.Term {
 			elCopy := msg.Election
@@ -245,16 +247,20 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 			}
 		}
 
-		// Include election state — prefer live state from LeaderElectionManager
-		electionIncluded := false
+		// Include election state. The member's own word comes first: a term
+		// that is decided (GroupElectionForGossip). With an election of its
+		// own that is not decided it tells nothing, and passes on no record
+		// heard from a peer either: it may have invalidated that very leader.
+		// Only a member with no election of its own passes on what it heard.
+		passOn := true
 		if len(lem) > 0 && lem[0] != nil {
-			es := lem[0].GetGroupElectionState(gi.hash)
-			if es.Term > 0 {
+			es, decided, known := lem[0].GroupElectionForGossip(gi.hash)
+			if decided {
 				msg.Election = es
-				electionIncluded = true
 			}
+			passOn = !known
 		}
-		if !electionIncluded {
+		if passOn {
 			if el, ok := gst.Elections[gi.hash]; ok {
 				msg.Election = *el
 			}

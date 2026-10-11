@@ -22,7 +22,7 @@ func (conf *Config) SetupMPCombinerRoutes(ctx context.Context, apirouter *mux.Ro
 	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 	sr := apirouter.PathPrefix("/api/v1").Subrouter()
 	sr.HandleFunc("/combiner", APIcombiner(&tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, hdb)).Methods("POST")
-	sr.HandleFunc("/gossip", APIgossip(conf.InternalMp.AgentRegistry, conf.InternalMp.LeaderElectionManager)).Methods("POST")
+	sr.HandleFunc("/gossip", APIgossip(conf)).Methods("POST")
 	sr.HandleFunc("/router", APIrouter(conf.InternalMp.TransportManager)).Methods("POST")
 	sr.HandleFunc("/peer", APIpeer(conf, conf.InternalMp.TransportManager, conf.InternalMp.AgentRegistry)).Methods("POST")
 	sr.HandleFunc("/zone/mplist", conf.APImplist()).Methods("POST")
