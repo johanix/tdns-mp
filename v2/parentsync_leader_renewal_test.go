@@ -16,10 +16,9 @@ import (
 //
 // Delivery is in the order of sending, through one queue. A broadcast queues
 // its copies for every member before anything a member sends in answer, so a
-// VOTE never overtakes the CALL it answers. An election does not survive that
-// reordering yet: handleGroupVote drops a vote for a term the member has not
-// joined, and the election then waits out the vote timeout. These tests are
-// about the lease renewal, not about that.
+// VOTE does not overtake the CALL it answers, unless lateCalls is set: then
+// the CALL's copy for the last member is held back until the next VOTE has
+// been queued, which is the order a network can give (#125).
 type electionNet struct {
 	group   string
 	members []string
@@ -29,7 +28,11 @@ type electionNet struct {
 
 	qmu   sync.Mutex
 	queue []electionMsg
+	held  *electionMsg // a CALL held back for its last member (lateCalls)
 	wake  chan struct{}
+
+	// lateCalls: a CALL reaches the last member after another member's VOTE.
+	lateCalls bool
 
 	mu      sync.Mutex
 	elected []AgentId // one entry per onLeaderElected call, the winner
@@ -47,10 +50,21 @@ func (n *electionNet) send(from AgentId, rfiType string, records map[string][]st
 		return
 	}
 	n.qmu.Lock()
+	var copies []electionMsg
 	for _, m := range n.members {
 		if to := AgentId(m); to != from {
-			n.queue = append(n.queue, electionMsg{to: to, from: from, rfiType: rfiType, records: records})
+			copies = append(copies, electionMsg{to: to, from: from, rfiType: rfiType, records: records})
 		}
+	}
+	if n.lateCalls && rfiType == "ELECT-CALL" && len(copies) > 1 {
+		last := copies[len(copies)-1]
+		n.held = &last
+		copies = copies[:len(copies)-1]
+	}
+	n.queue = append(n.queue, copies...)
+	if n.held != nil && rfiType == "ELECT-VOTE" {
+		n.queue = append(n.queue, *n.held)
+		n.held = nil
 	}
 	n.qmu.Unlock()
 	select {
