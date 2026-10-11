@@ -17,6 +17,9 @@ cmd/mpauditor/tdns-mpauditor
 # Generated version files
 cmd/*/version.go
 
+# NetBSD packages, left beside the binary by "make pkg" (tens of megabytes each)
+cmd/*/*.tgz
+
 # Editor backup files
 *~
 */*~

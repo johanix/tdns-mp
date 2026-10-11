@@ -1,4 +1,4 @@
-.PHONY: default all clean install bump-johanix-deps test test-race
+.PHONY: default all clean install pkg bump-johanix-deps test test-race
 
 default: all
 
@@ -11,6 +11,10 @@ clean:
 
 install:
 	$(MAKE) -C ./cmd/ install
+
+# NetBSD binary packages of the five daemons and the CLI (root; see cmd/Makefile).
+pkg:
+	$(MAKE) -C ./cmd/ pkg
 
 # bump-johanix-deps: in every go.mod under this repo, refresh every
 # github.com/johanix/* require line to its current proxy 'latest'
