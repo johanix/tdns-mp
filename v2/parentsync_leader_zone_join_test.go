@@ -38,6 +38,15 @@ func confirmed(le *LeaderElection, id AgentId) bool {
 	return ok
 }
 
+// waitingForVotes reports whether the member's vote timeout is armed: a join
+// that does not hold every vote arms it, one that does goes on to determine
+// the winner and arms none.
+func waitingForVotes(le *LeaderElection) bool {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	return le.VoteTimer != nil
+}
+
 func waitConfirmed(t *testing.T, le *LeaderElection, id AgentId) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -62,6 +71,9 @@ func TestAZoneMemberThatJoinsWaitsForEveryVote(t *testing.T) {
 	if expected != 2 {
 		t.Fatalf("after joining, the member counts against %d peers, want the zone's 2", expected)
 	}
+	if !waitingForVotes(le) {
+		t.Fatalf("the member joined with its own vote only and is not waiting for the others")
+	}
 
 	lem.handleVote(zone, "a.example.", map[string][]string{"_term": {"1"}, "_vote": {"7"}})
 	time.Sleep(50 * time.Millisecond)
@@ -80,7 +92,11 @@ func TestAZoneMemberThatJoinsWithAnEarlyVoteWaitsForEveryVote(t *testing.T) {
 
 	lem.handleVote(zone, "b.example.", map[string][]string{"_term": {"1"}, "_vote": {"9"}})
 	lem.handleCall(zone, "a.example.", map[string][]string{"_term": {"1"}})
-	time.Sleep(50 * time.Millisecond)
+	// The join decides under the election's lock whether the votes are
+	// complete, and arms the vote timeout only when they are not.
+	if !waitingForVotes(le) {
+		t.Fatalf("the member took two votes of three for all of them on joining")
+	}
 	if confirmed(le, "c.example.") {
 		t.Fatalf("the member determined a winner on joining, with two votes of three")
 	}

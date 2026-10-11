@@ -258,9 +258,14 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	votes, expected := len(le.Votes), le.ExpectedPeers+1
 	allVotes := votes >= expected
 
-	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
-		lem.onGroupVoteTimeout(groupHash, term, members, zones)
-	})
+	// With every vote in there is nothing to time out. The timer is armed
+	// here, under the lock, or not at all: once the lock is released it can
+	// be a newer term's.
+	if !allVotes {
+		le.VoteTimer = time.AfterFunc(5*time.Second, func() {
+			lem.onGroupVoteTimeout(groupHash, term, members, zones)
+		})
+	}
 	le.mu.Unlock()
 
 	// The counts were taken under the lock: a vote can arrive while this logs.
@@ -281,9 +286,6 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 
 	// If we already have all votes, proceed to confirm immediately.
 	if allVotes {
-		if le.VoteTimer != nil {
-			le.VoteTimer.Stop()
-		}
 		go lem.determineAndConfirmGroup(groupHash, term, members, zones)
 	}
 }

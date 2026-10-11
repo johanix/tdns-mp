@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -135,5 +136,51 @@ func TestZoneElectionCountsAVoteThatOvertakesTheCall(t *testing.T) {
 	defer le.mu.Unlock()
 	if got, ok := le.Votes["b.example."]; !ok || got != 5 {
 		t.Errorf("after the CALL the votes are %v, want b's early vote of 5 among them", le.Votes)
+	}
+}
+
+// A join that holds every vote goes on to confirm and has nothing to time out.
+// It used to arm the vote timeout anyway and stop it after broadcasting its
+// vote, outside the election's lock. A term this member had started in the
+// meantime had its own timeout there by then, and lost it: that election, if
+// its votes never came, would never have been aborted.
+func TestAJoinWithEveryVoteLeavesANewerTermsTimeoutAlone(t *testing.T) {
+	const group = "fedcba9876543210"
+	members := []string{"a.example.", "b.example."}
+	zones := []ZoneName{"zone.example."}
+
+	var lem *LeaderElectionManager
+	var once sync.Once
+	lem = NewLeaderElectionManager("b.example.", time.Hour,
+		func(_ ZoneName, rfiType string, _ map[string][]string) error {
+			// While b sends the vote of its join, it starts a term of its own.
+			if rfiType == "ELECT-VOTE" {
+				once.Do(func() { lem.StartGroupElection(group, members, zones) })
+			}
+			return nil
+		})
+	pgm := NewProviderGroupManager("b.example.")
+	pgm.Groups[group] = &ProviderGroup{GroupHash: group, Members: members, VotingMembers: members, Zones: zones}
+	lem.SetProviderGroupManager(pgm)
+
+	// a's CALL carries a's vote: with b's own, that is every vote of two.
+	lem.HandleGroupMessage(group, "a.example.", "ELECT-CALL",
+		map[string][]string{"_term": {"1"}, "_vote": {"7"}, "_group": {group}})
+
+	lem.mu.RLock()
+	le := lem.groupElections[group]
+	lem.mu.RUnlock()
+	le.mu.Lock()
+	term := le.Term
+	armed := le.VoteTimer != nil && le.VoteTimer.Stop()
+	if le.ConfirmTimer != nil {
+		le.ConfirmTimer.Stop()
+	}
+	le.mu.Unlock()
+	if term != 2 {
+		t.Fatalf("b is in term %d, want the term 2 it started while joining term 1", term)
+	}
+	if !armed {
+		t.Errorf("the vote timeout of the term b started was stopped by its join of the older term")
 	}
 }
