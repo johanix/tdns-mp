@@ -68,3 +68,7 @@ The kick now comes from where the transition is known: `routeHelloMessage` kicks
 **The first round is the baseline.** The schedule's view started empty, so the first round always counted as a change, and the gaps from the start were 2, 2, 4, 8, 16, 30 s where §2 says 2, 4, 8, 16, 30. `roundDone` now takes the first round's view as the baseline, and the gaps are as §2 lists them.
 
 **Tests added:** a repeated hello leaves the pace alone, at the engine and through `routeHelloMessage` into a running engine (the first hello there brings the next round to the fast interval); a kick before the first round runs it at once.
+
+### Amendment 2 (2026-10-11): what the election fix did to lease renewal
+
+§4's election fix had a side effect at lease renewal. In a two-member group the initiator used to finalize 5 s after its peer, so its renewal timer ran 5 s behind and was re-armed by the peer's renewal before it fired: one term per renewal. With both members finalizing together their renewal timers fire together, each starts the same term, and the group aborts after the vote timeout and then elects twice, as groups of three or more already did. The flaw is in the renewal, not in §4: issue #120, `docs/2026-10-11-election-lease-renewal.md`.
