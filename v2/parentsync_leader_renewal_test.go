@@ -12,8 +12,14 @@ import (
 )
 
 // electionNet is a provider group's election managers wired to each other in
-// process: what one broadcasts, every other one handles, each message in its
-// own goroutine as on a network.
+// process: what one broadcasts, every other one handles.
+//
+// Delivery is in the order of sending, through one queue. A broadcast queues
+// its copies for every member before anything a member sends in answer, so a
+// VOTE never overtakes the CALL it answers. An election does not survive that
+// reordering yet: handleGroupVote drops a vote for a term the member has not
+// joined, and the election then waits out the vote timeout. These tests are
+// about the lease renewal, not about that.
 type electionNet struct {
 	group   string
 	members []string
@@ -21,8 +27,57 @@ type electionNet struct {
 	mgrs    map[AgentId]*LeaderElectionManager
 	closed  atomic.Bool
 
+	qmu   sync.Mutex
+	queue []electionMsg
+	wake  chan struct{}
+
 	mu      sync.Mutex
 	elected []AgentId // one entry per onLeaderElected call, the winner
+}
+
+type electionMsg struct {
+	to, from AgentId
+	rfiType  string
+	records  map[string][]string
+}
+
+// send queues one broadcast for every member but its sender.
+func (n *electionNet) send(from AgentId, rfiType string, records map[string][]string) {
+	if n.closed.Load() {
+		return
+	}
+	n.qmu.Lock()
+	for _, m := range n.members {
+		if to := AgentId(m); to != from {
+			n.queue = append(n.queue, electionMsg{to: to, from: from, rfiType: rfiType, records: records})
+		}
+	}
+	n.qmu.Unlock()
+	select {
+	case n.wake <- struct{}{}:
+	default:
+	}
+}
+
+// deliver hands the queued messages to their members, one at a time, until
+// the net is closed.
+func (n *electionNet) deliver() {
+	for range n.wake {
+		for {
+			n.qmu.Lock()
+			if len(n.queue) == 0 || n.closed.Load() {
+				n.qmu.Unlock()
+				break
+			}
+			msg := n.queue[0]
+			n.queue = n.queue[1:]
+			n.qmu.Unlock()
+			n.mgrs[msg.to].HandleGroupMessage(n.group, msg.from, msg.rfiType, msg.records)
+		}
+		if n.closed.Load() {
+			return
+		}
+	}
 }
 
 func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electionNet {
@@ -32,18 +87,12 @@ func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electio
 		members: members,
 		zones:   []ZoneName{"zone.example."},
 		mgrs:    map[AgentId]*LeaderElectionManager{},
+		wake:    make(chan struct{}, 1),
 	}
 	for _, m := range members {
 		id := AgentId(m)
 		lem := NewLeaderElectionManager(id, ttl, func(_ ZoneName, rfiType string, records map[string][]string) error {
-			if n.closed.Load() {
-				return nil
-			}
-			for other, peer := range n.mgrs {
-				if other != id {
-					go peer.HandleGroupMessage(n.group, id, rfiType, records)
-				}
-			}
+			n.send(id, rfiType, records)
 			return nil
 		})
 		pgm := NewProviderGroupManager(m)
@@ -57,8 +106,13 @@ func newElectionNet(t *testing.T, ttl time.Duration, members ...string) *electio
 		})
 		n.mgrs[id] = lem
 	}
+	go n.deliver()
 	t.Cleanup(func() {
 		n.closed.Store(true)
+		select {
+		case n.wake <- struct{}{}:
+		default:
+		}
 		for _, lem := range n.mgrs {
 			if le := n.election(lem); le != nil {
 				le.mu.Lock()
