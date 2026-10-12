@@ -120,7 +120,7 @@ Elections are held per distinct make-up, never per zone: 40,000 zones that drop 
 
 A zone with fewer than two members is in no group and has an election of its own, per zone.
 
-Agents see the owner's edit at different moments. For that interval the old group and the new one can each have a leader for the zone.
+Agents see the owner's edit at different moments. For that interval the old group and the new one can each have a leader for the zone. Section 4.9 says what a leader does about it.
 
 ### 4.2 The counts
 
@@ -161,6 +161,21 @@ The same holds for an auditor. A member that does not vote causes no election, a
 ### 4.8 Retiring a group
 
 When no zone is left in a group, the group's election state and timers go with it.
+
+### 4.9 A leader acts for a zone only when the views of it agree
+
+Each provider fetches the owner's zone on its own, so two agents can hold different versions of a zone's HSYNC3 and HSYNCPARAM records while they are in full contact with each other. That takes no network partition. It lasts seconds when every provider is notified and transfers at once, longer when one transfer is late, and without end when one agent is stuck on an old copy. For that time the zone can have two leaders: the leader of the group the zone left, which has not seen the edit, and the leader of the group it arrived in. Each would sync the parent from its own view, and the parent would take whichever write came last. For a signer that was just removed, one of them publishes its DS and the other withdraws it.
+
+So a leader sends nothing to the parent for a zone until both of these hold:
+
+- every voting member of the zone's group holds the same make-up for the zone as the leader does;
+- the leader of the group the zone left has shown that it holds that make-up too, or that it no longer has the zone, or its lease has run out.
+
+Until then the sync is owed and not sent, and one line says who is waited for. This is the hold of 5.6 for another kind of not knowing: there the leader lacks the zone's data, here the group lacks one view of who the zone's members are.
+
+To make it possible, every agent tells its peers which make-up it holds for each zone they share. When the agents are in contact a disagreement shows within a beat, and the hold then lasts as long as the disagreement does. When the previous leader cannot be reached the hold lasts until its lease has run out.
+
+A zone that arrives while its group's election is running is one of the zones that election is held for.
 
 ## 5. Catch-up
 
