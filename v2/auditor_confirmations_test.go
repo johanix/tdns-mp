@@ -16,7 +16,9 @@
 package tdnsmp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"strconv"
 	"strings"
@@ -592,6 +594,89 @@ func TestACopyBeforeTheDistributionAndADistributionFromBeforeTheStart(t *testing
 	f.auditorReceives()
 	if d := f.distribution(zone, fleetP1, "d6"); d != nil {
 		t.Errorf("a distribution sent before the auditor started is followed: %+v", d)
+	}
+}
+
+// A copy is believed for the sender the transport established, and for no
+// other. One that reaches the auditor's route with no transport sender is
+// dropped: the sender its payload names is the claim to be checked, not
+// what to check it against. The same copy from the member it names is
+// booked.
+//
+// The receive pipeline stamps a transport sender on every message it
+// routes, so the copy without one is handed to the bridge's callback as the
+// parser leaves it, before that stamp. And no sync API endpoint takes the
+// confirm verb: a copy cannot come in over HTTPS, where the transport's
+// sender would be the one the body names.
+func TestACopyWithoutATransportSenderIsNotBelieved(t *testing.T) {
+	const zone = "sender.audit.example."
+	seedAuditedZone(t, zone, fleetAuditor, fleetP1, fleetP2, fleetP3)
+	f := newAuditFleet(t)
+	aud := f.peers[fleetAuditor]
+
+	body, err := json.Marshal(&DnsConfirmCopyPayload{
+		DnsConfirmPayload: transport.DnsConfirmPayload{
+			Type: transport.VerbConfirm, SenderID: fleetP2, Zone: zone,
+			DistributionID: "d4", Status: "SUCCESS", Timestamp: time.Now().Unix(),
+		},
+		Originator: fleetP1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the copy as the pipeline's parser hands it on
+	parsed := func(transportSender string) *transport.IncomingMessage {
+		t.Helper()
+		msg, err := parseAppPayload("d4", body, "127.0.0.1:0")
+		if err != nil || msg.Token() != transport.VerbConfirm || msg.SenderID != fleetP2 || msg.TransportSender != "" {
+			t.Fatalf("the parsed copy = %+v, %v; want a confirm naming p2, no transport sender yet", msg, err)
+		}
+		msg.TransportSender = transportSender
+		return msg
+	}
+	unbooked := func(when string) {
+		t.Helper()
+		if got := f.view(zone); len(got) != 0 {
+			t.Errorf("%s: the auditor booked the copy: %+v", when, got)
+		}
+		if got := f.sm.Reporters(); len(got) != 0 {
+			t.Errorf("%s: the auditor took %v for members that send it their confirmations", when, got)
+		}
+	}
+
+	aud.Bridge.routeIncomingMessage(parsed(""))
+	unbooked("a copy with no transport sender")
+
+	// sent by a member other than the one the payload names
+	aud.Bridge.routeIncomingMessage(parsed(fleetP3))
+	unbooked("a copy that names another sender than the one that sent it")
+
+	// over HTTPS: every endpoint refuses the verb before the pipeline
+	srv := apiEndpointsServer(t, aud.peerEnv)
+	for _, path := range []string{"/api/v1/hello", "/api/v1/beat", "/api/v1/sync/ping", "/api/v1/msg"} {
+		res, err := srv.Client().Post(srv.URL+path, "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply map[string]interface{}
+		err = json.NewDecoder(res.Body).Decode(&reply)
+		res.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply["Error"] != true {
+			t.Errorf("%s took a confirmation copy: %v", path, reply)
+		}
+	}
+	unbooked("a copy posted to the sync API endpoints")
+
+	// the same copy from the sender the transport established
+	aud.Bridge.routeIncomingMessage(parsed(fleetP2))
+	if state, status, _ := f.memberState(zone, fleetP1, "d4", fleetP2); state != "confirmed" || status != "SUCCESS" {
+		t.Errorf("the copy from p2 itself: p2 in d4 is %q %q, want confirmed, SUCCESS; view: %+v", state, status, f.view(zone))
+	}
+	if !f.sm.Reporters()[fleetP2] {
+		t.Error("p2 sent a copy and is not known as a member that sends them")
 	}
 }
 

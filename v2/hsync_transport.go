@@ -1564,10 +1564,11 @@ func (tm *MPTransportBridge) copyConfirmationToAuditors(detail *RemoteConfirmati
 // names that originator (DnsConfirmCopyPayload). The auditor books it for
 // that distribution.
 //
-// Who confirmed is the copy's sender as the transport established it. A
-// payload that names another sender is not believed, and neither is one
-// whose originator is no voting member of the zone, or is the confirming
-// member itself.
+// Who confirmed is the copy's sender as the transport established it, and
+// only that: a copy that comes with no transport sender is not believed,
+// whatever its payload says of itself. A payload that names another sender
+// is not believed, and neither is one whose originator is no voting member
+// of the zone, or is the confirming member itself.
 func (tm *MPTransportBridge) routeConfirmMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry == nil || tm.agentRegistry.AuditState == nil {
 		return
@@ -1582,7 +1583,9 @@ func (tm *MPTransportBridge) routeConfirmMessage(msg *transport.IncomingMessage)
 	}
 	confirmer := msg.TransportSender
 	if confirmer == "" {
-		confirmer = copied.SenderID
+		lgTransport.Warn("confirmation copy without a transport sender, ignoring",
+			"named", copied.SenderID, "zone", copied.Zone, "distributionID", copied.DistributionID)
+		return
 	}
 	if dns.Fqdn(confirmer) != dns.Fqdn(copied.SenderID) {
 		lgTransport.Warn("confirmation copy names a sender other than the one that sent it, ignoring",
