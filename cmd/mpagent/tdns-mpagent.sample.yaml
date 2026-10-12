@@ -118,6 +118,10 @@ imrengine:
 # The policy the agent signs its identity zone with. Testbed values:
 # a signature validity must exceed 2 x (largest served TTL +
 # kasp.propagation-delay), and tdns warns below 4 x.
+# kasp.propagation-delay is also what the agent tells the other
+# providers' agents about this provider's nameservers: the leader of a
+# zone holds a NOTIFY to the zone's parent for the largest value among
+# the providers that serve the zone. The default is 1h.
 dnssec:
    kasp:
       propagation-delay:  5m

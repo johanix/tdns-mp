@@ -87,6 +87,8 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
 					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
+						// a chain left from a term this agent led is over
+						conf.delegationSyncNotLeading(ds.ZoneName, false)
 						continue
 					}
 				}
@@ -141,6 +143,8 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
 					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
+						// a chain left from a term this agent led is over
+						conf.delegationSyncNotLeading(ds.ZoneName, false)
 						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
 						if ds.Response != nil {
 							ds.Response <- syncstate
@@ -230,13 +234,38 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 // a NOTIFY for a zone this agent leads, and the parent is looked at again
 // before it counts (mp_s5_leader_sync.go). The caller then books nothing and
 // tells the peers nothing yet.
+//
+// tdns hands a NOTIFY to the notifier through the queue it is given. For the
+// leader's sync of a multi-provider zone the queue it is given is one of our
+// own: what arrives on it says that the sync went out as a NOTIFY, and of
+// which types, and the chain sends it on to the notifier, at once or after
+// the zone's wait. An UPDATE passes through here untouched.
 func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
 	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (msg string, rcode uint8, ur tdns.UpdateResult, pending bool, err error) {
-	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
-	if err == nil {
-		pending = conf.delegationSyncNotified(ctx, ds, msg)
+	if !mpLeaderSync(conf, ds) {
+		msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
+		return msg, rcode, ur, false, err
 	}
-	return msg, rcode, ur, pending, err
+	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
+	// must not wait for a reader that comes only when it has returned.
+	taken := make(chan tdns.NotifyRequest, 8)
+	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, taken, syncstate, imr)
+	var notifies []tdns.NotifyRequest
+	for len(taken) > 0 {
+		notifies = append(notifies, <-taken)
+	}
+	if err != nil || len(notifies) == 0 {
+		// A sync that failed has handed nothing over: tdns's NOTIFY sender
+		// asks for all it needs first and sends last. Should that change,
+		// what a failed sync handed over is not sent on.
+		return msg, rcode, ur, false, err
+	}
+	if conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq}) {
+		// tdns's message says the NOTIFY was sent; whoever asked for the
+		// sync is told that it waits
+		msg += " (held: it leaves when the zone's nameservers have had time to serve the change)"
+	}
+	return msg, rcode, ur, true, nil
 }
 
 // notifyPeersParentSyncDone sends STATUS-UPDATE("parentsync-done") to all
