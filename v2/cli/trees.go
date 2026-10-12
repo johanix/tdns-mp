@@ -65,6 +65,7 @@ func NewAgentTree(use, role string) *cobra.Command {
 		newAgentDiscoverCmd(kind),
 		newAgentPeerCmd(kind),
 		newAgentImrCmd(kind),
+		newAgentParentSyncCmd(kind),
 		newHsyncCmd(kind),
 		newRouterCmd(kind),
 		NewGossipCmd(kind),
