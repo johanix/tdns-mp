@@ -21,6 +21,31 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 )
 
+// The leader's lease when delegationsync.leader-election-ttl is not set, and
+// the shortest lease that is taken as given.
+const (
+	defaultLeaderElectionTTL = 60 * time.Minute
+	minLeaderElectionTTL     = time.Minute
+)
+
+// leaderElectionTTL is the leader's lease from the config. The value takes a
+// unit: a bare number is read as nanoseconds, so 300 is a lease of 300 ns,
+// and a leader that renews at 90% of that calls one election after another
+// (tdns-mp #130). A lease below the floor is such a mistake and not a choice,
+// so it is refused with an error and the default is used.
+func leaderElectionTTL() time.Duration {
+	ttl := viper.GetDuration("delegationsync.leader-election-ttl")
+	switch {
+	case ttl == 0:
+		return defaultLeaderElectionTTL
+	case ttl < minLeaderElectionTTL:
+		lgAgent.Error("delegationsync.leader-election-ttl is below the floor, using the default; the value takes a unit (5m, 300s), a bare number is nanoseconds",
+			"configured", ttl, "floor", minLeaderElectionTTL, "default", defaultLeaderElectionTTL)
+		return defaultLeaderElectionTTL
+	}
+	return ttl
+}
+
 func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) error {
 	mp := conf.MpConfig()
 	// The DS engine's queue, before any engine that can sign a zone, as in
@@ -114,12 +139,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
 	ar := conf.InternalMp.AgentRegistry
-	leaderTTL := viper.GetDuration("delegationsync.leader-election-ttl")
-	if leaderTTL == 0 {
-		leaderTTL = 60 * time.Minute
-	}
 	lem := NewLeaderElectionManager(
-		AgentId(mp.Identity), leaderTTL,
+		AgentId(mp.Identity), leaderElectionTTL(),
 		func(zone ZoneName, rfiType string, records map[string][]string) error {
 			return ar.broadcastElectToZone(zone, rfiType, records)
 		},

@@ -124,7 +124,7 @@ parentsync:
          algorithm:  ED25519
 
 # How long an elected leader holds the role; 60m is the
-# default.
+# default. The value takes a unit (60m, 3600s).
 # delegationsync:
 #    leader-election-ttl: 60m
 ```
@@ -516,7 +516,9 @@ Key properties:
   the gossip protocol.
 - The leader has a TTL, `delegationsync.leader-election-ttl`
   (default 60m). Re-election is triggered automatically
-  before expiry.
+  before expiry. The value takes a unit: a bare number such as
+  `300` is read as nanoseconds. A lease below one minute is
+  refused with an error in the log, and the default is used.
 - If the group degrades (a member becomes unreachable), the
   leader is invalidated immediately.
 
