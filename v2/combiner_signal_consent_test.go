@@ -456,3 +456,71 @@ func TestAReapplyWithdrawsTheSignalKeysOfAZoneWithoutPubkey(t *testing.T) {
 	c.wantApexKey("re-apply of the customer zone", cust)
 	c.wantNoSignalKey("re-apply of the customer zone", zone, consentNS1)
 }
+
+// A retraction that fails is not booked as done. The provider zone could not
+// be published when the customer's consent was found missing: the signal
+// name stays in the stored instruction, and at-ns with it, so the next use of
+// the instruction tries again, and then the name is retracted.
+func TestAWithdrawalThatFailsIsTriedAgain(t *testing.T) {
+	const zone = "retry.customer.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	prov := c.load(consentProviderZone, consentProviderText())
+	cust := c.load(zone, consentCustomerText(zone, true))
+	c.sendKey(zone)
+	c.wantSignalKey("with pubkey", zone, consentNS1)
+
+	// The customer takes pubkey away while the provider zone cannot be
+	// published: a zone store the combine does not write to.
+	c.ownerSays(cust, false)
+	store := prov.ZoneStore
+	prov.ZoneStore = tdns.XfrZone
+	c.addNS(zone, consentNS2)
+	prov.ZoneStore = store
+	if served, _, _ := c.signalKey(zone, consentNS1); !served {
+		t.Fatal("the provider zone was published without the KEY: the retraction did not fail, and the test shows nothing")
+	}
+	c.wantStored("the retraction failed", zone, []string{"at-apex", "at-ns"}, []string{consentNS1})
+
+	// The next use of the instruction tries again, and the publish that
+	// was owed is made.
+	c.addNS(zone, consentNS3)
+	c.wantNoSignalKey("the retraction tried again", zone, consentNS1)
+	c.wantStored("the retraction tried again", zone, []string{"at-apex"}, nil)
+	c.wantApexKey("the retraction tried again", cust)
+}
+
+// The stored instructions could not be read when the combiner registered its
+// first-load callbacks, and can be read by the time the zones load. The
+// provider zone's re-apply reads them for itself and puts the signal name
+// back. The customer zone's first load must still find the instruction and
+// withdraw it, though the registration could not know the zone had one.
+func TestAStartThatCouldNotReadTheInstructionsStillAsksForConsent(t *testing.T) {
+	const zone = "unread.customer.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	c.load(consentProviderZone, consentProviderText())
+	c.load(zone, consentCustomerText(zone, true))
+	c.sendKey(zone)
+	c.wantSignalKey("before the restart", zone, consentNS1)
+
+	// The restart, with the instructions' table out of reach while the
+	// callbacks are registered.
+	rename := func(from, to string) {
+		t.Helper()
+		if _, err := c.hdb.DB.Exec("ALTER TABLE " + from + " RENAME TO " + to); err != nil {
+			t.Fatalf("renaming %s: %v", from, err)
+		}
+	}
+	rename("CombinerPublishInstructions", "CombinerPublishInstructionsAway")
+	c.start(consentProviderZone, zone)
+	rename("CombinerPublishInstructionsAway", "CombinerPublishInstructions")
+
+	signalRR := fmt.Sprintf("%s 3600 IN KEY 512 3 15 %s", Sig0KeyOwnerName(zone, consentNS1), testZSKPub)
+	c.load(consentProviderZone, consentProviderText(signalRR))
+	c.wantSignalKey("provider zone loaded, customer zone not", zone, consentNS1)
+	cust := c.load(zone, consentCustomerText(zone, false))
+	c.wantNoSignalKey("both zones loaded", zone, consentNS1)
+	c.wantStored("both zones loaded", zone, []string{"at-apex"}, nil)
+	c.wantApexKey("both zones loaded", cust)
+}

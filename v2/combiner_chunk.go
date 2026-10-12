@@ -727,11 +727,15 @@ func (mpzd *MPZoneData) contributionsLoaded() bool {
 // first load would put the persisted KEY back. Such a name stays in the
 // stored instruction, and at-ns with it, until that zone's startup re-apply
 // retracts it (ApplyPendingSignalKeys).
+//
+// So does a name whose retraction failed: the provider zone may still serve
+// its KEY, and an instruction that no longer named it would leave nothing to
+// try again. The next use of the instruction does.
 func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 	if !containsString(stored.Locations, "at-ns") {
 		return
 	}
-	var retracted, waiting []string
+	var retracted, waiting, failed []string
 	for _, ns := range stored.PublishedNS {
 		if pz := findProviderZoneForOwner(Sig0KeyOwnerName(stored.Zone, ns)); pz != "" {
 			if z, ok := Zones.Get(pz); ok && !z.contributionsLoaded() {
@@ -739,16 +743,24 @@ func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 				continue
 			}
 		}
-		publishSignalKeyToProvider(stored.Zone, ns, stored.SenderID, nil)
+		if err := retractSignalKey(stored.Zone, ns, stored.SenderID); err != nil {
+			lgCombiner.Error("failed to retract a _signal KEY; it stays in the stored instruction and is tried again",
+				"zone", stored.Zone, "sender", stored.SenderID, "ns", ns, "err", err)
+			failed = append(failed, ns)
+			continue
+		}
 		retracted = append(retracted, ns)
 	}
-	if len(waiting) > 0 && len(retracted) == 0 {
-		lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey",
-			"zone", stored.Zone, "sender", stored.SenderID, "waiting", waiting)
+	kept := append(append([]string(nil), waiting...), failed...)
+	if len(kept) > 0 && len(retracted) == 0 {
+		if len(waiting) > 0 {
+			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey",
+				"zone", stored.Zone, "sender", stored.SenderID, "waiting", waiting)
+		}
 		return
 	}
 	instr := stored.ToPublishInstruction()
-	if len(waiting) == 0 {
+	if len(kept) == 0 {
 		var locs []string
 		for _, loc := range stored.Locations {
 			if loc != "at-ns" {
@@ -757,11 +769,39 @@ func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 		}
 		instr.Locations = locs
 	}
-	if err := SavePublishInstruction(hdb, stored.Zone, stored.SenderID, instr, waiting); err != nil {
+	if err := SavePublishInstruction(hdb, stored.Zone, stored.SenderID, instr, kept); err != nil {
 		lgCombiner.Error("failed to save the publish instruction after withdrawing at-ns", "zone", stored.Zone, "sender", stored.SenderID, "err", err)
 	}
 	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey",
-		"zone", stored.Zone, "sender", stored.SenderID, "retracted", retracted, "waiting", waiting, "locations", instr.Locations)
+		"zone", stored.Zone, "sender", stored.SenderID, "retracted", retracted, "waiting", waiting, "failed", failed, "locations", instr.Locations)
+}
+
+// retractSignalKey takes a sender's _signal KEY for childZone out of the
+// provider zone that holds nsTarget, and says whether that worked: the
+// contribution is gone and the zone is published without it. With no provider
+// zone for the name there was nothing published and nothing to do.
+//
+// The publish is asked for whether or not the contribution changed. A
+// retraction whose publish failed is tried again, and by then the
+// contribution is already gone and the publish is all that is owed: the
+// combine has kept the cleanup it could not make.
+func retractSignalKey(childZone, nsTarget, senderID string) error {
+	ownerName := Sig0KeyOwnerName(childZone, nsTarget)
+	providerZone := findProviderZoneForOwner(ownerName)
+	if providerZone == "" {
+		return nil
+	}
+	mpzd, ok := Zones.Get(providerZone)
+	if !ok {
+		return fmt.Errorf("provider zone %s is not loaded", providerZone)
+	}
+	if _, _, _, err := mpzd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, nil); err != nil {
+		return fmt.Errorf("provider zone %s: retracting %s: %w", providerZone, ownerName, err)
+	}
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		return fmt.Errorf("provider zone %s: publishing without %s: %w", providerZone, ownerName, err)
+	}
+	return nil
 }
 
 // withdrawSignalKeysWithoutConsent is the startup's question about one
