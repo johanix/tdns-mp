@@ -132,16 +132,28 @@ func startMPUpstream(t *testing.T, zone, signers string, signed bool, serial uin
 	}
 	u.publish(t, serial)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen tcp: %v", err)
-	}
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	port, _ := strconv.Atoi(portStr)
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-	if err != nil {
+	// One port for TCP and UDP. The system picks the TCP port, and something
+	// else on the machine may hold that number for UDP: try another one.
+	var (
+		ln net.Listener
+		pc *net.UDPConn
+	)
+	for try := 1; ; try++ {
+		var err error
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen tcp: %v", err)
+		}
+		_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+		pc, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if err == nil {
+			break
+		}
 		ln.Close()
-		t.Fatalf("listen udp on the tcp port: %v", err)
+		if try == 10 {
+			t.Fatalf("listen udp on the tcp port: %v", err)
+		}
 	}
 	u.addr = ln.Addr().String()
 
