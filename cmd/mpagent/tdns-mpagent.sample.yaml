@@ -100,6 +100,11 @@ apiserver:
 # parentsync="agent". 60m is the default.
 # delegationsync:
 #    leader-election-ttl: 60m
+#
+# The longest the leader holds a NOTIFY to a zone's parent, whatever
+# propagation delay the zone's providers announce (see
+# kasp.propagation-delay below). 10m is the default; 0 holds none.
+#    notify-wait-max: 10m
 
 # Delegation sync towards the parent of a customer zone whose
 # HSYNCPARAM makes the agents responsible for it (parentsync="agent").

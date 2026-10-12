@@ -23,6 +23,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // delegationSyncRetryDelay and delegationSyncRetries bound what happens
@@ -498,7 +499,61 @@ func (conf *Config) delegationSyncInSync(zone string) {
 // wait. A provider that only signs, an auditor and a member with no role
 // have no nameservers to wait for. Also returned is the provider whose
 // value the wait is.
+//
+// The wait has a ceiling (delegationNotifyWaitMax): one provider that
+// announces a very large value would otherwise hold every leader's NOTIFY
+// that long. A NOTIFY that leaves before the slowest provider serves the
+// change costs one NOTIFY: the checks that follow send it again.
 func (conf *Config) delegationNotifyWait(zone string) (wait time.Duration, largest string) {
+	wait, largest = conf.delegationNotifyWaitAnnounced(zone)
+	if ceiling := delegationNotifyWaitMax(); wait > ceiling {
+		// with the ceiling at zero the operator has switched the hold off:
+		// nothing to tell
+		if _, told := notifyWaitCeilingTold.LoadOrStore(fmt.Sprintf("%s %s %s", largest, wait, ceiling), ceiling > 0); !told && ceiling > 0 {
+			lgEngine.Warn("a provider's propagation delay is above the ceiling of the wait before a NOTIFY; the NOTIFY is held for the ceiling",
+				"provider", largest, "announced", wait, "ceiling", ceiling, "setting", notifyWaitMaxKey)
+		}
+		wait = ceiling
+	}
+	return wait, largest
+}
+
+// notifyWaitMaxKey is the agent's setting for the ceiling of the wait before
+// a NOTIFY, and defaultNotifyWaitMax what it is when unset.
+const (
+	notifyWaitMaxKey     = "delegationsync.notify-wait-max"
+	defaultNotifyWaitMax = 10 * time.Minute
+)
+
+// notifyWaitCeilingTold: the provider, value and ceiling already warned of,
+// so that the warning comes once and not at every NOTIFY.
+var notifyWaitCeilingTold sync.Map
+
+// delegationNotifyWaitMax is the longest a NOTIFY is held, whatever the
+// providers announce. Zero is a setting: no NOTIFY is held. A value that is
+// negative, or positive and below a second (a number written without a unit
+// is read as nanoseconds), is refused and the default is used.
+func delegationNotifyWaitMax() time.Duration {
+	if !viper.IsSet(notifyWaitMaxKey) {
+		return defaultNotifyWaitMax
+	}
+	d := viper.GetDuration(notifyWaitMaxKey)
+	if d == 0 {
+		return 0
+	}
+	if d < time.Second {
+		if _, told := notifyWaitCeilingTold.LoadOrStore(fmt.Sprintf("refused %s", d), true); !told {
+			lgEngine.Error("the ceiling of the wait before a NOTIFY is not a usable duration (write a unit, as in 10m); the default is used",
+				"setting", notifyWaitMaxKey, "read_as", d, "default", defaultNotifyWaitMax)
+		}
+		return defaultNotifyWaitMax
+	}
+	return d
+}
+
+// delegationNotifyWaitAnnounced is the wait as the providers' announcements
+// give it, before the ceiling.
+func (conf *Config) delegationNotifyWaitAnnounced(zone string) (wait time.Duration, largest string) {
 	ar := conf.InternalMp.AgentRegistry
 	if ar == nil || ar.GossipStateTable == nil {
 		return 0, ""

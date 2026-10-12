@@ -31,6 +31,7 @@ import (
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // fakeParent answers what the leader's analysis asks a parent server about
@@ -1100,5 +1101,44 @@ func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.
 	gst.SetPropagationDelay(time.Minute)
 	if wait, of := conf.delegationNotifyWait("absent.notify.example."); wait != time.Minute || of != us {
 		t.Errorf("the wait for a zone that is not here is %s, by %s; want this agent's own", wait, of)
+	}
+}
+
+// The wait before a NOTIFY has a ceiling, ten minutes unless the agent's
+// configuration says otherwise: a provider that announces an hour does not
+// hold the leader's NOTIFY for an hour. Zero switches the hold off. A number
+// with no unit is read as nanoseconds and refused.
+func TestTheWaitBeforeANotifyHasACeiling(t *testing.T) {
+	gst := NewGossipStateTable("agent.us.example.")
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.AgentRegistry = &AgentRegistry{GossipStateTable: gst}
+	t.Cleanup(func() { viper.Set(notifyWaitMaxKey, nil) })
+	const zone = "ceiling.notify.example." // not loaded: the wait is this agent's own value
+
+	gst.SetPropagationDelay(time.Hour) // tdns's default for the setting
+	if wait, _ := conf.delegationNotifyWait(zone); wait != 10*time.Minute {
+		t.Errorf("with an hour announced and no ceiling configured the wait is %s, want the default ceiling of 10m", wait)
+	}
+	gst.SetPropagationDelay(5 * time.Minute)
+	if wait, _ := conf.delegationNotifyWait(zone); wait != 5*time.Minute {
+		t.Errorf("a value below the ceiling: the wait is %s, want the 5m announced", wait)
+	}
+
+	gst.SetPropagationDelay(time.Hour)
+	for _, tc := range []struct {
+		set  any
+		want time.Duration
+		why  string
+	}{
+		{"25m", 25 * time.Minute, "a configured ceiling"},
+		{"2h", time.Hour, "a ceiling above what is announced changes nothing"},
+		{"0", 0, "zero: no NOTIFY is held"},
+		{600, 10 * time.Minute, "a number with no unit is refused, the default is used"},
+		{"-5m", 10 * time.Minute, "a negative value is refused, the default is used"},
+	} {
+		viper.Set(notifyWaitMaxKey, tc.set)
+		if wait, _ := conf.delegationNotifyWait(zone); wait != tc.want {
+			t.Errorf("%s (%v): the wait is %s, want %s", tc.why, tc.set, wait, tc.want)
+		}
 	}
 }

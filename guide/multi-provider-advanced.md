@@ -171,7 +171,11 @@ for the largest `dnssec.kasp.propagation-delay` among the
 providers that serve the zone (HSYNCPARAM `servers=`).
 Each agent tells the other agents its own value in its
 beats; a provider whose value is not known is left out.
-An UPDATE is not held.
+The wait has a ceiling, `delegationsync.notify-wait-max`
+in the agent's configuration, 10 minutes by default: a
+provider that announces more is waited for that long and
+no longer, and the agent says so once in its log. An
+UPDATE is not held.
 
 Nor does the leader count the sync as done when the NOTIFY
 has been sent. It compares the parent with the zone again
