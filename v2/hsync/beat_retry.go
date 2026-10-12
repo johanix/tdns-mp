@@ -25,7 +25,9 @@ import (
 //     fast interval and then at doubling gaps, until one succeeds or the gap
 //     reaches the beat interval, where the rounds take over;
 //   - a peer that introduces itself again gets one beat back at once
-//     (BeatPeer): it restarted, and our reading of it is from before.
+//     (BeatPeer): it restarted, and our reading of it is from before. A beat
+//     back that fails is sent again after the fast interval, beatBackRetries
+//     times at most (#128).
 //
 // Neither touches the pace of the rounds, and both are bounded per peer: only
 // the first failure after a success starts the retries, so a peer that stays
@@ -50,8 +52,9 @@ func (e *Engine) baseCtx() context.Context {
 }
 
 // noteBeatFailed records a failed beat to peer and starts the peer's retrier
-// when it is the first failure since a success.
-func (e *Engine) noteBeatFailed(peer *Peer) {
+// when it is the first failure since a success. It reports whether it started
+// the retrier.
+func (e *Engine) noteBeatFailed(peer *Peer) bool {
 	e.beatMu.Lock()
 	first := !e.beatFailing[peer.ID]
 	e.beatFailing[peer.ID] = true
@@ -63,6 +66,7 @@ func (e *Engine) noteBeatFailed(peer *Peer) {
 	if start {
 		go e.beatRetrier(peer)
 	}
+	return start
 }
 
 // noteBeatSucceeded ends the peer's episode of failed beats.
@@ -131,16 +135,27 @@ func (e *Engine) endBeatRetrier(peer *Peer, over bool) {
 	}
 }
 
+// beatBackRetries is how many times a beat back that fails is sent again, a
+// fast interval apart. The peer's hello says that it is back, so a retry soon
+// is well spent, and a few are enough: a returning agent has been seen to
+// refuse a beat sent in the second its hello was processed and to acknowledge
+// the next one a second later, which the first retry covers; the second is for
+// a peer that needs longer than one fast interval. A peer that refuses three
+// beats in a row is not back in the sense its hello suggested, and the rounds
+// have it from there.
+const beatBackRetries = 2
+
 // BeatPeer beats one peer now, outside the rounds and without touching their
 // pace. The host calls it for a hello from a peer whose mechanism is already
 // introduced: the peer restarted, or never got our accept, and is introducing
 // itself again. Our reading of it is from before, so nothing else would beat
 // it until the next round, and a beat that failed while it was away would by
 // then be two intervals behind the last success. A peer that repeats its hello
-// costs one beat for each, to that peer alone, and never more than one at a
-// time: while one is on its way a further call does nothing, so hellos that
-// come faster than a beat returns cannot pile beats up. A peer the engine does
-// not know, or one not past its hello, gets none.
+// costs one beat back for each, to that peer alone, and never more than one at
+// a time: while one is on its way, or waits to be sent again (beatBack), a
+// further call does nothing, so hellos that come faster than a beat returns
+// cannot pile beats up. A peer the engine does not know, or one not past its
+// hello, gets none.
 func (e *Engine) BeatPeer(id PeerID) {
 	if e == nil || e.registry == nil {
 		return
@@ -164,9 +179,50 @@ func (e *Engine) BeatPeer(id PeerID) {
 			delete(e.beatingBack, id)
 			e.beatMu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(e.baseCtx(), 10*time.Second)
-		defer cancel()
-		e.sendBeatToPeer(ctx, peer)
-		e.runDeferredTasks(peer)
+		e.beatBack(peer)
 	}()
+}
+
+// beatBack sends the beat back to peer and, when it fails, sends it again
+// after the fast interval, beatBackRetries times at most. A returning peer can
+// refuse the beat sent in the moment its hello is processed, and with an
+// outage on the books nothing else beats it before the next round: the peer's
+// beat retrier, if it still runs, waits for a slot that may lie beyond that
+// round (#128).
+//
+// The beat back does not retry beside the retrier. A failed beat back that is
+// the first failure since a success starts the retrier, whose first retry
+// comes after the fast interval: that is the retry, and the beat back is done.
+// Otherwise the retries are sent from here, and a beat that succeeds in
+// between, a round's or the retrier's, ends them. With the fixed pace there is
+// no fast interval and no retry.
+func (e *Engine) beatBack(peer *Peer) {
+	if e.deps.Transport == nil {
+		return
+	}
+	base := e.baseCtx()
+	for try := 0; ; try++ {
+		ctx, cancel := context.WithTimeout(base, 10*time.Second)
+		ok := e.beatPeerOnce(ctx, peer)
+		cancel()
+		e.runDeferredTasks(peer)
+		if ok {
+			return
+		}
+		// The failure goes on the books as any failed beat's does.
+		if e.noteBeatFailed(peer) || try >= beatBackRetries || !e.fastBeatsOn() {
+			return
+		}
+		select {
+		case <-base.Done():
+			return
+		case <-time.After(e.cfg.BeatIntervalMin):
+		}
+		if !e.beatStillFailing(peer.ID) {
+			return
+		}
+		if _, ok := e.registry.S.Get(peer.ID); !ok || !e.peerAnyTransportReady(peer) {
+			return
+		}
+	}
 }
