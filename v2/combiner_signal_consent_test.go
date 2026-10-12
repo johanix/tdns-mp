@@ -396,20 +396,15 @@ func TestAZoneThatSaysPubkeyKeepsItsSignalKeys(t *testing.T) {
 	c.wantNoSignalKey("NS change", lacks, both...)
 	c.wantStored("NS change", lacks, []string{"at-apex"}, nil)
 
-	// A restart: the consenting zone's names are in the agent's
-	// contributions again and its instruction is as it was. (Served they
-	// are with the provider zone's next publish: the startup re-apply
-	// publishes only what the persisted contributions did not already hold.)
+	// A restart: the consenting zone's names are served again and its
+	// instruction is as it was (the start itself is the subject of
+	// combiner_signal_restart_test.go).
 	c.start(consentProviderZone, says, lacks)
 	prov := c.load(consentProviderZone, consentProviderText())
 	c.load(says, consentCustomerText(says, true))
 	c.load(lacks, consentCustomerText(lacks, false))
 	c.wantStored("restart", says, []string{"at-apex", "at-ns"}, both)
-	for _, ns := range both {
-		if _, held, persisted := c.signalKey(says, ns); !held || !persisted {
-			t.Errorf("restart: the KEY of %s under %s: held=%v persisted=%v, want it kept", says, ns, held, persisted)
-		}
-	}
+	c.wantSignalKey("restart", says, both...)
 	c.wantNoSignalKey("restart", lacks, both...)
 
 	// A re-apply of the provider zone serves the consenting zone's names

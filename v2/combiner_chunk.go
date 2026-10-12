@@ -659,8 +659,9 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 // --- The customer's consent to a stored at-ns publication (tdns-mp #115) ---
 //
 // A publish instruction is stored, and acted on later: on an NS change
-// (combinerResyncSignalKeys) and when the combiner starts or re-applies
-// (ApplyPendingSignalKeys, CombinerReapplyContributions). The agent asks
+// (combinerResyncSignalKeys), when the combiner starts or re-applies
+// (ApplyPendingSignalKeys, CombinerReapplyContributions), and when a
+// provider zone refreshes (MPPreRefresh). The agent asks
 // for at-ns only when the customer's HSYNCPARAM says pubkey
 // (publishLocations), but a stored instruction can say at-ns for a zone that
 // does not: an agent from before that rule sent it, or the customer has
@@ -788,6 +789,28 @@ func (mpzd *MPZoneData) withdrawSignalKeysWithoutConsent(senderID, zone string, 
 		withdrawSignalKeys(stored, hdb)
 	}
 	return true
+}
+
+// withdrawAllSignalKeysWithoutConsent goes through every stored instruction
+// and withdraws the at-ns publication of each zone that is loaded and does
+// not say pubkey (withdrawSignalKeys). A re-apply and a refresh of a provider
+// zone do this before they put the held _signal KEYs into the zone, so that
+// neither brings back a name the customer no longer consents to.
+func withdrawAllSignalKeysWithoutConsent(hdb *HsyncDB) error {
+	allInstr, err := LoadAllPublishInstructions(hdb)
+	if err != nil {
+		return err
+	}
+	for childZone, senders := range allInstr {
+		child, ok := Zones.Get(childZone)
+		if !ok || !child.lacksPubkeyConsent() {
+			continue
+		}
+		for _, stored := range senders {
+			withdrawSignalKeys(stored, hdb)
+		}
+	}
+	return nil
 }
 
 // publishSignalKeyToProvider directly applies a _signal KEY record to the
@@ -958,7 +981,21 @@ func buildPendingSignalKeys(hdb *HsyncDB) {
 	lgCombiner.Info("built pending signal key map", "providerZones", len(entries))
 }
 
-// ApplyPendingSignalKeys is called by each provider zone's OnFirstLoad.
+// ApplyPendingSignalKeys is called by each provider zone's OnFirstLoad. It
+// puts the _signal KEYs of the stored instructions into the zone's
+// contributions and publishes the zone with them.
+//
+// The publish does not depend on a contribution having changed. At a start
+// none has: the zone's first load has just read the same KEYs from the
+// persisted contributions, while the zone itself came back from its source
+// without them. The combiner's writes reach neither the zone's file nor its
+// upstream, so until the publish was made unconditional the names were held
+// and not served (tdns-mp #171).
+//
+// A customer zone that has not loaded yet says nothing of its consent, and
+// its names are served as its instruction has them, as they were before the
+// restart. That zone's own first load asks again and retracts them if the
+// flag is gone (RegisterCombinerOnFirstLoad).
 func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 	pendingSignalKeys.mu.Lock()
 	if !pendingSignalKeys.built {
@@ -973,7 +1010,6 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 		return
 	}
 
-	anyChanged := false
 	for _, entry := range myEntries {
 		// Asked here and not when the map was built: the customer's zone may
 		// have loaded since. Without its consent the stored names are
@@ -996,15 +1032,15 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 			continue
 		}
 		if changed {
-			anyChanged = true
 			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", mpzd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
 		}
 	}
-	// One publish for the whole re-apply.
-	if anyChanged {
-		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
-			lgCombiner.Error("startup re-apply: publishing the combiner state failed", "zone", mpzd.ZoneName, "err", err)
-		}
+	// One publish for the whole re-apply, after the loop: a name whose zone
+	// lacks consent has been retracted by then and is not put back here. The
+	// combine leaves an RRset alone that already reads as the contributions
+	// have it, so a zone that has the names publishes nothing.
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		lgCombiner.Error("startup re-apply: publishing the combiner state failed", "zone", mpzd.ZoneName, "err", err)
 	}
 }
 
