@@ -155,18 +155,50 @@ func TestDriverRollsTheAlgorithm(t *testing.T) {
 	}
 	r.clock.Advance(61 * time.Minute)
 	r.tick("the DS TTL passed")
-	// T9 for the new KSK, T10 for the old one, T19 for the old ZSK
+	// T9 for the new KSK; T10a for the old one: it goes on signing with
+	// its DS withdrawn (the old algorithm's signatures stay as long as a
+	// validator may hold the old DS, RFC 6781 §4.1.4); the old ZSK waits
 	if st, c := r.state(b), r.cols(b); st != KeyStateActive || c != "111" {
 		t.Errorf("the new KSK after the DS TTL: %s %s, want active 111", st, c)
 	}
-	if st, c := r.state(a), r.cols(a); st != KeyStateRetired || c != "100" {
-		t.Errorf("the old KSK after the DS TTL: %s %s, want retired 100 (its DS withdrawn on entry)", st, c)
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Errorf("the old KSK after the DS TTL: %s %s, want active 110 (it signs on, its DS withdrawn: T10a)", st, c)
 	}
-	if st, c := r.state(z), r.cols(z); st != KeyStateRetired || c != "100" {
-		t.Errorf("the old ZSK once no KSK of its algorithm signs: %s %s, want retired 100 (T19)", st, c)
+	if st, c := r.state(z), r.cols(z); st != KeyStateActive || c != "110" {
+		t.Errorf("the old ZSK with the old KSK still signing: %s %s, want active 110", st, c)
 	}
 	if st, c := r.state(y), r.cols(y); st != KeyStateActive || c != "110" {
 		t.Errorf("the new ZSK: %s %s, want active 110", st, c)
+	}
+	if st := r.rollOf("KSK"); st == nil || !strings.Contains(st.Step, "withdrawn from the DS set") {
+		t.Errorf("KSK roll step with both signing: %+v", st)
+	}
+	// the parent goes on serving the old DS: the old KSK signs on (T10b
+	// waits for E7 and the DS TTL)
+	r.clock.Advance(2 * time.Hour)
+	r.tick("the parent still serves the old DS")
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Errorf("the old KSK while the parent serves its DS: %s %s, want active 110", st, c)
+	}
+	// the parent drops it (T11a): the DS TTL is the wait, then T10b retires
+	// the old KSK and T19 the old ZSK in the same tick
+	r.wire.parentDS[a] = false
+	r.tick("the old DS gone")
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Errorf("the old KSK the tick its DS went: %s %s, want active 110 (a validator may hold the DS for the TTL)", st, c)
+	}
+	r.clock.Advance(30 * time.Minute)
+	r.tick("half the DS TTL")
+	if st := r.state(a); st != KeyStateActive {
+		t.Errorf("the old KSK inside the DS TTL: %s, want active", st)
+	}
+	r.clock.Advance(31 * time.Minute)
+	r.tick("the old DS TTL passed")
+	if st, c := r.state(a), r.cols(a); st != KeyStateRetired || c != "100" {
+		t.Errorf("the old KSK once its DS has been gone for the DS TTL: %s %s, want retired 100 (T10b)", st, c)
+	}
+	if st, c := r.state(z), r.cols(z); st != KeyStateRetired || c != "100" {
+		t.Errorf("the old ZSK once the old KSK retired: %s %s, want retired 100 (T19)", st, c)
 	}
 	for _, role := range []string{"KSK", "ZSK"} {
 		if st := r.rollOf(role); st == nil || !strings.Contains(st.Step, "retired") {
@@ -174,20 +206,15 @@ func TestDriverRollsTheAlgorithm(t *testing.T) {
 		}
 	}
 
-	// the withdrawal (§5.7): the margin, the parent dropping the old DS,
-	// the strip, the removal confirmed
+	// the withdrawal (§5.7): the margin (the old DS is gone already), the
+	// strip, the removal confirmed
 	r.clock.Advance(driverPolicy.Margin + time.Second)
 	r.tick("margin")
-	if st := r.state(a); st != KeyStateRetired {
-		t.Errorf("the old KSK left while the parent still served its DS: %s", st)
-	}
 	if st, c := r.state(z), r.cols(z); st != KeyStateMpremove || c != "000" {
 		t.Errorf("the old ZSK after the margin: %s %s, want mpremove 000", st, c)
 	}
-	r.wire.parentDS[a] = false
-	r.tick("the old DS gone")
 	if st, c := r.state(a), r.cols(a); st != KeyStateMpremove || c != "000" {
-		t.Errorf("the old KSK with its DS gone and the margin passed: %s %s, want mpremove 000", st, c)
+		t.Errorf("the old KSK after the margin, its DS long gone: %s %s, want mpremove 000", st, c)
 	}
 	stripped := map[uint16]bool{}
 	for _, k := range r.wire.stripped {
@@ -218,9 +245,8 @@ func TestDriverRollsTheAlgorithm(t *testing.T) {
 	}
 }
 
-// The KSK side done before the new ZSK is ready: the old ZSK retires with
-// its successor's promotion (T10's guard holds once no KSK of the old
-// algorithm signs).
+// The KSK side done before the new ZSK is ready: the old ZSK retires in
+// the tick its successor is promoted (T19, the old KSK being retired).
 func TestTheOldZSKRetiresWithItsSuccessorOnceTheKSKSideIsDone(t *testing.T) {
 	r := newDriverRig(t, "algorder.owned.example.", driverPolicy, "p2")
 	r.wire.parentTTL = time.Hour
@@ -241,6 +267,14 @@ func TestTheOldZSKRetiresWithItsSuccessorOnceTheKSKSideIsDone(t *testing.T) {
 	if st := r.state(b); st != KeyStateActive {
 		t.Fatalf("the new KSK: %s, want active", st)
 	}
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Fatalf("the old KSK: %s %s, want active 110 (signing on, its DS withdrawn)", st, c)
+	}
+	// the parent drops the old DS and the DS TTL passes: the old KSK retires
+	r.wire.parentDS[a] = false
+	r.tick("the old DS gone")
+	r.clock.Advance(61 * time.Minute)
+	r.tick("the old DS TTL passed")
 	if st := r.state(a); st != KeyStateRetired {
 		t.Fatalf("the old KSK: %s, want retired", st)
 	}
@@ -251,7 +285,7 @@ func TestTheOldZSKRetiresWithItsSuccessorOnceTheKSKSideIsDone(t *testing.T) {
 		t.Fatalf("the new ZSK, unconfirmed: %s, want mpdist", st)
 	}
 	// now the ZSK: confirmed, propagated, promoted; the old one retires in
-	// the same step, the KSK side being done
+	// the same tick (T19: the KSK side is done, the old KSK retired)
 	r.confirmAll("the ZSK applied", y)
 	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
 	r.tick("the ZSK propagated")
@@ -259,15 +293,16 @@ func TestTheOldZSKRetiresWithItsSuccessorOnceTheKSKSideIsDone(t *testing.T) {
 		t.Errorf("the new ZSK: %s %s, want active 110", st, c)
 	}
 	if st, c := r.state(z), r.cols(z); st != KeyStateRetired || c != "100" {
-		t.Errorf("the old ZSK with the KSK side done: %s %s, want retired 100 (T10)", st, c)
+		t.Errorf("the old ZSK with the KSK side done: %s %s, want retired 100 (T19)", st, c)
 	}
 	r.check("done")
 }
 
-// A ZSK-only change is gradual, as tdns's is: no KSK of the old algorithm
-// is left to wait for, so the old ZSK retires when the new one signs. And
-// once the new algorithm signs the cancel is refused.
-func TestAZSKOnlyAlgorithmChangeIsGradualAndCannotBeCancelledOnceItSigns(t *testing.T) {
+// A ZSK-only change is gradual, as tdns's relaxed roll is: no KSK of the
+// old algorithm is left to wait for, and the old ZSK keeps signing beside
+// the new one for a signature lifetime before it retires (T19). And once
+// the new algorithm signs the cancel is refused.
+func TestAZSKOnlyAlgorithmChangeKeepsTheOldZSKForASignatureLifetimeAndCannotBeCancelledOnceItSigns(t *testing.T) {
 	r := newDriverRig(t, "algzsk.owned.example.", driverPolicy, "p2")
 	a, z := bootstrapKSK(t, r)
 	r.wire.parentDS[a] = true
@@ -286,11 +321,27 @@ func TestAZSKOnlyAlgorithmChangeIsGradualAndCannotBeCancelledOnceItSigns(t *test
 	if st, c := r.state(y), r.cols(y); st != KeyStateActive || c != "110" {
 		t.Fatalf("the new ZSK: %s %s, want active 110", st, c)
 	}
-	if st, c := r.state(z), r.cols(z); st != KeyStateRetired || c != "100" {
-		t.Fatalf("the old ZSK of a ZSK-only change: %s %s, want retired 100 in the same step (gradual: the KSK signs with the policy's algorithm)", st, c)
+	if st, c := r.state(z), r.cols(z); st != KeyStateActive || c != "110" {
+		t.Fatalf("the old ZSK of a ZSK-only change with the new one signing: %s %s, want active 110 (both sign for a signature lifetime)", st, c)
 	}
 	if st := r.state(a); st != KeyStateActive {
 		t.Fatalf("the KSK: %s, want active, untouched", st)
+	}
+	if st := r.rollOf("ZSK"); st == nil || !strings.Contains(st.Step, "signature lifetime") {
+		t.Errorf("ZSK roll step with both signing: %+v", st)
+	}
+	r.clock.Advance(driverPolicy.SigLifetime / 2)
+	r.tick("half a signature lifetime")
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK inside the signature lifetime: %s, want active", st)
+	}
+	r.clock.Advance(driverPolicy.SigLifetime/2 + time.Second)
+	r.tick("a signature lifetime")
+	if st, c := r.state(z), r.cols(z); st != KeyStateRetired || c != "100" {
+		t.Fatalf("the old ZSK a signature lifetime after the new one began signing: %s %s, want retired 100 (T19)", st, c)
+	}
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("the new ZSK: %s, want active", st)
 	}
 	// the cancel rule: a key of the new algorithm signs, so the roll
 	// completes; the way back is a change of the algorithm once it has
@@ -412,9 +463,11 @@ func TestAlgorithmRolloverSurvivesARestart(t *testing.T) {
 }
 
 // The table's rows for the roll (O4), with a fake zone: T1 mints the
-// policy's algorithm when no key of it is on its way or signing; T10 keeps
-// the old algorithm's ZSK while a KSK of its algorithm signs; T19 retires it
-// once the KSK side is done.
+// policy's algorithm when no key of it is on its way or signing; a successor
+// of another algorithm retires nothing on T10: the old KSK goes on signing
+// with its DS withdrawn (T10a) until the parent has not served the DS for
+// the DS TTL (T11a, T10b); the old ZSK waits for T19, which needs the KSK
+// side done and either the old KSK retired or a signature lifetime.
 func TestAlgorithmRolloverGuards(t *testing.T) {
 	pending := ZoneView{AlgRollPending: true}
 	if next, row := Next(KeyView{}, EvMint, pending); row == nil || row.ID != "T1" || next != KeyStateCreated {
@@ -427,12 +480,11 @@ func TestAlgorithmRolloverGuards(t *testing.T) {
 
 	oldZSK := KeyView{State: KeyStateActive, Algorithm: dns.ED25519}
 	oldKSK := KeyView{State: KeyStateActive, SEP: true, Algorithm: dns.ED25519}
-	// T10: the successor of another algorithm while a KSK of the old one signs
-	if st, _ := Next(oldZSK, EvSuccessorActive, ZoneView{SuccessorAlgorithm: algRollTo}); st != KeyStateActive {
-		t.Errorf("the old ZSK retired on its successor with the KSK side pending: %s, want active", st)
-	}
-	if st, _ := Next(oldZSK, EvSuccessorActive, ZoneView{SuccessorAlgorithm: algRollTo, KSKSideDone: true}); st != KeyStateRetired {
-		t.Errorf("the old ZSK on its successor with the KSK side done: %s, want retired", st)
+	// E6 on the old keys: a successor of another algorithm retires nothing
+	for _, zv := range []ZoneView{{SuccessorAlgorithm: algRollTo}, {SuccessorAlgorithm: algRollTo, KSKSideDone: true}} {
+		if st, row := Next(oldZSK, EvSuccessorActive, zv); st != KeyStateActive || row != nil {
+			t.Errorf("the old ZSK on a successor of another algorithm (KSK side done %v): %s via %v, want active, no row", zv.KSKSideDone, st, row)
+		}
 	}
 	if st, _ := Next(oldZSK, EvSuccessorActive, ZoneView{SuccessorAlgorithm: dns.ED25519}); st != KeyStateRetired {
 		t.Errorf("a ZSK on a same-algorithm successor: %s, want retired", st)
@@ -440,13 +492,38 @@ func TestAlgorithmRolloverGuards(t *testing.T) {
 	if st, _ := Next(oldZSK, EvSuccessorActive, ZoneView{}); st != KeyStateRetired {
 		t.Errorf("a ZSK on a successor of unstated algorithm: %s, want retired", st)
 	}
-	if st, _ := Next(oldKSK, EvSuccessorActive, ZoneView{SuccessorAlgorithm: algRollTo}); st != KeyStateRetired {
-		t.Errorf("the old KSK on its successor: %s, want retired (the parent wait was T9's)", st)
+	if st, row := Next(oldKSK, EvSuccessorActive, ZoneView{SuccessorAlgorithm: algRollTo}); st != KeyStateActive || row == nil || row.ID != "T10a" {
+		t.Errorf("the old KSK on a successor of another algorithm: %s via %v, want active via T10a (it signs on with its DS withdrawn)", st, row)
 	}
-	// T19
-	done := ZoneView{PolicyAlgorithm: algRollTo, PolicyAlgActive: true, KSKSideDone: true}
+	if st, row := Next(oldKSK, EvSuccessorActive, ZoneView{SuccessorAlgorithm: dns.ED25519}); st != KeyStateRetired || row == nil || row.ID != "T10" {
+		t.Errorf("the old KSK on a same-algorithm successor: %s via %v, want retired via T10", st, row)
+	}
+	// the withdrawal wait: E7 is noted on the active row (T11a), and E15
+	// retires it once the DS has been gone for the DS TTL (T10b)
+	now := time.Now()
+	withdrawn := KeyView{State: KeyStateActive, SEP: true, Algorithm: dns.ED25519, Withdrawn: true}
+	if st, row := Next(withdrawn, EvDSGone, ZoneView{}); st != KeyStateActive || row == nil || row.ID != "T11a" {
+		t.Errorf("the withdrawn KSK's DS gone: %s via %v, want active via T11a", st, row)
+	}
+	if st, row := Next(oldKSK, EvDSGone, ZoneView{}); st != KeyStateActive || row != nil {
+		t.Errorf("an active KSK whose DS is not withdrawn on E7: %s via %v, want no row", st, row)
+	}
+	gone := withdrawn
+	gone.DSGone, gone.DSGoneAt, gone.ParentDSTTL = true, now.Add(-30*time.Minute), time.Hour
+	if st, row := Next(gone, EvDSExpired, ZoneView{Now: now}); st != KeyStateActive || row != nil {
+		t.Errorf("the withdrawn KSK inside the DS TTL: %s via %v, want active, no row", st, row)
+	}
+	if st, row := Next(gone, EvDSExpired, ZoneView{Now: now.Add(31 * time.Minute)}); st != KeyStateRetired || row == nil || row.ID != "T10b" {
+		t.Errorf("the withdrawn KSK after the DS TTL: %s via %v, want retired via T10b", st, row)
+	}
+	notGone := withdrawn
+	if st, row := Next(notGone, EvDSExpired, ZoneView{Now: now.Add(time.Hour)}); st != KeyStateActive || row != nil {
+		t.Errorf("the withdrawn KSK whose DS the parent still serves on E15: %s via %v, want no row", st, row)
+	}
+	// T19: the KSK side done and the old KSK retired (a combined roll)
+	done := ZoneView{PolicyAlgorithm: algRollTo, PolicyAlgActive: true, KSKSideDone: true, OldAlgKSKLeaving: true, Now: now}
 	if st, row := Next(oldZSK, EvAlgSuperseded, done); st != KeyStateRetired || row == nil || row.ID != "T19" {
-		t.Errorf("the old ZSK with the new one signing and the KSK side done: %s via %v, want retired via T19", st, row)
+		t.Errorf("the old ZSK with the new one signing and the old KSK retired: %s via %v, want retired via T19", st, row)
 	}
 	notYet := done
 	notYet.KSKSideDone = false
@@ -458,8 +535,17 @@ func TestAlgorithmRolloverGuards(t *testing.T) {
 	if st, _ := Next(oldZSK, EvAlgSuperseded, noNew); st != KeyStateActive {
 		t.Errorf("the old ZSK with no ZSK of the policy's algorithm signing: %s, want active", st)
 	}
+	// T19 in a ZSK-only roll: no old KSK to wait for, a signature lifetime instead
+	zskOnly := ZoneView{PolicyAlgorithm: algRollTo, PolicyAlgActive: true, KSKSideDone: true, PolicyAlgActiveSince: now.Add(-time.Hour), SigLifetime: 2 * time.Hour, Now: now}
+	if st, row := Next(oldZSK, EvAlgSuperseded, zskOnly); st != KeyStateActive || row != nil {
+		t.Errorf("the old ZSK of a ZSK-only roll inside the signature lifetime: %s via %v, want active, no row", st, row)
+	}
+	zskOnly.Now = now.Add(time.Hour + time.Second)
+	if st, row := Next(oldZSK, EvAlgSuperseded, zskOnly); st != KeyStateRetired || row == nil || row.ID != "T19" {
+		t.Errorf("the old ZSK of a ZSK-only roll after the signature lifetime: %s via %v, want retired via T19", st, row)
+	}
 	if _, row := Next(oldKSK, EvAlgSuperseded, done); row != nil {
-		t.Errorf("a KSK took row %s on E14, want none (T10 retires it)", row.ID)
+		t.Errorf("a KSK took row %s on E14, want none (T10a and T10b are its rows)", row.ID)
 	}
 	if _, row := Next(KeyView{State: KeyStateActive, Algorithm: algRollTo}, EvAlgSuperseded, done); row != nil {
 		t.Errorf("a ZSK of the policy's algorithm took row %s on E14, want none", row.ID)
@@ -540,14 +626,36 @@ func TestHarnessThreeProvidersRollTheAlgorithm(t *testing.T) {
 	}
 	h.clock.Advance(h.parentTTL + time.Second)
 	step("the DS TTL passed")
+	// T9 and T10a: both KSKs sign, the old one's DS withdrawn; the old
+	// algorithm's signatures stay while a validator may hold its DS
+	if got := activeOf(h, p1, "KSK"); len(got) != 2 {
+		t.Fatalf("p1's active KSKs after the DS TTL %v, want the new one %d and the old one %d signing together", got, newKSK, oldKSK)
+	}
+	for _, it := range h.inventory(p1) {
+		if it.KeyTag == oldKSK && (!it.Sign || it.DS == nil || *it.DS) {
+			t.Errorf("p1's old KSK after the new one signs: sign=%v ds=%v, want signing with its DS withdrawn (T10a)", it.Sign, it.DS)
+		}
+	}
+	if st := mpKeyState(t, p1.kdb, p1.zone, oldZSK); st != KeyStateActive {
+		t.Errorf("p1's old ZSK while the old KSK signs: %s, want active", st)
+	}
+	// the harness's parent follows the DS set one tick behind: the old DS
+	// goes (T11a), and after the DS TTL the old KSK retires (T10b) and the
+	// old ZSK with it (T19)
+	step("the parent drops the old DS")
+	if st := mpKeyState(t, p1.kdb, p1.zone, oldKSK); st != KeyStateActive {
+		t.Errorf("p1's old KSK the tick its DS went: %s, want active for the DS TTL", st)
+	}
+	h.clock.Advance(h.parentTTL + time.Second)
+	step("the old DS TTL passed")
 	if got := activeOf(h, p1, "KSK"); len(got) != 1 || got[0] != newKSK {
-		t.Fatalf("p1's active KSKs after the DS TTL %v, want the new one %d", got, newKSK)
+		t.Fatalf("p1's active KSKs once the old DS has been gone for the DS TTL %v, want the new one %d", got, newKSK)
 	}
 	if st := mpKeyState(t, p1.kdb, p1.zone, oldKSK); st != KeyStateRetired {
-		t.Errorf("p1's old KSK: %s, want retired", st)
+		t.Errorf("p1's old KSK: %s, want retired (T10b)", st)
 	}
 	if st := mpKeyState(t, p1.kdb, p1.zone, oldZSK); st != KeyStateRetired {
-		t.Errorf("p1's old ZSK once the KSK side is done: %s, want retired", st)
+		t.Errorf("p1's old ZSK once the KSK side is done: %s, want retired (T19)", st)
 	}
 	if left := h.drain(16); len(left) != 0 {
 		t.Errorf("after the drain, still in flight: %v", left)

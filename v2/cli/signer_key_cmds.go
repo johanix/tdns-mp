@@ -93,8 +93,10 @@ With --ksk-algorithm or --zsk-algorithm, changes the owner's algorithm for
 the role, which starts an algorithm rollover by the state machine: a key
 of the new algorithm is minted, distributed to the other signing providers,
 published and propagated, and signs beside the old one; a new KSK signs
-only once the parent has served its DS for the DS TTL, and the old KSK
-retires in that step; the old ZSK keeps signing until the KSK side is done.
+only once the parent has served its DS for the DS TTL; the old KSK then goes
+on signing with its DS withdrawn until the parent has not served that DS for
+the DS TTL, and retires; the old ZSK keeps signing until the KSK side is done,
+or, in a ZSK-only rollover, for a signature lifetime beside its successor.
 The old keys then leave as any retired key. signer key status shows the
 step; signer key rollover cancel takes the algorithm back while nothing of
 the new algorithm signs.`,

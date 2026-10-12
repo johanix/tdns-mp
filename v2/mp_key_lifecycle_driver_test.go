@@ -179,7 +179,7 @@ func (r *driverRig) keysIn(state, role string) []uint16 {
 }
 
 var driverPolicy = LifecyclePolicy{KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519, StandbyKSK: 0, StandbyZSK: 0,
-	PropagationDelay: 10 * time.Minute, Margin: time.Hour}
+	PropagationDelay: 10 * time.Minute, Margin: time.Hour, SigLifetime: 24 * time.Hour}
 
 // bootstrap: a fresh owned zone with two other signing providers gets one
 // active KSK and ZSK through the machine alone, in the table's order.

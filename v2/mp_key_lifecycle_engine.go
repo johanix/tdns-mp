@@ -257,17 +257,32 @@ func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 		if lifetimeSchedules(p.ZSK.Lifetime) {
 			pol.ZSKLifetime = time.Duration(p.ZSK.Lifetime) * time.Second
 		}
+		if p.SigValidity.Default > 0 {
+			pol.SigLifetime = time.Duration(p.SigValidity.Default) * time.Second
+		}
 	}
 	if conf != nil && conf.Config != nil {
 		pol.PropagationDelay = conf.Config.KaspPropagationDelay()
 		pol.Margin = pol.PropagationDelay
-		kasp := conf.Config.Dnssec.Kasp
-		pol.StandbyZSK, pol.StandbyKSK = 1, 0
-		if kasp.StandbyZskCount > 0 {
-			pol.StandbyZSK = kasp.StandbyZskCount
+		// the standby counts: the zone's policy's own standby-zsks and
+		// standby-ksks (the owner's fields, Q1), else the global kasp
+		// counts, else one ZSK and no KSK (tdns's StandbyKeyCount)
+		var bound *tdns.DnssecPolicy
+		if zd != nil {
+			bound = zd.DnssecPolicy
 		}
-		if kasp.StandbyKskCount > 0 {
-			pol.StandbyKSK = kasp.StandbyKskCount
+		if bound != nil {
+			pol.StandbyZSK = conf.Config.StandbyKeyCount(bound, false)
+			pol.StandbyKSK = conf.Config.StandbyKeyCount(bound, true)
+		} else {
+			kasp := conf.Config.Dnssec.Kasp
+			pol.StandbyZSK, pol.StandbyKSK = 1, 0
+			if kasp.StandbyZskCount > 0 {
+				pol.StandbyZSK = kasp.StandbyZskCount
+			}
+			if kasp.StandbyKskCount > 0 {
+				pol.StandbyKSK = kasp.StandbyKskCount
+			}
 		}
 		if mp := conf.MpConfig(); mp != nil && mp.KeyLifecycleResend != "" {
 			if d, err := time.ParseDuration(mp.KeyLifecycleResend); err == nil && d > 0 {

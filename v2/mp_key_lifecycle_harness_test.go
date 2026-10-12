@@ -441,8 +441,16 @@ func (h *mpHarness) checkAll(step string) {
 			if now[tag] {
 				continue
 			}
-			if ki := p.keyInfo[tag]; !ki.sep && !zskSigns[ki.alg] && oldKSKSigns[ki.alg] {
+			ki := p.keyInfo[tag]
+			if !ki.sep && !zskSigns[ki.alg] && oldKSKSigns[ki.alg] {
 				h.t.Errorf("%s: %s ZSK %d (%s) stopped signing while a KSK of %s still signs and the policy names another KSK algorithm (P11)", step, p.id, tag, dns.AlgorithmToString[ki.alg], dns.AlgorithmToString[ki.alg])
+			}
+			// P12 (O4, RFC 6781 §4.1.4): a KSK of an algorithm the policy no
+			// longer names for the KSK stops signing only once the parent no
+			// longer serves its DS (the harness's parent as of the last
+			// tick's end; the DS TTL wait on top of that is the driver's)
+			if ki.sep && ki.alg != policyAlg["KSK"] && p.parentServes[tag] {
+				h.t.Errorf("%s: %s KSK %d (%s) stopped signing while the parent still serves its DS and the policy names another KSK algorithm (P12)", step, p.id, tag, dns.AlgorithmToString[ki.alg])
 			}
 		}
 		p.signing = now
@@ -473,12 +481,33 @@ func (h *mpHarness) drain(rounds int) []string {
 	return h.inFlight()
 }
 
+// inFlight: what the drain waits for. A distribution on the wire (created,
+// mpdist, mpremove), and the waits that run on the clock alone with nothing
+// on the wire: a published key's propagation, a retired key's margin, an
+// algorithm rollover's withdrawal wait (an active KSK with its DS withdrawn,
+// T10a to T10b) and its tail (two active keys of a role: the old ZSK beside
+// its successor until T19). The rounds are two hours each, so every one of
+// these ends within a few rounds.
 func (h *mpHarness) inFlight() []string {
 	var out []string
 	for _, p := range h.providers {
+		active := map[string]int{}
 		for _, it := range h.inventory(p) {
-			if it.State == KeyStateMpdist || it.State == KeyStateMpremove || it.State == KeyStateCreated {
+			switch {
+			case it.State == KeyStateMpdist || it.State == KeyStateMpremove || it.State == KeyStateCreated:
 				out = append(out, fmt.Sprintf("%s:%d:%s", p.id, it.KeyTag, it.State))
+			case it.State == KeyStatePublished || it.State == KeyStateRetired:
+				out = append(out, fmt.Sprintf("%s:%d:%s (waiting)", p.id, it.KeyTag, it.State))
+			case it.State == KeyStateActive && it.Flags&dns.SEP != 0 && it.DS != nil && !*it.DS:
+				out = append(out, fmt.Sprintf("%s:%d:active, DS withdrawn", p.id, it.KeyTag))
+			}
+			if it.State == KeyStateActive {
+				active[roleOf(it.Flags)]++
+			}
+		}
+		for role, n := range active {
+			if n > 1 {
+				out = append(out, fmt.Sprintf("%s:%s:%d active", p.id, role, n))
 			}
 		}
 	}
@@ -496,8 +525,10 @@ func (h *mpHarness) restart(p *hProvider) {
 	}
 }
 
+// SigLifetime: what a ZSK-only algorithm roll keeps the old ZSK signing for
+// (T19); short enough for a drain's rounds of two hours each to cover it.
 var harnessPolicy = LifecyclePolicy{KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519, StandbyKSK: 1, StandbyZSK: 1,
-	PropagationDelay: 10 * time.Minute, Margin: time.Hour, ResendAfter: 30 * time.Minute}
+	PropagationDelay: 10 * time.Minute, Margin: time.Hour, ResendAfter: 30 * time.Minute, SigLifetime: 4 * time.Hour}
 
 // The scenarios of T3.4 through the harness: three providers bootstrap,
 // hold standbys, roll a KSK, one provider leaves mid-roll, one restarts.
