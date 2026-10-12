@@ -349,3 +349,248 @@ func TestOneFailedBeatDoesNotReadAsDegraded(t *testing.T) {
 		}
 	}
 }
+
+// outageWithTheRetriesSpent leaves the peer in an outage whose one episode of
+// retries is over: a beat failed, every retry failed, and nothing but the
+// rounds would beat the peer now. It returns the number of beats so far.
+func outageWithTheRetriesSpent(t *testing.T, e *Engine, s *scriptedBeats, peer *Peer) int {
+	t.Helper()
+	s.failing.Store(true)
+	e.sendBeatToPeer(context.Background(), peer)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		e.beatMu.Lock()
+		running := e.beatRetrying[peer.ID]
+		e.beatMu.Unlock()
+		if !running {
+			return len(s.beats())
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the beat retrier did not run out of retries")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitBeatBackDone waits until no beat back is on its way to the peer or
+// waiting to be sent again.
+func waitBeatBackDone(t *testing.T, e *Engine, id PeerID) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		e.beatMu.Lock()
+		busy := e.beatingBack[id]
+		e.beatMu.Unlock()
+		if !busy {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the beat back did not end")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// A returning peer can refuse the beat sent in the moment its hello is
+// processed. With an outage on the books that beat back starts no retrier, so
+// it is sent again after the fast interval, and the peer is healthy again
+// without waiting for a round (#128).
+func TestARefusedBeatBackIsSentAgainAfterTheFastInterval(t *testing.T) {
+	const fast, steady = 40 * time.Millisecond, 300 * time.Millisecond
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+	n := outageWithTheRetriesSpent(t, e, s, peer)
+
+	// The peer is back, and refuses one more beat.
+	s.failing.Store(false)
+	s.failOnce.Store(true)
+	e.BeatPeer(peer.ID)
+	b := s.waitBeats(t, n+2, time.Second)
+	if gap := b[n+1].Sub(b[n]); gap < fast*2/3 || gap > steady/2 {
+		t.Errorf("the beat back was sent again %v after it was refused, want about %v", gap, fast)
+	}
+	waitBeatBackDone(t, e, peer.ID)
+	if e.beatStillFailing(peer.ID) {
+		t.Error("the peer still counts as failing after the beat back was acknowledged")
+	}
+	p, _ := s.reg.Get(string(peer.ID))
+	if st, _ := p.MechanismEffectiveState(TransportDNS); st != transport.PeerStateOperational {
+		t.Errorf("the peer reads %v after the beat back was acknowledged, want OPERATIONAL", st)
+	}
+	time.Sleep(4 * fast)
+	if got := len(s.beats()) - n; got != 2 {
+		t.Errorf("%d beats for a beat back refused once, want 2 and no more", got)
+	}
+}
+
+// A peer that keeps refusing gets the beat back and its two retries, a fast
+// interval apart, and then no more. While they run, further hellos start no
+// second beat back beside them; the next hello after they have ended gets a
+// beat back of its own.
+func TestABeatBackIsRetriedTwiceAtMostAndOneAtATime(t *testing.T) {
+	const fast, steady = 40 * time.Millisecond, 300 * time.Millisecond
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+	n := outageWithTheRetriesSpent(t, e, s, peer)
+
+	// The peer says hello and goes on refusing. Its hellos keep coming while
+	// the beat back waits to be sent again.
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, n+1, time.Second)
+	for i := 0; i < 5; i++ {
+		e.BeatPeer(peer.ID)
+		time.Sleep(fast / 4)
+	}
+	b := s.waitBeats(t, n+1+beatBackRetries, time.Second)
+	for i := n + 1; i < len(b); i++ {
+		if gap := b[i].Sub(b[i-1]); gap < fast*2/3 {
+			t.Errorf("beat %d of the beat back came %v after the one before, want about %v", i-n, gap, fast)
+		}
+	}
+	waitBeatBackDone(t, e, peer.ID)
+	time.Sleep(4 * fast)
+	if got := len(s.beats()) - n; got != 1+beatBackRetries {
+		t.Fatalf("%d beats to a peer that refuses every one, want the beat back and %d retries", got, beatBackRetries)
+	}
+
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, n+1+beatBackRetries+1, time.Second)
+}
+
+// A beat back that fails with no outage on the books is the first failure
+// since a success, and starts the peer's beat retrier. The retries are then
+// the retrier's: after the fast interval, then at doubling gaps. The beat back
+// sends none beside them, so a peer that goes on refusing gets one beat per
+// slot of the retrier, not two.
+func TestAFailedBeatBackDoesNotRetryBesideTheRetrier(t *testing.T) {
+	const fast, steady = 200 * time.Millisecond, 4 * time.Second
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+
+	// The retrier's slots are 200 and 600 ms after the failure. A beat back
+	// retrying beside it would add beats at 200 and 400 ms.
+	s.failing.Store(true)
+	e.BeatPeer(peer.ID)
+	b := s.waitBeats(t, 2, time.Second)
+	if gap := b[1].Sub(b[0]); gap < fast*2/3 || gap > fast*2 {
+		t.Errorf("the retry came %v after the failed beat back, want about %v", gap, fast)
+	}
+	time.Sleep(time.Until(b[0].Add(fast * 5 / 2)))
+	if got := len(s.beats()); got != 2 {
+		t.Errorf("%d beats in the first 500 ms after a beat back that opened an outage, want 2: the beat back and the retrier's first retry", got)
+	}
+	s.failing.Store(false)
+}
+
+// A beat from a round that succeeds while the beat back waits to be sent
+// again ends it: the peer is no longer failing, and no retry is sent.
+func TestASuccessfulBeatEndsTheBeatBackRetries(t *testing.T) {
+	const fast, steady = 150 * time.Millisecond, 600 * time.Millisecond
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+	n := outageWithTheRetriesSpent(t, e, s, peer)
+
+	e.BeatPeer(peer.ID) // refused; the retry waits 150 ms
+	s.waitBeats(t, n+1, time.Second)
+	s.failing.Store(false)
+	e.sendBeatToPeer(context.Background(), peer) // a round's beat, which succeeds
+	waitBeatBackDone(t, e, peer.ID)
+	time.Sleep(2 * fast)
+	if got := len(s.beats()) - n; got != 2 {
+		t.Errorf("%d beats, want 2: the beat back retried to a peer that was no longer failing", got)
+	}
+}
+
+// With the fixed pace there is no fast interval: a beat back that fails is not
+// sent again.
+func TestNoBeatBackRetryOnTheFixedPace(t *testing.T) {
+	const steady = 100 * time.Millisecond
+	for _, fast := range []time.Duration{0, steady} {
+		s := newScriptedBeats()
+		e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+		peer := operationalDNSPeer(e, s)
+		s.failing.Store(true)
+		e.BeatPeer(peer.ID)
+		s.waitBeats(t, 1, time.Second)
+		time.Sleep(3 * steady)
+		if got := len(s.beats()); got != 1 {
+			t.Errorf("fast interval %v: %d beats, want the beat back only", fast, got)
+		}
+	}
+}
+
+// The case from a running fleet: a peer restarts, a round's beat to it fails,
+// and it is back late in the beat interval, after the retries that fall
+// before the next round. Its hello gets a beat back, which it refuses, being
+// barely up. Without a retry of the beat back nothing beats the peer before
+// the next round, whose refresh of the rows reads a last success two
+// intervals old: DEGRADED. With it the peer reads OPERATIONAL throughout. The
+// liveness interval is in whole seconds, so the rounds here are a second
+// apart.
+func TestAPeerBackLateInTheIntervalDoesNotReadAsDegraded(t *testing.T) {
+	const fast, steady = 100 * time.Millisecond, time.Second
+	s := newScriptedBeats()
+
+	var mu sync.Mutex
+	var rounds []time.Time
+	var seen []transport.PeerState
+	failedAt := -1
+	var e *Engine
+	e = NewEngine(Deps{
+		LocalID:   "local.example.",
+		Transport: s,
+		Host: HostCallbacks{BeforeHeartbeats: func() {
+			p, _ := s.reg.Get("remote.example.")
+			mu.Lock()
+			defer mu.Unlock()
+			now := time.Now()
+			seen = append(seen, p.EffectiveState())
+			// At the steady pace, the peer goes away just before a round.
+			if failedAt < 0 && len(rounds) > 0 && now.Sub(rounds[len(rounds)-1]) > steady*9/10 {
+				failedAt = len(rounds)
+				s.failing.Store(true)
+				// It is back 800 ms later, after the retries at 100, 300 and
+				// 700 ms. It says hello, and refuses the beat that answers.
+				time.AfterFunc(steady*8/10, func() {
+					s.failOnce.Store(true)
+					s.failing.Store(false)
+					e.BeatPeer("remote.example.")
+				})
+			}
+			rounds = append(rounds, now)
+		}},
+	}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+	p, _ := s.reg.Get(string(peer.ID))
+	p.SetLivenessInterval(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx, MsgChannels{Hello: make(chan *InboundReport), Beat: make(chan *InboundReport), Msg: make(chan *InboundMsg)})
+
+	// Until two rounds after the one whose beat failed.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		done := failedAt >= 0 && len(rounds) >= failedAt+3
+		mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the engine did not reach two rounds past the failed beat")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, st := range seen {
+		if st != transport.PeerStateOperational {
+			t.Errorf("round %d (the beat of round %d failed) read the peer as %v, want OPERATIONAL throughout", i, failedAt, st)
+		}
+	}
+}
