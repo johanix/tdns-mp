@@ -228,8 +228,10 @@ func parentSyncStatusFromResponse(amr *AgentMgmtResponse) (tdnsmp.ParentSyncStat
 }
 
 // printParentSyncStatus prints the agent's parent sync status for a zone.
-// The identities, names and records in it come from the zone's peers, the
-// zone and the parent's DNS, so they are printed through termSafe.
+// Every string in it is printed through termSafe. The identities, names and
+// records come from the zone's peers, the zone and the parent's DNS. The rest
+// are the agent's own names for a code or a state. They are escaped too: this
+// prints what a daemon sent, and does not check it against the agent's code.
 func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	fmt.Fprintf(w, "Parent sync status for zone %s\n", termSafe(string(s.Zone)))
 	fmt.Fprintf(w, "  checked:        %s\n", s.LastChecked.Format("2006-01-02 15:04:05 MST"))
@@ -253,7 +255,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	if s.KeyAlgorithm == "" {
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")
 	} else {
-		fmt.Fprintf(w, "  SIG(0) key:     %s, key id %d\n", s.KeyAlgorithm, s.KeyID)
+		fmt.Fprintf(w, "  SIG(0) key:     %s, key id %d\n", termSafe(s.KeyAlgorithm), s.KeyID)
 		fmt.Fprintf(w, "  KEY record:     %s\n", termSafe(strings.Join(strings.Fields(s.KeyRR), " ")))
 		// 0 is what the keystore holds for a key the parent was never asked
 		// about, and it is also a KeyState code of its own. The report does
@@ -261,7 +263,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		if s.ParentState == 0 {
 			fmt.Fprintf(w, "  parent state:   0 (not asked yet, or the parent answered %q)\n", s.ParentStateName)
 		} else {
-			fmt.Fprintf(w, "  parent state:   %s (%d), as last recorded\n", s.ParentStateName, s.ParentState)
+			fmt.Fprintf(w, "  parent state:   %s (%d), as last recorded\n", termSafe(s.ParentStateName), s.ParentState)
 		}
 	}
 	fmt.Fprintf(w, "  KEY at apex:    %s\n", publishedOrNot(s.ApexPublished))
@@ -280,7 +282,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		if s.ActiveScheme == "" {
 			fmt.Fprintln(w, "  scheme in use:  none (the parent advertises none of the agent's schemes)")
 		} else {
-			fmt.Fprintf(w, "  scheme in use:  %s\n", s.ActiveScheme)
+			fmt.Fprintf(w, "  scheme in use:  %s\n", termSafe(s.ActiveScheme))
 		}
 	}
 
@@ -288,7 +290,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		fmt.Fprintln(w, "\nSync schemes the parent advertises:")
 		fmt.Fprintf(w, "  %-8s  %-6s  %-5s  %s\n", "Scheme", "Type", "Port", "Target")
 		for _, d := range s.SyncSchemes {
-			fmt.Fprintf(w, "  %-8s  %-6s  %-5d  %s\n", d.Scheme, d.Type, d.Port, termSafe(d.Target))
+			fmt.Fprintf(w, "  %-8s  %-6s  %-5d  %s\n", termSafe(d.Scheme), termSafe(d.Type), d.Port, termSafe(d.Target))
 		}
 	}
 
@@ -320,7 +322,8 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 			if p.Operational {
 				operational = "yes"
 			}
-			fmt.Fprintf(w, "  %-12s  %-9s  %-11s  %s\n", p.State, p.Transport, operational, termSafe(string(p.Identity)))
+			fmt.Fprintf(w, "  %-12s  %-9s  %-11s  %s\n",
+				termSafe(p.State), termSafe(p.Transport), operational, termSafe(string(p.Identity)))
 		}
 	}
 }

@@ -131,6 +131,17 @@ func wantLines(t *testing.T, what, out string, lines ...string) {
 	}
 }
 
+// wantNoControls: nothing in out but its newlines would reach a terminal as
+// a control or format character.
+func wantNoControls(t *testing.T, what, out string) {
+	t.Helper()
+	for _, r := range out {
+		if r != '\n' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+			t.Errorf("%s printed control character %U:\n%q", what, r, out)
+		}
+	}
+}
+
 // Each of the four subcommands posts the command the agent's handler
 // switches on: the handler answers from that command's own branch. A command
 // name changed on one side only gets the handler's "Unknown agent command",
@@ -304,11 +315,42 @@ func TestParentSyncStatusPrintsEveryPartOfTheReport(t *testing.T) {
 		"  State         Transport  Operational  Identity",
 		"  OPERATIONAL   DNS        yes          agent.bravo.example.",
 		`  NEEDED        -          no           agent.charlie\x1b]0;retitled\x07.example.`)
-	for _, r := range out {
-		if r != '\n' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
-			t.Errorf("status printed control character %U:\n%q", r, out)
-		}
+	wantNoControls(t, "status", out)
+
+	// The agent's own names for a code or a state are escaped like the
+	// names from outside: the command prints what a daemon sent. The peer's
+	// state here is what the agent's string(AgentState) gives, one byte.
+	odd := report
+	odd.KeyAlgorithm = "ED25519\x1b[31m"
+	odd.ParentStateName = "Trusted\x07"
+	odd.ActiveScheme = "UPDATE\u202e"
+	odd.SyncSchemes = []tdnsmp.DsyncSchemeInfo{
+		{Scheme: "UPDATE\x08", Type: "ANY\x1b[1m", Target: "updates.parentsync.example.", Port: 5354},
 	}
+	odd.Peers = []tdnsmp.PeerSyncInfo{
+		{Identity: "agent.bravo.example.", State: string(tdnsmp.AgentStateInterrupted), Transport: "DNS\u009b1m", Operational: true},
+	}
+	out, err = parentSyncCLI(t, agent(odd))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status with control characters in the agent's own names: %v", err)
+	}
+	wantLines(t, "status with control characters in the agent's own names", out,
+		`  SIG(0) key:     ED25519\x1b[31m, key id 4711`,
+		`  parent state:   Trusted\x07 (4), as last recorded`,
+		`  scheme in use:  UPDATE\u202e`,
+		`  UPDATE\x08  ANY\x1b[1m  5354   updates.parentsync.example.`,
+		`  \x07          DNS\u009b1m  yes          agent.bravo.example.`)
+	wantNoControls(t, "status with control characters in the agent's own names", out)
+
+	// The same name on the line for a key the parent was never asked about.
+	odd.ParentState = 0
+	out, err = parentSyncCLI(t, agent(odd))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status with a control character in the name of state 0: %v", err)
+	}
+	wantLines(t, "status with a control character in the name of state 0", out,
+		`  parent state:   0 (not asked yet, or the parent answered "Trusted\a")`)
+	wantNoControls(t, "status with a control character in the name of state 0", out)
 
 	// A lease that has run out is no leader, whoever held it.
 	report.LeaderExpiry = checked.Add(-3 * time.Minute)
