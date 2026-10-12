@@ -123,6 +123,13 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load contributions", "err", err)
 		allContribs = nil
 	}
+	// And the stored publish instructions, to find the zones whose at-ns
+	// publication is to be checked against the customer's consent.
+	allInstr, err := LoadAllPublishInstructions(hdb)
+	if err != nil {
+		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load publish instructions", "err", err)
+		allInstr = nil
+	}
 
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
@@ -183,6 +190,26 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if w, ok := Zones.Get(zd.ZoneName); ok {
 					w.ApplyPendingSignalKeys(hdb)
+				}
+			})
+		}
+
+		// A zone with a stored at-ns instruction: once it has loaded, its
+		// HSYNCPARAM can be read, and the instruction is checked against the
+		// customer's consent. The provider zones' re-apply asks the same, but
+		// may have run before this zone could answer.
+		var atNSSenders []string
+		for senderID, stored := range allInstr[zoneName] {
+			if containsString(stored.Locations, "at-ns") {
+				atNSSenders = append(atNSSenders, senderID)
+			}
+		}
+		if len(atNSSenders) > 0 {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				if w, ok := Zones.Get(zd.ZoneName); ok {
+					for _, senderID := range atNSSenders {
+						w.withdrawSignalKeysWithoutConsent(senderID, zd.ZoneName, hdb)
+					}
 				}
 			})
 		}
