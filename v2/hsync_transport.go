@@ -689,6 +689,17 @@ func (tm *MPTransportBridge) beatBack(peerID string) {
 	}
 }
 
+// introduceByHello moves a peer's mechanism to INTRODUCING on a hello we
+// accepted from it, and brings the next beat round forward.
+func (tm *MPTransportBridge) introduceByHello(peer *transport.Peer, mech string) {
+	peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
+	// The hello moved the peer: beat it back soon, so that this side
+	// reaches OPERATIONAL too. Only here: a hello that finds the mechanism
+	// already introduced changes nothing, and a peer that never gets our
+	// accept repeats its hello every helloretry for as long as that lasts.
+	tm.kickBeats()
+}
+
 // routeHelloMessage routes a hello message to the hello channel.
 func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
@@ -711,13 +722,20 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastHelloReceived = time.Now()
+	noAddress := false
 	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
-		peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
-		// The hello moved the peer: beat it back soon, so that this side
-		// reaches OPERATIONAL too. Only here: a hello that finds the mechanism
-		// already introduced changes nothing, and a peer that never gets our
-		// accept repeats its hello every helloretry for as long as that lasts.
-		tm.kickBeats()
+		// An inbound hello shows that the peer reaches us, not that we reach
+		// it. A mechanism that discovery left without an address (the peer's
+		// URI found and no address, or the peer not looked up yet) is not
+		// moved: at INTRODUCING nothing would discover the peer again, and
+		// every send to it would fail for want of an address until a restart
+		// (#84). It stays where it is, the hello starts a discovery below,
+		// and the mechanism is introduced once that has found the address.
+		if peer.HasMechanism(mech) {
+			tm.introduceByHello(peer, mech)
+		} else {
+			noAddress = true
+		}
 	} else {
 		// The peer is introducing itself again: it restarted, or never got
 		// our accept. Our reading of it is from before, and a beat that
@@ -729,14 +747,20 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
 
-	// For an unknown (but authorized) sender, trigger discovery so we can beat
-	// back. Contact timestamps live on transport.Peer above — the AgentDetails
-	// telemetry mirror is gone (Phase 2).
+	// For an unknown (but authorized) sender, and for one whose mechanism has
+	// no address, trigger discovery so we can beat back. Contact timestamps
+	// live on transport.Peer above — the AgentDetails telemetry mirror is gone
+	// (Phase 2).
 	if tm.agentRegistry != nil {
-		if _, exists := tm.agentRegistry.S.Get(AgentId(senderID)); !exists {
+		_, exists := tm.agentRegistry.S.Get(AgentId(senderID))
+		if !exists || noAddress {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
 			// This ensures receiver can send beats back to sender
-			lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
+			if !exists {
+				lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
+			} else {
+				lgTransport.Info("authorized Hello from an agent with no address, triggering discovery", "agent", senderID, "mechanism", mech)
+			}
 			go func(peerID string) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
@@ -745,6 +769,20 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 					lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
 				} else {
 					lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
+				}
+				// The hello was accepted before there was an address to
+				// answer it at. If there is one now, it introduces the
+				// mechanism as it would have then; if not, the mechanism
+				// still needs discovery and the engine's retry has it.
+				if !noAddress {
+					return
+				}
+				p, ok := tm.PeerRegistry.Get(peerID)
+				if !ok || !p.HasMechanism(mech) {
+					return
+				}
+				if raw, ok := p.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
+					tm.introduceByHello(p, mech)
 				}
 			}(senderID)
 		}
@@ -772,7 +810,8 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	select {
 	case tm.msgQs.Hello <- report:
-		lgTransport.Debug("routed hello to hsyncengine", "mechanism", mech, "sender", senderID, "state", "INTRODUCING", "distributionID", msg.DistributionID)
+		state, _ := peer.MechanismRawState(mech)
+		lgTransport.Debug("routed hello to hsyncengine", "mechanism", mech, "sender", senderID, "state", state.String(), "distributionID", msg.DistributionID)
 	default:
 		lgTransport.Warn("hello channel full, dropping message", "sender", senderID)
 	}
