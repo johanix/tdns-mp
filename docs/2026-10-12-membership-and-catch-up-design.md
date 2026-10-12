@@ -171,11 +171,15 @@ Each provider fetches the owner's zone on its own, so two agents can hold differ
 So a leader sends nothing to the parent for a zone until both of these hold:
 
 - every voting member of the zone's group holds the same make-up for the zone as the leader does;
-- the leader of the group the zone left has shown that it holds that make-up too, or that it no longer has the zone, or its lease has run out.
+- the leader of the group the zone left has shown that it holds that make-up too, or that it no longer has the zone, or a short fixed time has passed since the zone arrived: a few beat intervals.
 
 Until then the sync is owed and not sent, and one line says who is waited for. This is the hold of 5.6 for another kind of not knowing: there the leader lacks the zone's data, here the group lacks one view of who the zone's members are.
 
-To make it possible, every agent tells its peers which make-up it holds for each zone they share. When the agents are in contact a disagreement shows within a beat, and the hold then lasts as long as the disagreement does. When the previous leader cannot be reached the hold lasts until its lease has run out.
+To make it possible, every agent tells its peers which make-up it holds for each zone they share. When the agents are in contact a disagreement shows within a beat, and the hold then lasts as long as the disagreement does. When the previous leader cannot be reached, or is stuck on an old copy of the zone, the hold ends with the fixed time.
+
+The fixed time is enough because the first condition holds every leader, the previous one too. A previous leader that is alive hears within a beat that its peers no longer have the zone in its group, and from then on it holds its own sync. One that is not alive sends nothing. Its lease is no way out: a lease belongs to a group, not to a zone, and it is renewed for as long as that group has any zone left, so a previous leader that is stuck on one zone would hold that zone's sync for ever.
+
+One case is not covered. An owner who replaces a zone's only provider by another in one edit leaves a previous leader that has no peer to tell it anything. If its agent is then stuck on the old copy, it and the new provider both act. The order of an add and a removal in `guide/provider-changes.md` avoids it: the new provider is added before the old one is taken away.
 
 A zone that arrives while its group's election is running is one of the zones that election is held for.
 
