@@ -155,10 +155,11 @@ and applies the changes.
 1. The agent detects a change to delegation data.
 2. The records the parent will read are published at the zone
    apex. For an NS or glue change the combiner publishes a
-   CSYNC record, with the immediate flag set, so that the
-   parent acts on it without waiting for an approval. For a
-   DS change the signers serve the CDS RRset of the zone's
-   DS set.
+   CSYNC record. It does not carry the immediate flag today,
+   and a scanning parent acts only on one that does: an NS
+   change does not reach the parent through this scheme yet.
+   For a DS change the signers serve the CDS RRset of the
+   zone's DS set.
 3. The elected leader agent sends a NOTIFY with the
    appropriate QTYPE (CSYNC or CDS) to the parent's NOTIFY
    receiver address (from the DSYNC RRset). A NOTIFY(CDS)

@@ -448,10 +448,6 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	return resp
 }
 
-// csyncFlagImmediate is the CSYNC "immediate" flag (RFC 7477 section
-// 2.1.1.2). Neither tdns nor the dns library exports a name for it.
-const csyncFlagImmediate uint16 = 0x01
-
 // combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
 // STATUS-UPDATE notification to the local agent that delivered the update.
 func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, nsChanged, kskChanged bool) {
@@ -475,13 +471,8 @@ func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, se
 			lgCombiner.Debug("combinerNotifyDelegationChange: NS changed but zone is not signed, skipping CSYNC", "zone", zonename)
 		} else {
 			csync := &dns.CSYNC{
-				Serial: mpzd.CurrentSerial,
-				// Immediate (RFC 7477 section 3): the NS set is what the
-				// providers' agents have agreed on, so the parent has no
-				// approval to wait for. soaminimum stays unset: the serial
-				// is this combiner's, not the SOA serial the provider's
-				// servers answer with.
-				Flags:      csyncFlagImmediate,
+				Serial:     mpzd.CurrentSerial,
+				Flags:      0,
 				TypeBitMap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA},
 			}
 			csync.Hdr = dns.RR_Header{
