@@ -117,6 +117,13 @@ JWK record that changed after the peer was discovered
 is picked up that way without a reset. The log says
 "peer keeps refusing our hello" when it happens.
 
+The agent does the same when a peer says hello and the
+agent has not found an address for it: an earlier
+lookup may have been answered before the peer's records
+were published, and the IMR caches that answer. Both
+together flush and look one peer up at most once a
+minute.
+
 `peer reset` is an agent/auditor command only. Signer
 and combiner use static peer configuration and respond
 with "not applicable".

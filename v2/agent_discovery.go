@@ -34,7 +34,8 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 // and discovers the peer again. What the lookup finds replaces what is held:
 // the address, and the peer's key in the payload crypto when the JWK lookup
 // returns one. It is the discovery kick for a sender whose key is missing,
-// and what a peer that keeps refusing our hellos gets (noteHelloRefused).
+// what a peer that keeps refusing our hellos gets (noteHelloRefused), and
+// what a hello from a sender with no address gets (routeHelloMessage).
 func (tm *MPTransportBridge) flushAndDiscover(peerID string) {
 	// Flush IMR cache for this peer's discovery names before re-discovery
 	if tm.getImrEngine != nil {
@@ -71,6 +72,11 @@ func (tm *MPTransportBridge) flushAndDiscover(peerID string) {
 // authorized for a zone. The lookup changes nothing then, and the interval
 // bounds what it costs. Only the answer to a hello of our own counts, so
 // nothing a third party sends us makes this agent look anything up.
+//
+// The interval is one per peer for every lookup past the cache that a
+// message can ask for. A hello from a sender with no address asks for one
+// too (freshLookupDue), and the two share the book: a peer is looked up past
+// the cache at most once an interval, whichever asks.
 const (
 	// helloRefusalsBeforeRediscovery: one refused hello is common while a
 	// peer starts and has not loaded the zone that authorizes us. Three in a
@@ -79,10 +85,52 @@ const (
 	peerRediscoveryInterval        = time.Minute
 )
 
-// refusedHellos is the count behind noteHelloRefused, for one peer.
+// refusedHellos is the count behind noteHelloRefused, for one peer, and when
+// the peer was last looked up past the cache.
 type refusedHellos struct {
 	inARow       int       // refused hellos since the last accepted one
-	rediscovered time.Time // when the peer was last looked up again for them
+	rediscovered time.Time // when the peer was last looked up past the cache, for them or for a hello of its own
+}
+
+// freshLookupInterval is the least time between two lookups of one peer past
+// the cache.
+func (tm *MPTransportBridge) freshLookupInterval() time.Duration {
+	if tm.rediscoveryInterval > 0 {
+		return tm.rediscoveryInterval
+	}
+	return peerRediscoveryInterval
+}
+
+// lookupBook returns the peer's entry in the book, and makes it when there
+// is none. The caller holds refusedHellosMu. The entry is one for the peer
+// however its identity is spelled: one caller has it from the registry, the
+// other from the peer's own hello.
+func (tm *MPTransportBridge) lookupBook(peerID string) *refusedHellos {
+	if tm.refusedHellos == nil {
+		tm.refusedHellos = make(map[string]*refusedHellos)
+	}
+	peerID = dns.CanonicalName(peerID)
+	r := tm.refusedHellos[peerID]
+	if r == nil {
+		r = &refusedHellos{}
+		tm.refusedHellos[peerID] = r
+	}
+	return r
+}
+
+// freshLookupDue reports whether the peer may be looked up past the cache
+// now, and books the lookup when it may: the interval has passed since the
+// last one, whichever asked for that.
+func (tm *MPTransportBridge) freshLookupDue(peerID string) bool {
+	interval := tm.freshLookupInterval()
+	tm.refusedHellosMu.Lock()
+	defer tm.refusedHellosMu.Unlock()
+	r := tm.lookupBook(peerID)
+	if time.Since(r.rediscovered) < interval {
+		return false
+	}
+	r.rediscovered = time.Now()
+	return true
 }
 
 // helloRefused reports whether a DNS hello failed because the peer answered
@@ -100,19 +148,9 @@ func helloRefused(err error) bool {
 // noteHelloRefused counts a hello that the peer refused and, when the
 // refusals have gone on for long enough, has the peer looked up again.
 func (tm *MPTransportBridge) noteHelloRefused(peerID string) {
-	interval := tm.rediscoveryInterval
-	if interval <= 0 {
-		interval = peerRediscoveryInterval
-	}
+	interval := tm.freshLookupInterval()
 	tm.refusedHellosMu.Lock()
-	if tm.refusedHellos == nil {
-		tm.refusedHellos = make(map[string]*refusedHellos)
-	}
-	r := tm.refusedHellos[peerID]
-	if r == nil {
-		r = &refusedHellos{}
-		tm.refusedHellos[peerID] = r
-	}
+	r := tm.lookupBook(peerID)
 	r.inARow++
 	refused := r.inARow
 	due := refused >= helloRefusalsBeforeRediscovery && time.Since(r.rediscovered) >= interval
@@ -132,7 +170,7 @@ func (tm *MPTransportBridge) noteHelloRefused(peerID string) {
 // last looked up stays on the books: the interval holds across it.
 func (tm *MPTransportBridge) noteHelloAccepted(peerID string) {
 	tm.refusedHellosMu.Lock()
-	if r := tm.refusedHellos[peerID]; r != nil {
+	if r := tm.refusedHellos[dns.CanonicalName(peerID)]; r != nil {
 		r.inARow = 0
 	}
 	tm.refusedHellosMu.Unlock()

@@ -92,8 +92,8 @@ type MPTransportBridge struct {
 	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
 
 	// refusedHellos is, per peer, the run of our DNS hellos that the peer
-	// has refused and when the peer was last looked up again for it
-	// (noteHelloRefused, agent_discovery.go).
+	// has refused and when the peer was last looked up past the resolver's
+	// cache (noteHelloRefused, freshLookupDue, agent_discovery.go).
 	refusedHellosMu sync.Mutex
 	refusedHellos   map[string]*refusedHellos
 	// rediscoveryInterval is the least time between two such lookups of one
@@ -756,13 +756,25 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 				lgTransport.Info("authorized Hello from an agent with no address, triggering discovery", "agent", senderID, "mechanism", mech)
 			}
 			go func(peerID string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				err := tm.DiscoverAndRegisterAgent(ctx, peerID)
-				if err != nil {
-					lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
+				// The resolver may hold the answer that the sender's address
+				// is not there, from a lookup before it could be found, and
+				// a discovery through the cache gets that answer again until
+				// it expires. The hello says that the sender's records can
+				// be found now, so a sender with no address is looked up
+				// past the cache. Once per peer and interval, so that hellos
+				// cannot drive flushes; within the interval the discovery
+				// goes through the cache.
+				if noAddress && tm.freshLookupDue(peerID) {
+					tm.flushAndDiscover(peerID)
 				} else {
-					lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					err := tm.DiscoverAndRegisterAgent(ctx, peerID)
+					cancel()
+					if err != nil {
+						lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
+					} else {
+						lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
+					}
 				}
 				// The hello was accepted before there was an address to
 				// answer it at. If there is one now, it introduces the
