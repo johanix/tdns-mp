@@ -1650,9 +1650,16 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 						}
 					}
 				}
+				// The state goes out by its name. A value the table does not
+				// hold goes out by its number, not as an empty string.
+				state := ar.effectiveAgentState(agent.ID)
+				stateName, ok := AgentStateToString[state]
+				if !ok {
+					stateName = fmt.Sprintf("STATE%d", state)
+				}
 				status.Peers = append(status.Peers, PeerSyncInfo{
 					Identity:    agent.ID,
-					State:       string(ar.effectiveAgentState(agent.ID)),
+					State:       stateName,
 					Transport:   transportStr,
 					Operational: ar.isAgentOperational(agent.ID),
 				})

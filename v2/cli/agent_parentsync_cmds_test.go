@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"unicode"
 
 	tdnsmp "github.com/johanix/tdns-mp/v2"
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	tdnscli "github.com/johanix/tdns/v2/cli"
 	"github.com/miekg/dns"
@@ -68,6 +70,14 @@ func parentSyncCLI(t *testing.T, agent http.HandlerFunc) func(args ...string) (s
 // peers, no resolver and no parent. Returns the handler and the key's id.
 func parentSyncTestAgent(t *testing.T, id, zone string) (http.HandlerFunc, uint16) {
 	t.Helper()
+	conf, hdb, keyid := parentSyncTestConf(t, id, zone)
+	return conf.APIagent(t.Context(), nil, hdb), keyid
+}
+
+// parentSyncTestConf is that agent before its handler is made, for a test
+// that gives it more: records are further records of the zone, one a line.
+func parentSyncTestConf(t *testing.T, id, zone string, records ...string) (*tdnsmp.Config, *tdnsmp.HsyncDB, uint16) {
+	t.Helper()
 	f := filepath.Join(t.TempDir(), "keys.db")
 	if err := os.WriteFile(f, nil, 0664); err != nil {
 		t.Fatalf("create db file: %v", err)
@@ -96,6 +106,9 @@ func parentSyncTestAgent(t *testing.T, id, zone string) (http.HandlerFunc, uint1
 	text := fmt.Sprintf("%s 3600 IN SOA ns1.alpha.example. hostmaster.%s 1 7200 1800 604800 7200\n"+
 		"%s 3600 IN NS ns1.alpha.example.\n%s 3600 IN NS ns1.bravo.example.\n%s\n",
 		zone, zone, zone, zone, sak.Keys[0].KeyRR.String())
+	for _, rr := range records {
+		text += rr + "\n"
+	}
 	zd := &tdns.ZoneData{
 		ZoneName:  zone,
 		ZoneStore: tdns.MapZone,
@@ -119,7 +132,7 @@ func parentSyncTestAgent(t *testing.T, id, zone string) (http.HandlerFunc, uint1
 	conf.InternalMp.LeaderElectionManager = tdnsmp.NewLeaderElectionManager(tdnsmp.AgentId(id), time.Hour,
 		func(tdnsmp.ZoneName, string, map[string][]string) error { return nil })
 
-	return conf.APIagent(t.Context(), nil, hdb), sak.Keys[0].KeyId
+	return conf, hdb, sak.Keys[0].KeyId
 }
 
 func wantLines(t *testing.T, what, out string, lines ...string) {
@@ -237,6 +250,98 @@ func TestParentSyncStatusShowsWhatTheAgentReports(t *testing.T) {
 	}
 }
 
+// The peers of the report, from the agent's real handler. The zone names
+// three other providers in HSYNC3 and gives each a role in HSYNCPARAM, and
+// the agent's transport holds them in three states. The report names each
+// peer's state, and the Peers table shows the names.
+func TestParentSyncStatusNamesEachPeersState(t *testing.T) {
+	const id, zone = "agent.alpha.example.", "peers.parentsync.example."
+	conf, hdb, _ := parentSyncTestConf(t, id, zone,
+		zone+" 3600 IN HSYNC3 ON alpha agent.alpha.example. .",
+		zone+" 3600 IN HSYNC3 ON bravo agent.bravo.example. .",
+		zone+" 3600 IN HSYNC3 ON charlie agent.charlie.example. .",
+		zone+" 3600 IN HSYNC3 ON delta agent.delta.example. .",
+		zone+` 3600 IN HSYNCPARAM servers="alpha,bravo,charlie,delta" signers="alpha" nsmgmt="agent" parentsync="agent"`)
+
+	ar := conf.NewAgentRegistry()
+	peers := transport.NewPeerRegistry()
+	ar.TransportManager = &transport.TransportManager{PeerRegistry: peers}
+	conf.InternalMp.AgentRegistry = ar
+	// bravo is reached over DNS, and a beat got through a moment ago.
+	bravo := peers.GetOrCreate("agent.bravo.example.")
+	bravo.SetMechanismState(transport.MechanismDNS, transport.PeerStateOperational, "test")
+	bravo.SetMechanismLastBeatSent(transport.MechanismDNS, time.Now())
+	// charlie was reached over the API; the last beat that got through is
+	// ten minutes old.
+	charlie := peers.GetOrCreate("agent.charlie.example.")
+	charlie.SetMechanismState(transport.MechanismAPI, transport.PeerStateOperational, "test")
+	charlie.SetMechanismLastBeatSent(transport.MechanismAPI, time.Now().Add(-10*time.Minute))
+	// delta is in the zone, and the transport has not heard of it.
+
+	agent := conf.APIagent(t.Context(), nil, hdb)
+	states := func() map[tdnsmp.AgentId]string {
+		t.Helper()
+		body, err := json.Marshal(AgentMgmtPost{Command: "parentsync-status", Zone: zone})
+		if err != nil {
+			t.Fatalf("marshal the request: %v", err)
+		}
+		rec := httptest.NewRecorder()
+		agent(rec, httptest.NewRequest(http.MethodPost, "/agent", bytes.NewReader(body)))
+		var amr AgentMgmtResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &amr); err != nil {
+			t.Fatalf("the answer does not parse: %v: %s", err, rec.Body.String())
+		}
+		if amr.Error {
+			t.Fatalf("the handler answered with an error: %s", amr.ErrorMsg)
+		}
+		report, err := parentSyncStatusFromResponse(&amr)
+		if err != nil {
+			t.Fatalf("the report: %v", err)
+		}
+		got := map[tdnsmp.AgentId]string{}
+		for _, p := range report.Peers {
+			got[p.Identity] = p.State
+		}
+		return got
+	}
+	want := map[tdnsmp.AgentId]string{
+		"agent.bravo.example.":   "OPERATIONAL",
+		"agent.charlie.example.": "INTERRUPTED",
+		"agent.delta.example.":   "NEEDED",
+	}
+	if got := states(); !maps.Equal(got, want) {
+		t.Errorf("the report gives the peers' states as %q, want %q", got, want)
+	}
+
+	run := parentSyncCLI(t, agent)
+	out, err := run("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status", out,
+		"Peers:",
+		"  State         Transport  Operational  Identity",
+		"  OPERATIONAL   DNS        yes          agent.bravo.example.",
+		"  INTERRUPTED   -          no           agent.charlie.example.",
+		"  NEEDED        -          no           agent.delta.example.")
+
+	// A state the table has no name for goes out by its number, and the
+	// column is not left empty. No state is without a name today, so the
+	// table loses one for the moment.
+	needed := AgentStateToString[tdnsmp.AgentStateNeeded]
+	delete(AgentStateToString, tdnsmp.AgentStateNeeded)
+	t.Cleanup(func() { AgentStateToString[tdnsmp.AgentStateNeeded] = needed })
+	if got := states()["agent.delta.example."]; got != "STATE1" {
+		t.Errorf("a state without a name is reported as %q, want STATE1", got)
+	}
+	out, err = run("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status with a state that has no name: %v", err)
+	}
+	wantLines(t, "status with a state that has no name", out,
+		"  STATE1        -          no           agent.delta.example.")
+}
+
 // The parts of the report that need a resolver, a parent and peers, which
 // the agent of the tests above has not got. The report is built in the
 // handler's own types and written the way the handler writes its response.
@@ -319,7 +424,8 @@ func TestParentSyncStatusPrintsEveryPartOfTheReport(t *testing.T) {
 
 	// The agent's own names for a code or a state are escaped like the
 	// names from outside: the command prints what a daemon sent. The peer's
-	// state here is what the agent's string(AgentState) gives, one byte.
+	// state here is one control byte, which is how an agent sent it before
+	// the state went out by its name.
 	odd := report
 	odd.KeyAlgorithm = "ED25519\x1b[31m"
 	odd.ParentStateName = "Trusted\x07"
@@ -328,7 +434,7 @@ func TestParentSyncStatusPrintsEveryPartOfTheReport(t *testing.T) {
 		{Scheme: "UPDATE\x08", Type: "ANY\x1b[1m", Target: "updates.parentsync.example.", Port: 5354},
 	}
 	odd.Peers = []tdnsmp.PeerSyncInfo{
-		{Identity: "agent.bravo.example.", State: string(tdnsmp.AgentStateInterrupted), Transport: "DNS\u009b1m", Operational: true},
+		{Identity: "agent.bravo.example.", State: "\x07", Transport: "DNS\u009b1m", Operational: true},
 	}
 	out, err = parentSyncCLI(t, agent(odd))("status", "-z", zone)
 	if err != nil {
