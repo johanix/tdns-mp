@@ -254,7 +254,7 @@ Over HTTPS the middleware has nothing to compare (2.9). There the sender the tra
 | Election | The sender is a voting member; the local agent is one | `HandleGroupMessage` (PR #163), `HandleMessage` | 1 |
 | RFI SYNC, RFI AUDIT | The sender is a member of the zone | `handleAppRfi` | 6 |
 | RFI CONFIG `upstream`, `downstream` | The sender is a member of the zone, related by an ON record's `upstream` field, and not an auditor only | `handleAppRfi`, `GetZoneAgentData` | 6 |
-| `CONFIG sig0key` | The same, and a voting member | `handleAppRfi` | 6 |
+| `CONFIG sig0key` | A voting member of the zone; the upstream relation is no longer asked for (decision 15) | `handleAppRfi` | 6 |
 
 A STATUS-UPDATE and a RELOCATE have no rule of their own (design 3.3): they are admitted, and the sender rule holds for them. A STATUS-UPDATE from a peer can at most ask this agent to look at the parent, and a relocate can then move only its sender's own address.
 
@@ -798,7 +798,7 @@ The same owed mark as step 5. What ends the hold: a beat that changes a peer's t
 
 The tracker of step 4 gets the retry beside its own: one more entry per zone, proposed `keyWanted`, with the attempt and the timer, and the same delays. A key that arrives is imported as today, and the zone is taken up.
 
-**Not settled by the design, and this part cannot be done until it is.** The answering side hands the key only to a requester that is its upstream or downstream by the HSYNC3 `upstream` fields (`MsgHandler`, `sig0key`), and design 3.3 keeps that rule. Two signers have no such relation, and a refusal sends no answer. Today that case ends in a new key. With this step it ends in a sync that is owed for good. Proposed, for the design to decide: a voting member of the zone is handed the key, related or not, since any voting member may come to lead it; and a refusal is answered, so that the requester does not wait out its time.
+**Who is handed the key (decision 15, design 3.3).** Today the answering side hands the key only to a requester that is its upstream or downstream by the HSYNC3 `upstream` fields (`MsgHandler`, `sig0key`), and a refusal sends no answer. Two signers have no such relation, so today that case ends in a new key. Decided: a voting member of the zone is handed the key, related or not, since any voting member may come to lead it; and a refusal is answered, so that the requester does not wait out its time. `MsgHandler`'s `sig0key` case drops the test of the upstream relation and keeps the test that the requester is a voting member (step 6); its refusal becomes an answer. Tests: `TestASignerHandsTheKeyToAnotherSigner`, `TestARefusedKeyRequestIsAnswered`.
 
 **Consequences to know.**
 
@@ -827,7 +827,7 @@ The tracker of step 4 gets the retry beside its own: one more entry per zone, pr
 
 Fleet: an owner's edit that moves a zone to a group with another leader, with the transfer to one voting member's provider held back: no leader sends anything to the parent, each says whom it waits for, and one sync follows when the last copy has arrived. The same with the previous leader's agent stopped: the sync follows when its lease has run out. A zone that moves between two groups keeps its SIG(0) key: the KEY at the apex is the same before and after.
 
-**Done when** the three fleet checks pass, and a run with no provider change shows no hold line. The key's part is done when the design has said who is handed the key.
+**Done when** the three fleet checks pass, and a run with no provider change shows no hold line. For the key: a zone with two signers that moves to a group led by the other signer keeps its SIG(0) key, and the parent goes on accepting its updates.
 
 ### Step 10. The switch: every HSYNC3 provider is a member (#158)
 
@@ -891,6 +891,7 @@ Decided by the project owner on 2026-10-12. The design is written with them.
 12. **A leader acts for a zone only when the views of it agree.** Agents see the owner's edit at different moments, with no network partition needed, and for that time a zone can have two leaders that sync the parent from different views. A leader sends nothing to the parent for a zone until every voting member of the zone's group holds the same make-up for it, and the leader of the group the zone left has shown that make-up, or no longer has the zone, or has lost its lease. Until then the sync is owed. Step 9. From the external review of this design.
 13. **The auditors stay in what defines a group.** The external review proposed to take them out, since an auditor neither votes nor leads. They stay: gossip is per group, and an auditor takes part in it as a member. The costs are accepted: an auditor edit moves the zone to another group, and the same providers with another auditor are another group. Auditors are few, and a zone's auditor is meant to be stable.
 14. **What withdraws a member does not wait for it** (the exception in decision 2), and **taking a zone up never gives it a new SIG(0) key** (step 9). Both from the external review. Two things the code adds to them are in 3.2 and in step 9: the leader's CSYNC waits for every member and is not what the exception names, and a key is handed today only to an upstream or a downstream.
+15. **Any voting member of a zone may be handed its SIG(0) key** by a voting member that has it, and a refusal is answered. Before, only an agent's upstream or downstream was handed it, so a leader that was another signer could never get it.
 
 Also decided:
 

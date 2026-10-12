@@ -86,7 +86,7 @@ The rule holds for every mechanism. Over HTTPS the sender the transport establis
 | RFI SYNC: a request for the zone's state | A member of the zone | Refused |
 | RFI CONFIG: the zone transfer set-up | A voting member or a member with no role that the HSYNC3 `upstream` fields relate to the answering agent: the HSYNC3 record states the zone owner's intent. Not an auditor | Refused |
 | RFI AUDIT | A member of the zone | Refused |
-| `CONFIG sig0key`: the zone's SIG(0) private key | A voting member, related in the same way | Refused |
+| `CONFIG sig0key`: the zone's SIG(0) private key | A voting member of the zone. The `upstream` fields play no part: any voting member may come to lead the zone, and a leader cannot do its work without the key | Refused, and the refusal is answered, so that the asker does not wait for nothing |
 
 An auditor falls under the same rules: its operations are not applied and its votes are not counted. A status update and a relocate have no rule of their own: they are admitted (3.1), and they count as sent by the sender the transport established (3.2), so a peer can relocate nobody but itself.
 
