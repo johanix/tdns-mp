@@ -53,6 +53,9 @@ type discoveryZone struct {
 	mu      sync.Mutex
 	rrsets  map[string][]dns.RR // key: owner name and type
 	queries map[string]int      // same key: how often it was asked for
+	// denialTTL is how long a resolver may cache the answer that a record
+	// is not there, in seconds (cacheDenials).
+	denialTTL uint32
 }
 
 func rrsetKey(name string, rrtype uint16) string {
@@ -73,13 +76,6 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 	}
 	z := &discoveryZone{addr: host, port: port, rrsets: map[string][]dns.RR{}, queries: map[string]int{}}
 
-	// TTL 0: a denial is not cached, so a record that a test publishes is
-	// found by the next lookup. An answer is cached for its own TTL.
-	soa := &dns.SOA{
-		Hdr: dns.RR_Header{Name: harnessIdentitySuffix, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 0},
-		Ns:  "ns." + harnessIdentitySuffix, Mbox: "hostmaster." + harnessIdentitySuffix,
-		Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 0,
-	}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetReply(r)
@@ -88,7 +84,17 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 		z.mu.Lock()
 		z.queries[rrsetKey(q.Name, q.Qtype)]++
 		rrs := z.rrsets[rrsetKey(q.Name, q.Qtype)]
+		denialTTL := z.denialTTL
 		z.mu.Unlock()
+		// The SOA's TTL and minimum are what a denial is cached for. They
+		// are 0 unless the test says otherwise (cacheDenials): a denial is
+		// not cached, and a record that a test publishes is found by the
+		// next lookup. An answer is cached for its own TTL.
+		soa := &dns.SOA{
+			Hdr: dns.RR_Header{Name: harnessIdentitySuffix, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: denialTTL},
+			Ns:  "ns." + harnessIdentitySuffix, Mbox: "hostmaster." + harnessIdentitySuffix,
+			Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: denialTTL,
+		}
 		switch {
 		case len(rrs) > 0:
 			m.Answer = append(m.Answer, rrs...)
@@ -140,6 +146,15 @@ func (z *discoveryZone) set(rrs ...dns.RR) {
 		}
 		z.rrsets[key] = append(z.rrsets[key], rr)
 	}
+}
+
+// cacheDenials has the zone's denials cached for ttl seconds from now on: a
+// resolver that was told that a record is not there goes on saying so for
+// that long, also after the record has been published.
+func (z *discoveryZone) cacheDenials(ttl uint32) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.denialTTL = ttl
 }
 
 // asked reports how many queries for name and rrtype have reached the
