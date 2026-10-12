@@ -153,8 +153,8 @@ github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b h1:5PKAL
 github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b/go.mod h1:CLJcOvHNaVOp5ciu58vfs+cJQT2dW5pjoUOj6sXNKAE=
 github.com/johanix/tdns-transport/v2 v2.0.0-20261001045532-b15bedb76c2e h1:pmkoX/Nsly2NoAFCR6yPxxLd/7E3kLiXyhG/Khgtra8=
 github.com/johanix/tdns-transport/v2 v2.0.0-20261001045532-b15bedb76c2e/go.mod h1:Bn6Xy+rjTqHKMOdCgRgPmVlGzZrCae62rLnK+dTLPjM=
-github.com/johanix/tdns/v2 v2.0.0-20261007054718-acd69416fcbb h1:L9Bo2PTU8lNnJLJKg9JcLrL4Qob57spDS6Yc42++EnI=
-github.com/johanix/tdns/v2 v2.0.0-20261007054718-acd69416fcbb/go.mod h1:20b1OVs88pqyg5FR2Ki4J+8o61sj+NcN/nFD3C0d8SU=
+github.com/johanix/tdns/v2 v2.0.0-20261011210126-e9767f5bbd2a h1:bwwybh+ahOEbQAJITh/wf1JCaMiG4ey0afIs5K0LXgE=
+github.com/johanix/tdns/v2 v2.0.0-20261011210126-e9767f5bbd2a/go.mod h1:20b1OVs88pqyg5FR2Ki4J+8o61sj+NcN/nFD3C0d8SU=
 github.com/johanix/tdns/v2/cache v0.0.0-20261007054718-acd69416fcbb h1:8y0qTgRha7MR9PYDzYTYBij66UedMC1QHqoOqCo7xYs=
 github.com/johanix/tdns/v2/cache v0.0.0-20261007054718-acd69416fcbb/go.mod h1:apZi+RsnXxOjHeHW9nCZfQUW4AWHG4GTZDW6xnB635w=
 github.com/johanix/tdns/v2/core v0.0.0-20261007054718-acd69416fcbb h1:6NQkPN9JhMpIQlXzxEZt4JoRpgk4HXljQVQsH6MEbXw=
