@@ -1209,6 +1209,13 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 	// First NOTIFY in two-phase protocol: status="PENDING" means the remote peer
 	// received the sync and is processing it.
+	//
+	// It says nothing once the same peer's final answer is in. The two are
+	// sent by different goroutines at the peer, and a peer that answers at
+	// once (an auditor, a combiner with nothing to do) can have its final
+	// answer arrive first. Written over that answer, the late "pending" left
+	// the record waiting for a confirmation that had already come and would
+	// not come again: the operation stayed pending at its origin for good.
 	if detail.Status == "PENDING" {
 		lgEngine.Debug("pending confirmation (delivery confirmed, awaiting final response)", "source", source, "distID", detail.DistributionID, "zone", detail.Zone)
 		zoneTracking := zdr.Tracking[detail.Zone]
@@ -1216,9 +1223,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 			for _, trackedRRset := range agentTracking {
 				for i := range trackedRRset.Tracked {
 					tr := &trackedRRset.Tracked[i]
-					if tr.DistributionID == detail.DistributionID {
-						setConfirmation(tr, "pending", "")
+					if tr.DistributionID != detail.DistributionID {
+						continue
 					}
+					if c, ok := tr.Confirmations[source]; ok && c.Status != "pending" {
+						lgEngine.Debug("pending confirmation after the same source's final one, ignored", "source", source, "distID", detail.DistributionID, "zone", detail.Zone, "final", c.Status)
+						continue
+					}
+					setConfirmation(tr, "pending", "")
 				}
 			}
 		}
