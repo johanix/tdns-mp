@@ -265,7 +265,7 @@ A STATUS-UPDATE and a RELOCATE have no rule of their own (design 3.3): they are 
 | Distributions, and the wait for confirmations | Every member | `EnqueueForZoneAgents`, `GetDistributionRecipients`, `TrackDnskeyPropagation`: unchanged |
 | Election messages | Voting members and auditors | `broadcastElectToZone` |
 | Requests for the zone's state | Voting members | `CommandHandler` (`send-rfi`), the tracker of step 4 |
-| The request for the SIG(0) key | Voting members. Proposed in step 9: also the leader of the group the zone left, while it is a member | `leaderKeySetup` (`v2/start_agent.go`), `CommandHandler` |
+| The request for the SIG(0) key | Voting members, and the leader of the group the zone left while it is a member (decision 18). Sent by every voting member that lacks the key, not by the leader alone | `leaderKeySetup` (`v2/start_agent.go`), `keyCheck` (step 9), `CommandHandler` |
 | "parentsync-done" | Every member | `notifyPeersParentSyncDone`: unchanged |
 | The leader's CSYNC (PR #188) | Every member, and the leader's own combiner. The NOTIFY waits for the final confirmation of each, with no time-out | `distributeCsync`, `GetDistributionRecipients`: unchanged |
 
@@ -288,7 +288,7 @@ What the leader's CSYNC waits for when a provider leaves is parked in the remova
 |---|---|---|
 | 4.1 The group is its members with what each one is | `RecomputeGroups`, `ComputeGroupHash`, `ProviderGroup` | 8 |
 | 4.1 A zone that arrives takes the group's leader, and the leader takes it up | PR #185. This plan adds nothing to it | before 8 |
-| 4.1 Taking a zone up never gives it a new SIG(0) key | `leaderKeySetup` | 9 |
+| 4.1 Every voting member holds the zone's SIG(0) key; a new one only when no member has one | `keyCheck`, the `sig0key` case of `MsgHandler`, `leaderKeySetup` | 9 |
 | 4.1 An agent that led the group the zone left stops acting for it | `zoneJoinedGroup` drops the zone's sync chain | 8 |
 | 4.2 The counts | The two peer functions | 1 |
 | 4.3 The gate | The five callers of `CheckGroupState` pass the voting members | 8 |
@@ -375,16 +375,16 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | 6 | A rule for the sender and the recipients of every message | | Step 1, PR #163, PR #188 | 9 | 150 | 80 | One middleware, guards | Not started |
 | 7 | Beats to a peer that repeats its hello, or is gone; the end of comms | #131, #132 | PR #162 | 10 | 140 | 40 | Guards, and one loop | Not started |
 | 8 | The group by its make-up, and its election | #149 | Steps 1 and 6, PR #185, PR #186 | 8 | 140 | 120 | Changes to existing functions | Not started |
-| 9 | A leader acts only when the views of a zone agree; no new key | | Steps 4, 5, 6 and 8, PR #185 | 10 | 260 | 70 | New state and a second hold | Not started |
+| 9 | A leader acts only when the views of a zone agree; the zone's SIG(0) key | | Steps 4, 5, 6 and 8, PR #185 | 11 | 330 | 80 | New state and a second hold | Not started |
 | 10 | The switch: every HSYNC3 provider is a member | #158 | Steps 1 to 9 | 9 | 80 | 150 | Changes to existing functions | Not started |
 
-About 1,700 new and 760 changed lines in all. Steps 4 and 9 are four tenths of the new lines.
+About 1,750 new and 770 changed lines in all. Steps 4 and 9 are nearly half of the new lines.
 
 What kind of code each step is:
 
 - **Guards in existing functions:** steps 1, 2 and 7, most of 5 and 6.
 - **Changes to what existing functions do:** steps 3, 8 and 10, and the key set-up of step 9.
-- **New machinery:** the tracker of step 4, the sender middleware of step 6 (about 30 lines), the repeated own read of step 3 (about 40 lines), the removal of a peer that shares no zone in step 7 (about 40 lines), `zoneChanged` of step 8 (about 40 lines), and in step 9 the zones each peer told and the group a zone left (about 110 lines) and the repeated request for a key, with its answers matched (about 80 lines).
+- **New machinery:** the tracker of step 4, the sender middleware of step 6 (about 30 lines), the repeated own read of step 3 (about 40 lines), the removal of a peer that shares no zone in step 7 (about 40 lines), `zoneChanged` of step 8 (about 40 lines), and in step 9 the zones each peer told and the group a zone left (about 110 lines) and the zone's key: who holds it, the request of every voting member, its answers matched and counted (about 150 lines).
 
 ### Step 1. No election without a vote (#172)
 
@@ -754,9 +754,9 @@ Fleet: two providers reduced to one, with no auditor: a leader with no restart. 
 
 **Done when** the four fleet checks pass, and a run with no provider change elects each group once.
 
-### Step 9. A leader acts for a zone only when the views of it agree; no new key (design 4.9, 4.1)
+### Step 9. A leader acts for a zone only when the views of it agree; the zone's SIG(0) key (design 4.9, 4.1)
 
-**Before it:** step 5, for the owed mark and the place of the hold. Step 6, for the sender of a beat's gossip. Step 8, which makes a group's hash the make-up: before it the hash does not say who votes. Step 4, for the retry schedule. PR #185, for `zoneJoinedGroup`.
+**Before it:** step 5, for the owed mark and the place of the hold. Step 6, for the sender of a beat's gossip and for the rule of who may ask for the key. Step 8, which makes a group's hash the make-up: before it the hash does not say who votes. Step 4, for the retry schedule. PR #185, for `zoneJoinedGroup`.
 
 This is a step of its own, between the group's new key and the switch, for three reasons. It is a gate on the parent sync, as step 5 is, and a gate that never opens stops every sync: it should be judged alone on a fleet. It needs steps 5, 6 and 8, which step 8 does not. And it has to be in place before step 10, which is when a zone's group starts to change at every edit of a provider's standing.
 
@@ -793,39 +793,57 @@ Every leader runs the check on its own view, and that is what makes it hold from
 
 The same owed mark as step 5. What ends the hold: a beat that changes a peer's told zones, for a zone with something owed whose check now passes; and a timer at the end of the fixed time, set when the zone's leaving is noted. What is then asked is what an election's winner asks for the zone (`onLeaderElected`), not the sync alone: it finds the key it has, and the sync sends only a difference. A recompute that has moved a zone also brings the next beat round forward (`KickBeats`), so that this agent's own row goes out soon.
 
-**No new key for a zone that has one (design 4.1).** `leaderKeySetup` (`v2/start_agent.go`) today uses a local SIG(0) key, else asks the zone's agents that are OPERATIONAL, else generates a keypair ("no peer has SIG(0) key, will generate new keypair"). It becomes:
+**The zone's SIG(0) key (design 4.1, decisions 14, 15 and 18).** Every voting member holds it, and a new one is the fallback. This part needs steps 4, 5 and 6 only and could be a pull request of its own. It is kept here because it shares the owed mark and the hold with the rest of the step.
 
-1. A local key that is the zone's: as today. Proposed: a local key counts when the zone publishes no KEY, or when its KEY record is among those the zone publishes. An agent that led the zone before may hold a key of its own from then, and design 4.1 speaks of the key that the parent holds. Not established: which record that is when the apex carries several. An inquiry at the parent would say (`queryParentKeyStateDetailed`, behind the operator's `parentsync-inquire`).
-2. The zone is not caught up: nothing is decided. This agent's contributions are not complete, so it cannot know whether the zone has a key. Owed.
-3. The zone publishes a KEY: the apex of the agent's copy of the zone has a KEY RRset (what `GetParentSyncStatus` shows as "KEY at apex"; the leader's KEY always goes to the apex, `publishLocations`), or some agent's contributions in the data repo hold one. Then the voting members are asked with `CONFIG sig0key`, and when none hands the key over, they are asked again on the schedule of step 4: after 5 s, 15 s, 30 s and 60 s, then every 5 minutes. Nothing is generated. Owed, and one line says who was asked and what each answered.
-4. No KEY anywhere: a keypair is generated, as today.
+Today `leaderKeySetup` (`v2/start_agent.go`) uses a local SIG(0) key, else asks the zone's agents that are OPERATIONAL, else generates a keypair ("no peer has SIG(0) key, will generate new keypair"). Nobody but a leader ever asks, and the answering side hands the key only to its upstream or downstream (2.10).
 
-The tracker of step 4 gets the retry beside its own: one more entry per zone, proposed `keyWanted`, with the attempt and the timer, and the same delays. A key that arrives is imported as today, and the zone is taken up.
+*What "holds the key" is read from.* The zone publishes a KEY when the apex of the agent's copy of the zone has a KEY RRset (what `GetParentSyncStatus` shows as "KEY at apex"; the leader's KEY always goes to the apex, `publishLocations`), or when some agent's contributions in the data repo hold one. An agent holds the private part of a published KEY when one of its active keys for the zone in the local keystore (`GetSig0Keys(zone, Sig0StateActive)`, each with its KEY record) is that record. Proposed helper: `zoneKeyHeld(zone)`, which returns the published KEY records, and the local key that matches one, if any. A local key whose KEY record the zone does not publish is not the zone's key (decision 18): an agent that led the zone before may hold one of its own from then.
 
-**Who is handed the key (decision 15, design 3.3).** Today the answering side hands the key only to a requester that is its upstream or downstream by the HSYNC3 `upstream` fields (`MsgHandler`, `sig0key`), and a refusal sends no answer. Two signers have no such relation, so today that case ends in a new key. Decided: a voting member of the zone is handed the key, related or not, and a refusal is answered.
+*A voting member asks for a key it does not hold.* Proposed: `keyCheck(zone)`. It does nothing unless this agent votes in the zone, the zone is caught up, and the zone publishes a KEY that this agent holds no private part for. Then it asks. It is called:
 
-- Where the refusal is produced: in the router's handler, `handleAppRfi`, by the rule step 6 puts there (the requester is a voting member of the zone). It is the request's own acknowledgement, REFUSED with the reason, so it is on the wire at once.
-- `MsgHandler`, the `sig0key` case: the test of the upstream relation goes. Its other failures (the zone or the keystore is not there, the lookup fails) send nothing today either. They become an answer, a CONFIG message with a status, as "no sig0 key for zone" is today.
-- What the requester does. `RequestAndWaitForConfig` (`v2/hsync_utils.go`) returns at once when the send fails, and a refusal is a failed send. With no answer it waits 15 s. So a refusal costs no wait, and the three outcomes are told apart:
-  1. refused: the peer does not have this agent as a voting member of the zone. Its copy of the zone differs, which is also what the hold's first condition sees. Asked again;
-  2. answered "no sig0 key for zone": this peer has none. The others are asked. When every member that was asked has said so, nothing is generated: the line says that nobody who was asked holds the key the zone publishes, and the request goes on at the long interval. That is a case for the operator;
-  3. no answer in 15 s: a failed request. Asked again.
+- by the tracker of step 4 when the zone becomes caught up, which covers a start, a join and a first role;
+- from the data engine, after a remote update that carried a KEY operation: the leader's `replace` of the KEY reaches every member, and it is the first sign of a new key;
+- from `PostRefresh`, when the refresh changed the apex KEY RRset. `MPPreRefresh` has both copies and notes it, in one more field of `ZoneRefreshAnalysis`.
+
+A key that arrives is imported as today (`importSig0KeyFromPeer`). An agent that does not lead publishes nothing and sends nothing to the parent.
+
+*Who is asked.* The voting members of the zone other than this agent, and the leader of the group the zone left for as long as it is still a member of the zone. That leader is read from the note of the move (the `zoneLeft` above; its name is kept for the key after the note itself has gone). After a restart there is no note. Proposed for that case: the member under whose name the published KEY record is held in the data repo, which is the agent that published it. Not asked: an auditor.
+
+*Who hands it over, and what an answer is* (decision 15, design 3.3).
+
+- The rule for the requester is in the router's handler, `handleAppRfi` (step 6): a voting member of the zone. A refusal there is the request's own acknowledgement, REFUSED with the reason, on the wire at once.
+- `MsgHandler`, the `sig0key` case: the test of the upstream relation goes. It hands over the key whose KEY record the zone publishes. `GetSig0KeyRaw`, which it uses today, returns the first active key it finds; it is replaced by the helper above.
+- "No key here" is produced in the same case, as it is today: a CONFIG message whose data is the status "no sig0 key for zone". It is sent when the answering agent holds no private part for a KEY the zone publishes. The case's other failures (the zone or the keystore is not there, the lookup fails) send nothing today. They become an answer with a status of their own, which is not "no key".
+- At the requester, `RequestAndWaitForConfig` (`v2/hsync_utils.go`) returns at once when the send fails, and a refusal is a failed send. With no answer it waits 15 s. So there are four outcomes: the key; "no key here"; refused (the peer does not have this agent as a voting member: its copy of the zone differs); and silence, which is no answer in 15 s or an answer with another status. Only the second says that the peer has no key.
 - An answer has to be matched to its request. `RequestAndWaitForConfig` takes whatever arrives next on one channel for all zones, and an election's winner runs the key set-up for every zone of its group at once. As read, the answer for one zone can be taken by the request for another and imported under its name. Today that is rare, because most requests get no answer. With every request answered it is not. This step matches by zone, sender and subtype, which the answer carries. A test with two zones asked at once would establish the fault.
-- Who is asked. Proposed, where the design says "the voting members": the leader of the group the zone left is asked too, when it is still a member of the zone. In the design's own example, a leader whose roles are taken away, it is the one agent that holds the private key: a key is made by the leader that first needed it and is not handed to anybody who has not asked. Without it the remaining providers ask each other for a key that neither has. Not covered by the design: the key's one holder has left the zone altogether, or its agent is stopped.
 
-Tests: `TestASignerHandsTheKeyToAnotherSigner`, `TestARefusedKeyRequestIsAnswered`, `TestARefusedKeyRequestCostsNoWait`, `TestAKeyAnswerIsMatchedToItsRequest`, `TestALocalKeyThatTheZoneDoesNotPublishIsNotTheZonesKey`, `TestThePreviousLeaderIsAskedForTheKey`.
+*How "every one has answered no" is kept.* The tracker of step 4 gets one more entry per zone, proposed `keyWanted`: the members asked in the current round, what each answered, the attempt and the timer. A round asks every member of the set again, also one that said "no key here" before: it may have got the key since. The rounds follow the schedule of step 4: after 5 s, 15 s, 30 s and 60 s, then every 5 minutes. The entry is dropped when a key arrives, and it starts over when the zone's voting members change (the refresh fields of step 4) or when the previous leader stops being a member.
+
+*The leader.* `leaderKeySetup` becomes:
+
+1. The zone is not caught up: nothing is decided. This agent's contributions are not complete, so it cannot know whether the zone has a key. Owed.
+2. This agent holds the private part of a KEY the zone publishes: it goes on as today, to the publication and, under the hold, to the bootstrap.
+3. The zone publishes no KEY: a keypair is generated, published and bootstrapped with the parent, as today, but only once the zone is caught up (`CaughtUp`, step 4) and the look at the parent shows no key for it. `leaderKeySetup` runs when a zone is taken up, which is not ordered after catch-up, and before catch-up the KEY set this agent knows is empty whatever the zone has: an empty set then says only that the agent has not heard yet (the external re-review). Until then this case waits as the others do, with the sync owed. Test: `TestALeaderDoesNotJudgeAZoneKeylessBeforeItIsCaughtUp`.
+4. The zone publishes a KEY and this agent holds no private part for it: the request above. Owed, and one line says who was asked and what each answered.
+5. In one round every member that was asked has answered "no key here": the fallback. A keypair is generated, published and bootstrapped with the parent, by the same code as in 3. A refusal or a silence in the round keeps it from happening: silence is never "no key".
+
+Not established: that a parent which holds a key for the zone takes the bootstrap of a second one. The path is the one a new key takes today.
+
+*Still not covered.* A holder of the key that is still a member of the zone and whose agent is stopped is silent, and silence holds the fallback back. If no other voting member has the key, the zone's sync is owed until that member answers or its record is removed. With every voting member asking for the key at its catch-up that takes two faults at once. And when the apex carries several KEY records, which one the parent holds is not established: an agent that holds any of them goes on, and the inquiry that the bootstrap starts with is what tells.
+
+Tests: `TestAVotingMemberAsksForAKeyItDoesNotHold` (at catch-up, on a KEY operation, on a refresh), `TestAMemberThatDoesNotVoteAsksForNoKey`, `TestASignerHandsTheKeyToAnotherSigner`, `TestTheKeyHandedOverIsTheOneTheZonePublishes`, `TestARefusedKeyRequestIsAnswered`, `TestARefusedKeyRequestCostsNoWait`, `TestAKeyAnswerIsMatchedToItsRequest`, `TestALocalKeyThatTheZoneDoesNotPublishIsNotTheZonesKey`, `TestThePreviousLeaderIsAskedForTheKey`, `TestTheKeyIsNotAskedOfAnAuditor`, `TestALeaderDoesNotGenerateAKeyWhileAMemberIsSilent`, `TestALeaderGeneratesAKeyWhenEveryMemberHasAnsweredNoKey`, `TestAnAnswerOfAnEarlierRoundDoesNotCount`, `TestTheAnswersStartOverWhenTheVotingMembersChange`, `TestAZoneWithNoKeyGetsOneAtOnce`, `TestNoKeyIsDecidedBeforeTheZoneIsCaughtUp`.
 
 **Limits (design 4.9).**
 
 - After a restart an agent knows of no group that a zone left, and the second condition asks for nothing.
 - One case is not covered. An owner who replaces a zone's only provider by another in one edit leaves a previous leader with no peer to tell it anything. If its agent is then stuck on the old copy, it and the new provider both act. The order of `guide/provider-changes.md` avoids it: the new provider is added before the old one is taken away.
 
-**Names.** Log, info, logger `zones`: "DelegationSyncher: the sync with the parent is held until the zone's members agree on its make-up" (`zone`, `waiting_for`); "the zone's members agree on its make-up, asking for what was owed" (`zone`). Log, warn, logger `agent`: "no SIG(0) key generated: the zone publishes one that this agent does not hold, asking again" (`zone`, `asked`, `attempt`, `in`), the first time and then once an hour. Status, in `agent parentsync status`:
+**Names.** Log, info, logger `zones`: "DelegationSyncher: the sync with the parent is held until the zone's members agree on its make-up" (`zone`, `waiting_for`); "the zone's members agree on its make-up, asking for what was owed" (`zone`). Log, logger `agent`: info "asking for the zone's SIG(0) key: the zone publishes one that this agent does not hold" (`zone`, `asked`); warn "no SIG(0) key yet, asking again" (`zone`, `answers`, `attempt`, `in`), the first time and then once an hour; warn "every member that was asked has no SIG(0) key for the zone, generating a new one" (`zone`, `asked`). Status, in `agent parentsync status`:
 
 ```
   parent sync:    held until every member has the zone's make-up (waiting for agent.bravo.example.)
   parent sync:    held until the leader of the group the zone left has it (agent.charlie.example., until 15:04:05 at the latest)
-  SIG(0) key:     the zone publishes one that this agent does not hold (asked agent.alpha.example., agent.bravo.example.)
+  SIG(0) key:     the zone publishes one that this agent does not hold (agent.alpha.example.: no key here; agent.bravo.example.: no answer)
 ```
 
 **Tests.** Unit, with `groupRig` (PR #185) and two agents that hold different copies of one zone:
@@ -840,11 +858,11 @@ Tests: `TestASignerHandsTheKeyToAnotherSigner`, `TestARefusedKeyRequestIsAnswere
 - `TestTheHoldEndsWhenTheLastViewArrives`.
 - `TestARestartedLeaderWaitsForNoPreviousLeader`: after a restart only the first condition and the catch-up hold. `TestAZoneInNoGroupIsNotHeld`.
 - `TestTheKeyBootstrapWaitsForTheSameHold`.
-- `TestALeaderDoesNotGenerateAKeyForAZoneThatPublishesOne`, `TestAKeyRequestIsRepeatedUntilAPeerAnswers`, `TestAZoneWithNoKeyStillGetsOne`, `TestNoKeyIsDecidedBeforeTheZoneIsCaughtUp`, `TestTheKeyIsNotAskedOfAnAuditor`.
+- The tests of the key are listed with its part above.
 
-Fleet: an owner's edit that moves a zone to a group with another leader, with the transfer to one voting member's provider held back: no leader sends anything to the parent, each says whom it waits for, and one sync follows when the last copy has arrived. The same with the previous leader's agent stopped, and with it stuck on an old copy of the zone: the sync follows when the fixed time has passed, and the previous leader has sent nothing to the parent in between. A zone that moves between two groups keeps its SIG(0) key: the KEY at the apex is the same before and after.
+Fleet: an owner's edit that moves a zone to a group with another leader, with the transfer to one voting member's provider held back: no leader sends anything to the parent, each says whom it waits for, and one sync follows when the last copy has arrived. The same with the previous leader's agent stopped, and with it stuck on an old copy of the zone: the sync follows when the fixed time has passed, and the previous leader has sent nothing to the parent in between. A zone that moves between two groups keeps its SIG(0) key: the KEY at the apex is the same before and after, and every voting member's keystore holds it. And the fallback: with the one holder's record removed and its agent stopped, the new leader generates a key once every member has answered, and not before.
 
-**Done when** the four fleet checks pass, and a run with no provider change shows no hold line. For the key: a zone with two signers that moves to a group led by the other signer keeps its SIG(0) key, and the parent goes on accepting its updates.
+**Done when** the five fleet checks pass, and a run with no provider change shows no hold line. For the key: a zone with two signers that moves to a group led by the other signer keeps its SIG(0) key, and the parent goes on accepting its updates.
 
 ### Step 10. The switch: every HSYNC3 provider is a member (#158)
 
@@ -907,11 +925,11 @@ Decided by the project owner on 2026-10-12. The design is written with them.
 11. **Comms end when no zone is shared.** When the last zone shared with a peer is gone, the agent keeps the peer for a hold time of 24 hours and then removes it and stops beating it. A peer that is named again within the hold time is kept. A provider that a zone names again later is discovered afresh. Until it is removed the agent goes on beating it and takes its hellos and beats, which is the one exception to admission by a shared zone, and every message from it that requires a member is refused.
 12. **A leader acts for a zone only when the views of it agree.** Agents see the owner's edit at different moments, with no network partition needed, and for that time a zone can have two leaders that sync the parent from different views. A leader sends nothing to the parent for a zone until every voting member of the zone's group holds the same make-up for it, and the leader of the group the zone left has shown that make-up, or has dropped the zone, or a short fixed time has passed (decision 16). Until then the sync is owed. Step 9. From the external review of this design.
 13. **The auditors stay in what defines a group.** The external review proposed to take them out, since an auditor neither votes nor leads. They stay: gossip is per group, and an auditor takes part in it as a member. The costs are accepted: an auditor edit moves the zone to another group, and the same providers with another auditor are another group. Auditors are few, and a zone's auditor is meant to be stable.
-14. **What withdraws a member does not wait for it** (the exception in decision 2), and **taking a zone up never gives it a new SIG(0) key** (step 9). Both from the external review. Two things the code added to them are decided since: who is handed the key (decision 15), and what the leader's CSYNC waits for (decision 17).
+14. **What withdraws a member does not wait for it** (the exception in decision 2), and **taking a zone up never gives it a new SIG(0) key** (step 9; decision 18 says when a new one is made after all). Both from the external review. Two things the code added to them are decided since: who is handed the key (decision 15), and what the leader's CSYNC waits for (decision 17).
 15. **Any voting member of a zone may be handed its SIG(0) key** by a voting member that has it, and a refusal is answered. Before, only an agent's upstream or downstream was handed it, so a leader that was another signer could never get it.
 16. **The hold's way out is a fixed time, not the previous leader's lease.** A lease belongs to a group and is renewed while the group has any zone, so a previous leader that is stuck on one zone would hold that zone's sync for ever. The new leader waits until the previous leader has shown the make-up or dropped the zone, or a few beat intervals have passed. That is safe because the first condition holds the previous leader too. In step 9 the time is three beat intervals from the zone's arrival (proposed).
 17. **The leader's CSYNC and a leaving provider is parked in the removal design.** The leader waits for every recipient's confirmation of the CSYNC with no time-out (PR #188), a member with no role is a recipient after the switch, and the CSYNC carries a leaving provider's NS removal to a NOTIFY-only parent. What the parent's scan does with a nameserver that lacks the record is not established. Nothing in this plan changes whom the leader's CSYNC waits for.
-18. **Every voting member holds the zone's SIG(0) key, and a new one is the fallback.** Today the private key is only at the agent that led the zone when the key was made; with its roles gone, or its agent stopped, nobody could sync the zone again. Every voting member now asks for a key it does not hold, at catch-up and when the zone publishes a KEY it has no private part for. A leader that has none asks the voting members and the previous leader; silence is never "no key"; only when every one of them has answered that it has no key is a new key generated and bootstrapped with the parent. STEP 9's key part is to be detailed for this. Also accepted as proposed there: a local key counts only if its KEY record is among those the zone publishes.
+18. **Every voting member holds the zone's SIG(0) key, and a new one is the fallback.** Today the private key is only at the agent that led the zone when the key was made; with its roles gone, or its agent stopped, nobody could sync the zone again. Every voting member now asks for a key it does not hold, at catch-up and when the zone publishes a KEY it has no private part for. A leader that has none asks the voting members and the previous leader; silence is never "no key"; only when every one of them has answered that it has no key is a new key generated and bootstrapped with the parent. Step 9 has the detail. Also accepted as proposed there: a local key counts only if its KEY record is among those the zone publishes.
 
 Also decided:
 
