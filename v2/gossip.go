@@ -230,8 +230,8 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 }
 
 // BuildGossipForPeer builds gossip messages for all groups shared with a peer.
-// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu
-// to avoid deadlock with RefreshLocalStates (which takes pgm.mu then gst.mu).
+// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu:
+// the two are never held together, here or in RefreshLocalStates.
 func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager, lem ...*LeaderElectionManager) []GossipMessage {
 	if pgm == nil {
 		return nil
@@ -379,6 +379,20 @@ func (gst *GossipStateTable) SetOnElectionUpdate(fn func(groupHash string, state
 	gst.onElectionUpdate = fn
 }
 
+// forgetGroup is the word that a provider group is gone: its last zone has
+// left it. The table forgets what would stand in the way of the group if it
+// comes back. That it was mutually OPERATIONAL: a group's election is called
+// when it becomes so, and a group still marked would come back without one.
+// And the election record: a group that comes back starts its terms again,
+// and the record of a higher term would keep its results out. The members'
+// rows stay: beats bring newer ones.
+func (gst *GossipStateTable) forgetGroup(groupHash string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	delete(gst.operationalGroups, groupHash)
+	delete(gst.Elections, groupHash)
+}
+
 // CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
 	gst.mu.Lock()
@@ -439,11 +453,14 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 		return
 	}
 
-	pgm.mu.RLock()
-	defer pgm.mu.RUnlock()
-
+	// The groups are copied out and the manager's lock is free while the rows
+	// are built and written: what is called from here takes the locks of the
+	// peers, of the zones and of this table, and a recompute of the groups
+	// must not wait for any of them with the manager's readers behind it
+	// (tdns-mp #180).
 	now := time.Now()
-	for hash, pg := range pgm.Groups {
+	for _, pg := range pgm.GetGroups() {
+		hash := pg.GroupHash
 		// Build our peer states for this group
 		peerStates := make(map[string]string)
 		var zones []string

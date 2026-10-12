@@ -553,6 +553,9 @@ func TestAnAuditorsRecomputeTellsNobody(t *testing.T) {
 	if pgm.onZoneJoinedGroup != nil {
 		t.Errorf("the auditor's group manager reports the zones that move to somebody")
 	}
+	if pgm.onGroupGone != nil {
+		t.Errorf("the auditor's group manager reports the groups that are gone to somebody")
+	}
 	if ar.LeaderElectionManager != nil || conf.InternalMp.LeaderElectionManager != nil {
 		t.Errorf("the auditor has an election manager")
 	}

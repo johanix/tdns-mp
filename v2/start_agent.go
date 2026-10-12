@@ -237,7 +237,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					if lem.providerGroupMgr != nil {
 						pg := lem.providerGroupMgr.GetGroupForZone(zone)
 						if pg != nil {
-							lem.DeferGroupElection(pg.GroupHash)
+							lem.leaveElectionToGroup(pg.GroupHash)
 							return
 						}
 					}
