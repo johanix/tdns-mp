@@ -166,13 +166,21 @@ and applies the changes.
 A NOTIFY only asks the parent to scan, and a scan that
 comes before the zone's nameservers serve the change finds
 nothing to do. For a multi-provider zone the leader agent
-therefore does not count the sync as done when the NOTIFY
+therefore holds the NOTIFY of a change before it sends it,
+for the largest `dnssec.kasp.propagation-delay` among the
+providers that serve the zone (HSYNCPARAM `servers=`).
+Each agent tells the other agents its own value in its
+beats; a provider whose value is not known is left out.
+An UPDATE is not held.
+
+Nor does the leader count the sync as done when the NOTIFY
 has been sent. It compares the parent with the zone again
-after 30 seconds, sends the NOTIFY again if they still
-differ, and repeats this with growing delays for about an
-hour. If the parent still differs then, the agent logs a
-warning, and the next change of the delegation's data, or
-the next election, starts over.
+30 seconds after the NOTIFY has left, sends the NOTIFY
+again (at once) if they still differ, and repeats this
+with growing delays for about an hour. If the parent still
+differs then, the agent logs a warning, and the next
+change of the delegation's data, or the next election,
+starts over.
 
 ### 1.4 Scheme Selection
 

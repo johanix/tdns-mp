@@ -483,6 +483,13 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
+	// This provider's propagation delay goes out in the agent's gossip: it is
+	// its share of the wait before a NOTIFY to a zone's parent
+	// (delegationNotifyWait).
+	if ar := conf.InternalMp.AgentRegistry; ar != nil {
+		ar.GossipStateTable.SetPropagationDelay(conf.Config.KaspPropagationDelay())
+	}
+
 	// The first hello waits for the identity zone; SetupAgent opens this.
 	conf.InternalMp.IdentityReady = newIdentityReadiness()
 

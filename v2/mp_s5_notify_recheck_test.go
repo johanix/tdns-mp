@@ -4,7 +4,10 @@
  * tdns-mp #175: a delegation sync that goes to the parent as a NOTIFY is
  * not done when the NOTIFY has been sent. The leader looks at the parent
  * again, sends again while the parent still differs, and tells its peers
- * when the parent is in sync.
+ * when the parent is in sync. And it holds the NOTIFY of a change until the
+ * zone's nameservers have had time to serve it: the largest propagation
+ * delay among the providers that serve the zone, which they tell each other
+ * in the gossip of their beats.
  */
 package tdnsmp
 
@@ -23,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
@@ -164,7 +168,8 @@ type notifyRig struct {
 
 // newNotifyRig starts the rig for a zone whose parent advertises the given
 // DSYNC scheme ("NOTIFY" or "UPDATE"). The parent starts in sync with the
-// zone. delays replaces delegationSyncNotifyDelays.
+// zone. delays replaces delegationSyncNotifyDelays. The agent announces no
+// propagation delay, so no NOTIFY is held, until propagation sets one.
 func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *notifyRig {
 	t.Helper()
 	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
@@ -181,6 +186,7 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 		notifyq: make(chan tdns.NotifyRequest, 64), log: logsink, oldNS: "gone.provider.example."}
 	r.leader(AgentId(us.Identity))
 	r.conf.InternalMp.MPTransport = us.Bridge
+	r.conf.InternalMp.AgentRegistry.GossipStateTable = us.Registry.GossipStateTable
 	tdns.RegisterKeyLifecycleOwner(r.conf.InternalMp.KeyLifecycleOwner)
 	t.Cleanup(func() { tdns.RegisterKeyLifecycleOwner(nil) })
 
@@ -295,6 +301,19 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 	return r
 }
 
+// propagation sets this provider's propagation delay, as the agent's start
+// does from dnssec.kasp.propagation-delay.
+func (r *notifyRig) propagation(d time.Duration) {
+	r.conf.InternalMp.AgentRegistry.GossipStateTable.SetPropagationDelay(d)
+}
+
+// inventory is the signer's word on the zone's keys, as the agent's engine
+// handles it: a DS set that is not what it was asks for a sync.
+func (r *notifyRig) inventory(items ...KeyInventoryItem) {
+	r.e.handleKeystateInventory(r.ctx, r.lem.localID, &KeystateInventoryMsg{SenderID: "signer.alice.example.", Zone: r.mpzd.ZoneName,
+		Inventory: items, Owned: true}, r.sdq, nil)
+}
+
 // hint is the combiner's word that the zone's NS set changed, as the
 // agent's engine handles it.
 func (r *notifyRig) hint() {
@@ -388,6 +407,10 @@ func (r *notifyRig) logged(t *testing.T, n int, text string) {
 }
 
 const (
+	logHeld       = `msg="a NOTIFY to the parent is held until the zone's nameservers have had time to serve the change"`
+	logLeft       = `msg="the held NOTIFY has left for the parent"`
+	logDropped    = `msg="the held NOTIFY is dropped: this agent no longer leads the zone"`
+	logNotNeeded  = `msg="the held NOTIFY is dropped: the parent does not need it any more"`
 	logCheckAgain = `msg="the delegation sync went to the parent as a NOTIFY; checking the parent again"`
 	logCheckAsked = `msg="delegation sync requested" zone=%s why="a NOTIFY was sent to the parent, which is checked again"`
 	logInSync     = `msg="the parent is in sync with the zone after the NOTIFY"`
@@ -406,8 +429,7 @@ func TestANotifiedSyncIsNotDoneUntilTheParentIsInSync(t *testing.T) {
 
 	// the signer's inventory, with the KSK's DS wanted at the parent, is what
 	// asks for the sync
-	r.e.handleKeystateInventory(r.ctx, r.lem.localID, &KeystateInventoryMsg{SenderID: "signer.alice.example.", Zone: z,
-		Inventory: []KeyInventoryItem{r.ksk}, Owned: true}, r.sdq, nil)
+	r.inventory(r.ksk)
 	r.notified(t, "the first sync", dns.TypeCDS)
 	// the parent does not have the DS: the leader looks again, and sends again
 	r.notified(t, "the first check", dns.TypeCDS)
@@ -441,9 +463,12 @@ func repeat(d time.Duration, n int) []time.Duration {
 }
 
 // An UPDATE's answer is the parent's: the sync is done when it has come, the
-// peers are told at once, and nothing looks at the parent again.
+// peers are told at once, and nothing looks at the parent again. Nor is an
+// UPDATE held back: the wait before a NOTIFY is for the parent's scan of the
+// zone's nameservers, and an UPDATE carries the change itself.
 func TestAnUpdateIsDoneWhenTheParentHasAnswered(t *testing.T) {
 	r := newNotifyRig(t, "update.notify.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
+	r.propagation(time.Hour)
 	z := r.mpzd.ZoneName
 	if _, err := r.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
@@ -462,8 +487,8 @@ func TestAnUpdateIsDoneWhenTheParentHasAnswered(t *testing.T) {
 	}
 	r.quiet(t, 0, "by the UPDATE scheme")
 	r.untold(t, 0, "a second time")
-	if l := r.log.String(); strings.Contains(l, logCheckAgain) || strings.Contains(l, "which is checked again") {
-		t.Errorf("a sync sent as an UPDATE was checked again:\n%s", l)
+	if l := r.log.String(); strings.Contains(l, logCheckAgain) || strings.Contains(l, "which is checked again") || strings.Contains(l, logHeld) {
+		t.Errorf("a sync sent as an UPDATE was held, or checked again:\n%s", l)
 	}
 }
 
@@ -530,8 +555,7 @@ func TestTheChecksOfANotifyAreBounded(t *testing.T) {
 	z := r.mpzd.ZoneName
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	r.parent.holdsDS()
-	r.e.handleKeystateInventory(r.ctx, r.lem.localID, &KeystateInventoryMsg{SenderID: "signer.alice.example.", Zone: z,
-		Inventory: []KeyInventoryItem{r.ksk}, Owned: true}, r.sdq, nil)
+	r.inventory(r.ksk)
 	r.notified(t, "the first sync", dns.TypeCSYNC, dns.TypeCDS)
 	r.notified(t, "the first check", dns.TypeCSYNC, dns.TypeCDS)
 	r.notified(t, "the second check", dns.TypeCSYNC, dns.TypeCDS)
@@ -546,8 +570,7 @@ func TestTheChecksOfANotifyAreBounded(t *testing.T) {
 	// given up means forgotten: the next change of the DS set is the first
 	// NOTIFY of a new chain
 	next := invItem(t, z, 257, KeyStateStandby, &yes)
-	r.e.handleKeystateInventory(r.ctx, r.lem.localID, &KeystateInventoryMsg{SenderID: "signer.alice.example.", Zone: z,
-		Inventory: []KeyInventoryItem{r.ksk, next}, Owned: true}, r.sdq, nil)
+	r.inventory(r.ksk, next)
 	r.notified(t, "the next change", dns.TypeCSYNC, dns.TypeCDS)
 	r.logged(t, 2, logCheckAgain+" zone="+z+` notify="CSYNC, CDS" check=1 in=30ms`)
 }
@@ -606,10 +629,13 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	}
 	short, long := repeat(20*time.Millisecond, 8), repeat(300*time.Millisecond, 8)
 	refused := errors.New("refused")
+	// what a sync handed over for the notifier, with no wait before it leaves
+	cds := delegationNotifies{requests: []tdns.NotifyRequest{{ZoneName: z, RRtype: dns.TypeCDS}}}
+	csync := delegationNotifies{requests: []tdns.NotifyRequest{{ZoneName: z, RRtype: dns.TypeCSYNC}}}
 
 	// a check's own sync fails: the failure asks again by its own delays,
 	// and the NOTIFY is not forgotten
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CDS", short)
+	r.conf.delegationSyncNotifiedWith(ctx, z, cds, short)
 	if n := r.waitRequests(t, 1, 2*time.Second); n != 1 {
 		t.Fatalf("after a NOTIFY: %d sync requests, want 1", n)
 	}
@@ -621,7 +647,7 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 		t.Errorf("the chain after a NOTIFY and a failure: %+v", ch)
 	}
 	// the retry sends: the failures are over, the checks go on where they were
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CDS", short)
+	r.conf.delegationSyncNotifiedWith(ctx, z, cds, short)
 	if ch, _ := chain(); ch.rechecks != 2 || ch.failures != 0 {
 		t.Errorf("the chain after the retry sent its NOTIFY: %+v", ch)
 	}
@@ -639,7 +665,7 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	// a retry of a failed sync waits, and something else's sync sends a
 	// NOTIFY: its check replaces the retry, which then asks for nothing
 	r.conf.delegationSyncFailedWith(ctx, z, refused, long)
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CSYNC", short)
+	r.conf.delegationSyncNotifiedWith(ctx, z, csync, short)
 	if ch, _ := chain(); ch.notified != "CSYNC" || ch.rechecks != 1 || ch.failures != 0 {
 		t.Errorf("the chain after a NOTIFY while a retry waited: %+v", ch)
 	}
@@ -652,7 +678,7 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	}
 	// a check waits, and something else's sync fails: the check that waits
 	// is the retry, and no second ask is scheduled
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CSYNC", long)
+	r.conf.delegationSyncNotifiedWith(ctx, z, csync, long)
 	r.conf.delegationSyncFailedWith(ctx, z, refused, short)
 	if ch, _ := chain(); ch.failures != 0 || ch.rechecks != 2 || !ch.waiting {
 		t.Errorf("the chain after a failure while a check waited: %+v", ch)
@@ -666,8 +692,8 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	}
 	// a check waits, and something else's sync sends a NOTIFY: the check is
 	// timed anew, for this NOTIFY, and is still the same check
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CSYNC", long)
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CDS", short)
+	r.conf.delegationSyncNotifiedWith(ctx, z, csync, long)
+	r.conf.delegationSyncNotifiedWith(ctx, z, cds, short)
 	if ch, _ := chain(); ch.notified != "CDS" || ch.rechecks != 3 {
 		t.Errorf("the chain after a NOTIFY while a check waited: %+v", ch)
 	}
@@ -680,7 +706,7 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	}
 	// the parent is found in sync while an ask waits: the chain is emptied,
 	// and the ask that fires finds nothing to go on with
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CSYNC", long)
+	r.conf.delegationSyncNotifiedWith(ctx, z, csync, long)
 	if sent, checks := r.conf.delegationSyncSucceeded(z); sent != "CSYNC" || checks != 4 {
 		t.Errorf("the chain ended with notify %q after %d checks, want CSYNC after 4", sent, checks)
 	}
@@ -702,8 +728,8 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	// delays are two checks, however many NOTIFYs came in between
 	short, long = short[:2], long[:2]
 	for check := 1; check <= 2; check++ {
-		r.conf.delegationSyncNotifiedWith(ctx, z, "CDS", long)  // the chain's own
-		r.conf.delegationSyncNotifiedWith(ctx, z, "CDS", short) // something else's, while the check waits
+		r.conf.delegationSyncNotifiedWith(ctx, z, cds, long)  // the chain's own
+		r.conf.delegationSyncNotifiedWith(ctx, z, cds, short) // something else's, while the check waits
 		if ch, _ := chain(); ch.rechecks != check {
 			t.Errorf("check %d: the chain counts %d", check, ch.rechecks)
 		}
@@ -711,7 +737,7 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 			t.Fatalf("check %d: %d sync requests, want 1", check, n)
 		}
 	}
-	r.conf.delegationSyncNotifiedWith(ctx, z, "CDS", short)
+	r.conf.delegationSyncNotifiedWith(ctx, z, cds, short)
 	if _, n := chain(); n != 0 {
 		t.Errorf("past the bound %d chains are left", n)
 	}
@@ -721,37 +747,358 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	}
 }
 
-// The words the scheme is read from are tdns's. The tests above hold the
-// two NOTIFY types to what the pinned tdns says, through its own sync; here
-// is what must not be taken for a NOTIFY.
-func TestOnlyANotifyThatWasSentIsChecked(t *testing.T) {
-	for msg, want := range map[string]string{
-		"SyncZoneDelegationViaNotify: Sent NOTIFY(CSYNC, CDS) for zone child.example. to NotifierEngine":                                     "CSYNC, CDS",
-		"SyncZoneDelegationViaNotify: Sent NOTIFY(CDS) for zone child.example. to NotifierEngine (after UPDATE failed: parent said REFUSED)": "CDS",
-		"SyncZoneDelegationViaNotify: nothing to notify for zone child.example.":                                                             "",
-		"SendUpdate(example.) returned rcode NOERROR":                                                                                        "",
-		"SendUpdate(example.) returned rcode NOERROR (after NOTIFY failed: zone child.example.: no CDS for a NOTIFY(CDS) to point at)":       "",
-		"": "",
+// A zone the agent runs alone (its identity zone) has its own loop and no
+// election to ask through. Its NOTIFY goes to the notifier as it always
+// did: not held, not checked.
+func TestAZoneThatIsNotMultiProviderIsNeitherHeldNorChecked(t *testing.T) {
+	r := newNotifyRig(t, "alone.notify.example.", "NOTIFY", repeat(50*time.Millisecond, 400)...)
+	r.propagation(time.Hour)
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = false
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.hint()
+	r.notified(t, "the sync", dns.TypeCSYNC) // at once: the rig waits ten seconds, not the hour
+	if m := r.told(t, "when the NOTIFY was sent"); !strings.Contains(m.Msg, "Sent NOTIFY(CSYNC)") {
+		t.Errorf("the peer was told %+v", *m)
+	}
+	r.quiet(t, 300*time.Millisecond, "by a check")
+	if l := r.log.String(); strings.Contains(l, logHeld) || strings.Contains(l, logCheckAgain) || r.chains() != 0 {
+		t.Errorf("a zone that is not multi-provider was held, or put on the leader's chain (%d chains):\n%s", r.chains(), l)
+	}
+}
+
+// The leader does not send the NOTIFY of a change at once. The zone's
+// nameservers need time to serve the change, and a parent that scans before
+// they do finds nothing. The NOTIFY is held for the zone's wait; the first
+// check is timed from when it leaves; and the chain's own checks send at
+// once, since the change is old by then.
+func TestANotifyIsHeldForTheZonesWaitAndCheckedFromWhenItLeaves(t *testing.T) {
+	const wait, delay = 400 * time.Millisecond, 300 * time.Millisecond
+	r := newNotifyRig(t, "held.notify.example.", "NOTIFY", repeat(delay, 400)...)
+	r.propagation(wait)
+	z := r.mpzd.ZoneName
+	r.parent.holdsDS() // the parent has no DS yet
+
+	changed := time.Now()
+	r.inventory(r.ksk)
+	r.notified(t, "the held NOTIFY", dns.TypeCDS)
+	if d := time.Since(changed); d < wait {
+		t.Errorf("the NOTIFY left %s after the change, want it held for %s", d, wait)
+	}
+	r.untold(t, 0, "while the NOTIFY was held")
+	// the first check: the wait and the first delay after the change
+	r.notified(t, "the first check", dns.TypeCDS)
+	if d := time.Since(changed); d < wait+delay {
+		t.Errorf("the first check sent %s after the change, want the wait and the first delay: %s", d, wait+delay)
+	}
+	r.logged(t, 1, logHeld+" zone="+z+" notify=CDS wait=400ms largest="+string(r.lem.localID))
+	r.logged(t, 1, logLeft+" zone="+z+" notify=CDS held=400ms")
+	r.logged(t, 1, logCheckAgain+" zone="+z+" notify=CDS check=1 in=300ms")
+	// the checks' own NOTIFYs were not held
+	r.notified(t, "the second check", dns.TypeCDS)
+	r.logged(t, 1, logHeld)
+	r.logged(t, 1, logLeft)
+	r.parent.holdsDS(r.ds)
+	r.told(t, "the parent in sync")
+	r.logged(t, 1, logInSync)
+	r.untold(t, 0, "a second time")
+}
+
+// The data changes again while a NOTIFY is held: the held one is replaced,
+// one per type, and the wait starts anew. The nameservers need the wait
+// from the last change.
+func TestAChangeDuringAHoldReplacesTheHeldNotifyAndStartsTheWaitAnew(t *testing.T) {
+	const wait = time.Second
+	r := newNotifyRig(t, "again.notify.example.", "NOTIFY", repeat(time.Minute, 4)...)
+	r.propagation(wait)
+	z := r.mpzd.ZoneName
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.parent.holdsDS()
+
+	// the NS set changed: NOTIFY(CSYNC), held
+	r.hint()
+	r.logged(t, 1, logHeld+" zone="+z+" notify=CSYNC wait=1s")
+	// the DS set changes while that waits: the sync finds both differing now
+	again := time.Now()
+	r.inventory(r.ksk)
+	r.logged(t, 1, logHeld+" zone="+z+` notify="CSYNC, CDS" wait=1s`)
+	r.notified(t, "after the second change", dns.TypeCSYNC, dns.TypeCDS)
+	if d := time.Since(again); d < wait {
+		t.Errorf("the NOTIFYs left %s after the second change, want the wait from there: %s", d, wait)
+	}
+	r.logged(t, 1, logLeft+" zone="+z+` notify="CSYNC, CDS" held=1s`)
+	// the NOTIFY(CSYNC) that was held first did not leave as well
+	r.quiet(t, 300*time.Millisecond, "for the change that was replaced")
+	r.untold(t, 0, "before the parent was in sync")
+	if n := r.chains(); n != 1 {
+		t.Errorf("%d chains for one zone", n)
+	}
+}
+
+// A sync that finds what the held NOTIFY is already for brings no change: an
+// election, an operator's request. It does not start the wait anew: where
+// such syncs come more often than the wait is long, the NOTIFY would never
+// leave.
+func TestASyncThatFindsTheSameDifferenceDoesNotStartTheWaitAnew(t *testing.T) {
+	const wait = time.Second
+	r := newNotifyRig(t, "same.notify.example.", "NOTIFY", repeat(time.Minute, 4)...)
+	r.propagation(wait)
+	z := r.mpzd.ZoneName
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.hint()
+	r.logged(t, 1, logHeld)
+	if !r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {
+		t.Fatal("the election's request was not queued")
+	}
+	// the operator's request, as the API makes it, is answered that the
+	// NOTIFY waits
+	answer := make(chan tdns.DelegationSyncStatus, 1)
+	r.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, Response: answer}
+	if st, ok := recvWithin(answer, 10*time.Second); !ok || st.Error || !strings.Contains(st.Msg, "Sent NOTIFY(CSYNC)") || !strings.Contains(st.Msg, "(held: ") {
+		t.Errorf("the operator's request was answered %q (error %v, answered %v)", st.Msg, st.Error, ok)
+	}
+	r.notified(t, "the held NOTIFY", dns.TypeCSYNC)
+	r.logged(t, 1, logLeft)
+	r.quiet(t, 300*time.Millisecond, "for each of the syncs")
+	r.logged(t, 1, logHeld)
+}
+
+// The leadership moves while a NOTIFY is held: it is the new leader's to
+// send. The held one is dropped, and the chain is over.
+func TestLosingTheLeadershipDuringAHoldDropsTheNotify(t *testing.T) {
+	const wait = time.Second
+	r := newNotifyRig(t, "moved.notify.example.", "NOTIFY", repeat(50*time.Millisecond, 400)...)
+	r.propagation(wait)
+	z := r.mpzd.ZoneName
+	us := r.lem.localID
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.hint()
+	r.logged(t, 1, logHeld)
+	r.leader(AgentId(r.peer.Identity)) // before the wait is over
+	r.logged(t, 1, logDropped+" zone="+z+" notify=CSYNC")
+	if n := r.chains(); n != 0 {
+		t.Errorf("%d chains left after the held NOTIFY was dropped", n)
+	}
+	r.leader(us)
+	r.quiet(t, 300*time.Millisecond, "by an agent that lost the leadership while it held it")
+	r.untold(t, 0, "by an agent whose chain had ended")
+	if l := r.log.String(); strings.Contains(l, logLeft) || strings.Contains(l, logCheckAgain) {
+		t.Errorf("a NOTIFY that was dropped left, or was checked:\n%s", l)
+	}
+}
+
+// The parent catches up by itself while a NOTIFY is held (its own scan):
+// the next analysis finds it in sync, and what is held has nothing left to
+// tell it. Nothing was sent, so the peers are told nothing.
+func TestAParentFoundInSyncDuringAHoldNeedsNoNotify(t *testing.T) {
+	const wait = time.Second
+	r := newNotifyRig(t, "caught.notify.example.", "NOTIFY", repeat(50*time.Millisecond, 400)...)
+	r.propagation(wait)
+	z := r.mpzd.ZoneName
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.hint()
+	r.logged(t, 1, logHeld)
+	r.parent.holdsNS("ns1." + z)
+	if !r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {
+		t.Fatal("the request was not queued")
+	}
+	r.logged(t, 1, logNotNeeded+" zone="+z+" notify=CSYNC")
+	r.quiet(t, wait+300*time.Millisecond, "although the parent was in sync")
+	r.untold(t, 0, "of a sync that sent nothing")
+	if n := r.chains(); n != 0 {
+		t.Errorf("%d chains left", n)
+	}
+}
+
+// A provider's propagation delay reaches the other providers' agents in the
+// gossip of its beats, and is merged there as its beat interval is. An agent
+// that announces none is not known.
+func TestThePropagationDelayIsAnnouncedInTheBeatsGossip(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})
+	alice, bob := env.Alice, env.Bob
+	zd := seedZoneWithHSYNC3(t, "gossip.notify.example.", alice.Identity, bob.Identity)
+	addHSYNCPARAMServers(t, zd, shortLabel(alice.Identity), shortLabel(bob.Identity))
+	alice.Registry.GossipStateTable.SetPropagationDelay(7 * time.Minute) // bob sets none
+	var group string
+	for _, p := range []*peerEnv{alice, bob} {
+		pgm := p.Registry.ProviderGroupManager
+		pgm.RecomputeGroups()
+		pg := pgm.GetGroupForZone(ZoneName(zd.ZoneName))
+		if pg == nil {
+			t.Fatalf("%s has no provider group for the zone", p.Identity)
+		}
+		group = pg.GroupHash
+		// each agent's own row, as the engine writes it before its beats
+		p.Registry.GossipStateTable.RefreshLocalStates(p.Registry, pgm)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("the peer's listener: %v", err)
+	}
+	bob.Registry.S.Set(AgentId(alice.Identity), NewAgent(AgentId(alice.Identity)))
+	bob.Bridge.PeerRegistry.GetOrCreate(alice.Identity)
+	bob.Bridge.StartIncomingMessageRouter(env.ctx)
+	serveDNS(t, env.ctx, ln, bob)
+	peer := peerFromAddress(bob.Identity, ln.Addr().String())
+	peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "said hello")
+	if err := alice.Bridge.PeerRegistry.Add(peer); err != nil {
+		t.Fatalf("the peer: %v", err)
+	}
+	agent := NewAgent(AgentId(bob.Identity))
+	agent.DnsMethod = true
+	if _, err := alice.Bridge.SendBeatWithFallback(env.ctx, agent, 1); err != nil {
+		t.Fatalf("the beat: %v", err)
+	}
+
+	// bob has alice's row from the beat
+	theirs, ours := bob.Registry.GossipStateTable, alice.Registry.GossipStateTable
+	var d time.Duration
+	var known bool
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end) && !known; time.Sleep(5 * time.Millisecond) {
+		d, known = theirs.AnnouncedPropagationDelay(alice.Identity)
+	}
+	if !known || d != 7*time.Minute {
+		t.Fatalf("bob has alice's propagation delay as %s (known=%v), want 7m0s", d, known)
+	}
+	theirs.mu.RLock()
+	row := gossipMatrixRow(alice.Identity, theirs.States[group][alice.Identity])
+	theirs.mu.RUnlock()
+	if row["propagation_delay"] != uint32(420) {
+		t.Errorf("the gossip API shows alice's row as %v, want propagation_delay 420", row)
+	}
+	// alice has bob's row from the beat's answer, and it announces none
+	ours.mu.RLock()
+	heard := ours.States[group][bob.Identity]
+	ours.mu.RUnlock()
+	if heard == nil {
+		t.Fatal("alice did not get bob's row with the answer to her beat")
+	}
+	if d, known := ours.AnnouncedPropagationDelay(bob.Identity); known {
+		t.Errorf("bob announces no propagation delay, and alice has %s", d)
+	}
+	if row := gossipMatrixRow(bob.Identity, heard); row["propagation_delay"] != nil {
+		t.Errorf("the gossip API shows a propagation delay bob did not announce: %v", row)
+	}
+	// a row that is older than the one held does not take its place
+	theirs.MergeGossip(&GossipMessage{GroupHash: group, Members: map[string]*MemberState{
+		alice.Identity: {Identity: alice.Identity, Timestamp: time.Now().Add(-time.Hour), PropagationDelay: 1}}})
+	if d, _ := theirs.AnnouncedPropagationDelay(alice.Identity); d != 7*time.Minute {
+		t.Errorf("an older row replaced alice's propagation delay: %s", d)
+	}
+}
+
+// The agent's own value is its dnssec.kasp.propagation-delay, and tdns's
+// default when that is not set. An auditor serves nothing and announces
+// none.
+func TestTheAgentAnnouncesItsConfiguredPropagationDelay(t *testing.T) {
+	for _, c := range []struct {
+		role, setting string
+		init          func(*Config, *MultiProviderConf) error
+		want          time.Duration
+	}{
+		{"agent", "7m", (*Config).initMPAgent, 7 * time.Minute},
+		{"agent", "", (*Config).initMPAgent, (&tdns.Config{}).KaspPropagationDelay()},
+		{"auditor", "7m", (*Config).initMPAuditor, 0},
 	} {
-		if got := notifiesSent(msg); got != want {
-			t.Errorf("notifiesSent(%q) = %q, want %q", msg, got, want)
+		conf := &Config{Config: &tdns.Config{}}
+		conf.Config.Internal.StopCh = make(chan struct{})
+		conf.Config.Dnssec.Kasp.PropagationDelay = c.setting
+		mp := &MultiProviderConf{Role: c.role, Identity: c.role + ".delay.example."}
+		conf.SetMpConfig(mp)
+		err := c.init(conf, mp)
+		close(conf.Config.Internal.StopCh)
+		if err != nil {
+			t.Fatalf("%s: init: %v", c.role, err)
+		}
+		gst := conf.InternalMp.AgentRegistry.GossipStateTable
+		if got := gst.PropagationDelay(); got != c.want {
+			t.Errorf("%s with propagation-delay %q: its own value is %s, want %s", c.role, c.setting, got, c.want)
+		}
+		// and it is in the agent's own row of a group, in whole seconds
+		gst.UpdateLocalState("0123456789abcdef", nil, nil, 30)
+		gst.mu.RLock()
+		got := gst.States["0123456789abcdef"][gst.LocalID].PropagationDelay
+		gst.mu.RUnlock()
+		if got != uint32(c.want/time.Second) {
+			t.Errorf("%s with propagation-delay %q announces %d s, want %d", c.role, c.setting, got, c.want/time.Second)
 		}
 	}
-	// not a multi-provider zone the leader syncs: the agent's own identity
-	// zone has its own loop, and no election to ask through
-	r := newLeaderSyncRig(t, "plain.notify.example.")
-	r.leader("agent.us.example.")
-	sent := "SyncZoneDelegationViaNotify: Sent NOTIFY(CDS) for zone " + r.mpzd.ZoneName + " to NotifierEngine"
-	ds := tdns.DelegationSyncRequest{ZoneName: r.mpzd.ZoneName, ZoneData: r.mpzd.ZoneData}
-	r.mpzd.Options[tdns.OptMultiProvider] = false
-	if r.conf.delegationSyncNotified(context.Background(), ds, sent) {
-		t.Error("a NOTIFY for a zone that is not multi-provider was put on the leader's chain")
+}
+
+// The zone's wait is the largest propagation delay among the agent's own
+// and those of the providers that serve the zone. A provider that only
+// signs, an auditor and a member with no role do not count, however large
+// their values; a serving provider whose value is not known is left out.
+func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.T) {
+	const us = "agent.us.example."
+	mpzd := signerTestZone(t, "wait.notify.example.", newMPTestKeyDB(t))
+	z := mpzd.ZoneName
+	apex, err := mpzd.OwnerForAnalysis(z)
+	if err != nil || apex == nil {
+		t.Fatalf("apex: %v", err)
 	}
-	r.mpzd.Options[tdns.OptMultiProvider] = true
-	if r.conf.delegationSyncNotified(context.Background(), ds, "SendUpdate(example.) returned rcode NOERROR") {
-		t.Error("an UPDATE was put on the leader's chain as a NOTIFY")
+	hdr := func(rrtype uint16) dns.RR_Header {
+		return dns.RR_Header{Name: z, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	if n := len(r.conf.InternalMp.delegationSyncChains.zones); n != 0 {
-		t.Errorf("%d chains started", n)
+	var h3s []dns.RR
+	for _, label := range []string{"us", "p2", "p3", "p4", "aud", "idle"} {
+		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: "agent." + label + ".example.", Upstream: "."}})
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+		&core.HSYNCPARAMServers{Servers: []string{"us", "p2", "p4"}},
+		&core.HSYNCPARAMSigners{Signers: []string{"us", "p3"}},
+		&core.HSYNCPARAMAuditors{Auditors: []string{"aud"}},
+	}}}}})
+	mpzd.Data.Set(z, *apex)
+	mpzd.InstallInitialSnapshot()
+	mpzd.Ready = true
+
+	gst := NewGossipStateTable(us)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.AgentRegistry = &AgentRegistry{GossipStateTable: gst}
+	// what each member's beats have brought: p4 serves, and announces none
+	const group = "0123456789abcdef"
+	announce := func(label string, seconds uint32) {
+		id := "agent." + label + ".example."
+		gst.MergeGossip(&GossipMessage{GroupHash: group, Members: map[string]*MemberState{
+			id: {Identity: id, Timestamp: time.Now(), PropagationDelay: seconds}}})
+	}
+	announce("p2", 120)
+	announce("p3", 900)
+	announce("p4", 0)
+	announce("aud", 3000)
+	announce("idle", 6000)
+
+	gst.SetPropagationDelay(time.Minute)
+	if wait, of := conf.delegationNotifyWait(z); wait != 2*time.Minute || of != "agent.p2.example." {
+		t.Errorf("the wait is %s, by %s; want p2's two minutes", wait, of)
+	}
+	gst.SetPropagationDelay(5 * time.Minute)
+	if wait, of := conf.delegationNotifyWait(z); wait != 5*time.Minute || of != us {
+		t.Errorf("the wait is %s, by %s; want this agent's own five minutes", wait, of)
+	}
+	// a provider's newer word counts, also when it comes in another group's gossip
+	gst.MergeGossip(&GossipMessage{GroupHash: "fedcba9876543210", Members: map[string]*MemberState{
+		"agent.p2.example.": {Identity: "agent.p2.example.", Timestamp: time.Now().Add(time.Second), PropagationDelay: 600}}})
+	if wait, of := conf.delegationNotifyWait(z); wait != 10*time.Minute || of != "agent.p2.example." {
+		t.Errorf("the wait is %s, by %s; want p2's ten minutes", wait, of)
+	}
+	// nobody says anything: no wait
+	gst.SetPropagationDelay(0)
+	announce("p2", 0)
+	gst.MergeGossip(&GossipMessage{GroupHash: "fedcba9876543210", Members: map[string]*MemberState{
+		"agent.p2.example.": {Identity: "agent.p2.example.", Timestamp: time.Now().Add(2 * time.Second)}}})
+	if wait, _ := conf.delegationNotifyWait(z); wait != 0 {
+		t.Errorf("the wait is %s with no propagation delay known, want none", wait)
+	}
+	// an agent with no gossip table, or a zone that is not here: no wait
+	if wait, _ := (&Config{Config: &tdns.Config{}}).delegationNotifyWait(z); wait != 0 {
+		t.Errorf("the wait is %s with no gossip table", wait)
+	}
+	gst.SetPropagationDelay(time.Minute)
+	if wait, of := conf.delegationNotifyWait("absent.notify.example."); wait != time.Minute || of != us {
+		t.Errorf("the wait for a zone that is not here is %s, by %s; want this agent's own", wait, of)
 	}
 }
