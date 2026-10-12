@@ -855,6 +855,14 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	}
 	if len(payload.Zones) > 0 {
 		report.Zone = ZoneName(payload.Zones[0])
+		// The beat names every zone its sender shares with us, in no
+		// particular order (beatZones). Zone alone would book it for
+		// whichever came first; the report carries them all, for the
+		// consumer that keeps liveness per zone (tdns-mp #153).
+		report.Zones = make([]ZoneName, len(payload.Zones))
+		for i, z := range payload.Zones {
+			report.Zones[i] = ZoneName(z)
+		}
 	}
 
 	if tm.msgQs == nil {

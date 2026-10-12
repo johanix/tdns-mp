@@ -301,6 +301,33 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 	return label, isSigner, true
 }
 
+// bookedBeatZones is the zones the auditor books a beat for: every zone the
+// beat names (tdns-mp #153). A beat names all the zones its sender shares
+// with us, in an order the sender leaves to chance, and the transport
+// authorizes it for the first. Booked for that one alone, a zone saw a beat
+// only when it happened to come first: a healthy provider read as silent, or
+// as never seen, and one that had stopped was not told from it. The other
+// zones meet the transport's check here, so a sender is booked only where its
+// beat would have been accepted had that zone come first.
+func bookedBeatZones(ar *AgentRegistry, report *AgentMsgReport) []ZoneName {
+	if report.Zone == "" {
+		return nil
+	}
+	zones := []ZoneName{report.Zone}
+	if ar == nil || ar.MPTransport == nil {
+		return zones
+	}
+	for _, z := range report.Zones {
+		if z == "" || z == report.Zone {
+			continue
+		}
+		if ok, _ := ar.MPTransport.IsPeerAuthorized(string(report.Identity), string(z)); ok {
+			zones = append(zones, z)
+		}
+	}
+	return zones
+}
+
 func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 	sm *AuditStateManager, ar *AgentRegistry) <-chan *hsync.InboundReport {
 	out := make(chan *hsync.InboundReport)
@@ -320,15 +347,17 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 				if ar != nil {
 					ar.HeartbeatHandler(report)
 				}
-				if sm != nil && report.Zone != "" {
-					zone := string(report.Zone)
+				if sm != nil {
 					identity := string(report.Identity)
-					label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, identity)
-					zs := sm.GetOrCreateZone(zone)
-					if IsAuditorIdentity(zone, identity) {
-						zs.UpdateAuditorBeat(identity, label, gossipState)
-					} else if IsProviderIdentity(zone, identity) {
-						zs.UpdateProviderBeat(identity, label, gossipState, isSigner)
+					for _, z := range bookedBeatZones(ar, report) {
+						zone := string(z)
+						label, gossipState, isSigner := providerBeatMeta(ar, z, identity)
+						zs := sm.GetOrCreateZone(zone)
+						if IsAuditorIdentity(zone, identity) {
+							zs.UpdateAuditorBeat(identity, label, gossipState)
+						} else if IsProviderIdentity(zone, identity) {
+							zs.UpdateProviderBeat(identity, label, gossipState, isSigner)
+						}
 					}
 				}
 				var msg interface{}
