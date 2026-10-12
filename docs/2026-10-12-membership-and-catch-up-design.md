@@ -168,16 +168,18 @@ When no zone is left in a group, the group's election state and timers go with i
 
 Each provider fetches the owner's zone on its own, so two agents can hold different versions of a zone's HSYNC3 and HSYNCPARAM records while they are in full contact with each other. That takes no network partition. It lasts seconds when every provider is notified and transfers at once, longer when one transfer is late, and without end when one agent is stuck on an old copy. For that time the zone can have two leaders: the leader of the group the zone left, which has not seen the edit, and the leader of the group it arrived in. Each would sync the parent from its own view, and the parent would take whichever write came last. For a signer that was just removed, one of them publishes its DS and the other withdraws it.
 
-So a leader sends nothing to the parent for a zone until both of these hold:
+So a leader sends nothing to the parent for a zone, the bootstrap of the zone's SIG(0) key included, until both of these hold:
 
 - every voting member of the zone's group holds the same make-up for the zone as the leader does;
 - the leader of the group the zone left has shown that it holds that make-up too, or that it no longer has the zone, or a short fixed time has passed since the zone arrived: a few beat intervals.
 
 Until then the sync is owed and not sent, and one line says who is waited for. This is the hold of 5.6 for another kind of not knowing: there the leader lacks the zone's data, here the group lacks one view of who the zone's members are.
 
-To make it possible, every agent tells its peers which make-up it holds for each zone they share. When the agents are in contact a disagreement shows within a beat, and the hold then lasts as long as the disagreement does. When the previous leader cannot be reached, or is stuck on an old copy of the zone, the hold ends with the fixed time.
+To make it possible, every agent tells the members of each of its groups which zones it has in that group, and so which make-up it holds for each of them. A previous leader that is in none of the new leader's groups any more tells it nothing about the zone: it shows that it has dropped the zone by no longer listing it in the group the zone left. When the agents are in contact a disagreement shows within a beat, and the hold then lasts as long as the disagreement does. When the previous leader cannot be reached, or is stuck on an old copy of the zone, the hold ends with the fixed time.
 
 The fixed time is enough because the first condition holds every leader, the previous one too. A previous leader that is alive hears within a beat that its peers no longer have the zone in its group, and from then on it holds its own sync. One that is not alive sends nothing. Its lease is no way out: a lease belongs to a group, not to a zone, and it is renewed for as long as that group has any zone left, so a previous leader that is stuck on one zone would hold that zone's sync for ever.
+
+After a restart an agent knows of no group that a zone has left, and the second condition then asks for nothing. The first condition and the catch-up of section 5 carry that case.
 
 One case is not covered. An owner who replaces a zone's only provider by another in one edit leaves a previous leader that has no peer to tell it anything. If its agent is then stuck on the old copy, it and the new provider both act. The order of an add and a removal in `guide/provider-changes.md` avoids it: the new provider is added before the old one is taken away.
 
@@ -213,7 +215,7 @@ RFI SYNC, with the reason word and a name for the request, both carried in the m
 
 One SYNC to the asker alone, through the confirmed queue, holding the answering agent's own contributions to the zone.
 
-1. **Every RRtype is named.** One `replace` for each type a provider may contribute (NS, KEY, CDS, CSYNC, DNSKEY), empty where the agent holds none. The asker's stale records go.
+1. **Every RRtype is named.** One `replace` for each type the answering agent may contribute (NS, KEY, CDS, DNSKEY), empty where it holds none. The asker's stale records go. The zone's CSYNC is the leader's alone, so only the leader's answer names it.
 2. **The key states travel.** When the answering agent's provider signs the zone, the DNSKEY operation carries the key states, from its signer's latest inventory.
 3. **An answer always goes out,** also from an agent that holds nothing.
 4. **The marker.** The SYNC names the request it answers and says `complete` or not, with the reason when not. An agent answers "not complete" when it cannot vouch for its own state: its provider signs and it has no inventory from its signer yet, or it has not finished reading its own contributions back from its combiner. A "not complete" answer carries the marker and no operation: empty sets from an agent that has not read its own state would remove its contributions at every peer.
@@ -267,6 +269,7 @@ With Z zones and P voting peers per zone, a start sends Z x P requests and recei
   - The rule needs no direction: the leader sees to it that nothing points at a member with no role. For a provider on its way in there is nothing to remove.
   - Open: whether the zone's NS RRset or the parent's changes first. A parent that takes NOTIFY only copies the NS RRset from the zone.
   - Open: how the leaving provider's own records are withdrawn. A `replace` is the sender's own set (5.4), so the leader cannot withdraw another provider's contributions with one (#159). Whatever does it is a distribution that does not wait for the leaving provider (3.3).
+  - Open: the leader's CSYNC and a leaving provider. The leader waits for every recipient's confirmation of the zone's CSYNC before it sends the NOTIFY, with no time-out, and a member with no role is a recipient. At a parent that takes NOTIFY only, the CSYNC is what carries a leaving provider's NS removal, so a leaving provider whose agent is stopped would hold its own removal. Not waiting for it may only move the stall: the parent scans every nameserver it delegates to, the leaving provider's among them, and what its scan does with a nameserver that lacks the record, or does not answer, is not established. To be settled with the point above.
 - **A server that becomes a signer and serves its own signatures too early** (#160), and wrong answers before a provider is listed (item 1 of #137).
 - **New confirmed message types:** a leader's statement about the parent that every member verifies, and the transfer set-up.
 - **Keeping key states across a restart.** Not done on purpose: a stale DS set can remove a DS that is needed, an unknown one cannot.
