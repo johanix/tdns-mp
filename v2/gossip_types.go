@@ -81,6 +81,13 @@ type ProviderGroup struct {
 }
 
 // ProviderGroupManager manages provider group computation and naming.
+//
+// Locking: mu is held only to read or replace what it guards, and nothing is
+// called with it held. A caller that needs the groups for a call into the
+// gossip table or the election manager copies them out first (GetGroups,
+// GetGroup): those call back into the manager, and a second read of mu on a
+// goroutine that holds one already blocks for good once a recompute is
+// waiting for the write lock in between (tdns-mp #180).
 type ProviderGroupManager struct {
 	mu      sync.RWMutex
 	Groups  map[string]*ProviderGroup // key: group hash

@@ -398,11 +398,16 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 					return
 				}
 				ar.GossipStateTable.RefreshLocalStates(ar, ar.ProviderGroupManager)
-				ar.ProviderGroupManager.mu.RLock()
-				for _, pg := range ar.ProviderGroupManager.Groups {
+				// The groups are copied out, and checked with the manager's
+				// lock free. A group that has just become OPERATIONAL has its
+				// election called from in there, by a callback that reads the
+				// manager. With the read lock held across the call, a
+				// recompute that asked for the write lock in between waited
+				// for this round, the callback's read waited for the
+				// recompute, and the agent beat no more (tdns-mp #180).
+				for _, pg := range ar.ProviderGroupManager.GetGroups() {
 					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
 				}
-				ar.ProviderGroupManager.mu.RUnlock()
 			},
 		},
 	}

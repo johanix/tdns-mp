@@ -185,8 +185,8 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 }
 
 // BuildGossipForPeer builds gossip messages for all groups shared with a peer.
-// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu
-// to avoid deadlock with RefreshLocalStates (which takes pgm.mu then gst.mu).
+// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu:
+// the two are never held together, here or in RefreshLocalStates.
 func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager, lem ...*LeaderElectionManager) []GossipMessage {
 	if pgm == nil {
 		return nil
@@ -394,11 +394,14 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 		return
 	}
 
-	pgm.mu.RLock()
-	defer pgm.mu.RUnlock()
-
+	// The groups are copied out and the manager's lock is free while the rows
+	// are built and written: what is called from here takes the locks of the
+	// peers, of the zones and of this table, and a recompute of the groups
+	// must not wait for any of them with the manager's readers behind it
+	// (tdns-mp #180).
 	now := time.Now()
-	for hash, pg := range pgm.Groups {
+	for _, pg := range pgm.GetGroups() {
+		hash := pg.GroupHash
 		// Build our peer states for this group
 		peerStates := make(map[string]string)
 		var zones []string
