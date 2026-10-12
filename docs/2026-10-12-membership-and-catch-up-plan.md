@@ -121,11 +121,11 @@ The sending agent's own restart sends nothing either, as far as the code reads. 
 - **The combiner has no role check either.** Where a combiner declines such an edit it is on other grounds: it does not apply a contribution to a signed zone when its provider is not a signer (`canApply`, `v2/combiner_chunk.go`), and stores it. In an unsigned zone the same edit from a provider with no role would be applied.
 - **Why the unlisted agent of #172 was in the election at all.** `PostRefresh` turns the parentsync option on for any zone whose HSYNCPARAM says `parentsync=agent` (`v2/hsync_utils.go:1546`), without the check of the local identity that the first-load callback makes, and a first load's `PostRefresh` runs before that callback.
 
-Found on the way, as read, none of them filed:
+Found on the way, as read. Two are filed since, the others are covered by the steps of this plan:
 
 - On an agent, the originator that a SYNC, an RFI or a beat names in its payload is not compared with the sender the transport established (`routeSyncMessage`, `routeBeatMessage`, `v2/hsync_transport.go`). The checks of the sender in `MsgHandler` and in the election read the named one, PR #163's check among them: any admitted peer can name a voting member.
 - An agent that does not vote and learns a leader from gossip arms the lease's fallback renewal (`ApplyGossipElection` calls `scheduleGroupReelection` with no look at the local agent). Today that is an agent listed under `auditors=` only. With members that have no role it is the normal case.
-- A group that no zone is left in keeps its election state and its timers. Nothing retires it: `RecomputeGroups` drops the group and the election manager is not told.
+- A group that no zone is left in keeps its election state and its timers. Nothing retires it: `RecomputeGroups` drops the group and the election manager is not told (issue #182).
 - A zone that moves into a group which has a leader is not taken up by that leader. The work a leader owes a zone is started by `onLeaderElected`, which the election manager calls at election events only, and `RecomputeGroups` tells the election manager nothing. On a test fleet a zone moved to another group when its owner removed a provider, the NS change of that edit was skipped by the new group's leader ("not the delegation sync leader, skipping DDNS"), and it reached the parent 49 minutes later, at the lease renewal. This is issue #179, and a change for the arrival is being made apart from this plan.
 - A lone voting member's self-election does not take a new term. `GroupElectionForGossip` tells nothing of term 0, and a renewed lease of the same term is not news to a peer, so an observer of a one-voter group never learns its leader.
 
