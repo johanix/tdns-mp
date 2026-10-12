@@ -6,7 +6,7 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20261012170509-ea64562104bb
+	github.com/johanix/tdns/v2 v2.0.0-20261012210600-980b5e67b83d
 	github.com/johanix/tdns/v2/cli v0.0.0-20261012170509-ea64562104bb
 	github.com/johanix/tdns/v2/core v0.0.0-20261012170509-ea64562104bb
 	github.com/spf13/cobra v1.10.2
