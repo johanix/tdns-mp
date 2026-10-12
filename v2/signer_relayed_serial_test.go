@@ -191,6 +191,9 @@ type mpServedZone struct {
 	zd   *tdns.ZoneData
 	conf *Config
 	up   *mpUpstream
+	// halt stops the engine and takes the zone away, as a stop of the daemon
+	// does; the keystore stays. Run at the end of the test if not before.
+	halt func()
 }
 
 // startMPServedZone pre-registers the zone the way ParseZones leaves it,
@@ -224,19 +227,23 @@ func startMPServedZone(t *testing.T, kdb *tdns.KeyDB, up *mpUpstream, mp *MultiP
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); tdns.RefreshEngine(ctx, conf.Config) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("RefreshEngine did not shut down")
-		}
-		zd.StopPublisher()
-		tdns.Zones.Remove(up.zone)
-		Zones.Invalidate(up.zone)
-	})
+	var once sync.Once
+	halt := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("RefreshEngine did not shut down")
+			}
+			zd.StopPublisher()
+			tdns.Zones.Remove(up.zone)
+			Zones.Invalidate(up.zone)
+		})
+	}
+	t.Cleanup(halt)
 
-	z := &mpServedZone{zd: zd, conf: conf, up: up}
+	z := &mpServedZone{zd: zd, conf: conf, up: up, halt: halt}
 	conf.Config.Internal.RefreshZoneCh <- z.configRefresher()
 	deadline := time.Now().Add(10 * time.Second)
 	for !zd.HasPublishedData() || !z.ready() {
@@ -473,6 +480,69 @@ func TestSignerKeepsItsOwnSerialForAZoneItSigns(t *testing.T) {
 	third := served("after a forced re-fetch")
 	if third != second+1 {
 		t.Fatalf("after a forced re-fetch the signing zone serves %d, want %d: its own count", third, second+1)
+	}
+}
+
+// A provider turns from server to signer, and its signer is restarted in
+// between: it relayed the zone from the other provider's signer, and comes
+// back with the zone's HSYNCPARAM naming it as the signer and its own combiner
+// as the upstream. The combiner counts a serial of its own, here far below the
+// one the signer was relaying. The provider's nameservers hold the relayed
+// serial and do not transfer a lower one, so the signer goes on from past it,
+// with an SOA signed by its own key.
+func TestSignerThatStartsToSignAcrossARestartGoesOnPastTheSerialItRelayed(t *testing.T) {
+	asMPDaemon(t, AppTypeMPSigner)
+	kdb := newMPTestKeyDB(t)
+	// the sample configuration's mode
+	kdb.SetOutboundSoaSerial(tdns.OutboundSoaSerialPersist)
+	const zone = "turned.example."
+
+	other := startMPUpstream(t, zone, "alpha", true, 40)
+	z := startMPServedZone(t, kdb, other, signerConfBeta(), nil)
+	other.publish(t, 43)
+	z.notified(t)
+	if soa, _ := z.servedSOA(t); soa.Serial != 43 {
+		t.Fatalf("relayed: the signer serves serial %d, the upstream signer has 43", soa.Serial)
+	}
+	if err := z.soaValidates(t, z.servedDNSKEYs(t)); err != nil {
+		t.Fatalf("relayed: %v", err)
+	}
+	z.halt()
+
+	mpGenKey(t, kdb, zone, tdns.DnskeyStateActive, "KSK")
+	mpGenKey(t, kdb, zone, tdns.DnskeyStateActive, "ZSK")
+	policy := &tdns.DnssecPolicy{
+		Mode:         tdns.DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+		SigValidity:  tdns.PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400},
+	}
+	combiner := startMPUpstream(t, zone, "beta", false, 7)
+	again := startMPServedZone(t, kdb, combiner, signerConfBeta(), policy)
+	if !again.signsInline() {
+		t.Fatal("inline-signing is off for a zone whose HSYNCPARAM names this provider as a signer")
+	}
+	soa, _ := again.servedSOA(t)
+	t.Logf("after the restart the signer serves serial %d", soa.Serial)
+	// RFC 1982 order; the signer may publish more than once while it loads
+	// and signs, so "past 43" and not one fixed serial.
+	if d := soa.Serial - 43; d == 0 || d > 10 {
+		t.Fatalf("after the restart the signer serves serial %d, want one shortly past the 43 it relayed, not its combiner's 7", soa.Serial)
+	}
+	inv, err := tdns.GetKeyInventory(kdb, zone)
+	if err != nil {
+		t.Fatalf("GetKeyInventory: %v", err)
+	}
+	var own []*dns.DNSKEY
+	for _, it := range inv {
+		rr, err := dns.NewRR(it.KeyRR)
+		if err != nil {
+			t.Fatalf("key %d: %v", it.KeyTag, err)
+		}
+		own = append(own, rr.(*dns.DNSKEY))
+	}
+	if err := again.soaValidates(t, own); err != nil {
+		t.Fatalf("after the restart the SOA is not signed by the signer's own key: %v", err)
 	}
 }
 
