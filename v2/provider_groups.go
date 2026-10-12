@@ -221,6 +221,31 @@ func (pgm *ProviderGroupManager) SetOnZoneJoinedGroup(f func(zone ZoneName, from
 	pgm.onZoneJoinedGroup = f
 }
 
+// SetOnGroupGone sets the callback that RecomputeGroups tells of each group
+// it has dropped: a group that had zones, and has none now that its last zone
+// has moved to another group or is gone. It is called as the callback of
+// SetOnZoneJoinedGroup is: once the new group map is in place, with the
+// manager's lock free, and it must not start a recompute. A group that
+// comes back later is a new group to whoever was told.
+func (pgm *ProviderGroupManager) SetOnGroupGone(f func(groupHash string)) {
+	pgm.mu.Lock()
+	defer pgm.mu.Unlock()
+	pgm.onGroupGone = f
+}
+
+// groupsThatAreGone returns the groups of the map before a recompute that
+// the map after it does not have, in the order of their hashes.
+func groupsThatAreGone(before, after map[string]*ProviderGroup) []string {
+	var gone []string
+	for hash := range before {
+		if _, ok := after[hash]; !ok {
+			gone = append(gone, hash)
+		}
+	}
+	slices.Sort(gone)
+	return gone
+}
+
 // zoneGroupChange is a zone that a recompute has put into a group it was not
 // in before: from is the group it was in, empty when it had none.
 type zoneGroupChange struct {
@@ -256,7 +281,8 @@ func zonesThatJoined(before, after map[string]*ProviderGroup) []zoneGroupChange 
 // RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
 // and rebuilds the provider group map. This is a pure function of zone data.
 // The zones it moves into a group are reported to the callback set with
-// SetOnZoneJoinedGroup, if there is one.
+// SetOnZoneJoinedGroup, if there is one, and the groups it drops to the one
+// set with SetOnGroupGone.
 //
 // Recomputes run one at a time, each from its scan to the last word of what
 // it changed. The scan used to run under no lock, and only the swap under
@@ -373,6 +399,11 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 	if onJoined != nil {
 		joined = zonesThatJoined(pgm.Groups, newGroups)
 	}
+	onGone := pgm.onGroupGone
+	var gone []string
+	if onGone != nil {
+		gone = groupsThatAreGone(pgm.Groups, newGroups)
+	}
 	pgm.Groups = newGroups
 	pgm.mu.Unlock()
 	pgm.installedScan = scan
@@ -381,6 +412,9 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 	// whoever is told may look the zone's group up.
 	for _, j := range joined {
 		onJoined(j.zone, j.from, j.to)
+	}
+	for _, hash := range gone {
+		onGone(hash)
 	}
 }
 

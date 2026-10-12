@@ -334,6 +334,20 @@ func (gst *GossipStateTable) SetOnElectionUpdate(fn func(groupHash string, state
 	gst.onElectionUpdate = fn
 }
 
+// forgetGroup is the word that a provider group is gone: its last zone has
+// left it. The table forgets what would stand in the way of the group if it
+// comes back. That it was mutually OPERATIONAL: a group's election is called
+// when it becomes so, and a group still marked would come back without one.
+// And the election record: a group that comes back starts its terms again,
+// and the record of a higher term would keep its results out. The members'
+// rows stay: beats bring newer ones.
+func (gst *GossipStateTable) forgetGroup(groupHash string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	delete(gst.operationalGroups, groupHash)
+	delete(gst.Elections, groupHash)
+}
+
 // CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
 	gst.mu.Lock()

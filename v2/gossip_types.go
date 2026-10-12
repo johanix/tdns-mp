@@ -109,6 +109,9 @@ type ProviderGroupManager struct {
 	// onZoneJoinedGroup is told of each zone a recompute has put into a
 	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
 	onZoneJoinedGroup func(zone ZoneName, from, to string)
+	// onGroupGone is told of each group a recompute has dropped: its last
+	// zone has left it (SetOnGroupGone). Guarded by mu.
+	onGroupGone func(groupHash string)
 }
 
 // --- From parentsync_leader.go ---
@@ -133,6 +136,9 @@ type LeaderElection struct {
 	// while an election is running and after one that was aborted: the
 	// leader then is still the one of the term before.
 	leaderTerm uint64
+	// gone: the provider group of this election is gone, and the manager
+	// has dropped the entry (groupGone). Nothing starts on it any more.
+	gone bool
 
 	// Votes that arrived for a term this member has not joined yet: a VOTE
 	// can overtake the CALL it answers, since the two come from different

@@ -114,7 +114,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 		le.Active = false
 		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8])
-		lem.scheduleGroupReelection(le, groupHash, members, zones)
+		lem.scheduleGroupReelection(le, groupHash, members)
 		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
 		le.mu.Unlock()
 
@@ -181,18 +181,6 @@ func (lem *LeaderElectionManager) DeferGroupElection(groupHash string) {
 
 // HandleGroupMessage dispatches an election message that carries a _group record.
 func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID AgentId, rfiType string, records map[string][]string) {
-	lem.mu.Lock()
-	le, ok := lem.groupElections[groupHash]
-	if !ok {
-		le = &LeaderElection{
-			Zone:     ZoneName(groupHash),
-			Votes:    make(map[AgentId]uint32),
-			Confirms: make(map[AgentId]AgentId),
-		}
-		lem.groupElections[groupHash] = le
-	}
-	lem.mu.Unlock()
-
 	// Find group metadata for callbacks. Quorum/initiator logic
 	// uses voting members only — non-voting roles (auditors) may
 	// receive the broadcast but must not be counted.
@@ -219,6 +207,21 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 			"group", groupHash[:8], "type", rfiType, "initiator", senderID, "term", parseUint64(records, "_term"))
 		return
 	}
+
+	// The election's entry is made only here, for a group that is known and
+	// in which this agent votes: a late message for a group that is gone
+	// must not bring its entry back (groupGone).
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	if !ok {
+		le = &LeaderElection{
+			Zone:     ZoneName(groupHash),
+			Votes:    make(map[AgentId]uint32),
+			Confirms: make(map[AgentId]AgentId),
+		}
+		lem.groupElections[groupHash] = le
+	}
+	lem.mu.Unlock()
 
 	switch rfiType {
 	case "ELECT-CALL":
@@ -367,7 +370,7 @@ func (lem *LeaderElectionManager) onGroupVoteTimeout(groupHash string, term uint
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members voted, retrying",
 			"group", groupHash[:8], "term", term, "votes", collected, "expected", expected)
-		lem.retryGroupElection(groupHash, term, members, zones)
+		lem.retryGroupElection(groupHash, term)
 		return
 	}
 	le.mu.Unlock()
@@ -443,7 +446,7 @@ func (lem *LeaderElectionManager) onGroupConfirmTimeout(groupHash string, term u
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members confirmed, retrying",
 			"group", groupHash[:8], "term", term, "confirms", collected, "expected", expected)
-		lem.retryGroupElection(groupHash, term, members, zones)
+		lem.retryGroupElection(groupHash, term)
 		return
 	}
 	le.mu.Unlock()
@@ -481,7 +484,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		le.Active = false
 		le.mu.Unlock()
 		lgElect.Warn("group election: no consensus, re-electing", "group", groupHash[:8], "term", term)
-		lem.retryGroupElection(groupHash, term, members, zones)
+		lem.retryGroupElection(groupHash, term)
 		return
 	}
 
@@ -496,7 +499,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
 	}
 
-	lem.scheduleGroupReelection(le, groupHash, members, zones)
+	lem.scheduleGroupReelection(le, groupHash, members)
 	le.mu.Unlock()
 
 	if isUs && lem.onLeaderElected != nil {
@@ -518,35 +521,112 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 // from gossip that it leads) or whose renewal was lost. A fallback that finds
 // the term renewed starts nothing (startGroupElection). When every member
 // renewed at the same instant, each started the same term, nobody joined
-// anybody, and all aborted after the vote timeout (#120). Must be called
-// with le.mu held.
-func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, groupHash string, members []string, zones []ZoneName) {
+// anybody, and all aborted after the vote timeout (#120).
+//
+// members decides only how long this member waits. Whom the renewal calls,
+// and through which zone, is read when the timer fires (groupForTimer). Must
+// be called with le.mu held.
+func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, groupHash string, members []string) {
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
+	}
+	if le.gone {
+		return
 	}
 	armed := le.Term
 	delay := lem.renewalDelay(le.Leader, members)
 	le.ReelectTimer = time.AfterFunc(delay, func() {
 		le.mu.Lock()
-		movedOn := le.Active || le.Term != armed
+		movedOn := le.gone || le.Active || le.Term != armed
 		le.mu.Unlock()
 		if movedOn {
 			lgElect.Debug("group lease already renewed, or an election is running; this renewal does nothing",
 				"group", groupHash[:8])
 			return
 		}
+		pg := lem.groupForTimer(groupHash, "lease renewal")
+		if pg == nil {
+			return
+		}
 		lgElect.Info("group leader TTL expiring, triggering re-election", "group", groupHash[:8])
-		lem.startGroupElection(groupHash, members, zones, &armed)
+		lem.startGroupElection(groupHash, pg.VotingMembers, pg.Zones, &armed)
 	})
 }
 
 // retryGroupElection starts the election again after one that was aborted or
 // found no consensus in term, after a short random delay, and only if no
-// other member's retry got there first (startGroupElection).
-func (lem *LeaderElectionManager) retryGroupElection(groupHash string, term uint64, members []string, zones []ZoneName) {
+// other member's retry got there first (startGroupElection). It starts it
+// for the group as it is when the delay is over (groupForTimer).
+func (lem *LeaderElectionManager) retryGroupElection(groupHash string, term uint64) {
 	time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
-		lem.startGroupElection(groupHash, members, zones, &term)
+		if pg := lem.groupForTimer(groupHash, "election retry"); pg != nil {
+			lem.startGroupElection(groupHash, pg.VotingMembers, pg.Zones, &term)
+		}
 	})
+}
+
+// groupForTimer returns a provider group as the provider group manager has
+// it now, for a timer of the group's election that has fired: a lease
+// renewal, or the retry after an aborted election. The timer starts its
+// election with these voting members and zones, not with the ones the group
+// had when the timer was armed, most of a lease earlier: a renewal with the
+// old lists was called through a zone that had left the group, and a member
+// that elects itself asked for the old zones only (tdns-mp #182).
+//
+// It returns nil when the timer has nothing to start. The group is gone:
+// what is still held for it is dropped. Or this agent has no vote in it (the
+// owner took it away, or the agent learnt of the election from gossip), and
+// a member without a vote calls no election.
+func (lem *LeaderElectionManager) groupForTimer(groupHash, timer string) *ProviderGroup {
+	var pg *ProviderGroup
+	if lem.providerGroupMgr != nil {
+		pg = lem.providerGroupMgr.GetGroup(groupHash)
+	}
+	if pg == nil {
+		lgElect.Info("provider group is gone, its timer starts no election",
+			"group", shortHash(groupHash), "timer", timer)
+		lem.groupGone(groupHash)
+		return nil
+	}
+	if !slices.Contains(pg.VotingMembers, string(lem.localID)) {
+		lgElect.Info("this agent has no vote in the provider group, its timer starts no election",
+			"group", shortHash(groupHash), "timer", timer)
+		return nil
+	}
+	return pg
+}
+
+// groupGone is the word that a provider group is gone: its last zone has
+// left it (ProviderGroupManager.SetOnGroupGone). The group's election ends
+// here: its timers are stopped and its entry is dropped. Kept, the entry
+// went on renewing a lease for no zone. Each former member called the
+// group's election at the end of its lease, no other member answered (each
+// had lost the group too), and the election was aborted and retried without
+// an end (tdns-mp #182).
+//
+// A group that comes back starts from nothing, as a new group does. An
+// entry can also come back without the group, through gossip, as for a group
+// whose zones are not loaded yet (ApplyGossipElection): it has no timer.
+func (lem *LeaderElectionManager) groupGone(groupHash string) {
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	delete(lem.groupElections, groupHash)
+	lem.mu.Unlock()
+	if !ok {
+		return
+	}
+	le.mu.Lock()
+	le.gone = true
+	for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		if tm != nil {
+			tm.Stop()
+		}
+	}
+	le.ReelectTimer, le.VoteTimer, le.ConfirmTimer = nil, nil, nil
+	leader, term := le.Leader, le.Term
+	le.mu.Unlock()
+	lgElect.Info("provider group is gone, its election state dropped",
+		"group", shortHash(groupHash), "leader", leader, "term", term)
 }
 
 // maxRenewalStep is the longest a fallback renewal waits behind the one
@@ -748,7 +828,7 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 				lgElect.Warn("accepted leader from gossip, but group has no voting members; skipping re-election timer",
 					"group", groupHash[:8])
 			} else {
-				lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers, pg.Zones)
+				lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers)
 			}
 		}
 	}

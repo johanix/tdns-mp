@@ -306,6 +306,17 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 			lem.ApplyGossipElection(groupHash, state)
 		}
 	})
+	// A group whose last zone has left it is gone for both: the election
+	// manager drops its election, and the gossip table what it remembers of
+	// it, so that a group that comes back elects as a new group does.
+	if pgm := ar.ProviderGroupManager; pgm != nil {
+		pgm.SetOnGroupGone(func(groupHash string) {
+			ar.GossipStateTable.forgetGroup(groupHash)
+			if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+				lem.groupGone(groupHash)
+			}
+		})
+	}
 }
 
 func newAgentHsyncEngine(conf *Config) *hsync.Engine {
