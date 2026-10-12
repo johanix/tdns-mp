@@ -197,12 +197,12 @@ By construction and by the marker: a `replace` is the sender's whole set for a t
 
 The asker keeps, per zone and peer: asked when, answered when, complete or not, and the last error. It is kept in memory, since a restart asks again anyway.
 
-A zone is **caught up** when every voting member other than this agent has answered completely since this agent started, became a member of the zone, or last asked.
+A zone is **caught up** when this agent has read its own provider's state back from its combiner and its signer, and every voting member other than this agent has answered completely since this agent started, became a member of the zone, or last asked.
 
 ### 5.6 What waits for it
 
 - **The DS set.** For a leader whose own signer does not own the zone, the zone's DS set is unknown while a provider in `signers=` has not spoken about its keys. A complete answer makes a provider speak, and a set that turns from unknown to known asks for a sync with the parent.
-- **The leader's sync with the parent.** Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
+- **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, its own signer), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
 - **Not "in sync".** When NS and glue are in step with the parent and there is no DS set to compare, for a zone that names a signer, the leader does not report "in sync". It reports "DS set unknown, waiting for" and the provider.
 - **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait.
 

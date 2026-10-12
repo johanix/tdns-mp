@@ -287,7 +287,7 @@ Decided by the project owner on 2026-10-12. The design is written with them.
 5. **A peer asks a restarted agent back,** once, on a `start` request. It is the only thing that finds a change the restarted agent made and lost from its queue. The request after a long outage stays too. Safety first: neither is cut to save code.
 6. **A member with no role gets the zone transfer set-up from its upstream.** The HSYNC3 record states the zone owner's intent.
 7. **What a provider contributed stands, frozen, once its roles are gone,** until the removal takes it away. The provider cannot change it, its own DNSKEYs included, so its key machine holds for the zone while it leaves. The removal starts at the edit that takes the roles away, and the leader of the group the zone is then in is responsible for it.
-8. **The whole sync with the parent waits for catch-up,** NS and glue as well as DS. A leader that does not have all the information is in no position to decide.
+8. **The whole sync with the parent waits for catch-up,** NS and glue as well as DS. A leader that does not have all the information is in no position to decide. A leader that has just started does not know what the parent holds either: it first gets the zone's data from the other agents, its combiner and its signer, then asks the parent, then sends the difference.
 
 Also decided: tdns-mp does not support agents that are out of step with each other (section 4).
 
