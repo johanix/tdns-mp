@@ -1002,6 +1002,17 @@ func (mpzd *MPZoneData) isAuditor(label string) bool {
 	return hp.IsAuditorLabel(label)
 }
 
+// hasPubkey checks whether HSYNCPARAM carries the pubkey flag: the
+// customer's word that its providers may publish the zone's key in zones of
+// their own (the at-ns location, see publishLocations).
+func (mpzd *MPZoneData) hasPubkey() bool {
+	hp := mpzd.getHSYNCPARAM()
+	if hp == nil {
+		return false
+	}
+	return hp.HasPubkey()
+}
+
 // analyzeHsyncSigners determines whether we should sign the zone and how many
 // other signers exist, by examining HSYNC3+HSYNCPARAM (preferred), then falling
 // back to HSYNC or HSYNC2 for backward compatibility with old zones.
