@@ -207,6 +207,18 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 		return
 	}
 
+	// A CALL, a VOTE or a CONFIRM counts only from a voting member. The
+	// transport has admitted the sender as a peer, which is not the same
+	// thing: an auditor gets the broadcast and observes. Checked once, here,
+	// for all three and so for a vote kept ahead of its CALL too
+	// (tdns-mp #143). Names are compared as FQDNs, as the authorization of
+	// a sender is.
+	if !slices.ContainsFunc(members, func(m string) bool { return dns.Fqdn(m) == dns.Fqdn(string(senderID)) }) {
+		lgElect.Warn("group election: message from a sender that is not a voting member, dropped",
+			"group", groupHash[:8], "type", rfiType, "sender", senderID, "term", parseUint64(records, "_term"))
+		return
+	}
+
 	// If we're not a voting member ourselves, we still want to
 	// observe the protocol (useful for auditors auditing) but we
 	// must not vote, initiate, or be counted in the quorum.
