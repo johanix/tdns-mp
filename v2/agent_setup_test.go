@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -234,6 +235,218 @@ func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
 			// need not be a zone cut. tdns resolves it through the resolver.
 			if got := zd.GetParent(); got != "" {
 				t.Errorf("parent = %q, want it left unset for tdns to resolve", got)
+			}
+		})
+	}
+}
+
+// identitySyncRig runs the real syncIdentityDelegation for a notify-only
+// identity zone (no SIG(0) setup: every request is an explicit sync) at the
+// given pace, against a fake syncher: the test reads the delegation sync
+// queue, which is unbuffered, and answers each ask itself. The agent's log is
+// captured with its debug lines, which carry every attempt and the interval
+// to the next.
+type identitySyncRig struct {
+	q      chan tdns.DelegationSyncRequest
+	done   chan struct{}
+	cancel context.CancelFunc
+	log    bytes.Buffer // read once done is closed
+	asks   int
+}
+
+func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *identitySyncRig {
+	t.Helper()
+	r := &identitySyncRig{q: make(chan tdns.DelegationSyncRequest), done: make(chan struct{})}
+	savedLog, savedPace := lgAgent, identitySync
+	lgAgent = slog.New(slog.NewJSONHandler(&r.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	identitySync = pace
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.DelegationSyncQ = r.q
+	conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+	conf.Config.Internal.ImrReady.Publish()
+	conf.Config.ParentSync.Schemes = []string{"notify"}
+	zd, _, _ := newIdentityTestZone(t, zone)
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+	go func() {
+		conf.syncIdentityDelegation(ctx, zd)
+		close(r.done)
+	}()
+	// The goroutine reads the logger and the pace: they are put back once
+	// it has ended.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-r.done:
+		case <-time.After(5 * time.Second):
+			t.Error("syncIdentityDelegation is still running after its context ended")
+		}
+		lgAgent, identitySync = savedLog, savedPace
+	})
+	return r
+}
+
+// next is the syncher's next ask. The test ends here if the sync stopped
+// asking, or asks for something else than an explicit sync with an answer.
+func (r *identitySyncRig) next(t *testing.T) tdns.DelegationSyncRequest {
+	t.Helper()
+	select {
+	case req := <-r.q:
+		r.asks++
+		if req.Command != "EXPLICIT-SYNC-DELEGATION" || req.Response == nil {
+			t.Fatalf("ask %d = %q (response channel %v), want EXPLICIT-SYNC-DELEGATION with a response channel", r.asks, req.Command, req.Response != nil)
+		}
+		return req
+	case <-r.done:
+		t.Fatalf("syncIdentityDelegation ended after %d asks with the parent not in sync", r.asks)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no ask after the first %d", r.asks)
+	}
+	return tdns.DelegationSyncRequest{}
+}
+
+// refuse answers the next n asks the way a parent that is down, or says no,
+// makes the syncher answer.
+func (r *identitySyncRig) refuse(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		r.next(t).Response <- tdns.DelegationSyncStatus{Error: true, ErrorMsg: "the parent refused the update", Rcode: dns.RcodeRefused}
+	}
+}
+
+// ended waits for syncIdentityDelegation to return.
+func (r *identitySyncRig) ended(t *testing.T, when string) {
+	t.Helper()
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("syncIdentityDelegation did not return %s", when)
+	}
+}
+
+// identitySyncLine is one logged attempt.
+type identitySyncLine struct {
+	Level   string        `json:"level"`
+	Msg     string        `json:"msg"`
+	Attempt int           `json:"attempt"`
+	Next    time.Duration `json:"next"`
+}
+
+// logged returns the attempts in the captured log, in order.
+func (r *identitySyncRig) logged(t *testing.T) []identitySyncLine {
+	t.Helper()
+	var out []identitySyncLine
+	for _, line := range strings.Split(r.log.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var l identitySyncLine
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if l.Attempt > 0 {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A parent that is unreachable, or refuses the DS, for longer than the fast
+// attempts used to end the sync for the life of the process: twelve attempts,
+// "gave up", and nothing queued another (tdns-mp #74). Now the sync goes on
+// past them, at an interval that doubles up to the cap and no further, until
+// the analysis says the parent is in sync; and it does not write a warning
+// per attempt.
+func TestSyncIdentityDelegationKeepsAskingUntilInSync(t *testing.T) {
+	// The real number of fast attempts, at a thousandth of the real pace or
+	// less: 1 ms between them, then 2, 4 and 8 ms, the cap; a reminder is
+	// due after four intervals at the cap.
+	pace := identitySyncPace{fast: identitySync.fast, interval: time.Millisecond, max: 8 * time.Millisecond, remind: 32 * time.Millisecond}
+	const refusals = 30
+	r := newIdentitySyncRig(t, "agent.keepsasking.example.", pace)
+	r.refuse(t, refusals)
+	r.next(t).Response <- tdns.DelegationSyncStatus{InSync: true}
+	r.ended(t, "after the parent was in sync")
+	if r.asks != refusals+1 {
+		t.Errorf("%d asks, want one per refusal and the one answered in sync (%d)", r.asks, refusals+1)
+	}
+
+	lines := r.logged(t)
+	if len(lines) != refusals+1 {
+		t.Fatalf("%d attempts in the log, want %d:\n%s", len(lines), refusals+1, r.log.String())
+	}
+	var warned []int
+	for i, l := range lines[:refusals] {
+		attempt := i + 1
+		want := pace.max
+		switch {
+		case attempt < pace.fast:
+			want = pace.interval
+		case attempt == pace.fast:
+			want = 2 * pace.interval
+		case attempt == pace.fast+1:
+			want = 4 * pace.interval
+		}
+		if l.Attempt != attempt || l.Next != want {
+			t.Errorf("log entry %d: attempt %d with %s to the next, want attempt %d and %s", attempt, l.Attempt, l.Next, attempt, want)
+		}
+		if l.Next > pace.max {
+			t.Errorf("attempt %d: %s to the next, over the cap of %s", attempt, l.Next, pace.max)
+		}
+		switch l.Level {
+		case "WARN":
+			warned = append(warned, attempt)
+		case "DEBUG":
+		default:
+			t.Errorf("attempt %d is logged at %s: %q", attempt, l.Level, l.Msg)
+		}
+	}
+	if last := lines[refusals-1]; last.Next != pace.max {
+		t.Errorf("after %d refusals the interval is %s, want the cap of %s", refusals, last.Next, pace.max)
+	}
+	// The first refusal; the last of the fast attempts; then 2+4+8+8+8+8 ms
+	// of waiting take it past the 32 ms to the next reminder, at attempt 18,
+	// and four intervals of 8 ms to each one after that.
+	if fmt.Sprint(warned) != fmt.Sprint([]int{1, pace.fast, 18, 22, 26, 30}) {
+		t.Errorf("warnings at attempts %v, want %v: the first refusal, the end of the fast attempts, then one per %s of waiting",
+			warned, []int{1, pace.fast, 18, 22, 26, 30}, pace.remind)
+	}
+	if last := lines[refusals]; last.Level != "INFO" || last.Attempt != refusals+1 || !strings.Contains(last.Msg, "in sync") {
+		t.Errorf("the last log entry is %+v, want the parent in sync at attempt %d, at info level", last, refusals+1)
+	}
+}
+
+// The sync runs for as long as the parent disagrees, so it must end with
+// its context wherever it is waiting: for the next attempt, for the syncher
+// to take its ask, or for the syncher's answer.
+func TestSyncIdentityDelegationStopsWhenItsContextEnds(t *testing.T) {
+	quick := identitySyncPace{fast: identitySync.fast, interval: time.Millisecond, max: 8 * time.Millisecond, remind: time.Hour}
+	hourly := identitySyncPace{fast: identitySync.fast, interval: time.Hour, max: time.Hour, remind: time.Hour}
+	for i, tc := range []struct {
+		name     string
+		pace     identitySyncPace
+		refusals int
+		then     func(t *testing.T, r *identitySyncRig) // what the syncher does before the context ends
+	}{
+		{"an hour to the second attempt", hourly, 1, nil},
+		{"past the fast attempts, between two asks", quick, quick.fast + 1, nil},
+		{"past the fast attempts, the syncher takes no ask", quick, quick.fast + 1,
+			func(t *testing.T, r *identitySyncRig) { time.Sleep(50 * time.Millisecond) }},
+		{"past the fast attempts, the syncher gives no answer", quick, quick.fast + 1,
+			func(t *testing.T, r *identitySyncRig) { r.next(t) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newIdentitySyncRig(t, fmt.Sprintf("agent.stops%d.example.", i), tc.pace)
+			r.refuse(t, tc.refusals)
+			if tc.then != nil {
+				tc.then(t, r)
+			}
+			r.cancel()
+			r.ended(t, "when its context ended")
+			for _, l := range r.logged(t) {
+				if l.Level == "INFO" {
+					t.Errorf("the sync logged %q at attempt %d; the parent never was in sync", l.Msg, l.Attempt)
+				}
 			}
 		})
 	}
