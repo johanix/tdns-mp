@@ -248,8 +248,54 @@ func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
 	return out
 }
 
+// SetOnZoneJoinedGroup sets the callback that RecomputeGroups tells of each
+// zone it has put into a group the zone was not in before: to is that group,
+// from the group the zone was in, empty when it had none. It is called once
+// the new group map is in place, with no lock held. A zone whose group did
+// not change is not reported, so a recompute that moves nothing calls
+// nothing.
+func (pgm *ProviderGroupManager) SetOnZoneJoinedGroup(f func(zone ZoneName, from, to string)) {
+	pgm.mu.Lock()
+	defer pgm.mu.Unlock()
+	pgm.onZoneJoinedGroup = f
+}
+
+// zoneGroupChange is a zone that a recompute has put into a group it was not
+// in before: from is the group it was in, empty when it had none.
+type zoneGroupChange struct {
+	zone     ZoneName
+	from, to string
+}
+
+// zonesThatJoined compares the group map before a recompute with the one
+// after it, and returns the zones that are now in another group than before
+// or in a group for the first time, in the order of their names. A zone that
+// only left its group is not among them.
+func zonesThatJoined(before, after map[string]*ProviderGroup) []zoneGroupChange {
+	was := make(map[ZoneName]string)
+	for hash, pg := range before {
+		for _, z := range pg.Zones {
+			was[z] = hash
+		}
+	}
+	var joined []zoneGroupChange
+	for hash, pg := range after {
+		for _, z := range pg.Zones {
+			if was[z] != hash {
+				joined = append(joined, zoneGroupChange{zone: z, from: was[z], to: hash})
+			}
+		}
+	}
+	sort.Slice(joined, func(i, j int) bool {
+		return joined[i].zone < joined[j].zone
+	})
+	return joined
+}
+
 // RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
 // and rebuilds the provider group map. This is a pure function of zone data.
+// The zones it moves into a group are reported to the callback set with
+// SetOnZoneJoinedGroup, if there is one.
 func (pgm *ProviderGroupManager) RecomputeGroups() {
 	type zoneGroup struct {
 		identities    []string
@@ -325,7 +371,6 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 
 	// Merge with existing groups (preserve name proposals)
 	pgm.mu.Lock()
-	defer pgm.mu.Unlock()
 
 	for hash, pg := range newGroups {
 		if existing, ok := pgm.Groups[hash]; ok {
@@ -333,7 +378,19 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			pg.Name = existing.Name
 		}
 	}
+	onJoined := pgm.onZoneJoinedGroup
+	var joined []zoneGroupChange
+	if onJoined != nil {
+		joined = zonesThatJoined(pgm.Groups, newGroups)
+	}
 	pgm.Groups = newGroups
+	pgm.mu.Unlock()
+
+	// Told outside the lock, and with the new map in place: whoever is told
+	// may look the zone's group up.
+	for _, j := range joined {
+		onJoined(j.zone, j.from, j.to)
+	}
 }
 
 // ProposeGroupName sets our name proposal for a group.

@@ -88,6 +88,9 @@ type ProviderGroupManager struct {
 	mu      sync.RWMutex
 	Groups  map[string]*ProviderGroup // key: group hash
 	LocalID string                    // our own identity
+	// onZoneJoinedGroup is told of each zone a recompute has put into a
+	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
+	onZoneJoinedGroup func(zone ZoneName, from, to string)
 }
 
 // --- From parentsync_leader.go ---

@@ -1553,6 +1553,18 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
 		case AppTypeMPAgent:
+			// Detect parentsync=agent dynamically from HSYNCPARAM. Before the
+			// diff is applied: the recompute of the provider groups that
+			// follows it may ask this agent, as the leader of the group the
+			// zone has joined, to sync the zone with its parent, and what is
+			// asked then reads this option.
+			if !mpzd.Options[tdns.OptParentSync] {
+				hp := mpzd.getHSYNCPARAM()
+				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
+					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
+					mpzd.Options[tdns.OptParentSync] = true
+				}
+			}
 			if tm != nil && tm.agentRegistry != nil {
 				ar := tm.agentRegistry
 				if ar.HsyncEngine != nil && analysis.HsyncStatus != nil {
@@ -1561,14 +1573,6 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 						Adds:    analysis.HsyncStatus.HsyncAdds,
 						Removes: analysis.HsyncStatus.HsyncRemoves,
 					})
-				}
-			}
-			// Detect parentsync=agent dynamically from HSYNCPARAM
-			if !mpzd.Options[tdns.OptParentSync] {
-				hp := mpzd.getHSYNCPARAM()
-				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
-					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
-					mpzd.Options[tdns.OptParentSync] = true
 				}
 			}
 		case AppTypeMPAuditor:
