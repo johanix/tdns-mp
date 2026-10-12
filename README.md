@@ -14,6 +14,42 @@ delegation-sync machinery all live in the
 [tdns repository](../tdns/) and must be present as a sibling
 checkout in order to build.
 
+## Goals
+
+**The problem.** A zone owner wants one zone served by
+several DNS providers, for resilience or to move between
+providers without going insecure. When each provider signs
+with its own keys, the providers must keep the DNSKEY
+RRset, CDS/CDNSKEY and the NS RRset in step, and the
+parent's DS and NS must follow. Today that coordination is
+manual and bilateral, and one mistake makes the zone bogus.
+
+**The approach.** Automatic and decentralised: no central
+controller, no provider-to-provider contracts and no
+proprietary APIs. The zone owner states intent in the zone
+itself, and the providers' agents find each other through
+DNS and coordinate from there. A zone without the owner's
+signalling is not a multi-provider zone, whatever the
+number of providers. The
+[Architecture](guide/multi-provider-architecture.md) page
+has the roles and the data flow.
+
+**Scope.**
+
+- Both a standard and a full implementation. Real
+  providers will most likely adapt their existing signers,
+  so what a signer must change is kept minimal; they may
+  well run the tdns-mp agent as it is.
+- Nothing is out of scope. Multi-provider without DNSSEC
+  is a goal in its own right.
+- An unmodified signer would be ideal, and is not expected
+  to be possible.
+
+**The overriding rule: safety before everything.** An
+operation may stall, but the zone must never go bogus or
+lame. When progress and safety conflict, the design that
+stalls is the right one.
+
 ## Applications
 
 | Binary           | Role                                                       |
