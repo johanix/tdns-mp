@@ -368,11 +368,13 @@ func TestAZSKOnlyAlgorithmChangeKeepsTheOldZSKForASignatureLifetimeAndCannotBeCa
 // The withdrawal wait against a parent that answers with no DS at all
 // (NOERROR and empty: the engine reports no TTL), and across a restart.
 // The TTL the wait runs on is the one the parent served the successor's DS
-// with (its T18 note), never the empty answer's zero; and the note is read
-// back after a restart, so the wait neither starts over nor ends at once.
+// with (its T18 note), never the empty answer's zero and not the margin
+// floor either (the parent's TTL is longer than the margin here, so the
+// two are told apart); and the note is read back after a restart, so the
+// wait neither starts over nor ends at once.
 func TestTheWithdrawalWaitHasATTLWithAnEmptyAnswerAndSurvivesARestart(t *testing.T) {
 	r := newDriverRig(t, "algwait.owned.example.", driverPolicy, "p2")
-	r.wire.parentTTL = time.Hour
+	r.wire.parentTTL = 90 * time.Minute
 	a, _ := bootstrapKSK(t, r)
 	r.wire.parentDS[a] = true
 	r.setAlgorithms("change", algRollTo, "KSK")
@@ -383,7 +385,7 @@ func TestTheWithdrawalWaitHasATTLWithAnEmptyAnswerAndSurvivesARestart(t *testing
 	r.tick("propagated")
 	r.wire.parentDS[b] = true
 	r.tick("the parent serves the new DS")
-	r.clock.Advance(61 * time.Minute)
+	r.clock.Advance(91 * time.Minute)
 	r.tick("the DS TTL passed")
 	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
 		t.Fatalf("the old KSK after the promotion: %s %s, want active 110", st, c)
@@ -394,25 +396,25 @@ func TestTheWithdrawalWaitHasATTLWithAnEmptyAnswerAndSurvivesARestart(t *testing
 	if st := r.state(a); st != KeyStateActive {
 		t.Fatalf("the old KSK the tick of the empty answer: %s, want active (the wait is the DS TTL the parent served, not the answer's zero)", st)
 	}
-	r.clock.Advance(20 * time.Minute)
-	r.tick("twenty minutes")
+	r.clock.Advance(30 * time.Minute)
+	r.tick("thirty minutes")
 	if st := r.state(a); st != KeyStateActive {
-		t.Fatalf("the old KSK twenty minutes into an hour's wait: %s, want active", st)
+		t.Fatalf("the old KSK thirty minutes into a ninety-minute wait: %s, want active", st)
 	}
 	// a restart in the middle of the wait: the note comes back
 	r.l = NewZoneKeyLifecycle(r.l.Zone, r.kdb, r.clock, driverPolicy, r.wire)
 	if err := r.l.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	r.clock.Advance(20 * time.Minute)
-	r.tick("forty minutes, after a restart")
+	r.clock.Advance(31 * time.Minute)
+	r.tick("sixty-one minutes, after a restart")
 	if st := r.state(a); st != KeyStateActive {
-		t.Fatalf("the old KSK forty minutes into the wait, after a restart: %s, want active (the wait did not end at the restart)", st)
+		t.Fatalf("the old KSK past the margin but inside the parent's DS TTL, after a restart: %s, want active (the wait is the T18 TTL, not the margin floor, and did not end at the restart)", st)
 	}
-	r.clock.Advance(21 * time.Minute)
+	r.clock.Advance(30 * time.Minute)
 	r.tick("the DS TTL passed")
 	if st, c := r.state(a), r.cols(a); st != KeyStateRetired || c != "100" {
-		t.Errorf("the old KSK an hour after the parent stopped serving its DS: %s %s, want retired 100 (the wait did not start over at the restart)", st, c)
+		t.Errorf("the old KSK ninety minutes after the parent stopped serving its DS: %s %s, want retired 100 (the wait did not start over at the restart)", st, c)
 	}
 	r.check("done")
 }

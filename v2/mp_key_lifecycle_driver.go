@@ -105,10 +105,12 @@ type ZoneKeyLifecycle struct {
 	// as T9's wait does (T18). Persisted with lastDSTTL in MPParentDS
 	// (saveWithdrawal; read back at T15).
 	dsGoneAt map[uint16]dsPresence
-	// lastDSTTL: the TTL a withdrawn KSK's DS is known to be served with:
-	// the DS RRset's TTL as T18 noted it for the successor whose promotion
-	// withdrew the key (the same RRset), then every poll that still sees
-	// the DS. What T11a's note is made of; an answer without the DS says
+	// lastDSTTL: the longest TTL a withdrawn KSK's DS was seen served
+	// with: the DS RRset's TTL as T18 noted it for the successor whose
+	// promotion withdrew the key (the same RRset), then every poll that
+	// still saw the DS, the longest kept. A cache that fetched under a
+	// longer TTL may hold the DS that long, whatever the parent served
+	// last. What T11a's note is made of; an answer without the DS says
 	// nothing about the TTL caches hold (an empty answer has none).
 	lastDSTTL map[uint16]time.Duration
 	// successorDSTTL: while a promotion applies E6 to the keys it replaces,
@@ -442,7 +444,7 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 		// the DS RRset TTL caches may hold the key's DS for: the TTL the
 		// parent served the successor's DS with (its T18 note), the same
 		// RRset; noted now, while the parent still serves this DS
-		if l.lastDSTTL[keyid] == 0 && l.successorDSTTL > 0 {
+		if l.successorDSTTL > l.lastDSTTL[keyid] {
 			l.lastDSTTL[keyid] = l.successorDSTTL
 		}
 		l.saveWithdrawal(keyid)
@@ -984,7 +986,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			if !served[keyid] {
 				continue
 			}
-			if l.parentTTL > 0 {
+			if l.parentTTL > l.lastDSTTL[keyid] {
 				l.lastDSTTL[keyid] = l.parentTTL
 			}
 			if l.dsGone[keyid] {
