@@ -34,7 +34,7 @@ One rule follows from these and shapes the rest: **a member with no role can tal
 | Gossip: it learns who leads | Yes | Yes | Yes | No |
 | Gossip: its word on who leads is taken | Yes | No | No | No |
 | Receives distributions | Yes | Yes | Yes | No |
-| Its confirmation is waited for | Yes | Yes (it confirms at once) | Yes | No |
+| Its confirmation is waited for | Yes | Yes (it confirms at once) | Yes, except for what withdraws it (3.3) | No |
 | Contributes: its operations are applied | Yes, by the edit policy | No | No: refused | No |
 | Asks for the zone's state | Yes | Yes | Yes | Refused |
 | Is asked for the zone's state | Yes | No | No | No |
@@ -92,7 +92,7 @@ An auditor falls under the same rules: its operations are not applied and its vo
 
 What is sent to whom:
 
-- **Distributions** go to every member, and every member's confirmation is waited for: the voting members, a member with no role, and the auditor. Where a zone has an auditor, it is a required participant: a SYNC is not complete without the auditor's confirmation. For a member with no role the wait is also a test. Being able to keep up with the other providers is a condition for serving the zone, and it has to show before the zone owner gives the provider a role, not after.
+- **Distributions** go to every member, and every member's confirmation is waited for: the voting members, a member with no role, and the auditor. Where a zone has an auditor, it is a required participant: a SYNC is not complete without the auditor's confirmation. For a member with no role the wait is also a test. Being able to keep up with the other providers is a condition for serving the zone, and it has to show before the zone owner gives the provider a role, not after. There is one exception: a distribution that withdraws a member with no role, which is to say its own NS records, DNSKEYs or DS, does not wait for that member. Its operator may already have stopped its agent, and its removal must not depend on it.
 - **Election messages** go to the voting members and the auditors.
 - **Requests for the zone's state** go to the voting members. An auditor holds nothing, and a member with no role contributes nothing.
 - **Gossip** of a group goes to that group's members.
@@ -260,6 +260,7 @@ With Z zones and P voting peers per zone, a start sends Z x P requests and recei
   - While it leaves, the provider's key machine holds for the zone: no rollover and no new DNSKEY, and signing and re-signing go on with the keys it has. A leaving signer that stopped signing would let its signatures expire while resolvers are still sent to it.
   - The rule needs no direction: the leader sees to it that nothing points at a member with no role. For a provider on its way in there is nothing to remove.
   - Open: whether the zone's NS RRset or the parent's changes first. A parent that takes NOTIFY only copies the NS RRset from the zone.
+  - Open: how the leaving provider's own records are withdrawn. A `replace` is the sender's own set (5.4), so the leader cannot withdraw another provider's contributions with one (#159). Whatever does it is a distribution that does not wait for the leaving provider (3.3).
 - **A server that becomes a signer and serves its own signatures too early** (#160), and wrong answers before a provider is listed (item 1 of #137).
 - **New confirmed message types:** a leader's statement about the parent that every member verifies, and the transfer set-up.
 - **Keeping key states across a restart.** Not done on purpose: a stale DS set can remove a DS that is needed, an unknown one cannot.
