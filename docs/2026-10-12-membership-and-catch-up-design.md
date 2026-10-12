@@ -52,7 +52,7 @@ Each one is one edit by the zone owner.
 | No record, to a record with no role | Discovery, hello, beats. The zone moves to the group that has it as a member with no role, and takes that group's leader (4.1). | It asks every voting member for the zone's state and its upstream for the transfer set-up. It shows "member, no role" and refuses its operator's edits. |
 | No role, to a role | The zone moves to the group in which it votes, and takes that group's leader. Its contributions are taken. | It asks for the zone's state once more. It may vote and lead. Edits follow the edit policy. |
 | A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). What the provider contributed stands until the removal takes it away. | It no longer votes or leads for the zone, and refuses edits. It can change nothing of what it contributed, its own DNSKEYs included: its key machine holds for the zone. It goes on serving. |
-| A record, to no record | It leaves the zone's group. Comms end unless another zone is shared. | The zone is no longer a multi-provider zone for it. |
+| A record, to no record | It leaves the zone's group. When no zone is shared with it any more, comms end after a hold time (3.1). | The zone is no longer a multi-provider zone for it. |
 
 ## 3. Who may talk, and what a sender may do
 
@@ -62,7 +62,9 @@ A message is admitted when its sender and the receiving agent are members of the
 
 Admission decides nothing else. No handler rests on it alone: each message type has its own rule for the sender (3.3).
 
-A provider whose roles are gone and whose record stays is a member. A peer with which comms are up and no zone is shared any more (LEGACY) stays admitted. It is a member of no zone here, so every rule of 3.3 that asks for a member refuses it.
+A provider whose roles are gone and whose record stays is a member.
+
+**Comms end when no zone is shared.** When the last zone shared with a peer is gone, the agent keeps the peer for a hold time of 24 hours, which is how long a queued message is kept, and then removes it and stops beating it. Until then the peer stays admitted. It is a member of no zone here, so every rule of 3.3 that asks for a member refuses it. A peer that a zone names again within the hold time is kept. One that is named again later is discovered afresh.
 
 ### 3.2 The sender is the one the transport established
 
@@ -70,12 +72,14 @@ On an agent, a message counts as sent by the sender the transport established. A
 
 A combiner is the exception, by design: the agent that delivers an operation and the origin it names differ. There the rule of 3.3 is applied to the named origin.
 
+The rule holds for every mechanism. Over HTTPS the sender the transport established is the name in the client's certificate, and a message whose body names another sender is refused.
+
 ### 3.3 What each message asks of its sender
 
 | Message | The sender must be | If it is not |
 |---|---|---|
 | Hello, beat | Admitted (3.1) | REFUSED |
-| Gossip, carried in a beat | A member of the group. From a voting member all of it is taken. From any other member: its own row and the term number of an election, never who leads | The rest is not taken |
+| Gossip, carried in a beat | A member of the group. From a voting member all of it is taken. From any other member: its own row only | The rest is not taken |
 | SYNC: contributions to the zone | A voting member of the zone | Refused, with the reason. Nothing is stored, passed to a combiner or applied |
 | The same operations, at a combiner | Named origin: a voting member of the zone | The operation is refused |
 | Election: CALL, VOTE, CONFIRM | A voting member, of the group or of the zone | Dropped, never counted |
@@ -144,11 +148,13 @@ Every change of the zone's HSYNC3 or HSYNCPARAM records, and the zone's first lo
 
 - **The roles go, the record stays.** The zone moves to a group of two members and one voting member. If the group is new, the gate is met by that member's own row, it expects no peers, and it leads. No restart is needed.
 - **The record goes.** No group is left. The check of 4.5 makes the remaining provider elect itself.
-- **A term for it.** A self-election takes a new term, as any election does: one above the highest term the agent holds or has heard of. Without a term the member with no role beside it never learns who leads.
+- **A term for it.** A self-election takes a new term, as any election does: one above the highest term the agent holds or has heard from a voting member. Without a term the member with no role beside it never learns who leads.
 
 ### 4.7 What a member with no role reports as leader
 
 It learns the leader from gossip: the decided term that a voting member tells. `agent parentsync status` and `gossip zone-state` show that leader and term, and that this agent does not vote. Before the first beat from a voting member it reports that no leader is known yet. It never reports itself.
+
+The same holds for an auditor. A member that does not vote causes no election, and nothing it says about terms is taken. It takes a newer term from a voting member at once. Whatever else a voting member tells it about who leads (a lower term, or the same term with another leader or a later end of the lease) it takes once the lease of the leader it holds has run out: the voting members have then started over, for example because they all restarted. Until that lease has run out it may show the earlier leader. What it shows is information only: nothing acts on it.
 
 ### 4.8 Retiring a group
 
@@ -163,6 +169,7 @@ When no zone is left in a group, the group's election state and timers go with i
 | The agent starts | `start` | The agent asks every voting member of every zone it is a member of |
 | The agent becomes a member of a zone | `join` | The agent asks every voting member of that zone |
 | The agent is given its first role in a zone | `role` | The same, once more |
+| A peer is given its first role in a zone | `peer-role` | The agent asks that peer. Without it a zone would never be caught up again once a newcomer has its role: the zone would name a voting member that nobody has asked |
 | A peer says that it has started | `peer-start` | The agent that got a `start` request answers it, and then asks that peer back |
 | A peer is OPERATIONAL again after more than an hour | `outage` | The agent asks that peer, for each zone they share. The hour is a config value, well below the 24 hours a queued message is kept |
 | The operator runs `resync --pull` | `manual` | The agent asks every voting member of the zone |

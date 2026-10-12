@@ -44,9 +44,9 @@ Most of the machinery of the design exists.
 4. The request is sent by the agent itself: at its start, when it joins a zone or gets its first role, when a peer says it has started, and after a long outage (design 5.1). A leader's sync with the parent waits for the answers (design 5.6).
 5. A group is defined by its members together with what each one is, so that all its zones agree on who votes. The election's edges: no election without a vote, a leader when the voting members become one, and a leader that drops a zone which leaves its group (design 4).
 6. An agent whose provider has no role refuses its operator's edits (design 6).
-7. Two bounds on the beats that recover a peer: how often repeated hellos cause a beat back (#131), and what happens to the work on its way for a peer that is removed (#132).
+7. Two bounds on the beats that recover a peer: how often repeated hellos cause a beat back (#131), and what happens to the work on its way for a peer that is removed (#132). And the removal itself: comms with a peer end when no zone has been shared with it for a hold time (design 3.1).
 
-No message type is added. One optional object is added to the sync-family payload (3.4). One config key is added (step 4).
+No message type is added. One optional object is added to the sync-family payload (3.4). Two config keys are added (steps 4 and 7).
 
 ## 2. What is wrong today
 
@@ -104,7 +104,7 @@ A zone that the owner reduces to one provider gets no leader (#149): an election
 
 Three more, found by reading:
 
-- **A lone voter's leader is never told.** A self-election keeps the term it finds, zero at a first one. `GroupElectionForGossip` tells nothing of term zero, and `ApplyGossipElection` and `MergeGossip` take an election record only when its term is above the one they hold. An observer of a group with one voting member never learns its leader.
+- **A lone voter's leader is never told.** A self-election keeps the term it finds, zero at a first one. `GroupElectionForGossip` tells nothing of term zero, and `ApplyGossipElection` and `MergeGossip` take an election record only when its term is above the one they hold. An observer of a group with one voting member never learns its leader. Both functions keep the lease's end of the record they took (`LeaderExpiry`, which travels in the record), so an observer knows when the leader it holds has run out.
 - **An agent that does not vote arms the lease's renewal.** `ApplyGossipElection` calls `scheduleGroupReelection` with no look at the local agent. When that timer fires, `startGroupElection` counts the voting members minus one, which is wrong for an agent that is not among them, and broadcasts a CALL. With PR #163 the receivers drop it.
 - **`DeferGroupElection` starts nothing.** It writes `pendingGroupElections`, which nothing reads (part of #183). A group's election starts on the edge to mutual OPERATIONAL and at the lease's renewal, nowhere else.
 
@@ -178,9 +178,10 @@ Four things around it are filed, and one change exists:
 
 **#132.** The engine keeps `beatFailing`, `beatRetrying` and `beatingBack` per peer identity. A retrier holds the `*Peer` it was started with for up to 30 s and checks only that the registry has a peer of that identity. `beatPeerOnce` (`v2/hsync/beat.go`) writes its `*Peer` back into the registry after every beat, and `sendHelloToPeer` (`v2/hsync/hello.go`) does the same after a hello. `beatFailing` is cleared only by a successful beat. So a beat or a hello that is on its way when its peer is removed puts the peer back, and a removed peer keeps its failure marker, which keeps a retrier from starting when the identity returns.
 
-Two readings bound the issue:
+Three readings bound the issue:
 
-- `Engine.RemovePeer` has no caller outside its own test, on either revision. A peer that leaves its last shared zone stays in the registry as LEGACY, and is beaten at every round for as long as the daemon runs. Nothing replaces a stored peer with another object. The faults of #132 are therefore latent: they become real with the first caller of `RemovePeer`.
+- `Engine.RemovePeer` has no caller outside its own test, on either revision. A peer that leaves its last shared zone stays in the registry as LEGACY, and is beaten at every round for as long as the daemon runs. Nothing replaces a stored peer with another object. The faults of #132 are therefore latent: they become real with the first caller of `RemovePeer`, which step 7 adds.
+- The engine's set of zones per peer is not the set of shared zones. `ReconcileZone` (`v2/hsync/reconcile.go`) marks every participant of a zone as needed whether or not the local agent is one of them: it has no gate like the one `ApplyHsyncDiff` has (`GateOnLocalPresence`). An agent whose own record has left a zone therefore keeps that zone on its peers for as long as the zone is in its config. And a zone that leaves the config is never taken off its peers: `reconcileAllZones` visits only the zones the agent has.
 - The beat's sequence number is read from the transport's count of successful beats, sent, and echoed. Nothing on the receiving side, in tdns-mp or in tdns-transport at the pinned revision, compares it with an earlier one. Beats from several loops can carry the same number, and nothing depends on it. Beats to one peer need not be sent one at a time.
 
 ### 2.12 Found on the way
@@ -217,7 +218,7 @@ It reads the records. Who is talked to stays a separate question until step 9.
 |---|---|---|---|
 | `zoneParticipants` | Role holders, and the voting subset | Returns three sets: members (every ON record), voting members, auditors. The legacy fallback is unchanged | 9 |
 | `ParticipantsForZone`, `participantFQDNSetForApex`, `sharedParticipantZones` | Role holders | Members. No change of their own: they follow `zoneParticipants` | 9 |
-| `isInHSYNC`, `isInHSYNCAnyZone`, LEGACY (`effectiveAgentState`, `isKnownLegacy`) | Both must hold a role | Follow: both must be members. A peer whose roles are gone and whose record stays is a member, not LEGACY | 9 |
+| `isInHSYNC`, `isInHSYNCAnyZone`, LEGACY (`effectiveAgentState`, `isKnownLegacy`) | Both must hold a role | Follow: both must be members. A peer whose roles are gone and whose record stays is a member, not LEGACY. A LEGACY peer is kept for the hold time and then removed (step 7) | 7, 9 |
 | `mpZoneView.Participants`, `ApplyHsyncDiff`, `ReconcileZone` | An add with no role is skipped | Follow: a member is registered and discovered. An OFF record is skipped as today | 9 |
 | `GetZoneAgentData` | `Agents` are the role holders | `Agents` are the members, each with its standing. The callers that mean a vote already filter (step 6) | 9 |
 | `beatZones`; the zones a hello names (`Registry.sharedZones`, fed by `ApplyHsyncDiff` and `ReconcileZone`) | Shared participant zones | Follow: shared member zones | 9 |
@@ -231,22 +232,22 @@ It reads the records. Who is talked to stays a separate question until step 9.
 
 **The sender the transport established.** One middleware on the router of the agent and of the auditor, before any handler, refuses a message whose payload names another sender than the one the transport established (step 6). It covers every verb at once. A combiner's router does not get it: there the deliverer and the named origin differ by design.
 
-Over HTTPS the middleware has nothing to compare (2.9). Step 6 adds one comparison in `apiSyncEndpoint` for the endpoints behind the TLSA check: the body's sender must be the name of the client certificate. `/hello` stays outside. The rest is issue #56.
+Over HTTPS the middleware has nothing to compare (2.9). There the sender the transport established is the name in the client's certificate (design 3.2, decision 9). The pipeline in tdns-transport takes no sender beside the body, so step 6 makes the comparison in `apiSyncEndpoint`, before the body enters the pipeline, for the three endpoints behind the TLSA check: `/beat`, `/ping` and `/msg`. `/hello` is outside that check, because a peer's TLSA record need not be known when its hello arrives. It stays with issue #56, and so does the choice of the certificate's identity field: step 6 reads the common name, as the TLSA check does today.
 
 **What each message asks of its sender** (design 3.3). The checks sit in the router's handlers, not in `MsgHandler`, so that a refusal is on the wire with its reason:
 
 | Message | Check | Where | Step |
 |---|---|---|---|
 | Hello, beat | Admission | Unchanged | |
-| Gossip | The group is known here and the sender is a member of it. From a member that does not vote: its own row, and the term of an election record as a number | `MergeGossip` gets the sender | 6, 8 |
+| Gossip | The group is known here and the sender is a member of it. From a member that does not vote: its own row only | `MergeGossip` gets the sender and the group | 6 |
 | SYNC | The sender is a voting member of the zone | `handleAppSync` | 6 |
 | The same operations, at a combiner | The named origin is a voting member of the zone | `CombinerProcessUpdate` | 6 |
 | Election | The sender is a voting member; the local agent is one | `HandleGroupMessage` (PR #163), `HandleMessage` | 1 |
-| RFI SYNC | The sender is a member of the zone | `handleAppRfi` | 6 |
+| RFI SYNC, RFI AUDIT | The sender is a member of the zone | `handleAppRfi` | 6 |
 | RFI CONFIG `upstream`, `downstream` | The sender is a member of the zone, related by an ON record's `upstream` field, and not an auditor only | `handleAppRfi`, `GetZoneAgentData` | 6 |
 | `CONFIG sig0key` | The same, and a voting member | `handleAppRfi` | 6 |
 
-The design's table has no row for three messages that an agent takes from a peer: RFI AUDIT, STATUS-UPDATE and RELOCATE. Proposed, until the design says: RFI AUDIT asks for a member of the zone, as RFI SYNC does. The other two stay on admission and the sender rule: a STATUS-UPDATE from a peer can at most ask this agent to look at the parent, and a relocate can then move only its sender's own address.
+A STATUS-UPDATE and a RELOCATE have no rule of their own (design 3.3): they are admitted, and the sender rule holds for them. A STATUS-UPDATE from a peer can at most ask this agent to look at the parent, and a relocate can then move only its sender's own address.
 
 **What is sent to whom.** Step 6 makes each sender choose its recipients by standing, while `Agents` still holds role holders. Step 9 then widens `Agents` and nothing else changes:
 
@@ -269,8 +270,9 @@ The design's table has no row for three messages that an agent takes from a peer
 | 4.3 The gate | The five callers of `CheckGroupState` pass the voting members | 8 |
 | 4.4 Start, vote, win | `startElection`, `startGroupElection`, `HandleMessage`, the two `finalize` functions, `ApplyGossipElection` | 1 |
 | 4.5 One check for every change | A new `zoneChanged` on the election manager, called from `PostRefresh` | 8 |
-| 4.6 One voting member; a term for a self-election | The two self-election branches | 8 |
-| 4.7 What a member with no role reports | `ApplyGossipElection` already takes a decided term whoever the local agent is. The status commands say that this agent does not vote | 9 |
+| 4.6 One voting member; a term for a self-election | The two self-election branches take the next term | 8 |
+| 4.7 What a member that does not vote takes | A newer term from a voting member at once, as today. A lower one once the lease it holds has run out: `MergeGossip`, `ApplyGossipElection` | 8 |
+| 4.7 What it reports | The status commands say that this agent does not vote | 9 |
 | 4.8 Retiring a group | Issue #182, in the pull request for #180 to #183. Not a step of this plan | before 8 |
 
 ### 3.4 Catch-up (design 5)
@@ -340,20 +342,20 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | 1 | No election without a vote | #172 | PR #163 | 4 | 80 | 40 | Guards | Not started |
 | 2 | An agent with no role refuses its operator's edits | #137 item 2 | Step 1 | 4 | 50 | 20 | Guards | Not started |
 | 3 | The complete answer | #157 | | 10 | 200 | 120 | Changes to existing functions | Not started |
-| 4 | Asking by itself | #157 | Step 3, PR #162, PR #164 | 8 | 450 | 80 | New machinery | Not started |
+| 4 | Asking by itself | #157 | Step 3, PR #162, PR #164 | 8 | 470 | 80 | New machinery | Not started |
 | 5 | The sync with the parent waits | #157 | Step 4, the change for #175 | 4 | 100 | 40 | Guards, and a little state | Not started |
 | 6 | A rule for the sender and the recipients of every message | | Step 1, PR #163 | 9 | 150 | 80 | One middleware, guards | Not started |
-| 7 | Beats to a peer that repeats its hello, or is gone | #131, #132 | PR #162 | 3 | 50 | 20 | Guards | Not started |
-| 8 | The group by its make-up, and its election | #149 | Steps 1 and 6, the change for #179, the pull request for #180 to #183 | 8 | 170 | 120 | Changes to existing functions | Not started |
+| 7 | Beats to a peer that repeats its hello, or is gone; the end of comms | #131, #132 | PR #162 | 10 | 140 | 40 | Guards, and one loop | Not started |
+| 8 | The group by its make-up, and its election | #149 | Steps 1 and 6, the change for #179, the pull request for #180 to #183 | 8 | 140 | 120 | Changes to existing functions | Not started |
 | 9 | The switch: every HSYNC3 provider is a member | #158 | Steps 1 to 8 | 9 | 80 | 150 | Changes to existing functions | Not started |
 
-About 1,300 new and 700 changed lines in all. One third of the new lines are step 4.
+About 1,400 new and 700 changed lines in all. One third of the new lines are step 4.
 
 What kind of code each step is:
 
 - **Guards in existing functions:** steps 1, 2 and 7, most of 5 and 6.
 - **Changes to what existing functions do:** steps 3, 8 and 9.
-- **New machinery:** the tracker of step 4, the sender middleware of step 6 (about 30 lines), the repeated own read of step 3 (about 40 lines), and `zoneChanged` of step 8 (about 40 lines).
+- **New machinery:** the tracker of step 4, the sender middleware of step 6 (about 30 lines), the repeated own read of step 3 (about 40 lines), the removal of a peer that shares no zone in step 7 (about 40 lines), and `zoneChanged` of step 8 (about 40 lines).
 
 ### Step 1. No election without a vote (#172)
 
@@ -494,6 +496,7 @@ Its functions, and who calls them:
 | `PeerOperational(peer)` | Notes the successful beat. First since this agent started: `Ask(zone, peer, "start")` for every zone they share that has loaded and in which the peer votes. After a gap above the outage time: the same with `outage`. Otherwise: asks again whatever was paused for this peer | `SendBeatWithFallback`, where a beat succeeds |
 | `Answered(zone, from, catchUp)` | Takes an answer that names the outstanding request. Complete: done. Not complete: a retry | `SynchedDataEngine`, the `remote` case, after an update the repo took |
 | `Requested(zone, from, catchUp)` | After the answer to a request of reason `start` is enqueued: `Ask(zone, from, "peer-start")`, when the asker votes in the zone | `MsgHandler`, RFI SYNC |
+| `Forget(peer)` | Drops everything kept for a peer that is removed (step 7), so that one named again later is asked as a new peer | The engine's `OnPeerRemoved` hook (`v2/hsync_bridge.go`), wired by whichever of steps 4 and 7 merges second |
 | `CaughtUp(zone)` | Design 5.5: the own read is done, and every voting member of the zone other than this agent, as the zone's records name them now, is complete with no request outstanding or noted. Also returns who is waited for | Step 5, the status |
 | `Status(zone)` | The rows for the status command | `GetParentSyncStatus` |
 
@@ -508,7 +511,8 @@ The reasons at a refresh. `MPPreRefresh` has the served zone and the incoming on
 
 - at a zone's first load, `AskZone(zone, "start")`. Proposed: a zone that is added to a running agent is a first load too, and asks with `start`;
 - when the standing rose from none, `AskZone(zone, "join")`;
-- when it rose to voting from no role or from auditor, `AskZone(zone, "role")`.
+- when it rose to voting from no role or from auditor, `AskZone(zone, "role")`;
+- for each other identity that became a voting member of the zone at this refresh, `Ask(zone, peer, "peer-role")` (design 5.1). Without it `CaughtUp` never holds again once a newcomer has its role: the zone's records name a voting member that nothing ever asks, and a leader's sync stays held. `MPPreRefresh` records those identities in a third new field.
 
 Before step 9 an agent with a record and no role has no OPERATIONAL peer in the zone, so its `join` sends nothing, and the request goes out with reason `role` when the role comes.
 
@@ -535,6 +539,7 @@ Log, logger `catchup`: info "asking a peer for the zone's state" (`zone`, `peer`
 - `TestOnlyAStartRequestIsAskedBack`, `TestTwoAgentsThatStartTogetherAskEachOtherOnce`.
 - `TestAPeerBackAfterALongOutageIsAsked`.
 - `TestAStandingThatRisesAsks`: `join`, `role`, and nothing when it falls.
+- `TestAPeerThatGetsARoleIsAsked`, `TestARemovedPeerIsForgotten`.
 - `TestEightRequestsInFlightToOnePeer`.
 
 Harness: a third peer beside the two of `integEnv` (`newPeer`), `TestCatchUpAfterARestartAmongThreeAgents`: one agent restarted asks two, is asked back by two, and ends caught up.
@@ -582,7 +587,7 @@ Not established: that `NewDSKnown` is false exactly when the zone's DS intent is
 **Changes, the sender.**
 
 - A new middleware, proposed `refuseNamedSender`, registered with `Router.Use` for the agent and the auditor, where `StartIncomingMessageRouter` registers its callback: when the context's peer and the parsed message's sender differ as FQDNs, it answers REFUSED and no handler runs. About 30 lines.
-- `apiSyncEndpoint` (`v2/api_receive.go`): for `/beat`, `/ping` and `/msg`, refuses a body whose sender is not the client certificate's name. Proposed; see 3.2.
+- `apiSyncEndpoint` (`v2/api_receive.go`): for `/beat`, `/ping` and `/msg`, refuses a body whose sender is not the client certificate's name (decision 9). The name is the certificate's common name, the one `tlsaVerificationMiddleware` has checked against the peer's TLSA record, compared as an FQDN with the sender the body names. A request with no client certificate does not get this far. `/hello` is not checked (3.2).
 - `routeSyncMessage`: its fallback to the transport's sender goes.
 
 **Changes, per message.**
@@ -591,22 +596,22 @@ Not established: that `NewDSKnown` is false exactly when the zone's DS intent is
 - `handleAppRfi`: on an agent or an auditor, and not for a peer its config names, refuses by RFI type as in 3.2.
 - `GetZoneAgentData`: an OFF record is nobody's upstream or downstream.
 - `CombinerProcessUpdate` (`v2/combiner_chunk.go`): for a zone that is not a provider zone, refuses the operations of an origin that is not a voting member of the zone, each with the reason.
-- `MergeGossip(msg, from)`: takes nothing for a group this agent does not have or of which the sender is not a member. From a member that does not vote it takes that member's own row and no election record. `hsync.GossipPort` follows. The term of such a record comes with step 8.
+- `MergeGossip(msg, from, group)`: takes nothing for a group this agent does not have or of which the sender is not a member. From a member that does not vote it takes that member's own row and nothing else: no election record, and no term from one (decision 10). The two callers in `v2/hsync_transport.go` look the group up, as they do today for `CheckGroupState`. `hsync.GossipPort` follows, and `hsync.ProviderGroupInfo` gets the voting members.
 
 **Changes, the recipients** (3.2): `broadcastElectToZone`, `CommandHandler` (`send-rfi` AUDIT and `sig0key`), `leaderKeySetup`.
 
 **For a zone in steady state** nothing changes: admission already keeps these senders out. What closes is the LEGACY way out, and the named originator. One thing does change: an auditor is no longer asked for the zone's state or its SIG(0) key, and its word on who leads is no longer taken.
 
-**Names.** Log, warn, logger `transport`: "message refused: its payload names another sender than the one it came from" (`verb`, `named`, `sender`). The refusal of a SYNC: "sync refused: %s is not a voting member of zone %s". Of an RFI: "rfi %s refused: %s is not a member of zone %s", or "is not a voting member".
+**Names.** Log, warn, logger `transport`: "message refused: its payload names another sender than the one it came from" (`verb`, `named`, `sender`). Log, warn, logger `api`: "sync API request refused: the body names another sender than the client certificate" (`path`, `named`, `certificate`). The refusal of a SYNC: "sync refused: %s is not a voting member of zone %s". Of an RFI: "rfi %s refused: %s is not a member of zone %s", or "is not a voting member".
 
 **Tests.** Unit:
 
 - `TestAPayloadThatNamesAnotherSenderIsRefused`: hello, beat, sync, rfi, relocate, through the real router as `v2/transport_dispatch_test.go` does.
-- `TestAnAPIMessageMustNameItsCertificatesIdentity`.
+- `TestAnAPIMessageMustNameItsCertificatesIdentity`: `/beat`, `/ping` and `/msg`, with and without a trailing dot on either name; `TestAnAPIHelloIsNotHeldToItsCertificate`.
 - `TestASyncFromAMemberThatDoesNotVoteIsRefused`, `TestTheCombinerRefusesAnOriginThatDoesNotVote`.
 - `TestTheSig0KeyGoesToAVotingMemberOnly`, `TestAnOFFRecordIsNobodysDownstream`.
 - `TestALegacyPeerGetsNoAnswerToAnRFI`.
-- `TestGossipFromAMemberThatDoesNotVoteIsItsOwnRowOnly`, `TestGossipForAnUnknownGroupIsNotTaken`.
+- `TestGossipFromAMemberThatDoesNotVoteIsItsOwnRowOnly`, `TestAnElectionRecordFromAMemberThatDoesNotVoteIsNotTaken`, `TestGossipForAnUnknownGroupIsNotTaken`.
 - `TestElectionMessagesGoToVotingMembersAndAuditors`.
 
 Harness: `TestTransportBoundary_LegacySyncRejection` gets the RFI verbs.
@@ -615,11 +620,11 @@ Fleet: no difference in a run without a provider change. That is the test.
 
 **Done when** the fleet run is clean, the auditor's view of a zone is unchanged, and no "message refused" line appears in it.
 
-### Step 7. Beats to a peer that repeats its hello, or is gone (#131, #132)
+### Step 7. Beats to a peer that repeats its hello, or is gone; the end of comms (#131, #132)
 
 **Before it:** PR #162, for the beat back that is sent again.
 
-How the two relate to the design: a member with no role is a peer that hellos and beats without a vote, and every step of an add or a removal changes who is a member. The sender half of #131 is closed by step 6, where a hello counts as sent by the sender the transport established. What is left of #131 is a bound, and #132 is latent until something removes a peer (2.11).
+How the three parts relate to the design: a member with no role is a peer that hellos and beats without a vote, and every step of an add or a removal changes who is a member. The sender half of #131 is closed by step 6, where a hello counts as sent by the sender the transport established. What is left of #131 is a bound. The end of comms (design 3.1, decision 11) gives `RemovePeer` its first caller, and with it the faults of #132 become live (2.11), so the guards and the caller go in together.
 
 **Changes, #131.** `Engine.BeatPeer` (`v2/hsync/beat_retry.go`): a new map, proposed `beatBackAt`, of when the last beat back to each peer started. A call less than one fast interval after it does nothing. The first beat back after a restart has no earlier one and is not delayed. The retries of a failed beat back run inside the same beat back and are not touched.
 
@@ -631,7 +636,23 @@ How the two relate to the design: a member with no role is a peer that hellos an
 - `RemovePeer` (`v2/hsync/discovery.go`) deletes the peer's entries in `beatFailing` and `beatBackAt`.
 - Beats to one peer are not serialised: nothing depends on the sequence number (2.11).
 
-This plan adds no caller of `RemovePeer`. Whether comms with a peer end when the last shared zone is gone is not settled by the design: its section 2.2 says they do, its section 3.1 keeps the peer admitted as LEGACY.
+**Changes, the end of comms.**
+
+- `ReconcileZone` (`v2/hsync/reconcile.go`): on an agent (`GateOnLocalPresence`), a zone whose participants do not include the local agent expects no peers. Without this an agent whose own record has left a zone would put every peer back one pass after removing it.
+- `reconcileAllZones`: a zone that the agent no longer holds is taken off its peers. Today nothing does that: the pass visits the zones the agent has, so a zone that left the config stays on its peers for good.
+- With those two the engine's set of zones per peer holds the shared zones and no others (2.11), and "no zone shared" reads as: that set is empty.
+- Where the time is kept: on the engine's peer object, a new field of `hsync.Peer`, proposed `Unshared time.Time`: since when no zone names the peer. It is zero while one does. It is in memory. An agent that restarts has no such peer in its registry at all, so nothing is lost with it.
+- What runs the removal: the reconcile loop. `reconcileAllZones` runs every `reconcile` interval, 60 s by default, and after its pass over the zones calls a new function, proposed `pruneUnsharedPeers(now)`. For every peer that is not an infrastructure peer:
+  1. a zone names it: `Unshared` is cleared. A peer that is named again within the hold time is kept this way;
+  2. no zone names it and `Unshared` is zero: it is set to now;
+  3. no zone names it and `Unshared` is older than the hold time: `RemovePeer`.
+- `RemovePeer` exists. It stops the peer's hello retrier, takes the peer out of the engine's registry, and its hook (`removePeerView`, `v2/agent_structs.go`) drops the agent's view and the transport's peer, keys and addresses included. The rounds beat the registry's peers, so the beats stop. A peer that is not in the agent's registry is not LEGACY, so it is no longer admitted. A provider that a zone names again later is a new peer to `MarkNeeded` and is discovered afresh.
+- Until it is removed nothing changes for the peer: it reads as LEGACY, is admitted and beaten, and every rule of step 6 that asks for a member refuses it.
+- The same loop runs on the auditor, which has no gate in `ReconcileZone`: it removes a peer when no zone it holds has named it for the hold time.
+
+The hold time is the time a queued message is kept. A message that was queued for the peer while a zone was shared has been delivered or has expired when the peer goes.
+
+**Names.** Config, proposed: `multi-provider.syncengine.intervals.peer_hold`, in seconds as its neighbours, default 86400. `hsync.Config` gets `PeerHold`, and `hsyncConfigFromMp` (`v2/hsync_bridge.go`) fills it. As for its neighbours, zero or absent means the default. Log, info, logger `engine`: "peer shares no zone with this agent any more, kept for the hold time" (`peer`, `hold`); "peer is named by a zone again, kept" (`peer`); "peer removed: no zone shared for the hold time" (`peer`, `since`).
 
 **Tests.** Unit, `v2/hsync/beat_retry_test.go`:
 
@@ -639,9 +660,21 @@ This plan adds no caller of `RemovePeer`. Whether comms with a peer end when the
 - `TestARemovedPeerIsNotBeatenAgain`, `TestABeatOnItsWayDoesNotPutARemovedPeerBack`, `TestAHelloOnItsWayDoesNotPutARemovedPeerBack`.
 - `TestARemovedPeerLeavesNoFailureMarker`, `TestAReplacedPeerIsNotBeatenThroughTheOldObject`.
 
-Fleet: one agent restarted so that it is back within ten seconds of a peer's failed beat: OPERATIONAL at every peer within the restart and three fast intervals, and no election. As for PR #162.
+Unit, `v2/hsync/reconcile_test.go` and `v2/hsync/remove_peer_test.go`:
 
-**Done when** the unit tests pass and the fleet check shows no difference from PR #162.
+- `TestReconcileExpectsNoPeersInAZoneThatDoesNotListThisAgent`, and that an auditor's reconcile is unchanged.
+- `TestAZoneTheAgentNoLongerHoldsIsTakenOffItsPeers`.
+- `TestAPeerWithNoZoneIsKeptForTheHoldTime`: it is beaten, and it is still in the registry.
+- `TestAPeerWithNoZoneIsRemovedAfterTheHoldTime`: no beat, no hello and no discovery goes to it after.
+- `TestAPeerNamedAgainWithinTheHoldTimeIsKept`: the time is cleared, and a second loss of its zones starts the hold time anew.
+- `TestAPeerNamedAgainAfterItsRemovalIsDiscoveredAfresh`.
+- `TestAnInfrastructurePeerIsNeverRemoved`.
+
+Unit, in `v2`: `TestARemovedPeerIsNoLongerAdmitted` (LEGACY and admitted before, refused after, through `IsPeerAuthorized`), `TestThePeerHoldTimeIsReadFromTheConfig`.
+
+Fleet: one agent restarted so that it is back within ten seconds of a peer's failed beat: OPERATIONAL at every peer within the restart and three fast intervals, and no election. As for PR #162. Then, with the hold time set to a few minutes: the owner takes a provider out of every zone it shares with the others. The others show it as LEGACY, refuse its SYNC and its requests, and go on beating it. After the hold time it is in no agent's peer list and no beat goes to it. Named again in a zone, it is discovered and reaches OPERATIONAL.
+
+**Done when** the unit tests pass, the first fleet check shows no difference from PR #162, and the second passes on both sides: at the agents that stay and at the one that left.
 
 ### Step 8. The group by its make-up, and its election (#149)
 
@@ -650,18 +683,23 @@ Fleet: one agent restarted so that it is back within ten seconds of a peer's fai
 **Changes.**
 
 - `RecomputeGroups`, `ComputeGroupHash`, `ProviderGroup` (`v2/provider_groups.go`, `v2/gossip_types.go`): the key and the hash are made from three sorted lists, each under its own label: the voting members, the auditors, the members with no role. `ProviderGroup` gets `Auditors` and `NoRole` beside `Members` and `VotingMembers`. The union of voting members and its warning go. Until step 9 the third list is empty.
-- The gate (design 4.3): the five callers of `CheckGroupState` pass the voting members. `hsync.ProviderGroupInfo` gets `VotingMembers`, and `pgmHsyncLookup` fills it.
+- The gate (design 4.3): the five callers of `CheckGroupState` pass the voting members. `hsync.ProviderGroupInfo` has them since step 6.
 - One check for every change (design 4.5): a new `zoneChanged(zone)` on the election manager, called from `PostRefresh` for every change of HSYNC3 or HSYNCPARAM and at the first load, for a zone with parentsync on. It replaces the logic of the first-load callback and the kick in `reattachHsyncMemberAdds`:
   1. the local agent does not vote in the zone: nothing is started, and a per-zone result it holds for the zone is dropped;
   2. a group covers the zone: a per-zone result is dropped, and nothing else is done;
   3. no group covers the zone and the local agent is its only voting member: `StartElection(zone, 0)`, unless it leads already.
-- A term for a self-election (design 4.6): both self-election branches take a term one above the highest of the term held and the term heard. `MergeGossip` hands the term of an election record from a member that does not vote to a new `NoteHeardTerm` on the election manager, which keeps the highest per group. `startGroupElection` starts above it too.
-- A term heard after the election. Proposed, the design does not say: a leader that hears, from a member that does not vote, a term at or above its own starts a new election above it. Without that, voting members that have all restarted elect at term 1, and a member with no role that stayed up holds the old, higher term and takes no record below it (`ApplyGossipElection`, `MergeGossip`): it reports no leader until the terms have caught up, one lease at a time.
+- A term for a self-election (design 4.6): both self-election branches take the next term, one above the term the agent holds. What a voting member has told is in the term held already (`ApplyGossipElection` raises it), and nothing a member that does not vote says about terms is taken (step 6). So there is no separate "term heard", and no election is ever caused by a member that does not vote (decision 10).
+- What a member that does not vote takes (design 4.7): `MergeGossip` and `ApplyGossipElection` take an election record with a term above the one held, as today. On an agent that does not vote in the group they also take a record with a lower term, once the lease of the leader it holds has run out. A voting member never takes a lower term.
+  - The same term (design 4.7): on an agent that does not vote, a record of the term held that names another leader or a later end of the lease is taken on the same condition. Voting members that have all restarted elect at term 1 again, and term 1 is what an observer of their first election holds. Otherwise a record of the term held is not news, as today.
+  - The lease's end is known in both places: it travels in the record (`GroupElectionState.LeaderExpiry`), and each function keeps it with the record it took, `MergeGossip` in the gossip table and `ApplyGossipElection` in the election manager. The auditor has the gossip table only, and the rule in `MergeGossip` covers it.
+  - Whether the local agent votes in the group: `MergeGossip` has the group since step 6, and `ApplyGossipElection` reads it from the group manager, as step 1 does for the renewal timer.
+  - The lease's end is the telling agent's clock, compared with the local one. A clock that is off moves the moment by as much.
+  - `InvalidateGroupLeader` clears the leader and keeps the lease's end. An observer whose group has degraded therefore waits for that lease's end too.
 - A zone that leaves (design 4.1): `zoneJoinedGroup` gets one more case. When this agent leads the group the zone left and not the one it arrived in, the zone's sync chain is dropped (`delegationSyncNotLeading`), through a callback set in `v2/start_agent.go`.
 
 A consequence to know: the hash of every group changes with this step. At the upgrade every group elects once, which the restart of the agents causes anyway.
 
-A risk to know: a member that does not vote can raise the term heard, and with the proposal above cause an election by doing so. The term is 32 bits on the wire. A voting member can do the same today with a CALL. Nothing is done about it here.
+A second one: when the voting members have all restarted they elect at term 1, and a member that does not vote and stayed up holds the earlier, higher term. It shows the earlier leader until that leader's lease has run out, an hour by default, and takes the new record then. What it shows is information only: nothing acts on it.
 
 **Names.** Log, info, logger `elect`: "zone left a group this agent leads, dropping its delegation sync" (`zone`, `group`, `now_in`).
 
@@ -669,16 +707,17 @@ A risk to know: a member that does not vote can raise the term heard, and with t
 
 - `TestTwoZonesWithTheSameProvidersAndAnotherMakeUpAreTwoGroups`, `TestAGroupsZonesAgreeOnWhoVotes`.
 - `TestAnAuditorThatIsDownDoesNotHoldTheElectionBack`, `TestAnAuditorThatGoesDownDoesNotInvalidateTheLeader`.
-- `TestALoneVoterLeadsAtATermAboveZeroAndItsObserverLearnsIt`, `TestASelfElectionGoesAboveATermHeardFromAnObserver`.
-- `TestALeaderThatHearsAHigherTermFromAnObserverElectsAboveIt`.
+- `TestALoneVoterLeadsAtATermAboveZeroAndItsObserverLearnsIt`, `TestEveryRenewalOfALoneVoterIsANewTerm`.
+- `TestAnObserverTakesAHigherTermAtOnce`, `TestAnObserverKeepsItsLeaderWhileTheLeaseRuns`, `TestAnObserverTakesALowerTermWhenTheLeaseHasRunOut`, `TestAnObserverTakesTheSameTermFromRestartedVotersWhenTheLeaseHasRunOut`: for the gossip table and for the election manager.
+- `TestAVotingMemberNeverTakesALowerTerm`, `TestNoElectionIsCausedByAMemberThatDoesNotVote`.
 - `TestAZoneReducedToOneVotingMemberGetsALeaderWithNoRestart` (#149).
 - `TestAPerZoneResultIsDroppedWhenAGroupCoversTheZone`.
 - `TestAZoneThatArrivesInAGroupWithALeaderForcesNoElection`.
 - `TestAnAgentThatLedTheGroupAZoneLeftDropsItsSync`.
 
-Fleet: two providers reduced to one, with no auditor: a leader with no restart. A lease renewal with the auditor stopped. A zone whose owner removes a provider that leads the zone's group: the NS change is at the parent without waiting for a lease renewal.
+Fleet: two providers reduced to one, with no auditor: a leader with no restart. A lease renewal with the auditor stopped. The agents of every voting member restarted while the auditor runs on, with a short lease: the auditor shows the new leader when the earlier lease has run out, and no election follows from anything it sent. A zone whose owner removes a provider that leads the zone's group: the NS change is at the parent without waiting for a lease renewal.
 
-**Done when** the three fleet checks pass, and a run with no provider change elects each group once.
+**Done when** the four fleet checks pass, and a run with no provider change elects each group once.
 
 ### Step 9. The switch: every HSYNC3 provider is a member (#158)
 
@@ -733,6 +772,10 @@ Decided by the project owner on 2026-10-12. The design is written with them.
 6. **A member with no role gets the zone transfer set-up from its upstream.** The HSYNC3 record states the zone owner's intent.
 7. **What a provider contributed stands, frozen, once its roles are gone,** until the removal takes it away. The provider cannot change it, its own DNSKEYs included, so its key machine holds for the zone while it leaves. The removal starts at the edit that takes the roles away, and the leader of the group the zone is then in is responsible for it.
 8. **The whole sync with the parent waits for catch-up,** NS and glue as well as DS. A leader that does not have all the information is in no position to decide. A leader that has just started does not know what the parent holds either: it first gets the zone's data from the other agents, its combiner and its signer, then asks the parent, then sends the difference.
+
+9. **The sender rule holds over HTTPS too.** An agent refuses an HTTPS `/beat`, `/ping` or `/msg` whose body names another sender than the client certificate's name. It is done in step 6, ahead of issue #56, which keeps `/hello` and the choice of the certificate's identity field.
+10. **A member that does not vote causes no election, and nothing it says about terms is taken.** A receiver takes its own row from it and nothing else. For who leads, it takes a newer term from a voting member at once. Whatever else a voting member tells it about who leads (a lower term, or the same term with another leader) it takes once the lease of the leader it holds has run out. A self-election still takes a term above zero, so that gossip tells it.
+11. **Comms end when no zone is shared.** When the last zone shared with a peer is gone, the agent keeps the peer for a hold time of 24 hours and then removes it and stops beating it. A peer that is named again within the hold time is kept. A provider that a zone names again later is discovered afresh. Until it is removed the peer stays admitted, and every rule that asks for a member refuses it.
 
 Also decided:
 
