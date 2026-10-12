@@ -148,3 +148,39 @@ func TestAGroupConfirmCountsOnlyFromAVotingMember(t *testing.T) {
 	lem.HandleGroupMessage(group, "b.example.", "ELECT-CONFIRM", confirm)
 	waitLeader(t, func() (AgentId, bool) { return lem.GetGroupLeader(group) }, winner, 2*time.Second)
 }
+
+// This agent's own membership is read the way a sender's is. The members of
+// a group come from zone data, with the trailing dot; an identity from the
+// config need not have it. Compared as plain strings, such an agent took
+// itself for an observer and never voted, while its peers counted it as a
+// member and waited for its vote.
+func TestAnAgentIsAVotingMemberWhateverTheDotOnItsConfiguredName(t *testing.T) {
+	const group = "0123456789abcdef"
+	voting := []string{"a.example.", "b.example.", "c.example."}
+	lem := NewLeaderElectionManager("c.example", time.Hour,
+		func(ZoneName, string, map[string][]string) error { return nil })
+	pgm := NewProviderGroupManager("c.example")
+	pgm.Groups[group] = &ProviderGroup{GroupHash: group, Members: voting, VotingMembers: voting, Zones: []ZoneName{"zone.example."}}
+	lem.SetProviderGroupManager(pgm)
+	t.Cleanup(func() {
+		if le := groupElectionOf(lem, group); le != nil {
+			le.mu.Lock()
+			for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+				if tm != nil {
+					tm.Stop()
+				}
+			}
+			le.mu.Unlock()
+		}
+	})
+
+	lem.HandleGroupMessage(group, "a.example.", "ELECT-CALL",
+		map[string][]string{"_term": {"1"}, "_vote": {"9"}, "_group": {group}})
+
+	le := groupElectionOf(lem, group)
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	if !le.Active || len(le.Votes) != 2 {
+		t.Fatalf("after a's CALL: active=%v, %d votes; want the election joined with a's vote and this agent's own", le.Active, len(le.Votes))
+	}
+}

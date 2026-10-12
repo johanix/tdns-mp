@@ -175,6 +175,16 @@ func (lem *LeaderElectionManager) DeferGroupElection(groupHash string) {
 	lgElect.Info("deferring group election until group is operational", "group", groupHash[:8])
 }
 
+// isAmong: whether id is one of a group's voting members. Names are compared
+// as FQDNs, as the authorization of a sender is: the members come from zone
+// data and carry the trailing dot, an identity from a config or a message
+// need not. One comparison for the sender and for this agent itself: with two,
+// an agent whose configured identity lacked the dot was counted by its peers
+// and took itself for an observer.
+func isAmong(members []string, id AgentId) bool {
+	return slices.ContainsFunc(members, func(m string) bool { return dns.Fqdn(m) == dns.Fqdn(string(id)) })
+}
+
 // HandleGroupMessage dispatches an election message that carries a _group record.
 func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID AgentId, rfiType string, records map[string][]string) {
 	lem.mu.Lock()
@@ -211,9 +221,8 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 	// transport has admitted the sender as a peer, which is not the same
 	// thing: an auditor gets the broadcast and observes. Checked once, here,
 	// for all three and so for a vote kept ahead of its CALL too
-	// (tdns-mp #143). Names are compared as FQDNs, as the authorization of
-	// a sender is.
-	if !slices.ContainsFunc(members, func(m string) bool { return dns.Fqdn(m) == dns.Fqdn(string(senderID)) }) {
+	// (tdns-mp #143).
+	if !isAmong(members, senderID) {
 		lgElect.Warn("group election: message from a sender that is not a voting member, dropped",
 			"group", groupHash[:8], "type", rfiType, "sender", senderID, "term", parseUint64(records, "_term"))
 		return
@@ -222,7 +231,7 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 	// If we're not a voting member ourselves, we still want to
 	// observe the protocol (useful for auditors auditing) but we
 	// must not vote, initiate, or be counted in the quorum.
-	if !slices.Contains(members, string(lem.localID)) {
+	if !isAmong(members, lem.localID) {
 		lgElect.Info("leader election observed (not a voting member, no participation)",
 			"group", groupHash[:8], "type", rfiType, "initiator", senderID, "term", parseUint64(records, "_term"))
 		return
