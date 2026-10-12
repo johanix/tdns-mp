@@ -34,8 +34,8 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 // and discovers the peer again. What the lookup finds replaces what is held:
 // the address, and the peer's key in the payload crypto when the JWK lookup
 // returns one. It is the discovery kick for a sender whose key is missing,
-// what a peer that keeps refusing our hellos gets (noteHelloRefused), and
-// what a hello from a sender with no address gets (routeHelloMessage).
+// what a peer that keeps refusing our hellos or our beats gets (noteRefused),
+// and what a hello from a sender with no address gets (routeHelloMessage).
 func (tm *MPTransportBridge) flushAndDiscover(peerID string) {
 	// Flush IMR cache for this peer's discovery names before re-discovery
 	if tm.getImrEngine != nil {
@@ -61,17 +61,20 @@ func (tm *MPTransportBridge) flushAndDiscover(peerID string) {
 // encrypt to the key we hold the peer cannot decrypt, and what the peer signs
 // does not verify with it. The peer answers our hello with REFUSED, and the
 // hello retrier used to go on like that until the daemon was restarted
-// (tdns-mp #145).
+// (tdns-mp #145). A peer that we are past the hello with gets beats and no
+// hello, also when the beats fail, so a peer that replaces its key while we
+// run refuses our beats instead.
 //
-// So a peer that keeps refusing our hello is looked up again, as a sender
-// whose key is missing is (flushAndDiscover): after
-// helloRefusalsBeforeRediscovery refused hellos in a row, and then at most
+// So a peer that keeps refusing our hello, or our beats, is looked up again,
+// as a sender whose key is missing is (flushAndDiscover): after
+// helloRefusalsBeforeRediscovery refused messages in a row, and then at most
 // once every peerRediscoveryInterval for as long as the refusals go on.
 //
 // REFUSED is also the answer of a peer that does not, or not yet, hold us
 // authorized for a zone. The lookup changes nothing then, and the interval
-// bounds what it costs. Only the answer to a hello of our own counts, so
-// nothing a third party sends us makes this agent look anything up.
+// bounds what it costs. Only the answer to a hello or a beat of our own
+// counts, so nothing a third party sends us makes this agent look anything
+// up.
 //
 // The interval is one per peer for every lookup past the cache that a
 // message can ask for. A hello from a sender with no address asks for one
@@ -85,10 +88,10 @@ const (
 	peerRediscoveryInterval        = time.Minute
 )
 
-// refusedHellos is the count behind noteHelloRefused, for one peer, and when
-// the peer was last looked up past the cache.
+// refusedHellos is the count behind noteRefused, for one peer, and when the
+// peer was last looked up past the cache.
 type refusedHellos struct {
-	inARow       int       // refused hellos since the last accepted one
+	inARow       int       // refused hellos and beats since the last accepted one
 	rediscovered time.Time // when the peer was last looked up past the cache, for them or for a hello of its own
 }
 
@@ -133,10 +136,10 @@ func (tm *MPTransportBridge) freshLookupDue(peerID string) bool {
 	return true
 }
 
-// helloRefused reports whether a DNS hello failed because the peer answered
-// REFUSED, as opposed to not answering or failing in another way. The
-// transport reports the answer's rcode in the text of its error and nowhere
-// else.
+// helloRefused reports whether a DNS hello, or a DNS beat, failed because the
+// peer answered REFUSED, as opposed to not answering or failing in another
+// way. The transport reports the answer's rcode in the text of its error and
+// nowhere else.
 func helloRefused(err error) bool {
 	var te *transport.TransportError
 	if !errors.As(err, &te) || te.Err == nil {
@@ -148,6 +151,21 @@ func helloRefused(err error) bool {
 // noteHelloRefused counts a hello that the peer refused and, when the
 // refusals have gone on for long enough, has the peer looked up again.
 func (tm *MPTransportBridge) noteHelloRefused(peerID string) {
+	tm.noteRefused(peerID, "hello")
+}
+
+// noteBeatRefused does the same for a beat. A peer that was OPERATIONAL gets
+// beats and no hellos, also when its beats start to fail, so a peer that is
+// given a new key while this agent runs never refuses a hello of ours: it
+// refuses our beats. Without this the key held for it stayed the old one
+// until a restart. The hellos and the beats share one count and one book.
+func (tm *MPTransportBridge) noteBeatRefused(peerID string) {
+	tm.noteRefused(peerID, "beats")
+}
+
+// noteRefused counts a message of ours that the peer answered with REFUSED.
+// what names it in the log: "hello" or "beats".
+func (tm *MPTransportBridge) noteRefused(peerID string, what string) {
 	interval := tm.freshLookupInterval()
 	tm.refusedHellosMu.Lock()
 	r := tm.lookupBook(peerID)
@@ -161,13 +179,14 @@ func (tm *MPTransportBridge) noteHelloRefused(peerID string) {
 	if !due {
 		return
 	}
-	lgTransport.Warn("peer keeps refusing our hello, flushing IMR cache and discovering it again: the key held for it may not be the one it uses",
+	lgTransport.Warn("peer keeps refusing our "+what+", flushing IMR cache and discovering it again: the key held for it may not be the one it uses",
 		"peer", peerID, "refused", refused)
 	go tm.flushAndDiscover(peerID)
 }
 
-// noteHelloAccepted ends the peer's run of refused hellos. When the peer was
-// last looked up stays on the books: the interval holds across it.
+// noteHelloAccepted ends the peer's run of refused hellos and beats: the peer
+// took a hello of ours, or a beat. When the peer was last looked up stays on
+// the books: the interval holds across it.
 func (tm *MPTransportBridge) noteHelloAccepted(peerID string) {
 	tm.refusedHellosMu.Lock()
 	if r := tm.refusedHellos[dns.CanonicalName(peerID)]; r != nil {
