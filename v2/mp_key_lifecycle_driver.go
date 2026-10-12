@@ -99,13 +99,29 @@ type ZoneKeyLifecycle struct {
 	dist   map[uint16]*distribution
 	dsGone map[uint16]bool
 	// dsGoneAt: for an active KSK whose DS is withdrawn (T10a), when the
-	// parent was first seen without the DS and the TTL it was served with
-	// (T11a); T10b waits that TTL out. In memory: a restart notes it again
-	// at its next poll, and the old key signs that much longer (T15).
+	// parent was first seen without the DS and the TTL caches may hold it
+	// for (T11a); T10b waits that TTL out. An answer that serves the DS
+	// again drops the note, and the wait starts afresh when it goes again,
+	// as T9's wait does (T18). Persisted with lastDSTTL in MPParentDS
+	// (saveWithdrawal; read back at T15).
 	dsGoneAt map[uint16]dsPresence
-	// lastDSTTL: the TTL a withdrawn KSK's DS was last served with, noted
-	// on every poll while the parent still serves it (for T11a's note).
+	// lastDSTTL: the TTL a withdrawn KSK's DS is known to be served with:
+	// the DS RRset's TTL as T18 noted it for the successor whose promotion
+	// withdrew the key (the same RRset), then every poll that still sees
+	// the DS. What T11a's note is made of; an answer without the DS says
+	// nothing about the TTL caches hold (an empty answer has none).
 	lastDSTTL map[uint16]time.Duration
+	// successorDSTTL: while a promotion applies E6 to the keys it replaces,
+	// the DS RRset TTL the promoted key's DS was observed with (its T18
+	// note), for T10a's note on the key it withdraws.
+	successorDSTTL time.Duration
+	// kskLeft, by algorithm: a KSK of that algorithm retired on T10b while a
+	// ZSK of the same algorithm was still signing with the policy naming
+	// another ZSK algorithm: the KSK this combined roll withdrew, which
+	// ends the old ZSK's wait (T19's OldAlgKSKLeaving). Cleared when that
+	// ZSK retires. In memory: after a restart the old ZSK waits the
+	// signature lifetime instead, the safe side (T15).
+	kskLeft map[uint8]bool
 	// dsPresent: standby SEP keys the parent has been seen serving the DS
 	// of, since when and with what TTL (E13, T18; persisted, T15). T9 waits
 	// for the TTL to pass (O7). parentEmpty and parentTTL are the parent's
@@ -153,7 +169,7 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 	l := &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
 		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known,
 		dsPresent: map[uint16]dsPresence{}, promoteWait: map[uint16]time.Time{}, promoteTold: map[uint16]bool{}, algorithms: map[string]uint8{},
-		dsGoneAt: map[uint16]dsPresence{}, lastDSTTL: map[uint16]time.Duration{}}
+		dsGoneAt: map[uint16]dsPresence{}, lastDSTTL: map[uint16]time.Duration{}, kskLeft: map[uint8]bool{}}
 	if kdb != nil {
 		if _, err := kdb.DB.Exec(HsyncTables["MPKeyDistribution"]); err != nil {
 			// without the table nothing in flight would survive a restart:
@@ -298,6 +314,7 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 	z.RolloverPending = l.rolls[role]
 	z.AlgRollInFlight = l.algRollInFlight(role, all)
 	z.SuccessorAlgorithm = l.successor
+	z.OldAlgKSKLeaving = l.oldAlgKSKLeaving(k, all)
 	// the algorithm rollover's view (O4): the policy's algorithm for the
 	// role, whether a key of the role signs with another, the policy's
 	// keys on their way or signing, and whether the KSK side is done
@@ -310,9 +327,6 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 	for _, o := range all {
 		if o.State == KeyStateActive && o.Flags&dns.SEP != 0 && o.Algorithm != l.policyAlgorithm("KSK") {
 			z.KSKSideDone = false
-		}
-		if (o.State == KeyStateRetired || o.State == KeyStateMpremove) && o.Flags&dns.SEP != 0 && o.Algorithm != l.policyAlgorithm("KSK") {
-			z.OldAlgKSKLeaving = true
 		}
 		if roleOf(o.Flags) != role {
 			continue
@@ -425,18 +439,34 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 			return k.State, k.State, fmt.Errorf("withdraw the DS of key %d of %s: %w", keyid, l.Zone, err)
 		}
 		l.Wire.KeysChanged(l.Zone)
-		l.logf("key lifecycle: the old algorithm's KSK goes on signing with its DS withdrawn; it retires once the parent has not served the DS for the DS TTL", "zone", l.Zone, "keyid", keyid, "algorithm", dns.AlgorithmToString[k.Algorithm])
+		// the DS RRset TTL caches may hold the key's DS for: the TTL the
+		// parent served the successor's DS with (its T18 note), the same
+		// RRset; noted now, while the parent still serves this DS
+		if l.lastDSTTL[keyid] == 0 && l.successorDSTTL > 0 {
+			l.lastDSTTL[keyid] = l.successorDSTTL
+		}
+		l.saveWithdrawal(keyid)
+		l.logf("key lifecycle: the old algorithm's KSK goes on signing with its DS withdrawn; it retires once the parent has not served the DS for the DS TTL", "zone", l.Zone, "keyid", keyid, "algorithm", dns.AlgorithmToString[k.Algorithm], "ds_ttl", l.lastDSTTL[keyid])
 		return k.State, next, nil
 	case "T11":
 		l.dsGone[keyid] = true
 		return k.State, next, nil
 	case "T11a":
+		// the TTL caches may hold the DS for: what the parent was seen
+		// serving it with (lastDSTTL); failing that, the TTL of the DS
+		// RRset this answer still carries (the other DS); failing that
+		// (an empty answer says nothing about it) the withdrawal margin,
+		// never zero
 		l.dsGone[keyid] = true
 		ttl := l.lastDSTTL[keyid]
 		if ttl == 0 {
 			ttl = l.parentTTL
 		}
+		if ttl == 0 {
+			ttl = l.Policy.Margin
+		}
 		l.dsGoneAt[keyid] = dsPresence{Since: l.Clock.Now(), TTL: ttl}
+		l.saveWithdrawal(keyid)
 		l.logf("key lifecycle: the parent no longer serves the old algorithm's DS; the old KSK retires after the DS TTL", "zone", l.Zone, "keyid", keyid, "ds_ttl", ttl)
 		return k.State, next, nil
 	case "T18":
@@ -461,7 +491,10 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 		return k.State, k.State, err
 	}
 	if k.State == KeyStateStandby {
-		// the parent wait is standby's: promoted, or withdrawn, it is over
+		// the parent wait is standby's: promoted, or withdrawn, it is over;
+		// the DS RRset TTL its note carries serves T10a on the key a
+		// promotion withdraws (the same RRset at the parent)
+		l.successorDSTTL = l.dsPresent[keyid].TTL
 		delete(l.dsPresent, keyid)
 		delete(l.promoteWait, keyid)
 		delete(l.promoteTold, keyid)
@@ -495,17 +528,31 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 			o := all[tag]
 			if o.State == KeyStateActive && o.KeyTag != keyid && roleOf(o.Flags) == roleOf(k.Flags) {
 				if _, _, err := l.applyLocked(o.KeyTag, EvSuccessorActive); err != nil {
-					l.successor = 0
+					l.successor, l.successorDSTTL = 0, 0
 					return k.State, next, err
 				}
 			}
 		}
-		l.successor = 0
+		l.successor, l.successorDSTTL = 0, 0
 	case KeyStateRetired:
-		// a KSK retired on T10b has its DS gone already (noted on T11a):
-		// T12's margin runs from here; the wait's notes are done with
-		delete(l.dsGoneAt, keyid)
-		delete(l.lastDSTTL, keyid)
+		switch row.ID {
+		case "T10b":
+			// the KSK's DS is gone already (noted on T11a): T12's margin runs
+			// from here, and the wait's notes are done with. A ZSK of its
+			// algorithm still signing with the policy naming another ZSK
+			// algorithm is this roll's old ZSK: the mark that lets T19
+			// retire it now that the KSK side is over
+			delete(l.dsGoneAt, keyid)
+			delete(l.lastDSTTL, keyid)
+			l.saveWithdrawal(keyid)
+			for _, o := range all {
+				if o.Flags&dns.SEP == 0 && o.State == KeyStateActive && o.Algorithm == k.Algorithm && o.Algorithm != l.policyAlgorithm("ZSK") {
+					l.kskLeft[k.Algorithm] = true
+				}
+			}
+		case "T19":
+			delete(l.kskLeft, k.Algorithm)
+		}
 		l.Wire.Resign(l.Zone)
 	case KeyStateMpremove:
 		delete(l.dsGone, keyid)
@@ -849,6 +896,24 @@ func (l *ZoneKeyLifecycle) CancelRollover(role string) {
 	delete(l.rolls, role)
 }
 
+// oldAlgKSKLeaving is T19's OldAlgKSKLeaving for k, an old-algorithm ZSK:
+// a KSK of k's own algorithm retired on T10b while k's change was pending
+// (kskLeft: the KSK this combined roll withdrew), and it is still retired
+// or being removed. A KSK of the old algorithm left over from an earlier
+// roll carries no mark: the change is then ZSK-only and T19 waits the
+// signature lifetime.
+func (l *ZoneKeyLifecycle) oldAlgKSKLeaving(k tdns.DnssecKeyWithTimestamps, all map[uint16]tdns.DnssecKeyWithTimestamps) bool {
+	if k.Flags&dns.SEP != 0 || !l.kskLeft[k.Algorithm] {
+		return false
+	}
+	for _, o := range all {
+		if o.Flags&dns.SEP != 0 && o.Algorithm == k.Algorithm && (o.State == KeyStateRetired || o.State == KeyStateMpremove) {
+			return true
+		}
+	}
+	return false
+}
+
 // withdrawnActive: the active KSKs whose DS withdrawal has been written
 // (ds=0; T10a), from the inventory's columns: the old algorithm's KSK in the
 // withdrawal wait of an algorithm rollover.
@@ -903,20 +968,31 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	l.parentKnown, l.parentEmpty = false, false
 	withdrawn := l.withdrawnActive(all)
 	for _, k := range all {
-		if k.Flags&dns.SEP != 0 && (k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateRetired && !l.dsGone[k.KeyTag] || withdrawn[k.KeyTag] && !l.dsGone[k.KeyTag]) {
+		if k.Flags&dns.SEP != 0 && (k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateRetired && !l.dsGone[k.KeyTag] || withdrawn[k.KeyTag]) {
 			served, l.parentTTL, l.parentKnown = l.Wire.ParentDS(l.Zone)
 			l.parentEmpty = l.parentKnown && len(served) == 0
 			break
 		}
 	}
 	parentKnown := l.parentKnown
-	// the TTL a withdrawn KSK's DS is served with, noted while it is still
-	// served: what T10b waits out once it is gone
+	// a withdrawn KSK whose DS the parent serves: the TTL it is served
+	// with, noted for T11a; and a DS that is served again after it was
+	// seen gone drops the note, the wait starts afresh when it goes again
+	// (as T18 does for a standby key's wait)
 	if parentKnown {
 		for keyid := range withdrawn {
-			if served[keyid] {
+			if !served[keyid] {
+				continue
+			}
+			if l.parentTTL > 0 {
 				l.lastDSTTL[keyid] = l.parentTTL
 			}
+			if l.dsGone[keyid] {
+				delete(l.dsGone, keyid)
+				delete(l.dsGoneAt, keyid)
+				l.logf("key lifecycle: the parent serves the old algorithm's DS again; the old KSK's wait starts afresh when it goes", "zone", l.Zone, "keyid", keyid)
+			}
+			l.saveWithdrawal(keyid)
 		}
 	}
 	for _, keyid := range keytagsOf(all) {
@@ -1576,6 +1652,32 @@ func (l *ZoneKeyLifecycle) savePresence(keyid uint16) {
 
 // loadPresences reads the notes back at a restart (T15); one for a key no
 // longer standby is dropped, its wait being over.
+// saveWithdrawal persists the withdrawal wait's notes of an active KSK
+// whose DS is withdrawn (T10a): the TTL caches may hold its DS for, and,
+// once the parent was seen without the DS, since when (T11a). Rows of
+// MPParentDS like a standby key's T18 note, with an empty since while the
+// DS is still served. No note (the key left active) deletes the row.
+func (l *ZoneKeyLifecycle) saveWithdrawal(keyid uint16) {
+	if l.KDB == nil {
+		return
+	}
+	ttl, hasTTL := l.lastDSTTL[keyid]
+	g, gone := l.dsGoneAt[keyid]
+	if !hasTTL && !gone {
+		l.KDB.DB.Exec(`DELETE FROM MPParentDS WHERE zonename=? AND keyid=?`, l.Zone, int(keyid))
+		return
+	}
+	since := ""
+	if gone {
+		since, ttl = g.Since.UTC().Format(time.RFC3339), g.TTL
+	}
+	if _, err := l.KDB.DB.Exec(`INSERT INTO MPParentDS (zonename, keyid, since, ttl_seconds) VALUES (?, ?, ?, ?)
+		ON CONFLICT(zonename, keyid) DO UPDATE SET since=excluded.since, ttl_seconds=excluded.ttl_seconds`,
+		l.Zone, int(keyid), since, int64(ttl/time.Second)); err != nil {
+		l.logf("key lifecycle: saving the withdrawal wait's note failed", "zone", l.Zone, "keyid", keyid, "err", err)
+	}
+}
+
 func (l *ZoneKeyLifecycle) loadPresences(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
 	rows, err := l.KDB.DB.Query(`SELECT keyid, since, ttl_seconds FROM MPParentDS WHERE zonename=?`, l.Zone)
 	if err != nil {
@@ -1583,6 +1685,7 @@ func (l *ZoneKeyLifecycle) loadPresences(all map[uint16]tdns.DnssecKeyWithTimest
 	}
 	defer rows.Close()
 	l.dsPresent = map[uint16]dsPresence{}
+	withdrawn := l.withdrawnActive(all)
 	var stale []uint16
 	for rows.Next() {
 		var keyid int
@@ -1592,6 +1695,22 @@ func (l *ZoneKeyLifecycle) loadPresences(all map[uint16]tdns.DnssecKeyWithTimest
 			return err
 		}
 		tag := uint16(keyid)
+		if withdrawn[tag] {
+			// the withdrawal wait's note (T10a, T11a): the TTL, and since
+			// when the parent was seen without the DS, if it was
+			if ttl > 0 {
+				l.lastDSTTL[tag] = time.Duration(ttl) * time.Second
+			}
+			if since != "" {
+				if t, err := time.Parse(time.RFC3339, since); err == nil {
+					l.dsGone[tag] = true
+					l.dsGoneAt[tag] = dsPresence{Since: t, TTL: time.Duration(ttl) * time.Second}
+				} else {
+					l.logf("key lifecycle: the withdrawal wait's note of a key is unreadable and is dropped; the next poll notes the DS gone again", "zone", l.Zone, "keyid", tag, "since", since, "err", err)
+				}
+			}
+			continue
+		}
 		if k, ok := all[tag]; !ok || k.State != KeyStateStandby {
 			stale = append(stale, tag)
 			continue

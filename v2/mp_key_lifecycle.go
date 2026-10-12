@@ -172,13 +172,16 @@ type ZoneView struct {
 	PolicyAlgActive    bool
 	KSKSideDone        bool
 	SuccessorAlgorithm uint8
-	// OldAlgKSKLeaving: a KSK of another algorithm than the policy's KSK
-	// algorithm is retired or being removed, so a combined roll's KSK side
-	// is over: its DS has been gone from the parent for the DS TTL (T10b).
-	// PolicyAlgActiveSince is when the first key of the role and the
-	// policy's algorithm went active, and SigLifetime the policy's
-	// signature validity: a ZSK-only roll keeps the old ZSK signing beside
-	// its successor that long (T19), the drain tdns's relaxed roll does.
+	// OldAlgKSKLeaving: the KSK this roll withdrew is retired or being
+	// removed: a KSK of the key's own (old) algorithm that retired on T10b
+	// while this ZSK change was pending, so a combined roll's KSK side is
+	// over (its DS gone from the parent for the DS TTL). A KSK of the old
+	// algorithm left over from an earlier roll is not it: the change is
+	// then ZSK-only and waits the signature lifetime. PolicyAlgActiveSince is when the first key of
+	// the role and the policy's algorithm went active, and SigLifetime the
+	// policy's signature validity: a ZSK-only roll keeps the old ZSK signing
+	// beside its successor that long (T19), the drain tdns's relaxed roll
+	// does.
 	OldAlgKSKLeaving     bool
 	PolicyAlgActiveSince time.Time
 	SigLifetime          time.Duration

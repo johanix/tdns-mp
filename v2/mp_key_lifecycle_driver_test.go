@@ -75,6 +75,11 @@ func (w *fakeWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) 
 			served[tag] = true
 		}
 	}
+	if len(served) == 0 {
+		// as the engine reads a NOERROR with no DS, or an NXDOMAIN: known,
+		// empty, and no TTL to speak of
+		return served, 0, true
+	}
 	return served, w.parentTTL, true
 }
 func (w *fakeWire) Strip(zone string, keyid uint16) error {

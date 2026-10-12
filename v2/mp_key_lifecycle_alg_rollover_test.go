@@ -187,6 +187,17 @@ func TestDriverRollsTheAlgorithm(t *testing.T) {
 	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
 		t.Errorf("the old KSK the tick its DS went: %s %s, want active 110 (a validator may hold the DS for the TTL)", st, c)
 	}
+	// the parent serves the old DS again (a secondary that lagged, say):
+	// the note is dropped, and the wait starts afresh when it goes again
+	r.wire.parentDS[a] = true
+	r.tick("the old DS is back")
+	r.clock.Advance(2 * time.Hour)
+	r.tick("two hours with the old DS back")
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Errorf("the old KSK retired while the parent served its DS again: %s %s, want active 110", st, c)
+	}
+	r.wire.parentDS[a] = false
+	r.tick("the old DS gone again")
 	r.clock.Advance(30 * time.Minute)
 	r.tick("half the DS TTL")
 	if st := r.state(a); st != KeyStateActive {
@@ -352,6 +363,108 @@ func TestAZSKOnlyAlgorithmChangeKeepsTheOldZSKForASignatureLifetimeAndCannotBeCa
 		t.Errorf("the refused cancel changed the algorithm to %d", r.l.Policy.ZSKAlgorithm)
 	}
 	r.check("after the refused cancel")
+}
+
+// The withdrawal wait against a parent that answers with no DS at all
+// (NOERROR and empty: the engine reports no TTL), and across a restart.
+// The TTL the wait runs on is the one the parent served the successor's DS
+// with (its T18 note), never the empty answer's zero; and the note is read
+// back after a restart, so the wait neither starts over nor ends at once.
+func TestTheWithdrawalWaitHasATTLWithAnEmptyAnswerAndSurvivesARestart(t *testing.T) {
+	r := newDriverRig(t, "algwait.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	a, _ := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	r.setAlgorithms("change", algRollTo, "KSK")
+	r.tick("minted")
+	b := r.one("minted", KeyStateMpdist, "KSK", algRollTo)
+	r.confirmAll("applied", b)
+	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("propagated")
+	r.wire.parentDS[b] = true
+	r.tick("the parent serves the new DS")
+	r.clock.Advance(61 * time.Minute)
+	r.tick("the DS TTL passed")
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Fatalf("the old KSK after the promotion: %s %s, want active 110", st, c)
+	}
+	// the parent now answers with no DS at all: known, empty, no TTL
+	r.wire.parentDS = map[uint16]bool{}
+	r.tick("an empty answer")
+	if st := r.state(a); st != KeyStateActive {
+		t.Fatalf("the old KSK the tick of the empty answer: %s, want active (the wait is the DS TTL the parent served, not the answer's zero)", st)
+	}
+	r.clock.Advance(20 * time.Minute)
+	r.tick("twenty minutes")
+	if st := r.state(a); st != KeyStateActive {
+		t.Fatalf("the old KSK twenty minutes into an hour's wait: %s, want active", st)
+	}
+	// a restart in the middle of the wait: the note comes back
+	r.l = NewZoneKeyLifecycle(r.l.Zone, r.kdb, r.clock, driverPolicy, r.wire)
+	if err := r.l.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	r.clock.Advance(20 * time.Minute)
+	r.tick("forty minutes, after a restart")
+	if st := r.state(a); st != KeyStateActive {
+		t.Fatalf("the old KSK forty minutes into the wait, after a restart: %s, want active (the wait did not end at the restart)", st)
+	}
+	r.clock.Advance(21 * time.Minute)
+	r.tick("the DS TTL passed")
+	if st, c := r.state(a), r.cols(a); st != KeyStateRetired || c != "100" {
+		t.Errorf("the old KSK an hour after the parent stopped serving its DS: %s %s, want retired 100 (the wait did not start over at the restart)", st, c)
+	}
+	r.check("done")
+}
+
+// A ZSK-only change in a zone that still carries a retired KSK of the old
+// algorithm from an earlier KSK roll (its removal unconfirmed, say): that
+// KSK is not this roll's, so the old ZSK waits the signature lifetime, not
+// the KSK's leaving.
+func TestAZSKOnlyChangeWithALeftoverKSKOfTheOldAlgorithmWaitsTheSignatureLifetime(t *testing.T) {
+	r := newDriverRig(t, "algleft.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	a, z := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	// a KSK roll, through to the old KSK's removal being distributed
+	r.setAlgorithms("change", algRollTo, "KSK")
+	r.tick("minted")
+	b := r.one("minted", KeyStateMpdist, "KSK", algRollTo)
+	r.confirmAll("applied", b)
+	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("propagated")
+	r.wire.parentDS[b] = true
+	r.tick("the parent serves the new DS")
+	r.clock.Advance(61 * time.Minute)
+	r.tick("promoted")
+	r.wire.parentDS[a] = false
+	r.tick("the old DS gone")
+	r.clock.Advance(61 * time.Minute)
+	r.tick("the old DS TTL passed")
+	r.clock.Advance(driverPolicy.Margin + time.Second)
+	r.tick("the margin")
+	if st := r.state(a); st != KeyStateMpremove {
+		t.Fatalf("the old KSK after its roll: %s, want mpremove (its removal unconfirmed)", st)
+	}
+	// now the ZSK: the leftover KSK retired before this change began
+	r.setAlgorithms("change", algRollTo, "ZSK")
+	r.tick("minted")
+	y := r.one("minted", KeyStateMpdist, "ZSK", algRollTo)
+	r.confirmAll("applied", y)
+	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("propagated")
+	if st, c := r.state(y), r.cols(y); st != KeyStateActive || c != "110" {
+		t.Fatalf("the new ZSK: %s %s, want active 110", st, c)
+	}
+	if st, c := r.state(z), r.cols(z); st != KeyStateActive || c != "110" {
+		t.Fatalf("the old ZSK with a leftover KSK of its algorithm in mpremove: %s %s, want active 110 (that KSK is not this roll's: the signature lifetime applies)", st, c)
+	}
+	r.clock.Advance(driverPolicy.SigLifetime + time.Second)
+	r.tick("a signature lifetime")
+	if st, c := r.state(z), r.cols(z); st != KeyStateRetired || c != "100" {
+		t.Errorf("the old ZSK after the signature lifetime: %s %s, want retired 100 (T19)", st, c)
+	}
+	r.check("done")
 }
 
 // Cancel while nothing of the new algorithm signs: the algorithm goes
