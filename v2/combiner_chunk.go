@@ -691,8 +691,9 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 // --- The customer's consent to a stored at-ns publication (tdns-mp #115) ---
 //
 // A publish instruction is stored, and acted on later: on an NS change
-// (combinerResyncSignalKeys) and when the combiner starts or re-applies
-// (ApplyPendingSignalKeys, CombinerReapplyContributions). The agent asks
+// (combinerResyncSignalKeys), when the combiner starts or re-applies
+// (ApplyPendingSignalKeys, CombinerReapplyContributions), and when a
+// provider zone refreshes (MPPreRefresh). The agent asks
 // for at-ns only when the customer's HSYNCPARAM says pubkey
 // (publishLocations), but a stored instruction can say at-ns for a zone that
 // does not: an agent from before that rule sent it, or the customer has
@@ -820,6 +821,28 @@ func (mpzd *MPZoneData) withdrawSignalKeysWithoutConsent(senderID, zone string, 
 		withdrawSignalKeys(stored, hdb)
 	}
 	return true
+}
+
+// withdrawAllSignalKeysWithoutConsent goes through every stored instruction
+// and withdraws the at-ns publication of each zone that is loaded and does
+// not say pubkey (withdrawSignalKeys). A re-apply and a refresh of a provider
+// zone do this before they put the held _signal KEYs into the zone, so that
+// neither brings back a name the customer no longer consents to.
+func withdrawAllSignalKeysWithoutConsent(hdb *HsyncDB) error {
+	allInstr, err := LoadAllPublishInstructions(hdb)
+	if err != nil {
+		return err
+	}
+	for childZone, senders := range allInstr {
+		child, ok := Zones.Get(childZone)
+		if !ok || !child.lacksPubkeyConsent() {
+			continue
+		}
+		for _, stored := range senders {
+			withdrawSignalKeys(stored, hdb)
+		}
+	}
+	return nil
 }
 
 // publishSignalKeyToProvider directly applies a _signal KEY record to the

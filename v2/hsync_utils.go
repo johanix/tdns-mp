@@ -1444,7 +1444,29 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			}
 		}
 
-		if mpzd.MPOptions[tdns.OptAllowEdits] {
+		// A provider zone has no HSYNC records and so never has allow-edits,
+		// but the combiner writes to it all the same: what agents contribute
+		// of its configured record types, the _signal KEYs. The upstream's
+		// copy has none of that, so it goes onto the incoming zone here, by
+		// the combine a customer zone's contributions go through. Without it
+		// a refresh served the provider zone without its _signal KEYs until
+		// the next contribution change (the refresh side of tdns-mp #171).
+		//
+		// The stored at-ns instructions are asked about first, as at a start
+		// and at a re-apply: the names of a zone that does not say pubkey are
+		// retracted, and the combine does not bring them back. When the
+		// instructions cannot be read the zone keeps the names it has.
+		isProvider := GetProviderZoneRRtypes(mpzd.ZoneName) != nil
+		if isProvider {
+			if hdb := NewHsyncDB(mpzd.KeyDB); hdb != nil {
+				if err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
+					lg.Error("failed to load publish instructions; the provider zone's _signal KEYs are not checked against the customers' consent",
+						"zone", mpzd.ZoneName, "err", err)
+				}
+			}
+		}
+
+		if mpzd.MPOptions[tdns.OptAllowEdits] || isProvider {
 			// Wrap new_zd with the persistent MP state so that
 			// CombineWithLocalChanges can read AgentContributions
 			// and CombinerData from the real MPState.

@@ -887,18 +887,8 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	// carry the customer's consent is withdrawn first, so that neither the
 	// snapshot nor step 2 puts its _signal KEYs back (withdrawSignalKeys).
 	if isProvider {
-		allInstr, err := LoadAllPublishInstructions(hdb)
-		if err != nil {
+		if err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
-		}
-		for childZone, senders := range allInstr {
-			child, ok := Zones.Get(childZone)
-			if !ok || !child.lacksPubkeyConsent() {
-				continue
-			}
-			for _, stored := range senders {
-				withdrawSignalKeys(stored, hdb)
-			}
 		}
 	}
 
