@@ -80,10 +80,11 @@ A combiner is the exception, by design: the agent that delivers an operation and
 | The same operations, at a combiner | Named origin: a voting member of the zone | The operation is refused |
 | Election: CALL, VOTE, CONFIRM | A voting member, of the group or of the zone | Dropped, never counted |
 | RFI SYNC: a request for the zone's state | A member of the zone | Refused |
-| RFI CONFIG: the zone transfer set-up | A member that the HSYNC3 `upstream` fields relate to the answering agent, with or without a role: the HSYNC3 record states the zone owner's intent | Refused |
+| RFI CONFIG: the zone transfer set-up | A voting member or a member with no role that the HSYNC3 `upstream` fields relate to the answering agent: the HSYNC3 record states the zone owner's intent. Not an auditor | Refused |
+| RFI AUDIT | A member of the zone | Refused |
 | `CONFIG sig0key`: the zone's SIG(0) private key | A voting member, related in the same way | Refused |
 
-An auditor falls under the same rules: its operations are not applied and its votes are not counted.
+An auditor falls under the same rules: its operations are not applied and its votes are not counted. A status update and a relocate have no rule of their own: they are admitted (3.1), and they count as sent by the sender the transport established (3.2), so a peer can relocate nobody but itself.
 
 What is sent to whom:
 
@@ -176,7 +177,7 @@ Every voting member of the zone other than the asker. The zones are those in whi
 
 ### 5.3 What is asked
 
-RFI SYNC, with the reason word and a name for the request. It is a plain send with a synchronous acknowledgement, not a queued message.
+RFI SYNC, with the reason word and a name for the request, both carried in the message. It is a plain send with a synchronous acknowledgement, not a queued message.
 
 ### 5.4 What is answered
 
@@ -185,7 +186,7 @@ One SYNC to the asker alone, through the confirmed queue, holding the answering 
 1. **Every RRtype is named.** One `replace` for each type a provider may contribute (NS, KEY, CDS, CSYNC, DNSKEY), empty where the agent holds none. The asker's stale records go.
 2. **The key states travel.** When the answering agent's provider signs the zone, the DNSKEY operation carries the key states, from its signer's latest inventory.
 3. **An answer always goes out,** also from an agent that holds nothing.
-4. **The marker.** The SYNC names the request it answers and says `complete` or not, with the reason when not. An agent answers "not complete" when it cannot vouch for its own state: its provider signs and it has no inventory from its signer yet, or it has not finished reading its own contributions back from its combiner.
+4. **The marker.** The SYNC names the request it answers and says `complete` or not, with the reason when not. An agent answers "not complete" when it cannot vouch for its own state: its provider signs and it has no inventory from its signer yet, or it has not finished reading its own contributions back from its combiner. A "not complete" answer carries the marker and no operation: empty sets from an agent that has not read its own state would remove its contributions at every peer.
 
 The asker handles the operations as it handles any remote update: it evaluates them, applies them, passes them to its own combiner and confirms. An older message that leaves a queue later does not undo the answer.
 
@@ -203,14 +204,14 @@ A zone is **caught up** when this agent has read its own provider's state back f
 
 - **The DS set.** For a leader whose own signer does not own the zone, the zone's DS set is unknown while a provider in `signers=` has not spoken about its keys. A complete answer makes a provider speak, and a set that turns from unknown to known asks for a sync with the parent.
 - **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, its own signer), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
-- **Not "in sync".** When NS and glue are in step with the parent and there is no DS set to compare, for a zone that names a signer, the leader does not report "in sync". It reports "DS set unknown, waiting for" and the provider.
+- **Not "in sync".** When NS and glue are in step with the parent and there is no DS set to compare, for a zone that names a signer, the leader does not report "in sync". It reports "DS set unknown, waiting for" and the provider. When every signer has spoken and none of them holds a key that a DS is made from, it says that.
 - **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait.
 
 The stall this adds is small. Catch-up needs the voting members to be reachable, and so does having a leader.
 
 ### 5.7 Retries
 
-A request that fails, is refused, or is answered "not complete" is sent again after 5 s, 15 s, 30 s and 60 s, and then every 5 minutes, for as long as the peer is OPERATIONAL. There is no bound: a stall must stay visible and end when its cause ends. The first failure is logged, then one line an hour. A peer that stops being OPERATIONAL pauses its requests, and they start again when it is back. A refusal is expected for a short while after a join, until the peer has loaded the zone with the new record.
+A request that fails, is refused, is answered "not complete", or is acknowledged and then not answered is sent again after 5 s, 15 s, 30 s and 60 s, and then every 5 minutes, for as long as the peer is OPERATIONAL. There is no bound: a stall must stay visible and end when its cause ends. The first failure is logged, then one line an hour. A peer that stops being OPERATIONAL pauses its requests, and they start again when it is back. A refusal is expected for a short while after a join, until the peer has loaded the zone with the new record.
 
 ### 5.8 The cost
 
