@@ -148,7 +148,8 @@ type ZoneView struct {
 	// ActiveOfRoleAndAlg reports another active key of the key's role and
 	// algorithm on this provider. RolloverRequested says the promotion is a
 	// rollover, requested or due: the active key retires in the same step.
-	// AlgRollInFlight lifts P5's one-per-role rule for the roll's duration.
+	// AlgRollInFlight lifts P5's one-per-role rule for the roll's one
+	// promotion: until a key of the policy's algorithm signs for the role.
 	ActiveOfRoleAndAlg bool
 	RolloverRequested  bool // the promotion under way is a rollover (T9)
 	RolloverPending    bool // a rollover of the role has been requested and not fired (C3, T1)

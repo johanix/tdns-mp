@@ -362,13 +362,16 @@ func (l *ZoneKeyLifecycle) policyAlgorithm(role string) uint8 {
 }
 
 // algRollInFlight: an active key of the role whose algorithm is not the
-// policy's, beside a key of the policy's algorithm in the pipeline.
+// policy's, beside a key of the policy's algorithm in the pipeline, and
+// none of the policy's algorithm signing yet: the roll's one promotion.
+// Once a key of the new algorithm signs, the next standby of it waits as
+// any standby does while the old algorithm's key signs on.
 func (l *ZoneKeyLifecycle) algRollInFlight(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) bool {
 	want := l.Policy.ZSKAlgorithm
 	if role == "KSK" {
 		want = l.Policy.KSKAlgorithm
 	}
-	oldActive, newComing := false, false
+	oldActive, newComing, newActive := false, false, false
 	for _, o := range all {
 		if roleOf(o.Flags) != role {
 			continue
@@ -376,11 +379,13 @@ func (l *ZoneKeyLifecycle) algRollInFlight(role string, all map[uint16]tdns.Dnss
 		switch {
 		case o.State == KeyStateActive && o.Algorithm != want:
 			oldActive = true
-		case o.Algorithm == want && o.State != KeyStateActive && o.State != KeyStateRetired && o.State != KeyStateMpremove && o.State != KeyStateRemoved:
+		case o.State == KeyStateActive && o.Algorithm == want:
+			newActive = true
+		case o.Algorithm == want && o.State != KeyStateRetired && o.State != KeyStateMpremove && o.State != KeyStateRemoved:
 			newComing = true
 		}
 	}
-	return oldActive && newComing
+	return oldActive && newComing && !newActive
 }
 
 // Apply feeds one event for one key through the table and carries out the
@@ -1090,7 +1095,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		// standby (a KSK once the parent has served its DS for the DS TTL,
 		// T9's wait, O7)
 		alg := l.policyAlgorithm(role)
-		pipeline, policyKeys, active, algPending, standbys := 0, 0, 0, false, []tdns.DnssecKeyWithTimestamps{}
+		pipeline, policyKeys, active, activeOfAlg, algPending, standbys := 0, 0, 0, 0, false, []tdns.DnssecKeyWithTimestamps{}
 		var oldest *tdns.DnssecKeyWithTimestamps
 		for _, keyid := range keytagsOf(all) {
 			k := all[keyid]
@@ -1113,6 +1118,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 					algPending = true
 				} else {
 					policyKeys++
+					activeOfAlg++
 				}
 				kk := k
 				// the oldest by active_at; a key with no stamp counts as the
@@ -1129,8 +1135,13 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		}
 		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
 		// T9: promote for a rollover requested or due, a role without an
-		// active key, or an algorithm rollover under way
-		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due || algPending) {
+		// active key, or an algorithm rollover whose algorithm does not sign
+		// yet: the roll promotes once. The standby the count mints after
+		// that promotion waits as any standby does while the old
+		// algorithm's key signs on (T10a's wait, T19's); promoting it on the
+		// old key's account rolled the new algorithm's key once per standby
+		// (seen on the testbed).
+		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due || (algPending && activeOfAlg == 0)) {
 			sort.Slice(standbys, func(i, j int) bool { return standbys[i].KeyTag < standbys[j].KeyTag })
 			l.rolling = role
 			_, to, err := l.applyLocked(standbys[0].KeyTag, EvPromote)

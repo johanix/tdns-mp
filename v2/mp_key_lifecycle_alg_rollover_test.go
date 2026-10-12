@@ -799,3 +799,86 @@ func TestHarnessThreeProvidersRollTheAlgorithm(t *testing.T) {
 		}
 	}
 }
+
+// The roll promotes the new algorithm once. After the new ZSK signs, the
+// standby count mints the next ZSK of the new algorithm; it waits as any
+// standby does while the old algorithm's ZSK signs on (T19's wait), and is
+// not promoted on the old key's account. Found on the testbed: one ZSK roll
+// per standby, each retiring the roll's key, until the old ZSK retired.
+func TestAnAlgorithmRolloverPromotesTheNewAlgorithmOnce(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyZSK = 1
+	r := newDriverRig(t, "algonce.owned.example.", pol, "p2")
+	r.wire.parentTTL = time.Hour
+	a, z := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	// the old algorithm's standby ZSK, propagated
+	r.tick("standby wanted")
+	z2 := r.one("standby wanted", KeyStateMpdist, "ZSK", dns.ED25519)
+	r.confirmAll("standby applied", z2)
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("standby propagated")
+	if st := r.state(z2); st != KeyStateStandby {
+		t.Fatalf("the old algorithm's standby: %s", st)
+	}
+
+	r.setAlgorithms("change", algRollTo, "ZSK")
+	r.tick("changed")
+	if st := r.state(z2); st != KeyStateMpremove {
+		t.Fatalf("the old algorithm's standby after the change: %s, want mpremove", st)
+	}
+	y := r.one("changed", KeyStateMpdist, "ZSK", algRollTo)
+	if _, to, err := r.l.ConfirmKind(z2, "p2", "applied", "", true); err != nil || to != KeyStateRemoved {
+		t.Fatalf("the withdrawn standby's removal: to=%s err=%v", to, err)
+	}
+	r.confirmAll("the new ZSK applied", y)
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("the new ZSK propagated")
+	r.tick("the new ZSK signs")
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("the new ZSK %d: %s, want active", y, st)
+	}
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d: %s, want active: it signs on until T19", z, st)
+	}
+	// the standby count mints the next ZSK of the new algorithm
+	ys := r.keysOfAlg(KeyStateMpdist, "ZSK", algRollTo)
+	if len(ys) == 0 {
+		r.tick("standby wanted again")
+		ys = r.keysOfAlg(KeyStateMpdist, "ZSK", algRollTo)
+	}
+	if len(ys) != 1 {
+		t.Fatalf("the standby count's next ZSK of %s: %v, want one", dns.AlgorithmToString[algRollTo], ys)
+	}
+	y2 := ys[0]
+	r.confirmAll("the next ZSK applied", y2)
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	for i := 0; i < 3; i++ {
+		r.tick("the next ZSK propagated")
+	}
+	if st := r.state(y2); st != KeyStateStandby {
+		t.Fatalf("the standby count's ZSK %d: %s, want standby: the roll promotes once", y2, st)
+	}
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("the roll's ZSK %d: %s, want active: it was rolled again", y, st)
+	}
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d: %s, want active", z, st)
+	}
+	if st := r.rollOf("ZSK"); st == nil || !strings.Contains(st.Step, "both ZSKs sign") {
+		t.Errorf("ZSK roll step with the next standby waiting: %+v", st)
+	}
+	// a rollover requested still rolls the new algorithm's ZSK as any key:
+	// the standby is promoted and the roll's ZSK retires (T10)
+	r.l.RequestRollover("ZSK")
+	r.tick("rollover requested")
+	if st := r.state(y2); st != KeyStateActive {
+		t.Fatalf("the standby after a rollover requested: %s, want active", st)
+	}
+	if st := r.state(y); st != KeyStateRetired {
+		t.Fatalf("the roll's ZSK after a rollover requested: %s, want retired", st)
+	}
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK after the requested roll: %s, want active still", st)
+	}
+}
