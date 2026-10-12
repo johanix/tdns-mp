@@ -137,10 +137,84 @@ var delegationSyncFailureDelays = []time.Duration{
 	8 * time.Minute, 15 * time.Minute, 15 * time.Minute, 15 * time.Minute,
 }
 
-type delegationSyncFailures struct {
-	mu      sync.Mutex
-	attempt map[string]int  // zone -> failures seen in this chain
-	waiting map[string]bool // zone -> a retry is scheduled and has not fired
+// A sync that goes to the parent as a NOTIFY is asked again too, for
+// another reason: it is not known to have done anything. The answer to an
+// UPDATE is the parent's word on the change. A NOTIFY only asks the parent
+// to come and look. The parent scans the zone's nameservers some time
+// later, and finds nothing to do if they do not serve the change yet. Seen
+// on a test fleet: the leader, a provider that does not sign the zone, sent
+// NOTIFY(CDS) in the second the signer created the CDS; the parent scanned,
+// found no change, and the sync counted as done with no DS at the parent.
+// A NOTIFY(CSYNC) that is early in the same way makes the parent refuse, or
+// apply the NS set from before the change and stay one change behind.
+//
+// So after a NOTIFY the leader looks at the parent again: it asks for the
+// explicit sync once more after a delay. That sync analyses the parent
+// first and sends only for a difference, so the ask is the check, and the
+// NOTIFY is repeated only while the parent still differs. The delays grow,
+// to about an hour in all: the zone's nameservers need seconds to a minute
+// to serve a change, and the parent then needs to scan. The chain is ended
+// by an analysis that finds the parent in sync, by losing the leadership,
+// or by the bound (then the next change of the delegation's data, or an
+// election, asks anew).
+var delegationSyncNotifyDelays = []time.Duration{
+	30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute,
+	8 * time.Minute, 15 * time.Minute, 30 * time.Minute,
+}
+
+// delegationSyncChains is what the leader keeps of each zone's sync between
+// two asks: one chain per zone, whether the last sync failed or went out as
+// a NOTIFY, and so at most one ask waiting per zone.
+type delegationSyncChains struct {
+	mu    sync.Mutex
+	zones map[string]*delegationSyncChain
+}
+
+type delegationSyncChain struct {
+	failures int    // syncs that failed, in a row
+	rechecks int    // checks of the parent scheduled after a NOTIFY, in this chain
+	notified string // the last NOTIFY sent that no analysis has seen at the parent ("CSYNC", "CDS", "CSYNC, CDS")
+	waiting  bool   // an ask is scheduled and has not fired
+	ask      int    // the number of the ask that waits: one that fires with another number was replaced
+}
+
+// of returns the zone's chain, a new one if it has none. The caller holds mu.
+func (c *delegationSyncChains) of(zone string) *delegationSyncChain {
+	if c.zones == nil {
+		c.zones = map[string]*delegationSyncChain{}
+	}
+	ch := c.zones[zone]
+	if ch == nil {
+		ch = &delegationSyncChain{}
+		c.zones[zone] = ch
+	}
+	return ch
+}
+
+// delegationSyncAskAfter schedules the zone's one waiting ask: the explicit
+// sync, after the delay. The caller has marked the chain as waiting and
+// given the ask its number, under the lock.
+func (conf *Config) delegationSyncAskAfter(ctx context.Context, zone string, ask int, delay time.Duration, why string) {
+	c := &conf.InternalMp.delegationSyncChains
+	time.AfterFunc(delay, func() {
+		c.mu.Lock()
+		ch := c.zones[zone]
+		if ch == nil || ch.ask != ask {
+			c.mu.Unlock()
+			return
+		}
+		ch.waiting = false
+		c.mu.Unlock()
+		if !conf.requestDelegationSync(ctx, zone, why) {
+			// The ask was not queued now: not the leader any more, the
+			// zone gone, the engine ended, or the syncher's queue full
+			// (the ask retries the queue by itself for a while). This
+			// chain ends here: whoever leads now has its own, and a sync
+			// that fails, or sends a NOTIFY, after a queued retry starts a
+			// new chain from the first delay.
+			conf.delegationSyncSucceeded(zone)
+		}
+	})
 }
 
 // delegationSyncFailed notes a failed sync of a zone and schedules the next
@@ -151,55 +225,144 @@ func (conf *Config) delegationSyncFailed(ctx context.Context, zone string, cause
 }
 
 func (conf *Config) delegationSyncFailedWith(ctx context.Context, zone string, cause error, delays []time.Duration) {
-	f := &conf.InternalMp.delegationSyncFailures
-	f.mu.Lock()
-	if f.attempt == nil {
-		f.attempt, f.waiting = map[string]int{}, map[string]bool{}
-	}
-	if f.waiting[zone] {
-		f.mu.Unlock()
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	ch := c.of(zone)
+	if ch.waiting {
+		c.mu.Unlock()
 		return
 	}
-	n := f.attempt[zone]
+	n := ch.failures
 	if n >= len(delays) {
-		delete(f.attempt, zone)
-		f.mu.Unlock()
+		delete(c.zones, zone)
+		c.mu.Unlock()
 		lgEngine.Warn("the delegation sync keeps failing; given up until the DS set changes or an election is held", "zone", zone, "failures", n+1, "last", cause)
 		return
 	}
-	f.attempt[zone] = n + 1
-	f.waiting[zone] = true
-	f.mu.Unlock()
+	ch.failures, ch.waiting = n+1, true
+	ch.ask++
+	ask := ch.ask
+	c.mu.Unlock()
 	delay := delays[n]
 	lgEngine.Warn("the delegation sync failed; asking again", "zone", zone, "failure", n+1, "in", delay, "cause", cause)
-	time.AfterFunc(delay, func() {
-		f.mu.Lock()
-		delete(f.waiting, zone)
-		f.mu.Unlock()
-		if !conf.requestDelegationSync(ctx, zone, "the last delegation sync failed") {
-			// The ask was not queued now: not the leader any more, the
-			// zone gone, the engine ended, or the syncher's queue full
-			// (the ask retries the queue by itself for a while). This
-			// chain ends here: whoever leads now has its own, and a sync
-			// that fails after a queued retry starts a new chain from the
-			// first delay.
-			conf.delegationSyncSucceeded(zone)
-		}
-	})
+	conf.delegationSyncAskAfter(ctx, zone, ask, delay, "the last delegation sync failed")
 }
 
-// delegationSyncSucceeded ends a zone's chain of retries: the next failure
-// starts from the first delay again.
-func (conf *Config) delegationSyncSucceeded(zone string) {
-	f := &conf.InternalMp.delegationSyncFailures
-	f.mu.Lock()
-	delete(f.attempt, zone)
-	f.mu.Unlock()
+// delegationSyncNotified is for a sync that SyncZoneDelegation carried out
+// without error: if it went to the parent as a NOTIFY, for a zone whose
+// leader this agent is, it schedules the look at the parent that decides
+// whether the sync is done, and reports true. The caller then does not book
+// the sync as done and does not tell the peers. delays is read once per
+// call, as for a failure.
+func (conf *Config) delegationSyncNotified(ctx context.Context, ds tdns.DelegationSyncRequest, msg string) bool {
+	sent := notifiesSent(msg)
+	if sent == "" || !mpLeaderSync(conf, ds) {
+		return false
+	}
+	conf.delegationSyncNotifiedWith(ctx, ds.ZoneName, sent, delegationSyncNotifyDelays)
+	return true
+}
+
+func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string, sent string, delays []time.Duration) {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	ch := c.of(zone)
+	ch.notified, ch.failures = sent, 0
+	n := ch.rechecks
+	// A NOTIFY while a check waits did not come from the chain: its own ask
+	// has not fired. A new change, or an election, asked in between. The
+	// check that waits was timed for an earlier NOTIFY, so it is replaced by
+	// the same check timed for this one, by the first delay: the parent is
+	// then looked at neither seconds after a NOTIFY nor half an hour after a
+	// change. The count of checks stays as it is. Only the chain's own asks
+	// move it towards the bound, so a trigger that comes again and again (an
+	// election, at every renewal of the lease) does not keep the chain from
+	// ending.
+	retimed := ch.waiting && n > 0 && len(delays) > 0
+	if !retimed && n >= len(delays) {
+		delete(c.zones, zone)
+		c.mu.Unlock()
+		lgEngine.Warn("the parent still differs from the zone after the last check, and a last NOTIFY has been sent; given up until the delegation's data changes or an election is held", "zone", zone, "notify", sent, "checks", n)
+		return
+	}
+	delay := delays[0]
+	if !retimed {
+		delay = delays[n]
+		ch.rechecks = n + 1
+	}
+	check := ch.rechecks
+	ch.waiting = true
+	ch.ask++
+	ask := ch.ask
+	c.mu.Unlock()
+	lgEngine.Info("the delegation sync went to the parent as a NOTIFY; checking the parent again", "zone", zone, "notify", sent, "check", check, "in", delay)
+	conf.delegationSyncAskAfter(ctx, zone, ask, delay, "a NOTIFY was sent to the parent, which is checked again")
+}
+
+// delegationSyncSucceeded ends a zone's chain: the next failure, or the next
+// NOTIFY, starts from the first delay again. An ask that still waits is left
+// to fire; it finds a chain with nothing in it. Returned are the NOTIFY the
+// chain had sent and the number of checks it had asked for, for the caller
+// that ends the chain because the parent was found in sync.
+func (conf *Config) delegationSyncSucceeded(zone string) (notified string, rechecks int) {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := c.zones[zone]
+	if ch == nil {
+		return "", 0
+	}
+	notified, rechecks = ch.notified, ch.rechecks
+	if ch.waiting {
+		ch.failures, ch.rechecks, ch.notified = 0, 0, ""
+	} else {
+		delete(c.zones, zone)
+	}
+	return notified, rechecks
+}
+
+// delegationSyncInSync is for an analysis that found the parent in sync with
+// the zone. It ends the zone's chain. If the chain had sent a NOTIFY, this
+// is when that sync is done, so the peers are told now, once; a sync that
+// never sent anything tells them nothing, as before.
+func (conf *Config) delegationSyncInSync(zone string) {
+	sent, checks := conf.delegationSyncSucceeded(zone)
+	if sent == "" {
+		return
+	}
+	lgEngine.Info("the parent is in sync with the zone after the NOTIFY", "zone", zone, "notify", sent, "checks", checks)
+	go notifyPeersParentSyncDone(conf, zone, dns.RcodeToString[dns.RcodeSuccess],
+		fmt.Sprintf("the parent is in sync with zone %s after NOTIFY(%s)", zone, sent))
+}
+
+// delegationSyncNotifyMarker starts the message of a sync that tdns sent as
+// a NOTIFY (SyncZoneDelegationViaNotify); the NOTIFY types follow it, up to
+// the closing bracket.
+const delegationSyncNotifyMarker = "SyncZoneDelegationViaNotify: Sent NOTIFY("
+
+// notifiesSent reads from the message of a sync which NOTIFYs it handed to
+// the notifier: "CSYNC", "CDS" or "CSYNC, CDS", and "" for a sync that went
+// as an UPDATE or through the API, or that sent nothing. The message is the
+// only place where SyncZoneDelegation says which scheme carried the sync:
+// the rcode is NOERROR either way, and the update result is as empty after
+// a NOTIFY as after an API call. The words are tdns's, not a contract; a
+// test runs the real sync and fails if they change.
+func notifiesSent(msg string) string {
+	rest, ok := strings.CutPrefix(msg, delegationSyncNotifyMarker)
+	if !ok {
+		return ""
+	}
+	types, _, ok := strings.Cut(rest, ")")
+	if !ok {
+		return ""
+	}
+	return types
 }
 
 // mpLeaderSync: the request is for a multi-provider zone that syncs with its
 // parent through its agents, which is the sync requestDelegationSync asks
-// for and the one whose failure is asked again.
+// for, and the one whose failure is asked again and whose NOTIFY is checked
+// at the parent.
 func mpLeaderSync(conf *Config, ds tdns.DelegationSyncRequest) bool {
 	return conf != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && ds.ZoneData.Options[tdns.OptParentSync]
 }

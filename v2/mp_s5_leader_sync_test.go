@@ -25,15 +25,22 @@ type leaderSyncRig struct {
 
 func newLeaderSyncRig(t *testing.T, zone string) *leaderSyncRig {
 	t.Helper()
+	return newLeaderSyncRigAs(t, zone, "agent.us.example.")
+}
+
+// newLeaderSyncRigAs is the rig for an agent with another identity than
+// the usual one: a test that also runs the agent's transport has one.
+func newLeaderSyncRigAs(t *testing.T, zone string, identity AgentId) *leaderSyncRig {
+	t.Helper()
 	mpzd := signerTestZone(t, zone, newMPTestKeyDB(t))
 	q := make(chan tdns.DelegationSyncRequest, 8)
 	mpzd.DelegationSyncQ = q
 	mpzd.Options[tdns.OptParentSync] = true
 	conf := &Config{Config: &tdns.Config{}}
-	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: "agent.us.example."})
+	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: string(identity)})
 	conf.InternalMp.KeyLifecycleOwner = NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return nil })
 	conf.InternalMp.AgentRegistry = &AgentRegistry{}
-	lem := NewLeaderElectionManager("agent.us.example.", time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
+	lem := NewLeaderElectionManager(identity, time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
 	conf.InternalMp.LeaderElectionManager = lem
 	return &leaderSyncRig{conf: conf, e: &HsyncDataEngine{conf: conf}, mpzd: mpzd, q: q, lem: lem, sdq: make(chan *SynchedDataUpdate, 8)}
 }

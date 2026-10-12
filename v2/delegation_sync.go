@@ -101,13 +101,18 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					zd.SetParent(parent)
 				}
 
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, ds.SyncStatus, imr().Imr)
+				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, ds.SyncStatus, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
 				}
 				ds.SyncStatus.UpdateResult = ur
 				lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+				if pending {
+					// A sync sent as a NOTIFY is not done, and the peers
+					// are told nothing, until the parent is seen in sync
+					continue
+				}
 				// Notify peer agents that parent sync is done
 				go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
 
@@ -147,7 +152,10 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if syncstate.InSync {
 					lg.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
 						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
-					conf.delegationSyncSucceeded(ds.ZoneName)
+					// This ends the zone's retries. It is also what a sync
+					// that went out as a NOTIFY waits for: the peers are
+					// told of that sync now
+					conf.delegationSyncInSync(ds.ZoneName)
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
@@ -155,7 +163,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr().Imr)
+				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, syncstate, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -168,10 +176,14 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
 					}
 				} else {
-					conf.delegationSyncSucceeded(ds.ZoneName)
 					lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-					// Notify peer agents that parent sync is done
-					go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
+					// A sync sent as a NOTIFY is not done, and the peers
+					// are told nothing, until the parent is seen in sync
+					if !pending {
+						conf.delegationSyncSucceeded(ds.ZoneName)
+						// Notify peer agents that parent sync is done
+						go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
+					}
 				}
 				syncstate.Msg = msg
 				syncstate.Rcode = rcode
@@ -210,6 +222,21 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			}
 		}
 	}
+}
+
+// syncDelegation is the one place where a delegation sync leaves this daemon
+// for the parent, for the implicit and the explicit request alike. pending
+// is set when nothing failed and the sync is still not done: it went out as
+// a NOTIFY for a zone this agent leads, and the parent is looked at again
+// before it counts (mp_s5_leader_sync.go). The caller then books nothing and
+// tells the peers nothing yet.
+func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
+	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (msg string, rcode uint8, ur tdns.UpdateResult, pending bool, err error) {
+	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
+	if err == nil {
+		pending = conf.delegationSyncNotified(ctx, ds, msg)
+	}
+	return msg, rcode, ur, pending, err
 }
 
 // notifyPeersParentSyncDone sends STATUS-UPDATE("parentsync-done") to all
