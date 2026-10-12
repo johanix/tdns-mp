@@ -374,14 +374,16 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName
 		})
 	}
 
-	// Membership changed (HSYNC3 identity add) — kick a leader election.
+	// Membership changed (HSYNC3 identity add): a zone without peers elects
+	// its one agent here. A zone in a provider group starts nothing here:
+	// its election is the group's (leaveElectionToGroup).
 	if ar.LeaderElectionManager != nil {
 		lem := ar.LeaderElectionManager
 		if lem.configuredPeers(zonename) == 0 {
 			lem.StartElection(zonename, 0)
 		} else if ar.ProviderGroupManager != nil {
 			if pg := ar.ProviderGroupManager.GetGroupForZone(zonename); pg != nil {
-				lem.DeferGroupElection(pg.GroupHash)
+				lem.leaveElectionToGroup(pg.GroupHash)
 			}
 		}
 	}

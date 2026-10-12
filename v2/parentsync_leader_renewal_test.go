@@ -306,6 +306,11 @@ func TestAnElectionRetryYieldsToANewerTerm(t *testing.T) {
 	zones := []ZoneName{"zone.example."}
 	lem := NewLeaderElectionManager("a.example.", time.Hour,
 		func(ZoneName, string, map[string][]string) error { return nil })
+	// The retry reads the group from the provider group manager when it
+	// fires, and starts nothing for a group that is not there.
+	pgm := NewProviderGroupManager("a.example.")
+	pgm.Groups[group] = &ProviderGroup{GroupHash: group, Members: members, VotingMembers: members, Zones: zones}
+	lem.SetProviderGroupManager(pgm)
 
 	lem.StartGroupElection(group, members, zones)
 	lem.mu.RLock()
