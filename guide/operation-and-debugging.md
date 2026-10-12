@@ -276,6 +276,16 @@ depends on who signs the zone:
   A zone that no provider signs is relayed the same way,
   from the provider's own combiner.
 
+**When the role changes.** A provider that starts to
+sign a zone it relayed goes on from one past the serial
+it was serving, also when its signer is restarted in
+between; the servers downstream of the signer keep
+transferring. A provider that stops signing a zone and
+relays it instead drops to the upstream signer's serial,
+which is normally lower than its own count. The servers
+downstream of it then hold the higher serial and need a
+forced retransfer, as after an upgrade (below).
+
 **Upgrading a signer that relays zones.** Earlier
 versions counted a serial of their own for a relayed
 zone as well, so a signer's copy could be a few serials
