@@ -106,6 +106,8 @@ A provider group is a set of providers together with what each of them is: the v
 
 So the providers a, b and c with a role each are one group, and a and b with a role and c with none are another, although the same three providers are in both.
 
+The auditors are part of the make-up because gossip is per group, and an auditor takes part in its group's gossip as a member: it gets the group's state, gives its own row, and learns who leads. Two things follow, and both are accepted. A zone whose owner changes its auditor moves to another group, which costs the hold of 4.9 and nothing more. And the same providers with another auditor are another group, with its own election and its own share of every beat. Auditors are few, and an auditor is by its purpose the stable part of a zone: it is there to watch the other changes, not to be changed.
+
 There is one election per group, among its voting members, and the group's leader leads all its zones. All zones of a group agree on who votes, by definition. So a leader has a role in every zone it leads, and a provider with no role in a zone never leads that zone.
 
 **A zone that joins or leaves a group forces no election.** A zone that arrives in a group with a leader takes that leader. A group elects when it has no leader: when it is new, when its lease runs out, or when its leader is lost.
