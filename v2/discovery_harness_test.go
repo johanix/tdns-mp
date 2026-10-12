@@ -65,14 +65,28 @@ func rrsetKey(name string, rrtype uint16) string {
 // newDiscoveryZone starts the server; it stops with the test.
 func newDiscoveryZone(t *testing.T) *discoveryZone {
 	t.Helper()
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("discovery zone: listen: %v", err)
-	}
-	host, port, _ := net.SplitHostPort(pc.LocalAddr().String())
-	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
-	if err != nil {
-		t.Fatalf("discovery zone: listen tcp: %v", err)
+	// One port for UDP and TCP. The system picks the UDP port, and something
+	// else on the machine may hold that number for TCP: try another one.
+	var (
+		pc         *net.UDPConn
+		ln         net.Listener
+		host, port string
+	)
+	for try := 1; ; try++ {
+		var err error
+		pc, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("discovery zone: listen: %v", err)
+		}
+		host, port, _ = net.SplitHostPort(pc.LocalAddr().String())
+		ln, err = net.Listen("tcp", net.JoinHostPort(host, port))
+		if err == nil {
+			break
+		}
+		pc.Close()
+		if try == 10 {
+			t.Fatalf("discovery zone: listen tcp: %v", err)
+		}
 	}
 	z := &discoveryZone{addr: host, port: port, rrsets: map[string][]dns.RR{}, queries: map[string]int{}}
 
