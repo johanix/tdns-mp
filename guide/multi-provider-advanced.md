@@ -403,6 +403,13 @@ When NS records change (providers added or removed), the
 combiner resyncs: it diffs the current NS set against the
 stored set and adds/removes `_signal` KEYs accordingly.
 
+The combiner stores the instruction. The provider zone's
+own source does not have the `_signal` KEYs, so when the
+combiner starts it publishes them again from the stored
+instructions, as soon as the provider zone has loaded. A
+customer zone that has not loaded by then is asked for its
+consent (below) when it has.
+
 The `_signal` names need the customer's consent: the
 `pubkey` flag in the zone's HSYNCPARAM record. The agent
 asks for `at-ns` only when the flag is there, and the
