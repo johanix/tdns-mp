@@ -197,11 +197,18 @@ required.
 ### 4.3 Observations
 
 Observations are anomalies the auditor has *inferred* —
-not raw events. Examples: a SYNC was sent to N peers
-but only N-1 confirmed; one peer's gossip view of
-another is persistently different from everyone else's;
-a DNSKEY appeared at one provider's served zone without
-a corresponding SYNC.
+not raw events. There are four today:
+
+- a provider that has stopped beating, and its return;
+- a provider declared in HSYNC3 that the auditor has
+  never heard from;
+- a DNSKEY, CDS or CDNSKEY sent by a provider that is
+  not a signer of the zone;
+- a distribution that has waited longer than
+  `audit.pending_threshold` (default 2 minutes) for a
+  member's confirmation. The observation names the
+  distribution, its originator and the member. A second
+  one follows when the member has answered. See 4.6.
 
 ```sh
 tdns-mpcli auditor observations
@@ -246,6 +253,55 @@ tdns-mpcli auditor zone mplist
 Same shape as `combiner zone mplist`, but from the
 auditor's view. The auditor should show every zone that
 includes it in HSYNCPARAM `auditors=`.
+
+### 4.6 Distributions and their confirmations
+
+Every agent sends its final confirmation of a
+distribution to the originator and, as a copy, to each
+auditor of the zone. The auditor gets the distribution
+itself as well, so for each one it knows which voting
+members have answered and which it still waits for.
+
+```
+$ tdns-mpcli auditor confirmations -z example.com.
+Zone: example.com.
+  Distribution  Originator                      Age       State      Carries
+  69812b15      agent.alpha.example.            3m12s     pending    add NS (1 record)
+      agent.bravo.example.            confirmed  SUCCESS at 09:30:00
+      agent.charlie.example.          pending    no confirmation seen for 3m10s
+```
+
+Here alpha's NS change is blocked on charlie: bravo has
+confirmed, charlie has not. A member that refused is
+listed as `rejected` with the reason it gave.
+
+A distribution is `pending` while a member's
+confirmation is missing, `completed` when all have
+confirmed and `rejected` when all have answered and one
+refused. `--pending` lists the pending ones only.
+Without `-z` every audited zone is listed.
+
+What the view cannot tell:
+
+- An agent on older software sends no copies. A member
+  that has sent the auditor none since the auditor
+  started is therefore listed as `unknown`, not
+  `pending`, and no observation is raised for it. A
+  distribution that misses only such members'
+  confirmations is `unknown` too. A member counts from
+  its first copy, for any zone.
+- A copy is sent once. If it is lost, the member stays
+  `pending` here although the originator has its
+  confirmation.
+- A distribution sent to one member only (a resync on
+  request) does not reach the auditor. Its confirmation
+  does, and it is listed as `unseen`: who else was to
+  confirm it is not known.
+- The state is kept in memory. After a restart the
+  auditor follows the distributions sent from then on.
+
+A distribution stays listed for an hour after its last
+confirmation, and for a day while one is missing.
 
 ## 5. What the Auditor Does Not Do
 

@@ -280,6 +280,140 @@ func (m *AuditStateManager) SnapshotAllObservations(zoneFilter string) []AuditOb
 	return out
 }
 
+// AuditDistributionSummary is the JSON shape of one distribution in the
+// /auditor "confirmations" command: who originated it, what it carries,
+// where it stands and what each member has said of it. State is
+//
+//   - "pending" while the confirmation of a member that sends its
+//     confirmations to the auditor has not been seen,
+//   - "completed" when every awaited member confirmed,
+//   - "rejected" when all answered and one refused,
+//   - "unknown" when the only confirmations missing are those of members
+//     that have sent the auditor none since it started (an agent on older
+//     code sends none at all), and
+//   - "unseen" for a distribution the auditor has only seen confirmations
+//     of: who else is to confirm it is not known here.
+type AuditDistributionSummary struct {
+	Zone           string                    `json:"zone"`
+	DistributionID string                    `json:"distribution_id"`
+	Originator     string                    `json:"originator"`
+	Summary        string                    `json:"summary,omitempty"`
+	State          string                    `json:"state"`
+	FirstSeen      time.Time                 `json:"first_seen"`
+	AgeSeconds     int64                     `json:"age_seconds"`
+	Members        []AuditDistributionMember `json:"members,omitempty"`
+}
+
+// AuditDistributionMember is one member's part in a distribution. State is
+// "confirmed" or "rejected" (with Status and Reason as the member sent
+// them), "pending", or "unknown" for a member whose confirmation has not
+// been seen and that has sent the auditor none since it started. For the
+// last two PendingSeconds is how long the auditor has had the distribution.
+type AuditDistributionMember struct {
+	Identity       string    `json:"identity"`
+	State          string    `json:"state"`
+	Status         string    `json:"status,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Seen           time.Time `json:"seen,omitempty"`
+	PendingSeconds int64     `json:"pending_seconds,omitempty"`
+}
+
+// SnapshotDistributions returns the zone's distributions as they stand at
+// now: those that wait for a member first, then the newest first. reporters
+// are the members known to send the auditor their confirmations
+// (AuditStateManager.Reporters).
+func (zs *AuditZoneState) SnapshotDistributions(now time.Time, reporters map[string]bool) []AuditDistributionSummary {
+	zs.mu.RLock()
+	defer zs.mu.RUnlock()
+	out := make([]AuditDistributionSummary, 0, len(zs.Distributions))
+	for _, d := range zs.Distributions {
+		sum := AuditDistributionSummary{
+			Zone:           zs.Zone,
+			DistributionID: d.DistributionID,
+			Originator:     d.Originator,
+			Summary:        d.Summary,
+			FirstSeen:      d.FirstSeen,
+			AgeSeconds:     int64(now.Sub(d.FirstSeen).Seconds()),
+		}
+		count := map[string]int{}
+		for id, m := range d.Members {
+			member := AuditDistributionMember{Identity: id, Status: m.Status, Reason: m.Reason, Seen: m.Seen}
+			switch {
+			case m.Status != "" && m.Rejected:
+				member.State = "rejected"
+			case m.Status != "":
+				member.State = "confirmed"
+			case reporters[id]:
+				member.State = "pending"
+			default:
+				member.State = "unknown"
+			}
+			if m.Status == "" && !d.Received.IsZero() {
+				member.PendingSeconds = int64(now.Sub(d.Received).Seconds())
+			}
+			count[member.State]++
+			sum.Members = append(sum.Members, member)
+		}
+		switch {
+		case d.Received.IsZero():
+			sum.State = "unseen"
+		case count["pending"] > 0:
+			sum.State = "pending"
+		case count["unknown"] > 0:
+			sum.State = "unknown"
+		case count["rejected"] > 0:
+			sum.State = "rejected"
+		default:
+			sum.State = "completed"
+		}
+		slices.SortFunc(sum.Members, func(a, b AuditDistributionMember) int {
+			return strings.Compare(a.Identity, b.Identity)
+		})
+		out = append(out, sum)
+	}
+	slices.SortFunc(out, func(a, b AuditDistributionSummary) int {
+		if ap, bp := a.State == "pending", b.State == "pending"; ap != bp {
+			if ap {
+				return -1
+			}
+			return 1
+		}
+		if c := b.FirstSeen.Compare(a.FirstSeen); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.Originator, b.Originator); c != 0 {
+			return c
+		}
+		return strings.Compare(a.DistributionID, b.DistributionID)
+	})
+	return out
+}
+
+// SnapshotAllDistributions returns the distributions of every tracked zone,
+// zone by zone, optionally of one zone only (empty string = no filter).
+func (m *AuditStateManager) SnapshotAllDistributions(zoneFilter string, now time.Time) []AuditDistributionSummary {
+	if zoneFilter != "" {
+		zoneFilter = dns.Fqdn(zoneFilter)
+	}
+	reporters := m.Reporters()
+	m.mu.RLock()
+	zones := make([]*AuditZoneState, 0, len(m.zones))
+	for _, zs := range m.zones {
+		if zoneFilter == "" || zs.Zone == zoneFilter {
+			zones = append(zones, zs)
+		}
+	}
+	m.mu.RUnlock()
+	slices.SortFunc(zones, func(a, b *AuditZoneState) int {
+		return strings.Compare(a.Zone, b.Zone)
+	})
+	var out []AuditDistributionSummary
+	for _, zs := range zones {
+		out = append(out, zs.SnapshotDistributions(now, reporters)...)
+	}
+	return out
+}
+
 // SnapshotAllProviders returns one entry per distinct provider
 // identity across all tracked zones. Merge semantics per field:
 //   - Identity, Label: first occurrence wins (in map-iteration
