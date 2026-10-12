@@ -1388,10 +1388,19 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
-				new_zd.Options[tdns.OptInlineSigning] = true
 			} else if !shouldSign && new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", mpzd.ZoneName)
-				new_zd.Options[tdns.OptInlineSigning] = false
+			}
+			// The switch is ours, not the configuration's: recorded on the
+			// served zone as a run-time option, at every refresh, so that a
+			// config update (config reload-zones, a zone reload) does not
+			// take it away until the next transfer (tdns-mp #144). On the
+			// incoming zone too: its options are the served zone's as they
+			// were when the fetch began, and a config update in between
+			// gives the served zone a map of its own.
+			mpzd.ZoneData.SetRuntimeOption(tdns.OptInlineSigning, shouldSign)
+			if new_zd.Options != nil && new_zd.Options[tdns.OptInlineSigning] != shouldSign {
+				new_zd.Options[tdns.OptInlineSigning] = shouldSign
 			}
 			isMS := shouldSign && otherSigners > 0
 			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {

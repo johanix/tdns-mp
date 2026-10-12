@@ -558,6 +558,60 @@ func TestSignerThatStartsToSignAcrossARestartGoesOnPastTheSerialItRelayed(t *tes
 	}
 }
 
+// `config reload-zones`, a zone reload: a config update replaces the zone's
+// options with the configured ones, and the signer's switch is in no
+// configuration. It must stay on for a zone the signer signs, also when no
+// transfer follows the update to set it again: without it the zone is, to
+// tdns, one this daemon only relays.
+func TestSignerKeepsSigningAcrossAConfigUpdate(t *testing.T) {
+	asMPDaemon(t, AppTypeMPSigner)
+	kdb := newMPTestKeyDB(t)
+	const zone = "reloaded.example."
+	mpGenKey(t, kdb, zone, tdns.DnskeyStateActive, "KSK")
+	mpGenKey(t, kdb, zone, tdns.DnskeyStateActive, "ZSK")
+	policy := &tdns.DnssecPolicy{
+		Mode:         tdns.DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+		SigValidity:  tdns.PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400},
+	}
+	up := startMPUpstream(t, zone, "beta", false, 7)
+	z := startMPServedZone(t, kdb, up, signerConfBeta(), policy)
+	if !z.signsInline() {
+		t.Fatal("inline-signing is off for a zone whose HSYNCPARAM names this provider as a signer")
+	}
+	before, _ := z.servedSOA(t)
+
+	// A config update with nothing new at the combiner: the options come
+	// from the configuration, and no transfer follows.
+	z.run(t, z.configRefresher())
+	if !z.signsInline() {
+		t.Fatal("a config update switched inline-signing off for a zone this provider signs")
+	}
+	if after, _ := z.servedSOA(t); after.Serial != before.Serial {
+		t.Fatalf("a config update with nothing new moved the serial from %d to %d", before.Serial, after.Serial)
+	}
+
+	// The combiner far ahead, and a refresh: still the signer's own count.
+	up.publish(t, 500)
+	z.notified(t)
+	if soa, _ := z.servedSOA(t); soa.Serial != before.Serial+1 {
+		t.Fatalf("after the update and a refresh the signer serves %d, want %d: its own count, not the combiner's 500", soa.Serial, before.Serial+1)
+	}
+
+	// And the other way: a zone this provider only relays does not start
+	// to sign because of a config update.
+	other := startMPUpstream(t, "relayed-reloaded.example.", "alpha", true, 40)
+	r := startMPServedZone(t, kdb, other, signerConfBeta(), nil)
+	r.run(t, r.configRefresher())
+	if r.signsInline() {
+		t.Fatal("a config update switched inline-signing on for a zone this provider only relays")
+	}
+	if soa, _ := r.servedSOA(t); soa.Serial != 40 {
+		t.Fatalf("after a config update the relayed zone serves %d, want the upstream's 40", soa.Serial)
+	}
+}
+
 // The guard: only the signer follows the rule. The combiner changes the zones
 // it holds as a secondary and counts its own serial for them; the agent and
 // the auditor keep their own rules too. Each of them, holding the same
