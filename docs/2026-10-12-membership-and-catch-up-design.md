@@ -188,7 +188,7 @@ A complete answer from a provider in `signers=` counts as that provider having s
 
 ### 5.5 How completeness is known
 
-By construction and by the marker (question 1): a `replace` is the sender's whole set for a type, the answer names every type, so one answer is everything that agent holds for the zone. The marker says so and names the request.
+By construction and by the marker (question 1): a `replace` is the sender's whole set for a type, the answer names every type, so one answer is everything that agent holds for the zone. The marker says so and names the request. An answer without the marker does not count as complete.
 
 The asker keeps, per zone and peer: asked when, answered when, complete or not, and the last error. It is kept in memory, since a restart asks again anyway.
 
@@ -221,6 +221,7 @@ With Z zones and P voting peers per zone, a start sends Z x P requests and recei
 
 ## 7. Not part of this design
 
+- **Agents that are out of step with each other.** All agents of a zone must be in sync protocol-wise. Nothing in this design makes an agent cope with a peer that follows other rules.
 - **A provider named in `signers=` while it runs** (#146, #136). This design gives a newcomer what that needs before it has a role: comms with every member, and the other signers' DNSKEYs with what they say about them.
 - **The rest of a removal:** when a leaving provider stops signing and serving, who removes its NS and its DS and in what order, "safe to remove" (#147, #138, #159, items 3 to 5 of #137). The member with no role of this design is its starting point.
 - **A server that becomes a signer and serves its own signatures too early** (#160), and wrong answers before a provider is listed (item 1 of #137).

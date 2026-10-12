@@ -146,7 +146,7 @@ Where each rule of the design lands. The design's sections are named as "design 
 | `reattachHsyncMemberAdds` | CONFIG requests for a role holder; an election kick | CONFIG requests for a member; the catch-up request for the zone (design 5.1). The kick goes (3.3) |
 | `SetConfiguredPeersFunc`, `SetOperationalPeersFunc` (`v2/start_agent.go`) | Participants minus one; OPERATIONAL agents of the zone | Voting members other than this agent; the OPERATIONAL ones among them |
 | `PostRefresh` (`v2/hsync_utils.go`) | Turns parentsync on for the zone, whoever is listed in it | Only for a zone in which this agent is a member |
-| `beatZones` (`v2/hsync_transport.go`), and the zones a hello names (`sendHelloToPeer`, `v2/hsync/hello.go`) | Shared participant zones, in no order | Shared member zones, those in which both hold a role first (section 4) |
+| `beatZones` (`v2/hsync_transport.go`), and the zones a hello names (`sendHelloToPeer`, `v2/hsync/hello.go`) | Shared participant zones | Shared member zones |
 | `logSilentAgents` | Every agent of the zone | The providers in `signers=` |
 | `populateMPdata`, guard 3 | A zone without a record of this provider is not a multi-provider zone for it | Unchanged |
 
@@ -189,7 +189,7 @@ On PR #163: its check compares the sender with `pg.VotingMembers`. This plan kee
 ### 3.4 Catch-up (design 5)
 
 - **When** (design 5.1). The edge exists: a mechanism that turns OPERATIONAL in `SendBeatWithFallback`, where `NotifyPeerOperational` is called today. That edge compares the raw mechanism state, which an outage need not move, so the `outage` case compares the effective state. PR #162 is what makes the edge arrive after a refused hello, a refused beat back or a wrong key. The `join` request is sent from `reattachHsyncMemberAdds`.
-- **The request** (design 5.3). RFI SYNC as today, with two additions that an older receiver ignores: the reason word in `RfiSubtype`, and the request's distribution ID as the request's name.
+- **The request** (design 5.3). RFI SYNC as today, with two additions: the reason word in `RfiSubtype`, and the request's distribution ID as the request's name.
 - **The answer** (design 5.4). `resync-targeted` stays the answer, sent with `EnqueueForSpecificAgent`. The types are those of `AllowedLocalRRtypes`. The key states are read from the signer's latest inventory by the code that `LocalDnskeysFromKeystate` uses, without touching what that function remembers. The marker is a new field on `DnsSyncPayload`, tdns-mp's own type, with its golden wire file.
 - **At the asker.** The operations go through `EvaluateUpdate` and `ProcessUpdate` as any remote update. The order guard holds (`noteReplaceOrigin`). `NoteForeignKeyStates` takes a complete answer from a provider in `signers=` as that provider having spoken, also when it lists no key: the wire cannot say "spoken, no keys" today, because an empty list of key states is not encoded.
 - **The tracker** (design 5.5). New, in memory, per zone and peer.
@@ -203,27 +203,19 @@ On PR #163: its check compares the sender with `pg.VotingMembers`. This plan kee
 - `resync --push` sends nothing to peers and says why.
 - `zone mplist` gets the member list with each member's standing. `agent parentsync status` gets the learned leader and term, "does not vote", and the tracker's state per voting member.
 
-## 4. Mixed versions
+## 4. Agents in step
 
-"New" is an agent with the design, "old" one without.
+tdns-mp does not support agents that are out of step with each other: all agents of a zone must be in sync protocol-wise. So this plan has no code for a peer that runs an earlier build:
 
-**A zone in which every member has a role works in a mixed group.** Members, hash and admission are the same on old and new agents, with or without an auditor. Three things differ:
+- no detection of a peer that answers a request for state without the marker;
+- no order among the zones a beat or a hello names;
+- no fallback for a group in which some agents count members and others count role holders.
 
-- A new agent asks an old one for state. The old one answers in the old way: its own records, no key states, no marker, and nothing at all when it holds nothing. A peer that has acknowledged three requests a minute apart and sent no marked answer is taken as old: answered, without key states. That is logged once, and it is asked again once an hour. A new leader with an old signer then syncs NS as today and leaves DS alone until that signer's next key event, as today.
-- An old agent never asks. A new agent answers `resync --pull` from an old one with the new answer. The old receiver ignores the marker and applies the operations, the empty ones included. The key states it gets are an improvement.
-- The election's gate is the voting members on new agents and every participant on old ones. With an auditor down, a new agent that is the lowest voting member calls an election, and an old voting member joins a CALL from a voting member, so the group elects. When the lowest voting member is old, nobody calls until the auditor is back, as today.
+An agent that is out of step shows as a stall, not as harm. Its answer has no marker, so it does not count as complete and is asked for again (design 5.7). A zone with a member that has no role is in different groups on the two sides, and the sides agree on no leader for it.
 
-**A zone with a member that has no role stalls in a mixed group. It is not harmed.**
+Two rules for operators follow:
 
-- Old agents refuse the member with no role and leave it out of the group. New agents include it, and compute another hash. For that zone the two sides are in different groups and agree on no leader. The new side never completes an election for it, since an old voting member does not know its group. So at most the old side's leader acts, and the zone's sync with the parent may stall until every voting member is new.
-- A new agent's beat names the zones it shares with the peer, and an old receiver authorizes it on the first one. So zones in which both hold a role come first, in no fixed order among themselves, and the zone a hello names is chosen the same way. An old peer then sees what it sees today.
-- A new member with no role whose hello an old peer refuses is looked up again by PR #162's recovery, once a minute. That is bounded, and ends with the upgrade.
-
-**An old agent as the member with no role is today's behaviour,** #172 included: it can elect itself and talk to the parent, and no peer can stop that. New voting members drop its election messages and refuse its SYNCs.
-
-So two rules for operators:
-
-1. An agent gets step 1 (section 5) before it is configured with a zone in which its provider has no role.
+1. Every step of section 5 goes to all agents of a zone together.
 2. Every agent of a zone runs the whole design before the owner starts a provider change in it.
 
 ## 5. The steps
@@ -253,13 +245,13 @@ Each step is one pull request. Steps 1 to 6 are safe to merge alone and change n
 
 **Step 3. The complete answer (#157, the answering side).**
 - Changes: `resync-targeted` as in design 5.4. The marker on `DnsSyncPayload`, and its golden wire file. `NoteForeignKeyStates` takes a complete answer as having spoken.
-- Unit: the answer of a signer with keys, of a signer without an inventory ("not complete"), of a server that holds nothing (five empty operations, complete). `computedDSIntent` is known after a complete answer from every provider in `signers=`. An answer in the old form is still applied.
+- Unit: the answer of a signer with keys, of a signer without an inventory ("not complete"), of a server that holds nothing (five empty operations, complete). `computedDSIntent` is known after a complete answer from every provider in `signers=`. An answer without the marker is applied and does not count as complete.
 - Harness: the two-agent transport test: RFI SYNC and its answer over the real path.
 - Fleet: restart a leader that does not sign, then run `resync --pull` by hand: the DS set becomes known, a sync is asked for, the DS is at the parent. The "Today" note of section 3.2 of the guide loses its sentence about key states.
 
 **Step 4. Asking by itself, and what waits (#157, the restart).**
 - Changes: the tracker of design 5.5. The requests of design 5.1 for `start`, `peer-start`, `outage` and `manual`. The retries. The held sync and the "DS set unknown" report of design 5.6. The status lines.
-- Unit: the tracker's states, the retry schedule, the one-minute rule, the peer taken as old. The syncher's messages for known, unknown and held.
+- Unit: the tracker's states, the retry schedule, the one-minute rule. The syncher's messages for known, unknown and held.
 - Harness: three agents, one restarted: it asks two, is asked back by two, and ends caught up.
 - Fleet: every agent restarted within ten seconds, on a zone whose leader does not sign: the DS is at the parent with no owner edit and no command. The leader alone restarted: the same. One signer's agent stopped: the leader reports what it waits for, and syncs when the agent is back.
 
@@ -276,7 +268,7 @@ Each step is one pull request. Steps 1 to 6 are safe to merge alone and change n
 - Fleet: two providers reduced to one, with no auditor: a leader with no restart. A lease renewal with the auditor stopped.
 
 **Step 7. The switch: every HSYNC3 provider is a member (#158).**
-- Changes: 3.1. The hash of design 4.1. The `join` and `role` requests. The displays of design 6. The order of the beat's zones. `guide/provider-changes.md` loses the "Today" notes of its sections 2 and 3.2.
+- Changes: 3.1. The hash of design 4.1. The `join` and `role` requests. The displays of design 6. `guide/provider-changes.md` loses the "Today" notes of its sections 2 and 3.2.
 - Unit: the two replaced tests of 3.2. Members, voting members and auditors for each kind of zone. The hash is today's for a zone in which every member has a role.
 - Harness: the hello of a member with no role is accepted; it gets gossip and an answer to its request for state.
 - Fleet: an add with the owner's two edits apart. After the first edit the newcomer is in every agent's gossip, reports the group's leader, has caught up with every voting member, and has its `addrr` refused. The other agents hold one election, without it. After the second edit there is one election, with it. No sample is bogus or lame at any point. Then the removal's first edit: the provider stops voting at once, and stops leading if it led.
