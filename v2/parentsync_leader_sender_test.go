@@ -99,7 +99,12 @@ func TestAGroupCallCountsOnlyFromAVotingMember(t *testing.T) {
 	lem.HandleGroupMessage(group, "auditor.example.", "ELECT-CALL",
 		map[string][]string{"_term": {"1"}, "_vote": {"7"}, "_group": {group}})
 
+	// No election state at all is the same answer: the entry is made only
+	// for a message that counts (the handler makes it after its checks).
 	le := groupElectionOf(lem, group)
+	if le == nil {
+		return
+	}
 	le.mu.Lock()
 	defer le.mu.Unlock()
 	if le.Active || le.Term != 0 {
