@@ -409,6 +409,17 @@ When NS records change (providers added or removed), the
 combiner resyncs: it diffs the current NS set against the
 stored set and adds/removes `_signal` KEYs accordingly.
 
+The `_signal` names need the customer's consent: the
+`pubkey` flag in the zone's HSYNCPARAM record. The agent
+asks for `at-ns` only when the flag is there, and the
+combiner looks again each time it acts on a stored
+instruction (an NS change, a restart, `edits reapply` of
+the provider zone). If the zone does not say `pubkey`,
+the combiner retracts the `_signal` KEYs it had published
+for that zone and keeps the instruction for the apex only.
+When the customer adds the flag again, the agent's next
+Publish instruction puts the `_signal` KEYs back.
+
 
 ## 4. Provider-to-Provider Synchronization
 

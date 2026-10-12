@@ -123,6 +123,16 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load contributions", "err", err)
 		allContribs = nil
 	}
+	// And the stored publish instructions, to find the zones whose at-ns
+	// publication is to be checked against the customer's consent. When
+	// they cannot be read now, each zone reads them at its first load: the
+	// provider zones' re-apply reads them for itself by then, and a KEY it
+	// puts back has to meet the check all the same.
+	allInstr, instrErr := LoadAllPublishInstructions(hdb)
+	if instrErr != nil {
+		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load publish instructions; each zone reads them at its first load", "err", instrErr)
+		allInstr = nil
+	}
 
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
@@ -186,7 +196,46 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 				}
 			})
 		}
+
+		// A zone with a stored at-ns instruction: once it has loaded, its
+		// HSYNCPARAM can be read, and the instruction is checked against the
+		// customer's consent. The provider zones' re-apply asks the same, but
+		// may have run before this zone could answer.
+		atNSSenders := atNSSendersOf(allInstr[zoneName])
+		if len(atNSSenders) > 0 || instrErr != nil {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				w, ok := Zones.Get(zd.ZoneName)
+				if !ok {
+					return
+				}
+				senders := atNSSenders
+				if instrErr != nil {
+					instr, err := LoadAllPublishInstructions(hdb)
+					if err != nil {
+						lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent",
+							"zone", zd.ZoneName, "err", err)
+						return
+					}
+					senders = atNSSendersOf(instr[zd.ZoneName])
+				}
+				for _, senderID := range senders {
+					w.withdrawSignalKeysWithoutConsent(senderID, zd.ZoneName, hdb)
+				}
+			})
+		}
 	}
+}
+
+// atNSSendersOf is the senders among a zone's stored publish instructions
+// that ask for the at-ns location.
+func atNSSendersOf(stored map[string]*StoredPublishInstruction) []string {
+	var senders []string
+	for senderID, instr := range stored {
+		if containsString(instr.Locations, "at-ns") {
+			senders = append(senders, senderID)
+		}
+	}
+	return senders
 }
 
 // InternalMpConf holds multi-provider internal state local to

@@ -19,10 +19,8 @@ import "github.com/miekg/dns"
 // parent says pubkey.
 func publishLocations(zone ZoneName) []string {
 	locs := []string{"at-apex"}
-	if mpzd, ok := Zones.Get(dns.Fqdn(string(zone))); ok && mpzd != nil {
-		if hp := mpzd.getHSYNCPARAM(); hp != nil && hp.HasPubkey() {
-			locs = append(locs, "at-ns")
-		}
+	if mpzd, ok := Zones.Get(dns.Fqdn(string(zone))); ok && mpzd != nil && mpzd.hasPubkey() {
+		locs = append(locs, "at-ns")
 	}
 	return locs
 }
