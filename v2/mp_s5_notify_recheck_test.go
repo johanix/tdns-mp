@@ -158,6 +158,7 @@ func (b *lockedBuffer) String() string {
 type notifyRig struct {
 	*leaderSyncRig
 	parent  *fakeParent
+	us      *peerEnv // the leader's own transport and registry
 	peer    *peerEnv
 	notifyq chan tdns.NotifyRequest
 	log     *lockedBuffer
@@ -173,6 +174,16 @@ type notifyRig struct {
 // propagation delay, so no NOTIFY is held, until propagation sets one.
 func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *notifyRig {
 	t.Helper()
+	return newNotifyRigFor(t, zone, scheme, false, delays...)
+}
+
+// newNotifyRigFor is the rig for a zone that no provider signs, as the tests
+// of the hold and the checks have it, or for a signed one: both providers
+// sign it. For a signed zone the leader makes the zone's CSYNC, so the rig
+// then also runs the leader's data engine, which distributes it
+// (mp_s5_leader_csync_test.go has what stands in for the providers).
+func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...time.Duration) *notifyRig {
+	t.Helper()
 	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
 	logsink := &lockedBuffer{}
 	delegationSyncNotifyDelays = delays
@@ -183,7 +194,7 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})
 	us, them := env.Alice, env.Bob
-	r := &notifyRig{leaderSyncRig: newLeaderSyncRigAs(t, zone, AgentId(us.Identity)), peer: them,
+	r := &notifyRig{leaderSyncRig: newLeaderSyncRigAs(t, zone, AgentId(us.Identity)), us: us, peer: them,
 		notifyq: make(chan tdns.NotifyRequest, 64), log: logsink, oldNS: "gone.provider.example."}
 	r.leader(AgentId(us.Identity))
 	r.conf.InternalMp.MPTransport = us.Bridge
@@ -220,8 +231,12 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: shortLabel(id), Identity: id, Upstream: "."}})
 	}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
+	roles := []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: labels}}
+	if signed {
+		roles = append(roles, &core.HSYNCPARAMSigners{Signers: labels})
+	}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM),
-		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: labels}}}}}})
+		Data: &core.HSYNCPARAM{Value: roles}}}})
 	r.mpzd.Data.Set(zone, *apex)
 	zd.InstallInitialSnapshot() // the analysis reads the zone as it is served
 	zd.Ready = true
@@ -280,6 +295,9 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 	r.ctx = ctx
 	ensureDSEngineQueue(zd.KeyDB)
 	var engines sync.WaitGroup
+	if signed {
+		r.startDataEngine(t, ctx, &engines)
+	}
 	engines.Add(2)
 	go func() {
 		defer engines.Done()

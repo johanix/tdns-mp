@@ -240,12 +240,21 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 // own: what arrives on it says that the sync went out as a NOTIFY, and of
 // which types, and the chain sends it on to the notifier, at once or after
 // the zone's wait. An UPDATE passes through here untouched.
+//
+// Before the sync, the leader makes the zone's CSYNC if the NS set or the
+// glue differs from the parent's and no CSYNC has been made for that
+// difference, and sends it to the zone's providers
+// (mp_s5_leader_csync.go). The sync does not wait for them. A NOTIFY does,
+// in the chain. If the CSYNC could not be distributed, or a provider has
+// rejected it, the NOTIFY is not sent and the sync has failed: the failure
+// chain asks again, and that ask distributes anew.
 func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
 	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (msg string, rcode uint8, ur tdns.UpdateResult, pending bool, err error) {
 	if !mpLeaderSync(conf, ds) {
 		msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
 		return msg, rcode, ur, false, err
 	}
+	csyncErr := conf.delegationCsyncStep(ctx, ds.ZoneName, syncstate)
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
@@ -260,7 +269,17 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 		// what a failed sync handed over is not sent on.
 		return msg, rcode, ur, false, err
 	}
-	if conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq}) {
+	held, failed := false, csyncErr
+	if failed == nil {
+		held, failed = conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq})
+	}
+	if failed != nil {
+		// The NOTIFY is not sent on. Asked again here, and not left to the
+		// caller: the request of a refresh has no caller that asks again.
+		conf.delegationSyncFailed(ctx, ds.ZoneName, failed)
+		return msg, rcode, ur, false, failed
+	}
+	if held {
 		// tdns's message says the NOTIFY was sent; whoever asked for the
 		// sync is told that it waits
 		msg += " (held: it leaves when the zone's nameservers have had time to serve the change)"

@@ -153,8 +153,10 @@ and applies the changes.
 **Flow:**
 
 1. The agent detects a change to delegation data.
-2. The agent publishes a CSYNC record (for NS/glue changes)
-   or a CDS record (for DS changes) at the zone apex.
+2. A CSYNC record (for NS/glue changes) or a CDS record
+   (for DS changes) is published at the zone apex. For a
+   multi-provider zone the CSYNC is made by the leader
+   agent and the CDS is served by the signer; see below.
 3. The agent sends a NOTIFY with the appropriate QTYPE
    (CSYNC or CDS) to the parent's NOTIFY receiver address
    (from the DSYNC RRset).
@@ -162,6 +164,35 @@ and applies the changes.
    records, authenticates them under the parent zone's
    delegation policy (section 2.3), and applies the changes
    to the parent zone.
+
+A multi-provider zone has one CSYNC, and the leader agent
+makes it. A change of the NS set reaches every provider as
+a SYNC, the leader among them. When the leader then finds
+the zone's NS set or glue differing from the parent's, and
+a provider signs the zone, it makes a CSYNC with the
+immediate flag and sends it to every provider as a
+contribution: to the other agents, each of which hands it
+to its combiner, and to its own combiner. Its serial field
+is the time it was made, or one more than the newest CSYNC
+the leader knows of for the zone if that is later. A
+combiner serves the newest CSYNC it has been sent and
+makes none itself; an agent takes a CSYNC only from the
+agent it knows as the zone's leader, and rejects any
+other. The leader makes a new CSYNC only when that
+difference changes: an election, an operator's request and
+the leader's own checks of the parent make none.
+
+The NOTIFY(CSYNC) leaves when every provider has given its
+final confirmation of the CSYNC, and the wait described
+next has passed since the last of them. While
+confirmations are missing the agent logs which providers
+it waits for, at once and then every 10 minutes; there is
+no time-out. If a provider rejects the CSYNC the sync has
+failed: nothing is sent, the agent asks again after a
+delay, and that attempt distributes a new CSYNC. A
+NOTIFY(CDS) of the same sync leaves together with the
+NOTIFY(CSYNC). A parent that takes UPDATE gets its UPDATE
+at once; the CSYNC is distributed all the same.
 
 A NOTIFY only asks the parent to scan, and a scan that
 comes before the zone's nameservers serve the change finds

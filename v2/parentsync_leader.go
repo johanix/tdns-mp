@@ -883,6 +883,20 @@ func (lem *LeaderElectionManager) IsLeader(zone ZoneName) bool {
 	return leader == lem.localID
 }
 
+// ZoneLeader returns the agent this agent knows as the zone's current
+// leader, the way IsLeader decides it: the leader of the zone's provider
+// group if there is one, else the zone's own.
+func (lem *LeaderElectionManager) ZoneLeader(zone ZoneName) (AgentId, bool) {
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			if leader, ok := lem.GetGroupLeader(pg.GroupHash); ok {
+				return leader, true
+			}
+		}
+	}
+	return lem.GetLeader(zone)
+}
+
 // GetAllLeaders returns the current leader status for all zones with an active leader.
 func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
 	lem.mu.RLock()
