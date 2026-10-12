@@ -280,7 +280,17 @@ func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 
 const foreverLifetime = 0xFFFFFFFF
 
-func lifetimeSchedules(secs uint32) bool { return secs != 0 && secs != foreverLifetime }
+// lifetimeSchedules: whether a policy lifetime is a schedule at all. tdns
+// stores `lifetime: forever` as a large finite number of seconds
+// (foreverLifetimeSecs in its api_structs.go, 10000 hours), and its own
+// rollover paths take that value as "never" (lifetimeSchedulesRoll beside
+// it). Neither is exported, so the value is asked of tdns's parser: taken as
+// a schedule it rolled the keys of a `forever` policy at about 417 days
+// (tdns-mp #134).
+func lifetimeSchedules(secs uint32) bool {
+	forever, _ := tdns.GenKeyLifetime("forever")
+	return secs != 0 && secs != foreverLifetime && secs != forever.Lifetime
+}
 
 // KeyLifecycleEngine runs the drivers of the owned zones.
 type KeyLifecycleEngine struct {
