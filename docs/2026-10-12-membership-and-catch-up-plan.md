@@ -2,7 +2,7 @@
 
 **Status:** PLAN, 2026-10-12. No step is started. Section 5 holds the status of each step.
 
-This is the plan for the design in `2026-10-12-membership-and-catch-up-design.md` ("the design" below). The design describes membership and catch-up as they are meant to stand. This document holds what is dated: the difference from today's code, where each rule of the design lands in the code, the steps, and the questions that are open.
+This is the plan for the design in `2026-10-12-membership-and-catch-up-design.md` ("the design" below). The design describes membership and catch-up as they are meant to stand. This document holds what is dated: the difference from today's code, where each rule of the design lands in the code, the steps, and the decisions the design rests on.
 
 For issues #158, #157, #172, #149 and #137 (item 2). It sits on PR #163 (issues #143, #130) and PR #162 (issues #84, #128, #145), which are not on main yet.
 
@@ -24,7 +24,7 @@ Most of the machinery of the design exists.
 2. What a sender may do is checked per message, not by admission alone, and a message counts as sent by the sender the transport established (design 3).
 3. The answer to a request for state is complete: every type, the key states, always sent, and marked. A leader waits for it (design 5.4 to 5.6).
 4. The request is also sent when an agent joins a zone or gets its first role, and after a long outage (design 5.1).
-5. The election's edges: no election without a vote, and a leader when the voting members become one (design 4).
+5. A group is defined by its members together with what each one is, so that all its zones agree on who votes. The election's edges: no election without a vote, a leader when the voting members become one, and a leader that takes up a zone which arrives in its group (design 4).
 6. An agent whose provider has no role refuses its operator's edits (design 6).
 
 No message type is added. Two fields are: the marker on the answer, and a reason word on the request.
@@ -126,6 +126,7 @@ Found on the way, as read, none of them filed:
 - On an agent, the originator that a SYNC, an RFI or a beat names in its payload is not compared with the sender the transport established (`routeSyncMessage`, `routeBeatMessage`, `v2/hsync_transport.go`). The checks of the sender in `MsgHandler` and in the election read the named one, PR #163's check among them: any admitted peer can name a voting member.
 - An agent that does not vote and learns a leader from gossip arms the lease's fallback renewal (`ApplyGossipElection` calls `scheduleGroupReelection` with no look at the local agent). Today that is an agent listed under `auditors=` only. With members that have no role it is the normal case.
 - A group that no zone is left in keeps its election state and its timers. Nothing retires it: `RecomputeGroups` drops the group and the election manager is not told.
+- A zone that moves into a group which has a leader is not taken up by that leader. The work a leader owes a zone is started by `onLeaderElected`, which the election manager calls at election events only, and `RecomputeGroups` tells the election manager nothing. On a test fleet a zone moved to another group when its owner removed a provider, the NS change of that edit was skipped by the new group's leader ("not the delegation sync leader, skipping DDNS"), and it reached the parent 49 minutes later, at the lease renewal. A fix for the arrival is being written apart from this plan.
 - A lone voting member's self-election does not take a new term. `GroupElectionForGossip` tells nothing of term 0, and a renewed lease of the same term is not news to a peer, so an observer of a one-voter group never learns its leader.
 
 ## 3. The design in the code
@@ -138,7 +139,7 @@ Where each rule of the design lands. The design's sections are named as "design 
 |---|---|---|
 | `zoneParticipants` (`v2/provider_groups.go`) | Role holders, and the voting subset | Returns three sets: members (every ON record), voting members, auditors. The legacy fallback is unchanged |
 | `ParticipantsForZone`, `participantFQDNSetForApex`, `sharedParticipantZones` | Role holders | Members. The callers that mean a role get `VotingMembersForZone`, `AuditorsForZone` and `isVotingMember`. Those exist today only on the draft PR #169 (issue #152); step 1 brings them if that has not merged |
-| `RecomputeGroups` | Key and hash from the participants | Key and hash from the members (design 4.1). It tells the election manager which groups are gone |
+| `RecomputeGroups` | Key and hash from the participants; voting members are the union across the group's zones | Key and hash from the members with what each one is: voting member, auditor, no role (design 4.1). No union, and its warning goes. It tells the election manager which groups are gone, and which zones arrived in which group |
 | `isInHSYNC`, `isInHSYNCAnyZone` (`v2/agent_authorization.go`) | Both must hold a role | Both must be members. What a member may do is checked per message (3.2) |
 | LEGACY (`effectiveAgentState`, `isKnownLegacy`) | No shared participant zone | No shared member zone. A peer whose roles are gone and whose record stays is a member, not LEGACY |
 | `mpZoneView.Participants` (`v2/hsync_bridge.go`), `ApplyHsyncDiff`, `ReconcileZone` | An add with no role is skipped | A member is registered and discovered. An OFF record is skipped as today |
@@ -163,7 +164,7 @@ What the exclusion protected, and how each protection survives:
 | The zone's SIG(0) private key is not handed to it | `CONFIG sig0key` (`MsgHandler`) wants a requester that is a voting member, in addition to today's check |
 | It cannot inflate the election's count | The counts are taken from the voting members (3.3) |
 | It gets no gossip, so it learns nothing of the group and cannot speak into it | It is a member of its zone's group and gets that group's gossip. From a member that does not vote a receiver takes that member's own row and the term number of an election record, never who leads (`MergeGossip`, keyed on the beat's sender as the transport established it) |
-| No distribution waits for it | It is a recipient, and waited for (question 2) |
+| No distribution waits for it | It is a recipient, and waited for |
 | Only an identity the zone owner names can make an agent run discovery | Unchanged. The owner names it with one record instead of two edits |
 
 This also closes the way out of 2.9: no handler rests on admission alone any more.
@@ -172,8 +173,8 @@ Tests: `RoleLessRejected` becomes a test that the hello of a member with no role
 
 ### 3.3 Elections (design 4)
 
-- **The hash** (design 4.1). `ComputeGroupHash` over the identities, a member with no role with a marker after its name. For a zone in which every member has a role the list and the hash are today's: nothing changes for a zone until its owner adds a record without a role, or takes a provider's roles away.
-- **The lead checked per zone** (design 4.1). `IsLeader` also checks that the leader is a voting member of the zone that is asked about.
+- **The group's key** (design 4.1). `RecomputeGroups` keys a group on the zone's members with what each one is, and `ComputeGroupHash` takes the same. The union of voting members across a group's zones goes: all zones of a group agree on who votes.
+- **A zone that arrives** (design 4.1). `RecomputeGroups` reports which zones arrived in which group. An agent that leads the group runs for the zone what `onLeaderElected` runs, once per arrival. An agent that led the group the zone left drops what it holds for the zone. A zone that arrives in a new group gets it from that group's election.
 - **The counts** (design 4.2). The two peer functions of 3.1. `startGroupElection` already expects the voting members minus one.
 - **The gate** (design 4.3). The three callers of `CheckGroupState` pass `pg.VotingMembers` for the gate.
 - **Start** (design 4.4). `startElection` and `startGroupElection` return when the local agent is not a voting member, which covers the four callers of 2.4. `ApplyGossipElection` arms no renewal timer on an agent that does not vote.
@@ -262,53 +263,33 @@ Each step is one pull request. Steps 1 to 6 are safe to merge alone and change n
 - Fleet: no difference in a run without a provider change. That is the test.
 
 **Step 6. The election by its voting members (#149).**
-- Changes: 3.3, without what step 1 took: the gate, the one check for every change, a term for a self-election, retiring a group, the lead checked per zone.
-- Unit: a group of one voting member and one observer: the voter leads at a term above zero and the observer learns it. A group that is dropped leaves no timer. A leader whose role is gone is no leader. An auditor that is down does not hold the election back (question 3).
+- Changes: 3.3, without what step 1 took: the gate, the one check for every change, a term for a self-election, retiring a group, a zone's arrival in a group.
+- Unit: a group of one voting member and one observer: the voter leads at a term above zero and the observer learns it. A group that is dropped leaves no timer. A zone that arrives in a group with a leader is taken up by it, and no election is held. An auditor that is down does not hold the election back.
 - Harness: several managers through a real election, as the existing renewal tests do.
-- Fleet: two providers reduced to one, with no auditor: a leader with no restart. A lease renewal with the auditor stopped.
+- Fleet: two providers reduced to one, with no auditor: a leader with no restart. A lease renewal with the auditor stopped. A zone whose owner removes a provider that leads the zone's group: the NS change is at the parent without waiting for a lease renewal.
 
 **Step 7. The switch: every HSYNC3 provider is a member (#158).**
-- Changes: 3.1. The hash of design 4.1. The `join` and `role` requests. The displays of design 6. `guide/provider-changes.md` loses the "Today" notes of its sections 2 and 3.2.
-- Unit: the two replaced tests of 3.2. Members, voting members and auditors for each kind of zone. The hash is today's for a zone in which every member has a role.
+- Changes: 3.1. The group's key of design 4.1. The `join` and `role` requests. The displays of design 6. `guide/provider-changes.md` loses the "Today" notes of its sections 2 and 3.2.
+- Unit: the two replaced tests of 3.2. Members, voting members and auditors for each kind of zone. Two zones with the same providers and another make-up are in two groups.
 - Harness: the hello of a member with no role is accepted; it gets gossip and an answer to its request for state.
-- Fleet: an add with the owner's two edits apart. After the first edit the newcomer is in every agent's gossip, reports the group's leader, has caught up with every voting member, and has its `addrr` refused. The other agents hold one election, without it. After the second edit there is one election, with it. No sample is bogus or lame at any point. Then the removal's first edit: the provider stops voting at once, and stops leading if it led.
+- Fleet: an add with the owner's two edits apart. After the first edit the newcomer is in every agent's gossip, reports the group's leader, has caught up with every voting member, and has its `addrr` refused. The zone is in the group that has the newcomer as a member with no role, and that group's leader has taken it up; a new group has elected, among its voting members. After the second edit the zone is in the group in which the newcomer votes. No sample is bogus or lame at any point. Then the removal's first edit: the zone moves to a group that the leaving provider cannot lead, at once.
 - Not safe alone: it needs steps 1, 5 and 6, and step 4 on every agent for the newcomer to catch up by itself.
+- For a leaving signer the last fleet test needs more than this plan. Today a signer that is taken out of `signers=` stops signing and drops to its combiner's serial, and its own agent refuses the lower serial: it stays on the old copy of the zone and does not see the owner's edit. The other agents refuse what it sends, so the zone stalls and is not harmed. That belongs to the removal (#147).
 
-## 6. Open questions for the project owner
+## 6. Decisions
 
-The design is written with the recommended answer to each, and marks the places that depend on one. A decision is written into the design, and the question moves to the end of this section. The numbers stay.
+Decided by the project owner on 2026-10-12. The design is written with them.
 
-1. **How the asker knows that an answer is complete.**
-   (a) One message that is complete by construction, with a marker that names the request. (b) Several messages and an end marker. (c) A count or a digest announced first.
-   Recommended: (a). A `replace` per type is already a whole set, the answer for one zone is small, and (b) needs an ordered delivery that the transport does not have.
+1. **How the asker knows that an answer is complete.** One message that is complete by construction, with a marker that names the request. A `replace` per type is a whole set, and the answer for one zone is small.
+2. **A member with no role receives every distribution, and the distribution waits for its confirmation,** like any member. A provider on its way out still serves, and a new key of another signer must be at every server that still answers before it is used: the roll waits instead of answers going bogus. And being able to keep up with the other providers is a condition for serving the zone: if a provider cannot, that has to show before the zone owner gives it a role, not after.
+3. **An auditor that is down does not hold an election back.** The gate is the voting members. A SYNC is another matter: where a zone has an auditor, the auditor is a required participant, and the SYNC is not complete without its confirmation.
+4. **A group is the set of providers with roles together with the set of providers without a role** (and the auditors), which is not the same as the set of providers. A provider with no role in a zone cannot lead it. Elections are per group. A zone that joins or leaves a group forces no election: it takes the leader of the group it arrives in, and that leader takes the zone up.
+5. **A peer asks a restarted agent back,** once, on a `start` request. It is the only thing that finds a change the restarted agent made and lost from its queue. The request after a long outage stays too. Safety first: neither is cut to save code.
+6. **A member with no role gets the zone transfer set-up from its upstream.** The HSYNC3 record states the zone owner's intent.
+7. **What a provider contributed stands, frozen, once its roles are gone,** until the removal takes it away. The provider cannot change it, its own DNSKEYs included, so its key machine holds for the zone while it leaves. The removal starts at the edit that takes the roles away, and the leader of the group the zone is then in is responsible for it.
+8. **The whole sync with the parent waits for catch-up,** NS and glue as well as DS. A leader that does not have all the information is in no position to decide.
 
-2. **Does a member with no role receive every distribution, and does a distribution wait for its confirmation?**
-   (a) It receives nothing until it has a role, and catches up then. (b) It receives, and is not waited for. (c) It receives and is waited for, like any member. (d) It is waited for only on its way out, which needs to know what the zone said before the owner's edit.
-   Recommended: (c). On its way out a provider still serves, and a new key of another signer must be at every server that still answers before it is used. So (a) and (b) can make answers bogus, and (c) stalls instead: a key roll waits for a member whose agent is down, until it is up or the owner removes its record. The wait is what the removal design will need. It does not by itself make a removal safe (issues #147, #138).
-
-3. **Does an auditor that is down still hold an election back?**
-   Today it does, because the gate is every participant. (a) The gate is the voting members. (b) The voting members and the auditors.
-   Recommended: (a), by the rule that takes the member with no role out of the gate: who cannot vote cannot block the vote.
-
-4. **Is one election for each step of an add or a removal acceptable?**
-   (a) Yes: the group is the member list, as decided, and a zone changes group at each step. (b) Key the election on the voting members alone, so that a record without a role disturbs nothing.
-   Recommended: (a). With (b) the group that gossips and the group that elects are two different things, and a member with no role would have to be shown the election of a group that may hold zones it is not a member of.
-
-6. **May a member with no role get the zone transfer set-up from its upstream (RFI CONFIG)?**
-   (a) Yes. (b) Not until it has a role.
-   Recommended: (a). Section 3.3 of the guide needs it: the newcomer serves the zone before it is listed, and the HSYNC3 record names its upstream.
-
-7. **What a provider contributed while it had a role, after its roles are gone.**
-   (a) It stands until the removal procedure takes it away, and the provider cannot change it: not its NS records, and not its DNSKEYs or what it says about them. (b) It may still update its own DNSKEYs and key states until it is gone.
-   Recommended: (a) here, with the removal design to say how a leader that restarts in the middle of a removal learns a departing signer's keys: by asking it, or from what was kept.
-
-8. **Does the whole sync with the parent wait for catch-up, or only the DS?**
-   (a) The whole sync. (b) Only the DS; NS and glue go as today.
-   Recommended: (a). A leader that missed a change would send its older view of the NS RRset, and the wait adds no stall that the loss of the leader would not cause anyway.
-
-**Decided:**
-
-5. **A peer asks a restarted agent back,** once, on a `start` request (design 5.1). It is the only thing that finds a change the restarted agent made and lost from its queue. The request after a long outage stays too. Safety first: neither is cut to save code.
+Also decided: tdns-mp does not support agents that are out of step with each other (section 4).
 
 ## 7. After this plan
 
