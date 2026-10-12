@@ -121,8 +121,12 @@ guide is organised as a reading order:
 8. [Making Data Changes](guide/data-changes.md) —
    `agent zone addrr/delrr`, DNSSEC key rollover,
    inspection at three layers, recovery and resync.
-9. [The Auditor](guide/auditor.md) — adding the optional
-   passive observer.
+9. [Changing the Set of Providers](guide/provider-changes.md)
+   — adding and removing a provider and changing its
+   role: the required order, and what is still done by
+   hand.
+10. [The Auditor](guide/auditor.md) — adding the optional
+    passive observer.
 
 Reference material:
 
