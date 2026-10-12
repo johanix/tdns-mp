@@ -448,66 +448,25 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	return resp
 }
 
-// csyncFlagImmediate is the CSYNC "immediate" flag (RFC 7477 section
-// 2.1.1.2). Neither tdns nor the dns library exports a name for it.
-const csyncFlagImmediate uint16 = 0x01
-
-// combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
-// STATUS-UPDATE notification to the local agent that delivered the update.
+// combinerNotifyDelegationChange tells the local agent that delivered the
+// update that the delegation's data changed: a STATUS-UPDATE "ns-changed" or
+// "ksk-changed". It publishes nothing.
+//
+// The combiner used to make a CSYNC here on an NS change, one of its own per
+// signing provider, with its own zone serial in it. Nothing made two
+// providers' CSYNC records the same, and nothing told the leader when the
+// providers served one (tdns-mp #175). The zone's CSYNC is now made once, by
+// the delegation sync leader, and reaches every combiner as a contribution
+// (csyncVerdict in combiner_utils.go is what a combiner does with it).
 func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, nsChanged, kskChanged bool) {
-	zoneSigned := false
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err == nil && apex != nil {
-		if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
-			hsyncparam := hpRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
-			if len(hsyncparam.GetSigners()) > 0 {
-				zoneSigned = true
-			}
-		}
-	}
+	apex, _ := mpzd.GetOwner(mpzd.ZoneName)
 
-	lgCombiner.Info("combinerNotifyDelegationChange: delegation change detected", "zone", zonename, "nsChanged", nsChanged, "kskChanged", kskChanged, "zoneSigned", zoneSigned)
+	lgCombiner.Info("combinerNotifyDelegationChange: delegation change detected", "zone", zonename, "nsChanged", nsChanged, "kskChanged", kskChanged)
 
-	changed := false
-
-	if nsChanged {
-		if !zoneSigned {
-			lgCombiner.Debug("combinerNotifyDelegationChange: NS changed but zone is not signed, skipping CSYNC", "zone", zonename)
-		} else {
-			csync := &dns.CSYNC{
-				Serial: mpzd.CurrentSerial,
-				// Immediate (RFC 7477 section 3): the NS set is what the
-				// providers' agents have agreed on, so the parent has no
-				// approval to wait for. soaminimum stays unset: the serial
-				// is this combiner's, not the SOA serial the provider's
-				// servers answer with.
-				Flags:      csyncFlagImmediate,
-				TypeBitMap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA},
-			}
-			csync.Hdr = dns.RR_Header{
-				Name:   mpzd.ZoneName,
-				Rrtype: dns.TypeCSYNC,
-				Class:  dns.ClassINET,
-				Ttl:    120,
-			}
-			_, _, csyncChanged, err := mpzd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
-			if err != nil {
-				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
-			} else {
-				lgCombiner.Info("combinerNotifyDelegationChange: CSYNC published", "zone", zonename, "changed", csyncChanged)
-				changed = changed || csyncChanged
-			}
-		}
-	}
-	// The combiner synthesizes no CDS: the signer serves the CDS of the
-	// zone's DS set from its key rows (key lifecycle ownership design §4.1,
-	// arrow 1; S5), and a CDS of every served SEP key would put mpdist and
-	// foreign keys in front of the parent.
-	if changed {
-		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
-			lgCombiner.Error("combinerNotifyDelegationChange: publishing the combiner state failed", "zone", zonename, "err", err)
-		}
-	}
+	// The combiner synthesizes no CDS either: the signer serves the CDS of
+	// the zone's DS set from its key rows (key lifecycle ownership design
+	// §4.1, arrow 1; S5), and a CDS of every served SEP key would put mpdist
+	// and foreign keys in front of the parent.
 
 	var nsRecords []string
 	if apex != nil {
@@ -1255,6 +1214,22 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 				}
 			}
 
+			// One CSYNC per zone: the newest among those the agents have
+			// contributed (combiner_utils.go). An older one that arrives
+			// late is refused, and the sender is told why; a newer one
+			// takes the place of those held for other senders.
+			var supersededCsyncs []string
+			if rrtype == dns.TypeCSYNC && len(parsedRRs) > 0 {
+				reason, drop := mpzd.csyncVerdict(req.SenderID, zonename, parsedRRs)
+				if reason != "" {
+					for _, rr := range parsedRRs {
+						rejectedItems = append(rejectedItems, RejectedItem{Record: rr.String(), Reason: reason})
+					}
+					continue
+				}
+				supersededCsyncs = drop
+			}
+
 			applied, removed, changed, err := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
@@ -1263,6 +1238,18 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					Reason: fmt.Sprintf("replace failed: %v", err),
 				})
 				continue
+			}
+			for _, older := range supersededCsyncs {
+				_, gone, dropped, derr := mpzd.ReplaceCombinerDataByRRtype(older, zonename, rrtype, nil)
+				if derr != nil {
+					lgCombiner.Error("removing a superseded CSYNC failed", "zone", zonename, "sender", older, "err", derr)
+					continue
+				}
+				if dropped {
+					lgCombiner.Info("removed a CSYNC that a newer one supersedes", "zone", zonename, "sender", older, "by", req.SenderID, "records", gone)
+					removed = append(removed, gone...)
+					changed = true
+				}
 			}
 			if policy.canApply(rrtype) {
 				if len(applied) > 0 {

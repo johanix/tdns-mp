@@ -23,6 +23,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // delegationSyncRetryDelay and delegationSyncRetries bound what happens
@@ -174,6 +175,11 @@ var delegationSyncNotifyDelays = []time.Duration{
 // nameservers need that long from now. The chain's own check sends at
 // once: the change is old by then. Only the NOTIFY is held. The sync has
 // run, an UPDATE is not delayed, and the syncher does not wait.
+//
+// A NOTIFY(CSYNC) waits for one thing more, and first: the zone's CSYNC,
+// which the leader makes and sends to every provider, must have every
+// provider's final confirmation (mp_s5_leader_csync.go). The zone's wait is
+// counted from the last of them.
 
 // delegationSyncChains is what the leader keeps of each zone's sync between
 // two asks: one chain per zone, whether the last sync failed or went out as
@@ -183,6 +189,10 @@ type delegationSyncChains struct {
 	mu    sync.Mutex
 	zones map[string]*delegationSyncChain
 	asks  int // the number last given to something scheduled, for any zone
+	// csyncs is the CSYNC this agent made for each zone it leads, kept apart
+	// from the chains: a chain ends and starts over, and the CSYNC of a
+	// difference is made once
+	csyncs map[string]*delegationCsync
 }
 
 type delegationSyncChain struct {
@@ -200,6 +210,14 @@ type delegationNotifyHold struct {
 	notifies []tdns.NotifyRequest // one per NOTIFY type
 	diff     string               // the difference between the zone and the parent that they are for
 	retimed  bool                 // a check waited when the hold began: the check after the hold is that one
+	// awaiting: the hold has no end yet. It waits for the providers' final
+	// confirmations of the zone's CSYNC (csync is that record), and the
+	// zone's wait starts when the last one is in. out and delays are what
+	// the release needs then.
+	awaiting bool
+	csync    string
+	out      chan tdns.NotifyRequest
+	delays   []time.Duration
 }
 
 // delegationNotifies is what one sync handed over for the notifier, and what
@@ -305,18 +323,20 @@ func (conf *Config) delegationSyncFailedWith(ctx context.Context, zone string, c
 // the notifier at once, or after the zone's wait, and the look at the parent
 // that decides whether the sync is done is scheduled from when they leave.
 // The caller does not book the sync as done and does not tell the peers.
-// Reported is whether they are held. delays is read once per call, as for a
-// failure.
-func (conf *Config) delegationSyncNotified(ctx context.Context, zone string, sent delegationNotifies) (held bool) {
+// Reported is whether they are held, or that the sync has failed after all:
+// a provider has rejected the zone's CSYNC, and a NOTIFY(CSYNC) for a record
+// that not every provider serves is not sent. delays is read once per call,
+// as for a failure.
+func (conf *Config) delegationSyncNotified(ctx context.Context, zone string, sent delegationNotifies) (held bool, failed error) {
 	sent.wait, sent.largest = conf.delegationNotifyWait(zone)
 	return conf.delegationSyncNotifiedWith(ctx, zone, sent, delegationSyncNotifyDelays)
 }
 
-func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string, sent delegationNotifies, delays []time.Duration) (held bool) {
+func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string, sent delegationNotifies, delays []time.Duration) (held bool, failed error) {
 	c := &conf.InternalMp.delegationSyncChains
+	every := delegationCsyncAwaitedEvery
 	c.mu.Lock()
 	ch := c.of(zone)
-	ch.failures = 0
 	// The sync was the chain's own if a NOTIFY of the chain's is out and
 	// nothing of the chain's is scheduled: its check, or the retry of a
 	// check that failed, has fired, and this is the sync it asked for. Any
@@ -329,6 +349,43 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 		leave, retimed = mergeNotifies(ch.hold.notifies, sent.requests), ch.hold.retimed
 	}
 	types := notifyTypes(leave)
+	// A NOTIFY(CSYNC) is for the CSYNC this leader made and sent to the
+	// zone's providers. It does not leave before each of them has given its
+	// final confirmation, and not at all if one has rejected the record.
+	if cur := c.csyncs[zone]; cur != nil && !own && slices.ContainsFunc(leave, func(req tdns.NotifyRequest) bool { return req.RRtype == dns.TypeCSYNC }) {
+		if cur.failed != nil {
+			// rejected before the sync handed its NOTIFY over: the next
+			// ask makes and distributes a new one
+			cause := cur.failed
+			delete(c.csyncs, zone)
+			if ch.hold != nil {
+				ch.hold, ch.waiting = nil, false
+			}
+			c.mu.Unlock()
+			return false, cause
+		}
+		if !cur.confirmed {
+			// A hold with no end yet. Nothing is timed here: the zone's
+			// wait is counted from the last confirmation
+			// (delegationCsyncProgress). The count of failures stays, so
+			// that a CSYNC that is rejected again and again is asked for at
+			// growing intervals.
+			same := ch.hold != nil && ch.hold.awaiting && ch.hold.csync == cur.record
+			ch.hold = &delegationNotifyHold{notifies: leave, diff: sent.diff, retimed: retimed,
+				awaiting: true, csync: cur.record, out: sent.out, delays: delays}
+			if same {
+				c.mu.Unlock()
+				return true, nil
+			}
+			ask := c.schedule(ch)
+			awaited := slices.Clone(cur.awaited)
+			c.mu.Unlock()
+			lgEngine.Info("a NOTIFY to the parent waits for the providers' confirmations of the zone's CSYNC", "zone", zone, "notify", types, "serial", cur.serial, "awaited", awaited)
+			conf.delegationCsyncAwaitedAfter(ctx, zone, ask, every)
+			return true, nil
+		}
+	}
+	ch.failures = 0
 	if !own && sent.wait > 0 {
 		// The wait runs from the change. A sync that found the same
 		// difference as the one the hold is for brings no change (an
@@ -339,20 +396,20 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 		ch.hold = &delegationNotifyHold{notifies: leave, diff: sent.diff, retimed: retimed}
 		if !restart {
 			c.mu.Unlock()
-			return true
+			return true, nil
 		}
 		ask := c.schedule(ch)
 		c.mu.Unlock()
 		lgEngine.Info("a NOTIFY to the parent is held until the zone's nameservers have had time to serve the change", "zone", zone, "notify", types, "wait", sent.wait, "largest", sent.largest)
 		conf.delegationSyncReleaseAfter(ctx, zone, ask, sent, delays)
-		return true
+		return true, nil
 	}
 	ch.hold = nil
 	check := c.notifyLeft(zone, ch, types, retimed, delays)
 	c.mu.Unlock()
 	forwardNotifies(ctx, sent.out, leave)
 	conf.delegationSyncCheckAfter(ctx, zone, types, check)
-	return false
+	return false, nil
 }
 
 // notifyLeft books a NOTIFY as on its way to the parent and decides on the
@@ -403,7 +460,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		leads := conf.leadsZone(zone)
 		c.mu.Lock()
 		ch := c.zones[zone]
-		if ch == nil || ch.ask != ask || ch.hold == nil {
+		if ch == nil || ch.ask != ask || ch.hold == nil || ch.hold.awaiting {
 			c.mu.Unlock()
 			return
 		}
@@ -425,12 +482,15 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 
 // delegationSyncNotLeading ends the zone's chain on an agent that does not
 // lead the zone any more: whoever leads now has its own. A NOTIFY that is
-// still held is dropped, and said to be unless the engine is stopping.
+// still held is dropped, and said to be unless the engine is stopping. What
+// is remembered of the CSYNC this agent made goes too: the next leader makes
+// its own.
 func (conf *Config) delegationSyncNotLeading(zone string, quiet bool) {
 	c := &conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
 	ch := c.zones[zone]
 	delete(c.zones, zone)
+	delete(c.csyncs, zone)
 	c.mu.Unlock()
 	if ch != nil && ch.hold != nil && !quiet {
 		lgEngine.Info("the held NOTIFY is dropped: this agent no longer leads the zone", "zone", zone, "notify", notifyTypes(ch.hold.notifies))
@@ -481,6 +541,12 @@ func (conf *Config) delegationSyncSucceeded(zone string) (notified string, reche
 // is when that sync is done, so the peers are told now, once; a sync that
 // never sent anything tells them nothing, as before.
 func (conf *Config) delegationSyncInSync(zone string) {
+	// The difference the zone's CSYNC was made for is gone. The same
+	// difference at a later time is a new change, and gets a new CSYNC.
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	delete(c.csyncs, zone)
+	c.mu.Unlock()
 	sent, checks := conf.delegationSyncSucceeded(zone)
 	if sent == "" {
 		return
@@ -498,7 +564,61 @@ func (conf *Config) delegationSyncInSync(zone string) {
 // wait. A provider that only signs, an auditor and a member with no role
 // have no nameservers to wait for. Also returned is the provider whose
 // value the wait is.
+//
+// The wait has a ceiling (delegationNotifyWaitMax): one provider that
+// announces a very large value would otherwise hold every leader's NOTIFY
+// that long. A NOTIFY that leaves before the slowest provider serves the
+// change costs one NOTIFY: the checks that follow send it again.
 func (conf *Config) delegationNotifyWait(zone string) (wait time.Duration, largest string) {
+	wait, largest = conf.delegationNotifyWaitAnnounced(zone)
+	if ceiling := delegationNotifyWaitMax(); wait > ceiling {
+		// with the ceiling at zero the operator has switched the hold off:
+		// nothing to tell
+		if _, told := notifyWaitCeilingTold.LoadOrStore(fmt.Sprintf("%s %s %s", largest, wait, ceiling), ceiling > 0); !told && ceiling > 0 {
+			lgEngine.Warn("a provider's propagation delay is above the ceiling of the wait before a NOTIFY; the NOTIFY is held for the ceiling",
+				"provider", largest, "announced", wait, "ceiling", ceiling, "setting", notifyWaitMaxKey)
+		}
+		wait = ceiling
+	}
+	return wait, largest
+}
+
+// notifyWaitMaxKey is the agent's setting for the ceiling of the wait before
+// a NOTIFY, and defaultNotifyWaitMax what it is when unset.
+const (
+	notifyWaitMaxKey     = "delegationsync.notify-wait-max"
+	defaultNotifyWaitMax = 10 * time.Minute
+)
+
+// notifyWaitCeilingTold: the provider, value and ceiling already warned of,
+// so that the warning comes once and not at every NOTIFY.
+var notifyWaitCeilingTold sync.Map
+
+// delegationNotifyWaitMax is the longest a NOTIFY is held, whatever the
+// providers announce. Zero is a setting: no NOTIFY is held. A value that is
+// negative, or positive and below a second (a number written without a unit
+// is read as nanoseconds), is refused and the default is used.
+func delegationNotifyWaitMax() time.Duration {
+	if !viper.IsSet(notifyWaitMaxKey) {
+		return defaultNotifyWaitMax
+	}
+	d := viper.GetDuration(notifyWaitMaxKey)
+	if d == 0 {
+		return 0
+	}
+	if d < time.Second {
+		if _, told := notifyWaitCeilingTold.LoadOrStore(fmt.Sprintf("refused %s", d), true); !told {
+			lgEngine.Error("the ceiling of the wait before a NOTIFY is not a usable duration (write a unit, as in 10m); the default is used",
+				"setting", notifyWaitMaxKey, "read_as", d, "default", defaultNotifyWaitMax)
+		}
+		return defaultNotifyWaitMax
+	}
+	return d
+}
+
+// delegationNotifyWaitAnnounced is the wait as the providers' announcements
+// give it, before the ceiling.
+func (conf *Config) delegationNotifyWaitAnnounced(zone string) (wait time.Duration, largest string) {
 	ar := conf.InternalMp.AgentRegistry
 	if ar == nil || ar.GossipStateTable == nil {
 		return 0, ""
@@ -540,16 +660,27 @@ func (conf *Config) delegationNotifyWait(zone string) (wait time.Duration, large
 // records to add and those to remove. Two syncs with the same difference
 // found the zone and the parent as they were.
 func delegationDifference(dss tdns.DelegationSyncStatus) string {
+	return differenceOf(dss.NsAdds, dss.NsRemoves, dss.AAdds, dss.ARemoves, dss.AAAAAdds, dss.AAAARemoves, dss.DSAdds, dss.DSRemoves)
+}
+
+// delegationNSDifference is the part of the difference that a CSYNC tells
+// the parent about: the NS set and the glue, not the DS set. Empty when they
+// do not differ.
+func delegationNSDifference(dss tdns.DelegationSyncStatus) string {
+	return differenceOf(dss.NsAdds, dss.NsRemoves, dss.AAdds, dss.ARemoves, dss.AAAAAdds, dss.AAAARemoves)
+}
+
+// differenceOf names a difference by its records: sets to add and sets to
+// remove, in turn.
+func differenceOf(sets ...[]dns.RR) string {
 	var parts []string
-	for _, set := range []struct {
-		op  string
-		rrs []dns.RR
-	}{
-		{"+", dss.NsAdds}, {"-", dss.NsRemoves}, {"+", dss.AAdds}, {"-", dss.ARemoves},
-		{"+", dss.AAAAAdds}, {"-", dss.AAAARemoves}, {"+", dss.DSAdds}, {"-", dss.DSRemoves},
-	} {
-		for _, rr := range set.rrs {
-			parts = append(parts, set.op+rr.String())
+	for i, rrs := range sets {
+		op := "+"
+		if i%2 == 1 {
+			op = "-"
+		}
+		for _, rr := range rrs {
+			parts = append(parts, op+rr.String())
 		}
 	}
 	sort.Strings(parts)

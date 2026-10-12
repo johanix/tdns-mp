@@ -31,6 +31,7 @@ import (
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // fakeParent answers what the leader's analysis asks a parent server about
@@ -157,6 +158,7 @@ func (b *lockedBuffer) String() string {
 type notifyRig struct {
 	*leaderSyncRig
 	parent  *fakeParent
+	us      *peerEnv // the leader's own transport and registry
 	peer    *peerEnv
 	notifyq chan tdns.NotifyRequest
 	log     *lockedBuffer
@@ -172,6 +174,16 @@ type notifyRig struct {
 // propagation delay, so no NOTIFY is held, until propagation sets one.
 func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *notifyRig {
 	t.Helper()
+	return newNotifyRigFor(t, zone, scheme, false, delays...)
+}
+
+// newNotifyRigFor is the rig for a zone that no provider signs, as the tests
+// of the hold and the checks have it, or for a signed one: both providers
+// sign it. For a signed zone the leader makes the zone's CSYNC, so the rig
+// then also runs the leader's data engine, which distributes it
+// (mp_s5_leader_csync_test.go has what stands in for the providers).
+func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...time.Duration) *notifyRig {
+	t.Helper()
 	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
 	logsink := &lockedBuffer{}
 	delegationSyncNotifyDelays = delays
@@ -182,7 +194,7 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})
 	us, them := env.Alice, env.Bob
-	r := &notifyRig{leaderSyncRig: newLeaderSyncRigAs(t, zone, AgentId(us.Identity)), peer: them,
+	r := &notifyRig{leaderSyncRig: newLeaderSyncRigAs(t, zone, AgentId(us.Identity)), us: us, peer: them,
 		notifyq: make(chan tdns.NotifyRequest, 64), log: logsink, oldNS: "gone.provider.example."}
 	r.leader(AgentId(us.Identity))
 	r.conf.InternalMp.MPTransport = us.Bridge
@@ -219,8 +231,12 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: shortLabel(id), Identity: id, Upstream: "."}})
 	}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
+	roles := []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: labels}}
+	if signed {
+		roles = append(roles, &core.HSYNCPARAMSigners{Signers: labels})
+	}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM),
-		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: labels}}}}}})
+		Data: &core.HSYNCPARAM{Value: roles}}}})
 	r.mpzd.Data.Set(zone, *apex)
 	zd.InstallInitialSnapshot() // the analysis reads the zone as it is served
 	zd.Ready = true
@@ -279,6 +295,9 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 	r.ctx = ctx
 	ensureDSEngineQueue(zd.KeyDB)
 	var engines sync.WaitGroup
+	if signed {
+		r.startDataEngine(t, ctx, &engines)
+	}
 	engines.Add(2)
 	go func() {
 		defer engines.Done()
@@ -1100,5 +1119,44 @@ func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.
 	gst.SetPropagationDelay(time.Minute)
 	if wait, of := conf.delegationNotifyWait("absent.notify.example."); wait != time.Minute || of != us {
 		t.Errorf("the wait for a zone that is not here is %s, by %s; want this agent's own", wait, of)
+	}
+}
+
+// The wait before a NOTIFY has a ceiling, ten minutes unless the agent's
+// configuration says otherwise: a provider that announces an hour does not
+// hold the leader's NOTIFY for an hour. Zero switches the hold off. A number
+// with no unit is read as nanoseconds and refused.
+func TestTheWaitBeforeANotifyHasACeiling(t *testing.T) {
+	gst := NewGossipStateTable("agent.us.example.")
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.AgentRegistry = &AgentRegistry{GossipStateTable: gst}
+	t.Cleanup(func() { viper.Set(notifyWaitMaxKey, nil) })
+	const zone = "ceiling.notify.example." // not loaded: the wait is this agent's own value
+
+	gst.SetPropagationDelay(time.Hour) // tdns's default for the setting
+	if wait, _ := conf.delegationNotifyWait(zone); wait != 10*time.Minute {
+		t.Errorf("with an hour announced and no ceiling configured the wait is %s, want the default ceiling of 10m", wait)
+	}
+	gst.SetPropagationDelay(5 * time.Minute)
+	if wait, _ := conf.delegationNotifyWait(zone); wait != 5*time.Minute {
+		t.Errorf("a value below the ceiling: the wait is %s, want the 5m announced", wait)
+	}
+
+	gst.SetPropagationDelay(time.Hour)
+	for _, tc := range []struct {
+		set  any
+		want time.Duration
+		why  string
+	}{
+		{"25m", 25 * time.Minute, "a configured ceiling"},
+		{"2h", time.Hour, "a ceiling above what is announced changes nothing"},
+		{"0", 0, "zero: no NOTIFY is held"},
+		{600, 10 * time.Minute, "a number with no unit is refused, the default is used"},
+		{"-5m", 10 * time.Minute, "a negative value is refused, the default is used"},
+	} {
+		viper.Set(notifyWaitMaxKey, tc.set)
+		if wait, _ := conf.delegationNotifyWait(zone); wait != tc.want {
+			t.Errorf("%s (%v): the wait is %s, want %s", tc.why, tc.set, wait, tc.want)
+		}
 	}
 }
