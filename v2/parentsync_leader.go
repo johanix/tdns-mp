@@ -23,13 +23,12 @@ var lgElect = tdns.Logger("elect")
 
 func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcastFunc func(ZoneName, string, map[string][]string) error) *LeaderElectionManager {
 	return &LeaderElectionManager{
-		elections:             make(map[ZoneName]*LeaderElection),
-		pendingElections:      make(map[ZoneName]bool),
-		groupElections:        make(map[string]*LeaderElection),
-		pendingGroupElections: make(map[string]bool),
-		localID:               localID,
-		leaderTTL:             leaderTTL,
-		broadcastFunc:         broadcastFunc,
+		elections:        make(map[ZoneName]*LeaderElection),
+		pendingElections: make(map[ZoneName]bool),
+		groupElections:   make(map[string]*LeaderElection),
+		localID:          localID,
+		leaderTTL:        leaderTTL,
+		broadcastFunc:    broadcastFunc,
 	}
 }
 
@@ -94,7 +93,6 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 		}
 		lem.groupElections[groupHash] = le
 	}
-	delete(lem.pendingGroupElections, groupHash)
 	lem.mu.Unlock()
 
 	le.mu.Lock()
@@ -171,12 +169,18 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 	}
 }
 
-// DeferGroupElection records a group as needing an election when OnGroupOperational fires.
-func (lem *LeaderElectionManager) DeferGroupElection(groupHash string) {
-	lem.mu.Lock()
-	lem.pendingGroupElections[groupHash] = true
-	lem.mu.Unlock()
-	lgElect.Info("deferring group election until group is operational", "group", groupHash[:8])
+// leaveElectionToGroup says, in the log, that a zone's election is its
+// provider group's, and that nothing is started for the zone here. The
+// group's election is called when the group becomes mutually OPERATIONAL
+// (wireAgentGossipCallbacks), and a zone that arrives in a group that has
+// its leader is taken up by that leader (zoneJoinedGroup).
+//
+// It was DeferGroupElection, and marked the group in a map of elections to
+// start once the group was OPERATIONAL. Nothing ever read the map: the
+// election of a group that becomes OPERATIONAL is called whether the group
+// was marked or not (tdns-mp #183).
+func (lem *LeaderElectionManager) leaveElectionToGroup(groupHash string) {
+	lgElect.Info("no election started here, the zone's election is its provider group's", "group", groupHash[:8])
 }
 
 // HandleGroupMessage dispatches an election message that carries a _group record.
@@ -797,10 +801,13 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	// asks (the SIG(0) key, a delegation sync): the DS set may have changed
 	// while it was away, and a sync it had asked for before is gone with
 	// the process. The sync sends only a difference, so asking costs
-	// nothing when there is none. It asks once per term, and only once the
-	// group is known: gossip heard before this agent's groups are
-	// registered asks nothing yet, and the same term's next word asks then.
-	// A term this agent won by election has asked already.
+	// nothing when there is none. It asks once per term, for the zones the
+	// group has here at that moment. Gossip heard before any zone of the
+	// group is loaded finds no group and asks nothing, and no later word of
+	// the same term asks either: the gossip table hands a term on once
+	// (MergeGossip). Each zone is asked for when it arrives in the group
+	// (zoneJoinedGroup). A term this agent won by election has asked
+	// already.
 	if le.Leader == lem.localID && le.askedTerm != le.Term && lem.onLeaderElected != nil && lem.providerGroupMgr != nil {
 		if pg := lem.providerGroupMgr.GetGroup(groupHash); pg != nil {
 			le.askedTerm = le.Term
@@ -918,7 +925,7 @@ func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones []ZoneName) {
 				lem.mu.Lock()
 				delete(lem.pendingElections, zone)
 				lem.mu.Unlock()
-				lem.DeferGroupElection(pg.GroupHash)
+				lem.leaveElectionToGroup(pg.GroupHash)
 				continue
 			}
 		}
@@ -1454,7 +1461,7 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 			if pg != nil {
 				lgElect.Info("leader TTL expiring, deferring to group re-election",
 					"zone", zone, "group", pg.GroupHash[:8])
-				lem.DeferGroupElection(pg.GroupHash)
+				lem.leaveElectionToGroup(pg.GroupHash)
 				return
 			}
 		}

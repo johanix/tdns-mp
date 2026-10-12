@@ -87,8 +87,15 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 
 	// Agent-only pre-diff guard: mirror the legacy weAreInHSYNC abort. When the
 	// local identity is absent from the zone's current HSYNC3 RRset, skip remote
-	// add/remove processing and the group recompute. An explicit local-remove RR
-	// still fires OnLocalRemoved so the one-time teardown hook runs.
+	// add/remove processing. An explicit local-remove RR still fires
+	// OnLocalRemoved so the one-time teardown hook runs.
+	//
+	// The provider groups are recomputed on this path too. They are made from
+	// the zones' records whoever is in them, and this path used to return
+	// before the recompute: an agent whose role and HSYNC3 record the owner
+	// removed in one edit kept the zone in the group it had been in, and went
+	// on answering that it led the zone if it led that group, until a change
+	// in some other zone recomputed the groups (tdns-mp #183).
 	if e.deps.GateOnLocalPresence && !localInHsync3(zv, local) {
 		for _, rr := range diff.Removes {
 			if h3, ok := hsync3Of(rr); ok && h3.Identity == local {
@@ -97,6 +104,9 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 				}
 				break
 			}
+		}
+		if e.deps.Host.OnHsync3Changed != nil {
+			e.deps.Host.OnHsync3Changed(zone)
 		}
 		return nil
 	}

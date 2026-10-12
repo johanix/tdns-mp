@@ -153,18 +153,17 @@ type LeaderElection struct {
 // When a ProviderGroupManager is set, elections are per-group and the leader
 // covers all zones in the group. IsLeader checks group membership first.
 type LeaderElectionManager struct {
-	mu                    sync.RWMutex
-	elections             map[ZoneName]*LeaderElection
-	pendingElections      map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
-	groupElections        map[string]*LeaderElection // key: group hash
-	pendingGroupElections map[string]bool            // group hashes waiting for OnGroupOperational
-	localID               AgentId
-	leaderTTL             time.Duration
-	broadcastFunc         func(zone ZoneName, rfiType string, records map[string][]string) error
-	operationalPeersFunc  func(zone ZoneName) int   // returns count of operational peers for a zone
-	configuredPeersFunc   func(zone ZoneName) int   // returns count of configured peers for a zone
-	onLeaderElected       func(zone ZoneName) error // called when local agent wins election
-	providerGroupMgr      *ProviderGroupManager
+	mu                   sync.RWMutex
+	elections            map[ZoneName]*LeaderElection
+	pendingElections     map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
+	groupElections       map[string]*LeaderElection // key: group hash
+	localID              AgentId
+	leaderTTL            time.Duration
+	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
+	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
+	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
+	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
+	providerGroupMgr     *ProviderGroupManager
 }
 
 // LeaderStatus holds the current leader status for a zone.

@@ -40,7 +40,8 @@ func newDiffEngine(local string, gate bool, zones mapZoneLookup) (*Engine, *diff
 
 // Delta (a): the pre-diff guard mirrors the legacy weAreInHSYNC abort — when the
 // local identity is absent from the zone's current HSYNC3 RRset, remote adds are
-// ignored and the group recompute is suppressed.
+// ignored. The provider groups are recomputed all the same: they are made from
+// the zones' records, whoever is in them.
 func TestApplyHsyncDiff_guardSkipsWhenLocalAbsent(t *testing.T) {
 	remote := mustHSYNC3RR(t, "rem", "rem.example.")
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{remote}}}
@@ -51,8 +52,8 @@ func TestApplyHsyncDiff_guardSkipsWhenLocalAbsent(t *testing.T) {
 	if _, ok := e.registry.S.Get("rem.example."); ok {
 		t.Fatal("guard should skip the remote add when local is absent from HSYNC3")
 	}
-	if h.hsync3Changed != 0 {
-		t.Fatalf("group recompute must be suppressed when local absent, fired %d", h.hsync3Changed)
+	if h.hsync3Changed != 1 {
+		t.Fatalf("the groups are recomputed once when local is absent, fired %d", h.hsync3Changed)
 	}
 	if h.membersAdded != 0 {
 		t.Fatalf("OnHsyncMembersAdded must not fire when the guard trips, fired %d", h.membersAdded)
@@ -70,6 +71,31 @@ func TestApplyHsyncDiff_guardFiresLocalRemoved(t *testing.T) {
 
 	if h.localRemoved != 1 {
 		t.Fatalf("OnLocalRemoved should fire once for a local-remove RR, fired %d", h.localRemoved)
+	}
+}
+
+// The owner removes the local identity's HSYNC3 record, and with it the
+// local identity's place in the zone's provider group. The guard trips, the
+// local identity being gone from the RRset, and the provider groups are
+// recomputed all the same, once: the zone is in another group now, or in
+// none. The guard used to return before the recompute, and the agent kept
+// the zone in the group it had been in.
+func TestApplyHsyncDiff_guardRecomputesGroupsWhenLocalIsRemoved(t *testing.T) {
+	localRR := mustHSYNC3RR(t, "loc", "local.example.")
+	remote := mustHSYNC3RR(t, "rem", "rem.example.")
+	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{remote}}}
+	e, h := newDiffEngine("local.example.", true, zones)
+
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Removes: []dns.RR{localRR}})
+
+	if h.localRemoved != 1 {
+		t.Fatalf("OnLocalRemoved should fire once for a local-remove RR, fired %d", h.localRemoved)
+	}
+	if h.hsync3Changed != 1 {
+		t.Fatalf("the groups are recomputed once when the local identity is removed, fired %d", h.hsync3Changed)
+	}
+	if h.membersAdded != 0 {
+		t.Fatalf("OnHsyncMembersAdded must not fire when the guard trips, fired %d", h.membersAdded)
 	}
 }
 
