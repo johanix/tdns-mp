@@ -272,7 +272,8 @@ type InternalMpConf struct {
 	// runtime goroutines read it.
 	mpConfig atomic.Pointer[MultiProviderConf]
 
-	// delegationSyncFailures: the zones whose last delegation sync failed,
-	// and how often, for the retries (mp_s5_leader_sync.go)
-	delegationSyncFailures delegationSyncFailures
+	// delegationSyncChains: the zones whose last delegation sync failed, or
+	// went to the parent as a NOTIFY, and how often, for the asks that follow
+	// (mp_s5_leader_sync.go)
+	delegationSyncChains delegationSyncChains
 }
