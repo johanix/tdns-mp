@@ -51,7 +51,7 @@ Each one is one edit by the zone owner.
 |---|---|---|
 | No record, to a record with no role | Discovery, hello, beats. The zone moves to the group that has it as a member with no role, and takes that group's leader (4.1). | It asks every voting member for the zone's state and its upstream for the transfer set-up. It shows "member, no role" and refuses its operator's edits. |
 | No role, to a role | The zone moves to the group in which it votes, and takes that group's leader. Its contributions are taken. | It asks for the zone's state once more. It may vote and lead. Edits follow the edit policy. |
-| A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). What the provider contributed stands until the removal takes it away. | It no longer votes or leads for the zone, and refuses edits. It can change nothing of what it contributed, its own DNSKEYs included: its key machine holds for the zone. It goes on serving. |
+| A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). What the provider contributed stands until the removal takes it away. | It no longer votes or leads for the zone, and refuses edits. It can change nothing of what it contributed, its own DNSKEYs included: its key machine holds for the zone. Hold means no rollover and no new DNSKEY. It goes on signing, and re-signing, with the keys it has, and it goes on serving, until the removal withdraws them. |
 | A record, to no record | It leaves the zone's group. When no zone is shared with it any more, comms end after a hold time (3.1). | The zone is no longer a multi-provider zone for it. |
 
 ## 3. Who may talk, and what a sender may do
@@ -64,7 +64,7 @@ Admission decides nothing else. No handler rests on it alone: each message type 
 
 A provider whose roles are gone and whose record stays is a member.
 
-**Comms end when no zone is shared.** When the last zone shared with a peer is gone, the agent keeps the peer for a hold time of 24 hours, which is how long a queued message is kept, and then removes it and stops beating it. Until then the peer stays admitted. It is a member of no zone here, so every rule of 3.3 that asks for a member refuses it. A peer that a zone names again within the hold time is kept. One that is named again later is discovered afresh.
+**Comms end when no zone is shared.** When the last zone shared with a peer is gone, the agent keeps the peer for a hold time of 24 hours, which is how long a queued message is kept, and then removes it and stops beating it. This is the one exception to admission by a shared zone: until the peer is removed the agent goes on beating it and takes its hellos and beats. It is a member of no zone here, so every message from it that requires a member is refused (3.3). A peer that a zone names again within the hold time is kept. One that is named again later is discovered afresh.
 
 ### 3.2 The sender is the one the transport established
 
@@ -111,6 +111,8 @@ There is one election per group, among its voting members, and the group's leade
 **A zone that joins or leaves a group forces no election.** A zone that arrives in a group with a leader takes that leader. A group elects when it has no leader: when it is new, when its lease runs out, or when its leader is lost.
 
 **The leader takes up a zone that arrives.** When a zone arrives in a group, the group's leader does for that zone what it does for every zone of the group when it is elected. An agent that led the group the zone left stops acting for it.
+
+**Taking a zone up never gives it a new SIG(0) key.** A zone that publishes a KEY has a key, and the parent holds it. A leader that does not have that key asks the voting members for it, and asks again until one hands it over, on the schedule of 5.7. A peer that is slow, restarting or silent is a peer to ask again, not a peer without the key. Until the leader has the key its sync with the parent is owed and not sent. A key is generated only for a zone that publishes none.
 
 An example. The group of a, b and c has 100,000 zones, and c leads it. The owner of one zone takes c's roles away. That zone moves to the group "a and b, with c as a member with no role". If that group exists, the zone takes its leader. If it is new, a and b elect. Nothing is elected in the first group, which now has 99,999 zones and c as its leader. Later the owner removes c's record, and the zone moves to the group of a and b and takes its leader.
 
@@ -240,6 +242,7 @@ With Z zones and P voting peers per zone, a start sends Z x P requests and recei
   - The removal starts at the zone owner's edit that takes the provider's roles away.
   - It runs at the parent first (the NS, then the DS), then in the zone, and last at the provider's own servers.
   - The leader of the group the zone is in after that edit is responsible for it. That leader is never the leaving provider, and it needs nothing from it: when a step is safe is a matter of time and TTL.
+  - While it leaves, the provider's key machine holds for the zone: no rollover and no new DNSKEY, and signing and re-signing go on with the keys it has. A leaving signer that stopped signing would let its signatures expire while resolvers are still sent to it.
   - The rule needs no direction: the leader sees to it that nothing points at a member with no role. For a provider on its way in there is nothing to remove.
   - Open: whether the zone's NS RRset or the parent's changes first. A parent that takes NOTIFY only copies the NS RRset from the zone.
 - **A server that becomes a signer and serves its own signatures too early** (#160), and wrong answers before a provider is listed (item 1 of #137).
