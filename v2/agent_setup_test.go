@@ -306,11 +306,13 @@ func (r *identitySyncRig) next(t *testing.T) tdns.DelegationSyncRequest {
 }
 
 // refuse answers the next n asks the way a parent that is down, or says no,
-// makes the syncher answer.
+// makes both synchers answer: an error with the reason in its text. The
+// parent's rcode is not passed on; Rcode stays 0.
 func (r *identitySyncRig) refuse(t *testing.T, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		r.next(t).Response <- tdns.DelegationSyncStatus{Error: true, ErrorMsg: "the parent refused the update", Rcode: dns.RcodeRefused}
+		r.next(t).Response <- tdns.DelegationSyncStatus{Error: true,
+			ErrorMsg: "every available sync scheme failed: UPDATE failed: parent REFUSED the delegation UPDATE"}
 	}
 }
 
@@ -327,9 +329,16 @@ func (r *identitySyncRig) ended(t *testing.T, when string) {
 // identitySyncLine is one logged attempt.
 type identitySyncLine struct {
 	Level   string        `json:"level"`
-	Msg     string        `json:"msg"`
 	Attempt int           `json:"attempt"`
 	Next    time.Duration `json:"next"`
+	line    string
+}
+
+// says: the line's log message is this one. A line about an answer has two
+// "msg" keys, the log message and the answer's own message, and a decoder
+// keeps the last: the log message is looked for in the line itself.
+func (l identitySyncLine) says(message string) bool {
+	return strings.Contains(l.line, `"msg":"identity zone: `+message+`"`)
 }
 
 // logged returns the attempts in the captured log, in order.
@@ -340,7 +349,7 @@ func (r *identitySyncRig) logged(t *testing.T) []identitySyncLine {
 		if line == "" {
 			continue
 		}
-		var l identitySyncLine
+		l := identitySyncLine{line: line}
 		if err := json.Unmarshal([]byte(line), &l); err != nil {
 			t.Fatalf("log line %q: %v", line, err)
 		}
@@ -398,7 +407,7 @@ func TestSyncIdentityDelegationKeepsAskingUntilInSync(t *testing.T) {
 			warned = append(warned, attempt)
 		case "DEBUG":
 		default:
-			t.Errorf("attempt %d is logged at %s: %q", attempt, l.Level, l.Msg)
+			t.Errorf("attempt %d is logged at %s: %s", attempt, l.Level, l.line)
 		}
 	}
 	if last := lines[refusals-1]; last.Next != pace.max {
@@ -411,8 +420,40 @@ func TestSyncIdentityDelegationKeepsAskingUntilInSync(t *testing.T) {
 		t.Errorf("warnings at attempts %v, want %v: the first refusal, the end of the fast attempts, then one per %s of waiting",
 			warned, []int{1, pace.fast, 18, 22, 26, 30}, pace.remind)
 	}
-	if last := lines[refusals]; last.Level != "INFO" || last.Attempt != refusals+1 || !strings.Contains(last.Msg, "in sync") {
-		t.Errorf("the last log entry is %+v, want the parent in sync at attempt %d, at info level", last, refusals+1)
+	if last := lines[refusals]; last.Level != "INFO" || last.Attempt != refusals+1 || !last.says("delegation in sync with the parent") {
+		t.Errorf("the last log entry is %s, want the parent in sync at attempt %d, at info level", last.line, refusals+1)
+	}
+}
+
+// An answer without an error is a sync the parent accepted. The synchers
+// send the scheme's message with it; the sync must not need one to tell an
+// acceptance from a refusal, which comes as an error. Either way the first
+// one is told at info level, as sent, and no warning is written.
+func TestSyncIdentityDelegationTellsAnAcceptedSyncAsSent(t *testing.T) {
+	pace := identitySyncPace{fast: identitySync.fast, interval: time.Millisecond, max: 8 * time.Millisecond, remind: time.Hour}
+	for i, tc := range []struct {
+		name   string
+		answer tdns.DelegationSyncStatus
+	}{
+		{"with the scheme's message", tdns.DelegationSyncStatus{Msg: "SendUpdate(example.) returned rcode NOERROR"}},
+		{"with no message", tdns.DelegationSyncStatus{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newIdentitySyncRig(t, fmt.Sprintf("agent.accepted%d.example.", i), pace)
+			r.next(t).Response <- tc.answer
+			r.next(t).Response <- tdns.DelegationSyncStatus{InSync: true}
+			r.ended(t, "after the parent was in sync")
+			lines := r.logged(t)
+			if len(lines) != 2 {
+				t.Fatalf("%d attempts in the log, want 2:\n%s", len(lines), r.log.String())
+			}
+			if l := lines[0]; l.Level != "INFO" || l.Attempt != 1 || !l.says("delegation sent to the parent") {
+				t.Errorf("the accepted sync is logged as %s, want \"delegation sent to the parent\" at info level", l.line)
+			}
+			if l := lines[1]; l.Level != "INFO" || l.Attempt != 2 || !l.says("delegation in sync with the parent") {
+				t.Errorf("the second attempt is logged as %s, want the parent in sync at info level", l.line)
+			}
+		})
 	}
 }
 
@@ -445,7 +486,7 @@ func TestSyncIdentityDelegationStopsWhenItsContextEnds(t *testing.T) {
 			r.ended(t, "when its context ended")
 			for _, l := range r.logged(t) {
 				if l.Level == "INFO" {
-					t.Errorf("the sync logged %q at attempt %d; the parent never was in sync", l.Msg, l.Attempt)
+					t.Errorf("the sync logged %s; the parent never was in sync, and nothing was accepted", l.line)
 				}
 			}
 		})

@@ -799,8 +799,12 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 				wait = pace.max
 			}
 		}
-		// Sent and accepted: the next round's analysis confirms it.
-		sent := !st.Error && st.Rcode == dns.RcodeSuccess && st.Msg != ""
+		// Sent and accepted: the next round's analysis confirms it. The
+		// synchers answer a refusal, a parent without a usable scheme and a
+		// failure on the way as an error, and no answer is one too (above):
+		// an answer without an error is a sync that was accepted, whether
+		// or not it carries the scheme's message.
+		sent := !st.Error && st.Rcode == dns.RcodeSuccess
 		kv := []any{"zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "next", wait,
 			"rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "msg", st.Msg}
 		switch {
