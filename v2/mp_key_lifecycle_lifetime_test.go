@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -143,5 +144,38 @@ func TestALifetimeOfForeverNeverRollsAKey(t *testing.T) {
 				break
 			}
 		})
+	}
+}
+
+// tdnsForeverFallback is a copy of a number tdns keeps to itself. It is held
+// here to what tdns's parser stores for the word, so a tdns that changes its
+// value fails this test when it is pinned, and the copy cannot go stale
+// unseen. The test guards that invariant: no change of tdns-mp's own code
+// makes it fail, only the two numbers parting.
+func TestTheForeverFallbackIsWhatTdnsStores(t *testing.T) {
+	lt, err := tdns.GenKeyLifetime("forever")
+	if err != nil {
+		t.Fatalf("tdns's parser refuses `forever`: %v", err)
+	}
+	if lt.Lifetime != tdnsForeverFallback {
+		t.Errorf("tdns stores %d s for `forever` and tdnsForeverFallback is %d s: set it to tdns's foreverLifetimeSecs", lt.Lifetime, tdnsForeverFallback)
+	}
+	if tdnsForeverLifetime != lt.Lifetime {
+		t.Errorf("the value in use for `forever` is %d s, tdns's parser stores %d s", tdnsForeverLifetime, lt.Lifetime)
+	}
+}
+
+// A parser that refuses the word, or stores nothing for it, must not leave
+// tdns's 10000 hours a schedule: the fallback is the value then. A value the
+// parser does give is the one taken.
+func TestForeverIsTheFallbackWhenTheParserGivesNone(t *testing.T) {
+	if got := tdnsForever(tdns.KeyLifetime{}, errors.New("invalid key lifetime")); got != tdnsForeverFallback {
+		t.Errorf("the parser refused the word: forever is %d s, want the fallback %d s", got, tdnsForeverFallback)
+	}
+	if got := tdnsForever(tdns.KeyLifetime{}, nil); got != tdnsForeverFallback {
+		t.Errorf("the parser stored 0 for the word: forever is %d s, want the fallback %d s", got, tdnsForeverFallback)
+	}
+	if got := tdnsForever(tdns.KeyLifetime{Lifetime: 86400}, nil); got != 86400 {
+		t.Errorf("the parser stored 86400 s for the word: forever is %d s, want the parser's value", got)
 	}
 }
