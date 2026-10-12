@@ -276,7 +276,7 @@ Each step is one pull request. Steps 1 to 6 are safe to merge alone and change n
 
 ## 6. Open questions for the project owner
 
-The design is written with the recommended answer to each, and marks the places that depend on one. A decision is written into the design, and the question leaves this list.
+The design is written with the recommended answer to each, and marks the places that depend on one. A decision is written into the design, and the question moves to the end of this section. The numbers stay.
 
 1. **How the asker knows that an answer is complete.**
    (a) One message that is complete by construction, with a marker that names the request. (b) Several messages and an end marker. (c) A count or a digest announced first.
@@ -294,10 +294,6 @@ The design is written with the recommended answer to each, and marks the places 
    (a) Yes: the group is the member list, as decided, and a zone changes group at each step. (b) Key the election on the voting members alone, so that a record without a role disturbs nothing.
    Recommended: (a). With (b) the group that gossips and the group that elects are two different things, and a member with no role would have to be shown the election of a group that may hold zones it is not a member of.
 
-5. **Does a peer ask a restarted agent back?**
-   (a) Yes, once, on a `start` request. (b) No.
-   Recommended: (a). It is the only thing that finds a change the restarted agent made and lost from its queue.
-
 6. **May a member with no role get the zone transfer set-up from its upstream (RFI CONFIG)?**
    (a) Yes. (b) Not until it has a role.
    Recommended: (a). Section 3.3 of the guide needs it: the newcomer serves the zone before it is listed, and the HSYNC3 record names its upstream.
@@ -309,6 +305,10 @@ The design is written with the recommended answer to each, and marks the places 
 8. **Does the whole sync with the parent wait for catch-up, or only the DS?**
    (a) The whole sync. (b) Only the DS; NS and glue go as today.
    Recommended: (a). A leader that missed a change would send its older view of the NS RRset, and the wait adds no stall that the loss of the leader would not cause anyway.
+
+**Decided:**
+
+5. **A peer asks a restarted agent back,** once, on a `start` request (design 5.1). It is the only thing that finds a change the restarted agent made and lost from its queue. The request after a long outage stays too. Safety first: neither is cut to save code.
 
 ## 7. After this plan
 

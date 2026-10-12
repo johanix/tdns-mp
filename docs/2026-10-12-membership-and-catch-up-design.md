@@ -157,7 +157,7 @@ When no zone is left in a group, the group's election state and timers go with i
 | The agent starts | `start` | The agent asks every voting member of every zone it is a member of |
 | The agent becomes a member of a zone | `join` | The agent asks every voting member of that zone |
 | The agent is given its first role in a zone | `role` | The same, once more |
-| A peer says that it has started | `peer-start` | The agent that got a `start` request answers it, and then asks that peer back (question 5) |
+| A peer says that it has started | `peer-start` | The agent that got a `start` request answers it, and then asks that peer back |
 | A peer is OPERATIONAL again after more than an hour | `outage` | The agent asks that peer, for each zone they share. The hour is a config value, well below the 24 hours a queued message is kept |
 | The operator runs `resync --pull` | `manual` | The agent asks every voting member of the zone |
 
