@@ -536,6 +536,17 @@ value among the providers that serve the zone (see
 [Multi-Provider Advanced Topics §1.3](multi-provider-advanced.md#13-the-notify-scheme-child-side)).
 Left unset, the value is tdns's default of one hour.
 
+With the `parentsync:` block (and `imrengine` active) the
+agent also publishes the CDS of the identity zone it
+builds and sends its DS to the parent; the auditor does
+the same. An identity zone listed under `zones:` gets
+none of that (no CDS, no DS sent, no delegation sync),
+which the daemon says in a warning in its log at start:
+a validating peer does not trust that
+zone's TLSA without a DS, so leave the zone out of
+`zones:` and let the daemon build it, or install its DS
+at the parent by hand.
+
 ### 4.5 CLI Configuration
 
 `/etc/tdns/tdns-mpcli.yaml`:
