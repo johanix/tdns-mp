@@ -7,6 +7,7 @@ package tdnsmp
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -92,6 +93,19 @@ type ProviderGroupManager struct {
 	mu      sync.RWMutex
 	Groups  map[string]*ProviderGroup // key: group hash
 	LocalID string                    // our own identity
+	// recomputeMu serialises RecomputeGroups, from its scan of the zones to
+	// the last word of what changed. It is not mu, which the readers of the
+	// groups need while a scan runs.
+	recomputeMu sync.Mutex
+	// scansBegun counts the scans of the zones that have begun, and
+	// installedScan is the number of the scan whose map is in place (guarded
+	// by recomputeMu): a recompute that finds a scan in place that began
+	// after it was called has nothing to add (RecomputeGroups).
+	scansBegun    atomic.Uint64
+	installedScan uint64
+	// afterScan, when set, is called by a recompute between its scan and
+	// its swap. Tests only.
+	afterScan func()
 	// onZoneJoinedGroup is told of each zone a recompute has put into a
 	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
 	onZoneJoinedGroup func(zone ZoneName, from, to string)

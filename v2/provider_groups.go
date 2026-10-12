@@ -210,9 +210,11 @@ func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
 // SetOnZoneJoinedGroup sets the callback that RecomputeGroups tells of each
 // zone it has put into a group the zone was not in before: to is that group,
 // from the group the zone was in, empty when it had none. It is called once
-// the new group map is in place, with no lock held. A zone whose group did
-// not change is not reported, so a recompute that moves nothing calls
-// nothing.
+// the new group map is in place, with the manager's lock free: whoever is
+// told may read the groups. It must not start a recompute: the one that
+// tells is not over until the callback returns, so that two recomputes tell
+// in the order in which they ran. A zone whose group did not change is not
+// reported, so a recompute that moves nothing calls nothing.
 func (pgm *ProviderGroupManager) SetOnZoneJoinedGroup(f func(zone ZoneName, from, to string)) {
 	pgm.mu.Lock()
 	defer pgm.mu.Unlock()
@@ -255,7 +257,32 @@ func zonesThatJoined(before, after map[string]*ProviderGroup) []zoneGroupChange 
 // and rebuilds the provider group map. This is a pure function of zone data.
 // The zones it moves into a group are reported to the callback set with
 // SetOnZoneJoinedGroup, if there is one.
+//
+// Recomputes run one at a time, each from its scan to the last word of what
+// it changed. The scan used to run under no lock, and only the swap under
+// the manager's: of two recomputes at once, started by the refreshes of two
+// zones, the one that had scanned first could swap last, and the map then
+// held a zone in the group it had before its providers changed, until
+// something recomputed again (tdns-mp #181).
 func (pgm *ProviderGroupManager) RecomputeGroups() {
+	// A scan that has begun by now may have read the zones before the change
+	// this call is for. One that begins later has not.
+	pgm.recomputeSince(pgm.scansBegun.Load())
+}
+
+// recomputeSince is RecomputeGroups for a call that was made when begun scans
+// had begun. When it gets its turn and finds a scan in place that began
+// after that, it returns at once: that scan read everything this one would,
+// and has told what it changed. The caller has what it came for either way,
+// a map made from the zones as they were at its call or later.
+func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
+	pgm.recomputeMu.Lock()
+	defer pgm.recomputeMu.Unlock()
+	if pgm.installedScan > begun {
+		return
+	}
+	scan := pgm.scansBegun.Add(1)
+
 	type zoneGroup struct {
 		identities    []string
 		votingMembers []string // union of voting identities across zones in this group
@@ -328,6 +355,10 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 		newGroups[hash] = pg
 	}
 
+	if pgm.afterScan != nil {
+		pgm.afterScan()
+	}
+
 	// Merge with existing groups (preserve name proposals)
 	pgm.mu.Lock()
 
@@ -344,9 +375,10 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 	}
 	pgm.Groups = newGroups
 	pgm.mu.Unlock()
+	pgm.installedScan = scan
 
-	// Told outside the lock, and with the new map in place: whoever is told
-	// may look the zone's group up.
+	// Told with the manager's lock free, and with the new map in place:
+	// whoever is told may look the zone's group up.
 	for _, j := range joined {
 		onJoined(j.zone, j.from, j.to)
 	}
