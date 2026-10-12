@@ -2816,6 +2816,28 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli auditor confirmations
+use: confirmations
+short: Show the zones' distributions and which members have confirmed them
+long: |
+  Show the distributions the auditor has seen in the zones it audits, and
+  for each the members whose confirmation it waits for, has seen, or has seen
+  refused (with the reason). Distributions that still wait for a member come
+  first. A completed distribution is kept for an hour.
+  
+  A member is "unknown" when its confirmation has not been seen and it has
+  sent the auditor none since the auditor started: an agent on older software
+  sends none at all.
+flags: |
+      --pending       only the distributions that wait for a member
+  -z, --zone string   filter by zone
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+
 === tdns-mpcli auditor daemon
 use: daemon
 short: Only useful via sub-commands

@@ -130,6 +130,9 @@ audit:
    # A provider is flagged as silent if no BEAT arrives within
    # this window.
    silence_threshold:   90s
+   # A distribution is flagged when it has waited this long for
+   # a member's confirmation.
+   pending_threshold:   2m
    # How often the auditor's detectors run (silence, divergence,
    # quorum checks).
    detector_interval:   30s

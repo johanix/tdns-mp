@@ -40,4 +40,6 @@ type AuditEvent = tdnsmp.AuditEvent
 type AuditObservation = tdnsmp.AuditObservation
 type AuditZoneSummary = tdnsmp.AuditZoneSummary
 type AuditProviderSummary = tdnsmp.AuditProviderSummary
+type AuditDistributionSummary = tdnsmp.AuditDistributionSummary
+type AuditDistributionMember = tdnsmp.AuditDistributionMember
 type AuditWebUser = tdnsmp.AuditWebUser
