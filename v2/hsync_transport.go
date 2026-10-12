@@ -90,6 +90,15 @@ type MPTransportBridge struct {
 
 	keystateRfiMu    sync.Mutex
 	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
+
+	// refusedHellos is, per peer, the run of our DNS hellos that the peer
+	// has refused and when the peer was last looked up again for it
+	// (noteHelloRefused, agent_discovery.go).
+	refusedHellosMu sync.Mutex
+	refusedHellos   map[string]*refusedHellos
+	// rediscoveryInterval is the least time between two such lookups of one
+	// peer; zero means peerRediscoveryInterval.
+	rediscoveryInterval time.Duration
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -435,22 +444,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// is blocking discovery.
 	tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
 		lgTransport.Info("discovery kick: flushing IMR cache and triggering discovery", "peer", peerID)
-
-		// Flush IMR cache for this peer's discovery names before re-discovery
-		if tm.getImrEngine != nil {
-			if removed := flushDiscoveryCache(tm.getImrEngine(), peerID); removed > 0 {
-				lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
-			}
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		err := tm.DiscoverAndRegisterAgent(ctx, peerID)
-		if err != nil {
-			lgTransport.Warn("discovery incomplete for peer", "peer", peerID, "err", err)
-		} else {
-			lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
-		}
+		tm.flushAndDiscover(peerID)
 	}
 
 	// Provide gossip for beat responses: when we receive a beat,
@@ -1617,12 +1611,18 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 		dnsResp, dnsErr = helloResult(results["DNS"])
 		if dnsErr != nil {
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
+			// A peer that keeps answering REFUSED may be one whose key we
+			// hold wrong: it is looked up again (#145).
+			if helloRefused(dnsErr) {
+				tm.noteHelloRefused(peer.ID)
+			}
 		} else if dnsResp != nil && !dnsResp.Accepted {
 			lgTransport.Warn("DNS Hello not accepted", "peer", peer.ID, "reason", dnsResp.RejectReason)
 		} else {
 			lgTransport.Info("DNS Hello succeeded", "peer", peer.ID)
 		}
 		if dnsErr == nil && dnsResp != nil && dnsResp.Accepted {
+			tm.noteHelloAccepted(peer.ID)
 			if raw, ok := peer.MechanismRawState("DNS"); !ok || raw < transport.PeerStateIntroducing {
 				peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted")
 				lgTransport.Info("updated DNS mechanism state to INTRODUCING after successful Hello", "agent", peer.ID)
