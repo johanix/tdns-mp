@@ -23,6 +23,12 @@ import (
 
 func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) error {
 	mp := conf.MpConfig()
+	// The DS engine's queue, before any engine that can sign a zone, as in
+	// the signer (ensureDSEngineQueue): here that is the refresh engine, for
+	// an identity zone the config lists, and the identity set-up at the end.
+	// The engine itself starts further down, beside the delegation syncher.
+	ensureDSEngineQueue(conf.Config.Internal.KeyDB)
+
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
@@ -414,6 +420,17 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
 		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
+	})
+	// tdns's DS engine. The syncher asks it for the CDS before every
+	// NOTIFY(CDS), and with no engine to answer, the leader sent none: a
+	// parent that offers only the NOTIFY scheme never got the zone's DS
+	// (tdns-mp #150). For a multi-provider zone, which the agent does not
+	// sign, the engine publishes nothing: its answer is the CDS that the
+	// agent's copy of the zone carries, the one the signers serve (key
+	// lifecycle ownership design §4.1, Amendment 3). The zone it does write
+	// a CDS for is the agent's own identity zone (startIdentityParentSync).
+	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
+		return hdb.DSEngine(ctx)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
 		return tdns.NotifyHandler(ctx, conf.Config)
