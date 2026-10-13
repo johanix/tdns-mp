@@ -1976,9 +1976,17 @@ long: |
   UPDATE receiver, found through the parent's DSYNC records, and print the state
   the parent reports for the key.
   
-  The agent need not be the leader. The inquiry is signed with the key. The
-  answer is printed as it was received: it is not authenticated, and it is not
-  recorded, so the parent state in "parentsync status" does not change.
+  The agent need not be the leader. The inquiry is signed with the key.
+  
+  The parent's answer is authenticated before it is read, and the line printed
+  says whether it was. An answer whose signature is wrong is a failure and is
+  not printed. An answer that cannot be authenticated, because it is unsigned
+  or because the key it is signed with has no chain of trust, is a failure too,
+  unless the agent is configured with parentsync.update.allow-insecure: then it
+  is printed and marked as not authenticated.
+  
+  The answer is not recorded, so the parent state in "parentsync status" does
+  not change.
   
   Fails when the agent has no active SIG(0) key for the zone, when the parent
   advertises no UPDATE scheme, and when the receiver does not answer.

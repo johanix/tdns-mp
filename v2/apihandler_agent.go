@@ -614,20 +614,21 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, err := queryParentKeyStateDetailed(hdb, imr, string(amp.Zone), keyid)
+			keyState, extra, authenticated, err := queryParentKeyStateDetailed(hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
 				return
 			}
 			resp.Data = map[string]interface{}{
-				"zone":       string(amp.Zone),
-				"keyid":      keyid,
-				"state":      keyState,
-				"state_name": edns0.KeyStateToString(keyState),
-				"extra_text": extra,
+				"zone":          string(amp.Zone),
+				"keyid":         keyid,
+				"state":         keyState,
+				"state_name":    edns0.KeyStateToString(keyState),
+				"extra_text":    extra,
+				"authenticated": authenticated,
 			}
-			resp.Msg = fmt.Sprintf("Parent says: %s", edns0.KeyStateToString(keyState))
+			resp.Msg = parentKeyStateLine(keyState, authenticated)
 
 		case "parentsync-bootstrap":
 			lem := conf.InternalMp.LeaderElectionManager
