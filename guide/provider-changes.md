@@ -41,6 +41,20 @@ provider, and the DS RRset that makes them trust its keys.
   first. It keeps answering correctly until nothing in
   any cache can still send a resolver to it.
 
+**One provider at a time.** Change the set of providers
+one provider at a time, and let each edit settle before
+the next. At every step at least one provider that serves
+or signs the zone before the edit must still do so after
+it.
+
+Do not exchange the whole set in one edit: the only
+provider replaced by another, or two providers replaced by
+a third. The providers agree on a change through the ones
+that are part of the zone both before and after it. An
+edit that leaves none gives them nobody to agree through,
+and for a while the old providers and the new ones can
+both update the parent.
+
 ## 2. Who Is a Member
 
 - Every provider with an HSYNC3 record is a member of the
