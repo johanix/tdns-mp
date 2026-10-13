@@ -226,4 +226,8 @@ type InternalMpConf struct {
 	// delegationSyncFailures: the zones whose last delegation sync failed,
 	// and how often, for the retries (mp_s5_leader_sync.go)
 	delegationSyncFailures delegationSyncFailures
+	// zoneKeyWaits: the zones that joined a group this agent leads while it
+	// held no SIG(0) key for them, and whose key it is asking its peers for
+	// (parentsync_utils.go).
+	zoneKeyWaits zoneKeyWaits
 }

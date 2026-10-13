@@ -34,8 +34,12 @@ func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcas
 }
 
 // SetProviderGroupManager sets the provider group manager for group-based elections.
+// The manager then also reports each zone that enters a group (zoneJoinedGroup).
 func (lem *LeaderElectionManager) SetProviderGroupManager(pgm *ProviderGroupManager) {
 	lem.providerGroupMgr = pgm
+	if pgm != nil {
+		pgm.SetOnZoneJoinedGroup(lem.zoneJoinedGroup)
+	}
 }
 
 // SetOperationalPeersFunc sets the callback used to count operational peers for re-election.
@@ -63,6 +67,15 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 // SetOnLeaderElected sets the callback invoked when the local agent wins an election.
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
 	lem.onLeaderElected = f
+}
+
+// SetOnZoneJoined sets the callback invoked when a zone joins a provider
+// group that the local agent already leads (zoneJoinedGroup). It is not the
+// election's callback: a zone that arrives has had a leader before, and what
+// that leader made for it, its SIG(0) key first of all, is not to be made
+// again. With no callback set an arrival asks nothing.
+func (lem *LeaderElectionManager) SetOnZoneJoined(f func(zone ZoneName) error) {
+	lem.onZoneJoined = f
 }
 
 // StartGroupElection initiates a leader election for a provider group.
@@ -748,6 +761,58 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 			}
 		}
 	}
+}
+
+// zoneJoinedGroup is the provider group manager's word that a recompute has
+// put a zone into a group: the zone's set of providers changed, or the zone
+// is new here. A delegation sync is asked for at an election, for the zones
+// the group has then. A zone that arrived in a group whose leader was already
+// elected was asked for by nobody, and a change of its delegation waited for
+// the next lease renewal. When this agent leads the group, it asks for the
+// zone now (onZoneJoined).
+//
+// What is asked is not what an election's winner is asked (onLeaderElected).
+// The zone that arrives has had a leader, and that leader made its SIG(0)
+// key, which the parent holds. The winner's key setup makes a key when it
+// finds none, and here that would put a new key in place of the one the
+// parent trusts. The arrival's callback leaves the key as it is.
+//
+// A group without a leader asks nothing here: the election that follows asks
+// for every zone the group has by then. Nor does a group that another member
+// leads: that member is told by its own group manager. The manager tells of
+// a zone once, when its group changes, and has the zone in its new group
+// before it tells, so the sync that is asked for finds this agent the zone's
+// leader.
+//
+// An election of this agent that is decided in the same instant can ask for
+// the zone too. Those are two asks from one agent with one view of the zone,
+// and the sync sends only a difference, so the second sends nothing.
+//
+// Not covered: the agent that led the group the zone left. It stops acting
+// for the zone when its own refresh moves the zone, and until then it reads
+// itself as the zone's leader. A lease renewal of its group in that time asks
+// for a sync from the view it still has, and a difference computed from that
+// view undoes what was sent from here; the parent keeps what arrives last.
+// Nothing in this function can see that agent's view. A leader that acts only
+// when the views of a zone agree is what closes it (the membership design).
+func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	if lem.onZoneJoined == nil {
+		return
+	}
+	if leader, ok := lem.GetGroupLeader(to); !ok || leader != lem.localID {
+		return
+	}
+	was := "no group"
+	if from != "" {
+		was = shortHash(from)
+	}
+	lgElect.Info("zone joined a group this agent leads, asking for its delegation sync",
+		"zone", zone, "group", shortHash(to), "was_in", was)
+	go func() {
+		if err := lem.onZoneJoined(zone); err != nil {
+			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
+		}
+	}()
 }
 
 // DeferElection records a zone as needing an election once peers become operational.

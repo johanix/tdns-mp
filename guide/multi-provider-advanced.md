@@ -523,4 +523,7 @@ Key properties:
 
 The leader is responsible for parent-facing operations
 (delegation sync, key publication) on behalf of the entire
-provider group.
+provider group. It takes them up when it is elected, for
+the zones the group has then, and for a zone that joins
+the group later (its set of providers changed) when that
+zone arrives.
