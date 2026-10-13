@@ -425,9 +425,12 @@ func (conf *Config) delegationCsyncAwaitedAfter(ctx context.Context, zone string
 // the sender is told so in a final confirmation. The rest of the update is
 // processed as usual. Returned is the reason, empty if nothing was refused.
 //
-// The sender is the one the transport established (the identity whose key
-// opened the message, or the TLS peer), and the agent the update says it
-// comes from must be the same.
+// The sender is the one the transport established, never the one the update
+// names: on the DNS mechanism the identity whose key opened the message. The
+// agent the update says it comes from must be the same. An update that
+// carries no transport sender has no sender for this rule, and its CSYNC is
+// rejected. (On the HTTPS mechanism the transport's sender is still the one
+// the message names, checked only to be a known peer: tdns-mp #56.)
 func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs) string {
 	if u == nil || u.Update == nil {
 		return ""
@@ -437,9 +440,6 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 		return ""
 	}
 	sender := u.DeliveredBy
-	if sender == "" {
-		sender = u.AgentId
-	}
 	var leader AgentId
 	known := false
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
@@ -449,13 +449,17 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if known && same(sender, leader) && same(u.AgentId, leader) {
 		return ""
 	}
-	reason := fmt.Sprintf("a CSYNC is taken only from the zone's delegation sync leader: the sender is %s, the leader is %s", sender, leader)
+	senderName := string(sender)
+	if senderName == "" {
+		senderName = "(not established)"
+	}
+	reason := fmt.Sprintf("a CSYNC is taken only from the zone's delegation sync leader: the sender is %s, the leader is %s", senderName, leader)
 	leaderName := string(leader)
 	if !known {
-		reason = fmt.Sprintf("a CSYNC is taken only from the zone's delegation sync leader: the sender is %s, and no leader is known", sender)
+		reason = fmt.Sprintf("a CSYNC is taken only from the zone's delegation sync leader: the sender is %s, and no leader is known", senderName)
 		leaderName = "(none known)"
 	}
-	lgEngine.Info("a CSYNC in a SYNC is rejected: it is not from the zone's delegation sync leader", "zone", u.Zone, "sender", sender, "originator", u.AgentId, "leader", leaderName)
+	lgEngine.Info("a CSYNC in a SYNC is rejected: it is not from the zone's delegation sync leader", "zone", u.Zone, "sender", senderName, "originator", u.AgentId, "leader", leaderName)
 
 	var kept []core.RROperation
 	var refused []RejectedItemInfo
