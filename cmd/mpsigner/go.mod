@@ -7,7 +7,7 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 require (
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20261013071257-8be3dbc8b0f1
+	github.com/johanix/tdns/v2 v2.0.0-20261013090526-42c06637c854
 	github.com/mattn/go-sqlite3 v1.14.16
 )
 
@@ -23,7 +23,7 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261012202931-4f100cfcf254 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261013083536-8c5d0cf80439 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20261012170509-ea64562104bb // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20261012170509-ea64562104bb // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20261012170509-ea64562104bb // indirect
