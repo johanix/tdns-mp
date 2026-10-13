@@ -76,23 +76,33 @@ func zonePublishesKey(zd *MPZoneData) bool {
 }
 
 // mayGenerateZoneKey says whether a leader that holds no SIG(0) key for the
-// zone, and was handed none by a peer, may make one.
+// zone, and was handed none by a peer, may make one. unanswered is how many
+// of the zone's voting members have not said that they hold none.
 //
 // A leader that won the zone in an election may, as before. A leader that the
 // zone arrived at, because the zone's set of providers changed, may only when
-// the zone publishes no key. A zone that publishes one has a key that the
-// parent holds, made by the leader the zone had. A new key in its place is
-// not trusted by the parent, and its publication replaces the zone's KEY
-// RRset, so the key the parent trusts is gone from the zone as well.
-func mayGenerateZoneKey(elected bool, zd *MPZoneData) bool {
-	return elected || !zonePublishesKey(zd)
+// the zone publishes no key and every voting member has said it holds none.
+//
+// A zone that publishes a key has one that the parent holds, made by the
+// leader the zone had. A new key in its place is not trusted by the parent,
+// and its publication replaces the zone's KEY RRset, so the key the parent
+// trusts is gone from the zone as well.
+//
+// That this agent's copy of the zone shows no KEY is not enough by itself: a
+// provider that has just joined leads the group the zone moves into before it
+// holds anything of the zone, and its copy shows no KEY although the zone has
+// one. So a member that is silent is a member to ask again, never a member
+// without the key.
+func mayGenerateZoneKey(elected bool, zd *MPZoneData, unanswered int) bool {
+	return elected || (!zonePublishesKey(zd) && unanswered == 0)
 }
 
 // errZoneKeyNotHeld is the key setup's answer for a zone that joined a group
-// this agent leads, publishes a SIG(0) key, and whose private key neither this
-// agent nor a peer that answered holds. No key is made then, and nothing can
-// be signed for the parent until a peer hands the key over.
-var errZoneKeyNotHeld = errors.New("the zone publishes a SIG(0) key that this agent does not hold")
+// this agent leads, whose SIG(0) key this agent does not hold and was not
+// handed, and for which it may not make one (mayGenerateZoneKey). Nothing can
+// be signed for the parent until a peer hands the key over, or every voting
+// member has said that it holds none.
+var errZoneKeyNotHeld = errors.New("this agent holds no SIG(0) key for the zone and may not make one yet")
 
 // zoneKeyWaitDelays are the waits between two rounds of asking the peers for
 // the key of a zone that arrived without it. The last one repeats: the asking

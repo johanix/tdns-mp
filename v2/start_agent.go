@@ -283,6 +283,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 
 		keyName := string(zone)
+		// unanswered: see step b. Declared here because a goto may not jump
+		// over a declaration.
+		unanswered := 0
 		// Step a: check local keystore
 		sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 		if err == nil && len(sak.Keys) > 0 {
@@ -290,27 +293,51 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				"zone", zone, "keyid", sak.Keys[0].KeyId)
 			goto publish
 		}
-		// Step b: ask peers via RFI CONFIG subtype=sig0key
+		// Step b: ask peers via RFI CONFIG subtype=sig0key.
+		//
+		// unanswered counts the voting members that have not said "no key":
+		// one that is not operational, one that did not answer, one whose key
+		// could not be imported. A silent peer is a peer to ask again, not a
+		// peer without the key. A member that does not vote cannot lead and
+		// never holds the key, so its silence says nothing.
 		{
 			zad, err := ar.GetZoneAgentData(zone)
-			if err == nil {
+			if err != nil {
+				unanswered++ // the zone's members are not known: nobody has said "no key"
+			} else {
+				_, voting := zoneParticipants(zoneApex(zone))
+				votes := func(id AgentId) bool {
+					for _, v := range voting {
+						if dns.Fqdn(v) == dns.Fqdn(string(id)) {
+							return true
+						}
+					}
+					return false
+				}
 				for _, agent := range zad.Agents {
 					if agent.ID == AgentId(ar.LocalAgent.Identity) {
 						continue
 					}
 					if !ar.isAgentOperational(agent.ID) {
+						if votes(agent.ID) {
+							unanswered++
+						}
 						continue
 					}
 					lgAgent.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.ID)
 					configResp := RequestAndWaitForConfig(ar, agent, string(zone), "sig0key", msgQs)
 					if configResp == nil {
 						lgAgent.Info("peer did not respond to CONFIG sig0key", "zone", zone, "peer", agent.ID)
+						if votes(agent.ID) {
+							unanswered++
+						}
 						continue
 					}
 					if len(configResp.ConfigData) > 0 && configResp.ConfigData["status"] != "no sig0 key for zone" {
 						if err := importSig0KeyFromPeer(hdb, keyName, configResp.ConfigData); err != nil {
 							lgAgent.Error("failed to import SIG(0) key from peer",
 								"zone", zone, "peer", agent.ID, "err", err)
+							unanswered++ // it has a key: that is not "no key"
 							continue
 						}
 						lgAgent.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.ID)
@@ -323,10 +350,18 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		// Step c: no peer has the key — generate a new keypair. Not for a
 		// zone that arrived with a key of its own: the parent holds that
 		// key, and a new one in its place is refused there and replaces the
-		// zone's KEY RRset here.
-		if !mayGenerateZoneKey(elected, zd) {
-			lgAgent.Warn("the zone publishes a SIG(0) key that this agent does not hold, and no peer handed it over; no new key is made for a zone that joined a group, a sync that needs the key waits",
-				"zone", zone)
+		// zone's KEY RRset here. And not while a voting member has not
+		// answered: this agent's own copy of the zone may be behind (a
+		// provider that has just joined holds nothing of the zone yet), so
+		// that it shows no KEY says little.
+		if !mayGenerateZoneKey(elected, zd, unanswered) {
+			if zonePublishesKey(zd) {
+				lgAgent.Warn("the zone publishes a SIG(0) key that this agent does not hold, and no peer handed it over; no new key is made for a zone that joined a group, a sync that needs the key waits",
+					"zone", zone)
+			} else {
+				lgAgent.Warn("not every voting member has said whether it holds the zone's SIG(0) key; no new key is made for a zone that joined a group until each has, a sync that needs the key waits",
+					"zone", zone, "unanswered", unanswered)
+			}
 			return errZoneKeyNotHeld
 		}
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)

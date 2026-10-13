@@ -580,8 +580,13 @@ func TestAZoneThatArrivesWithAKeyGetsNoNewOne(t *testing.T) {
 	if zonePublishesKey(mpzd) {
 		t.Fatal("precondition: the seeded zone publishes a KEY")
 	}
-	if !mayGenerateZoneKey(false, mpzd) {
-		t.Error("a zone that publishes no key and joins a group may not be given one: nothing would")
+	if !mayGenerateZoneKey(false, mpzd, 0) {
+		t.Error("a zone that publishes no key, and whose every voting member said it holds none, may not be given one: nothing would")
+	}
+	// A provider that has just joined shows no KEY in its own copy of a zone
+	// that has one. While a voting member has not answered, it makes none.
+	if mayGenerateZoneKey(false, mpzd, 1) {
+		t.Error("a zone that joins a group may be given a key while a voting member has not said it holds none")
 	}
 
 	key, err := dns.NewRR("keyed.example. 3600 IN KEY 512 3 15 l02Woqwl4Uca9VQhrPQYG5cM3bxPV1RJxbr1iZqt6KE=")
@@ -599,13 +604,13 @@ func TestAZoneThatArrivesWithAKeyGetsNoNewOne(t *testing.T) {
 	if !zonePublishesKey(mpzd) {
 		t.Fatal("the zone serves a KEY at its apex and reads as publishing none")
 	}
-	if mayGenerateZoneKey(false, mpzd) {
+	if mayGenerateZoneKey(false, mpzd, 0) {
 		t.Error("a zone that joins a group with a key of its own may be given a new one: the parent holds the one it has")
 	}
-	if !mayGenerateZoneKey(true, mpzd) {
+	if !mayGenerateZoneKey(true, mpzd, 0) || !mayGenerateZoneKey(true, mpzd, 2) {
 		t.Error("an election's winner may no longer make a key when it has none")
 	}
-	if zonePublishesKey(nil) || !mayGenerateZoneKey(false, nil) {
+	if zonePublishesKey(nil) || !mayGenerateZoneKey(false, nil, 0) {
 		t.Error("an unknown zone reads as publishing a key")
 	}
 }
