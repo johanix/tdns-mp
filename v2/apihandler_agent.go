@@ -614,7 +614,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, authenticated, err := queryParentKeyStateDetailed(hdb, imr, string(amp.Zone), keyid)
+			keyState, extra, authenticated, err := queryParentKeyStateDetailed(r.Context(), hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)

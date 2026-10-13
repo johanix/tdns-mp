@@ -32,8 +32,11 @@ const parentKeyStateInquiryTimeout = 20 * time.Second
 // asked with QTYPE=ANY, over UDP, and read the answer unauthenticated; a tdns
 // parent answers only the QTYPE=KEY inquiry with the option, so every inquiry
 // ended in "KeyState option missing in response".
-func queryParentKeyStateDetailed(hdb *HsyncDB, imr *Imr, keyName string, keyid uint16) (uint8, string, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), parentKeyStateInquiryTimeout)
+//
+// The inquiry ends with ctx, the request it is made for, or after
+// parentKeyStateInquiryTimeout, whichever comes first.
+func queryParentKeyStateDetailed(ctx context.Context, hdb *HsyncDB, imr *Imr, keyName string, keyid uint16) (uint8, string, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, parentKeyStateInquiryTimeout)
 	defer cancel()
 	ks, authenticated, err := tdns.QueryParentKeyState(ctx, hdb.KeyDB, imr.Imr, keyName, keyid)
 	if err != nil {
