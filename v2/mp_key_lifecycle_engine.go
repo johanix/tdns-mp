@@ -295,7 +295,35 @@ func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 
 const foreverLifetime = 0xFFFFFFFF
 
-func lifetimeSchedules(secs uint32) bool { return secs != 0 && secs != foreverLifetime }
+// tdnsForeverFallback is tdns's foreverLifetimeSecs (its api_structs.go,
+// 10000 hours), which tdns does not export. It stands in when tdns's parser
+// gives no value for the word; a test holds it to what the parser gives.
+const tdnsForeverFallback = uint32(10000 * 3600)
+
+// tdnsForeverLifetime is what tdns stores for `lifetime: forever`, asked of
+// its parser once, at start.
+var tdnsForeverLifetime = tdnsForever(tdns.GenKeyLifetime("forever"))
+
+// tdnsForever takes the parser's answer for the word. An error, or 0, would
+// leave tdns's value unknown and make it a schedule again without a sign:
+// the fallback is taken then.
+func tdnsForever(lt tdns.KeyLifetime, err error) uint32 {
+	if err != nil || lt.Lifetime == 0 {
+		return tdnsForeverFallback
+	}
+	return lt.Lifetime
+}
+
+// lifetimeSchedules: whether a policy lifetime is a schedule at all. tdns
+// stores `lifetime: forever` as a large finite number of seconds
+// (foreverLifetimeSecs in its api_structs.go, 10000 hours), and its own
+// rollover paths take that value as "never" (lifetimeSchedulesRoll beside
+// it). Neither is exported, so the value is asked of tdns's parser: taken as
+// a schedule it rolled the keys of a `forever` policy at about 417 days
+// (tdns-mp #134).
+func lifetimeSchedules(secs uint32) bool {
+	return secs != 0 && secs != foreverLifetime && secs != tdnsForeverLifetime
+}
 
 // KeyLifecycleEngine runs the drivers of the owned zones.
 type KeyLifecycleEngine struct {

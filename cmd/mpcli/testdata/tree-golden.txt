@@ -1876,6 +1876,156 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli agent parentsync
+use: parentsync
+short: Delegation sync leader, election and SIG(0) key bootstrap for a zone
+long: |
+  Commands for this agent's part in a zone's delegation sync with the parent:
+  which agent leads it among the zone's providers, and where the parent stands
+  on the SIG(0) key that signs the UPDATEs. All take the zone with --zone.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync bootstrap
+use: bootstrap
+short: Bootstrap the zone's SIG(0) key with the parent (leader only)
+long: |
+  Have the agent bring the parent to trust the zone's active SIG(0) key. This
+  is what a new leader does by itself after its election; the command runs it
+  again.
+  
+  Refused unless this agent is the zone's delegation sync leader, and when it
+  has no active SIG(0) key for the zone.
+  
+  The command returns at once and the work runs in the agent:
+    - The agent asks the parent for the state of the key.
+    - A parent that already trusts the key is sent no bootstrap. The agent then
+      checks that the delegation is in sync.
+    - A parent that does not know the key is sent the bootstrap UPDATE, and is
+      asked again until it trusts the key or the attempts run out.
+    - A parent that requires a manual bootstrap is left to its operator.
+  Nothing is done, and nothing is reported here, for a zone whose HSYNCPARAM
+  does not say parentsync="agent", and while an earlier run for the same key is
+  still asking the parent.
+  
+  The outcome is in the agent's log, and in the parent state that
+  "parentsync status" shows for the key.
+  
+  Example:
+    tdns-mpcli agent parentsync bootstrap --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync election
+use: election
+short: Start a leader election for the zone's provider group
+long: |
+  Start a leader election now. The agents elect by themselves, when a provider
+  group has become operational and again before the leader's lease runs out;
+  this command is for a group that has no leader and does not get one.
+  
+  A zone in a provider group gets a group election, and its leader leads every
+  zone of the group, not only the one named here. The election is started
+  whatever the state of the group:
+    - A leader with a valid lease stays the leader until the new election is
+      decided. The winner may be another agent.
+    - An election that is running is not waited for: a new one is started.
+    - Every voting member has to answer. While one does not, the election is
+      aborted after five seconds and started again, until all have answered.
+  The agent that wins does what every new leader does, for each zone of the
+  group that syncs with its parent through the agents. For a parent that takes
+  UPDATEs it publishes the zone's SIG(0) key, generating one when no agent has
+  it, and bootstraps the key with the parent. And it brings the delegation in
+  sync.
+  
+  Refused: a zone the agent does not know, and a group with no voting members.
+  An agent that is not a voting member of the group starts nothing, and says so.
+  
+  A zone that no provider group covers gets an election of its own. That one is
+  refused unless every configured peer for the zone is operational; with no
+  peers the agent becomes the leader at once.
+  
+  The command returns when the election is started, not when it is decided.
+  "parentsync status" and "gossip state" show the outcome.
+  
+  Example:
+    tdns-mpcli agent parentsync election --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync inquire
+use: inquire
+short: Ask the parent for the state of the zone's SIG(0) key
+long: |
+  Send a KeyState inquiry about the zone's active SIG(0) key to the parent's
+  UPDATE receiver, found through the parent's DSYNC records, and print the state
+  the parent reports for the key.
+  
+  The agent need not be the leader. The inquiry is signed with the key.
+  
+  The parent's answer is authenticated before it is read, and the line printed
+  says whether it was. An answer whose signature is wrong is a failure and is
+  not printed. An answer that cannot be authenticated, because it is unsigned
+  or because the key it is signed with has no chain of trust, is a failure too,
+  unless the agent is configured with parentsync.update.allow-insecure: then it
+  is printed and marked as not authenticated.
+  
+  The answer is not recorded, so the parent state in "parentsync status" does
+  not change.
+  
+  Fails when the agent has no active SIG(0) key for the zone, when the parent
+  advertises no UPDATE scheme, and when the receiver does not answer.
+  
+  Example:
+    tdns-mpcli agent parentsync inquire --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync status
+use: status
+short: Show the leader, the SIG(0) key and the parent's sync schemes for a zone
+long: |
+  Show where this agent stands in a zone's delegation sync with the parent:
+  the leader among the zone's providers and its lease, the zone's active SIG(0)
+  key and where its KEY record is published, the sync schemes the parent
+  advertises in DSYNC, and the state of the zone's peers.
+  
+  The agent looks up the parent's DSYNC records and the published KEY records
+  through its own resolver when asked, so the answer can take a few seconds.
+  
+  The parent state of the key is the one the agent last recorded, not a new
+  inquiry (see "inquire").
+  
+  Example:
+    tdns-mpcli agent parentsync status --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli agent peer
 use: peer
 short: Peer agent commands (list, ping, zones, resync)
