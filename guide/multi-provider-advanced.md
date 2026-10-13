@@ -157,9 +157,11 @@ and applies the changes.
    (for DS changes) is published at the zone apex. For a
    multi-provider zone the CSYNC is made by the leader
    agent and the CDS is served by the signer; see below.
-3. The agent sends a NOTIFY with the appropriate QTYPE
-   (CSYNC or CDS) to the parent's NOTIFY receiver address
-   (from the DSYNC RRset).
+3. The elected leader agent sends a NOTIFY with the
+   appropriate QTYPE (CSYNC or CDS) to the parent's NOTIFY
+   receiver address (from the DSYNC RRset). A NOTIFY(CDS)
+   goes out only once the agent's own copy of the zone, which
+   it transfers from its signer, carries a CDS RRset.
 4. The parent's scanner queries the child for the published
    records, authenticates them under the parent zone's
    delegation policy (section 2.3), and applies the changes
