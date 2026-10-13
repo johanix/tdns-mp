@@ -10,6 +10,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/edns0"
+	"github.com/miekg/dns"
 )
 
 // parentKeyStateInquiryTimeout bounds one inquiry: the DSYNC lookup, the
