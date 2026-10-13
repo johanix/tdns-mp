@@ -179,7 +179,9 @@ type ZoneView struct {
 	// over (its DS gone from the parent for the DS TTL). A KSK of the old
 	// algorithm left over from an earlier roll is not it: the change is
 	// then ZSK-only and waits the signature lifetime. PolicyAlgActiveSince is when the first key of
-	// the role and the policy's algorithm went active, and SigLifetime the
+	// the role and the policy's algorithm went active in this roll (one
+	// that has retired since counts: a rollover of the new key does not
+	// start the wait over), and SigLifetime the
 	// policy's signature validity: a ZSK-only roll keeps the old ZSK signing
 	// beside its successor that long (T19), the drain tdns's relaxed roll
 	// does.

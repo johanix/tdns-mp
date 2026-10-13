@@ -41,8 +41,9 @@ type fakeWire struct {
 	resigns   int
 	reports   []string
 	ttl       time.Duration
-	changes   int   // KeysChanged calls
-	stripErr  error // what Strip returns
+	changes   int    // KeysChanged calls
+	stripErr  error  // what Strip returns
+	onResign  func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
 }
 
 func newFakeWire(signers ...string) *fakeWire {
@@ -91,7 +92,15 @@ func (w *fakeWire) Strip(zone string, keyid uint16) error {
 	w.stripped = append(w.stripped, keyid)
 	return nil
 }
-func (w *fakeWire) Resign(zone string)                        { w.mu.Lock(); defer w.mu.Unlock(); w.resigns++ }
+func (w *fakeWire) Resign(zone string) {
+	w.mu.Lock()
+	w.resigns++
+	hook := w.onResign
+	w.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
 func (w *fakeWire) KeysChanged(zone string)                   { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
 func (w *fakeWire) ServedDnskeyTTL(zone string) time.Duration { return w.ttl }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {

@@ -336,7 +336,7 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 		if roleOf(o.Flags) != role {
 			continue
 		}
-		if o.State == KeyStateActive && o.Algorithm == z.PolicyAlgorithm && o.ActiveAt != nil && (z.PolicyAlgActiveSince.IsZero() || o.ActiveAt.Before(z.PolicyAlgActiveSince)) {
+		if l.signsInThisRoll(k, o, z.PolicyAlgorithm) && (z.PolicyAlgActiveSince.IsZero() || o.ActiveAt.Before(z.PolicyAlgActiveSince)) {
 			z.PolicyAlgActiveSince = *o.ActiveAt
 		}
 		if o.State == KeyStateActive && o.Algorithm != z.PolicyAlgorithm {
@@ -362,6 +362,33 @@ func (l *ZoneKeyLifecycle) policyAlgorithm(role string) uint8 {
 		return l.Policy.KSKAlgorithm
 	}
 	return l.Policy.ZSKAlgorithm
+}
+
+// signsInThisRoll: o is a key of the policy's algorithm that began
+// signing in the roll that k, a key of another algorithm, is leaving in.
+// T19's signature lifetime counts from the first such key, and a later
+// rollover of it (requested, or its own lifetime) does not start the wait
+// over: the policy's algorithm has signed since the first one. So a key
+// that has since retired or left counts too, as long as it began signing
+// after k did: a key of the policy's algorithm from before k (the roll
+// before this one, back the other way) is not this roll's. Stamps that
+// are equal, or no stamp on k, tell the two apart no better, and then
+// only a key that still signs counts: the wait is longer, never shorter.
+func (l *ZoneKeyLifecycle) signsInThisRoll(k, o tdns.DnssecKeyWithTimestamps, policyAlg uint8) bool {
+	if o.Algorithm != policyAlg || o.ActiveAt == nil {
+		return false
+	}
+	if o.State == KeyStateActive {
+		return true
+	}
+	if k.Algorithm == policyAlg || k.ActiveAt == nil {
+		return false
+	}
+	switch o.State {
+	case KeyStateRetired, KeyStateMpremove, KeyStateRemoved:
+		return o.ActiveAt.After(*k.ActiveAt)
+	}
+	return false
 }
 
 // algRollInFlight: an active key of the role whose algorithm is not the
@@ -1132,14 +1159,19 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			case KeyStateActive:
 				active++
 				if k.Algorithm != alg {
+					// a key of another algorithm that still signs is waiting
+					// out T10b or T19. Its age is not the lifetime's
+					// business: promoting on its account rolls the new
+					// algorithm's key (T10) and leaves this one signing.
 					algPending = true
-				} else {
-					policyKeys++
-					activeOfAlg++
+					continue
 				}
+				policyKeys++
+				activeOfAlg++
 				kk := k
-				// the oldest by active_at; a key with no stamp counts as the
-				// oldest, so a missing stamp never hides a due rollover
+				// the oldest of the policy's algorithm by active_at; a key
+				// with no stamp counts as the oldest, so a missing stamp
+				// never hides a due rollover
 				if oldest == nil || oldest.ActiveAt != nil && (k.ActiveAt == nil || k.ActiveAt.Before(*oldest.ActiveAt)) {
 					oldest = &kk
 				}
@@ -1157,7 +1189,8 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		// that promotion waits as any standby does while the old
 		// algorithm's key signs on (T10a's wait, T19's); promoting it on the
 		// old key's account rolled the new algorithm's key once per standby
-		// (seen on the testbed).
+		// (seen on the testbed). Due is the policy algorithm's own key past
+		// its lifetime, for the same reason.
 		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due || (algPending && activeOfAlg == 0)) {
 			sort.Slice(standbys, func(i, j int) bool { return standbys[i].KeyTag < standbys[j].KeyTag })
 			l.rolling = role

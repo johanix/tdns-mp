@@ -1037,3 +1037,224 @@ func TestAFailedSaveOfTheAlgorithmLeavesThePolicyAsItWas(t *testing.T) {
 	}
 	r.check("done")
 }
+
+// stampWithRigClock makes a key's active_at follow the rig's clock from
+// here on. tdns stamps the row with the wall clock and the rig runs on its
+// own, so a key otherwise looks as old as the test in the very tick it
+// begins signing: a test about the age of one key against another's needs
+// the stamps a running signer has. The driver asks for a re-sign right
+// after it writes a key's row to active, and the stamp is rewritten there,
+// before anything else in the tick reads it.
+func (r *driverRig) stampWithRigClock() {
+	stamped := map[uint16]bool{}
+	r.wire.onResign = func() {
+		ks, err := tdns.GetDnssecKeysByState(r.kdb, r.l.Zone, KeyStateActive)
+		if err != nil {
+			r.t.Errorf("stamping active_at: %v", err)
+			return
+		}
+		for _, k := range ks {
+			if stamped[k.KeyTag] {
+				continue
+			}
+			stamped[k.KeyTag] = true
+			if _, err := r.kdb.DB.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND keyid=?`,
+				r.clock.Now().UTC().Format(time.RFC3339), r.l.Zone, int(k.KeyTag)); err != nil {
+				r.t.Errorf("stamping active_at of key %d: %v", k.KeyTag, err)
+			}
+		}
+	}
+}
+
+// zskRollWithStandby runs a ZSK-only algorithm change with a standby count
+// of one and finite lifetimes to the point where the roll's ZSK signs
+// beside the old one and the count's next ZSK of the new algorithm has
+// propagated. With step the time a key takes from applied to standby: the
+// old ZSK is three steps old, the roll's ZSK one, the ZSK lifetime two and
+// the signature lifetime three. Returns the old ZSK, the roll's ZSK, the
+// count's next one, and step.
+func zskRollWithStandby(t *testing.T, r *driverRig) (old, rolled, next uint16, step time.Duration) {
+	t.Helper()
+	r.stampWithRigClock()
+	step = r.l.Policy.PropagationDelay + r.wire.ttl + time.Second
+	r.l.Policy.ZSKLifetime = 2 * step
+	r.l.Policy.SigLifetime = 3 * step
+	r.wire.parentTTL = time.Hour
+	a, z := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	// the old algorithm's standby ZSK, propagated
+	r.tick("standby wanted")
+	z2 := r.one("standby wanted", KeyStateMpdist, "ZSK", dns.ED25519)
+	r.confirmAll("standby applied", z2)
+	r.clock.Advance(step)
+	r.tick("standby propagated")
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d one step in, half its lifetime: %s, want active", z, st)
+	}
+
+	r.setAlgorithms("change", algRollTo, "ZSK")
+	r.tick("changed")
+	y := r.one("changed", KeyStateMpdist, "ZSK", algRollTo)
+	if _, to, err := r.l.ConfirmKind(z2, "p2", "applied", "", true); err != nil || to != KeyStateRemoved {
+		t.Fatalf("the withdrawn standby's removal: to=%s err=%v", to, err)
+	}
+	r.confirmAll("the new ZSK applied", y)
+	r.clock.Advance(step)
+	r.tick("the new ZSK propagated")
+	r.tick("the new ZSK signs")
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("the roll's ZSK %d: %s, want active", y, st)
+	}
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d beside the roll's: %s, want active", z, st)
+	}
+	ys := r.keysOfAlg(KeyStateMpdist, "ZSK", algRollTo)
+	if len(ys) == 0 {
+		r.tick("standby wanted again")
+		ys = r.keysOfAlg(KeyStateMpdist, "ZSK", algRollTo)
+	}
+	if len(ys) != 1 {
+		t.Fatalf("the standby count's next ZSK of %s: %v, want one", dns.AlgorithmToString[algRollTo], ys)
+	}
+	r.confirmAll("the next ZSK applied", ys[0])
+	r.clock.Advance(step)
+	r.tick("the next ZSK propagated")
+	return z, y, ys[0], step
+}
+
+// gone: retired, or already on its way out (the rig's retired_at is the
+// wall clock's, so the margin of a key retired late in a test is over at
+// once).
+func gone(state string) bool { return state == KeyStateRetired || state == KeyStateMpremove }
+
+// The lifetime that makes a rollover due is the policy algorithm's own
+// key's. The old algorithm's key is past its lifetime for the whole of the
+// wait (it is the oldest key of the role, and it is waiting out T19): that
+// promotes nothing. Taking its age promoted the count's standby, which
+// retired the roll's key (T10) and left the old one, tick after tick. The
+// roll's key still rolls when its own lifetime has passed.
+func TestAnOldKeyPastItsLifetimeDoesNotRollTheNewAlgorithm(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyZSK = 1
+	r := newDriverRig(t, "alglife.owned.example.", pol, "p2")
+	z, y, y2, step := zskRollWithStandby(t, r)
+	// the old ZSK is three steps old against a lifetime of two; the
+	// roll's ZSK is one step old
+	for i := 0; i < 3; i++ {
+		r.tick("the old key past its lifetime")
+	}
+	if st := r.state(y2); st != KeyStateStandby {
+		t.Fatalf("the count's ZSK %d with the old key past its lifetime: %s, want standby (the old key's age promotes nothing)", y2, st)
+	}
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("the roll's ZSK %d with the old key past its lifetime: %s, want active (it was rolled on the old key's account)", y, st)
+	}
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d: %s, want active (T19's wait is not over)", z, st)
+	}
+	// the roll's own lifetime: now it is due, and rolls as any key
+	r.clock.Advance(step + time.Minute)
+	r.tick("the roll's ZSK past its own lifetime")
+	if st := r.state(y2); st != KeyStateActive {
+		t.Fatalf("the count's ZSK %d once the roll's ZSK is past its lifetime: %s, want active", y2, st)
+	}
+	if st := r.state(y); !gone(st) {
+		t.Fatalf("the roll's ZSK %d past its own lifetime: %s, want retired", y, st)
+	}
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d after the new algorithm's own rollover: %s, want active still", z, st)
+	}
+	r.check("done")
+}
+
+// T19's signature lifetime counts from the first key of the policy's
+// algorithm to sign in this roll. A rollover of that key during the wait
+// (here: its own lifetime) does not start the wait over, so the old ZSK
+// retires a signature lifetime after the new algorithm began signing, not
+// a signature lifetime after its latest key did. With a ZSK lifetime
+// shorter than the signature lifetime the wait would otherwise never end.
+func TestARolloverOfTheNewKeyDoesNotRestartTheSignatureLifetime(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyZSK = 1
+	r := newDriverRig(t, "algsince.owned.example.", pol, "p2")
+	z, y, y2, step := zskRollWithStandby(t, r)
+	// the roll's ZSK began signing one step ago; its lifetime is two
+	// steps, the signature lifetime three
+	r.clock.Advance(step + time.Minute)
+	r.tick("the roll's ZSK past its own lifetime")
+	if st, st2 := r.state(y), r.state(y2); !gone(st) || st2 != KeyStateActive {
+		t.Fatalf("the new algorithm's own rollover: the roll's ZSK %s, the next %s, want retired and active", st, st2)
+	}
+	r.tick("two steps into the signature lifetime")
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("the old ZSK %d two steps into a signature lifetime of three: %s, want active", z, st)
+	}
+	r.clock.Advance(step)
+	r.tick("the signature lifetime passed")
+	if st := r.state(z); !gone(st) {
+		t.Fatalf("the old ZSK %d a signature lifetime after the new algorithm began signing: %s, want retired (the wait counts from the first key of the new algorithm, not from its latest)", z, st)
+	}
+	if st := r.state(y2); st != KeyStateActive {
+		t.Fatalf("the new algorithm's ZSK %d: %s, want active", y2, st)
+	}
+	r.check("done")
+}
+
+// The signature lifetime counts keys of this roll only. After a roll to
+// another algorithm and back, the keys of the first algorithm from before
+// are still in the keystore with their old stamps: they are not what the
+// wait counts from, or the roll back would retire the old ZSK at once.
+func TestARollBackWaitsItsOwnSignatureLifetime(t *testing.T) {
+	r := newDriverRig(t, "algback.owned.example.", driverPolicy, "p2")
+	r.stampWithRigClock()
+	r.wire.parentTTL = time.Hour
+	step := driverPolicy.PropagationDelay + r.wire.ttl + time.Second
+	a, z := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	signs := func(what string, alg uint8) uint16 {
+		t.Helper()
+		r.setAlgorithms(what, alg, "ZSK")
+		r.tick(what + ": minted")
+		k := r.one(what+": minted", KeyStateMpdist, "ZSK", alg)
+		r.confirmAll(what+": applied", k)
+		r.clock.Advance(step)
+		r.tick(what + ": propagated")
+		r.tick(what + ": signs")
+		if st := r.state(k); st != KeyStateActive {
+			t.Fatalf("%s: the new ZSK %d: %s, want active", what, k, st)
+		}
+		return k
+	}
+	// there: the first algorithm's ZSK leaves a signature lifetime later
+	y := signs("there", algRollTo)
+	if st := r.state(z); st != KeyStateActive {
+		t.Fatalf("there: the old ZSK %d the tick its successor signs: %s, want active", z, st)
+	}
+	r.clock.Advance(driverPolicy.SigLifetime + time.Minute)
+	r.tick("there: the signature lifetime passed")
+	r.clock.Advance(driverPolicy.Margin + time.Second)
+	r.tick("there: the margin")
+	if st := r.state(z); st != KeyStateMpremove {
+		t.Fatalf("there: the old ZSK %d a signature lifetime and the margin on: %s, want mpremove", z, st)
+	}
+	if _, to, err := r.l.ConfirmKind(z, "p2", "applied", "", true); err != nil || to != KeyStateRemoved {
+		t.Fatalf("there: the old ZSK's removal: to=%s err=%v", to, err)
+	}
+	// and back: a new ZSK of the first algorithm signs beside y
+	x := signs("back", dns.ED25519)
+	r.tick("back: both sign")
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("back: the ZSK %d of %s the tick its successor signs: %s, want active (the first algorithm's keys from before the roll there do not count)", y, dns.AlgorithmToString[algRollTo], st)
+	}
+	r.clock.Advance(driverPolicy.SigLifetime - time.Hour)
+	r.tick("back: an hour short of the signature lifetime")
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("back: the ZSK %d an hour short of the signature lifetime: %s, want active", y, st)
+	}
+	r.clock.Advance(time.Hour + time.Minute)
+	r.tick("back: the signature lifetime passed")
+	if st := r.state(y); !gone(st) {
+		t.Fatalf("back: the ZSK %d a signature lifetime after %d began signing: %s, want retired", y, x, st)
+	}
+	r.check("done")
+}
