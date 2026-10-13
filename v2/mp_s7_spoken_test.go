@@ -138,13 +138,12 @@ func TestAReplaceByNoRecordFromAProviderHeardFromIsItsEmptyWord(t *testing.T) {
 	}
 }
 
-// T5.6 (the agent half of tdns-mp #55, dropped): the agent starts no DS
-// engine, and for an owned zone its DS engine path publishes no CDS. The
-// KeyDB as tdns-mp's roles build it has no DS engine queue, so tdns's
-// KeysChanged is a no-op there; and even with an engine serving that
-// queue, an owned multi-provider zone the agent does not sign gets no CDS
-// from it: that CDS is the signer's (design §4.1, arrow 1).
-func TestTheAgentStartsNoDSEngineAndAnOwnedZoneGetsNoCDSFromIt(t *testing.T) {
+// T5.6 (the agent half of tdns-mp #55, dropped): the agent runs tdns's DS
+// engine (design Amendment 3, #161), and an owned multi-provider zone the
+// agent does not sign gets no CDS from it: that CDS is the signer's
+// (design §4.1, arrow 1). Neither a KeysChanged on the agent's KeyDB nor
+// the engine serving its queue writes one.
+func TestAnOwnedZoneGetsNoCDSFromTheAgentsDSEngine(t *testing.T) {
 	mpzd := trackTestZone(t, "agent.ds.example.")
 	kdb := mpzd.KeyDB
 	// the agent serves the zone and signs none of it
@@ -179,20 +178,13 @@ func TestTheAgentStartsNoDSEngineAndAnOwnedZoneGetsNoCDSFromIt(t *testing.T) {
 		}
 	}
 
-	// as the agent's start leaves the KeyDB: no DS engine queue (tdns makes
-	// one only for a KeyDB that exists at its MainInit; the signer's start
-	// makes its own), so KeysChanged has no engine to wake and returns
-	if kdb.DSEngineQ != nil {
-		t.Errorf("tdns's KeyDB constructor now makes the DS engine's queue itself; the agent's start must then make sure no engine serves it")
-	}
+	// before the engine runs: a KeysChanged on the agent's KeyDB writes
+	// nothing for the zone
 	kdb.KeysChanged(mpzd.ZoneData)
-	noCDS("without a DS engine")
-	if kdb.DSEngineQ != nil {
-		t.Error("KeysChanged on the agent's KeyDB made the DS engine's queue")
-	}
+	noCDS("before the engine runs")
 
-	// were an engine serving the queue, an owned zone the agent does not
-	// sign would still get no CDS from it
+	// with the engine serving the queue, as the agent's start has it: an
+	// owned zone the agent does not sign still gets no CDS from it
 	ensureDSEngineQueue(kdb)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

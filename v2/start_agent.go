@@ -368,17 +368,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return err
 	})
 
-	// No DS engine on the agent (key lifecycle ownership design §4.1, S7;
-	// the agent half of tdns-mp #55, dropped). The agent holds none of a
-	// multi-provider zone's keys and signs none of them, so a DS engine
-	// here could publish no CDS for an owned zone: that CDS is the
-	// signer's (arrow 1), and the DS set the agent hands the parent goes
-	// through the owner's DS-intent provider (arrow 2). The one zone tdns
-	// signs here, the agent's identity zone, gets its CDS from the agent's
-	// own setup (startIdentityParentSync). The KeyDB's DS engine queue is
-	// therefore never made on this role: tdns's KeysChanged returns at
-	// once, and the syncher's NOTIFY(CDS) step fails over to UPDATE or API,
-	// which carry the DS set (T5.6).
+	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so
+	// the leader can send NOTIFY(CDS), but writes no CDS for a
+	// multi-provider zone: it holds none of the zone's keys and signs none
+	// of them, so the CDS such a zone serves is the signers' (design §4.1,
+	// arrow 1), and the DS set the agent hands the parent goes through the
+	// owner's DS-intent provider (arrow 2). The one zone the engine writes
+	// a CDS for is the agent's own identity zone (T5.6).
 	//
 	// Agent-specific engines (the hsync data engine itself was constructed
 	// above, before RefreshEngine)
