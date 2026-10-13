@@ -104,7 +104,7 @@ An auditor falls under the same rules: its operations are not applied and its vo
 
 What is sent to whom:
 
-- **Distributions** go to every member, and every member's confirmation is waited for: the voting members, a member with no role, and the auditor. Where a zone has an auditor, it is a required participant: a SYNC is not complete without the auditor's confirmation. For a member with no role the wait is also a test. Being able to keep up with the other providers is a condition for serving the zone, and it has to show before the zone owner gives the provider a role, not after. There is one exception: a distribution that withdraws a member with no role, which is to say its own NS records, DNSKEYs or DS, does not wait for that member. Its operator may already have stopped its agent, and its removal must not depend on it.
+- **Distributions** go to every member, and every member's confirmation is waited for: the voting members, a member with no role, and the auditor. Where a zone has an auditor, it is a required participant: a SYNC is not complete without the auditor's confirmation. For a member with no role the wait is also a test. Being able to keep up with the other providers is a condition for serving the zone, and it has to show before the zone owner gives the provider a role, not after. There is one exception: a distribution that withdraws a member with no role, which is to say its own NS records, DNSKEYs or DS, does not wait for that member. Its operator may already have stopped its agent, and its removal must not depend on it. A distribution is started, and taken, only for a zone that is settled (4.9).
 - **Election messages** go to the voting members and the auditors.
 - **Requests for the zone's state** go to the voting members. An auditor holds nothing, and a member with no role contributes nothing.
 - **Gossip** of a group goes to that group's members.
@@ -140,7 +140,7 @@ Elections are held per distinct make-up, never per zone: 40,000 zones that drop 
 
 A zone with fewer than two members is in no group and has an election of its own, per zone.
 
-Agents see the owner's edit at different moments. For that interval the old group and the new one can each have a leader for the zone. Section 4.9 says what a leader does about it.
+Agents see the owner's edit at different moments. For that interval the old group and the new one can each have a leader for the zone. Section 4.9 says what is done about it.
 
 ### 4.2 The counts
 
@@ -182,30 +182,49 @@ The same holds for an auditor. A member that does not vote causes no election, a
 
 When no zone is left in a group, the group's election state and timers go with it.
 
-### 4.9 A leader acts for a zone only when the views of it agree
+### 4.9 Nothing is changed for a zone until its voting members agree on its make-up
 
-Each provider fetches the owner's zone on its own, so two agents can hold different versions of a zone's HSYNC3 and HSYNCPARAM records while they are in full contact with each other. That takes no network partition. It lasts seconds when every provider is notified and transfers at once, longer when one transfer is late, and without end when one agent is stuck on an old copy. For that time the zone can have two leaders: the leader of the group the zone left, which has not seen the edit, and the leader of the group it arrived in. Each would sync the parent from its own view, and the parent would take whichever write came last. For a signer that was just removed, one of them publishes its DS and the other withdraws it.
+Each provider fetches the owner's zone on its own, so two agents can hold different versions of a zone's HSYNC3 and HSYNCPARAM records while they are in full contact with each other. That takes no network partition. It lasts seconds when every provider is notified and transfers at once, longer when one transfer is late, and without end when one agent is stuck on an old copy. For that time the zone can have two leaders: the leader of the group the zone left, which has not seen the edit, and the leader of the group it arrived in. Each would sync the parent from its own view, and the parent would take whichever write came last. And each provider would apply what the others send it by its own version of who the zone's members are.
 
-So a leader sends nothing to the parent for a zone, the bootstrap of the zone's SIG(0) key included, until both of these hold:
+So after a change of a zone's make-up, nothing that a provider does is changed for the zone until the zone is **settled**. A zone is settled at an agent when both of these hold:
 
-- every voting member of the zone's group holds the same make-up for the zone as the leader does;
-- the leader of the group the zone left has shown that it holds that make-up too, or that it no longer has the zone, or a short fixed time has passed since the zone arrived: a few beat intervals.
+- the agent has held the zone's make-up, unchanged, for a fixed time;
+- every other voting member of that make-up has told the agent the same make-up, not longer ago than a telling counts.
 
-Until then the sync is owed and not sent, and one line says who is waited for. This is the hold of 5.6 for another kind of not knowing: there the leader lacks the zone's data, here the group lacks one view of who the zone's members are.
+While a zone is not settled at an agent:
 
-To make it possible, every agent tells the members of each of its groups which zones it has in that group, and so which make-up it holds for each of them. Two rules make that telling something a leader can act on.
+- **It starts nothing for the zone.** No distribution of its own, and, if it leads, nothing to the parent: no sync, and no bootstrap and no roll of the zone's SIG(0) key. What it would have started is owed, and is started when the zone is settled.
+- **It takes nothing for the zone.** A distribution that arrives is kept, neither applied nor confirmed, and is handled when the zone is settled. Its sender waits for the confirmation as for any other.
+- One line says who is waited for.
 
-**What an agent was told counts only while it goes on being told.** A make-up that a peer has told counts for two beat intervals and then has to be told again. A peer that stops telling it, tells another, or cannot be heard counts as not agreeing, and the leader holds. So a previous leader does not go on acting on what it heard before the others moved the zone.
+This is the hold of 5.6 for another kind of not knowing: there an agent lacks the zone's data, here the group lacks one view of who the zone's members are.
 
-**The others go on telling the previous leader.** An agent that has moved a zone out of a group goes on telling the members of that group that it no longer has the zone there, for the fixed time, also when it shares the zone with none of them any more. The previous leader is told, and is not left to notice a silence. In the other direction, a previous leader that is in none of the new leader's groups shows that it has dropped the zone by no longer listing it in the group the zone left.
+**What does not wait.** The owner's zone itself: every new version is transferred, signed and served as it comes (2.3). Beats and gossip. Elections, which are held per group and not per zone. A request for the zone's state (5.3); the answer to it is a distribution, and waits like any other.
 
-With these two, one voting member that has seen the edit is enough to stop the previous leader. A leader needs the current agreement of every voting member of the zone as it sees the zone, and a voting member agrees with one make-up at a time. Two leaders can both act only when their two views of the zone have no voting member in common. That is the case named below, and no other.
+**The telling.** An agent tells a peer which make-up it holds for a zone by listing the zone in its row of that group's gossip, which every beat carries. Two things decide whether a zone is listed.
 
-The fixed time is the way out when the previous leader cannot be reached, or is stuck on an old copy of the zone. It is longer than the time for which a told make-up counts: when it has passed, nothing that the previous leader heard before the move is still valid, so it is holding its own sync, or it is not alive and sends nothing. Its lease is no way out: a lease belongs to a group, not to a zone, and it is renewed for as long as that group has any zone left, so a previous leader that is stuck on one zone would hold that zone's sync for ever.
+- The agent has held the zone in that make-up for the fixed time. The time is counted on the agent's own clock, and it starts again at every change of the zone's make-up and at the agent's start.
+- The zone is of interest now: the agent has something owed or kept for it, or the peer has listed it within the time a telling counts.
 
-After a restart an agent knows of no group that a zone has left, and the second condition then asks for nothing. The first condition and the catch-up of section 5 carry that case.
+So listing a zone tells, and it asks. The peer answers by listing the zone in its own next row, if it holds it in a make-up for the fixed time. What a peer hears of a zone from an agent is one make-up that the agent has held for the fixed time, or nothing. A zone that nobody has anything to do for is in no beat.
 
-One case is not covered. An owner who replaces a zone's only provider by another in one edit leaves a previous leader that has no peer to tell it anything. If its agent is then stuck on the old copy, it and the new provider both act. The order of an add and a removal in `guide/provider-changes.md` avoids it: the new provider is added before the old one is taken away.
+**A telling counts only while it goes on being told.** A make-up that a peer has told counts for two beat intervals and then has to be heard again. A peer that stops telling it, tells another, or cannot be heard counts as not agreeing.
+
+**The two times.** The fixed time is three beat intervals and a telling counts for two. What matters is that the fixed time is the longer one, by more than a beat can be under way.
+
+**Why it holds.** Take two agents that hold different make-ups for a zone, and a voting member that both of them count. That member held one make-up at a time. The agent of the make-up it left counts its word for no longer than a telling counts after the member last told it. The other agent hears the new make-up from it no earlier than the fixed time after it moved. The fixed time is the longer, so at no moment do both count it, whatever is lost or late and however often the owner changes the zone. Two agents can therefore both act for a zone under different make-ups only when the two make-ups have no voting member in common. That is the case named below, and no other.
+
+**Who has to agree.** The voting members, and only they. A member with no role and an auditor do not: a leaving provider that is stuck on an old copy must not be able to hold its own removal (section 7), and an auditor that is down holds no election (4.3). Both still receive every distribution, and their confirmations are waited for as before (3.3). They take a distribution by the same rule as everyone: when the zone is settled at them.
+
+**What it costs.**
+
+- After a change of a zone's make-up, nothing that a provider makes happens for the zone until the fixed time after the last voting member has loaded the change.
+- After the start of a voting member's agent, the same holds for its zones until it tells them again.
+- A voting member that cannot be heard holds every change that a provider makes in its zones. A distribution already waited for its confirmation. Now it is not started.
+
+**A beat stays small.** It grows with the number of zones that something is owed or kept for, not with the number of zones. The price is one exchange of beats before an agent can act for a zone it had nothing to do for until then.
+
+**One case is not covered.** An owner who replaces a zone's only provider by another in one edit leaves two make-ups with no voting member in common. If the old provider's agent is then stuck on the old copy, it and the new provider both act. The order of an add and a removal in `guide/provider-changes.md` avoids it: the new provider is added before the old one is taken away.
 
 A zone that arrives while its group's election is running is one of the zones that election is held for.
 
@@ -261,7 +280,7 @@ A zone is **caught up** when this agent has read its own provider's state back f
 - **The DS set.** For a leader whose own signer does not own the zone, the zone's DS set is unknown while a provider in `signers=` has not spoken about its keys. A complete answer makes a provider speak, and a set that turns from unknown to known asks for a sync with the parent.
 - **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, its own signer), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
 - **Not "in sync".** When NS and glue are in step with the parent and there is no DS set to compare, for a zone that names a signer, the leader does not report "in sync". It reports "DS set unknown, waiting for" and the provider. When every signer has spoken and none of them holds a key that a DS is made from, it says that.
-- **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait.
+- **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait for the catch-up. The last two wait for the zone to be settled (4.9).
 
 The stall this adds is small. Catch-up needs the voting members to be reachable, and so does having a leader.
 

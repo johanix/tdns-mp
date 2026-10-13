@@ -1,6 +1,8 @@
 # Membership and catch-up: implementation plan
 
-**Status:** PLAN, revised 2026-10-12. No step is started. Section 5 holds the status of each step.
+**Status:** PLAN, revised 2026-10-12, decisions added 2026-10-13. No step is started. Section 5 holds the status of each step.
+
+**Behind the design in one place.** The design's section 4.9 was rewritten on 2026-10-13 (decisions 23 and 24 in section 6). Step 9 below, and what the plan says elsewhere about a leader's hold, were written for the earlier rule, which held the leader's sync only. They are being reworked and are not to be read as the plan for 4.9. Everything else in the plan stands.
 
 This is the plan for the design in `2026-10-12-membership-and-catch-up-design.md` ("the design" below). The design describes membership and catch-up as they are meant to stand. This document holds what is dated: the difference from today's code, where each rule of the design lands in the code, the steps, and the decisions the design rests on.
 
@@ -756,6 +758,8 @@ Fleet: two providers reduced to one, with no auditor: a leader with no restart. 
 
 ### Step 9. A leader acts for a zone only when the views of it agree; the zone's SIG(0) key (design 4.9, 4.1)
 
+**This step is being reworked** for the rule that design 4.9 now states (decisions 23 and 24): every change that a provider makes is held until the zone is settled, not the leader's sync alone, and a beat lists only the zones that something is owed or kept for. The part on the zone's SIG(0) key stands, with decision 22. The rest is the earlier rule.
+
 **Before it:** step 5, for the owed mark and the place of the hold. Step 6, for the sender of a beat's gossip and for the rule of who may ask for the key. Step 8, which makes a group's hash the make-up: before it the hash does not say who votes. Step 4, for the retry schedule. PR #185, for `zoneJoinedGroup`.
 
 This is a step of its own, between the group's new key and the switch, for three reasons. It is a gate on the parent sync, as step 5 is, and a gate that never opens stops every sync: it should be judged alone on a fleet. It needs steps 5, 6 and 8, which step 8 does not. And it has to be in place before step 10, which is when a zone's group starts to change at every edit of a provider's standing.
@@ -949,6 +953,8 @@ Decided by the project owner on 2026-10-12. The design is written with them.
     A roll has been run in tdns by the project owner, some time ago, and never in tdns-mp or on the lab's fleets: a test of it is to be designed before the leader's roll is built on it.
 
     What a leader's roll adds, in order: the new key at the leader; the add at the parent, signed with the old key; the new private key to every voting member that stays, which needs a hand-over the leader starts (today a member can only ask); the new KEY published as the leader's, in place of the old, only after the parent has taken it; the delete of the old key at the parent, signed with the new one; and every member retires the old private key.
+23. **Nothing that a provider makes is changed for a zone until its voting members agree on its make-up** (2026-10-13; design 4.9). It replaces the leader-only hold of decisions 12, 16 and 19. The hold as it stood had a hole: its fixed time counted from the zone's arrival at the new leader alone, so a voting member that both leaders count, and that loaded the owner's edit later than the new leader, could be counted by both for as long as a telling counts. Decided in three steps. First: an agent tells a make-up for a zone only once it has held it for the fixed time, by its own clock, which starts again at every change of the make-up and at the agent's start. Then the project owner asked for more: after an owner's change to the set of providers there are to be no changes at all until things have settled, in the zone as well as at the parent. And of the two ways to do that, a time alone or agreement, he chose agreement: a zone is settled at an agent when the agent has held its make-up for the fixed time and every other voting member has told it the same make-up within the time a telling counts. Until then the agent starts nothing for the zone and takes nothing. Only the voting members have to agree. The costs are accepted: a pause after every change of make-up and after every start of a voting member's agent, and a voting member that cannot be heard holds every change that a provider makes in its zones. Of decision 19, the first rule stays (a telling counts for two beat intervals). There is no second condition any more: no note of the group a zone left, and no leader of that group to wait for.
+24. **A beat lists only the zones that something is owed or kept for** (2026-10-13; design 4.9). Today a row lists every zone of its group, in every beat, which grows with the number of zones. An agent lists a zone when it has something to do for it, or when the peer has listed it; so listing tells, and asks. It is a stage of its own, after the settle rule: first the rule on today's full listing, then this. A rough size, not yet read against the code in full: about 150 lines in six files and as much in tests, with no change of the wire and none in tdns-transport. What changes most is three readers of a row's zone list: the lookup of a zone's group for `gossip group status --zone`, its zone count, and the auditor's dashboard.
 
 Also decided:
 
