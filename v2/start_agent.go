@@ -9,6 +9,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -326,7 +327,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		if !mayGenerateZoneKey(elected, zd) {
 			lgAgent.Warn("the zone publishes a SIG(0) key that this agent does not hold, and no peer handed it over; no new key is made for a zone that joined a group, a sync that needs the key waits",
 				"zone", zone)
-			return nil
+			return errZoneKeyNotHeld
 		}
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
 		{
@@ -406,13 +407,29 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return err
 	})
 	// A zone that joins a group this agent already leads is asked for the
-	// same sync: nobody else asks for it before the next lease renewal
-	// (tdns-mp #179). Its key is left as it is: the key this agent holds is
-	// used, a peer is asked for one it does not hold, and a new one is made
-	// only for a zone that publishes none.
+	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
+	// it is: the key this agent holds is used, a peer is asked for one it
+	// does not hold, and a new one is made only for a zone that publishes
+	// none.
+	//
+	// When the zone has a key and no peer hands it over, the sync is not
+	// asked for yet: it could not be signed. The peers are asked again until
+	// one of them hands the key over, and the sync is asked for then
+	// (zoneKeyWaits). A parent that takes no UPDATE needs no key, and the key
+	// setup says so by finding nothing to do.
 	lem.SetOnZoneJoined(func(zone ZoneName) error {
+		ask := func() {
+			conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
+		}
 		err := leaderKeySetup(zone, false)
-		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
+		if errors.Is(err, errZoneKeyNotHeld) {
+			conf.InternalMp.zoneKeyWaits.await(ctx, zone, zoneKeyWaitDelays,
+				func() bool { return lem.IsLeader(zone) },
+				func() error { return leaderKeySetup(zone, false) },
+				ask)
+			return nil
+		}
+		ask()
 		return err
 	})
 

@@ -6,6 +6,8 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -84,4 +86,85 @@ func zonePublishesKey(zd *MPZoneData) bool {
 // RRset, so the key the parent trusts is gone from the zone as well.
 func mayGenerateZoneKey(elected bool, zd *MPZoneData) bool {
 	return elected || !zonePublishesKey(zd)
+}
+
+// errZoneKeyNotHeld is the key setup's answer for a zone that joined a group
+// this agent leads, publishes a SIG(0) key, and whose private key neither this
+// agent nor a peer that answered holds. No key is made then, and nothing can
+// be signed for the parent until a peer hands the key over.
+var errZoneKeyNotHeld = errors.New("the zone publishes a SIG(0) key that this agent does not hold")
+
+// zoneKeyWaitDelays are the waits between two rounds of asking the peers for
+// the key of a zone that arrived without it. The last one repeats: the asking
+// does not end by itself, since nothing else brings the key, and without it
+// the zone's changes do not reach a parent that takes UPDATE.
+var zoneKeyWaitDelays = []time.Duration{
+	30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute,
+	8 * time.Minute, 15 * time.Minute,
+}
+
+// zoneKeyWaits is the set of zones a key is being asked for: one round of
+// asking at a time per zone.
+type zoneKeyWaits struct {
+	mu      sync.Mutex
+	waiting map[ZoneName]bool
+}
+
+// await asks for a zone's key again, round after round, until it is there.
+//
+// A zone that joins a group this agent leads is asked for its delegation
+// sync, and the sync was asked for whether or not the agent held the zone's
+// key. Without the key the sync cannot be signed. It failed, was tried again a
+// fixed number of times, and was given up; the peers were asked for the key
+// once and never again; and the lease renewal does not take the zone up, since
+// it asks for the zones the group had when its timer was armed. So the change
+// that moved the zone never reached the parent.
+//
+// try is one round of the key setup. It answers errZoneKeyNotHeld while no
+// peer has handed the key over; then the wait goes on. When it answers nil
+// the key is held and got is called, once: that is where the sync is asked
+// for. Any other answer is logged and tried again. The wait ends without got
+// when leads says this agent no longer leads the zone, and with ctx.
+func (w *zoneKeyWaits) await(ctx context.Context, zone ZoneName, delays []time.Duration,
+	leads func() bool, try func() error, got func()) {
+	w.mu.Lock()
+	if w.waiting == nil {
+		w.waiting = map[ZoneName]bool{}
+	}
+	if w.waiting[zone] {
+		w.mu.Unlock()
+		return
+	}
+	w.waiting[zone] = true
+	w.mu.Unlock()
+
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.waiting, zone)
+			w.mu.Unlock()
+		}()
+		for round := 0; ; round++ {
+			delay := delays[min(round, len(delays)-1)]
+			lgAgent.Info("the zone's SIG(0) key is not held here; asking the peers for it again", "zone", zone, "in", delay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			if !leads() {
+				lgAgent.Info("this agent no longer leads the zone; its SIG(0) key is asked for no more", "zone", zone)
+				return
+			}
+			err := try()
+			if err == nil {
+				lgAgent.Info("the zone's SIG(0) key is held now; asking for the delegation sync that waited for it", "zone", zone)
+				got()
+				return
+			}
+			if !errors.Is(err, errZoneKeyNotHeld) {
+				lgAgent.Warn("the key setup of a zone that waits for its SIG(0) key failed; trying again", "zone", zone, "err", err)
+			}
+		}
+	}()
 }
