@@ -1,8 +1,6 @@
 # Membership and catch-up: implementation plan
 
-**Status:** PLAN, revised 2026-10-12, decisions added 2026-10-13. No step is started. Section 5 holds the status of each step.
-
-**Behind the design in one place.** The design's section 4.9 was rewritten on 2026-10-13 (decisions 23 and 24 in section 6). Step 9 below, and what the plan says elsewhere about a leader's hold, were written for the earlier rule, which held the leader's sync only. They are being reworked and are not to be read as the plan for 4.9. Everything else in the plan stands.
+**Status:** PLAN, revised 2026-10-13. No step is started. Section 5 holds the status of each step.
 
 This is the plan for the design in `2026-10-12-membership-and-catch-up-design.md` ("the design" below). The design describes membership and catch-up as they are meant to stand. This document holds what is dated: the difference from today's code, where each rule of the design lands in the code, the steps, and the decisions the design rests on.
 
@@ -49,9 +47,9 @@ Most of the machinery of the design exists.
 5. A group is defined by its members together with what each one is, so that all its zones agree on who votes. The election's edges: no election without a vote, a leader when the voting members become one, and a leader that drops a zone which leaves its group (design 4).
 6. An agent whose provider has no role refuses its operator's edits (design 6).
 7. Two bounds on the beats that recover a peer: how often repeated hellos cause a beat back (#131), and what happens to the work on its way for a peer that is removed (#132). And the removal itself: comms with a peer end when no zone has been shared with it for a hold time (design 3.1).
-8. A leader acts for a zone only when the views of it agree, and taking a zone up gives it no new SIG(0) key (design 4.9 and 4.1).
+8. Nothing is changed for a zone until its voting members agree on its make-up: while a zone is not settled an agent starts no distribution for it and takes none, and a leader sends nothing to the parent (design 4.9). A row of gossip lists a zone only while there is something to do for it. And every voting member holds the zone's SIG(0) key, which taking a zone up does not replace (design 4.1).
 
-No message type is added. One optional object is added to the sync-family payload (3.4). Two config keys are added (steps 4 and 7).
+No message type is added. One optional object is added to the sync-family payload (3.4). Two config keys are added (steps 4 and 7). Nothing is added to the beat or to a row of gossip: steps 9 and 9b change which zones a row lists.
 
 ## 2. What is wrong today
 
@@ -197,10 +195,20 @@ Three readings bound the issue:
 
 ### 2.12 Found on the way
 
-- **A multi-operation update reports only its last `replace`.** `processOperations` (`v2/agent_policy.go`) assigns the result of each `replace` to `changed` instead of adding to it. An update with several `replace` operations whose last one changes nothing is stored and not passed to the combiner. The complete answer of design 5.4 always has four or five.
-- **An update that changes nothing and lists nothing is never confirmed.** The short path for a remote update whose result is already there (`SynchedDataEngine`, the `remote` case) sends the final confirmation only when it has at least one applied or removed record to report. An answer of five empty `replace` operations would stay in its sender's queue until it expires.
+- **A multi-operation update reports only its last `replace`.** `processOperations` (`v2/agent_policy.go`) assigns the result of each `replace` to `changed` instead of adding to it. An update with several `replace` operations whose last one changes nothing is stored and not passed to the combiner. The complete answer of design 5.4 always has three to five.
+- **An update that changes nothing and lists nothing is never confirmed.** The short path for a remote update whose result is already there (`SynchedDataEngine`, the `remote` case) sends the final confirmation only when it has at least one applied or removed record to report. An answer of empty `replace` operations would stay in its sender's queue until it expires.
 - **The sync-family payload has two types.** The sender marshals `core.AgentMsgPost`, a type of tdns (`syncAppMessage`, `v2/mp_send.go`). The receiver parses `DnsSyncPayload`, tdns-mp's own (`v2/mp_wire_payloads.go`). The sent form has no distribution ID in it: over DNS that travels in the query name, and over HTTPS the receiver makes a new one. Two agents' distribution IDs can coincide. So a request cannot be named by its distribution ID.
 - **`GetZoneAgentData` relates upstream and downstream through every HSYNC3 record,** OFF ones included.
+
+### 2.13 Nothing waits for the agents to hold the same make-up
+
+Each provider fetches the owner's zone on its own. So for a time after an owner's edit the agents hold different versions of who the zone's members are. Nothing in the code looks for that.
+
+- **Each agent acts by its own copy.** The recipients of a distribution (`GetDistributionRecipients`), the admission of its sender, and who leads the zone are read from the agent's own copy of the zone at that moment.
+- **A SYNC is taken as it comes.** `routeSyncMessage` answers PENDING at once and passes the update on. The data engine stores it and passes it to the combiner, and the final confirmation follows. An auditor confirms when it has logged the event.
+- **A local change is sent as it comes.** The `local` case of the data engine stores the update and sends it, to the combiner and to the zone's agents, in one pass.
+- **A leader syncs as it comes.** For the time the copies differ, the leader of the group the zone left and the leader of the group it arrived in can both send to the parent, each from its own view.
+- **What an agent tells of a zone can be stale, or double.** Its row of a group lists the group's zones as they were at the last beat round, and a message is built from the groups of the moment and the rows of the last round. Nothing acts on the lists today: they are shown, and `gossip state --zone` falls back on them when the group manager has no group for the zone.
 
 ## 3. The design in the code
 
@@ -264,7 +272,7 @@ A STATUS-UPDATE and a RELOCATE have no rule of their own (design 3.3): they are 
 
 | Sent | To | Function |
 |---|---|---|
-| Distributions, and the wait for confirmations | Every member | `EnqueueForZoneAgents`, `GetDistributionRecipients`, `TrackDnskeyPropagation`: unchanged |
+| Distributions, and the wait for confirmations | Every member | `EnqueueForZoneAgents`, `GetDistributionRecipients`, `TrackDnskeyPropagation`: unchanged in whom they name. Step 9 adds when: a distribution is started, and taken, only for a zone that is settled (design 3.3, 4.9) |
 | Election messages | Voting members and auditors | `broadcastElectToZone` |
 | Requests for the zone's state | Voting members | `CommandHandler` (`send-rfi`), the tracker of step 4 |
 | The request for the SIG(0) key | Voting members, and the leader of the group the zone left while it is a member (decision 18). Sent by every voting member that lacks the key, not by the leader alone | `leaderKeySetup` (`v2/start_agent.go`), `keyCheck` (step 9), `CommandHandler` |
@@ -278,9 +286,9 @@ A STATUS-UPDATE and a RELOCATE have no rule of their own (design 3.3): they are 
 
 Three consequences are worth knowing:
 
-- **Whom the NOTIFY waits for.** The leader's own combiner and every agent that `GetZoneAgentData` lists: today the role holders, the auditor among them, and after step 10 every member, a member with no role among them. That is decision 2. There is no time-out. So after step 10 a member with no role whose agent is stopped holds every NOTIFY(CSYNC) of the zone until its record is removed. An UPDATE to the parent is not held.
+- **Whom the NOTIFY waits for.** The leader's own combiner and every agent that `GetZoneAgentData` lists: today the role holders, the auditor among them, and after step 10 every member, a member with no role among them. That is decision 2. There is no time-out. So after step 10 a member with no role whose agent is stopped holds every NOTIFY(CSYNC) of the zone until its record is removed. An UPDATE to the parent is not held. From step 9 each of them confirms only once the zone is settled there.
 - **The exception of decision 2 does not reach it.** The exception names a distribution that withdraws a member: its own NS records, DNSKEYs or DS. The CSYNC is not one of those, and it is what carries an NS change, a leaving provider's NS records included, to a parent that takes NOTIFY only.
-- **A catch-up answer.** Design 5.4: an answer names NS, KEY, CDS and DNSKEY, and only the leader's answer names the CSYNC. The code agrees since PR #188: a CSYNC operation from an agent that does not lead the zone is taken out and answered with a final confirmation REJECTED, an empty `replace` too. Step 3 is written so.
+- **A catch-up answer.** Design 5.4: an answer names NS, CDS and DNSKEY, and only the leader's answer names the zone's KEY and its CSYNC, which are the group's. For the CSYNC the code agrees since PR #188: a CSYNC operation from an agent that does not lead the zone is taken out and answered with a final confirmation REJECTED, an empty `replace` too. For the KEY it does not yet: today the KEY is a contribution of the agent that published it. Step 3 is written for the CSYNC, and step 9 moves the KEY.
 
 What the leader's CSYNC waits for when a provider leaves is parked in the removal (decision 17, 7.4). No step of this plan changes it.
 
@@ -291,7 +299,8 @@ What the leader's CSYNC waits for when a provider leaves is parked in the remova
 | 4.1 The group is its members with what each one is | `RecomputeGroups`, `ComputeGroupHash`, `ProviderGroup` | 8 |
 | 4.1 A zone that arrives takes the group's leader, and the leader takes it up | PR #185. This plan adds nothing to it | before 8 |
 | 4.1 Every voting member holds the zone's SIG(0) key; a new one only when no member has one | `keyCheck`, the `sig0key` case of `MsgHandler`, `leaderKeySetup` | 9 |
-| 4.1 An agent that led the group the zone left stops acting for it | `zoneJoinedGroup` drops the zone's sync chain | 8 |
+| 4.1 The KEY record is the group's, published by the leader | `leaderKeySetup` publishes it at every take-up already. New: it is taken from the leader only, and an earlier publisher's is dropped | 9 |
+| 4.1 An agent that led the group the zone left stops acting for it | `zoneJoinedGroup` drops the zone's sync chain, and from step 9 what it owes the parent for the zone | 8, 9 |
 | 4.2 The counts | The two peer functions | 1 |
 | 4.3 The gate | The five callers of `CheckGroupState` pass the voting members | 8 |
 | 4.4 Start, vote, win | `startElection`, `startGroupElection`, `HandleMessage`, the two `finalize` functions, `ApplyGossipElection` | 1 |
@@ -300,8 +309,12 @@ What the leader's CSYNC waits for when a provider leaves is parked in the remova
 | 4.7 What a member that does not vote takes | A newer term from a voting member at once, as today. A lower one once the lease it holds has run out: `MergeGossip`, `ApplyGossipElection` | 8 |
 | 4.7 What it reports | The status commands say that this agent does not vote | 10 |
 | 4.8 Retiring a group | PR #186 (#182). Not a step of this plan | before 8 |
-| 4.9 Every agent tells which make-up it holds for a zone | It does today: its own row in a group's gossip lists the zones it has in that group. Read first hand, per peer | 9 |
-| 4.9 A leader acts only when the views agree | One more condition beside step 5's hold; the group a zone left, noted in `zoneJoinedGroup` | 9 |
+| 4.9 A zone is settled | `zoneSettled`: since when the make-up is held, kept by the group manager, and what each voting member has told, read first hand per peer | 9 |
+| 4.9 Nothing is started | The `local` case of the data engine, where a local change becomes a distribution; the answer to a request for state; `resync --push` | 9 |
+| 4.9 Nothing is taken | The `remote` case of the data engine; the auditor's confirmation. The delivery is acknowledged, and the final confirmation waits | 9 |
+| 4.9 A leader sends nothing to the parent | `syncHeld`, in the place of step 5's hold and in `leaderKeySetup` | 9 |
+| 4.9 The telling: a zone is listed once it has been held for the fixed time | `BuildGossipForPeer`. A row lists every zone of its group today | 9 |
+| 4.9 The telling: and only while it is of interest | The same builder, per peer: an ask in a beat, the answer in the answer to it | 9b |
 | 4.9 A zone that arrives while an election runs | `finalizeGroupElection` reads the group's zones when it sets the leader | 8 |
 
 ### 3.4 Catch-up (design 5)
@@ -312,7 +325,7 @@ What the leader's CSYNC waits for when a provider leaves is parked in the remova
 // CatchUp travels on an RFI SYNC, and on the SYNC that answers it.
 type CatchUp struct {
     Request  string `json:"request"`            // the request's name, chosen by the asker
-    Reason   string `json:"reason,omitempty"`   // on the request: start, join, role, peer-start, outage, manual
+    Reason   string `json:"reason,omitempty"`   // on the request: start, join, role, peer-role, peer-start, outage, manual
     Complete *bool  `json:"complete,omitempty"` // on the answer
     Why      string `json:"why,omitempty"`      // on the answer, when it is not complete
 }
@@ -329,12 +342,13 @@ The sender marshals a type of tdns (2.12). To add the field without a change in 
 | Design | In the code | Step |
 |---|---|---|
 | 5.3 The request | `sendRfiToAgent` with `catch_up`. A plain send; the router's acknowledgement is its synchronous answer | 3 |
-| 5.4 The answer | `resync-targeted`, rewritten: five `replace` operations, the key states, always sent, marked | 3 |
+| 5.4 The answer | `resync-targeted`, rewritten: a `replace` for each type the agent may contribute, the key states, always sent, marked | 3 |
 | 5.4 At the asker | `EvaluateUpdate` and `ProcessUpdate` as any remote update; `noteReplaceOrigin` keeps an older message from undoing it; `NoteForeignKeyStates` takes a complete answer as having spoken | 3 |
 | 5.1 When | The edge to OPERATIONAL in `SendBeatWithFallback`; the zone's first load; a standing that rises at a refresh; a `start` request received | 4 |
 | 5.5 The tracker, 5.7 the retries, 5.8 the pacing | New, `v2/catchup.go` | 4 |
 | 5.6 What waits | `DelegationSyncher`, both sync commands | 5 |
 | 5.6 "DS set unknown, waiting for" | `DelegationSyncher`, when the analysis has no DS set to compare | 5 |
+| 4.9 The answer is a distribution, and waits | Owed at the answering agent and kept at the asker, until the zone is settled at each. The tracker's time for an answer follows | 9 |
 
 ### 3.5 The agent's own operator (design 6)
 
@@ -343,7 +357,7 @@ The sender marshals a type of tdns (2.12). To add the field without a change in 
 - `resync --push` sends nothing to peers and says why. Step 2.
 - `zone mplist` gets each member's standing. `agent parentsync status` gets the standing of this agent, the learned leader and term, and the tracker's state per voting member. Steps 4 and 10. The mpcli command exists with PR #164.
 
-What design 2.3 asks of a provider that has lost its roles, to go on as before and to initiate nothing, has two sides. The agent's side is step 2: nothing that such a provider would contribute leaves its agent. The signer's side is not in this plan: that it goes on signing and following the zone, and that its key machine makes no transition for the zone meanwhile. Today a signer that is taken out of `signers=` stops signing altogether (#147), and its agent and its nameserver stay on the copy from before the edit (decision 20). Both belong to the removal.
+What design 2.3 asks of a provider that has lost its roles, to go on as before and to initiate nothing, has two sides. The agent's side is step 2: nothing that such a provider would contribute leaves its agent. What the others distribute it takes, applies and confirms as before, and from step 9 by the settle rule, as every member does. The signer's side is not in this plan: that it goes on signing and following the zone, and that its key machine makes no transition for the zone meanwhile. Today a signer that is taken out of `signers=` stops signing altogether (#147), and its agent and its nameserver stay on the copy from before the edit (decision 20). Both belong to the removal.
 
 ## 4. Agents in step
 
@@ -352,18 +366,18 @@ tdns-mp does not support agents that are out of step with each other: all agents
 - no detection of a peer that answers a request for state without the marker;
 - no order among the zones a beat or a hello names;
 - no fallback for a group in which some agents count members and others count role holders, or compute the group's hash from another key;
-- no reading of a peer whose gossip rows do not list its zones: it reads as holding no make-up for them, and a leader holds (step 9).
+- no reading of a peer whose gossip rows do not list its zones as this plan has them listed: it reads as telling no make-up for them, and nothing is started or taken for them (step 9). Agents of step 9 and agents of step 9b do not mix either.
 
 An agent that is out of step shows as a stall, not as harm. Its answer has no marker, so it does not count as complete and is asked for again (design 5.7). A zone is in different groups on the two sides, and the sides agree on no leader for it.
 
 Two rules for operators follow:
 
-1. Every step of section 5 goes to all agents of a zone together. For step 8 that includes the auditor: the group's hash changes for every group.
+1. Every step of section 5 goes to all agents of a zone together. For step 8 that includes the auditor: the group's hash changes for every group. For steps 9 and 9b too: nobody waits for what an auditor tells, but it reads what it is told, and takes a distribution, by the same rule.
 2. Every agent of a zone runs the whole design before the owner starts a provider change in it.
 
 ## 5. The steps
 
-Each step is one pull request. Each of steps 1 to 9 is safe to merge once what its "Needs first" column names is in, and changes nothing for a zone in steady state except what the step names. Step 10 is the switch and needs the others.
+Each step is one pull request. Each of steps 1 to 9b is safe to merge once what its "Needs first" column names is in, and changes nothing for a zone in steady state except what the step names. Step 10 is the switch and needs the others.
 
 The sizes are estimates from reading the code, tests apart: files touched, and lines new and changed. They are an order of magnitude, not a count. Tests are likely to be two to three times as many lines.
 
@@ -377,16 +391,17 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | 6 | A rule for the sender and the recipients of every message | | Step 1, PR #163, PR #188 | 9 | 150 | 80 | One middleware, guards | Not started |
 | 7 | Beats to a peer that repeats its hello, or is gone; the end of comms | #131, #132 | PR #162 | 10 | 140 | 40 | Guards, and one loop | Not started |
 | 8 | The group by its make-up, and its election | #149 | Steps 1 and 6, PR #185, PR #186 | 8 | 140 | 120 | Changes to existing functions | Not started |
-| 9 | A leader acts only when the views of a zone agree; the zone's SIG(0) key | | Steps 4, 5, 6 and 8, PR #185 | 11 | 330 | 80 | New state and a second hold | Not started |
+| 9 | Nothing is started or taken for a zone until its voting members agree on its make-up; the zone's SIG(0) key | | Steps 3 to 6 and 8, PR #185 | 22 | 790 | 200 | New state and three holds | Not started |
+| 9b | A row lists a zone only while there is something to do for it | | Step 9 | 8 | 155 | 95 | Changes to existing functions | Not started |
 | 10 | The switch: every HSYNC3 provider is a member | #158 | Steps 1 to 9 | 9 | 80 | 150 | Changes to existing functions | Not started |
 
-About 1,750 new and 770 changed lines in all. Steps 4 and 9 are nearly half of the new lines.
+About 2,400 new and 990 changed lines in all. Steps 4 and 9 are over half of the new lines, and step 9 alone is a third. Its two parts can be two pull requests: the settle rule, about 600 new lines, and the key, about 190.
 
 What kind of code each step is:
 
-- **Guards in existing functions:** steps 1, 2 and 7, most of 5 and 6.
-- **Changes to what existing functions do:** steps 3, 8 and 10, and the key set-up of step 9.
-- **New machinery:** the tracker of step 4, the sender middleware of step 6 (about 30 lines), the repeated own read of step 3 (about 40 lines), the removal of a peer that shares no zone in step 7 (about 40 lines), `zoneChanged` of step 8 (about 40 lines), and in step 9 the zones each peer told and the group a zone left (about 110 lines) and the zone's key: who holds it, the request of every voting member, its answers matched and counted (about 150 lines).
+- **Guards in existing functions:** steps 1, 2 and 7, most of 5 and 6, and the leader's hold of step 9.
+- **Changes to what existing functions do:** steps 3, 8, 9b and 10, the key set-up of step 9, and in step 9 the two cases of the data engine that send and take a distribution. Each is split where it sends or stores, and the second half waits.
+- **New machinery:** the tracker of step 4, the sender middleware of step 6 (about 30 lines), the repeated own read of step 3 (about 40 lines), the removal of a peer that shares no zone in step 7 (about 40 lines), `zoneChanged` of step 8 (about 40 lines), and in step 9 since when a make-up is held and what each peer told (about 135 lines), the check and its times (about 85 lines), the list of what is kept per zone and its release (about 150 lines), and the zone's key: who holds it, the request of every voting member, its answers matched and counted (about 150 lines).
 
 ### Step 1. No election without a vote (#172)
 
@@ -432,6 +447,8 @@ Fleet: a zone with one provider and a second agent that has a record and no role
 - `resync` (`SynchedDataEngine`): on an agent with no role it sends nothing to the zone's agents and says so. It still reads its combiner. Proposed: it does not send its own contributions to its combiner either, since an empty `replace` there would change what the provider contributed.
 - `logSilentAgents` (`v2/hsync_transport.go`): reads the providers in `signers=`, not every agent.
 
+What such an agent takes is not changed by this step. Design 2.3 has it take what the others distribute, apply it and confirm. From step 9 it does so when the zone is settled at it, as every member does.
+
 **Names.** The refusal of an edit: "zone %s: this provider has no role in the zone (it is listed under neither servers= nor signers=); nothing is stored and nothing is sent". Of an election: "this provider cannot lead zone %s: it has no role in it". Of the push: "zone %s: nothing sent to the other agents: this provider has no role in the zone".
 
 **Tests.** Unit, with the API handler tests (`v2/apihandler_agent_test.go`):
@@ -462,7 +479,7 @@ Fleet: `addrr` on a provider with a record and no role is refused; its combiner 
 - `SynchedDataEngine`, the own read. A mark per zone, proposed `ownState` on `ZoneDataRepo`: when the combiner's contributions were read, and when the signer's inventory arrived. `RequestAndWaitForEdits` reports whether it applied an answer. A zone whose own read is not done is read again, one zone per 30 s tick, once the zone has loaded: the combiner, and for a provider that signs with no inventory, the signer. This closes the two weak points of 2.5.
 - `resync-targeted` becomes one function, proposed `catchUpAnswer(zone, target, request)`:
   1. It is not complete when the zone has not loaded (`zone-not-loaded`), when the own read from the combiner is not done (`own-state-not-read`), or when the provider signs and no inventory is there (`no-inventory`). A not complete answer carries the marker and no operation (design 5.4): empty sets from an agent that has not read its own state would remove its contributions at every peer.
-  2. Otherwise one `replace` for each of NS, KEY, CDS and DNSKEY, empty where the agent holds none (design 5.4). The zone's CSYNC is the leader's alone: the answer of the agent that leads the zone names it too, and no other answer does. A CSYNC operation from any other agent is rejected since PR #188, an empty one too (3.2).
+  2. Otherwise one `replace` for each type the agent may contribute, empty where it holds none (design 5.4): NS, CDS and DNSKEY, and in this step the KEY as well. The zone's CSYNC is the leader's alone: the answer of the agent that leads the zone names it too, and no other answer does. A CSYNC operation from any other agent is rejected since PR #188, an empty one too (3.2). Design 5.4 has the KEY as the leader's in the same way. In the code it is not yet: until step 9 the KEY is a contribution of the agent that published it, and an answer that left it out would let an asker keep a stale one. Step 9 moves it.
   3. The DNSKEY operation carries the key states, from the signer's latest inventory, through a helper split out of `LocalDnskeysFromKeystate` (proposed `inventoryKeys`) that does not touch what that function remembers.
   4. It is always enqueued, with `EnqueueForSpecificAgent`.
 - `MsgHandler`, RFI SYNC: passes the request's `catch_up` to the command.
@@ -480,7 +497,7 @@ Fleet: `addrr` on a provider with a record and no role is refused; its combiner 
 **Tests.** Unit:
 
 - `TestOnlyTheLeadersAnswerCarriesACSYNC`, `TestAnAnswerWhoseCSYNCIsRefusedStillCounts`.
-- `TestAnAnswerNamesEveryRRtype`, `TestAnAnswerCarriesTheKeyStates`, `TestAnAgentThatHoldsNothingStillAnswers` (four empty operations, complete).
+- `TestAnAnswerNamesEveryRRtype`, `TestAnAnswerCarriesTheKeyStates`, `TestAnAgentThatHoldsNothingStillAnswers` (an empty operation for each type, complete).
 - `TestASignerWithoutAnInventoryAnswersNotComplete`, `TestAnAgentThatHasNotReadItsOwnStateSendsNoOperation`.
 - `TestTheOwnReadIsRepeatedUntilItSucceeds`, `TestTheOwnReadWaitsForTheZonesFirstLoad`.
 - `TestACompleteAnswerMakesItsProviderSpeak`: `computedDSIntent` is known after a complete answer from every provider in `signers=`, one of which lists no key.
@@ -495,6 +512,8 @@ Fleet: restart a leader that does not sign, then run `resync --pull` by hand. Th
 **Done when** the fleet check passes. The "Today" note of section 3.2 of `guide/provider-changes.md` then loses its sentence about key states.
 
 Not established: that the confirmation of an answer with nothing applied closes the entry in the answering agent's queue. The harness test above establishes it.
+
+From step 9 an answer is held like any other distribution (design 4.9): it is sent when the zone is settled at the answering agent, and taken when it is settled at the asker.
 
 ### Step 4. Asking by itself (#157, the restart)
 
@@ -535,7 +554,7 @@ Its functions, and who calls them:
 
 Rules inside it:
 
-- **A request fails** when the send fails, when it is refused, when its answer says not complete, and when no answer has come 30 s after the acknowledgement (design 5.7; the 30 s are proposed).
+- **A request fails** when the send fails, when it is refused, when its answer says not complete, and when no answer has come 30 s after the acknowledgement (design 5.7; the 30 s are proposed). Step 9 changes the last: an answer waits for the zone to be settled at both ends, and that wait is not a failure.
 - **Retries** (design 5.7): after 5 s, 15 s, 30 s and 60 s, then every 5 minutes, with the same reason and a new name. A retry that finds its peer not OPERATIONAL sends nothing and waits for `PeerOperational`.
 - **Pacing** (design 5.8): eight requests in flight to one peer.
 - **Logging:** the first failure of a request, then one line an hour.
@@ -592,6 +611,8 @@ Fleet: every agent restarted within ten seconds, on a zone whose leader does not
 - The tracker: `owed` per zone. `Answered`, and the own read of step 3, call `requestDelegationSync(zone, "the zone is caught up")` when the zone becomes caught up with a sync owed. That is the explicit sync: it looks at the parent first and sends only the difference, which is the order design 5.6 fixes. A sync that was held as an implicit one is not sent as it was.
 - `EXPLICIT-SYNC-DELEGATION`, the "in sync" branch: when the analysis has no DS set to compare (`NewDSKnown` is false) and the zone names a signer, the line is not "in sync". The retry chain ends as today: the set turning known asks again.
 - A new function beside `computedDSIntent`, proposed `computedDSWaitingFor(zone)`: the providers in `signers=` that have not spoken, and this provider's own signer when it has sent no inventory. When every signer has spoken and none holds a key with the SEP flag, the set is unknown and there is nobody to name; the line then says so.
+
+Step 9 puts one more condition in the same places: the zone is settled (design 4.9, and the last bullet of design 5.6). Catch-up itself then takes longer after a start or a change of the providers, by the fixed time of step 9 and a beat: an answer is a distribution, and waits.
 
 **Names.** Log, info, logger `zones`: "DelegationSyncher: the sync with the parent is held until the zone is caught up" (`zone`, `waiting_for`); "the zone is caught up, asking for the sync that was owed" (`zone`); "DelegationSyncher: NS and glue are in sync with the parent, the DS set is unknown" (`zone`, `waiting_for`). Status, two lines in `agent parentsync status`:
 
@@ -732,7 +753,7 @@ Fleet: one agent restarted so that it is back within ten seconds of a peer's fai
   - The lease's end is the telling agent's clock, compared with the local one. A clock that is off moves the moment by as much.
   - `InvalidateGroupLeader` clears the leader and keeps the lease's end. An observer whose group has degraded therefore waits for that lease's end too.
 - A zone that arrives while its group's election runs (design 4.9, its last sentence): `finalizeGroupElection` sets the leader and then reads the group's zones from the group manager, in place of the list its caller read. A zone that arrived before that is on the list. One that arrives after it finds a leader, and `zoneJoinedGroup` asks for it. A zone can be asked for twice at that seam, which costs nothing: the key set-up finds the key it has, and the sync sends only a difference.
-- A zone that leaves (design 4.1): `zoneJoinedGroup` gets one more case. When this agent leads the group the zone left and not the one it arrived in, the zone's sync chain is dropped (`delegationSyncNotLeading`), through a callback set in `v2/start_agent.go`.
+- A zone that leaves (design 4.1): `zoneJoinedGroup` gets one more case. When this agent leads the group the zone left and not the one it arrived in, the zone's sync chain is dropped (`delegationSyncNotLeading`), through a callback set in `v2/start_agent.go`. From step 9 a sync that is owed for the zone is dropped with it.
 
 A consequence to know: the hash of every group changes with this step. At the upgrade every group elects once, which the restart of the agents causes anyway.
 
@@ -756,48 +777,193 @@ Fleet: two providers reduced to one, with no auditor: a leader with no restart. 
 
 **Done when** the four fleet checks pass, and a run with no provider change elects each group once.
 
-### Step 9. A leader acts for a zone only when the views of it agree; the zone's SIG(0) key (design 4.9, 4.1)
+### Step 9. Nothing is started or taken for a zone that is not settled; the zone's SIG(0) key (design 4.9, 4.1)
 
-**This step is being reworked** for the rule that design 4.9 now states (decisions 23 and 24): every change that a provider makes is held until the zone is settled, not the leader's sync alone, and a beat lists only the zones that something is owed or kept for. The part on the zone's SIG(0) key stands, with decision 22. The rest is the earlier rule.
+**Before it:** step 8, which makes a group's hash the make-up: before it the hash does not say who votes. Step 6, for the sender of a beat's gossip, for the sender rule that is asked again when a kept distribution is handled, and for who may ask for the key. Steps 3 and 4, for the answer that now waits and for the tracker. Step 5, for the owed mark and the place of the leader's hold. PR #185, for `zoneJoinedGroup`.
 
-**Before it:** step 5, for the owed mark and the place of the hold. Step 6, for the sender of a beat's gossip and for the rule of who may ask for the key. Step 8, which makes a group's hash the make-up: before it the hash does not say who votes. Step 4, for the retry schedule. PR #185, for `zoneJoinedGroup`.
+The step has two parts, the settle rule and the key, with a size each (at its end). They can be two pull requests. It is a step of its own, after the group's new key and before the switch, for three reasons. A hold that never opens stops every change that a provider makes: it should be judged alone on a fleet. It needs steps 3 to 6, which step 8 does not. And it has to be in place before step 10, which is when a zone's make-up starts to change at every edit of a provider's standing.
 
-This is a step of its own, between the group's new key and the switch, for three reasons. It is a gate on the parent sync, as step 5 is, and a gate that never opens stops every sync: it should be judged alone on a fleet. It needs steps 5, 6 and 8, which step 8 does not. And it has to be in place before step 10, which is when a zone's group starts to change at every edit of a provider's standing.
+It keeps today's listing: a row lists every zone of its group. Step 9b cuts the listing down, as a stage of its own (decision 24). The rule is safe with either. The argument of design 4.9 needs a telling to be one make-up that its agent has held for the fixed time, and to count for a bounded time. It does not need a zone to be left out of a row.
+
+**The rule (design 4.9, decision 23).** A zone is settled at an agent when the agent has held the zone's make-up, unchanged, for the fixed time, and every other voting member of that make-up has told the agent the same make-up within the time a telling counts. While a zone is not settled, the agent starts nothing for it and takes nothing for it. The parts below are lettered: (a) since when a make-up is held, (b) the check, (c) nothing is started, (d) nothing is taken, (e) the leader, (f) the release, (g) catch-up, (h) elections.
 
 **What is told. Nothing is added to the wire.**
 
-- Every agent already tells, for each group, which zones it has in that group: its own row in the group's gossip lists them (`MemberState.Zones`, written by `RefreshLocalStates` from the group's zones, `v2/gossip.go`). With step 8 the group's hash is the make-up. So "zone Z is in my row of group G" says "I hold make-up G for Z". That is design 4.9: an agent tells the members of each of its groups which zones it has there. It tells nobody else, so a previous leader that is in none of the new leader's groups tells it nothing about the zone where the zone now is.
+- Every agent already tells, for each group, which zones it has in that group: its own row in the group's gossip lists them (`MemberState.Zones`, `v2/gossip.go`). With step 8 the group's hash is the make-up. So "zone Z is in my row of group G" says "I hold make-up G for Z". It tells the members of that group and nobody else.
+- One thing changes in what is told: a zone is listed only once the agent has held it in that group for the fixed time (a).
 - Why not a value per zone in the beat's own zone list: that list is `Zones []string` in tdns-transport's beat payload. The transport reads its first entry as the scope of the beat's authorization, and so does `parseAppPayload`. A value per zone there is a change of tdns-transport's wire type, of both readers, and a new pin. The gossip is tdns-mp's own, and it rides in the same beat.
-- An absent value: a beat from a peer with no row of its own for the group, or with a row that does not list the zone, reads as "this peer does not hold this make-up for the zone". That is the hold, not a case of its own.
-- Not established: how large a beat gets. A row lists every zone of its group, and a beat carries every member's row. That is so today.
+- An absent value: a beat from a peer with no row of its own for the group, or with a row that does not list the zone, reads as "this peer does not tell this make-up for the zone". That is the hold, not a case of its own.
+- The size of a beat: a row lists every zone of its group, and a beat carries every member's row. That is so today, and this step leaves it. Step 9b changes it.
 
-**What is kept.**
+**(a) Since when a make-up is held.**
 
-- Per peer, first hand: which group it has each zone in, and when it said so. Proposed: `NoteToldZones(from, msgs, at)` on the gossip table, called in the two places gossip is merged (`routeBeatMessage`, and the gossip of a beat's answer in `SendBeatWithFallback`, `v2/hsync_transport.go`), with the sender that step 6 passes there. It reads the sender's own rows only and replaces what was kept for that sender. `ZoneToldBy(peer, zone)` returns the group and the time.
+The group manager knows. `recomputeSince` (`v2/provider_groups.go`) is the one place that reads every zone's records and installs the result. It runs at every change of a zone's HSYNC3 or HSYNCPARAM records (`OnHsync3Changed`, `PostRefresh`), and at the auditor's start. Proposed: a map beside the groups, `held`, with one entry per zone: the make-up (the key of step 8), the group's hash (empty for a zone in no group), and since when. It is written where the new map of groups is installed, under the manager's lock:
+
+- a zone with no entry, or whose make-up is not the entry's: a new entry, with the time of the install;
+- a zone whose make-up is the entry's: the entry stays;
+- a zone the agent no longer has: the entry goes.
+
+Four things about it:
+
+- **A zone with fewer than two members.** The scan skips such a zone before it keeps anything for it. The entry is made before that skip: a zone with one provider has a make-up too, and its one agent waits out the fixed time after a change, like any other.
+- **The first load after a start.** The first recompute that sees the zone makes the entry. So the time starts at the agent's start, as design 4.9 asks, and nothing is kept across a restart.
+- **A zone that is not ready.** The scan skips it. Proposed: it keeps its entry. Not established: whether a loaded zone ever reads as not ready while it is refreshed. If it did and the entry went, the time would start over, which costs time and no safety.
+- **A change that is on its way.** Between the moment a refreshed zone is in place and the recompute that follows it, the entry is of the make-up from before. The check (b) reads the zone's records when it is asked and compares. When they differ the zone is not settled.
+
+Proposed accessor: `ZoneHeld(zone)`, which returns the entry. It is also the way to a zone's group from here on: `GetGroupForZone` walks every zone of every group and copies the group's zone list at each call.
+
+**How a row leaves a zone out.** Two things are wrong with a row today, for this purpose. An agent's own row is written at the start of each beat round (`RefreshLocalStates`) and kept in the gossip table, so a recompute between two rounds leaves the kept row as it was. And `BuildGossipForPeer` reads which groups to send from the group manager of the moment, and the rows from the table. So a beat that is built just after a recompute can list a zone in the row of the group it left.
+
+- One helper on the group manager, proposed `zonesToTell(group, now)`: the zones of the group whose entry in `held` is older than the fixed time. Both are read under one hold of the manager's lock, so the list is of one map.
+- `BuildGossipForPeer` puts that list in this agent's own row of each message, in place of the list the kept row has. One map has each zone in one group, so no message lists a zone twice, and none lists it in a group it left. About 15 lines.
+- `RefreshLocalStates` uses the same helper for the row it keeps, so that what the agent shows of itself is what it sends.
+- A row that lists nothing is still sent. The builder includes a group when both agents are members of it, whatever its rows hold. The receiver replaces what it kept for the sender as a whole (below), so an empty list takes the zone away there.
+- An agent with no row of its own for a group sends the others' rows only. That happens for up to a beat interval after a start, when the first row of a group is held back (`HoldFirstLocalRows`), and for a group that is new since the last round. It reads as telling nothing, which is right, and it ends well inside the fixed time.
+
+**What is kept of what the peers tell.**
+
+- Per peer, first hand: which group it has each zone in, and when this agent heard it. Proposed: `NoteToldZones(from, msgs, sent, at)` on the gossip table. It reads the sender's own rows only, and what it keeps for that sender is replaced as a whole. `ZoneToldBy(peer, zone, now)` returns the group and the time. The time of the sender's last beat is kept too, so that the check can tell a peer that was not heard from one that did not list the zone.
   - First hand, because a row that another member passes on can be older, and because a peer that has dropped a group sends no newer row for it: the gossip table would keep its last one for good.
+  - Where it is called, and where the time comes from: for every beat that arrives, in `routeBeatMessage`, and for the answer to every beat this agent sent, in `SendBeatWithFallback` (`v2/hsync_transport.go`). `at` is this agent's clock at that moment. It is called also when the beat carries no gossip at all, which today skips the merge: such a beat says that its sender lists no zone in any group it shares with this agent.
   - It reads the message before `MergeGossip` filters it (step 6). A row for a group this agent does not have is a view that differs, and it is exactly what has to be seen.
-- Per zone, the group it left. `RecomputeGroups` knows no leaders. The place is `zoneJoinedGroup(zone, from, to)` on the election manager, which it calls for each zone it has moved. The election of the group the zone left is still there at that moment: a recompute tells of the zones that joined before it tells of the groups that are gone. Proposed: `zoneLeft{group, leader, at}`, kept per zone: the group the zone left, who led it, and when the zone arrived here. It is noted when the zone had a group, that group had a leader, and the leader is not this agent. The lease of that leader is not kept: it is no way out (decision 16).
-  - The note goes when its leader has shown what the second condition asks, and at the latest when the fixed time has passed.
-  - An agent that has restarted has no such note: at its first load of the zone there is no group the zone left. The second condition below then asks for nothing, and the first condition and the catch-up of step 5 carry the case (design 4.9).
+  - An older beat must not replace a newer view. `sent` is the sender's own time in the beat (`Timestamp` of the beat's payload); a beat that is older than the one last taken from that sender is not taken. An answer is taken when its beat was sent after the view now held was heard.
+  - A zone that a sender lists in two of its own rows counts for neither. With the builder's change no agent sends that.
+- The engine's own merge of the same beat (`mergeGossipFromBeat`, `v2/hsync/transport_peer.go`) is left as it is.
 
-**The fixed time.** Proposed: three beat intervals from the zone's arrival here, a constant `zoneArrivalWaitBeats = 3` times this agent's beat interval (`multi-provider.syncengine.intervals.beatinterval`, 30 s by default, so 90 s). No config key of its own. Three, because the previous leader needs one beat to hear that its peers have moved the zone, its own row needs one to come back, and one is spare. It is usually shorter than that: a recompute that moves a zone brings the next beat round forward.
+**The two times** (decisions 19 and 23). Both are counted in beat intervals, read from the config (`multi-provider.syncengine.intervals.beatinterval`, 30 s by default), and neither has a config key of its own.
 
-**The check.** Proposed: `viewsAgree(zone)`, which also returns who is waited for. A zone in no group agrees.
+| | Proposed constant | With the default |
+|---|---|---|
+| A told make-up counts for | `toldValidBeats = 2` | 60 s |
+| The fixed time: how long a make-up is held before it is told | `settleHoldBeats = 3` | 90 s |
 
-1. Every voting member of the zone's group other than this agent has the zone in that group: `ZoneToldBy(member, zone)` is the group's hash.
-2. For each group the zone left: its leader has the zone in the group this agent has it in; or its own rows, first hand and later than the zone's arrival, do not list the zone in the group it left; or the fixed time has passed since the zone arrived. The second is what "has dropped the zone" looks like: a previous leader that is no longer a member of the zone is not in the new group and sends no row for it, so it can show only that the zone has left its row of the old one.
+- Two, because this agent hears every peer at least once per beat interval of its own, in the answer to its own beat: one answer may be lost.
+- Three, because the fixed time has to be the longer one, by more than a beat can be under way (design 4.9).
+- Two limits, both proposed. The fixed time is never less than the first time plus 15 s: a beat can be 10 s on its way (the time-out of its send), which is more than one beat where the interval is set that short. And the beat interval of the fixed time is the largest this agent knows of in its groups: its own, and the one each member announces in its row (`MemberState.BeatInterval`). A peer counts what it is told in its own beat intervals, so an agent that beats faster than a peer must not tell sooner than that peer has stopped counting. Not established: an upper limit on an announced interval. A peer that announces a very long one lengthens the fixed time of every agent that shares a group with it.
+- With a beat interval of 10 s, as a test fleet may run, a telling counts for 20 s and the fixed time is 35 s, by the floor. Every scenario that follows an owner's edit of the providers, or the start of an agent, waits that much longer than it does today.
 
-Every leader runs the check on its own view, and that is what makes it hold from both sides. A leader that has not seen the edit still has the zone in the old group, and the voting members that have seen it no longer list the zone there: the first condition fails for the stale leader too, one beat after any of them has moved the zone. That is why a fixed time is enough for the second condition: a previous leader that is alive holds its own sync within a beat, also when it is stuck on an old copy of the zone, and one that is not alive sends nothing.
+**A told make-up counts only while it goes on being told** (decision 19, its first rule). It is applied in `ZoneToldBy`: what was heard longer ago than the first time is not returned. So a peer that has stopped telling, that tells another make-up, or that cannot be heard reads the same in the check: it does not agree. Nothing has to notice the moment a telling runs out. The check is asked whenever an agent is about to start or take something, and an agent that was acting holds at its next attempt.
 
-**The hold.** One helper, proposed `syncHeld(zone)`, in the place of step 5's test: not caught up, or the views do not agree. It is asked:
+**How a peer learns that a zone has left a make-up.** The second rule of decision 19 asked an agent that has moved a zone to go on telling the members of the old group so. It is no longer a mechanism of its own (decision 23). An agent that has moved a zone lists it nowhere until it has held the new make-up for the fixed time, and its next beat to each peer says so by what it no longer lists:
 
-- in `DelegationSyncher`, for both sync commands, where step 5 put its test;
-- where a waiting NOTIFY is let go (step 5);
-- before the bootstrap of the zone's SIG(0) key at the parent, `ParentSyncAfterKeyPublication`, which `leaderKeySetup` starts by itself and which does not pass the syncher. Design 4.9 names it. Not established: whether it sends anything but a query when the parent already holds the key.
+- The old group still has zones at the mover: its row for the group goes on, without the zone.
+- The old group is gone at the mover: it sends no row for it. The beat still arrives, with the rows of the other groups the two share.
+- The two share no zone at all any more: the peer is LEGACY at the mover, and a LEGACY peer is still beaten (`SendBeatWithFallback`), for the 24 hours of step 7. Such a beat carries no gossip: the builder finds no group with both in it.
 
-The same owed mark as step 5. What ends the hold: a beat that changes a peer's told zones, for a zone with something owed whose check now passes; and a timer at the end of the fixed time, set when the zone's leaving is noted. What is then asked is what an election's winner asks for the zone (`onLeaderElected`), not the sync alone: it finds the key it has, and the sync sends only a difference. A recompute that has moved a zone also brings the next beat round forward (`KickBeats`), so that this agent's own row goes out soon.
+In all three the receiver replaces what it kept for that sender, and the zone is no longer there. That is why `NoteToldZones` replaces the whole of a sender's view at every beat, with or without gossip. A beat that does not arrive at all is the first rule.
 
-**The zone's SIG(0) key (design 4.1, decisions 14, 15 and 18).** Every voting member holds it, and a new one is the fallback. This part needs steps 4, 5 and 6 only and could be a pull request of its own. It is kept here because it shares the owed mark and the hold with the rest of the step.
+**(b) The check.** Proposed: `zoneSettled(zone, now)`, in a new file `v2/settle.go`. It returns whether the zone is settled, and when it is not, what is waited for: who, and why.
+
+1. The zone has no HSYNC3 RRset: settled. It is not a multi-provider zone, as in step 1.
+2. The zone has no entry in `held`, or its records now give another make-up than the entry's: not settled. Why: `make-up-changed`.
+3. The entry is younger than the fixed time: not settled. Why: `own-time`, with the time it is up.
+4. For every voting member of the make-up other than this agent, `ZoneToldBy(member, zone, now)`:
+   - the entry's group: the member agrees;
+   - another group: why `other-make-up`, with the group;
+   - nothing, and the member's last beat is older than the time a telling counts: why `not-heard`, with how long;
+   - nothing, and the member's last beat is newer: why `not-listed`. The member holds another make-up for the zone, or has not held this one for the fixed time yet.
+
+A zone in no group, and a zone whose only voting member is this agent, are settled by 1 to 3: the agent's own time. On an agent that does not vote in the zone, an auditor or a member with no role, every voting member is another member, and the rule is the same (design 4.9, "Who has to agree").
+
+**The argument, and what the code does to it.** Design 4.9 has it ("Why it holds"): a voting member holds one make-up at a time and tells it no sooner than the fixed time after it took it up, and a peer counts what it was told for a shorter time than that. So two agents that hold different make-ups for a zone never both count the same member. Four things in the code could break that, and each is closed above: a row from before the recompute (the builder's list and the `held` entries are of one map), an old beat that arrives late (the sender's time), a beat with no gossip that is not looked at (the call for every beat), and the time between a zone's refresh and its recompute (the check compares). One thing is assumed: a beat is not delivered later than the time-out of its send. The floor of 15 s rests on it.
+
+**(c) Nothing is started.** Where a change that a provider makes becomes a distribution today:
+
+| What | Where it starts | How it is sent |
+|---|---|---|
+| The operator's `add-rr`, `del-rr` and `update-local-zonedata` | `APIagent` (`v2/apihandler_agent.go`) | A `local` update to the data engine (`SynchedDataEngine`, `v2/syncheddataengine.go`) |
+| The signer's DNSKEYs with their key states | `SyncRequestHandler` (`v2/hsyncengine.go`), when the signer's inventory differs from what was last distributed | The same |
+| The leader's CSYNC (PR #188) | `distributeCsync` (`v2/mp_s5_leader_csync.go`) | The same |
+| The leader's KEY | `leaderKeySetup` (`v2/start_agent.go`) | `EnqueueForCombiner` and `EnqueueForZoneAgents`, called there |
+| The operator's `resync --push` | The `resync` command of the data engine | The same two calls, in the engine |
+| The answer to a request for state (step 3) | `catchUpAnswer`, today `resync-targeted` | `EnqueueForSpecificAgent` |
+
+*The `local` case of the data engine* is where the first three meet. Today it evaluates the update, stores it in the agent's data, marks its records as pending under a new distribution ID, and sends: to the agent's own combiner, to the zone's agents, and a note for the key machine of which DNSKEYs went out (`TrackDnskeyPropagation`). Proposed: for a zone that is not settled it does everything up to the marking, and the three sends are owed.
+
+- Why it stores at once: `add-rr` and `del-rr` build a `replace` from the agent's own data as it is when the command comes. A second edit made during the hold has to see the first, or its `replace` would take the first edit away when both are sent.
+- What is owed: the update and its distribution ID, in a list per zone, in the order they came.
+- When it is sent: the recipients are read then, not when the update came (`GetDistributionRecipients`, then `setExpectedRecipients` for the records marked), then the three sends, then `delegationCsyncProgress` as today.
+- The agent's standing is asked again then (step 2). An agent that no longer votes in the zone sends nothing: design 2.3 has it initiate nothing. The owed entry is dropped with a log line. NOT YET DETAILED: its records stay in the agent's own data, marked as pending; whether they are taken out again there.
+- A repeat is owed once. The key machine has a distribution sent again when it has waited for its confirmations longer than `ResendAfter` (`v2/mp_key_lifecycle_driver.go`), and it sets no other limit on that wait. Not established: by which path that resend reaches the agent's data engine, and whether it comes as a new local update. If it does, an update with the same operations as one that is owed for the zone is not owed a second time.
+- What the operator is told: the edit is stored and kept, and for whom the zone waits. It is not an error.
+- The send to the agent's own combiner waits with the rest: it is the same distribution, and it is what changes the zone at this provider.
+
+*The others.*
+
+- **The leader's CSYNC** is not made while the leader's sync is held (e): the hold is asked before `delegationCsyncStep`. One whose zone stops being settled between that and the data engine is owed like any local update, and reads to the sync chain as handed over and not yet confirmed. The NOTIFY waits for the confirmations with no time-out already.
+- **The leader's KEY.** `leaderKeySetup` asks the hold before anything else (e), so its two sends need no change.
+- **`resync --push`** is refused while the zone is not settled, with the reason. Proposed: it is an operator's command and can be given again, and what it would push is the agent's own data, which a hold does not lose.
+- **The answer to a request for state.** The request is taken as before: it is not held (design 4.9). The answer is owed, one per zone and asker. A request from the same asker that comes while one is owed replaces it. The answer is built when it is sent, so it holds the agent's data of that moment and names the latest request.
+
+*Nothing is lost or put out of order.* One list per zone holds what is owed and what is kept (d), in the order it came, and it is handled in that order by the data engine itself (f). What it holds is in memory. An agent that restarts loses it, as it loses its queue today (2.5). For an operator's edit that is new: the operator was told that it is kept. The status shows what is owed.
+
+**(d) Nothing is taken.** A SYNC that arrives gets three answers today, and they are three things:
+
+1. **The transport's acknowledgement,** in the reply to the message itself, once the router's handler has accepted it (`handleAppSync`, `v2/mp_verb_handlers.go`). It says that the message arrived and passed admission and the sender rule.
+2. **A confirmation with status PENDING,** sent at once by `routeSyncMessage` when it has passed the message on (`sendImmediateConfirmation`, `v2/hsync_transport.go`: "Sync received, forwarding to combiner"). At the sender it starts the wait for the final confirmation over (`MarkPending`).
+3. **The final confirmation,** with what was applied and what was refused. It is sent when the receiving agent's own combiner has confirmed (`PendingRemoteConfirms`, `sendRemoteConfirmation`), or at once when the update changes nothing here. An auditor sends it when it has logged the event (`auditorConfirms`).
+
+What the sender's queue does with a recipient that has the message and has not confirmed it (`reliable_message_queue.go` in tdns-transport, with its defaults, which tdns-mp does not change): it waits 2 minutes for the final confirmation and then sends the same message again, with the same distribution ID. The wait doubles with every resend, up to 15 minutes. A PENDING starts the current wait over. The message is given up after 24 hours, with a log line and nothing else. A send that fails is another matter: it is tried again on a backoff that starts at 2 s and stops growing at one minute.
+
+Proposed, as the least change that fits:
+
+- **The first two answers are given when the message arrives,** as today. They say "it is here". The text of the second says that the update is kept and why: "Sync received, kept until the zone is settled here". Refusing the delivery in their place would put the message on the backoff for failed sends: one send a minute, for as long as the hold lasts, to every recipient that is not settled.
+- **The third is not given until the update has been handled.** That is what design 4.9 means by "not confirmed", as the plan reads it. The sender waits for it as for any other.
+- **The update is kept** at the head of the `remote` case of the data engine, before `refuseCsyncNotFromLeader`, `EvaluateUpdate` and `ProcessUpdate`. Nothing is stored in the agent's data, nothing is passed to its combiner, and what the sending provider says about its keys is not passed to the signer (`noteForeignDistribution`). It goes on the zone's list (c), in the order it came.
+- **A resend is not kept twice.** A kept update is known by its sender and its distribution ID (`OriginatingDistID`). A resend of one that is kept gets the first two answers again and is dropped.
+- **When it is handled,** it takes the path it would have taken. Two things are asked by the make-up that has settled, since the router asked them when the message came: that the sender is a voting member of the zone (step 6), and for a CSYNC, who leads. One that fails is answered with a final confirmation REJECTED and the reason.
+- **`MsgHandler`** waits 3 s for the data engine's word on an update (`v2/hsyncengine.go`). It gets "kept" at once, which is no error.
+- **The auditor** (`AuditorEngine.recordSyncMsg`, `v2/auditor_engine.go`). It is left as it is: it logs the event when the message comes and confirms at once (`auditorConfirms`). Design 4.9 says so: an auditor changes nothing in a zone, so there is nothing for the settle rule to hold at it, and a distribution does not wait for an auditor's view of the make-up.
+- **A member with no role** takes by the same code as a voting member.
+
+How many resends that costs: none for a hold that ends within 2 minutes, which is the common case with a fixed time of 90 s. For a hold of an hour, six. Each is one message and its two answers.
+
+What a restart does: a recipient that restarts loses what it kept. The sender has no final confirmation, sends again when its wait runs out, and the copy is kept anew. A sender that restarts loses its queue, as today. The kept copy is handled when the zone settles, and its confirmation finds no message waiting.
+
+Not established:
+
+- That a final confirmation which arrives after its message was given up, 24 hours after it was sent, still moves the sender's record of the distribution. `OnConfirmationReceived` is where to look. A recipient that is down for a day gives the same case today.
+- What a sender does with records whose distribution was given up. As read, nothing: they stay pending.
+
+**(e) The leader.** One helper, proposed `syncHeld(zone)`, in the place of step 5's test: the zone is not settled, or it is not caught up. It is asked:
+
+- in `DelegationSyncher`, for both sync commands, where step 5 put its test, and so before `syncDelegation` and `delegationCsyncStep`;
+- where a waiting NOTIFY is let go (step 5): a NOTIFY that is held then is dropped, and the sync is owed;
+- first thing in `leaderKeySetup`, and before the bootstrap of the zone's SIG(0) key at the parent, `ParentSyncAfterKeyPublication`, which `leaderKeySetup` starts by itself and which does not pass the syncher. Design 4.9 names the bootstrap. Not established: whether it sends anything but a query when the parent already holds the key.
+
+The roll of the key when a voting member leaves (decision 22) is held by the same rule. It is the removal's, and nothing of it is in this step.
+
+The same owed mark as step 5. An agent that stops leading a zone while something is owed for the parent drops it: step 8 drops the zone's sync chain when the zone leaves a group this agent leads, and this step drops the owed mark with it.
+
+**(f) What releases a zone.** Two things can make a zone settled: a beat, and the agent's own fixed time running out.
+
+- The zones that have something owed or kept are in one small set, proposed `settleWaiting` on the agent's registry, with a lock of its own. The data engine puts a zone in it when the zone's list gets its first entry and takes it out when the list is empty. The syncher does the same for a sync that is owed, and the auditor's engine for what it has kept.
+- Where a beat or an answer has been noted (`NoteToldZones`), and at the start of every beat round (`BeforeHeartbeats`, `v2/hsync_bridge.go`), the check is asked for the zones in the set. With nothing waiting that is nothing.
+- A zone that is settled is released: a command to the data engine, proposed `settled`, which handles the zone's list in order, and for a zone this agent leads, what an election's winner asks for it (`onLeaderElected`): the key set-up finds the key it has, and the sync looks at the parent first and sends only a difference.
+- Each entry of the list takes the path it would have taken, and that path asks the check again. An entry that finds the zone not settled stays at the head of the list, and the rest behind it.
+- The round's check is what releases a zone that waits only for its own time. It can be a beat interval late. No timer per zone is kept: a change of the providers of many zones at once would set as many.
+
+**(g) Catch-up (steps 3 to 5).** There is no deadlock.
+
+- What an agent tells of a zone depends on its `held` entry and on nothing else. It does not ask the tracker. So a newcomer that has just got its role tells the new make-up when it has held it for the fixed time, before it has caught up, and the others tell it.
+- The request for state is not held, so it is sent and taken at once. The answer waits twice: at the answering agent until the zone is settled there, and at the asker until it is settled there. Both need tellings, and tellings need only time and beats.
+- So the order after an edit that gives a provider its first role is: every agent loads the edit; the fixed time passes at each; the tellings cross; the answers go; the zone is caught up; the leader syncs. Catch-up waits for the settle rule and never the other way.
+- After a start it is the same. The first row of a group, which is held back for up to a beat interval (`HoldFirstLocalRows`), lists nothing either way, so that hold sits inside the fixed time and adds nothing to it.
+- One thing in step 4 has to change. A request fails there when no answer has come 30 s after its acknowledgement, and under the hold no answer can come that soon after a start or a change of make-up. Proposed, in `v2/catchup.go`: the time for an answer is 30 s or two beat intervals, the longer, and it is counted from the later of the acknowledgement and the moment the zone is settled at the asker. And an answer that arrives and is kept stops that time: the data engine tells the tracker (proposed `Arrived(zone, from, catchUp)`), and `Answered` follows when the answer is handled.
+- The answering side says so too: the acknowledgement of an RFI SYNC (`handleAppRfi`) says that the answer waits for the zone to be settled there. The status of the asker shows it.
+
+**(h) Elections are not held,** and nothing in this step changes one. As read: `CheckGroupState` reads the cells of the rows (`PeerStates`) and not their zone lists; a group's election is started by its gate and its lease; `zoneChanged` (step 8) reads the zone's records. Nothing in the election path reads a row's zone list or asks about a zone's make-up. What an election's winner does for each zone, the key set-up and the sync, is held per zone (e). A group that is new, because a zone has moved to a make-up no zone had, can elect within seconds, inside the fixed time: it has a leader before the leader may act. The readers of a row's zone list are all for display (step 9b lists them). One is affected here: `gossip state --zone` on an agent whose group manager has no group for the zone finds the zone by the rows' lists, and a zone that is held back from the rows is not found until the fixed time has passed.
+
+**Limits and costs (design 4.9, decision 23).**
+
+- After a change of a zone's make-up, nothing that a provider makes happens for the zone until the fixed time after the last voting member has loaded the change.
+- After the start of a voting member's agent, the same holds for its zones, at every agent. The catch-up of step 4 therefore ends later by the fixed time and a beat, and the checks of steps 4, 5 and 8 pass that much later.
+- A voting member that cannot be heard holds every change that a provider makes in its zones, for as long as it cannot be heard. A voting member whose agent is stuck on an old copy of a zone does the same for that zone.
+- A recipient that does not vote, an auditor or a member with no role, is not waited for in the agreement, and its confirmation is waited for as before. If the zone never settles at it, because its agent is stuck on an old copy, it confirms nothing, and every distribution of the zone waits for that confirmation. Step 10 has the case that exists today.
+- What is owed and kept is in memory.
+- What is not covered: an owner's edit whose old and new sets of voting members have no member in common (one provider replaced by another, two by a third). From the fixed time after the new side has the edit until a voting member of the old side loads it, both sides act, and the old side does not have to be stuck: a transfer that takes longer than the fixed time is enough. No code closes it. The order of `guide/provider-changes.md` avoids it, one provider at a time with a voting member in common at every step; the guide is to say that an edit which exchanges the whole set is not to be made.
+
+**The zone's SIG(0) key (design 4.1, decisions 14, 15, 18 and 22).** Every voting member holds it, and a new one is the fallback. This part needs steps 4, 5 and 6 only and can be a pull request of its own. It is kept here because it shares the owed mark and the hold with the rest of the step.
 
 Today `leaderKeySetup` (`v2/start_agent.go`) uses a local SIG(0) key, else asks the zone's agents that are OPERATIONAL, else generates a keypair ("no peer has SIG(0) key, will generate new keypair"). Nobody but a leader ever asks, and the answering side hands the key only to its upstream or downstream (2.10).
 
@@ -809,9 +975,9 @@ Today `leaderKeySetup` (`v2/start_agent.go`) uses a local SIG(0) key, else asks 
 - from the data engine, after a remote update that carried a KEY operation: the leader's `replace` of the KEY reaches every member, and it is the first sign of a new key;
 - from `PostRefresh`, when the refresh changed the apex KEY RRset. `MPPreRefresh` has both copies and notes it, in one more field of `ZoneRefreshAnalysis`.
 
-A key that arrives is imported as today (`importSig0KeyFromPeer`). An agent that does not lead publishes nothing and sends nothing to the parent.
+A key that arrives is imported as today (`importSig0KeyFromPeer`). An agent that does not lead publishes nothing and sends nothing to the parent. The request and its answer are CONFIG messages, not distributions. Proposed: the settle rule does not hold them. Design 4.9 names distributions and what goes to the parent, and neither is this.
 
-*Who is asked.* The voting members of the zone other than this agent, and the leader of the group the zone left for as long as it is still a member of the zone. That leader is read from the note of the move (the `zoneLeft` above; its name is kept for the key after the note itself has gone). After a restart there is no note. Proposed for that case: the member under whose name the published KEY record is held in the data repo, which is the agent that published it. Not asked: an auditor.
+*Who is asked.* The voting members of the zone other than this agent, and the leader of the group the zone left for as long as it is still a member of the zone. That leader's name is noted for this purpose alone, where a recompute tells of a zone that has moved: `zoneJoinedGroup(zone, from, to)` on the election manager. The election of the group the zone left is still there at that moment, since a recompute tells of the zones that joined before it tells of the groups that are gone. Proposed: `keyAskAlso`, per zone, kept while that agent is a member of the zone. After a restart there is no such note. Proposed for that case: the member under whose name the published KEY record is held in the data repo, which is the agent that published it. Not asked: an auditor. The one that is asked this way is often a member with no role by then. It is not given the key (design 2.1), and it initiates nothing (design 2.3), but it answers: a holder hands the key to a voting member that asks, whatever its own standing. So the admission rule of step 6 is about the ASKER, a voting member, and the answering side needs only to hold the key. Its silence is a missing answer like any other: it blocks the fallback and makes no key.
 
 *Who hands it over, and what an answer is* (decision 15, design 3.3).
 
@@ -825,52 +991,175 @@ A key that arrives is imported as today (`importSig0KeyFromPeer`). An agent that
 
 *The leader.* `leaderKeySetup` becomes:
 
-1. The zone is not caught up: nothing is decided. This agent's contributions are not complete, so it cannot know whether the zone has a key. Owed.
-2. This agent holds the private part of a KEY the zone publishes: it goes on as today, to the publication and, under the hold, to the bootstrap.
-3. The zone publishes no KEY: a keypair is generated, published and bootstrapped with the parent, as today, but only once the zone is caught up (`CaughtUp`, step 4) and the look at the parent shows no key for it. `leaderKeySetup` runs when a zone is taken up, which is not ordered after catch-up, and before catch-up the KEY set this agent knows is empty whatever the zone has: an empty set then says only that the agent has not heard yet (the external re-review). Until then this case waits as the others do, with the sync owed. Test: `TestALeaderDoesNotJudgeAZoneKeylessBeforeItIsCaughtUp`.
+1. The zone is not settled, or it is not caught up (`syncHeld`): nothing is decided. While it is not caught up this agent's contributions are not complete, so it cannot know whether the zone has a key. Owed.
+2. This agent holds the private part of a KEY the zone publishes: it goes on as today, to the publication and to the bootstrap.
+3. The zone publishes no KEY: a keypair is generated, published and bootstrapped with the parent, as today, but only once the look at the parent shows no key for it. `leaderKeySetup` runs when a zone is taken up, which is not ordered after catch-up, and before catch-up the KEY set this agent knows is empty whatever the zone has: an empty set then says only that the agent has not heard yet (the external re-review). The first case sees to that. Test: `TestALeaderDoesNotJudgeAZoneKeylessBeforeItIsCaughtUp`.
 4. The zone publishes a KEY and this agent holds no private part for it: the request above. Owed, and one line says who was asked and what each answered.
 5. In one round every member that was asked has answered "no key here": the fallback. A keypair is generated, published and bootstrapped with the parent, by the same code as in 3. A refusal or a silence in the round keeps it from happening: silence is never "no key".
 
 Not established: that a parent which holds a key for the zone takes the bootstrap of a second one. The path is the one a new key takes today.
 
+*The KEY record is the group's (design 4.1, decision 22).* Today `leaderKeySetup` publishes the KEY as a contribution of the agent that runs it: a `replace` to its own combiner, with the instruction where to publish it, and to the zone's agents. Every agent that takes the zone up does that. So with decision 18 a new leader publishes the same record again under its own name, and the one under the earlier leader's name stays at every combiner. That is harmless while the two are one record. Three changes make the KEY the leader's, as the CSYNC is since PR #188:
+
+1. A KEY operation is taken from the zone's leader only. `refuseCsyncNotFromLeader` (`v2/mp_s5_leader_csync.go`) is asked for the KEY as well as the CSYNC.
+2. Only the leader's answer to a request for state names the KEY (design 5.4). Step 3 has every agent that published one name it, until this step.
+3. A member keeps the KEY that the leader publishes and no other: an agent that takes the leader's KEY drops a KEY it holds under another agent's name, in its own data and at its own combiner. NOT YET DETAILED. An agent passes a remote update on to its combiner under the origin's name today, so an empty `replace` in the earlier publisher's name is a form that exists. Not established: what the combiner makes of KEY contributions from two agents when one is withdrawn that way (`v2/combiner_chunk.go`, where a KEY from the local agent comes before one that was passed on), and whether the rule of step 6 refuses it there when the earlier publisher no longer votes. Until a key is rolled, or the fallback above makes a new one, the records are the same and nothing shows. The fallback is where this plan needs it: without it a zone whose leader has generated a new key publishes both.
+
 *Still not covered.* A holder of the key that is still a member of the zone and whose agent is stopped is silent, and silence holds the fallback back. If no other voting member has the key, the zone's sync is owed until that member answers or its record is removed. With every voting member asking for the key at its catch-up that takes two faults at once. And when the apex carries several KEY records, which one the parent holds is not established: an agent that holds any of them goes on, and the inquiry that the bootstrap starts with is what tells.
 
-Tests: `TestAVotingMemberAsksForAKeyItDoesNotHold` (at catch-up, on a KEY operation, on a refresh), `TestAMemberThatDoesNotVoteAsksForNoKey`, `TestASignerHandsTheKeyToAnotherSigner`, `TestTheKeyHandedOverIsTheOneTheZonePublishes`, `TestARefusedKeyRequestIsAnswered`, `TestARefusedKeyRequestCostsNoWait`, `TestAKeyAnswerIsMatchedToItsRequest`, `TestALocalKeyThatTheZoneDoesNotPublishIsNotTheZonesKey`, `TestThePreviousLeaderIsAskedForTheKey`, `TestTheKeyIsNotAskedOfAnAuditor`, `TestALeaderDoesNotGenerateAKeyWhileAMemberIsSilent`, `TestALeaderGeneratesAKeyWhenEveryMemberHasAnsweredNoKey`, `TestAnAnswerOfAnEarlierRoundDoesNotCount`, `TestTheAnswersStartOverWhenTheVotingMembersChange`, `TestAZoneWithNoKeyGetsOneAtOnce`, `TestNoKeyIsDecidedBeforeTheZoneIsCaughtUp`.
+**Names.**
 
-**Limits (design 4.9).**
+Log, info, logger `engine`: "a change of this provider's own is kept until the zone is settled" (`zone`, `distrib`, `waiting_for`); "a distribution from a peer is kept until the zone is settled" (`zone`, `peer`, `distrib`, `waiting_for`); "the zone is settled, handling what was kept" (`zone`, `owed`, `kept`); "a kept change is dropped: this provider no longer has a role in the zone" (`zone`, `distrib`). Log, info, logger `zones`: "DelegationSyncher: the sync with the parent is held until the zone is settled" (`zone`, `waiting_for`). Log, info, logger `gossip`: "the zone's make-up has changed, telling it again from" (`zone`, `group`, `from`). A hold that lasts is logged when it starts and then once an hour.
 
-- After a restart an agent knows of no group that a zone left, and the second condition asks for nothing.
-- One case is not covered. An owner who replaces a zone's only provider by another in one edit leaves a previous leader with no peer to tell it anything. If its agent is then stuck on the old copy, it and the new provider both act. The order of `guide/provider-changes.md` avoids it: the new provider is added before the old one is taken away.
+Log, logger `agent`, for the key: info "asking for the zone's SIG(0) key: the zone publishes one that this agent does not hold" (`zone`, `asked`); warn "no SIG(0) key yet, asking again" (`zone`, `answers`, `attempt`, `in`), the first time and then once an hour; warn "every member that was asked has no SIG(0) key for the zone, generating a new one" (`zone`, `asked`).
 
-**Names.** Log, info, logger `zones`: "DelegationSyncher: the sync with the parent is held until the zone's members agree on its make-up" (`zone`, `waiting_for`); "the zone's members agree on its make-up, asking for what was owed" (`zone`). Log, logger `agent`: info "asking for the zone's SIG(0) key: the zone publishes one that this agent does not hold" (`zone`, `asked`); warn "no SIG(0) key yet, asking again" (`zone`, `answers`, `attempt`, `in`), the first time and then once an hour; warn "every member that was asked has no SIG(0) key for the zone, generating a new one" (`zone`, `asked`). Status, in `agent parentsync status`:
+Status, in `agent parentsync status`, from new fields of `ParentSyncStatus`:
 
 ```
-  parent sync:    held until every member has the zone's make-up (waiting for agent.bravo.example.)
-  parent sync:    held until the leader of the group the zone left has it (agent.charlie.example., until 15:04:05 at the latest)
+  settled:        yes, since 15:04:40
+  settled:        no: this agent has held the zone's make-up since 15:03:10 and tells it from 15:04:40
+  settled:        no: waiting for agent.bravo.example. (not heard for 75s), agent.charlie.example. (tells another make-up)
+  kept here:      2 changes of this provider's own, 1 distribution from agent.alpha.example., the sync with the parent
   SIG(0) key:     the zone publishes one that this agent does not hold (agent.alpha.example.: no key here; agent.bravo.example.: no answer)
 ```
 
-**Tests.** Unit, with `groupRig` (PR #185) and two agents that hold different copies of one zone:
+Where a distribution's state is shown at its sender, the list of `agent distrib` (`v2/apihandler_agent_distrib.go`), a recipient that has answered PENDING shows the text of that answer: "kept until the zone is settled here". tdns-transport's queue keeps no text for a PENDING, so tdns-mp keeps the last one per distribution and recipient, about 15 lines. The auditor's view of a distribution shows that member as not confirmed, as it does for a member that is slow: a PENDING is not copied to the auditors (`copyConfirmationToAuditors`). It does not show why. That is #152.
 
-- `TestALeaderHoldsItsSyncWhileAVotingMemberHasAnotherMakeUp`.
-- `TestALeaderHoldsItsSyncUntilThePreviousLeaderHasTheMakeUpOrDroppedTheZone`: the two ways out that the previous leader gives, each alone.
-- `TestTheHoldEndsAFixedTimeAfterTheZoneArrived`: the previous leader says nothing, and one that keeps listing the zone in the group it left.
-- `TestAPreviousLeadersLeaseIsNoWayOut`: the lease ends inside the fixed time and nothing is sent.
-- `TestAStaleLeaderHoldsItsSyncWhenTheOthersHaveMovedTheZone`.
-- `TestAPeersOwnRowIsReadFirstHand`: a row passed on by another member is not taken as that peer's view.
-- `TestARowForAGroupThisAgentDoesNotHaveIsAViewThatDiffers`.
-- `TestTheHoldEndsWhenTheLastViewArrives`.
-- `TestARestartedLeaderWaitsForNoPreviousLeader`: after a restart only the first condition and the catch-up hold. `TestAZoneInNoGroupIsNotHeld`.
-- `TestTheKeyBootstrapWaitsForTheSameHold`.
-- The tests of the key are listed with its part above.
+**Tests.** Unit, with `groupRig` (PR #185) and two or three agents that hold different copies of one zone.
 
-Fleet: an owner's edit that moves a zone to a group with another leader, with the transfer to one voting member's provider held back: no leader sends anything to the parent, each says whom it waits for, and one sync follows when the last copy has arrived. The same with the previous leader's agent stopped, and with it stuck on an old copy of the zone: the sync follows when the fixed time has passed, and the previous leader has sent nothing to the parent in between. A zone that moves between two groups keeps its SIG(0) key: the KEY at the apex is the same before and after, and every voting member's keystore holds it. And the fallback: with the one holder's record removed and its agent stopped, the new leader generates a key once every member has answered, and not before.
+- The telling: `TestAZoneIsListedOnlyAfterTheFixedTime` (the builder, and the kept row), `TestTheTimeStartsOverAtEveryChangeOfMakeUp`, `TestTheTimeStartsAtTheAgentsStart`, `TestAZoneWithOneProviderWaitsOutTheFixedTimeToo`, `TestARowThatListsNothingIsStillSentAndReplacesThePeersView`, `TestAMessageNeverListsAZoneInTheGroupItLeft` (built after the recompute, and in the middle of a round), `TestAZoneListedInTwoRowsCountsForNeither`.
+- What is kept: `TestAPeersOwnRowIsReadFirstHand`, `TestARowForAGroupThisAgentDoesNotHaveIsAViewThatDiffers`, `TestABeatWithNoGossipSaysThatItsSenderListsNothing` (two agents that share no zone any more), `TestAnOlderBeatDoesNotReplaceANewerView`.
+- The times: `TestAToldMakeUpCountsForTwoBeatIntervals` (it counts, it runs out, it counts when told again), `TestTheFixedTimeIsLongerThanATellingCounts` (for any beat interval, by a beat and by 15 s at least), `TestTheFixedTimeUsesTheLongestBeatIntervalAnnounced`.
+- The check: `TestAZoneIsSettledWhenEveryVotingMemberTellsItsMakeUp`, `TestTheCheckSaysWhoIsWaitedForAndWhy` (the five reasons), `TestOnlyVotingMembersHaveToAgree` (a silent auditor, a member with no role that tells another make-up), `TestAZoneWhoseRecordsHaveJustChangedIsNotSettled`, `TestAPeerThatCannotBeHeardCountsAsNotAgreeing`, `TestAZoneWithNoHSYNC3IsNotHeld`.
+- The argument: `TestTwoAgentsNeverBothCountAMemberThatMoved`: beats lost and late, any order of loading, the owner's edits in a row.
+- Starting: `TestALocalChangeIsKeptWhileTheZoneIsNotSettled` (the operator's edit, the signer's DNSKEYs, the leader's CSYNC; nothing reaches the combiner or a peer), `TestKeptChangesGoOutInTheOrderTheyCame`, `TestASecondEditSeesTheFirstWhileBothAreKept`, `TestAKeptChangeGoesToTheMembersOfTheSettledMakeUp`, `TestARepeatedDistributionIsKeptOnce`, `TestAKeptChangeIsDroppedWhenTheProviderHasLostItsRole`, `TestResyncPushIsRefusedWhileTheZoneIsNotSettled`, `TestTheAnswerToARequestWaitsAndNamesTheLatestRequest`.
+- Taking: `TestAnArrivingDistributionIsKeptAndNotApplied`, `TestAKeptDistributionIsAcknowledgedAndNotConfirmed`, `TestAResentDistributionIsNotKeptTwice`, `TestAKeptDistributionIsJudgedByTheSettledMakeUp` (a sender that no longer votes, a CSYNC from an agent that no longer leads), `TestTheAuditorConfirmsWhenTheZoneIsSettledThere`, `TestAMemberWithNoRoleTakesByTheSameRule`.
+- The leader: `TestALeaderSendsNothingToTheParentWhileTheZoneIsNotSettled` (both sync commands, a NOTIFY that waits, the key bootstrap), `TestALeaderThatWasActingHoldsWhenATellingRunsOut`, `TestAStaleLeaderHoldsWhenTheOthersHaveMovedTheZone`, `TestAnAgentThatNoLongerLeadsDropsWhatItOwedTheParent`, `TestAZoneInNoGroupWaitsForItsOwnTimeOnly`.
+- The release: `TestTheBeatThatCompletesTheAgreementReleasesTheZone`, `TestAZoneThatWaitsForItsOwnTimeIsReleasedAtARound`, `TestWhatWasKeptIsHandledInTheOrderItCame` (changes of its own and distributions from peers, mixed), `TestAnEntryThatFindsTheZoneNotSettledStaysAtTheHead`.
+- Catch-up: `TestANewcomerTellsBeforeItHasCaughtUp`, `TestAnAnswerThatWaitsIsNotAFailedRequest`, `TestTheTimeForAnAnswerStartsWhenTheZoneIsSettledHere`.
+- Elections: `TestAnElectionIsNotHeldByAZoneThatIsNotSettled`.
+- The key: `TestAVotingMemberAsksForAKeyItDoesNotHold` (at catch-up, on a KEY operation, on a refresh), `TestAMemberThatDoesNotVoteAsksForNoKey`, `TestASignerHandsTheKeyToAnotherSigner`, `TestTheKeyHandedOverIsTheOneTheZonePublishes`, `TestARefusedKeyRequestIsAnswered`, `TestARefusedKeyRequestCostsNoWait`, `TestAKeyAnswerIsMatchedToItsRequest`, `TestALocalKeyThatTheZoneDoesNotPublishIsNotTheZonesKey`, `TestThePreviousLeaderIsAskedForTheKey`, `TestTheKeyIsNotAskedOfAnAuditor`, `TestALeaderDoesNotGenerateAKeyWhileAMemberIsSilent`, `TestALeaderGeneratesAKeyWhenEveryMemberHasAnsweredNoKey`, `TestAnAnswerOfAnEarlierRoundDoesNotCount`, `TestTheAnswersStartOverWhenTheVotingMembersChange`, `TestNoKeyIsDecidedBeforeTheZoneIsSettledAndCaughtUp`, `TestAKEYIsTakenFromTheLeaderOnly`, `TestOnlyTheLeadersAnswerNamesTheKEY`.
 
-**Done when** the five fleet checks pass, and a run with no provider change shows no hold line. For the key: a zone with two signers that moves to a group led by the other signer keeps its SIG(0) key, and the parent goes on accepting its updates.
+Harness, `integEnv` with a third peer (`newPeer`):
+
+- `TestTransportBoundary_ADistributionWaitsForTheZoneToSettle`: over the real path. The delivery is acknowledged and answered PENDING when it comes, no final confirmation goes while the zone is not settled at the recipient, one goes when it is, and the entry in the sender's queue is closed.
+- `TestCatchUpAfterARoleChangeAmongThreeAgents`: the order of (g), to the end.
+
+Fleet:
+
+1. The owner changes a zone's providers, with the transfer to one voting member's provider held back. No distribution for the zone completes and nothing reaches the parent, at any agent, until the fixed time after the last one has loaded the change. Each agent says whom it waits for.
+2. The agent of one voting member is restarted. The changes in its zones pause at every agent, and resume by themselves, with no command.
+3. An operator makes a change during the pause. It is applied afterwards, once, at every provider.
+4. The agent of a voting member is kept on an old copy of a zone while the others load a change of its providers. It says that it holds within two beat intervals. Nothing is started or taken for the zone on either side, and it ends when that agent has loaded the change.
+5. The key: a zone that moves between two groups keeps its SIG(0) key. The KEY at the apex is the same before and after, and every voting member's keystore holds it. And the fallback: with the one holder's record removed and its agent stopped, the new leader generates a key once every member has answered, and not before.
+
+**Done when** the five fleet checks pass; a run with no change of providers and no restart shows no hold line; and the fleet checks of steps 4, 5 and 8 still pass, each later by the fixed time and a beat and by no more. For the key: a zone with two signers that moves to a group led by the other signer keeps its SIG(0) key, and the parent goes on accepting its updates. `guide/multi-provider-advanced.md` then gets the rule in its sections 4.3 and 5.1: what the first confirmation says, and when a row lists a zone.
+
+**Size.** The settle rule: about 600 new and 140 changed lines in about 19 files. Of the new lines, about 135 are the telling (the `held` entries, the builder, what each peer told), 85 the check and the times, 190 the two holds on distributions, 125 the leader and the release, and 60 the names. The key: about 190 new and 60 changed lines in about 9 files, the third item of "The KEY record is the group's" apart.
+
+### Step 9b. A row lists a zone only while there is something to do for it (design 4.9, decision 24)
+
+**Before it:** step 9, on every agent of a zone and on its auditor. Nothing else. Step 10 does not need this step, and this step does not need step 10: the two can be merged in either order.
+
+**What it is.** After step 9 an agent's row lists every zone of its group that the agent has held for the fixed time, in every beat, to every member. That is today's listing with one condition added. This step is the form design 4.9 describes: a zone is listed to a peer only while there is something to do for it. It is a stage of its own so that the settle rule is judged on the listing that exists, and so that the change to the beats can be judged alone (decision 24).
+
+**On the wire nothing changes.** A row's `zones` stays a list of names (`MemberState`, `v2/hsync/gossip.go`). The beat's payload, tdns-transport and its pin are not touched. What changes is which names an agent puts in its own row, and that the list depends on the peer the message goes to.
+
+**An ask and an answer.** Gossip rides both ways in an exchange of beats: in the beat (`SendBeatWithFallback` builds it), and in the answer to the beat (tdns-transport's beat handler calls the function tdns-mp gives it, `GossipForPeer`, `v2/hsync_transport.go`). Both go through `BuildGossipForPeer`.
+
+- **In a beat,** this agent's own row lists a zone when the agent has held it in that group for the fixed time and has something to do for it: something owed or kept (the set of step 9, part f), or a sync with the parent that is under way, which is a chain or a NOTIFY that waits (`delegationSyncChains`, `v2/mp_s5_leader_sync.go`). The second is needed because the places that let a waiting NOTIFY go ask the hold again. That tells, and it asks.
+- **In the answer to a beat,** the own row lists those zones too, and every zone that the beat it answers listed, if this agent has held that zone for the fixed time. That is the answer. The zone is listed in the row of the group this agent has it in. When that is not a group the two agents share, there is no row to list it in, and the asker reads that as not agreeing.
+- **An answer tells and does not ask.** Nothing is listed because a peer's answer listed it.
+- **The rows of other members** that a message passes on carry no zones. Only first hand counts (step 9).
+
+Design 4.9 says that a zone is listed when "the peer has listed it within the time a telling counts". Read for both directions alike that never ends: one agent lists a zone because it has work, the other lists it because the first did, and when the work is done the first goes on listing it because the second does. A row is a list of names and cannot say why a name is in it. So the plan takes the narrower reading: what a peer lists in a beat is an ask, what it lists in an answer is not. A zone then leaves the beats when the last agent with something to do for it is done, which is what the design's "a zone that nobody has anything to do for is in no beat" asks.
+
+**When the answer comes.** As the code stands, one exchange late. tdns-transport builds the answer to a beat before the application has seen the beat: `RouteToCallback` runs the beat's handler, which calls `GossipForPeer`, and only then hands the message to `routeBeatMessage`, where step 9 notes what the sender listed. Both mechanisms share that path. So the answer to an ask would ride in the answer to the asker's next beat, a beat interval later.
+
+Proposed: a middleware of tdns-mp's own on the router, registered with `Router.Use` after the one of step 6. For a beat it notes what the sender listed and then calls the next handler. The noting of step 9 moves there from `routeBeatMessage`. The answer then rides in the same exchange. It needs no change in tdns-transport: its router runs a middleware before the handler, and the parsed message is in the context by then. The cost is that a beat's gossip is decoded twice, there and in `routeBeatMessage`. About 25 lines.
+
+**How long a zone with nothing going on waits.** One exchange of beats with each voting member. An agent that gets something to do for such a zone lists it in its next round of beats, at most one beat interval later, and has the answers with that round. A recipient of the distribution that follows does the same before it takes it. So a change in a quiet zone starts up to one beat interval later than after step 9, and is taken up to one more later. Design 4.9 names that price. No beat is sent for it outside the rounds. If it is too slow, `Engine.BeatPeer` beats one peer now, under the bound of step 7. `KickBeats` is not the tool: each kick starts the fast pace of the rounds over. Neither is in this step.
+
+**What is noted** changes, in `NoteToldZones`:
+
+- After step 9 a sender's view is replaced as a whole by every beat and every answer. That no longer fits: a beat lists only what its sender has something to do for, and says nothing of its other zones.
+- From a beat: each zone it lists is taken, with its group and the time. Nothing else that is kept for that sender changes. The zones it lists are also kept as what that sender asks, until its next beat.
+- From an answer: each zone it lists is taken. A zone that this agent's beat asked about and that the answer does not list is dropped for that sender: it was asked and did not tell. `SendBeatWithFallback` built the beat and has what it asked.
+- What was told runs out after the time a telling counts, as before. That is now how most of it ends.
+
+**The check** is that of step 9. Two things around it change:
+
+- A zone with nothing owed, kept or under way is not asked about, so nobody has told it lately, and by the check it is not settled. That is its usual state, and it costs nothing until there is something to do. The status says that, and not that every member has gone silent.
+- A reason is added to those of step 9: `asked`, for a member that was asked in the last beat and whose answer has not come.
+
+**Who reads a row's zone list today,** as found on the integration branch (main is the same):
+
+| Reader | What it does with the list | After this step |
+|---|---|---|
+| `providerGroupForGossipZone`, `providerGroupFromGossipState` (`v2/apihandler_gossip.go`) | When the group manager has no group for a zone, finds the group by the rows that list the zone, and makes the group's zone list from the rows. Behind `gossip state --zone` and the auditor's web page for a zone | Goes. The group manager is the one source. An agent or an auditor that has not loaded the zone says "no provider group for zone", where the rows could answer before |
+| `gossipMatrixRow` (the same file) | Puts the length of the list in each row of the API's answer, as `zones`. The CLI does not print it | Goes |
+| `gossipMemberRow`, `GossipMemberRow.Zones` (`v2/auditor_dto.go`) | Copies the list into each row of the auditor's API answer and of the page's data. No template prints it | Goes. A group's zones and their count on the page come from the group manager, as today |
+| `GetGroupState`, `deepCopyMemberState`, a debug line in `RefreshLocalStates` | Copy it | Unchanged |
+
+`RefreshLocalStates` no longer puts a zone list in the row it keeps: the list is made per peer, when a message is built.
+
+**At a start, and when many zones change at once,** a beat is not small. An agent that has started has an answer owed or kept for every zone it shares with a peer, until it has caught up, and a change of the providers of many zones gives each of them something to do. For that time the rows are as long as after step 9. They empty when the work is done. One more case comes round: an election asks for a sync of every zone of its group at every renewal of the lease, so once per lease the leader's rows list every zone of the group for one exchange.
+
+**Names.** Status, in `agent parentsync status`, in place of the "settled" line of step 9 where nothing is going on:
+
+```
+  settled:        not asked: nothing is kept or under way for the zone
+  settled:        no: asked agent.bravo.example. at 15:04:05, no answer yet
+```
+
+Log, debug, logger `gossip`: "asking the zone's members for their make-up" (`zone`, `group`, `why`).
+
+**The beat path: what is touched, and what is not.**
+
+Touched, all in tdns-mp:
+
+- which zones `BuildGossipForPeer` puts in this agent's own row, now by peer and by whether the message is a beat or an answer, and that rows passed on carry none;
+- one middleware on the router, which reads what a beat's sender listed before the answer is built;
+- what `NoteToldZones` keeps of a beat and of an answer, in the two places that already call it after step 9, of which one moves to the middleware.
+
+Not touched:
+
+- tdns-transport: no change and no new pin. The beat's payload, its own `Zones` list and what the transport reads from it, the sequence number, `MyBeatInterval`.
+- The hsync engine: the rounds and their pace, `KickBeats`, the fast interval, the retriers and the beat back of step 7, the states of a peer, the edge to OPERATIONAL.
+- The gossip types on the wire: `MemberState` and `GossipMessage` as they are.
+- The rest of a row and of a message: the cells (`PeerStates`), the time, the beat interval, the propagation delay, the election record, the group's name. `MergeGossip`'s rule for which row is newer, `CheckGroupState`, `HoldFirstLocalRows`, the gate of an election.
+
+**Tests.** Unit, beside those of step 9:
+
+- `TestARowListsNoZoneWhenNothingIsGoingOn`, `TestABeatListsTheZonesThisAgentHasSomethingToDoFor` (owed, kept, a sync under way), `TestAZoneIsStillListedOnlyAfterTheFixedTime`.
+- `TestTheAnswerToABeatListsWhatTheBeatAskedAbout`, `TestTheAnswerIsInTheRowOfTheGroupThisAgentHasTheZoneIn`, `TestAnAnswerIsNotAnAsk`, `TestAZoneLeavesTheBeatsWhenTheWorkIsDone` (two agents, to the end: no list in either direction).
+- `TestTheAnswerRidesInTheSameExchange`: through the real router, with the middleware.
+- `TestRowsPassedOnCarryNoZones`.
+- `TestABeatThatDoesNotListAZoneTakesNothingAway`, `TestAnAnswerThatDoesNotListAnAskedZoneTakesItAway`, `TestWhatWasToldStillRunsOut`.
+- `TestAZoneWithNothingToDoIsNotAskedAbout`, `TestSomethingToDoAsksAndIsReleasedByTheAnswers`, `TestARecipientAsksBeforeItTakes`.
+- `TestTheGroupOfAZoneComesFromTheGroupManagerOnly`.
+
+Existing tests that change: `TestProviderGroupForGossipZone_fromGossipStateTable` (`v2/apihandler_gossip_test.go`) asserts the reader that goes, and is replaced by the last test above. The rows of `TestSnapshotGossipForZone_singleMatrix` (`v2/auditor_web_test.go`) carry zone lists that nothing reads any more. `TestTheFirstLocalRowWaitsForGoodNews` (`v2/gossip_hold_test.go`) passes a zone list to `refreshLocalRow`, whose signature loses it. No golden file carries a zone in a row. Of step 9's own tests, three are rewritten: `TestARowThatListsNothingIsStillSentAndReplacesThePeersView`, `TestABeatWithNoGossipSaysThatItsSenderListsNothing` and `TestAZoneIsListedOnlyAfterTheFixedTime`.
+
+Harness: `TestTransportBoundary_AnAskIsAnsweredInTheSameExchange`, over both mechanisms.
+
+Fleet: the five checks of step 9, unchanged in what they ask. And three of its own. A fleet at rest: no beat lists a zone, at any agent. An operator's change in a zone at rest: it is at every provider within two beat intervals and the usual time of a distribution, and the zone is in no beat a little later. Every agent restarted: the zones are in the beats until every agent has caught up, and in none after.
+
+**Done when** those pass, and a run with no change of providers shows nothing held for longer than one beat interval. `guide/multi-provider-advanced.md` section 5.1 then says what a row's zone list means, and `guide/operation-and-debugging.md` section 3 that the matrix shows no zones and that a zone at rest reads "not asked". A fleet's checks of gossip that read the members and the cells of a row need no change. One that reads a row's zone list, or the `zones` count in the API's answer, does.
+
+**Size.** About 155 new and 95 changed lines in 8 files, and about 50 removed: `v2/gossip.go` (about 70 new, 45 changed), `v2/hsync_transport.go` (25, 20), `v2/settle.go` (30, 10), `v2/mp_s5_leader_sync.go` (10 new), `v2/apihandler_gossip.go` and `v2/auditor_dto.go` (10 changed, the removed lines), and the status in the API and the CLI (20, 10). Tests: about 300 lines.
+
+**Risks.**
+
+1. The listing that never ends, above. It is closed by taking only a beat's listing as an ask. The tests `TestAnAnswerIsNotAnAsk` and `TestAZoneLeavesTheBeatsWhenTheWorkIsDone` are there for it.
+2. Every piece of work in a zone at rest now starts with an exchange. A beat or an answer that is lost costs a beat interval, where after step 9 the tellings of the last two rounds were at hand.
+3. A beat is as long as before at a start and when many zones change at once. The gain is in the steady state.
+4. Agents of step 9 and of this step do not mix (section 4). An agent of step 9 replaces a peer's whole view at every beat, and would see a zone come and go with each exchange.
+5. An operator loses two things on the screen: the `zones` count of a row in the API's answer, and `gossip state --zone` for a zone that the agent has not loaded.
 
 ### Step 10. The switch: every HSYNC3 provider is a member (#158)
 
-**Before it:** steps 1, 2, 6, 8 and 9 merged. Without step 1 a member with no role elects, without step 2 it edits, without step 6 it sends a SYNC and asks for the SIG(0) key, without step 8 its group votes by a union, without step 9 a zone has two leaders for as long as the agents hold different copies of it. Steps 3 to 5 and 7 on every agent, for the newcomer to catch up by itself.
+**Before it:** steps 1, 2, 6, 8 and 9 merged. Without step 1 a member with no role elects, without step 2 it edits, without step 6 it sends a SYNC and asks for the SIG(0) key, without step 8 its group votes by a union, without step 9 the agents act for a zone by different versions of who its members are, for as long as they hold different copies of it, and the zone can have two leaders. Steps 3 to 5 and 7 on every agent, for the newcomer to catch up by itself.
 
 **Changes.**
 
@@ -882,6 +1171,8 @@ Fleet: an owner's edit that moves a zone to a group with another leader, with th
 - Nothing in admission, discovery, beats, distributions, the transfer set-up or catch-up changes by its own code: each follows from the first change.
 
 A consequence to know (3.2): from this step on the leader's CSYNC waits for a member with no role as well, with no time-out. A member with no role whose agent is stopped holds every NS change of the zone at a parent that takes NOTIFY only, until its record is removed.
+
+A second one (step 9): from this step on every edit of a provider's standing changes the zone's make-up, also an edit that only gives or takes a role. So every step of an add or a removal is followed by the hold of step 9: nothing that a provider makes happens for the zone until the fixed time after the last voting member has loaded the edit. A member with no role is not waited for in that agreement. It takes what is distributed when the zone is settled at it, and its confirmation is waited for as before.
 
 **Names.** `zone mplist`, two new columns: `NoRole` (labels) and `This`, one of `signer`, `server`, `signer,server`, `auditor`, `member, no role`, `not listed`. Status:
 
@@ -905,11 +1196,13 @@ Log, info, logger `zones`: "an HSYNC3 record and no role: member, no vote, no ed
 
 Harness: `integEnv`, `TestTransportBoundary_MemberWithNoRoleCatchesUp`: its hello is accepted, it gets gossip, and its request for state is answered completely.
 
-Fleet: an add with the owner's two edits apart. After the first edit the newcomer is in every agent's gossip, reports the group's leader, has caught up with every voting member, and has its `addrr` refused. The zone is in the group that has the newcomer as a member with no role, and that group's leader has taken it up; a new group has elected, among its voting members. After the second edit the zone is in the group in which the newcomer votes. No sample is bogus or lame at any point. Then the removal's first edit: the zone moves to a group that the leaving provider cannot lead, at once.
+Fleet: an add with the owner's two edits apart. After the first edit the newcomer is in every agent's gossip, reports the group's leader, has caught up with every voting member, and has its `addrr` refused. The zone is in the group that has the newcomer as a member with no role, and that group's leader has taken it up; a new group has elected, among its voting members. After the second edit the zone is in the group in which the newcomer votes. No sample is bogus or lame at any point. Then the removal's first edit: the zone moves to a group that the leaving provider cannot lead, at once. Each of these is looked for after the hold of step 9, which every agent reports while it lasts.
 
 **Done when** the fleet check passes for a provider that is added as a server. `guide/provider-changes.md` then loses the "Today" notes of its sections 2 and 3.2.
 
 For a leaving signer the last part of the fleet check needs more than this plan. Today a signer that is taken out of `signers=` stops signing and drops to its combiner's serial, and its own agent refuses the lower serial: it stays on the old copy of the zone and does not see the owner's edit. The other agents refuse what it sends, so the zone stalls and is not harmed. That belongs to the removal (#147).
+
+Step 9 adds to that case. The zone never settles at an agent that is stuck on the old copy: it holds the old make-up, and the others no longer tell it. So it keeps every distribution it is sent and confirms none. After this step it is a recipient, as a member with no role, so every distribution of the zone waits for its confirmation: another signer's new key does not get past its distribution, and the leader's NOTIFY(CSYNC) does not leave. Without step 9 it would take and confirm them by its old copy. So until #147 is fixed, taking a signer's roles away stalls what the providers make for the zone, from that edit until the provider's record is removed. Nothing is harmed, and the status of every agent says whom it waits for.
 
 ## 6. Decisions
 
@@ -927,15 +1220,15 @@ Decided by the project owner on 2026-10-12. The design is written with them.
 9. **The sender rule holds over HTTPS too.** An agent refuses an HTTPS `/beat`, `/ping` or `/msg` whose body names another sender than the client certificate's name. It is done in step 6, ahead of issue #56, which keeps `/hello` and the choice of the certificate's identity field.
 10. **A member that does not vote causes no election, and nothing it says about terms is taken.** A receiver takes its own row from it and nothing else. For who leads, it takes a newer term from a voting member at once. Whatever else a voting member tells it about who leads (a lower term, or the same term with another leader) it takes once the lease of the leader it holds has run out. A self-election still takes a term above zero, so that gossip tells it.
 11. **Comms end when no zone is shared.** When the last zone shared with a peer is gone, the agent keeps the peer for a hold time of 24 hours and then removes it and stops beating it. A peer that is named again within the hold time is kept. A provider that a zone names again later is discovered afresh. Until it is removed the agent goes on beating it and takes its hellos and beats, which is the one exception to admission by a shared zone, and every message from it that requires a member is refused.
-12. **A leader acts for a zone only when the views of it agree.** Agents see the owner's edit at different moments, with no network partition needed, and for that time a zone can have two leaders that sync the parent from different views. A leader sends nothing to the parent for a zone until every voting member of the zone's group holds the same make-up for it, and the leader of the group the zone left has shown that make-up, or has dropped the zone, or a short fixed time has passed (decision 16). Until then the sync is owed. Step 9. From the external review of this design.
+12. **A leader acts for a zone only when the views of it agree.** Agents see the owner's edit at different moments, with no network partition needed, and for that time a zone can have two leaders that sync the parent from different views. A leader sends nothing to the parent for a zone until every voting member of the zone's group holds the same make-up for it, and the leader of the group the zone left has shown that make-up, or has dropped the zone, or a short fixed time has passed (decision 16). Until then the sync is owed. Step 9. From the external review of this design. Since decision 23 this is one case of a wider rule: what holds the leader's sync holds everything that a provider makes for the zone. Its second half, about the leader of the group the zone left, is no longer a mechanism.
 13. **The auditors stay in what defines a group.** The external review proposed to take them out, since an auditor neither votes nor leads. They stay: gossip is per group, and an auditor takes part in it as a member. The costs are accepted: an auditor edit moves the zone to another group, and the same providers with another auditor are another group. Auditors are few, and a zone's auditor is meant to be stable.
 14. **What withdraws a member does not wait for it** (the exception in decision 2), and **taking a zone up never gives it a new SIG(0) key** (step 9; decision 18 says when a new one is made after all). Both from the external review. Two things the code added to them are decided since: who is handed the key (decision 15), and what the leader's CSYNC waits for (decision 17).
 15. **Any voting member of a zone may be handed its SIG(0) key** by a voting member that has it, and a refusal is answered. Before, only an agent's upstream or downstream was handed it, so a leader that was another signer could never get it.
-16. **The hold's way out is a fixed time, not the previous leader's lease.** A lease belongs to a group and is renewed while the group has any zone, so a previous leader that is stuck on one zone would hold that zone's sync for ever. The new leader waits until the previous leader has shown the make-up or dropped the zone, or a few beat intervals have passed. That is safe because the first condition holds the previous leader too. In step 9 the time is three beat intervals from the zone's arrival (proposed).
+16. **The hold's way out is a fixed time, not the previous leader's lease.** A lease belongs to a group and is renewed while the group has any zone, so a previous leader that is stuck on one zone would hold that zone's sync for ever. The new leader waits until the previous leader has shown the make-up or dropped the zone, or a few beat intervals have passed. That is safe because the first condition holds the previous leader too. In step 9 the time is three beat intervals from the zone's arrival, one more than a told make-up counts for (decision 19). Decision 23 takes away what this decision chose between: there is no second condition, nothing notes the group a zone left, and no previous leader is waited for. The fixed time stays, as the time an agent holds a make-up before it tells it, and it is still three beat intervals.
 17. **The leader's CSYNC and a leaving provider is parked in the removal design.** The leader waits for every recipient's confirmation of the CSYNC with no time-out (PR #188), a member with no role is a recipient after the switch, and the CSYNC carries a leaving provider's NS removal to a NOTIFY-only parent. What the parent's scan does with a nameserver that lacks the record is not established. Nothing in this plan changes whom the leader's CSYNC waits for.
 18. **Every voting member holds the zone's SIG(0) key, and a new one is the fallback.** Today the private key is only at the agent that led the zone when the key was made; with its roles gone, or its agent stopped, nobody could sync the zone again. Every voting member now asks for a key it does not hold, at catch-up and when the zone publishes a KEY it has no private part for. A leader that has none asks the voting members and the previous leader; silence is never "no key"; only when every one of them has answered that it has no key is a new key generated and bootstrapped with the parent. Step 9 has the detail. Also accepted as proposed there: a local key counts only if its KEY record is among those the zone publishes.
-19. **Two rules under the hold, from the external re-review.** What an agent was told counts only while it goes on being told: a told make-up counts for two beat intervals. And an agent that has moved a zone out of a group goes on telling that group's members so for the fixed time, also when it shares the zone with none of them. With them one voting member that has seen the edit stops the previous leader, and the fixed time of decision 16 stays: it is longer than the time a told make-up counts. The re-review proposed to keep the hold for as long as the previous leader reports the old make-up; the project owner keeps the fixed time. STEP 9 is to be detailed for the two rules.
-20. **A provider that has lost its roles goes on exactly as before, and initiates nothing** (2026-10-13; design 2.3). It takes the owner's zone and what the others distribute, signs with the keys it has, moves its serial on, notifies its downstream and serves. It makes no change of its own: no edit, no rollover, no new DNSKEY. The other providers go on treating what it contributed as before, and each withdrawal is a step of the removal. This says in full what decision 7 meant: that the provider can change nothing was never that it stops. It was decided on the lab's runs of the remove-a-signer scenario (2026-10-12, a parent that takes UPDATE), where the code does stop:
+19. **Two rules under the hold, from the external re-review.** What an agent was told counts only while it goes on being told: a told make-up counts for two beat intervals. And an agent that has moved a zone out of a group goes on telling that group's members so for the fixed time, also when it shares the zone with none of them. With them one voting member that has seen the edit stops the previous leader, and the fixed time of decision 16 stays: it is longer than the time a told make-up counts. The re-review proposed to keep the hold for as long as the previous leader reports the old make-up; the project owner keeps the fixed time. Step 9 has the detail: the two times are two and three beat intervals, and the second rule needs no row of its own, since a beat that no longer lists the zone says it. Since decision 23 the first rule stands as it is, and the second is no longer a mechanism of its own: an agent that has moved a zone lists it nowhere until it has held the new make-up for the fixed time, and the members of the old group see it gone from its rows at its next beat.
+20. **A provider that has lost its roles goes on exactly as before, and initiates nothing** (2026-10-13; design 2.3). It takes the owner's zone and what the others distribute, signs with the keys it has, moves its serial on, notifies its downstream and serves. It makes no change of its own: no edit, no rollover, no new DNSKEY. The other providers go on treating what it contributed as before, and each withdrawal is a step of the removal. This says in full what decision 7 meant: that the provider can change nothing was never that it stops. What the others distribute it takes by the settle rule, as every member does (decision 23). It was decided on the lab's runs of the remove-a-signer scenario (2026-10-12, a parent that takes UPDATE), where the code does stop:
     - The leaving signer stopped signing at the owner's edit (#147). Its signer handed out the new zone unsigned, at a lower serial than its last signed copy, so its agent refused it and its nameserver stayed on the copy from before the edit. That copy still listed the provider's own NS.
     - The other two providers served the NS RRset without it. The parent refused the removal 39 times in ten minutes: "the nameservers of the zone do not agree on its NS RRset". The removal waited for the provider it was removing.
     - The remaining signer dropped the leaving signer's DNSKEYs from its key set 3 seconds after the edit, and the leader asked the parent to remove the leaving signer's DS together with its NS. Only the parent's refusal kept the DS there.
@@ -952,9 +1245,23 @@ Decided by the project owner on 2026-10-12. The design is written with them.
 
     A roll has been run in tdns by the project owner, some time ago, and never in tdns-mp or on the lab's fleets: a test of it is to be designed before the leader's roll is built on it.
 
+    One more reason for the roll to go through the old key: a self-signed upload of a second key races the key's publication. The child offers the key as soon as the parent says it does not know it, in the second the key is made; the parent then finds another KEY published at the zone's apex and records a failed verification that it does not revisit (tdns issue #917; seen in the lab on 2026-10-13, where a newcomer made a key at take-up). The roll's own updates need no verification from DNS.
+
     What a leader's roll adds, in order: the new key at the leader; the add at the parent, signed with the old key; the new private key to every voting member that stays, which needs a hand-over the leader starts (today a member can only ask); the new KEY published as the leader's, in place of the old, only after the parent has taken it; the delete of the old key at the parent, signed with the new one; and every member retires the old private key.
-23. **Nothing that a provider makes is changed for a zone until its voting members agree on its make-up** (2026-10-13; design 4.9). It replaces the leader-only hold of decisions 12, 16 and 19. The hold as it stood had a hole: its fixed time counted from the zone's arrival at the new leader alone, so a voting member that both leaders count, and that loaded the owner's edit later than the new leader, could be counted by both for as long as a telling counts. Decided in three steps. First: an agent tells a make-up for a zone only once it has held it for the fixed time, by its own clock, which starts again at every change of the make-up and at the agent's start. Then the project owner asked for more: after an owner's change to the set of providers there are to be no changes at all until things have settled, in the zone as well as at the parent. And of the two ways to do that, a time alone or agreement, he chose agreement: a zone is settled at an agent when the agent has held its make-up for the fixed time and every other voting member has told it the same make-up within the time a telling counts. Until then the agent starts nothing for the zone and takes nothing. Only the voting members have to agree. The costs are accepted: a pause after every change of make-up and after every start of a voting member's agent, and a voting member that cannot be heard holds every change that a provider makes in its zones. Of decision 19, the first rule stays (a telling counts for two beat intervals). There is no second condition any more: no note of the group a zone left, and no leader of that group to wait for.
-24. **A beat lists only the zones that something is owed or kept for** (2026-10-13; design 4.9). Today a row lists every zone of its group, in every beat, which grows with the number of zones. An agent lists a zone when it has something to do for it, or when the peer has listed it; so listing tells, and asks. It is a stage of its own, after the settle rule: first the rule on today's full listing, then this. A rough size, not yet read against the code in full: about 150 lines in six files and as much in tests, with no change of the wire and none in tdns-transport. What changes most is three readers of a row's zone list: the lookup of a zone's group for `gossip group status --zone`, its zone count, and the auditor's dashboard.
+
+23. **Nothing is changed for a zone until its voting members agree on its make-up** (2026-10-13; design 4.9). The hold of decision 12 had a hole. Its fixed time was counted from the zone's arrival at the new leader only, so a voting member that both leaders counted, and that loaded the owner's edit later than the new leader, could be counted by both for as long as a telling counts. The fix: an agent tells a make-up for a zone only once it has held it for the fixed time, on its own clock, which starts again at every change of the make-up and at the agent's start. The project owner then widened the rule: after a change of a zone's providers nothing is to change until things have settled, in the zone as well as at the parent. Of two forms, a pause for a time at each provider that has seen the edit, and agreement among the voting members, agreement was chosen: a provider that has not seen the edit is in no pause, so time alone does not hold it.
+    - A zone is settled at an agent when the agent has held its make-up for the fixed time and every other voting member of that make-up has told it the same make-up within the time a telling counts.
+    - While it is not settled the agent starts nothing for the zone: no distribution of its own, and, if it leads, nothing to the parent, the bootstrap and the roll of the zone's SIG(0) key included. And it takes nothing: a distribution that arrives is kept, neither applied nor confirmed, and handled when the zone is settled.
+    - Only the voting members have to agree. A member with no role takes by the same rule and is waited for as a recipient as before. An auditor changes nothing and confirms at once, as before.
+    - Not held: the owner's zone itself (its transfer, signing and serving), beats and gossip, elections, and a request for the zone's state. The answer to such a request is a distribution, and waits. "Nothing is to change" means what a provider makes. Every provider, a leaving one included, goes on following the owner's zone while the voting members settle; a nameserver that stopped doing so would be the one that disagrees with the others on the zone's NS RRset, which is what the lab saw (decision 20).
+    - What is kept is judged when the zone is settled, by the zone as the agent then holds it: applied and confirmed, or refused. Nothing kept under one make-up is applied under another without being judged again.
+    - What it does not cover: an owner's edit whose old and new sets of voting members have no member in common. From the fixed time after the new side has the edit until a voting member of the old side loads it, both sides act; the old side does not have to be stuck. Only the order of the owner's edits closes that (one provider at a time, each edit settled before the next), and the guide is to say that an edit which exchanges the whole set is not to be made.
+    - The margin between the two times (one beat interval, and never less than a beat's send time-out with a reserve) is what covers a telling that is heard late and clocks that run apart. A telling later than the margin is counted for too long.
+    - It replaces the second half of decision 12 and what decisions 16 and 19 added to it. No group that a zone left is noted, and no previous leader is waited for.
+    - The costs, accepted: after a change of make-up nothing that a provider makes happens for the zone until the fixed time after the last voting member has loaded the change; the same after the start of a voting member's agent, for its zones; and a voting member that cannot be heard holds every change that a provider makes in its zones.
+
+    Step 9 has the detail.
+24. **A row lists a zone only while there is something to do for it, as a stage of its own after the settle rule** (2026-10-13; design 4.9, "The telling"). A row of gossip lists every zone of its group today, and a beat carries every member's row, so a beat grows with the number of zones. The first decision was to leave that as it is and to put a cheaper form off, with one idea for later: to list only the zones added to a group and removed from it since the last beat. This replaces that idea. A zone is listed to a peer only when the agent has held it for the fixed time and either has something owed or kept for it or was asked about it by that peer. Listing a zone tells and asks, and the peer answers. A zone that nobody has anything to do for is in no beat. The project owner took it as an improvement, with one concern: churn in the code of the beats, which was considered settled. So it is a stage of its own. First the settle rule on today's full listing (step 9), then the listing (step 9b), each judged alone on a fleet. Step 9b says which parts of the beat path it touches and which it does not.
 
 Also decided:
 
@@ -976,7 +1283,7 @@ Also decided:
 | PR #186 (#180 to #183), a draft, on top of #185 | 1 (the same functions), 8 |
 | PR #188 (#175 with #151), a draft | 3, 5, 6 |
 
-PRs #161, #165, #166, #167, #168, #187 (#144), #189 (#171, #170) and #190 (#73) are needed by no step. Three of them edit a function or a file that a step edits, in another place: PR #167 (`v2/combiner_chunk.go`, step 6), PR #168 (`routeBeatMessage`, steps 6 and 9), and PR #187 (`MPPreRefresh`, step 4).
+PRs #161, #165, #166, #167, #168, #187 (#144), #189 (#171, #170) and #190 (#73) are needed by no step. Three of them edit a function or a file that a step edits, in another place: PR #167 (`v2/combiner_chunk.go`, step 6), PR #168 (`routeBeatMessage`, steps 6, 9 and 9b), and PR #187 (`MPPreRefresh`, step 4).
 
 ### 7.2 Issues #179 to #183, each against the steps
 
@@ -984,13 +1291,13 @@ None of the five is a step of this plan. Each has a change on the integration br
 
 - **#179, a zone that arrives in a group with a leader (PR #185).** It is design 4.1. Three things it leaves open are steps of this plan: the zone that leaves (step 8), the zone that arrives while an election runs (step 8), and the new SIG(0) key (step 9).
 - **#180, the deadlock (PR #186).** Step 8 edits the five callers of `CheckGroupState`, one of which was the place of the deadlock, and step 10 makes recomputes more frequent.
-- **#181, two recomputes at once (PR #186).** With step 8 a zone's group is how its leader is found, and a provider change is two or three recomputes in a row on every agent. Step 9 leans on the order in which a recompute tells what it changed: the zones that joined first, the groups that are gone after.
+- **#181, two recomputes at once (PR #186).** With step 8 a zone's group is how its leader is found, and a provider change is two or three recomputes in a row on every agent. Step 9 writes since when each zone's make-up is held in that same recompute, and its key part leans on the order in which a recompute tells what it changed: the zones that joined first, the groups that are gone after.
 - **#182, the election manager is not told (PR #186).** It is design 4.8. With step 8's key a group never changes its make-up: a change is another group. So what is left of "a group changes" is that it gains and loses zones, and that it disappears.
 - **#183, the leftovers (PR #186).** Two of the three bear on this plan. A group's timers now read the group when they fire. And an agent whose own record is removed now recomputes, so that the zone leaves its old group there too: that is the last edit of every removal.
 
 ### 7.3 Other work that is decided, and where it meets this plan
 
-- **#175 with #151 (PR #188):** the leader makes the zone's CSYNC, sends it to every member by SYNC, and sends the NOTIFY when all have confirmed and the propagation delay has passed, with a ceiling on that delay (`delegationsync.notify-wait-max`). It meets this plan in four places, all in 3.2 and in the steps named there: the answer of step 3 carries a CSYNC from the leader only; the hold of step 5 comes before the CSYNC is made; the sender rule of step 6 and the leader rule of that pull request apply one after the other; and after step 10 the confirmations waited for include a member with no role.
+- **#175 with #151 (PR #188):** the leader makes the zone's CSYNC, sends it to every member by SYNC, and sends the NOTIFY when all have confirmed and the propagation delay has passed, with a ceiling on that delay (`delegationsync.notify-wait-max`). It meets this plan in four places, all in 3.2 and in the steps named there: the answer of step 3 carries a CSYNC from the leader only; the hold of step 5 comes before the CSYNC is made; the sender rule of step 6 and the leader rule of that pull request apply one after the other; and after step 10 the confirmations waited for include a member with no role. A fifth is step 9: the CSYNC is made, and each recipient confirms it, only when the zone is settled there.
 - **#171 and #170 (PR #189):** a combiner that restarts serves its stored `_signal` KEYs again; the auditor's identity zone is re-signed. Neither is in a step. #171 is next to the own read of step 3: not established is whether a combiner that has just restarted answers RFI EDITS before it has loaded its stored contributions. `contributionsLoaded` and the EDITS case of `v2/combiner_msg_handler.go` are where to look.
 - **#73 (PR #190):** an identity zone listed in the config with parentsync gets a warning. No step touches it. Step 1's guard leaves a zone with no HSYNC3 records as it is.
 - **#56 and #59, HTTPS:** step 6 adds one comparison (3.2). The rest, `/hello` included, stays with #56.
@@ -999,14 +1306,17 @@ None of the five is a step of this plan. Each has a change on the integration br
 
 The removal (#147, #138, #159, items 3 to 5 of #137) is not in this plan. Its starting point is the member with no role of step 10, and the design's section 7 holds what is decided for it.
 
-Three things this plan leaves to it:
+Four things this plan leaves to it:
 
 - The leaving signer's agent stays on an old copy of the zone (step 10, the last paragraph).
 - The leader's CSYNC and a leaving provider (decision 17). The leader waits for every recipient's confirmation of the zone's CSYNC with no time-out (PR #188), a member with no role is a recipient after step 10, and at a parent that takes NOTIFY only the CSYNC is what carries the leaving provider's NS removal. Whether not waiting helps is not established: the parent scans every nameserver it delegates to, the leaving provider's among them.
 - The signer's side of design 2.3: a provider that has lost its roles goes on signing and following the zone (3.5, decision 20).
+- The roll of the zone's SIG(0) key when a voting member leaves (decision 22). The leader sends it to the parent, so the settle rule of step 9 holds it as it holds the sync and the bootstrap. Nothing of the roll itself is in this plan.
 
 ### 7.5 After this plan
 
 A provider that is named in `signers=` while it runs does not sign until its signer is restarted (#146), and the key machine's `SignersChanged` has no caller (#136). Both need what the design gives a newcomer before it has a role: comms with every member, and the other signers' DNSKEYs with what they say about them. With that in place, calling `SignersChanged` from the refresh when `signers=` changes, and binding the signing policy at that moment, is the next step. It is not part of this plan.
+
+Two things that the settle rule of step 9 leaves for later. What an agent keeps for a zone that is not settled is in memory: an agent that restarts during a hold loses an operator's edit that the operator was told is kept. And the auditor's view of a distribution does not say that a member keeps it because the zone is not settled there (#152).
 
 What else the design leaves out is listed in its section 7.
