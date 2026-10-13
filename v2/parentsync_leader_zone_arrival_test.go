@@ -108,9 +108,10 @@ func providerZone(t *testing.T, name string, providers ...string) *tdns.ZoneData
 	return zd
 }
 
-// asked is one onLeaderElected call: who was asked, for which zone, and
-// whether it was the zone's leader then, which is what the delegation sync
-// the call asks for requires.
+// asked is one call of a leader's callback, the election's (onLeaderElected)
+// or the arrival's (onZoneJoined): who was asked, for which zone, and whether
+// it was the zone's leader then, which is what the delegation sync the call
+// asks for requires.
 type asked struct {
 	agent AgentId
 	zone  ZoneName
@@ -158,13 +159,15 @@ func newGroupRig(t *testing.T, electing []string, agents ...string) *groupRig {
 		})
 		pgm := NewProviderGroupManager(m)
 		lem.SetProviderGroupManager(pgm)
-		lem.SetOnLeaderElected(func(zone ZoneName) error {
+		ask := func(zone ZoneName) error {
 			leads := lem.IsLeader(zone)
 			r.mu.Lock()
 			r.calls = append(r.calls, asked{agent: id, zone: zone, leads: leads})
 			r.mu.Unlock()
 			return nil
-		})
+		}
+		lem.SetOnLeaderElected(ask)
+		lem.SetOnZoneJoined(ask)
 		gst := NewGossipStateTable(m)
 		conf := &Config{Config: &tdns.Config{}}
 		conf.InternalMp.LeaderElectionManager = lem
@@ -246,7 +249,7 @@ func (r *groupRig) leader(t *testing.T, term uint64) AgentId {
 	return leader
 }
 
-// take waits for want calls of onLeaderElected, then a moment longer for
+// take waits for want calls of the leader's callbacks, then a moment longer for
 // one that should not come, and returns the calls made since the last take.
 func (r *groupRig) take(want int) []asked {
 	count := func() int {
@@ -466,6 +469,10 @@ func TestARefreshThatMovesAZoneHasItsNewLeaderSyncIt(t *testing.T) {
 		conf.requestDelegationSync(context.Background(), string(zone), "this agent was elected the zone's delegation sync leader")
 		return nil
 	})
+	lem.SetOnZoneJoined(func(zone ZoneName) error {
+		conf.requestDelegationSync(context.Background(), string(zone), "the zone joined a provider group this agent leads")
+		return nil
+	})
 	syncs := make(chan tdns.DelegationSyncRequest, 8)
 	mover.DelegationSyncQ = syncs
 
@@ -555,5 +562,47 @@ func TestAnAuditorsRecomputeTellsNobody(t *testing.T) {
 	}
 	if ar.LeaderElectionManager != nil || conf.InternalMp.LeaderElectionManager != nil {
 		t.Errorf("the auditor has an election manager")
+	}
+}
+
+// A zone that arrives in a group this agent leads has had a leader, and may
+// have a SIG(0) key that leader made and the parent holds. The agent that it
+// arrives at makes no new key in its place: only a zone that publishes none
+// gets one there. An election's winner makes one when it has none, as before.
+func TestAZoneThatArrivesWithAKeyGetsNoNewOne(t *testing.T) {
+	zd := seedZoneWithHSYNC3(t, "keyed.example.")
+	t.Cleanup(func() { tdns.Zones.Remove(zd.ZoneName) })
+	mpzd := &MPZoneData{ZoneData: zd}
+
+	if zonePublishesKey(mpzd) {
+		t.Fatal("precondition: the seeded zone publishes a KEY")
+	}
+	if !mayGenerateZoneKey(false, mpzd) {
+		t.Error("a zone that publishes no key and joins a group may not be given one: nothing would")
+	}
+
+	key, err := dns.NewRR("keyed.example. 3600 IN KEY 512 3 15 l02Woqwl4Uca9VQhrPQYG5cM3bxPV1RJxbr1iZqt6KE=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apex, ok := zd.Data.Get(zd.ZoneName)
+	if !ok {
+		t.Fatal("the seeded zone has no apex")
+	}
+	apex.RRtypes.Set(dns.TypeKEY, core.RRset{RRs: []dns.RR{key}})
+	zd.Data.Set(zd.ZoneName, apex)
+	zd.InstallInitialSnapshot()
+
+	if !zonePublishesKey(mpzd) {
+		t.Fatal("the zone serves a KEY at its apex and reads as publishing none")
+	}
+	if mayGenerateZoneKey(false, mpzd) {
+		t.Error("a zone that joins a group with a key of its own may be given a new one: the parent holds the one it has")
+	}
+	if !mayGenerateZoneKey(true, mpzd) {
+		t.Error("an election's winner may no longer make a key when it has none")
+	}
+	if zonePublishesKey(nil) || !mayGenerateZoneKey(false, nil) {
+		t.Error("an unknown zone reads as publishing a key")
 	}
 }

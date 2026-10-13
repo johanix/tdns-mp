@@ -71,3 +71,30 @@ func queryParentKeyStateDetailed(hdb *HsyncDB, imr *Imr, keyName string, keyid u
 
 	return keystate.KeyState, keystate.ExtraText, nil
 }
+
+// zonePublishesKey reports whether the zone's apex carries a KEY RRset: the
+// zone has a SIG(0) key, whoever holds its private part.
+func zonePublishesKey(zd *MPZoneData) bool {
+	if zd == nil || zd.ZoneData == nil {
+		return false
+	}
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return false
+	}
+	rrset, ok := apex.RRtypes.Get(dns.TypeKEY)
+	return ok && len(rrset.RRs) > 0
+}
+
+// mayGenerateZoneKey says whether a leader that holds no SIG(0) key for the
+// zone, and was handed none by a peer, may make one.
+//
+// A leader that won the zone in an election may, as before. A leader that the
+// zone arrived at, because the zone's set of providers changed, may only when
+// the zone publishes no key. A zone that publishes one has a key that the
+// parent holds, made by the leader the zone had. A new key in its place is
+// not trusted by the parent, and its publication replaces the zone's KEY
+// RRset, so the key the parent trusts is gone from the zone as well.
+func mayGenerateZoneKey(elected bool, zd *MPZoneData) bool {
+	return elected || !zonePublishesKey(zd)
+}
