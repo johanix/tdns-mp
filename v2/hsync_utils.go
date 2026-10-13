@@ -1396,11 +1396,17 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			// config update (config reload-zones, a zone reload) does not
 			// take it away until the next transfer (tdns-mp #144). On the
 			// incoming zone too: its options are the served zone's as they
-			// were when the fetch began, and a config update in between
-			// gives the served zone a map of its own.
+			// were when the fetch began. That map is the one the served
+			// zone had, which is read without a lock, so the incoming zone
+			// gets a map of its own and the old one is not written.
 			mpzd.ZoneData.SetRuntimeOption(tdns.OptInlineSigning, shouldSign)
-			if new_zd.Options != nil && new_zd.Options[tdns.OptInlineSigning] != shouldSign {
-				new_zd.Options[tdns.OptInlineSigning] = shouldSign
+			if new_zd.Options[tdns.OptInlineSigning] != shouldSign {
+				opts := make(map[tdns.ZoneOption]bool, len(new_zd.Options)+1)
+				for o, on := range new_zd.Options {
+					opts[o] = on
+				}
+				opts[tdns.OptInlineSigning] = shouldSign
+				new_zd.Options = opts
 			}
 			isMS := shouldSign && otherSigners > 0
 			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {
