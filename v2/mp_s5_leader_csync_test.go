@@ -630,6 +630,60 @@ func TestACsyncFromAnyoneButTheLeaderIsRejected(t *testing.T) {
 	}
 }
 
+// The rule goes by the sender the transport established and by nothing
+// else. A SYNC that carries no transport sender names its sender only in its
+// payload, which can name anybody: the leader, too. Such a message is not
+// queued at all. And an update that reaches the rule without a transport
+// sender has its CSYNC rejected, whoever it says it is from.
+func TestACsyncWithNoTransportSenderIsNotTaken(t *testing.T) {
+	r := receivingRig(t, "nosender.csync.example.")
+	z := r.mpzd.ZoneName
+	peer := r.peer.Identity
+	r.leader(AgentId(peer)) // the peer leads the zone: its CSYNC would be taken
+	op, _ := csyncOp(z, 1000)
+
+	body, err := json.Marshal(DnsSyncPayload{
+		MessageType:    "sync",
+		OriginatorID:   peer,
+		YourIdentity:   r.us.Identity,
+		Zone:           z,
+		Operations:     []core.RROperation{op},
+		Time:           time.Now().Format(time.RFC3339Nano),
+		Timestamp:      time.Now().Unix(),
+		DistributionID: "no-transport-sender",
+	})
+	if err != nil {
+		t.Fatalf("the SYNC: %v", err)
+	}
+	r.us.Bridge.routeIncomingMessage(&transport.IncomingMessage{
+		TypeToken:      "sync",
+		DistributionID: "no-transport-sender",
+		SenderID:       peer, // the payload's word, and the only one
+		Zone:           z,
+		Payload:        body,
+		ReceivedAt:     time.Now(),
+		SourceAddr:     "127.0.0.1:0",
+	})
+	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 300*time.Millisecond); ok {
+		t.Fatalf("a SYNC with no transport sender was queued: %+v", amp)
+	}
+
+	// The rule itself, for an update that reaches it by another way.
+	u := &SynchedDataUpdate{
+		Zone:       ZoneName(z),
+		AgentId:    AgentId(peer),
+		UpdateType: "remote",
+		Update:     &ZoneUpdate{Zone: ZoneName(z), AgentId: AgentId(peer), Operations: []core.RROperation{op}},
+	}
+	reason := r.conf.refuseCsyncNotFromLeader(u, r.us.MsgQs)
+	if !strings.Contains(reason, "the sender is (not established)") {
+		t.Errorf("a CSYNC in an update with no transport sender, in the leader's name: reason %q, want it rejected", reason)
+	}
+	if len(u.Update.Operations) != 0 {
+		t.Errorf("the CSYNC stayed in the update: %+v", u.Update.Operations)
+	}
+}
+
 // The leadership has moved to this agent, and its clock is behind the
 // previous leader's. Its CSYNC must still be the newer one at every
 // combiner, so its serial is one more than the newest it knows of.
