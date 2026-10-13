@@ -51,8 +51,20 @@ Each one is one edit by the zone owner.
 |---|---|---|
 | No record, to a record with no role | Discovery, hello, beats. The zone moves to the group that has it as a member with no role, and takes that group's leader (4.1). | It asks every voting member for the zone's state and its upstream for the transfer set-up. It shows "member, no role" and refuses its operator's edits. |
 | No role, to a role | The zone moves to the group in which it votes, and takes that group's leader. Its contributions are taken. | It asks for the zone's state once more. It may vote and lead. Edits follow the edit policy. |
-| A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). What the provider contributed stands until the removal takes it away. | It no longer votes or leads for the zone, and refuses edits. It can change nothing of what it contributed, its own DNSKEYs included: its key machine holds for the zone. Hold means no rollover and no new DNSKEY. It goes on signing, and re-signing, with the keys it has, and it goes on serving, until the removal withdraws them. |
+| A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). The edit by itself withdraws nothing of what the provider contributed: its NS records stay in the zone, its DNSKEYs stay in every signer's key set, and its DS stays at the parent, until the removal takes each of them away in its turn. | It no longer votes or leads for the zone. It goes on exactly as before, except that it initiates nothing (2.3). |
 | A record, to no record | It leaves the zone's group. When no zone is shared with it any more, comms end after a hold time (3.1). | The zone is no longer a multi-provider zone for it. |
+
+### 2.3 A provider that has lost its roles goes on, and initiates nothing
+
+A provider whose roles the owner has taken away is still delegated to, and resolvers are still sent to it, until the removal has run. So for that time it does exactly what it did before, with one exception.
+
+**What it goes on doing.** It takes every new version of the owner's zone. It takes what the other members distribute, applies it, and confirms. If it signed, it signs and re-signs with the keys it has. It moves its serial on, notifies its downstream servers, and serves.
+
+**The exception: it initiates nothing.** It refuses its operator's edits for the zone. It starts no key rollover and makes no new DNSKEY, and a rollover that is under way stops where it is. It can change nothing of what it contributed, its own NS records and DNSKEYs included. Every change that concerns it comes from the others, and it processes each as it processes any other.
+
+**Why it must follow the zone.** A leaving provider that stopped signing would let its signatures expire while resolvers are still sent to it. One that stopped following the zone would be the one nameserver that serves another NS RRset than the rest, and a parent does not change a delegation while the child's nameservers disagree about it. The removal would then wait for the provider it is removing.
+
+**The others do the same from their side.** They go on treating what the provider has contributed as before, until the removal withdraws it. A signer that dropped the leaving signer's DNSKEYs from its own key set at the owner's edit would make the leaving signer's answers fail validation at every resolver that holds that key set.
 
 ## 3. Who may talk, and what a sender may do
 
@@ -273,9 +285,9 @@ With Z zones and P voting peers per zone, a start sends Z x P requests and recei
   - The removal starts at the zone owner's edit that takes the provider's roles away.
   - It runs at the parent first (the NS, then the DS), then in the zone, and last at the provider's own servers.
   - The leader of the group the zone is in after that edit is responsible for it. That leader is never the leaving provider, and it needs nothing from it: when a step is safe is a matter of time and TTL.
-  - While it leaves, the provider's key machine holds for the zone: no rollover and no new DNSKEY, and signing and re-signing go on with the keys it has. A leaving signer that stopped signing would let its signatures expire while resolvers are still sent to it.
+  - While it leaves, the provider goes on exactly as before and initiates nothing (2.3). The owner's edit withdraws nothing by itself, at the leaving provider or at any other: each withdrawal is a step of the removal.
   - The rule needs no direction: the leader sees to it that nothing points at a member with no role. For a provider on its way in there is nothing to remove.
-  - Open: whether the zone's NS RRset or the parent's changes first. A parent that takes NOTIFY only copies the NS RRset from the zone.
+  - Open: whether the zone's NS RRset or the parent's changes first. What is known: a parent that takes NOTIFY only copies the NS RRset from the zone. A parent that takes UPDATE and checks the child accepts either order, as long as the child's nameservers agree on the NS RRset and it keeps no NS that the agreed set lacks. It refuses when some nameservers have changed and one has not. With the leaving provider following the zone (2.3), a change in the zone reaches every nameserver, the leaving provider's among them, and the leader's ordinary sync then carries it to the parent.
   - Open: how the leaving provider's own records are withdrawn. A `replace` is the sender's own set (5.4), so the leader cannot withdraw another provider's contributions with one (#159). Whatever does it is a distribution that does not wait for the leaving provider (3.3).
   - Open: the leader's CSYNC and a leaving provider. The leader waits for every recipient's confirmation of the zone's CSYNC before it sends the NOTIFY, with no time-out, and a member with no role is a recipient. At a parent that takes NOTIFY only, the CSYNC is what carries a leaving provider's NS removal, so a leaving provider whose agent is stopped would hold its own removal. Not waiting for it may only move the stall: the parent scans every nameserver it delegates to, the leaving provider's among them, and what its scan does with a nameserver that lacks the record, or does not answer, is not established. To be settled with the point above.
 - **A server that becomes a signer and serves its own signatures too early** (#160), and wrong answers before a provider is listed (item 1 of #137).
