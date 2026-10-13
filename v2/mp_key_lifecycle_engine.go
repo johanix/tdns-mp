@@ -665,8 +665,10 @@ func (e *KeyLifecycleEngine) RequestRollover(zone, role string) (string, error) 
 // algorithm rollover of the role it takes the algorithm back instead, as
 // long as nothing of the new algorithm signs yet: the new keys are
 // withdrawn on the next tick. Once a key of the new algorithm signs the
-// cancel is refused: the roll completes, and the way back is a change of
-// the algorithm once it has (a rollover through the same steps).
+// algorithm rollover is past cancelling: it completes, and the way back is
+// a change of the algorithm once it has (a rollover through the same
+// steps). A rollover request made in that window is still withdrawn, and
+// the answer says both; with no request to withdraw the cancel is refused.
 func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 	l, err := e.driverOf(zone)
 	if err != nil {
@@ -676,12 +678,25 @@ func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return cancelRollover(l, r)
+}
+
+// cancelRollover is CancelRollover on the zone's driver, the role checked.
+func cancelRollover(l *ZoneKeyLifecycle, r string) (string, error) {
 	for _, roll := range l.AlgorithmRollovers() {
 		if roll.Role != r {
 			continue
 		}
 		from, to, err := l.CancelAlgorithmRollover(r)
 		if errors.Is(err, ErrAlgRollSigns) {
+			// the old key waits out T10b or T19 for a DS TTL or a signature
+			// lifetime, and a rollover requested meanwhile (one that mints
+			// its key first takes hours to fire) is the operator's to
+			// withdraw: the refusal is the algorithm's, not the request's
+			if l.CancelRollover(r) {
+				return fmt.Sprintf("Zone %s: %s rollover request cleared; the %s algorithm rollover to %s is not cancelled: a %s of %s already signs, and it completes on its own",
+					l.Zone, r, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[to]), nil
+			}
 			return "", fmt.Errorf("zone %s: the %s algorithm rollover to %s cannot be cancelled: a %s of %s already signs, and the roll completes on its own; to go back, set the %s algorithm to %s again once it has, which is a rollover through the same steps",
 				l.Zone, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[roll.From])
 		}

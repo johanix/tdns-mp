@@ -1258,3 +1258,45 @@ func TestARollBackWaitsItsOwnSignatureLifetime(t *testing.T) {
 	}
 	r.check("done")
 }
+
+// A rollover requested while the old algorithm's key waits to leave is
+// still the operator's to withdraw. The algorithm rollover is past
+// cancelling then (a key of the new algorithm signs), and that refusal used
+// to come back before the request was looked at: the request stayed, and
+// with no standby it minted a key and rolled once it had propagated.
+func TestACancelWithdrawsARolloverRequestMadeDuringAnAlgorithmRollover(t *testing.T) {
+	r := newDriverRig(t, "algcancelreq.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	withdrawalWait(t, r)
+	// nothing requested: the cancel is the algorithm's, and is refused
+	if msg, err := cancelRollover(r.l, "KSK"); err == nil || !strings.Contains(err.Error(), "cannot be cancelled") {
+		t.Fatalf("cancel with no request and the new KSK signing: msg=%q err=%v, want the refusal", msg, err)
+	}
+	r.l.RequestRollover("KSK")
+	if reqs := r.l.RolloverRequests(); len(reqs) != 1 || reqs[0] != "KSK" {
+		t.Fatalf("the rollover requests after the request: %v, want [KSK]", reqs)
+	}
+	msg, err := cancelRollover(r.l, "KSK")
+	if err != nil {
+		t.Fatalf("cancel with a request pending during the algorithm rollover: %v, want the request withdrawn", err)
+	}
+	if !strings.Contains(msg, "KSK rollover request cleared") || !strings.Contains(msg, "is not cancelled") {
+		t.Errorf("the answer: %q, want the request cleared and the algorithm rollover named as not cancelled", msg)
+	}
+	if reqs := r.l.RolloverRequests(); len(reqs) != 0 {
+		t.Fatalf("the rollover requests after the cancel: %v, want none", reqs)
+	}
+	if r.l.Policy.KSKAlgorithm != algRollTo || r.rollOf("KSK") == nil {
+		t.Fatalf("the algorithm rollover after the cancel: algorithm %s, status %+v, want it still under way", dns.AlgorithmToString[r.l.Policy.KSKAlgorithm], r.rollOf("KSK"))
+	}
+	// and nothing is minted for a request that is gone
+	r.tick("after the cancel")
+	if ks := r.keysOfAlg(KeyStateMpdist, "KSK", algRollTo); len(ks) != 0 {
+		t.Fatalf("a KSK minted after the request was withdrawn: %v", ks)
+	}
+	// the cancel with nothing left to withdraw is the refusal again
+	if _, err := cancelRollover(r.l, "KSK"); err == nil {
+		t.Error("a second cancel succeeded with no request pending and the new KSK signing")
+	}
+	r.check("done")
+}

@@ -927,10 +927,14 @@ func (l *ZoneKeyLifecycle) RequestRollover(role string) {
 	l.rolls[role] = true
 }
 
-func (l *ZoneKeyLifecycle) CancelRollover(role string) {
+// CancelRollover withdraws the role's rollover request, and says whether
+// there was one.
+func (l *ZoneKeyLifecycle) CancelRollover(role string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	had := l.rolls[role]
 	delete(l.rolls, role)
+	return had
 }
 
 // oldAlgKSKLeaving is T19's OldAlgKSKLeaving for k, an old-algorithm ZSK:
