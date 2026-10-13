@@ -937,6 +937,7 @@ Decided by the project owner on 2026-10-12. The design is written with them.
     - The remaining signer dropped the leaving signer's DNSKEYs from its key set 3 seconds after the edit, and the leader asked the parent to remove the leaving signer's DS together with its NS. Only the parent's refusal kept the DS there.
 
     None of the three is changed by this plan: they are the removal's work (#147, #138). The plan's own part is the agent's side (step 2).
+21. **The leader withdraws a leaving provider's records, with or without that provider** (2026-10-13; design section 7). The design covers a provider that cooperates while it leaves. One that does not cooperate will have to be removed later, so the mechanism must not depend on the leaving provider: the withdrawal is the leader's operation, every other member applies it, and nothing waits for the provider it names. The owner's edit is its authority: it is applied only for a member that has no role. A provider that cooperates applies it like any other change, which is what decision 20 asks of it. Its form is open; a `replace` cannot be it (#159). It belongs to the removal, not to this plan.
 
 Also decided:
 
