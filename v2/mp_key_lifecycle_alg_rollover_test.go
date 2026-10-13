@@ -882,3 +882,158 @@ func TestAnAlgorithmRolloverPromotesTheNewAlgorithmOnce(t *testing.T) {
 		t.Fatalf("the old ZSK after the requested roll: %s, want active still", st)
 	}
 }
+
+// withdrawalWait runs a KSK algorithm roll to the point where the old KSK
+// signs on with its DS withdrawn, the parent has answered without the DS
+// and the note is taken: the wait of T11a/T10b is on. Returns the old and
+// the new KSK.
+func withdrawalWait(t *testing.T, r *driverRig) (old, new uint16) {
+	t.Helper()
+	a, _ := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	r.setAlgorithms("change", algRollTo, "KSK")
+	r.tick("minted")
+	b := r.one("minted", KeyStateMpdist, "KSK", algRollTo)
+	r.confirmAll("applied", b)
+	r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("propagated")
+	r.wire.parentDS[b] = true
+	r.tick("the parent serves the new DS")
+	r.clock.Advance(r.wire.parentTTL + time.Minute)
+	r.tick("the DS TTL passed")
+	if st, c := r.state(a), r.cols(a); st != KeyStateActive || c != "110" {
+		t.Fatalf("the old KSK after the promotion: %s %s, want active 110", st, c)
+	}
+	r.wire.parentDS[a] = false
+	r.tick("the old DS gone")
+	if !r.l.dsGone[a] {
+		t.Fatalf("the DS gone was not noted for the old KSK %d", a)
+	}
+	return a, b
+}
+
+// T10b fires only on a tick the parent answered without the DS: with the
+// parent unknown the note's TTL passing retires nothing (the parent may
+// serve the DS again, which would drop the note), as T9's wait does (O7).
+func TestTheWithdrawalWaitEndsOnlyOnATickTheParentAnswered(t *testing.T) {
+	r := newDriverRig(t, "algknown.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	a, _ := withdrawalWait(t, r)
+	r.wire.parentOff = true
+	r.clock.Advance(r.wire.parentTTL + time.Minute)
+	r.tick("the DS TTL passed, the parent unknown")
+	r.tick("still unknown")
+	if st := r.state(a); st != KeyStateActive {
+		t.Fatalf("the old KSK with the parent unknown after the DS TTL: %s, want active (no answer, no expiry)", st)
+	}
+	r.wire.parentOff = false
+	r.tick("the parent answers without the DS")
+	if st, c := r.state(a), r.cols(a); st != KeyStateRetired || c != "100" {
+		t.Fatalf("the old KSK once the parent answered without the DS: %s %s, want retired 100", st, c)
+	}
+	r.check("done")
+}
+
+// A key inventory that cannot be read at a restart fails the reload and
+// keeps the withdrawal wait's notes; the next reload reads them back.
+func TestAnUnreadableInventoryAtARestartKeepsTheWithdrawalNotes(t *testing.T) {
+	r := newDriverRig(t, "alginv.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	a, _ := withdrawalWait(t, r)
+	notes := func() int {
+		var n int
+		if err := r.kdb.DB.QueryRow(`SELECT COUNT(*) FROM MPParentDS WHERE zonename=? AND keyid=?`, r.l.Zone, int(a)).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if notes() != 1 {
+		t.Fatalf("the withdrawal wait's note of %d before the restart: %d rows, want one", a, notes())
+	}
+	broken := NewZoneKeyLifecycle(r.l.Zone, r.kdb, r.clock, driverPolicy, r.wire)
+	broken.Inventory = func(*tdns.KeyDB, string) ([]tdns.KeyInventoryItem, error) {
+		return nil, errors.New("the keystore is away")
+	}
+	if err := broken.Reload(); err == nil {
+		t.Fatal("a reload with an unreadable inventory succeeded; it must fail")
+	}
+	if notes() != 1 {
+		t.Fatalf("the withdrawal wait's note after the failed reload: %d rows, want one (nothing deleted)", notes())
+	}
+	// the same driver with the inventory unreadable only on a tick: the
+	// wait is left alone, not ended
+	r.l = NewZoneKeyLifecycle(r.l.Zone, r.kdb, r.clock, driverPolicy, r.wire)
+	if err := r.l.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !r.l.dsGone[a] {
+		t.Fatalf("the DS gone note of %d did not come back at the reload", a)
+	}
+	r.l.Inventory = func(*tdns.KeyDB, string) ([]tdns.KeyInventoryItem, error) {
+		return nil, errors.New("the keystore is away")
+	}
+	r.clock.Advance(r.wire.parentTTL + time.Minute)
+	r.tick("the DS TTL passed, the inventory unreadable")
+	if st := r.state(a); st != KeyStateActive {
+		t.Fatalf("the old KSK on a tick with the inventory unreadable: %s, want active (the wait left alone)", st)
+	}
+	r.l.Inventory = nil
+	r.tick("the inventory readable again")
+	if st := r.state(a); st != KeyStateRetired {
+		t.Fatalf("the old KSK once the inventory is readable again: %s, want retired", st)
+	}
+	r.check("done")
+}
+
+// A change of the owner's algorithm whose save fails leaves the policy as
+// it was: no roll starts from a value the database does not hold. The
+// same for a cancel whose save fails: the roll goes on.
+func TestAFailedSaveOfTheAlgorithmLeavesThePolicyAsItWas(t *testing.T) {
+	r := newDriverRig(t, "algsave.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	a, _ := bootstrapKSK(t, r)
+	r.wire.parentDS[a] = true
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE MPOwnerAlgorithm RENAME TO MPOwnerAlgorithm_away`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.l.SetAlgorithm("KSK", algRollTo); err == nil {
+		t.Fatal("setting the algorithm with the table away succeeded; it must fail")
+	}
+	if r.l.Policy.KSKAlgorithm != dns.ED25519 {
+		t.Fatalf("the policy's KSK algorithm after the failed save: %s, want ED25519", dns.AlgorithmToString[r.l.Policy.KSKAlgorithm])
+	}
+	if st := r.rollOf("KSK"); st != nil {
+		t.Fatalf("a KSK algorithm rollover reported after the failed save: %+v", st)
+	}
+	r.tick("nothing to mint")
+	if ks := r.keysOfAlg(KeyStateMpdist, "KSK", algRollTo); len(ks) != 0 {
+		t.Fatalf("a KSK of the new algorithm minted after the failed save: %v", ks)
+	}
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE MPOwnerAlgorithm_away RENAME TO MPOwnerAlgorithm`); err != nil {
+		t.Fatal(err)
+	}
+	// the change saved: a roll starts; a cancel whose save fails changes nothing
+	r.setAlgorithms("change", algRollTo, "KSK")
+	r.tick("minted")
+	b := r.one("minted", KeyStateMpdist, "KSK", algRollTo)
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE MPOwnerAlgorithm RENAME TO MPOwnerAlgorithm_away`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.l.CancelAlgorithmRollover("KSK"); err == nil {
+		t.Fatal("a cancel with the table away succeeded; it must fail")
+	}
+	if r.l.Policy.KSKAlgorithm != algRollTo {
+		t.Fatalf("the policy's KSK algorithm after the failed cancel: %s, want %s (the roll goes on)", dns.AlgorithmToString[r.l.Policy.KSKAlgorithm], dns.AlgorithmToString[algRollTo])
+	}
+	if st := r.rollOf("KSK"); st == nil {
+		t.Fatal("the KSK algorithm rollover vanished after the failed cancel")
+	}
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE MPOwnerAlgorithm_away RENAME TO MPOwnerAlgorithm`); err != nil {
+		t.Fatal(err)
+	}
+	r.tick("the roll goes on")
+	if st := r.state(b); st != KeyStateMpdist {
+		t.Fatalf("the new KSK after the failed cancel: %s, want mpdist (not withdrawn)", st)
+	}
+	r.check("done")
+}

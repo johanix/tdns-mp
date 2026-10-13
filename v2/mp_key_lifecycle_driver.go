@@ -94,6 +94,9 @@ type ZoneKeyLifecycle struct {
 	Policy LifecyclePolicy
 	Wire   Wire
 	Log    func(msg string, kv ...any)
+	// Inventory reads the zone's key rows with their columns (ds among
+	// them); nil means tdns's keystore. A seam for the tests.
+	Inventory func(kdb *tdns.KeyDB, zone string) ([]tdns.KeyInventoryItem, error)
 
 	mu     sync.Mutex
 	dist   map[uint16]*distribution
@@ -924,19 +927,26 @@ func (l *ZoneKeyLifecycle) oldAlgKSKLeaving(k tdns.DnssecKeyWithTimestamps, all 
 // withdrawnActive: the active KSKs whose DS withdrawal has been written
 // (ds=0; T10a), from the inventory's columns: the old algorithm's KSK in the
 // withdrawal wait of an algorithm rollover.
-func (l *ZoneKeyLifecycle) withdrawnActive(all map[uint16]tdns.DnssecKeyWithTimestamps) map[uint16]bool {
-	out := map[uint16]bool{}
-	inv, err := tdns.GetKeyInventory(l.KDB, l.Zone)
-	if err != nil {
-		return out
+// An inventory that cannot be read is an error, not an empty set: a
+// restart that read it as empty would take every withdrawal-wait note for
+// a stale one and delete it.
+func (l *ZoneKeyLifecycle) withdrawnActive(all map[uint16]tdns.DnssecKeyWithTimestamps) (map[uint16]bool, error) {
+	read := l.Inventory
+	if read == nil {
+		read = tdns.GetKeyInventory
 	}
+	inv, err := read(l.KDB, l.Zone)
+	if err != nil {
+		return nil, fmt.Errorf("the key inventory of %s: %w", l.Zone, err)
+	}
+	out := map[uint16]bool{}
 	for _, it := range inv {
 		k, ok := all[it.KeyTag]
 		if ok && k.State == KeyStateActive && k.Flags&dns.SEP != 0 && it.DS != nil && !*it.DS {
 			out[it.KeyTag] = true
 		}
 	}
-	return out
+	return out, nil
 }
 
 // Tick runs the timers, then the policy: distribute created keys, move
@@ -973,7 +983,13 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	// Not asked: nothing is known of the parent this tick, and a key waits.
 	var served map[uint16]bool
 	l.parentKnown, l.parentEmpty = false, false
-	withdrawn := l.withdrawnActive(all)
+	withdrawn, werr := l.withdrawnActive(all)
+	if werr != nil {
+		// the withdrawal wait is left where it is this tick: no note
+		// taken, none expired
+		l.logf("key lifecycle: the key inventory is unreadable; the withdrawal wait is left alone this tick", "zone", l.Zone, "err", werr)
+		withdrawn = map[uint16]bool{}
+	}
 	for _, k := range all {
 		if k.Flags&dns.SEP != 0 && (k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateRetired && !l.dsGone[k.KeyTag] || withdrawn[k.KeyTag]) {
 			served, l.parentTTL, l.parentKnown = l.Wire.ParentDS(l.Zone)
@@ -1038,12 +1054,13 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			// the withdrawal wait of an algorithm rollover (T10a): the old
 			// KSK signs on until the parent has dropped its DS (T11a) and
 			// the DS TTL has passed (T10b, E15)
-			if withdrawn[keyid] {
+			// Both on a tick the parent answered, and answered without
+			// the DS: the parent unknown counts as neither (O7), and a DS
+			// served again dropped the note above.
+			if withdrawn[keyid] && parentKnown && !served[keyid] {
 				if !l.dsGone[keyid] {
-					if parentKnown && !served[keyid] {
-						if _, _, err := l.applyLocked(keyid, EvDSGone); err != nil {
-							fail(keyid, "ds gone", err)
-						}
+					if _, _, err := l.applyLocked(keyid, EvDSGone); err != nil {
+						fail(keyid, "ds gone", err)
 					}
 				} else if _, _, err := l.applyLocked(keyid, EvDSExpired); err != nil {
 					fail(keyid, "ds expired", err)
@@ -1360,11 +1377,11 @@ func (l *ZoneKeyLifecycle) SetAlgorithm(role string, alg uint8) (uint8, error) {
 		return 0, fmt.Errorf("no algorithm")
 	}
 	old := l.policyAlgorithm(role)
+	prev, hadPrev := l.algorithms[role]
 	l.algorithms[role] = alg
 	l.applyAlgorithms()
 	if err := l.saveAlgorithm(role); err != nil {
-		delete(l.algorithms, role)
-		l.applyAlgorithms()
+		l.restoreAlgorithm(role, prev, hadPrev, old)
 		return old, err
 	}
 	l.logf("key lifecycle: the owner's algorithm set", "zone", l.Zone, "role", role, "from", dns.AlgorithmToString[old], "to", dns.AlgorithmToString[alg])
@@ -1372,6 +1389,23 @@ func (l *ZoneKeyLifecycle) SetAlgorithm(role string, alg uint8) (uint8, error) {
 }
 
 // applyAlgorithms puts the owner's algorithms over the bound policy's.
+// restoreAlgorithm puts the role's override and the policy's algorithm
+// back as they were before a change whose save failed: what the next tick
+// runs is what the database holds. applyAlgorithms writes only non-zero
+// overrides, so the policy's value is put back by hand.
+func (l *ZoneKeyLifecycle) restoreAlgorithm(role string, prev uint8, hadPrev bool, policyAlg uint8) {
+	if hadPrev {
+		l.algorithms[role] = prev
+	} else {
+		delete(l.algorithms, role)
+	}
+	if role == "KSK" {
+		l.Policy.KSKAlgorithm = policyAlg
+	} else {
+		l.Policy.ZSKAlgorithm = policyAlg
+	}
+}
+
 func (l *ZoneKeyLifecycle) applyAlgorithms() {
 	if a := l.algorithms["KSK"]; a != 0 {
 		l.Policy.KSKAlgorithm = a
@@ -1409,9 +1443,11 @@ func (l *ZoneKeyLifecycle) CancelAlgorithmRollover(role string) (from, to uint8,
 			return from, to, fmt.Errorf("the %s algorithm rollover of %s to %s: %w", role, l.Zone, dns.AlgorithmToString[to], ErrAlgRollSigns)
 		}
 	}
+	prev, hadPrev := l.algorithms[role]
 	l.algorithms[role] = from
 	l.applyAlgorithms()
 	if err := l.saveAlgorithm(role); err != nil {
+		l.restoreAlgorithm(role, prev, hadPrev, to)
 		return from, to, err
 	}
 	l.logf("key lifecycle: the algorithm rollover cancelled; the keys of the new algorithm are withdrawn", "zone", l.Zone, "role", role, "from", dns.AlgorithmToString[from], "to", dns.AlgorithmToString[to])
@@ -1692,13 +1728,16 @@ func (l *ZoneKeyLifecycle) saveWithdrawal(keyid uint16) {
 }
 
 func (l *ZoneKeyLifecycle) loadPresences(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
+	withdrawn, err := l.withdrawnActive(all)
+	if err != nil {
+		return err
+	}
 	rows, err := l.KDB.DB.Query(`SELECT keyid, since, ttl_seconds FROM MPParentDS WHERE zonename=?`, l.Zone)
 	if err != nil {
 		return fmt.Errorf("read the parent's DS notes of %s: %w", l.Zone, err)
 	}
 	defer rows.Close()
 	l.dsPresent = map[uint16]dsPresence{}
-	withdrawn := l.withdrawnActive(all)
 	var stale []uint16
 	for rows.Next() {
 		var keyid int

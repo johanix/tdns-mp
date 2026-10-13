@@ -292,7 +292,7 @@ var KeyLifecycleTable = []Transition{
 	{"T11a", KeyStateActive, EvDSGone, func(k KeyView, z ZoneView) bool { return k.SEP && k.Withdrawn }, KeyStateActive, "the parent no longer serves the DS of the old algorithm's KSK; since when, and the DS TTL it was served with, noted for T10b"},
 	{"T10b", KeyStateActive, EvDSExpired, func(k KeyView, z ZoneView) bool {
 		return k.SEP && k.Withdrawn && k.DSGone && !k.DSGoneAt.IsZero() && !z.Now.Before(k.DSGoneAt.Add(k.ParentDSTTL))
-	}, KeyStateRetired, "the old algorithm's KSK retires once the parent has not served its DS for the DS TTL: no validator reaches the zone through the old algorithm any more (RFC 6781 §4.1.4); retired_at stamped, resign asked of tdns, T12's margin follows"},
+	}, KeyStateRetired, "the old algorithm's KSK retires once the parent has not served its DS for the DS TTL, on a tick the parent answered without it (the parent unknown counts as neither, O7): no validator reaches the zone through the old algorithm any more (RFC 6781 §4.1.4); retired_at stamped, resign asked of tdns, T12's margin follows"},
 	{"T12", KeyStateRetired, EvMargin, func(k KeyView, z ZoneView) bool {
 		if k.SEP && !k.DSGone {
 			return false
