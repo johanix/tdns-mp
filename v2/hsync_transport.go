@@ -2369,7 +2369,10 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // and the signer is told so by name (S7, the empty-share clause of A2.2).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
 	var states []core.KeyState
-	found, records, anyRecord, emptyReplace := false, false, false, false
+	// endsEmpty: the last DNSKEY operation replaces the whole set by no
+	// record. That is what the operations leave, whatever came before it
+	// in the same update: a record an earlier operation carried is gone.
+	found, records, endsEmpty := false, false, false
 	for _, op := range ops {
 		if op.RRtype != "DNSKEY" {
 			continue
@@ -2378,12 +2381,7 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 			states = append(states, op.KeyStates...)
 			found = true
 		}
-		if len(op.Records) > 0 {
-			anyRecord = true
-		}
-		if op.Operation == "replace" && len(op.Records) == 0 {
-			emptyReplace = true
-		}
+		endsEmpty = op.Operation == "replace" && len(op.Records) == 0
 		if len(op.Records) > 0 || op.Operation == "replace" {
 			records = true
 		}
@@ -2409,7 +2407,7 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 		}
 	}
 	emptied := false
-	if !found && emptyReplace && !anyRecord {
+	if !found && endsEmpty {
 		if _, spoke := tm.foreignKeyStates[zone][from]; spoke {
 			found, emptied = true, true
 		}

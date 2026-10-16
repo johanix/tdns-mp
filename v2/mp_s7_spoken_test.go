@@ -71,6 +71,20 @@ func TestAProviderNamedAmongTheSpokenWithNoKeyHasStoppedServingThem(t *testing.T
 			t.Errorf("key %d after a word that names nobody and leaves p2 out: columns %s, want %s (p2 said nothing new)", k, got, want)
 		}
 	}
+	// and p2's keys are still known as p2's: a word that then names p2
+	// with none (an agent that restarted, and has heard p2 since) omits
+	// them, where a signer that had forgotten them would leave p2a's DS
+	if err := r.l.SetForeignWord([]core.ForeignKeyState{said("p3", p3k, KeyStateActive, &yes)}, []string{"p2", "p3"}); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[uint16]string{p2a: "100", p2b: "100", p3k: "101"} {
+		if got := r.cols(k); got != want {
+			t.Errorf("key %d after p2's empty word that follows a word without p2: columns %s, want %s", k, got, want)
+		}
+	}
+	if known, tags := dsSetTags(t, r); !known || len(tags) != 1 || !tags[p3k] {
+		t.Errorf("the DS set after p2's empty word that follows a word without p2: known=%v tags=%v, want p3's KSK alone", known, tags)
+	}
 }
 
 // The agent's bookkeeping of who has spoken. A sender that says what it
@@ -135,6 +149,22 @@ func TestAReplaceByNoRecordFromAProviderHeardFromIsItsEmptyWord(t *testing.T) {
 	}
 	if sh := tm.foreignSharesFor(zone)["agent.p2.example."]; len(sh.dnskeys) != 1 {
 		t.Errorf("the records of a replace without key states were not kept: %+v", sh)
+	}
+	// p2 speaks with its key again; then one update whose operations end
+	// with a replace by none, after one that carried the record: what the
+	// operations leave is no record, so that is p2's empty word
+	tm.NoteForeignKeyStates(zone, "agent.p2.example.", withKey)
+	if keys, _ := tm.foreignWordFor(zone); len(keys) != 1 {
+		t.Fatalf("after p2 spoke with its key again: keys %+v, want one", keys)
+	}
+	tm.NoteForeignKeyStates(zone, "agent.p2.example.", wire(
+		core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{key.String()}},
+		core.RROperation{Operation: "replace", RRtype: "DNSKEY"}))
+	if keys, spoken := tm.foreignWordFor(zone); len(keys) != 0 || len(spoken) != 1 || spoken[0] != "p2" {
+		t.Errorf("after an update that ends with a replace by none: keys %+v spoken %v, want no key and p2 among the spoken", keys, spoken)
+	}
+	if sh := tm.foreignSharesFor(zone)["agent.p2.example."]; len(sh.dnskeys) != 0 {
+		t.Errorf("p2's records after an update that ends with a replace by none: %+v, want none", sh)
 	}
 }
 

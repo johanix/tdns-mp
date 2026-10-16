@@ -82,9 +82,10 @@ func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
 // named (S7): a provider among them whose keys are not in the set has
 // said it holds none, so every key it mentioned before is omitted (ds=0
 // until its row goes), where a provider named nowhere has said nothing
-// new. Nothing is kept of the spoken list between words: the agent names
-// the providers again with every word, and the rows written from it are
-// what the signer keeps.
+// new, and what it said before stands: its keys are kept, so a later word
+// that names it with none can still omit them. Nothing is kept of the
+// spoken list between words: the agent names the providers again with
+// every word.
 func (l *ZoneKeyLifecycle) SetForeignWord(keys []core.ForeignKeyState, spoken []string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -113,8 +114,15 @@ func (l *ZoneKeyLifecycle) SetForeignWord(keys []core.ForeignKeyState, spoken []
 	}
 	no := false
 	for kt, old := range l.foreign {
-		if _, still := said[kt]; !still && speaking[old.Provider] {
+		if _, still := said[kt]; still {
+			continue
+		}
+		if speaking[old.Provider] {
 			said[kt] = foreignSaid{Provider: old.Provider, State: foreignStateOmitted, DS: &no}
+		} else {
+			// silent in this word (an agent restarted, an older agent):
+			// the provider's last word stands
+			said[kt] = old
 		}
 	}
 	if err := l.saveForeign(said); err != nil {
