@@ -97,7 +97,9 @@ apiserver:
    keyfile:        /etc/tdns/certs/agent.key
 
 # Leader-election lease for zones whose HSYNCPARAM says
-# parentsync="agent". 60m is the default.
+# parentsync="agent". 60m is the default. The value takes a unit
+# (60m, 3600s): a bare number is read as nanoseconds. A lease
+# below one minute is refused and the default is used.
 # delegationsync:
 #    leader-election-ttl: 60m
 #
