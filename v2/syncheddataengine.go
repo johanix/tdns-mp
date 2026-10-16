@@ -243,6 +243,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
 								}
 							}
+							// the leader's CSYNC is one of these: who must
+							// confirm it is known now
+							conf.delegationCsyncProgress(ctx, zdr, synchedDataUpdate.Zone, nil)
 						} else if tm == nil {
 							lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
 							resp.Error = true
@@ -260,6 +263,20 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				}
 			case "remote":
 				lgEngine.Info("received remote update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
+
+				// A CSYNC is taken from the zone's delegation sync leader
+				// only; the sender of any other has been told. What else
+				// the update carries goes on.
+				if reason := conf.refuseCsyncNotFromLeader(synchedDataUpdate, msgQs); reason != "" && len(synchedDataUpdate.Update.Operations) == 0 {
+					if synchedDataUpdate.Response != nil {
+						select {
+						case synchedDataUpdate.Response <- &AgentMsgResponse{Zone: synchedDataUpdate.Zone, AgentId: synchedDataUpdate.AgentId, Error: true, ErrorMsg: reason}:
+						default:
+							lgEngine.Warn("response channel blocked, skipping response")
+						}
+					}
+					continue
+				}
 
 				// 1. Evaluate the update for applicability (valid zone, etc)
 				// 2. Evaluate the update according to policy.
@@ -880,6 +897,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 		case detail := <-msgQs.Confirmation:
 			lgEngine.Info("received confirmation", "source", detail.Source, "distID", detail.DistributionID, "zone", detail.Zone, "status", detail.Status, "applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems), "truncated", detail.Truncated)
 			zdr.ProcessConfirmation(detail, msgQs)
+			// the leader's CSYNC waits for its confirmations
+			conf.delegationCsyncProgress(ctx, zdr, detail.Zone, detail)
 		}
 	}
 }

@@ -100,6 +100,11 @@ apiserver:
 # parentsync="agent". 60m is the default.
 # delegationsync:
 #    leader-election-ttl: 60m
+#
+# The longest the leader holds a NOTIFY to a zone's parent, whatever
+# propagation delay the zone's providers announce (see
+# kasp.propagation-delay below). 10m is the default; 0 holds none.
+#    notify-wait-max: 10m
 
 # Delegation sync towards the parent of a customer zone whose
 # HSYNCPARAM makes the agents responsible for it (parentsync="agent").
@@ -116,6 +121,10 @@ imrengine:
 # The policy the agent signs its identity zone with. Testbed values:
 # a signature validity must exceed 2 x (largest served TTL +
 # kasp.propagation-delay), and tdns warns below 4 x.
+# kasp.propagation-delay is also what the agent tells the other
+# providers' agents about this provider's nameservers: the leader of a
+# zone holds a NOTIFY to the zone's parent for the largest value among
+# the providers that serve the zone. The default is 1h.
 dnssec:
    kasp:
       propagation-delay:  5m
