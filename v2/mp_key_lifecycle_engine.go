@@ -257,17 +257,32 @@ func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 		if lifetimeSchedules(p.ZSK.Lifetime) {
 			pol.ZSKLifetime = time.Duration(p.ZSK.Lifetime) * time.Second
 		}
+		if p.SigValidity.Default > 0 {
+			pol.SigLifetime = time.Duration(p.SigValidity.Default) * time.Second
+		}
 	}
 	if conf != nil && conf.Config != nil {
 		pol.PropagationDelay = conf.Config.KaspPropagationDelay()
 		pol.Margin = pol.PropagationDelay
-		kasp := conf.Config.Dnssec.Kasp
-		pol.StandbyZSK, pol.StandbyKSK = 1, 0
-		if kasp.StandbyZskCount > 0 {
-			pol.StandbyZSK = kasp.StandbyZskCount
+		// the standby counts: the zone's policy's own standby-zsks and
+		// standby-ksks (the owner's fields, Q1), else the global kasp
+		// counts, else one ZSK and no KSK (tdns's StandbyKeyCount)
+		var bound *tdns.DnssecPolicy
+		if zd != nil {
+			bound = zd.DnssecPolicy
 		}
-		if kasp.StandbyKskCount > 0 {
-			pol.StandbyKSK = kasp.StandbyKskCount
+		if bound != nil {
+			pol.StandbyZSK = conf.Config.StandbyKeyCount(bound, false)
+			pol.StandbyKSK = conf.Config.StandbyKeyCount(bound, true)
+		} else {
+			kasp := conf.Config.Dnssec.Kasp
+			pol.StandbyZSK, pol.StandbyKSK = 1, 0
+			if kasp.StandbyZskCount > 0 {
+				pol.StandbyZSK = kasp.StandbyZskCount
+			}
+			if kasp.StandbyKskCount > 0 {
+				pol.StandbyKSK = kasp.StandbyKskCount
+			}
 		}
 		if mp := conf.MpConfig(); mp != nil && mp.KeyLifecycleResend != "" {
 			if d, err := time.ParseDuration(mp.KeyLifecycleResend); err == nil && d > 0 {
@@ -280,7 +295,35 @@ func policyFor(conf *Config, zd *tdns.ZoneData) LifecyclePolicy {
 
 const foreverLifetime = 0xFFFFFFFF
 
-func lifetimeSchedules(secs uint32) bool { return secs != 0 && secs != foreverLifetime }
+// tdnsForeverFallback is tdns's foreverLifetimeSecs (its api_structs.go,
+// 10000 hours), which tdns does not export. It stands in when tdns's parser
+// gives no value for the word; a test holds it to what the parser gives.
+const tdnsForeverFallback = uint32(10000 * 3600)
+
+// tdnsForeverLifetime is what tdns stores for `lifetime: forever`, asked of
+// its parser once, at start.
+var tdnsForeverLifetime = tdnsForever(tdns.GenKeyLifetime("forever"))
+
+// tdnsForever takes the parser's answer for the word. An error, or 0, would
+// leave tdns's value unknown and make it a schedule again without a sign:
+// the fallback is taken then.
+func tdnsForever(lt tdns.KeyLifetime, err error) uint32 {
+	if err != nil || lt.Lifetime == 0 {
+		return tdnsForeverFallback
+	}
+	return lt.Lifetime
+}
+
+// lifetimeSchedules: whether a policy lifetime is a schedule at all. tdns
+// stores `lifetime: forever` as a large finite number of seconds
+// (foreverLifetimeSecs in its api_structs.go, 10000 hours), and its own
+// rollover paths take that value as "never" (lifetimeSchedulesRoll beside
+// it). Neither is exported, so the value is asked of tdns's parser: taken as
+// a schedule it rolled the keys of a `forever` policy at about 417 days
+// (tdns-mp #134).
+func lifetimeSchedules(secs uint32) bool {
+	return secs != 0 && secs != foreverLifetime && secs != tdnsForeverLifetime
+}
 
 // KeyLifecycleEngine runs the drivers of the owned zones.
 type KeyLifecycleEngine struct {
@@ -535,6 +578,9 @@ type KeyLifecycleStatus struct {
 	Foreign      []KeyLifecycleKey    `json:"foreign,omitempty"`
 	InFlight     []DistributionStatus `json:"in_flight,omitempty"`
 	Rollovers    []string             `json:"rollovers,omitempty"`
+	// AlgorithmRollovers are the algorithm rollovers under way, by role
+	// (table §6 O4): the old algorithm, the policy's, and the step.
+	AlgorithmRollovers []AlgRolloverStatus `json:"algorithm_rollovers,omitempty"`
 }
 
 // Zones lists the zones tdns-mp's state machine runs.
@@ -559,9 +605,15 @@ func (e *KeyLifecycleEngine) Status(zone string) (*KeyLifecycleStatus, error) {
 	if zd != nil {
 		st.PolicyName = zd.DnssecPolicyName
 	}
+	// the algorithm rollovers from the same read of the rows as the keys:
+	// a read that fails fails the status, and no rollover under way shows
+	// as over
 	l.mu.Lock()
 	st.Policy = l.Policy
 	all, err := l.rows()
+	if err == nil {
+		st.AlgorithmRollovers = l.algRolloversOf(all)
+	}
 	l.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -615,7 +667,14 @@ func (e *KeyLifecycleEngine) RequestRollover(zone, role string) (string, error) 
 	return fmt.Sprintf("Zone %s: %s rollover requested; the next standby %s is promoted on the next tick (a standby is minted first if none is ready)", l.Zone, r, r), nil
 }
 
-// CancelRollover withdraws a rollover request not yet fired.
+// CancelRollover withdraws a rollover request not yet fired. During an
+// algorithm rollover of the role it takes the algorithm back instead, as
+// long as nothing of the new algorithm signs yet: the new keys are
+// withdrawn on the next tick. Once a key of the new algorithm signs the
+// algorithm rollover is past cancelling: it completes, and the way back is
+// a change of the algorithm once it has (a rollover through the same
+// steps). A rollover request made in that window is still withdrawn, and
+// the answer says both; with no request to withdraw the cancel is refused.
 func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 	l, err := e.driverOf(zone)
 	if err != nil {
@@ -625,8 +684,86 @@ func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return cancelRollover(l, r)
+}
+
+// cancelRollover is CancelRollover on the zone's driver, the role checked.
+func cancelRollover(l *ZoneKeyLifecycle, r string) (string, error) {
+	rolls, err := l.AlgorithmRollovers()
+	if err != nil {
+		// whether an algorithm rollover is under way decides what a
+		// cancel does: with that unknown, nothing is done
+		return "", fmt.Errorf("zone %s: the %s rollover is not cancelled: %w", l.Zone, r, err)
+	}
+	for _, roll := range rolls {
+		if roll.Role != r {
+			continue
+		}
+		from, to, err := l.CancelAlgorithmRollover(r)
+		if errors.Is(err, ErrAlgRollSigns) {
+			// the old key waits out T10b or T19 for a DS TTL or a signature
+			// lifetime, and a rollover requested meanwhile (one that mints
+			// its key first takes hours to fire) is the operator's to
+			// withdraw: the refusal is the algorithm's, not the request's
+			if l.CancelRollover(r) {
+				return fmt.Sprintf("Zone %s: %s rollover request cleared; the %s algorithm rollover to %s is not cancelled: a %s of %s already signs, and it completes on its own",
+					l.Zone, r, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[to]), nil
+			}
+			return "", fmt.Errorf("zone %s: the %s algorithm rollover to %s cannot be cancelled: a %s of %s already signs, and the roll completes on its own; to go back, set the %s algorithm to %s again once it has, which is a rollover through the same steps",
+				l.Zone, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[roll.From])
+		}
+		if err != nil {
+			return "", err
+		}
+		l.CancelRollover(r)
+		return fmt.Sprintf("Zone %s: the %s algorithm rollover to %s is cancelled; the %s algorithm is %s again, and the keys of %s not yet signing are withdrawn on the next tick",
+			l.Zone, r, dns.AlgorithmToString[to], r, dns.AlgorithmToString[from], dns.AlgorithmToString[to]), nil
+	}
 	l.CancelRollover(r)
 	return fmt.Sprintf("Zone %s: %s rollover request cleared", l.Zone, r), nil
+}
+
+// lifecycleAlgorithm reads an algorithm name for the owner's policy: one
+// tdns's keystore can generate a key of.
+func lifecycleAlgorithm(name string) (uint8, error) {
+	alg, ok := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(name))]
+	if !ok {
+		return 0, fmt.Errorf("algorithm %q is not a DNSSEC algorithm name", name)
+	}
+	switch alg {
+	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384, dns.ED25519, dns.RSASHA256, dns.RSASHA512:
+		return alg, nil
+	}
+	return 0, fmt.Errorf("algorithm %s: the keystore generates ECDSAP256SHA256, ECDSAP384SHA384, ED25519, RSASHA256 and RSASHA512", dns.AlgorithmToString[alg])
+}
+
+// SetAlgorithm changes the owner's algorithm for a role of an owned zone
+// (tdns-mpcli signer key policy --ksk-algorithm, --zsk-algorithm): an
+// algorithm rollover from the next tick (table §6 O4). The bound tdns
+// policy is not touched: tdns's policy binding refuses an algorithm
+// change on an owned zone, the algorithm being the owner's field (Q1).
+func (e *KeyLifecycleEngine) SetAlgorithm(zone, role, algorithm string) (string, error) {
+	l, err := e.driverOf(zone)
+	if err != nil {
+		return "", err
+	}
+	r, err := lifecycleRole(role)
+	if err != nil {
+		return "", err
+	}
+	alg, err := lifecycleAlgorithm(algorithm)
+	if err != nil {
+		return "", err
+	}
+	old, err := l.SetAlgorithm(r, alg)
+	if err != nil {
+		return "", err
+	}
+	if old == alg {
+		return fmt.Sprintf("Zone %s: the %s algorithm is %s already; nothing changes", l.Zone, r, dns.AlgorithmToString[alg]), nil
+	}
+	return fmt.Sprintf("Zone %s: the %s algorithm is %s (was %s); an algorithm rollover runs from the next tick: a %s of %s is minted, distributed and published, it signs beside the old one once standby (a KSK once the parent has served its DS for the DS TTL), and the old algorithm's keys leave after that. signer key status shows the step; signer key rollover cancel takes the algorithm back while nothing of %s signs",
+		l.Zone, r, dns.AlgorithmToString[alg], dns.AlgorithmToString[old], r, dns.AlgorithmToString[alg], dns.AlgorithmToString[alg]), nil
 }
 
 // Retry sends a key's distribution (or removal) again, the rejection

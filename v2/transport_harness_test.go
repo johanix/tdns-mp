@@ -86,6 +86,10 @@ type integEnvConfig struct {
 	// sends over the wire needs it; with the shared zone every sender is
 	// integControlZone and is refused.
 	ControlZoneIsIdentity bool
+
+	// Role is the role the bridge is built for. Empty is the agent's; an
+	// auditor peer takes roleAuditor.
+	Role string
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -179,8 +183,12 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 	if cfg != nil && cfg.ControlZoneIsIdentity {
 		controlZone = identity
 	}
+	role := roleAgent
+	if cfg != nil && cfg.Role != "" {
+		role = cfg.Role
+	}
 	bridgeCfg := &MPTransportBridgeConfig{
-		Role:                roleAgent,
+		Role:                role,
 		LocalID:             identity,
 		ControlZone:         controlZone,
 		APITimeout:          2 * time.Second,
@@ -306,6 +314,38 @@ func addHSYNCPARAMServers(t *testing.T, zd *tdns.ZoneData, serverLabels ...strin
 	// Re-baseline the published snapshot from the updated working set.
 	zd.InstallInitialSnapshot()
 	Zones.Invalidate(zd.ZoneName)
+}
+
+// seedAuditedZone seeds a Ready zone with an HSYNC3 record per identity, the
+// providers under HSYNCPARAM servers= and the auditor under auditors=: the
+// providers are the zone's voting members, the auditor a member that does
+// not vote.
+func seedAuditedZone(t *testing.T, zoneName, auditor string, providers ...string) *tdns.ZoneData {
+	t.Helper()
+	zd := seedZoneWithHSYNC3(t, zoneName, append([]string{auditor}, providers...)...)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("apex not found for %s: %v", zd.ZoneName, err)
+	}
+	servers := make([]string, len(providers))
+	for i, p := range providers {
+		servers[i] = shortLabel(p)
+	}
+	hp := &core.HSYNCPARAM{
+		Value: []core.HSYNCPARAMKeyValue{
+			&core.HSYNCPARAMServers{Servers: servers},
+			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(auditor)}},
+		},
+	}
+	prr := &dns.PrivateRR{
+		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: hp,
+	}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	zd.Data.Set(zd.ZoneName, *apex)
+	zd.InstallInitialSnapshot()
+	Zones.Invalidate(zd.ZoneName)
+	return zd
 }
 
 // shortLabel takes an FQDN and returns its first label, used as a

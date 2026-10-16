@@ -638,3 +638,26 @@ Two ways out were named in r18: hold the election among the signing providers on
 
 A unit test on the agent: three providers, one signing, the leader's signer not owning the zone; the DS set is unknown until the signing provider's distribution with key states has arrived, then it is that provider's `ds=1` SEP keys; a `ds` flip in a later distribution changes it and asks for a sync. On the testbed: the case of 2026-09-18 (a one-signer, three-provider zone whose leader does not sign) with the parent getting the DS.
 
+## Amendment 3 (2026-10-12): the agent runs tdns's DS engine
+
+Decided by Johan on 2026-10-12, from tdns-mp #150. This settles the last item of §6's S7, which read "what is left is a DS engine on the agent for the zones tdns owns there, or dropping that half", and adds to §4.1's arrow 1; the text above is left as it was.
+
+### A3.1 What was found
+
+§4.1 says a NOTIFY(CDS) "only needs the CDS to be served, which arrow 1 provides". That is what the parent needs. The sender needs one thing more: tdns's delegation sync asks its DS engine for the CDS before every NOTIFY(CDS) (`SyncZoneDelegationViaNotify`), and with no engine running the answer is "the DS engine is not running" and no NOTIFY goes out. The agent leads and sends, and `StartMPAgent` started no engine. On a test fleet a zone whose parent offered the NOTIFY scheme alone never got its DS, although every provider served the agreed CDS; the same fleet synced its DS to a parent that takes DNS UPDATE.
+
+### A3.2 The rule
+
+- **`StartMPAgent` starts tdns's DS engine, as the signer does:** its queue before any engine that can sign a zone, the engine itself beside the delegation syncher. tdns is not changed, and tdns-mp has no engine of its own.
+- **For a multi-provider zone the agent's engine writes nothing.** §4.1's rule stands ("The agent's DS engine never publishes CDS for an owned zone"), and it holds for every multi-provider zone the agent does not sign: the engine does not follow such a zone, and asked for its CDS it answers with the CDS RRset that the agent's copy of the zone carries. The copy is a transfer from the provider's signer, so that is the CDS the signers serve (arrow 1). While the copy carries no CDS the sync fails, and the leader asks again (§4.1, r17).
+- **The agent's identity zone is the one zone the engine writes a CDS for,** as tdns does for any zone it signs: the CDS of the keys whose `ds` is 1, from the key state worker's next tick on and before a NOTIFY(CDS) goes out, with or without a `parentsync:` block (`cds: false` in the zone's policy stops the first). Where the engine runs, the identity set-up no longer writes a CDS of its own. Its rule was every SEP key of the served DNSKEY RRset, and two writers with two rules disagree as soon as the zone holds a KSK that is published or retired.
+- **The auditor is as it was.** It sets up its identity zone through the same code and runs no DS engine, so its set-up still writes that zone's CDS, and that zone cannot be synced by NOTIFY(CDS). It runs no key state worker either; whether it gets the engine is not decided.
+
+### A3.3 What this does not change, and what is open
+
+- Arrow 2 is as it was: UPDATE and API carry the DS set from the owner's DS intent, and the same things ask for the sync.
+- The engine answers with the CDS the copy carries and does not compare it with the DS set the leader wants. A NOTIFY(CDS) sent while the signers still serve the previous CDS points the parent at that one, and the sync counts as done. Whether the leader must wait until its copy carries the new set, or look at the parent again afterwards, is open.
+
+### A3.4 Tests
+
+In tdns-mp: the agent's start makes the queue and starts the engine (`TestTheAgentStartsTheDSEngine`); the leader's sync over the NOTIFY scheme is refused without the engine and hands the notifier a NOTIFY(CDS) with it, the engine publishing nothing for the zone, asked or unasked (`TestTheLeadersNotifyCDSNeedsTheAgentsDSEngine`, which is also T5.6 with the engine really running); no NOTIFY(CDS) for a copy that carries no CDS (`TestTheLeadersNotifyCDSWaitsForTheSignersCDS`); the identity zone's CDS has one writer (`TestTheIdentityZonesCDSIsTheDSEnginesAlone`). Owed on a fleet, against a parent that offers only the NOTIFY scheme: a change of the DS set is followed by a NOTIFY(CDS) from the leader and the parent's DS follows.
