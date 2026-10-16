@@ -20,6 +20,16 @@ import (
 
 const algRollTo = dns.ECDSAP256SHA256
 
+// algRolls is the driver's algorithm rollovers, a failed read fatal.
+func algRolls(t *testing.T, l *ZoneKeyLifecycle) []AlgRolloverStatus {
+	t.Helper()
+	rolls, err := l.AlgorithmRollovers()
+	if err != nil {
+		t.Fatalf("the algorithm rollovers: %v", err)
+	}
+	return rolls
+}
+
 // keysOfAlg: the zone's own keys of the role and algorithm in the state.
 func (r *driverRig) keysOfAlg(state, role string, alg uint8) []uint16 {
 	r.t.Helper()
@@ -46,7 +56,7 @@ func (r *driverRig) one(step, state, role string, alg uint8) uint16 {
 }
 
 func (r *driverRig) rollOf(role string) *AlgRolloverStatus {
-	for _, st := range r.l.AlgorithmRollovers() {
+	for _, st := range algRolls(r.t, r.l) {
 		if st.Role == role {
 			s := st
 			return &s
@@ -246,7 +256,7 @@ func TestDriverRollsTheAlgorithm(t *testing.T) {
 	if ks := r.keysIn(KeyStateActive, "ZSK"); len(ks) != 1 || ks[0] != y {
 		t.Errorf("active ZSKs at the end %v, want the new one %d", ks, y)
 	}
-	if rolls := r.l.AlgorithmRollovers(); len(rolls) != 0 {
+	if rolls := algRolls(t, r.l); len(rolls) != 0 {
 		t.Errorf("rollovers still reported after the old keys left: %+v", rolls)
 	}
 	// a steady zone on the new algorithm: nothing more minted or moved
@@ -532,7 +542,7 @@ func TestAlgorithmRolloverCancelledBeforeTheNewAlgorithmSigns(t *testing.T) {
 	if a3 == a2 {
 		t.Errorf("the withdrawn standby came back as itself")
 	}
-	if rolls := r.l.AlgorithmRollovers(); len(rolls) != 0 {
+	if rolls := algRolls(t, r.l); len(rolls) != 0 {
 		t.Errorf("rollovers reported after the cancel: %+v", rolls)
 	}
 	if _, to, err := r.l.ConfirmKind(b, "p2", "applied", "", true); err != nil || to != KeyStateRemoved {
@@ -782,7 +792,7 @@ func TestHarnessThreeProvidersRollTheAlgorithm(t *testing.T) {
 			t.Errorf("p1 ends with active %s %v, want one of the new algorithm", role, got)
 		}
 	}
-	if rolls := p1.driver.AlgorithmRollovers(); len(rolls) != 0 {
+	if rolls := algRolls(t, p1.driver); len(rolls) != 0 {
 		t.Errorf("p1 still reports %+v after the drain", rolls)
 	}
 	for _, p := range []*hProvider{p2, p3} {
@@ -1299,4 +1309,30 @@ func TestACancelWithdrawsARolloverRequestMadeDuringAnAlgorithmRollover(t *testin
 		t.Error("a second cancel succeeded with no request pending and the new KSK signing")
 	}
 	r.check("done")
+}
+
+// A cancel that cannot read the keys does nothing. Whether an algorithm
+// rollover is under way decides what the cancel does, and a failed read
+// used to read as none: the request was cleared and the answer said so.
+func TestACancelThatCannotReadTheKeysDoesNothing(t *testing.T) {
+	r := newDriverRig(t, "algcancelread.owned.example.", driverPolicy, "p2")
+	r.wire.parentTTL = time.Hour
+	withdrawalWait(t, r)
+	r.l.RequestRollover("KSK")
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE DnssecKeyStore RENAME TO DnssecKeyStore_away`); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := cancelRollover(r.l, "KSK")
+	if _, rerr := r.kdb.DB.Exec(`ALTER TABLE DnssecKeyStore_away RENAME TO DnssecKeyStore`); rerr != nil {
+		t.Fatal(rerr)
+	}
+	if err == nil {
+		t.Fatalf("a cancel with the keys unreadable: %q and no error, want an error", msg)
+	}
+	if reqs := r.l.RolloverRequests(); len(reqs) != 1 || reqs[0] != "KSK" {
+		t.Errorf("the rollover requests after the failed cancel: %v, want [KSK] (nothing done)", reqs)
+	}
+	if rolls := algRolls(t, r.l); len(rolls) != 1 || rolls[0].Role != "KSK" {
+		t.Errorf("the algorithm rollovers once the keys read again: %+v, want the KSK one", rolls)
+	}
 }

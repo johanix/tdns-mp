@@ -601,13 +601,19 @@ func (e *KeyLifecycleEngine) Status(zone string) (*KeyLifecycleStatus, error) {
 		return nil, err
 	}
 	zd, _ := tdns.Zones.Get(l.Zone)
-	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests(), AlgorithmRollovers: l.AlgorithmRollovers()}
+	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests()}
 	if zd != nil {
 		st.PolicyName = zd.DnssecPolicyName
 	}
+	// the algorithm rollovers from the same read of the rows as the keys:
+	// a read that fails fails the status, and no rollover under way shows
+	// as over
 	l.mu.Lock()
 	st.Policy = l.Policy
 	all, err := l.rows()
+	if err == nil {
+		st.AlgorithmRollovers = l.algRolloversOf(all)
+	}
 	l.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -683,7 +689,13 @@ func (e *KeyLifecycleEngine) CancelRollover(zone, role string) (string, error) {
 
 // cancelRollover is CancelRollover on the zone's driver, the role checked.
 func cancelRollover(l *ZoneKeyLifecycle, r string) (string, error) {
-	for _, roll := range l.AlgorithmRollovers() {
+	rolls, err := l.AlgorithmRollovers()
+	if err != nil {
+		// whether an algorithm rollover is under way decides what a
+		// cancel does: with that unknown, nothing is done
+		return "", fmt.Errorf("zone %s: the %s rollover is not cancelled: %w", l.Zone, r, err)
+	}
+	for _, roll := range rolls {
 		if roll.Role != r {
 			continue
 		}

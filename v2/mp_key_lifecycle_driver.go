@@ -1504,13 +1504,22 @@ type AlgRolloverStatus struct {
 // AlgorithmRollovers lists the algorithm rollovers under way: a role whose
 // key signs, or has signed and not yet left, with another algorithm than
 // the policy's.
-func (l *ZoneKeyLifecycle) AlgorithmRollovers() []AlgRolloverStatus {
+//
+// A failed read of the rows is an error, not an empty list: none would
+// tell the operator that a rollover still under way is over.
+func (l *ZoneKeyLifecycle) AlgorithmRollovers() ([]AlgRolloverStatus, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	all, err := l.rows()
 	if err != nil {
-		return nil
+		return nil, err
 	}
+	return l.algRolloversOf(all), nil
+}
+
+// algRolloversOf is AlgorithmRollovers from rows already read; the caller
+// holds l.mu.
+func (l *ZoneKeyLifecycle) algRolloversOf(all map[uint16]tdns.DnssecKeyWithTimestamps) []AlgRolloverStatus {
 	var out []AlgRolloverStatus
 	for _, role := range []string{"KSK", "ZSK"} {
 		if st, ok := l.algRolloverOf(role, all); ok {

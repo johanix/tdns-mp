@@ -810,7 +810,7 @@ func TestHarnessPropertyRuns(t *testing.T) {
 						t.Errorf("seed %d: %s ends with its active %s on %s, the policy names %s (O4)", seed, p.id, role, dns.AlgorithmToString[got], dns.AlgorithmToString[want])
 					}
 				}
-				if rolls := p.driver.AlgorithmRollovers(); len(rolls) != 0 {
+				if rolls := algRolls(h.t, p.driver); len(rolls) != 0 {
 					t.Errorf("seed %d: %s ends with an algorithm rollover still reported: %+v", seed, p.id, rolls)
 				}
 			}
