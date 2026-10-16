@@ -319,7 +319,7 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 		ar.CleanupZoneRelationships(ZoneName(zone))
 	}
 	deps.Host.OnHsyncMembersAdded = func(zone hsync.ZoneName, added []hsync.PeerID, localAdded bool) {
-		ar.reattachHsyncMemberAdds(conf, ZoneName(zone), added, localAdded)
+		ar.reattachHsyncMemberAdds(ZoneName(zone), added, localAdded)
 	}
 	return hsync.NewEngine(deps, cfg)
 }

@@ -271,107 +271,19 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	lgAgent.Info("local removal from zone; membership is derived, no teardown needed", "zone", zonename)
 }
 
-// reattachHsyncMemberAdds re-homes the per-add CONFIG RFI deferred tasks and the
-// membership-change election kick that used to live in UpdateAgents. It is driven
-// by the member-add set ApplyHsyncDiff already computed (HSYNCPARAM-gated), so a
-// role-less identity neither triggers an RFI nor kicks an election. The plain
-// "remote agent, no relationship" discovery is already handled by ApplyHsyncDiff's
-// MarkNeeded; this only attaches the upstream/downstream RFI tasks.
-func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName, added []hsync.PeerID, localAdded bool) {
+// reattachHsyncMemberAdds re-homes the membership-change election kick that used
+// to live in UpdateAgents. It is driven by the member-add set ApplyHsyncDiff
+// already computed (HSYNCPARAM-gated), so a role-less identity does not kick an
+// election. Discovery of the added members is ApplyHsyncDiff's MarkNeeded, with
+// the periodic ReconcileZone behind it.
+//
+// UpdateAgents also queued a CONFIG upstream/downstream RFI here for a new
+// upstream or downstream. Nothing ever consumed the answer, and since
+// CommandHandler switches on Command the request was dropped unsent, so those
+// tasks are gone. The debug CLI's send-rfi still asks for CONFIG on demand.
+func (ar *AgentRegistry) reattachHsyncMemberAdds(zonename ZoneName, added []hsync.PeerID, localAdded bool) {
 	if len(added) == 0 && !localAdded {
 		return
-	}
-	ourId := AgentId(ar.LocalAgent.Identity)
-
-	var synchedDataUpdateQ chan *SynchedDataUpdate
-	var msgQs *MsgQs
-	if conf.InternalMp.MsgQs != nil {
-		synchedDataUpdateQ = conf.InternalMp.MsgQs.SynchedDataUpdate
-		msgQs = conf.InternalMp.MsgQs
-	}
-
-	// Build label->Identity and Identity->record from the zone's full current
-	// HSYNC3 RRset (the delta alone would miss unchanged upstream records).
-	labelToIdentity := map[string]string{}
-	recByIdentity := map[AgentId]*core.HSYNC3{}
-	if zd, exists := Zones.Get(string(zonename)); exists {
-		if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
-			if hsync3RRset, ok := apex.RRtypes.Get(core.TypeHSYNC3); ok {
-				for _, rr := range hsync3RRset.RRs {
-					if prr, ok := rr.(*dns.PrivateRR); ok {
-						if h3, ok := prr.Data.(*core.HSYNC3); ok {
-							labelToIdentity[h3.Label] = h3.Identity
-							recByIdentity[AgentId(h3.Identity)] = h3
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// If our own record was (re)added and we have an upstream, request its config.
-	if localAdded {
-		if h3 := recByIdentity[ourId]; h3 != nil && h3.Upstream != "." {
-			upstreamIdentity := AgentId(labelToIdentity[h3.Upstream])
-			if upstreamIdentity == "" {
-				lgAgent.Warn("cannot resolve upstream label to identity, skipping", "zone", zonename, "upstream", h3.Upstream)
-			} else {
-				upstreamLabel := h3.Upstream
-				ar.MarkAgentAsNeeded(upstreamIdentity, zonename, &DeferredAgentTask{
-					Precondition: func() bool {
-						// Operational gate reads the canonical transport.Peer
-						// store (END.0); was agent.ApiDetails.State.
-						return ar.isAgentOperational(upstreamIdentity)
-					},
-					Action: func() (bool, error) {
-						lgAgent.Info("executing deferred RFI for upstream data", "upstream", upstreamLabel, "zone", zonename)
-						amp := AgentMgmtPost{
-							MessageType: AgentMsgRfi,
-							RfiType:     "CONFIG",
-							RfiSubtype:  "upstream",
-							Zone:        zonename,
-							Upstream:    upstreamIdentity,
-						}
-						ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
-						return true, nil
-					},
-					Desc: fmt.Sprintf("RFI for upstream data from %q", upstreamLabel),
-				})
-			}
-		}
-	}
-
-	// For each member add whose upstream is us, request its config (downstream).
-	for _, pid := range added {
-		id := AgentId(pid)
-		h3 := recByIdentity[id]
-		if h3 == nil {
-			continue
-		}
-		if AgentId(labelToIdentity[h3.Upstream]) != ourId {
-			continue
-		}
-		downstreamId := id
-		ar.MarkAgentAsNeeded(downstreamId, zonename, &DeferredAgentTask{
-			Precondition: func() bool {
-				// Operational gate reads the canonical transport.Peer store
-				// (END.0); was agent.State.
-				return ar.isAgentOperational(downstreamId)
-			},
-			Action: func() (bool, error) {
-				lgAgent.Info("executing deferred RFI for downstream data", "downstream", downstreamId, "zone", zonename)
-				amp := AgentMgmtPost{
-					MessageType: AgentMsgRfi,
-					RfiType:     "CONFIG",
-					RfiSubtype:  "downstream",
-					Zone:        zonename,
-					Downstream:  downstreamId,
-				}
-				ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
-				return true, nil
-			},
-			Desc: fmt.Sprintf("RFI for downstream data from %q", downstreamId),
-		})
 	}
 
 	// Membership changed (HSYNC3 identity add) — kick a leader election.
