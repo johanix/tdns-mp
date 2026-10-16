@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -87,4 +88,86 @@ func TestALatePendingConfirmationDoesNotUndoTheFinalOne(t *testing.T) {
 			t.Fatalf("the recipient's confirmation reads %q, want accepted", got)
 		}
 	})
+}
+
+// A record that every recipient has accepted is then deleted, in a new
+// distribution. What the recipients said about the addition says nothing
+// about the delete, and the record starts the new distribution with no
+// confirmations. Left in place, the old answers counted: the delete read as
+// confirmed by everybody as soon as the first recipient confirmed it, and the
+// guard against a late "pending" kept them there.
+func TestADeleteWaitsForItsOwnConfirmationsNotTheAdditions(t *testing.T) {
+	const (
+		zone   = ZoneName("delete.after.add.example.")
+		us     = AgentId("agent.us.example.")
+		first  = "combiner.us.example."
+		quick  = "auditor.example."
+		addID  = "11111111"
+		delID  = "22222222"
+		absent = "33333333"
+	)
+	rr, err := dns.NewRR("delete.after.add.example. 3600 IN NS ns9.provider.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &TrackedRRset{Tracked: []TrackedRR{{
+		RR:                 rr,
+		State:              RRStatePending,
+		DistributionID:     addID,
+		ExpectedRecipients: []string{first, quick},
+	}}}
+	zdr.Tracking[zone] = map[AgentId]map[uint16]*TrackedRRset{us: {dns.TypeNS: set}}
+	tr := &set.Tracked[0]
+
+	// The addition, confirmed by both.
+	for _, source := range []string{first, quick} {
+		zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: addID, Zone: zone, Source: source, Status: "ok",
+			AppliedRecords: []string{rr.String()}}, nil)
+	}
+	if tr.State != RRStateAccepted {
+		t.Fatalf("precondition: the record's state after both accepted it is %v", tr.State)
+	}
+
+	// The delete, a new distribution to the same two recipients.
+	del := dns.Copy(rr)
+	del.Header().Class = dns.ClassNONE
+	zdr.markDeletePending(set, del, delID, time.Now())
+	zdr.setExpectedRecipients(zone, us, delID, []string{first, quick})
+	if len(tr.Confirmations) != 0 {
+		t.Fatalf("the record starts the delete with the confirmations of the addition: %v", tr.Confirmations)
+	}
+	removed := func(source string) *ConfirmationDetail {
+		return &ConfirmationDetail{DistributionID: delID, Zone: zone, Source: source, Status: "ok", RemovedRecords: []string{rr.String()}}
+	}
+
+	// One recipient confirms the delete, its final answer before its
+	// "pending". The other has said nothing about the delete yet.
+	zdr.ProcessConfirmation(removed(quick), nil)
+	zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: delID, Zone: zone, Source: quick, Status: "PENDING"}, nil)
+	if tr.State != RRStatePendingRemoval {
+		t.Fatalf("after one of two recipients confirmed the delete the record's state is %v, want it still pending removal: confirmations %v",
+			tr.State, tr.Confirmations)
+	}
+	if got := tr.Confirmations[quick].Status; got != "removed" {
+		t.Errorf("the recipient that confirmed the delete reads %q, want removed", got)
+	}
+
+	// The other one: "pending", then its final answer. Now it is removed.
+	zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: delID, Zone: zone, Source: first, Status: "PENDING"}, nil)
+	if got := tr.Confirmations[first].Status; got != "pending" {
+		t.Errorf("the other recipient's PENDING for the delete reads %q, want pending", got)
+	}
+	if tr.State != RRStatePendingRemoval {
+		t.Fatalf("after a PENDING the record's state is %v, want pending removal", tr.State)
+	}
+	zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: absent, Zone: zone, Source: first, Status: "PENDING"}, nil)
+	zdr.ProcessConfirmation(removed(first), nil)
+	if tr.State != RRStateRemoved {
+		t.Fatalf("with both recipients' confirmations of the delete in, the record's state is %v, want removed: confirmations %v",
+			tr.State, tr.Confirmations)
+	}
 }
