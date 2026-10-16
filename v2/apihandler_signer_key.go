@@ -14,11 +14,12 @@ import (
 )
 
 type SignerKeyPost struct {
-	Command string `json:"command"`
-	Zone    string `json:"zone,omitempty"`
-	Role    string `json:"role,omitempty"`
-	KeyId   uint16 `json:"keyid,omitempty"`
-	Policy  string `json:"policy,omitempty"`
+	Command   string `json:"command"`
+	Zone      string `json:"zone,omitempty"`
+	Role      string `json:"role,omitempty"`
+	KeyId     uint16 `json:"keyid,omitempty"`
+	Policy    string `json:"policy,omitempty"`
+	Algorithm string `json:"algorithm,omitempty"` // policy-algorithm: the role's new algorithm, by name
 }
 
 type SignerKeyResponse struct {
@@ -31,7 +32,7 @@ type SignerKeyResponse struct {
 }
 
 // APIsignerKey serves the replacement commands: zones, status, rollover,
-// rollover-cancel, retry, withdraw, policy-set.
+// rollover-cancel, retry, withdraw, policy-set, policy-algorithm.
 func (conf *Config) APIsignerKey() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SignerKeyPost
@@ -69,6 +70,8 @@ func (conf *Config) APIsignerKey() func(w http.ResponseWriter, r *http.Request) 
 			resp.Msg, err = e.Withdraw(req.Zone, req.KeyId)
 		case "policy-set":
 			resp.Msg, err = e.SetPolicy(r.Context(), req.Zone, req.Policy)
+		case "policy-algorithm":
+			resp.Msg, err = e.SetAlgorithm(req.Zone, req.Role, req.Algorithm)
 		default:
 			err = fmt.Errorf("unknown signer key command: %q", req.Command)
 		}

@@ -9237,17 +9237,31 @@ inherited: |
 
 === tdns-mpcli signer key policy
 use: policy
-short: The policy the state machine applies; --set binds another
+short: The policy the state machine applies; --set binds another, --ksk-algorithm and --zsk-algorithm start an algorithm rollover
 long: |
-  Without --set, the owner's policy fields as the state machine applies them
+  Without flags, the owner's policy fields as the state machine applies them
   (algorithms, lifetimes, standby counts, propagation delay, withdrawal
   margin, resend interval). With --set NAME, binds tdns's DNSSEC policy NAME
   to the zone on the owner's behalf: lifetimes, standby counts and margin
   follow at once. A policy that changes the mode, an algorithm or the DS
   model is refused: that is a rollover, not a binding.
+  
+  With --ksk-algorithm or --zsk-algorithm, changes the owner's algorithm for
+  the role, which starts an algorithm rollover by the state machine: a key
+  of the new algorithm is minted, distributed to the other signing providers,
+  published and propagated, and signs beside the old one; a new KSK signs
+  only once the parent has served its DS for the DS TTL; the old KSK then goes
+  on signing with its DS withdrawn until the parent has not served that DS for
+  the DS TTL, and retires; the old ZSK keeps signing until the KSK side is done,
+  or, in a ZSK-only rollover, for a signature lifetime beside its successor.
+  The old keys then leave as any retired key. signer key status shows the
+  step; signer key rollover cancel takes the algorithm back while nothing of
+  the new algorithm signs.
 flags: |
-      --set string    Name of the DNSSEC policy to bind
-  -z, --zone string   Zone name
+      --ksk-algorithm string   The KSK algorithm, by name (ED25519, ECDSAP256SHA256, ...): a change starts an algorithm rollover
+      --set string             Name of the DNSSEC policy to bind
+  -z, --zone string            Zone name
+      --zsk-algorithm string   The ZSK algorithm, by name: a change starts an algorithm rollover
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output

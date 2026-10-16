@@ -24,14 +24,15 @@ func flagsOf(f tdns.KeyRowFlags) string {
 	return b(f.Pub) + b(f.Sign) + ds
 }
 
-// The document's §1, for a KSK (retired: on entry / withdrawn) and a ZSK.
+// The document's §1, for a KSK (retired, and active in an algorithm rollover:
+// on entry / withdrawn) and a ZSK.
 func TestKeyStateColumnsFollowTheTable(t *testing.T) {
 	want := map[string][3]string{ // state: KSK on entry, KSK withdrawn, ZSK
 		KeyStateCreated:   {"000", "000", "000"},
 		KeyStateMpdist:    {"100", "100", "100"},
 		KeyStatePublished: {"100", "100", "100"},
 		KeyStateStandby:   {"101", "101", "100"},
-		KeyStateActive:    {"111", "111", "110"},
+		KeyStateActive:    {"111", "110", "110"}, // withdrawn: the old algorithm's KSK signing on with its DS withdrawn (T10a)
 		KeyStateRetired:   {"101", "100", "100"},
 		KeyStateMpremove:  {"000", "000", "000"},
 		KeyStateRemoved:   {"000", "000", "000"},
@@ -82,7 +83,10 @@ func TestTransitionTableMatchesTheDocument(t *testing.T) {
 		{"T8", KeyStatePublished, KeyStateStandby, EvPropagated},
 		{"T9", KeyStateStandby, KeyStateActive, EvPromote},
 		{"T10", KeyStateActive, KeyStateRetired, EvSuccessorActive},
+		{"T10a", KeyStateActive, KeyStateActive, EvSuccessorActive},
 		{"T11", KeyStateRetired, KeyStateRetired, EvDSGone},
+		{"T11a", KeyStateActive, KeyStateActive, EvDSGone},
+		{"T10b", KeyStateActive, KeyStateRetired, EvDSExpired},
 		{"T12", KeyStateRetired, KeyStateMpremove, EvMargin},
 		{"T13", KeyStateMpremove, KeyStateRemoved, EvRemovalApplied},
 		{"T13'", KeyStateMpremove, KeyStateRemoved, EvDistributed},
@@ -90,6 +94,7 @@ func TestTransitionTableMatchesTheDocument(t *testing.T) {
 		{"T14b", KeyStateMpremove, KeyStateMpremove, EvSignersChanged},
 		{"T15", "*", "*", EvRestart},
 		{"T18", KeyStateStandby, KeyStateStandby, EvDSPresent},
+		{"T19", KeyStateActive, KeyStateRetired, EvAlgSuperseded},
 	}
 	if len(doc) != len(KeyLifecycleTable) {
 		t.Errorf("the table has %d rows, the document %d", len(KeyLifecycleTable), len(doc))
