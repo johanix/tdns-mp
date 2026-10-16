@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 var lgGossip *slog.Logger = tdns.Logger("gossip")
@@ -21,9 +22,10 @@ func shortHash(h string) string {
 // deepCopyMemberState returns an independent copy of a MemberState.
 func deepCopyMemberState(src *MemberState) *MemberState {
 	dst := &MemberState{
-		Identity:     src.Identity,
-		Timestamp:    src.Timestamp,
-		BeatInterval: src.BeatInterval,
+		Identity:         src.Identity,
+		Timestamp:        src.Timestamp,
+		BeatInterval:     src.BeatInterval,
+		PropagationDelay: src.PropagationDelay,
 	}
 	if src.PeerStates != nil {
 		dst.PeerStates = make(map[string]string, len(src.PeerStates))
@@ -118,11 +120,54 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		Zones:        zones,
 		Timestamp:    time.Now(),
 		BeatInterval: beatInterval,
+		// whole seconds on the wire, rounded up: a delay below a second is
+		// not announced as none
+		PropagationDelay: uint32((gst.propagationDelay + time.Second - 1) / time.Second),
 	}
 	if gst.localWritten == nil {
 		gst.localWritten = make(map[string]bool)
 	}
 	gst.localWritten[groupHash] = true
+}
+
+// SetPropagationDelay sets this provider's propagation delay: how long a
+// change needs to reach all of its nameservers
+// (dnssec.kasp.propagation-delay). It rides in gossip, in our own row of
+// every group, so that the leader of a zone knows how long the slowest of
+// the zone's serving providers needs before a NOTIFY to the parent is worth
+// sending (delegationNotifyWait).
+func (gst *GossipStateTable) SetPropagationDelay(d time.Duration) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.propagationDelay = max(d, 0)
+}
+
+// PropagationDelay is this provider's own propagation delay, as set.
+func (gst *GossipStateTable) PropagationDelay() time.Duration {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	return gst.propagationDelay
+}
+
+// AnnouncedPropagationDelay is the propagation delay a member announces in
+// its own row: the newest row of the member over all groups, since the value
+// is the provider's and not a group's. Not known: the member has no row
+// here, or announces none.
+func (gst *GossipStateTable) AnnouncedPropagationDelay(identity string) (time.Duration, bool) {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	var newest *MemberState
+	for _, members := range gst.States {
+		for id, ms := range members {
+			if ms != nil && dns.Fqdn(id) == dns.Fqdn(identity) && (newest == nil || ms.Timestamp.After(newest.Timestamp)) {
+				newest = ms
+			}
+		}
+	}
+	if newest == nil || newest.PropagationDelay == 0 {
+		return 0, false
+	}
+	return time.Duration(newest.PropagationDelay) * time.Second, true
 }
 
 // MergeGossip merges received gossip into the local state table.

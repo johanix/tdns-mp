@@ -113,6 +113,123 @@ func rrsetEqual(a, b core.RRset) bool {
 	return true
 }
 
+// --- One CSYNC per zone ------------------------------------------------------
+//
+// A zone's CSYNC is made by the zone's delegation sync leader and reaches
+// every provider's combiner as a contribution (tdns-mp #175). The leadership
+// moves, so over time a combiner is sent CSYNC records by more than one
+// agent. It holds and serves one: the one with the newest serial field, in
+// the order of RFC 1982. An older one is refused when it arrives late, and
+// dropped when a newer one arrives.
+//
+// A combiner of an earlier build made a CSYNC itself, stored under its own
+// identity, with the zone's SOA serial in it. That number is not one of the
+// leaders' and is not compared with theirs: the combiner's own CSYNC is older
+// than any that an agent contributes. Until one arrives it is served as it
+// was, so a start under a new build changes nothing in the zone.
+
+// serialNewer: a is after b in the serial number arithmetic of RFC 1982.
+func serialNewer(a, b uint32) bool {
+	return a != b && a-b < 1<<31
+}
+
+// heldCsync is a CSYNC at an owner name and the sender it is stored under.
+type heldCsync struct {
+	sender string
+	rr     *dns.CSYNC
+}
+
+// supersedes: h is to be served rather than o. self is this combiner's own
+// identity.
+func (h heldCsync) supersedes(o heldCsync, self string) bool {
+	if (h.sender == self) != (o.sender == self) {
+		return o.sender == self
+	}
+	return serialNewer(h.rr.Serial, o.rr.Serial)
+}
+
+// combinerSelfID is this combiner's own identity, the sender name under
+// which an earlier build stored the CSYNC it made.
+func (mpzd *MPZoneData) combinerSelfID() string {
+	if mpzd.MP == nil || mpzd.MP.MultiProvider == nil || mpzd.MP.MultiProvider.Identity == "" {
+		return ""
+	}
+	return dns.Fqdn(mpzd.MP.MultiProvider.Identity)
+}
+
+// csyncsHeld lists the CSYNC records contributed at an owner, with their
+// senders. The caller holds the zone's lock, or is the only one at work.
+func (mpzd *MPZoneData) csyncsHeld(owner string) []heldCsync {
+	var held []heldCsync
+	if mpzd.MP == nil {
+		return held
+	}
+	for sender, owners := range mpzd.MP.AgentContributions {
+		rrset, ok := owners[owner][dns.TypeCSYNC]
+		if !ok {
+			continue
+		}
+		for _, rr := range rrset.RRs {
+			if csync, ok := rr.(*dns.CSYNC); ok {
+				held = append(held, heldCsync{sender: sender, rr: csync})
+			}
+		}
+	}
+	return held
+}
+
+// csyncToServe is the one CSYNC at an owner that the zone serves: none of
+// the others supersedes it. The caller holds the zone's lock.
+func (mpzd *MPZoneData) csyncToServe(owner string) (heldCsync, bool) {
+	held := mpzd.csyncsHeld(owner)
+	if len(held) == 0 {
+		return heldCsync{}, false
+	}
+	self := mpzd.combinerSelfID()
+	best := held[0]
+	for _, h := range held[1:] {
+		// two records neither of which supersedes the other read the same
+		// but for who sent them; the sender's name makes the choice the
+		// same on every pass
+		if h.supersedes(best, self) || (!best.supersedes(h, self) && h.sender < best.sender) {
+			best = h
+		}
+	}
+	return best, true
+}
+
+// csyncVerdict is what a combiner does with a CSYNC that a sender asks it to
+// hold in the place of what that sender had: refuse it, with the reason, if
+// another sender's CSYNC supersedes it; otherwise take it, and drop those of
+// the other senders, which it supersedes or equals. More than one CSYNC in a
+// contribution is refused: a zone has one.
+func (mpzd *MPZoneData) csyncVerdict(sender, owner string, rrs []dns.RR) (reason string, drop []string) {
+	if len(rrs) != 1 {
+		return fmt.Sprintf("%d CSYNC records in one contribution: a zone has one", len(rrs)), nil
+	}
+	csync, ok := rrs[0].(*dns.CSYNC)
+	if !ok {
+		return "not a CSYNC record", nil
+	}
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	self := mpzd.combinerSelfID()
+	arriving := heldCsync{sender: sender, rr: csync}
+	for _, h := range mpzd.csyncsHeld(owner) {
+		if h.sender == sender {
+			continue
+		}
+		if h.supersedes(arriving, self) {
+			return fmt.Sprintf("an older CSYNC than the one held for the zone: serial %d, held is %d from %s",
+				csync.Serial, h.rr.Serial, h.sender), nil
+		}
+		if !containsString(drop, h.sender) {
+			drop = append(drop, h.sender)
+		}
+	}
+	return "", drop
+}
+
 // --- The combiner's zone writes -------------------------------------------
 //
 // The combiner's state (AgentContributions, merged into CombinerData) is
@@ -1013,6 +1130,14 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 				merged[owner] = make(ownerRRtypes)
 			}
 			for rrtype, rrset := range rrtypeMap {
+				if rrtype == dns.TypeCSYNC {
+					// one CSYNC per owner, whoever sent the others: also
+					// for what an earlier build left in the store
+					if serve, ok := mpzd.csyncToServe(owner); ok && serve.sender == agentID {
+						merged[owner][rrtype] = []dns.RR{serve.rr}
+					}
+					continue
+				}
 				merged[owner][rrtype] = append(merged[owner][rrtype], rrset.RRs...)
 				if mpzd.Debug {
 					mpzd.Logger.Printf("rebuildCombinerData: Zone %s: agent %s contributes %d %s RRs for owner %q",
