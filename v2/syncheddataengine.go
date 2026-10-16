@@ -1012,6 +1012,24 @@ func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *Zo
 	}
 }
 
+// beginDistribution puts a tracked record under a new distribution: its state,
+// the distribution it now waits for, and no confirmations.
+//
+// The confirmations are those of the distribution the record carries. What
+// the recipients said about an earlier one says nothing about this one, and
+// left in place it counted: a record that every recipient had accepted, and
+// that was then deleted, read as confirmed by all of them as soon as the
+// first one confirmed the delete. A "pending" that arrives for the new
+// distribution used to write over the old answer, which hid this most of the
+// time; it is no reason to keep the old answers.
+func (tr *TrackedRR) beginDistribution(state RRState, distID string, now time.Time) {
+	tr.State = state
+	tr.Reason = ""
+	tr.DistributionID = distID
+	tr.Confirmations = nil
+	tr.UpdatedAt = now
+}
+
 // markAddPending marks a ClassINET RR as pending (addition awaiting confirmation).
 func (zdr *ZoneDataRepo) markAddPending(tracked *TrackedRRset, rr dns.RR, distID string, now time.Time) {
 	rrStr := rr.String()
@@ -1021,10 +1039,7 @@ func (zdr *ZoneDataRepo) markAddPending(tracked *TrackedRRset, rr dns.RR, distID
 				lgEngine.Debug("markAddPending: RR already accepted, skipping", "rr", rrStr)
 				return
 			}
-			tracked.Tracked[i].State = RRStatePending
-			tracked.Tracked[i].Reason = ""
-			tracked.Tracked[i].DistributionID = distID
-			tracked.Tracked[i].UpdatedAt = now
+			tracked.Tracked[i].beginDistribution(RRStatePending, distID, now)
 			return
 		}
 	}
@@ -1046,10 +1061,7 @@ func (zdr *ZoneDataRepo) markDeletePending(tracked *TrackedRRset, rr dns.RR, dis
 
 	for i := range tracked.Tracked {
 		if tracked.Tracked[i].RR.String() == matchStr {
-			tracked.Tracked[i].State = RRStatePendingRemoval
-			tracked.Tracked[i].Reason = ""
-			tracked.Tracked[i].DistributionID = distID
-			tracked.Tracked[i].UpdatedAt = now
+			tracked.Tracked[i].beginDistribution(RRStatePendingRemoval, distID, now)
 			lgEngine.Debug("marked RR as pending-removal", "rr", matchStr, "distID", distID)
 			return
 		}
@@ -1062,10 +1074,7 @@ func (zdr *ZoneDataRepo) markAllDeletePending(tracked *TrackedRRset, distID stri
 	transitioned := 0
 	for i := range tracked.Tracked {
 		if tracked.Tracked[i].State == RRStateAccepted || tracked.Tracked[i].State == RRStatePending {
-			tracked.Tracked[i].State = RRStatePendingRemoval
-			tracked.Tracked[i].Reason = ""
-			tracked.Tracked[i].DistributionID = distID
-			tracked.Tracked[i].UpdatedAt = now
+			tracked.Tracked[i].beginDistribution(RRStatePendingRemoval, distID, now)
 			transitioned++
 		}
 	}
@@ -1228,6 +1237,13 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 	// First NOTIFY in two-phase protocol: status="PENDING" means the remote peer
 	// received the sync and is processing it.
+	//
+	// It says nothing once the same peer's final answer is in. The two are
+	// sent by different goroutines at the peer, and a peer that answers at
+	// once (an auditor, a combiner with nothing to do) can have its final
+	// answer arrive first. Written over that answer, the late "pending" left
+	// the record waiting for a confirmation that had already come and would
+	// not come again: the operation stayed pending at its origin for good.
 	if detail.Status == "PENDING" {
 		lgEngine.Debug("pending confirmation (delivery confirmed, awaiting final response)", "source", source, "distID", detail.DistributionID, "zone", detail.Zone)
 		zoneTracking := zdr.Tracking[detail.Zone]
@@ -1235,9 +1251,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 			for _, trackedRRset := range agentTracking {
 				for i := range trackedRRset.Tracked {
 					tr := &trackedRRset.Tracked[i]
-					if tr.DistributionID == detail.DistributionID {
-						setConfirmation(tr, "pending", "")
+					if tr.DistributionID != detail.DistributionID {
+						continue
 					}
+					if c, ok := tr.Confirmations[source]; ok && c.Status != "pending" {
+						lgEngine.Debug("pending confirmation after the same source's final one, ignored", "source", source, "distID", detail.DistributionID, "zone", detail.Zone, "final", c.Status)
+						continue
+					}
+					setConfirmation(tr, "pending", "")
 				}
 			}
 		}
