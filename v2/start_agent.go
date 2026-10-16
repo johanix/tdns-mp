@@ -389,6 +389,14 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return err
 	})
 
+	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so
+	// the leader can send NOTIFY(CDS), but writes no CDS for a
+	// multi-provider zone: it holds none of the zone's keys and signs none
+	// of them, so the CDS such a zone serves is the signers' (design §4.1,
+	// arrow 1), and the DS set the agent hands the parent goes through the
+	// owner's DS-intent provider (arrow 2). The one zone the engine writes
+	// a CDS for is the agent's own identity zone (T5.6).
+	//
 	// Agent-specific engines (the hsync data engine itself was constructed
 	// above, before RefreshEngine)
 	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
