@@ -1460,6 +1460,12 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("PrepareKeyCache failed: %v", err)
 	}
 
+	// The keystore files the key under its KEY RR's owner, so a key for
+	// another name must not be added in keyName's place.
+	if pkc.KeyType != dns.TypeKEY || dns.CanonicalName(pkc.KeyRR.Hdr.Name) != dns.CanonicalName(keyName) {
+		return fmt.Errorf("peer sent a key for %q, not a KEY for %q", pkc.KeyRR.Hdr.Name, keyName)
+	}
+
 	// Import via Sig0KeyMgmt "add" (also adds to TrustStore)
 	kp := tdns.KeystorePost{
 		Command:         "sig0-mgmt",

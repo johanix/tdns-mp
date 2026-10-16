@@ -155,8 +155,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		KeystateInventory: make(chan *KeystateInventoryMsg, 4),
 		KeystateSignal:    make(chan *KeystateSignalMsg, 4),
 		EditsResponse:     make(chan *EditsResponseMsg, 4),
-		ConfigResponse:    make(chan *ConfigResponseMsg, 4),
-		AuditResponse:     make(chan *AuditResponseMsg, 4),
 		StatusUpdate:      make(chan *StatusUpdateMsg, 4),
 	}
 
