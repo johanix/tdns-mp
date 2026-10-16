@@ -900,6 +900,14 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	}
 	if len(payload.Zones) > 0 {
 		report.Zone = ZoneName(payload.Zones[0])
+		// The beat names every zone its sender shares with us, in no
+		// particular order (beatZones). Zone alone would book it for
+		// whichever came first; the report carries them all, for the
+		// consumer that keeps liveness per zone (tdns-mp #153).
+		report.Zones = make([]ZoneName, len(payload.Zones))
+		for i, z := range payload.Zones {
+			report.Zones[i] = ZoneName(z)
+		}
 	}
 
 	if tm.msgQs == nil {
@@ -983,6 +991,17 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// Messages reaching routeSyncMessage have passed middleware auth.
 	lgTransport.Debug("processing authorized DNS message", "msgType", msgTypeStr, "sender", senderID, "zone", zone, "transportSender", msg.TransportSender)
 
+	// The transport names the sender of every message it routes: on the DNS
+	// mechanism the identity whose key opened the payload. A message without
+	// one did not come through that, and all there is to go on is the name
+	// its payload gives. That is not enough: what is done with the message
+	// depends on who sent it (a CSYNC is taken only from the zone's leader),
+	// and a payload can name anybody. It is dropped.
+	if msg.TransportSender == "" {
+		lgTransport.Warn("sync message with no transport sender, dropped", "msgType", msgTypeStr, "sender", senderID, "zone", zone)
+		return
+	}
+
 	// Record inbound liveness ONLY — receiving a message proves they can
 	// reach us, not that we can reach them. State is set by the outbound
 	// beat path (SendBeatWithFallback), never on inbound receipt.
@@ -993,9 +1012,6 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// the originator for forwarded messages. The combiner needs this to send confirmations
 	// back to the agent that actually delivered the message, not the original author.
 	deliveredBy := msg.TransportSender
-	if deliveredBy == "" {
-		deliveredBy = senderID // Fallback for direct delivery
-	}
 
 	// Ensure the transport sender (deliverer) has a PeerRegistry entry with an address.
 	// For forwarded messages, the deliverer may be a remote agent not pre-registered in this

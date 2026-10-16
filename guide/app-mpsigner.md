@@ -48,6 +48,14 @@ material is in the topical guides:
    [Initial Provider Configuration](initial-provider-configuration.md)
    for the full layout.
 
+4. **The serial follows who signs.** A zone the signer
+   signs has a serial of the signer's own. A zone it
+   only serves, signed by another provider, is relayed
+   with the upstream signer's SOA, serial and RRSIG
+   unchanged. See
+   [Operation and Debugging §4.4](operation-and-debugging.md#44-the-soa-serial-a-signer-serves),
+   also for what an upgrade needs.
+
 ## See Also
 
 - [Architecture](multi-provider-architecture.md)
