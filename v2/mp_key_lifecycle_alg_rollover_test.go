@@ -1336,3 +1336,95 @@ func TestACancelThatCannotReadTheKeysDoesNothing(t *testing.T) {
 		t.Errorf("the algorithm rollovers once the keys read again: %+v, want the KSK one", rolls)
 	}
 }
+
+// A roll back while the original key still signs: the operator changes the
+// ZSK algorithm back during the first roll's signature-lifetime wait. The
+// returning algorithm's key never left the DNSKEY RRset and signed every
+// RRset throughout, so the wait for the key being left runs from that key's
+// own stamp (signsInThisRoll counts an active key of the policy's algorithm,
+// whatever its age). With the returning key younger than a signature
+// lifetime, the other algorithm's ZSK waits out the rest of it; with it
+// older, that ZSK retires on the next tick. Nothing is minted or promoted
+// for the roll back: the returning algorithm already signs.
+func TestARollBackWhileTheOriginalKeyStillSignsEndsOnThatKeysStamp(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		aged    time.Duration // how long the original ZSK has signed before the first change
+		atOnce  bool
+		zoneTag string
+	}{
+		{"the original key younger than a signature lifetime", 0, false, "rbyoung"},
+		{"the original key older than a signature lifetime", driverPolicy.SigLifetime + time.Hour, true, "rbold"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDriverRig(t, c.zoneTag+".owned.example.", driverPolicy, "p2")
+			r.stampWithRigClock()
+			r.wire.parentTTL = time.Hour
+			step := driverPolicy.PropagationDelay + r.wire.ttl + time.Second
+			a, z := bootstrapKSK(t, r)
+			r.wire.parentDS[a] = true
+			r.clock.Advance(c.aged)
+			// there: a ZSK of the new algorithm signs beside z
+			r.setAlgorithms("there", algRollTo, "ZSK")
+			r.tick("there: minted")
+			y := r.one("there: minted", KeyStateMpdist, "ZSK", algRollTo)
+			r.confirmAll("there: applied", y)
+			r.clock.Advance(step)
+			r.tick("there: propagated")
+			r.tick("there: signs")
+			if st, sz := r.state(y), r.state(z); st != KeyStateActive || sz != KeyStateActive {
+				t.Fatalf("there: the new ZSK %d %s, the original %d %s, want both active", y, st, z, sz)
+			}
+			// and back, in the wait: z is the policy's algorithm again and
+			// signs; y is the key being left
+			r.setAlgorithms("back", dns.ED25519, "ZSK")
+			r.tick("back")
+			for _, state := range []string{KeyStateCreated, KeyStateMpdist, KeyStatePublished, KeyStateStandby} {
+				if ks := r.keysOfAlg(state, "ZSK", dns.ED25519); len(ks) != 0 {
+					t.Fatalf("back: a ZSK of the returning algorithm in %s: %v, want none (z signs)", state, ks)
+				}
+			}
+			if st := r.state(z); st != KeyStateActive {
+				t.Fatalf("back: the original ZSK %d: %s, want active", z, st)
+			}
+			if c.atOnce {
+				if st := r.state(y); !gone(st) {
+					t.Fatalf("back: the ZSK %d with the original key signing for longer than a signature lifetime: %s, want retired at once", y, st)
+				}
+			} else {
+				if st := r.state(y); st != KeyStateActive {
+					t.Fatalf("back: the ZSK %d with the original key signing for less than a signature lifetime: %s, want active", y, st)
+				}
+				// the wait counts from z's stamp: it ends a signature
+				// lifetime after z began signing, not after the roll back
+				r.clock.Advance(driverPolicy.SigLifetime - step - time.Hour)
+				r.tick("back: an hour short of z's signature lifetime")
+				if st := r.state(y); st != KeyStateActive {
+					t.Fatalf("back: the ZSK %d an hour short of a signature lifetime from z's stamp: %s, want active", y, st)
+				}
+				r.clock.Advance(time.Hour + time.Minute)
+				r.tick("back: z's signature lifetime passed")
+				if st := r.state(y); !gone(st) {
+					t.Fatalf("back: the ZSK %d a signature lifetime after z began signing: %s, want retired", y, st)
+				}
+			}
+			if st := r.state(z); st != KeyStateActive {
+				t.Fatalf("the original ZSK %d at the end: %s, want active", z, st)
+			}
+			// the roll is reported until the other signer confirms y's
+			// removal; then it is over
+			r.clock.Advance(driverPolicy.Margin + time.Second)
+			r.tick("the margin")
+			if st := r.state(y); st != KeyStateMpremove {
+				t.Fatalf("the ZSK %d a margin after it retired: %s, want mpremove", y, st)
+			}
+			if _, to, err := r.l.ConfirmKind(y, "p2", "applied", "", true); err != nil || to != KeyStateRemoved {
+				t.Fatalf("the removal of %d: to=%s err=%v", y, to, err)
+			}
+			if st := r.rollOf("ZSK"); st != nil {
+				t.Errorf("a ZSK algorithm rollover still reported once the key being left is removed: %+v", st)
+			}
+			r.check("done")
+		})
+	}
+}
