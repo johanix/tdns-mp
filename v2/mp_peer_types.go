@@ -109,6 +109,7 @@ type PeerEditsRequest struct {
 	Zone         string                         // Zone (FQDN)
 	AgentRecords map[string]map[string][]string // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         // Optional status
+	Nonce        string                         // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp    time.Time
 }
 

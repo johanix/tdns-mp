@@ -15,9 +15,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// rfiWaiters hands the answer to a two-phase RFI (CONFIG, AUDIT) to the
-// request that asked for it. The answer arrives as a message of its own, so
-// it is matched on what it carries: the sender the transport established,
+// rfiWaiters hands the answer to a two-phase RFI (EDITS, CONFIG, AUDIT) to
+// the request that asked for it. The answer arrives as a message of its own,
+// so it is matched on what it carries: the sender the transport established,
 // the zone, for CONFIG the subtype, and the nonce of the RFI it answers.
 // Each request sends a nonce of its own, so an answer to an earlier request
 // that timed out does not answer a later one. An answer no request waits
@@ -33,10 +33,11 @@ func rfiWaitKey(sender, zone, subtype, nonce string) string {
 	return dns.CanonicalName(sender) + " " + dns.CanonicalName(zone) + " " + subtype + " " + nonce
 }
 
-// rfiAnswerSender returns the sender a CONFIG or AUDIT answer is matched on:
-// the one the transport established. The identity the payload names is a
-// claim. An answer that names an agent other than the one that sent it, or
-// that came with no transport sender, is not matched (ok is false).
+// rfiAnswerSender returns the sender an EDITS, CONFIG or AUDIT answer is
+// matched on: the one the transport established. The identity the payload
+// names is a claim. An answer that names an agent other than the one that
+// sent it, or that came with no transport sender, is not matched (ok is
+// false).
 func rfiAnswerSender(msg *transport.IncomingMessage, named string) (sender string, ok bool) {
 	if msg.TransportSender == "" {
 		return "", false

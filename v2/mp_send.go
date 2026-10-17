@@ -109,14 +109,21 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 
 // editsAppMessage mirrors DNSTransport.Edits (core.AgentEditsPost).
 func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessage, error) {
-	payload := &core.AgentEditsPost{
-		MessageType:  core.AgentMsgEdits,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peerID,
-		Zone:         req.Zone,
-		AgentRecords: req.AgentRecords,
-		Message:      req.Message,
-		Time:         req.Timestamp,
+	// core.AgentEditsPost has no nonce; the answer carries the RFI's.
+	payload := &struct {
+		core.AgentEditsPost
+		Nonce string `json:"nonce,omitempty"`
+	}{
+		AgentEditsPost: core.AgentEditsPost{
+			MessageType:  core.AgentMsgEdits,
+			MyIdentity:   req.SenderID,
+			YourIdentity: peerID,
+			Zone:         req.Zone,
+			AgentRecords: req.AgentRecords,
+			Message:      req.Message,
+			Time:         req.Timestamp,
+		},
+		Nonce: req.Nonce,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

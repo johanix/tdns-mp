@@ -1130,7 +1130,11 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("EDITS response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone)
+		return
+	}
 	lgTransport.Debug("processing EDITS", "sender", senderID, "zone", payload.Zone)
 
 	if tm.msgQs == nil {
@@ -1144,7 +1148,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		AgentRecords: payload.AgentRecords,
 	}
 
-	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", ""), editsMsg) {
+	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
 		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "agents", len(payload.AgentRecords))
 	} else {
 		lgTransport.Warn("EDITS response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone)
@@ -2648,7 +2652,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) error {
+func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonce string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
@@ -2665,13 +2669,12 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	peer := tm.GetOrCreatePeer(combiner)
 
-	syncReq := &PeerSyncRequest{
-		SenderID:    tm.LocalID,
-		Zone:        zone,
-		Timestamp:   time.Now(),
-		MessageType: "rfi",
+	syncReq := rfiSyncRequest(tm.LocalID, &AgentMsgPost{
+		MessageType: AgentMsgRfi,
+		Zone:        ZoneName(zone),
 		RfiType:     rfiType,
-	}
+		Nonce:       nonce,
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

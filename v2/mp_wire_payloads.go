@@ -129,6 +129,7 @@ type DnsEditsPayload struct {
 	Zone         string                         `json:"Zone"`                   // Zone (FQDN)
 	AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"` // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         `json:"Message,omitempty"`      // Optional status message
+	Nonce        string                         `json:"nonce,omitempty"`        // the nonce of the RFI EDITS this answers
 
 	Timestamp int64 `json:"timestamp"` // Unix timestamp
 

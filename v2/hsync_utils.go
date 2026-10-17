@@ -448,13 +448,15 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 		return
 	}
 
-	// Take only the combiner's answer for this zone: an answer to an
-	// earlier request that timed out must not stand in for this one.
-	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, "", ""))
+	// Take only the combiner's answer to this request: an answer to an
+	// earlier one that timed out, for this zone or another, must not stand
+	// in for it.
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, "", nonce))
 	defer cancel()
 
 	// Send RFI EDITS to combiner
-	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
+	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS", nonce); err != nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
 		return
 	}
