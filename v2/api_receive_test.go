@@ -276,3 +276,139 @@ func TestBridge_WithoutDNSRegistersNoChunkNotifyHandler(t *testing.T) {
 		t.Fatalf("Start without DNS: %v", err)
 	}
 }
+
+// The answer to an HTTPS beat carries the receiver's gossip, as the answer
+// to a DNS beat does (plan decision 26): alice beats bob over HTTPS only,
+// and bob's row for the zone's group is in alice's gossip table when the
+// beat returns.
+// apiGossipEnv is alice and bob sharing zone, each with its own gossip row
+// for the zone's group, and bob's sync API endpoints serving.
+func apiGossipEnv(t *testing.T, zone string) (env *integEnv, srv *httptest.Server, group string) {
+	t.Helper()
+	env = newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	zd := seedZoneWithHSYNC3(t, zone, alice, bob)
+	addHSYNCPARAMServers(t, zd, shortLabel(alice), shortLabel(bob))
+	for _, p := range []*peerEnv{env.Alice, env.Bob} {
+		pgm := p.Registry.ProviderGroupManager
+		pgm.RecomputeGroups()
+		pg := pgm.GetGroupForZone(ZoneName(zone))
+		if pg == nil {
+			t.Fatalf("%s has no provider group for the zone", p.Identity)
+		}
+		group = pg.GroupHash
+		// each agent's own row, as the engine writes it before its beats
+		p.Registry.GossipStateTable.RefreshLocalStates(p.Registry, pgm)
+	}
+	env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
+	env.Bob.Bridge.PeerRegistry.GetOrCreate(alice)
+	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
+	return env, apiEndpointsServer(t, env.Bob), group
+}
+
+func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
+	env, srv, group := apiGossipEnv(t, "api-gossip.example.")
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	tr := apiSender(srv, alice)
+	env.Alice.Bridge.APITransport = tr
+	env.Alice.Bridge.TransportManager.APITransport = tr
+	peer := transport.NewPeer(bob)
+	peer.APIEndpoint = srv.URL + "/api/v1"
+	peer.SetMechanismState("API", transport.PeerStateIntroducing, "said hello")
+	if err := env.Alice.Bridge.PeerRegistry.Add(peer); err != nil {
+		t.Fatalf("the peer: %v", err)
+	}
+	agent := NewAgent(AgentId(bob))
+	agent.ApiMethod = true // and no DNS: the gossip can only come over HTTPS
+
+	ours := env.Alice.Registry.GossipStateTable
+	ours.mu.RLock()
+	before := ours.States[group][bob]
+	ours.mu.RUnlock()
+	if before != nil {
+		t.Fatal("alice has bob's row before any beat")
+	}
+	resp, err := env.Alice.Bridge.SendBeatWithFallback(env.ctx, agent, 1)
+	if err != nil || resp == nil || !resp.Ack {
+		t.Fatalf("the beat: %+v %v", resp, err)
+	}
+	if len(resp.Gossip) == 0 {
+		t.Error("the answer to the HTTPS beat carried no gossip")
+	}
+	ours.mu.RLock()
+	heard := ours.States[group][bob]
+	ours.mu.RUnlock()
+	if heard == nil || heard.Identity != bob {
+		t.Fatalf("alice did not get bob's row with the answer to her HTTPS beat: %+v", heard)
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
+		t.Error("the beat did not reach bob's MsgQs.Beat")
+	}
+}
+
+// On /beat and /sync/ping the sender the body names is the identity of the
+// client certificate (review M1 of plan decision 26). A peer that presents
+// its own certificate and names alice gets no answer, and no gossip built
+// for alice; the beat reaches no queue. Alice's own certificate, its name
+// in other case and without the trailing dot, is alice.
+func TestAPIReceive_SenderIsTheClientCertificate(t *testing.T) {
+	const zone = "api-cert.example."
+	env, srv, _ := apiGossipEnv(t, zone)
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	peer := transport.NewPeer(bob)
+	peer.APIEndpoint = srv.URL + "/api/v1"
+	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+	defer cancel()
+
+	carol := apiSender(srv, alice, clientCert(t, "carol.agent.example."))
+	beat, err := carol.Beat(ctx, peer, &transport.BeatRequest{SenderID: alice, Zones: []string{zone}, Timestamp: time.Now()})
+	if err != nil || beat.Ack {
+		t.Fatalf("a beat naming alice under carol's certificate was taken: %+v %v", beat, err)
+	}
+	if len(beat.Gossip) != 0 {
+		t.Errorf("carol got the gossip built for alice: %s", beat.Gossip)
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
+		t.Error("a beat naming alice under carol's certificate reached MsgQs.Beat")
+	}
+	ping, err := carol.Ping(ctx, peer, &transport.PingRequest{SenderID: alice, Nonce: "n-1", Timestamp: time.Now()})
+	if err != nil || ping.OK {
+		t.Fatalf("a ping naming alice under carol's certificate was answered: %+v %v", ping, err)
+	}
+	// Under her own certificate alice names herself in OriginatorID, which
+	// the parser reads first, and carol in MyIdentity, which the beat
+	// router reads first: refused as a whole, not booked as carol's beat.
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: pool, Certificates: []tls.Certificate{clientCert(t, alice)}}}}
+	body := `{"MessageType":"beat","OriginatorID":"` + alice + `","MyIdentity":"carol.agent.example.","Zones":["` + zone + `"]}`
+	res, err := client.Post(srv.URL+"/api/v1/beat", "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply AgentBeatResponse
+	err = json.NewDecoder(res.Body).Decode(&reply)
+	res.Body.Close()
+	if err != nil || !reply.Error || len(reply.Gossip) != 0 {
+		t.Fatalf("a beat naming alice and carol under alice's certificate: %+v %v", reply, err)
+	}
+	if b, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
+		t.Errorf("a beat naming alice and carol reached MsgQs.Beat as %s's", b.Identity)
+	}
+
+	own := apiSender(srv, alice, clientCert(t, "Alice.Agent.Example"))
+	beat, err = own.Beat(ctx, peer, &transport.BeatRequest{SenderID: alice, Zones: []string{zone}, Timestamp: time.Now()})
+	if err != nil || !beat.Ack {
+		t.Fatalf("alice's beat under her own certificate: %+v %v", beat, err)
+	}
+	if len(beat.Gossip) == 0 {
+		t.Error("the answer to alice's beat under her own certificate carried no gossip")
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
+		t.Error("alice's beat did not reach MsgQs.Beat")
+	}
+}

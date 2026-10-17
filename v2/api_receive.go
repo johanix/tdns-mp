@@ -109,6 +109,21 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			_ = sink.fail(fmt.Sprintf("message type %q is not accepted on %s", im.Token(), r.URL.Path))
 			return
 		}
+		// On /beat and /sync/ping a peer speaks for itself: the sender the
+		// body names is the identity of the certificate the connection
+		// presented. The answer to a beat carries the gossip built for
+		// that sender (plan decision 26), so a peer must not get it by
+		// naming another. /msg is not held to this: an agent forwards a
+		// peer's update to its combiner under that peer's name. /hello is
+		// reached before the peer's certificate is known.
+		if kind == apiEndpointBeat || kind == apiEndpointPing {
+			if cn, ok := clientIdentity(r); ok && dns.CanonicalName(cn) != dns.CanonicalName(im.SenderID) {
+				lgApi.Warn("sync API request refused: the sender is not the client certificate's identity",
+					"path", r.URL.Path, "from", r.RemoteAddr, "sender", im.SenderID, "certificate", cn)
+				_ = sink.fail(fmt.Sprintf("sender %q is not the client certificate's identity", im.SenderID))
+				return
+			}
+		}
 		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your, "originator", im.SenderID)
 		if err := handler.RouteAPIPayload(r.Context(), body, r.RemoteAddr, sender, sink); err != nil {
 			lgApi.Warn("sync API request failed", "path", r.URL.Path, "from", r.RemoteAddr, "err", err)
@@ -129,20 +144,24 @@ func clientIdentity(r *http.Request) (string, bool) {
 // object. HTTP status is always 200 with the Error field set, which is
 // what the endpoints returned before and what every sender checks.
 type apiReplySink struct {
-	kind  apiEndpointKind
-	w     http.ResponseWriter
-	local AgentId
-	your  AgentId
-	done  bool
+	kind   apiEndpointKind
+	w      http.ResponseWriter
+	local  AgentId
+	your   AgentId
+	gossip json.RawMessage // the beat handler's gossip for the sender
+	done   bool
 }
 
 // inlineConfirm is what the handlers put in the reply payload: the
 // transport's confirm and ping_confirm objects and the application's acks
-// all carry these three fields.
+// all carry the first three fields. The beat handler's confirm also
+// carries the receiver's gossip for the sender, and the beat's answer
+// passes it on, as the answer to a DNS beat does (plan decision 26).
 type inlineConfirm struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-	Nonce   string `json:"nonce"`
+	Status  string          `json:"status"`
+	Message string          `json:"message"`
+	Nonce   string          `json:"nonce"`
+	Gossip  json.RawMessage `json:"Gossip"`
 }
 
 func (s *apiReplySink) Reply(ctx *transport.MessageContext, payload []byte, rcode int) error {
@@ -155,6 +174,7 @@ func (s *apiReplySink) Reply(ctx *transport.MessageContext, payload []byte, rcod
 	if im, ok := ctx.Incoming(); ok && im.TransportSender != "" {
 		s.your = AgentId(im.TransportSender)
 	}
+	s.gossip = inline.Gossip
 	ok := rcode == dns.RcodeSuccess && (inline.Status == "" || inline.Status == "ok" || inline.Status == "pending")
 	if ok {
 		return s.write(true, inline.Message, inline.Nonce)
@@ -205,7 +225,7 @@ func (s *apiReplySink) write(ok bool, msg, nonce string) error {
 		}
 		resp = r
 	case apiEndpointBeat:
-		r := AgentBeatResponse{MyIdentity: s.local, YourIdentity: s.your, Time: now}
+		r := AgentBeatResponse{MyIdentity: s.local, YourIdentity: s.your, Time: now, Gossip: s.gossip}
 		if ok {
 			r.Status = "ok"
 			r.Msg = msg
