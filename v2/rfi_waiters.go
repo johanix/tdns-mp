@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * Routing of RFI CONFIG and RFI AUDIT answers to the request that asked.
+ * Routing of RFI EDITS, CONFIG and AUDIT answers to the request that asked.
  */
 
 package tdnsmp
@@ -13,9 +13,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// rfiWaiters hands the answer to a two-phase RFI (CONFIG, AUDIT) to the
-// request that asked for it. The answer arrives as a message of its own, so
-// it is matched on what it carries: sender, zone and, for CONFIG, subtype.
+// rfiWaiters hands the answer to a two-phase RFI (EDITS, CONFIG, AUDIT) to
+// the request that asked for it. The answer arrives as a message of its own,
+// so it is matched on what it carries: sender, zone and, for CONFIG, subtype.
 // Requests with the same key get the answers in the order they asked. An
 // answer no request waits for, such as one that arrives after its request
 // timed out, is dropped.

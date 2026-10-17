@@ -5,10 +5,12 @@
 package tdnsmp
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
@@ -89,6 +91,59 @@ func TestRfiWaiters_SameKeyAndLateAnswer(t *testing.T) {
 	}
 	if len(w.waiting) != 0 {
 		t.Errorf("waiters left behind: %v", w.waiting)
+	}
+}
+
+// The combiner's EDITS answer for a zone arrives after that zone's request
+// timed out, before or while the next zone's request waits. The late answer
+// is dropped, and the next zone's request gets its own zone's answer.
+func TestRouteEdits_LateAnswerThenNextZone(t *testing.T) {
+	const combiner = "combiner.p.example."
+	edits := func(t *testing.T, zone string) *transport.IncomingMessage {
+		t.Helper()
+		payload, err := json.Marshal(&DnsEditsPayload{MessageType: "edits", MyIdentity: combiner,
+			YourIdentity: "agent.p.example.", Zone: zone, Timestamp: time.Now().Unix(),
+			AgentRecords: map[string]map[string][]string{"agent.p.example.": {zone: {zone + " 3600 IN TXT \"edits\""}}}})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return &transport.IncomingMessage{Payload: payload}
+	}
+
+	for _, lateWhileWaiting := range []bool{false, true} {
+		name := "before the next request"
+		if lateWhileWaiting {
+			name = "while the next request waits"
+		}
+		t.Run(name, func(t *testing.T) {
+			tm := &MPTransportBridge{msgQs: NewMsgQs()}
+			waiters := &tm.msgQs.editsWaiters
+
+			// The request for a.example. times out unanswered.
+			_, cancelA := waiters.register(rfiWaitKey(combiner, "a.example.", ""))
+			cancelA()
+
+			if !lateWhileWaiting {
+				tm.routeEditsMessage(edits(t, "a.example."))
+			}
+			ansB, cancelB := waiters.register(rfiWaitKey(combiner, "b.example.", ""))
+			if lateWhileWaiting {
+				tm.routeEditsMessage(edits(t, "a.example."))
+			}
+			if m, ok := recvWithin(ansB, 100*time.Millisecond); ok {
+				t.Fatalf("request for b.example. took the late answer for %s", m.Zone)
+			}
+
+			tm.routeEditsMessage(edits(t, "b.example."))
+			m, ok := recvWithin(ansB, time.Second)
+			if !ok || m.Zone != "b.example." || m.SenderID != combiner || len(m.AgentRecords["agent.p.example."]["b.example."]) != 1 {
+				t.Fatalf("request for b.example. got %+v (ok=%v)", m, ok)
+			}
+			cancelB()
+			if len(waiters.waiting) != 0 {
+				t.Errorf("waiters left behind: %v", waiters.waiting)
+			}
+		})
 	}
 }
 

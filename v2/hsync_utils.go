@@ -437,10 +437,21 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 		return
 	}
 
-	if msgQs == nil || msgQs.EditsResponse == nil {
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
+	if msgQs == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no MsgQs available", zd.ZoneName)
 		return
 	}
+
+	combinerID, err := tm.getCombinerID()
+	if err != nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: %v", zd.ZoneName, err)
+		return
+	}
+
+	// Take only the combiner's answer for this zone: an answer to an
+	// earlier request that timed out must not stand in for this one.
+	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, ""))
+	defer cancel()
 
 	// Send RFI EDITS to combiner
 	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
@@ -453,12 +464,7 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.EditsResponse:
-		if resp == nil || resp.Zone != zd.ZoneName {
-			zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received nil or mismatched edits from combiner", zd.ZoneName)
-			return
-		}
-
+	case resp := <-answer:
 		// Count total records for logging
 		totalAgents := len(resp.AgentRecords)
 		totalRRs := 0

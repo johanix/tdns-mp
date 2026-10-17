@@ -1121,9 +1121,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 }
 
-// routeEditsMessage routes an incoming EDITS message from the combiner.
-// Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
-// Modeled on routeKeystateMessage.
+// routeEditsMessage routes an incoming EDITS message from the combiner
+// to the RequestAndWaitForEdits that asked this sender for this zone.
 func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 	var payload DnsEditsPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1145,11 +1144,10 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		AgentRecords: payload.AgentRecords,
 	}
 
-	select {
-	case tm.msgQs.EditsResponse <- editsMsg:
+	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, ""), editsMsg) {
 		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "agents", len(payload.AgentRecords))
-	default:
-		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
+	} else {
+		lgTransport.Warn("EDITS response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone)
 	}
 }
 
