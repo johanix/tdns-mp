@@ -14,9 +14,14 @@ package tdnsmp
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -50,7 +55,9 @@ func postAPIHello(t *testing.T, receiver *peerEnv, sender, zone string) *AgentHe
 }
 
 // apiEndpointsServer serves the receiver's sync API endpoints the way the
-// agent router mounts them, under /api/v1.
+// agent router mounts them, under /api/v1. It asks for a client
+// certificate and does not require one; the TLSA middleware in front of
+// the endpoints is not mounted.
 func apiEndpointsServer(t *testing.T, receiver *peerEnv) *httptest.Server {
 	t.Helper()
 	conf := &Config{}
@@ -60,17 +67,43 @@ func apiEndpointsServer(t *testing.T, receiver *peerEnv) *httptest.Server {
 	mux.HandleFunc("/api/v1/beat", conf.apiSyncEndpoint(apiEndpointBeat))
 	mux.HandleFunc("/api/v1/sync/ping", conf.apiSyncEndpoint(apiEndpointPing))
 	mux.HandleFunc("/api/v1/msg", conf.apiSyncEndpoint(apiEndpointMsg))
-	srv := httptest.NewTLSServer(mux)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// apiSender is an HTTPS sender for local that trusts the test receiver.
-func apiSender(srv *httptest.Server, local string) *transport.APITransport {
+// apiSender is an HTTPS sender for local that trusts the test receiver,
+// and presents the given client certificate, if any.
+func apiSender(srv *httptest.Server, local string, certs ...tls.Certificate) *transport.APITransport {
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
 	return transport.NewAPITransport(&transport.APITransportConfig{
-		LocalID: local, DefaultTimeout: integTestTimeout, TLSConfig: &tls.Config{RootCAs: pool}})
+		LocalID: local, DefaultTimeout: integTestTimeout, TLSConfig: &tls.Config{RootCAs: pool, Certificates: certs}})
+}
+
+// clientCert is a self-signed client certificate whose common name is
+// identity.
+func clientCert(t *testing.T, identity string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: identity},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 func TestAPIReceive_SenderToPipeline(t *testing.T) {
@@ -248,14 +281,15 @@ func TestBridge_WithoutDNSRegistersNoChunkNotifyHandler(t *testing.T) {
 // to a DNS beat does (plan decision 26): alice beats bob over HTTPS only,
 // and bob's row for the zone's group is in alice's gossip table when the
 // beat returns.
-func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
-	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
-	const zone = "api-gossip.example."
+// apiGossipEnv is alice and bob sharing zone, each with its own gossip row
+// for the zone's group, and bob's sync API endpoints serving.
+func apiGossipEnv(t *testing.T, zone string) (env *integEnv, srv *httptest.Server, group string) {
+	t.Helper()
+	env = newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
 	alice := dns.Fqdn(env.Alice.Identity)
 	bob := dns.Fqdn(env.Bob.Identity)
 	zd := seedZoneWithHSYNC3(t, zone, alice, bob)
 	addHSYNCPARAMServers(t, zd, shortLabel(alice), shortLabel(bob))
-	var group string
 	for _, p := range []*peerEnv{env.Alice, env.Bob} {
 		pgm := p.Registry.ProviderGroupManager
 		pgm.RecomputeGroups()
@@ -267,11 +301,16 @@ func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
 		// each agent's own row, as the engine writes it before its beats
 		p.Registry.GossipStateTable.RefreshLocalStates(p.Registry, pgm)
 	}
-
 	env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
 	env.Bob.Bridge.PeerRegistry.GetOrCreate(alice)
 	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
-	srv := apiEndpointsServer(t, env.Bob)
+	return env, apiEndpointsServer(t, env.Bob), group
+}
+
+func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
+	env, srv, group := apiGossipEnv(t, "api-gossip.example.")
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
 	tr := apiSender(srv, alice)
 	env.Alice.Bridge.APITransport = tr
 	env.Alice.Bridge.TransportManager.APITransport = tr
@@ -306,5 +345,49 @@ func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
 	}
 	if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
 		t.Error("the beat did not reach bob's MsgQs.Beat")
+	}
+}
+
+// On /beat and /sync/ping the sender the body names is the identity of the
+// client certificate (review M1 of plan decision 26). A peer that presents
+// its own certificate and names alice gets no answer, and no gossip built
+// for alice; the beat reaches no queue. Alice's own certificate, its name
+// in other case and without the trailing dot, is alice.
+func TestAPIReceive_SenderIsTheClientCertificate(t *testing.T) {
+	const zone = "api-cert.example."
+	env, srv, _ := apiGossipEnv(t, zone)
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	peer := transport.NewPeer(bob)
+	peer.APIEndpoint = srv.URL + "/api/v1"
+	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+	defer cancel()
+
+	carol := apiSender(srv, alice, clientCert(t, "carol.agent.example."))
+	beat, err := carol.Beat(ctx, peer, &transport.BeatRequest{SenderID: alice, Zones: []string{zone}, Timestamp: time.Now()})
+	if err != nil || beat.Ack {
+		t.Fatalf("a beat naming alice under carol's certificate was taken: %+v %v", beat, err)
+	}
+	if len(beat.Gossip) != 0 {
+		t.Errorf("carol got the gossip built for alice: %s", beat.Gossip)
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
+		t.Error("a beat naming alice under carol's certificate reached MsgQs.Beat")
+	}
+	ping, err := carol.Ping(ctx, peer, &transport.PingRequest{SenderID: alice, Nonce: "n-1", Timestamp: time.Now()})
+	if err != nil || ping.OK {
+		t.Fatalf("a ping naming alice under carol's certificate was answered: %+v %v", ping, err)
+	}
+
+	own := apiSender(srv, alice, clientCert(t, "Alice.Agent.Example"))
+	beat, err = own.Beat(ctx, peer, &transport.BeatRequest{SenderID: alice, Zones: []string{zone}, Timestamp: time.Now()})
+	if err != nil || !beat.Ack {
+		t.Fatalf("alice's beat under her own certificate: %+v %v", beat, err)
+	}
+	if len(beat.Gossip) == 0 {
+		t.Error("the answer to alice's beat under her own certificate carried no gossip")
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
+		t.Error("alice's beat did not reach MsgQs.Beat")
 	}
 }

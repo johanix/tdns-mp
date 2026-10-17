@@ -92,11 +92,35 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			_ = sink.fail(fmt.Sprintf("message type %q is not accepted on %s", im.Token(), r.URL.Path))
 			return
 		}
+		// On /beat and /sync/ping a peer speaks for itself: the sender the
+		// body names is the identity of the certificate the connection
+		// presented. The answer to a beat carries the gossip built for
+		// that sender (plan decision 26), so a peer must not get it by
+		// naming another. /msg is not held to this: an agent forwards a
+		// peer's update to its combiner under that peer's name. /hello is
+		// reached before the peer's certificate is known.
+		if kind == apiEndpointBeat || kind == apiEndpointPing {
+			if cn, ok := clientIdentity(r); ok && dns.CanonicalName(cn) != dns.CanonicalName(im.SenderID) {
+				lgApi.Warn("sync API request refused: the sender is not the client certificate's identity",
+					"path", r.URL.Path, "from", r.RemoteAddr, "sender", im.SenderID, "certificate", cn)
+				_ = sink.fail(fmt.Sprintf("sender %q is not the client certificate's identity", im.SenderID))
+				return
+			}
+		}
 		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your)
 		if err := handler.RouteAPIPayload(r.Context(), body, r.RemoteAddr, sink); err != nil {
 			lgApi.Warn("sync API request failed", "path", r.URL.Path, "from", r.RemoteAddr, "err", err)
 		}
 	}
+}
+
+// clientIdentity is the identity of the client certificate the request
+// presented: its common name.
+func clientIdentity(r *http.Request) (string, bool) {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return "", false
+	}
+	return r.TLS.PeerCertificates[0].Subject.CommonName, true
 }
 
 // apiReplySink shapes the pipeline's answer into the endpoint's response
