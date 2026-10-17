@@ -116,6 +116,27 @@ func pastDiscovery(s transport.PeerState) bool {
 	return !needsDiscovery(s)
 }
 
+// mechHasAddress reports whether discovery gave the peer's mechanism
+// somewhere to send to: an endpoint for the API mechanism, an address for
+// DNS (transport.Peer.HasMechanism). A peer that is not in the transport
+// registry has none.
+//
+// The state alone does not say it. An inbound hello used to move a
+// mechanism to INTRODUCING whether or not the peer had been resolved, and a
+// mechanism left like that was never discovered again: every send to it
+// failed for want of an address until the daemon was restarted (tdns-mp #84).
+func mechHasAddress(e *Engine, peerID PeerID, mech string) bool {
+	if e == nil || e.deps.Transport == nil {
+		return false
+	}
+	reg := e.deps.Transport.PeerRegistry()
+	if reg == nil {
+		return false
+	}
+	p, ok := reg.Get(string(peerID))
+	return ok && p != nil && p.HasMechanism(mech)
+}
+
 // needsHello: discovered, not yet introduced.
 func needsHello(s transport.PeerState) bool {
 	return s == transport.PeerStateKnown

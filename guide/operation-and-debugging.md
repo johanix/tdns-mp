@@ -108,6 +108,22 @@ for its discovery names, and restarts the
 - The agent is caching a stale resolution for the
   peer's identity.
 
+An agent does part of this by itself. When a peer
+refuses its hello three times in a row, the agent
+flushes the IMR cache entries for the peer's discovery
+names and looks the peer up again, and repeats that at
+most once a minute for as long as the peer refuses. A
+JWK record that changed after the peer was discovered
+is picked up that way without a reset. The log says
+"peer keeps refusing our hello" when it happens.
+
+The agent does the same when a peer says hello and the
+agent has not found an address for it: an earlier
+lookup may have been answered before the peer's records
+were published, and the IMR caches that answer. Both
+together flush and look one peer up at most once a
+minute.
+
 `peer reset` is an agent/auditor command only. Signer
 and combiner use static peer configuration and respond
 with "not applicable".

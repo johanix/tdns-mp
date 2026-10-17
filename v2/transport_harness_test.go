@@ -87,6 +87,17 @@ type integEnvConfig struct {
 	// integControlZone and is refused.
 	ControlZoneIsIdentity bool
 
+	// Discovery, when set, gives each peer a resolver of its own over the
+	// records of that zone, to discover the other through
+	// (discovery_harness_test.go). Without it a discovery fails before its
+	// first query.
+	Discovery *discoveryZone
+
+	// Keys, when set, gives the peer with that identity payload crypto with
+	// the key pair as its own. Without it the peers run without payload
+	// crypto.
+	Keys map[string]*harnessKey
+
 	// Role is the role the bridge is built for. Empty is the agent's; an
 	// auditor peer takes roleAuditor.
 	Role string
@@ -202,6 +213,13 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		// production reads tdns.Zones (scenario 6).
 		GetZone:      tdns.Zones.Get,
 		GetZoneNames: tdns.Zones.Keys,
+	}
+	if cfg != nil && cfg.Discovery != nil {
+		imr := harnessImr(t, cfg.Discovery)
+		bridgeCfg.GetImrEngine = func() *Imr { return imr }
+	}
+	if cfg != nil && cfg.Keys[identity] != nil {
+		bridgeCfg.PayloadCrypto = cfg.Keys[identity].payloadCrypto(t)
 	}
 	bridge, err := NewMPTransportBridge(bridgeCfg)
 	if err != nil {
