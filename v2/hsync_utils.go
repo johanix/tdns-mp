@@ -450,7 +450,7 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 
 	// Take only the combiner's answer for this zone: an answer to an
 	// earlier request that timed out must not stand in for this one.
-	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, ""))
+	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, "", ""))
 	defer cancel()
 
 	// Send RFI EDITS to combiner
@@ -498,8 +498,10 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	}
 
 	// Several requests can be out at once (one per zone when a group elects
-	// a leader); take only the answer to this one.
-	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype))
+	// a leader), and an earlier one may still be answered after it timed
+	// out; take only the answer to this one.
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
 	defer cancel()
 
 	// Send RFI CONFIG to the peer agent
@@ -510,6 +512,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 		Zone:         ZoneName(zone),
 		RfiType:      "CONFIG",
 		RfiSubtype:   subtype,
+		Nonce:        nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.ID, "zone", zone, "subtype", subtype, "err", err)
@@ -540,7 +543,8 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 		return nil
 	}
 
-	answer, cancel := msgQs.auditWaiters.register(rfiWaitKey(string(agent.ID), zone, ""))
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.auditWaiters.register(rfiWaitKey(string(agent.ID), zone, "", nonce))
 	defer cancel()
 
 	// Send RFI AUDIT to the peer agent
@@ -550,6 +554,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 		YourIdentity: agent.ID,
 		Zone:         ZoneName(zone),
 		RfiType:      "AUDIT",
+		Nonce:        nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.ID, "zone", zone, "err", err)
