@@ -10,7 +10,6 @@
 package tdnsmp
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -35,7 +34,7 @@ func TestAFailedDelegationSyncIsAskedAgain(t *testing.T) {
 	r.leader("agent.us.example.")
 	refused := errors.New("parent REFUSED the delegation UPDATE (SIG(0) key known, but not yet trusted)")
 	delays := []time.Duration{20 * time.Millisecond, 20 * time.Millisecond}
-	ctx := context.Background()
+	ctx := r.ctx
 
 	// a failure asks again after the first delay; a second report while that
 	// retry waits adds none
@@ -70,7 +69,7 @@ func TestASyncThatSucceedsEndsTheRetries(t *testing.T) {
 	z := r.mpzd.ZoneName
 	r.leader("agent.us.example.")
 	delays := []time.Duration{10 * time.Millisecond}
-	ctx := context.Background()
+	ctx := r.ctx
 	for i := 0; i < 3; i++ {
 		// with one delay in the list, a second failure in one chain would be
 		// past the bound; a success between them makes each the first
@@ -87,7 +86,7 @@ func TestARetryAsksNothingOnceTheLeadershipIsLost(t *testing.T) {
 	z := r.mpzd.ZoneName
 	r.leader("agent.us.example.")
 	delays := []time.Duration{30 * time.Millisecond, 30 * time.Millisecond}
-	r.conf.delegationSyncFailedWith(context.Background(), z, errors.New("refused"), delays)
+	r.conf.delegationSyncFailedWith(r.ctx, z, errors.New("refused"), delays)
 	r.leader("agent.p2.example.") // before the retry comes due
 	time.Sleep(100 * time.Millisecond)
 	if n := r.requests(t); n != 0 {
@@ -95,7 +94,7 @@ func TestARetryAsksNothingOnceTheLeadershipIsLost(t *testing.T) {
 	}
 	// and its chain ended with that: leading again, a failure is the first
 	r.leader("agent.us.example.")
-	r.conf.delegationSyncFailedWith(context.Background(), z, errors.New("refused"), delays)
+	r.conf.delegationSyncFailedWith(r.ctx, z, errors.New("refused"), delays)
 	if n := r.waitRequests(t, 1, time.Second); n != 1 {
 		t.Errorf("leading again: %d sync requests after a failure, want 1", n)
 	}
@@ -192,7 +191,7 @@ func TestAnInventoryTheAgentAskedForFeedsTheDSSetToo(t *testing.T) {
 	}
 	inv := &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z, Owned: true,
 		Inventory: []KeyInventoryItem{invItem(t, z, 257, KeyStateActive, &yes), invItem(t, z, 256, KeyStateActive, &no)}}
-	r.mpzd.recordRequestedInventory(context.Background(), tm, inv)
+	r.mpzd.recordRequestedInventory(r.ctx, tm, inv)
 
 	if in, err := owner.DSIntent(r.mpzd.ZoneData, dns.SHA256); err != nil || !in.Known || len(in.Set) != 1 {
 		t.Errorf("the DS set after the requested inventory: known=%v set=%d err=%v, want the one KSK", in.Known, len(in.Set), err)
@@ -204,13 +203,13 @@ func TestAnInventoryTheAgentAskedForFeedsTheDSSetToo(t *testing.T) {
 		t.Errorf("the first inventory after a start: %d sync requests, want 1", n)
 	}
 	// the same inventory again, as at the next refresh: nothing to ask
-	r.mpzd.recordRequestedInventory(context.Background(), tm, inv)
+	r.mpzd.recordRequestedInventory(r.ctx, tm, inv)
 	if n := r.requests(t); n != 0 {
 		t.Errorf("an unchanged DS set asked for %d syncs", n)
 	}
 	// a role with no owner keeps the snapshot, with the mark
 	other := signerTestZone(t, "plain.sync.example.", newMPTestKeyDB(t))
-	other.recordRequestedInventory(context.Background(), &MPTransportBridge{}, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: other.ZoneName, Owned: true})
+	other.recordRequestedInventory(r.ctx, &MPTransportBridge{}, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: other.ZoneName, Owned: true})
 	if snap := other.GetLastKeyInventory(); snap == nil || !snap.Owned {
 		t.Errorf("without the hook the snapshot is %+v, want it kept with its Owned mark", snap)
 	}

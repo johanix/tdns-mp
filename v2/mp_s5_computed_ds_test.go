@@ -23,6 +23,7 @@ type computedDSRig struct {
 	owner *MPKeyLifecycleOwner
 	q     chan tdns.DelegationSyncRequest
 	lem   *LeaderElectionManager
+	ctx   context.Context // the engines' ctx: it ends with the test
 }
 
 // newComputedDSRig: an agent ("us") of a zone with providers us, p2 and p3,
@@ -44,7 +45,8 @@ func newComputedDSRig(t *testing.T, zone string, signers []string) *computedDSRi
 	conf.InternalMp.LeaderElectionManager = lem
 	tdns.RegisterKeyLifecycleOwner(owner)
 	t.Cleanup(func() { tdns.RegisterKeyLifecycleOwner(nil) })
-	return &computedDSRig{conf: conf, mpzd: mpzd, owner: owner, q: q, lem: lem}
+	waitDelegationSyncTimers(t, conf)
+	return &computedDSRig{conf: conf, mpzd: mpzd, owner: owner, q: q, lem: lem, ctx: t.Context()}
 }
 
 func (r *computedDSRig) leader(who AgentId) {
@@ -78,7 +80,7 @@ func (r *computedDSRig) distribution(t *testing.T, from AgentId, keys ...word) {
 	if err := json.Unmarshal(b, &ops); err != nil {
 		t.Fatal(err)
 	}
-	r.conf.noteForeignDistribution(context.Background(), ZoneName(r.mpzd.ZoneName), from, ops)
+	r.conf.noteForeignDistribution(r.ctx, ZoneName(r.mpzd.ZoneName), from, ops)
 }
 
 func (r *computedDSRig) requests(t *testing.T) int {
@@ -248,7 +250,7 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 	// the same word built by hand with an explicit empty list, as a later
 	// wire may carry it: the same empty share, nothing changed, nothing
 	// asked
-	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p3.example.",
+	r.conf.noteForeignDistribution(r.ctx, ZoneName(z), "agent.p3.example.",
 		[]core.RROperation{{Operation: "replace", RRtype: "DNSKEY", KeyStates: []core.KeyState{}}})
 	if known, tags := r.dsSet(t); !known || len(tags) != 1 || !tags[p2key.KeyTag()] {
 		t.Errorf("after p3's explicit empty list: known=%v tags=%v, want p2's KSK alone", known, tags)
@@ -261,20 +263,20 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 	ghost := testDnskey(t, z, 257)
 	ops := []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{p2key.String()},
 		KeyStates: []core.KeyState{{KeyTag: p2key.KeyTag(), State: KeyStateActive, DS: &yes}, {KeyTag: ghost.KeyTag(), State: KeyStateStandby, DS: &yes}}}}
-	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p2.example.", ops)
+	r.conf.noteForeignDistribution(r.ctx, ZoneName(z), "agent.p2.example.", ops)
 	if known, _ := r.dsSet(t); known {
 		t.Error("a DS set with a ds=1 key that has no record")
 	}
 	// the same key with ds undecided: it may be a SEP key whose record has
 	// not arrived, and the set stays unknown
 	ops[0].KeyStates[1].DS = nil
-	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p2.example.", ops)
+	r.conf.noteForeignDistribution(r.ctx, ZoneName(z), "agent.p2.example.", ops)
 	if known, _ := r.dsSet(t); known {
 		t.Error("a DS set with an undecided key that has no record")
 	}
 	// the same key with ds=0 is nothing to make a DS of: the set is known
 	ops[0].KeyStates[1].DS = &no
-	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p2.example.", ops)
+	r.conf.noteForeignDistribution(r.ctx, ZoneName(z), "agent.p2.example.", ops)
 	if known, tags := r.dsSet(t); !known || len(tags) != 1 {
 		t.Errorf("a recordless key with ds=0: known=%v tags=%v, want p2's KSK alone", known, tags)
 	}
@@ -312,7 +314,7 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 		t.Error("a DS set before our own signer, which signs the zone, has sent an inventory")
 	}
 	ours := invItem(t, oz, 257, KeyStateActive, &yes)
-	o.conf.noteKeyInventory(context.Background(), o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{ours}, Owned: false})
+	o.conf.noteKeyInventory(o.ctx, o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{ours}, Owned: false})
 	known, tags = o.dsSet(t)
 	if !known || len(tags) != 2 || !tags[ours.KeyTag] {
 		t.Errorf("with our signer's inventory: known=%v tags=%v, want our KSK beside p2's", known, tags)
@@ -321,7 +323,7 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 		t.Errorf("our own share arriving: %d sync requests, want 1", n)
 	}
 	ours.DS = &no
-	o.conf.noteKeyInventory(context.Background(), o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{ours}, Owned: false})
+	o.conf.noteKeyInventory(o.ctx, o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{ours}, Owned: false})
 	if known, tags := o.dsSet(t); !known || len(tags) != 1 || tags[ours.KeyTag] {
 		t.Errorf("our KSK's ds withdrawn: known=%v tags=%v, want p2's KSK alone", known, tags)
 	}
@@ -332,7 +334,7 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 	// our signer owns the zone: its inventory is the answer (A2.3), the
 	// computed set is not consulted, and the owner runs the keys
 	owned := invItem(t, oz, 257, KeyStateActive, &yes)
-	o.conf.noteKeyInventory(context.Background(), o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{owned}, Owned: true})
+	o.conf.noteKeyInventory(o.ctx, o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{owned}, Owned: true})
 	if !o.owner.runsKeys(o.mpzd.ZoneData) {
 		t.Error("an inventory marked Owned does not make the owner run the keys")
 	}
