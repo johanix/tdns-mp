@@ -16,6 +16,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // An agent forwards a remote agent's update to its combiner under the
@@ -78,5 +79,55 @@ func TestAPIReceive_ForwardedUpdateIsDeliveredByTheForwarder(t *testing.T) {
 				t.Errorf("DeliveredBy %q, want the forwarding agent %q", m.DeliveredBy, alice)
 			}
 		})
+	}
+}
+
+// With the certificate as the sender, authorization looks at the
+// certificate and no longer at the name in the body, and a beat or a ping
+// is still booked under the body's name. So a member whose certificate
+// gets in must not file a beat or a ping as another member: the refusal
+// on /beat and /sync/ping of a body sender that is not the certificate
+// (PR 201) is what stops it (review M1 on PR 204). Dave is a member, and
+// his own beat is taken; under his certificate a beat or a ping naming
+// alice is refused and reaches no queue.
+func TestAPIReceive_MemberCannotBeatAsAnother(t *testing.T) {
+	const (
+		zone = "api-member.example."
+		dave = "dave.agent.example."
+	)
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	zd := seedZoneWithHSYNC3(t, zone, alice, bob, dave)
+	addHSYNCPARAMServers(t, zd, shortLabel(alice), shortLabel(bob), shortLabel(dave))
+	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
+	srv := apiEndpointsServer(t, env.Bob)
+	peer := transport.NewPeer(bob)
+	peer.APIEndpoint = srv.URL + "/api/v1"
+	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+	defer cancel()
+	tr := apiSender(srv, dave, clientCert(t, dave))
+
+	own, err := tr.Beat(ctx, peer, &transport.BeatRequest{SenderID: dave, Zones: []string{zone}, Timestamp: time.Now()})
+	if err != nil || !own.Ack {
+		t.Fatalf("dave's own beat: %+v %v", own, err)
+	}
+	if b, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok || string(b.Identity) != dave {
+		t.Fatalf("dave's own beat was not booked as dave: %+v", b)
+	}
+
+	beat, err := tr.Beat(ctx, peer, &transport.BeatRequest{SenderID: alice, Zones: []string{zone}, Timestamp: time.Now()})
+	if err != nil || beat.Ack {
+		t.Fatalf("a beat naming alice under dave's certificate was taken: %+v %v", beat, err)
+	}
+	if b, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
+		t.Errorf("a beat naming alice under dave's certificate was booked as %s", b.Identity)
+	}
+	ping, err := tr.Ping(ctx, peer, &transport.PingRequest{SenderID: alice, Nonce: "n-dave", Timestamp: time.Now()})
+	if err != nil || ping.OK {
+		t.Fatalf("a ping naming alice under dave's certificate was answered: %+v %v", ping, err)
+	}
+	if p, ok := recvWithin(env.Bob.MsgQs.Ping, 100*time.Millisecond); ok {
+		t.Errorf("a ping naming alice under dave's certificate was booked as %s", p.Identity)
 	}
 }
