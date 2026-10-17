@@ -162,7 +162,6 @@ type notifyRig struct {
 	peer    *peerEnv
 	notifyq chan tdns.NotifyRequest
 	log     *lockedBuffer
-	ctx     context.Context
 	ksk     KeyInventoryItem // the zone's KSK, as its signer reports it
 	ds      dns.RR           // the DS of that key
 	oldNS   string           // a nameserver the zone no longer lists
@@ -188,7 +187,8 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 	logsink := &lockedBuffer{}
 	delegationSyncNotifyDelays = delays
 	lgEngine = slog.New(slog.NewTextHandler(logsink, nil))
-	// registered first, so run last: after the syncher has stopped
+	// registered first, so run last: after the syncher has stopped and what
+	// it scheduled has ended (waitDelegationSyncTimers)
 	t.Cleanup(func() { delegationSyncNotifyDelays, lgEngine = savedDelays, savedLog })
 	installParentSync(t, fmt.Sprintf(parentSyncConfig, "ED25519"))
 
@@ -290,9 +290,9 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 	cached(target, dns.TypeAAAA)
 	r.conf.Config.Internal.ImrEngine = imr
 
-	// the syncher, and the DS engine it asks for the CDS before a NOTIFY(CDS)
-	ctx, cancel := context.WithCancel(context.Background())
-	r.ctx = ctx
+	// the syncher, and the DS engine it asks for the CDS before a NOTIFY(CDS),
+	// on the rig's ctx, which ends with the test
+	ctx := r.ctx
 	ensureDSEngineQueue(zd.KeyDB)
 	var engines sync.WaitGroup
 	if signed {
@@ -308,7 +308,6 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 		_ = (&HsyncDB{KeyDB: zd.KeyDB}).DelegationSyncher(ctx, r.q, r.notifyq, r.conf)
 	}()
 	t.Cleanup(func() {
-		cancel()
 		stopped := make(chan struct{})
 		go func() { engines.Wait(); close(stopped) }()
 		select {
@@ -636,7 +635,7 @@ func TestAFailedAndANotifiedSyncShareOneChain(t *testing.T) {
 	r := newLeaderSyncRig(t, "shared.sync.example.")
 	z := r.mpzd.ZoneName
 	r.leader("agent.us.example.")
-	ctx := context.Background()
+	ctx := r.ctx
 	chains := &r.conf.InternalMp.delegationSyncChains
 	chain := func() (ch delegationSyncChain, n int) {
 		chains.mu.Lock()

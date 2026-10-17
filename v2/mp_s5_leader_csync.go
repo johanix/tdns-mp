@@ -397,7 +397,7 @@ func (zdr *ZoneDataRepo) trackedRR(zone ZoneName, agent AgentId, rrtype uint16, 
 // meanwhile drops what it holds.
 func (conf *Config) delegationCsyncAwaitedAfter(ctx context.Context, zone string, ask int, every time.Duration) {
 	c := &conf.InternalMp.delegationSyncChains
-	time.AfterFunc(every, func() {
+	conf.delegationSyncAfter(ctx, every, func() {
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
 		c.mu.Lock()
