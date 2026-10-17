@@ -115,7 +115,7 @@ func heldJWK(pe *peerEnv, peer string) string {
 	return jwk
 }
 
-// refusedInARow is how many hellos in a row peer has refused pe.
+// refusedInARow is how many hellos and beats in a row peer has refused pe.
 func refusedInARow(pe *peerEnv, peer string) int {
 	tm := pe.Bridge
 	tm.refusedHellosMu.Lock()
@@ -295,5 +295,46 @@ func TestAHelloThatGetsNoAnswerStartsNoLookup(t *testing.T) {
 	}
 	if got := s.bobJWKLookups(); got != 1 {
 		t.Errorf("Bob's JWK record was looked up %d times, want once: when Alice discovered him", got)
+	}
+}
+
+// A peer that is given a new key while this agent runs. The agent holds the
+// peer's mechanism past the hello: it sends beats, and a peer whose beats
+// fail is still sent beats, never a hello. So the peer refuses beats and no
+// hello, and the count behind the fresh lookup has to see those too. Here
+// Alice holds an older key for Bob and holds him as OPERATIONAL, as she would
+// had he changed his key since their last beat.
+func TestAPeerThatRefusesOurBeatsIsLookedUpAgain(t *testing.T) {
+	s := newRefusedHelloScenario(t, true)
+	old := newHarnessKey(t)
+	s.publishBob(old)
+	s.discovers(t, s.alice, s.bob)
+	s.discovers(t, s.bob, s.alice)
+	if got := heldJWK(s.alice, s.bob.Identity); got != old.jwk {
+		t.Fatalf("precondition: Alice holds the key %q for Bob, want the older one that was published", got)
+	}
+	p, ok := s.alice.Bridge.PeerRegistry.Get(s.bob.Identity)
+	if !ok {
+		t.Fatal("precondition: Alice has no peer entry for Bob")
+	}
+	p.SetMechanismState(transport.MechanismDNS, transport.PeerStateOperational, "test: as after a completed handshake")
+
+	// The record is Bob's current key; Alice's resolver has the older one
+	// cached.
+	s.publishBob(s.bobKey)
+	s.release()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for heldJWK(s.alice, s.bob.Identity) != s.bobKey.jwk {
+		if time.Now().After(deadline) {
+			t.Fatalf("Alice still holds the older key for Bob after %d of her messages were refused in a row; his JWK record was looked up %d time(s)",
+				refusedInARow(s.alice, s.bob.Identity), s.bobJWKLookups())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitForDNSState(t, s.alice, s.bob.Identity, transport.PeerStateOperational, 10*time.Second)
+	waitForDNSState(t, s.bob, s.alice.Identity, transport.PeerStateOperational, 10*time.Second)
+	if got := s.bobJWKLookups(); got != 2 {
+		t.Errorf("Bob's JWK record was looked up %d times, want 2: when Alice discovered him, and once more after his refusals", got)
 	}
 }

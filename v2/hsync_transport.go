@@ -91,9 +91,9 @@ type MPTransportBridge struct {
 	keystateRfiMu    sync.Mutex
 	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
 
-	// refusedHellos is, per peer, the run of our DNS hellos that the peer
-	// has refused and when the peer was last looked up past the resolver's
-	// cache (noteHelloRefused, freshLookupDue, agent_discovery.go).
+	// refusedHellos is, per peer, the run of our DNS hellos and beats that
+	// the peer has refused and when the peer was last looked up past the
+	// resolver's cache (noteRefused, freshLookupDue, agent_discovery.go).
 	refusedHellosMu sync.Mutex
 	refusedHellos   map[string]*refusedHellos
 	// rediscoveryInterval is the least time between two such lookups of one
@@ -1770,10 +1770,16 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		dnsResp, dnsErr = beatResult(results["DNS"])
 		if dnsErr != nil {
 			lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
+			// A peer that keeps answering our beats with REFUSED may be
+			// one whose key we hold wrong, as a refused hello may (#145).
+			if helloRefused(dnsErr) {
+				tm.noteBeatRefused(peer.ID)
+			}
 		} else if dnsResp != nil && !dnsResp.Ack {
 			lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
 		} else {
 			lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
+			tm.noteHelloAccepted(peer.ID)
 			peer.SetMechanismState("DNS", transport.PeerStateOperational, "DNS beat round-trip succeeded")
 			peer.SetMechanismLastBeatSent("DNS", time.Now())
 			if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
