@@ -148,7 +148,7 @@ func TestAPIReceive_SenderToPipeline(t *testing.T) {
 	if b.MessageType != AgentMsgBeat || string(b.Identity) != alice || b.Transport != transport.MechanismAPI || string(b.Zone) != zone {
 		t.Errorf("beat report: %+v", *b)
 	}
-	if p, ok := env.Bob.Bridge.PeerRegistry.Get(alice); !ok || p.LastBeatReceived.IsZero() {
+	if p, ok := env.Bob.Bridge.PeerRegistry.Get(alice); !ok || p.GetLastBeatReceived().IsZero() {
 		t.Error("the beat must record inbound liveness on the peer")
 	}
 

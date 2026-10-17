@@ -70,8 +70,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// OPERATIONAL means). State is set on the outbound beat path.
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
-				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+				peer.SetMechanismLastBeatRecv("DNS", time.Now())
 			}
 
 		case report := <-msgQs.Hello:
@@ -85,7 +84,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// OPERATIONAL (that requires an outbound beat round-trip).
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
+				peer.SetLastBeatReceived(time.Now())
 			}
 
 		case report := <-msgQs.Ping:

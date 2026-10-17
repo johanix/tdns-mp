@@ -305,10 +305,10 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
-			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
-			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
+			agentPeer.SetAPIEndpoint(agentConf.ApiBaseUrl)
 		}
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
@@ -430,13 +430,13 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
-			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
-			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
-			agentPeer.PreferredTransport = "API"
+			agentPeer.SetAPIEndpoint(agentConf.ApiBaseUrl)
+			agentPeer.SetPreferredTransport("API")
 		} else {
-			agentPeer.PreferredTransport = "DNS"
+			agentPeer.SetPreferredTransport("DNS")
 		}
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, err)
