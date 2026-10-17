@@ -177,10 +177,15 @@ record stays.
 
 ### 4.2 Charlie's NS records leave the zone
 
-With `nsmgmt="agent"` the NS records charlie contributed
-are removed at this moment, not when its HSYNC3 record
-goes: by then it is too late. With the NS RRset managed
-by the owner, the owner removes them in the same edit.
+The edit of 4.1 withdraws nothing by itself. It starts
+the removal, which the leader of the zone's group runs.
+Charlie is never that leader, and the leader needs
+nothing from charlie to do it. With `nsmgmt="agent"` the
+leader removes the NS records charlie contributed, as the
+first step of the removal, not when charlie's HSYNC3
+record goes: by then it is too late. With the NS RRset
+managed by the owner, the owner removes them in the same
+edit.
 
 **Today:** contributed NS records stay until an operator
 purges them at every remaining provider
@@ -211,7 +216,8 @@ fixed.
    needs nothing from charlie for that: when it is safe
    is a matter of time and TTL only.
 3. The DS RRset's TTL passes.
-4. The other signers drop charlie's DNSKEYs.
+4. The leader removes charlie's DNSKEYs. Until then
+   every other signer keeps them in its key set.
 
 Charlie's DS has to outlive its NS because every signer
 signs its DNSKEY RRset with its own KSK.
@@ -275,9 +281,8 @@ server (section 3).
 - Whether `servers=` before `signers=` is refused for a
   provider that is to sign. The owner's later intent
   cannot be known from the first edit.
-- Who removes a leaving provider's NS records: every
-  remaining provider when it sees the `servers=` change,
-  or the leaving provider's own agent.
+- Whether the zone's NS RRset or the parent's delegation
+  changes first when a provider leaves.
 
 ## 7. See Also
 
