@@ -1000,6 +1000,15 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	isProvider := GetProviderZoneRRtypes(zone) != nil
 	var parts []string
 
+	// 0. For provider zones: a stored at-ns instruction whose zone does not
+	// carry the customer's consent is withdrawn first, so that neither the
+	// snapshot nor step 2 puts its _signal KEYs back (withdrawSignalKeys).
+	if isProvider {
+		if err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
+			return "", fmt.Errorf("failed to load publish instructions: %w", err)
+		}
+	}
+
 	// 1. Reload AgentContributions from the CombinerContributions snapshot.
 	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
