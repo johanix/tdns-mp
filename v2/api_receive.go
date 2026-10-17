@@ -4,10 +4,12 @@
  * The HTTPS mechanism's receive side (cleanup plan, step 5).
  *
  * The sync API endpoints (/hello, /beat, /sync/ping, /msg) hand the request
- * body to the transport's receive pipeline, RouteAPIPayload, which parses
- * it with parseAppPayload, authorizes the sender at all and for the zone,
- * runs the role's verb table and delivers the message to the same queues
- * a NOTIFY(CHUNK) reaches. The reply the pipeline produces (the handler's
+ * body and the client certificate's identity to the transport's receive
+ * pipeline, RouteAPIPayload. That identity is the sender (the body names
+ * the originator); the pipeline parses the body with parseAppPayload,
+ * authorizes the sender at all and for the zone, runs the role's verb
+ * table and delivers the message to the same queues a NOTIFY(CHUNK)
+ * reaches. The reply the pipeline produces (the handler's
  * inline confirmation) is shaped here into the response object each
  * endpoint has always returned, so a sender from before this change reads
  * the same fields.
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -77,15 +80,34 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			return
 		}
 		// The verb and the sender the body names, before the pipeline
-		// decides anything about it: the sender for the reply, the verb to
-		// hold the body to what this endpoint takes.
+		// decides anything about it: the sender for the reply when no
+		// certificate names one, the verb to hold the body to what this
+		// endpoint takes.
 		im, perr := parseAppPayload("", body, r.RemoteAddr)
 		if perr != nil || im == nil {
 			lgApi.Warn("unparseable sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "err", perr)
 			_ = sink.fail("Invalid request format")
 			return
 		}
+		// The sender is the identity the connection authenticated: the
+		// client certificate, whose CN the TLSA middleware has checked,
+		// as a NOTIFY's sender is the identity in its query name. The
+		// body names the originator, which for an update an agent
+		// forwards to its combiner is the remote agent whose update it
+		// is. It goes in canonical form, the form a peer is known by;
+		// the certificate may spell the name otherwise. /hello is reached
+		// before the peer's TLSA is known; nothing has checked a
+		// certificate there, and the body names the sender.
+		var sender string
+		if kind != apiEndpointHello {
+			if cn, ok := clientIdentity(r); ok {
+				sender = core.CanonicalizeName(dns.Fqdn(cn))
+			}
+		}
 		sink.your = AgentId(im.SenderID)
+		if sender != "" {
+			sink.your = AgentId(sender)
+		}
 		if !slices.Contains(endpointVerbs[kind], im.Token()) {
 			lgApi.Warn("sync API request refused: this endpoint does not take the verb",
 				"path", r.URL.Path, "from", r.RemoteAddr, "verb", im.Token(), "sender", im.SenderID)
@@ -107,8 +129,8 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 				return
 			}
 		}
-		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your)
-		if err := handler.RouteAPIPayload(r.Context(), body, r.RemoteAddr, sink); err != nil {
+		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your, "originator", im.SenderID)
+		if err := handler.RouteAPIPayload(r.Context(), body, r.RemoteAddr, sender, sink); err != nil {
 			lgApi.Warn("sync API request failed", "path", r.URL.Path, "from", r.RemoteAddr, "err", err)
 		}
 	}
@@ -154,8 +176,8 @@ func (s *apiReplySink) Reply(ctx *transport.MessageContext, payload []byte, rcod
 			lgApi.Warn("unparseable inline confirmation", "err", err)
 		}
 	}
-	if im, ok := ctx.Incoming(); ok && im.SenderID != "" {
-		s.your = AgentId(im.SenderID)
+	if im, ok := ctx.Incoming(); ok && im.TransportSender != "" {
+		s.your = AgentId(im.TransportSender)
 	}
 	s.gossip = inline.Gossip
 	ok := rcode == dns.RcodeSuccess && (inline.Status == "" || inline.Status == "ok" || inline.Status == "pending")

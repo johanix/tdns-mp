@@ -44,7 +44,7 @@ func postAPIHello(t *testing.T, receiver *peerEnv, sender, zone string) *AgentHe
 	}
 	rec := httptest.NewRecorder()
 	sink := &apiReplySink{kind: apiEndpointHello, w: rec, local: AgentId(receiver.Identity)}
-	if err := receiver.Bridge.ChunkHandler.RouteAPIPayload(context.Background(), body, "127.0.0.1:0", sink); err != nil {
+	if err := receiver.Bridge.ChunkHandler.RouteAPIPayload(context.Background(), body, "127.0.0.1:0", "", sink); err != nil {
 		t.Logf("RouteAPIPayload: %v", err)
 	}
 	var resp AgentHelloResponse
