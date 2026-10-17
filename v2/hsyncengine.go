@@ -235,7 +235,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 						lgEngine.Error("RFI AUDIT: failed to get audit data", "zone", ampp.Zone, "err", sdResp.ErrorMsg)
 						return
 					}
-					sendAuditToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), sdResp.ZDR)
+					sendAuditToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.Nonce, sdResp.ZDR)
 				case <-time.After(5 * time.Second):
 					lgEngine.Error("RFI AUDIT: timeout getting audit data", "zone", ampp.Zone)
 				}
@@ -375,7 +375,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.Msg = "CONFIG request failed: transport unavailable"
 				return
 			}
-			go sendConfigToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, configData)
+			go sendConfigToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, ampp.Nonce, configData)
 			resp.Msg = fmt.Sprintf("CONFIG %s request received, response pending", ampp.RfiSubtype)
 
 		default:
@@ -700,17 +700,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	syncReq := &PeerSyncRequest{
-		SenderID:    ar.LocalAgent.Identity,
-		Zone:        string(msg.Zone),
-		Records:     msg.Records,
-		Timestamp:   time.Now(),
-		MessageType: string(msg.MessageType),
-		RfiType:     msg.RfiType,
-		RfiSubtype:  msg.RfiSubtype,
-	}
-
-	syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
+	syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, rfiSyncRequest(ar.LocalAgent.Identity, msg))
 	if err != nil {
 		return nil, fmt.Errorf("send to agent %q failed: %w", agent.ID, err)
 	}
@@ -727,6 +717,21 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 		Msg:    syncResp.Message,
 		Zone:   msg.Zone,
 	}, nil
+}
+
+// rfiSyncRequest is the request an RFI goes out as. The nonce comes back in
+// a CONFIG or AUDIT answer, which is how the requester matches it.
+func rfiSyncRequest(localID string, msg *AgentMsgPost) *PeerSyncRequest {
+	return &PeerSyncRequest{
+		SenderID:    localID,
+		Zone:        string(msg.Zone),
+		Records:     msg.Records,
+		Timestamp:   time.Now(),
+		MessageType: string(msg.MessageType),
+		RfiType:     msg.RfiType,
+		RfiSubtype:  msg.RfiSubtype,
+		Nonce:       msg.Nonce,
+	}
 }
 
 // XXX: Not used at the moment.

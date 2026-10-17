@@ -182,7 +182,7 @@ func dispatchCases() []dispatchCase {
 					t.Fatal("rfi did not reach MsgQs.Msg")
 				}
 				if m.MessageType != AgentMsgRfi || string(m.OriginatorID) != alice || m.RfiType != "downstream" ||
-					m.RfiSubtype != "ns" || m.DistributionID != distID {
+					m.RfiSubtype != "ns" || m.DistributionID != distID || m.Nonce != "rfi-"+distID {
 					t.Errorf("rfi msg: %+v", m.AgentMsgPost)
 				}
 			}},
@@ -245,10 +245,10 @@ func dispatchCases() []dispatchCase {
 		{name: "config", verb: "config", wantAck: "config received",
 			build: func(a, b, d string) interface{} {
 				return &DnsConfigPayload{MessageType: "config", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Timestamp: time.Now().Unix()}
+					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
 			},
 			before: func(env *integEnv, alice string) {
-				configAnswer, _ = env.Bob.MsgQs.configWaiters.register(rfiWaitKey(alice, dispatchZone, "policy"))
+				configAnswer, _ = env.Bob.MsgQs.configWaiters.register(rfiWaitKey(alice, dispatchZone, "policy", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
 				m, ok := recvWithin(configAnswer, integTestTimeout)
@@ -262,10 +262,10 @@ func dispatchCases() []dispatchCase {
 		{name: "audit", verb: "audit", wantAck: "audit received",
 			build: func(a, b, d string) interface{} {
 				return &DnsAuditPayload{MessageType: "audit", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					AuditData: map[string]interface{}{"check": "ok"}, Timestamp: time.Now().Unix()}
+					AuditData: map[string]interface{}{"check": "ok"}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
 			},
 			before: func(env *integEnv, alice string) {
-				auditAnswer, _ = env.Bob.MsgQs.auditWaiters.register(rfiWaitKey(alice, dispatchZone, ""))
+				auditAnswer, _ = env.Bob.MsgQs.auditWaiters.register(rfiWaitKey(alice, dispatchZone, "", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
 				m, ok := recvWithin(auditAnswer, integTestTimeout)
