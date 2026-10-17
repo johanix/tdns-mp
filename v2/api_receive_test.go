@@ -378,6 +378,27 @@ func TestAPIReceive_SenderIsTheClientCertificate(t *testing.T) {
 	if err != nil || ping.OK {
 		t.Fatalf("a ping naming alice under carol's certificate was answered: %+v %v", ping, err)
 	}
+	// Under her own certificate alice names herself in OriginatorID, which
+	// the parser reads first, and carol in MyIdentity, which the beat
+	// router reads first: refused as a whole, not booked as carol's beat.
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: pool, Certificates: []tls.Certificate{clientCert(t, alice)}}}}
+	body := `{"MessageType":"beat","OriginatorID":"` + alice + `","MyIdentity":"carol.agent.example.","Zones":["` + zone + `"]}`
+	res, err := client.Post(srv.URL+"/api/v1/beat", "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply AgentBeatResponse
+	err = json.NewDecoder(res.Body).Decode(&reply)
+	res.Body.Close()
+	if err != nil || !reply.Error || len(reply.Gossip) != 0 {
+		t.Fatalf("a beat naming alice and carol under alice's certificate: %+v %v", reply, err)
+	}
+	if b, ok := recvWithin(env.Bob.MsgQs.Beat, 100*time.Millisecond); ok {
+		t.Errorf("a beat naming alice and carol reached MsgQs.Beat as %s's", b.Identity)
+	}
 
 	own := apiSender(srv, alice, clientCert(t, "Alice.Agent.Example"))
 	beat, err = own.Beat(ctx, peer, &transport.BeatRequest{SenderID: alice, Zones: []string{zone}, Timestamp: time.Now()})

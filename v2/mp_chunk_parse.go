@@ -44,6 +44,20 @@ func parseAppPayload(distributionID string, payload []byte, sourceAddr string) (
 	if fields.Zone != "" && fields.LegacyZone != "" && fields.Zone != fields.LegacyZone {
 		return nil, fmt.Errorf("conflicting zone fields: Zone=%q vs zone=%q", fields.Zone, fields.LegacyZone)
 	}
+	// Nor different senders: this parser reads OriginatorID first, the
+	// verb routers (GetSenderID) read MyIdentity first, so a body that
+	// named two would be authorized as one sender and handled as the other.
+	var named string
+	for _, s := range []string{fields.OriginatorID, fields.MyIdentity, fields.SenderID} {
+		if s == "" {
+			continue
+		}
+		if named != "" && s != named {
+			return nil, fmt.Errorf("conflicting sender fields: OriginatorID=%q MyIdentity=%q sender_id=%q",
+				fields.OriginatorID, fields.MyIdentity, fields.SenderID)
+		}
+		named = s
+	}
 	msgType := fields.MessageType
 	if msgType == "" {
 		msgType = fields.Type
