@@ -426,6 +426,9 @@ func (m *KeystateSignalMsg) Describe() string {
 			t.add(2, "provider %s: key %d: %s", fk.Provider, fk.KeyTag, describeKeyState(fk.KeyState, nil))
 		}
 	}
+	if len(m.ForeignSpoken) > 0 {
+		t.add(1, "providers that have spoken: %s", strings.Join(m.ForeignSpoken, " "))
+	}
 	return t.String()
 }
 

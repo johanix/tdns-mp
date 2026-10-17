@@ -266,6 +266,70 @@ combiner's contributions are documented in
 These are the bread-and-butter commands when something
 is wrong with what is being published.
 
+### 4.4 The SOA serial a signer serves
+
+Which serial a signer serves for a multi-provider zone
+depends on who signs the zone:
+
+- **A zone this provider signs** (its label is in
+  `signers=`) has a serial of the signer's own. It starts
+  at the combiner's serial and moves on by itself at
+  every publish, so it is normally ahead of the
+  combiner's.
+- **A zone this provider only serves**, signed by another
+  provider, is relayed as it was received: the upstream
+  signer's SOA, with its serial and its RRSIG. The two
+  signers answer with the same SOA:
+
+  ```sh
+  dog @<upstream-signer> +dnssec example.com. SOA
+  dog @<this-signer>     +dnssec example.com. SOA
+  ```
+
+  Nothing at this provider changes such a zone. A
+  `signer zone bump` of it is refused, and a server-wide
+  `outbound-soa-serial` setting does not apply to it.
+  A zone that no provider signs is relayed the same way,
+  from the provider's own combiner.
+
+**When the role changes.** A provider that starts to
+sign a zone it relayed goes on from one past the serial
+it was serving, also when its signer is restarted in
+between; the servers downstream of the signer keep
+transferring. A provider that stops signing a zone and
+relays it instead drops to the upstream signer's serial,
+which is normally lower than its own count. The servers
+downstream of it then hold the higher serial and need a
+forced retransfer, as after an upgrade (below).
+
+**Upgrading a signer that relays zones.** Earlier
+versions counted a serial of their own for a relayed
+zone as well, so a signer's copy could be a few serials
+ahead of its upstream's, or behind it, and its SOA then
+failed validation. A signer with this fix takes the
+upstream's serial at its first load. Where the old
+version was ahead, that serial is lower than the one it
+served, and the signer's log does not say so. The
+servers that transfer the zone from this signer (the
+provider's public nameservers, and its agent if it is
+not restarted after the signer) still hold the higher
+serial. They do not transfer a lower one, and go on
+serving their old copy until the upstream signer's
+serial has passed the one they hold. So after the
+upgrade, force a retransfer of each relayed zone on each
+of them: with
+`tdns-mpcli agent zone reload -z <zone> --force` for the
+agent, and with the server's own command for a
+nameserver that is not tdns. Then compare the SOA at the
+upstream signer, at this signer and at each of those
+servers.
+
+A signer logs `secondary SOA serial steps BACKWARDS to
+mirror upstream` when the serial of a zone drops while it
+runs. The same remedy applies. The command the message
+names is tdns-auth's; for a tdns-mp daemon it is the
+`zone reload ... --force` above.
+
 ## 5. Transactions and Queues
 
 The outbound message queue is where in-flight peer

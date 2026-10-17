@@ -527,6 +527,15 @@ binds. The `api` block's listener always starts; with
 is not advertised. The `dnssec:` policy signs the agent's
 identity zone.
 
+`kasp.propagation-delay` has a second use on the agent. It
+is this provider's word on how long a change needs to
+reach all of its nameservers. The agent announces it to
+the other providers' agents, and the agent that leads a
+zone holds a NOTIFY to the zone's parent for the largest
+value among the providers that serve the zone (see
+[Multi-Provider Advanced Topics §1.3](multi-provider-advanced.md#13-the-notify-scheme-child-side)).
+Left unset, the value is tdns's default of one hour.
+
 ### 4.5 CLI Configuration
 
 `/etc/tdns/tdns-mpcli.yaml`:

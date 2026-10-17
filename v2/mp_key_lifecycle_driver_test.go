@@ -41,8 +41,9 @@ type fakeWire struct {
 	resigns   int
 	reports   []string
 	ttl       time.Duration
-	changes   int   // KeysChanged calls
-	stripErr  error // what Strip returns
+	changes   int    // KeysChanged calls
+	stripErr  error  // what Strip returns
+	onResign  func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
 }
 
 func newFakeWire(signers ...string) *fakeWire {
@@ -75,6 +76,11 @@ func (w *fakeWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) 
 			served[tag] = true
 		}
 	}
+	if len(served) == 0 {
+		// as the engine reads a NOERROR with no DS, or an NXDOMAIN: known,
+		// empty, and no TTL to speak of
+		return served, 0, true
+	}
 	return served, w.parentTTL, true
 }
 func (w *fakeWire) Strip(zone string, keyid uint16) error {
@@ -86,7 +92,15 @@ func (w *fakeWire) Strip(zone string, keyid uint16) error {
 	w.stripped = append(w.stripped, keyid)
 	return nil
 }
-func (w *fakeWire) Resign(zone string)                        { w.mu.Lock(); defer w.mu.Unlock(); w.resigns++ }
+func (w *fakeWire) Resign(zone string) {
+	w.mu.Lock()
+	w.resigns++
+	hook := w.onResign
+	w.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
 func (w *fakeWire) KeysChanged(zone string)                   { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
 func (w *fakeWire) ServedDnskeyTTL(zone string) time.Duration { return w.ttl }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {
@@ -179,7 +193,7 @@ func (r *driverRig) keysIn(state, role string) []uint16 {
 }
 
 var driverPolicy = LifecyclePolicy{KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519, StandbyKSK: 0, StandbyZSK: 0,
-	PropagationDelay: 10 * time.Minute, Margin: time.Hour}
+	PropagationDelay: 10 * time.Minute, Margin: time.Hour, SigLifetime: 24 * time.Hour}
 
 // bootstrap: a fresh owned zone with two other signing providers gets one
 // active KSK and ZSK through the machine alone, in the table's order.

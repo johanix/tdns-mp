@@ -89,8 +89,13 @@ type PeerKeystateRequest struct {
 	Message      string                 // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry    // Complete key inventory (only when Signal == "inventory")
 	ForeignKeys  []core.ForeignKeyState // what the other providers said about their keys (only when Signal == "foreign")
-	Owned        bool                   // the sender's own state machine runs the zone's keys (S3)
-	Timestamp    time.Time              // Request timestamp
+	// ForeignSpoken: the providers (HSYNC3 labels) whose word the sender
+	// holds, a provider whose latest word listed no keys included; the
+	// signer tells that provider's empty word from silence by it (only
+	// when Signal == "foreign"; S7)
+	ForeignSpoken []string
+	Owned         bool      // the sender's own state machine runs the zone's keys (S3)
+	Timestamp     time.Time // Request timestamp
 }
 
 type PeerKeystateResponse struct {

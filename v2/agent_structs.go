@@ -486,6 +486,7 @@ type AgentMsgReport struct {
 	Transport      string
 	MessageType    AgentMsg
 	Zone           ZoneName
+	Zones          []ZoneName // a beat: every zone it names, Zone being the first (tdns-mp #153)
 	Identity       AgentId
 	BeatInterval   uint32
 	Msg            interface{}
