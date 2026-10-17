@@ -243,3 +243,68 @@ func TestBridge_WithoutDNSRegistersNoChunkNotifyHandler(t *testing.T) {
 		t.Fatalf("Start without DNS: %v", err)
 	}
 }
+
+// The answer to an HTTPS beat carries the receiver's gossip, as the answer
+// to a DNS beat does (plan decision 26): alice beats bob over HTTPS only,
+// and bob's row for the zone's group is in alice's gossip table when the
+// beat returns.
+func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
+	const zone = "api-gossip.example."
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	zd := seedZoneWithHSYNC3(t, zone, alice, bob)
+	addHSYNCPARAMServers(t, zd, shortLabel(alice), shortLabel(bob))
+	var group string
+	for _, p := range []*peerEnv{env.Alice, env.Bob} {
+		pgm := p.Registry.ProviderGroupManager
+		pgm.RecomputeGroups()
+		pg := pgm.GetGroupForZone(ZoneName(zone))
+		if pg == nil {
+			t.Fatalf("%s has no provider group for the zone", p.Identity)
+		}
+		group = pg.GroupHash
+		// each agent's own row, as the engine writes it before its beats
+		p.Registry.GossipStateTable.RefreshLocalStates(p.Registry, pgm)
+	}
+
+	env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
+	env.Bob.Bridge.PeerRegistry.GetOrCreate(alice)
+	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
+	srv := apiEndpointsServer(t, env.Bob)
+	tr := apiSender(srv, alice)
+	env.Alice.Bridge.APITransport = tr
+	env.Alice.Bridge.TransportManager.APITransport = tr
+	peer := transport.NewPeer(bob)
+	peer.APIEndpoint = srv.URL + "/api/v1"
+	peer.SetMechanismState("API", transport.PeerStateIntroducing, "said hello")
+	if err := env.Alice.Bridge.PeerRegistry.Add(peer); err != nil {
+		t.Fatalf("the peer: %v", err)
+	}
+	agent := NewAgent(AgentId(bob))
+	agent.ApiMethod = true // and no DNS: the gossip can only come over HTTPS
+
+	ours := env.Alice.Registry.GossipStateTable
+	ours.mu.RLock()
+	before := ours.States[group][bob]
+	ours.mu.RUnlock()
+	if before != nil {
+		t.Fatal("alice has bob's row before any beat")
+	}
+	resp, err := env.Alice.Bridge.SendBeatWithFallback(env.ctx, agent, 1)
+	if err != nil || resp == nil || !resp.Ack {
+		t.Fatalf("the beat: %+v %v", resp, err)
+	}
+	if len(resp.Gossip) == 0 {
+		t.Error("the answer to the HTTPS beat carried no gossip")
+	}
+	ours.mu.RLock()
+	heard := ours.States[group][bob]
+	ours.mu.RUnlock()
+	if heard == nil || heard.Identity != bob {
+		t.Fatalf("alice did not get bob's row with the answer to her HTTPS beat: %+v", heard)
+	}
+	if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
+		t.Error("the beat did not reach bob's MsgQs.Beat")
+	}
+}
