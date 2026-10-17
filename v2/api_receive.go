@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -93,15 +94,19 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 		// as a NOTIFY's sender is the identity in its query name. The
 		// body names the originator, which for an update an agent
 		// forwards to its combiner is the remote agent whose update it
-		// is. /hello is reached before the peer's TLSA is known; nothing
-		// has checked a certificate there, and the body names the sender.
+		// is. It goes in canonical form, the form a peer is known by;
+		// the certificate may spell the name otherwise. /hello is reached
+		// before the peer's TLSA is known; nothing has checked a
+		// certificate there, and the body names the sender.
 		var sender string
 		if kind != apiEndpointHello {
-			sender, _ = clientIdentity(r)
+			if cn, ok := clientIdentity(r); ok {
+				sender = core.CanonicalizeName(dns.Fqdn(cn))
+			}
 		}
 		sink.your = AgentId(im.SenderID)
 		if sender != "" {
-			sink.your = AgentId(dns.Fqdn(sender))
+			sink.your = AgentId(sender)
 		}
 		if !slices.Contains(endpointVerbs[kind], im.Token()) {
 			lgApi.Warn("sync API request refused: this endpoint does not take the verb",
