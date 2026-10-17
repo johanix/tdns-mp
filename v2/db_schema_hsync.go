@@ -243,6 +243,16 @@ var HsyncTables = map[string]string{
 		ttl_seconds INTEGER DEFAULT 0,
 		UNIQUE (zonename, keyid)
 	)`,
+	// MPOwnerAlgorithm is the key lifecycle owner's algorithm per role of
+	// an owned zone, set through tdns-mpcli signer key policy (design Q1:
+	// the algorithm is the owner's field). A change starts an algorithm
+	// rollover (table §6 O4); the row keeps it over a restart (T15).
+	"MPOwnerAlgorithm": `CREATE TABLE IF NOT EXISTS 'MPOwnerAlgorithm' (
+		zonename  TEXT NOT NULL,
+		role      TEXT NOT NULL,
+		algorithm INTEGER NOT NULL,
+		UNIQUE (zonename, role)
+	)`,
 	"MPKeyDistribution": `CREATE TABLE IF NOT EXISTS 'MPKeyDistribution' (
 		zonename  TEXT NOT NULL,
 		keyid     INTEGER NOT NULL,

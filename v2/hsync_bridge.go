@@ -45,6 +45,10 @@ func (b *mpHsyncBridge) DiscoverPeer(ctx context.Context, identity string) (*tra
 // Only a peer that really is unresolved is re-armed: one with no address
 // and no mechanism past NEEDED. OnDiscoveryFailed writes ERROR again if the
 // retry fails too.
+//
+// A mechanism past NEEDED that has no address does not count: it is not
+// resolved, whatever its state says, and the engine's retry asks for it to
+// be discovered (tdns-mp #84).
 func rearmFailedDiscovery(reg *transport.PeerRegistry, identity string) {
 	if reg == nil {
 		return
@@ -54,6 +58,9 @@ func rearmFailedDiscovery(reg *transport.PeerRegistry, identity string) {
 		return
 	}
 	for _, mech := range []string{"API", "DNS"} {
+		if !p.HasMechanism(mech) {
+			continue
+		}
 		switch st, _ := p.MechanismRawState(mech); st {
 		case transport.PeerStateKnown, transport.PeerStateIntroducing, transport.PeerStateOperational,
 			transport.PeerStateDegraded, transport.PeerStateInterrupted:

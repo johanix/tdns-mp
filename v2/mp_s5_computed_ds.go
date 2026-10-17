@@ -99,11 +99,16 @@ func (tm *MPTransportBridge) foreignSharesFor(zone ZoneName) map[AgentId]foreign
 // HSYNCPARAM marks as signers. Unknown while any of them has not spoken, or
 // has a SEP key whose ds is undecided, or names a ds=1 key this agent holds
 // no record of; the syncher then leaves the parent's DS alone (Q9). A
-// provider that has spoken and listed no keys has an empty share. This
-// provider's own share, when it signs the zone, is its signer's latest
-// inventory, since a signer never distributes to its own agent. As with the
-// owner's answer from the inventory, a set with no SEP key in it is not an
-// answer: nobody has said anything about a key.
+// provider that has spoken and listed no keys has an empty share (A2.2's
+// empty-share clause, S7): it is present with nothing in it, so it holds
+// nothing back, and the set is known when every other signing provider has
+// spoken. Spoken is an entry in the agent's bookkeeping, which an explicit
+// empty list makes, and so does a replace of the whole set by no record
+// from a provider heard from before (NoteForeignKeyStates); a provider that
+// never said has none. This provider's own share, when it signs the zone,
+// is its signer's latest inventory, since a signer never distributes to its
+// own agent. As with the owner's answer from the inventory, a set with no
+// SEP key in it is not an answer: nobody has said anything about a key.
 func (conf *Config) computedDSIntent(zone string, digest uint8) (tdns.DSIntent, error) {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)

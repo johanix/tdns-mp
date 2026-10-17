@@ -51,6 +51,9 @@ type KeystateSignalMsg struct {
 	// ForeignKeys: Signal "foreign", what the other providers said about
 	// their keys in the zone (the complete latest set)
 	ForeignKeys []core.ForeignKeyState
+	// ForeignSpoken: Signal "foreign", the providers whose word the agent
+	// holds, one that listed no keys included; nil from an older agent
+	ForeignSpoken []string
 }
 
 type EditsResponseMsg struct {
