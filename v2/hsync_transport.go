@@ -533,12 +533,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// Set preferred transport based on what's offered
 		switch {
 		case apiOffered && dnsOffered:
-			peer.PreferredTransport = "API"
+			peer.SetPreferredTransport("API")
 			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.ID)
 		case apiOffered:
-			peer.PreferredTransport = "API"
+			peer.SetPreferredTransport("API")
 		case dnsOffered:
-			peer.PreferredTransport = "DNS"
+			peer.SetPreferredTransport("DNS")
 		}
 
 		// Top-level State must agree with the per-mechanism truth:
@@ -551,7 +551,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			peer.SetState(transport.PeerStateKnown, "discovery complete")
 		}
 
-		lgTransport.Info("agent discovery complete, view materialized", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
+		lgTransport.Info("agent discovery complete, view materialized", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.GetPreferredTransport())
 	}
 
 	// Symmetric failure-side seam (Bite D). Fired by MP's
@@ -715,7 +715,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	// inbound receipt must not assert top-level state.)
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastHelloReceived = time.Now()
+	helloAt := time.Now()
 	noAddress := false
 	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
 		// An inbound hello shows that the peer reaches us, not that we reach
@@ -739,7 +739,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 		// of the rounds, so a repeated hello still leaves their pace alone.
 		tm.beatBack(senderID)
 	}
-	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
+	peer.SetMechanismLastHelloRecv(mech, helloAt)
 
 	// For an unknown (but authorized) sender, and for one whose mechanism has
 	// no address, trigger discovery so we can beat back. Contact timestamps
@@ -847,8 +847,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// lives on the outbound success edge, not here.
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastBeatReceived = time.Now()
-	peer.SetMechanismLastBeatRecv(mech, peer.LastBeatReceived)
+	peer.SetMechanismLastBeatRecv(mech, time.Now())
 
 	// Inbound-liveness evidence lives on transport.Peer above (Phase 2: the
 	// AgentDetails telemetry mirror is gone; the NG beat-age scanner it once
@@ -935,8 +934,7 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	// path, not here.
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastBeatReceived = time.Now()
-	peer.SetMechanismLastBeatRecv(mech, peer.LastBeatReceived)
+	peer.SetMechanismLastBeatRecv(mech, time.Now())
 
 	report := &AgentMsgReport{
 		Transport:      mech,
@@ -1006,7 +1004,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// reach us, not that we can reach them. State is set by the outbound
 	// beat path (SendBeatWithFallback), never on inbound receipt.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastBeatReceived = time.Now()
+	peer.SetLastBeatReceived(time.Now())
 
 	// DeliveredBy is the transport-level sender (from QNAME), which may differ from
 	// the originator for forwarded messages. The combiner needs this to send confirmations
@@ -1019,7 +1017,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	if deliveredBy != senderID {
 		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
 		// Inbound liveness only — do not assert OPERATIONAL on a delivery.
-		deliverPeer.LastBeatReceived = time.Now()
+		deliverPeer.SetLastBeatReceived(time.Now())
 		if deliverPeer.CurrentAddress() == nil {
 			lgTransport.Info("transport sender has no address, triggering async discovery", "sender", deliveredBy)
 			go func(peerID string) {
@@ -1529,20 +1527,22 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 
 // SelectTransport selects the appropriate transport for communicating with a peer.
 func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Transport {
+	apiEndpoint := peer.GetAPIEndpoint()
+
 	// Check peer's preferred transport
-	switch peer.PreferredTransport {
+	switch peer.GetPreferredTransport() {
 	case "DNS":
 		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
 			return tm.DNSTransport
 		}
 	case "API":
-		if tm.APITransport != nil && peer.APIEndpoint != "" {
+		if tm.APITransport != nil && apiEndpoint != "" {
 			return tm.APITransport
 		}
 	}
 
 	// Default: try API first (more reliable), then DNS
-	if tm.APITransport != nil && peer.APIEndpoint != "" {
+	if tm.APITransport != nil && apiEndpoint != "" {
 		return tm.APITransport
 	}
 	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
@@ -1626,7 +1626,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// transport's SendAll — every eligible mechanism is tried, in order,
 	// and each outcome is applied below exactly as before.
 	apiGate, _ := mechStateForGate(peer, "API")
-	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown
+	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && apiGate == AgentStateKnown
 	dnsGate, _ := mechStateForGate(peer, "DNS")
 	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
 	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
@@ -1752,7 +1752,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		return st == AgentStateOperational || st == AgentStateIntroduced || st == AgentStateLegacy || st == AgentStateDegraded || st == AgentStateInterrupted
 	}
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && beatable(apiBeatGate)
+	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
 	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
 	apiRaw, _ := peer.MechanismRawState("API")
