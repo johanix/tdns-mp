@@ -27,9 +27,12 @@ type MsgQs struct {
 	KeystateInventory chan *KeystateInventoryMsg
 	KeystateSignal    chan *KeystateSignalMsg
 	EditsResponse     chan *EditsResponseMsg
-	ConfigResponse    chan *ConfigResponseMsg
-	AuditResponse     chan *AuditResponseMsg
 	StatusUpdate      chan *StatusUpdateMsg
+
+	// Answers to RFI CONFIG and RFI AUDIT, each handed to the request
+	// that asked for it (see rfiWaiters).
+	configWaiters rfiWaiters[*ConfigResponseMsg]
+	auditWaiters  rfiWaiters[*AuditResponseMsg]
 
 	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
 }

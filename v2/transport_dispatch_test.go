@@ -101,12 +101,17 @@ type dispatchCase struct {
 	// unhandled marks a verb the agent router has no handler for: it must be
 	// REFUSED on the wire and must NOT reach any MP queue.
 	unhandled bool
+	// before, when set, runs before the message is routed (e.g. to register
+	// the request an answer is routed to).
+	before func(env *integEnv, alice string)
 	// observe asserts the MP-side delivery.
 	observe func(t *testing.T, env *integEnv, alice, distID string)
 }
 
 func dispatchCases() []dispatchCase {
 	rr := dispatchZone + " 3600 IN TXT \"dispatch\""
+	var configAnswer <-chan *ConfigResponseMsg
+	var auditAnswer <-chan *AuditResponseMsg
 	return []dispatchCase{
 		{name: "hello", verb: "hello",
 			build: func(a, b, d string) interface{} {
@@ -177,7 +182,7 @@ func dispatchCases() []dispatchCase {
 					t.Fatal("rfi did not reach MsgQs.Msg")
 				}
 				if m.MessageType != AgentMsgRfi || string(m.OriginatorID) != alice || m.RfiType != "downstream" ||
-					m.RfiSubtype != "ns" || m.DistributionID != distID {
+					m.RfiSubtype != "ns" || m.DistributionID != distID || m.Nonce != "rfi-"+distID {
 					t.Errorf("rfi msg: %+v", m.AgentMsgPost)
 				}
 			}},
@@ -240,12 +245,15 @@ func dispatchCases() []dispatchCase {
 		{name: "config", verb: "config", wantAck: "config received",
 			build: func(a, b, d string) interface{} {
 				return &DnsConfigPayload{MessageType: "config", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Timestamp: time.Now().Unix()}
+					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
+			},
+			before: func(env *integEnv, alice string) {
+				configAnswer, _ = env.Bob.MsgQs.configWaiters.register(rfiWaitKey(alice, dispatchZone, "policy", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
-				m, ok := recvWithin(env.Bob.MsgQs.ConfigResponse, integTestTimeout)
+				m, ok := recvWithin(configAnswer, integTestTimeout)
 				if !ok {
-					t.Fatal("config did not reach MsgQs.ConfigResponse")
+					t.Fatal("config did not reach the waiting request")
 				}
 				if m.SenderID != alice || m.Zone != dispatchZone || m.Subtype != "policy" || m.ConfigData["k"] != "v" {
 					t.Errorf("config: %+v", *m)
@@ -254,12 +262,15 @@ func dispatchCases() []dispatchCase {
 		{name: "audit", verb: "audit", wantAck: "audit received",
 			build: func(a, b, d string) interface{} {
 				return &DnsAuditPayload{MessageType: "audit", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					AuditData: map[string]interface{}{"check": "ok"}, Timestamp: time.Now().Unix()}
+					AuditData: map[string]interface{}{"check": "ok"}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
+			},
+			before: func(env *integEnv, alice string) {
+				auditAnswer, _ = env.Bob.MsgQs.auditWaiters.register(rfiWaitKey(alice, dispatchZone, "", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
-				m, ok := recvWithin(env.Bob.MsgQs.AuditResponse, integTestTimeout)
+				m, ok := recvWithin(auditAnswer, integTestTimeout)
 				if !ok {
-					t.Fatal("audit did not reach MsgQs.AuditResponse")
+					t.Fatal("audit did not reach the waiting request")
 				}
 				if m.SenderID != alice || m.Zone != dispatchZone {
 					t.Errorf("audit: %+v", *m)
@@ -349,6 +360,9 @@ func TestTransportDispatch_PerVerb(t *testing.T) {
 			ctx.Peer = alicePeer
 			if string(msgType) != tc.verb {
 				t.Fatalf("pre-parsed type: got %q, want %q", msgType, tc.verb)
+			}
+			if tc.before != nil {
+				tc.before(env, alice)
 			}
 			if err := env.Bob.Bridge.Router.Route(ctx, msgType); err != nil {
 				t.Fatalf("Router.Route(%s): %v", tc.verb, err)

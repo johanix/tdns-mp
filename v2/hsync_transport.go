@@ -1199,8 +1199,8 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 	}
 }
 
-// routeConfigMessage routes an incoming CONFIG response message from a peer agent.
-// Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
+// routeConfigMessage routes an incoming CONFIG response message from a peer agent
+// to the RequestAndWaitForConfig that asked this sender for this zone and subtype.
 func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) {
 	var payload DnsConfigPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1208,7 +1208,11 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("CONFIG response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone, "subtype", payload.Subtype)
+		return
+	}
 	lgTransport.Debug("processing CONFIG response", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
 
 	if tm.msgQs == nil {
@@ -1223,18 +1227,17 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 		ConfigData: payload.ConfigData,
 	}
 
-	select {
-	case tm.msgQs.ConfigResponse <- configMsg:
+	if tm.msgQs.configWaiters.deliver(rfiWaitKey(senderID, payload.Zone, payload.Subtype, payload.Nonce), configMsg) {
 		lgTransport.Info("routed CONFIG response to agent", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
-	default:
-		lgTransport.Warn("ConfigResponse channel full, dropping config", "sender", senderID)
+	} else {
+		lgTransport.Warn("CONFIG response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
 	}
 }
 
 // sendConfigToAgent gathers config data for the given subtype and sends it as a separate
 // CONFIG message back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI CONFIG is received.
-func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, subtype string, configData map[string]string) {
+func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, subtype string, nonce string, configData map[string]string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendConfigToAgent: no DNSTransport available", "requester", requesterID)
 		return
@@ -1251,6 +1254,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		Zone:       zone,
 		Subtype:    subtype,
 		ConfigData: configData,
+		Nonce:      nonce,
 		Timestamp:  time.Now(),
 	}
 
@@ -1270,8 +1274,8 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype)
 }
 
-// routeAuditMessage routes an incoming AUDIT response message from a peer agent.
-// Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
+// routeAuditMessage routes an incoming AUDIT response message from a peer agent
+// to the RequestAndWaitForAudit that asked this sender for this zone.
 func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 	var payload DnsAuditPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1279,7 +1283,11 @@ func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("AUDIT response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone)
+		return
+	}
 	lgTransport.Debug("processing AUDIT response", "sender", senderID, "zone", payload.Zone)
 
 	if tm.msgQs == nil {
@@ -1293,11 +1301,10 @@ func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 		AuditData: payload.AuditData,
 	}
 
-	select {
-	case tm.msgQs.AuditResponse <- auditMsg:
+	if tm.msgQs.auditWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), auditMsg) {
 		lgTransport.Info("routed AUDIT response to agent", "sender", senderID, "zone", payload.Zone)
-	default:
-		lgTransport.Warn("AuditResponse channel full, dropping audit", "sender", senderID)
+	} else {
+		lgTransport.Warn("AUDIT response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone)
 	}
 }
 
@@ -1339,7 +1346,7 @@ func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMes
 // sendAuditToAgent gathers audit data and sends it as a separate AUDIT message
 // back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI AUDIT is received.
-func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, auditData interface{}) {
+func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, nonce string, auditData interface{}) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendAuditToAgent: no DNSTransport available", "requester", requesterID)
 		return
@@ -1355,6 +1362,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 		SenderID:  ar.LocalAgent.Identity,
 		Zone:      zone,
 		AuditData: auditData,
+		Nonce:     nonce,
 		Timestamp: time.Now(),
 	}
 

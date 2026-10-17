@@ -160,6 +160,7 @@ type DnsConfigPayload struct {
 	Subtype      string            `json:"Subtype"`
 	ConfigData   map[string]string `json:"ConfigData,omitempty"`
 	Message      string            `json:"Message,omitempty"`
+	Nonce        string            `json:"nonce,omitempty"` // the nonce of the RFI CONFIG this answers
 	Timestamp    int64             `json:"timestamp"`
 	Type         string            `json:"type"`
 	SenderID     string            `json:"sender_id"`
@@ -182,6 +183,7 @@ type DnsAuditPayload struct {
 	Zone         string      `json:"Zone"`
 	AuditData    interface{} `json:"AuditData,omitempty"`
 	Message      string      `json:"Message,omitempty"`
+	Nonce        string      `json:"nonce,omitempty"` // the nonce of the RFI AUDIT this answers
 	Timestamp    int64       `json:"timestamp"`
 	Type         string      `json:"type"`
 	SenderID     string      `json:"sender_id"`
