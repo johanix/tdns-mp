@@ -180,15 +180,29 @@ record stays.
 The edit of 4.1 withdraws nothing by itself. It starts
 the removal, which the leader of the zone's group runs.
 Charlie is never that leader, and the leader needs
-nothing from charlie to do it. With `nsmgmt="agent"` the
-leader removes the NS records charlie contributed, as the
-first step of the removal, not when charlie's HSYNC3
-record goes: by then it is too late. With the NS RRset
-managed by the owner, the owner removes them in the same
-edit.
+nothing from charlie to do it. With `parentsync="agent"`
+and a parent that takes UPDATE, the removal's first step
+is a roll of the zone's SIG(0) key, since charlie holds
+its private key. With `nsmgmt="agent"` the leader removes
+the NS records charlie contributed as a step of the
+removal, not when charlie's HSYNC3 record goes: by then
+it is too late. With the NS RRset managed by the owner,
+the owner removes them. Whether the zone's NS RRset or
+the parent's delegation changes first is open
+(section 6).
 
-**Today:** contributed NS records stay until an operator
-purges them at every remaining provider
+**Today:** nothing rolls the zone's SIG(0) key for a
+multi-provider zone. The agent's
+`zone dsync roll-sig0-key` runs the single-provider roll:
+it hands the new key to no other member, and it has not
+been tried on a multi-provider zone. So a provider that
+leaves and holds the zone's private key keeps it, and
+with it a key the parent may still trust. Today that is
+a provider that led the zone when the key was made, or
+one the key was handed to through the upstream relation.
+Contributed NS
+records stay until an operator purges them at every
+remaining provider
 ([issue 159](https://github.com/johanix/tdns-mp/issues/159)):
 
 ```sh
@@ -198,9 +212,10 @@ tdns-mpcli combiner zone edits purge -z example.com. \
 
 ### 4.3 Charlie keeps answering
 
-Charlie answers correctly, and keeps signing if it signs,
-for the NS RRset's TTL plus a safety period of its own.
-It notes any query that still arrives.
+Charlie answers correctly for the NS RRset's TTL plus a
+safety period of its own, and notes any query that still
+arrives. A signer goes on signing until the leader
+removes its DNSKEYs (4.4, 4.5).
 
 **Today:** a provider taken out of `signers=` stops
 signing at its next zone refresh and serves an unsigned
@@ -230,8 +245,11 @@ order
 ### 4.5 "Safe to remove"
 
 When the waits are over, charlie's `zone mplist` shows
-the zone as safe to remove. Charlie's operator, not the
-software, then takes the zone out of service.
+the zone as safe to remove. For a signer, the leader's
+removal of its DNSKEYs (4.4) is where charlie stops
+signing and serving the zone. For a server only, charlie's
+operator, not the software, then takes the zone out of
+service.
 
 **Today:** nothing says so
 ([issue 137](https://github.com/johanix/tdns-mp/issues/137)).
