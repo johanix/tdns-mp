@@ -365,11 +365,12 @@ func TestRfiEdits_NonceRoundTrip(t *testing.T) {
 	}
 }
 
-// A peer's key whose KEY RR belongs to another name is refused before it
-// reaches the keystore.
-func TestImportSig0KeyFromPeer_WrongOwner(t *testing.T) {
+// newSig0Key generates an ED25519 SIG(0) key for owner and returns its KEY RR
+// and its private key as PEM.
+func newSig0Key(t *testing.T, owner string) (*dns.KEY, string) {
+	t.Helper()
 	key := &dns.KEY{DNSKEY: dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: "b.example.", Rrtype: dns.TypeKEY, Class: dns.ClassINET, Ttl: 3600},
+		Hdr:       dns.RR_Header{Name: owner, Rrtype: dns.TypeKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags:     256,
 		Protocol:  3,
 		Algorithm: dns.ED25519,
@@ -382,11 +383,32 @@ func TestImportSig0KeyFromPeer_WrongOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrivateKeyToPEM: %v", err)
 	}
+	return key, pem
+}
+
+// A peer's key whose KEY RR belongs to another name is refused before it
+// reaches the keystore.
+func TestImportSig0KeyFromPeer_WrongOwner(t *testing.T) {
+	key, pem := newSig0Key(t, "b.example.")
 	configData := map[string]string{"algorithm": "ED25519", "privatekey": pem, "keyrr": key.String()}
 
 	// hdb is nil: the check must refuse before the keystore is touched.
-	err = importSig0KeyFromPeer(nil, "a.example.", configData)
+	err := importSig0KeyFromPeer(nil, "a.example.", configData)
 	if err == nil || !strings.Contains(err.Error(), "not a KEY for") {
 		t.Fatalf("import of b.example.'s key as a.example.: err = %v, want a refusal", err)
+	}
+}
+
+// A KEY RR for the right name with a private key that is not its own half is
+// refused before it reaches the keystore.
+func TestImportSig0KeyFromPeer_MismatchedPair(t *testing.T) {
+	keyA, _ := newSig0Key(t, "a.example.")
+	_, pemB := newSig0Key(t, "a.example.")
+	configData := map[string]string{"algorithm": "ED25519", "privatekey": pemB, "keyrr": keyA.String()}
+
+	// hdb is nil: the check must refuse before the keystore is touched.
+	err := importSig0KeyFromPeer(nil, "a.example.", configData)
+	if err == nil || !strings.Contains(err.Error(), "does not match its KEY") {
+		t.Fatalf("import of one key's KEY RR with another key's private half: err = %v, want a refusal", err)
 	}
 }

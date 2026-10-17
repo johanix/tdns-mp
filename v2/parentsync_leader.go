@@ -1466,6 +1466,13 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("peer sent a key for %q, not a KEY for %q", pkc.KeyRR.Hdr.Name, keyName)
 	}
 
+	// Nor a private key that is not the KEY's own half: it would be stored
+	// active, and its signatures would not validate against the published
+	// KEY. Same check as tdns's bulk SIG(0) import.
+	if _, err := tdns.VerifyStoredKeyPair(pkc.PrivateKeyPEM, &pkc.KeyRR.DNSKEY); err != nil {
+		return fmt.Errorf("peer's private key for %q does not match its KEY: %v", keyName, err)
+	}
+
 	// Import via Sig0KeyMgmt "add" (also adds to TrustStore)
 	kp := tdns.KeystorePost{
 		Command:         "sig0-mgmt",
