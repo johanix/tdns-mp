@@ -101,6 +101,14 @@ type integEnvConfig struct {
 	// Role is the role the bridge is built for. Empty is the agent's; an
 	// auditor peer takes roleAuditor.
 	Role string
+
+	// AuthorizedPeers, when set, is what the bridge's AuthorizedPeers
+	// callback returns, as a combiner's configured agents are. It takes
+	// the place of AuthorizeAllPeers.
+	AuthorizedPeers []string
+
+	// CombinerID is the agent's combiner, as the agent's config names it.
+	CombinerID string
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -189,6 +197,9 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		bob := dns.Fqdn("bob.agent.example.")
 		authorizedPeers = func() []string { return []string{alice, bob} }
 	}
+	if cfg != nil && cfg.AuthorizedPeers != nil {
+		authorizedPeers = func() []string { return cfg.AuthorizedPeers }
+	}
 
 	controlZone := integControlZone
 	if cfg != nil && cfg.ControlZoneIsIdentity {
@@ -213,6 +224,9 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		// production reads tdns.Zones (scenario 6).
 		GetZone:      tdns.Zones.Get,
 		GetZoneNames: tdns.Zones.Keys,
+	}
+	if cfg != nil {
+		bridgeCfg.CombinerID = cfg.CombinerID
 	}
 	if cfg != nil && cfg.Discovery != nil {
 		imr := harnessImr(t, cfg.Discovery)

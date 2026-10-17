@@ -14,9 +14,14 @@ package tdnsmp
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,7 +44,7 @@ func postAPIHello(t *testing.T, receiver *peerEnv, sender, zone string) *AgentHe
 	}
 	rec := httptest.NewRecorder()
 	sink := &apiReplySink{kind: apiEndpointHello, w: rec, local: AgentId(receiver.Identity)}
-	if err := receiver.Bridge.ChunkHandler.RouteAPIPayload(context.Background(), body, "127.0.0.1:0", sink); err != nil {
+	if err := receiver.Bridge.ChunkHandler.RouteAPIPayload(context.Background(), body, "127.0.0.1:0", "", sink); err != nil {
 		t.Logf("RouteAPIPayload: %v", err)
 	}
 	var resp AgentHelloResponse
@@ -50,7 +55,9 @@ func postAPIHello(t *testing.T, receiver *peerEnv, sender, zone string) *AgentHe
 }
 
 // apiEndpointsServer serves the receiver's sync API endpoints the way the
-// agent router mounts them, under /api/v1.
+// agent router mounts them, under /api/v1. It asks for a client
+// certificate and does not require one; the TLSA middleware in front of
+// the endpoints is not mounted.
 func apiEndpointsServer(t *testing.T, receiver *peerEnv) *httptest.Server {
 	t.Helper()
 	conf := &Config{}
@@ -60,17 +67,43 @@ func apiEndpointsServer(t *testing.T, receiver *peerEnv) *httptest.Server {
 	mux.HandleFunc("/api/v1/beat", conf.apiSyncEndpoint(apiEndpointBeat))
 	mux.HandleFunc("/api/v1/sync/ping", conf.apiSyncEndpoint(apiEndpointPing))
 	mux.HandleFunc("/api/v1/msg", conf.apiSyncEndpoint(apiEndpointMsg))
-	srv := httptest.NewTLSServer(mux)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// apiSender is an HTTPS sender for local that trusts the test receiver.
-func apiSender(srv *httptest.Server, local string) *transport.APITransport {
+// apiSender is an HTTPS sender for local that trusts the test receiver,
+// and presents the given client certificate, if any.
+func apiSender(srv *httptest.Server, local string, certs ...tls.Certificate) *transport.APITransport {
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
 	return transport.NewAPITransport(&transport.APITransportConfig{
-		LocalID: local, DefaultTimeout: integTestTimeout, TLSConfig: &tls.Config{RootCAs: pool}})
+		LocalID: local, DefaultTimeout: integTestTimeout, TLSConfig: &tls.Config{RootCAs: pool, Certificates: certs}})
+}
+
+// clientCert is a self-signed client certificate whose common name is
+// identity.
+func clientCert(t *testing.T, identity string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: identity},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 func TestAPIReceive_SenderToPipeline(t *testing.T) {
