@@ -110,6 +110,7 @@ type dispatchCase struct {
 
 func dispatchCases() []dispatchCase {
 	rr := dispatchZone + " 3600 IN TXT \"dispatch\""
+	var editsAnswer <-chan *EditsResponseMsg
 	var configAnswer <-chan *ConfigResponseMsg
 	var auditAnswer <-chan *AuditResponseMsg
 	return []dispatchCase{
@@ -231,12 +232,15 @@ func dispatchCases() []dispatchCase {
 		{name: "edits", verb: "edits", wantAck: "edits received",
 			build: func(a, b, d string) interface{} {
 				return &DnsEditsPayload{MessageType: "edits", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					AgentRecords: map[string]map[string][]string{b: {dispatchZone: {rr}}}, Timestamp: time.Now().Unix()}
+					AgentRecords: map[string]map[string][]string{b: {dispatchZone: {rr}}}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
+			},
+			before: func(env *integEnv, alice string) {
+				editsAnswer, _ = env.Bob.MsgQs.editsWaiters.register(rfiWaitKey(alice, dispatchZone, "", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
-				m, ok := recvWithin(env.Bob.MsgQs.EditsResponse, integTestTimeout)
+				m, ok := recvWithin(editsAnswer, integTestTimeout)
 				if !ok {
-					t.Fatal("edits did not reach MsgQs.EditsResponse")
+					t.Fatal("edits did not reach the waiting request")
 				}
 				if m.SenderID != alice || m.Zone != dispatchZone || len(m.AgentRecords) != 1 {
 					t.Errorf("edits: %+v", *m)

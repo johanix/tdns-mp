@@ -1167,9 +1167,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 }
 
-// routeEditsMessage routes an incoming EDITS message from the combiner.
-// Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
-// Modeled on routeKeystateMessage.
+// routeEditsMessage routes an incoming EDITS message from the combiner
+// to the RequestAndWaitForEdits that asked this sender for this zone.
 func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 	var payload DnsEditsPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1177,7 +1176,11 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("EDITS response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone)
+		return
+	}
 	lgTransport.Debug("processing EDITS", "sender", senderID, "zone", payload.Zone)
 
 	if tm.msgQs == nil {
@@ -1191,11 +1194,10 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		AgentRecords: payload.AgentRecords,
 	}
 
-	select {
-	case tm.msgQs.EditsResponse <- editsMsg:
+	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
 		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "agents", len(payload.AgentRecords))
-	default:
-		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
+	} else {
+		lgTransport.Warn("EDITS response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone)
 	}
 }
 
@@ -2737,7 +2739,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) error {
+func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonce string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
@@ -2754,13 +2756,12 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	peer := tm.GetOrCreatePeer(combiner)
 
-	syncReq := &PeerSyncRequest{
-		SenderID:    tm.LocalID,
-		Zone:        zone,
-		Timestamp:   time.Now(),
-		MessageType: "rfi",
+	syncReq := rfiSyncRequest(tm.LocalID, &AgentMsgPost{
+		MessageType: AgentMsgRfi,
+		Zone:        ZoneName(zone),
 		RfiType:     rfiType,
-	}
+		Nonce:       nonce,
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -211,6 +211,160 @@ func TestRfiConfig_NonceRoundTrip(t *testing.T) {
 	}
 }
 
+func editsAnswer(t *testing.T, transportSender, named, zone, nonce string) *transport.IncomingMessage {
+	t.Helper()
+	payload, err := json.Marshal(&DnsEditsPayload{MessageType: "edits", MyIdentity: named, Zone: zone,
+		AgentRecords: map[string]map[string][]string{transportSender: {zone: {zone + " 3600 IN TXT \"edits\""}}}, Nonce: nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &transport.IncomingMessage{TypeToken: "edits", SenderID: named, TransportSender: transportSender, Zone: zone, Payload: payload}
+}
+
+// editsFrom is the agent whose contributions an EDITS answer carries; the
+// tests put the transport sender there to see whose answer a request got.
+func editsFrom(m *EditsResponseMsg) string {
+	for agent := range m.AgentRecords {
+		return agent
+	}
+	return ""
+}
+
+// Only the combiner that was asked can answer an RFI EDITS, as for CONFIG.
+func TestRouteEdits_OnlyTheCombinerAnswers(t *testing.T) {
+	const combiner, other, zone = "combiner.p.example.", "agent.b.example.", "z.example."
+	tm := &MPTransportBridge{msgQs: &MsgQs{}}
+	ans, cancel := tm.msgQs.editsWaiters.register(rfiWaitKey(combiner, zone, "", "n1"))
+	defer cancel()
+
+	tm.routeEditsMessage(editsAnswer(t, other, combiner, zone, "n1")) // other claims to be the combiner
+	tm.routeEditsMessage(editsAnswer(t, "", combiner, zone, "n1"))    // no transport sender
+	tm.routeEditsMessage(editsAnswer(t, other, other, zone, "n1"))    // other, honestly
+	if m, ok := recvWithin(ans, 100*time.Millisecond); ok {
+		t.Fatalf("request to %s took an answer from %s", combiner, editsFrom(m))
+	}
+
+	tm.routeEditsMessage(editsAnswer(t, combiner, combiner, zone, "n1"))
+	if m, ok := recvWithin(ans, time.Second); !ok || m.SenderID != combiner || editsFrom(m) != combiner {
+		t.Fatalf("request to %s: got %+v (ok=%v), want its answer", combiner, m, ok)
+	}
+}
+
+// A request for a zone that timed out is asked again; the first request's
+// answer, arriving late, does not answer the second.
+func TestRouteEdits_LateAnswerDoesNotAnswerTheRetry(t *testing.T) {
+	const combiner, zone = "combiner.p.example.", "z.example."
+	tm := &MPTransportBridge{msgQs: &MsgQs{}}
+	_, cancelFirst := tm.msgQs.editsWaiters.register(rfiWaitKey(combiner, zone, "", "first"))
+	cancelFirst() // timed out
+	retry, cancelRetry := tm.msgQs.editsWaiters.register(rfiWaitKey(combiner, zone, "", "retry"))
+	defer cancelRetry()
+
+	tm.routeEditsMessage(editsAnswer(t, combiner, combiner, zone, "first"))
+	if _, ok := recvWithin(retry, 100*time.Millisecond); ok {
+		t.Fatal("the retry took the answer to the request that timed out")
+	}
+	tm.routeEditsMessage(editsAnswer(t, combiner, combiner, zone, "retry"))
+	if _, ok := recvWithin(retry, time.Second); !ok {
+		t.Fatal("the retry got no answer")
+	}
+}
+
+// The combiner's EDITS answer for a zone arrives after that zone's request
+// timed out, before or while the next zone's request waits. The late answer
+// is dropped, and the next zone's request gets its own zone's answer.
+func TestRouteEdits_LateAnswerThenNextZone(t *testing.T) {
+	const combiner = "combiner.p.example."
+	for _, lateWhileWaiting := range []bool{false, true} {
+		name := "before the next request"
+		if lateWhileWaiting {
+			name = "while the next request waits"
+		}
+		t.Run(name, func(t *testing.T) {
+			tm := &MPTransportBridge{msgQs: &MsgQs{}}
+			waiters := &tm.msgQs.editsWaiters
+
+			// The request for a.example. times out unanswered.
+			_, cancelA := waiters.register(rfiWaitKey(combiner, "a.example.", "", "na"))
+			cancelA()
+
+			if !lateWhileWaiting {
+				tm.routeEditsMessage(editsAnswer(t, combiner, combiner, "a.example.", "na"))
+			}
+			ansB, cancelB := waiters.register(rfiWaitKey(combiner, "b.example.", "", "nb"))
+			if lateWhileWaiting {
+				tm.routeEditsMessage(editsAnswer(t, combiner, combiner, "a.example.", "na"))
+			}
+			if m, ok := recvWithin(ansB, 100*time.Millisecond); ok {
+				t.Fatalf("request for b.example. took the late answer for %s", m.Zone)
+			}
+
+			tm.routeEditsMessage(editsAnswer(t, combiner, combiner, "b.example.", "nb"))
+			m, ok := recvWithin(ansB, time.Second)
+			if !ok || m.Zone != "b.example." || m.SenderID != combiner || len(m.AgentRecords[combiner]["b.example."]) != 1 {
+				t.Fatalf("request for b.example. got %+v (ok=%v)", m, ok)
+			}
+			cancelB()
+			if len(waiters.waiting) != 0 {
+				t.Errorf("waiters left behind: %v", waiters.waiting)
+			}
+		})
+	}
+}
+
+// The nonce makes the round trip for EDITS: Alice's RFI EDITS, built as
+// sendRfiToCombiner builds it, carries it to Bob, who stands in for her
+// combiner; Bob's EDITS answer carries it back, and Alice's request is
+// answered. This runs the production builders, routers and handlers on both
+// sides.
+func TestRfiEdits_NonceRoundTrip(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
+	alice, bob := env.Alice.Identity, env.Bob.Identity
+	env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
+	env.Alice.Registry.S.Set(AgentId(bob), NewAgent(AgentId(bob)))
+	alicePeer := env.Bob.Bridge.PeerRegistry.GetOrCreate(alice)
+	bobPeer := env.Alice.Bridge.PeerRegistry.GetOrCreate(bob)
+	seedZoneWithHSYNC3(t, dispatchZone, alice, bob)
+	env.Alice.Bridge.StartIncomingMessageRouter(env.ctx)
+	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
+
+	// Alice asks, as RequestAndWaitForEdits and sendRfiToCombiner do.
+	nonce := newRfiNonce()
+	answer, cancel := env.Alice.MsgQs.editsWaiters.register(rfiWaitKey(bob, dispatchZone, "", nonce))
+	defer cancel()
+	rfi, err := syncAppMessage(rfiSyncRequest(alice, &AgentMsgPost{MessageType: AgentMsgRfi, Zone: dispatchZone,
+		RfiType: "EDITS", Nonce: nonce}), bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeVia(t, env.Bob, alicePeer, alice, rfi.Payload)
+
+	got, ok := recvWithin(env.Bob.MsgQs.Msg, integTestTimeout)
+	if !ok {
+		t.Fatal("RFI did not reach Bob's MsgQs.Msg")
+	}
+	if got.RfiType != "EDITS" || got.Nonce != nonce {
+		t.Fatalf("Bob sees RFI %s with nonce %q, want EDITS with %q", got.RfiType, got.Nonce, nonce)
+	}
+
+	// Bob answers with the nonce he was given, as sendEditsToAgent does.
+	reply, err := editsAppMessage(&PeerEditsRequest{SenderID: bob, Zone: string(got.Zone),
+		AgentRecords: map[string]map[string][]string{alice: {dispatchZone: {dispatchZone + " 3600 IN TXT \"edits\""}}},
+		Nonce:        got.Nonce, Timestamp: time.Now()}, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeVia(t, env.Alice, bobPeer, bob, reply.Payload)
+
+	m, ok := recvWithin(answer, integTestTimeout)
+	if !ok {
+		t.Fatal("Alice's request got no answer")
+	}
+	if m.SenderID != bob || m.Zone != dispatchZone || len(m.AgentRecords[alice][dispatchZone]) != 1 {
+		t.Errorf("answer: %+v", *m)
+	}
+}
+
 // newSig0Key generates an ED25519 SIG(0) key for owner and returns its KEY RR
 // and its private key as PEM.
 func newSig0Key(t *testing.T, owner string) (*dns.KEY, string) {

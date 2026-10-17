@@ -245,10 +245,11 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 	// Store for processing by the agent
 	ctx.SetHandledType("edits")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "edits",
-		SenderID:  edits.GetSenderID(),
-		Zone:      edits.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "edits",
+		SenderID:        edits.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            edits.Zone,
+		Payload:         ctx.ChunkPayload,
 	})
 
 	// Create confirmation response using standard "confirm" type
