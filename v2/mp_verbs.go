@@ -61,7 +61,9 @@ func appVerbTable() []appVerb {
 		{token: "hello", route: (*MPTransportBridge).routeHelloMessage},
 		{token: "beat", route: (*MPTransportBridge).routeBeatMessage},
 		{token: "ping", route: (*MPTransportBridge).routePingMessage},
-		{token: "confirm"}, // fully handled by transport (HandleConfirmation → OnConfirmationReceived)
+		// handled by transport (HandleConfirmation → OnConfirmationReceived);
+		// the route is the auditor's, for a member's copy of a confirmation.
+		{token: "confirm", route: (*MPTransportBridge).routeConfirmMessage},
 
 		// application verbs.
 		{token: "sync", roles: rolesAgentLike, handle: handleAppSync,

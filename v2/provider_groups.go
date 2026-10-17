@@ -171,6 +171,47 @@ func ParticipantsForZone(zone ZoneName) []AgentId {
 	return out
 }
 
+// AuditorsForZone returns the zone's members that are auditors and nothing
+// else: the participants without a vote, auditors= being the one role that
+// confers membership and no vote (zoneParticipants). An identity that the
+// zone lists as a server or signer too is a provider, and is not returned.
+// Nil for an unknown zone, and for a zone without HSYNCPARAM, which declares
+// no auditors.
+func AuditorsForZone(zone ZoneName) []AgentId {
+	participants, voting := zoneParticipants(zoneApex(zone))
+	var out []AgentId
+	for _, id := range participants {
+		if !slices.Contains(voting, id) {
+			out = append(out, AgentId(id))
+		}
+	}
+	return out
+}
+
+// VotingMembersForZone returns the zone's voting members: the identities
+// with a servers= or signers= role (zoneParticipants). Nil for an unknown
+// zone.
+func VotingMembersForZone(zone ZoneName) []AgentId {
+	_, voting := zoneParticipants(zoneApex(zone))
+	out := make([]AgentId, len(voting))
+	for i, id := range voting {
+		out[i] = AgentId(id)
+	}
+	return out
+}
+
+// isVotingMember reports whether identity is one of the zone's voting
+// members, identities compared as FQDNs.
+func isVotingMember(zone ZoneName, identity string) bool {
+	identity = dns.Fqdn(identity)
+	for _, id := range VotingMembersForZone(zone) {
+		if dns.Fqdn(string(id)) == identity {
+			return true
+		}
+	}
+	return false
+}
+
 // participantFQDNSetForApex returns the FQDN-keyed participant set for a zone
 // apex. Used by the wire boundary (auth/HELLO), which already holds the zone
 // data, so it never re-looks-up through a second accessor.

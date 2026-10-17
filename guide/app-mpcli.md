@@ -163,8 +163,8 @@ Role-specific commands include:
 - **`signer zone bump`** / **`combiner zone bump`** /
   **`auth zone bump`** — force a SOA bump and
   re-NOTIFY at each layer.
-- **`auditor zones / eventlog / observations`** —
-  auditor-specific introspection.
+- **`auditor zones / eventlog / observations /
+  confirmations`** — auditor-specific introspection.
 
 For per-command syntax, flags and example output, see
 the topical guides:

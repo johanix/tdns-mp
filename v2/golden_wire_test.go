@@ -6,7 +6,7 @@
  * renamed JSON tag or verb that still compiles, still delivers, but no
  * longer dispatches on the other side). These tests lock today's wire:
  *
- *   - byte-exact JSON (tags + values) for the 13 Dns*Payload types,
+ *   - byte-exact JSON (tags + values) for the 14 Dns*Payload types,
  *   - the query-mode manifest (core.ManifestData + the metadata key
  *     convention from distrib.CreateManifestMetadata),
  *   - the wire verb set the parser extracts and the verb table dispatches on.
@@ -108,6 +108,23 @@ func goldenWirePayloads() []struct {
 			IgnoredCount:   1,
 			IgnoredRecords: []string{"dup.zone1.example. 3600 IN A 192.0.2.1"},
 			Truncated:      true, Timestamp: 1700000004,
+		}},
+		{"DnsConfirmCopyPayload", &DnsConfirmCopyPayload{
+			DnsConfirmPayload: transport.DnsConfirmPayload{
+				Type: "confirm", SenderID: "me.example.", Zone: "zone1.example.",
+				DistributionID: "dist-001", Nonce: "sync-nonce", Status: "ok",
+				Message: "applied", AppliedCount: 2, RemovedCount: 1,
+				RejectedCount:  1,
+				AppliedRecords: []string{"a.zone1.example. 3600 IN A 192.0.2.1"},
+				RemovedRecords: []string{"old.zone1.example. 3600 IN A 192.0.2.9"},
+				RejectedItems: []transport.RejectedItemDTO{
+					{Record: "bad.zone1.example. 3600 IN A 192.0.2.66", Reason: "not yours"},
+				},
+				IgnoredCount:   1,
+				IgnoredRecords: []string{"dup.zone1.example. 3600 IN A 192.0.2.1"},
+				Truncated:      true, Timestamp: 1700000004,
+			},
+			Originator: "originator.example.",
 		}},
 		{"DnsPingPayload", &transport.DnsPingPayload{
 			Type: "ping", SenderID: "legacy-sender.example.",
