@@ -623,6 +623,11 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 	if !containsString(storedInstr.Locations, "at-ns") {
 		return
 	}
+	// A stored instruction is acted on only while the customer consents.
+	if mpzd.lacksPubkeyConsent() {
+		withdrawSignalKeys(storedInstr, hdb)
+		return
+	}
 
 	currentNS := mpzd.signalNSTargets(senderID, zone)
 	prevSet := stringSet(storedInstr.PublishedNS)
@@ -649,6 +654,140 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 		}
 		lgCombiner.Info("signal keys resynced after NS change", "zone", zone, "sender", senderID, "publishedNS", currentNS)
 	}
+}
+
+// --- The customer's consent to a stored at-ns publication (tdns-mp #115) ---
+//
+// A publish instruction is stored, and acted on later: on an NS change
+// (combinerResyncSignalKeys) and when the combiner starts or re-applies
+// (ApplyPendingSignalKeys, CombinerReapplyContributions). The agent asks
+// for at-ns only when the customer's HSYNCPARAM says pubkey
+// (publishLocations), but a stored instruction can say at-ns for a zone that
+// does not: an agent from before that rule sent it, or the customer has
+// taken the flag away since. So every use of a stored instruction asks the
+// zone first.
+
+// lacksPubkeyConsent: the customer's zone is loaded and its HSYNCPARAM does
+// not say pubkey. A zone that has not loaded yet says nothing either way,
+// and its stored instructions are left as they are until it has.
+func (mpzd *MPZoneData) lacksPubkeyConsent() bool {
+	return mpzd.HasPublishedData() && !mpzd.hasPubkey()
+}
+
+// contributionsLoaded: the zone's first load has put its persisted
+// contributions in memory, and a change to them is persisted from now on
+// (RegisterCombinerOnFirstLoad does both under one hold of the zone's lock).
+func (mpzd *MPZoneData) contributionsLoaded() bool {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	return mpzd.MP != nil && mpzd.MP.PersistContributions != nil
+}
+
+// withdrawSignalKeys makes a stored instruction apex-only, for a zone that
+// lacks the customer's consent: the signal names it published are retracted,
+// and at-ns is taken out of the stored Locations so that nothing acts on it
+// later. The KEY and the other locations stay as they are. Should the
+// customer say pubkey again, the agent's next instruction asks for at-ns
+// again.
+//
+// A name in a provider zone whose contributions are not loaded yet cannot be
+// retracted now: the retraction would find nothing there, and the zone's
+// first load would put the persisted KEY back. Such a name stays in the
+// stored instruction, and at-ns with it, until that zone's startup re-apply
+// retracts it (ApplyPendingSignalKeys).
+//
+// So does a name whose retraction failed: the provider zone may still serve
+// its KEY, and an instruction that no longer named it would leave nothing to
+// try again. The next use of the instruction does.
+func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
+	if !containsString(stored.Locations, "at-ns") {
+		return
+	}
+	var retracted, waiting, failed []string
+	for _, ns := range stored.PublishedNS {
+		if pz := findProviderZoneForOwner(Sig0KeyOwnerName(stored.Zone, ns)); pz != "" {
+			if z, ok := Zones.Get(pz); ok && !z.contributionsLoaded() {
+				waiting = append(waiting, ns)
+				continue
+			}
+		}
+		if err := retractSignalKey(stored.Zone, ns, stored.SenderID); err != nil {
+			lgCombiner.Error("failed to retract a _signal KEY; it stays in the stored instruction and is tried again",
+				"zone", stored.Zone, "sender", stored.SenderID, "ns", ns, "err", err)
+			failed = append(failed, ns)
+			continue
+		}
+		retracted = append(retracted, ns)
+	}
+	kept := append(append([]string(nil), waiting...), failed...)
+	if len(kept) > 0 && len(retracted) == 0 {
+		if len(waiting) > 0 {
+			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey",
+				"zone", stored.Zone, "sender", stored.SenderID, "waiting", waiting)
+		}
+		return
+	}
+	instr := stored.ToPublishInstruction()
+	if len(kept) == 0 {
+		var locs []string
+		for _, loc := range stored.Locations {
+			if loc != "at-ns" {
+				locs = append(locs, loc)
+			}
+		}
+		instr.Locations = locs
+	}
+	if err := SavePublishInstruction(hdb, stored.Zone, stored.SenderID, instr, kept); err != nil {
+		lgCombiner.Error("failed to save the publish instruction after withdrawing at-ns", "zone", stored.Zone, "sender", stored.SenderID, "err", err)
+	}
+	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey",
+		"zone", stored.Zone, "sender", stored.SenderID, "retracted", retracted, "waiting", waiting, "failed", failed, "locations", instr.Locations)
+}
+
+// retractSignalKey takes a sender's _signal KEY for childZone out of the
+// provider zone that holds nsTarget, and says whether that worked: the
+// contribution is gone and the zone is published without it. With no provider
+// zone for the name there was nothing published and nothing to do.
+//
+// The publish is asked for whether or not the contribution changed. A
+// retraction whose publish failed is tried again, and by then the
+// contribution is already gone and the publish is all that is owed: the
+// combine has kept the cleanup it could not make.
+func retractSignalKey(childZone, nsTarget, senderID string) error {
+	ownerName := Sig0KeyOwnerName(childZone, nsTarget)
+	providerZone := findProviderZoneForOwner(ownerName)
+	if providerZone == "" {
+		return nil
+	}
+	mpzd, ok := Zones.Get(providerZone)
+	if !ok {
+		return fmt.Errorf("provider zone %s is not loaded", providerZone)
+	}
+	if _, _, _, err := mpzd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, nil); err != nil {
+		return fmt.Errorf("provider zone %s: retracting %s: %w", providerZone, ownerName, err)
+	}
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		return fmt.Errorf("provider zone %s: publishing without %s: %w", providerZone, ownerName, err)
+	}
+	return nil
+}
+
+// withdrawSignalKeysWithoutConsent is the startup's question about one
+// stored instruction: does its zone lack the customer's consent? If it does,
+// the instruction is made apex-only, and the caller applies nothing from it.
+func (mpzd *MPZoneData) withdrawSignalKeysWithoutConsent(senderID, zone string, hdb *HsyncDB) bool {
+	if hdb == nil || !mpzd.lacksPubkeyConsent() {
+		return false
+	}
+	stored, err := GetPublishInstruction(hdb, zone, senderID)
+	if err != nil {
+		lgCombiner.Error("failed to read the stored publish instruction", "zone", zone, "sender", senderID, "err", err)
+		return true
+	}
+	if stored != nil {
+		withdrawSignalKeys(stored, hdb)
+	}
+	return true
 }
 
 // publishSignalKeyToProvider directly applies a _signal KEY record to the
@@ -764,6 +903,7 @@ func (mpzd *MPZoneData) getAgentNSTargets(senderID, zone string) []string {
 
 // signalKeyEntry represents a _signal KEY that should be published in a provider zone.
 type signalKeyEntry struct {
+	ChildZone string
 	OwnerName string
 	SenderID  string
 	KEYRRs    []string
@@ -806,6 +946,7 @@ func buildPendingSignalKeys(hdb *HsyncDB) {
 					continue
 				}
 				entries[providerZone] = append(entries[providerZone], signalKeyEntry{
+					ChildZone: zone,
 					OwnerName: ownerName,
 					SenderID:  senderID,
 					KEYRRs:    stored.KEYRRs,
@@ -834,6 +975,12 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 
 	anyChanged := false
 	for _, entry := range myEntries {
+		// Asked here and not when the map was built: the customer's zone may
+		// have loaded since. Without its consent the stored names are
+		// retracted, this zone's among them, and nothing is applied.
+		if child, ok := Zones.Get(entry.ChildZone); ok && child.withdrawSignalKeysWithoutConsent(entry.SenderID, entry.ChildZone, hdb) {
+			continue
+		}
 		var parsedRRs []dns.RR
 		for _, rrStr := range entry.KEYRRs {
 			rr, err := dns.NewRR(rrStr)

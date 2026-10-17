@@ -1000,6 +1000,33 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	isProvider := GetProviderZoneRRtypes(zone) != nil
 	var parts []string
 
+	// 0. For provider zones: a stored at-ns instruction whose zone does not
+	// carry the customer's consent is withdrawn first, so that neither the
+	// snapshot nor step 2 puts its _signal KEYs back (withdrawSignalKeys).
+	//
+	// A retraction that failed keeps its name in the instruction, with at-ns,
+	// so that the next use tries again. Step 2 reads the instruction anew and
+	// would put that KEY back, so it skips the zones found here. They are
+	// found before the provider zone is locked: step 2 then reads no customer
+	// zone's state under that lock.
+	withoutConsent := map[string]bool{}
+	if isProvider {
+		allInstr, err := LoadAllPublishInstructions(hdb)
+		if err != nil {
+			return "", fmt.Errorf("failed to load publish instructions: %w", err)
+		}
+		for childZone, senders := range allInstr {
+			child, ok := Zones.Get(childZone)
+			if !ok || !child.lacksPubkeyConsent() {
+				continue
+			}
+			withoutConsent[childZone] = true
+			for _, stored := range senders {
+				withdrawSignalKeys(stored, hdb)
+			}
+		}
+	}
+
 	// 1. Reload AgentContributions from the CombinerContributions snapshot.
 	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
@@ -1030,6 +1057,9 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 		}
 		keyCount := 0
 		for childZone, senders := range allInstr {
+			if withoutConsent[childZone] {
+				continue
+			}
 			for senderID, stored := range senders {
 				if !containsString(stored.Locations, "at-ns") || len(stored.KEYRRs) == 0 {
 					continue
