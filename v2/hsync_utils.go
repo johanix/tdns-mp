@@ -437,13 +437,26 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 		return
 	}
 
-	if msgQs == nil || msgQs.EditsResponse == nil {
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
+	if msgQs == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no MsgQs available", zd.ZoneName)
 		return
 	}
 
+	combinerID, err := tm.getCombinerID()
+	if err != nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: %v", zd.ZoneName, err)
+		return
+	}
+
+	// Take only the combiner's answer to this request: an answer to an
+	// earlier one that timed out, for this zone or another, must not stand
+	// in for it.
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, "", nonce))
+	defer cancel()
+
 	// Send RFI EDITS to combiner
-	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
+	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS", nonce); err != nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
 		return
 	}
@@ -453,12 +466,7 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.EditsResponse:
-		if resp == nil || resp.Zone != zd.ZoneName {
-			zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received nil or mismatched edits from combiner", zd.ZoneName)
-			return
-		}
-
+	case resp := <-answer:
 		// Count total records for logging
 		totalAgents := len(resp.AgentRecords)
 		totalRRs := 0
@@ -482,13 +490,21 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 	}
 }
 
-// RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
-// response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
+// RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for that
+// agent's config response for this zone and subtype. Returns the config data or
+// nil on timeout/error.
 func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) *ConfigResponseMsg {
-	if msgQs == nil || msgQs.ConfigResponse == nil {
-		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
+	if msgQs == nil {
+		lgEngine.Warn("RequestAndWaitForConfig: no MsgQs available")
 		return nil
 	}
+
+	// Several requests can be out at once (one per zone when a group elects
+	// a leader), and an earlier one may still be answered after it timed
+	// out; take only the answer to this one.
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
+	defer cancel()
 
 	// Send RFI CONFIG to the peer agent
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
@@ -498,6 +514,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 		Zone:         ZoneName(zone),
 		RfiType:      "CONFIG",
 		RfiSubtype:   subtype,
+		Nonce:        nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.ID, "zone", zone, "subtype", subtype, "err", err)
@@ -509,11 +526,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.ConfigResponse:
-		if resp == nil {
-			lgEngine.Warn("RequestAndWaitForConfig: received nil config response", "zone", zone, "subtype", subtype)
-			return nil
-		}
+	case resp := <-answer:
 		lgEngine.Info("RequestAndWaitForConfig: received config response", "sender", resp.SenderID, "zone", resp.Zone, "subtype", resp.Subtype)
 		return resp
 
@@ -523,13 +536,18 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	}
 }
 
-// RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
-// response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
+// RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for that
+// agent's audit response for this zone. Returns the audit data or nil on
+// timeout/error.
 func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) *AuditResponseMsg {
-	if msgQs == nil || msgQs.AuditResponse == nil {
-		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
+	if msgQs == nil {
+		lgEngine.Warn("RequestAndWaitForAudit: no MsgQs available")
 		return nil
 	}
+
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.auditWaiters.register(rfiWaitKey(string(agent.ID), zone, "", nonce))
+	defer cancel()
 
 	// Send RFI AUDIT to the peer agent
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
@@ -538,6 +556,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 		YourIdentity: agent.ID,
 		Zone:         ZoneName(zone),
 		RfiType:      "AUDIT",
+		Nonce:        nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.ID, "zone", zone, "err", err)
@@ -549,11 +568,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.AuditResponse:
-		if resp == nil {
-			lgEngine.Warn("RequestAndWaitForAudit: received nil audit response", "zone", zone)
-			return nil
-		}
+	case resp := <-answer:
 		lgEngine.Info("RequestAndWaitForAudit: received audit response", "sender", resp.SenderID, "zone", resp.Zone)
 		return resp
 
@@ -1432,8 +1447,10 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			// from the next publish, never signing. A refresh collects its
 			// DNSKEY RRset before this callback, so a change here is served
 			// by the re-sign requested below rather than by this refresh.
+			// The other signers are the ones the incoming zone names.
 			if shouldSign {
-				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS); err != nil {
+				others, _ := otherSignerLabels(&MPZoneData{ZoneData: new_zd}, mp)
+				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS, others); err != nil {
 					lg.Error("syncing foreign DNSKEYs failed", "zone", mpzd.ZoneName, "err", err)
 				} else if changed {
 					sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)

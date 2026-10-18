@@ -104,10 +104,18 @@ func (conf *Config) ForEachMPZone(fn func(zd *MPZoneData)) {
 	}
 }
 
-// RegisterCombinerOnFirstLoad attaches OnFirstLoad callbacks
-// (PersistContributions, contribution hydration, signal keys) to MP
-// zones that don't already have them. Called at startup and on
-// reload via PostParseZonesHook for mpcombiner.
+// RegisterCombinerOnFirstLoad restores the persisted contributions of the
+// MP zones that have not had them (and the PersistContributions callback),
+// and attaches their OnFirstLoad callbacks (the combine, signal keys).
+// Called at startup, before the refresh engine and the message router
+// start, and on reload via PostParseZonesHook for mpcombiner.
+//
+// The contributions are restored here, before the zone's first load, and
+// not in OnFirstLoad: the first load combines and publishes in
+// MPPreRefresh, before the OnFirstLoad callbacks run, and the copy it
+// publishes is the first one the signer is sent. Restored after it, that
+// copy was the upstream's alone, without the other providers' DNSKEYs
+// (tdns-mp #207).
 func (conf *Config) RegisterCombinerOnFirstLoad() {
 	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 	if hdb == nil {
@@ -143,6 +151,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			continue
 		}
 		conf.InternalMp.onFirstLoadRegistered[zoneName] = true
+		mpzd.restoreContributions(hdb, allContribs[zoneName])
 
 		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 			if !zd.Options[tdns.OptMultiProvider] {
@@ -153,38 +162,17 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			w := mpzd
 			w.Lock()
 			w.EnsureMP()
-			if w.MP.PersistContributions == nil && zd.KeyDB != nil {
-				hdb := NewHsyncDB(zd.KeyDB)
-				w.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
-					return SaveContributions(hdb, zone, senderID, contribs)
-				}
-				lgCombiner.Info("PersistContributions callback set", "zone", zd.ZoneName)
-			}
-			var doRebuild bool
-			if w.MP.AgentContributions == nil && allContribs != nil {
-				if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
-					w.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
-					for senderID, ownerMap := range zoneContribs {
-						w.MP.AgentContributions[senderID] = ownerMap
-					}
-					doRebuild = true
-					lgCombiner.Info("hydrated AgentContributions from snapshot",
-						"zone", zd.ZoneName, "agents", len(zoneContribs))
-				}
-			}
 			doCombine := w.MPOptions[tdns.OptAllowEdits]
 			w.Unlock()
-			// RebuildCombinerData and CombineWithLocalChanges acquire
-			// their own locks; call them outside our lock window.
-			if doRebuild {
-				w.RebuildCombinerData()
-			}
+			// The first-load combine in MPPreRefresh published the restored
+			// contributions already; this one normally finds them in place.
+			// CombineWithLocalChanges takes its own locks.
 			if doCombine {
 				success, err := w.CombineWithLocalChanges()
 				if err != nil {
 					lgCombiner.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
 				} else if success {
-					lgCombiner.Info("re-applied local changes after hydration", "zone", zd.ZoneName)
+					lgCombiner.Info("applied local changes after the first load", "zone", zd.ZoneName)
 				}
 			}
 		})
@@ -238,6 +226,31 @@ func atNSSendersOf(stored map[string]*StoredPublishInstruction) []string {
 	return senders
 }
 
+// restoreContributions sets the zone's PersistContributions callback and
+// puts its persisted contributions back in AgentContributions, before
+// anything is combined for the zone (RegisterCombinerOnFirstLoad).
+// zoneContribs is the zone's part of the snapshot, nil when it has none.
+func (mpzd *MPZoneData) restoreContributions(hdb *HsyncDB, zoneContribs map[string]map[string]map[uint16]core.RRset) {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	mpzd.EnsureMP()
+	if mpzd.MP.PersistContributions == nil {
+		mpzd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
+			return SaveContributions(hdb, zone, senderID, contribs)
+		}
+	}
+	if mpzd.MP.AgentContributions != nil || len(zoneContribs) == 0 {
+		return
+	}
+	mpzd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset, len(zoneContribs))
+	for senderID, ownerMap := range zoneContribs {
+		mpzd.MP.AgentContributions[senderID] = ownerMap
+	}
+	mpzd.RebuildCombinerData()
+	lgCombiner.Info("restored the persisted contributions before the first load",
+		"zone", mpzd.ZoneName, "agents", len(zoneContribs))
+}
+
 // InternalMpConf holds multi-provider internal state local to
 // tdns-mp. Mirrors tdns.InternalMpConf field-by-field. During
 // migration, both exist — code in tdns-mp reads from here,
@@ -273,7 +286,7 @@ type InternalMpConf struct {
 	mpConfig atomic.Pointer[MultiProviderConf]
 
 	// delegationSyncChains: the zones whose last delegation sync failed, or
-	// went to the parent as a NOTIFY, and how often, for the asks that follow
-	// (mp_s5_leader_sync.go)
+	// went to the parent as a NOTIFY, and how often, for the asks that
+	// follow, and what is scheduled for them (mp_s5_leader_sync.go)
 	delegationSyncChains delegationSyncChains
 }

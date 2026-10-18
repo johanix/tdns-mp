@@ -31,6 +31,11 @@ type MPKeyLifecycleOwner struct {
 	// signer does not own: the DS set computed from the signing providers'
 	// key states (design Amendment 2). nil on every other role.
 	computed func(zone string, digest uint8) (tdns.DSIntent, error)
+	// withheld is the agent's check on the DS set its own signer's
+	// inventory gives: it names a DS that the key states another signing
+	// provider's agent sent this agent put at the parent, and the inventory
+	// leaves out (tdns-mp #207). nil on every other role.
+	withheld func(zone string, inv []tdns.KeyInventoryItem) string
 }
 
 // SetComputedDSSource installs the agent's computed DS set (Amendment 2);
@@ -45,6 +50,20 @@ func (o *MPKeyLifecycleOwner) computedSource() func(zone string, digest uint8) (
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.computed
+}
+
+// SetForeignDSCheck installs the agent's check on the DS set from its own
+// signer's inventory; the agent's start does this, no other role.
+func (o *MPKeyLifecycleOwner) SetForeignDSCheck(f func(zone string, inv []tdns.KeyInventoryItem) string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.withheld = f
+}
+
+func (o *MPKeyLifecycleOwner) foreignDSCheck() func(zone string, inv []tdns.KeyInventoryItem) string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.withheld
 }
 
 // NewMPKeyLifecycleOwner: keyDB is looked up at call time, since the
@@ -173,8 +192,19 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 	var inv []tdns.KeyInventoryItem
 	snap := o.inventoryOf(zd.ZoneName)
 	if computed := o.computedSource(); snap != nil && snap.Owned {
-		// the agent: its own signer's inventory, own and foreign rows alike
+		// the agent: its own signer's inventory, own and foreign rows
+		// alike, as long as it leaves out no DS that the key states from
+		// another signing provider's agent put at the parent. Another
+		// provider's DS goes when those key states drop it, not when one
+		// inventory lacks its key (tdns-mp #207): until the two agree the
+		// set is unknown, and the parent's DS is left alone.
 		inv = snap.Inventory
+		if check := o.foreignDSCheck(); check != nil {
+			if why := check(zd.ZoneName, inv); why != "" {
+				lgEngine.Warn("the DS set from the signer's inventory is held back; the parent's DS is left as it is", "zone", zd.ZoneName, "why", why)
+				return tdns.DSIntent{}, nil
+			}
+		}
 	} else if computed != nil {
 		// the agent, for a zone its own signer does not own: what the
 		// signing providers said (Amendment 2). An inventory that is not

@@ -114,6 +114,7 @@ type PeerEditsRequest struct {
 	Zone         string                         // Zone (FQDN)
 	AgentRecords map[string]map[string][]string // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         // Optional status
+	Nonce        string                         // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp    time.Time
 }
 
@@ -132,6 +133,7 @@ type PeerConfigRequest struct {
 	Subtype    string            // Config subtype: "upstream", "downstream", "sig0key"
 	ConfigData map[string]string // Key-value config data
 	Message    string            // Optional status
+	Nonce      string            // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp  time.Time
 }
 
@@ -149,6 +151,7 @@ type PeerAuditRequest struct {
 	Zone      string      // Zone (FQDN)
 	AuditData interface{} // Zone data repo snapshot (placeholder)
 	Message   string      // Optional status
+	Nonce     string      // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp time.Time
 }
 

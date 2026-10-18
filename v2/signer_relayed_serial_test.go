@@ -211,8 +211,9 @@ type mpServedZone struct {
 // startMPServedZone pre-registers the zone the way ParseZones leaves it,
 // attaches tdns-mp's refresh callbacks as the daemons' starts do, starts the
 // engine and loads the zone with the config refresher. policy, when not nil,
-// is the zone's bound DNSSEC policy.
-func startMPServedZone(t *testing.T, kdb *tdns.KeyDB, up *mpUpstream, mp *MultiProviderConf, policy *tdns.DnssecPolicy) *mpServedZone {
+// is the zone's bound DNSSEC policy. setup runs after the refresh callbacks
+// are attached and before the engine starts, for what a daemon's start adds.
+func startMPServedZone(t *testing.T, kdb *tdns.KeyDB, up *mpUpstream, mp *MultiProviderConf, policy *tdns.DnssecPolicy, setup ...func(*Config, *tdns.ZoneData)) *mpServedZone {
 	t.Helper()
 	conf := &Config{Config: &tdns.Config{}}
 	conf.Config.Internal.KeyDB = kdb
@@ -234,6 +235,9 @@ func startMPServedZone(t *testing.T, kdb *tdns.KeyDB, up *mpUpstream, mp *MultiP
 	conf.RegisterMPRefreshCallbacks()
 	if len(zd.OnZonePreRefresh) == 0 {
 		t.Fatal("RegisterMPRefreshCallbacks attached no pre-refresh callback to the zone")
+	}
+	for _, f := range setup {
+		f(conf, zd)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

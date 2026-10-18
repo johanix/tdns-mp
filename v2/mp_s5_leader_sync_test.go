@@ -21,6 +21,7 @@ type leaderSyncRig struct {
 	q    chan tdns.DelegationSyncRequest
 	lem  *LeaderElectionManager
 	sdq  chan *SynchedDataUpdate
+	ctx  context.Context // the engines' ctx: it ends with the test
 }
 
 func newLeaderSyncRig(t *testing.T, zone string) *leaderSyncRig {
@@ -42,7 +43,25 @@ func newLeaderSyncRigAs(t *testing.T, zone string, identity AgentId) *leaderSync
 	conf.InternalMp.AgentRegistry = &AgentRegistry{}
 	lem := NewLeaderElectionManager(identity, time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
 	conf.InternalMp.LeaderElectionManager = lem
-	return &leaderSyncRig{conf: conf, e: &HsyncDataEngine{conf: conf}, mpzd: mpzd, q: q, lem: lem, sdq: make(chan *SynchedDataUpdate, 8)}
+	waitDelegationSyncTimers(t, conf)
+	return &leaderSyncRig{conf: conf, e: &HsyncDataEngine{conf: conf}, mpzd: mpzd, q: q, lem: lem, sdq: make(chan *SynchedDataUpdate, 8), ctx: t.Context()}
+}
+
+// waitDelegationSyncTimers: what the agent scheduled for its delegation
+// syncs ends with the test. The test's ctx has ended when the cleanup runs,
+// and the cleanup waits for what is still running, so that nothing reads
+// the settings or the logger that the test's other cleanups put back.
+func waitDelegationSyncTimers(t *testing.T, conf *Config) {
+	t.Helper()
+	t.Cleanup(func() {
+		stopped := make(chan struct{})
+		go func() { conf.waitDelegationSyncTimers(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			t.Error("what the delegation sync scheduled did not end with the test")
+		}
+	})
 }
 
 func (r *leaderSyncRig) leader(who AgentId) {
@@ -52,7 +71,7 @@ func (r *leaderSyncRig) leader(who AgentId) {
 }
 
 func (r *leaderSyncRig) inventory(items ...KeyInventoryItem) {
-	r.e.handleKeystateInventory(context.Background(), "agent.us.example.", &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: r.mpzd.ZoneName, Inventory: items, Owned: true}, r.sdq, nil)
+	r.e.handleKeystateInventory(r.ctx, "agent.us.example.", &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: r.mpzd.ZoneName, Inventory: items, Owned: true}, r.sdq, nil)
 }
 
 func (r *leaderSyncRig) requests(t *testing.T) int {
@@ -145,12 +164,12 @@ func TestOnlyTheLeaderAsksAndANewLeaderAsksOnce(t *testing.T) {
 	if n := r.requests(t); n != 0 {
 		t.Fatalf("a peer that does not lead asked for %d syncs", n)
 	}
-	if r.conf.requestDelegationSync(context.Background(), z, "test") {
+	if r.conf.requestDelegationSync(r.ctx, z, "test") {
 		t.Error("a request was queued by a peer that does not lead")
 	}
 	// the leadership comes to us: what the election callback asks for
 	r.leader("agent.us.example.")
-	if !r.conf.requestDelegationSync(context.Background(), z, "this agent was elected the zone's delegation sync leader") {
+	if !r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {
 		t.Fatal("the new leader's request was not queued")
 	}
 	if n := r.requests(t); n != 1 {
@@ -159,7 +178,7 @@ func TestOnlyTheLeaderAsksAndANewLeaderAsksOnce(t *testing.T) {
 	// a zone with no queue, or one that is not here, asks for nothing and
 	// does not block
 	r.mpzd.DelegationSyncQ = nil
-	if r.conf.requestDelegationSync(context.Background(), z, "test") || r.conf.requestDelegationSync(context.Background(), "absent.sync.example.", "test") {
+	if r.conf.requestDelegationSync(r.ctx, z, "test") || r.conf.requestDelegationSync(r.ctx, "absent.sync.example.", "test") {
 		t.Error("a request was reported queued with nowhere to queue it")
 	}
 }
@@ -179,7 +198,7 @@ func TestAFullSyncQueueDoesNotBlockTheEngine(t *testing.T) {
 	r.leader("agent.us.example.")
 	r.mpzd.DelegationSyncQ = make(chan tdns.DelegationSyncRequest) // nobody reads
 	done := make(chan bool, 1)
-	go func() { done <- r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "test") }()
+	go func() { done <- r.conf.requestDelegationSync(r.ctx, r.mpzd.ZoneName, "test") }()
 	select {
 	case queued := <-done:
 		if queued {
@@ -199,7 +218,7 @@ func TestARequestThatFoundTheQueueFullIsAskedAgain(t *testing.T) {
 	r.leader("agent.us.example.")
 	q := make(chan tdns.DelegationSyncRequest) // no room, and nobody reading yet
 	r.mpzd.DelegationSyncQ = q
-	if r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "test") {
+	if r.conf.requestDelegationSync(r.ctx, r.mpzd.ZoneName, "test") {
 		t.Fatal("a request was reported queued on a queue with no room")
 	}
 	select {
@@ -212,7 +231,7 @@ func TestARequestThatFoundTheQueueFullIsAskedAgain(t *testing.T) {
 	}
 	// the leadership moves away before the retry: nothing is asked for a
 	// zone this agent no longer leads
-	if r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "test") {
+	if r.conf.requestDelegationSync(r.ctx, r.mpzd.ZoneName, "test") {
 		t.Fatal("queued with no room")
 	}
 	r.leader("agent.p2.example.")
@@ -235,7 +254,7 @@ func TestOnlyAParentsyncZoneWithAnOwningSignerAsks(t *testing.T) {
 
 	r.mpzd.Options[tdns.OptParentSync] = false
 	r.inventory(ksk)
-	if r.conf.requestDelegationSync(context.Background(), r.mpzd.ZoneName, "this agent was elected") {
+	if r.conf.requestDelegationSync(r.ctx, r.mpzd.ZoneName, "this agent was elected") {
 		t.Error("an election asked for a zone that does not sync with its parent through its agents")
 	}
 	if n := r.requests(t); n != 0 {
@@ -244,7 +263,7 @@ func TestOnlyAParentsyncZoneWithAnOwningSignerAsks(t *testing.T) {
 
 	r.mpzd.Options[tdns.OptParentSync] = true
 	next := invItem(t, r.mpzd.ZoneName, 257, KeyStateStandby, &yes)
-	r.e.handleKeystateInventory(context.Background(), "agent.us.example.", &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: r.mpzd.ZoneName, Inventory: []KeyInventoryItem{ksk, next}, Owned: false}, r.sdq, nil)
+	r.e.handleKeystateInventory(r.ctx, "agent.us.example.", &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: r.mpzd.ZoneName, Inventory: []KeyInventoryItem{ksk, next}, Owned: false}, r.sdq, nil)
 	if n := r.requests(t); n != 0 {
 		t.Errorf("an inventory from a signer that does not own the zone's keys asked for %d syncs", n)
 	}
@@ -265,7 +284,7 @@ func TestCombinerHintDoesNotBlockAndTTLsAreNotTheDSSet(t *testing.T) {
 	r.mpzd.DelegationSyncQ = make(chan tdns.DelegationSyncRequest) // nobody reads
 	done := make(chan struct{})
 	go func() {
-		r.e.handleStatusUpdate(context.Background(), &StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
+		r.e.handleStatusUpdate(r.ctx, &StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
 		close(done)
 	}()
 	select {
@@ -301,22 +320,22 @@ func TestCombinerHintUsesTheGateAndAStoppedEngineAsksNothing(t *testing.T) {
 		r.e.handleStatusUpdate(ctx, &StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ksk-changed"})
 	}
 	r.leader("agent.p2.example.")
-	hint(context.Background())
+	hint(r.ctx)
 	r.leader("agent.us.example.")
 	r.mpzd.Options[tdns.OptParentSync] = false
-	hint(context.Background())
+	hint(r.ctx)
 	if n := r.requests(t); n != 0 {
 		t.Fatalf("a hint asked for %d syncs on a zone this agent does not lead, or that has no parentsync=agent", n)
 	}
 	r.mpzd.Options[tdns.OptParentSync] = true
-	hint(context.Background())
+	hint(r.ctx)
 	if n := r.requests(t); n != 1 {
 		t.Errorf("the hint on a zone we lead: %d sync requests, want 1", n)
 	}
 	// a full queue: the hint is tried again, unless its engine has stopped
 	q := make(chan tdns.DelegationSyncRequest)
 	r.mpzd.DelegationSyncQ = q
-	ctx, stop := context.WithCancel(context.Background())
+	ctx, stop := context.WithCancel(r.ctx)
 	hint(ctx)
 	stop()
 	select {
@@ -324,7 +343,7 @@ func TestCombinerHintUsesTheGateAndAStoppedEngineAsksNothing(t *testing.T) {
 		t.Errorf("a retry asked after its engine stopped: %+v", req)
 	case <-time.After(200 * time.Millisecond):
 	}
-	hint(context.Background())
+	hint(r.ctx)
 	select {
 	case <-q:
 	case <-time.After(2 * time.Second):

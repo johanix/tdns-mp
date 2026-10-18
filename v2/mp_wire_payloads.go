@@ -134,6 +134,7 @@ type DnsEditsPayload struct {
 	Zone         string                         `json:"Zone"`                   // Zone (FQDN)
 	AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"` // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         `json:"Message,omitempty"`      // Optional status message
+	Nonce        string                         `json:"nonce,omitempty"`        // the nonce of the RFI EDITS this answers
 
 	Timestamp int64 `json:"timestamp"` // Unix timestamp
 
@@ -160,6 +161,7 @@ type DnsConfigPayload struct {
 	Subtype      string            `json:"Subtype"`
 	ConfigData   map[string]string `json:"ConfigData,omitempty"`
 	Message      string            `json:"Message,omitempty"`
+	Nonce        string            `json:"nonce,omitempty"` // the nonce of the RFI CONFIG this answers
 	Timestamp    int64             `json:"timestamp"`
 	Type         string            `json:"type"`
 	SenderID     string            `json:"sender_id"`
@@ -182,6 +184,7 @@ type DnsAuditPayload struct {
 	Zone         string      `json:"Zone"`
 	AuditData    interface{} `json:"AuditData,omitempty"`
 	Message      string      `json:"Message,omitempty"`
+	Nonce        string      `json:"nonce,omitempty"` // the nonce of the RFI AUDIT this answers
 	Timestamp    int64       `json:"timestamp"`
 	Type         string      `json:"type"`
 	SenderID     string      `json:"sender_id"`
