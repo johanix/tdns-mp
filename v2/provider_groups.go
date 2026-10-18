@@ -160,10 +160,12 @@ func zoneApex(zone ZoneName) *tdns.OwnerData {
 // is the provider group's, for the zone's delegation sync with its parent, so
 // any agent that can be elected the zone's leader may hold it: a member with
 // a voting role (servers or signers). Who transfers the zone from whom
-// (HSYNC3's upstream) has nothing to do with it.
+// (HSYNC3's upstream) has nothing to do with it. Identities compare as FQDNs
+// (isAmong): the zone's records carry the trailing dot, and an agent's
+// configured identity need not.
 func mayHoldZoneSig0Key(zone ZoneName, agent AgentId) bool {
 	_, voting := zoneParticipants(zoneApex(zone))
-	return slices.Contains(voting, string(agent))
+	return isAmong(voting, agent)
 }
 
 // ParticipantsForZone is the single membership truth for agent/auditor reads:

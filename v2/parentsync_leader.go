@@ -1441,6 +1441,21 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 	return winner
 }
 
+// dropKeyMadeForALostLead deletes a SIG(0) key the leader's setup made, when
+// the lead moved before the setup could publish it. Left active, the key
+// would be handed to the next leader that asks this agent, and published the
+// next time this agent leads, though the parent never saw it. A key this
+// agent already held, or imported from a peer, is the group's and stays.
+func dropKeyMadeForALostLead(hdb *HsyncDB, zone, keyName string, keyid uint16) {
+	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete",
+		Zone: zone, Keyname: keyName, Keyid: keyid}); err != nil {
+		lgAgent.Error("onLeaderElected: the SIG(0) key made for a lead that has moved could not be deleted; it stays active",
+			"zone", zone, "keyid", keyid, "err", err)
+		return
+	}
+	lgAgent.Info("onLeaderElected: the SIG(0) key made for a lead that has moved is deleted", "zone", zone, "keyid", keyid)
+}
+
 // importSig0KeyFromPeer imports a SIG(0) key received from a peer via RFI CONFIG.
 // TODO: This calls unexported tdns functions (PrepareKeyCache, Sig0KeyMgmt).
 // It will need to be reworked when those are exported or moved.

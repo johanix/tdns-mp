@@ -41,6 +41,7 @@ func TestTheZoneKeyGoesToAnyAgentThatCanLead(t *testing.T) {
 	for agent, want := range map[AgentId]bool{
 		"alice.agent.example.": true,  // servers
 		"bob.agent.example.":   true,  // signers
+		"alice.agent.example":  true,  // the same, as a configured identity without the trailing dot
 		"carol.agent.example.": false, // auditors: no vote, never leads
 		"dave.agent.example.":  false, // no role
 		"eve.agent.example.":   false, // not in the zone
@@ -91,9 +92,11 @@ func TestTheKeyHolderAnswersEveryKeyRequest(t *testing.T) {
 		}
 	}
 
-	a := ask("alice.agent.example.")
-	if a.data["privatekey"] == "" || a.data["keyrr"] == "" || a.data[configRefusedKey] != "" {
-		t.Errorf("an agent that can lead did not get the key: %v", a.data)
+	for _, from := range []string{"alice.agent.example.", "bob.agent.example"} {
+		a := ask(from)
+		if a.data["privatekey"] == "" || a.data["keyrr"] == "" || a.data[configRefusedKey] != "" {
+			t.Errorf("%s, which can lead, did not get the key: %v", from, a.data)
+		}
 	}
 	for _, from := range []string{"carol.agent.example.", "dave.agent.example."} {
 		a := ask(from)
@@ -104,5 +107,26 @@ func TestTheKeyHolderAnswersEveryKeyRequest(t *testing.T) {
 		if why := resp.Refused(); !strings.Contains(why, "has no voting role") {
 			t.Errorf("%s was answered %v, want a refusal", from, a.data)
 		}
+	}
+}
+
+// A key the leader's setup made, when the lead moved before the setup could
+// publish it, is deleted: left active, this agent would hand it to the next
+// leader, and publish it the next time it leads, though the parent never saw
+// it.
+func TestAKeyMadeForALostLeadIsNotLeftActive(t *testing.T) {
+	const zone = "lostlead.example."
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: zone,
+		Keyname: zone, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "leader-election"}); err != nil {
+		t.Fatalf("the key the setup made: %v", err)
+	}
+	sak, err := hdb.GetSig0Keys(zone, tdns.Sig0StateActive)
+	if err != nil || len(sak.Keys) != 1 {
+		t.Fatalf("the active keys after the setup made one: %v, %v", sak, err)
+	}
+	dropKeyMadeForALostLead(hdb, zone, zone, sak.Keys[0].KeyRR.KeyTag())
+	if sak, err := hdb.GetSig0Keys(zone, tdns.Sig0StateActive); err == nil && len(sak.Keys) > 0 {
+		t.Errorf("the key made for a lead that moved is still active: keyid %d", sak.Keys[0].KeyRR.KeyTag())
 	}
 }

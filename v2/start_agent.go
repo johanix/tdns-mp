@@ -273,6 +273,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 
 		keyName := string(zone)
+		// A key this setup makes in step c, which the lead may not outlast.
+		var made bool
+		var madeKeyid uint16
 		// Step a: check local keystore
 		sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 		if err == nil && len(sak.Keys) > 0 {
@@ -339,10 +342,17 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				return fmt.Errorf("onLeaderElected: failed to generate SIG(0) keypair: %v", err)
 			}
 			lgAgent.Info("generated SIG(0) keypair", "zone", zone, "msg", resp.Msg)
+			// step a found no active key, so the active key is this one
+			if gen, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive); err == nil && len(gen.Keys) > 0 {
+				made, madeKeyid = true, gen.Keys[0].KeyRR.KeyTag()
+			}
 		}
 	publish:
 		if !lem.IsLeader(zone) {
 			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; its KEY is not published", "zone", zone)
+			if made {
+				dropKeyMadeForALostLead(hdb, zd.ZoneName, keyName, madeKeyid)
+			}
 			return nil
 		}
 		// Step d: get the active key and publish to combiner + remote agents
