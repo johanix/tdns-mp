@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -60,9 +61,19 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 	return 0
 }
 
-// SetOnLeaderElected sets the callback invoked when the local agent wins an election.
+// SetOnLeaderElected sets the callback invoked when the local agent wins an
+// election, renews its lease, or leads a zone whose delegation sync comes back
+// to the agents (delegationSyncGivenBack). Each of those runs it in a goroutine
+// of its own. For one zone they run one at a time, so that two leader setups
+// never both find no SIG(0) key and each make one.
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
-	lem.onLeaderElected = f
+	var setups sync.Map // ZoneName -> *sync.Mutex
+	lem.onLeaderElected = func(zone ZoneName) error {
+		mu, _ := setups.LoadOrStore(zone, new(sync.Mutex))
+		mu.(*sync.Mutex).Lock()
+		defer mu.(*sync.Mutex).Unlock()
+		return f(zone)
+	}
 }
 
 // StartGroupElection initiates a leader election for a provider group.

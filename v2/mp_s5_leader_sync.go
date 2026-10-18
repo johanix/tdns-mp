@@ -544,6 +544,27 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	}
 }
 
+// delegationSyncGivenBack runs the leader's setup when the zone's HSYNCPARAM
+// gives the delegation sync back to the agents (followParentSyncParam) and
+// this agent leads the zone. While the owner synced it, an election or a lease
+// renewal skipped the setup (onLeaderElected), so a leader elected then has no
+// SIG(0) key for the zone, and nothing would ask for a sync until the next
+// renewal. The setup is what an election runs: the key, then a sync. An agent
+// that does not lead runs nothing; the leader's own refresh runs it. At a
+// zone's first load there is no leader yet, and the election runs it.
+func (conf *Config) delegationSyncGivenBack(zone string) {
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil || lem.onLeaderElected == nil || !lem.IsLeader(ZoneName(zone)) {
+		return
+	}
+	lgEngine.Info("the zone's delegation sync is the agents' again, and this agent leads it: running the leader's setup", "zone", zone)
+	go func() {
+		if err := lem.onLeaderElected(ZoneName(zone)); err != nil {
+			lgEngine.Error("the leader's setup failed after the delegation sync came back to the agents", "zone", zone, "err", err)
+		}
+	}()
+}
+
 // endDelegationSyncChain forgets the zone's chain and its CSYNC, and returns
 // the hold the chain had, if any.
 func (conf *Config) endDelegationSyncChain(zone string) *delegationNotifyHold {

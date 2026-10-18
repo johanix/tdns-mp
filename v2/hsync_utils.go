@@ -1535,7 +1535,9 @@ func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSync
 // When the owner takes the sync over, what this agent has scheduled for the
 // zone's parent ends here: a held NOTIFY is dropped, and an ask or a check
 // that waits finds no chain (delegationSyncOwnerSyncs). An election, a
-// lease renewal included, finds the option off and asks for nothing.
+// lease renewal included, finds the option off and asks for nothing. When
+// the owner gives the sync back, the agent that leads the zone runs the
+// leader's setup that its election skipped (delegationSyncGivenBack).
 //
 // A zone whose HSYNCPARAM cannot be read keeps the option it has.
 func (conf *Config) followParentSyncParam(mpzd *MPZoneData) {
@@ -1561,6 +1563,7 @@ func (conf *Config) followParentSyncParam(mpzd *MPZoneData) {
 	mpzd.SetRuntimeOption(tdns.OptParentSync, byAgents)
 	if byAgents {
 		lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
+		conf.delegationSyncGivenBack(mpzd.ZoneName)
 		return
 	}
 	lg.Info("HSYNCPARAM does not say parentsync=agent: the zone's owner syncs its delegation, and this agent no longer sends anything to the parent", "zone", mpzd.ZoneName)

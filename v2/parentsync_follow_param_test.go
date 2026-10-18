@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -215,4 +216,115 @@ func TestASyncQueuedBeforeTheOwnerTookOverIsNotSent(t *testing.T) {
 	}
 	r.quiet(t, 300*time.Millisecond, "for a request queued before the owner took over")
 	r.untold(t, 0, "for a request queued before the owner took over")
+}
+
+// The owner gives the sync back. While the owner synced the zone, an
+// election or a lease renewal skipped the leader's setup, so a leader elected
+// then had no SIG(0) key for the zone, and the first sync after the give-back
+// failed until the next renewal. The refresh that gives the sync back runs the
+// setup at the agent that leads the zone, and only there.
+func TestTheLeaderRunsItsSetupWhenTheSyncIsGivenBack(t *testing.T) {
+	asMPAgent(t)
+	for _, tc := range []struct {
+		name   string
+		leader AgentId
+		want   int
+	}{
+		{"this agent leads", "agent.us.example.", 1},
+		{"another agent leads", "agent.eu.example.", 0},
+		{"no leader yet", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newLeaderSyncRig(t, "givenback.parentsync.example.")
+			r.leader(tc.leader)
+			setups := make(chan ZoneName, 4)
+			r.lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
+			setupsWithin := func(d time.Duration) int {
+				n, deadline := 0, time.After(d)
+				for {
+					select {
+					case z := <-setups:
+						if z != ZoneName(r.mpzd.ZoneName) {
+							t.Errorf("a leader setup for %s", z)
+						}
+						n++
+					case <-deadline:
+						return n
+					}
+				}
+			}
+
+			servedParentSync(t, r.mpzd, &parentSyncOwner, false)
+			refreshed(t, r.conf, r.mpzd)
+			if n := setupsWithin(200 * time.Millisecond); n != 0 {
+				t.Errorf("the owner took the sync over, and %d leader setups ran", n)
+			}
+
+			servedParentSync(t, r.mpzd, &parentSyncAgent, false)
+			refreshed(t, r.conf, r.mpzd)
+			if !r.mpzd.Options[tdns.OptParentSync] {
+				t.Fatal("the sync was given back, and the option is off")
+			}
+			wait := 200 * time.Millisecond
+			if tc.want > 0 {
+				wait = 5 * time.Second
+			}
+			n := setupsWithin(wait)
+			if tc.want > 0 && n > 0 {
+				n += setupsWithin(200 * time.Millisecond)
+			}
+			if n != tc.want {
+				t.Errorf("the sync was given back: %d leader setups ran, want %d", n, tc.want)
+			}
+		})
+	}
+}
+
+// An election, a lease renewal, gossip and a give-back each start the leader's
+// setup in a goroutine of their own. For one zone the setups run one at a
+// time, so two cannot both find no SIG(0) key and make one each. Setups for
+// different zones still run together.
+func TestTheLeadersSetupRunsOneAtATimePerZone(t *testing.T) {
+	lem := NewLeaderElectionManager("agent.us.example.", time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
+	const a, b = ZoneName("a.example."), ZoneName("b.example.")
+	var inA, mostInA atomic.Int32
+	bRunning := make(chan struct{})
+	lem.SetOnLeaderElected(func(z ZoneName) error {
+		if z == b {
+			close(bRunning)
+			return nil
+		}
+		n := inA.Add(1)
+		for {
+			m := mostInA.Load()
+			if n <= m || mostInA.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inA.Add(-1)
+		return nil
+	})
+
+	done := make(chan struct{}, 4)
+	for range 4 {
+		go func() { _ = lem.onLeaderElected(a); done <- struct{}{} }()
+	}
+	// a's setups hold its lock; b's runs anyway
+	go func() { _ = lem.onLeaderElected(b) }()
+	select {
+	case <-bRunning:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a setup for another zone waited for this zone's")
+	}
+	for range 4 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a setup did not end")
+		}
+	}
+	if m := mostInA.Load(); m != 1 {
+		t.Errorf("%d setups for one zone ran at once, want 1", m)
+	}
 }
