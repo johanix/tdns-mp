@@ -674,10 +674,17 @@ func (mpzd *MPZoneData) lacksPubkeyConsent() bool {
 	return mpzd.HasPublishedData() && !mpzd.hasPubkey()
 }
 
-// contributionsLoaded: the zone's first load has put its persisted
-// contributions in memory, and a change to them is persisted from now on
-// (RegisterCombinerOnFirstLoad does both under one hold of the zone's lock).
+// contributionsLoaded: the zone has loaded, its persisted contributions are
+// in memory, and a change to them is persisted from now on. The
+// contributions are restored before the zone's first load
+// (restoreContributions), so that alone does not say the zone has data: a
+// retraction from a provider zone that has not loaded finds nothing to take
+// out, and the zone's file then brings the signal name back. Until the zone
+// has loaded, its names wait for its startup re-apply (ApplyPendingSignalKeys).
 func (mpzd *MPZoneData) contributionsLoaded() bool {
+	if !mpzd.HasPublishedData() {
+		return false
+	}
 	mpzd.Lock()
 	defer mpzd.Unlock()
 	return mpzd.MP != nil && mpzd.MP.PersistContributions != nil
