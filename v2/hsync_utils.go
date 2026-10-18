@@ -1492,7 +1492,15 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		// and at a re-apply: the names of a zone that does not say pubkey are
 		// retracted, and the combine does not bring them back. When the
 		// instructions cannot be read the zone keeps the names it has.
-		isProvider := GetProviderZoneRRtypes(mpzd.ZoneName) != nil
+		//
+		// Not at the zone's first load. Its persisted contributions are in
+		// memory by then (restoreContributions), and the consent pass cannot
+		// retract a name from a zone that has no data yet: it leaves the
+		// name for the zone's startup re-apply. Combined here, such a name
+		// would be in the first copy the zone serves, for a customer that
+		// has withdrawn it. At a first load the re-apply puts the names on
+		// instead, after the consent pass (ApplyPendingSignalKeys).
+		isProvider := GetProviderZoneRRtypes(mpzd.ZoneName) != nil && mpzd.HasPublishedData()
 		if isProvider {
 			if hdb := NewHsyncDB(mpzd.KeyDB); hdb != nil {
 				if _, err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {

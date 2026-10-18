@@ -370,3 +370,70 @@ func TestARefreshOfACustomerZoneCombinesAsBefore(t *testing.T) {
 	c.wantSignalKey("the customer zone's refresh", zone, both...)
 	c.wantStored("the customer zone's refresh", zone, []string{"at-apex", "at-ns"}, both)
 }
+
+// restart is a combiner start on the same database: the zones are configured
+// again with nothing loaded, nothing is held in memory, and the start's
+// registrations run again. The refresh engine keeps running, as a new
+// process's would start; it takes the zones as the config parser leaves them.
+func (c *refreshCombiner) restart(zones ...string) {
+	c.t.Helper()
+	pendingSignalKeys.mu.Lock()
+	pendingSignalKeys.built = false
+	pendingSignalKeys.entries = nil
+	pendingSignalKeys.mu.Unlock()
+	c.conf.InternalMp.MPZoneNames = nil
+	c.conf.InternalMp.onFirstLoadRegistered = nil
+	c.conf.InternalMp.refreshRegistered = nil
+	for _, name := range zones {
+		c.drop(name)
+		tdns.Zones.Set(name, &tdns.ZoneData{
+			ZoneName:      name,
+			Logger:        log.New(io.Discard, "", 0),
+			FirstZoneLoad: true,
+			Options:       map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
+		})
+		c.conf.InternalMp.MPZoneNames = append(c.conf.InternalMp.MPZoneNames, name)
+	}
+	c.conf.RegisterCombinerOnFirstLoad()
+	c.conf.RegisterMPRefreshCallbacks()
+}
+
+// The owner takes pubkey away while the combiner is down. At the start the
+// customer zone loads first, and its signal name waits for the provider
+// zone's load to be retracted. The provider zone's first copy, the one its
+// first load publishes and its downstream transfers, must not carry that
+// name: the KEY is the customer's, and the customer has withdrawn it. Gone a
+// serial later is too late; the signer has taken the first copy by then.
+func TestAStartsFirstCopyOfAProviderZoneHasNoSignalKeyWithoutConsent(t *testing.T) {
+	const zone = "first.refresh.example."
+	c := newRefreshCombiner(t, consentProviderZone, zone)
+	c.up.publish(consentProviderZone, consentProviderText())
+	c.up.publish(zone, consentCustomerText(zone, true))
+	c.load(consentProviderZone)
+	c.load(zone)
+	c.sendKey(zone)
+	c.wantSignalKey("with pubkey", zone, consentNS1)
+
+	c.up.publish(zone, atSerial(consentCustomerText(zone, false), 2))
+	c.restart(consentProviderZone, zone)
+	c.load(zone)
+
+	// What the provider zone's first load publishes, read before any of its
+	// first-load callbacks run.
+	owner := Sig0KeyOwnerName(zone, consentNS1)
+	var firstCopy []string
+	prov, ok := tdns.Zones.Get(consentProviderZone)
+	if !ok {
+		t.Fatal("the provider zone is not configured")
+	}
+	prov.OnFirstLoad = append([]func(*tdns.ZoneData){func(zd *tdns.ZoneData) {
+		firstCopy = servedNames(t, zd, owner, dns.TypeKEY)
+	}}, prov.OnFirstLoad...)
+	c.load(consentProviderZone)
+
+	if len(firstCopy) != 0 {
+		t.Errorf("the provider zone's first copy after the start serves %s KEY %v for a zone without pubkey, want nothing", owner, firstCopy)
+	}
+	c.wantNoSignalKey("after the start", zone, consentNS1)
+	c.wantStored("after the start", zone, []string{"at-apex"}, nil)
+}
