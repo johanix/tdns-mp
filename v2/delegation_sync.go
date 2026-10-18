@@ -7,6 +7,7 @@ package tdnsmp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -277,14 +278,26 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 		msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
 		return msg, rcode, ur, false, err
 	}
-	csyncErr := conf.delegationCsyncStep(ctx, ds.ZoneName, syncstate)
+	// The owner may take the sync over while it runs: the refresh that brings
+	// the owner's word cancels runCtx (delegationSyncOwnerSyncs), which stops
+	// an UPDATE that tdns is still retrying. The run is listed before the
+	// option is read, so a takeover either finds it or is seen here.
+	runCtx, done := conf.delegationSyncRun(ctx, ds.ZoneName)
+	defer done()
+	if ownerSyncsDelegation(ds.ZoneData) {
+		return "", 0, tdns.UpdateResult{}, false, errors.New("the zone's owner has taken its delegation sync over; nothing is sent")
+	}
+	csyncErr := conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
-	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, taken, syncstate, imr)
+	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(runCtx, hdb.KeyDB, taken, syncstate, imr)
 	var notifies []tdns.NotifyRequest
 	for len(taken) > 0 {
 		notifies = append(notifies, <-taken)
+	}
+	if err != nil && ownerSyncsDelegation(ds.ZoneData) {
+		return msg, rcode, ur, false, fmt.Errorf("the zone's owner has taken its delegation sync over; the sync is stopped: %w", err)
 	}
 	if err != nil || len(notifies) == 0 {
 		// A sync that failed has handed nothing over: tdns's NOTIFY sender

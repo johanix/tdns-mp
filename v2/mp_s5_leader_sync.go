@@ -233,6 +233,10 @@ type delegationSyncChains struct {
 	// timers counts what is scheduled for later, for every zone, until it
 	// has returned (delegationSyncAfter)
 	timers sync.WaitGroup
+	// runs holds a cancel for each leader sync under way, per zone, until it
+	// has returned (delegationSyncRun)
+	runs  map[string]map[uint64]context.CancelFunc
+	runID uint64
 }
 
 type delegationSyncChain struct {
@@ -537,11 +541,57 @@ func (conf *Config) delegationSyncNotLeading(zone string, quiet bool) {
 // ask, a check or the end of a hold that is still scheduled finds no chain
 // when it fires, and does nothing. What is remembered of the CSYNC this
 // agent made goes too: the agent that leads when the sync comes back to the
-// agents makes its own.
+// agents makes its own. A sync under way is stopped: an UPDATE that tdns is
+// still retrying is not sent again.
 func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	if hold := conf.endDelegationSyncChain(zone); hold != nil {
 		lgEngine.Info("the held NOTIFY is dropped: the zone's owner syncs its delegation", "zone", zone, "notify", notifyTypes(hold.notifies))
 	}
+	if n := conf.stopDelegationSyncRuns(zone); n > 0 {
+		lgEngine.Info("the delegation sync under way is stopped: the zone's owner syncs its delegation", "zone", zone, "syncs", n)
+	}
+}
+
+// delegationSyncRun gives a leader sync of the zone a context of its own,
+// which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
+// over. A sync can sit in tdns's UPDATE retry loop for a minute or more after
+// a REFUSED, and the loop asks only its context whether to go on. done ends
+// the run.
+func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx context.Context, done func()) {
+	c := &conf.InternalMp.delegationSyncChains
+	runCtx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	if c.runs == nil {
+		c.runs = map[string]map[uint64]context.CancelFunc{}
+	}
+	if c.runs[zone] == nil {
+		c.runs[zone] = map[uint64]context.CancelFunc{}
+	}
+	c.runID++
+	id := c.runID
+	c.runs[zone][id] = cancel
+	c.mu.Unlock()
+	return runCtx, func() {
+		c.mu.Lock()
+		delete(c.runs[zone], id)
+		if len(c.runs[zone]) == 0 {
+			delete(c.runs, zone)
+		}
+		c.mu.Unlock()
+		cancel()
+	}
+}
+
+// stopDelegationSyncRuns cancels the zone's leader syncs under way, and says
+// how many there were. Each leaves the list when it has returned.
+func (conf *Config) stopDelegationSyncRuns(zone string) int {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, cancel := range c.runs[zone] {
+		cancel()
+	}
+	return len(c.runs[zone])
 }
 
 // delegationSyncGivenBack runs the leader's setup when the zone's HSYNCPARAM

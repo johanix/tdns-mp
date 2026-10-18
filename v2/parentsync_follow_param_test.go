@@ -328,3 +328,54 @@ func TestTheLeadersSetupRunsOneAtATimePerZone(t *testing.T) {
 		t.Errorf("%d setups for one zone ran at once, want 1", m)
 	}
 }
+
+const logSyncStopped = `msg="the delegation sync under way is stopped: the zone's owner syncs its delegation"`
+
+// The owner takes the sync over while the leader's UPDATE is in tdns's retry
+// loop: the parent answered REFUSED, and the loop sends the UPDATE again after
+// its wait. The refresh that brings the owner's word stops the sync, and the
+// UPDATE is not sent again. It was: a multi-host run saw an ADD, refused
+// before the owner's edit, applied after it.
+func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
+	asMPAgent(t)
+	r := newNotifyRig(t, "retried.update.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
+	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
+	r.propagation(time.Hour)
+	z := r.mpzd.ZoneName
+	if _, err := r.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
+		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+		t.Fatalf("the zone's SIG(0) key: %v", err)
+	}
+	r.parent.refuses()
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.hint()
+	underWay := func() int {
+		c := &r.conf.InternalMp.delegationSyncChains
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.runs[z])
+	}
+	for deadline := time.Now().Add(10 * time.Second); r.parent.updatesSeen() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no UPDATE reached the parent")
+		}
+	}
+	if underWay() != 1 {
+		t.Fatal("the refused UPDATE is not being retried")
+	}
+
+	servedParentSync(t, r.mpzd, &parentSyncOwner, false) // before the retry's wait is over
+	refreshed(t, r.conf, r.mpzd)
+	if l := r.log.String(); !strings.Contains(l, logSyncStopped+" zone="+z+" syncs=1") {
+		t.Errorf("the refresh did not stop the sync under way:\n%s", l)
+	}
+	for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the sync went on after the owner took the sync over")
+		}
+	}
+	if n := r.parent.updatesSeen(); n != 1 {
+		t.Errorf("the parent got %d UPDATEs, want the one sent before the owner took over", n)
+	}
+	r.untold(t, 0, "for a sync the owner stopped")
+}
