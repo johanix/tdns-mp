@@ -447,6 +447,22 @@ multi-provider:
         allowed-rrtypes: [ KEY ]
 ```
 
+The provider zone itself is configured in the combiner as a
+customer zone is: a secondary of the provider's own primary,
+with the `multi-provider` option. The combiner's start-up
+re-apply and the combine onto a refreshed copy are attached
+only to zones with that option, so without it a restart or a
+refresh does not put the `_signal` KEYs back. The zone has no
+HSYNC records, and the combiner does not expect any.
+
+```yaml
+zones:
+   - name:       alpha.example.net.
+     type:       secondary
+     primaries:  [ { addr: '192.0.2.1:53', key: NOKEY } ]
+     options:    [ multi-provider ]
+```
+
 When the agent sends a Publish instruction with
 `locations: ["at-ns"]`, the combiner:
 

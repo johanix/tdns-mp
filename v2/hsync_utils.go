@@ -1160,7 +1160,11 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
 
 	hasHsyncRecords := (h3exists && hpExists) || h1exists || h2exists
 	if !hasHsyncRecords {
-		mpzd.Logger.Printf("populateMPdata: zone %s: OptMultiProvider is set but zone owner has no HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2) records — zone is not multi-provider", mpzd.ZoneName)
+		// A provider zone has no HSYNC records by design; its option is
+		// what attaches the combiner's start-up re-apply and refresh combine.
+		if GetProviderZoneRRtypes(mpzd.ZoneName) == nil {
+			mpzd.Logger.Printf("populateMPdata: zone %s: OptMultiProvider is set but zone owner has no HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2) records — zone is not multi-provider", mpzd.ZoneName)
+		}
 		mpzd.MP.MPdata = nil
 		return
 	}
