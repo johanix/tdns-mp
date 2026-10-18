@@ -337,7 +337,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 						if err := importSig0KeyFromPeer(hdb, keyName, configResp.ConfigData); err != nil {
 							lgAgent.Error("failed to import SIG(0) key from peer",
 								"zone", zone, "peer", agent.ID, "err", err)
-							unanswered++ // it has a key: that is not "no key"
+							if votes(agent.ID) {
+								unanswered++ // it has a key: that is not "no key"
+							}
 							continue
 						}
 						lgAgent.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.ID)
@@ -363,6 +365,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					"zone", zone, "unanswered", unanswered)
 			}
 			return errZoneKeyNotHeld
+		}
+		// The asks above take time, and the leadership can move meanwhile. A
+		// key is the leader's to make: one made by an agent that no longer
+		// leads would replace the zone's KEY beside the new leader's.
+		if !lem.IsLeader(zone) {
+			lgAgent.Info("no longer the zone's leader after asking the peers; no SIG(0) key is made", "zone", zone)
+			return nil
 		}
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
 		{
