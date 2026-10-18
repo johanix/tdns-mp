@@ -168,6 +168,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			Update:            zu,
 			OriginatingDistID: ampp.DistributionID,
 			OriginatingTime:   ampp.Time,
+			DeliveredBy:       ampp.DeliveredBy,
 			Response:          cresp,
 		}
 		select {

@@ -90,6 +90,15 @@ type MPTransportBridge struct {
 
 	keystateRfiMu    sync.Mutex
 	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
+
+	// refusedHellos is, per peer, the run of our DNS hellos and beats that
+	// the peer has refused and when the peer was last looked up past the
+	// resolver's cache (noteRefused, freshLookupDue, agent_discovery.go).
+	refusedHellosMu sync.Mutex
+	refusedHellos   map[string]*refusedHellos
+	// rediscoveryInterval is the least time between two such lookups of one
+	// peer; zero means peerRediscoveryInterval.
+	rediscoveryInterval time.Duration
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -435,22 +444,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// is blocking discovery.
 	tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
 		lgTransport.Info("discovery kick: flushing IMR cache and triggering discovery", "peer", peerID)
-
-		// Flush IMR cache for this peer's discovery names before re-discovery
-		if tm.getImrEngine != nil {
-			if removed := flushDiscoveryCache(tm.getImrEngine(), peerID); removed > 0 {
-				lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
-			}
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		err := tm.DiscoverAndRegisterAgent(ctx, peerID)
-		if err != nil {
-			lgTransport.Warn("discovery incomplete for peer", "peer", peerID, "err", err)
-		} else {
-			lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
-		}
+		tm.flushAndDiscover(peerID)
 	}
 
 	// Provide gossip for beat responses: when we receive a beat,
@@ -689,6 +683,17 @@ func (tm *MPTransportBridge) beatBack(peerID string) {
 	}
 }
 
+// introduceByHello moves a peer's mechanism to INTRODUCING on a hello we
+// accepted from it, and brings the next beat round forward.
+func (tm *MPTransportBridge) introduceByHello(peer *transport.Peer, mech string) {
+	peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
+	// The hello moved the peer: beat it back soon, so that this side
+	// reaches OPERATIONAL too. Only here: a hello that finds the mechanism
+	// already introduced changes nothing, and a peer that never gets our
+	// accept repeats its hello every helloretry for as long as that lasts.
+	tm.kickBeats()
+}
+
 // routeHelloMessage routes a hello message to the hello channel.
 func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
@@ -711,13 +716,20 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
 	peer.LastHelloReceived = time.Now()
+	noAddress := false
 	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
-		peer.SetMechanismState(mech, transport.PeerStateIntroducing, mech+" hello accepted and authorized")
-		// The hello moved the peer: beat it back soon, so that this side
-		// reaches OPERATIONAL too. Only here: a hello that finds the mechanism
-		// already introduced changes nothing, and a peer that never gets our
-		// accept repeats its hello every helloretry for as long as that lasts.
-		tm.kickBeats()
+		// An inbound hello shows that the peer reaches us, not that we reach
+		// it. A mechanism that discovery left without an address (the peer's
+		// URI found and no address, or the peer not looked up yet) is not
+		// moved: at INTRODUCING nothing would discover the peer again, and
+		// every send to it would fail for want of an address until a restart
+		// (#84). It stays where it is, the hello starts a discovery below,
+		// and the mechanism is introduced once that has found the address.
+		if peer.HasMechanism(mech) {
+			tm.introduceByHello(peer, mech)
+		} else {
+			noAddress = true
+		}
 	} else {
 		// The peer is introducing itself again: it restarted, or never got
 		// our accept. Our reading of it is from before, and a beat that
@@ -729,22 +741,54 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
 
-	// For an unknown (but authorized) sender, trigger discovery so we can beat
-	// back. Contact timestamps live on transport.Peer above — the AgentDetails
-	// telemetry mirror is gone (Phase 2).
+	// For an unknown (but authorized) sender, and for one whose mechanism has
+	// no address, trigger discovery so we can beat back. Contact timestamps
+	// live on transport.Peer above — the AgentDetails telemetry mirror is gone
+	// (Phase 2).
 	if tm.agentRegistry != nil {
-		if _, exists := tm.agentRegistry.S.Get(AgentId(senderID)); !exists {
+		_, exists := tm.agentRegistry.S.Get(AgentId(senderID))
+		if !exists || noAddress {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
 			// This ensures receiver can send beats back to sender
-			lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
+			if !exists {
+				lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
+			} else {
+				lgTransport.Info("authorized Hello from an agent with no address, triggering discovery", "agent", senderID, "mechanism", mech)
+			}
 			go func(peerID string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				err := tm.DiscoverAndRegisterAgent(ctx, peerID)
-				if err != nil {
-					lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
+				// The resolver may hold the answer that the sender's address
+				// is not there, from a lookup before it could be found, and
+				// a discovery through the cache gets that answer again until
+				// it expires. The hello says that the sender's records can
+				// be found now, so a sender with no address is looked up
+				// past the cache. Once per peer and interval, so that hellos
+				// cannot drive flushes; within the interval the discovery
+				// goes through the cache.
+				if noAddress && tm.freshLookupDue(peerID) {
+					tm.flushAndDiscover(peerID)
 				} else {
-					lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					err := tm.DiscoverAndRegisterAgent(ctx, peerID)
+					cancel()
+					if err != nil {
+						lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
+					} else {
+						lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
+					}
+				}
+				// The hello was accepted before there was an address to
+				// answer it at. If there is one now, it introduces the
+				// mechanism as it would have then; if not, the mechanism
+				// still needs discovery and the engine's retry has it.
+				if !noAddress {
+					return
+				}
+				p, ok := tm.PeerRegistry.Get(peerID)
+				if !ok || !p.HasMechanism(mech) {
+					return
+				}
+				if raw, ok := p.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
+					tm.introduceByHello(p, mech)
 				}
 			}(senderID)
 		}
@@ -772,7 +816,8 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	select {
 	case tm.msgQs.Hello <- report:
-		lgTransport.Debug("routed hello to hsyncengine", "mechanism", mech, "sender", senderID, "state", "INTRODUCING", "distributionID", msg.DistributionID)
+		state, _ := peer.MechanismRawState(mech)
+		lgTransport.Debug("routed hello to hsyncengine", "mechanism", mech, "sender", senderID, "state", state.String(), "distributionID", msg.DistributionID)
 	default:
 		lgTransport.Warn("hello channel full, dropping message", "sender", senderID)
 	}
@@ -855,6 +900,14 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	}
 	if len(payload.Zones) > 0 {
 		report.Zone = ZoneName(payload.Zones[0])
+		// The beat names every zone its sender shares with us, in no
+		// particular order (beatZones). Zone alone would book it for
+		// whichever came first; the report carries them all, for the
+		// consumer that keeps liveness per zone (tdns-mp #153).
+		report.Zones = make([]ZoneName, len(payload.Zones))
+		for i, z := range payload.Zones {
+			report.Zones[i] = ZoneName(z)
+		}
 	}
 
 	if tm.msgQs == nil {
@@ -938,6 +991,17 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// Messages reaching routeSyncMessage have passed middleware auth.
 	lgTransport.Debug("processing authorized DNS message", "msgType", msgTypeStr, "sender", senderID, "zone", zone, "transportSender", msg.TransportSender)
 
+	// The transport names the sender of every message it routes: on the DNS
+	// mechanism the identity whose key opened the payload. A message without
+	// one did not come through that, and all there is to go on is the name
+	// its payload gives. That is not enough: what is done with the message
+	// depends on who sent it (a CSYNC is taken only from the zone's leader),
+	// and a payload can name anybody. It is dropped.
+	if msg.TransportSender == "" {
+		lgTransport.Warn("sync message with no transport sender, dropped", "msgType", msgTypeStr, "sender", senderID, "zone", zone)
+		return
+	}
+
 	// Record inbound liveness ONLY — receiving a message proves they can
 	// reach us, not that we can reach them. State is set by the outbound
 	// beat path (SendBeatWithFallback), never on inbound receipt.
@@ -948,9 +1012,6 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// the originator for forwarded messages. The combiner needs this to send confirmations
 	// back to the agent that actually delivered the message, not the original author.
 	deliveredBy := msg.TransportSender
-	if deliveredBy == "" {
-		deliveredBy = senderID // Fallback for direct delivery
-	}
 
 	// Ensure the transport sender (deliverer) has a PeerRegistry entry with an address.
 	// For forwarded messages, the deliverer may be a remote agent not pre-registered in this
@@ -1047,7 +1108,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 				Signal:   payload.Signal,
 				Message:  payload.Message,
 
-				ForeignKeys: payload.ForeignKeys,
+				ForeignKeys:   payload.ForeignKeys,
+				ForeignSpoken: payload.ForeignSpoken,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
@@ -1578,12 +1640,18 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 		dnsResp, dnsErr = helloResult(results["DNS"])
 		if dnsErr != nil {
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
+			// A peer that keeps answering REFUSED may be one whose key we
+			// hold wrong: it is looked up again (#145).
+			if helloRefused(dnsErr) {
+				tm.noteHelloRefused(peer.ID)
+			}
 		} else if dnsResp != nil && !dnsResp.Accepted {
 			lgTransport.Warn("DNS Hello not accepted", "peer", peer.ID, "reason", dnsResp.RejectReason)
 		} else {
 			lgTransport.Info("DNS Hello succeeded", "peer", peer.ID)
 		}
 		if dnsErr == nil && dnsResp != nil && dnsResp.Accepted {
+			tm.noteHelloAccepted(peer.ID)
 			if raw, ok := peer.MechanismRawState("DNS"); !ok || raw < transport.PeerStateIntroducing {
 				peer.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted")
 				lgTransport.Info("updated DNS mechanism state to INTRODUCING after successful Hello", "agent", peer.ID)
@@ -1702,10 +1770,16 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		dnsResp, dnsErr = beatResult(results["DNS"])
 		if dnsErr != nil {
 			lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
+			// A peer that keeps answering our beats with REFUSED may be
+			// one whose key we hold wrong, as a refused hello may (#145).
+			if helloRefused(dnsErr) {
+				tm.noteBeatRefused(peer.ID)
+			}
 		} else if dnsResp != nil && !dnsResp.Ack {
 			lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
 		} else {
 			lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
+			tm.noteHelloAccepted(peer.ID)
 			peer.SetMechanismState("DNS", transport.PeerStateOperational, "DNS beat round-trip succeeded")
 			peer.SetMechanismLastBeatSent("DNS", time.Now())
 			if !dnsWasOperational && tm.agentRegistry != nil && tm.agentRegistry.LeaderElectionManager != nil {
@@ -2342,10 +2416,20 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // latest set on to our signer. An operation without key states (an older
 // release) says nothing: what that provider said before, if anything,
 // stands, and a provider that never said leaves its keys undecided at
-// the signer (Q9).
+// the signer (Q9). One exception: a replace of the whole DNSKEY set by no
+// record at all, from a provider whose key states this agent already
+// holds, is that provider's word that it has no key now. A sender that
+// says what it holds its keys as says it with every record it sends, and
+// the wire between providers carries no empty list, so this is the only
+// shape its empty word can take; a provider that never said gets no entry
+// from it. The entry stays, with no key in it: the provider has spoken,
+// and the signer is told so by name (S7, the empty-share clause of A2.2).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
 	var states []core.KeyState
-	found, records := false, false
+	// endsEmpty: the last DNSKEY operation replaces the whole set by no
+	// record. That is what the operations leave, whatever came before it
+	// in the same update: a record an earlier operation carried is gone.
+	found, records, endsEmpty := false, false, false
 	for _, op := range ops {
 		if op.RRtype != "DNSKEY" {
 			continue
@@ -2354,6 +2438,7 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 			states = append(states, op.KeyStates...)
 			found = true
 		}
+		endsEmpty = op.Operation == "replace" && len(op.Records) == 0
 		if len(op.Records) > 0 || op.Operation == "replace" {
 			records = true
 		}
@@ -2378,9 +2463,19 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 			}
 		}
 	}
+	emptied := false
+	if !found && endsEmpty {
+		if _, spoke := tm.foreignKeyStates[zone][from]; spoke {
+			found, emptied = true, true
+		}
+	}
 	if !found {
 		tm.foreignKeyStatesMu.Unlock()
 		return
+	}
+	if states == nil {
+		// spoken, and no key: an entry with nothing in it is the record
+		states = []core.KeyState{}
 	}
 	if tm.foreignKeyStates == nil {
 		tm.foreignKeyStates = map[ZoneName]map[AgentId][]core.KeyState{}
@@ -2390,14 +2485,21 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 	}
 	tm.foreignKeyStates[zone][from] = states
 	tm.foreignKeyStatesMu.Unlock()
-	lgTransport.Info("key states received from another provider", "zone", zone, "agent", from, "keys", len(states))
+	if emptied {
+		lgTransport.Info("a provider that had said what it holds its keys as replaced its whole DNSKEY set by none: it has no key now", "zone", zone, "agent", from)
+	} else {
+		lgTransport.Info("key states received from another provider", "zone", zone, "agent", from, "keys", len(states))
+	}
 	go tm.sendForeignKeysToSigner(zone)
 }
 
-// foreignKeysFor is the zone's complete latest set of the other providers'
+// foreignWordFor is the zone's complete latest set of the other providers'
 // key states, each with its provider's label (the agent's HSYNC3 label in
-// the zone); an agent with no label there is left out, with a warning.
-func (tm *MPTransportBridge) foreignKeysFor(zone ZoneName) []core.ForeignKeyState {
+// the zone), and the labels of every provider whose word this agent holds,
+// one whose latest word listed no keys included: the spoken list is how
+// the signer tells such a provider's empty word from silence (S7). An
+// agent with no label in the zone is left out of both, with a warning.
+func (tm *MPTransportBridge) foreignWordFor(zone ZoneName) (keys []core.ForeignKeyState, spoken []string) {
 	tm.foreignKeyStatesMu.Lock()
 	byAgent := map[AgentId][]core.KeyState{}
 	for a, st := range tm.foreignKeyStates[zone] {
@@ -2405,29 +2507,30 @@ func (tm *MPTransportBridge) foreignKeysFor(zone ZoneName) []core.ForeignKeyStat
 	}
 	tm.foreignKeyStatesMu.Unlock()
 	if len(byAgent) == 0 {
-		return nil
+		return nil, nil
 	}
 	mpzd, ok := Zones.Get(dns.Fqdn(string(zone)))
 	if !ok || mpzd == nil {
-		return nil
+		return nil, nil
 	}
 	agents := make([]string, 0, len(byAgent))
 	for a := range byAgent {
 		agents = append(agents, string(a))
 	}
 	sort.Strings(agents)
-	var out []core.ForeignKeyState
 	for _, a := range agents {
 		matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(a)})
 		if err != nil || !matched {
 			lgTransport.Warn("key states from an agent with no HSYNC3 label in the zone; not handed to the signer", "zone", zone, "agent", a)
 			continue
 		}
+		spoken = append(spoken, label)
 		for _, st := range byAgent[AgentId(a)] {
-			out = append(out, core.ForeignKeyState{Provider: label, KeyState: st})
+			keys = append(keys, core.ForeignKeyState{Provider: label, KeyState: st})
 		}
 	}
-	return out
+	sort.Strings(spoken)
+	return keys, spoken
 }
 
 // logSilentAgents says which of the zone's agents have not said anything
@@ -2465,17 +2568,16 @@ func (tm *MPTransportBridge) logSilentAgents(zone ZoneName) {
 }
 
 // sendForeignKeysToSigner hands our signer what the other providers said
-// about their keys in the zone (KEYSTATE "foreign").
+// about their keys in the zone (KEYSTATE "foreign"): the keys, and the
+// providers whose word we hold. A provider whose latest word lists no
+// keys is among the spoken, so the signer learns that its keys are gone
+// and gives their rows ds=0 until they go with its DNSKEYs, instead of
+// keeping what it had (transition table section 3; S7).
 func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
-	keys := tm.foreignKeysFor(zone)
+	keys, spoken := tm.foreignWordFor(zone)
 	tm.logSilentAgents(zone)
-	// Nothing to hand over. That is also the case when the last provider
-	// that spoke now says an explicit empty list: the flat set cannot
-	// carry "this provider has spoken and holds no key", so the signer
-	// keeps what it had until the rows go with the provider's DNSKEYs
-	// (transition table section 3). Our own sender never says that: an
-	// empty list is not encoded.
-	if len(keys) == 0 {
+	// nothing to hand over while nobody has spoken
+	if len(keys) == 0 && len(spoken) == 0 {
 		return
 	}
 	if tm.signerID == "" || tm.signerAddress == "" || tm.DNSTransport == nil {
@@ -2488,17 +2590,18 @@ func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
-		SenderID:    tm.LocalID,
-		Zone:        string(zone),
-		Signal:      "foreign",
-		ForeignKeys: keys,
-		Timestamp:   time.Now(),
+		SenderID:      tm.LocalID,
+		Zone:          string(zone),
+		Signal:        "foreign",
+		ForeignKeys:   keys,
+		ForeignSpoken: spoken,
+		Timestamp:     time.Now(),
 	})
 	if err != nil {
 		lgTransport.Error("KEYSTATE foreign send to signer failed", "zone", zone, "err", err)
 		return
 	}
-	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "accepted", resp.Accepted, "msg", resp.Message)
+	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "spoken", spoken, "accepted", resp.Accepted, "msg", resp.Message)
 }
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.

@@ -62,15 +62,16 @@ func StartAuditDetectors(ctx context.Context, sm *AuditStateManager,
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runDetectorsOnce(sm, state, silenceThreshold)
+				runDetectorsOnce(sm, state, time.Now(), silenceThreshold)
 			}
 		}
 	}()
 }
 
+// runDetectorsOnce is one detector round over every tracked zone, judged
+// at now.
 func runDetectorsOnce(sm *AuditStateManager, state *detectorRunState,
-	silenceThreshold time.Duration) {
-	now := time.Now()
+	now time.Time, silenceThreshold time.Duration) {
 	zones := sm.SnapshotAllZones()
 	for _, zsum := range zones {
 		zs := sm.GetZone(zsum.Zone)

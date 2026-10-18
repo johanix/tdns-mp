@@ -1399,10 +1399,25 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
-				new_zd.Options[tdns.OptInlineSigning] = true
 			} else if !shouldSign && new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", mpzd.ZoneName)
-				new_zd.Options[tdns.OptInlineSigning] = false
+			}
+			// The switch is ours, not the configuration's: recorded on the
+			// served zone as a run-time option, at every refresh, so that a
+			// config update (config reload-zones, a zone reload) does not
+			// take it away until the next transfer (tdns-mp #144). On the
+			// incoming zone too: its options are the served zone's as they
+			// were when the fetch began. That map is the one the served
+			// zone had, which is read without a lock, so the incoming zone
+			// gets a map of its own and the old one is not written.
+			mpzd.ZoneData.SetRuntimeOption(tdns.OptInlineSigning, shouldSign)
+			if new_zd.Options[tdns.OptInlineSigning] != shouldSign {
+				opts := make(map[tdns.ZoneOption]bool, len(new_zd.Options)+1)
+				for o, on := range new_zd.Options {
+					opts[o] = on
+				}
+				opts[tdns.OptInlineSigning] = shouldSign
+				new_zd.Options = opts
 			}
 			isMS := shouldSign && otherSigners > 0
 			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {
@@ -1459,7 +1474,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		isProvider := GetProviderZoneRRtypes(mpzd.ZoneName) != nil
 		if isProvider {
 			if hdb := NewHsyncDB(mpzd.KeyDB); hdb != nil {
-				if err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
+				if _, err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
 					lg.Error("failed to load publish instructions; the provider zone's _signal KEYs are not checked against the customers' consent",
 						"zone", mpzd.ZoneName, "err", err)
 				}

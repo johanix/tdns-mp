@@ -202,6 +202,9 @@ func gossipMatrixRow(reporter string, ms *MemberState) map[string]interface{} {
 	if ms.BeatInterval > 0 {
 		row["beat_interval"] = ms.BeatInterval
 	}
+	if ms.PropagationDelay > 0 {
+		row["propagation_delay"] = ms.PropagationDelay
+	}
 	return row
 }
 

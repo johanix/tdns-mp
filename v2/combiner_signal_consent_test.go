@@ -485,6 +485,40 @@ func TestAWithdrawalThatFailsIsTriedAgain(t *testing.T) {
 	c.wantApexKey("the retraction tried again", cust)
 }
 
+// The operator's re-apply finds a zone without pubkey and retracts its signal
+// name, and the retraction fails: the name stays in the stored instruction,
+// with at-ns, to be tried again. The same re-apply then reads the
+// instructions to put the signal names back. It must not put back the one it
+// has just failed to take away.
+func TestAReapplyDoesNotPutBackAWithdrawalThatFailed(t *testing.T) {
+	const zone = "reapplyfail.customer.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	prov := c.load(consentProviderZone, consentProviderText())
+	cust := c.load(zone, consentCustomerText(zone, true))
+	c.sendKey(zone)
+	c.wantSignalKey("with pubkey", zone, consentNS1)
+
+	// The customer takes pubkey away, and the re-apply runs while the
+	// provider zone cannot be published.
+	c.ownerSays(cust, false)
+	store := prov.ZoneStore
+	prov.ZoneStore = tdns.XfrZone
+	_, _ = CombinerReapplyContributions(consentProviderZone, c.hdb)
+	prov.ZoneStore = store
+	c.wantStored("the retraction failed", zone, []string{"at-apex", "at-ns"}, []string{consentNS1})
+	if _, held, persisted := c.signalKey(zone, consentNS1); held || persisted {
+		t.Errorf("after a re-apply whose retraction failed: the KEY of %s under %s is held=%v persisted=%v, want it not put back", zone, consentNS1, held, persisted)
+	}
+
+	// The next re-apply tries the retraction again and finishes it.
+	if _, err := CombinerReapplyContributions(consentProviderZone, c.hdb); err != nil {
+		t.Fatalf("CombinerReapplyContributions: %v", err)
+	}
+	c.wantNoSignalKey("the retraction tried again", zone, consentNS1)
+	c.wantStored("the retraction tried again", zone, []string{"at-apex"}, nil)
+}
+
 // The stored instructions could not be read when the combiner registered its
 // first-load callbacks, and can be read by the time the zones load. The
 // provider zone's re-apply reads them for itself and puts the signal name

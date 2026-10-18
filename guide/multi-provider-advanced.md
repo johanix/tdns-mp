@@ -124,7 +124,7 @@ parentsync:
          algorithm:  ED25519
 
 # How long an elected leader holds the role; 60m is the
-# default.
+# default. The value takes a unit (60m, 3600s).
 # delegationsync:
 #    leader-election-ttl: 60m
 ```
@@ -153,15 +153,71 @@ and applies the changes.
 **Flow:**
 
 1. The agent detects a change to delegation data.
-2. The agent publishes a CSYNC record (for NS/glue changes)
-   or a CDS record (for DS changes) at the zone apex.
-3. The agent sends a NOTIFY with the appropriate QTYPE
-   (CSYNC or CDS) to the parent's NOTIFY receiver address
-   (from the DSYNC RRset).
+2. A CSYNC record (for NS/glue changes) or a CDS record
+   (for DS changes) is published at the zone apex. For a
+   multi-provider zone the CSYNC is made by the leader
+   agent and the CDS is served by the signer; see below.
+3. The elected leader agent sends a NOTIFY with the
+   appropriate QTYPE (CSYNC or CDS) to the parent's NOTIFY
+   receiver address (from the DSYNC RRset). A NOTIFY(CDS)
+   goes out only once the agent's own copy of the zone, which
+   it transfers from its signer, carries a CDS RRset.
 4. The parent's scanner queries the child for the published
    records, authenticates them under the parent zone's
    delegation policy (section 2.3), and applies the changes
    to the parent zone.
+
+A multi-provider zone has one CSYNC, and the leader agent
+makes it. A change of the NS set reaches every provider as
+a SYNC, the leader among them. When the leader then finds
+the zone's NS set or glue differing from the parent's, and
+a provider signs the zone, it makes a CSYNC with the
+immediate flag and sends it to every provider as a
+contribution: to the other agents, each of which hands it
+to its combiner, and to its own combiner. Its serial field
+is the time it was made, or one more than the newest CSYNC
+the leader knows of for the zone if that is later. A
+combiner serves the newest CSYNC it has been sent and
+makes none itself; an agent takes a CSYNC only from the
+agent it knows as the zone's leader, and rejects any
+other. The leader makes a new CSYNC only when that
+difference changes: an election, an operator's request and
+the leader's own checks of the parent make none.
+
+The NOTIFY(CSYNC) leaves when every provider has given its
+final confirmation of the CSYNC, and the wait described
+next has passed since the last of them. While
+confirmations are missing the agent logs which providers
+it waits for, at once and then every 10 minutes; there is
+no time-out. If a provider rejects the CSYNC the sync has
+failed: nothing is sent, the agent asks again after a
+delay, and that attempt distributes a new CSYNC. A
+NOTIFY(CDS) of the same sync leaves together with the
+NOTIFY(CSYNC). A parent that takes UPDATE gets its UPDATE
+at once; the CSYNC is distributed all the same.
+
+A NOTIFY only asks the parent to scan, and a scan that
+comes before the zone's nameservers serve the change finds
+nothing to do. For a multi-provider zone the leader agent
+therefore holds the NOTIFY of a change before it sends it,
+for the largest `dnssec.kasp.propagation-delay` among the
+providers that serve the zone (HSYNCPARAM `servers=`).
+Each agent tells the other agents its own value in its
+beats; a provider whose value is not known is left out.
+The wait has a ceiling, `delegationsync.notify-wait-max`
+in the agent's configuration, 10 minutes by default: a
+provider that announces more is waited for that long and
+no longer, and the agent says so once in its log. An
+UPDATE is not held.
+
+Nor does the leader count the sync as done when the NOTIFY
+has been sent. It compares the parent with the zone again
+30 seconds after the NOTIFY has left, sends the NOTIFY
+again (at once) if they still differ, and repeats this
+with growing delays for about an hour. If the parent still
+differs then, the agent logs a warning, and the next
+change of the delegation's data, or the next election,
+starts over.
 
 ### 1.4 Scheme Selection
 
@@ -532,7 +588,9 @@ Key properties:
   the gossip protocol.
 - The leader has a TTL, `delegationsync.leader-election-ttl`
   (default 60m). Re-election is triggered automatically
-  before expiry.
+  before expiry. The value takes a unit: a bare number such as
+  `300` is read as nanoseconds. A lease below one minute is
+  refused with an error in the log, and the default is used.
 - If the group degrades (a member becomes unreachable), the
   leader is invalidated immediately.
 

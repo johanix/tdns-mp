@@ -87,9 +87,14 @@ type DnsKeystatePayload struct {
 	Message      string                 `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry    `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
 	ForeignKeys  []core.ForeignKeyState `json:"ForeignKeys,omitempty"`  // Signal "foreign": the other providers' key states
-	Owned        bool                   `json:"Owned,omitempty"`        // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
-	Time         string                 `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
-	Timestamp    int64                  `json:"timestamp"`              // Unix timestamp
+	// ForeignSpoken: with Signal "foreign", the providers (HSYNC3 labels)
+	// whose word the agent holds, one whose latest word listed no keys
+	// included (S7). An older agent does not send it, and an older signer
+	// ignores it.
+	ForeignSpoken []string `json:"ForeignSpoken,omitempty"`
+	Owned         bool     `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time          string   `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
+	Timestamp     int64    `json:"timestamp"`       // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"

@@ -25,6 +25,10 @@ type MemberState struct {
 	Zones        []string          `json:"zones"`
 	Timestamp    time.Time         `json:"timestamp"`
 	BeatInterval uint32            `json:"beat_interval,omitempty"`
+	// PropagationDelay is how long, in seconds, a change needs to reach all
+	// of this member's nameservers. Zero: the member does not say (an agent
+	// that serves nothing, or one from before the field).
+	PropagationDelay uint32 `json:"propagation_delay,omitempty"`
 }
 
 // GroupElectionState carries election state for a provider group.

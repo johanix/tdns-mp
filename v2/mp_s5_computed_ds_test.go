@@ -232,17 +232,29 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 		t.Errorf("the set known once both spoke: %d sync requests, want 1", n)
 	}
 	// a provider that has spoken and lists no keys: an empty share, the
-	// set is the other's. Built by hand: the wire's JSON drops an empty
-	// list, so today's sender cannot say this (A2.2, the empty-share
-	// clause), and what arrives here is what a later wire will carry
-	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p3.example.",
-		[]core.RROperation{{Operation: "replace", RRtype: "DNSKEY", KeyStates: []core.KeyState{}}})
+	// set is the other's (A2.2, the empty-share clause; S7). On the wire
+	// between providers that word is a replace of the whole set by no
+	// record, with no key states (the JSON drops an empty list), from a
+	// provider heard from before: r.distribution with no keys is exactly
+	// that
+	r.distribution(t, "agent.p3.example.")
 	known, tags = r.dsSet(t)
 	if !known || len(tags) != 1 || !tags[p2key.KeyTag()] {
 		t.Errorf("after p3's empty word: known=%v tags=%v, want p2's KSK alone", known, tags)
 	}
 	if n := r.requests(t); n != 1 {
 		t.Errorf("a share emptied: %d sync requests, want 1", n)
+	}
+	// the same word built by hand with an explicit empty list, as a later
+	// wire may carry it: the same empty share, nothing changed, nothing
+	// asked
+	r.conf.noteForeignDistribution(context.Background(), ZoneName(z), "agent.p3.example.",
+		[]core.RROperation{{Operation: "replace", RRtype: "DNSKEY", KeyStates: []core.KeyState{}}})
+	if known, tags := r.dsSet(t); !known || len(tags) != 1 || !tags[p2key.KeyTag()] {
+		t.Errorf("after p3's explicit empty list: known=%v tags=%v, want p2's KSK alone", known, tags)
+	}
+	if n := r.requests(t); n != 0 {
+		t.Errorf("an unchanged empty share asked for %d syncs", n)
 	}
 	// ds=1 for a key the provider sent no record of: no DS can be made,
 	// the set is unknown
@@ -272,6 +284,20 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 	u.distribution(t, "agent.p2.example.", word{testDnskey(t, u.mpzd.ZoneName, 257), KeyStateActive, &yes})
 	if known, _ := u.dsSet(t); known {
 		t.Error("a DS set for a zone with no signers")
+	}
+
+	// a replace of the whole set by no record from a signing provider
+	// never heard from says nothing (an older release, Q9): the set stays
+	// unknown until it speaks
+	fresh := newComputedDSRig(t, "never.spoke.example.", []string{"p2", "p3"})
+	fresh.leader("agent.us.example.")
+	fresh.distribution(t, "agent.p2.example.", word{testDnskey(t, fresh.mpzd.ZoneName, 257), KeyStateActive, &yes})
+	fresh.distribution(t, "agent.p3.example.")
+	if known, _ := fresh.dsSet(t); known {
+		t.Error("a DS set while a signing provider never heard from replaced its set by none")
+	}
+	if n := fresh.requests(t); n != 0 {
+		t.Errorf("a provider never heard from asked for %d syncs", n)
 	}
 
 	// our own provider signs, and its signer does not own the zone: our
