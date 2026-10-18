@@ -1451,8 +1451,10 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			// from the next publish, never signing. A refresh collects its
 			// DNSKEY RRset before this callback, so a change here is served
 			// by the re-sign requested below rather than by this refresh.
+			// The other signers are the ones the incoming zone names.
 			if shouldSign {
-				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS); err != nil {
+				others, _ := otherSignerLabels(&MPZoneData{ZoneData: new_zd}, mp)
+				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS, others); err != nil {
 					lg.Error("syncing foreign DNSKEYs failed", "zone", mpzd.ZoneName, "err", err)
 				} else if changed {
 					sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
