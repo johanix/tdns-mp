@@ -190,7 +190,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		if mpzd.Options[tdns.OptMultiProvider] {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if zd.Options[tdns.OptParentSync] {
-					return // already set via static config
+					return // set from HSYNCPARAM by the first load's post-refresh callback, which runs before this (followParentSyncParam)
 				}
 				mp := conf.MpConfig()
 				if mp == nil {
@@ -211,7 +211,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				}
 				if hp.GetParentSync() == core.HsyncParentSyncAgent {
 					lgAgent.Info("HSYNCPARAM parentsync=agent, enabling delegation sync", "zone", zd.ZoneName)
-					zd.Options[tdns.OptParentSync] = true
+					zd.SetRuntimeOption(tdns.OptParentSync, true)
 					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
 						lgAgent.Error("SetupZoneSync failed in MP OnFirstLoad", "zone", zd.ZoneName, "err", err)
 					}

@@ -6,6 +6,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -81,6 +82,15 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
+				// No agent sends to the parent of a zone whose owner syncs its
+				// delegation; the request was queued before the owner took
+				// the sync over
+				if ownerSyncsDelegation(ds.ZoneData) {
+					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncOwnerSyncs(ds.ZoneName)
+					continue
+				}
+
 				// Only the elected leader of a multi-provider zone sends to the
 				// parent; a zone this daemon is primary for alone (its
 				// identity zone) has no election to wait for.
@@ -133,6 +143,19 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// again: whatever asked for it will not ask twice
 					if mpLeaderSync(conf, ds) {
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
+					}
+					continue
+				}
+
+				// No agent sends to the parent of a zone whose owner syncs its
+				// delegation; the request was queued before the owner took
+				// the sync over
+				if ownerSyncsDelegation(ds.ZoneData) {
+					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncOwnerSyncs(ds.ZoneName)
+					syncstate.Msg = "the zone's owner syncs its delegation, skipping DDNS"
+					if ds.Response != nil {
+						ds.Response <- syncstate
 					}
 					continue
 				}
@@ -268,6 +291,12 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 		// asks for all it needs first and sends last. Should that change,
 		// what a failed sync handed over is not sent on.
 		return msg, rcode, ur, false, err
+	}
+	if ownerSyncsDelegation(ds.ZoneData) {
+		// The zone's owner took the sync over while this sync ran: its
+		// NOTIFY is not sent on, held or checked. The caller does not ask
+		// again: it retries only a zone whose agents sync it (mpLeaderSync).
+		return msg, rcode, ur, false, errors.New("the zone's owner has taken its delegation sync over; the NOTIFY is not sent")
 	}
 	held, failed := false, csyncErr
 	if failed == nil {

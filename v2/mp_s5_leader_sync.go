@@ -526,15 +526,44 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 // is remembered of the CSYNC this agent made goes too: the next leader makes
 // its own.
 func (conf *Config) delegationSyncNotLeading(zone string, quiet bool) {
+	if hold := conf.endDelegationSyncChain(zone); hold != nil && !quiet {
+		lgEngine.Info("the held NOTIFY is dropped: this agent no longer leads the zone", "zone", zone, "notify", notifyTypes(hold.notifies))
+	}
+}
+
+// delegationSyncOwnerSyncs ends the zone's chain when the zone's owner has
+// taken its delegation sync over (followParentSyncParam): no agent sends
+// anything to the parent now. A NOTIFY that is still held is dropped. An
+// ask, a check or the end of a hold that is still scheduled finds no chain
+// when it fires, and does nothing. What is remembered of the CSYNC this
+// agent made goes too: the agent that leads when the sync comes back to the
+// agents makes its own.
+func (conf *Config) delegationSyncOwnerSyncs(zone string) {
+	if hold := conf.endDelegationSyncChain(zone); hold != nil {
+		lgEngine.Info("the held NOTIFY is dropped: the zone's owner syncs its delegation", "zone", zone, "notify", notifyTypes(hold.notifies))
+	}
+}
+
+// endDelegationSyncChain forgets the zone's chain and its CSYNC, and returns
+// the hold the chain had, if any.
+func (conf *Config) endDelegationSyncChain(zone string) *delegationNotifyHold {
 	c := &conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
 	ch := c.zones[zone]
 	delete(c.zones, zone)
 	delete(c.csyncs, zone)
 	c.mu.Unlock()
-	if ch != nil && ch.hold != nil && !quiet {
-		lgEngine.Info("the held NOTIFY is dropped: this agent no longer leads the zone", "zone", zone, "notify", notifyTypes(ch.hold.notifies))
+	if ch == nil {
+		return nil
 	}
+	return ch.hold
+}
+
+// ownerSyncsDelegation: the zone is a multi-provider zone whose owner syncs
+// its delegation with the parent, not its agents: its HSYNCPARAM does not
+// say parentsync=agent (followParentSyncParam).
+func ownerSyncsDelegation(zd *tdns.ZoneData) bool {
+	return zd != nil && zd.Options[tdns.OptMultiProvider] && !zd.Options[tdns.OptParentSync]
 }
 
 // leadsZone: this agent leads the zone's delegation sync. With no election
