@@ -312,9 +312,6 @@ func NewMsgQs() *MsgQs {
 		Confirmation:      make(chan *ConfirmationDetail, 100),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
 		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
-		EditsResponse:     make(chan *EditsResponseMsg, 10),
-		ConfigResponse:    make(chan *ConfigResponseMsg, 10),
-		AuditResponse:     make(chan *AuditResponseMsg, 10),
 		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
 	}
 }

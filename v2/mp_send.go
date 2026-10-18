@@ -71,6 +71,15 @@ func syncResponseFromApp(req *PeerSyncRequest, resp *transport.AppResponse) *Pee
 	}
 }
 
+// keystateWirePayload is the KEYSTATE message as it goes on the wire:
+// tdns's core.AgentKeystatePost, whose fields it encodes under their own
+// names, and beside them the one field tdns-mp adds (S7). An older receiver
+// decodes the post and ignores the field; DnsKeystatePayload decodes both.
+type keystateWirePayload struct {
+	*core.AgentKeystatePost
+	ForeignSpoken []string `json:"ForeignSpoken,omitempty"`
+}
+
 // keystateAppMessage mirrors DNSTransport.Keystate (core.AgentKeystatePost).
 func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.AppMessage, error) {
 	var coreInventory []core.KeyInventoryEntry
@@ -86,19 +95,22 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 			DS:        e.DS,
 		})
 	}
-	payload := &core.AgentKeystatePost{
-		MessageType:  core.AgentMsgKeystate,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peerID,
-		Zone:         req.Zone,
-		KeyTag:       req.KeyTag,
-		Algorithm:    req.Algorithm,
-		Signal:       req.Signal,
-		Message:      req.Message,
-		KeyInventory: coreInventory,
-		ForeignKeys:  req.ForeignKeys,
-		Owned:        req.Owned,
-		Time:         req.Timestamp,
+	payload := &keystateWirePayload{
+		AgentKeystatePost: &core.AgentKeystatePost{
+			MessageType:  core.AgentMsgKeystate,
+			MyIdentity:   req.SenderID,
+			YourIdentity: peerID,
+			Zone:         req.Zone,
+			KeyTag:       req.KeyTag,
+			Algorithm:    req.Algorithm,
+			Signal:       req.Signal,
+			Message:      req.Message,
+			KeyInventory: coreInventory,
+			ForeignKeys:  req.ForeignKeys,
+			Owned:        req.Owned,
+			Time:         req.Timestamp,
+		},
+		ForeignSpoken: req.ForeignSpoken,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -109,14 +121,21 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 
 // editsAppMessage mirrors DNSTransport.Edits (core.AgentEditsPost).
 func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessage, error) {
-	payload := &core.AgentEditsPost{
-		MessageType:  core.AgentMsgEdits,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peerID,
-		Zone:         req.Zone,
-		AgentRecords: req.AgentRecords,
-		Message:      req.Message,
-		Time:         req.Timestamp,
+	// core.AgentEditsPost has no nonce; the answer carries the RFI's.
+	payload := &struct {
+		core.AgentEditsPost
+		Nonce string `json:"nonce,omitempty"`
+	}{
+		AgentEditsPost: core.AgentEditsPost{
+			MessageType:  core.AgentMsgEdits,
+			MyIdentity:   req.SenderID,
+			YourIdentity: peerID,
+			Zone:         req.Zone,
+			AgentRecords: req.AgentRecords,
+			Message:      req.Message,
+			Time:         req.Timestamp,
+		},
+		Nonce: req.Nonce,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -127,15 +146,22 @@ func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessag
 
 // configAppMessage mirrors DNSTransport.Config (core.AgentConfigPost).
 func configAppMessage(req *PeerConfigRequest, peerID string) (*transport.AppMessage, error) {
-	payload := &core.AgentConfigPost{
-		MessageType:  core.AgentMsgConfig,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peerID,
-		Zone:         req.Zone,
-		Subtype:      req.Subtype,
-		ConfigData:   req.ConfigData,
-		Message:      req.Message,
-		Time:         req.Timestamp,
+	// core.AgentConfigPost has no nonce; the answer carries the RFI's.
+	payload := &struct {
+		core.AgentConfigPost
+		Nonce string `json:"nonce,omitempty"`
+	}{
+		AgentConfigPost: core.AgentConfigPost{
+			MessageType:  core.AgentMsgConfig,
+			MyIdentity:   req.SenderID,
+			YourIdentity: peerID,
+			Zone:         req.Zone,
+			Subtype:      req.Subtype,
+			ConfigData:   req.ConfigData,
+			Message:      req.Message,
+			Time:         req.Timestamp,
+		},
+		Nonce: req.Nonce,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -146,14 +172,21 @@ func configAppMessage(req *PeerConfigRequest, peerID string) (*transport.AppMess
 
 // auditAppMessage mirrors DNSTransport.Audit (core.AgentAuditPost).
 func auditAppMessage(req *PeerAuditRequest, peerID string) (*transport.AppMessage, error) {
-	payload := &core.AgentAuditPost{
-		MessageType:  core.AgentMsgAudit,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peerID,
-		Zone:         req.Zone,
-		AuditData:    req.AuditData,
-		Message:      req.Message,
-		Time:         req.Timestamp,
+	// core.AgentAuditPost has no nonce; the answer carries the RFI's.
+	payload := &struct {
+		core.AgentAuditPost
+		Nonce string `json:"nonce,omitempty"`
+	}{
+		AgentAuditPost: core.AgentAuditPost{
+			MessageType:  core.AgentMsgAudit,
+			MyIdentity:   req.SenderID,
+			YourIdentity: peerID,
+			Zone:         req.Zone,
+			AuditData:    req.AuditData,
+			Message:      req.Message,
+			Time:         req.Timestamp,
+		},
+		Nonce: req.Nonce,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

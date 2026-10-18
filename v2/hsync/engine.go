@@ -28,7 +28,8 @@ type Engine struct {
 	beatFailing map[PeerID]bool
 	// beatRetrying: the peers a beat retrier is running for.
 	beatRetrying map[PeerID]bool
-	// beatingBack: the peers a BeatPeer beat is on its way to.
+	// beatingBack: the peers a BeatPeer beat is on its way to, or waits to
+	// be sent again for.
 	beatingBack map[PeerID]bool
 }
 

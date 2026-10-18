@@ -213,7 +213,7 @@ func handleRouterMetrics(tm *transport.TransportManager, detailed bool) *RouterR
 			if detailed {
 				peerMetrics = append(peerMetrics, map[string]interface{}{
 					"peer_id":          peer.ID,
-					"state":            string(peer.State),
+					"state":            peer.State.String(),
 					"last_used":        s.LastUsed.Format(time.RFC3339),
 					"hello_sent":       s.HelloSent,
 					"hello_received":   s.HelloReceived,

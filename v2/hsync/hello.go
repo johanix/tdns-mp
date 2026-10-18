@@ -9,10 +9,10 @@ import (
 )
 
 // helloHandler takes an inbound hello and does nothing with it. The host has
-// already moved the sender's mechanism to INTRODUCING, and it is the host that
-// kicks the beat rounds, there, where it can tell a hello that moved the peer
-// from one a peer repeats (KickBeats). By the time the report is here the
-// state reads the same for both.
+// already moved the sender's mechanism to INTRODUCING (when it has an address
+// to send to), and it is the host that kicks the beat rounds, there, where it
+// can tell a hello that moved the peer from one a peer repeats (KickBeats). By
+// the time the report is here the state reads the same for both.
 func (e *Engine) helloHandler(report *InboundReport) {
 	if report == nil || report.MessageType != MsgHello {
 		return

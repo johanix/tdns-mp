@@ -86,6 +86,29 @@ type integEnvConfig struct {
 	// sends over the wire needs it; with the shared zone every sender is
 	// integControlZone and is refused.
 	ControlZoneIsIdentity bool
+
+	// Discovery, when set, gives each peer a resolver of its own over the
+	// records of that zone, to discover the other through
+	// (discovery_harness_test.go). Without it a discovery fails before its
+	// first query.
+	Discovery *discoveryZone
+
+	// Keys, when set, gives the peer with that identity payload crypto with
+	// the key pair as its own. Without it the peers run without payload
+	// crypto.
+	Keys map[string]*harnessKey
+
+	// Role is the role the bridge is built for. Empty is the agent's; an
+	// auditor peer takes roleAuditor.
+	Role string
+
+	// AuthorizedPeers, when set, is what the bridge's AuthorizedPeers
+	// callback returns, as a combiner's configured agents are. It takes
+	// the place of AuthorizeAllPeers.
+	AuthorizedPeers []string
+
+	// CombinerID is the agent's combiner, as the agent's config names it.
+	CombinerID string
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -150,9 +173,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		Ping:              make(chan *AgentMsgReport, 4),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 4),
 		KeystateSignal:    make(chan *KeystateSignalMsg, 4),
-		EditsResponse:     make(chan *EditsResponseMsg, 4),
-		ConfigResponse:    make(chan *ConfigResponseMsg, 4),
-		AuditResponse:     make(chan *AuditResponseMsg, 4),
 		StatusUpdate:      make(chan *StatusUpdateMsg, 4),
 	}
 
@@ -174,13 +194,20 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		bob := dns.Fqdn("bob.agent.example.")
 		authorizedPeers = func() []string { return []string{alice, bob} }
 	}
+	if cfg != nil && cfg.AuthorizedPeers != nil {
+		authorizedPeers = func() []string { return cfg.AuthorizedPeers }
+	}
 
 	controlZone := integControlZone
 	if cfg != nil && cfg.ControlZoneIsIdentity {
 		controlZone = identity
 	}
+	role := roleAgent
+	if cfg != nil && cfg.Role != "" {
+		role = cfg.Role
+	}
 	bridgeCfg := &MPTransportBridgeConfig{
-		Role:                roleAgent,
+		Role:                role,
 		LocalID:             identity,
 		ControlZone:         controlZone,
 		APITimeout:          2 * time.Second,
@@ -194,6 +221,16 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		// production reads tdns.Zones (scenario 6).
 		GetZone:      tdns.Zones.Get,
 		GetZoneNames: tdns.Zones.Keys,
+	}
+	if cfg != nil {
+		bridgeCfg.CombinerID = cfg.CombinerID
+	}
+	if cfg != nil && cfg.Discovery != nil {
+		imr := harnessImr(t, cfg.Discovery)
+		bridgeCfg.GetImrEngine = func() *Imr { return imr }
+	}
+	if cfg != nil && cfg.Keys[identity] != nil {
+		bridgeCfg.PayloadCrypto = cfg.Keys[identity].payloadCrypto(t)
 	}
 	bridge, err := NewMPTransportBridge(bridgeCfg)
 	if err != nil {
@@ -306,6 +343,38 @@ func addHSYNCPARAMServers(t *testing.T, zd *tdns.ZoneData, serverLabels ...strin
 	// Re-baseline the published snapshot from the updated working set.
 	zd.InstallInitialSnapshot()
 	Zones.Invalidate(zd.ZoneName)
+}
+
+// seedAuditedZone seeds a Ready zone with an HSYNC3 record per identity, the
+// providers under HSYNCPARAM servers= and the auditor under auditors=: the
+// providers are the zone's voting members, the auditor a member that does
+// not vote.
+func seedAuditedZone(t *testing.T, zoneName, auditor string, providers ...string) *tdns.ZoneData {
+	t.Helper()
+	zd := seedZoneWithHSYNC3(t, zoneName, append([]string{auditor}, providers...)...)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("apex not found for %s: %v", zd.ZoneName, err)
+	}
+	servers := make([]string, len(providers))
+	for i, p := range providers {
+		servers[i] = shortLabel(p)
+	}
+	hp := &core.HSYNCPARAM{
+		Value: []core.HSYNCPARAMKeyValue{
+			&core.HSYNCPARAMServers{Servers: servers},
+			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(auditor)}},
+		},
+	}
+	prr := &dns.PrivateRR{
+		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: hp,
+	}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	zd.Data.Set(zd.ZoneName, *apex)
+	zd.InstallInitialSnapshot()
+	Zones.Invalidate(zd.ZoneName)
+	return zd
 }
 
 // shortLabel takes an FQDN and returns its first label, used as a
