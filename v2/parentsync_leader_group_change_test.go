@@ -392,3 +392,32 @@ func TestAGroupMemberWithoutAVoteRenewsNothing(t *testing.T) {
 		t.Errorf("past the lease the group's leader here is %s, want none: the member without a vote elected nobody", leader)
 	}
 }
+
+// A timer of the group's election reads this agent's vote as a sender's is
+// read: the voting members come from zone data and carry the trailing dot,
+// a configured identity need not. An agent configured without the dot is a
+// voter, and its renewal starts; one that is not a member is not.
+func TestARenewalCountsTheVoteOfAnIdentityWithoutTheTrailingDot(t *testing.T) {
+	const group = "0123456789abcdef"
+	pgm := NewProviderGroupManager("a.timer.example")
+	pgm.Groups[group] = &ProviderGroup{
+		GroupHash:     group,
+		Members:       []string{"a.timer.example.", "b.timer.example."},
+		VotingMembers: []string{"a.timer.example.", "b.timer.example."},
+		Zones:         []ZoneName{"zone.timer.example."},
+	}
+	for _, tc := range []struct {
+		id    AgentId
+		voter bool
+	}{
+		{"a.timer.example", true},
+		{"a.timer.example.", true},
+		{"c.timer.example", false},
+	} {
+		lem := NewLeaderElectionManager(tc.id, time.Hour, nil)
+		lem.providerGroupMgr = pgm
+		if got := lem.groupForTimer(group, "lease renewal") != nil; got != tc.voter {
+			t.Errorf("%s: the timer starts an election: %v, want %v", tc.id, got, tc.voter)
+		}
+	}
+}

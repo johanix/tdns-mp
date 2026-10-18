@@ -622,7 +622,7 @@ func (lem *LeaderElectionManager) groupForTimer(groupHash, timer string) *Provid
 		lem.groupGone(groupHash)
 		return nil
 	}
-	if !slices.Contains(pg.VotingMembers, string(lem.localID)) {
+	if !isAmong(pg.VotingMembers, lem.localID) {
 		lgElect.Info("this agent has no vote in the provider group, its timer starts no election",
 			"group", shortHash(groupHash), "timer", timer)
 		return nil
