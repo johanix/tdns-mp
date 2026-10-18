@@ -763,13 +763,37 @@ func retractSignalKey(childZone, nsTarget, senderID string) error {
 	if !ok {
 		return fmt.Errorf("provider zone %s is not loaded", providerZone)
 	}
-	if _, _, _, err := mpzd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, nil); err != nil {
+	_, _, changed, err := mpzd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, nil)
+	if err != nil {
 		return fmt.Errorf("provider zone %s: retracting %s: %w", providerZone, ownerName, err)
+	}
+	// A retraction whose save failed is tried again with the KEY already gone
+	// from memory, and the replace then saves nothing. The saved
+	// contributions are what a restart loads, so the retry saves them all
+	// the same: otherwise the instruction would be booked as withdrawn while
+	// the saved KEY comes back at the next start, with nothing left to
+	// withdraw it.
+	if !changed {
+		if err := mpzd.persistContributionsOf(senderID); err != nil {
+			return fmt.Errorf("provider zone %s: saving the contributions without %s: %w", providerZone, ownerName, err)
+		}
 	}
 	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
 		return fmt.Errorf("provider zone %s: publishing without %s: %w", providerZone, ownerName, err)
 	}
 	return nil
+}
+
+// persistContributionsOf saves one sender's contributions to the snapshot a
+// restart loads, as they are held now. With no snapshot to save to there is
+// nothing to do.
+func (mpzd *MPZoneData) persistContributionsOf(senderID string) error {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP == nil || mpzd.MP.PersistContributions == nil {
+		return nil
+	}
+	return mpzd.MP.PersistContributions(mpzd.ZoneName, senderID, mpzd.MP.AgentContributions[senderID])
 }
 
 // withdrawSignalKeysWithoutConsent is the startup's question about one

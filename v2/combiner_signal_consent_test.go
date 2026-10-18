@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -488,6 +489,42 @@ func TestAWithdrawalThatFailsIsTriedAgain(t *testing.T) {
 	c.wantNoSignalKey("the retraction tried again", zone, consentNS1)
 	c.wantStored("the retraction tried again", zone, []string{"at-apex"}, nil)
 	c.wantApexKey("the retraction tried again", cust)
+}
+
+// A retraction whose save fails takes the KEY out of memory and keeps the
+// name for a retry. The retry finds nothing left to take out. It must still
+// save, or the saved KEY outlives the withdrawal: booked as done in the
+// instruction, it comes back at the next start with nothing to withdraw it.
+func TestAWithdrawalWhoseSaveFailedIsSavedOnTheRetry(t *testing.T) {
+	const zone = "savefail.customer.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	prov := c.load(consentProviderZone, consentProviderText())
+	cust := c.load(zone, consentCustomerText(zone, true))
+	c.sendKey(zone)
+	c.wantSignalKey("with pubkey", zone, consentNS1)
+
+	// The customer takes pubkey away while the contributions cannot be saved.
+	c.ownerSays(cust, false)
+	prov.Lock()
+	save := prov.MP.PersistContributions
+	prov.MP.PersistContributions = func(string, string, map[string]map[uint16]core.RRset) error {
+		return errors.New("the database is away")
+	}
+	prov.Unlock()
+	c.addNS(zone, consentNS2)
+	prov.Lock()
+	prov.MP.PersistContributions = save
+	prov.Unlock()
+	if _, held, persisted := c.signalKey(zone, consentNS1); held || !persisted {
+		t.Fatalf("the save did not fail as the test needs: held=%v persisted=%v, want held=false persisted=true", held, persisted)
+	}
+	c.wantStored("the save failed", zone, []string{"at-apex", "at-ns"}, []string{consentNS1})
+
+	// The retry finds nothing in memory to take out, and saves all the same.
+	c.addNS(zone, consentNS3)
+	c.wantNoSignalKey("the retraction tried again", zone, consentNS1)
+	c.wantStored("the retraction tried again", zone, []string{"at-apex"}, nil)
 }
 
 // The operator's re-apply finds a zone without pubkey and retracts its signal
