@@ -629,3 +629,24 @@ func TestAReapplyWhoseSaveFailsServesNoWithdrawnSignalKey(t *testing.T) {
 	c.wantNoSignalKey("a re-apply once the database is back", zone, consentNS1)
 	c.wantStored("a re-apply once the database is back", zone, []string{"at-apex"}, nil)
 }
+
+// A provider zone configured without the multi-provider option gets none of
+// what the combiner does for a provider zone at a start and a refresh. The
+// start says so: the zones are named, and a provider zone with the option is
+// not.
+func TestAProviderZoneWithoutTheMultiProviderOptionIsNamed(t *testing.T) {
+	RegisterProviderZoneRRtypes(ProviderZoneConf{Zone: "plain.provider.example.", AllowedRRtypes: []string{"KEY"}})
+	RegisterProviderZoneRRtypes(ProviderZoneConf{Zone: "mp.provider.example.", AllowedRRtypes: []string{"KEY"}})
+	t.Cleanup(func() {
+		delete(providerZoneRRtypes, "plain.provider.example.")
+		delete(providerZoneRRtypes, "mp.provider.example.")
+	})
+	got := providerZonesWithoutOption([]string{"mp.provider.example", "customer.example."})
+	found := map[string]bool{}
+	for _, z := range got {
+		found[z] = true
+	}
+	if !found["plain.provider.example."] || found["mp.provider.example."] {
+		t.Errorf("provider zones without the option: %v, want plain.provider.example. and not mp.provider.example.", got)
+	}
+}

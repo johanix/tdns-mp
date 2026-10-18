@@ -7,10 +7,13 @@
 package tdnsmp
 
 import (
+	"sort"
+	"sync/atomic"
+
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
-	"sync/atomic"
+	"github.com/miekg/dns"
 )
 
 // Config wraps a pointer to the tdns.Config (typically &tdns.Conf)
@@ -124,6 +127,10 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	if conf.InternalMp.onFirstLoadRegistered == nil {
 		conf.InternalMp.onFirstLoadRegistered = make(map[string]bool)
 	}
+	for _, zone := range providerZonesWithoutOption(conf.InternalMp.MPZoneNames) {
+		lgCombiner.Warn("a provider zone lacks the multi-provider option: its _signal KEYs are not put back at a restart or a refresh, and a withdrawal from it waits for good",
+			"zone", zone)
+	}
 
 	// Load contributions snapshot once for all new zones
 	allContribs, err := LoadAllContributions(hdb)
@@ -212,6 +219,27 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			})
 		}
 	}
+}
+
+// providerZonesWithoutOption is the configured provider zones that are not
+// among the multi-provider zones. Everything the combiner does for a
+// provider zone at a start and a refresh is attached to its multi-provider
+// zones only (this function's caller and RegisterMPRefreshCallbacks), so
+// such a zone is published to by the next instruction and loses the names
+// again at the next restart or refresh.
+func providerZonesWithoutOption(mpZoneNames []string) []string {
+	mp := map[string]bool{}
+	for _, z := range mpZoneNames {
+		mp[dns.Fqdn(z)] = true
+	}
+	var missing []string
+	for zone := range providerZoneRRtypes {
+		if !mp[zone] {
+			missing = append(missing, zone)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // atNSSendersOf is the senders among a zone's stored publish instructions
