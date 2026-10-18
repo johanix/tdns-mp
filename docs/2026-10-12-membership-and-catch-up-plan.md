@@ -1,10 +1,18 @@
 # Membership and catch-up: implementation plan
 
-**Status:** PLAN, revised 2026-10-17, twice. No step is started. Section 5 holds the status of each step.
+**Status:** PLAN, revised 2026-10-17, twice; split 2026-10-18. No step is started. Section 5 holds the status of each step.
+
+**Scope since the split (2026-10-18).** This plan is steps 1 to 8: membership, catch-up, the rule for every message's sender, the end of comms, and groups and their elections. Each of them is safe on its own and changes nothing for a zone in steady state. Steps 9, 9b and 10 move to the design for changes to the zone owner's instructions (the transitions design, to come):
+
+- step 9, both parts: the settle rule, and the zone's SIG(0) key, whose context the settle rule holds and cancels;
+- step 9b, the listing by interest;
+- step 10, the switch that makes every HSYNC3 provider a member.
+
+The transitions design numbers the owner's instructions (a `serial` key in HSYNCPARAM) and holds every change of them, not only a change of the make-up. It replaces the settle rule of design 4.9. Steps 9, 9b and 10 are kept below, unchanged and marked as moved, as that design's starting point; they are not part of this plan. Where steps 1 to 8 say "from step 9" or name step 10, they mean those steps as the transitions design will have them. Add and remove a provider reach WORKS only with that design and the removal; steps 1 to 8 are their ground.
 
 This is the plan for the design in `2026-10-12-membership-and-catch-up-design.md` ("the design" below). The design describes membership and catch-up as they are meant to stand. This document holds what is dated: the difference from today's code, where each rule of the design lands in the code, the steps, and the decisions the design rests on.
 
-For issues #158, #157, #172, #149, #137 (item 2), #131 and #132.
+For issues #157, #172, #149, #137 (item 2), #131 and #132. Issue #158, the switch, goes with step 10 to the transitions design.
 
 **Base.** This revision of the plan rests on these readings of tdns-mp:
 
@@ -52,7 +60,7 @@ Most of the machinery of the design exists.
 5. A group is defined by its members together with what each one is, so that all its zones agree on who votes. The election's edges: no election without a vote, a leader when the voting members become one, and a leader that drops a zone which leaves its group (design 4).
 6. An agent whose provider has no role refuses its operator's edits (design 6).
 7. Two bounds on the beats that recover a peer: how often repeated hellos cause a beat back (#131), and what happens to the work on its way for a peer that is removed (#132). And the removal itself: comms with a peer end when no zone has been shared with it for a hold time (design 3.1).
-8. Nothing is changed for a zone until its voting members agree on its make-up: while a zone is not settled an agent starts no distribution for it and takes none, and a leader sends nothing to the parent (design 4.9). A row of gossip lists a zone only while there is something to do for it. And every voting member holds the zone's SIG(0) key, which taking a zone up does not replace (design 4.1).
+8. Nothing is changed for a zone until its voting members agree on its make-up: while a zone is not settled an agent starts no distribution for it and takes none, and a leader sends nothing to the parent (design 4.9). A row of gossip lists a zone only while there is something to do for it. And every voting member holds the zone's SIG(0) key, which taking a zone up does not replace (design 4.1). Since the split, this item is the transitions design's (steps 9 and 9b), and so is the switch of item 1 (step 10).
 
 No message type is added. One optional object is added to the sync-family payload (3.4). Two config keys are added (steps 4 and 7). Nothing is added to a row of gossip: steps 9 and 9b change which zones a row lists.
 
@@ -406,11 +414,13 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | 6 | A rule for the sender and the recipients of every message | | Step 1 (PRs #201 and #204 are merged) | 8 | 120 | 70 | One middleware, guards | Not started |
 | 7 | Beats to a peer that repeats its hello, or is gone; the end of comms | #131, #132 | Step 6 (PRs #162 and #193 are merged) | 10 | 140 | 40 | Guards, and one loop | Not started |
 | 8 | The group by its make-up, and its election | #149 | Steps 1 and 6, PR #185, PR #186 | 8 | 140 | 120 | Changes to existing functions | Not started |
-| 9 | Nothing is started or taken for a zone until its voting members agree on its make-up; the zone's SIG(0) key | | Steps 3 to 6 and 8, PR #185 (merged: PR #198, and PR #201 with tdns-transport #26, the change of decision 26) | 23 | 840 | 210 | New state and three holds | Not started |
-| 9b | A row lists a zone only while there is something to do for it | | Step 9; and the check of who answered, if step 9 takes tellings from beats only | 9 | 155 | 95 | Changes to existing functions | Not started |
-| 10 | The switch: every HSYNC3 provider is a member | #158 | Steps 1, 2, 6, 8 and 9; steps 3 to 5 and 7 on every agent | 10 | 110 | 160 | Changes to existing functions | Not started |
+| 9 | Nothing is started or taken for a zone until its voting members agree on its make-up; the zone's SIG(0) key | | Steps 3 to 6 and 8, PR #185 (merged: PR #198, and PR #201 with tdns-transport #26, the change of decision 26) | 23 | 840 | 210 | New state and three holds | Moved to the transitions design |
+| 9b | A row lists a zone only while there is something to do for it | | Step 9; and the check of who answered, if step 9 takes tellings from beats only | 9 | 155 | 95 | Changes to existing functions | Moved to the transitions design |
+| 10 | The switch: every HSYNC3 provider is a member | #158 | Steps 1, 2, 6, 8 and 9; steps 3 to 5 and 7 on every agent | 10 | 110 | 160 | Changes to existing functions | Moved to the transitions design |
 
-About 2,500 new and 1,000 changed lines in all. Steps 4 and 9 are over half of the new lines, and step 9 alone is a third. Its two parts can be two pull requests, the key after the settle rule: the settle rule, about 610 new lines, and the key, about 230.
+Steps 1 to 8, this plan: about 1,360 new and 540 changed lines. Step 4 is a third of the new lines, and steps 3 and 4 together over half.
+
+Steps 9, 9b and 10, moved to the transitions design, as sized here: about 1,100 new and 470 changed lines. That design will size them again on its own basis. Before the split the whole was about 2,500 new and 1,000 changed lines.
 
 What kind of code each step is:
 
@@ -823,6 +833,8 @@ Fleet: two providers reduced to one, with no auditor: a leader with no restart. 
 
 ### Step 9. Nothing is started or taken for a zone that is not settled; the zone's SIG(0) key (design 4.9, 4.1)
 
+**Moved to the transitions design (2026-10-18).** Kept here unchanged as that design's starting point. Not part of this plan.
+
 **Before it:** step 8, which makes a group's hash the make-up: before it the hash does not say who votes. Step 6, for the sender of a beat's gossip, for the sender rule that is asked again when a kept distribution is handled, and for who may ask for the key. Steps 3 and 4, for the answer that now waits and for the tracker. Step 5, for the owed mark and the place of the leader's hold. PR #185, for `zoneJoinedGroup` and the key set-up at an arrival. Merged: PR #198, for the key's answers (below), and decision 26's change (PR #201 with tdns-transport #26): the answer to an HTTPS beat carries gossip, as the answer to a DNS beat does.
 
 The step has two parts, the settle rule and the key, with a size each (at its end). They can be two pull requests. It is a step of its own, after the group's new key and before the switch, for three reasons. A hold that never opens stops every change that a provider makes: it should be judged alone on a fleet. It needs steps 3 to 6, which step 8 does not. And it has to be in place before step 10, which is when a zone's make-up starts to change at every edit of a provider's standing.
@@ -1130,6 +1142,8 @@ Fleet:
 
 ### Step 9b. A row lists a zone only while there is something to do for it (design 4.9, decision 24)
 
+**Moved to the transitions design (2026-10-18).** Kept here unchanged as that design's starting point. Not part of this plan.
+
 **Before it:** step 9, on every agent of a zone and on its auditor. And the check of who answered, if step 9 takes tellings from beats only (step 9, "Who answered"). Step 10 does not need this step, and this step does not need step 10: the two can be merged in either order.
 
 **What it is.** After step 9 an agent's row lists every zone of its group that the agent has held for the fixed time, in every beat, to every member. That is today's listing with one condition added. This step is the form design 4.9 describes: a zone is listed to a peer only while there is something to do for it. It is a stage of its own so that the settle rule is judged on the listing that exists, and so that the change to the beats can be judged alone (decision 24).
@@ -1230,6 +1244,8 @@ Fleet: the six checks of step 9, unchanged in what they ask. And three of its ow
 
 ### Step 10. The switch: every HSYNC3 provider is a member (#158)
 
+**Moved to the transitions design (2026-10-18).** Kept here unchanged as that design's starting point. Not part of this plan.
+
 **Before it:** steps 1, 2, 6, 8 and 9 merged. Without step 1 a member with no role elects, without step 2 it edits, without step 6 it sends a SYNC and asks for the SIG(0) key, without step 8 its group votes by a union, without step 9 the agents act for a zone by different versions of who its members are, for as long as they hold different copies of it, and the zone can have two leaders. Steps 3 to 5 and 7 on every agent, for the newcomer to catch up by itself.
 
 **Changes.**
@@ -1280,6 +1296,8 @@ For a leaving signer the last part of the fleet check needs more than this plan.
 Step 9 adds to that case. The zone never settles at an agent that is stuck on the old copy: it holds the old make-up, and the others no longer tell it. So it keeps every distribution it is sent and confirms none. After this step it is a recipient, as a member with no role, so every distribution of the zone waits for its confirmation: another signer's new key does not get past its distribution, and the leader's NOTIFY(CSYNC) does not leave. Without step 9 it would take and confirm them by its old copy. So until #147 is fixed, taking a signer's roles away stalls what the providers make for the zone, from that edit until the provider's record is removed. Nothing is harmed, and the status of every agent says whom it waits for.
 
 ## 6. Decisions
+
+Since the split (2026-10-18), decisions 12, 16, 19, 23 and 24 (the settle rule and the listing), 14, 18, 22 and 25 (the zone's SIG(0) key) and 26 (gossip in the answer to an HTTPS beat, which is merged) are carried by the steps that move to the transitions design. They stand as decided; that design takes them up.
 
 Decided by the project owner on 2026-10-12. The design is written with them.
 
@@ -1372,7 +1390,7 @@ Also decided:
 
 Not needed by any step, and worth having: tdns #917's two sides. The child's bootstrap waiting until the nameservers serve the key; until then step 9 waits the propagation delay. The parent's rule of decision 25, which other parents need for the recovery of a lost key (7.5).
 
-Open for the project owner, from the readings of 2026-10-17: the asking half of decision 6 has no step (7.3); two short exceptions to decision 23, tdns's own key offers and a delegation UPDATE that tdns retries after the zone has stopped being settled (step 9, Limits and costs); the asker of a beat does not check who answers it, over HTTPS or by a DNS answer without the payload envelope (step 9, "Who answered"); and whether the recovery of a lost key is built now for tdns parents (7.5).
+Open for the project owner, from the readings of 2026-10-17, and since the split all four for the transitions design: the asking half of decision 6 has no step (7.3); two short exceptions to decision 23, tdns's own key offers and a delegation UPDATE that tdns retries after the zone has stopped being settled (step 9, Limits and costs); the asker of a beat does not check who answers it, over HTTPS or by a DNS answer without the payload envelope (step 9, "Who answered"); and whether the recovery of a lost key is built now for tdns parents (7.5).
 
 Needed by no step: PRs #161, #165, #168 and #187 (#144), merged on 2026-10-12 and 13; #192, #140, #141, #142, #199, #197 (#195), #203 and #205, merged on 2026-10-16 and 17; #166 (#74), open; #189 (#171, #170) and #190 (#73), drafts. Several of them edit a function or a file that a step edits, in another place, and none conflicts: PR #168 (`routeBeatMessage`, steps 6, 9 and 9b), PR #187 (`MPPreRefresh`, step 4), PR #192 (`beginDistribution` and the late PENDING, which step 9 uses as they are), PR #140 (`NoteForeignKeyStates`, step 3, 2.7), PR #197 (`reattachHsyncMemberAdds`, step 8), PR #203 (`delegationSyncReleaseAfter` and `delegationSyncChains`, steps 5, 9 and 9b), and PR #205 (`routeBeatMessage`, `routeSyncMessage`, `SendBeatWithFallback`, the `OnPeerDiscovered` closure: steps 4, 6, 7, 9 and 9b; the steps use its locked accessors of a peer's fields). PR #167 is needed by step 3 (above).
 
@@ -1407,6 +1425,8 @@ Five things this plan leaves to it:
 - With the roll: a member keeps the KEY that the leader publishes and no other (step 9, the third item of "The KEY record is the group's"). A roll is where two KEY records first differ.
 
 ### 7.5 After this plan
+
+First, the transitions design (2026-10-18): changes to the zone owner's instructions, numbered by the owner with a `serial` key in HSYNCPARAM, held until the providers have agreed on the new instructions, then carried out by the leader. It takes steps 9, 9b and 10 of this document as its starting point, the open questions of 7.1, and the faults of issue #200 that are not plain bugs. Whether the removal of 7.4 goes with it is the project owner's to decide. Implemented after this plan.
 
 The recovery of a lost SIG(0) key (decisions 18 and 25), once tdns parents judge a bootstrap by what they find (tdns #917): the leader publishes a new KEY beside the lost one, bootstraps it once the nameservers serve both, deletes the old key with an update the new key signs, and takes the old KEY off the apex. Until then step 9's stall stands. It needs the third item of step 9's "The KEY record is the group's" too, which goes with the roll (7.4). Read on 2026-10-17: a tdns parent as pinned takes a second key once its lookup finds it served, when its policy takes a self-signed upload, so for tdns parents with that policy the recovery need not wait for #917. Open for the project owner: whether it is built now.
 

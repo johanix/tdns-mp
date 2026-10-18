@@ -1,6 +1,14 @@
 # Membership and catch-up: every HSYNC3 provider is a member, and a member asks for what it does not know
 
-**Status:** PROPOSAL, 2026-10-12, revised 2026-10-17.
+**Status:** PROPOSAL, 2026-10-12, revised 2026-10-17; split 2026-10-18.
+
+**Scope since the split (2026-10-18).** The plan implements this design's membership, catch-up, sender rules, groups and elections (its steps 1 to 8). How a zone moves from one set of the owner's instructions to the next goes to a design of its own, the transitions design (to come). It takes over three things described here:
+
+- section 4.9, whose settle rule it replaces with one that holds every change of the owner's instructions, numbered by the owner;
+- the zone's SIG(0) key as section 4.1 describes it, whose handling is held by that rule;
+- the switch of rule 1 in the code: every HSYNC3 provider a member.
+
+Those parts are kept here unchanged as that design's starting point. Where other sections refer to section 4.9, they refer to that part.
 
 This document describes membership and catch-up in tdns-mp as a whole: who is a member of a zone's group, what each kind of member may do, how an election counts, and how an agent learns the state of a zone. It describes the design as it is meant to stand. Parts of it are in the code today and parts are not.
 
@@ -127,6 +135,8 @@ There is one election per group, among its voting members, and the group's leade
 
 **The leader takes up a zone that arrives.** When a zone arrives in a group, the group's leader does for that zone what it does for every zone of the group when it is elected. An agent that led the group the zone left stops acting for it.
 
+**The zone's SIG(0) key.** What follows is implemented with the transitions design (the scope note above).
+
 **Every voting member holds the zone's SIG(0) key,** for a zone that syncs with its parent by UPDATE. A voting member that does not hold the key asks for it: when it catches up, and whenever the zone publishes a KEY that it has no private part for. Whoever holds it hands it over to a voting member that asks (3.3): a voting member, and also a provider that has lost its roles and still holds it (2.3). So the key does not sit at the one leader that made it, and a zone does not lose its parent sync with one provider.
 
 **The key is the group's, not its maker's.** The zone's KEY record is nobody's contribution. The zone's leader publishes it on the group's behalf, as it publishes the CSYNC, and a member keeps the KEY that the leader of the zone publishes and no other. So nothing of the key has to be withdrawn when the provider that made it leaves.
@@ -193,6 +203,8 @@ The same holds for an auditor. A member that does not vote causes no election, a
 When no zone is left in a group, the group's election state and timers go with it.
 
 ### 4.9 Nothing is changed for a zone until its voting members agree on its make-up
+
+**Moved to the transitions design (2026-10-18).** That design holds every change of the owner's instructions, not only a change of the make-up, and numbers them. This section is kept unchanged as its starting point. It is not implemented by this design's plan.
 
 Each provider fetches the owner's zone on its own, so two agents can hold different versions of a zone's HSYNC3 and HSYNCPARAM records while they are in full contact with each other. That takes no network partition. It lasts seconds when every provider is notified and transfers at once, longer when one transfer is late, and without end when one agent is stuck on an old copy. For that time the zone can have two leaders: the leader of the group the zone left, which has not seen the edit, and the leader of the group it arrived in. Each would sync the parent from its own view, and the parent would take whichever write came last. And each provider would apply what the others send it by its own version of who the zone's members are.
 
