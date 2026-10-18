@@ -55,6 +55,16 @@ edit that leaves none gives them nobody to agree through,
 and for a while the old providers and the new ones can
 both update the parent.
 
+**Today:** tdns-mp does not yet hold a change until the
+providers agree on it. For a while after an edit that gives
+a provider a role or takes one away, two leaders can update
+the parent. Before the next edit, have each provider's
+operator check that its agent shows the zone's new roles:
+
+```sh
+tdns-mpcli agent zone mplist
+```
+
 ## 2. Who Is a Member
 
 - Every provider with an HSYNC3 record is a member of the
@@ -206,7 +216,7 @@ remaining provider
 ([issue 159](https://github.com/johanix/tdns-mp/issues/159)):
 
 ```sh
-tdns-mpcli combiner zone edits purge -z example.com. \
+tdns-mpcli combiner zone edits purge --zone example.com. \
     --origin agent.charlie.example.
 ```
 

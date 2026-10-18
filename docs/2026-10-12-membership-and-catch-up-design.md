@@ -1,14 +1,14 @@
 # Membership and catch-up: every HSYNC3 provider is a member, and a member asks for what it does not know
 
-**Status:** PROPOSAL, 2026-10-12, revised 2026-10-17; split 2026-10-18.
+**Status:** PROPOSAL, 2026-10-12, revised 2026-10-17; split 2026-10-18, and revised the same day.
 
-**Scope since the split (2026-10-18).** The plan implements this design's membership, catch-up, sender rules, groups and elections (its steps 1 to 8). How a zone moves from one set of the owner's instructions to the next goes to a design of its own, the transitions design (to come). It takes over three things described here:
+**Scope since the split (2026-10-18).** The plan implements, in its steps 1 to 8, this design's standings and what each may do, catch-up, sender rules, the end of comms, and groups and elections. How a zone moves from one set of the owner's instructions to the next goes to a design of its own, the transitions design (to come). It takes over three things described here:
 
 - section 4.9, whose settle rule it replaces with one that holds every change of the owner's instructions, numbered by the owner;
-- the zone's SIG(0) key as section 4.1 describes it, whose handling is held by that rule;
-- the switch of rule 1 in the code: every HSYNC3 provider a member.
+- the zone's SIG(0) key as section 4.1 describes it, whose handling is held by that rule. That includes who holds the key and who is handed it: the row "Gets the zone's SIG(0) key" of 2.1, the hand-over in 2.3, and the row on `CONFIG sig0key` in 3.3, of which steps 1 to 8 implement only that the asker is a voting member (the row on the answer to it holds in the code today). It includes the KEY clause of 5.4 too: only the leader's answer names the KEY;
+- the switch of rule 1 in the code: every HSYNC3 provider a member. Until the switch, a provider with a record and no role is no member in the code: the others send it no distribution and no gossip, and from steps 1 and 2 it does not vote, elect itself or edit; a per-zone lead it already holds lasts until its lease runs out or step 8 drops it (plan, step 2 and 7.1). The rest of what this design says of a member with no role holds from the switch on: the rows of its column in 2.1 that say yes, its rows in 2.2, what 2.3 says it goes on doing, the provider of 3.1 whose roles are gone, its requests in 5.1 and 5.2 (`join`, and `start`, `outage`, `peer-role` and `manual` in a zone in which it has no role), the groups of 4.1 and 4.6 that have one, the reporting of 4.7 and the keeping of a CSYNC or the leader's KEY (4.7, its last two sentences, the last also at a voting member that knows no leader yet), and in section 6 what it shows, the line it logs, and that `resync --pull` works.
 
-Those parts are kept here unchanged as that design's starting point. Where other sections refer to section 4.9, they refer to that part.
+Those parts are kept here unchanged as that design's starting point, but for the last sentence of 4.9, which is in 4.1 since the split. Where other sections refer to section 4.9, they refer to that part. Until the transitions design, three things stay as the code has them today: for a time after an owner's edit a zone can have two leaders (4.1, its last paragraph); a SIG(0) key is handed over only along the `upstream` relation, and an elected leader that is handed none makes one (the plan's step 8 has where this meets a zone that arrives in a group); and the gossip in the answer to a beat is taken from whoever answered (section 7).
 
 This document describes membership and catch-up in tdns-mp as a whole: who is a member of a zone's group, what each kind of member may do, how an election counts, and how an agent learns the state of a zone. It describes the design as it is meant to stand. Parts of it are in the code today and parts are not.
 
@@ -58,7 +58,7 @@ Each one is one edit by the zone owner.
 | From, to | At the other agents | At the provider's own agent |
 |---|---|---|
 | No record, to a record with no role | Discovery, hello, beats. The zone moves to the group that has it as a member with no role, and takes that group's leader (4.1). | It asks every voting member for the zone's state and its upstream for the transfer set-up (the second is open: plan, decision 6). It shows "member, no role" and refuses its operator's edits. |
-| No role, to a role | The zone moves to the group in which it votes, and takes that group's leader. Its contributions are taken. | It asks for the zone's state once more. It may vote and lead. Edits follow the edit policy. |
+| No role, to a role | The zone moves to the group in which it votes, and takes that group's leader. Each asks it for the zone's state (5.1, `peer-role`). Its contributions are taken. | It asks for the zone's state once more. It may vote and lead. Edits follow the edit policy. |
 | A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). The edit by itself withdraws nothing of what the provider contributed: its NS records stay in the zone, its DNSKEYs stay in every signer's key set, and its DS stays at the parent, until the removal takes each of them away in its turn. | It no longer votes or leads for the zone. It goes on exactly as before, except that it initiates nothing (2.3). |
 | A record, to no record | It leaves the zone's group. When no zone is shared with it any more, comms end after a hold time (3.1). | The zone is no longer a multi-provider zone for it. |
 
@@ -66,7 +66,7 @@ Each one is one edit by the zone owner.
 
 A provider whose roles the owner has taken away is still delegated to, and resolvers are still sent to it, until the removal has run. So for that time it does exactly what it did before, with one exception.
 
-**What it goes on doing.** It takes every new version of the owner's zone, as it comes. It takes what the other members distribute, applies it and confirms, by the same rule as every member (4.9). It answers what it is asked. If it holds the zone's SIG(0) key, that includes a voting member's request for the key: handing the key over is an answer and not a change of its own, and a leader that took the zone up after it may have nobody else to ask (4.1). If it signed, it signs and re-signs with the keys it has. It moves its serial on, notifies its downstream servers, and serves.
+**What it goes on doing.** It takes every new version of the owner's zone, as it comes. It takes what the other members distribute, applies it and confirms, as every member does, and from the transitions design on by the same rule as every member (4.9). It answers what it is asked. If it holds the zone's SIG(0) key, that includes a voting member's request for the key: handing the key over is an answer and not a change of its own, and a leader that took the zone up after it may have nobody else to ask (4.1). If it signed, it signs and re-signs with the keys it has. It moves its serial on, notifies its downstream servers, and serves.
 
 **The exception: it initiates nothing.** It refuses its operator's edits for the zone. It starts no key rollover and makes no new DNSKEY, and a rollover that is under way stops where it is. It can change nothing of what it contributed, its own NS records and DNSKEYs included, and it does not withdraw them itself: the leader does (section 7). Every change that concerns it comes from the others, and it processes each as it processes any other.
 
@@ -88,11 +88,11 @@ A provider whose roles are gone and whose record stays is a member.
 
 ### 3.2 The sender is the one the transport established
 
-On an agent, a message counts as sent by the sender the transport established. A payload that names another originator is refused, and nothing of it is handled. An agent forwards nothing to another agent, so nothing legitimate is lost. Without this rule a member with no role could name a voting member in a SYNC or in a vote.
+On an agent and on the auditor, a message counts as sent by the sender the transport established. A payload that names another originator, or names none, is refused, and nothing of it is handled. An agent forwards nothing to another agent, so nothing legitimate is lost. Without this rule a member with no role could name a voting member in a SYNC or in a vote.
 
 A combiner is the exception, by design: the agent that delivers an operation and the origin it names differ. There the rule of 3.3 is applied to the named origin.
 
-The rule holds for every mechanism. Over HTTPS the sender the transport established is the name in the client's certificate, and a message whose body names another sender is refused. For the answer to a beat the sender is the peer that was beaten. Over HTTPS, and for a DNS answer without the payload envelope, the transport does not establish it yet: open (section 7).
+The rule holds for every mechanism. Over HTTPS the sender the transport established is the name in the client's certificate, and a message whose body names another sender, or names none, is refused. A hello over HTTPS is the exception until #56: it can arrive before the peer's TLSA record is known, so its body still names its sender (section 7). For the answer to a beat the sender is the peer that was beaten. Over HTTPS, and for a DNS answer without the payload envelope, the transport does not establish it yet: open (section 7).
 
 ### 3.3 What each message asks of its sender
 
@@ -113,7 +113,7 @@ An auditor falls under the same rules: its operations are not applied and its vo
 
 What is sent to whom:
 
-- **Distributions** go to every member, and every member's confirmation is waited for: the voting members, a member with no role, and the auditor. Where a zone has an auditor, it is a required participant: a SYNC is not complete without the auditor's confirmation. For a member with no role the wait is also a test. Being able to keep up with the other providers is a condition for serving the zone, and it has to show before the zone owner gives the provider a role, not after. There is one exception: a distribution that withdraws a member with no role, which is to say its own NS records, DNSKEYs or DS, does not wait for that member. Its operator may already have stopped its agent, and its removal must not depend on it. A distribution is started, and taken, only for a zone that is settled (4.9). An auditor, which changes nothing, confirms it at once.
+- **Distributions** go to every member, and every member's confirmation is waited for: the voting members, a member with no role, and the auditor. Where a zone has an auditor, it is a required participant: a SYNC is not complete without the auditor's confirmation. For a member with no role the wait is also a test. Being able to keep up with the other providers is a condition for serving the zone, and it has to show before the zone owner gives the provider a role, not after. There is one exception: a distribution that withdraws a member with no role, which is to say its own NS records, DNSKEYs or DS, does not wait for that member. Its operator may already have stopped its agent, and its removal must not depend on it. From the transitions design on, a distribution is started, and taken, only for a zone that is settled (4.9). An auditor, which changes nothing, confirms it at once.
 - **Election messages** go to the voting members and the auditors.
 - **Requests for the zone's state** go to the voting members. An auditor holds nothing, and a member with no role contributes nothing.
 - **Gossip** of a group goes to that group's members.
@@ -127,15 +127,15 @@ A provider group is a set of providers together with what each of them is: the v
 
 So the providers a, b and c with a role each are one group, and a and b with a role and c with none are another, although the same three providers are in both.
 
-The auditors are part of the make-up because gossip is per group, and an auditor takes part in its group's gossip as a member: it gets the group's state, gives its own row, and learns who leads. Two things follow, and both are accepted. A zone whose owner changes its auditor moves to another group, which costs the hold of 4.9 and nothing more. And the same providers with another auditor are another group, with its own election and its own share of every beat. Auditors are few, and an auditor is by its purpose the stable part of a zone: it is there to watch the other changes, not to be changed.
+The auditors are part of the make-up because gossip is per group, and an auditor takes part in its group's gossip as a member: it gets the group's state, gives its own row, and learns who leads. Two things follow, and both are accepted. A zone whose owner changes its auditor moves to another group, which costs what any move costs: the take-up by that group's leader, an election when the group is new, and, from the transitions design on, the hold of 4.9. And the same providers with another auditor are another group, with its own election and its own share of every beat. Auditors are few, and an auditor is by its purpose the stable part of a zone: it is there to watch the other changes, not to be changed.
 
 There is one election per group, among its voting members, and the group's leader leads all its zones. All zones of a group agree on who votes, by definition. So a leader has a role in every zone it leads, and a provider with no role in a zone never leads that zone.
 
-**A zone that joins or leaves a group forces no election.** A zone that arrives in a group with a leader takes that leader. A group elects when it has no leader: when it is new, when its lease runs out, or when its leader is lost.
+**A zone that joins or leaves a group forces no election.** A zone that arrives in a group with a leader takes that leader. A group elects when it has no leader: when it is new, when its lease runs out, or when its leader was lost and the voting members see each other again (4.3).
 
-**The leader takes up a zone that arrives.** When a zone arrives in a group, the group's leader does for that zone what it does for every zone of the group when it is elected. An agent that led the group the zone left stops acting for it.
+**The leader takes up a zone that arrives.** When a zone arrives in a group, the group's leader does for that zone what it does for every zone of the group when it is elected. An agent that led the group the zone left stops acting for it. A zone that arrives while its group's election is running is one of the zones that election is held for.
 
-**The zone's SIG(0) key.** What follows is implemented with the transitions design (the scope note above).
+**The zone's SIG(0) key.** What follows, up to the example below, is implemented with the transitions design (the scope note above).
 
 **Every voting member holds the zone's SIG(0) key,** for a zone that syncs with its parent by UPDATE. A voting member that does not hold the key asks for it: when it catches up, and whenever the zone publishes a KEY that it has no private part for. Whoever holds it hands it over to a voting member that asks (3.3): a voting member, and also a provider that has lost its roles and still holds it (2.3). So the key does not sit at the one leader that made it, and a zone does not lose its parent sync with one provider.
 
@@ -160,11 +160,11 @@ Elections are held per distinct make-up, never per zone: 40,000 zones that drop 
 
 A zone with fewer than two members is in no group and has an election of its own, per zone.
 
-Agents see the owner's edit at different moments. For that interval the old group and the new one can each have a leader for the zone. Section 4.9 says what is done about it.
+Agents see the owner's edit at different moments. For that interval the old group and the new one can each have a leader for the zone. Section 4.9 says what the transitions design does about it. Until then the window stays open, as it is today.
 
 ### 4.2 The counts
 
-Every count is taken from the voting members: the peers an election expects, the peers that have to be reachable, and the order in which a lease is renewed. An agent that is not a voting member of the zone has no count at all: it runs no election.
+Every count is taken from the voting members: the peers an election expects, the peers that have to be reachable, and the order in which a lease is renewed. An agent that is not a voting member of the zone runs no election, whatever it counts.
 
 ### 4.3 The gate: the voting members see each other
 
@@ -180,9 +180,9 @@ A member with no role does not hold an election back. On its way in its agent ma
 
 ### 4.5 One check for every change
 
-Every change of the zone's HSYNC3 or HSYNCPARAM records, and the zone's first load, runs one check for the zone. It applies to a zone that syncs with its parent through its agents.
+Every change of the zone's HSYNC3 or HSYNCPARAM records, and the zone's first load, runs one check for the zone. It applies to a multi-provider zone, one with HSYNC3 records, that syncs with its parent through its agents.
 
-- The local agent does not vote in the zone: nothing is started, and a lead it holds for the zone is dropped.
+- The local agent does not vote in the zone: nothing is started, and a per-zone result it holds for the zone is dropped. If it led the zone through a group, it stops acting for the zone when the zone leaves that group (4.1).
 - A group covers the zone: a per-zone result for the zone is dropped. A group with a leader keeps it, and the leader takes the zone up (4.1). A group without one is left to its gate.
 - No group covers the zone and the local agent is its only voting member: the agent elects itself, unless it leads already.
 
@@ -194,7 +194,7 @@ Every change of the zone's HSYNC3 or HSYNCPARAM records, and the zone's first lo
 
 ### 4.7 What a member with no role reports as leader
 
-It learns the leader from gossip: the decided term that a voting member tells. `agent parentsync status` and `gossip zone-state` show that leader and term, and that this agent does not vote. Before the first beat from a voting member it reports that no leader is known yet. It never reports itself.
+It learns the leader from gossip: the decided term that a voting member tells. `agent parentsync status` and `agent gossip state --zone` show that leader and term, and that this agent does not vote. Before the first beat from a voting member it reports that no leader is known yet. It never reports itself.
 
 The same holds for an auditor. A member that does not vote causes no election, and nothing it says about terms is taken. It takes a newer term from a voting member at once. Whatever else a voting member tells it about who leads (a lower term, or the same term with another leader or a later end of the lease) it takes once the lease of the leader it holds has run out: the voting members have then started over, for example because they all restarted. Until that lease has run out it may show the earlier leader. What it shows is information. At a member with no role it has one use: a CSYNC or the leader's KEY from a voting member that is not the leader it shows is kept, not refused, until it shows that member as leader or the lease has run out (plan, step 10). An agent that knows no leader for the zone yet, voting or not, keeps a CSYNC or the leader's KEY and judges it when it learns the leader (plan, step 10).
 
@@ -204,7 +204,7 @@ When no zone is left in a group, the group's election state and timers go with i
 
 ### 4.9 Nothing is changed for a zone until its voting members agree on its make-up
 
-**Moved to the transitions design (2026-10-18).** That design holds every change of the owner's instructions, not only a change of the make-up, and numbers them. This section is kept unchanged as its starting point. It is not implemented by this design's plan.
+**Moved to the transitions design (2026-10-18).** That design holds every change of the owner's instructions, not only a change of the make-up, and numbers them. This section is kept as its starting point, unchanged but for its last sentence, which is in 4.1 since the split. It is not implemented by this design's plan.
 
 Each provider fetches the owner's zone on its own, so two agents can hold different versions of a zone's HSYNC3 and HSYNCPARAM records while they are in full contact with each other. That takes no network partition. It lasts seconds when every provider is notified and transfers at once, longer when one transfer is late, and without end when one agent is stuck on an old copy. For that time the zone can have two leaders: the leader of the group the zone left, which has not seen the edit, and the leader of the group it arrived in. Each would sync the parent from its own view, and the parent would take whichever write came last. And each provider would apply what the others send it by its own version of who the zone's members are.
 
@@ -254,7 +254,7 @@ So a zone listed in a beat tells, and it asks. A zone listed in the answer to a 
 
 No rule between agents closes this: the two sides have nobody in common to carry it. What closes it is the order of the owner's edits. A set of voting members is changed one provider at a time, with a voting member in common at every step, and the next edit waits until the one before has settled. `guide/provider-changes.md` describes an add and a removal in that order, and says that an edit which exchanges the whole set is not to be made (its section 1).
 
-A zone that arrives while its group's election is running is one of the zones that election is held for.
+(The sentence that ended this section, on a zone that arrives while its group's election is running, is in 4.1 since the split: the plan's step 8 implements it.)
 
 ## 5. Catch-up
 
@@ -264,10 +264,10 @@ A zone that arrives while its group's election is running is one of the zones th
 |---|---|---|
 | The agent starts | `start` | The agent asks every voting member of every zone it is a member of |
 | The agent becomes a member of a zone | `join` | The agent asks every voting member of that zone |
-| The agent is given its first role in a zone | `role` | The same, once more |
-| A peer is given its first role in a zone | `peer-role` | The agent asks that peer. Without it a zone would never be caught up again once a newcomer has its role: the zone would name a voting member that nobody has asked |
+| The agent becomes a voting member of a zone, from no role or from auditor | `role` | The same, once more |
+| A peer becomes a voting member of a zone | `peer-role` | The agent asks that peer. Without it a zone would never be caught up again once a newcomer has its role: the zone would name a voting member that nobody has asked |
 | A peer says that it has started | `peer-start` | The agent that got a `start` request answers it, and then asks that peer back |
-| A peer is OPERATIONAL again after more than an hour | `outage` | The agent asks that peer, for each zone they share. The hour is a config value, well below the 24 hours a queued message is kept |
+| A peer is OPERATIONAL again after more than an hour | `outage` | The agent asks that peer, for each zone they share in which the peer votes. The hour is a config value, well below the 24 hours a queued message is kept |
 | The operator runs `resync --pull` | `manual` | The agent asks every voting member of the zone |
 
 A request to a peer goes out when that peer is OPERATIONAL from here and the zone's first load is done.
@@ -286,8 +286,8 @@ RFI SYNC, with the reason word and a name for the request, both carried in the m
 
 One SYNC to the asker alone, through the confirmed queue, holding the answering agent's own contributions to the zone.
 
-1. **Every RRtype is named.** One `replace` for each type the answering agent may contribute (NS, CDS, DNSKEY), empty where it holds none. The asker's stale records go. The zone's KEY and its CSYNC are the group's, published by the leader alone (4.1), so only the leader's answer names them.
-2. **The key states travel.** When the answering agent's provider signs the zone, the DNSKEY operation carries the key states, from its signer's latest inventory.
+1. **The types are fixed.** One `replace` for NS and one for CDS, and one for DNSKEY when the answering agent's provider is in `signers=`, each empty where it holds none, whatever the zone's `nsmgmt` and `parentsync`. A provider not in `signers=` names no DNSKEY: it does not withdraw keys itself (2.3). The asker's stale records go. The zone's KEY and its CSYNC are the group's, published by the leader alone (4.1), so only the leader's answer names them. The KEY half of this is the transitions design's (the scope note); until then what an answer does with the KEY is open (plan, 7.1).
+2. **The keys come from the inventory.** When the answering agent's provider is in `signers=`, the DNSKEY operation takes its records and their key states from its signer's latest inventory, never from what the agent has stored.
 3. **An answer always goes out,** also from an agent that holds nothing.
 4. **The marker.** The SYNC names the request it answers and says `complete` or not, with the reason when not. An agent answers "not complete" when it cannot vouch for its own state: its provider signs and it has no inventory from its signer yet, or it has not finished reading its own contributions back from its combiner. A "not complete" answer carries the marker and no operation: empty sets from an agent that has not read its own state would remove its contributions at every peer.
 
@@ -297,28 +297,28 @@ A complete answer from a provider in `signers=` counts as that provider having s
 
 ### 5.5 How completeness is known
 
-By construction and by the marker: a `replace` is the sender's whole set for a type, the answer names every type, so one answer is everything that agent holds for the zone. The marker says so and names the request. An answer without the marker does not count as complete.
+By construction and by the marker: a `replace` is the sender's whole set for a type, and the answer names every type that 5.4 has it name, so one answer is all that the agent vouches for in the zone. The marker says so and names the request. An answer without the marker does not count as complete.
 
 The asker keeps, per zone and peer: asked when, answered when, complete or not, and the last error. It is kept in memory, since a restart asks again anyway.
 
-A zone is **caught up** when this agent has read its own provider's state back from its combiner and its signer, and every voting member other than this agent has answered completely since this agent started, became a member of the zone, or last asked.
+A zone is **caught up** when this agent has read its own provider's state back from its combiner, and from its signer when its provider signs the zone, and every voting member other than this agent has answered completely since this agent started, became a member of the zone, or last asked.
 
 ### 5.6 What waits for it
 
 - **The DS set.** For a leader whose own signer does not own the zone, the zone's DS set is unknown while a provider in `signers=` has not spoken about its keys. A complete answer makes a provider speak, and a set that turns from unknown to known asks for a sync with the parent.
-- **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, its own signer), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
+- **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, and its own signer when its provider signs the zone), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
 - **Not "in sync".** When NS and glue are in step with the parent and there is no DS set to compare, for a zone that names a signer, the leader does not report "in sync". It reports "DS set unknown, waiting for" and the provider. When every signer has spoken and none of them holds a key that a DS is made from, it says that.
-- **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait for the catch-up. The last two wait for the zone to be settled (4.9).
+- **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait for the catch-up. From the transitions design on, the last two wait for the zone to be settled (4.9).
 
-The stall this adds is small. Catch-up needs the voting members to be reachable, and so does having a leader.
+The stall this adds is small. Catch-up needs the voting members to be reachable, and so does having a leader. There is one case where it is longer: a leader that restarts inside its term while a voting member's agent is down learns from gossip that it leads, and sends nothing to the parent until that member is back.
 
 ### 5.7 Retries
 
-A request that fails, is refused, is answered "not complete", or is acknowledged and then not answered is sent again after 5 s, 15 s, 30 s and 60 s, and then every 5 minutes, for as long as the peer is OPERATIONAL. There is no bound: a stall must stay visible and end when its cause ends. The first failure is logged, then one line an hour. A peer that stops being OPERATIONAL pauses its requests, and they start again when it is back. A refusal is expected for a short while after a join, until the peer has loaded the zone with the new record. An answer that waits for the zone to be settled (4.9) is not a failed request: the time to the next try is counted from when the zone is settled at the asker, and an answer that has arrived and is kept ends the tries.
+A request that fails, is refused, is answered "not complete", or is acknowledged and then not answered is sent again after 5 s, 15 s, 30 s and 60 s, and then every 5 minutes, for as long as the peer is OPERATIONAL. There is no bound: a stall must stay visible and end when its cause ends. The first failure is logged, then one line an hour. A peer that stops being OPERATIONAL pauses its requests, and they start again when it is back. A refusal is expected for a short while after a join, until the peer has loaded the zone with the new record. From the transitions design on, an answer that waits for the zone to be settled (4.9) is not a failed request: the time to the next try is counted from when the zone is settled at the asker, and an answer that has arrived and is kept ends the tries.
 
 ### 5.8 The cost
 
-With Z zones and P voting peers per zone, a start sends Z x P requests and receives as many answers. Each answer is one small message and its two confirmations. A `start` is asked back, which doubles it. An agent with 1,000 zones and two peers handles about 4,000 requests and 4,000 answers at its start. Requests to one peer are paced, eight in flight, as discovery is, so the start takes tens of seconds, not one burst. After a restart nearly every answer changes nothing at the asker. One request per peer for many zones would cut the count and is a wire change: left for when it is needed.
+With Z zones and P voting peers per zone, a start sends Z x P requests and receives as many answers. Each answer is one small message and its two confirmations. A `start` is asked back, which doubles it. An agent with 1,000 zones and two peers handles about 4,000 requests and 4,000 answers at its start. Requests to one peer are paced, eight in flight, each from its send to its answer, its failure or its time-out. Each answer leaves through the answering agent's queue, which sends what is due once a second, so a start with 1,000 zones takes a minute or two, its peers side by side, not one burst. After a restart nearly every answer changes nothing at the asker. One request per peer for many zones would cut the count and is a wire change: left for when it is needed.
 
 ## 6. What an agent with no role does for its own operator
 
@@ -358,6 +358,6 @@ With Z zones and P voting peers per zone, a start sends Z x P requests and recei
 - **The unused option `mp-not-listed-error`** (item 4 of #137).
 - **Ordered delivery** (#51), and one request for many zones.
 - **The auditor's view of a blocked distribution** (#152).
-- **HTTPS as the only mechanism** (#59, #56).
-- **Who answered a beat.** Open: whether the asker checks the server that answers before step 9 (over HTTPS against the peer's TLSA record, over DNS by refusing an answer without the payload envelope while payload crypto is on), or step 9 takes tellings from beats only until it does (plan, step 9, "Who answered").
+- **HTTPS as the only mechanism** (#59, #56), and the sender of a hello over HTTPS (#56, 3.2).
+- **Who answered a beat.** Open: whether the asker checks the server that answers (over HTTPS against the peer's TLSA record, over DNS by refusing an answer without the payload envelope while payload crypto is on). Until it does, the gossip in a beat's answer is taken from whoever answered, as today. Whether step 6 already takes no election record and no term from it, or the transitions design takes those only from messages their sender sent, is open for the project owner (plan, 7.1).
 - **The transfer set-up, asked for by the member itself.** Open: no step makes a member ask its upstream, and nothing uses the answer today (plan, decision 6).
