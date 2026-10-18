@@ -1,0 +1,108 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
+package tdnsmp
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
+)
+
+// handoverZone is a zone whose providers all transfer it from the owner: no
+// agent is another's upstream or downstream. alice and bob have voting roles,
+// carol audits, and dave has an HSYNC3 record and no role.
+func handoverZone(t *testing.T, zone string) *tdns.ZoneData {
+	t.Helper()
+	zd := seedZoneWithHSYNC3(t, zone, "alice.agent.example.", "bob.agent.example.", "carol.agent.example.", "dave.agent.example.")
+	rr, err := dns.NewRR(zone + ` 3600 IN HSYNCPARAM servers="alice" signers="bob" auditors="carol"`)
+	if err != nil {
+		t.Fatalf("HSYNCPARAM: %v", err)
+	}
+	apex, _ := zd.Data.Get(zone)
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{rr}})
+	zd.Data.Set(zone, apex)
+	zd.InstallInitialSnapshot()
+	return zd
+}
+
+// The zone's SIG(0) key is the provider group's: any agent that can be
+// elected the zone's leader may hold it. It went only to an agent's upstream
+// or downstream, which say who transfers the zone from whom, so in a zone
+// like this one no agent got it, and every new leader made a key of its own.
+func TestTheZoneKeyGoesToAnyAgentThatCanLead(t *testing.T) {
+	const zone = "handover.example."
+	handoverZone(t, zone)
+	for agent, want := range map[AgentId]bool{
+		"alice.agent.example.": true,  // servers
+		"bob.agent.example.":   true,  // signers
+		"carol.agent.example.": false, // auditors: no vote, never leads
+		"dave.agent.example.":  false, // no role
+		"eve.agent.example.":   false, // not in the zone
+	} {
+		if got := mayHoldZoneSig0Key(zone, agent); got != want {
+			t.Errorf("%s may hold the zone's key: %v, want %v", agent, got, want)
+		}
+	}
+}
+
+type keyAnswer struct {
+	requester, subtype, nonce string
+	data                      map[string]string
+}
+
+// The agent that holds the key answers a CONFIG sig0key request from an agent
+// that can lead with the key, and any other with a refusal. The refusal is an
+// answer: the asker waits for one, and without it waited out its timeout.
+func TestTheKeyHolderAnswersEveryKeyRequest(t *testing.T) {
+	const zone = "answered.example."
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
+	zd := handoverZone(t, zone)
+	zd.KeyDB = newMPTestKeyDB(t)
+	if _, err := zd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: zone,
+		Keyname: zone, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+		t.Fatalf("the zone's SIG(0) key: %v", err)
+	}
+	answers := make(chan keyAnswer, 4)
+	saved := answerConfigRequest
+	answerConfigRequest = func(_ *MPTransportBridge, _ *AgentRegistry, requester, _, subtype, nonce string, data map[string]string) {
+		answers <- keyAnswer{requester, subtype, nonce, data}
+	}
+	t.Cleanup(func() { answerConfigRequest = saved })
+
+	ask := func(from string) keyAnswer {
+		t.Helper()
+		env.Bob.Registry.MsgHandler(&AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgRfi,
+			OriginatorID: AgentId(from), Zone: zone, RfiType: "CONFIG", RfiSubtype: "sig0key", Nonce: "nonce-" + from}}, nil, nil)
+		select {
+		case a := <-answers:
+			if a.requester != from || a.subtype != "sig0key" || a.nonce != "nonce-"+from {
+				t.Errorf("the answer to %s: %+v", from, a)
+			}
+			return a
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s's request got no answer", from)
+			return keyAnswer{}
+		}
+	}
+
+	a := ask("alice.agent.example.")
+	if a.data["privatekey"] == "" || a.data["keyrr"] == "" || a.data[configRefusedKey] != "" {
+		t.Errorf("an agent that can lead did not get the key: %v", a.data)
+	}
+	for _, from := range []string{"carol.agent.example.", "dave.agent.example."} {
+		a := ask(from)
+		if a.data["privatekey"] != "" {
+			t.Errorf("%s, which cannot lead, got the key", from)
+		}
+		resp := &ConfigResponseMsg{ConfigData: a.data}
+		if why := resp.Refused(); !strings.Contains(why, "has no voting role") {
+			t.Errorf("%s was answered %v, want a refusal", from, a.data)
+		}
+	}
+}

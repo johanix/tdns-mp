@@ -156,6 +156,16 @@ func zoneApex(zone ZoneName) *tdns.OwnerData {
 	return apex
 }
 
+// mayHoldZoneSig0Key: the agent may be handed the zone's SIG(0) key. The key
+// is the provider group's, for the zone's delegation sync with its parent, so
+// any agent that can be elected the zone's leader may hold it: a member with
+// a voting role (servers or signers). Who transfers the zone from whom
+// (HSYNC3's upstream) has nothing to do with it.
+func mayHoldZoneSig0Key(zone ZoneName, agent AgentId) bool {
+	_, voting := zoneParticipants(zoneApex(zone))
+	return slices.Contains(voting, string(agent))
+}
+
 // ParticipantsForZone is the single membership truth for agent/auditor reads:
 // the identities holding a membership-conferring HSYNCPARAM role in the zone
 // (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with

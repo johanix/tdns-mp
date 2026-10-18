@@ -297,6 +297,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 						lgAgent.Info("peer did not respond to CONFIG sig0key", "zone", zone, "peer", agent.ID)
 						continue
 					}
+					if why := configResp.Refused(); why != "" {
+						lgAgent.Warn("peer refused to hand over the zone's SIG(0) key", "zone", zone, "peer", agent.ID, "reason", why)
+						continue
+					}
 					if len(configResp.ConfigData) > 0 && configResp.ConfigData["status"] != "no sig0 key for zone" {
 						if err := importSig0KeyFromPeer(hdb, keyName, configResp.ConfigData); err != nil {
 							lgAgent.Error("failed to import SIG(0) key from peer",
@@ -309,6 +313,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					lgAgent.Info("peer does not have SIG(0) key", "zone", zone, "peer", agent.ID)
 				}
 			}
+		}
+		// Asking the peers takes a while, and the lead may move meanwhile. A
+		// key made by an agent that no longer leads is a KEY in the zone
+		// that nobody bootstraps.
+		if !lem.IsLeader(zone) {
+			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; no SIG(0) key is made", "zone", zone)
+			return nil
 		}
 		// Step c: no peer has the key — generate a new keypair
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
@@ -330,6 +341,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			lgAgent.Info("generated SIG(0) keypair", "zone", zone, "msg", resp.Msg)
 		}
 	publish:
+		if !lem.IsLeader(zone) {
+			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; its KEY is not published", "zone", zone)
+			return nil
+		}
 		// Step d: get the active key and publish to combiner + remote agents
 		sak, err = hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 		if err != nil || len(sak.Keys) == 0 {
