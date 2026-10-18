@@ -89,8 +89,13 @@ type PeerKeystateRequest struct {
 	Message      string                 // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry    // Complete key inventory (only when Signal == "inventory")
 	ForeignKeys  []core.ForeignKeyState // what the other providers said about their keys (only when Signal == "foreign")
-	Owned        bool                   // the sender's own state machine runs the zone's keys (S3)
-	Timestamp    time.Time              // Request timestamp
+	// ForeignSpoken: the providers (HSYNC3 labels) whose word the sender
+	// holds, a provider whose latest word listed no keys included; the
+	// signer tells that provider's empty word from silence by it (only
+	// when Signal == "foreign"; S7)
+	ForeignSpoken []string
+	Owned         bool      // the sender's own state machine runs the zone's keys (S3)
+	Timestamp     time.Time // Request timestamp
 }
 
 type PeerKeystateResponse struct {
@@ -109,6 +114,7 @@ type PeerEditsRequest struct {
 	Zone         string                         // Zone (FQDN)
 	AgentRecords map[string]map[string][]string // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         // Optional status
+	Nonce        string                         // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp    time.Time
 }
 
@@ -127,6 +133,7 @@ type PeerConfigRequest struct {
 	Subtype    string            // Config subtype: "upstream", "downstream", "sig0key"
 	ConfigData map[string]string // Key-value config data
 	Message    string            // Optional status
+	Nonce      string            // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp  time.Time
 }
 
@@ -144,6 +151,7 @@ type PeerAuditRequest struct {
 	Zone      string      // Zone (FQDN)
 	AuditData interface{} // Zone data repo snapshot (placeholder)
 	Message   string      // Optional status
+	Nonce     string      // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp time.Time
 }
 

@@ -139,8 +139,11 @@ func (e *Engine) retryPendingDiscoveries() {
 		peer.Mu.RUnlock()
 		apiState := mechPeerState(e, id, TransportAPI)
 		dnsState := mechPeerState(e, id, TransportDNS)
-		apiNeeded := apiMethod && needsDiscovery(apiState)
-		dnsNeeded := dnsMethod && needsDiscovery(dnsState)
+		// A mechanism with no address needs discovery whatever its state:
+		// nothing can be sent to it, and nothing else looks the peer up
+		// again (mechHasAddress).
+		apiNeeded := apiMethod && (needsDiscovery(apiState) || !mechHasAddress(e, id, TransportAPI))
+		dnsNeeded := dnsMethod && (needsDiscovery(dnsState) || !mechHasAddress(e, id, TransportDNS))
 
 		if apiNeeded || dnsNeeded {
 			sem := e.discoverySem()

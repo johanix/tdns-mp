@@ -172,12 +172,13 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *PeerResponse {
 	}
 
 	if useAPI {
-		if peer.APIEndpoint == "" {
+		apiEndpoint := peer.GetAPIEndpoint()
+		if apiEndpoint == "" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("peer %q has no API endpoint configured", peerID)
 			return resp
 		}
-		url := strings.TrimSuffix(peer.APIEndpoint, "/") + "/ping"
+		url := strings.TrimSuffix(apiEndpoint, "/") + "/ping"
 		body := tdns.PingPost{Msg: fmt.Sprintf("peer ping %s", peerID), Pings: 1}
 		data, _ := json.Marshal(body)
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
@@ -243,7 +244,7 @@ func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 		dns.Fqdn(mp.Combiner.Identity) == peerID && mp.Combiner.Address != "" {
 		if peer := peerFromAddress(peerID, mp.Combiner.Address); peer != nil {
 			if mp.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = mp.Combiner.ApiBaseUrl
+				peer.SetAPIEndpoint(mp.Combiner.ApiBaseUrl)
 			}
 			return peer
 		}
@@ -285,6 +286,6 @@ func peerFromAddress(peerID string, address string) *transport.Peer {
 		Port:      uint16(port),
 		Transport: "udp",
 	})
-	peer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+	peer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 	return peer
 }

@@ -70,8 +70,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// OPERATIONAL means). State is set on the outbound beat path.
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
-				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+				peer.SetMechanismLastBeatRecv("DNS", time.Now())
 			}
 
 		case report := <-msgQs.Hello:
@@ -85,7 +84,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// OPERATIONAL (that requires an outbound beat round-trip).
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
+				peer.SetLastBeatReceived(time.Now())
 			}
 
 		case report := <-msgQs.Ping:
@@ -121,7 +120,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
 				switch msg.RfiType {
 				case "EDITS":
-					go sendEditsToAgent(ctx, conf, tm, senderID, zone)
+					go sendEditsToAgent(ctx, conf, tm, senderID, zone, msg.Nonce)
 				default:
 					lgCombiner.Warn("unknown RFI type, ignoring", "type", msg.RfiType, "sender", senderID)
 				}
@@ -358,9 +357,9 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 }
 
 // sendEditsToAgent looks up the agent's current contributions for the zone and sends
-// them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
-// when an RFI EDITS is received.
-func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
+// them back via DNSTransport.Edits(), with the RFI's nonce. Called asynchronously
+// from CombinerMsgHandler when an RFI EDITS is received.
+func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string, nonce string) {
 	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
@@ -413,6 +412,7 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 		SenderID:     conf.MpConfig().Identity,
 		Zone:         zone,
 		AgentRecords: agentRecords,
+		Nonce:        nonce,
 		Timestamp:    time.Now(),
 	}
 

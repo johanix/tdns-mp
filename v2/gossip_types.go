@@ -53,6 +53,9 @@ type GossipStateTable struct {
 	firstRowHoldUntil time.Time
 	// localWritten: the groups this process has written its own row for.
 	localWritten map[string]bool
+	// propagationDelay: this provider's propagation delay, announced in our
+	// own row of every group (SetPropagationDelay). Zero: nothing announced.
+	propagationDelay time.Duration
 }
 
 // --- From provider_groups.go ---

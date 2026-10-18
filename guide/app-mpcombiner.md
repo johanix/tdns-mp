@@ -45,6 +45,17 @@ material is in the topical guides:
      contributions, the inbound RRset is dropped
      (CDS/CSYNC) or retained as-is (DNSKEY pass-through,
      but the signer typically owns this).
+   - **CSYNC** — a zone has one. It is made by the zone's
+     delegation sync leader and reaches the combiner as
+     a contribution; the combiner makes none itself. If
+     more than one agent has contributed a CSYNC (the
+     leadership has moved), the one with the newest
+     serial field is served, an older one that arrives
+     late is refused, and the older ones are removed
+     from the store when a newer one arrives. A CSYNC
+     that the combiner of an earlier release made
+     itself is served until the first contributed one
+     arrives, and is then removed.
    - **NS** — if there are contributions, they replace
      the inbound RRset. Otherwise the inbound NS RRset
      is left intact.

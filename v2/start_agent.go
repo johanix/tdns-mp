@@ -22,8 +22,39 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 )
 
+// The leader's lease when delegationsync.leader-election-ttl is not set, and
+// the shortest lease that is taken as given.
+const (
+	defaultLeaderElectionTTL = 60 * time.Minute
+	minLeaderElectionTTL     = time.Minute
+)
+
+// leaderElectionTTL is the leader's lease from the config. The value takes a
+// unit: a bare number is read as nanoseconds, so 300 is a lease of 300 ns,
+// and a leader that renews at 90% of that calls one election after another
+// (tdns-mp #130). A lease below the floor is such a mistake and not a choice,
+// so it is refused with an error and the default is used.
+func leaderElectionTTL() time.Duration {
+	ttl := viper.GetDuration("delegationsync.leader-election-ttl")
+	switch {
+	case ttl == 0:
+		return defaultLeaderElectionTTL
+	case ttl < minLeaderElectionTTL:
+		lgAgent.Error("delegationsync.leader-election-ttl is below the floor, using the default; the value takes a unit (5m, 300s), a bare number is nanoseconds",
+			"configured", ttl, "floor", minLeaderElectionTTL, "default", defaultLeaderElectionTTL)
+		return defaultLeaderElectionTTL
+	}
+	return ttl
+}
+
 func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) error {
 	mp := conf.MpConfig()
+	// The DS engine's queue, before any engine that can sign a zone, as in
+	// the signer (ensureDSEngineQueue): here that is the refresh engine, for
+	// an identity zone the config lists, and the identity set-up at the end.
+	// The engine itself starts further down, beside the delegation syncher.
+	ensureDSEngineQueue(conf.Config.Internal.KeyDB)
+
 	tdns.StartEngine(&tdns.Globals.App, "APIdispatcher", func() error {
 		return tdns.APIdispatcher(conf.Config, apirouter, conf.Config.Internal.APIStopCh)
 	})
@@ -109,12 +140,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
 	ar := conf.InternalMp.AgentRegistry
-	leaderTTL := viper.GetDuration("delegationsync.leader-election-ttl")
-	if leaderTTL == 0 {
-		leaderTTL = 60 * time.Minute
-	}
 	lem := NewLeaderElectionManager(
-		AgentId(mp.Identity), leaderTTL,
+		AgentId(mp.Identity), leaderElectionTTL(),
 		func(zone ZoneName, rfiType string, records map[string][]string) error {
 			return ar.broadcastElectToZone(zone, rfiType, records)
 		},
@@ -441,6 +468,14 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return err
 	})
 
+	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so
+	// the leader can send NOTIFY(CDS), but writes no CDS for a
+	// multi-provider zone: it holds none of the zone's keys and signs none
+	// of them, so the CDS such a zone serves is the signers' (design §4.1,
+	// arrow 1), and the DS set the agent hands the parent goes through the
+	// owner's DS-intent provider (arrow 2). The one zone the engine writes
+	// a CDS for is the agent's own identity zone (T5.6).
+	//
 	// Agent-specific engines (the hsync data engine itself was constructed
 	// above, before RefreshEngine)
 	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
@@ -481,6 +516,17 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
 		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
+	})
+	// tdns's DS engine. The syncher asks it for the CDS before every
+	// NOTIFY(CDS), and with no engine to answer, the leader sent none: a
+	// parent that offers only the NOTIFY scheme never got the zone's DS
+	// (tdns-mp #150). For a multi-provider zone, which the agent does not
+	// sign, the engine publishes nothing: its answer is the CDS that the
+	// agent's copy of the zone carries, the one the signers serve (key
+	// lifecycle ownership design §4.1, Amendment 3). The zone it does write
+	// a CDS for is the agent's own identity zone (startIdentityParentSync).
+	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
+		return hdb.DSEngine(ctx)
 	})
 	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
 		return tdns.NotifyHandler(ctx, conf.Config)

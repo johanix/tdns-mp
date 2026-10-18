@@ -26,10 +26,13 @@ type MsgQs struct {
 	Confirmation      chan *ConfirmationDetail
 	KeystateInventory chan *KeystateInventoryMsg
 	KeystateSignal    chan *KeystateSignalMsg
-	EditsResponse     chan *EditsResponseMsg
-	ConfigResponse    chan *ConfigResponseMsg
-	AuditResponse     chan *AuditResponseMsg
 	StatusUpdate      chan *StatusUpdateMsg
+
+	// Answers to RFI EDITS, CONFIG and AUDIT, each handed to the request
+	// that asked for it (see rfiWaiters).
+	editsWaiters  rfiWaiters[*EditsResponseMsg]
+	configWaiters rfiWaiters[*ConfigResponseMsg]
+	auditWaiters  rfiWaiters[*AuditResponseMsg]
 
 	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
 }
@@ -51,6 +54,9 @@ type KeystateSignalMsg struct {
 	// ForeignKeys: Signal "foreign", what the other providers said about
 	// their keys in the zone (the complete latest set)
 	ForeignKeys []core.ForeignKeyState
+	// ForeignSpoken: Signal "foreign", the providers whose word the agent
+	// holds, one that listed no keys included; nil from an older agent
+	ForeignSpoken []string
 }
 
 type EditsResponseMsg struct {

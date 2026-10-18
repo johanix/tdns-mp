@@ -188,6 +188,16 @@ func (lem *LeaderElectionManager) DeferGroupElection(groupHash string) {
 	lgElect.Info("deferring group election until group is operational", "group", groupHash[:8])
 }
 
+// isAmong: whether id is one of a group's voting members. Names are compared
+// as FQDNs, as the authorization of a sender is: the members come from zone
+// data and carry the trailing dot, an identity from a config or a message
+// need not. One comparison for the sender and for this agent itself: with two,
+// an agent whose configured identity lacked the dot was counted by its peers
+// and took itself for an observer.
+func isAmong(members []string, id AgentId) bool {
+	return slices.ContainsFunc(members, func(m string) bool { return dns.Fqdn(m) == dns.Fqdn(string(id)) })
+}
+
 // HandleGroupMessage dispatches an election message that carries a _group record.
 func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID AgentId, rfiType string, records map[string][]string) {
 	lem.mu.Lock()
@@ -220,10 +230,21 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 		return
 	}
 
+	// A CALL, a VOTE or a CONFIRM counts only from a voting member. The
+	// transport has admitted the sender as a peer, which is not the same
+	// thing: an auditor gets the broadcast and observes. Checked once, here,
+	// for all three and so for a vote kept ahead of its CALL too
+	// (tdns-mp #143).
+	if !isAmong(members, senderID) {
+		lgElect.Warn("group election: message from a sender that is not a voting member, dropped",
+			"group", groupHash[:8], "type", rfiType, "sender", senderID, "term", parseUint64(records, "_term"))
+		return
+	}
+
 	// If we're not a voting member ourselves, we still want to
 	// observe the protocol (useful for auditors auditing) but we
 	// must not vote, initiate, or be counted in the quorum.
-	if !slices.Contains(members, string(lem.localID)) {
+	if !isAmong(members, lem.localID) {
 		lgElect.Info("leader election observed (not a voting member, no participation)",
 			"group", groupHash[:8], "type", rfiType, "initiator", senderID, "term", parseUint64(records, "_term"))
 		return
@@ -948,6 +969,20 @@ func (lem *LeaderElectionManager) IsLeader(zone ZoneName) bool {
 	return leader == lem.localID
 }
 
+// ZoneLeader returns the agent this agent knows as the zone's current
+// leader, the way IsLeader decides it: the leader of the zone's provider
+// group if there is one, else the zone's own.
+func (lem *LeaderElectionManager) ZoneLeader(zone ZoneName) (AgentId, bool) {
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			if leader, ok := lem.GetGroupLeader(pg.GroupHash); ok {
+				return leader, true
+			}
+		}
+	}
+	return lem.GetLeader(zone)
+}
+
 // GetAllLeaders returns the current leader status for all zones with an active leader.
 func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
 	lem.mu.RLock()
@@ -1490,6 +1525,19 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("PrepareKeyCache failed: %v", err)
 	}
 
+	// The keystore files the key under its KEY RR's owner, so a key for
+	// another name must not be added in keyName's place.
+	if pkc.KeyType != dns.TypeKEY || dns.CanonicalName(pkc.KeyRR.Hdr.Name) != dns.CanonicalName(keyName) {
+		return fmt.Errorf("peer sent a key for %q, not a KEY for %q", pkc.KeyRR.Hdr.Name, keyName)
+	}
+
+	// Nor a private key that is not the KEY's own half: it would be stored
+	// active, and its signatures would not validate against the published
+	// KEY. Same check as tdns's bulk SIG(0) import.
+	if _, err := tdns.VerifyStoredKeyPair(pkc.PrivateKeyPEM, &pkc.KeyRR.DNSKEY); err != nil {
+		return fmt.Errorf("peer's private key for %q does not match its KEY: %v", keyName, err)
+	}
+
 	// Import via Sig0KeyMgmt "add" (also adds to TrustStore)
 	kp := tdns.KeystorePost{
 		Command:         "sig0-mgmt",
@@ -1715,9 +1763,16 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 						}
 					}
 				}
+				// The state goes out by its name. A value the table does not
+				// hold goes out by its number, not as an empty string.
+				state := ar.effectiveAgentState(agent.ID)
+				stateName, ok := AgentStateToString[state]
+				if !ok {
+					stateName = fmt.Sprintf("STATE%d", state)
+				}
 				status.Peers = append(status.Peers, PeerSyncInfo{
 					Identity:    agent.ID,
-					State:       string(ar.effectiveAgentState(agent.ID)),
+					State:       stateName,
 					Transport:   transportStr,
 					Operational: ar.isAgentOperational(agent.ID),
 				})
