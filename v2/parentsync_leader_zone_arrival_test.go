@@ -189,10 +189,17 @@ func newGroupRig(t *testing.T, electing []string, agents ...string) *groupRig {
 }
 
 // stopElectionTimers stops the timers of every group election of a manager.
+// The elections are copied out first and each is locked after the manager's
+// lock is released: finalizing a confirm takes the manager's lock while it
+// holds the election's, and a cleanup can run while one is delivered.
 func stopElectionTimers(lem *LeaderElectionManager) {
 	lem.mu.RLock()
-	defer lem.mu.RUnlock()
+	les := make([]*LeaderElection, 0, len(lem.groupElections))
 	for _, le := range lem.groupElections {
+		les = append(les, le)
+	}
+	lem.mu.RUnlock()
+	for _, le := range les {
 		le.mu.Lock()
 		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
 			if tm != nil {
