@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -128,5 +129,24 @@ func TestAKeyMadeForALostLeadIsNotLeftActive(t *testing.T) {
 	dropKeyMadeForALostLead(hdb, zone, zone, sak.Keys[0].KeyRR.KeyTag())
 	if sak, err := hdb.GetSig0Keys(zone, tdns.Sig0StateActive); err == nil && len(sak.Keys) > 0 {
 		t.Errorf("the key made for a lead that moved is still active: keyid %d", sak.Keys[0].KeyRR.KeyTag())
+	}
+}
+
+// A new leader asks only the peers that may hold the zone's key. An auditor
+// never answers, so asking it cost the full timeout, and a key from an agent
+// that may not hold the zone's key is not the group's key.
+func TestTheLeaderAsksOnlyPeersThatMayHoldTheKey(t *testing.T) {
+	const zone = "asked.example."
+	handoverZone(t, zone)
+	var agents []*Agent
+	for _, id := range []AgentId{"alice.agent.example.", "bob.agent.example.", "carol.agent.example.", "dave.agent.example."} {
+		agents = append(agents, &Agent{Peer: hsync.NewPeer(id)})
+	}
+	var asked []AgentId
+	for _, a := range sig0KeyPeers(zone, agents, "alice.agent.example") { // alice leads; her own identity without the dot
+		asked = append(asked, a.ID)
+	}
+	if len(asked) != 1 || asked[0] != "bob.agent.example." {
+		t.Errorf("the leader asks %v, want only bob, the other agent with a voting role", asked)
 	}
 }

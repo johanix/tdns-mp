@@ -287,10 +287,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		{
 			zad, err := ar.GetZoneAgentData(zone)
 			if err == nil {
-				for _, agent := range zad.Agents {
-					if agent.ID == AgentId(ar.LocalAgent.Identity) {
-						continue
-					}
+				for _, agent := range sig0KeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
 					if !ar.isAgentOperational(agent.ID) {
 						continue
 					}
