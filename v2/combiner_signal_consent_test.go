@@ -590,3 +590,42 @@ func TestAStartThatCouldNotReadTheInstructionsStillAsksForConsent(t *testing.T) 
 	c.wantStored("both zones loaded", zone, []string{"at-apex"}, nil)
 	c.wantApexKey("both zones loaded", cust)
 }
+
+// The operator's re-apply withdraws the signal name of a zone without
+// pubkey, and the save of that fails: the KEY is out of memory and still in
+// the saved contributions. The re-apply's next step reloads those, KEY and
+// all. It must take the name out again rather than serve it: a re-apply
+// does not publish a KEY the customer has withdrawn. The name stays in the
+// instruction, and a re-apply once the database is back finishes the
+// withdrawal.
+func TestAReapplyWhoseSaveFailsServesNoWithdrawnSignalKey(t *testing.T) {
+	const zone = "reapplysave.customer.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	prov := c.load(consentProviderZone, consentProviderText())
+	cust := c.load(zone, consentCustomerText(zone, true))
+	c.sendKey(zone)
+	c.wantSignalKey("with pubkey", zone, consentNS1)
+
+	c.ownerSays(cust, false)
+	prov.Lock()
+	save := prov.MP.PersistContributions
+	prov.MP.PersistContributions = func(string, string, map[string]map[uint16]core.RRset) error {
+		return errors.New("the database is away")
+	}
+	prov.Unlock()
+	_, _ = CombinerReapplyContributions(consentProviderZone, c.hdb)
+	prov.Lock()
+	prov.MP.PersistContributions = save
+	prov.Unlock()
+	if served, held, persisted := c.signalKey(zone, consentNS1); served || held || !persisted {
+		t.Errorf("after a re-apply whose save failed: served=%v held=%v persisted=%v, want served=false held=false persisted=true", served, held, persisted)
+	}
+	c.wantStored("the save failed", zone, []string{"at-apex", "at-ns"}, []string{consentNS1})
+
+	if _, err := CombinerReapplyContributions(consentProviderZone, c.hdb); err != nil {
+		t.Fatalf("CombinerReapplyContributions: %v", err)
+	}
+	c.wantNoSignalKey("a re-apply once the database is back", zone, consentNS1)
+	c.wantStored("a re-apply once the database is back", zone, []string{"at-apex"}, nil)
+}
