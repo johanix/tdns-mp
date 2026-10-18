@@ -421,3 +421,31 @@ func TestARenewalCountsTheVoteOfAnIdentityWithoutTheTrailingDot(t *testing.T) {
 		}
 	}
 }
+
+// A heartbeat round checks the groups from a copy it took before a
+// recompute dropped one of them. Its members' rows survive the group, so the
+// check finds it mutually OPERATIONAL again and calls the operational
+// callback, which finds no group. The callback forgets the group, as its
+// going did: kept marked, a group that comes back would call no election.
+func TestAnOperationalCheckOfAGroupThatIsGoneLeavesItUnmarked(t *testing.T) {
+	const group = "fedcba9876543210"
+	a, b := "a.marker.example.", "b.marker.example."
+	gst := NewGossipStateTable(a)
+	gst.States[group] = map[string]*MemberState{
+		a: {Identity: a, PeerStates: map[string]string{b: AgentStateToString[AgentStateOperational]}},
+		b: {Identity: b, PeerStates: map[string]string{a: AgentStateToString[AgentStateOperational]}},
+	}
+	ar := &AgentRegistry{GossipStateTable: gst, ProviderGroupManager: NewProviderGroupManager(a)}
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.LeaderElectionManager = NewLeaderElectionManager(AgentId(a), time.Hour, nil)
+	conf.InternalMp.AgentRegistry = ar
+	wireAgentGossipCallbacks(conf, ar)
+
+	gst.CheckGroupState(group, []string{a, b})
+	gst.mu.Lock()
+	marked := gst.operationalGroups[group]
+	gst.mu.Unlock()
+	if marked {
+		t.Errorf("a group that is gone is marked OPERATIONAL after a late check; a group that comes back would call no election")
+	}
+}

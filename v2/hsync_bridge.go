@@ -279,18 +279,19 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 			return
 		}
 		pg := pgm.GetGroup(groupHash)
-		if pg == nil || len(pg.VotingMembers) == 0 {
+		if pg == nil {
+			// A heartbeat round that checked a copy of the groups taken
+			// before the group went must not leave it marked OPERATIONAL:
+			// a group that comes back would then call no election.
+			ar.GossipStateTable.forgetGroup(groupHash)
 			return
 		}
-		localID := string(lem.localID)
-		weVote := false
-		for _, m := range pg.VotingMembers {
-			if m == localID {
-				weVote = true
-				break
-			}
+		if len(pg.VotingMembers) == 0 {
+			return
 		}
-		if !weVote {
+		// The members come from zone data and carry the trailing dot; a
+		// configured identity need not (isAmong).
+		if !isAmong(pg.VotingMembers, lem.localID) {
 			return
 		}
 		initiator := pg.VotingMembers[0]
@@ -299,7 +300,7 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 				initiator = m
 			}
 		}
-		if localID == initiator {
+		if dns.Fqdn(string(lem.localID)) == dns.Fqdn(initiator) {
 			lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
 		}
 	})
