@@ -245,10 +245,11 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 	// Store for processing by the agent
 	ctx.SetHandledType("edits")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "edits",
-		SenderID:  edits.GetSenderID(),
-		Zone:      edits.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "edits",
+		SenderID:        edits.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            edits.Zone,
+		Payload:         ctx.ChunkPayload,
 	})
 
 	// Create confirmation response using standard "confirm" type
@@ -301,10 +302,11 @@ func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error
 
 	ctx.SetHandledType("config")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "config",
-		SenderID:  config.GetSenderID(),
-		Zone:      config.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "config",
+		SenderID:        config.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            config.Zone,
+		Payload:         ctx.ChunkPayload,
 	})
 
 	confirmPayload := struct {
@@ -356,10 +358,11 @@ func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 
 	ctx.SetHandledType("audit")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "audit",
-		SenderID:  audit.GetSenderID(),
-		Zone:      audit.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "audit",
+		SenderID:        audit.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            audit.Zone,
+		Payload:         ctx.ChunkPayload,
 	})
 
 	confirmPayload := struct {

@@ -533,12 +533,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// Set preferred transport based on what's offered
 		switch {
 		case apiOffered && dnsOffered:
-			peer.PreferredTransport = "API"
+			peer.SetPreferredTransport("API")
 			lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.ID)
 		case apiOffered:
-			peer.PreferredTransport = "API"
+			peer.SetPreferredTransport("API")
 		case dnsOffered:
-			peer.PreferredTransport = "DNS"
+			peer.SetPreferredTransport("DNS")
 		}
 
 		// Top-level State must agree with the per-mechanism truth:
@@ -551,7 +551,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			peer.SetState(transport.PeerStateKnown, "discovery complete")
 		}
 
-		lgTransport.Info("agent discovery complete, view materialized", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.PreferredTransport)
+		lgTransport.Info("agent discovery complete, view materialized", "agent", agent.ID, "anyUsable", anyUsable, "preferredTransport", peer.GetPreferredTransport())
 	}
 
 	// Symmetric failure-side seam (Bite D). Fired by MP's
@@ -715,7 +715,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	// inbound receipt must not assert top-level state.)
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastHelloReceived = time.Now()
+	helloAt := time.Now()
 	noAddress := false
 	if raw, ok := peer.MechanismRawState(mech); !ok || raw < transport.PeerStateIntroducing {
 		// An inbound hello shows that the peer reaches us, not that we reach
@@ -739,7 +739,7 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 		// of the rounds, so a repeated hello still leaves their pace alone.
 		tm.beatBack(senderID)
 	}
-	peer.SetMechanismLastHelloRecv(mech, peer.LastHelloReceived)
+	peer.SetMechanismLastHelloRecv(mech, helloAt)
 
 	// For an unknown (but authorized) sender, and for one whose mechanism has
 	// no address, trigger discovery so we can beat back. Contact timestamps
@@ -847,8 +847,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	// lives on the outbound success edge, not here.
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastBeatReceived = time.Now()
-	peer.SetMechanismLastBeatRecv(mech, peer.LastBeatReceived)
+	peer.SetMechanismLastBeatRecv(mech, time.Now())
 
 	// Inbound-liveness evidence lives on transport.Peer above (Phase 2: the
 	// AgentDetails telemetry mirror is gone; the NG beat-age scanner it once
@@ -935,8 +934,7 @@ func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	// path, not here.
 	mech := messageMechanism(msg)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastBeatReceived = time.Now()
-	peer.SetMechanismLastBeatRecv(mech, peer.LastBeatReceived)
+	peer.SetMechanismLastBeatRecv(mech, time.Now())
 
 	report := &AgentMsgReport{
 		Transport:      mech,
@@ -1006,7 +1004,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// reach us, not that we can reach them. State is set by the outbound
 	// beat path (SendBeatWithFallback), never on inbound receipt.
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
-	peer.LastBeatReceived = time.Now()
+	peer.SetLastBeatReceived(time.Now())
 
 	// DeliveredBy is the transport-level sender (from QNAME), which may differ from
 	// the originator for forwarded messages. The combiner needs this to send confirmations
@@ -1019,7 +1017,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	if deliveredBy != senderID {
 		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
 		// Inbound liveness only — do not assert OPERATIONAL on a delivery.
-		deliverPeer.LastBeatReceived = time.Now()
+		deliverPeer.SetLastBeatReceived(time.Now())
 		if deliverPeer.CurrentAddress() == nil {
 			lgTransport.Info("transport sender has no address, triggering async discovery", "sender", deliveredBy)
 			go func(peerID string) {
@@ -1167,9 +1165,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 }
 
-// routeEditsMessage routes an incoming EDITS message from the combiner.
-// Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
-// Modeled on routeKeystateMessage.
+// routeEditsMessage routes an incoming EDITS message from the combiner
+// to the RequestAndWaitForEdits that asked this sender for this zone.
 func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 	var payload DnsEditsPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1177,7 +1174,11 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("EDITS response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone)
+		return
+	}
 	lgTransport.Debug("processing EDITS", "sender", senderID, "zone", payload.Zone)
 
 	if tm.msgQs == nil {
@@ -1191,16 +1192,15 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		AgentRecords: payload.AgentRecords,
 	}
 
-	select {
-	case tm.msgQs.EditsResponse <- editsMsg:
+	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
 		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "agents", len(payload.AgentRecords))
-	default:
-		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
+	} else {
+		lgTransport.Warn("EDITS response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone)
 	}
 }
 
-// routeConfigMessage routes an incoming CONFIG response message from a peer agent.
-// Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
+// routeConfigMessage routes an incoming CONFIG response message from a peer agent
+// to the RequestAndWaitForConfig that asked this sender for this zone and subtype.
 func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) {
 	var payload DnsConfigPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1208,7 +1208,11 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("CONFIG response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone, "subtype", payload.Subtype)
+		return
+	}
 	lgTransport.Debug("processing CONFIG response", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
 
 	if tm.msgQs == nil {
@@ -1223,18 +1227,17 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 		ConfigData: payload.ConfigData,
 	}
 
-	select {
-	case tm.msgQs.ConfigResponse <- configMsg:
+	if tm.msgQs.configWaiters.deliver(rfiWaitKey(senderID, payload.Zone, payload.Subtype, payload.Nonce), configMsg) {
 		lgTransport.Info("routed CONFIG response to agent", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
-	default:
-		lgTransport.Warn("ConfigResponse channel full, dropping config", "sender", senderID)
+	} else {
+		lgTransport.Warn("CONFIG response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
 	}
 }
 
 // sendConfigToAgent gathers config data for the given subtype and sends it as a separate
 // CONFIG message back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI CONFIG is received.
-func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, subtype string, configData map[string]string) {
+func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, subtype string, nonce string, configData map[string]string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendConfigToAgent: no DNSTransport available", "requester", requesterID)
 		return
@@ -1251,6 +1254,7 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		Zone:       zone,
 		Subtype:    subtype,
 		ConfigData: configData,
+		Nonce:      nonce,
 		Timestamp:  time.Now(),
 	}
 
@@ -1270,8 +1274,8 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype)
 }
 
-// routeAuditMessage routes an incoming AUDIT response message from a peer agent.
-// Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
+// routeAuditMessage routes an incoming AUDIT response message from a peer agent
+// to the RequestAndWaitForAudit that asked this sender for this zone.
 func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 	var payload DnsAuditPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -1279,7 +1283,11 @@ func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID()
+	senderID, ok := rfiAnswerSender(msg, payload.GetSenderID())
+	if !ok {
+		lgTransport.Warn("AUDIT response not from the agent it names, dropping", "sender", senderID, "names", payload.GetSenderID(), "zone", payload.Zone)
+		return
+	}
 	lgTransport.Debug("processing AUDIT response", "sender", senderID, "zone", payload.Zone)
 
 	if tm.msgQs == nil {
@@ -1293,11 +1301,10 @@ func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 		AuditData: payload.AuditData,
 	}
 
-	select {
-	case tm.msgQs.AuditResponse <- auditMsg:
+	if tm.msgQs.auditWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), auditMsg) {
 		lgTransport.Info("routed AUDIT response to agent", "sender", senderID, "zone", payload.Zone)
-	default:
-		lgTransport.Warn("AuditResponse channel full, dropping audit", "sender", senderID)
+	} else {
+		lgTransport.Warn("AUDIT response matches no pending request, dropping", "sender", senderID, "zone", payload.Zone)
 	}
 }
 
@@ -1339,7 +1346,7 @@ func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMes
 // sendAuditToAgent gathers audit data and sends it as a separate AUDIT message
 // back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI AUDIT is received.
-func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, auditData interface{}) {
+func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, nonce string, auditData interface{}) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendAuditToAgent: no DNSTransport available", "requester", requesterID)
 		return
@@ -1355,6 +1362,7 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 		SenderID:  ar.LocalAgent.Identity,
 		Zone:      zone,
 		AuditData: auditData,
+		Nonce:     nonce,
 		Timestamp: time.Now(),
 	}
 
@@ -1519,20 +1527,22 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 
 // SelectTransport selects the appropriate transport for communicating with a peer.
 func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Transport {
+	apiEndpoint := peer.GetAPIEndpoint()
+
 	// Check peer's preferred transport
-	switch peer.PreferredTransport {
+	switch peer.GetPreferredTransport() {
 	case "DNS":
 		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
 			return tm.DNSTransport
 		}
 	case "API":
-		if tm.APITransport != nil && peer.APIEndpoint != "" {
+		if tm.APITransport != nil && apiEndpoint != "" {
 			return tm.APITransport
 		}
 	}
 
 	// Default: try API first (more reliable), then DNS
-	if tm.APITransport != nil && peer.APIEndpoint != "" {
+	if tm.APITransport != nil && apiEndpoint != "" {
 		return tm.APITransport
 	}
 	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
@@ -1616,7 +1626,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// transport's SendAll — every eligible mechanism is tried, in order,
 	// and each outcome is applied below exactly as before.
 	apiGate, _ := mechStateForGate(peer, "API")
-	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && apiGate == AgentStateKnown
+	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && apiGate == AgentStateKnown
 	dnsGate, _ := mechStateForGate(peer, "DNS")
 	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
 	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
@@ -1742,7 +1752,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		return st == AgentStateOperational || st == AgentStateIntroduced || st == AgentStateLegacy || st == AgentStateDegraded || st == AgentStateInterrupted
 	}
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIEndpoint != "" && beatable(apiBeatGate)
+	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
 	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
 	apiRaw, _ := peer.MechanismRawState("API")
@@ -2729,7 +2739,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) error {
+func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonce string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
@@ -2746,13 +2756,12 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) erro
 
 	peer := tm.GetOrCreatePeer(combiner)
 
-	syncReq := &PeerSyncRequest{
-		SenderID:    tm.LocalID,
-		Zone:        zone,
-		Timestamp:   time.Now(),
-		MessageType: "rfi",
+	syncReq := rfiSyncRequest(tm.LocalID, &AgentMsgPost{
+		MessageType: AgentMsgRfi,
+		Zone:        ZoneName(zone),
 		RfiType:     rfiType,
-	}
+		Nonce:       nonce,
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

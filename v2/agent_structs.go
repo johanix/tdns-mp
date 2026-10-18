@@ -5,6 +5,7 @@
 package tdnsmp
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -241,6 +242,7 @@ type AgentBeatResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+	Gossip       json.RawMessage `json:"Gossip,omitempty"` // the responder's gossip for the sender, as a DNS beat's confirm carries it
 }
 
 type AgentBeatReport struct {

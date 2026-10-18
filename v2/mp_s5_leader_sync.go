@@ -49,8 +49,8 @@ type delegationSyncRetryPolicy struct {
 // election manager there is nobody else to be it). The request is an
 // explicit sync: analysis first, an update only for a difference, so
 // asking twice sends once. It does not wait: the callers are engines'
-// loops. ctx is the asking engine's: a retry that comes due after it has
-// ended asks for nothing. Reports whether a request was queued now.
+// loops. ctx is the asking engine's: a retry ends with it, and asks for
+// nothing after it has ended. Reports whether a request was queued now.
 func (conf *Config) requestDelegationSync(ctx context.Context, zone string, why string) bool {
 	return conf.requestDelegationSyncAttempt(ctx, zone, why, 0,
 		delegationSyncRetryPolicy{delay: delegationSyncRetryDelay, retries: delegationSyncRetries})
@@ -81,8 +81,45 @@ func (conf *Config) requestDelegationSyncAttempt(ctx context.Context, zone strin
 		return false
 	}
 	lgEngine.Warn("the delegation sync queue is full; asking again shortly", "zone", zone, "why", why, "attempt", attempt+1, "in", policy.delay)
-	time.AfterFunc(policy.delay, func() { conf.requestDelegationSyncAttempt(ctx, zone, why, attempt+1, policy) })
+	conf.delegationSyncAfter(ctx, policy.delay, func() { conf.requestDelegationSyncAttempt(ctx, zone, why, attempt+1, policy) })
 	return false
+}
+
+// delegationSyncAfter runs f once d has passed, for the engine whose ctx is
+// given: a retry of a full queue, a chain's ask, the end of a hold and the
+// word that a hold still waits are scheduled this way. When the ctx ends
+// first, f does not run and nothing is left waiting. What is scheduled is
+// counted until it has returned (delegationSyncChains.timers), so that the
+// end of an engine can be waited for (waitDelegationSyncTimers).
+func (conf *Config) delegationSyncAfter(ctx context.Context, d time.Duration, f func()) {
+	var stopped <-chan struct{}
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		stopped = ctx.Done()
+	}
+	conf.InternalMp.delegationSyncChains.timers.Go(func() {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-stopped:
+			return
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return // both were ready, and the select took the timer
+		}
+		f()
+	})
+}
+
+// waitDelegationSyncTimers returns once nothing that delegationSyncAfter
+// scheduled is waiting or running. Once the engines' ctx has ended, that is
+// at once, or when what is running has returned: a test's rig waits for it
+// before it puts back the settings and the logger the test replaced.
+func (conf *Config) waitDelegationSyncTimers() {
+	conf.InternalMp.delegationSyncChains.timers.Wait()
 }
 
 // queueExplicitDelegationSync puts an explicit sync on the zone's queue
@@ -193,6 +230,9 @@ type delegationSyncChains struct {
 	// from the chains: a chain ends and starts over, and the CSYNC of a
 	// difference is made once
 	csyncs map[string]*delegationCsync
+	// timers counts what is scheduled for later, for every zone, until it
+	// has returned (delegationSyncAfter)
+	timers sync.WaitGroup
 }
 
 type delegationSyncChain struct {
@@ -267,7 +307,7 @@ func (c *delegationSyncChains) schedule(ch *delegationSyncChain) int {
 // given the ask its number, under the lock.
 func (conf *Config) delegationSyncAskAfter(ctx context.Context, zone string, ask int, delay time.Duration, why string) {
 	c := &conf.InternalMp.delegationSyncChains
-	time.AfterFunc(delay, func() {
+	conf.delegationSyncAfter(ctx, delay, func() {
 		c.mu.Lock()
 		ch := c.zones[zone]
 		if ch == nil || ch.ask != ask {
@@ -455,7 +495,7 @@ func (conf *Config) delegationSyncCheckAfter(ctx context.Context, zone string, t
 // caller has given the hold its number, under the lock.
 func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string, ask int, sent delegationNotifies, delays []time.Duration) {
 	c := &conf.InternalMp.delegationSyncChains
-	time.AfterFunc(sent.wait, func() {
+	conf.delegationSyncAfter(ctx, sent.wait, func() {
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
 		c.mu.Lock()
