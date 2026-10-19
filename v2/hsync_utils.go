@@ -1541,7 +1541,10 @@ func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSync
 // option went on at a refresh after the zone's first. The callback then runs,
 // after PostRefresh, the leader's setup that an election skipped while the
 // owner synced the zone (delegationSyncGivenBack). At a first load the option
-// comes on too, but there is no leader yet, and the election runs the setup.
+// comes on too, and that is no give-back: at start-up the zone's election runs
+// the setup. A zone whose first load comes after its group already has a
+// leader (a zone added to a running agent, a late first transfer) has no
+// election of its own, and waits for its group's next lease renewal.
 //
 // A zone whose HSYNCPARAM cannot be read keeps the option it has.
 func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {

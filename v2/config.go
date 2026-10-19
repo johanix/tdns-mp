@@ -81,8 +81,10 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 					mpzd.PostRefresh(tm, msgQs)
 					if givenBack {
 						// after PostRefresh, which applies this refresh's
-						// HSYNC3 change: who leads is judged on the groups
-						// that change gives
+						// HSYNC3 change and recomputes the groups: who leads
+						// is judged on the groups that change gives. (An
+						// edit that also removes this agent's own HSYNC3
+						// recomputes nothing, and is judged on the old ones.)
 						conf.delegationSyncGivenBack(mpzd.ZoneName)
 					}
 				}

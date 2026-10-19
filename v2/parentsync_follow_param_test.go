@@ -381,9 +381,9 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 }
 
 // A zone's first load turns the option on when HSYNCPARAM says
-// parentsync=agent, and that is no give-back: there is no leader yet, the
-// election runs the setup, and at start-up the election manager may not be
-// set yet. Only a later refresh can give the sync back.
+// parentsync=agent, and that is no give-back: at start-up the zone's election
+// runs the setup, and the election manager may not be set yet. Only a later
+// refresh can give the sync back.
 func TestAZonesFirstLoadIsNoGiveBack(t *testing.T) {
 	asMPAgent(t)
 	r := newLeaderSyncRig(t, "firstload.parentsync.example.")
