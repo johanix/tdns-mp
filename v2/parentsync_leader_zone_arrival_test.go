@@ -202,7 +202,7 @@ func stopElectionTimers(lem *LeaderElectionManager) {
 	lem.mu.RUnlock()
 	for _, le := range les {
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}

@@ -29,7 +29,7 @@ func senderTestGroup(t *testing.T) (*LeaderElectionManager, string) {
 			return
 		}
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}
@@ -169,7 +169,7 @@ func TestAnAgentIsAVotingMemberWhateverTheDotOnItsConfiguredName(t *testing.T) {
 	t.Cleanup(func() {
 		if le := groupElectionOf(lem, group); le != nil {
 			le.mu.Lock()
-			for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+			for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 				if tm != nil {
 					tm.Stop()
 				}

@@ -428,7 +428,7 @@ func (lem *LeaderElectionManager) onGroupVoteTimeout(groupHash string, term uint
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members voted, retrying",
 			"group", groupHash[:8], "term", term, "votes", collected, "expected", expected)
-		lem.retryGroupElection(groupHash, term)
+		lem.retryGroupElection(le, groupHash, term)
 		return
 	}
 	le.mu.Unlock()
@@ -504,7 +504,7 @@ func (lem *LeaderElectionManager) onGroupConfirmTimeout(groupHash string, term u
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members confirmed, retrying",
 			"group", groupHash[:8], "term", term, "confirms", collected, "expected", expected)
-		lem.retryGroupElection(groupHash, term)
+		lem.retryGroupElection(le, groupHash, term)
 		return
 	}
 	le.mu.Unlock()
@@ -542,7 +542,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		le.Active = false
 		le.mu.Unlock()
 		lgElect.Warn("group election: no consensus, re-electing", "group", groupHash[:8], "term", term)
-		lem.retryGroupElection(groupHash, term)
+		lem.retryGroupElection(le, groupHash, term)
 		return
 	}
 
@@ -615,8 +615,29 @@ func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, gr
 // found no consensus in term, after a short random delay, and only if no
 // other member's retry got there first (startGroupElection). It starts it
 // for the group as it is when the delay is over (groupForTimer).
-func (lem *LeaderElectionManager) retryGroupElection(groupHash string, term uint64) {
-	time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+//
+// The retry's timer is the election's (RetryTimer), so that a group that goes
+// stops it with the others (groupGone). Left running, it fired for a group
+// that had gone and come back, found the new election's term-1 entry idle,
+// and called a needless term-2 election that could replace the leader just
+// elected. A retry that fires as the group goes finds the election gone and
+// starts nothing.
+func (lem *LeaderElectionManager) retryGroupElection(le *LeaderElection, groupHash string, term uint64) {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	if le.gone {
+		return
+	}
+	if le.RetryTimer != nil {
+		le.RetryTimer.Stop()
+	}
+	le.RetryTimer = time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+		le.mu.Lock()
+		gone := le.gone
+		le.mu.Unlock()
+		if gone {
+			return
+		}
 		if pg := lem.groupForTimer(groupHash, "election retry"); pg != nil {
 			lem.startGroupElection(groupHash, pg.VotingMembers, pg.Zones, &term)
 		}
@@ -675,12 +696,12 @@ func (lem *LeaderElectionManager) groupGone(groupHash string) {
 	}
 	le.mu.Lock()
 	le.gone = true
-	for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+	for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 		if tm != nil {
 			tm.Stop()
 		}
 	}
-	le.ReelectTimer, le.VoteTimer, le.ConfirmTimer = nil, nil, nil
+	le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer = nil, nil, nil, nil
 	leader, term := le.Leader, le.Term
 	le.mu.Unlock()
 	lgElect.Info("provider group is gone, its election state dropped",

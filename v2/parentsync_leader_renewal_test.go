@@ -159,7 +159,7 @@ func (n *electionNet) start(t *testing.T) {
 		for _, lem := range n.mgrs {
 			if le := n.election(lem); le != nil {
 				le.mu.Lock()
-				for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+				for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 					if tm != nil {
 						tm.Stop()
 					}

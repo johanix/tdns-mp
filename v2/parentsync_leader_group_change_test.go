@@ -10,6 +10,7 @@ package tdnsmp
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -447,5 +448,45 @@ func TestAnOperationalCheckOfAGroupThatIsGoneLeavesItUnmarked(t *testing.T) {
 	gst.mu.Unlock()
 	if marked {
 		t.Errorf("a group that is gone is marked OPERATIONAL after a late check; a group that comes back would call no election")
+	}
+}
+
+// An aborted group election schedules a retry a second or so later. The
+// group goes before the retry fires, and is back by then. The retry belongs
+// to the election that went: it starts nothing, so it cannot call a needless
+// election that replaces the leader the group that came back elects.
+func TestARetryOfAGroupThatWentStartsNothing(t *testing.T) {
+	const group = "aa11bb22cc33dd44"
+	var calls atomic.Int32
+	lem := NewLeaderElectionManager("c.retry.example.", time.Hour,
+		func(ZoneName, string, map[string][]string) error { calls.Add(1); return nil })
+	pgm := NewProviderGroupManager("c.retry.example.")
+	voting := []string{"a.retry.example.", "b.retry.example.", "c.retry.example."}
+	pgm.Groups[group] = &ProviderGroup{GroupHash: group, Members: voting, VotingMembers: voting, Zones: []ZoneName{"zone.retry.example."}}
+	lem.SetProviderGroupManager(pgm)
+
+	le := &LeaderElection{Term: 1}
+	lem.mu.Lock()
+	lem.groupElections[group] = le
+	lem.mu.Unlock()
+	lem.retryGroupElection(le, group, 1)
+	lem.groupGone(group)
+
+	// The group is back (the provider group manager still has it) and has
+	// elected in a term 1 of its own: an idle entry at term 1, with a leader.
+	back := &LeaderElection{Term: 1, Leader: "a.retry.example.", LeaderExpiry: time.Now().Add(time.Hour)}
+	lem.mu.Lock()
+	lem.groupElections[group] = back
+	lem.mu.Unlock()
+
+	time.Sleep(1800 * time.Millisecond)
+	if n := calls.Load(); n != 0 {
+		t.Errorf("the retry of an election whose group went called an election (%d messages sent)", n)
+	}
+	now := groupElectionOf(lem, group)
+	now.mu.Lock()
+	defer now.mu.Unlock()
+	if now.Term != 1 || now.Active || now.Leader != "a.retry.example." {
+		t.Errorf("the group that came back is at term %d (active %v, leader %s), want its own term 1 with its leader", now.Term, now.Active, now.Leader)
 	}
 }
