@@ -971,9 +971,12 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	// The distribution ID is extracted from the CHUNK qname, not the JSON payload.
-	// Propagate it into the parsed payload so downstream code (AgentMsgPost,
-	// sendImmediateConfirmation) can access it uniformly.
+	// The sender puts its distribution ID in the payload (syncWirePayload).
+	// Over DNS it is also the one in the query name; over HTTPS the
+	// transport made the message an ID of its own, which the sender does
+	// not know. A payload with none takes the transport's, so that
+	// downstream code (AgentMsgPost, sendImmediateConfirmation) can read it
+	// in one place.
 	if msg.DistributionID != "" && payload.DistributionID == "" {
 		payload.DistributionID = msg.DistributionID
 	}
