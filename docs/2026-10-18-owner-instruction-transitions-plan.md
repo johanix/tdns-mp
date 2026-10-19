@@ -240,6 +240,7 @@ For comparison: the membership plan sized its steps 9, 9b and 10 at about 1,100 
 - A new value type: on the wire 4 octets in network order, any other length refused; in text decimal, 0 to 4294967295, written `serial=7` or `serial="7"`, no sign, no hex.
 - An accessor `GetSerial() (uint32, bool)`. Nothing in tdns acts on the value.
 - `Parse` refuses a repeated key (`:246-285`), as `Pack` does (`:191-194`), so a zone file with one fails at its load and not at its first transfer.
+- **Lists are Labels, and a malformed list is refused** (the project owner, 2026-10-19; tdns#928 at `e6d64979`). A Label is 1 to 16 characters, each a lowercase ASCII letter, a digit or a hyphen, so Labels compare octet by octet with no case folding. `servers`, `signers` and `auditors` are Labels separated by commas and nothing else, the same on the wire and in text. The wire decoder, the text parser and the encoder refuse an empty item, a space, an uppercase letter, more than 16 characters and any other character; the text parser no longer drops empty items or trims spaces. An empty value is the empty list. The draft (#3) defines the same Label syntax, and a receiver MUST reject a malformed list. The HSYNC3 Label and Upstream fields are not under the rule yet; that is proposed as a tdns follow-up.
 
 Then a new pseudo-version of the core module. tdns-mp re-pins only the core module in S1.
 
@@ -317,7 +318,7 @@ type Instructions struct {
     HasParam bool           // false: HSYNC3 without HSYNCPARAM, the legacy case
     Records  []InstrRecord  // ON records, sorted by label
     Off      []string       // labels of OFF records, sorted
-    Servers, Signers, Auditors []string // sorted sets, no empty entries, no trailing dots
+    Servers, Signers, Auditors []string // sorted sets of Labels (P1), compared octet by octet
     NSmgmt, ParentSync uint8 // absent reads as the default
     Suffix   string
     Pubkey, Pubcds bool
@@ -331,6 +332,7 @@ func CompareSerial(a, b uint32) int                                // RFC 1982; 
 
 - The reading follows rule 2. tdns's parser adds a trailing dot to a label and an upstream (tdns `3615261f:v2/core/rr_hsync3.go:54, 61`); the reading drops it. Unknown and private-use keys, TTLs and signatures are not read.
 - `HasParam` is in the digest. Without it, HSYNC3 without HSYNCPARAM and an HSYNCPARAM with no lists would read alike, and they do not mean the same: in the first every ON record votes (`ec1c6b3:v2/provider_groups.go:106-113`; membership step 1), in the second nobody has a role.
+- The lists need no folding or trimming here: with P1, tdns refuses a malformed list when the zone loads, so a reading has Labels only. The configure generator must not write a list tdns refuses: `providerLabel` (`ed6d874:v2/cli/configure/render.go:149-159`) lowercases the first label of the agent's identity (the second after `agent`) but does not check the Label rule, so an identity whose label is longer than 16 characters or holds another character gives an example zone that does not load. With the re-pin it refuses such an identity, with a message that asks for a shorter label.
 - Owner errors: `errTwoHsyncparams` (more than one record), `errDuplicateLabel` (two HSYNC3 records with one label, in any state). HSYNC3 without HSYNCPARAM is the legacy reading; S2 decides what it means against a held version.
 - The digest: SHA-256 over a versioned, length-prefixed encoding of the reading without the serial, first 8 octets as 16 hex digits, the form of `ComputeGroupHash` (`ec1c6b3:v2/provider_groups.go:32-50`).
 - `CompareVersions(held, copy)`: same, newer, older, conflict (same serial, another digest), or undefined (RFC 1982's undefined half, read as not newer). Records are matched by label and identity together: an identity changed under a label is one record removed and another added (rule 2).
