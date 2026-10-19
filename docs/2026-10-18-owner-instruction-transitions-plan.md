@@ -6,7 +6,7 @@ This is the plan for the design in `2026-10-18-owner-instruction-transitions-des
 
 It follows the membership plan, `2026-10-12-membership-and-catch-up-plan.md` ("the membership plan"). Its steps 1 to 8 are implemented first and are this plan's ground. Its steps 9, 9b and 10, marked moved there, are this plan's starting material: they are taken up in S6 to S9, S14, S15 and S22.
 
-**The membership plan's decisions of 2026-10-19** (the project owner's answers to its 13 open questions) that touch this plan: the removal of a provider is this plan's (membership decision 40; S12, S16, S17b); membership step 6 takes nothing but the rows from a beat's answer (membership decision 35; S5a); no catch-up answer names the zone's KEY until S14 (membership decision 27); step 8's elections use main's key set-up as PR #213 left it, and S14 makes one rule for an election and an arrival (membership decision 32); until the switch, step 7's gate asks for a role as admission does (membership decision 31; S15); an agent with no vote in a zone leads it no more (membership decision 34; S15). This plan's own decisions keep their numbers; "decision N" alone is this plan's.
+**The membership plan's decisions of 2026-10-19** (the project owner's answers to its 13 open questions) that touch this plan: the removal of a provider is this plan's (membership decision 40; S12, S16, S17b); membership step 6 takes nothing but the rows from a beat's answer (membership decision 35; S5a); no catch-up answer names the zone's KEY until S14 (membership decision 27); step 8's elections use main's key set-up as PR #213 left it, and S14 makes one rule for an election and an arrival (membership decision 32); until the switch, step 7's gate asks for a role as admission does (membership decision 31; S15); an agent with no vote in a zone leads it no more (membership decision 34; S15). From the external review of the membership plan, the same day: a SYNC carries its distribution ID in the payload, so that a SYNC's confirmation over HTTPS reaches its sender, in a small pull request before membership step 3 (membership decision 41; S5b's confirmations rely on it); and a provider in `servers=` or `signers=` does not move to `auditors=`: it is removed and added back as an auditor, and nothing looks for that edit (membership decision 45). This plan does not cover that move: the judge refuses it as a kind of change with no steps (S4), with nothing written for it. This plan's own decisions keep their numbers; "decision N" alone is this plan's.
 
 **Base.** tdns-mp main at `ec1c6b3`, which pins tdns at `3615261f` (the core module at `dd133172`) and tdns-transport at `f76a204` (`ec1c6b3:v2/go.mod:9-13`). Open pull requests at their heads of 2026-10-18: tdns-mp #209 (`6eeb002`), #208 (`b7534c3`), #185 (`6a673ca`), #186 (`8ba5984`), #167 (`09dffcd`), #169 (`db29f4b`); tdns #926 (`e7bfb9fa`).
 
@@ -562,7 +562,7 @@ Log, info, logger `gossip`: "a member tells newer instructions, fetching the zon
 
 ### S5b. Stamps on messages and confirmations
 
-**Before it:** S5a. P2 and a new pin of tdns-transport. Membership step 3, for the sync wrapper.
+**Before it:** S5a. P2 and a new pin of tdns-transport. Membership step 3, for the sync wrapper, and the pull request of membership decision 41, without which no confirmation of a SYNC sent over HTTPS reaches its sender.
 
 **Changes.**
 
