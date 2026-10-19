@@ -259,6 +259,15 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		fmt.Fprintf(w, "  leader:         %s, lease expires in %s\n", leader, lease)
 	}
 	fmt.Fprintf(w, "  election term:  %d\n", s.ElectionTerm)
+	if c := s.CatchUp; c != nil {
+		if c.NotVoting {
+			fmt.Fprintln(w, "  catch-up:       none: this agent does not vote in the zone, and asks nothing")
+		} else if c.CaughtUp {
+			fmt.Fprintln(w, "  catch-up:       caught up")
+		} else {
+			fmt.Fprintf(w, "  catch-up:       not caught up, waiting for %s\n", termSafe(c.WaitingFor))
+		}
+	}
 
 	if s.KeyAlgorithm == "" {
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")
@@ -321,6 +330,23 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		}
 	}
 
+	if c := s.CatchUp; c != nil && len(c.Peers) > 0 {
+		fmt.Fprintln(w, "\nCatch-up, per voting member:")
+		fmt.Fprintf(w, "  %-12s  %-8s  %-8s  %-10s  %s\n", "Answer", "Asked", "Answered", "Reason", "Identity")
+		for _, p := range c.Peers {
+			reason := p.Reason
+			if reason == "" {
+				reason = "-"
+			}
+			note := ""
+			if p.Note != "" {
+				note = "  (" + termSafe(p.Note) + ")"
+			}
+			fmt.Fprintf(w, "  %-12s  %-8s  %-8s  %-10s  %s%s\n", termSafe(p.Answer), clockOrDash(p.Asked), clockOrDash(p.Answered),
+				termSafe(reason), termSafe(string(p.Identity)), note)
+		}
+	}
+
 	if len(s.Peers) > 0 {
 		// Transport is the one that is live towards the peer, "-" for none.
 		fmt.Fprintln(w, "\nPeers:")
@@ -334,6 +360,14 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 				termSafe(p.State), termSafe(p.Transport), operational, termSafe(string(p.Identity)))
 		}
 	}
+}
+
+// clockOrDash is the time of day the agent gave, "-" for none.
+func clockOrDash(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format("15:04:05")
 }
 
 func publishedOrNot(published bool) string {

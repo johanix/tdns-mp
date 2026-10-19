@@ -45,6 +45,10 @@ type MPTransportBridge struct {
 	// (keyHandOverAdmits)
 	keyAsks keyAskTable
 
+	// catchUp is the agent's catch-up tracker (catchup.go), as
+	// conf.InternalMp.CatchUp; nil on every other role.
+	catchUp *catchUpTracker
+
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
 
@@ -1822,6 +1826,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			}
 		}
 	}
+	// A beat that succeeded, on one mechanism or both, is one successful
+	// beat to the peer for the catch-up tracker.
+	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
+		tm.catchUp.PeerOperational(agent.ID)
+	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
 			if resp == nil || len(resp.Gossip) == 0 {
@@ -2944,6 +2953,12 @@ func helloResult(r transport.MechanismResult) (*transport.HelloResponse, error) 
 	}
 	resp, _ := r.Response.(*transport.HelloResponse)
 	return resp, nil
+}
+
+// beatSucceeded: a beat's round trip succeeded, as SendBeatWithFallback
+// takes it: no error, and no answer that withholds its acknowledgement.
+func beatSucceeded(resp *transport.BeatResponse, err error) bool {
+	return err == nil && (resp == nil || resp.Ack)
 }
 
 func beatResult(r transport.MechanismResult) (*transport.BeatResponse, error) {

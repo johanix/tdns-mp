@@ -260,6 +260,14 @@ type ZoneRefreshAnalysis struct {
 	HsyncStatus       *HsyncStatus
 	DnskeyChanged     bool
 	DnskeyStatus      *DnskeyStatus
+	// What the catch-up asks for at the refresh (catchup.go, afterRefresh):
+	// the agent's standing in the served zone and in the incoming one,
+	// whether this is the zone's first load, and the identities that became
+	// voting members.
+	StandingBefore standing
+	StandingAfter  standing
+	FirstLoad      bool
+	NewVoters      []AgentId
 }
 
 // Transaction API types

@@ -389,7 +389,8 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 		"hello_fast_attempts", cfg.HelloFastAttempts,
 		"hello_fast_interval", cfg.HelloFastSpacing,
 		"discoveryretry", cfg.RetryInterval,
-		"reconcile", cfg.ReconcileInterval)
+		"reconcile", cfg.ReconcileInterval,
+		"catchup_outage", catchUpOutageFor(mp))
 	deps := hsync.Deps{
 		LocalID:           hsync.PeerID(mp.Identity),
 		LocalBeatInterval: mp.Remote.BeatInterval,
@@ -404,7 +405,10 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 			OnPeerStored: func(peer *hsync.Peer) { ar.materializeAgentView(peer) },
 			// Phase 3c: prunes are events — drop the MP view + transport
 			// peer promptly when the engine removes a peer object.
-			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer.ID) },
+			OnPeerRemoved: func(peer *hsync.Peer) {
+				ar.removePeerView(peer.ID)
+				conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
+			},
 		},
 		Host: hsync.HostCallbacks{
 			OnHsync3Changed: func(zone hsync.ZoneName) {

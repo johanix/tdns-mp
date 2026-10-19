@@ -611,6 +611,11 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 	tm.onKeyInventory = conf.noteKeyInventory
 	conf.InternalMp.MPTransport = tm
+	// The catch-up tracker, before the refresh engine starts: a zone's
+	// first load asks through it.
+	catchUp := newCatchUpTracker(AgentId(mp.Identity), conf.InternalMp.MPZoneNames, catchUpOutageFor(mp))
+	catchUp.wire(tm, conf.InternalMp.AgentRegistry)
+	conf.InternalMp.CatchUp, tm.catchUp = catchUp, catchUp
 	// the DS set of a zone our own signer does not own (Amendment 2), and
 	// the other providers' word on the one it owns (#207)
 	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {

@@ -130,6 +130,9 @@ type MultiProviderConf struct {
 			Reconcile         int `yaml:"reconcile" mapstructure:"reconcile"`
 			HelloFastAttempts int `yaml:"hello_fast_attempts" mapstructure:"hello_fast_attempts"`
 			HelloFastInterval int `yaml:"hello_fast_interval" mapstructure:"hello_fast_interval"`
+			// CatchupOutage: a peer back after a longer gap between two
+			// successful beats is asked for the zones' state (catchup.go).
+			CatchupOutage int `yaml:"catchup_outage" mapstructure:"catchup_outage"`
 		} `yaml:"intervals" mapstructure:"intervals"`
 	} `yaml:"syncengine" mapstructure:"syncengine"`
 	Api LocalAgentApiConf

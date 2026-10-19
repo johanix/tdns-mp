@@ -1473,6 +1473,28 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 	}
 
+	// The catch-up's reasons at a refresh (catchup.go, afterRefresh): the
+	// agent's standing in the served zone and in the incoming one, read as
+	// HsyncChanged reads them, and the identities that became voting
+	// members. Whether this is the zone's first load is kept until a
+	// PostRefresh takes it: PostRefresh has no such signal of its own, and
+	// at a first load tdns runs it only once the zone is ready.
+	if tdns.Globals.App.Type == AppTypeMPAgent && mp != nil {
+		oldApex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
+		pBefore, before := zoneParticipants(oldApex)
+		pAfter, after := zoneParticipants(newApex)
+		analysis.StandingBefore = standingIn(oldApex, pBefore, before, mp.Identity)
+		analysis.StandingAfter = standingIn(newApex, pAfter, after, mp.Identity)
+		prev := mpzd.MP.RefreshAnalysis
+		analysis.FirstLoad = mpzd.FirstZoneLoad || (prev != nil && prev.FirstLoad)
+		for _, id := range after {
+			if !isAmong(before, AgentId(id)) {
+				analysis.NewVoters = append(analysis.NewVoters, AgentId(id))
+			}
+		}
+	}
+
 	// DNSKEY change detection — only for roles that actually act on
 	// DNSKEY data (signer signs zones; agent contributes its own
 	// DNSKEYs; combiner needs awareness). The auditor observes
@@ -1870,5 +1892,12 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
 		// is done in MPPreRefresh on new_zd before the flip.
+	}
+
+	// What the refresh calls for of the catch-up: the requests of the
+	// zone's first load, of a standing that rose and of a new voting
+	// member, and the end of those that no longer apply.
+	if tdns.Globals.App.Type == AppTypeMPAgent && tm != nil && mpzd.Options[tdns.OptMultiProvider] {
+		tm.catchUp.afterRefresh(ZoneName(mpzd.ZoneName), analysis)
 	}
 }

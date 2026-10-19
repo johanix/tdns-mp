@@ -139,6 +139,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 		}
 		lgEngine.Info("startup hydration complete")
 	}
+	// The catch-up tracker sends from here on: answers to its requests,
+	// and requests back, no longer wait on this loop.
+	conf.InternalMp.CatchUp.run(ctx, zdr)
 
 	// Periodic eviction of stale tracking entries (terminal states older than 1 hour).
 	trackingEvictTicker := time.NewTicker(5 * time.Minute)
@@ -334,6 +337,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					if cu := synchedDataUpdate.CatchUp; cu != nil && err == nil {
 						lgEngine.Info("a peer answered a request for the zone's state", "zone", synchedDataUpdate.Zone,
 							"peer", synchedDataUpdate.AgentId, "request", cu.Request, "complete", cu.IsComplete(), "why", cu.Why)
+						conf.InternalMp.CatchUp.Answered(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, cu)
 					}
 					// What a replace the repo found stale says about keys is
 					// stale too (it is out of the update by now): an older
@@ -886,6 +890,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				if a := sdcmd.ownRead; a != nil {
 					if zd, ok := Zones.Get(string(sdcmd.Zone)); ok {
 						applyOwnRead(zd, a, zdr, AgentId(conf.MpConfig().Identity))
+						conf.InternalMp.CatchUp.ownReadDone(sdcmd.Zone)
 					}
 				}
 
@@ -925,6 +930,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						continue
 					}
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: msg}
+					// a peer that started is asked back (peer-start)
+					conf.InternalMp.CatchUp.Requested(sdcmd.Zone, sdcmd.TargetAgent, sdcmd.CatchUp)
 					continue
 				}
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)

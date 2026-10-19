@@ -1957,6 +1957,12 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// as this agent's.
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry) && votesInZone(zone, lem.localID)
 
+	// The zone's catch-up (catchup.go), which needs neither the zone's data
+	// nor the keystore.
+	if ar != nil && ar.MPTransport != nil {
+		status.CatchUp = ar.MPTransport.catchUp.Status(zone)
+	}
+
 	if zd == nil || hdb == nil {
 		return status
 	}
