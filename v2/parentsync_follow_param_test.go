@@ -581,6 +581,16 @@ func TestAGiveBackThatAlsoRemovesThisAgentRunsNoSetupHere(t *testing.T) {
 // still participates in the zone, which the refresh has already published.
 func TestAnAgentTheZoneNoLongerHasSyncsNothing(t *testing.T) {
 	asMPAgent(t)
+	// With the option off too, as for an agent the zone's records do not
+	// name: the reason given is still that it no longer participates.
+	for _, optionOn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("option %v", optionOn), func(t *testing.T) {
+			noLongerParticipates(t, optionOn)
+		})
+	}
+}
+
+func noLongerParticipates(t *testing.T, optionOn bool) {
 	r := newNotifyRig(t, "removed.update.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
 	r.propagation(0)
 	z := r.mpzd.ZoneName
@@ -611,8 +621,11 @@ func TestAnAgentTheZoneNoLongerHasSyncsNothing(t *testing.T) {
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
 	r.mpzd.Data.Set(z, apex)
 	r.mpzd.InstallInitialSnapshot()
-	if !r.mpzd.Options[tdns.OptParentSync] || !r.lem.IsLeader(ZoneName(z)) {
-		t.Fatal("the rig does not start as the zone's leader with the sync on")
+	if !r.lem.IsLeader(ZoneName(z)) {
+		t.Fatal("the rig does not start as the zone's leader")
+	}
+	if !optionOn {
+		r.mpzd.SetRuntimeOption(tdns.OptParentSync, false)
 	}
 
 	r.q <- tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, SyncStatus: dss}
