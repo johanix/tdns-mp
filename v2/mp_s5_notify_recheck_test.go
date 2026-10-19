@@ -48,6 +48,7 @@ type fakeParent struct {
 	ns      []string
 	ds      []dns.RR
 	updates int
+	refuse  bool // answer an UPDATE REFUSED, as a parent that will not take it yet
 }
 
 func newFakeParent(t *testing.T, child string) *fakeParent {
@@ -92,6 +93,9 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 	defer p.mu.Unlock()
 	if r.Opcode == dns.OpcodeUpdate {
 		p.updates++
+		if p.refuse {
+			m.Rcode = dns.RcodeRefused
+		}
 		_ = w.WriteMsg(m)
 		return
 	}
@@ -120,6 +124,13 @@ func (p *fakeParent) holdsNS(ns ...string) {
 func (p *fakeParent) holdsDS(ds ...dns.RR) {
 	p.mu.Lock()
 	p.ds = ds
+	p.mu.Unlock()
+}
+
+// refuses has the parent answer every UPDATE REFUSED.
+func (p *fakeParent) refuses() {
+	p.mu.Lock()
+	p.refuse = true
 	p.mu.Unlock()
 }
 
