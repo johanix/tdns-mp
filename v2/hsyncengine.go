@@ -744,6 +744,9 @@ func rfiSyncRequest(localID string, msg *AgentMsgPost) *PeerSyncRequest {
 		RfiType:     msg.RfiType,
 		RfiSubtype:  msg.RfiSubtype,
 		Nonce:       msg.Nonce,
+		// set by a sender that must know it in advance; empty, the
+		// transport makes one
+		DistributionID: msg.DistributionID,
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -508,19 +509,24 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	// The answer to a request for the zone's SIG(0) key is let in from a
 	// peer that has no role in the zone (keyHandOverAdmits): the leader of
 	// the group the zone left, whose role the owner may have taken.
+	// Its delivery confirmation is let in by its distribution id alone.
+	var distributionID string
 	if subtype == "sig0key" && ar.MPTransport != nil {
 		defer ar.MPTransport.keyAsks.start(string(agent.ID), zone)()
+		distributionID = transport.GenerateDistributionID()
+		ar.MPTransport.keyAsks.expectConfirm(string(agent.ID), distributionID)
 	}
 
 	// Send RFI CONFIG to the peer agent
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
-		MessageType:  AgentMsgRfi,
-		OriginatorID: AgentId(ar.LocalAgent.Identity),
-		YourIdentity: agent.ID,
-		Zone:         ZoneName(zone),
-		RfiType:      "CONFIG",
-		RfiSubtype:   subtype,
-		Nonce:        nonce,
+		MessageType:    AgentMsgRfi,
+		OriginatorID:   AgentId(ar.LocalAgent.Identity),
+		YourIdentity:   agent.ID,
+		Zone:           ZoneName(zone),
+		RfiType:        "CONFIG",
+		RfiSubtype:     subtype,
+		DistributionID: distributionID,
+		Nonce:          nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.ID, "zone", zone, "subtype", subtype, "err", err)

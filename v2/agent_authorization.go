@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
@@ -244,10 +245,13 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 	}
 	switch msg.Token() {
 	case "confirm":
-		// The delivery confirmation of the key's request or answer: the
-		// transport settles the sender's queued message with it. It moves
-		// no zone data.
-		return true
+		// The delivery confirmation of the key's request or of its answer,
+		// and of no other message: its distribution id is one this agent
+		// sent the key exchange with, to this sender (expectConfirm).
+		var p transport.DnsConfirmPayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil && tm.keyAsks.confirmExpected(sender, p.DistributionID) {
+			return true
+		}
 	case "rfi":
 		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" {
 			return true
@@ -264,10 +268,53 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 }
 
 // keyAskTable is the requests for a zone's SIG(0) key this agent has out,
-// by peer and zone: an answer from that peer about that zone is due.
+// by peer and zone: an answer from that peer about that zone is due. And the
+// distribution ids of the key exchange's own messages, by the peer they went
+// to, whose delivery confirmations are due (expectConfirm).
 type keyAskTable struct {
-	mu   sync.Mutex
-	asks map[string]int
+	mu       sync.Mutex
+	asks     map[string]int
+	confirms map[string]keyConfirm
+}
+
+// keyConfirm is a delivery confirmation due from peer until expires.
+type keyConfirm struct {
+	peer    string
+	expires time.Time
+}
+
+// keyConfirmWait is how long a key exchange message's delivery confirmation
+// is let in: well past the transport's retries.
+const keyConfirmWait = 5 * time.Minute
+
+// expectConfirm notes a key exchange message sent to peer under id.
+func (t *keyAskTable) expectConfirm(peer, id string) {
+	if id == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.confirms == nil {
+		t.confirms = map[string]keyConfirm{}
+	}
+	now := time.Now()
+	for k, c := range t.confirms {
+		if now.After(c.expires) {
+			delete(t.confirms, k)
+		}
+	}
+	t.confirms[id] = keyConfirm{peer: dns.Fqdn(peer), expires: now.Add(keyConfirmWait)}
+}
+
+// confirmExpected: a delivery confirmation from peer for id is due.
+func (t *keyAskTable) confirmExpected(peer, id string) bool {
+	if id == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	c, ok := t.confirms[id]
+	return ok && c.peer == dns.Fqdn(peer) && time.Now().Before(c.expires)
 }
 
 func keyAskKey(peer, zone string) string { return dns.Fqdn(peer) + " " + dns.Fqdn(zone) }

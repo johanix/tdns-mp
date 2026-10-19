@@ -161,9 +161,25 @@ func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *tes
 	if reached(rfiMessage(t, arrivalA, moved, "upstream")) {
 		t.Error("another request from A about the zone C has no role in reaches C's handler")
 	}
-	// The delivery confirmation of the request or the answer reaches the
-	// transport's own handler, which settles the sender's queued message.
-	if !reached(&transport.IncomingMessage{TypeToken: "confirm", SenderID: arrivalA, Zone: string(moved)}) {
-		t.Error("A's delivery confirmation about the zone does not reach C's transport")
+	// A delivery confirmation reaches the transport's own handler, which
+	// settles the sender's queued message, only when it confirms the key
+	// exchange's own message, sent to that peer. Any other confirmation
+	// would settle another distribution.
+	confirm := func(sender, id string) *transport.IncomingMessage {
+		payload, err := json.Marshal(&transport.DnsConfirmPayload{Type: "confirm", SenderID: sender, Zone: string(moved), DistributionID: id})
+		if err != nil {
+			t.Fatalf("confirm payload: %v", err)
+		}
+		return &transport.IncomingMessage{TypeToken: "confirm", SenderID: sender, Zone: string(moved), Payload: payload}
+	}
+	if reached(confirm(arrivalA, "other-distribution")) {
+		t.Error("a confirmation of another distribution reaches C's transport")
+	}
+	c.keyAsks.expectConfirm(arrivalA, "key-answer")
+	if !reached(confirm(arrivalA, "key-answer")) {
+		t.Error("A's confirmation of C's answer about the key does not reach C's transport")
+	}
+	if reached(confirm(arrivalB, "key-answer")) {
+		t.Error("B's confirmation of the answer C sent to A reaches C's transport")
 	}
 }
