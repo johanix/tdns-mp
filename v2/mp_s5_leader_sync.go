@@ -580,6 +580,20 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	}
 }
 
+// endDelegationSyncWork ends what this agent has scheduled for the zone's
+// parent, as delegationSyncOwnerSyncs does: the chain, a held NOTIFY with it,
+// and every sync under way, the key poll included, under the chains' lock at
+// once. It says whether there was a chain or a run to end.
+func (conf *Config) endDelegationSyncWork(zone string) bool {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	_, chained := c.zones[zone]
+	c.endChainLocked(zone)
+	n := c.cancelRunsLocked(zone)
+	c.mu.Unlock()
+	return chained || n > 0
+}
+
 // delegationSyncRun gives a leader sync of the zone a context of its own,
 // which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
 // over. A sync can sit in tdns's UPDATE retry loop for a minute or more after

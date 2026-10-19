@@ -151,7 +151,11 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					}
 					// the leader's sync of a multi-provider zone is asked
 					// again: whatever asked for it will not ask twice
-					if mpLeaderSync(conf, ds) {
+					//
+					// A sync that was stopped because this agent no longer
+					// takes part in the zone (followParentSyncParam) is not a
+					// failure to ask again for.
+					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
 					}
 					continue
@@ -219,7 +223,11 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// a refusal that passes by itself (a SIG(0) key the parent
 					// has not finished verifying) must not leave the parent
 					// without the DS set until the keys change again
-					if mpLeaderSync(conf, ds) {
+					//
+					// A sync that was stopped because this agent no longer
+					// takes part in the zone (followParentSyncParam) is not a
+					// failure to ask again for.
+					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
 					}
 				} else {
@@ -318,6 +326,9 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	var notifies []tdns.NotifyRequest
 	for len(taken) > 0 {
 		notifies = append(notifies, <-taken)
+	}
+	if err != nil && runCtx.Err() != nil && !conf.stillParticipates(ds.ZoneName) {
+		return msg, rcode, ur, false, fmt.Errorf("this agent no longer takes part in the zone; the sync is stopped: %w", err)
 	}
 	if err != nil && ownerSyncsDelegation(ds.ZoneData) {
 		return msg, rcode, ur, false, fmt.Errorf("the zone's owner has taken its delegation sync over; the sync is stopped: %w", err)

@@ -49,6 +49,27 @@ func servedParentSync(t *testing.T, mpzd *MPZoneData, parentsync *uint8, gone bo
 	mpzd.InstallInitialSnapshot() // the analysis reads the zone as it is served
 }
 
+// namedInTheZone gives the zone an ON HSYNC3 record for the agent, and the
+// agent the role servers= in a new HSYNCPARAM. The delegation sync follows
+// HSYNCPARAM only for a zone whose records name this agent.
+func namedInTheZone(t *testing.T, mpzd *MPZoneData, identity string) {
+	t.Helper()
+	zone := mpzd.ZoneName
+	apex, ok := mpzd.Data.Get(zone)
+	if !ok {
+		t.Fatalf("the zone %s has no apex", zone)
+	}
+	label := shortLabel(identity)
+	h3 := &dns.PrivateRR{Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNC3, Class: dns.ClassINET, Ttl: 3600},
+		Data: &core.HSYNC3{State: 1, Label: label, Identity: dns.Fqdn(identity), Upstream: "."}}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: []dns.RR{h3}})
+	hp := &dns.PrivateRR{Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{label}}}}}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
+	mpzd.Data.Set(zone, apex)
+	mpzd.InstallInitialSnapshot()
+}
+
 // refreshed runs the post-refresh callbacks that the daemon registers for a
 // multi-provider zone (RegisterMPRefreshCallbacks), as a refresh does that
 // found the HSYNC records changed.
@@ -78,6 +99,7 @@ var (
 func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 	asMPAgent(t)
 	r := newLeaderSyncRig(t, "follow.parentsync.example.")
+	namedInTheZone(t, r.mpzd, "agent.us.example.")
 	r.leader("agent.us.example.")
 	z := r.mpzd.ZoneName
 	r.mpzd.SetOption(tdns.OptParentSync, false)
@@ -115,6 +137,7 @@ func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 func TestTheOwnersHSYNCPARAMOutweighsTheAgentsConfig(t *testing.T) {
 	asMPAgent(t)
 	r := newLeaderSyncRig(t, "static.parentsync.example.")
+	namedInTheZone(t, r.mpzd, "agent.us.example.")
 	r.leader("agent.us.example.")
 	// the rig's zone has the option on, as from the agent's configuration
 	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
@@ -236,6 +259,7 @@ func TestTheLeaderRunsItsSetupWhenTheSyncIsGivenBack(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newLeaderSyncRig(t, "givenback.parentsync.example.")
+			namedInTheZone(t, r.mpzd, "agent.us.example.")
 			r.leader(tc.leader)
 			setups := make(chan ZoneName, 4)
 			r.lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
@@ -387,6 +411,7 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 func TestAZonesFirstLoadIsNoGiveBack(t *testing.T) {
 	asMPAgent(t)
 	r := newLeaderSyncRig(t, "firstload.parentsync.example.")
+	namedInTheZone(t, r.mpzd, "agent.us.example.")
 	r.mpzd.SetOption(tdns.OptParentSync, false)
 	r.leader("agent.us.example.") // even if this agent led, as a fast election could have it
 	setups := make(chan ZoneName, 4)

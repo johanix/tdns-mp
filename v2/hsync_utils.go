@@ -1605,6 +1605,13 @@ func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSync
 // leader (a zone added to a running agent, a late first transfer) has no
 // election of its own, and waits for its group's next lease renewal.
 //
+// The option follows HSYNCPARAM only for a zone whose records name this
+// agent (matchHsyncIdentity, as the first-load detection asks; an OFF record
+// counts). For any other zone it is off, and what this agent had scheduled
+// for the zone's parent ends, a sync under way included. An option that
+// comes on because a refresh names this agent where the last one did not is
+// no give-back either: the zone arrives, and is taken up as an arrival.
+//
 // A zone whose HSYNCPARAM cannot be read keeps the option it has.
 func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
 	if tdns.Globals.App.Type != AppTypeMPAgent || !mpzd.Options[tdns.OptMultiProvider] {
@@ -1623,19 +1630,42 @@ func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
 			}
 		}
 	}
+	named, _, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig()))
+	if err != nil {
+		lg.Warn("the zone's HSYNC records could not be read; its delegation sync is left as it is", "zone", mpzd.ZoneName, "err", err)
+		return false
+	}
 	mpzd.EnsureMP()
 	first := !mpzd.MP.ParentSyncFollowed
+	wasNamed := mpzd.MP.ParentSyncNamed
 	mpzd.MP.ParentSyncFollowed = true
+	mpzd.MP.ParentSyncNamed = named
+
+	// Whatever the option says: an agent that the records name and that no
+	// longer takes part in the zone (its record OFF, or no role) sends
+	// nothing to the parent. The syncher asks the same (stillParticipates),
+	// but only when a sync is asked for, and a refresh that only sets this
+	// agent's record OFF asks for none. The option stays as it is.
+	if named && !conf.stillParticipates(mpzd.ZoneName) && conf.endDelegationSyncWork(mpzd.ZoneName) {
+		lg.Info("this agent takes no part in the zone: what it had scheduled for the parent ends", "zone", mpzd.ZoneName)
+	}
+
+	byAgents = byAgents && named
 	if byAgents == mpzd.Options[tdns.OptParentSync] {
 		return false
 	}
 	mpzd.SetRuntimeOption(tdns.OptParentSync, byAgents)
-	if byAgents {
+	switch {
+	case byAgents:
 		lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
-		return !first
+		return !first && wasNamed
+	case !named:
+		lg.Info("this agent is not named in the zone's records: it sends nothing to the parent", "zone", mpzd.ZoneName)
+		conf.endDelegationSyncWork(mpzd.ZoneName)
+	default:
+		lg.Info("HSYNCPARAM does not say parentsync=agent: the zone's owner syncs its delegation, and this agent no longer sends anything to the parent", "zone", mpzd.ZoneName)
+		conf.delegationSyncOwnerSyncs(mpzd.ZoneName)
 	}
-	lg.Info("HSYNCPARAM does not say parentsync=agent: the zone's owner syncs its delegation, and this agent no longer sends anything to the parent", "zone", mpzd.ZoneName)
-	conf.delegationSyncOwnerSyncs(mpzd.ZoneName)
 	return false
 }
 

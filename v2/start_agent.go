@@ -149,30 +149,15 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	conf.InternalMp.LeaderElectionManager = lem
 	ar.LeaderElectionManager = lem
 
-	// Wire operational peers counter for re-election decisions
+	// The counts an election takes (the membership design, 4.2): the zone's
+	// voting members other than this agent, and the OPERATIONAL ones among
+	// them. Elections require all of them. An auditor and a record with no
+	// role are not counted.
 	lem.SetOperationalPeersFunc(func(zone ZoneName) int {
-		zad, err := ar.GetZoneAgentData(zone)
-		if err != nil {
-			return 0
-		}
-		count := 0
-		for _, agent := range zad.Agents {
-			if agent.ID != AgentId(mp.Identity) && ar.isAgentOperational(agent.ID) {
-				count++
-			}
-		}
-		return count
+		return ar.operationalVotingPeers(zone, AgentId(mp.Identity))
 	})
-
-	// Wire configured peers counter — elections require ALL configured peers.
-	// Quorum is the participant count minus ourselves, not the raw HSYNC3 count:
-	// a role-less identity must not inflate the quorum.
 	lem.SetConfiguredPeersFunc(func(zone ZoneName) int {
-		count := len(ParticipantsForZone(zone)) - 1
-		if count < 0 {
-			count = 0
-		}
-		return count
+		return configuredVotingPeers(zone, AgentId(mp.Identity))
 	})
 
 	// Wire provider group manager into leader election manager
@@ -226,25 +211,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		// runs. The election callback below therefore finds the zone's group.
 		// Leader election callback (must run after parentsync detection above).
 		if mpzd.Options[tdns.OptParentSync] || mpzd.Options[tdns.OptMultiProvider] {
-			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if !zd.Options[tdns.OptParentSync] {
-					return
-				}
-				zone := ZoneName(zd.ZoneName)
-				configured := lem.configuredPeers(zone)
-				if configured == 0 {
-					lem.StartElection(zone, 0)
-				} else {
-					if lem.providerGroupMgr != nil {
-						pg := lem.providerGroupMgr.GetGroupForZone(zone)
-						if pg != nil {
-							lem.leaveElectionToGroup(pg.GroupHash)
-							return
-						}
-					}
-					lem.DeferElection(zone)
-				}
-			})
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, lem.electAtFirstLoad)
 		}
 	}
 

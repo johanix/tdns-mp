@@ -114,6 +114,20 @@ func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members [
 // that, every member's renewal and every member's retry minted a term of its
 // own, and a lease renewal was two or three elections in one second (#120).
 func (lem *LeaderElectionManager) startGroupElection(groupHash string, members []string, zones []ZoneName, armed *uint64) {
+	// Only a voting member starts an election, whoever asks for it (the
+	// membership design, 4.4). Asked of the group as the group manager has
+	// it now; members is the test only where there is no group manager.
+	voters, known := lem.groupVoters(groupHash, members)
+	if !known {
+		lgElect.Debug("no election started: the provider group is gone", "group", shortHash(groupHash))
+		return
+	}
+	if !isAmong(voters, lem.localID) {
+		lgElect.Debug("no election started: this agent does not vote in the zone", "group", shortHash(groupHash))
+		return
+	}
+	members = voters
+
 	expectedPeers := len(members) - 1 // minus self
 
 	lem.mu.Lock()
@@ -214,6 +228,21 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 // was marked or not (tdns-mp #183).
 func (lem *LeaderElectionManager) leaveElectionToGroup(groupHash string) {
 	lgElect.Info("no election started here, the zone's election is its provider group's", "group", groupHash[:8])
+}
+
+// groupVoters returns the group's voting members as the provider group
+// manager has them now, and false when it has no such group. Without a
+// group manager, as in a test, they are members. (A group that is gone is
+// dropped by groupGone, which the manager calls after its recompute.)
+func (lem *LeaderElectionManager) groupVoters(groupHash string, members []string) ([]string, bool) {
+	if lem.providerGroupMgr == nil {
+		return members, true
+	}
+	pg := lem.providerGroupMgr.GetGroup(groupHash)
+	if pg == nil {
+		return nil, false
+	}
+	return pg.VotingMembers, true
 }
 
 // isAmong: whether id is one of a group's voting members. Names are compared
@@ -535,6 +564,17 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		} else if winner != agreedWinner {
 			consensus = false
 			break
+		}
+	}
+
+	// A winner that is not one of the group's voting members is not taken:
+	// the election counts as having found no consensus (the membership
+	// design, 4.4).
+	if consensus && agreedWinner != "" {
+		if voters, known := lem.groupVoters(groupHash, members); known && !isAmong(voters, agreedWinner) {
+			lgElect.Warn("election: the winner is not a voting member, not taken",
+				"group", shortHash(groupHash), "winner", agreedWinner, "term", term)
+			consensus = false
 		}
 	}
 
@@ -909,6 +949,11 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 			if len(pg.VotingMembers) == 0 {
 				lgElect.Warn("accepted leader from gossip, but group has no voting members; skipping re-election timer",
 					"group", groupHash[:8])
+			} else if !isAmong(pg.VotingMembers, lem.localID) {
+				// An agent that does not vote renews no lease (the
+				// membership design, 4.4).
+				lgElect.Debug("accepted leader from gossip; this agent does not vote in the group, and arms no renewal",
+					"group", shortHash(groupHash))
 			} else {
 				lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers)
 			}
@@ -966,6 +1011,30 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
 		}
 	}()
+}
+
+// electAtFirstLoad is the zone's election at its first load, for a zone
+// whose delegation sync is the agents'. It runs after the parentsync
+// detection. With no voting peer counted it elects (startElection leaves a
+// zone that a group covers to the group); a zone in a group is the group's;
+// otherwise the election waits for the peers to become OPERATIONAL.
+func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
+	if !zd.Options[tdns.OptParentSync] {
+		return
+	}
+	zone := ZoneName(zd.ZoneName)
+	configured := lem.configuredPeers(zone)
+	if configured == 0 {
+		lem.StartElection(zone, 0)
+		return
+	}
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			lem.leaveElectionToGroup(pg.GroupHash)
+			return
+		}
+	}
+	lem.DeferElection(zone)
 }
 
 // DeferElection records a zone as needing an election once peers become operational.
@@ -1177,8 +1246,22 @@ func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int
 // startElection is StartElection, for a timer when armed is set, as
 // startGroupElection is for a group: it starts nothing when the zone's
 // election has moved on since the timer was armed.
+//
+// Only a voting member of the zone starts an election, whatever asks for it:
+// the first load, a lease renewal, the retry after no consensus, a peer that
+// becomes OPERATIONAL, the operator (the membership design, 4.4). A zone with
+// no HSYNC3 RRset is not a multi-provider zone and elects as before.
+//
+// A count of zero self-elects only where no group covers the zone. A zero
+// count meant a single participant while auditors were counted. It no longer
+// does: a group of one voting member and an auditor is covered by its group's
+// election, which decides.
 func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int, armed *uint64) {
-	if expectedPeers > 0 && lem.providerGroupMgr != nil {
+	if !votesInZone(zone, lem.localID) {
+		lgElect.Debug("no election started: this agent does not vote in the zone", "zone", zone)
+		return
+	}
+	if lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroupForZone(zone)
 		if pg != nil {
 			lgElect.Debug("skipping per-zone election, zone covered by provider group",
@@ -1269,6 +1352,21 @@ func (lem *LeaderElectionManager) HandleMessage(zone ZoneName, senderID AgentId,
 				"zone", zone, "type", rfiType, "group", pg.GroupHash[:8])
 			return
 		}
+	}
+
+	// A CALL, a VOTE or a CONFIRM counts only from a voting member of the
+	// zone, and only a voting member takes part, as in HandleGroupMessage. A
+	// zone this agent does not know, or that has no HSYNC3 RRset, has no
+	// standings, and is not checked (votesInZone).
+	if !votesInZone(zone, senderID) {
+		lgElect.Warn("election: message from a sender that is not a voting member of the zone, dropped",
+			"zone", zone, "type", rfiType, "sender", senderID, "term", parseUint64(records, "_term"))
+		return
+	}
+	if !votesInZone(zone, lem.localID) {
+		lgElect.Info("leader election observed (not a voting member, no participation)",
+			"zone", zone, "type", rfiType, "initiator", senderID, "term", parseUint64(records, "_term"))
+		return
 	}
 
 	switch rfiType {
@@ -1496,6 +1594,14 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 			consensus = false
 			break
 		}
+	}
+
+	// A winner that is not a voting member of the zone is not taken: the
+	// election counts as having found no consensus.
+	if consensus && agreedWinner != "" && !votesInZone(zone, agreedWinner) {
+		lgElect.Warn("election: the winner is not a voting member, not taken",
+			"zone", zone, "winner", agreedWinner, "term", term)
+		consensus = false
 	}
 
 	if !consensus || agreedWinner == "" {

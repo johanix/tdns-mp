@@ -54,10 +54,7 @@ record and no role.
 
 **Today:** the group is built from the roles, so a
 provider with no role is left out of it
-([issue 158](https://github.com/johanix/tdns-mp/issues/158)),
-and an agent with no role may elect itself leader of a
-zone when it sees no peers
-([issue 172](https://github.com/johanix/tdns-mp/issues/172)).
+([issue 158](https://github.com/johanix/tdns-mp/issues/158)).
 
 ## 3. Adding a Provider
 
