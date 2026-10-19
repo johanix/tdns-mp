@@ -274,7 +274,11 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 // chain asks again, and that ask distributes anew.
 func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
 	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (msg string, rcode uint8, ur tdns.UpdateResult, pending bool, err error) {
-	if !mpLeaderSync(conf, ds) {
+	// The path is chosen on the zone's kind alone, not on the option: a
+	// multi-provider zone never belongs on the plain path, and reading the
+	// option here, before the run is listed, let a takeover that came in
+	// between send one last sync down it.
+	if conf == nil || ds.ZoneData == nil || !ds.ZoneData.Options[tdns.OptMultiProvider] {
 		msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
 		return msg, rcode, ur, false, err
 	}
@@ -313,7 +317,7 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	}
 	held, failed := false, csyncErr
 	if failed == nil {
-		held, failed = conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq})
+		held, failed = conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq, run: runCtx})
 	}
 	if failed != nil {
 		// The NOTIFY is not sent on. Asked again here, and not left to the

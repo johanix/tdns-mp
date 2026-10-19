@@ -14,6 +14,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -272,6 +273,9 @@ type delegationNotifies struct {
 	out      chan tdns.NotifyRequest // the notifier's queue
 	wait     time.Duration           // the zone's wait (delegationNotifyWait)
 	largest  string                  // the provider whose propagation delay the wait is
+	// run is the sync's own context (delegationSyncRun), cancelled when the
+	// zone's owner takes the sync over. Nil for a caller with no run.
+	run context.Context
 }
 
 // delegationCheck is the look at the parent that follows a NOTIFY, or the
@@ -380,6 +384,15 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 	c := &conf.InternalMp.delegationSyncChains
 	every := delegationCsyncAwaitedEvery
 	c.mu.Lock()
+	if sent.run != nil && sent.run.Err() != nil {
+		// The owner took the sync over after the sync last looked at the
+		// option: its run was cancelled, under this lock, as the chain was
+		// ended (delegationSyncOwnerSyncs). No chain is made again, and
+		// nothing is held or sent. A run cancelled because the agent stops
+		// sends nothing either.
+		c.mu.Unlock()
+		return false, errors.New("the zone's owner has taken its delegation sync over; the NOTIFY is not sent")
+	}
 	ch := c.of(zone)
 	// The sync was the chain's own if a NOTIFY of the chain's is out and
 	// nothing of the chain's is scheduled: its check, or the retry of a
@@ -451,7 +464,11 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 	ch.hold = nil
 	check := c.notifyLeft(zone, ch, types, retimed, delays)
 	c.mu.Unlock()
-	forwardNotifies(ctx, sent.out, leave)
+	fwd := ctx
+	if sent.run != nil {
+		fwd = sent.run // a takeover from here on stops what has not gone yet
+	}
+	forwardNotifies(fwd, sent.out, leave)
 	conf.delegationSyncCheckAfter(ctx, zone, types, check)
 	return false, nil
 }
@@ -543,11 +560,21 @@ func (conf *Config) delegationSyncNotLeading(zone string, quiet bool) {
 // agent made goes too: the agent that leads when the sync comes back to the
 // agents makes its own. A sync under way is stopped: an UPDATE that tdns is
 // still retrying is not sent again.
+//
+// Both happen under the chains' lock at once: a sync that hands its NOTIFY
+// over takes that lock, and finds either the chain it may use or its run
+// cancelled (delegationSyncNotifiedWith), never a chain ended and its run
+// still going.
 func (conf *Config) delegationSyncOwnerSyncs(zone string) {
-	if hold := conf.endDelegationSyncChain(zone); hold != nil {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	hold := c.endChainLocked(zone)
+	n := c.cancelRunsLocked(zone)
+	c.mu.Unlock()
+	if hold != nil {
 		lgEngine.Info("the held NOTIFY is dropped: the zone's owner syncs its delegation", "zone", zone, "notify", notifyTypes(hold.notifies))
 	}
-	if n := conf.stopDelegationSyncRuns(zone); n > 0 {
+	if n > 0 {
 		lgEngine.Info("the delegation sync under way is stopped: the zone's owner syncs its delegation", "zone", zone, "syncs", n)
 	}
 }
@@ -582,12 +609,10 @@ func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx 
 	}
 }
 
-// stopDelegationSyncRuns cancels the zone's leader syncs under way, and says
-// how many there were. Each leaves the list when it has returned.
-func (conf *Config) stopDelegationSyncRuns(zone string) int {
-	c := &conf.InternalMp.delegationSyncChains
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// cancelRunsLocked cancels the zone's leader syncs under way, and says how
+// many there were. Each leaves the list when it has returned. The caller
+// holds mu.
+func (c *delegationSyncChains) cancelRunsLocked(zone string) int {
 	for _, cancel := range c.runs[zone] {
 		cancel()
 	}
@@ -620,10 +645,15 @@ func (conf *Config) delegationSyncGivenBack(zone string) {
 func (conf *Config) endDelegationSyncChain(zone string) *delegationNotifyHold {
 	c := &conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.endChainLocked(zone)
+}
+
+// endChainLocked is endDelegationSyncChain for a caller that holds mu.
+func (c *delegationSyncChains) endChainLocked(zone string) *delegationNotifyHold {
 	ch := c.zones[zone]
 	delete(c.zones, zone)
 	delete(c.csyncs, zone)
-	c.mu.Unlock()
 	if ch == nil {
 		return nil
 	}
@@ -861,6 +891,9 @@ func forwardNotifies(ctx context.Context, out chan tdns.NotifyRequest, notifies 
 		stopped = ctx.Done()
 	}
 	for _, req := range notifies {
+		if ctx != nil && ctx.Err() != nil {
+			return // a ready queue would otherwise win the select half the time
+		}
 		select {
 		case out <- req:
 		case <-stopped:

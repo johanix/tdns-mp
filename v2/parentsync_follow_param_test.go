@@ -379,3 +379,73 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 	}
 	r.untold(t, 0, "for a sync the owner stopped")
 }
+
+// A sync that starts after the owner took the sync over sends nothing, also
+// when the takeover came after the syncher's own check. It went down the
+// plain path, as for a zone with one provider: on the syncher's context, and
+// the peers were told it was done.
+func TestASyncThatStartsAfterTheTakeoverSendsNothing(t *testing.T) {
+	asMPAgent(t)
+	r := newNotifyRig(t, "late.update.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
+	z := r.mpzd.ZoneName
+	if _, err := r.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
+		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+		t.Fatalf("the zone's SIG(0) key: %v", err)
+	}
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	changed, dss, err := implicitDelegationChange(r.mpzd, refreshedZone(t, r.mpzd, fmt.Sprintf("%s 3600 IN NS ns2.provider.example.", z)))
+	if err != nil || !changed {
+		t.Fatalf("the refresh: changed=%v err=%v", changed, err)
+	}
+	// the owner takes over after the syncher has checked the option
+	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
+	refreshed(t, r.conf, r.mpzd)
+
+	hdb := &HsyncDB{KeyDB: r.mpzd.KeyDB}
+	ds := tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, SyncStatus: dss}
+	_, _, _, pending, err := hdb.syncDelegation(r.ctx, r.conf, r.notifyq, ds, dss, (&Imr{r.conf.Config.Internal.ImrEngine}).Imr)
+	if err == nil || pending {
+		t.Errorf("a sync that started after the takeover returned err=%v pending=%v, want the owner's refusal", err, pending)
+	}
+	if n := r.parent.updatesSeen(); n != 0 {
+		t.Errorf("the parent got %d UPDATEs after the owner took the sync over", n)
+	}
+}
+
+// The owner takes the sync over after a sync last looked at the option, and
+// before it hands its NOTIFY over. The takeover ended the zone's chain, and
+// the handoff made it again, without the CSYNC the takeover forgot, and sent
+// the NOTIFY on. It now finds its run cancelled, under the same lock, and
+// sends nothing.
+func TestANotifyHandedOverAfterTheTakeoverIsNotSent(t *testing.T) {
+	asMPAgent(t)
+	for _, wait := range []time.Duration{0, time.Hour} { // sent at once, and held
+		t.Run(fmt.Sprintf("wait %v", wait), func(t *testing.T) {
+			handedOverAfterTheTakeover(t, wait)
+		})
+	}
+}
+
+func handedOverAfterTheTakeover(t *testing.T, wait time.Duration) {
+	r := newNotifyRig(t, "handoff.notify.example.", "NOTIFY", repeat(time.Hour, 3)...)
+	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
+	z := r.mpzd.ZoneName
+	run, done := r.conf.delegationSyncRun(r.ctx, z) // a sync under way, past its last look
+	defer done()
+
+	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
+	refreshed(t, r.conf, r.mpzd)
+
+	out := make(chan tdns.NotifyRequest, 4)
+	held, failed := r.conf.delegationSyncNotifiedWith(r.ctx, z, delegationNotifies{
+		requests: []tdns.NotifyRequest{{ZoneName: z, RRtype: dns.TypeCSYNC}}, out: out, run: run, wait: wait}, repeat(time.Hour, 3))
+	if failed == nil || held {
+		t.Errorf("the handoff after the takeover: held=%v failed=%v, want the owner's refusal", held, failed)
+	}
+	if len(out) != 0 {
+		t.Errorf("%d NOTIFYs were sent on after the owner took the sync over", len(out))
+	}
+	if n := r.chains(); n != 0 {
+		t.Errorf("the handoff made the zone's chain again: %d chains", n)
+	}
+}
