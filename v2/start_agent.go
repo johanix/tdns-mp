@@ -303,7 +303,11 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		//
 		// The peers asked are the voting members other than this agent
 		// (sig0KeyPeers): the agents that may hold the key, and the ones whose
-		// word on it counts. unanswered counts those that have not said "no
+		// word on it counts. And the agent that led the group the zone left,
+		// while the zone's HSYNC3 lists it (previousKeyHolder, zoneKeyPeers):
+		// it set the key up there, and the edit that moved the zone may have
+		// taken its vote.
+		// unanswered counts those that have not said "no
 		// key": one that is not operational, one that did not answer, one that
 		// refused to hand the key over (it may hold it), one whose key could
 		// not be imported. A silent peer is a peer to ask again, not a peer
@@ -313,7 +317,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			if err != nil {
 				unanswered++ // the zone's members are not known: nobody has said "no key"
 			} else {
-				for _, agent := range sig0KeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
+				previous := ar.previousKeyHolder(zone, lem.previousLeader(zone))
+				for _, agent := range zoneKeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity), previous) {
 					if !ar.isAgentOperational(agent.ID) {
 						unanswered++
 						continue

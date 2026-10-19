@@ -677,3 +677,84 @@ func TestKeySetupsOfAZoneRunOneAtATime(t *testing.T) {
 	}
 	close(release)
 }
+
+// The owner takes the vote away from the provider that led the zone's group,
+// and keeps its HSYNC3 record for now: the zone moves to the group of the
+// others. The provider that led holds the zone's SIG(0) key. It has no role
+// now, so it is none of the zone's agents (GetZoneAgentData has the role
+// holders only) and no voting member: the agents that were asked had no key
+// to hand over, the new group's leader made none while the zone published
+// one, and the zone's delegation sync waited for good. The move notes who led
+// the group the zone left, and the key setup asks that agent too, from the
+// registry, while the zone's HSYNC3 lists it.
+func TestAZoneThatMovesAsksTheLeaderOfTheGroupItLeftForItsKey(t *testing.T) {
+	r := newGroupRig(t, []string{arrivalA, arrivalB, arrivalC}, arrivalA)
+	mover := providerZone(t, "mover.key.arrival.example.", arrivalA, arrivalB, arrivalC)
+	r.refresh()
+	r.gossipLeader(arrivalA, arrivalC, 1)
+	lem := r.lems[arrivalA]
+	if l, ok := lem.GetGroupLeader(r.net.group); !ok || l != arrivalC {
+		t.Fatalf("before the move the zone's group is led by %q, want %s", l, arrivalC)
+	}
+	zone := ZoneName(mover.ZoneName)
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: &MultiProviderConf{Identity: arrivalA}}
+	for _, id := range []string{arrivalB, arrivalC} {
+		ar.S.Set(AgentId(id), NewAgent(AgentId(id)))
+	}
+
+	zoneEdit{listed: []string{arrivalA, arrivalB, arrivalC}, serving: []string{arrivalA, arrivalB}}.apply(t, mover)
+	r.refresh()
+	inGroup(t, r.pgms[arrivalA], mover, arrivalA, arrivalB)
+
+	if prev := lem.previousLeader(zone); prev != arrivalC {
+		t.Fatalf("after the move the previous leader of %s is %q, want %s, who led the group it left", zone, prev, arrivalC)
+	}
+	// The zone's agents as the key setup reads them: the role holders.
+	zad, err := ar.GetZoneAgentData(zone)
+	if err != nil {
+		t.Fatalf("the zone's agents: %v", err)
+	}
+	zoneAgents := zad.Agents
+	if len(zoneAgents) != 1 || zoneAgents[0].ID != arrivalB {
+		t.Fatalf("the zone's agents are %v, want only %s: the test needs %s among them no more", zoneAgents, arrivalB, arrivalC)
+	}
+	var asked []AgentId
+	for _, a := range zoneKeyPeers(zone, zoneAgents, arrivalA, ar.previousKeyHolder(zone, lem.previousLeader(zone))) {
+		asked = append(asked, a.ID)
+	}
+	if len(asked) != 2 || asked[0] != arrivalB || asked[1] != arrivalC {
+		t.Errorf("the key setup asks %v, want %s and %s, who led the group the zone left", asked, arrivalB, arrivalC)
+	}
+
+	// Once the owner takes its HSYNC3 record away too, it is not asked.
+	serve(arrivalA, arrivalB).apply(t, mover)
+	if got := zoneKeyPeers(zone, zoneAgents, arrivalA, ar.previousKeyHolder(zone, lem.previousLeader(zone))); len(got) != 1 {
+		t.Errorf("with %s's HSYNC3 record gone the key setup asks %d agents, want only %s", arrivalC, len(got), arrivalB)
+	}
+}
+
+// The agent that led the group a zone left is noted only when another agent
+// led it: one that led it holds the key itself. A zone that had no group
+// notes nobody.
+func TestAZoneThatMovesFromAGroupThisAgentLedNotesNoPreviousLeader(t *testing.T) {
+	r := newGroupRig(t, []string{arrivalA, arrivalB, arrivalC}, arrivalA)
+	mover := providerZone(t, "self.key.arrival.example.", arrivalA, arrivalB, arrivalC)
+	r.refresh()
+	r.gossipLeader(arrivalA, arrivalA, 1)
+	lem := r.lems[arrivalA]
+	if l, ok := lem.GetGroupLeader(r.net.group); !ok || l != arrivalA {
+		t.Fatalf("before the move the zone's group is led by %q, want this agent", l)
+	}
+
+	zoneEdit{listed: []string{arrivalA, arrivalB, arrivalC}, serving: []string{arrivalA, arrivalB}}.apply(t, mover)
+	r.refresh()
+	inGroup(t, r.pgms[arrivalA], mover, arrivalA, arrivalB)
+	if prev := lem.previousLeader(ZoneName(mover.ZoneName)); prev != "" {
+		t.Errorf("a zone that left a group this agent led notes %q as its previous leader, want nobody", prev)
+	}
+
+	lem.notePreviousLeader("new.key.arrival.example.", "")
+	if prev := lem.previousLeader("new.key.arrival.example."); prev != "" {
+		t.Errorf("a zone that had no group notes %q as its previous leader, want nobody", prev)
+	}
+}

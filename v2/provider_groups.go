@@ -182,6 +182,57 @@ func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
 	return peers
 }
 
+// zoneKeyPeers are the agents leaderKeySetup asks for the zone's SIG(0) key:
+// sig0KeyPeers, and also previous, the agent that led the group the zone left
+// (previousKeyHolder), when it is not among them. It hands the key to a
+// voting member as any holder does.
+func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous *Agent) []*Agent {
+	peers := sig0KeyPeers(zone, agents, self)
+	if previous == nil || isAmong([]string{string(self)}, previous.ID) {
+		return peers
+	}
+	for _, p := range peers {
+		if isAmong([]string{string(p.ID)}, previous.ID) {
+			return peers
+		}
+	}
+	return append(peers, previous)
+}
+
+// zoneListsAgent: the zone's HSYNC3 RRset has a record for the agent, with a
+// role in HSYNCPARAM or without.
+func zoneListsAgent(zone ZoneName, id AgentId) bool {
+	apex := zoneApex(zone)
+	if apex == nil {
+		return false
+	}
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok && isAmong([]string{h3.Identity}, id) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// previousKeyHolder is the agent that led the group the zone left
+// (LeaderElectionManager.previousLeader), as the registry has it, while the
+// zone's HSYNC3 still lists it. The zone's agents (GetZoneAgentData) are its
+// role holders only, and the edit that moved the zone may have taken that
+// agent's role: it is looked up here, and asked as one of the zone's
+// providers until the owner takes its HSYNC3 record away.
+func (ar *AgentRegistry) previousKeyHolder(zone ZoneName, id AgentId) *Agent {
+	if id == "" || !zoneListsAgent(zone, id) {
+		return nil
+	}
+	agent, err := ar.GetAgentInfo(id)
+	if err != nil {
+		return nil
+	}
+	return agent
+}
+
 // ParticipantsForZone is the single membership truth for agent/auditor reads:
 // the identities holding a membership-conferring HSYNCPARAM role in the zone
 // (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with

@@ -169,6 +169,7 @@ type LeaderElectionManager struct {
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
 	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
+	keyAskAlso           sync.Map                  // ZoneName -> AgentId: who led the group the zone left (notePreviousLeader)
 	providerGroupMgr     *ProviderGroupManager
 }
 

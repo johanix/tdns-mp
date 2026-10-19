@@ -949,6 +949,7 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // Nothing in this function can see that agent's view. A leader that acts only
 // when the views of a zone agree is what closes it (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	lem.notePreviousLeader(zone, from)
 	if lem.onZoneJoined == nil {
 		return
 	}
@@ -966,6 +967,47 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
 		}
 	}()
+}
+
+// notePreviousLeader remembers who led the group a zone has left: the agent
+// that set the zone's SIG(0) key up there, and holds it. The leader that sets
+// the zone up next asks that agent for the key too (previousKeyHolder), while
+// the zone's HSYNC3 lists it. The edit that moved the zone may have taken its
+// vote, and then it is not among the voting members that are asked: when it
+// was the only holder, no voting member had a key to hand over, the new
+// leader made none while the zone published one, and the zone's delegation
+// sync waited for good. The leader is read whatever its lease: the agent that
+// led last holds the key.
+//
+// Groups are reported gone only after the zones that moved
+// (ProviderGroupManager.RecomputeGroups), so the group the zone left still
+// has its election here.
+func (lem *LeaderElectionManager) notePreviousLeader(zone ZoneName, from string) {
+	var leader AgentId
+	if from != "" {
+		lem.mu.RLock()
+		le, ok := lem.groupElections[from]
+		lem.mu.RUnlock()
+		if ok {
+			le.mu.Lock()
+			leader = le.Leader
+			le.mu.Unlock()
+		}
+	}
+	if leader == "" || isAmong([]string{string(lem.localID)}, leader) {
+		lem.keyAskAlso.Delete(zone)
+		return
+	}
+	lem.keyAskAlso.Store(zone, leader)
+}
+
+// previousLeader is the agent that led the group the zone was in before its
+// last move, when another agent did (notePreviousLeader).
+func (lem *LeaderElectionManager) previousLeader(zone ZoneName) AgentId {
+	if v, ok := lem.keyAskAlso.Load(zone); ok {
+		return v.(AgentId)
+	}
+	return ""
 }
 
 // DeferElection records a zone as needing an election once peers become operational.
