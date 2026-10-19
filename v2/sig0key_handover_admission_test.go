@@ -43,7 +43,7 @@ func rfiMessage(t *testing.T, sender string, zone ZoneName, subtype string) *tra
 	if err != nil {
 		t.Fatalf("rfi payload: %v", err)
 	}
-	return &transport.IncomingMessage{TypeToken: "rfi", SenderID: sender, Zone: string(zone), Payload: payload}
+	return &transport.IncomingMessage{TypeToken: "rfi", SenderID: sender, TransportSender: sender, Zone: string(zone), Payload: payload}
 }
 
 func configMessage(t *testing.T, sender string, zone ZoneName, subtype string) *transport.IncomingMessage {
@@ -52,7 +52,7 @@ func configMessage(t *testing.T, sender string, zone ZoneName, subtype string) *
 	if err != nil {
 		t.Fatalf("config payload: %v", err)
 	}
-	return &transport.IncomingMessage{TypeToken: "config", SenderID: sender, Zone: string(zone), Payload: payload}
+	return &transport.IncomingMessage{TypeToken: "config", SenderID: sender, TransportSender: sender, Zone: string(zone), Payload: payload}
 }
 
 // The provider that led the zone, C, holds the key and has no role in the
@@ -170,7 +170,7 @@ func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *tes
 		if err != nil {
 			t.Fatalf("confirm payload: %v", err)
 		}
-		return &transport.IncomingMessage{TypeToken: "confirm", SenderID: sender, Zone: string(moved), Payload: payload}
+		return &transport.IncomingMessage{TypeToken: "confirm", SenderID: sender, TransportSender: sender, Zone: string(moved), Payload: payload}
 	}
 	if reached(confirm(arrivalA, "other-distribution")) {
 		t.Error("a confirmation of another distribution reaches C's transport")
@@ -181,5 +181,38 @@ func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *tes
 	}
 	if reached(confirm(arrivalB, "key-answer")) {
 		t.Error("B's confirmation of the answer C sent to A reaches C's transport")
+	}
+}
+
+// An RFI is routed by its payload's MessageType, and one with none is taken
+// as a sync, whose records and operations are applied. Such a message, sent
+// as an RFI with the key's markers, passed the check for the key alone and
+// reached the update path. Only a payload that says rfi itself, and carries
+// nothing to apply, is the request for the key.
+func TestARequestForTheKeyThatCarriesAnUpdateIsRefused(t *testing.T) {
+	moved, _ := handoverZones(t)
+	c := handoverBridge(arrivalC)
+	send := func(p *DnsSyncPayload) bool {
+		payload, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		return c.keyHandOverOnly(&transport.IncomingMessage{TypeToken: "rfi", SenderID: arrivalA, TransportSender: arrivalA, Zone: string(moved), Payload: payload})
+	}
+	key := func() *DnsSyncPayload {
+		return &DnsSyncPayload{MessageType: "rfi", OriginatorID: arrivalA, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: "sig0key"}
+	}
+	if !send(key()) {
+		t.Fatal("the request for the key is refused")
+	}
+	untyped := key()
+	untyped.MessageType = ""
+	if send(untyped) {
+		t.Error("a request for the key with no MessageType, routed as a sync, is let through")
+	}
+	withRecords := key()
+	withRecords.Records = map[string][]string{string(moved): {string(moved) + " 3600 IN NS ns.other.example."}}
+	if send(withRecords) {
+		t.Error("a request for the key that carries records is let through")
 	}
 }

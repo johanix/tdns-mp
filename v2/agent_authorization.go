@@ -236,10 +236,9 @@ func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next
 // delivery confirmation of either. Anything else that came in that way is
 // not acted on.
 func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
+	// The sender is the one admission judged: the transport's, never the
+	// author the payload names.
 	sender := msg.TransportSender
-	if sender == "" {
-		sender = msg.SenderID
-	}
 	if !tm.admittedForKeyOnly(sender, msg.Zone) {
 		return true
 	}
@@ -253,7 +252,11 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 			return true
 		}
 	case "rfi":
-		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" {
+		// Routed by the payload's MessageType, which defaults to a sync
+		// (routeSyncMessage): the payload must say rfi itself, and carry
+		// nothing an update would apply.
+		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.MessageType == string(AgentMsgRfi) &&
+			p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" && len(p.GetRecords()) == 0 && len(p.GetOperations()) == 0 {
 			return true
 		}
 	case "config":
