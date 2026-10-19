@@ -88,6 +88,9 @@ type ProviderGroupManager struct {
 	mu      sync.RWMutex
 	Groups  map[string]*ProviderGroup // key: group hash
 	LocalID string                    // our own identity
+	// onZoneJoinedGroup is told of each zone a recompute has put into a
+	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
+	onZoneJoinedGroup func(zone ZoneName, from, to string)
 }
 
 // --- From parentsync_leader.go ---
@@ -137,6 +140,8 @@ type LeaderElectionManager struct {
 	operationalPeersFunc  func(zone ZoneName) int   // returns count of operational peers for a zone
 	configuredPeersFunc   func(zone ZoneName) int   // returns count of configured peers for a zone
 	onLeaderElected       func(zone ZoneName) error // called when local agent wins election
+	onZoneJoined          func(zone ZoneName) error // called when a zone joins a group the local agent already leads
+	keySetups             sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
 	providerGroupMgr      *ProviderGroupManager
 }
 
