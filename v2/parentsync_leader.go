@@ -949,7 +949,6 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // Nothing in this function can see that agent's view. A leader that acts only
 // when the views of a zone agree is what closes it (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
-	lem.notePreviousLeader(zone, from)
 	if lem.onZoneJoined == nil {
 		return
 	}
@@ -967,70 +966,6 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
 		}
 	}()
-}
-
-// notePreviousLeader remembers who led the group a zone has left: the agent
-// that set the zone's SIG(0) key up there, and holds it. The leader that sets
-// the zone up next asks that agent for the key too (previousKeyHolders), while
-// the zone's HSYNC3 lists it. The edit that moved the zone may have taken its
-// vote, and then it is not among the voting members that are asked: when it
-// was the only holder, no voting member had a key to hand over, the new
-// leader made none while the zone published one, and the zone's delegation
-// sync waited for good. The leader is read whatever its lease: the agent that
-// led last holds the key.
-//
-// Every such leader is kept until the key is held here (keyHeldHere), not
-// only the last one. A zone that moves again before its new leader has the
-// key has as its previous leader one that never had it, and the agent that
-// holds the only key would no longer be asked. A leader that is this agent is
-// not noted: if it held the key, the setup finds it here.
-//
-// Groups are reported gone only after the zones that moved
-// (ProviderGroupManager.RecomputeGroups), so the group the zone left still
-// has its election here.
-func (lem *LeaderElectionManager) notePreviousLeader(zone ZoneName, from string) {
-	if from == "" {
-		return
-	}
-	lem.mu.RLock()
-	le, ok := lem.groupElections[from]
-	lem.mu.RUnlock()
-	if !ok {
-		return
-	}
-	le.mu.Lock()
-	leader := le.Leader
-	le.mu.Unlock()
-	if leader == "" || isAmong([]string{string(lem.localID)}, leader) {
-		return
-	}
-	lem.keyAskMu.Lock()
-	defer lem.keyAskMu.Unlock()
-	for _, id := range lem.keyAskAlso[zone] {
-		if isAmong([]string{string(id)}, leader) {
-			return
-		}
-	}
-	if lem.keyAskAlso == nil {
-		lem.keyAskAlso = map[ZoneName][]AgentId{}
-	}
-	lem.keyAskAlso[zone] = append(lem.keyAskAlso[zone], leader)
-}
-
-// previousLeaders are the agents that led the groups the zone has left since
-// its key was last held here, other than this agent (notePreviousLeader).
-func (lem *LeaderElectionManager) previousLeaders(zone ZoneName) []AgentId {
-	lem.keyAskMu.Lock()
-	defer lem.keyAskMu.Unlock()
-	return slices.Clone(lem.keyAskAlso[zone])
-}
-
-// keyHeldHere: the zone's SIG(0) key is in this agent's keystore now. The
-// leaders noted for the zone need not be asked any more.
-func (lem *LeaderElectionManager) keyHeldHere(zone ZoneName) {
-	lem.keyAskMu.Lock()
-	defer lem.keyAskMu.Unlock()
-	delete(lem.keyAskAlso, zone)
 }
 
 // DeferElection records a zone as needing an election once peers become operational.
@@ -1774,8 +1709,8 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 	}
 	// A zone that publishes a KEY takes only that key: one the zone does not
 	// publish would put a key the parent does not know in place of the one
-	// it trusts. The peers asked include agents with no vote any more
-	// (previousKeyHolders), whose keystore need not hold the zone's key.
+	// it trusts. The peers asked include agents with no role any more
+	// (roleLessKeyHolders), whose keystore need not hold the zone's key.
 	if !zoneTakesKey(ZoneName(keyName), &pkc.KeyRR) {
 		return fmt.Errorf("peer sent key %d, which %s does not publish", pkc.KeyRR.KeyTag(), keyName)
 	}

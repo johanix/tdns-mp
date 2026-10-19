@@ -183,9 +183,9 @@ func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
 }
 
 // zoneKeyPeers are the agents leaderKeySetup asks for the zone's SIG(0) key:
-// sig0KeyPeers, and also previous, the agents that led the groups the zone
-// left (previousKeyHolders), those not among them already. They hand the key
-// to a voting member as any holder does.
+// sig0KeyPeers, and also previous, the agents the zone lists with no role
+// (roleLessKeyHolders), those not among them already. They hand the key to
+// a voting member as any holder does.
 func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous []*Agent) []*Agent {
 	peers := sig0KeyPeers(zone, agents, self)
 	for _, prev := range previous {
@@ -236,19 +236,36 @@ func zoneListsAgent(zone ZoneName, id AgentId) bool {
 	return false
 }
 
-// previousKeyHolders are the agents that led the groups the zone left
-// (LeaderElectionManager.previousLeaders), as the registry has them, those
-// the zone's HSYNC3 still lists. The zone's agents (GetZoneAgentData) are its
-// role holders only, and the edit that moved the zone may have taken such an
-// agent's role: they are looked up here, and asked as the zone's providers
-// until the owner takes their HSYNC3 records away.
-func (ar *AgentRegistry) previousKeyHolders(zone ZoneName, ids []AgentId) []*Agent {
+// roleLessKeyHolders are the agents the zone's HSYNC3 lists ON with no role
+// in HSYNCPARAM, as the registry has them, other than this agent. The owner
+// takes a provider's role first and its HSYNC3 record later, and in between
+// that provider may hold the zone's SIG(0) key: it led the zone's group, and
+// set the key up. It is no voting member and none of the zone's agents
+// (GetZoneAgentData has the role holders only), so the voting members alone
+// were asked, none had a key to hand over, the new leader made none while
+// the zone published one, and the zone's delegation sync waited for good.
+//
+// Read from the zone as it is, so nothing is lost at a restart, and a leader
+// that was never in the group the zone left asks as well. Outside such an
+// edit the zone lists no agent without a role, and nobody more is asked.
+func (ar *AgentRegistry) roleLessKeyHolders(zone ZoneName) []*Agent {
+	apex := zoneApex(zone)
+	if apex == nil {
+		return nil
+	}
+	participants, _ := zoneParticipants(apex)
 	var out []*Agent
-	for _, id := range ids {
-		if !zoneListsAgent(zone, id) {
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
 			continue
 		}
-		if agent, err := ar.GetAgentInfo(id); err == nil {
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok || h3.State == 0 || isAmong(participants, AgentId(h3.Identity)) ||
+			(ar.LocalAgent != nil && isAmong([]string{ar.LocalAgent.Identity}, AgentId(h3.Identity))) {
+			continue
+		}
+		if agent, err := ar.GetAgentInfo(AgentId(h3.Identity)); err == nil {
 			out = append(out, agent)
 		}
 	}

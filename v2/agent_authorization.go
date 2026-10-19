@@ -175,7 +175,7 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 // The owner takes the role of the provider that leads a zone's group and
 // keeps its HSYNC3 record for now. That provider holds the zone's SIG(0) key,
 // and the leader that takes the zone up next asks it for the key
-// (previousKeyHolders). isInHSYNC admits a message about a zone only between
+// (roleLessKeyHolders). isInHSYNC admits a message about a zone only between
 // two of its role holders, so the request was refused at the holder, which
 // has no role now, and the answer at the asker, from a sender with no role.
 // The key never moved, and the zone's delegation sync waited for good.
