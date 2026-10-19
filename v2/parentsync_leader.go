@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -60,9 +61,19 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 	return 0
 }
 
-// SetOnLeaderElected sets the callback invoked when the local agent wins an election.
+// SetOnLeaderElected sets the callback invoked when the local agent wins an
+// election, renews its lease, or leads a zone whose delegation sync comes back
+// to the agents (delegationSyncGivenBack). Each of those runs it in a goroutine
+// of its own. For one zone they run one at a time, so that two leader setups
+// never both find no SIG(0) key and each make one.
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
-	lem.onLeaderElected = f
+	var setups sync.Map // ZoneName -> *sync.Mutex
+	lem.onLeaderElected = func(zone ZoneName) error {
+		mu, _ := setups.LoadOrStore(zone, new(sync.Mutex))
+		mu.(*sync.Mutex).Lock()
+		defer mu.(*sync.Mutex).Unlock()
+		return f(zone)
+	}
 }
 
 // StartGroupElection initiates a leader election for a provider group.
@@ -1439,6 +1450,51 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 		}
 	}
 	return winner
+}
+
+// activeSig0KeyIDs lists the key ids of keyName's active SIG(0) keys: all of
+// them, where GetSig0Keys keeps one.
+func activeSig0KeyIDs(hdb *HsyncDB, keyName string) (map[uint16]bool, error) {
+	resp, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "list"})
+	if err != nil {
+		return nil, err
+	}
+	ids := map[uint16]bool{}
+	for mapkey, k := range resp.Sig0keys {
+		if !strings.EqualFold(dns.Fqdn(k.Name), dns.Fqdn(keyName)) || k.State != tdns.Sig0StateActive {
+			continue
+		}
+		_, idstr, ok := strings.Cut(mapkey, "::")
+		if !ok {
+			continue
+		}
+		if id, err := strconv.ParseUint(idstr, 10, 16); err == nil {
+			ids[uint16(id)] = true
+		}
+	}
+	return ids, nil
+}
+
+// dropKeyMadeForALostLead deletes a SIG(0) key the leader's setup made, when
+// the lead moved before the setup could publish it. Left active, the key
+// would be handed to the next leader that asks this agent, and published the
+// next time this agent leads, though the parent never saw it. A key this
+// agent already held, or imported from a peer, is the group's and stays. Nor is a key deleted that is
+// not the zone's only active key: the delete cannot be undone, and the one
+// the parent trusts may be the other.
+func dropKeyMadeForALostLead(hdb *HsyncDB, zone, keyName string, keyid uint16) {
+	if ids, err := activeSig0KeyIDs(hdb, keyName); err != nil || len(ids) != 1 || !ids[keyid] {
+		lgAgent.Warn("onLeaderElected: the SIG(0) key made for a lead that has moved is kept: it is not the zone's only active key, or the keys could not be listed",
+			"zone", zone, "keyid", keyid, "active", len(ids), "err", err)
+		return
+	}
+	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete",
+		Zone: zone, Keyname: keyName, Keyid: keyid}); err != nil {
+		lgAgent.Error("onLeaderElected: the SIG(0) key made for a lead that has moved could not be deleted; it stays active",
+			"zone", zone, "keyid", keyid, "err", err)
+		return
+	}
+	lgAgent.Info("onLeaderElected: the SIG(0) key made for a lead that has moved is deleted", "zone", zone, "keyid", keyid)
 }
 
 // importSig0KeyFromPeer imports a SIG(0) key received from a peer via RFI CONFIG.
