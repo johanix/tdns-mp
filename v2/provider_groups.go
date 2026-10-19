@@ -198,8 +198,29 @@ func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous []*Agen
 	return peers
 }
 
-// zoneListsAgent: the zone's HSYNC3 RRset has a record for the agent, with a
-// role in HSYNCPARAM or without.
+// zoneTakesKey: the zone publishes no KEY at its apex, or it publishes
+// this one (same flags, protocol, algorithm and public key). A zone that has
+// not loaded here publishes nothing to compare with.
+func zoneTakesKey(zone ZoneName, key *dns.KEY) bool {
+	apex := zoneApex(zone)
+	if apex == nil {
+		return true
+	}
+	published := apex.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs
+	if len(published) == 0 {
+		return true
+	}
+	for _, rr := range published {
+		if k, ok := rr.(*dns.KEY); ok && k.Flags == key.Flags && k.Protocol == key.Protocol &&
+			k.Algorithm == key.Algorithm && k.PublicKey == key.PublicKey {
+			return true
+		}
+	}
+	return false
+}
+
+// zoneListsAgent: the zone's HSYNC3 RRset has an ON record for the agent,
+// with a role in HSYNCPARAM or without.
 func zoneListsAgent(zone ZoneName, id AgentId) bool {
 	apex := zoneApex(zone)
 	if apex == nil {
@@ -207,7 +228,7 @@ func zoneListsAgent(zone ZoneName, id AgentId) bool {
 	}
 	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok && isAmong([]string{h3.Identity}, id) {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 && isAmong([]string{h3.Identity}, id) {
 				return true
 			}
 		}

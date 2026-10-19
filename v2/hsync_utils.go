@@ -505,6 +505,12 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	nonce := newRfiNonce()
 	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
 	defer cancel()
+	// The answer to a request for the zone's SIG(0) key is let in from a
+	// peer that has no role in the zone (keyHandOverAdmits): the leader of
+	// the group the zone left, whose role the owner may have taken.
+	if subtype == "sig0key" && ar.MPTransport != nil {
+		defer ar.MPTransport.keyAsks.start(string(agent.ID), zone)()
+	}
 
 	// Send RFI CONFIG to the peer agent
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{

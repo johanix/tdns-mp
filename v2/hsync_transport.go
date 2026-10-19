@@ -41,6 +41,10 @@ type MPTransportBridge struct {
 	agentRegistry *AgentRegistry
 	msgQs         *MsgQs
 
+	// keyAsks: the zone SIG(0) key requests out, whose answers are let in
+	// (keyHandOverAdmits)
+	keyAsks keyAskTable
+
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
 

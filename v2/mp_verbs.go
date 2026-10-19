@@ -133,6 +133,9 @@ func (tm *MPTransportBridge) RegisterAppVerbs(router *transport.DNSMessageRouter
 func (tm *MPTransportBridge) routeIncomingMessage(msg *transport.IncomingMessage) {
 	token := msg.Token()
 	lgTransport.Debug("routing message", "type", token, "sender", msg.SenderID)
+	if !tm.keyHandOverOnly(msg) {
+		return
+	}
 	for i := range appVerbRegistry {
 		v := &appVerbRegistry[i]
 		if v.token != token {
