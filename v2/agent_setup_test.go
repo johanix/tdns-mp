@@ -329,16 +329,15 @@ func (r *identitySyncRig) ended(t *testing.T, when string) {
 // identitySyncLine is one logged attempt.
 type identitySyncLine struct {
 	Level   string        `json:"level"`
+	Msg     string        `json:"msg"`
 	Attempt int           `json:"attempt"`
 	Next    time.Duration `json:"next"`
 	line    string
 }
 
-// says: the line's log message is this one. A line about an answer has two
-// "msg" keys, the log message and the answer's own message, and a decoder
-// keeps the last: the log message is looked for in the line itself.
+// says: the line's log message is this one.
 func (l identitySyncLine) says(message string) bool {
-	return strings.Contains(l.line, `"msg":"identity zone: `+message+`"`)
+	return l.Msg == "identity zone: "+message
 }
 
 // logged returns the attempts in the captured log, in order.

@@ -807,7 +807,7 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 		// or not it carries the scheme's message.
 		sent := !st.Error && st.Rcode == dns.RcodeSuccess
 		kv := []any{"zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "next", wait,
-			"rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "msg", st.Msg}
+			"rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "answer", st.Msg}
 		switch {
 		case !sent && !toldRefused:
 			toldRefused, quiet = true, 0
