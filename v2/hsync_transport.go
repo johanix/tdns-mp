@@ -655,6 +655,10 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	//
 	// Each message type fans out directly to its own MsgQs channel; the
 	// single IncomingChan this replaced was deleted (C3.0).
+	// A message let in for a zone's SIG(0) key alone is refused before any
+	// verb handler takes it, unless it is the request for the key or its
+	// answer (keyHandOverGate).
+	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))

@@ -141,3 +141,24 @@ func TestAHandedOverKeyIsTakenOnlyWhenTheZonePublishesIt(t *testing.T) {
 		t.Errorf("the import of a key the zone does not publish: err = %v, want a refusal", err)
 	}
 }
+
+// The check runs before the verb handlers: a message let in for the key
+// alone that is not about the key reaches no handler, which would have
+// acknowledged it as taken. The request for the key does.
+func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *testing.T) {
+	moved, _ := handoverZones(t)
+	c := handoverBridge(arrivalC)
+	reached := func(msg *transport.IncomingMessage) bool {
+		ctx := &transport.MessageContext{Data: map[string]interface{}{}}
+		ctx.SetIncoming(msg)
+		handled := false
+		_ = c.keyHandOverGate(ctx, func(*transport.MessageContext) error { handled = true; return nil })
+		return handled
+	}
+	if !reached(rfiMessage(t, arrivalA, moved, "sig0key")) {
+		t.Error("A's request for the key does not reach C's handler")
+	}
+	if reached(rfiMessage(t, arrivalA, moved, "upstream")) {
+		t.Error("another request from A about the zone C has no role in reaches C's handler")
+	}
+}
