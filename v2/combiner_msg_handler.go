@@ -365,13 +365,46 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
 		return
 	}
+	req := editsAnswerFor(zd, conf.MpConfig().Identity, zone, nonce)
+	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(req.AgentRecords))
+	if req.Message == editsNotLoaded {
+		lgCombiner.Info("RFI EDITS: the zone's stored contributions are not read; answering that they are not loaded", "zone", zone, "agent", agentID)
+	}
 
-	// Copy AgentContributions under lock, then convert outside the lock
+	if tm == nil || tm.DNSTransport == nil {
+		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(agentID)
+	if !peerExists || peer == nil {
+		lgCombiner.Warn("RFI EDITS: agent not in PeerRegistry", "agent", agentID)
+		return
+	}
+
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.sendEdits(sendCtx, peer, req)
+	if err != nil {
+		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
+		return
+	}
+
+	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "agents", len(req.AgentRecords), "word", req.Message, "accepted", resp.Accepted)
+}
+
+// editsAnswerFor is the combiner's answer to an RFI EDITS for the zone:
+// every agent's contributions, and its word that they are loaded, with the
+// request's nonce. Until the zone's stored contributions are read
+// (ContributionsRead) the answer says that they are not loaded, and
+// carries none: an empty map would read as the agent's own state.
+func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest {
+	// Copy AgentContributions under lock, then convert outside the lock.
 	zd.Lock()
+	loaded := zd.MP != nil && zd.MP.ContributionsRead
 	var contribsCopy map[string]map[string]map[uint16]core.RRset
-	if zd.MP == nil {
-		contribsCopy = make(map[string]map[string]map[uint16]core.RRset)
-	} else {
+	if loaded {
 		contribsCopy = make(map[string]map[string]map[uint16]core.RRset, len(zd.MP.AgentContributions))
 		for aid, ownerMap := range zd.MP.AgentContributions {
 			newOwnerMap := make(map[string]map[uint16]core.RRset, len(ownerMap))
@@ -394,38 +427,18 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 			agentRecords[aid] = recs
 		}
 	}
-
-	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(agentRecords))
-
-	if tm == nil || tm.DNSTransport == nil {
-		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
-		return
+	word := editsLoaded
+	if !loaded {
+		word = editsNotLoaded
 	}
-
-	peer, peerExists := tm.PeerRegistry.Get(agentID)
-	if !peerExists || peer == nil {
-		lgCombiner.Warn("RFI EDITS: agent not in PeerRegistry", "agent", agentID)
-		return
-	}
-
-	req := &PeerEditsRequest{
-		SenderID:     conf.MpConfig().Identity,
+	return &PeerEditsRequest{
+		SenderID:     self,
 		Zone:         zone,
 		AgentRecords: agentRecords,
+		Message:      word,
 		Nonce:        nonce,
 		Timestamp:    time.Now(),
 	}
-
-	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	resp, err := tm.sendEdits(sendCtx, peer, req)
-	if err != nil {
-		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
-		return
-	}
-
-	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "agents", len(agentRecords), "accepted", resp.Accepted)
 }
 
 // contributionsToRecords converts an agent's contributions map to the flat

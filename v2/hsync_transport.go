@@ -1068,6 +1068,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
 			ZoneClass:      payload.ZoneClass,
 			Publish:        payload.GetPublish(),
+			CatchUp:        payload.CatchUp,
 		},
 	}
 
@@ -1201,6 +1202,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		SenderID:     senderID,
 		Zone:         payload.Zone,
 		AgentRecords: payload.AgentRecords,
+		Message:      payload.Message,
 	}
 
 	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
@@ -1963,6 +1965,9 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 	}
 	if update != nil {
 		syncReq.Operations = update.Operations
+		if !isCombiner {
+			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
+		}
 		if isCombiner {
 			syncReq.ZoneClass = update.ZoneClass
 			if update.Publish != nil {
@@ -2457,6 +2462,20 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // from it. The entry stays, with no key in it: the provider has spoken,
 // and the signer is told so by name (S7, the empty-share clause of A2.2).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
+	tm.noteForeignKeyStates(zone, from, ops, false)
+}
+
+// noteForeignKeyStates is NoteForeignKeyStates for an update that may be a
+// complete answer to a request for the zone's state. A complete answer
+// whose DNSKEY operation lists no key state says that its provider has
+// spoken and holds no key, also when it has not been heard from before:
+// that is what makes the providers speak after the leader's restart. A
+// complete answer with no DNSKEY operation says nothing about keys: its
+// sender's copy of the zone does not list it in signers=. Where the
+// asker's copy does, the provider stays silent and the zone's DS set
+// unknown, which holds the leader's sync, and never removes the
+// provider's DS at the parent.
+func (tm *MPTransportBridge) noteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation, complete bool) {
 	var states []core.KeyState
 	// endsEmpty: the last DNSKEY operation replaces the whole set by no
 	// record. That is what the operations leave, whatever came before it
@@ -2500,6 +2519,9 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 		if _, spoke := tm.foreignKeyStates[zone][from]; spoke {
 			found, emptied = true, true
 		}
+	}
+	if !found && complete && records {
+		found = true
 	}
 	if !found {
 		tm.foreignKeyStatesMu.Unlock()
@@ -2728,7 +2750,8 @@ func peerAddressLookup(reg *transport.PeerRegistry) func(senderID string) (strin
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).
 // Returns the ACK from the signer. The actual data comes back as a separate KEYSTATE message.
-func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error {
+// The send is bounded at 10 s under ctx, whose end stops it.
+func (tm *MPTransportBridge) sendRfiToSigner(ctx context.Context, zone string, rfiType string) error {
 	if tm.signerID == "" || tm.signerAddress == "" {
 		return fmt.Errorf("no signer configured (signerID=%q, signerAddress=%q)", tm.signerID, tm.signerAddress)
 	}
@@ -2750,7 +2773,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 		RfiType:     rfiType,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -2764,7 +2787,8 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonce string) error {
+// The send is bounded at 10 s under ctx, whose end stops it.
+func (tm *MPTransportBridge) sendRfiToCombiner(ctx context.Context, zone string, rfiType string, nonce string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
@@ -2788,7 +2812,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonc
 		Nonce:       nonce,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)

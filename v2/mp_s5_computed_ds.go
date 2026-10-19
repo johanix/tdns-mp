@@ -336,12 +336,19 @@ func (conf *Config) computedDSIntentOr(zone string) tdns.DSIntent {
 // the key states are written). The signer's own inventory asks for the
 // zone it owns (noteKeyInventory); the two never both apply to a zone.
 func (conf *Config) noteForeignDistribution(ctx context.Context, zone ZoneName, from AgentId, ops []core.RROperation) {
+	conf.noteForeignAnswer(ctx, zone, from, ops, false)
+}
+
+// noteForeignAnswer is noteForeignDistribution for an update that may be
+// a complete answer to a request for the zone's state (complete), which
+// makes its provider speak (noteForeignKeyStates).
+func (conf *Config) noteForeignAnswer(ctx context.Context, zone ZoneName, from AgentId, ops []core.RROperation, complete bool) {
 	tm := conf.InternalMp.MPTransport
 	if tm == nil {
 		return
 	}
 	before := conf.computedDSIntentOr(string(zone))
-	tm.NoteForeignKeyStates(zone, from, ops)
+	tm.noteForeignKeyStates(zone, from, ops, complete)
 	conf.noteComputedDSSet(ctx, string(zone), before)
 }
 

@@ -421,7 +421,14 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 
 		switch op.Operation {
 		case "replace":
-			changed, msg = zdr.processReplaceOp(synchedDataUpdate, nod, rrtype, op)
+			// every replace of the update counts: one whose set is
+			// already there must not hide one before it that changed
+			// something
+			c, m := zdr.processReplaceOp(synchedDataUpdate, nod, rrtype, op)
+			changed = changed || c
+			if m != "" {
+				msg = m
+			}
 
 		case "add":
 			curRRset, _ := nod.RRtypes.Get(rrtype)
@@ -497,6 +504,10 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 	// every other signer's DNSKEY RRset). The newest origin wins.
 	if synchedDataUpdate.UpdateType == "remote" && !synchedDataUpdate.OriginatingTime.IsZero() {
 		if stale, applied := zdr.noteReplaceOrigin(synchedDataUpdate, rrtype); stale {
+			if synchedDataUpdate.staleTypes == nil {
+				synchedDataUpdate.staleTypes = map[uint16]bool{}
+			}
+			synchedDataUpdate.staleTypes[rrtype] = true
 			msg = fmt.Sprintf("Ignored a stale REPLACE of %s %s from agent %q: originated %s (%s), one from %s (%s) is already applied",
 				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId,
 				synchedDataUpdate.OriginatingTime.UTC().Format(time.RFC3339), synchedDataUpdate.OriginatingDistID,

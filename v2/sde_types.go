@@ -44,7 +44,42 @@ type SynchedDataUpdate struct {
 	// (a state, a ds) with the DNSKEY set as it was; the REPLACE goes to
 	// the other providers all the same, for the key states it carries.
 	KeyStatesChanged bool
-	Response         chan *AgentMsgResponse
+	// CatchUp: the update is the answer to a request for the zone's state
+	// (the membership design, 5.4).
+	CatchUp  *CatchUp `json:"catch_up,omitempty"`
+	Response chan *AgentMsgResponse
+	// staleTypes: the types whose replace the repo found older than the
+	// one it has applied (noteReplaceOrigin). What they say about keys is
+	// not noted either (freshOperations).
+	staleTypes map[uint16]bool
+}
+
+// dropStaleOperations takes the operations the repo found stale out of the
+// update, so that they go no further: not to the key states, and not to the
+// combiner, which would put an older set back in the zone it publishes.
+func (u *SynchedDataUpdate) dropStaleOperations() {
+	if u.Update != nil && len(u.staleTypes) > 0 {
+		u.Update.Operations = u.freshOperations()
+	}
+}
+
+// freshOperations are the update's operations whose type the repo did not
+// find stale.
+func (u *SynchedDataUpdate) freshOperations() []core.RROperation {
+	if u.Update == nil {
+		return nil
+	}
+	if len(u.staleTypes) == 0 {
+		return u.Update.Operations
+	}
+	var out []core.RROperation
+	for _, op := range u.Update.Operations {
+		if t, ok := dns.StringToType[op.RRtype]; ok && u.staleTypes[t] {
+			continue
+		}
+		out = append(out, op)
+	}
+	return out
 }
 
 type SynchedDataResponse struct {
@@ -61,7 +96,13 @@ type SynchedDataCmd struct {
 	Cmd         string
 	Zone        ZoneName
 	TargetAgent AgentId // For "resync-targeted": send only to this agent
-	Response    chan *SynchedDataCmdResponse
+	// CatchUp: the request for the zone's state that a "resync-targeted"
+	// answers (the membership design, 5.3).
+	CatchUp  *CatchUp `json:"catch_up,omitempty"`
+	Response chan *SynchedDataCmdResponse
+	// ownRead: for "own-read", what a re-read of the zone brought
+	// (own_read.go)
+	ownRead *ownReadAnswer
 }
 
 type SynchedDataCmdResponse struct {
@@ -86,6 +127,15 @@ type ZoneDataRepo struct {
 	// roll the set back to what it was. Keyed under mu; in memory only:
 	// after a restart the peers re-announce.
 	lastReplace map[string]replaceOrigin
+	// ownState: when this agent last read its own state of each zone from
+	// its combiner, with the combiner's word that its stored contributions
+	// were loaded; ownStateNote: why not, when it has not. Under mu: the
+	// syncher and the status read them (own_read.go).
+	ownState     map[ZoneName]time.Time
+	ownStateNote map[ZoneName]string
+	// notes: per zone, agent and type, the last change the engine stored
+	// and passed to its combiner (setNote). Engine only.
+	notes map[ZoneName]map[AgentId]map[uint16]*setNote
 }
 
 type replaceOrigin struct {

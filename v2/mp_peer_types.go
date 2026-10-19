@@ -63,6 +63,7 @@ type PeerSyncRequest struct {
 	RfiSubtype     string                   // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
 	ZoneClass      string                   // "mp" (default) or "provider"
 	Publish        *core.PublishInstruction // KEY/CDS publication instruction for combiner
+	CatchUp        *CatchUp                 `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
 }
 
 // PeerSyncResponse is the receiver's confirmation of a PeerSyncRequest.

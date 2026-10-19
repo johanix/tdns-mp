@@ -92,7 +92,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	// Uses conf.InternalMp.MPZoneNames (collected at parse time) instead of
 	// scanning Zones.IterBuffered() -- avoids race with RefreshEngine.
 	tm := conf.InternalMp.MPTransport
-	hasCombiner := tm != nil && tm.combinerID != ""
+	hasCombiner := tm != nil && conf.namesCombiner()
 	hasSigner := tm != nil && tm.signerID != ""
 
 	lgEngine.Info("SynchedDataEngine started")
@@ -107,7 +107,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			}
 			if hasCombiner {
 				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
-				RequestAndWaitForEdits(zd.ZoneData, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs, conf.InternalMp.ZoneDataRepo)
+				conf.RequestAndWaitForEdits(zd.ZoneData, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs, conf.InternalMp.ZoneDataRepo, AgentId(conf.MpConfig().Identity))
 			}
 			weAreSigner := zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.WeAreSigner
 			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner
@@ -144,6 +144,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	trackingEvictTicker := time.NewTicker(5 * time.Minute)
 	defer trackingEvictTicker.Stop()
 
+	// The own read of a zone that is not done is read again (own_read.go).
+	ownReadTicker := time.NewTicker(ownReadInterval)
+	defer ownReadTicker.Stop()
+	owner := newOwnReader(conf, msgQs, zdr)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -152,6 +157,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case <-trackingEvictTicker.C:
 			zdr.evictStaleTracking(1 * time.Hour)
+
+		case <-ownReadTicker.C:
+			owner.tick(ctx)
 
 		case synchedDataUpdate = <-SDupdateQ:
 			var change bool
@@ -184,6 +192,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// 3. Add the update to the agent data repo.
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
+					stored := time.Now()
 					if err != nil {
 						lgEngine.Error("failed to add update to agent data repo", "err", err)
 						resp.Error = true
@@ -209,11 +218,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								lgEngine.Info("update applied, enqueuing for combiner and remote agents", "zone", synchedDataUpdate.Zone)
 								// Enqueue for combiner (reliable delivery with retry)
 								_, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID)
+								sentAs := distID
 								if err != nil {
 									lgEngine.Error("failed to enqueue for combiner", "zone", synchedDataUpdate.Zone, "err", err)
 									resp.Error = true
 									resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
+									sentAs = ""
 								}
+								zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, sentAs)
 							}
 
 							// Enqueue for all remote agents in this zone (same distID)
@@ -307,6 +319,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// 3. Add the update to the agent data repo.
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
+					stored := time.Now()
+					synchedDataUpdate.dropStaleOperations()
 					if err != nil {
 						lgEngine.Error("failed to add remote update to agent data repo", "err", err)
 						resp.Error = true
@@ -317,8 +331,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// to our signer whether or not the DNSKEY set changed, and
 					// for a zone our own signer does not own it is the DS set
 					// (Amendment 2); only from an update the repo took
+					if cu := synchedDataUpdate.CatchUp; cu != nil && err == nil {
+						lgEngine.Info("a peer answered a request for the zone's state", "zone", synchedDataUpdate.Zone,
+							"peer", synchedDataUpdate.AgentId, "request", cu.Request, "complete", cu.IsComplete(), "why", cu.Why)
+					}
+					// What a replace the repo found stale says about keys is
+					// stale too (it is out of the update by now): an older
+					// message must not overwrite the key states of a newer
+					// one, an answer or a distribution.
 					if err == nil && synchedDataUpdate.Update != nil {
-						conf.noteForeignDistribution(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations)
+						conf.noteForeignAnswer(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations, synchedDataUpdate.CatchUp.IsComplete())
 					}
 					if change {
 						// Always forward remote updates to the local combiner for persistence.
@@ -331,6 +353,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// The combiner deduplicates KEY/CDS contributions: local agent
 							// contributions take precedence over remote-forwarded ones.
 							distID, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
+							if err != nil {
+								distID = ""
+							}
+							zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, distID)
 							if err != nil {
 								lgEngine.Error("failed to enqueue remote update for combiner", "zone", synchedDataUpdate.Zone, "err", err)
 								resp.Error = true
@@ -373,100 +399,111 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// transition PENDING->ACCEPTED (adds) and
 						// PendingRemoval->Removed (deletes). Without this an
 						// idempotent re-send strands the sender in PENDING.
+						//
+						// Every such update is confirmed, also when it lists no
+						// record and this agent holds nothing of the sender's
+						// (decision 42): an empty replace of a set already
+						// absent, a stale replace, an answer of empty sets.
+						// Unconfirmed, it was sent again for a day, and a stale
+						// one sent again after a restart, when the order guard
+						// is gone, rolled the set back.
 						zone := synchedDataUpdate.Zone
 						agentId := synchedDataUpdate.AgentId
+						var nod *OwnerData
 						if agentRepo, ok := zdr.Repo.Get(zone); ok {
-							if nod, ok := agentRepo.Get(agentId); ok {
-								var appliedRecords, removedRecords []string
-								// inRepo reports whether an RR (in ClassINET form)
-								// is present in the agent's repo.
-								inRepo := func(rrStr string, rrtype uint16) bool {
-									repoRRset, exists := nod.RRtypes.Get(rrtype)
-									if !exists {
-										return false
-									}
-									for _, repoRR := range repoRRset.RRs {
-										if repoRR.String() == rrStr {
-											return true
-										}
-									}
-									return false
-								}
-								// A no-op confirmation reports the desired post-state:
-								// add/replace records already present -> Applied;
-								// delete records already absent -> Removed (the sender
-								// tracks removals in ClassINET form). The modern edit
-								// path is Operations (apihandler_agent.go emits a
-								// "replace"), which takes precedence in ProcessUpdate;
-								// the legacy class-overloaded RRsets/RRs form is only a
-								// fallback.
-								if upd := synchedDataUpdate.Update; upd != nil && len(upd.Operations) > 0 {
-									for _, op := range upd.Operations {
-										rrtype, ok := dns.StringToType[op.RRtype]
-										if !ok {
-											continue
-										}
-										for _, rrStr := range op.Records {
-											rr, err := dns.NewRR(rrStr)
-											if err != nil {
-												continue
-											}
-											s := rr.String()
-											switch op.Operation {
-											case "add", "replace":
-												if inRepo(s, rrtype) {
-													appliedRecords = append(appliedRecords, s)
-												}
-											case "delete":
-												if !inRepo(s, rrtype) {
-													removedRecords = append(removedRecords, s)
-												}
-											}
-										}
-									}
-								} else if upd != nil {
-									// Legacy class-overloaded form (no Operations).
-									confirm := func(rr dns.RR) {
-										switch rr.Header().Class {
-										case dns.ClassINET:
-											s := rr.String()
-											if inRepo(s, rr.Header().Rrtype) {
-												appliedRecords = append(appliedRecords, s)
-											}
-										case dns.ClassNONE:
-											m := dns.Copy(rr)
-											m.Header().Class = dns.ClassINET
-											s := m.String()
-											if !inRepo(s, rr.Header().Rrtype) {
-												removedRecords = append(removedRecords, s)
-											}
-										}
-									}
-									for _, rrset := range upd.RRsets {
-										for _, rr := range rrset.RRs {
-											confirm(rr)
-										}
-									}
-									for _, rr := range upd.RRs {
-										confirm(rr)
-									}
-								}
-								if (len(appliedRecords) > 0 || len(removedRecords) > 0) && msgQs.OnRemoteConfirmationReady != nil {
-									lgEngine.Info("remote update already in desired state, sending immediate confirmation",
-										"zone", zone, "agent", agentId,
-										"applied", len(appliedRecords), "removed", len(removedRecords),
-										"originDistID", synchedDataUpdate.OriginatingDistID)
-									msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-										OriginatingSender: string(agentId),
-										Zone:              zone,
-										Status:            "ok",
-										Message:           "desired state already present at remote agent",
-										AppliedRecords:    appliedRecords,
-										RemovedRecords:    removedRecords,
-									})
+							nod, _ = agentRepo.Get(agentId)
+						}
+						var appliedRecords, removedRecords []string
+						// inRepo reports whether an RR (in ClassINET form)
+						// is present in the agent's repo.
+						inRepo := func(rrStr string, rrtype uint16) bool {
+							if nod == nil {
+								return false
+							}
+							repoRRset, exists := nod.RRtypes.Get(rrtype)
+							if !exists {
+								return false
+							}
+							for _, repoRR := range repoRRset.RRs {
+								if repoRR.String() == rrStr {
+									return true
 								}
 							}
+							return false
+						}
+						// A no-op confirmation reports the desired post-state:
+						// add/replace records already present -> Applied;
+						// delete records already absent -> Removed (the sender
+						// tracks removals in ClassINET form). The modern edit
+						// path is Operations (apihandler_agent.go emits a
+						// "replace"), which takes precedence in ProcessUpdate;
+						// the legacy class-overloaded RRsets/RRs form is only a
+						// fallback.
+						if upd := synchedDataUpdate.Update; upd != nil && len(upd.Operations) > 0 {
+							for _, op := range upd.Operations {
+								rrtype, ok := dns.StringToType[op.RRtype]
+								if !ok {
+									continue
+								}
+								for _, rrStr := range op.Records {
+									rr, err := dns.NewRR(rrStr)
+									if err != nil {
+										continue
+									}
+									s := rr.String()
+									switch op.Operation {
+									case "add", "replace":
+										if inRepo(s, rrtype) {
+											appliedRecords = append(appliedRecords, s)
+										}
+									case "delete":
+										if !inRepo(s, rrtype) {
+											removedRecords = append(removedRecords, s)
+										}
+									}
+								}
+							}
+						} else if upd != nil {
+							// Legacy class-overloaded form (no Operations).
+							confirm := func(rr dns.RR) {
+								switch rr.Header().Class {
+								case dns.ClassINET:
+									s := rr.String()
+									if inRepo(s, rr.Header().Rrtype) {
+										appliedRecords = append(appliedRecords, s)
+									}
+								case dns.ClassNONE:
+									m := dns.Copy(rr)
+									m.Header().Class = dns.ClassINET
+									s := m.String()
+									if !inRepo(s, rr.Header().Rrtype) {
+										removedRecords = append(removedRecords, s)
+									}
+								}
+							}
+							for _, rrset := range upd.RRsets {
+								for _, rr := range rrset.RRs {
+									confirm(rr)
+								}
+							}
+							for _, rr := range upd.RRs {
+								confirm(rr)
+							}
+						}
+						if msgQs.OnRemoteConfirmationReady != nil {
+							lgEngine.Info("remote update already in desired state, sending immediate confirmation",
+								"zone", zone, "agent", agentId,
+								"applied", len(appliedRecords), "removed", len(removedRecords),
+								"originDistID", synchedDataUpdate.OriginatingDistID)
+							msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+								OriginatingDistID: synchedDataUpdate.OriginatingDistID,
+								OriginatingSender: string(agentId),
+								Zone:              zone,
+								Status:            "ok",
+								Message:           "desired state already present at remote agent",
+								AppliedRecords:    appliedRecords,
+								RemovedRecords:    removedRecords,
+							})
 						}
 					}
 				}
@@ -662,7 +699,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				zd, zdExists := Zones.Get(string(sdcmd.Zone))
 				if zdExists && zd != nil {
 					lgEngine.Info("resync: pulling contributions from combiner", "zone", sdcmd.Zone)
-					RequestAndWaitForEdits(zd.ZoneData, ctx, tm, conf.InternalMp.MsgQs, zdr)
+					conf.RequestAndWaitForEdits(zd.ZoneData, ctx, tm, conf.InternalMp.MsgQs, zdr, AgentId(conf.MpConfig().Identity))
 				}
 
 				myAgentId := AgentId(conf.MpConfig().Identity)
@@ -842,6 +879,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					Msg: note + fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
 				}
 
+			case "own-read":
+				// A re-read's answer (ownReader), applied here because the
+				// apply writes zdr.Tracking, which has no lock.
+				owner.done(sdcmd.Zone)
+				if a := sdcmd.ownRead; a != nil {
+					if zd, ok := Zones.Get(string(sdcmd.Zone)); ok {
+						applyOwnRead(zd, a, zdr, AgentId(conf.MpConfig().Identity))
+					}
+				}
+
 			case "resync-targeted":
 				// Send local data (including DNSKEY) only to the requesting agent.
 				if sdcmd.Response == nil {
@@ -864,6 +911,20 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				if !votesInZone(sdcmd.Zone, myAgentId) {
 					lgEngine.Info(noRolePushNote(sdcmd.Zone), "target", sdcmd.TargetAgent)
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: noRolePushNote(sdcmd.Zone)}
+					continue
+				}
+				// A peer's request for the zone's state carries catch_up,
+				// and gets the complete answer (catchUpAnswer). Only the
+				// combiner's agent-resync asks without it, for this
+				// agent's own data as it holds it, as before.
+				if sdcmd.CatchUp != nil {
+					msg, err := conf.catchUpAnswer(zdr, sdcmd.Zone, sdcmd.TargetAgent, sdcmd.CatchUp)
+					if err != nil {
+						lgEngine.Error("the answer to a request for the zone's state was not enqueued", "zone", sdcmd.Zone, "peer", sdcmd.TargetAgent, "err", err)
+						sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: err.Error()}
+						continue
+					}
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: msg}
 					continue
 				}
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
@@ -925,6 +986,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case detail := <-msgQs.Confirmation:
 			lgEngine.Info("received confirmation", "source", detail.Source, "distID", detail.DistributionID, "zone", detail.Zone, "status", detail.Status, "applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems), "truncated", detail.Truncated)
+			if tm := conf.InternalMp.MPTransport; tm != nil && tm.combinerID != "" && detail.Source == string(tm.combinerID) && detail.Status != "PENDING" {
+				zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
+			}
 			zdr.ProcessConfirmation(detail, msgQs)
 			// the leader's CSYNC waits for its confirmations
 			conf.delegationCsyncProgress(ctx, zdr, detail.Zone, detail)

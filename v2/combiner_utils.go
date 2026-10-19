@@ -1025,6 +1025,7 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 
 	mpzd.Lock()
 	mpzd.EnsureMP()
+	mpzd.MP.ContributionsRead = true // the store is read now, if it was not at the start
 	if zoneContribs, ok := allContribs[zone]; ok {
 		mpzd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 		for senderID, ownerMap := range zoneContribs {
