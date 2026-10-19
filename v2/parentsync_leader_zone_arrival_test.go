@@ -202,7 +202,7 @@ func stopElectionTimers(lem *LeaderElectionManager) {
 	lem.mu.RUnlock()
 	for _, le := range les {
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}
@@ -567,6 +567,9 @@ func TestAnAuditorsRecomputeTellsNobody(t *testing.T) {
 
 	if pgm.onZoneJoinedGroup != nil {
 		t.Errorf("the auditor's group manager reports the zones that move to somebody")
+	}
+	if pgm.onGroupGone != nil {
+		t.Errorf("the auditor's group manager reports the groups that are gone to somebody")
 	}
 	if ar.LeaderElectionManager != nil || conf.InternalMp.LeaderElectionManager != nil {
 		t.Errorf("the auditor has an election manager")

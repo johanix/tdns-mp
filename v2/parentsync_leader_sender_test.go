@@ -29,7 +29,7 @@ func senderTestGroup(t *testing.T) (*LeaderElectionManager, string) {
 			return
 		}
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}
@@ -99,7 +99,11 @@ func TestAGroupCallCountsOnlyFromAVotingMember(t *testing.T) {
 	lem.HandleGroupMessage(group, "auditor.example.", "ELECT-CALL",
 		map[string][]string{"_term": {"1"}, "_vote": {"7"}, "_group": {group}})
 
+	// No election entry at all is no term: the refused CALL created nothing.
 	le := groupElectionOf(lem, group)
+	if le == nil {
+		return
+	}
 	le.mu.Lock()
 	defer le.mu.Unlock()
 	if le.Active || le.Term != 0 {
@@ -165,7 +169,7 @@ func TestAnAgentIsAVotingMemberWhateverTheDotOnItsConfiguredName(t *testing.T) {
 	t.Cleanup(func() {
 		if le := groupElectionOf(lem, group); le != nil {
 			le.mu.Lock()
-			for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+			for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 				if tm != nil {
 					tm.Stop()
 				}

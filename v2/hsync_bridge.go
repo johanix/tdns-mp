@@ -279,18 +279,19 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 			return
 		}
 		pg := pgm.GetGroup(groupHash)
-		if pg == nil || len(pg.VotingMembers) == 0 {
+		if pg == nil {
+			// A heartbeat round that checked a copy of the groups taken
+			// before the group went must not leave it marked OPERATIONAL:
+			// a group that comes back would then call no election.
+			ar.GossipStateTable.forgetGroup(groupHash)
 			return
 		}
-		localID := string(lem.localID)
-		weVote := false
-		for _, m := range pg.VotingMembers {
-			if m == localID {
-				weVote = true
-				break
-			}
+		if len(pg.VotingMembers) == 0 {
+			return
 		}
-		if !weVote {
+		// The members come from zone data and carry the trailing dot; a
+		// configured identity need not (isAmong).
+		if !isAmong(pg.VotingMembers, lem.localID) {
 			return
 		}
 		initiator := pg.VotingMembers[0]
@@ -299,7 +300,7 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 				initiator = m
 			}
 		}
-		if localID == initiator {
+		if dns.Fqdn(string(lem.localID)) == dns.Fqdn(initiator) {
 			lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
 		}
 	})
@@ -313,6 +314,17 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 			lem.ApplyGossipElection(groupHash, state)
 		}
 	})
+	// A group whose last zone has left it is gone for both: the election
+	// manager drops its election, and the gossip table what it remembers of
+	// it, so that a group that comes back elects as a new group does.
+	if pgm := ar.ProviderGroupManager; pgm != nil {
+		pgm.SetOnGroupGone(func(groupHash string) {
+			ar.GossipStateTable.forgetGroup(groupHash)
+			if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+				lem.groupGone(groupHash)
+			}
+		})
+	}
 }
 
 func newAgentHsyncEngine(conf *Config) *hsync.Engine {
@@ -405,11 +417,16 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 					return
 				}
 				ar.GossipStateTable.RefreshLocalStates(ar, ar.ProviderGroupManager)
-				ar.ProviderGroupManager.mu.RLock()
-				for _, pg := range ar.ProviderGroupManager.Groups {
+				// The groups are copied out, and checked with the manager's
+				// lock free. A group that has just become OPERATIONAL has its
+				// election called from in there, by a callback that reads the
+				// manager. With the read lock held across the call, a
+				// recompute that asked for the write lock in between waited
+				// for this round, the callback's read waited for the
+				// recompute, and the agent beat no more (tdns-mp #180).
+				for _, pg := range ar.ProviderGroupManager.GetGroups() {
 					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
 				}
-				ar.ProviderGroupManager.mu.RUnlock()
 			},
 		},
 	}

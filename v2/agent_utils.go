@@ -261,8 +261,9 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 // (provider_groups.go) recomputes the participant set from HSYNCPARAM on
 // every read. So when local participation in `zonename` ends, there is no
 // stored per-zone relationship to tear down — it simply stops being
-// derived on the next read. The provider groups are recomputed by the hook
-// itself (localRemovedFromZone). There is nothing to manually clean up here.
+// derived on the next read. The provider groups are recomputed on that path
+// by ApplyHsyncDiff (OnHsync3Changed). There is nothing to manually clean up
+// here.
 //
 // Revisit only if the testbed shows orphaned per-zone state surviving a
 // local removal; that would mean some state is still stored rather than
@@ -271,16 +272,14 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	lgAgent.Info("local removal from zone; membership is derived, no teardown needed", "zone", zonename)
 }
 
-// localRemovedFromZone is the OnLocalRemoved hook. ApplyHsyncDiff returns right
-// after it, before the group recompute it runs for any other HSYNC3 change,
-// so the hook recomputes the groups itself. Without that the zone stayed in
-// the group this agent was in, and a give-back in the same refresh found
-// this agent still leading the zone and ran the leader's setup here.
+// localRemovedFromZone is the OnLocalRemoved hook. The groups are recomputed
+// right after it on the same path (ApplyHsyncDiff calls OnHsync3Changed
+// there too, tdns-mp #183), under the recompute's own lock. Without the
+// recompute the zone stayed in the group this agent was in, and a give-back
+// in the same refresh found this agent still leading the zone and ran the
+// leader's setup here.
 func (ar *AgentRegistry) localRemovedFromZone(zone ZoneName) {
 	ar.CleanupZoneRelationships(zone)
-	if ar.ProviderGroupManager != nil {
-		ar.ProviderGroupManager.RecomputeGroups()
-	}
 }
 
 // reattachHsyncMemberAdds re-homes the membership-change election kick that used
@@ -298,14 +297,16 @@ func (ar *AgentRegistry) reattachHsyncMemberAdds(zonename ZoneName, added []hsyn
 		return
 	}
 
-	// Membership changed (HSYNC3 identity add) — kick a leader election.
+	// Membership changed (HSYNC3 identity add): a zone without peers elects
+	// its one agent here. A zone in a provider group starts nothing here:
+	// its election is the group's (leaveElectionToGroup).
 	if ar.LeaderElectionManager != nil {
 		lem := ar.LeaderElectionManager
 		if lem.configuredPeers(zonename) == 0 {
 			lem.StartElection(zonename, 0)
 		} else if ar.ProviderGroupManager != nil {
 			if pg := ar.ProviderGroupManager.GetGroupForZone(zonename); pg != nil {
-				lem.DeferGroupElection(pg.GroupHash)
+				lem.leaveElectionToGroup(pg.GroupHash)
 			}
 		}
 	}
