@@ -144,3 +144,49 @@ func TestAZoneWhoseKeySetupFailsWaitsAsForAMissingKey(t *testing.T) {
 		t.Errorf("the setup ran %d times, want 3: twice failing, once working", got)
 	}
 }
+
+// What an arrival does with its key setup's answer. The key held, or none
+// needed: the sync is asked for. The lead moved on during the setup: nothing
+// is asked for and nothing waits, so that a lead that comes back cannot find
+// a sync queued without its key. Anything else waits.
+func TestAnArrivalAsksForTheSyncOnlyWithItsKeyAndOnlyWhileItLeads(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		err         error
+		asks, waits int
+	}{
+		{"the key is held", nil, 1, 0},
+		{"the lead moved on", errLeadMoved, 0, 0},
+		{"nobody has handed the key over", errZoneKeyNotHeld, 0, 1},
+		{"the setup failed", errors.New("failed to publish KEY to combiner"), 0, 1},
+	} {
+		var asks, waits int
+		afterArrivalSetup(tc.err, func() { asks++ }, func() { waits++ })
+		if asks != tc.asks || waits != tc.waits {
+			t.Errorf("%s: asked %d, waited %d; want asked %d, waited %d", tc.name, asks, waits, tc.asks, tc.waits)
+		}
+	}
+}
+
+// A round of the wait that finds the lead moved on ends the wait without the
+// sync, whatever the next round would have found.
+func TestAZoneThatWaitsForItsKeyStopsWhenARoundFindsTheLeadMoved(t *testing.T) {
+	var w zoneKeyWaits
+	var tries, syncs atomic.Int32
+	try := func() error {
+		if tries.Add(1) == 1 {
+			return errLeadMoved
+		}
+		return nil
+	}
+	w.await(context.Background(), "moved.example.", keyWaitDelays, func() bool { return true }, try,
+		func() { syncs.Add(1) })
+	eventually(t, "the wait never ended", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return !w.waiting["moved.example."]
+	})
+	if tries.Load() != 1 || syncs.Load() != 0 {
+		t.Errorf("tried %d, synced %d; want tried once and no sync", tries.Load(), syncs.Load())
+	}
+}

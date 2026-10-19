@@ -104,6 +104,29 @@ func mayGenerateZoneKey(elected bool, zd *MPZoneData, unanswered int) bool {
 // member has said that it holds none.
 var errZoneKeyNotHeld = errors.New("this agent holds no SIG(0) key for the zone and may not make one yet")
 
+// errLeadMoved is the key setup's answer when it stops because this agent no
+// longer leads the zone: before it makes a key, or before it publishes one.
+// Nothing is to be asked of the parent for the zone from here, and nothing is
+// to be waited for.
+var errLeadMoved = errors.New("this agent no longer leads the zone")
+
+// afterArrivalSetup is what a zone's arrival does with its key setup's
+// answer. With the key held, or none needed, it asks for the sync. When the
+// lead has moved it asks for nothing: a sync asked for then is sent by
+// nobody, and should the lead come back before the ask is looked at, it would
+// go out without the key while nothing set the key up. Any other answer,
+// a key nobody has handed over or a setup that failed, waits: the wait asks
+// again and asks for the sync once a round has worked.
+func afterArrivalSetup(err error, ask, wait func()) {
+	switch {
+	case err == nil:
+		ask()
+	case errors.Is(err, errLeadMoved):
+	default:
+		wait()
+	}
+}
+
 // zoneKeyWaitDelays are the waits between two rounds of asking the peers for
 // the key of a zone that arrived without it. The last one repeats: the asking
 // does not end by itself, since nothing else brings the key, and without it
@@ -170,6 +193,10 @@ func (w *zoneKeyWaits) await(ctx context.Context, zone ZoneName, delays []time.D
 			if err == nil {
 				lgAgent.Info("the zone's SIG(0) key is held now; asking for the delegation sync that waited for it", "zone", zone)
 				got()
+				return
+			}
+			if errors.Is(err, errLeadMoved) {
+				lgAgent.Info("this agent no longer leads the zone; its SIG(0) key is asked for no more", "zone", zone)
 				return
 			}
 			if !errors.Is(err, errZoneKeyNotHeld) {

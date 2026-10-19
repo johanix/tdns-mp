@@ -366,7 +366,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		// that nobody bootstraps.
 		if !lem.IsLeader(zone) {
 			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; no SIG(0) key is made", "zone", zone)
-			return nil
+			return errLeadMoved
 		}
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
 		{
@@ -405,7 +405,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			if made {
 				dropKeyMadeForALostLead(hdb, zd.ZoneName, keyName, madeKeyid)
 			}
-			return nil
+			return errLeadMoved
 		}
 		// Step d: get the active key and publish to combiner + remote agents
 		sak, err = hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
@@ -463,6 +463,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
 		err := leaderKeySetup(zone, true)
 		conf.requestDelegationSync(ctx, string(zone), "this agent was elected the zone's delegation sync leader")
+		if errors.Is(err, errLeadMoved) {
+			return nil // the lead moved on during the setup: nothing failed
+		}
 		return err
 	})
 	// A zone that joins a group this agent already leads is asked for the
@@ -488,23 +491,17 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		}
 		err := leaderKeySetup(zone, false)
-		if err != nil {
-			// Not only a key that is not held yet: a setup that failed to make
-			// or publish the key leaves a sync that cannot be signed, and the
-			// sync's own retries never set the key up again. The wait asks
-			// again, and asks for the sync once the setup has worked.
-			if !errors.Is(err, errZoneKeyNotHeld) {
-				lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; it is tried again before the sync is asked for", "zone", zone, "err", err)
-			}
+		if err != nil && !errors.Is(err, errZoneKeyNotHeld) && !errors.Is(err, errLeadMoved) {
+			lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; it is tried again before the sync is asked for", "zone", zone, "err", err)
+		}
+		afterArrivalSetup(err, ask, func() {
 			conf.InternalMp.zoneKeyWaits.await(ctx, zone, zoneKeyWaitDelays,
 				func() bool { return lem.IsLeader(zone) },
 				func() error {
 					return lem.inKeySetup(zone, func() error { return leaderKeySetup(zone, false) })
 				},
 				ask)
-			return nil
-		}
-		ask()
+		})
 		return nil
 	})
 
