@@ -161,4 +161,9 @@ func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *tes
 	if reached(rfiMessage(t, arrivalA, moved, "upstream")) {
 		t.Error("another request from A about the zone C has no role in reaches C's handler")
 	}
+	// The delivery confirmation of the request or the answer reaches the
+	// transport's own handler, which settles the sender's queued message.
+	if !reached(&transport.IncomingMessage{TypeToken: "confirm", SenderID: arrivalA, Zone: string(moved)}) {
+		t.Error("A's delivery confirmation about the zone does not reach C's transport")
+	}
 }

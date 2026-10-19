@@ -231,8 +231,9 @@ func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next
 }
 
 // keyHandOverOnly: a message that came in for the zone's SIG(0) key alone
-// (admittedForKeyOnly) is the request for the key or its answer. Anything
-// else that came in that way is not acted on.
+// (admittedForKeyOnly) is the request for the key, its answer, or the
+// delivery confirmation of either. Anything else that came in that way is
+// not acted on.
 func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
 	sender := msg.TransportSender
 	if sender == "" {
@@ -242,6 +243,11 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 		return true
 	}
 	switch msg.Token() {
+	case "confirm":
+		// The delivery confirmation of the key's request or answer: the
+		// transport settles the sender's queued message with it. It moves
+		// no zone data.
+		return true
 	case "rfi":
 		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" {
 			return true
