@@ -1441,12 +1441,42 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 	return winner
 }
 
+// activeSig0KeyIDs lists the key ids of keyName's active SIG(0) keys: all of
+// them, where GetSig0Keys keeps one.
+func activeSig0KeyIDs(hdb *HsyncDB, keyName string) (map[uint16]bool, error) {
+	resp, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "list"})
+	if err != nil {
+		return nil, err
+	}
+	ids := map[uint16]bool{}
+	for mapkey, k := range resp.Sig0keys {
+		if !strings.EqualFold(dns.Fqdn(k.Name), dns.Fqdn(keyName)) || k.State != tdns.Sig0StateActive {
+			continue
+		}
+		_, idstr, ok := strings.Cut(mapkey, "::")
+		if !ok {
+			continue
+		}
+		if id, err := strconv.ParseUint(idstr, 10, 16); err == nil {
+			ids[uint16(id)] = true
+		}
+	}
+	return ids, nil
+}
+
 // dropKeyMadeForALostLead deletes a SIG(0) key the leader's setup made, when
 // the lead moved before the setup could publish it. Left active, the key
 // would be handed to the next leader that asks this agent, and published the
 // next time this agent leads, though the parent never saw it. A key this
-// agent already held, or imported from a peer, is the group's and stays.
+// agent already held, or imported from a peer, is the group's and stays. Nor is a key deleted that is
+// not the zone's only active key: the delete cannot be undone, and the one
+// the parent trusts may be the other.
 func dropKeyMadeForALostLead(hdb *HsyncDB, zone, keyName string, keyid uint16) {
+	if ids, err := activeSig0KeyIDs(hdb, keyName); err != nil || len(ids) != 1 || !ids[keyid] {
+		lgAgent.Warn("onLeaderElected: the SIG(0) key made for a lead that has moved is kept: it is not the zone's only active key, or the keys could not be listed",
+			"zone", zone, "keyid", keyid, "active", len(ids), "err", err)
+		return
+	}
 	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete",
 		Zone: zone, Keyname: keyName, Keyid: keyid}); err != nil {
 		lgAgent.Error("onLeaderElected: the SIG(0) key made for a lead that has moved could not be deleted; it stays active",

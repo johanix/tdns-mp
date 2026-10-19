@@ -278,6 +278,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		var madeKeyid uint16
 		// Step a: check local keystore
 		sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
+		// a clean read that found none: only then can a key made below be
+		// told for the one this setup made
+		readEmpty := err == nil && sak != nil && len(sak.Keys) == 0
 		if err == nil && len(sak.Keys) > 0 {
 			lgAgent.Info("leader has local SIG(0) key, proceeding to publish",
 				"zone", zone, "keyid", sak.Keys[0].KeyId)
@@ -334,14 +337,23 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				State:      tdns.Sig0StateActive,
 				Creator:    "leader-election",
 			}
+			before, berr := activeSig0KeyIDs(hdb, keyName)
 			resp, err := hdb.Sig0KeyMgmt(nil, kp)
 			if err != nil {
 				return fmt.Errorf("onLeaderElected: failed to generate SIG(0) keypair: %v", err)
 			}
 			lgAgent.Info("generated SIG(0) keypair", "zone", zone, "msg", resp.Msg)
-			// step a found no active key, so the active key is this one
-			if gen, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive); err == nil && len(gen.Keys) > 0 {
-				made, madeKeyid = true, gen.Keys[0].KeyRR.KeyTag()
+			// The key made is the one new active key, and only when there was
+			// none before. A key another writer added meanwhile, or one a
+			// failed read hid, is never taken for it: what this names is what
+			// dropKeyMadeForALostLead deletes.
+			after, aerr := activeSig0KeyIDs(hdb, keyName)
+			if readEmpty && berr == nil && aerr == nil && len(before) == 0 && len(after) == 1 {
+				for id := range after {
+					made, madeKeyid = true, id
+				}
+			} else {
+				lgAgent.Info("onLeaderElected: the SIG(0) key just made cannot be told from another active key; it is kept whatever becomes of the lead", "zone", zone)
 			}
 		}
 	publish:

@@ -127,8 +127,41 @@ func TestAKeyMadeForALostLeadIsNotLeftActive(t *testing.T) {
 		t.Fatalf("the active keys after the setup made one: %v, %v", sak, err)
 	}
 	dropKeyMadeForALostLead(hdb, zone, zone, sak.Keys[0].KeyRR.KeyTag())
-	if sak, err := hdb.GetSig0Keys(zone, tdns.Sig0StateActive); err == nil && len(sak.Keys) > 0 {
-		t.Errorf("the key made for a lead that moved is still active: keyid %d", sak.Keys[0].KeyRR.KeyTag())
+	ids, err := activeSig0KeyIDs(hdb, zone)
+	if err != nil {
+		t.Fatalf("the active keys after the delete: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("the key made for a lead that moved is still active: %v", ids)
+	}
+}
+
+// A key is deleted only when it is the zone's only active key. With two, the
+// one the setup believes it made may be the other, the one the parent trusts,
+// and a delete cannot be undone: both stay.
+func TestAKeyIsNotDeletedWhenItIsNotTheOnlyActiveOne(t *testing.T) {
+	const zone = "twokeys.example."
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	for range 2 {
+		if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: zone,
+			Keyname: zone, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+			t.Fatalf("a key: %v", err)
+		}
+	}
+	ids, err := activeSig0KeyIDs(hdb, zone)
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("the active keys before: %v, %v", ids, err)
+	}
+	for id := range ids {
+		dropKeyMadeForALostLead(hdb, zone, zone, id)
+		break
+	}
+	after, err := activeSig0KeyIDs(hdb, zone)
+	if err != nil {
+		t.Fatalf("the active keys after: %v", err)
+	}
+	if len(after) != 2 {
+		t.Errorf("a key was deleted while the zone had two active keys: %v left of %v", after, ids)
 	}
 }
 
