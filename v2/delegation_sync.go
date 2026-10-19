@@ -315,11 +315,18 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 		// again: it retries only a zone whose agents sync it (mpLeaderSync).
 		return msg, rcode, ur, false, errors.New("the zone's owner has taken its delegation sync over; the NOTIFY is not sent")
 	}
+	delegationSyncBeforeHandoff(ds.ZoneName)
 	held, failed := false, csyncErr
 	if failed == nil {
 		held, failed = conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq, run: runCtx})
 	}
 	if failed != nil {
+		if runCtx.Err() != nil || ownerSyncsDelegation(ds.ZoneData) {
+			// The owner took the sync over after this sync last looked, or
+			// the agent is stopping: nothing is asked again, and no chain is
+			// made again for a zone whose owner syncs it.
+			return msg, rcode, ur, false, failed
+		}
 		// The NOTIFY is not sent on. Asked again here, and not left to the
 		// caller: the request of a refresh has no caller that asks again.
 		conf.delegationSyncFailed(ctx, ds.ZoneName, failed)
@@ -409,3 +416,8 @@ func mpSetupAllowed(conf *Config, zd *tdns.ZoneData) bool {
 	}
 	return lem.IsLeader(ZoneName(zd.ZoneName))
 }
+
+// delegationSyncBeforeHandoff runs in a leader sync after its last look at
+// the option and before it hands its NOTIFY over: the window a takeover can
+// land in. A test puts a takeover there.
+var delegationSyncBeforeHandoff = func(zone string) {}

@@ -449,3 +449,46 @@ func handedOverAfterTheTakeover(t *testing.T, wait time.Duration) {
 		t.Errorf("the handoff made the zone's chain again: %d chains", n)
 	}
 }
+
+// The same takeover, through the sync itself: it lands after the sync's last
+// look at the option and before the handoff. The handoff refuses, and the
+// sync does not take that for a failure to ask again: that made the chain
+// again, right after the takeover had ended it, and scheduled an ask.
+func TestATakeoverJustBeforeTheHandoffLeavesNoChain(t *testing.T) {
+	asMPAgent(t)
+	r := newNotifyRig(t, "beforehandoff.notify.example.", "NOTIFY", repeat(time.Hour, 3)...)
+	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
+	z := r.mpzd.ZoneName
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	changed, dss, err := implicitDelegationChange(r.mpzd, refreshedZone(t, r.mpzd, fmt.Sprintf("%s 3600 IN NS ns2.provider.example.", z)))
+	if err != nil || !changed {
+		t.Fatalf("the refresh: changed=%v err=%v", changed, err)
+	}
+	took := false
+	saved := delegationSyncBeforeHandoff
+	delegationSyncBeforeHandoff = func(zone string) {
+		if zone == z && !took {
+			took = true
+			servedParentSync(t, r.mpzd, &parentSyncOwner, false)
+			refreshed(t, r.conf, r.mpzd)
+		}
+	}
+	t.Cleanup(func() { delegationSyncBeforeHandoff = saved })
+
+	hdb := &HsyncDB{KeyDB: r.mpzd.KeyDB}
+	ds := tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, SyncStatus: dss}
+	_, _, _, pending, err := hdb.syncDelegation(r.ctx, r.conf, r.notifyq, ds, dss, (&Imr{r.conf.Config.Internal.ImrEngine}).Imr)
+	if !took {
+		t.Fatal("the sync handed nothing over: no NOTIFY to judge")
+	}
+	if err == nil || pending {
+		t.Errorf("the sync returned err=%v pending=%v, want the handoff's refusal", err, pending)
+	}
+	if n := r.chains(); n != 0 {
+		t.Errorf("%d chains after a takeover just before the handoff, want none", n)
+	}
+	if l := r.log.String(); strings.Contains(l, "the delegation sync failed; asking again") {
+		t.Errorf("the refused handoff was taken for a failure to ask again:\n%s", l)
+	}
+	r.quiet(t, 300*time.Millisecond, "after a takeover just before the handoff")
+}

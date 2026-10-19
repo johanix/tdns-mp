@@ -391,7 +391,7 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 		// nothing is held or sent. A run cancelled because the agent stops
 		// sends nothing either.
 		c.mu.Unlock()
-		return false, errors.New("the zone's owner has taken its delegation sync over; the NOTIFY is not sent")
+		return false, errors.New("the delegation sync was cancelled: the zone's owner has taken it over, or the agent is stopping; the NOTIFY is not sent")
 	}
 	ch := c.of(zone)
 	// The sync was the chain's own if a NOTIFY of the chain's is out and
@@ -458,6 +458,7 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 		ask := c.schedule(ch)
 		c.mu.Unlock()
 		lgEngine.Info("a NOTIFY to the parent is held until the zone's nameservers have had time to serve the change", "zone", zone, "notify", types, "wait", sent.wait, "largest", sent.largest)
+		sent.run = nil // the hold outlives the run: its release goes on the syncher's context
 		conf.delegationSyncReleaseAfter(ctx, zone, ask, sent, delays)
 		return true, nil
 	}
