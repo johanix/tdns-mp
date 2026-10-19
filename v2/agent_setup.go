@@ -700,21 +700,53 @@ func (conf *Config) identityZoneParentSync() bool {
 	return len(conf.Config.ParentSync.Schemes) > 0 && imrActive
 }
 
+// identitySyncPace is how syncIdentityDelegation paces its asks, and how
+// often it says in the log that they fail.
+//
+// The first attempts come at a fixed, short interval: right after a cold
+// start the parent may not yet see the zone at its nameservers and refuses a
+// DS it cannot check, and that passes within minutes. After them the
+// interval doubles per attempt up to max and stays there. An ask costs the
+// parent a few queries and, while it disagrees, a NOTIFY or an UPDATE, so
+// one an hour is cheap however long the parent stays away, and the DS is in
+// place within the hour once it is back. tdns's KSK rollover probes a parent
+// that offers it no scheme at the same cap.
+//
+// A sync that keeps failing is logged at warn level at its first refusal,
+// at the end of the fast attempts, and then once per remind of waiting. The
+// attempts between are logged at debug level: a parent that is away for a
+// day leaves a handful of lines in the log, not one per attempt.
+type identitySyncPace struct {
+	fast     int           // attempts at the first interval
+	interval time.Duration // between the fast attempts; doubled per attempt after them
+	max      time.Duration // where the doubling stops
+	remind   time.Duration // the waiting between two reminders in the log
+}
+
+// identitySync is the pace in use. A variable so a test need not wait out
+// the real schedule; syncIdentityDelegation reads it once, when it starts.
+var identitySync = identitySyncPace{fast: 12, interval: 15 * time.Second, max: time.Hour, remind: 6 * time.Hour}
+
 // syncIdentityDelegation brings the parent's DS for the identity zone in
 // line with the zone's keys through the schemes the parent advertises. It
 // waits for the resolver the syncher discovers the parent's DSYNC records
 // with, prepares the zone's SIG(0) key, then asks for an explicit sync and
-// repeats until the parent agrees or the attempts run out: right after a
-// cold start the parent may not yet see the zone at its nameservers and
-// refuses a DS it cannot check. After the last attempt it gives up. tdns's
-// zone updater re-queues a sync only after an update from outside the
-// daemon, not after the daemon's own key changes, so the delegation then
-// stays as it is until the next start. The parent is not set here: tdns
-// resolves it through the resolver as for any other zone
-// (AnalyseZoneDelegation, via ResolveParentVia), because the name one label
-// up need not be a zone cut and a parent set on the zone is used as the
-// UPDATE zone as it stands.
+// repeats, at the pace of identitySync, until the analysis says the parent
+// agrees or ctx ends. It does not give up: nothing else asks for this zone
+// (tdns's zone updater re-queues a sync only after an update from outside
+// the daemon), so a parent that was unreachable, or refused the DS, for
+// longer than the fast attempts used to leave the zone without a DS until
+// the next start (tdns-mp #74).
+//
+// It ends once the parent is in sync: a change of the zone's keys after
+// that is not followed up from here.
+//
+// The parent is not set here: tdns resolves it through the resolver as for
+// any other zone (AnalyseZoneDelegation, via ResolveParentVia), because the
+// name one label up need not be a zone cut and a parent set on the zone is
+// used as the UPDATE zone as it stands.
 func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
+	pace := identitySync
 	if !conf.Config.Internal.ImrReady.Wait(ctx) {
 		return
 	}
@@ -739,9 +771,10 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 			return
 		}
 	}
-	const attempts = 12
-	const interval = 15 * time.Second
-	for attempt := 1; attempt <= attempts; attempt++ {
+	wait := pace.interval
+	var quiet time.Duration // waited since the last warning
+	var toldSent, toldRefused bool
+	for attempt := 1; ; attempt++ {
 		resp := make(chan tdns.DelegationSyncStatus, 1)
 		select {
 		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
@@ -753,26 +786,46 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 		select {
 		case st = <-resp:
 		case <-time.After(time.Minute):
-			lgAgent.Warn("identity zone: no answer to the delegation sync request", "zone", zd.ZoneName, "attempt", attempt)
+			st.Error, st.ErrorMsg = true, "no answer to the delegation sync request"
 		case <-ctx.Done():
 			return
 		}
-		switch {
-		case st.InSync:
+		if st.InSync {
 			lgAgent.Info("identity zone: delegation in sync with the parent", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt)
 			return
-		case !st.Error && st.Rcode == dns.RcodeSuccess && st.Msg != "":
-			// Sent and accepted; the next round's analysis confirms it.
-			lgAgent.Info("identity zone: delegation sent to the parent", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "msg", st.Msg)
-		default:
-			lgAgent.Warn("identity zone: delegation sync not accepted yet", "zone", zd.ZoneName, "parent", zd.GetParent(),
-				"attempt", attempt, "rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "msg", st.Msg)
 		}
+		if attempt >= pace.fast {
+			wait *= 2
+			if wait > pace.max {
+				wait = pace.max
+			}
+		}
+		// Sent and accepted: the next round's analysis confirms it. The
+		// synchers answer a refusal, a parent without a usable scheme and a
+		// failure on the way as an error, and no answer is one too (above):
+		// an answer without an error is a sync that was accepted, whether
+		// or not it carries the scheme's message.
+		sent := !st.Error && st.Rcode == dns.RcodeSuccess
+		kv := []any{"zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "next", wait,
+			"rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "answer", st.Msg}
+		switch {
+		case !sent && !toldRefused:
+			toldRefused, quiet = true, 0
+			lgAgent.Warn("identity zone: delegation sync not accepted yet", kv...)
+		case attempt == pace.fast || quiet >= pace.remind:
+			quiet = 0
+			lgAgent.Warn("identity zone: delegation still not in sync with the parent; the sync keeps asking", kv...)
+		case sent && !toldSent:
+			toldSent = true
+			lgAgent.Info("identity zone: delegation sent to the parent", kv...)
+		default:
+			lgAgent.Debug("identity zone: delegation not in sync yet", kv...)
+		}
+		quiet += wait
 		select {
-		case <-time.After(interval):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return
 		}
 	}
-	lgAgent.Error("identity zone: delegation sync gave up", "zone", zd.ZoneName, "parent", zd.GetParent(), "attempts", attempts)
 }

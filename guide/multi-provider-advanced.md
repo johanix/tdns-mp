@@ -490,10 +490,11 @@ The `_signal` names need the customer's consent: the
 asks for `at-ns` only when the flag is there, and the
 combiner looks again each time it acts on a stored
 instruction (an NS change, a restart, a refresh or
-`edits reapply` of the provider zone). If the zone does
-not say `pubkey`, the combiner retracts the `_signal`
-KEYs it had published for that zone and keeps the
-instruction for the apex only.
+`edits reapply` of the provider zone), and when a
+refresh of the customer's zone changes its HSYNCPARAM.
+If the zone does not say `pubkey`, the combiner retracts
+the `_signal` KEYs it had published for that zone and
+keeps the instruction for the apex only.
 When the customer adds the flag again, the agent's next
 Publish instruction puts the `_signal` KEYs back.
 

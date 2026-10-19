@@ -295,9 +295,9 @@ func TestARefreshOfAProviderZoneKeepsTheSignalKeys(t *testing.T) {
 // A refresh of a provider zone asks for the customer's consent before it puts
 // the held signal names onto the incoming zone, as a start and a re-apply do.
 // Three customers have a name in the provider zone. One says pubkey and keeps
-// its name. One has taken pubkey away and nothing has acted on its stored
-// instruction since: the refresh retracts its name instead of putting it
-// back. One had its names withdrawn before the refresh: they stay away.
+// its name. One has taken pubkey away, and the retraction at its own refresh
+// failed: the provider zone's refresh retracts the name instead of putting it
+// back. One had its names withdrawn at its own refresh: they stay away.
 func TestARefreshOfAProviderZoneBringsBackNoSignalKeyWithoutConsent(t *testing.T) {
 	const says, lacks, gone = "says.refresh.example.", "lacks.refresh.example.", "gone.refresh.example."
 	const www = "www." + consentProviderZone
@@ -311,17 +311,22 @@ func TestARefreshOfAProviderZoneBringsBackNoSignalKeyWithoutConsent(t *testing.T
 		c.wantSignalKey("with pubkey", zone, consentNS1)
 	}
 
-	// The owners of two of the zones take pubkey away. For one of them an NS
-	// change follows, which withdraws its names; for the other nothing does.
-	for _, zone := range []string{lacks, gone} {
-		c.up.publish(zone, atSerial(consentCustomerText(zone, false), 2))
-		c.refresh(zone, false)
+	// The owners of two of the zones take pubkey away. One zone's refresh
+	// withdraws its name. The other's refresh comes while the provider zone
+	// cannot be published, a zone store the combine does not write to, and
+	// its retraction fails.
+	c.up.publish(gone, atSerial(consentCustomerText(gone, false), 2))
+	c.refresh(gone, false)
+	c.wantNoSignalKey("withdrawn by its own refresh", gone, consentNS1)
+	c.up.publish(lacks, atSerial(consentCustomerText(lacks, false), 2))
+	store := prov.ZoneStore
+	prov.ZoneStore = tdns.XfrZone
+	c.refresh(lacks, false)
+	prov.ZoneStore = store
+	if served, _, _ := c.signalKey(lacks, consentNS1); !served {
+		t.Fatalf("the name of %s is gone before the provider zone refreshes: the retraction did not fail, and the test shows nothing", lacks)
 	}
-	c.addNS(gone, consentNS2)
-	c.wantNoSignalKey("withdrawn by an NS change", gone, consentNS1, consentNS2)
-	if served, held, _ := c.signalKey(lacks, consentNS1); !served || !held {
-		t.Fatalf("the name of %s is gone before the provider zone refreshes (served=%v held=%v), and the test shows nothing", lacks, served, held)
-	}
+	c.wantStored("the retraction failed", lacks, []string{"at-apex", "at-ns"}, []string{consentNS1})
 
 	c.up.publish(consentProviderZone, atSerial(consentProviderText(www+" 3600 IN A 192.0.2.80"), 2))
 	c.refresh(consentProviderZone, false)
@@ -330,14 +335,14 @@ func TestARefreshOfAProviderZoneBringsBackNoSignalKeyWithoutConsent(t *testing.T
 	c.wantStored("the provider zone's refresh", says, []string{"at-apex", "at-ns"}, []string{consentNS1})
 	c.wantNoSignalKey("the provider zone's refresh", lacks, consentNS1)
 	c.wantStored("the provider zone's refresh", lacks, []string{"at-apex"}, nil)
-	c.wantNoSignalKey("the provider zone's refresh", gone, consentNS1, consentNS2)
+	c.wantNoSignalKey("the provider zone's refresh", gone, consentNS1)
 	c.wantStored("the provider zone's refresh", gone, []string{"at-apex"}, nil)
 
 	// A forced retransfer of the same content brings nothing back either.
 	c.refresh(consentProviderZone, true)
 	c.wantSignalKey("a forced retransfer", says, consentNS1)
 	c.wantNoSignalKey("a forced retransfer", lacks, consentNS1)
-	c.wantNoSignalKey("a forced retransfer", gone, consentNS1, consentNS2)
+	c.wantNoSignalKey("a forced retransfer", gone, consentNS1)
 	for _, zone := range []string{says, lacks, gone} {
 		cust, _ := Zones.Get(zone)
 		c.wantApexKey("a forced retransfer", cust)
@@ -369,6 +374,37 @@ func TestARefreshOfACustomerZoneCombinesAsBefore(t *testing.T) {
 	c.wantServed("the customer zone's refresh", cust, zone, dns.TypeNS, 2)
 	c.wantSignalKey("the customer zone's refresh", zone, both...)
 	c.wantStored("the customer zone's refresh", zone, []string{"at-apex", "at-ns"}, both)
+}
+
+// The owner takes pubkey away, and the customer zone's refresh brings the
+// new HSYNCPARAM. The agent sends no new instruction for that, so the
+// combiner withdraws the stored one's signal names at the refresh: under
+// both nameservers, with the KEY kept at the apex. Before, the names stayed
+// served until an NS change, a refresh of the provider zone or a restart.
+// A refresh that changes HSYNCPARAM and keeps pubkey withdraws nothing.
+func TestARefreshOfACustomerZoneWithoutPubkeyWithdrawsItsSignalKeys(t *testing.T) {
+	const zone = "withdrawn.refresh.example."
+	both := []string{consentNS1, consentNS2}
+	c := newRefreshCombiner(t, consentProviderZone, zone)
+	c.up.publish(consentProviderZone, consentProviderText())
+	c.up.publish(zone, consentCustomerText(zone, true))
+	c.load(consentProviderZone)
+	cust := c.load(zone)
+	c.sendKey(zone)
+	c.addNS(zone, consentNS2)
+	c.wantSignalKey("with pubkey", zone, both...)
+
+	kept := strings.Replace(consentCustomerText(zone, true), `parentsync="agent"`, `parentsync="owner"`, 1)
+	c.up.publish(zone, atSerial(kept, 2))
+	c.refresh(zone, false)
+	c.wantSignalKey("a refresh that changed HSYNCPARAM and kept pubkey", zone, both...)
+	c.wantStored("a refresh that changed HSYNCPARAM and kept pubkey", zone, []string{"at-apex", "at-ns"}, both)
+
+	c.up.publish(zone, atSerial(consentCustomerText(zone, false), 3))
+	c.refresh(zone, false)
+	c.wantNoSignalKey("the customer zone's refresh without pubkey", zone, both...)
+	c.wantStored("the customer zone's refresh without pubkey", zone, []string{"at-apex"}, nil)
+	c.wantApexKey("the customer zone's refresh without pubkey", cust)
 }
 
 // restart is a combiner start on the same database: the zones are configured
