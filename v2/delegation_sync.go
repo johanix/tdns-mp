@@ -6,6 +6,8 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -81,6 +83,15 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
+				// No agent sends to the parent of a zone whose owner syncs its
+				// delegation; the request was queued before the owner took
+				// the sync over
+				if ownerSyncsDelegation(ds.ZoneData) {
+					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncOwnerSyncs(ds.ZoneName)
+					continue
+				}
+
 				// Only the elected leader of a multi-provider zone sends to the
 				// parent; a zone this daemon is primary for alone (its
 				// identity zone) has no election to wait for.
@@ -133,6 +144,19 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// again: whatever asked for it will not ask twice
 					if mpLeaderSync(conf, ds) {
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
+					}
+					continue
+				}
+
+				// No agent sends to the parent of a zone whose owner syncs its
+				// delegation; the request was queued before the owner took
+				// the sync over
+				if ownerSyncsDelegation(ds.ZoneData) {
+					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncOwnerSyncs(ds.ZoneName)
+					syncstate.Msg = "the zone's owner syncs its delegation, skipping DDNS"
+					if ds.Response != nil {
+						ds.Response <- syncstate
 					}
 					continue
 				}
@@ -250,18 +274,34 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 // chain asks again, and that ask distributes anew.
 func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
 	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (msg string, rcode uint8, ur tdns.UpdateResult, pending bool, err error) {
-	if !mpLeaderSync(conf, ds) {
+	// The path is chosen on the zone's kind alone, not on the option: a
+	// multi-provider zone never belongs on the plain path, and reading the
+	// option here, before the run is listed, let a takeover that came in
+	// between send one last sync down it.
+	if conf == nil || ds.ZoneData == nil || !ds.ZoneData.Options[tdns.OptMultiProvider] {
 		msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
 		return msg, rcode, ur, false, err
 	}
-	csyncErr := conf.delegationCsyncStep(ctx, ds.ZoneName, syncstate)
+	// The owner may take the sync over while it runs: the refresh that brings
+	// the owner's word cancels runCtx (delegationSyncOwnerSyncs), which stops
+	// an UPDATE that tdns is still retrying. The run is listed before the
+	// option is read, so a takeover either finds it or is seen here.
+	runCtx, done := conf.delegationSyncRun(ctx, ds.ZoneName)
+	defer done()
+	if ownerSyncsDelegation(ds.ZoneData) {
+		return "", 0, tdns.UpdateResult{}, false, errors.New("the zone's owner has taken its delegation sync over; nothing is sent")
+	}
+	csyncErr := conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
-	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, taken, syncstate, imr)
+	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(runCtx, hdb.KeyDB, taken, syncstate, imr)
 	var notifies []tdns.NotifyRequest
 	for len(taken) > 0 {
 		notifies = append(notifies, <-taken)
+	}
+	if err != nil && ownerSyncsDelegation(ds.ZoneData) {
+		return msg, rcode, ur, false, fmt.Errorf("the zone's owner has taken its delegation sync over; the sync is stopped: %w", err)
 	}
 	if err != nil || len(notifies) == 0 {
 		// A sync that failed has handed nothing over: tdns's NOTIFY sender
@@ -269,11 +309,24 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 		// what a failed sync handed over is not sent on.
 		return msg, rcode, ur, false, err
 	}
+	if ownerSyncsDelegation(ds.ZoneData) {
+		// The zone's owner took the sync over while this sync ran: its
+		// NOTIFY is not sent on, held or checked. The caller does not ask
+		// again: it retries only a zone whose agents sync it (mpLeaderSync).
+		return msg, rcode, ur, false, errors.New("the zone's owner has taken its delegation sync over; the NOTIFY is not sent")
+	}
+	delegationSyncBeforeHandoff(ds.ZoneName)
 	held, failed := false, csyncErr
 	if failed == nil {
-		held, failed = conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq})
+		held, failed = conf.delegationSyncNotified(ctx, ds.ZoneName, delegationNotifies{requests: notifies, diff: delegationDifference(syncstate), out: notifyq, run: runCtx})
 	}
 	if failed != nil {
+		if runCtx.Err() != nil || ownerSyncsDelegation(ds.ZoneData) {
+			// The owner took the sync over after this sync last looked, or
+			// the agent is stopping: nothing is asked again, and no chain is
+			// made again for a zone whose owner syncs it.
+			return msg, rcode, ur, false, failed
+		}
 		// The NOTIFY is not sent on. Asked again here, and not left to the
 		// caller: the request of a refresh has no caller that asks again.
 		conf.delegationSyncFailed(ctx, ds.ZoneName, failed)
@@ -363,3 +416,8 @@ func mpSetupAllowed(conf *Config, zd *tdns.ZoneData) bool {
 	}
 	return lem.IsLeader(ZoneName(zd.ZoneName))
 }
+
+// delegationSyncBeforeHandoff runs in a leader sync after its last look at
+// the option and before it hands its NOTIFY over: the window a takeover can
+// land in. A test puts a takeover there.
+var delegationSyncBeforeHandoff = func(zone string) {}

@@ -320,21 +320,15 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				}
 
 			case "sig0key":
-				// Verify the requestor is an authorized peer (upstream or downstream) before
-				// returning private key material.
-				isAuthorized := false
-				if zad.MyUpstream == ampp.OriginatorID {
-					isAuthorized = true
-				} else {
-					for _, aid := range zad.MyDownstreams {
-						if aid == ampp.OriginatorID {
-							isAuthorized = true
-							break
-						}
-					}
-				}
-				if !isAuthorized {
-					configErr = fmt.Sprintf("%s: CONFIG sig0key request denied — %q is not an authorized peer for zone %s", ar.LocalAgent.Identity, ampp.OriginatorID, ampp.Zone)
+				// The zone's SIG(0) key is the provider group's: any agent
+				// that can be elected the zone's leader may hold it
+				// (mayHoldZoneSig0Key). It went only to this agent's upstream
+				// or downstream, which say who transfers the zone from whom.
+				// In a zone whose providers all transfer from the owner no
+				// agent was either, and every new leader made a key of its
+				// own, which the parent then had to bootstrap.
+				if !mayHoldZoneSig0Key(ampp.Zone, ampp.OriginatorID) {
+					configErr = fmt.Sprintf("%s: CONFIG sig0key request denied — %q has no voting role in zone %s", ar.LocalAgent.Identity, ampp.OriginatorID, ampp.Zone)
 				} else if zd, ok := Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
 					configErr = "zone or KeyDB not available"
 				} else {
@@ -360,10 +354,15 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			}
 
 			if configErr != "" {
+				lgEngine.Warn("RFI CONFIG: request refused", "zone", ampp.Zone, "originator", ampp.OriginatorID, "subtype", ampp.RfiSubtype, "reason", configErr)
 				resp.Error = true
 				resp.ErrorMsg = configErr
 				resp.Msg = configErr
-				return
+				// This reply does not reach the asker: its request was taken
+				// in before it was handled, and it waits for the answer. So
+				// the refusal is the answer; without it the asker waited out
+				// its timeout and took the silence for no answer at all.
+				configData = map[string]string{configRefusedKey: configErr}
 			}
 
 			// Send config data back as a separate CONFIG message (two-phase pattern).
@@ -375,8 +374,10 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.Msg = "CONFIG request failed: transport unavailable"
 				return
 			}
-			go sendConfigToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, ampp.Nonce, configData)
-			resp.Msg = fmt.Sprintf("CONFIG %s request received, response pending", ampp.RfiSubtype)
+			go answerConfigRequest(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, ampp.Nonce, configData)
+			if configErr == "" {
+				resp.Msg = fmt.Sprintf("CONFIG %s request received, response pending", ampp.RfiSubtype)
+			}
 
 		default:
 			resp.Error = true
@@ -524,9 +525,13 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.ID)
 					return
 				}
-				resp.RfiResponse[agent.ID] = &RfiData{
-					Status:     "ok",
-					ConfigData: configResp.ConfigData,
+				if why := configResp.Refused(); why != "" {
+					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: "refused: " + why}
+				} else {
+					resp.RfiResponse[agent.ID] = &RfiData{
+						Status:     "ok",
+						ConfigData: configResp.ConfigData,
+					}
 				}
 
 			case "downstream":
@@ -545,6 +550,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
 						continue
 					}
+					if why := configResp.Refused(); why != "" {
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: "refused: " + why}
+						continue
+					}
 					resp.RfiResponse[aid] = &RfiData{
 						Status:     "ok",
 						ConfigData: configResp.ConfigData,
@@ -560,6 +569,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
 					if configResp == nil {
 						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						continue
+					}
+					if why := configResp.Refused(); why != "" {
+						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: "refused: " + why}
 						continue
 					}
 					resp.RfiResponse[agent.ID] = &RfiData{

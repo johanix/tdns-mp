@@ -156,6 +156,32 @@ func zoneApex(zone ZoneName) *tdns.OwnerData {
 	return apex
 }
 
+// mayHoldZoneSig0Key: the agent may be handed the zone's SIG(0) key. The key
+// is the provider group's, for the zone's delegation sync with its parent, so
+// any agent that can be elected the zone's leader may hold it: a member with
+// a voting role (servers or signers). Who transfers the zone from whom
+// (HSYNC3's upstream) has nothing to do with it. Identities compare as FQDNs
+// (isAmong): the zone's records carry the trailing dot, and an agent's
+// configured identity need not.
+func mayHoldZoneSig0Key(zone ZoneName, agent AgentId) bool {
+	_, voting := zoneParticipants(zoneApex(zone))
+	return isAmong(voting, agent)
+}
+
+// sig0KeyPeers are the zone's agents a new leader asks for the zone's SIG(0)
+// key: the others that may hold it. An auditor never answers (its engine
+// only records the request), so asking one cost the full timeout; and a key
+// from an agent that may not hold the zone's key is not the group's key.
+func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
+	var peers []*Agent
+	for _, a := range agents {
+		if !isAmong([]string{string(self)}, a.ID) && mayHoldZoneSig0Key(zone, a.ID) {
+			peers = append(peers, a)
+		}
+	}
+	return peers
+}
+
 // ParticipantsForZone is the single membership truth for agent/auditor reads:
 // the identities holding a membership-conferring HSYNCPARAM role in the zone
 // (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with

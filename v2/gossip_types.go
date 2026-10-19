@@ -167,6 +167,7 @@ type LeaderElectionManager struct {
 	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
+	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
 	providerGroupMgr     *ProviderGroupManager
 }
 

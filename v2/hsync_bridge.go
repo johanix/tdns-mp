@@ -335,7 +335,7 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 	// re-home the removal teardown + RFI/election side effects of UpdateAgents.
 	deps.GateOnLocalPresence = true
 	deps.Host.OnLocalRemoved = func(zone hsync.ZoneName) {
-		ar.CleanupZoneRelationships(ZoneName(zone))
+		ar.localRemovedFromZone(ZoneName(zone))
 	}
 	deps.Host.OnHsyncMembersAdded = func(zone hsync.ZoneName, added []hsync.PeerID, localAdded bool) {
 		ar.reattachHsyncMemberAdds(ZoneName(zone), added, localAdded)

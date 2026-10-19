@@ -261,14 +261,25 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 // (provider_groups.go) recomputes the participant set from HSYNCPARAM on
 // every read. So when local participation in `zonename` ends, there is no
 // stored per-zone relationship to tear down — it simply stops being
-// derived on the next read, and provider groups recompute via
-// OnHsync3Changed. There is nothing to manually clean up here.
+// derived on the next read. The provider groups are recomputed on that path
+// by ApplyHsyncDiff (OnHsync3Changed). There is nothing to manually clean up
+// here.
 //
 // Revisit only if the testbed shows orphaned per-zone state surviving a
 // local removal; that would mean some state is still stored rather than
 // derived, and should be moved to derivation rather than scrubbed here.
 func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	lgAgent.Info("local removal from zone; membership is derived, no teardown needed", "zone", zonename)
+}
+
+// localRemovedFromZone is the OnLocalRemoved hook. The groups are recomputed
+// right after it on the same path (ApplyHsyncDiff calls OnHsync3Changed
+// there too, tdns-mp #183), under the recompute's own lock. Without the
+// recompute the zone stayed in the group this agent was in, and a give-back
+// in the same refresh found this agent still leading the zone and ran the
+// leader's setup here.
+func (ar *AgentRegistry) localRemovedFromZone(zone ZoneName) {
+	ar.CleanupZoneRelationships(zone)
 }
 
 // reattachHsyncMemberAdds re-homes the membership-change election kick that used

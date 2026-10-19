@@ -72,6 +72,19 @@ type ConfigResponseMsg struct {
 	ConfigData map[string]string
 }
 
+// configRefusedKey is the ConfigData key of the answer to a CONFIG request
+// the peer refused: its value is the peer's reason.
+const configRefusedKey = "refused"
+
+// Refused is the peer's reason for refusing the CONFIG request, or "" when
+// it answered it.
+func (m *ConfigResponseMsg) Refused() string {
+	if m == nil {
+		return ""
+	}
+	return m.ConfigData[configRefusedKey]
+}
+
 type AuditResponseMsg struct {
 	SenderID  string
 	Zone      string
