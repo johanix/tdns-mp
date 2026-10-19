@@ -1642,6 +1642,17 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	analysis := mpzd.MP.RefreshAnalysis
 	mpzd.MP.RefreshAnalysis = nil // clear after use
 
+	// The customer's consent to at-ns, read from the zone as this refresh
+	// left it. The agent sends no new instruction when the owner takes
+	// pubkey away, so the combiner withdraws the stored one's signal names
+	// here.
+	if tdns.Globals.App.Type == AppTypeMPCombiner && analysis.HsyncStatus != nil && analysis.HsyncStatus.ParamChanged {
+		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
+			lg.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent until the provider zone's next refresh",
+				"zone", mpzd.ZoneName, "err", err)
+		}
+	}
+
 	// Delegation sync notification
 	if analysis.DelegationChanged && mpzd.Options[tdns.OptParentSync] {
 		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", mpzd.ZoneName)
