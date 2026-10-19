@@ -516,3 +516,60 @@ func TestATakeoverJustBeforeTheHandoffLeavesNoChain(t *testing.T) {
 	}
 	r.quiet(t, 300*time.Millisecond, "after a takeover just before the handoff")
 }
+
+// The owner's edit gives the sync back and, in the same refresh, removes this
+// agent's HSYNC3 record. The HSYNC diff then fires only the removal hook and
+// returns before its group recompute, so the zone stayed in the group this
+// agent led, and the give-back ran the leader's setup here. The hook now
+// recomputes the groups, and the give-back runs nothing at this agent.
+func TestAGiveBackThatAlsoRemovesThisAgentRunsNoSetupHere(t *testing.T) {
+	asMPAgent(t)
+	const zone = "removed.parentsync.example."
+	const local, other, third = "alpha.agent.example.", "bravo.agent.example.", "charlie.agent.example."
+	zd := seedZoneWithHSYNC3(t, zone, local, other, third)
+
+	pgm := NewProviderGroupManager(local)
+	ar := &AgentRegistry{LocalAgent: &MultiProviderConf{Identity: local}, ProviderGroupManager: pgm}
+	pgm.RecomputeGroups()
+	pg := pgm.GetGroupForZone(zone)
+	if pg == nil {
+		t.Fatal("the zone is in no group")
+	}
+	lem := NewLeaderElectionManager(local, time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
+	lem.SetProviderGroupManager(pgm)
+	lem.mu.Lock()
+	lem.groupElections[pg.GroupHash] = &LeaderElection{Leader: local, LeaderExpiry: time.Now().Add(time.Hour)}
+	lem.mu.Unlock()
+	setups := make(chan ZoneName, 4)
+	lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.LeaderElectionManager = lem
+	conf.InternalMp.AgentRegistry = ar
+	if !lem.IsLeader(zone) {
+		t.Fatal("this agent does not lead the zone's group to start with")
+	}
+
+	// the owner's edit: this agent's HSYNC3 record goes
+	apex, _ := zd.Data.Get(zone)
+	h3, _ := apex.RRtypes.Get(core.TypeHSYNC3)
+	var kept []dns.RR
+	for _, rr := range h3.RRs {
+		if rr.(*dns.PrivateRR).Data.(*core.HSYNC3).Identity != local {
+			kept = append(kept, rr)
+		}
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: kept})
+	zd.Data.Set(zone, apex)
+	zd.InstallInitialSnapshot()
+
+	ar.localRemovedFromZone(zone) // what ApplyHsyncDiff calls, and all it calls
+	if lem.IsLeader(zone) {
+		t.Error("after its HSYNC3 record went, this agent still leads the zone")
+	}
+	conf.delegationSyncGivenBack(zone)
+	select {
+	case <-setups:
+		t.Error("the give-back ran the leader's setup at an agent the edit removed")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
