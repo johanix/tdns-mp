@@ -7,10 +7,13 @@
 package tdnsmp
 
 import (
+	"sort"
+	"sync/atomic"
+
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
-	"sync/atomic"
+	"github.com/miekg/dns"
 )
 
 // Config wraps a pointer to the tdns.Config (typically &tdns.Conf)
@@ -133,12 +136,26 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	if conf.InternalMp.onFirstLoadRegistered == nil {
 		conf.InternalMp.onFirstLoadRegistered = make(map[string]bool)
 	}
+	for _, zone := range providerZonesWithoutOption(conf.InternalMp.MPZoneNames) {
+		lgCombiner.Warn("a provider zone lacks the multi-provider option: its _signal KEYs are not put back at a restart or a refresh, and a withdrawal from it waits for good",
+			"zone", zone)
+	}
 
 	// Load contributions snapshot once for all new zones
 	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
 		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load contributions", "err", err)
 		allContribs = nil
+	}
+	// And the stored publish instructions, to find the zones whose at-ns
+	// publication is to be checked against the customer's consent. When
+	// they cannot be read now, each zone reads them at its first load: the
+	// provider zones' re-apply reads them for itself by then, and a KEY it
+	// puts back has to meet the check all the same.
+	allInstr, instrErr := LoadAllPublishInstructions(hdb)
+	if instrErr != nil {
+		lgCombiner.Error("RegisterCombinerOnFirstLoad: failed to load publish instructions; each zone reads them at its first load", "err", instrErr)
+		allInstr = nil
 	}
 
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
@@ -183,7 +200,67 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 				}
 			})
 		}
+
+		// A zone with a stored at-ns instruction: once it has loaded, its
+		// HSYNCPARAM can be read, and the instruction is checked against the
+		// customer's consent. The provider zones' re-apply asks the same, but
+		// may have run before this zone could answer.
+		atNSSenders := atNSSendersOf(allInstr[zoneName])
+		if len(atNSSenders) > 0 || instrErr != nil {
+			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
+				w, ok := Zones.Get(zd.ZoneName)
+				if !ok {
+					return
+				}
+				senders := atNSSenders
+				if instrErr != nil {
+					instr, err := LoadAllPublishInstructions(hdb)
+					if err != nil {
+						lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent",
+							"zone", zd.ZoneName, "err", err)
+						return
+					}
+					senders = atNSSendersOf(instr[zd.ZoneName])
+				}
+				for _, senderID := range senders {
+					w.withdrawSignalKeysWithoutConsent(senderID, zd.ZoneName, hdb)
+				}
+			})
+		}
 	}
+}
+
+// providerZonesWithoutOption is the configured provider zones that are not
+// among the multi-provider zones. Everything the combiner does for a
+// provider zone at a start and a refresh is attached to its multi-provider
+// zones only (this function's caller and RegisterMPRefreshCallbacks), so
+// such a zone is published to by the next instruction and loses the names
+// again at the next restart or refresh.
+func providerZonesWithoutOption(mpZoneNames []string) []string {
+	mp := map[string]bool{}
+	for _, z := range mpZoneNames {
+		mp[dns.Fqdn(z)] = true
+	}
+	var missing []string
+	for zone := range providerZoneRRtypes {
+		if !mp[zone] {
+			missing = append(missing, zone)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// atNSSendersOf is the senders among a zone's stored publish instructions
+// that ask for the at-ns location.
+func atNSSendersOf(stored map[string]*StoredPublishInstruction) []string {
+	var senders []string
+	for senderID, instr := range stored {
+		if containsString(instr.Locations, "at-ns") {
+			senders = append(senders, senderID)
+		}
+	}
+	return senders
 }
 
 // restoreContributions sets the zone's PersistContributions callback and
@@ -249,4 +326,8 @@ type InternalMpConf struct {
 	// went to the parent as a NOTIFY, and how often, for the asks that
 	// follow, and what is scheduled for them (mp_s5_leader_sync.go)
 	delegationSyncChains delegationSyncChains
+	// zoneKeyWaits: the zones that joined a group this agent leads while it
+	// held no SIG(0) key for them, and whose key it is asking its peers for
+	// (parentsync_utils.go).
+	zoneKeyWaits zoneKeyWaits
 }

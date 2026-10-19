@@ -24,19 +24,22 @@ var lgElect = tdns.Logger("elect")
 
 func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcastFunc func(ZoneName, string, map[string][]string) error) *LeaderElectionManager {
 	return &LeaderElectionManager{
-		elections:             make(map[ZoneName]*LeaderElection),
-		pendingElections:      make(map[ZoneName]bool),
-		groupElections:        make(map[string]*LeaderElection),
-		pendingGroupElections: make(map[string]bool),
-		localID:               localID,
-		leaderTTL:             leaderTTL,
-		broadcastFunc:         broadcastFunc,
+		elections:        make(map[ZoneName]*LeaderElection),
+		pendingElections: make(map[ZoneName]bool),
+		groupElections:   make(map[string]*LeaderElection),
+		localID:          localID,
+		leaderTTL:        leaderTTL,
+		broadcastFunc:    broadcastFunc,
 	}
 }
 
 // SetProviderGroupManager sets the provider group manager for group-based elections.
+// The manager then also reports each zone that enters a group (zoneJoinedGroup).
 func (lem *LeaderElectionManager) SetProviderGroupManager(pgm *ProviderGroupManager) {
 	lem.providerGroupMgr = pgm
+	if pgm != nil {
+		pgm.SetOnZoneJoinedGroup(lem.zoneJoinedGroup)
+	}
 }
 
 // SetOperationalPeersFunc sets the callback used to count operational peers for re-election.
@@ -67,12 +70,34 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 // of its own. For one zone they run one at a time, so that two leader setups
 // never both find no SIG(0) key and each make one.
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
-	var setups sync.Map // ZoneName -> *sync.Mutex
 	lem.onLeaderElected = func(zone ZoneName) error {
-		mu, _ := setups.LoadOrStore(zone, new(sync.Mutex))
-		mu.(*sync.Mutex).Lock()
-		defer mu.(*sync.Mutex).Unlock()
-		return f(zone)
+		return lem.inKeySetup(zone, func() error { return f(zone) })
+	}
+}
+
+// inKeySetup runs f with the zone's key-setup lock held. Every setup of a
+// zone's SIG(0) key takes it: the leader's after an election, a renewal or a
+// sync given back (SetOnLeaderElected), the one at an arrival
+// (SetOnZoneJoined), and that one's later rounds (zoneKeyWaits). For one zone
+// they run one at a time, so that two of them never both find no key and
+// each make one, and a setup's clean-up of a key it made for a lead that
+// moved never takes a key another setup has just adopted. It is taken once
+// per setup and never nested: a sync.Mutex is not re-entrant.
+func (lem *LeaderElectionManager) inKeySetup(zone ZoneName, f func() error) error {
+	mu, _ := lem.keySetups.LoadOrStore(zone, new(sync.Mutex))
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+	return f()
+}
+
+// SetOnZoneJoined sets the callback invoked when a zone joins a provider
+// group that the local agent already leads (zoneJoinedGroup). It is not the
+// election's callback: a zone that arrives has had a leader before, and what
+// that leader made for it, its SIG(0) key first of all, is not to be made
+// again. With no callback set an arrival asks nothing.
+func (lem *LeaderElectionManager) SetOnZoneJoined(f func(zone ZoneName) error) {
+	lem.onZoneJoined = func(zone ZoneName) error {
+		return lem.inKeySetup(zone, func() error { return f(zone) })
 	}
 }
 
@@ -101,7 +126,6 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 		}
 		lem.groupElections[groupHash] = le
 	}
-	delete(lem.pendingGroupElections, groupHash)
 	lem.mu.Unlock()
 
 	le.mu.Lock()
@@ -121,7 +145,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 		le.Active = false
 		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8])
-		lem.scheduleGroupReelection(le, groupHash, members, zones)
+		lem.scheduleGroupReelection(le, groupHash, members)
 		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
 		le.mu.Unlock()
 
@@ -178,12 +202,18 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 	}
 }
 
-// DeferGroupElection records a group as needing an election when OnGroupOperational fires.
-func (lem *LeaderElectionManager) DeferGroupElection(groupHash string) {
-	lem.mu.Lock()
-	lem.pendingGroupElections[groupHash] = true
-	lem.mu.Unlock()
-	lgElect.Info("deferring group election until group is operational", "group", groupHash[:8])
+// leaveElectionToGroup says, in the log, that a zone's election is its
+// provider group's, and that nothing is started for the zone here. The
+// group's election is called when the group becomes mutually OPERATIONAL
+// (wireAgentGossipCallbacks), and a zone that arrives in a group that has
+// its leader is taken up by that leader (zoneJoinedGroup).
+//
+// It was DeferGroupElection, and marked the group in a map of elections to
+// start once the group was OPERATIONAL. Nothing ever read the map: the
+// election of a group that becomes OPERATIONAL is called whether the group
+// was marked or not (tdns-mp #183).
+func (lem *LeaderElectionManager) leaveElectionToGroup(groupHash string) {
+	lgElect.Info("no election started here, the zone's election is its provider group's", "group", groupHash[:8])
 }
 
 // isAmong: whether id is one of a group's voting members. Names are compared
@@ -198,18 +228,6 @@ func isAmong(members []string, id AgentId) bool {
 
 // HandleGroupMessage dispatches an election message that carries a _group record.
 func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID AgentId, rfiType string, records map[string][]string) {
-	lem.mu.Lock()
-	le, ok := lem.groupElections[groupHash]
-	if !ok {
-		le = &LeaderElection{
-			Zone:     ZoneName(groupHash),
-			Votes:    make(map[AgentId]uint32),
-			Confirms: make(map[AgentId]AgentId),
-		}
-		lem.groupElections[groupHash] = le
-	}
-	lem.mu.Unlock()
-
 	// Find group metadata for callbacks. Quorum/initiator logic
 	// uses voting members only — non-voting roles (auditors) may
 	// receive the broadcast but must not be counted.
@@ -247,6 +265,21 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 			"group", groupHash[:8], "type", rfiType, "initiator", senderID, "term", parseUint64(records, "_term"))
 		return
 	}
+
+	// The election's entry is made only here, for a group that is known and
+	// in which this agent votes: a late message for a group that is gone
+	// must not bring its entry back (groupGone).
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	if !ok {
+		le = &LeaderElection{
+			Zone:     ZoneName(groupHash),
+			Votes:    make(map[AgentId]uint32),
+			Confirms: make(map[AgentId]AgentId),
+		}
+		lem.groupElections[groupHash] = le
+	}
+	lem.mu.Unlock()
 
 	switch rfiType {
 	case "ELECT-CALL":
@@ -395,7 +428,7 @@ func (lem *LeaderElectionManager) onGroupVoteTimeout(groupHash string, term uint
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members voted, retrying",
 			"group", groupHash[:8], "term", term, "votes", collected, "expected", expected)
-		lem.retryGroupElection(groupHash, term, members, zones)
+		lem.retryGroupElection(le, groupHash, term)
 		return
 	}
 	le.mu.Unlock()
@@ -471,7 +504,7 @@ func (lem *LeaderElectionManager) onGroupConfirmTimeout(groupHash string, term u
 		le.mu.Unlock()
 		lgElect.Warn("group election aborted: not all members confirmed, retrying",
 			"group", groupHash[:8], "term", term, "confirms", collected, "expected", expected)
-		lem.retryGroupElection(groupHash, term, members, zones)
+		lem.retryGroupElection(le, groupHash, term)
 		return
 	}
 	le.mu.Unlock()
@@ -509,7 +542,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		le.Active = false
 		le.mu.Unlock()
 		lgElect.Warn("group election: no consensus, re-electing", "group", groupHash[:8], "term", term)
-		lem.retryGroupElection(groupHash, term, members, zones)
+		lem.retryGroupElection(le, groupHash, term)
 		return
 	}
 
@@ -524,7 +557,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
 	}
 
-	lem.scheduleGroupReelection(le, groupHash, members, zones)
+	lem.scheduleGroupReelection(le, groupHash, members)
 	le.mu.Unlock()
 
 	if isUs && lem.onLeaderElected != nil {
@@ -546,35 +579,133 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 // from gossip that it leads) or whose renewal was lost. A fallback that finds
 // the term renewed starts nothing (startGroupElection). When every member
 // renewed at the same instant, each started the same term, nobody joined
-// anybody, and all aborted after the vote timeout (#120). Must be called
-// with le.mu held.
-func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, groupHash string, members []string, zones []ZoneName) {
+// anybody, and all aborted after the vote timeout (#120).
+//
+// members decides only how long this member waits. Whom the renewal calls,
+// and through which zone, is read when the timer fires (groupForTimer). Must
+// be called with le.mu held.
+func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, groupHash string, members []string) {
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
+	}
+	if le.gone {
+		return
 	}
 	armed := le.Term
 	delay := lem.renewalDelay(le.Leader, members)
 	le.ReelectTimer = time.AfterFunc(delay, func() {
 		le.mu.Lock()
-		movedOn := le.Active || le.Term != armed
+		movedOn := le.gone || le.Active || le.Term != armed
 		le.mu.Unlock()
 		if movedOn {
 			lgElect.Debug("group lease already renewed, or an election is running; this renewal does nothing",
 				"group", groupHash[:8])
 			return
 		}
+		pg := lem.groupForTimer(groupHash, "lease renewal")
+		if pg == nil {
+			return
+		}
 		lgElect.Info("group leader TTL expiring, triggering re-election", "group", groupHash[:8])
-		lem.startGroupElection(groupHash, members, zones, &armed)
+		lem.startGroupElection(groupHash, pg.VotingMembers, pg.Zones, &armed)
 	})
 }
 
 // retryGroupElection starts the election again after one that was aborted or
 // found no consensus in term, after a short random delay, and only if no
-// other member's retry got there first (startGroupElection).
-func (lem *LeaderElectionManager) retryGroupElection(groupHash string, term uint64, members []string, zones []ZoneName) {
-	time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
-		lem.startGroupElection(groupHash, members, zones, &term)
+// other member's retry got there first (startGroupElection). It starts it
+// for the group as it is when the delay is over (groupForTimer).
+//
+// The retry's timer is the election's (RetryTimer), so that a group that goes
+// stops it with the others (groupGone). Left running, it fired for a group
+// that had gone and come back, found the new election's term-1 entry idle,
+// and called a needless term-2 election that could replace the leader just
+// elected. A retry that fires as the group goes finds the election gone and
+// starts nothing.
+func (lem *LeaderElectionManager) retryGroupElection(le *LeaderElection, groupHash string, term uint64) {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	if le.gone {
+		return
+	}
+	if le.RetryTimer != nil {
+		le.RetryTimer.Stop()
+	}
+	le.RetryTimer = time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+		le.mu.Lock()
+		gone := le.gone
+		le.mu.Unlock()
+		if gone {
+			return
+		}
+		if pg := lem.groupForTimer(groupHash, "election retry"); pg != nil {
+			lem.startGroupElection(groupHash, pg.VotingMembers, pg.Zones, &term)
+		}
 	})
+}
+
+// groupForTimer returns a provider group as the provider group manager has
+// it now, for a timer of the group's election that has fired: a lease
+// renewal, or the retry after an aborted election. The timer starts its
+// election with these voting members and zones, not with the ones the group
+// had when the timer was armed, most of a lease earlier: a renewal with the
+// old lists was called through a zone that had left the group, and a member
+// that elects itself asked for the old zones only (tdns-mp #182).
+//
+// It returns nil when the timer has nothing to start. The group is gone:
+// what is still held for it is dropped. Or this agent has no vote in it (the
+// owner took it away, or the agent learnt of the election from gossip), and
+// a member without a vote calls no election.
+func (lem *LeaderElectionManager) groupForTimer(groupHash, timer string) *ProviderGroup {
+	var pg *ProviderGroup
+	if lem.providerGroupMgr != nil {
+		pg = lem.providerGroupMgr.GetGroup(groupHash)
+	}
+	if pg == nil {
+		lgElect.Info("provider group is gone, its timer starts no election",
+			"group", shortHash(groupHash), "timer", timer)
+		lem.groupGone(groupHash)
+		return nil
+	}
+	if !isAmong(pg.VotingMembers, lem.localID) {
+		lgElect.Info("this agent has no vote in the provider group, its timer starts no election",
+			"group", shortHash(groupHash), "timer", timer)
+		return nil
+	}
+	return pg
+}
+
+// groupGone is the word that a provider group is gone: its last zone has
+// left it (ProviderGroupManager.SetOnGroupGone). The group's election ends
+// here: its timers are stopped and its entry is dropped. Kept, the entry
+// went on renewing a lease for no zone. Each former member called the
+// group's election at the end of its lease, no other member answered (each
+// had lost the group too), and the election was aborted and retried without
+// an end (tdns-mp #182).
+//
+// A group that comes back starts from nothing, as a new group does. An
+// entry can also come back without the group, through gossip, as for a group
+// whose zones are not loaded yet (ApplyGossipElection): it has no timer.
+func (lem *LeaderElectionManager) groupGone(groupHash string) {
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	delete(lem.groupElections, groupHash)
+	lem.mu.Unlock()
+	if !ok {
+		return
+	}
+	le.mu.Lock()
+	le.gone = true
+	for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
+		if tm != nil {
+			tm.Stop()
+		}
+	}
+	le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer = nil, nil, nil, nil
+	leader, term := le.Leader, le.Term
+	le.mu.Unlock()
+	lgElect.Info("provider group is gone, its election state dropped",
+		"group", shortHash(groupHash), "leader", leader, "term", term)
 }
 
 // maxRenewalStep is the longest a fallback renewal waits behind the one
@@ -745,10 +876,13 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	// asks (the SIG(0) key, a delegation sync): the DS set may have changed
 	// while it was away, and a sync it had asked for before is gone with
 	// the process. The sync sends only a difference, so asking costs
-	// nothing when there is none. It asks once per term, and only once the
-	// group is known: gossip heard before this agent's groups are
-	// registered asks nothing yet, and the same term's next word asks then.
-	// A term this agent won by election has asked already.
+	// nothing when there is none. It asks once per term, for the zones the
+	// group has here at that moment. Gossip heard before any zone of the
+	// group is loaded finds no group and asks nothing, and no later word of
+	// the same term asks either: the gossip table hands a term on once
+	// (MergeGossip). Each zone is asked for when it arrives in the group
+	// (zoneJoinedGroup). A term this agent won by election has asked
+	// already.
 	if le.Leader == lem.localID && le.askedTerm != le.Term && lem.onLeaderElected != nil && lem.providerGroupMgr != nil {
 		if pg := lem.providerGroupMgr.GetGroup(groupHash); pg != nil {
 			le.askedTerm = le.Term
@@ -776,10 +910,62 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 				lgElect.Warn("accepted leader from gossip, but group has no voting members; skipping re-election timer",
 					"group", groupHash[:8])
 			} else {
-				lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers, pg.Zones)
+				lem.scheduleGroupReelection(le, groupHash, pg.VotingMembers)
 			}
 		}
 	}
+}
+
+// zoneJoinedGroup is the provider group manager's word that a recompute has
+// put a zone into a group: the zone's set of providers changed, or the zone
+// is new here. A delegation sync is asked for at an election, for the zones
+// the group has then. A zone that arrived in a group whose leader was already
+// elected was asked for by nobody, and a change of its delegation waited for
+// the next lease renewal. When this agent leads the group, it asks for the
+// zone now (onZoneJoined).
+//
+// What is asked is not what an election's winner is asked (onLeaderElected).
+// The zone that arrives has had a leader, and that leader made its SIG(0)
+// key, which the parent holds. The winner's key setup makes a key when it
+// finds none, and here that would put a new key in place of the one the
+// parent trusts. The arrival's callback leaves the key as it is.
+//
+// A group without a leader asks nothing here: the election that follows asks
+// for every zone the group has by then. Nor does a group that another member
+// leads: that member is told by its own group manager. The manager tells of
+// a zone once, when its group changes, and has the zone in its new group
+// before it tells, so the sync that is asked for finds this agent the zone's
+// leader.
+//
+// An election of this agent that is decided in the same instant can ask for
+// the zone too. Those are two asks from one agent with one view of the zone,
+// and the sync sends only a difference, so the second sends nothing.
+//
+// Not covered: the agent that led the group the zone left. It stops acting
+// for the zone when its own refresh moves the zone, and until then it reads
+// itself as the zone's leader. A lease renewal of its group in that time asks
+// for a sync from the view it still has, and a difference computed from that
+// view undoes what was sent from here; the parent keeps what arrives last.
+// Nothing in this function can see that agent's view. A leader that acts only
+// when the views of a zone agree is what closes it (the membership design).
+func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	if lem.onZoneJoined == nil {
+		return
+	}
+	if leader, ok := lem.GetGroupLeader(to); !ok || leader != lem.localID {
+		return
+	}
+	was := "no group"
+	if from != "" {
+		was = shortHash(from)
+	}
+	lgElect.Info("zone joined a group this agent leads, asking for its delegation sync",
+		"zone", zone, "group", shortHash(to), "was_in", was)
+	go func() {
+		if err := lem.onZoneJoined(zone); err != nil {
+			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
+		}
+	}()
 }
 
 // DeferElection records a zone as needing an election once peers become operational.
@@ -828,7 +1014,7 @@ func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones []ZoneName) {
 				lem.mu.Lock()
 				delete(lem.pendingElections, zone)
 				lem.mu.Unlock()
-				lem.DeferGroupElection(pg.GroupHash)
+				lem.leaveElectionToGroup(pg.GroupHash)
 				continue
 			}
 		}
@@ -1378,7 +1564,7 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 			if pg != nil {
 				lgElect.Info("leader TTL expiring, deferring to group re-election",
 					"zone", zone, "group", pg.GroupHash[:8])
-				lem.DeferGroupElection(pg.GroupHash)
+				lem.leaveElectionToGroup(pg.GroupHash)
 				return
 			}
 		}
@@ -1450,6 +1636,51 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 		}
 	}
 	return winner
+}
+
+// activeSig0KeyIDs lists the key ids of keyName's active SIG(0) keys: all of
+// them, where GetSig0Keys keeps one.
+func activeSig0KeyIDs(hdb *HsyncDB, keyName string) (map[uint16]bool, error) {
+	resp, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "list"})
+	if err != nil {
+		return nil, err
+	}
+	ids := map[uint16]bool{}
+	for mapkey, k := range resp.Sig0keys {
+		if !strings.EqualFold(dns.Fqdn(k.Name), dns.Fqdn(keyName)) || k.State != tdns.Sig0StateActive {
+			continue
+		}
+		_, idstr, ok := strings.Cut(mapkey, "::")
+		if !ok {
+			continue
+		}
+		if id, err := strconv.ParseUint(idstr, 10, 16); err == nil {
+			ids[uint16(id)] = true
+		}
+	}
+	return ids, nil
+}
+
+// dropKeyMadeForALostLead deletes a SIG(0) key the leader's setup made, when
+// the lead moved before the setup could publish it. Left active, the key
+// would be handed to the next leader that asks this agent, and published the
+// next time this agent leads, though the parent never saw it. A key this
+// agent already held, or imported from a peer, is the group's and stays. Nor is a key deleted that is
+// not the zone's only active key: the delete cannot be undone, and the one
+// the parent trusts may be the other.
+func dropKeyMadeForALostLead(hdb *HsyncDB, zone, keyName string, keyid uint16) {
+	if ids, err := activeSig0KeyIDs(hdb, keyName); err != nil || len(ids) != 1 || !ids[keyid] {
+		lgAgent.Warn("onLeaderElected: the SIG(0) key made for a lead that has moved is kept: it is not the zone's only active key, or the keys could not be listed",
+			"zone", zone, "keyid", keyid, "active", len(ids), "err", err)
+		return
+	}
+	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete",
+		Zone: zone, Keyname: keyName, Keyid: keyid}); err != nil {
+		lgAgent.Error("onLeaderElected: the SIG(0) key made for a lead that has moved could not be deleted; it stays active",
+			"zone", zone, "keyid", keyid, "err", err)
+		return
+	}
+	lgAgent.Info("onLeaderElected: the SIG(0) key made for a lead that has moved is deleted", "zone", zone, "keyid", keyid)
 }
 
 // importSig0KeyFromPeer imports a SIG(0) key received from a peer via RFI CONFIG.

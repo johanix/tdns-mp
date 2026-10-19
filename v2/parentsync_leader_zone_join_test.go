@@ -19,7 +19,7 @@ func zoneJoiner(t *testing.T) (*LeaderElectionManager, *LeaderElection, ZoneName
 	le := lem.getOrCreate(zone)
 	t.Cleanup(func() {
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}

@@ -1000,6 +1000,23 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	isProvider := GetProviderZoneRRtypes(zone) != nil
 	var parts []string
 
+	// 0. For provider zones: a stored at-ns instruction whose zone does not
+	// carry the customer's consent is withdrawn first (withdrawSignalKeys).
+	//
+	// A retraction that failed keeps its name in the instruction, with at-ns,
+	// so that the next use tries again. If its save failed, the snapshot that
+	// step 1 reloads still holds the KEY. So step 2 does not put the names of
+	// the zones found here back: it takes them out of what step 1 reloaded.
+	// They are found before the provider zone is locked: step 2 then reads no
+	// customer zone's state under that lock.
+	var withoutConsent map[string]bool
+	if isProvider {
+		var err error
+		if withoutConsent, err = withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
+			return "", fmt.Errorf("failed to load publish instructions: %w", err)
+		}
+	}
+
 	// 1. Reload AgentContributions from the CombinerContributions snapshot.
 	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
@@ -1028,8 +1045,30 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 			mpzd.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
 		}
-		keyCount := 0
+		keyCount, keptOut := 0, 0
 		for childZone, senders := range allInstr {
+			if withoutConsent[childZone] {
+				for senderID, stored := range senders {
+					if !containsString(stored.Locations, "at-ns") {
+						continue
+					}
+					for _, ns := range stored.PublishedNS {
+						ownerName := Sig0KeyOwnerName(childZone, ns)
+						if findProviderZoneForOwner(ownerName) != zone {
+							continue
+						}
+						_, _, changed, replErr := mpzd.replaceCombinerDataByRRtypeLocked(senderID, ownerName, dns.TypeKEY, nil)
+						if replErr != nil {
+							lgCombiner.Error("reapply: failed to take out the _signal KEY of a zone without consent; it is tried again at the next use of its instruction",
+								"zone", childZone, "sender", senderID, "owner", ownerName, "err", replErr)
+						}
+						if changed {
+							keptOut++
+						}
+					}
+				}
+				continue
+			}
 			for senderID, stored := range senders {
 				if !containsString(stored.Locations, "at-ns") || len(stored.KEYRRs) == 0 {
 					continue
@@ -1060,6 +1099,9 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 		}
 		if keyCount > 0 {
 			parts = append(parts, fmt.Sprintf("applied %d _signal KEY record(s)", keyCount))
+		}
+		if keptOut > 0 {
+			parts = append(parts, fmt.Sprintf("took out %d _signal KEY(s) of zones without pubkey consent whose withdrawal had not finished", keptOut))
 		}
 	}
 

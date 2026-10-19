@@ -156,6 +156,32 @@ func zoneApex(zone ZoneName) *tdns.OwnerData {
 	return apex
 }
 
+// mayHoldZoneSig0Key: the agent may be handed the zone's SIG(0) key. The key
+// is the provider group's, for the zone's delegation sync with its parent, so
+// any agent that can be elected the zone's leader may hold it: a member with
+// a voting role (servers or signers). Who transfers the zone from whom
+// (HSYNC3's upstream) has nothing to do with it. Identities compare as FQDNs
+// (isAmong): the zone's records carry the trailing dot, and an agent's
+// configured identity need not.
+func mayHoldZoneSig0Key(zone ZoneName, agent AgentId) bool {
+	_, voting := zoneParticipants(zoneApex(zone))
+	return isAmong(voting, agent)
+}
+
+// sig0KeyPeers are the zone's agents a new leader asks for the zone's SIG(0)
+// key: the others that may hold it. An auditor never answers (its engine
+// only records the request), so asking one cost the full timeout; and a key
+// from an agent that may not hold the zone's key is not the group's key.
+func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
+	var peers []*Agent
+	for _, a := range agents {
+		if !isAmong([]string{string(self)}, a.ID) && mayHoldZoneSig0Key(zone, a.ID) {
+			peers = append(peers, a)
+		}
+	}
+	return peers
+}
+
 // ParticipantsForZone is the single membership truth for agent/auditor reads:
 // the identities holding a membership-conferring HSYNCPARAM role in the zone
 // (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with
@@ -207,9 +233,108 @@ func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
 	return out
 }
 
+// SetOnZoneJoinedGroup sets the callback that RecomputeGroups tells of each
+// zone it has put into a group the zone was not in before: to is that group,
+// from the group the zone was in, empty when it had none. It is called once
+// the new group map is in place, with the manager's lock free: whoever is
+// told may read the groups. It must not start a recompute: the one that
+// tells is not over until the callback returns, so that two recomputes tell
+// in the order in which they ran. A zone whose group did not change is not
+// reported, so a recompute that moves nothing calls nothing.
+func (pgm *ProviderGroupManager) SetOnZoneJoinedGroup(f func(zone ZoneName, from, to string)) {
+	pgm.mu.Lock()
+	defer pgm.mu.Unlock()
+	pgm.onZoneJoinedGroup = f
+}
+
+// SetOnGroupGone sets the callback that RecomputeGroups tells of each group
+// it has dropped: a group that had zones, and has none now that its last zone
+// has moved to another group or is gone. It is called as the callback of
+// SetOnZoneJoinedGroup is: once the new group map is in place, with the
+// manager's lock free, and it must not start a recompute. A group that
+// comes back later is a new group to whoever was told.
+func (pgm *ProviderGroupManager) SetOnGroupGone(f func(groupHash string)) {
+	pgm.mu.Lock()
+	defer pgm.mu.Unlock()
+	pgm.onGroupGone = f
+}
+
+// groupsThatAreGone returns the groups of the map before a recompute that
+// the map after it does not have, in the order of their hashes.
+func groupsThatAreGone(before, after map[string]*ProviderGroup) []string {
+	var gone []string
+	for hash := range before {
+		if _, ok := after[hash]; !ok {
+			gone = append(gone, hash)
+		}
+	}
+	slices.Sort(gone)
+	return gone
+}
+
+// zoneGroupChange is a zone that a recompute has put into a group it was not
+// in before: from is the group it was in, empty when it had none.
+type zoneGroupChange struct {
+	zone     ZoneName
+	from, to string
+}
+
+// zonesThatJoined compares the group map before a recompute with the one
+// after it, and returns the zones that are now in another group than before
+// or in a group for the first time, in the order of their names. A zone that
+// only left its group is not among them.
+func zonesThatJoined(before, after map[string]*ProviderGroup) []zoneGroupChange {
+	was := make(map[ZoneName]string)
+	for hash, pg := range before {
+		for _, z := range pg.Zones {
+			was[z] = hash
+		}
+	}
+	var joined []zoneGroupChange
+	for hash, pg := range after {
+		for _, z := range pg.Zones {
+			if was[z] != hash {
+				joined = append(joined, zoneGroupChange{zone: z, from: was[z], to: hash})
+			}
+		}
+	}
+	sort.Slice(joined, func(i, j int) bool {
+		return joined[i].zone < joined[j].zone
+	})
+	return joined
+}
+
 // RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
 // and rebuilds the provider group map. This is a pure function of zone data.
+// The zones it moves into a group are reported to the callback set with
+// SetOnZoneJoinedGroup, if there is one, and the groups it drops to the one
+// set with SetOnGroupGone.
+//
+// Recomputes run one at a time, each from its scan to the last word of what
+// it changed. The scan used to run under no lock, and only the swap under
+// the manager's: of two recomputes at once, started by the refreshes of two
+// zones, the one that had scanned first could swap last, and the map then
+// held a zone in the group it had before its providers changed, until
+// something recomputed again (tdns-mp #181).
 func (pgm *ProviderGroupManager) RecomputeGroups() {
+	// A scan that has begun by now may have read the zones before the change
+	// this call is for. One that begins later has not.
+	pgm.recomputeSince(pgm.scansBegun.Load())
+}
+
+// recomputeSince is RecomputeGroups for a call that was made when begun scans
+// had begun. When it gets its turn and finds a scan in place that began
+// after that, it returns at once: that scan read everything this one would,
+// and has told what it changed. The caller has what it came for either way,
+// a map made from the zones as they were at its call or later.
+func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
+	pgm.recomputeMu.Lock()
+	defer pgm.recomputeMu.Unlock()
+	if pgm.installedScan > begun {
+		return
+	}
+	scan := pgm.scansBegun.Add(1)
+
 	type zoneGroup struct {
 		identities    []string
 		votingMembers []string // union of voting identities across zones in this group
@@ -282,9 +407,12 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 		newGroups[hash] = pg
 	}
 
+	if pgm.afterScan != nil {
+		pgm.afterScan()
+	}
+
 	// Merge with existing groups (preserve name proposals)
 	pgm.mu.Lock()
-	defer pgm.mu.Unlock()
 
 	for hash, pg := range newGroups {
 		if existing, ok := pgm.Groups[hash]; ok {
@@ -292,7 +420,28 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			pg.Name = existing.Name
 		}
 	}
+	onJoined := pgm.onZoneJoinedGroup
+	var joined []zoneGroupChange
+	if onJoined != nil {
+		joined = zonesThatJoined(pgm.Groups, newGroups)
+	}
+	onGone := pgm.onGroupGone
+	var gone []string
+	if onGone != nil {
+		gone = groupsThatAreGone(pgm.Groups, newGroups)
+	}
 	pgm.Groups = newGroups
+	pgm.mu.Unlock()
+	pgm.installedScan = scan
+
+	// Told with the manager's lock free, and with the new map in place:
+	// whoever is told may look the zone's group up.
+	for _, j := range joined {
+		onJoined(j.zone, j.from, j.to)
+	}
+	for _, hash := range gone {
+		onGone(hash)
+	}
 }
 
 // ProposeGroupName sets our name proposal for a group.

@@ -447,6 +447,22 @@ multi-provider:
         allowed-rrtypes: [ KEY ]
 ```
 
+The provider zone itself is configured in the combiner as a
+customer zone is: a secondary of the provider's own primary,
+with the `multi-provider` option. The combiner's start-up
+re-apply and the combine onto a refreshed copy are attached
+only to zones with that option, so without it a restart or a
+refresh does not put the `_signal` KEYs back. The zone has no
+HSYNC records, and the combiner does not expect any.
+
+```yaml
+zones:
+   - name:       alpha.example.net.
+     type:       secondary
+     primaries:  [ { addr: '192.0.2.1:53', key: NOKEY } ]
+     options:    [ multi-provider ]
+```
+
 When the agent sends a Publish instruction with
 `locations: ["at-ns"]`, the combiner:
 
@@ -458,6 +474,28 @@ When the agent sends a Publish instruction with
 When NS records change (providers added or removed), the
 combiner resyncs: it diffs the current NS set against the
 stored set and adds/removes `_signal` KEYs accordingly.
+
+The combiner stores the instruction. The provider zone's
+own source does not have the `_signal` KEYs, so when the
+combiner starts it publishes them again from the stored
+instructions, as soon as the provider zone has loaded. A
+customer zone that has not loaded by then is asked for its
+consent (below) when it has. A refresh of the provider
+zone from its source keeps them in the same way: the
+combiner puts them onto the incoming zone before it is
+served.
+
+The `_signal` names need the customer's consent: the
+`pubkey` flag in the zone's HSYNCPARAM record. The agent
+asks for `at-ns` only when the flag is there, and the
+combiner looks again each time it acts on a stored
+instruction (an NS change, a restart, a refresh or
+`edits reapply` of the provider zone). If the zone does
+not say `pubkey`, the combiner retracts the `_signal`
+KEYs it had published for that zone and keeps the
+instruction for the apex only.
+When the customer adds the flag again, the agent's next
+Publish instruction puts the `_signal` KEYs back.
 
 
 ## 4. Provider-to-Provider Synchronization
@@ -574,4 +612,13 @@ Key properties:
 
 The leader is responsible for parent-facing operations
 (delegation sync, key publication) on behalf of the entire
-provider group.
+provider group. It takes them up when it is elected, for
+the zones the group has then, and for a zone that joins
+the group later (its set of providers changed) when that
+zone arrives.
+
+A group whose last zone has left it is gone, and its
+election with it. If the group comes back later, it elects
+a leader as a new group does. A lease renewal is called
+for the zones and the voting members the group has when
+the renewal is due.
