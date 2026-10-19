@@ -213,14 +213,23 @@ later leader that was handed it: a new leader asks the
 other providers in `servers=` and `signers=`, and any of
 them that holds the key hands it over. With
 [PR 217](https://github.com/johanix/tdns-mp/pull/217)
-it also asks the provider that led the zone's group
-before, while that provider's HSYNC3 record stays. A
+it also asks every provider the zone lists without a
+role, which charlie is while its HSYNC3 record stays. A
 newly elected leader that no provider hands the key
 makes one of its own, and a parent that takes UPDATE may
 refuse it. So when charlie led the group and the parent
 takes UPDATE, keep charlie's agent running after 4.1
 until the new leader logs `imported SIG(0) key from peer`
 or `leader has local SIG(0) key, proceeding to publish`.
+Once every provider in `servers=` and `signers=` holds
+the key (step 7b of
+`docs/2026-10-12-membership-and-catch-up-plan.md`), the
+wait is not needed when, before charlie's agent stops,
+`tdns-mpcli agent parentsync status` at each remaining
+provider in `servers=` and `signers=` shows the zone's
+key id. No leader then makes a new key while the zone
+publishes one. From then on every provider that leaves
+keeps the key until the key is rolled.
 Contributed NS
 records stay until an operator purges them at every
 remaining provider
