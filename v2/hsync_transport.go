@@ -41,6 +41,10 @@ type MPTransportBridge struct {
 	agentRegistry *AgentRegistry
 	msgQs         *MsgQs
 
+	// keyAsks: the zone SIG(0) key requests out, whose answers are let in
+	// (keyHandOverAdmits)
+	keyAsks keyAskTable
+
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
 
@@ -651,6 +655,10 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	//
 	// Each message type fans out directly to its own MsgQs channel; the
 	// single IncomingChan this replaced was deleted (C3.0).
+	// A message let in for a zone's SIG(0) key alone is refused before any
+	// verb handler takes it, unless it is the request for the key or its
+	// answer (keyHandOverGate).
+	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))
@@ -1260,6 +1268,13 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		ConfigData: configData,
 		Nonce:      nonce,
 		Timestamp:  time.Now(),
+	}
+	// The answer about the zone's SIG(0) key may go to a peer that lets this
+	// agent in for the key alone (keyHandOverAdmits): its delivery
+	// confirmation is let in by its distribution id.
+	if subtype == "sig0key" {
+		req.DistributionID = transport.GenerateDistributionID()
+		tm.keyAsks.expectConfirm(requesterID, req.DistributionID)
 	}
 
 	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -1707,6 +1707,13 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 	if pkc.KeyType != dns.TypeKEY || dns.CanonicalName(pkc.KeyRR.Hdr.Name) != dns.CanonicalName(keyName) {
 		return fmt.Errorf("peer sent a key for %q, not a KEY for %q", pkc.KeyRR.Hdr.Name, keyName)
 	}
+	// A zone that publishes a KEY takes only that key: one the zone does not
+	// publish would put a key the parent does not know in place of the one
+	// it trusts. The peers asked include agents with no role any more
+	// (roleLessKeyHolders), whose keystore need not hold the zone's key.
+	if !zoneTakesKey(ZoneName(keyName), &pkc.KeyRR) {
+		return fmt.Errorf("peer sent key %d, which %s does not publish", pkc.KeyRR.KeyTag(), keyName)
+	}
 
 	// Nor a private key that is not the KEY's own half: it would be stored
 	// active, and its signatures would not validate against the published

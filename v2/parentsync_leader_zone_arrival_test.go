@@ -12,6 +12,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -676,4 +677,76 @@ func TestKeySetupsOfAZoneRunOneAtATime(t *testing.T) {
 		t.Error("another zone's setup waited for this zone's")
 	}
 	close(release)
+}
+
+// The owner takes the role of the provider that led the zone's group, C,
+// and keeps its HSYNC3 record for now. C holds the zone's SIG(0) key. It has
+// no role, so it is no voting member and none of the zone's agents
+// (GetZoneAgentData has the role holders only): the agents asked had no key
+// to hand over, the new leader made none while the zone published one, and
+// the zone's delegation sync waited for good. The key setup asks every agent
+// the zone lists ON with no role, read from the zone as it is: an agent that
+// restarts, or leads a zone whose old group it was never in, asks the same.
+func TestTheKeySetupAsksAProviderListedWithoutARole(t *testing.T) {
+	const arrivalD = "d.agent.example."
+	zd := providerZone(t, "roleless.key.arrival.example.", arrivalA, arrivalB, arrivalC, arrivalD)
+	zone := ZoneName(zd.ZoneName)
+	ar := keyHolderRegistry(arrivalA, arrivalB, arrivalC, arrivalD)
+
+	// Every listed provider has a role: the voting members are asked, once.
+	if asked := keyAsked(t, zone, ar); !slices.Equal(asked, []AgentId{arrivalB, arrivalC, arrivalD}) {
+		t.Fatalf("with every provider holding a role the key setup asks %v, want the voting members B, C and D", asked)
+	}
+
+	// The owner takes the roles of C and of D, in one edit or in two, and
+	// keeps their records.
+	zoneEdit{listed: []string{arrivalA, arrivalB, arrivalC, arrivalD}, serving: []string{arrivalA, arrivalB}}.apply(t, zd)
+	if asked := keyAsked(t, zone, ar); !slices.Equal(asked, []AgentId{arrivalB, arrivalC, arrivalD}) {
+		t.Errorf("with C and D listed and no role the key setup asks %v, want B, and C and D from the registry", asked)
+	}
+
+	// A record set OFF, or gone, is not asked.
+	apex, _ := zd.Data.Get(zd.ZoneName)
+	h3s := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
+	for _, rr := range h3s.RRs {
+		if h3 := rr.(*dns.PrivateRR).Data.(*core.HSYNC3); h3.Identity == arrivalD {
+			h3.State = 0
+		}
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, h3s)
+	zd.Data.Set(zd.ZoneName, apex)
+	zd.InstallInitialSnapshot()
+	if asked := keyAsked(t, zone, ar); !slices.Equal(asked, []AgentId{arrivalB, arrivalC}) {
+		t.Errorf("with D's record OFF the key setup asks %v, want B and C", asked)
+	}
+	zoneEdit{listed: []string{arrivalA, arrivalB}, serving: []string{arrivalA, arrivalB}}.apply(t, zd)
+	if asked := keyAsked(t, zone, ar); !slices.Equal(asked, []AgentId{arrivalB}) {
+		t.Errorf("with C's and D's records gone the key setup asks %v, want only B", asked)
+	}
+}
+
+// keyHolderRegistry is an agent registry, as this agent's, that knows the
+// other agents.
+func keyHolderRegistry(local string, others ...string) *AgentRegistry {
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: &MultiProviderConf{Identity: local}}
+	for _, id := range others {
+		ar.S.Set(AgentId(id), NewAgent(AgentId(id)))
+	}
+	return ar
+}
+
+// keyAsked is who the key setup's step b asks for the zone's key: the
+// voting members among the zone's agents, and the agents it lists with no
+// role.
+func keyAsked(t *testing.T, zone ZoneName, ar *AgentRegistry) []AgentId {
+	t.Helper()
+	zad, err := ar.GetZoneAgentData(zone)
+	if err != nil {
+		t.Fatalf("the zone's agents: %v", err)
+	}
+	var asked []AgentId
+	for _, a := range zoneKeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity), ar.roleLessKeyHolders(zone)) {
+		asked = append(asked, a.ID)
+	}
+	return asked
 }

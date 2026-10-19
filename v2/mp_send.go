@@ -167,7 +167,7 @@ func configAppMessage(req *PeerConfigRequest, peerID string) (*transport.AppMess
 	if err != nil {
 		return nil, fmt.Errorf("marshal config payload: %w", err)
 	}
-	return &transport.AppMessage{Scope: req.Zone, TypeToken: "config", Payload: b}, nil
+	return &transport.AppMessage{Scope: req.Zone, TypeToken: "config", Payload: b, DistributionID: req.DistributionID}, nil
 }
 
 // auditAppMessage mirrors DNSTransport.Audit (core.AgentAuditPost).

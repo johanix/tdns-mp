@@ -182,6 +182,96 @@ func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
 	return peers
 }
 
+// zoneKeyPeers are the agents leaderKeySetup asks for the zone's SIG(0) key:
+// sig0KeyPeers, and also previous, the agents the zone lists with no role
+// (roleLessKeyHolders), those not among them already. They hand the key to
+// a voting member as any holder does.
+func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous []*Agent) []*Agent {
+	peers := sig0KeyPeers(zone, agents, self)
+	for _, prev := range previous {
+		if isAmong([]string{string(self)}, prev.ID) ||
+			slices.ContainsFunc(peers, func(p *Agent) bool { return isAmong([]string{string(p.ID)}, prev.ID) }) {
+			continue
+		}
+		peers = append(peers, prev)
+	}
+	return peers
+}
+
+// zoneTakesKey: the zone publishes no KEY at its apex, or it publishes
+// this one (same flags, protocol, algorithm and public key). A zone that has
+// not loaded here publishes nothing to compare with.
+func zoneTakesKey(zone ZoneName, key *dns.KEY) bool {
+	apex := zoneApex(zone)
+	if apex == nil {
+		return true
+	}
+	published := apex.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs
+	if len(published) == 0 {
+		return true
+	}
+	for _, rr := range published {
+		if k, ok := rr.(*dns.KEY); ok && k.Flags == key.Flags && k.Protocol == key.Protocol &&
+			k.Algorithm == key.Algorithm && k.PublicKey == key.PublicKey {
+			return true
+		}
+	}
+	return false
+}
+
+// zoneListsAgent: the zone's HSYNC3 RRset has an ON record for the agent,
+// with a role in HSYNCPARAM or without.
+func zoneListsAgent(zone ZoneName, id AgentId) bool {
+	apex := zoneApex(zone)
+	if apex == nil {
+		return false
+	}
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 && isAmong([]string{h3.Identity}, id) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// roleLessKeyHolders are the agents the zone's HSYNC3 lists ON with no role
+// in HSYNCPARAM, as the registry has them, other than this agent. The owner
+// takes a provider's role first and its HSYNC3 record later, and in between
+// that provider may hold the zone's SIG(0) key: it led the zone's group, and
+// set the key up. It is no voting member and none of the zone's agents
+// (GetZoneAgentData has the role holders only), so the voting members alone
+// were asked, none had a key to hand over, the new leader made none while
+// the zone published one, and the zone's delegation sync waited for good.
+//
+// Read from the zone as it is, so nothing is lost at a restart, and a leader
+// that was never in the group the zone left asks as well. Outside such an
+// edit the zone lists no agent without a role, and nobody more is asked.
+func (ar *AgentRegistry) roleLessKeyHolders(zone ZoneName) []*Agent {
+	apex := zoneApex(zone)
+	if apex == nil {
+		return nil
+	}
+	participants, _ := zoneParticipants(apex)
+	var out []*Agent
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok || h3.State == 0 || isAmong(participants, AgentId(h3.Identity)) ||
+			(ar.LocalAgent != nil && isAmong([]string{ar.LocalAgent.Identity}, AgentId(h3.Identity))) {
+			continue
+		}
+		if agent, err := ar.GetAgentInfo(AgentId(h3.Identity)); err == nil {
+			out = append(out, agent)
+		}
+	}
+	return out
+}
+
 // ParticipantsForZone is the single membership truth for agent/auditor reads:
 // the identities holding a membership-conferring HSYNCPARAM role in the zone
 // (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with
