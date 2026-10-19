@@ -99,7 +99,11 @@ func TestAGroupCallCountsOnlyFromAVotingMember(t *testing.T) {
 	lem.HandleGroupMessage(group, "auditor.example.", "ELECT-CALL",
 		map[string][]string{"_term": {"1"}, "_vote": {"7"}, "_group": {group}})
 
+	// No election entry at all is no term: the refused CALL created nothing.
 	le := groupElectionOf(lem, group)
+	if le == nil {
+		return
+	}
 	le.mu.Lock()
 	defer le.mu.Unlock()
 	if le.Active || le.Term != 0 {

@@ -520,8 +520,9 @@ func TestATakeoverJustBeforeTheHandoffLeavesNoChain(t *testing.T) {
 // The owner's edit gives the sync back and, in the same refresh, removes this
 // agent's HSYNC3 record. The HSYNC diff then fires only the removal hook and
 // returns before its group recompute, so the zone stayed in the group this
-// agent led, and the give-back ran the leader's setup here. The hook now
-// recomputes the groups, and the give-back runs nothing at this agent.
+// agent led, and the give-back ran the leader's setup here. That path now
+// recomputes the groups too (OnHsync3Changed, tdns-mp #183), and the
+// give-back runs nothing at this agent.
 func TestAGiveBackThatAlsoRemovesThisAgentRunsNoSetupHere(t *testing.T) {
 	asMPAgent(t)
 	const zone = "removed.parentsync.example."
@@ -562,7 +563,10 @@ func TestAGiveBackThatAlsoRemovesThisAgentRunsNoSetupHere(t *testing.T) {
 	zd.Data.Set(zone, apex)
 	zd.InstallInitialSnapshot()
 
-	ar.localRemovedFromZone(zone) // what ApplyHsyncDiff calls, and all it calls
+	// what ApplyHsyncDiff calls on that path: the removal hook, then
+	// OnHsync3Changed, which the agent wires to the group recompute
+	ar.localRemovedFromZone(zone)
+	pgm.RecomputeGroups()
 	if lem.IsLeader(zone) {
 		t.Error("after its HSYNC3 record went, this agent still leads the zone")
 	}

@@ -104,9 +104,10 @@ type Deps struct {
 	PeerHooks         PeerHooks
 	// GateOnLocalPresence makes ApplyHsyncDiff mirror the legacy weAreInHSYNC
 	// abort: when the local identity is absent from the zone's current HSYNC3
-	// RRset, skip remote add/remove processing and the group recompute (a
-	// local-remove RR still fires OnLocalRemoved). Set by the agent; the
-	// auditor observes zones it is not a member of, so it leaves this false.
+	// RRset, skip remote add/remove processing (a local-remove RR still fires
+	// OnLocalRemoved, and the groups are still recomputed through
+	// OnHsync3Changed). Set by the agent; the auditor observes zones it is
+	// not a member of, so it leaves this false.
 	GateOnLocalPresence bool
 	// HelloReady, when set, is waited on before the engine's first hello to a
 	// peer. The agent sets it to the publication of its own identity zone: a

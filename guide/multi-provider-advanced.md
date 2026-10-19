@@ -574,4 +574,13 @@ Key properties:
 
 The leader is responsible for parent-facing operations
 (delegation sync, key publication) on behalf of the entire
-provider group.
+provider group. It takes them up when it is elected, for
+the zones the group has then, and for a zone that joins
+the group later (its set of providers changed) when that
+zone arrives.
+
+A group whose last zone has left it is gone, and its
+election with it. If the group comes back later, it elects
+a leader as a new group does. A lease renewal is called
+for the zones and the voting members the group has when
+the renewal is due.

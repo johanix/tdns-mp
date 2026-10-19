@@ -562,15 +562,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 							amp.Zone, pg.GroupHash[:8])
 						return
 					}
-					localID := mp.Identity
-					weVote := false
-					for _, m := range pg.VotingMembers {
-						if m == localID {
-							weVote = true
-							break
-						}
-					}
-					if !weVote {
+					if !isAmong(pg.VotingMembers, AgentId(mp.Identity)) {
 						resp.Msg = fmt.Sprintf("group election observed only for zone %s (this node is not a voting member of group %s)",
 							amp.Zone, pg.GroupHash[:8])
 						return

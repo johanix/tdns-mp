@@ -9,6 +9,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -237,7 +238,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					if lem.providerGroupMgr != nil {
 						pg := lem.providerGroupMgr.GetGroupForZone(zone)
 						if pg != nil {
-							lem.DeferGroupElection(pg.GroupHash)
+							lem.leaveElectionToGroup(pg.GroupHash)
 							return
 						}
 					}
@@ -249,7 +250,12 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 
 	// When the local agent wins leader election: ensure we have a SIG(0) key,
 	// then publish KEY to combiner and sync to remote agents.
-	leaderKeySetup := func(zone ZoneName) error {
+	//
+	// elected is false when the zone was not won in an election but joined a
+	// group this agent already leads. Such a zone has had a leader, and may
+	// have a key that leader made. The setup then does everything but make a
+	// new key in place of one the zone publishes (mayGenerateZoneKey).
+	leaderKeySetup := func(zone ZoneName, elected bool) error {
 		zd, ok := Zones.Get(string(zone))
 		if !ok || zd == nil {
 			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
@@ -258,7 +264,11 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			lgAgent.Info("onLeaderElected: zone does not have OptParentSync, skipping", "zone", zone)
 			return nil
 		}
-		lgAgent.Info("onLeaderElected: processing", "zone", zone)
+		if elected {
+			lgAgent.Info("onLeaderElected: processing", "zone", zone)
+		} else {
+			lgAgent.Info("zone joined a group this agent leads: processing", "zone", zone)
+		}
 
 		if tdns.Globals.ImrEngine == nil {
 			lgAgent.Debug("onLeaderElected: IMR not available, skipping DSYNC bootstrap", "zone", zone)
@@ -273,6 +283,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 
 		keyName := string(zone)
+		// unanswered: see step b. Declared here because a goto may not jump
+		// over a declaration.
+		unanswered := 0
 		// A key this setup makes in step c, which the lead may not outlast.
 		var made bool
 		var madeKeyid uint16
@@ -286,28 +299,42 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				"zone", zone, "keyid", sak.Keys[0].KeyId)
 			goto publish
 		}
-		// Step b: ask peers via RFI CONFIG subtype=sig0key
+		// Step b: ask peers via RFI CONFIG subtype=sig0key.
+		//
+		// The peers asked are the voting members other than this agent
+		// (sig0KeyPeers): the agents that may hold the key, and the ones whose
+		// word on it counts. unanswered counts those that have not said "no
+		// key": one that is not operational, one that did not answer, one that
+		// refused to hand the key over (it may hold it), one whose key could
+		// not be imported. A silent peer is a peer to ask again, not a peer
+		// without the key.
 		{
 			zad, err := ar.GetZoneAgentData(zone)
-			if err == nil {
+			if err != nil {
+				unanswered++ // the zone's members are not known: nobody has said "no key"
+			} else {
 				for _, agent := range sig0KeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
 					if !ar.isAgentOperational(agent.ID) {
+						unanswered++
 						continue
 					}
 					lgAgent.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.ID)
 					configResp := RequestAndWaitForConfig(ar, agent, string(zone), "sig0key", msgQs)
 					if configResp == nil {
 						lgAgent.Info("peer did not respond to CONFIG sig0key", "zone", zone, "peer", agent.ID)
+						unanswered++
 						continue
 					}
 					if why := configResp.Refused(); why != "" {
 						lgAgent.Warn("peer refused to hand over the zone's SIG(0) key", "zone", zone, "peer", agent.ID, "reason", why)
+						unanswered++ // a refusal is not "no key": the peer may hold it
 						continue
 					}
 					if len(configResp.ConfigData) > 0 && configResp.ConfigData["status"] != "no sig0 key for zone" {
 						if err := importSig0KeyFromPeer(hdb, keyName, configResp.ConfigData); err != nil {
 							lgAgent.Error("failed to import SIG(0) key from peer",
 								"zone", zone, "peer", agent.ID, "err", err)
+							unanswered++ // it has a key: that is not "no key"
 							continue
 						}
 						lgAgent.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.ID)
@@ -317,6 +344,23 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				}
 			}
 		}
+		// Step c: no peer has the key — generate a new keypair. Not for a
+		// zone that arrived with a key of its own: the parent holds that
+		// key, and a new one in its place is refused there and replaces the
+		// zone's KEY RRset here. And not while a voting member has not
+		// answered: this agent's own copy of the zone may be behind (a
+		// provider that has just joined holds nothing of the zone yet), so
+		// that it shows no KEY says little.
+		if !mayGenerateZoneKey(elected, zd, unanswered) {
+			if zonePublishesKey(zd) {
+				lgAgent.Warn("the zone publishes a SIG(0) key that this agent does not hold, and no peer handed it over; no new key is made for a zone that joined a group, a sync that needs the key waits",
+					"zone", zone)
+			} else {
+				lgAgent.Warn("not every voting member has said whether it holds the zone's SIG(0) key; no new key is made for a zone that joined a group until each has, a sync that needs the key waits",
+					"zone", zone, "unanswered", unanswered)
+			}
+			return errZoneKeyNotHeld
+		}
 		// Asking the peers takes a while, and the lead may move meanwhile. A
 		// key made by an agent that no longer leads is a KEY in the zone
 		// that nobody bootstraps.
@@ -324,7 +368,6 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; no SIG(0) key is made", "zone", zone)
 			return nil
 		}
-		// Step c: no peer has the key — generate a new keypair
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
 		{
 			alg := parentSyncKeygenAlgorithm()
@@ -418,8 +461,36 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// neither loses an update nor repeats one. Asked whatever the key
 	// setup said: the sync has other schemes than the one that key is for.
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
-		err := leaderKeySetup(zone)
+		err := leaderKeySetup(zone, true)
 		conf.requestDelegationSync(ctx, string(zone), "this agent was elected the zone's delegation sync leader")
+		return err
+	})
+	// A zone that joins a group this agent already leads is asked for the
+	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
+	// it is: the key this agent holds is used, a peer is asked for one it
+	// does not hold, and a new one is made only for a zone that publishes
+	// none.
+	//
+	// When the zone has a key and no peer hands it over, the sync is not
+	// asked for yet: it could not be signed. The peers are asked again until
+	// one of them hands the key over, and the sync is asked for then
+	// (zoneKeyWaits). A parent that takes no UPDATE needs no key, and the key
+	// setup says so by finding nothing to do.
+	lem.SetOnZoneJoined(func(zone ZoneName) error {
+		ask := func() {
+			conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
+		}
+		err := leaderKeySetup(zone, false)
+		if errors.Is(err, errZoneKeyNotHeld) {
+			conf.InternalMp.zoneKeyWaits.await(ctx, zone, zoneKeyWaitDelays,
+				func() bool { return lem.IsLeader(zone) },
+				func() error {
+					return lem.inKeySetup(zone, func() error { return leaderKeySetup(zone, false) })
+				},
+				ask)
+			return nil
+		}
+		ask()
 		return err
 	})
 

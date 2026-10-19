@@ -249,4 +249,8 @@ type InternalMpConf struct {
 	// went to the parent as a NOTIFY, and how often, for the asks that
 	// follow, and what is scheduled for them (mp_s5_leader_sync.go)
 	delegationSyncChains delegationSyncChains
+	// zoneKeyWaits: the zones that joined a group this agent leads while it
+	// held no SIG(0) key for them, and whose key it is asking its peers for
+	// (parentsync_utils.go).
+	zoneKeyWaits zoneKeyWaits
 }
