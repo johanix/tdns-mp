@@ -1517,6 +1517,71 @@ func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSync
 	return changed, dss, nil
 }
 
+// followParentSyncParam keeps an agent's delegation-sync option for a
+// multi-provider zone in step with the zone's HSYNCPARAM. The agents sync
+// the zone's delegation with its parent when, and only while, HSYNCPARAM
+// says parentsync=agent. With parentsync=owner, or with no HSYNCPARAM, the
+// owner syncs it, and what an agent sent to the parent could undo what the
+// owner put there. A parentsync option in the agent's own configuration
+// does not change that: the owner's word decides.
+//
+// The option used to be turned on at a refresh and never off (tdns-mp
+// #200): after the owner took the sync over, the leader went on syncing the
+// parent at every lease renewal. It runs after every refresh, the first
+// load's included, before PostRefresh: the delegation sync a refresh asks
+// for reads the option.
+//
+// The option is a run-time option (SetRuntimeOption): the zone gets a new
+// options map rather than a write into the one that the query and refresh
+// paths read without a lock, and a config update does not take it away.
+// When the owner takes the sync over, what this agent has scheduled for the
+// zone's parent ends here: a held NOTIFY is dropped, and an ask or a check
+// that waits finds no chain (delegationSyncOwnerSyncs). An election, a
+// lease renewal included, finds the option off and asks for nothing.
+//
+// givenBack says the owner has given the sync back to the agents: the
+// option went on at a refresh after the zone's first. The callback then runs,
+// after PostRefresh, the leader's setup that an election skipped while the
+// owner synced the zone (delegationSyncGivenBack). At a first load the option
+// comes on too, and that is no give-back: at start-up the zone's election runs
+// the setup. A zone whose first load comes after its group already has a
+// leader (a zone added to a running agent, a late first transfer) has no
+// election of its own, and waits for its group's next lease renewal.
+//
+// A zone whose HSYNCPARAM cannot be read keeps the option it has.
+func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
+	if tdns.Globals.App.Type != AppTypeMPAgent || !mpzd.Options[tdns.OptMultiProvider] {
+		return false
+	}
+	rrset, err := mpzd.RRsetForAnalysis(mpzd.ZoneName, core.TypeHSYNCPARAM)
+	if err != nil {
+		lg.Warn("the zone's HSYNCPARAM could not be read; its delegation sync is left as it is", "zone", mpzd.ZoneName, "err", err)
+		return false
+	}
+	byAgents := false
+	if rrset != nil && len(rrset.RRs) > 0 {
+		if prr, ok := rrset.RRs[0].(*dns.PrivateRR); ok {
+			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+				byAgents = hp.GetParentSync() == core.HsyncParentSyncAgent
+			}
+		}
+	}
+	mpzd.EnsureMP()
+	first := !mpzd.MP.ParentSyncFollowed
+	mpzd.MP.ParentSyncFollowed = true
+	if byAgents == mpzd.Options[tdns.OptParentSync] {
+		return false
+	}
+	mpzd.SetRuntimeOption(tdns.OptParentSync, byAgents)
+	if byAgents {
+		lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
+		return !first
+	}
+	lg.Info("HSYNCPARAM does not say parentsync=agent: the zone's owner syncs its delegation, and this agent no longer sends anything to the parent", "zone", mpzd.ZoneName)
+	conf.delegationSyncOwnerSyncs(mpzd.ZoneName)
+	return false
+}
+
 // PostRefresh runs after the hard flip for all MP roles.
 // Sends notifications to SyncQ, DelegationSyncQ based on
 // the pre-refresh analysis results.
@@ -1565,18 +1630,6 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	if analysis.HsyncChanged {
 		switch tdns.Globals.App.Type {
 		case AppTypeMPAgent:
-			// Detect parentsync=agent dynamically from HSYNCPARAM. Before the
-			// diff is applied: the recompute of the provider groups that
-			// follows it may ask this agent, as the leader of the group the
-			// zone has joined, to sync the zone with its parent, and what is
-			// asked then reads this option.
-			if !mpzd.Options[tdns.OptParentSync] {
-				hp := mpzd.getHSYNCPARAM()
-				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
-					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
-					mpzd.Options[tdns.OptParentSync] = true
-				}
-			}
 			if tm != nil && tm.agentRegistry != nil {
 				ar := tm.agentRegistry
 				if ar.HsyncEngine != nil && analysis.HsyncStatus != nil {
@@ -1587,6 +1640,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 					})
 				}
 			}
+			// parentsync=agent or not: followParentSyncParam, before this
 		case AppTypeMPAuditor:
 			if tm != nil && tm.agentRegistry != nil {
 				ar := tm.agentRegistry

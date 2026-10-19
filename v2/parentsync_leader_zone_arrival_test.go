@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -617,4 +618,59 @@ func TestAZoneThatArrivesWithAKeyGetsNoNewOne(t *testing.T) {
 	if zonePublishesKey(nil) || !mayGenerateZoneKey(false, nil, 0) {
 		t.Error("an unknown zone reads as publishing a key")
 	}
+}
+
+// An election's setup and an arrival's setup of the same zone, and a later
+// round of the arrival's, never run at the same time: each would otherwise
+// find no SIG(0) key and make one. Another zone's setup is not held up.
+func TestKeySetupsOfAZoneRunOneAtATime(t *testing.T) {
+	lem := NewLeaderElectionManager("a.setup.example.", time.Hour, nil)
+	var running, most atomic.Int32
+	setup := func(ZoneName) error {
+		n := running.Add(1)
+		for {
+			m := most.Load()
+			if n <= m || most.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		running.Add(-1)
+		return nil
+	}
+	lem.SetOnLeaderElected(setup)
+	lem.SetOnZoneJoined(setup)
+	const zone ZoneName = "one.setup.example."
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(3)
+		go func() { defer wg.Done(); _ = lem.onLeaderElected(zone) }()
+		go func() { defer wg.Done(); _ = lem.onZoneJoined(zone) }()
+		go func() {
+			defer wg.Done()
+			_ = lem.inKeySetup(zone, func() error { return setup(zone) })
+		}()
+	}
+	wg.Wait()
+	if got := most.Load(); got != 1 {
+		t.Errorf("%d key setups of one zone ran at the same time, want 1", got)
+	}
+
+	// Another zone's setup goes ahead while one runs.
+	release := make(chan struct{})
+	go func() {
+		_ = lem.inKeySetup(zone, func() error { <-release; return nil })
+	}()
+	time.Sleep(10 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		_ = lem.onZoneJoined("other.setup.example.")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("another zone's setup waited for this zone's")
+	}
+	close(release)
 }
