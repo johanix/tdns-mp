@@ -83,6 +83,15 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
+				// No agent the zone no longer has sends to its parent: the owner
+				// removed it in the refresh that queued this (stillParticipates).
+				// Asked first: such an agent may have the option off too, and the
+				// owner's reason would then be the wrong one.
+				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
+					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncNotLeading(ds.ZoneName, false)
+					continue
+				}
 				// No agent sends to the parent of a zone whose owner syncs its
 				// delegation; the request was queued before the owner took
 				// the sync over
@@ -148,6 +157,16 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 
+				// An agent the zone no longer has first, as above
+				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
+					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncNotLeading(ds.ZoneName, false)
+					syncstate.Msg = "this agent no longer participates in the zone, skipping DDNS"
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					continue
+				}
 				// No agent sends to the parent of a zone whose owner syncs its
 				// delegation; the request was queued before the owner took
 				// the sync over

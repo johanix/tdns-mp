@@ -577,3 +577,75 @@ func TestAGiveBackThatAlsoRemovesThisAgentRunsNoSetupHere(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// The owner's edit removes this agent from the zone and changes the
+// delegation. PostRefresh queues the delegation sync before it applies the
+// HSYNC diff, so the syncher could judge the lead on the old groups and sync
+// once as a leader the agent no longer is. It now asks first whether the agent
+// still participates in the zone, which the refresh has already published.
+func TestAnAgentTheZoneNoLongerHasSyncsNothing(t *testing.T) {
+	asMPAgent(t)
+	// With the option off too, as for an agent the zone's records do not
+	// name: the reason given is still that it no longer participates.
+	for _, optionOn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("option %v", optionOn), func(t *testing.T) {
+			noLongerParticipates(t, optionOn)
+		})
+	}
+}
+
+func noLongerParticipates(t *testing.T, optionOn bool) {
+	r := newNotifyRig(t, "removed.update.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
+	r.propagation(0)
+	z := r.mpzd.ZoneName
+	if _, err := r.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
+		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+		t.Fatalf("the zone's SIG(0) key: %v", err)
+	}
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	changed, dss, err := implicitDelegationChange(r.mpzd, refreshedZone(t, r.mpzd, fmt.Sprintf("%s 3600 IN NS ns2.provider.example.", z)))
+	if err != nil || !changed {
+		t.Fatalf("the refresh: changed=%v err=%v", changed, err)
+	}
+
+	// The zone as the owner's edit left it: two providers, neither this
+	// agent; the agents still sync it, and the leader map still says this
+	// agent leads.
+	apex, _ := r.mpzd.Data.Get(z)
+	var h3 []dns.RR
+	for _, id := range []string{"eu.provider.example.", "as.provider.example."} {
+		h3 = append(h3, &dns.PrivateRR{Hdr: dns.RR_Header{Name: z, Rrtype: core.TypeHSYNC3, Class: dns.ClassINET, Ttl: 3600},
+			Data: &core.HSYNC3{State: 1, Label: shortLabel(id), Identity: id, Upstream: "."}})
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3})
+	hp, err := dns.NewRR(z + ` 3600 IN HSYNCPARAM servers="eu,as" parentsync="agent"`)
+	if err != nil {
+		t.Fatalf("HSYNCPARAM: %v", err)
+	}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
+	r.mpzd.Data.Set(z, apex)
+	r.mpzd.InstallInitialSnapshot()
+	if !r.lem.IsLeader(ZoneName(z)) {
+		t.Fatal("the rig does not start as the zone's leader")
+	}
+	if !optionOn {
+		r.mpzd.SetRuntimeOption(tdns.OptParentSync, false)
+	}
+
+	r.q <- tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, SyncStatus: dss}
+	resp := make(chan tdns.DelegationSyncStatus, 1)
+	r.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, Response: resp}
+	select {
+	case st := <-resp:
+		if want := "this agent no longer participates in the zone, skipping DDNS"; st.Msg != want {
+			t.Errorf("the explicit sync answered %q, want %q", st.Msg, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the explicit sync did not answer")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := r.parent.updatesSeen(); n != 0 {
+		t.Errorf("the parent got %d UPDATEs from an agent the zone no longer has", n)
+	}
+	r.untold(t, 0, "from an agent the zone no longer has")
+}
