@@ -303,10 +303,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		//
 		// The peers asked are the voting members other than this agent
 		// (sig0KeyPeers): the agents that may hold the key, and the ones whose
-		// word on it counts. And the agent that led the group the zone left,
-		// while the zone's HSYNC3 lists it (previousKeyHolder, zoneKeyPeers):
-		// it set the key up there, and the edit that moved the zone may have
-		// taken its vote.
+		// word on it counts. And the agents that led the groups the zone left,
+		// while the zone's HSYNC3 lists them (previousKeyHolders,
+		// zoneKeyPeers): one of them set the key up, and the edit that moved
+		// the zone may have taken its vote.
 		// unanswered counts those that have not said "no
 		// key": one that is not operational, one that did not answer, one that
 		// refused to hand the key over (it may hold it), one whose key could
@@ -317,7 +317,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			if err != nil {
 				unanswered++ // the zone's members are not known: nobody has said "no key"
 			} else {
-				previous := ar.previousKeyHolder(zone, lem.previousLeader(zone))
+				previous := ar.previousKeyHolders(zone, lem.previousLeaders(zone))
 				for _, agent := range zoneKeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity), previous) {
 					if !ar.isAgentOperational(agent.ID) {
 						unanswered++
@@ -417,6 +417,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		if err != nil || len(sak.Keys) == 0 {
 			return fmt.Errorf("onLeaderElected: no active SIG(0) key after generation for zone %s", zone)
 		}
+		lem.keyHeldHere(zone)
 		keyRR := &sak.Keys[0].KeyRR
 		lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", sak.Keys[0].KeyId)
 

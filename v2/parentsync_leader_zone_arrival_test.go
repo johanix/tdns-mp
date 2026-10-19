@@ -12,6 +12,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -697,45 +698,109 @@ func TestAZoneThatMovesAsksTheLeaderOfTheGroupItLeftForItsKey(t *testing.T) {
 		t.Fatalf("before the move the zone's group is led by %q, want %s", l, arrivalC)
 	}
 	zone := ZoneName(mover.ZoneName)
-	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: &MultiProviderConf{Identity: arrivalA}}
-	for _, id := range []string{arrivalB, arrivalC} {
-		ar.S.Set(AgentId(id), NewAgent(AgentId(id)))
-	}
+	ar := keyHolderRegistry(arrivalA, arrivalB, arrivalC)
 
 	zoneEdit{listed: []string{arrivalA, arrivalB, arrivalC}, serving: []string{arrivalA, arrivalB}}.apply(t, mover)
 	r.refresh()
 	inGroup(t, r.pgms[arrivalA], mover, arrivalA, arrivalB)
 
-	if prev := lem.previousLeader(zone); prev != arrivalC {
-		t.Fatalf("after the move the previous leader of %s is %q, want %s, who led the group it left", zone, prev, arrivalC)
+	if prev := lem.previousLeaders(zone); len(prev) != 1 || prev[0] != arrivalC {
+		t.Fatalf("after the move the previous leaders of %s are %v, want %s, who led the group it left", zone, prev, arrivalC)
 	}
 	// The zone's agents as the key setup reads them: the role holders.
 	zad, err := ar.GetZoneAgentData(zone)
 	if err != nil {
 		t.Fatalf("the zone's agents: %v", err)
 	}
-	zoneAgents := zad.Agents
-	if len(zoneAgents) != 1 || zoneAgents[0].ID != arrivalB {
-		t.Fatalf("the zone's agents are %v, want only %s: the test needs %s among them no more", zoneAgents, arrivalB, arrivalC)
+	if len(zad.Agents) != 1 || zad.Agents[0].ID != arrivalB {
+		t.Fatalf("the zone's agents are %v, want only %s: the test needs %s among them no more", zad.Agents, arrivalB, arrivalC)
 	}
-	var asked []AgentId
-	for _, a := range zoneKeyPeers(zone, zoneAgents, arrivalA, ar.previousKeyHolder(zone, lem.previousLeader(zone))) {
-		asked = append(asked, a.ID)
-	}
-	if len(asked) != 2 || asked[0] != arrivalB || asked[1] != arrivalC {
+	if asked := keyAsked(zone, zad.Agents, ar, lem); len(asked) != 2 || asked[0] != arrivalB || asked[1] != arrivalC {
 		t.Errorf("the key setup asks %v, want %s and %s, who led the group the zone left", asked, arrivalB, arrivalC)
 	}
 
 	// Once the owner takes its HSYNC3 record away too, it is not asked.
 	serve(arrivalA, arrivalB).apply(t, mover)
-	if got := zoneKeyPeers(zone, zoneAgents, arrivalA, ar.previousKeyHolder(zone, lem.previousLeader(zone))); len(got) != 1 {
-		t.Errorf("with %s's HSYNC3 record gone the key setup asks %d agents, want only %s", arrivalC, len(got), arrivalB)
+	if asked := keyAsked(zone, zad.Agents, ar, lem); len(asked) != 1 {
+		t.Errorf("with %s's HSYNC3 record gone the key setup asks %v, want only %s", arrivalC, asked, arrivalB)
 	}
 }
 
-// The agent that led the group a zone left is noted only when another agent
-// led it: one that led it holds the key itself. A zone that had no group
-// notes nobody.
+// The zone moves twice before its new leader has the key: the leader of the
+// group in between never held it. The agent that led first holds the only
+// key, and is still asked after the second move, whether another agent or
+// this one led the group in between. Once the key is held here, nobody noted
+// is asked any more.
+func TestAZoneThatMovesTwiceStillAsksTheLeaderThatHoldsItsKey(t *testing.T) {
+	const arrivalD = "d.agent.example."
+	all := []string{arrivalA, arrivalB, arrivalC, arrivalD}
+	for _, between := range []string{arrivalD, arrivalA} {
+		t.Run("led in between by "+between, func(t *testing.T) {
+			r := newGroupRig(t, all, arrivalA)
+			mover := providerZone(t, "twice.key.arrival.example.", all...)
+			r.refresh()
+			r.gossipLeader(arrivalA, arrivalC, 1)
+			lem := r.lems[arrivalA]
+			zone := ZoneName(mover.ZoneName)
+			ar := keyHolderRegistry(arrivalA, arrivalB, arrivalC, arrivalD)
+
+			// First move: C's role goes. The group in between gets its leader.
+			zoneEdit{listed: all, serving: []string{arrivalA, arrivalB, arrivalD}}.apply(t, mover)
+			r.refresh()
+			inGroup(t, r.pgms[arrivalA], mover, arrivalA, arrivalB, arrivalD)
+			r.gsts[arrivalA].MergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB, arrivalD}),
+				Election: GroupElectionState{Leader: between, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}})
+			if l, ok := lem.GetGroupLeader(ComputeGroupHash([]string{arrivalA, arrivalB, arrivalD})); !ok || l != AgentId(between) {
+				t.Fatalf("the group in between is led by %q, want %s", l, between)
+			}
+
+			// Second move, before any key was handed over: D's role goes too.
+			zoneEdit{listed: all, serving: []string{arrivalA, arrivalB}}.apply(t, mover)
+			r.refresh()
+			inGroup(t, r.pgms[arrivalA], mover, arrivalA, arrivalB)
+
+			zad, err := ar.GetZoneAgentData(zone)
+			if err != nil {
+				t.Fatalf("the zone's agents: %v", err)
+			}
+			asked := keyAsked(zone, zad.Agents, ar, lem)
+			if !slices.Contains(asked, AgentId(arrivalC)) {
+				t.Errorf("after two moves the key setup asks %v; %s, who led first and holds the key, is not among them", asked, arrivalC)
+			}
+			if between == arrivalD && !slices.Contains(asked, AgentId(arrivalD)) {
+				t.Errorf("after two moves the key setup asks %v; %s, who led in between, is not among them", asked, arrivalD)
+			}
+
+			lem.keyHeldHere(zone)
+			if prev := lem.previousLeaders(zone); len(prev) != 0 {
+				t.Errorf("with the key held here the previous leaders are still %v", prev)
+			}
+		})
+	}
+}
+
+// keyHolderRegistry is an agent registry, as this agent's, that knows the
+// other agents.
+func keyHolderRegistry(local string, others ...string) *AgentRegistry {
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: &MultiProviderConf{Identity: local}}
+	for _, id := range others {
+		ar.S.Set(AgentId(id), NewAgent(AgentId(id)))
+	}
+	return ar
+}
+
+// keyAsked is who the key setup's step b asks for the zone's key.
+func keyAsked(zone ZoneName, zoneAgents []*Agent, ar *AgentRegistry, lem *LeaderElectionManager) []AgentId {
+	var asked []AgentId
+	for _, a := range zoneKeyPeers(zone, zoneAgents, AgentId(ar.LocalAgent.Identity), ar.previousKeyHolders(zone, lem.previousLeaders(zone))) {
+		asked = append(asked, a.ID)
+	}
+	return asked
+}
+
+// A zone that leaves a group this agent led notes nobody: if this agent held
+// the key, its setup finds it here. A zone that had no group notes nobody
+// either.
 func TestAZoneThatMovesFromAGroupThisAgentLedNotesNoPreviousLeader(t *testing.T) {
 	r := newGroupRig(t, []string{arrivalA, arrivalB, arrivalC}, arrivalA)
 	mover := providerZone(t, "self.key.arrival.example.", arrivalA, arrivalB, arrivalC)
@@ -749,12 +814,12 @@ func TestAZoneThatMovesFromAGroupThisAgentLedNotesNoPreviousLeader(t *testing.T)
 	zoneEdit{listed: []string{arrivalA, arrivalB, arrivalC}, serving: []string{arrivalA, arrivalB}}.apply(t, mover)
 	r.refresh()
 	inGroup(t, r.pgms[arrivalA], mover, arrivalA, arrivalB)
-	if prev := lem.previousLeader(ZoneName(mover.ZoneName)); prev != "" {
-		t.Errorf("a zone that left a group this agent led notes %q as its previous leader, want nobody", prev)
+	if prev := lem.previousLeaders(ZoneName(mover.ZoneName)); len(prev) != 0 {
+		t.Errorf("a zone that left a group this agent led notes %v as its previous leaders, want nobody", prev)
 	}
 
 	lem.notePreviousLeader("new.key.arrival.example.", "")
-	if prev := lem.previousLeader("new.key.arrival.example."); prev != "" {
-		t.Errorf("a zone that had no group notes %q as its previous leader, want nobody", prev)
+	if prev := lem.previousLeaders("new.key.arrival.example."); len(prev) != 0 {
+		t.Errorf("a zone that had no group notes %v as its previous leaders, want nobody", prev)
 	}
 }

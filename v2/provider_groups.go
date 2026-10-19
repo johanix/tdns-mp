@@ -183,20 +183,19 @@ func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
 }
 
 // zoneKeyPeers are the agents leaderKeySetup asks for the zone's SIG(0) key:
-// sig0KeyPeers, and also previous, the agent that led the group the zone left
-// (previousKeyHolder), when it is not among them. It hands the key to a
-// voting member as any holder does.
-func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous *Agent) []*Agent {
+// sig0KeyPeers, and also previous, the agents that led the groups the zone
+// left (previousKeyHolders), those not among them already. They hand the key
+// to a voting member as any holder does.
+func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous []*Agent) []*Agent {
 	peers := sig0KeyPeers(zone, agents, self)
-	if previous == nil || isAmong([]string{string(self)}, previous.ID) {
-		return peers
-	}
-	for _, p := range peers {
-		if isAmong([]string{string(p.ID)}, previous.ID) {
-			return peers
+	for _, prev := range previous {
+		if isAmong([]string{string(self)}, prev.ID) ||
+			slices.ContainsFunc(peers, func(p *Agent) bool { return isAmong([]string{string(p.ID)}, prev.ID) }) {
+			continue
 		}
+		peers = append(peers, prev)
 	}
-	return append(peers, previous)
+	return peers
 }
 
 // zoneListsAgent: the zone's HSYNC3 RRset has a record for the agent, with a
@@ -216,21 +215,23 @@ func zoneListsAgent(zone ZoneName, id AgentId) bool {
 	return false
 }
 
-// previousKeyHolder is the agent that led the group the zone left
-// (LeaderElectionManager.previousLeader), as the registry has it, while the
-// zone's HSYNC3 still lists it. The zone's agents (GetZoneAgentData) are its
-// role holders only, and the edit that moved the zone may have taken that
-// agent's role: it is looked up here, and asked as one of the zone's
-// providers until the owner takes its HSYNC3 record away.
-func (ar *AgentRegistry) previousKeyHolder(zone ZoneName, id AgentId) *Agent {
-	if id == "" || !zoneListsAgent(zone, id) {
-		return nil
+// previousKeyHolders are the agents that led the groups the zone left
+// (LeaderElectionManager.previousLeaders), as the registry has them, those
+// the zone's HSYNC3 still lists. The zone's agents (GetZoneAgentData) are its
+// role holders only, and the edit that moved the zone may have taken such an
+// agent's role: they are looked up here, and asked as the zone's providers
+// until the owner takes their HSYNC3 records away.
+func (ar *AgentRegistry) previousKeyHolders(zone ZoneName, ids []AgentId) []*Agent {
+	var out []*Agent
+	for _, id := range ids {
+		if !zoneListsAgent(zone, id) {
+			continue
+		}
+		if agent, err := ar.GetAgentInfo(id); err == nil {
+			out = append(out, agent)
+		}
 	}
-	agent, err := ar.GetAgentInfo(id)
-	if err != nil {
-		return nil
-	}
-	return agent
+	return out
 }
 
 // ParticipantsForZone is the single membership truth for agent/auditor reads:
