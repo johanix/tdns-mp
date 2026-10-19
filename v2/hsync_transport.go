@@ -1237,6 +1237,10 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 // sendConfigToAgent gathers config data for the given subtype and sends it as a separate
 // CONFIG message back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI CONFIG is received.
+// answerConfigRequest sends the answer to a CONFIG request (sendConfigToAgent).
+// A test puts itself in its place to see the answer.
+var answerConfigRequest = sendConfigToAgent
+
 func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, subtype string, nonce string, configData map[string]string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendConfigToAgent: no DNSTransport available", "requester", requesterID)

@@ -273,8 +273,14 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 
 		keyName := string(zone)
+		// A key this setup makes in step c, which the lead may not outlast.
+		var made bool
+		var madeKeyid uint16
 		// Step a: check local keystore
 		sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
+		// a clean read that found none: only then can a key made below be
+		// told for the one this setup made
+		readEmpty := err == nil && sak != nil && len(sak.Keys) == 0
 		if err == nil && len(sak.Keys) > 0 {
 			lgAgent.Info("leader has local SIG(0) key, proceeding to publish",
 				"zone", zone, "keyid", sak.Keys[0].KeyId)
@@ -284,10 +290,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		{
 			zad, err := ar.GetZoneAgentData(zone)
 			if err == nil {
-				for _, agent := range zad.Agents {
-					if agent.ID == AgentId(ar.LocalAgent.Identity) {
-						continue
-					}
+				for _, agent := range sig0KeyPeers(zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
 					if !ar.isAgentOperational(agent.ID) {
 						continue
 					}
@@ -295,6 +298,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 					configResp := RequestAndWaitForConfig(ar, agent, string(zone), "sig0key", msgQs)
 					if configResp == nil {
 						lgAgent.Info("peer did not respond to CONFIG sig0key", "zone", zone, "peer", agent.ID)
+						continue
+					}
+					if why := configResp.Refused(); why != "" {
+						lgAgent.Warn("peer refused to hand over the zone's SIG(0) key", "zone", zone, "peer", agent.ID, "reason", why)
 						continue
 					}
 					if len(configResp.ConfigData) > 0 && configResp.ConfigData["status"] != "no sig0 key for zone" {
@@ -310,6 +317,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				}
 			}
 		}
+		// Asking the peers takes a while, and the lead may move meanwhile. A
+		// key made by an agent that no longer leads is a KEY in the zone
+		// that nobody bootstraps.
+		if !lem.IsLeader(zone) {
+			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; no SIG(0) key is made", "zone", zone)
+			return nil
+		}
 		// Step c: no peer has the key — generate a new keypair
 		lgAgent.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
 		{
@@ -323,13 +337,33 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 				State:      tdns.Sig0StateActive,
 				Creator:    "leader-election",
 			}
+			before, berr := activeSig0KeyIDs(hdb, keyName)
 			resp, err := hdb.Sig0KeyMgmt(nil, kp)
 			if err != nil {
 				return fmt.Errorf("onLeaderElected: failed to generate SIG(0) keypair: %v", err)
 			}
 			lgAgent.Info("generated SIG(0) keypair", "zone", zone, "msg", resp.Msg)
+			// The key made is the one new active key, and only when there was
+			// none before. A key another writer added meanwhile, or one a
+			// failed read hid, is never taken for it: what this names is what
+			// dropKeyMadeForALostLead deletes.
+			after, aerr := activeSig0KeyIDs(hdb, keyName)
+			if readEmpty && berr == nil && aerr == nil && len(before) == 0 && len(after) == 1 {
+				for id := range after {
+					made, madeKeyid = true, id
+				}
+			} else {
+				lgAgent.Info("onLeaderElected: the SIG(0) key just made cannot be told from another active key; it is kept whatever becomes of the lead", "zone", zone)
+			}
 		}
 	publish:
+		if !lem.IsLeader(zone) {
+			lgAgent.Info("onLeaderElected: this agent no longer leads the zone; its KEY is not published", "zone", zone)
+			if made {
+				dropKeyMadeForALostLead(hdb, zd.ZoneName, keyName, madeKeyid)
+			}
+			return nil
+		}
 		// Step d: get the active key and publish to combiner + remote agents
 		sak, err = hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
 		if err != nil || len(sak.Keys) == 0 {
