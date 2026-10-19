@@ -37,7 +37,7 @@ func TestLocalKeyStatesTravelWithTheDnskeys(t *testing.T) {
 		mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: mpzd.ZoneName, Inventory: items, Received: time.Now()})
 	}
 	inventory(ksk, zsk, next, theirs, minted)
-	changed, ds, err := mpzd.LocalDnskeysFromKeystate()
+	changed, ds, err := mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil)
 	if err != nil || !changed || ds == nil {
 		t.Fatalf("the first inventory: changed=%v err=%v", changed, err)
 	}
@@ -61,21 +61,21 @@ func TestLocalKeyStatesTravelWithTheDnskeys(t *testing.T) {
 		t.Error("another provider's key is among what we say about ours")
 	}
 	// the same inventory again: nothing to send
-	if changed, ds, _ := mpzd.LocalDnskeysFromKeystate(); changed || ds.StatesChanged {
+	if changed, ds, _ := mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil); changed || ds.StatesChanged {
 		t.Errorf("the same inventory again: changed=%v states changed=%v", changed, ds.StatesChanged)
 	}
 	// the published KSK becomes standby with its ds set: the key set is as
 	// it was, and it is a change to send all the same
 	next.State, next.DS = KeyStateStandby, &yes
 	inventory(ksk, zsk, next, theirs, minted)
-	changed, ds, _ = mpzd.LocalDnskeysFromKeystate()
+	changed, ds, _ = mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil)
 	if !changed || !ds.StatesChanged || len(ds.LocalAdds)+len(ds.LocalRemoves) != 0 {
 		t.Errorf("a state and ds change alone: changed=%v states changed=%v adds=%d removes=%d", changed, ds.StatesChanged, len(ds.LocalAdds), len(ds.LocalRemoves))
 	}
 	// a row whose ds nobody decided travels undecided
 	zsk.DS = nil
 	inventory(ksk, zsk, next, theirs, minted)
-	_, ds, _ = mpzd.LocalDnskeysFromKeystate()
+	_, ds, _ = mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil)
 	for _, st := range ds.CurrentKeyStates {
 		if st.KeyTag == zsk.KeyTag && st.DS != nil {
 			t.Errorf("an undecided ds travels as %v", *st.DS)

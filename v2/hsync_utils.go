@@ -6,6 +6,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/johanix/tdns-mp/v2/hsync"
 	"sort"
@@ -191,7 +192,20 @@ func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *Dnske
 //
 // Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
 // returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
-func (mpzd *MPZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
+//
+// An agent whose provider self has no role in the zone distributes no keys
+// of its own (the membership design, 2.3). That is tested first, before
+// anything is recorded as distributed, so that no caller remembers a refused
+// distribution as sent: it returns errNoRoleInZone. The test reads apex, the
+// copy of the zone the distribution is judged against (the incoming copy at
+// a refresh), or the zone as it is when apex is nil.
+func (mpzd *MPZoneData) LocalDnskeysFromKeystate(self AgentId, apex *tdns.OwnerData) (bool, *DnskeyStatus, error) {
+	if apex == nil {
+		apex, _ = mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	}
+	if !votesInApex(apex, self) {
+		return false, nil, errNoRoleInZone
+	}
 	// Don't process DNSKEYs for unsigned zones, but clean up any
 	// previously published keys on transition to unsigned.
 	if mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.ZoneSigned {
@@ -1385,8 +1399,16 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			case AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				mpzd.RequestAndWaitForKeyInventory(context.Background(), tm)
-				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate()
-				if err != nil {
+				var self AgentId
+				if mp != nil {
+					self = AgentId(mp.Identity)
+				}
+				newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName) // the copy the distribution is judged against
+				dnskeyschanged, analysis.DnskeyStatus, err = mpzd.LocalDnskeysFromKeystate(self, newApex)
+				switch {
+				case errors.Is(err, errNoRoleInZone):
+					lg.Debug("no DNSKEYs of this provider are distributed", "zone", mpzd.ZoneName, "reason", err)
+				case err != nil:
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", mpzd.ZoneName, "err", err)
 				}
 				if analysis.DnskeyStatus == nil {
