@@ -208,8 +208,10 @@ it hands the new key to no other member, and it has not
 been tried on a multi-provider zone. So a provider that
 leaves and holds the zone's private key keeps it, and
 with it a key the parent may still trust. Today that is
-a provider that led the zone when the key was made, or
-one the key was handed to through the upstream relation.
+a provider that led the zone when the key was made, or a
+later leader that was handed it: a new leader asks the
+other providers in `servers=` and `signers=`, and any of
+them that holds the key hands it over.
 Contributed NS
 records stay until an operator purges them at every
 remaining provider
