@@ -8,7 +8,7 @@ It builds on the membership design, `2026-10-12-membership-and-catch-up-design.m
 
 - its section 4.9, the hold after a change of a zone's make-up, which this design replaces with a hold after any change of the owner's instructions;
 - the listing by interest of its 4.9 and decision 24, in the form of rule 4 below;
-- the zone's SIG(0) key, as its section 4.1 describes it;
+- the zone's SIG(0) key, as its section 4.1 describes it, but for what that design's plan builds in its step 7b since 2026-10-19: every voting member holds the key, and no key is made while the zone publishes one;
 - the switch of its rule 1 in the code: every provider with an HSYNC3 record is a member;
 - the rest of a removal (its section 7), which here is what the leader carries out after an edit that takes a provider's roles away.
 
