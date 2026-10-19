@@ -80,6 +80,10 @@ type MPState struct {
 	KeystateError        string
 	KeystateTime         time.Time
 	RefreshAnalysis      *ZoneRefreshAnalysis
+	// ParentSyncFollowed: followParentSyncParam has run for the zone. Its
+	// first run is the zone's first load, which has no leader yet and is no
+	// give-back. Read and written only by the zone's post-refresh callback.
+	ParentSyncFollowed bool
 
 	// pendingCleanups are the (owner, rrtype) pairs a contribution change may
 	// have emptied: the next CombineWithLocalChanges restores or deletes what

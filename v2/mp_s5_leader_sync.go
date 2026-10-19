@@ -626,8 +626,11 @@ func (c *delegationSyncChains) cancelRunsLocked(zone string) int {
 // renewal skipped the setup (onLeaderElected), so a leader elected then has no
 // SIG(0) key for the zone, and nothing would ask for a sync until the next
 // renewal. The setup is what an election runs: the key, then a sync. An agent
-// that does not lead runs nothing; the leader's own refresh runs it. At a
-// zone's first load there is no leader yet, and the election runs it.
+// that does not lead runs nothing; the leader's own refresh runs it. A zone's
+// first load is no give-back (followParentSyncParam): there is no leader yet,
+// the election runs the setup, and start-up may not yet have set the election
+// manager that this reads. It runs after PostRefresh, so that a refresh that
+// also moves the zone between groups is judged on the groups it gives.
 func (conf *Config) delegationSyncGivenBack(zone string) {
 	lem := conf.InternalMp.LeaderElectionManager
 	if lem == nil || lem.onLeaderElected == nil || !lem.IsLeader(ZoneName(zone)) {

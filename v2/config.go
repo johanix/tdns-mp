@@ -77,8 +77,14 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
 			func(zd *tdns.ZoneData) {
 				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
-					conf.followParentSyncParam(mpzd)
+					givenBack := conf.followParentSyncParam(mpzd)
 					mpzd.PostRefresh(tm, msgQs)
+					if givenBack {
+						// after PostRefresh, which applies this refresh's
+						// HSYNC3 change: who leads is judged on the groups
+						// that change gives
+						conf.delegationSyncGivenBack(mpzd.ZoneName)
+					}
 				}
 			})
 	}

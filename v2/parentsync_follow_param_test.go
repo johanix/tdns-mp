@@ -380,6 +380,30 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 	r.untold(t, 0, "for a sync the owner stopped")
 }
 
+// A zone's first load turns the option on when HSYNCPARAM says
+// parentsync=agent, and that is no give-back: there is no leader yet, the
+// election runs the setup, and at start-up the election manager may not be
+// set yet. Only a later refresh can give the sync back.
+func TestAZonesFirstLoadIsNoGiveBack(t *testing.T) {
+	asMPAgent(t)
+	r := newLeaderSyncRig(t, "firstload.parentsync.example.")
+	r.mpzd.SetOption(tdns.OptParentSync, false)
+	r.leader("agent.us.example.") // even if this agent led, as a fast election could have it
+	setups := make(chan ZoneName, 4)
+	r.lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
+
+	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
+	refreshed(t, r.conf, r.mpzd)
+	if !r.mpzd.Options[tdns.OptParentSync] {
+		t.Fatal("the first load did not turn the delegation sync on")
+	}
+	select {
+	case <-setups:
+		t.Error("the zone's first load ran the leader's setup as a give-back")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // A sync that starts after the owner took the sync over sends nothing, also
 // when the takeover came after the syncher's own check. It went down the
 // plain path, as for a zone with one provider: on the syncher's context, and
