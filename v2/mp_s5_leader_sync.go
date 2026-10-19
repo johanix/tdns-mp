@@ -666,6 +666,27 @@ func (c *delegationSyncChains) endChainLocked(zone string) *delegationNotifyHold
 	return ch.hold
 }
 
+// stillParticipates: one of this agent's identities has a role in the zone
+// (ParticipantsForZone: an HSYNCPARAM role through an ON HSYNC3 record). A
+// refresh that removed this agent from the zone has published that before
+// PostRefresh queues anything, so the syncher reads it whatever the order of
+// the group recompute: PostRefresh queues a delegation sync before it applies
+// the HSYNC diff, and the syncher could judge the lead on the old groups. A
+// zone with no participants at all gives nothing to judge by.
+func (conf *Config) stillParticipates(zone string) bool {
+	ids := ourHsyncIdentities(conf.MpConfig())
+	participants := ParticipantsForZone(ZoneName(zone))
+	if len(ids) == 0 || len(participants) == 0 {
+		return true
+	}
+	for _, p := range participants {
+		if isAmong(ids, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // ownerSyncsDelegation: the zone is a multi-provider zone whose owner syncs
 // its delegation with the parent, not its agents: its HSYNCPARAM does not
 // say parentsync=agent (followParentSyncParam).
