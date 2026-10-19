@@ -249,7 +249,7 @@ Then a new pseudo-version of the core module. tdns-mp re-pins only the core modu
 
 **Tests.** Unit: `TestHsyncparamKeyNumbersMatchTheDraft` (`rr_hsyncparam_test.go:18`) gets key 8; `TestHsyncparamWireEncoding` gets `00 08 00 04 00 00 00 07`; `TestHsyncparamPresentationRoundTrip`. New: `TestHsyncparamSerialRefusesBadValues` (empty, -1, 1.5, 0x10, 4294967296, "7 8"), `TestHsyncparamSerialWireLengthIsFour`, `TestHsyncparamParseRefusesARepeatedKey`, `TestHsyncparamKey8FromAnOlderWriterIsTheSerial`.
 
-**Fleet.** A zone with `serial="1"` loads at a tdns-auth primary built with this, and reaches every agent through combiners and signers on the old pin, unchanged. With #929: a primary on the new tdns and parts on the old pin still exchange the zone (the old Unpack takes an undotted label); a primary on the old tdns and parts on the new pin do not, which is the order above.
+**Fleet.** A zone with `serial="1"` loads at a tdns-auth primary built with this, and reaches every agent through combiners and signers on the old pin, unchanged. With #929: a primary on the new tdns and parts on the old pin are expected to still exchange the zone (the old `Unpack` should take an undotted label; to be checked when #929 is reviewed); a primary on the old tdns and parts on the new pin do not, which is the order above.
 
 **Done when** merged and tagged, and the draft has the number.
 
