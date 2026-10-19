@@ -99,11 +99,16 @@ func (tm *MPTransportBridge) foreignSharesFor(zone ZoneName) map[AgentId]foreign
 // HSYNCPARAM marks as signers. Unknown while any of them has not spoken, or
 // has a SEP key whose ds is undecided, or names a ds=1 key this agent holds
 // no record of; the syncher then leaves the parent's DS alone (Q9). A
-// provider that has spoken and listed no keys has an empty share. This
-// provider's own share, when it signs the zone, is its signer's latest
-// inventory, since a signer never distributes to its own agent. As with the
-// owner's answer from the inventory, a set with no SEP key in it is not an
-// answer: nobody has said anything about a key.
+// provider that has spoken and listed no keys has an empty share (A2.2's
+// empty-share clause, S7): it is present with nothing in it, so it holds
+// nothing back, and the set is known when every other signing provider has
+// spoken. Spoken is an entry in the agent's bookkeeping, which an explicit
+// empty list makes, and so does a replace of the whole set by no record
+// from a provider heard from before (NoteForeignKeyStates); a provider that
+// never said has none. This provider's own share, when it signs the zone,
+// is its signer's latest inventory, since a signer never distributes to its
+// own agent. As with the owner's answer from the inventory, a set with no
+// SEP key in it is not an answer: nobody has said anything about a key.
 func (conf *Config) computedDSIntent(zone string, digest uint8) (tdns.DSIntent, error) {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)
@@ -221,6 +226,82 @@ func (conf *Config) computedDSIntent(zone string, digest uint8) (tdns.DSIntent, 
 		}
 	}
 	return tdns.DSIntent{Set: set, Known: seen}, nil
+}
+
+// foreignDSWithheld is the agent's check on the DS set its own signer's
+// inventory gives (MPKeyLifecycleOwner.DSIntent): another provider's DS
+// leaves the parent only when the key states that provider's agent sent this
+// agent, with its DNSKEY distributions, say so (tdns-mp #207). It names a key
+// those key states have standby, active or retired with ds=1 (P3, as
+// foreignDSFor reads the same key states at the signer, where this agent
+// relays them) and that the inventory does not hold as a SEP key with ds=1;
+// empty when there is none. One inventory without the key is not the key
+// states dropping it: the signer may have taken a copy of the zone that
+// lacked it. A provider the zone owner no longer names among the signers is
+// not asked: its DS is the leader's to remove.
+func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
+	zone = dns.Fqdn(zone)
+	tm := conf.InternalMp.MPTransport
+	if tm == nil {
+		return ""
+	}
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return ""
+	}
+	hp := mpzd.getHSYNCPARAM()
+	if hp == nil {
+		return ""
+	}
+	signing := map[string]bool{}
+	for _, s := range hp.GetSigners() {
+		signing[trimDot(s)] = true
+	}
+	ourLabel := ""
+	if matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig())); err == nil && matched {
+		ourLabel = trimDot(label)
+	}
+	held := map[uint16]bool{}
+	for _, it := range inv {
+		if it.Flags&dns.SEP != 0 && it.DS != nil && *it.DS {
+			held[it.KeyTag] = true
+		}
+	}
+	shares := tm.foreignSharesFor(ZoneName(zone))
+	agents := make([]string, 0, len(shares))
+	for a := range shares {
+		agents = append(agents, string(a))
+	}
+	sort.Strings(agents)
+	for _, a := range agents {
+		matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(a)})
+		if err != nil || !matched {
+			continue
+		}
+		label = trimDot(label)
+		if label == ourLabel || !signing[label] {
+			continue
+		}
+		share := shares[AgentId(a)]
+		for _, st := range share.states {
+			// a key whose record has not arrived is taken to be a SEP key:
+			// its provider says its DS belongs at the parent
+			sep := true
+			for _, dk := range share.dnskeys {
+				if dk.KeyTag() == st.KeyTag {
+					sep = dk.Flags&dns.SEP != 0
+					break
+				}
+			}
+			want, decided := foreignDSFor(foreignSaid{Provider: label, State: st.State, DS: st.DS}, sep, signing)
+			if !decided || !want || held[st.KeyTag] {
+				continue
+			}
+			return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
+				label, st.KeyTag, st.State)
+		}
+	}
+	return ""
 }
 
 // dnskeyRecordKnown reports whether any record carries the key tag.

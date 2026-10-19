@@ -48,10 +48,45 @@ func foreignDSFor(said foreignSaid, sep bool, signers map[string]bool) (ds bool,
 	return *said.DS && sep && held && signers[said.Provider], true
 }
 
+// ForeignWord hands the zone's driver what the other providers said about
+// their keys and which providers have spoken (the agent's KEYSTATE
+// "foreign", tdns-mp #58 and S7). Reports whether the zone is owned: for
+// one that is not, nobody writes ds on the foreign rows, and the word is
+// dropped. The engine's Foreign is the same hand-over from an agent that
+// does not name the spoken providers.
+func (e *KeyLifecycleEngine) ForeignWord(zone string, keys []core.ForeignKeyState, spoken []string) bool {
+	l, owned := e.driverState(zone)
+	if !owned {
+		return false
+	}
+	if l == nil {
+		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
+		return true
+	}
+	if err := l.SetForeignWord(keys, spoken); err != nil {
+		lgSigner.Error("key lifecycle: recording the other providers' key states failed", "zone", zone, "err", err)
+	}
+	return true
+}
+
 // SetForeignStates records the complete latest set of what the other
 // providers said about their keys in the zone (a provider missing from
 // the set has said nothing), and writes ds on the foreign rows from it.
+// The word of an agent that does not name the providers that have spoken
+// (an older release): a provider speaks only through the keys it lists.
 func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
+	return l.SetForeignWord(keys, nil)
+}
+
+// SetForeignWord is SetForeignStates with the providers that have spoken
+// named (S7): a provider among them whose keys are not in the set has
+// said it holds none, so every key it mentioned before is omitted (ds=0
+// until its row goes), where a provider named nowhere has said nothing
+// new, and what it said before stands: its keys are kept, so a later word
+// that names it with none can still omit them. Nothing is kept of the
+// spoken list between words: the agent names the providers again with
+// every word.
+func (l *ZoneKeyLifecycle) SetForeignWord(keys []core.ForeignKeyState, spoken []string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.initErr != nil {
@@ -65,15 +100,29 @@ func (l *ZoneKeyLifecycle) SetForeignStates(keys []core.ForeignKeyState) error {
 		said[k.KeyTag] = foreignSaid{Provider: k.Provider, State: k.State, DS: k.DS}
 	}
 	// the latest word replaces the one before; a key a provider mentioned
-	// before and leaves out now, while it still speaks, is omitted: ds=0
+	// before and leaves out now, while it still speaks, is omitted: ds=0.
+	// A provider speaks through the keys it lists, or by name among the
+	// spoken when it lists none
 	speaking := map[string]bool{}
 	for _, s := range said {
 		speaking[s.Provider] = true
 	}
+	for _, p := range spoken {
+		if p != "" {
+			speaking[p] = true
+		}
+	}
 	no := false
 	for kt, old := range l.foreign {
-		if _, still := said[kt]; !still && speaking[old.Provider] {
+		if _, still := said[kt]; still {
+			continue
+		}
+		if speaking[old.Provider] {
 			said[kt] = foreignSaid{Provider: old.Provider, State: foreignStateOmitted, DS: &no}
+		} else {
+			// silent in this word (an agent restarted, an older agent):
+			// the provider's last word stands
+			said[kt] = old
 		}
 	}
 	if err := l.saveForeign(said); err != nil {
@@ -218,9 +267,21 @@ func (l *ZoneKeyLifecycle) saveForeign(said map[uint16]foreignSaid) error {
 }
 
 func (l *ZoneKeyLifecycle) loadForeign() error {
-	rows, err := l.KDB.DB.Query(`SELECT keyid, provider, state, ds FROM MPForeignKeyState WHERE zonename=?`, l.Zone)
+	said, err := readForeignWord(l.KDB, l.Zone)
 	if err != nil {
-		return fmt.Errorf("foreign key states of %s: %w", l.Zone, err)
+		return err
+	}
+	l.foreign = said
+	return nil
+}
+
+// readForeignWord is the key states of zone that the other providers' agents
+// sent our agent and our agent relayed to this signer (KEYSTATE "foreign"),
+// as the key lifecycle last saved them, by key tag.
+func readForeignWord(kdb *tdns.KeyDB, zone string) (map[uint16]foreignSaid, error) {
+	rows, err := kdb.DB.Query(`SELECT keyid, provider, state, ds FROM MPForeignKeyState WHERE zonename=?`, zone)
+	if err != nil {
+		return nil, fmt.Errorf("foreign key states of %s: %w", zone, err)
 	}
 	defer rows.Close()
 	said := map[uint16]foreignSaid{}
@@ -229,7 +290,7 @@ func (l *ZoneKeyLifecycle) loadForeign() error {
 		var s foreignSaid
 		var ds sql.NullBool
 		if err := rows.Scan(&keyid, &s.Provider, &s.State, &ds); err != nil {
-			return fmt.Errorf("foreign key states of %s: %w", l.Zone, err)
+			return nil, fmt.Errorf("foreign key states of %s: %w", zone, err)
 		}
 		if ds.Valid {
 			v := ds.Bool
@@ -238,8 +299,50 @@ func (l *ZoneKeyLifecycle) loadForeign() error {
 		said[uint16(keyid)] = s
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	l.foreign = said
-	return nil
+	return said, nil
+}
+
+// foreignKeyWithdrawn says whether the signer may drop the row of another
+// provider's key that an incoming zone lacks (syncForeignDNSKEYs); one copy
+// of the zone without the key is not enough (tdns-mp #207). The signer hears
+// nothing from another provider directly. word is the key states that the
+// other providers' agents sent our agent with their DNSKEY distributions,
+// as our agent relayed them here (readForeignWord). The key may go in two
+// cases. The latest key states relayed for its provider no longer list it
+// (omitted, SetForeignWord). Or the zone owner no longer names that
+// provider among the zone's signers: others, from the HSYNCPARAM of the
+// incoming zone, which is the owner's word, not the provider's. A key that
+// no relayed key states name goes once key states from every other signer
+// have been relayed. why says which, or what keeps the key.
+func foreignKeyWithdrawn(word map[uint16]foreignSaid, keytag uint16, others []string) (withdrawn bool, why string) {
+	if len(others) == 0 {
+		return true, "the zone owner names no other signer"
+	}
+	signing := map[string]bool{}
+	for _, p := range others {
+		signing[trimDot(p)] = true
+	}
+	if said, ok := word[keytag]; ok {
+		switch {
+		case said.State == foreignStateOmitted:
+			return true, fmt.Sprintf("the key states relayed for provider %s no longer list it", said.Provider)
+		case !signing[trimDot(said.Provider)]:
+			return true, fmt.Sprintf("the zone owner no longer names provider %s as a signer", said.Provider)
+		}
+		return false, fmt.Sprintf("the key states relayed for provider %s still list it (%s)", said.Provider, said.State)
+	}
+	named := map[string]bool{}
+	for _, s := range word {
+		named[trimDot(s.Provider)] = true
+	}
+	sorted := append([]string(nil), others...)
+	sort.Strings(sorted)
+	for _, p := range sorted {
+		if !named[trimDot(p)] {
+			return false, fmt.Sprintf("no key states from provider %s have been relayed", trimDot(p))
+		}
+	}
+	return true, "the key states relayed for the other signers do not list it"
 }

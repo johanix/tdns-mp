@@ -7,6 +7,7 @@ package tdnsmp
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -53,6 +54,9 @@ type GossipStateTable struct {
 	firstRowHoldUntil time.Time
 	// localWritten: the groups this process has written its own row for.
 	localWritten map[string]bool
+	// propagationDelay: this provider's propagation delay, announced in our
+	// own row of every group (SetPropagationDelay). Zero: nothing announced.
+	propagationDelay time.Duration
 }
 
 // --- From provider_groups.go ---
@@ -81,10 +85,36 @@ type ProviderGroup struct {
 }
 
 // ProviderGroupManager manages provider group computation and naming.
+//
+// Locking: mu is held only to read or replace what it guards, and nothing is
+// called with it held. A caller that needs the groups for a call into the
+// gossip table or the election manager copies them out first (GetGroups,
+// GetGroup): those call back into the manager, and a second read of mu on a
+// goroutine that holds one already blocks for good once a recompute is
+// waiting for the write lock in between (tdns-mp #180).
 type ProviderGroupManager struct {
 	mu      sync.RWMutex
 	Groups  map[string]*ProviderGroup // key: group hash
 	LocalID string                    // our own identity
+	// recomputeMu serialises RecomputeGroups, from its scan of the zones to
+	// the last word of what changed. It is not mu, which the readers of the
+	// groups need while a scan runs.
+	recomputeMu sync.Mutex
+	// scansBegun counts the scans of the zones that have begun, and
+	// installedScan is the number of the scan whose map is in place (guarded
+	// by recomputeMu): a recompute that finds a scan in place that began
+	// after it was called has nothing to add (RecomputeGroups).
+	scansBegun    atomic.Uint64
+	installedScan uint64
+	// afterScan, when set, is called by a recompute between its scan and
+	// its swap. Tests only.
+	afterScan func()
+	// onZoneJoinedGroup is told of each zone a recompute has put into a
+	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
+	onZoneJoinedGroup func(zone ZoneName, from, to string)
+	// onGroupGone is told of each group a recompute has dropped: its last
+	// zone has left it (SetOnGroupGone). Guarded by mu.
+	onGroupGone func(groupHash string)
 }
 
 // --- From parentsync_leader.go ---
@@ -104,11 +134,15 @@ type LeaderElection struct {
 	VoteTimer     *time.Timer
 	ConfirmTimer  *time.Timer
 	ReelectTimer  *time.Timer
-	askedTerm     uint64 // the term in which this agent, leading, last asked what an election's winner asks (once per term)
+	RetryTimer    *time.Timer // the retry after an aborted group election (retryGroupElection)
+	askedTerm     uint64      // the term in which this agent, leading, last asked what an election's winner asks (once per term)
 	// leaderTerm is the term Leader was elected in. Term runs ahead of it
 	// while an election is running and after one that was aborted: the
 	// leader then is still the one of the term before.
 	leaderTerm uint64
+	// gone: the provider group of this election is gone, and the manager
+	// has dropped the entry (groupGone). Nothing starts on it any more.
+	gone bool
 
 	// Votes that arrived for a term this member has not joined yet: a VOTE
 	// can overtake the CALL it answers, since the two come from different
@@ -123,18 +157,19 @@ type LeaderElection struct {
 // When a ProviderGroupManager is set, elections are per-group and the leader
 // covers all zones in the group. IsLeader checks group membership first.
 type LeaderElectionManager struct {
-	mu                    sync.RWMutex
-	elections             map[ZoneName]*LeaderElection
-	pendingElections      map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
-	groupElections        map[string]*LeaderElection // key: group hash
-	pendingGroupElections map[string]bool            // group hashes waiting for OnGroupOperational
-	localID               AgentId
-	leaderTTL             time.Duration
-	broadcastFunc         func(zone ZoneName, rfiType string, records map[string][]string) error
-	operationalPeersFunc  func(zone ZoneName) int   // returns count of operational peers for a zone
-	configuredPeersFunc   func(zone ZoneName) int   // returns count of configured peers for a zone
-	onLeaderElected       func(zone ZoneName) error // called when local agent wins election
-	providerGroupMgr      *ProviderGroupManager
+	mu                   sync.RWMutex
+	elections            map[ZoneName]*LeaderElection
+	pendingElections     map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
+	groupElections       map[string]*LeaderElection // key: group hash
+	localID              AgentId
+	leaderTTL            time.Duration
+	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
+	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
+	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
+	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
+	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
+	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
+	providerGroupMgr     *ProviderGroupManager
 }
 
 // LeaderStatus holds the current leader status for a zone.

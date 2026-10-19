@@ -257,8 +257,8 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			discoveryInfo := map[string]interface{}{
 				"identity": peer.ID,
 			}
-			if peer.APIEndpoint != "" {
-				discoveryInfo["api_uri"] = peer.APIEndpoint
+			if apiURI := peer.GetAPIEndpoint(); apiURI != "" {
+				discoveryInfo["api_uri"] = apiURI
 			}
 			if addr := peer.CurrentAddress(); addr != nil {
 				discoveryInfo["host"] = addr.Host
@@ -266,7 +266,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				discoveryInfo["transport"] = addr.Transport
 			}
 			discoveryInfo["state"] = peer.GetState().String()
-			discoveryInfo["preferred_transport"] = peer.PreferredTransport
+			discoveryInfo["preferred_transport"] = peer.GetPreferredTransport()
 
 			// Return result through handledManually
 			respMap := tdns.SanitizeForJSON(resp).(AgentDistribResponse)
@@ -381,7 +381,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					var apiPort uint16
 					var apiAddrs []string
 					if apiPeer != nil {
-						apiURI = apiPeer.APIEndpoint
+						apiURI = apiPeer.GetAPIEndpoint()
 						if a := apiPeer.CurrentAddress(); a != nil {
 							apiPort = a.Port
 							apiAddrs = []string{a.Host}
@@ -466,7 +466,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					var dnsPort uint16
 					var dnsAddrs []string
 					if dnsPeer != nil {
-						dnsURI = dnsPeer.DNSEndpoint
+						dnsURI = dnsPeer.GetDNSEndpoint()
 						if a := dnsPeer.CurrentAddress(); a != nil {
 							dnsPort = a.Port
 							dnsAddrs = []string{a.Host}

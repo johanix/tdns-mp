@@ -437,13 +437,26 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 		return
 	}
 
-	if msgQs == nil || msgQs.EditsResponse == nil {
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
+	if msgQs == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no MsgQs available", zd.ZoneName)
 		return
 	}
 
+	combinerID, err := tm.getCombinerID()
+	if err != nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: %v", zd.ZoneName, err)
+		return
+	}
+
+	// Take only the combiner's answer to this request: an answer to an
+	// earlier one that timed out, for this zone or another, must not stand
+	// in for it.
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, "", nonce))
+	defer cancel()
+
 	// Send RFI EDITS to combiner
-	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
+	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS", nonce); err != nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
 		return
 	}
@@ -453,12 +466,7 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.EditsResponse:
-		if resp == nil || resp.Zone != zd.ZoneName {
-			zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received nil or mismatched edits from combiner", zd.ZoneName)
-			return
-		}
-
+	case resp := <-answer:
 		// Count total records for logging
 		totalAgents := len(resp.AgentRecords)
 		totalRRs := 0
@@ -482,13 +490,21 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 	}
 }
 
-// RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
-// response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
+// RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for that
+// agent's config response for this zone and subtype. Returns the config data or
+// nil on timeout/error.
 func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) *ConfigResponseMsg {
-	if msgQs == nil || msgQs.ConfigResponse == nil {
-		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
+	if msgQs == nil {
+		lgEngine.Warn("RequestAndWaitForConfig: no MsgQs available")
 		return nil
 	}
+
+	// Several requests can be out at once (one per zone when a group elects
+	// a leader), and an earlier one may still be answered after it timed
+	// out; take only the answer to this one.
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
+	defer cancel()
 
 	// Send RFI CONFIG to the peer agent
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
@@ -498,6 +514,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 		Zone:         ZoneName(zone),
 		RfiType:      "CONFIG",
 		RfiSubtype:   subtype,
+		Nonce:        nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.ID, "zone", zone, "subtype", subtype, "err", err)
@@ -509,11 +526,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.ConfigResponse:
-		if resp == nil {
-			lgEngine.Warn("RequestAndWaitForConfig: received nil config response", "zone", zone, "subtype", subtype)
-			return nil
-		}
+	case resp := <-answer:
 		lgEngine.Info("RequestAndWaitForConfig: received config response", "sender", resp.SenderID, "zone", resp.Zone, "subtype", resp.Subtype)
 		return resp
 
@@ -523,13 +536,18 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	}
 }
 
-// RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
-// response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
+// RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for that
+// agent's audit response for this zone. Returns the audit data or nil on
+// timeout/error.
 func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) *AuditResponseMsg {
-	if msgQs == nil || msgQs.AuditResponse == nil {
-		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
+	if msgQs == nil {
+		lgEngine.Warn("RequestAndWaitForAudit: no MsgQs available")
 		return nil
 	}
+
+	nonce := newRfiNonce()
+	answer, cancel := msgQs.auditWaiters.register(rfiWaitKey(string(agent.ID), zone, "", nonce))
+	defer cancel()
 
 	// Send RFI AUDIT to the peer agent
 	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
@@ -538,6 +556,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 		YourIdentity: agent.ID,
 		Zone:         ZoneName(zone),
 		RfiType:      "AUDIT",
+		Nonce:        nonce,
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.ID, "zone", zone, "err", err)
@@ -549,11 +568,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 	defer timeout.Stop()
 
 	select {
-	case resp := <-msgQs.AuditResponse:
-		if resp == nil {
-			lgEngine.Warn("RequestAndWaitForAudit: received nil audit response", "zone", zone)
-			return nil
-		}
+	case resp := <-answer:
 		lgEngine.Info("RequestAndWaitForAudit: received audit response", "sender", resp.SenderID, "zone", resp.Zone)
 		return resp
 
@@ -1002,6 +1017,17 @@ func (mpzd *MPZoneData) isAuditor(label string) bool {
 	return hp.IsAuditorLabel(label)
 }
 
+// hasPubkey checks whether HSYNCPARAM carries the pubkey flag: the
+// customer's word that its providers may publish the zone's key in zones of
+// their own (the at-ns location, see publishLocations).
+func (mpzd *MPZoneData) hasPubkey() bool {
+	hp := mpzd.getHSYNCPARAM()
+	if hp == nil {
+		return false
+	}
+	return hp.HasPubkey()
+}
+
 // analyzeHsyncSigners determines whether we should sign the zone and how many
 // other signers exist, by examining HSYNC3+HSYNCPARAM (preferred), then falling
 // back to HSYNC or HSYNC2 for backward compatibility with old zones.
@@ -1134,7 +1160,11 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
 
 	hasHsyncRecords := (h3exists && hpExists) || h1exists || h2exists
 	if !hasHsyncRecords {
-		mpzd.Logger.Printf("populateMPdata: zone %s: OptMultiProvider is set but zone owner has no HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2) records — zone is not multi-provider", mpzd.ZoneName)
+		// A provider zone has no HSYNC records by design; its option is
+		// what attaches the combiner's start-up re-apply and refresh combine.
+		if GetProviderZoneRRtypes(mpzd.ZoneName) == nil {
+			mpzd.Logger.Printf("populateMPdata: zone %s: OptMultiProvider is set but zone owner has no HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2) records — zone is not multi-provider", mpzd.ZoneName)
+		}
 		mpzd.MP.MPdata = nil
 		return
 	}
@@ -1388,10 +1418,25 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			otherSigners := mpzd.MP.MPdata.OtherSigners
 			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
-				new_zd.Options[tdns.OptInlineSigning] = true
 			} else if !shouldSign && new_zd.Options[tdns.OptInlineSigning] {
 				lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", mpzd.ZoneName)
-				new_zd.Options[tdns.OptInlineSigning] = false
+			}
+			// The switch is ours, not the configuration's: recorded on the
+			// served zone as a run-time option, at every refresh, so that a
+			// config update (config reload-zones, a zone reload) does not
+			// take it away until the next transfer (tdns-mp #144). On the
+			// incoming zone too: its options are the served zone's as they
+			// were when the fetch began. That map is the one the served
+			// zone had, which is read without a lock, so the incoming zone
+			// gets a map of its own and the old one is not written.
+			mpzd.ZoneData.SetRuntimeOption(tdns.OptInlineSigning, shouldSign)
+			if new_zd.Options[tdns.OptInlineSigning] != shouldSign {
+				opts := make(map[tdns.ZoneOption]bool, len(new_zd.Options)+1)
+				for o, on := range new_zd.Options {
+					opts[o] = on
+				}
+				opts[tdns.OptInlineSigning] = shouldSign
+				new_zd.Options = opts
 			}
 			isMS := shouldSign && otherSigners > 0
 			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {
@@ -1406,8 +1451,10 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			// from the next publish, never signing. A refresh collects its
 			// DNSKEY RRset before this callback, so a change here is served
 			// by the re-sign requested below rather than by this refresh.
+			// The other signers are the ones the incoming zone names.
 			if shouldSign {
-				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS); err != nil {
+				others, _ := otherSignerLabels(&MPZoneData{ZoneData: new_zd}, mp)
+				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS, others); err != nil {
 					lg.Error("syncing foreign DNSKEYs failed", "zone", mpzd.ZoneName, "err", err)
 				} else if changed {
 					sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
@@ -1433,7 +1480,37 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			}
 		}
 
-		if mpzd.MPOptions[tdns.OptAllowEdits] {
+		// A provider zone has no HSYNC records and so never has allow-edits,
+		// but the combiner writes to it all the same: what agents contribute
+		// of its configured record types, the _signal KEYs. The upstream's
+		// copy has none of that, so it goes onto the incoming zone here, by
+		// the combine a customer zone's contributions go through. Without it
+		// a refresh served the provider zone without its _signal KEYs until
+		// the next contribution change (the refresh side of tdns-mp #171).
+		//
+		// The stored at-ns instructions are asked about first, as at a start
+		// and at a re-apply: the names of a zone that does not say pubkey are
+		// retracted, and the combine does not bring them back. When the
+		// instructions cannot be read the zone keeps the names it has.
+		//
+		// Not at the zone's first load. Its persisted contributions are in
+		// memory by then (restoreContributions), and the consent pass cannot
+		// retract a name from a zone that has no data yet: it leaves the
+		// name for the zone's startup re-apply. Combined here, such a name
+		// would be in the first copy the zone serves, for a customer that
+		// has withdrawn it. At a first load the re-apply puts the names on
+		// instead, after the consent pass (ApplyPendingSignalKeys).
+		isProvider := GetProviderZoneRRtypes(mpzd.ZoneName) != nil && mpzd.HasPublishedData()
+		if isProvider {
+			if hdb := NewHsyncDB(mpzd.KeyDB); hdb != nil {
+				if _, err := withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
+					lg.Error("failed to load publish instructions; the provider zone's _signal KEYs are not checked against the customers' consent",
+						"zone", mpzd.ZoneName, "err", err)
+				}
+			}
+		}
+
+		if mpzd.MPOptions[tdns.OptAllowEdits] || isProvider {
 			// Wrap new_zd with the persistent MP state so that
 			// CombineWithLocalChanges can read AgentContributions
 			// and CombinerData from the real MPState.
@@ -1483,6 +1560,71 @@ func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSync
 	changed := len(dss.NsAdds)+len(dss.NsRemoves)+len(dss.AAdds)+len(dss.ARemoves)+len(dss.AAAAAdds)+len(dss.AAAARemoves) > 0
 	dss.InSync = !changed
 	return changed, dss, nil
+}
+
+// followParentSyncParam keeps an agent's delegation-sync option for a
+// multi-provider zone in step with the zone's HSYNCPARAM. The agents sync
+// the zone's delegation with its parent when, and only while, HSYNCPARAM
+// says parentsync=agent. With parentsync=owner, or with no HSYNCPARAM, the
+// owner syncs it, and what an agent sent to the parent could undo what the
+// owner put there. A parentsync option in the agent's own configuration
+// does not change that: the owner's word decides.
+//
+// The option used to be turned on at a refresh and never off (tdns-mp
+// #200): after the owner took the sync over, the leader went on syncing the
+// parent at every lease renewal. It runs after every refresh, the first
+// load's included, before PostRefresh: the delegation sync a refresh asks
+// for reads the option.
+//
+// The option is a run-time option (SetRuntimeOption): the zone gets a new
+// options map rather than a write into the one that the query and refresh
+// paths read without a lock, and a config update does not take it away.
+// When the owner takes the sync over, what this agent has scheduled for the
+// zone's parent ends here: a held NOTIFY is dropped, and an ask or a check
+// that waits finds no chain (delegationSyncOwnerSyncs). An election, a
+// lease renewal included, finds the option off and asks for nothing.
+//
+// givenBack says the owner has given the sync back to the agents: the
+// option went on at a refresh after the zone's first. The callback then runs,
+// after PostRefresh, the leader's setup that an election skipped while the
+// owner synced the zone (delegationSyncGivenBack). At a first load the option
+// comes on too, and that is no give-back: at start-up the zone's election runs
+// the setup. A zone whose first load comes after its group already has a
+// leader (a zone added to a running agent, a late first transfer) has no
+// election of its own, and waits for its group's next lease renewal.
+//
+// A zone whose HSYNCPARAM cannot be read keeps the option it has.
+func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
+	if tdns.Globals.App.Type != AppTypeMPAgent || !mpzd.Options[tdns.OptMultiProvider] {
+		return false
+	}
+	rrset, err := mpzd.RRsetForAnalysis(mpzd.ZoneName, core.TypeHSYNCPARAM)
+	if err != nil {
+		lg.Warn("the zone's HSYNCPARAM could not be read; its delegation sync is left as it is", "zone", mpzd.ZoneName, "err", err)
+		return false
+	}
+	byAgents := false
+	if rrset != nil && len(rrset.RRs) > 0 {
+		if prr, ok := rrset.RRs[0].(*dns.PrivateRR); ok {
+			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+				byAgents = hp.GetParentSync() == core.HsyncParentSyncAgent
+			}
+		}
+	}
+	mpzd.EnsureMP()
+	first := !mpzd.MP.ParentSyncFollowed
+	mpzd.MP.ParentSyncFollowed = true
+	if byAgents == mpzd.Options[tdns.OptParentSync] {
+		return false
+	}
+	mpzd.SetRuntimeOption(tdns.OptParentSync, byAgents)
+	if byAgents {
+		lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
+		return !first
+	}
+	lg.Info("HSYNCPARAM does not say parentsync=agent: the zone's owner syncs its delegation, and this agent no longer sends anything to the parent", "zone", mpzd.ZoneName)
+	conf.delegationSyncOwnerSyncs(mpzd.ZoneName)
+	return false
 }
 
 // PostRefresh runs after the hard flip for all MP roles.
@@ -1543,14 +1685,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 					})
 				}
 			}
-			// Detect parentsync=agent dynamically from HSYNCPARAM
-			if !mpzd.Options[tdns.OptParentSync] {
-				hp := mpzd.getHSYNCPARAM()
-				if hp != nil && hp.GetParentSync() == core.HsyncParentSyncAgent {
-					lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
-					mpzd.Options[tdns.OptParentSync] = true
-				}
-			}
+			// parentsync=agent or not: followParentSyncParam, before this
 		case AppTypeMPAuditor:
 			if tm != nil && tm.agentRegistry != nil {
 				ar := tm.agentRegistry

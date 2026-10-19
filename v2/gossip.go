@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 var lgGossip *slog.Logger = tdns.Logger("gossip")
@@ -21,9 +22,10 @@ func shortHash(h string) string {
 // deepCopyMemberState returns an independent copy of a MemberState.
 func deepCopyMemberState(src *MemberState) *MemberState {
 	dst := &MemberState{
-		Identity:     src.Identity,
-		Timestamp:    src.Timestamp,
-		BeatInterval: src.BeatInterval,
+		Identity:         src.Identity,
+		Timestamp:        src.Timestamp,
+		BeatInterval:     src.BeatInterval,
+		PropagationDelay: src.PropagationDelay,
 	}
 	if src.PeerStates != nil {
 		dst.PeerStates = make(map[string]string, len(src.PeerStates))
@@ -118,11 +120,54 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		Zones:        zones,
 		Timestamp:    time.Now(),
 		BeatInterval: beatInterval,
+		// whole seconds on the wire, rounded up: a delay below a second is
+		// not announced as none
+		PropagationDelay: uint32((gst.propagationDelay + time.Second - 1) / time.Second),
 	}
 	if gst.localWritten == nil {
 		gst.localWritten = make(map[string]bool)
 	}
 	gst.localWritten[groupHash] = true
+}
+
+// SetPropagationDelay sets this provider's propagation delay: how long a
+// change needs to reach all of its nameservers
+// (dnssec.kasp.propagation-delay). It rides in gossip, in our own row of
+// every group, so that the leader of a zone knows how long the slowest of
+// the zone's serving providers needs before a NOTIFY to the parent is worth
+// sending (delegationNotifyWait).
+func (gst *GossipStateTable) SetPropagationDelay(d time.Duration) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.propagationDelay = max(d, 0)
+}
+
+// PropagationDelay is this provider's own propagation delay, as set.
+func (gst *GossipStateTable) PropagationDelay() time.Duration {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	return gst.propagationDelay
+}
+
+// AnnouncedPropagationDelay is the propagation delay a member announces in
+// its own row: the newest row of the member over all groups, since the value
+// is the provider's and not a group's. Not known: the member has no row
+// here, or announces none.
+func (gst *GossipStateTable) AnnouncedPropagationDelay(identity string) (time.Duration, bool) {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	var newest *MemberState
+	for _, members := range gst.States {
+		for id, ms := range members {
+			if ms != nil && dns.Fqdn(id) == dns.Fqdn(identity) && (newest == nil || ms.Timestamp.After(newest.Timestamp)) {
+				newest = ms
+			}
+		}
+	}
+	if newest == nil || newest.PropagationDelay == 0 {
+		return 0, false
+	}
+	return time.Duration(newest.PropagationDelay) * time.Second, true
 }
 
 // MergeGossip merges received gossip into the local state table.
@@ -185,8 +230,8 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 }
 
 // BuildGossipForPeer builds gossip messages for all groups shared with a peer.
-// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu
-// to avoid deadlock with RefreshLocalStates (which takes pgm.mu then gst.mu).
+// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu:
+// the two are never held together, here or in RefreshLocalStates.
 func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager, lem ...*LeaderElectionManager) []GossipMessage {
 	if pgm == nil {
 		return nil
@@ -334,6 +379,20 @@ func (gst *GossipStateTable) SetOnElectionUpdate(fn func(groupHash string, state
 	gst.onElectionUpdate = fn
 }
 
+// forgetGroup is the word that a provider group is gone: its last zone has
+// left it. The table forgets what would stand in the way of the group if it
+// comes back. That it was mutually OPERATIONAL: a group's election is called
+// when it becomes so, and a group still marked would come back without one.
+// And the election record: a group that comes back starts its terms again,
+// and the record of a higher term would keep its results out. The members'
+// rows stay: beats bring newer ones.
+func (gst *GossipStateTable) forgetGroup(groupHash string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	delete(gst.operationalGroups, groupHash)
+	delete(gst.Elections, groupHash)
+}
+
 // CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
 	gst.mu.Lock()
@@ -394,11 +453,14 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 		return
 	}
 
-	pgm.mu.RLock()
-	defer pgm.mu.RUnlock()
-
+	// The groups are copied out and the manager's lock is free while the rows
+	// are built and written: what is called from here takes the locks of the
+	// peers, of the zones and of this table, and a recompute of the groups
+	// must not wait for any of them with the manager's readers behind it
+	// (tdns-mp #180).
 	now := time.Now()
-	for hash, pg := range pgm.Groups {
+	for _, pg := range pgm.GetGroups() {
+		hash := pg.GroupHash
 		// Build our peer states for this group
 		peerStates := make(map[string]string)
 		var zones []string

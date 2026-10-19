@@ -115,9 +115,9 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// start, so the zone stays an island and the log says why.
 	//
 	// The option is set here; the work starts after the commit
-	// (startIdentityParentSync): the CDS is synthesised from the published
-	// apex and the SIG(0) key preparation reads it too, and a held zone has
-	// no snapshot to read.
+	// (startIdentityParentSync): a CDS written there is synthesised from the
+	// published apex and the SIG(0) key preparation reads it too, and a held
+	// zone has no snapshot to read.
 	if conf.identityZoneParentSync() {
 		zd.Options[tdns.OptParentSync] = true
 	} else if len(conf.Config.ParentSync.Schemes) > 0 {
@@ -127,8 +127,9 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// Renewal. tdns registers a zone for periodic re-signing when its config
 	// carries a signing option; this zone has none (it is built here), so it
 	// is put on the resigner's watchlist explicitly. The engine that reads
-	// this queue is started in StartMPAgent; without it the zone was signed
-	// once and never renewed.
+	// this queue is started in StartMPAgent and in StartMPAuditor, the two
+	// starts that set an identity up; without it the zone was signed once and
+	// never renewed.
 	if q := conf.Config.Internal.ResignQ; q != nil {
 		select {
 		case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
@@ -182,31 +183,45 @@ func (conf *Config) commitIdentityZone(ctx context.Context, zd *tdns.ZoneData, t
 	return nil
 }
 
-// startIdentityParentSync publishes the identity zone's CDS and starts its
-// delegation sync, once the zone is published: both read the zone's apex
-// through accessors that need it Ready, which a held zone is not. The CDS is
-// a serial of its own, after the one that carries the identity; the parent,
-// not discovery, is what reads it.
+// startIdentityParentSync starts the identity zone's delegation sync, once
+// the zone is published, and publishes the zone's CDS first where nothing
+// else does: both read the zone's apex through accessors that need it Ready,
+// which a held zone is not.
 //
-// The delegation sync starts only once the zone serves the CDS. Its first
-// step, the SIG(0) key preparation, writes the key store, and the updater
-// persists the CDS update there too; the key store takes one transaction at
-// a time and refuses a second rather than wait for it. With the CDS queued
-// and not waited for, the two ran together and one of them lost: either the
-// update was refused and the zone published no CDS, or no key was generated
-// and the setup was queued without one.
+// Where tdns's DS engine runs (the agent) the CDS is the engine's to write,
+// as for any zone tdns signs: from the keys' ds column, at the key state
+// worker's next tick, and before a NOTIFY(CDS) goes out. A CDS written here
+// as well would be a second writer with another rule, every SEP key of the
+// served DNSKEY RRset, and the two differ whenever the zone holds a KSK that
+// is published or retired: the zone would serve one set and then the other.
+//
+// Where no DS engine runs (the auditor) the CDS is published here, a serial
+// of its own, after the one that carries the identity; the parent, not
+// discovery, is what reads it. The delegation sync then starts only once
+// the zone serves the CDS. Its first step, the SIG(0) key preparation,
+// writes the key store, and the updater persists the CDS update there too;
+// the key store takes one transaction at a time and refuses a second rather
+// than wait for it. With the CDS queued and not waited for, the two ran
+// together and one of them lost: either the update was refused and the zone
+// published no CDS, or no key was generated and the setup was queued
+// without one.
 func (conf *Config) startIdentityParentSync(ctx context.Context, zd *tdns.ZoneData) {
 	if !zd.Options[tdns.OptParentSync] {
 		return
 	}
-	if err := publishIdentityCds(ctx, zd); err != nil {
-		lgAgent.Warn("identity zone: could not publish CDS", "zone", zd.ZoneName, "err", err)
+	// A role that runs the DS engine made its queue at its start
+	// (ensureDSEngineQueue).
+	if zd.KeyDB == nil || zd.KeyDB.DSEngineQ == nil {
+		if err := publishIdentityCds(ctx, zd); err != nil {
+			lgAgent.Warn("identity zone: could not publish CDS", "zone", zd.ZoneName, "err", err)
+		}
 	}
 	go conf.syncIdentityDelegation(ctx, zd)
 }
 
 // publishIdentityCds publishes the CDS for the SEP keys of the zone's served
 // DNSKEY RRset, as PublishCdsRRs does, and returns once the zone serves it.
+// For a role without a DS engine only (startIdentityParentSync).
 func publishIdentityCds(ctx context.Context, zd *tdns.ZoneData) error {
 	cds, err := zd.SynthesizeCdsRRs()
 	if err != nil {

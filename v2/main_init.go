@@ -305,10 +305,10 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
-			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
-			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
+			agentPeer.SetAPIEndpoint(agentConf.ApiBaseUrl)
 		}
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
@@ -430,13 +430,13 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 				Port:      uint16(port),
 				Transport: "udp",
 			})
-			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
 		if agentConf.ApiBaseUrl != "" {
-			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
-			agentPeer.PreferredTransport = "API"
+			agentPeer.SetAPIEndpoint(agentConf.ApiBaseUrl)
+			agentPeer.SetPreferredTransport("API")
 		} else {
-			agentPeer.PreferredTransport = "DNS"
+			agentPeer.SetPreferredTransport("DNS")
 		}
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, err)
@@ -482,6 +482,13 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
+
+	// This provider's propagation delay goes out in the agent's gossip: it is
+	// its share of the wait before a NOTIFY to a zone's parent
+	// (delegationNotifyWait).
+	if ar := conf.InternalMp.AgentRegistry; ar != nil {
+		ar.GossipStateTable.SetPropagationDelay(conf.Config.KaspPropagationDelay())
+	}
 
 	// The first hello waits for the identity zone; SetupAgent opens this.
 	conf.InternalMp.IdentityReady = newIdentityReadiness()
@@ -604,9 +611,11 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 	tm.onKeyInventory = conf.noteKeyInventory
 	conf.InternalMp.MPTransport = tm
-	// the DS set of a zone our own signer does not own (Amendment 2)
+	// the DS set of a zone our own signer does not own (Amendment 2), and
+	// the other providers' word on the one it owns (#207)
 	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
 		o.SetComputedDSSource(conf.computedDSIntent)
+		o.SetForeignDSCheck(conf.foreignDSWithheld)
 	}
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager

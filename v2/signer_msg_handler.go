@@ -16,6 +16,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 var lgSigner = tdns.Logger("signer")
@@ -55,8 +56,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			// OPERATIONAL means). State is set on the outbound beat path.
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
-				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+				peer.SetMechanismLastBeatRecv("DNS", time.Now())
 			}
 
 		case report := <-msgQs.Hello:
@@ -70,7 +70,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			// OPERATIONAL (that requires an outbound beat round-trip).
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
+				peer.SetLastBeatReceived(time.Now())
 			}
 
 		case report := <-msgQs.Ping:
@@ -96,12 +96,20 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
-			// what the other providers said about their keys (#58): the
-			// owner of the zone's key lifecycle writes ds on their rows
-			// from it; for a zone nobody here owns it has no reader
+			// what the other providers said about their keys (#58), and
+			// which providers have spoken (S7): the owner of the zone's key
+			// lifecycle writes ds on their rows from it; for a zone nobody
+			// here owns it has no reader
 			if sigMsg.Signal == "foreign" {
-				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.Foreign(sigMsg.Zone, sigMsg.ForeignKeys) {
+				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.ForeignWord(sigMsg.Zone, sigMsg.ForeignKeys, sigMsg.ForeignSpoken) {
 					lgSigner.Debug("KEYSTATE foreign for a zone whose key lifecycle is not run here; dropped", "zone", sigMsg.Zone)
+					continue
+				}
+				// a foreign DNSKEY an incoming zone lacked was kept until the
+				// key states relayed for its provider, or the zone owner,
+				// let it go; these key states may do that (#207)
+				if mpzd, ok := Zones.Get(dns.Fqdn(sigMsg.Zone)); ok && mpzd.dropWithdrawnForeignDNSKEYs(conf.MpConfig()) {
+					sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
 				}
 				continue
 			}
