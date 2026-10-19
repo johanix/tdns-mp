@@ -611,9 +611,11 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 	tm.onKeyInventory = conf.noteKeyInventory
 	conf.InternalMp.MPTransport = tm
-	// the DS set of a zone our own signer does not own (Amendment 2)
+	// the DS set of a zone our own signer does not own (Amendment 2), and
+	// the other providers' word on the one it owns (#207)
 	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
 		o.SetComputedDSSource(conf.computedDSIntent)
+		o.SetForeignDSCheck(conf.foreignDSWithheld)
 	}
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager

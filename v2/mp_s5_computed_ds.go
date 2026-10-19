@@ -228,6 +228,82 @@ func (conf *Config) computedDSIntent(zone string, digest uint8) (tdns.DSIntent, 
 	return tdns.DSIntent{Set: set, Known: seen}, nil
 }
 
+// foreignDSWithheld is the agent's check on the DS set its own signer's
+// inventory gives (MPKeyLifecycleOwner.DSIntent): another provider's DS
+// leaves the parent only when the key states that provider's agent sent this
+// agent, with its DNSKEY distributions, say so (tdns-mp #207). It names a key
+// those key states have standby, active or retired with ds=1 (P3, as
+// foreignDSFor reads the same key states at the signer, where this agent
+// relays them) and that the inventory does not hold as a SEP key with ds=1;
+// empty when there is none. One inventory without the key is not the key
+// states dropping it: the signer may have taken a copy of the zone that
+// lacked it. A provider the zone owner no longer names among the signers is
+// not asked: its DS is the leader's to remove.
+func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
+	zone = dns.Fqdn(zone)
+	tm := conf.InternalMp.MPTransport
+	if tm == nil {
+		return ""
+	}
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return ""
+	}
+	hp := mpzd.getHSYNCPARAM()
+	if hp == nil {
+		return ""
+	}
+	signing := map[string]bool{}
+	for _, s := range hp.GetSigners() {
+		signing[trimDot(s)] = true
+	}
+	ourLabel := ""
+	if matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig())); err == nil && matched {
+		ourLabel = trimDot(label)
+	}
+	held := map[uint16]bool{}
+	for _, it := range inv {
+		if it.Flags&dns.SEP != 0 && it.DS != nil && *it.DS {
+			held[it.KeyTag] = true
+		}
+	}
+	shares := tm.foreignSharesFor(ZoneName(zone))
+	agents := make([]string, 0, len(shares))
+	for a := range shares {
+		agents = append(agents, string(a))
+	}
+	sort.Strings(agents)
+	for _, a := range agents {
+		matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(a)})
+		if err != nil || !matched {
+			continue
+		}
+		label = trimDot(label)
+		if label == ourLabel || !signing[label] {
+			continue
+		}
+		share := shares[AgentId(a)]
+		for _, st := range share.states {
+			// a key whose record has not arrived is taken to be a SEP key:
+			// its provider says its DS belongs at the parent
+			sep := true
+			for _, dk := range share.dnskeys {
+				if dk.KeyTag() == st.KeyTag {
+					sep = dk.Flags&dns.SEP != 0
+					break
+				}
+			}
+			want, decided := foreignDSFor(foreignSaid{Provider: label, State: st.State, DS: st.DS}, sep, signing)
+			if !decided || !want || held[st.KeyTag] {
+				continue
+			}
+			return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
+				label, st.KeyTag, st.State)
+		}
+	}
+	return ""
+}
+
 // dnskeyRecordKnown reports whether any record carries the key tag.
 func dnskeyRecordKnown(records []*dns.DNSKEY, keytag uint16) bool {
 	for _, dk := range records {

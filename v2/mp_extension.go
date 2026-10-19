@@ -85,6 +85,11 @@ type MPState struct {
 	// give-back. Read and written only by the zone's post-refresh callback.
 	ParentSyncFollowed bool
 
+	// absentForeign: the signer's foreign rows whose keys the last incoming
+	// zone lacked, kept because foreignKeyWithdrawn did not let them go
+	// (syncForeignDNSKEYs, #207)
+	absentForeign []uint16
+
 	// pendingCleanups are the (owner, rrtype) pairs a contribution change may
 	// have emptied: the next CombineWithLocalChanges restores or deletes what
 	// no agent contributes any more. Its own mutex, because MPZoneData.Lock
@@ -195,4 +200,20 @@ func (mpzd *MPZoneData) SetRemoteDNSKEYs(keys []dns.RR) {
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
 	mpzd.MP.RemoteDNSKEYs = keys
+}
+
+func (mpzd *MPZoneData) absentForeignKeys() []uint16 {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP == nil {
+		return nil
+	}
+	return append([]uint16(nil), mpzd.MP.absentForeign...)
+}
+
+func (mpzd *MPZoneData) setAbsentForeign(keytags []uint16) {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	mpzd.EnsureMP()
+	mpzd.MP.absentForeign = keytags
 }
