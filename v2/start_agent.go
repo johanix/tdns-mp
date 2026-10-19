@@ -477,11 +477,25 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// (zoneKeyWaits). A parent that takes no UPDATE needs no key, and the key
 	// setup says so by finding nothing to do.
 	lem.SetOnZoneJoined(func(zone ZoneName) error {
+		// The arrival is reported after the recompute, and this runs on its
+		// own: a refresh can have moved the zone on by now. An agent that no
+		// longer leads it asks its peers for nothing.
+		if !lem.IsLeader(zone) {
+			lgAgent.Info("a zone that joined a group this agent leads has moved on; nothing is set up for it", "zone", zone)
+			return nil
+		}
 		ask := func() {
 			conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		}
 		err := leaderKeySetup(zone, false)
-		if errors.Is(err, errZoneKeyNotHeld) {
+		if err != nil {
+			// Not only a key that is not held yet: a setup that failed to make
+			// or publish the key leaves a sync that cannot be signed, and the
+			// sync's own retries never set the key up again. The wait asks
+			// again, and asks for the sync once the setup has worked.
+			if !errors.Is(err, errZoneKeyNotHeld) {
+				lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; it is tried again before the sync is asked for", "zone", zone, "err", err)
+			}
 			conf.InternalMp.zoneKeyWaits.await(ctx, zone, zoneKeyWaitDelays,
 				func() bool { return lem.IsLeader(zone) },
 				func() error {
@@ -491,7 +505,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 			return nil
 		}
 		ask()
-		return err
+		return nil
 	})
 
 	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so

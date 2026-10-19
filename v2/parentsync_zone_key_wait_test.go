@@ -120,3 +120,27 @@ func TestAZoneThatWaitsForItsKeyStopsWhenTheAgentNoLongerLeads(t *testing.T) {
 		t.Errorf("the sync was asked for %d times by an agent that does not lead the zone", got)
 	}
 }
+
+// An arrival whose key setup fails for another reason than a key nobody has
+// handed over, a key that could not be made or published, waits the same
+// way: the sync is not asked for while the setup fails, since it could not be
+// signed, and it is asked for once the setup has worked.
+func TestAZoneWhoseKeySetupFailsWaitsAsForAMissingKey(t *testing.T) {
+	var w zoneKeyWaits
+	var tries, syncs atomic.Int32
+	try := func() error {
+		switch tries.Add(1) {
+		case 1:
+			return errors.New("failed to generate SIG(0) keypair")
+		case 2:
+			return errors.New("failed to publish KEY to combiner")
+		}
+		return nil
+	}
+	w.await(context.Background(), "failing.example.", keyWaitDelays, func() bool { return true }, try,
+		func() { syncs.Add(1) })
+	eventually(t, "the sync was never asked for", func() bool { return syncs.Load() == 1 })
+	if got := tries.Load(); got != 3 {
+		t.Errorf("the setup ran %d times, want 3: twice failing, once working", got)
+	}
+}
