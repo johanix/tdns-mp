@@ -211,7 +211,16 @@ with it a key the parent may still trust. Today that is
 a provider that led the zone when the key was made, or a
 later leader that was handed it: a new leader asks the
 other providers in `servers=` and `signers=`, and any of
-them that holds the key hands it over.
+them that holds the key hands it over. With
+[PR 217](https://github.com/johanix/tdns-mp/pull/217)
+it also asks the provider that led the zone's group
+before, while that provider's HSYNC3 record stays. A
+newly elected leader that no provider hands the key
+makes one of its own, and a parent that takes UPDATE may
+refuse it. So when charlie led the group and the parent
+takes UPDATE, keep charlie's agent running after 4.1
+until the new leader logs `imported SIG(0) key from peer`
+or `leader has local SIG(0) key, proceeding to publish`.
 Contributed NS
 records stay until an operator purges them at every
 remaining provider
@@ -305,6 +314,19 @@ server (section 3).
 
 **Today:** the provider stops signing
 ([issue 147](https://github.com/johanix/tdns-mp/issues/147)).
+
+### 5.3 A provider becomes an auditor: not allowed
+
+A provider in `servers=` or `signers=` is not moved to
+`auditors=`. It holds contributions to the zone, and it
+may hold the zone's SIG(0) key; nothing hands those over
+when it becomes an auditor. To get there, the owner
+removes the provider completely (section 4) and adds it
+back as an auditor.
+
+Nothing looks for that edit. An owner who makes it
+anyway gets what the code does with it, which nothing
+tests.
 
 ## 6. Open Points
 

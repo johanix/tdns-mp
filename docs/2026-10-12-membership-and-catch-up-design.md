@@ -1,6 +1,6 @@
 # Membership and catch-up: every HSYNC3 provider is a member, and a member asks for what it does not know
 
-**Status:** PROPOSAL, 2026-10-12, revised 2026-10-17; split 2026-10-18, revised the same day and on 2026-10-19 with the project owner's decisions, then read again against main `fd5e950`.
+**Status:** PROPOSAL, 2026-10-12, revised 2026-10-17; split 2026-10-18, revised the same day and on 2026-10-19 with the project owner's decisions, then read again against main `fd5e950`, and revised again that day after an external review (main `0fc5366`).
 
 **Scope since the split (2026-10-18).** The plan implements, in its steps 1 to 8, this design's standings and what each may do, catch-up, sender rules, the end of comms, and groups and elections. How a zone moves from one set of the owner's instructions to the next goes to a design of its own, the transitions design (tdns-mp PR #211), and so does the rest of a removal (section 7). It takes over three things described here:
 
@@ -61,6 +61,8 @@ Each one is one edit by the zone owner.
 | No role, to a role | The zone moves to the group in which it votes, and takes that group's leader. Each asks it for the zone's state (5.1, `peer-role`). Its contributions are taken. | It asks for the zone's state once more. It may vote and lead. Edits follow the edit policy. |
 | A role, to no role | The zone moves to the group that has it as a member with no role. If it led the zone it no longer does: that group has a leader of its own, and the removal is that leader's to run (section 7). The edit by itself withdraws nothing of what the provider contributed: its NS records stay in the zone, its DNSKEYs stay in every signer's key set, and its DS stays at the parent, until the removal takes each of them away in its turn. | It no longer votes or leads for the zone. It goes on exactly as before, except that it initiates nothing (2.3). |
 | A record, to no record | It leaves the zone's group. When no zone is shared with it any more, comms end after a hold time (3.1). | The zone is no longer a multi-provider zone for it. |
+
+A provider with a role does not move to `auditors=`: the owner removes it (section 7) and adds it back as an auditor (plan, decision 45). Nothing looks for that edit.
 
 ### 2.3 A provider that has lost its roles goes on, and initiates nothing
 
@@ -284,7 +286,7 @@ RFI SYNC, with the reason word and a name for the request, both carried in the m
 
 ### 5.4 What is answered
 
-One SYNC to the asker alone, through the confirmed queue, holding the answering agent's own contributions to the zone.
+One SYNC to the asker alone, through the confirmed queue, holding the answering agent's own contributions to the zone. A record that its own combiner refused is not one of them; a record that only a peer refused is.
 
 1. **The types are fixed.** One `replace` for NS and one for CDS, and one for DNSKEY when the answering agent's provider is in `signers=`, each empty where it holds none, whatever the zone's `nsmgmt` and `parentsync`. A provider not in `signers=` names no DNSKEY: it does not withdraw keys itself (2.3). The asker's stale records go. The zone's KEY and its CSYNC are the group's, published by the leader alone (4.1), so only the leader's answer names them. The KEY half of this is the transitions design's (the scope note); until then no answer names the KEY (plan, step 3).
 2. **The keys come from the inventory.** When the answering agent's provider is in `signers=`, the DNSKEY operation takes its records and their key states from its signer's latest inventory, never from what the agent has stored.
@@ -306,7 +308,7 @@ A zone is **caught up** when this agent has read its own provider's state back f
 ### 5.6 What waits for it
 
 - **The DS set.** For a leader whose own signer does not own the zone, the zone's DS set is unknown while a provider in `signers=` has not spoken about its keys. A complete answer makes a provider speak, and a set that turns from unknown to known asks for a sync with the parent.
-- **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, and its own signer when its provider signs the zone), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
+- **The leader's sync with the parent.** The order is fixed: first the zone's data from every source (the other agents, its own combiner, and its own signer when its provider signs the zone), then a look at what the parent holds, then only the difference. A leader that has just started remembers nothing of what the parent has, and does not assume it. Nothing is sent while the zone is not caught up. One line says what is waited for, the sync is noted as owed, and the answer that completes the catch-up asks for it. A request that finds no room stays owed and is asked for again. This holds for NS and glue as well as DS: a leader that missed a peer's change would send the parent its own older view. A leader that does not have all the information is in no position to decide.
 - **Not "in sync".** When NS and glue are in step with the parent and there is no DS set to compare, for a zone that names a signer, the leader does not report "in sync". It reports "DS set unknown, waiting for" and the provider. When every signer has spoken and none of them holds a key that a DS is made from, it says that.
 - **Nothing else.** Voting, the agent's own edits, and what it confirms to others do not wait for the catch-up. From the transitions design on, the last two wait for the zone to be settled (4.9).
 
@@ -318,7 +320,7 @@ A request that fails, is refused, is answered "not complete", or is acknowledged
 
 ### 5.8 The cost
 
-With Z zones and P voting peers per zone, a start sends Z x P requests and receives as many answers. Each answer is one small message and its two confirmations. A `start` is asked back, which doubles it. An agent with 1,000 zones and two peers handles about 4,000 requests and 4,000 answers at its start. Requests to one peer are paced, eight in flight, each from its send to its answer, its failure or its time-out. Each answer leaves through the answering agent's queue, which sends what is due once a second, so a start with 1,000 zones takes a minute or two, its peers side by side, not one burst. After a restart nearly every answer changes nothing at the asker. One request per peer for many zones would cut the count and is a wire change: left for when it is needed.
+With Z zones and P voting peers per zone, a start sends Z x P requests and receives as many answers. Each answer is one small message and its two confirmations. A `start` is asked back, which doubles it. An agent with 1,000 zones and two peers handles about 4,000 requests and 4,000 answers at its start. Requests to one peer are paced, eight in flight, each from its send to its answer, its failure or its time-out. Each answer leaves through the answering agent's queue. Once a second the queue sends every message that is due, one after another. So the pace is the asker's: eight requests in flight to each peer, and each answer waits up to a second for the queue. A start with 1,000 zones and two peers takes a minute or two, its peers side by side, not one burst. A slow recipient delays every message behind it in that queue. An answer that comes after its request has timed out still arrives, and counts for nothing. After a restart nearly every answer changes nothing at the asker. One request per peer for many zones would cut the count and is a wire change: left for when it is needed.
 
 ## 6. What an agent with no role does for its own operator
 
