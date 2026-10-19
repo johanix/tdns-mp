@@ -7,11 +7,11 @@ require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/tdns-transport/v2 v2.0.0-20261017185751-f76a2041b2e9
-	github.com/johanix/tdns/v2 v2.0.0-20261019085847-9febcafdd114
-	github.com/johanix/tdns/v2/cache v0.0.0-20261019085847-9febcafdd114
-	github.com/johanix/tdns/v2/cli v0.0.0-20261019085847-9febcafdd114
-	github.com/johanix/tdns/v2/core v0.0.0-20261019085847-9febcafdd114
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261019085847-9febcafdd114
+	github.com/johanix/tdns/v2 v2.0.0-20261019130124-38faefbbc200
+	github.com/johanix/tdns/v2/cache v0.0.0-20261019130124-38faefbbc200
+	github.com/johanix/tdns/v2/cli v0.0.0-20261019130124-38faefbbc200
+	github.com/johanix/tdns/v2/core v0.0.0-20261019130124-38faefbbc200
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261019130124-38faefbbc200
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -40,7 +40,7 @@ require (
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
