@@ -494,6 +494,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
 		return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
 	}
+	tm.Router.Use(logConfirmationReceived)
 
 	// Phase 2.6: the discovery-completion callback is now LIVE — transport's
 	// RegisterDiscoveredPeer fires it after the process completes (it was
@@ -1553,6 +1554,23 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	}
 }
 
+// logConfirmationReceived logs every confirmation the router handles, with
+// the mechanism it arrived on, so that which way a confirmation went shows at
+// both ends ("confirmation sent" at the other).
+func logConfirmationReceived(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
+	err := next(ctx)
+	in, ok := ctx.Incoming()
+	if !ok || in.Token() != transport.VerbConfirm || err != nil {
+		return err
+	}
+	var c transport.DnsConfirmPayload
+	if json.Unmarshal(ctx.ChunkPayload, &c) == nil {
+		lgTransport.Info("confirmation received", "distributionID", c.DistributionID, "sender", c.SenderID,
+			"status", c.Status, "mechanism", in.Mechanism)
+	}
+	return err
+}
+
 // confirmTransport is the transport a SYNC's confirmations go back on first:
 // the mechanism the SYNC arrived on, whatever else the peer offers. A SYNC
 // over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents
@@ -1577,32 +1595,42 @@ func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transp
 // that fails, the confirmation goes on the other mechanism, if that reaches
 // the peer; the first try then gets half the time, so a peer that hangs on
 // it leaves the other mechanism the rest. When the mechanism is not known,
-// the manager picks by what the peer offers, with the same fallback: a
-// confirmation that is not sent leaves the sender sending its SYNC again.
+// the first choice is what the peer offers (SelectTransport), with the same
+// fallback: a confirmation that is not sent leaves the sender sending its
+// SYNC again. A confirmation sent is logged with the mechanism that carried
+// it.
 func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
 	t := tm.confirmTransport(mechanism)
 	if t == nil {
+		t = tm.SelectTransport(peer)
+		if t == nil {
+			return fmt.Errorf("no transport reaches peer %s", peer.ID)
+		}
 		lgTransport.Debug("the sync's mechanism is not known; the confirmation goes by what the peer offers",
-			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism)
-		return tm.Confirm(ctx, peer, req)
+			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism, "first", t.Name())
 	}
-	other := tm.otherConfirmTransport(t, peer)
-	if other == nil {
-		return t.Confirm(ctx, peer, req)
+	used := t
+	if other := tm.otherConfirmTransport(t, peer); other == nil {
+		if err := t.Confirm(ctx, peer, req); err != nil {
+			return err
+		}
+	} else {
+		first, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok {
+			first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		}
+		err := t.Confirm(first, peer, req)
+		cancel()
+		if err != nil {
+			if otherErr := other.Confirm(ctx, peer, req); otherErr != nil {
+				return fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), otherErr)
+			}
+			tm.noteConfirmFallback(peer.ID, t.Name(), other.Name(), err)
+			used = other
+		}
 	}
-	first, cancel := ctx, context.CancelFunc(func() {})
-	if deadline, ok := ctx.Deadline(); ok {
-		first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
-	}
-	err := t.Confirm(first, peer, req)
-	cancel()
-	if err == nil {
-		return nil
-	}
-	if otherErr := other.Confirm(ctx, peer, req); otherErr != nil {
-		return fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), otherErr)
-	}
-	tm.noteConfirmFallback(peer.ID, t.Name(), other.Name(), err)
+	lgTransport.Info("confirmation sent", "distributionID", req.DistributionID, "peer", peer.ID,
+		"status", req.Status.String(), "mechanism", used.Name())
 	return nil
 }
 
