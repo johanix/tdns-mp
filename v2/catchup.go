@@ -83,6 +83,11 @@ type catchUpPeer struct {
 	Why       string // a not complete answer's reason
 	LastError string
 
+	// startRequest, on a peer-start: the name of the peer's start request
+	// it asks back for. The same start request delivered again is no new
+	// start.
+	startRequest string
+
 	attempt  int       // the failures since the request was made
 	acked    bool      // the request's send was acknowledged
 	deadline time.Time // sent: the end of the wait for the answer; retry: when it is asked again
@@ -268,12 +273,24 @@ func (t *catchUpTracker) entryLocked(zone ZoneName, peer AgentId) *catchUpPeer {
 // only way to its last change (design 5.1). Nor does an outstanding
 // request hold peer-start: it is made anew, under a new name, so that an
 // answer the peer's earlier process built, still on its way, names a
-// request that is no longer outstanding and counts for nothing. A
-// peer-start already outstanding is the restarted process's, and stands.
+// request that is no longer outstanding and counts for nothing. That holds
+// for an outstanding peer-start too, once it has gone out: the peer may
+// have started again since, and an answer from the process before is no
+// answer for what the peer lost then. A peer-start not yet sent goes out to
+// the process that runs now, and stands; so does one asked back for the
+// same start request, delivered again. A start request asked again by the
+// same process, after a failure, has a new name and is made anew as well:
+// its retries are 5 s apart at the least, so they do not starve the answer.
 // A request clears Complete. To a peer that is not OPERATIONAL it is noted,
 // and goes out at PeerOperational. Ask only records: the peer's sender
 // sends.
 func (t *catchUpTracker) Ask(zone ZoneName, peer AgentId, reason string) askResult {
+	return t.ask(zone, peer, reason, "")
+}
+
+// ask is Ask, with the name of the peer's start request that a peer-start
+// asks back for (Requested).
+func (t *catchUpTracker) ask(zone ZoneName, peer AgentId, reason, startRequest string) askResult {
 	if t == nil {
 		return askOutstanding
 	}
@@ -282,7 +299,10 @@ func (t *catchUpTracker) Ask(zone ZoneName, peer AgentId, reason string) askResu
 	defer t.mu.Unlock()
 	e := t.entryLocked(zone, peer)
 	if e.outstanding() {
-		if reason != catchUpPeerStart || e.Reason == catchUpPeerStart {
+		switch {
+		case reason != catchUpPeerStart:
+			return askOutstanding
+		case e.Reason == catchUpPeerStart && (e.State != catchUpSent || (startRequest != "" && e.startRequest == startRequest)):
 			return askOutstanding
 		}
 		lgCatchUp.Info("a peer started while a request to it was outstanding; the request is made anew", "zone", zone, "peer", peer,
@@ -291,7 +311,7 @@ func (t *catchUpTracker) Ask(zone ZoneName, peer AgentId, reason string) askResu
 	if reason != catchUpManual && reason != catchUpPeerStart && e.Complete && time.Since(e.Answered) < catchUpRecent {
 		return askRecent
 	}
-	*e = catchUpPeer{Request: newRfiNonce(), Reason: reason, Answered: e.Answered, Why: e.Why}
+	*e = catchUpPeer{Request: newRfiNonce(), Reason: reason, Answered: e.Answered, Why: e.Why, startRequest: startRequest}
 	delete(t.caught, zone)
 	if !t.operational(peer) {
 		e.State = catchUpNoted
@@ -432,7 +452,7 @@ func (t *catchUpTracker) Requested(zone ZoneName, from AgentId, cu *CatchUp) {
 	if !isVotingMember(zone, string(from)) || !isVotingMember(zone, string(t.self)) {
 		return
 	}
-	t.Ask(zone, from, catchUpPeerStart)
+	t.ask(zone, from, catchUpPeerStart, cu.Request)
 }
 
 // Forget drops everything kept for a peer that is removed, so that one

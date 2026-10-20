@@ -1006,15 +1006,61 @@ func TestAPeerStartReplacesTheOutstandingRequest(t *testing.T) {
 	if e := r.entry(zone, roleB); e == nil || e.Complete || !e.outstanding() || e.Request != again.request {
 		t.Errorf("the replaced request's answer counted: %+v", e)
 	}
-	// another start while the ask-back is outstanding leaves it
-	r.t.Requested(zone, roleB, &CatchUp{Request: "b-start-retried", Reason: catchUpStart})
+	// the same start request, delivered again, leaves the ask-back
+	r.t.Requested(zone, roleB, &CatchUp{Request: "b-started", Reason: catchUpStart})
 	time.Sleep(50 * time.Millisecond)
 	if n := len(r.sent()); n != 2 {
-		t.Errorf("a start while the ask-back was outstanding replaced it: %+v", r.sent())
+		t.Errorf("the start request delivered again replaced the ask-back: %+v", r.sent())
 	}
 	r.t.Answered(zone, roleB, completeAnswer(again.request))
 	if e := r.entry(zone, roleB); e == nil || !e.Complete || e.outstanding() {
 		t.Errorf("the ask-back's answer did not end the request: %+v", e)
+	}
+}
+
+// A peer that starts again while it is asked back is asked anew: the
+// answer its process before built, still on its way, says nothing of what
+// the peer lost at the second start, and counts for nothing. An ask-back
+// that has not gone out yet goes to the process that runs now, and stands.
+func TestAPeerThatStartsAgainWhileAskedBackIsAskedAnew(t *testing.T) {
+	const zone = "twice.start.example."
+	catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+	r := newTrackerRig(t, roleA)
+	r.run()
+
+	// the peer is not OPERATIONAL: the ask-back is noted, and a second
+	// start leaves it
+	r.t.Requested(zone, roleB, &CatchUp{Request: "b-first", Reason: catchUpStart})
+	noted := r.entry(zone, roleB)
+	if noted == nil || noted.State != catchUpNoted {
+		t.Fatalf("the ask-back to a peer that is not OPERATIONAL: %+v", noted)
+	}
+	name := noted.Request
+	r.t.Requested(zone, roleB, &CatchUp{Request: "b-second", Reason: catchUpStart})
+	if e := r.entry(zone, roleB); e == nil || e.Request != name {
+		t.Errorf("a second start replaced an ask-back that had not gone out: %+v", e)
+	}
+
+	r.setUp(roleB, true)
+	r.t.PeerOperational(roleB)
+	first := r.waitSends(t, 1)[0]
+	if first.reason != catchUpPeerStart || first.request != name {
+		t.Fatalf("the noted ask-back went out as %+v, want peer-start %s", first, name)
+	}
+
+	// the peer starts again while the ask-back is out
+	r.t.Requested(zone, roleB, &CatchUp{Request: "b-third", Reason: catchUpStart})
+	again := r.waitSends(t, 2)[1]
+	if again.reason != catchUpPeerStart || again.request == first.request {
+		t.Fatalf("after the peer's second start the agent asked %+v, want peer-start under a new name", again)
+	}
+	r.t.Answered(zone, roleB, completeAnswer(first.request))
+	if e := r.entry(zone, roleB); e == nil || e.Complete || !e.outstanding() || e.Request != again.request {
+		t.Errorf("the answer of the process before counted: %+v", e)
+	}
+	r.t.Answered(zone, roleB, completeAnswer(again.request))
+	if e := r.entry(zone, roleB); e == nil || !e.Complete || e.outstanding() {
+		t.Errorf("the answer to the new ask-back did not end the request: %+v", e)
 	}
 }
 
