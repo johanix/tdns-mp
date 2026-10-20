@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -86,6 +87,68 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 	}
 }
 
+// errNoRoleInZone: this provider has no role in the zone, so nothing of its
+// own leaves its agent for it (the membership design, 2.3; issue 137, item 2).
+var errNoRoleInZone = errors.New("this provider has no role in the zone (it is listed under neither servers= nor signers=)")
+
+// forgetRefusedDnskeys: a local update with this provider's DNSKEYs that is
+// refused for want of a role was derived while the provider had one, and
+// LocalDnskeysFromKeystate has recorded its keys and key states as
+// distributed. They were not. They are forgotten, so that the next
+// derivation, once the role is back (the signer's resend, or its next
+// inventory), finds the whole set new and distributes it.
+func forgetRefusedDnskeys(u *SynchedDataUpdate) {
+	if u.Update == nil || !updateCarriesDnskey(u.Update) {
+		return
+	}
+	mpzd, ok := Zones.Get(string(u.Zone))
+	if !ok {
+		return
+	}
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP != nil {
+		mpzd.MP.LocalDNSKEYs, mpzd.MP.LocalKeyStates = nil, nil
+	}
+}
+
+// updateCarriesDnskey: the update has a DNSKEY operation or record.
+func updateCarriesDnskey(u *ZoneUpdate) bool {
+	for _, op := range u.Operations {
+		if op.RRtype == "DNSKEY" {
+			return true
+		}
+	}
+	for _, rr := range u.RRs {
+		if rr.Header().Rrtype == dns.TypeDNSKEY {
+			return true
+		}
+	}
+	for t := range u.RRsets {
+		if t == dns.TypeDNSKEY {
+			return true
+		}
+	}
+	return false
+}
+
+// noRoleEditRefusal is the answer to an edit of the zone by the operator of
+// a provider that has no role in it.
+func noRoleEditRefusal(zone ZoneName) string {
+	return fmt.Sprintf("zone %s: this provider has no role in the zone (it is listed under neither servers= nor signers=); nothing is stored and nothing is sent", zone)
+}
+
+// noRoleLeadRefusal is the answer to the operator who asks a provider with
+// no role in the zone to lead it.
+func noRoleLeadRefusal(zone ZoneName) string {
+	return fmt.Sprintf("this provider cannot lead zone %s: it has no role in it", zone)
+}
+
+// noRolePushNote says that a resync sends none of this provider's own data.
+func noRolePushNote(zone ZoneName) string {
+	return fmt.Sprintf("zone %s: none of this provider's data is sent, to the other agents or to its combiner: it has no role in the zone", zone)
+}
+
 // --- Policy evaluation and update processing ---
 
 func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (bool, string, error) {
@@ -156,6 +219,15 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		}
 
 	case "local":
+		// First, so that no path gets past: an agent whose provider has no
+		// role in the zone sends nothing of its own for it, an operator's
+		// edit, the DNSKEYs of an inventory or a CSYNC (the membership
+		// design, 2.3). A refusal, not an error: the data engine answers
+		// nothing for an evaluation error.
+		if !votesInZone(synchedDataUpdate.Zone, synchedDataUpdate.AgentId) {
+			forgetRefusedDnskeys(synchedDataUpdate)
+			return false, noRoleEditRefusal(synchedDataUpdate.Zone), nil
+		}
 		rrs := append([]dns.RR{}, synchedDataUpdate.Update.RRs...)
 
 		// Check HSYNC nsmgmt policy for NS record operations

@@ -1000,6 +1000,14 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 	if leader, ok := lem.GetGroupLeader(to); !ok || leader != lem.localID {
 		return
 	}
+	// The group's voting members are the union of its zones' until the
+	// group is keyed on its make-up, so its leader can be one that does not
+	// vote in the zone that arrived. It does not lead that zone (IsLeader).
+	if !votesInZone(zone, lem.localID) {
+		lgElect.Info("zone joined a group this agent leads, but this agent does not vote in the zone: it does not take the zone up",
+			"zone", zone, "group", shortHash(to))
+		return
+	}
 	was := "no group"
 	if from != "" {
 		was = shortHash(from)
@@ -1151,7 +1159,15 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 }
 
 // IsLeader returns true if the local agent is the current leader for a zone.
+//
+// An agent that does not vote in a multi-provider zone does not lead it,
+// whatever lease it holds (decision 34; the membership design, 2.2): a lead
+// from before its roles were taken no longer counts. A zone with no HSYNC3
+// RRset is left as it is.
 func (lem *LeaderElectionManager) IsLeader(zone ZoneName) bool {
+	if !votesInZone(zone, lem.localID) {
+		return false
+	}
 	// Check group-based leader first
 	if lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroupForZone(zone)
@@ -1185,7 +1201,22 @@ func (lem *LeaderElectionManager) ZoneLeader(zone ZoneName) (AgentId, bool) {
 }
 
 // GetAllLeaders returns the current leader status for all zones with an active leader.
+//
+// IsSelf is this agent's lead as IsLeader has it: a lease held in a zone
+// this agent does not vote in is no lead of its own (decision 34). That is
+// asked once the election locks are free, as IsLeader asks it.
 func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
+	result := lem.allLeases()
+	for i := range result {
+		if result[i].IsSelf && !votesInZone(result[i].Zone, lem.localID) {
+			result[i].IsSelf = false
+		}
+	}
+	return result
+}
+
+// allLeases is GetAllLeaders by the leases alone.
+func (lem *LeaderElectionManager) allLeases() []LeaderStatus {
 	lem.mu.RLock()
 	defer lem.mu.RUnlock()
 
@@ -1937,7 +1968,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 		status.ElectionTerm = le.Term
 		le.mu.Unlock()
 	}
-	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry)
+	// The same test as IsLeader: a lead that no longer counts is not shown
+	// as this agent's.
+	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry) && votesInZone(zone, lem.localID)
 
 	if zd == nil || hdb == nil {
 		return status

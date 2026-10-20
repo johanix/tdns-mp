@@ -978,9 +978,12 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	// The distribution ID is extracted from the CHUNK qname, not the JSON payload.
-	// Propagate it into the parsed payload so downstream code (AgentMsgPost,
-	// sendImmediateConfirmation) can access it uniformly.
+	// The sender puts its distribution ID in the payload (syncWirePayload).
+	// Over DNS it is also the one in the query name; over HTTPS the
+	// transport made the message an ID of its own, which the sender does
+	// not know. A payload with none takes the transport's, so that
+	// downstream code (AgentMsgPost, sendImmediateConfirmation) can read it
+	// in one place.
 	if msg.DistributionID != "" && payload.DistributionID == "" {
 		payload.DistributionID = msg.DistributionID
 	}
@@ -2696,16 +2699,20 @@ func (tm *MPTransportBridge) foreignWordFor(zone ZoneName) (keys []core.ForeignK
 	return keys, spoken
 }
 
-// logSilentAgents says which of the zone's agents have not said anything
-// about their keys (an older release, or not heard from since we
+// logSilentAgents says which of the zone's signing providers have not said
+// anything about their keys (an older release, or not heard from since we
 // started): while one of them signs the zone its KSK stays undecided at
-// our signer and the zone's DS set unknown (design R9). Logged when the
-// set changes, not with every hand-over.
+// our signer and the zone's DS set unknown (design R9). Only the providers
+// in signers= other than this agent are named: an auditor or a server that
+// does not sign holds no key. Logged when the set changes, not with every
+// hand-over.
 func (tm *MPTransportBridge) logSilentAgents(zone ZoneName) {
-	all, err := tm.getAllAgentsForZone(zone)
-	if err != nil {
+	// With no transport there is no identity of this agent's to leave
+	// out, and it would be named as a provider that has not spoken.
+	if tm.TransportManager == nil {
 		return
 	}
+	all := signingPeers(zone, AgentId(tm.LocalID))
 	tm.foreignKeyStatesMu.Lock()
 	defer tm.foreignKeyStatesMu.Unlock()
 	var silent []string

@@ -22,6 +22,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -410,5 +411,92 @@ func TestAPIReceive_SenderIsTheClientCertificate(t *testing.T) {
 	}
 	if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
 		t.Error("alice's beat did not reach MsgQs.Beat")
+	}
+}
+
+// A SYNC sent over HTTPS carries its sender's distribution ID, and the
+// receiver confirms it under that ID, over DNS: the confirmation finds the
+// sender's queue entry (issue #221). Before, the receiver gave the message
+// an ID of its own, and the entry stayed in the sender's queue, to be sent
+// again for a day.
+func TestAPIReceive_ASyncIsConfirmedUnderTheSendersDistributionID(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ControlZoneIsIdentity: true})
+	const zone = "confirm.https.example."
+	const distID = "d-221"
+	alice := dns.Fqdn(env.Alice.Identity)
+	bob := dns.Fqdn(env.Bob.Identity)
+	zd := seedZoneWithHSYNC3(t, zone, bob, alice)
+	addHSYNCPARAMServers(t, zd, shortLabel(bob), shortLabel(alice))
+
+	// alice takes the confirmation over DNS
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("alice's listener: %v", err)
+	}
+	env.Alice.Registry.S.Set(AgentId(bob), NewAgent(AgentId(bob)))
+	env.Alice.Bridge.PeerRegistry.GetOrCreate(bob)
+	serveDNS(t, env.ctx, ln, env.Alice)
+	if err := env.Bob.Bridge.PeerRegistry.Add(peerFromAddress(alice, ln.Addr().String())); err != nil {
+		t.Fatalf("alice at bob: %v", err)
+	}
+
+	// bob takes the SYNC over HTTPS
+	env.Bob.Bridge.StartIncomingMessageRouter(env.ctx)
+	srv := apiEndpointsServer(t, env.Bob)
+	peer := transport.NewPeer(bob)
+	peer.APIEndpoint = srv.URL + "/api/v1"
+
+	// the SYNC in alice's queue, as the reliable queue holds it while it is
+	// out (its worker is not running here)
+	queue := env.Alice.Bridge.ReliableQueue
+	if err := queue.Enqueue(&transport.OutgoingMessage{DistributionID: distID, RecipientID: bob, Zone: zone}); err != nil {
+		t.Fatalf("the queue: %v", err)
+	}
+	state := func() string {
+		for _, m := range queue.GetPendingMessages() {
+			if m.DistributionID == distID {
+				return m.State
+			}
+		}
+		return "gone"
+	}
+	before := state()
+
+	msg, err := syncAppMessage(&PeerSyncRequest{SenderID: alice, Zone: zone, MessageType: "sync", Timestamp: time.Now(),
+		DistributionID: distID, Operations: []core.RROperation{{Operation: "replace", RRtype: "TXT",
+			Records: []string{zone + " 3600 IN TXT \"https\""}}}}, bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+	defer cancel()
+	resp, err := apiSender(srv, alice).SendApp(ctx, peer, msg)
+	if err != nil || resp.ResponderID != bob {
+		t.Fatalf("SendApp: %+v %v", resp, err)
+	}
+	m, ok := recvMsgWithin(t, env.Bob.MsgQs.Msg, integTestTimeout)
+	if !ok {
+		t.Fatal("the SYNC did not reach bob's message queue")
+	}
+	if m.DistributionID != distID {
+		t.Errorf("bob has the SYNC under %q, want the sender's %q", m.DistributionID, distID)
+	}
+	for deadline := time.Now().Add(integTestTimeout); state() == before; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("bob's confirmation did not reach alice's queue entry: it is still %s", before)
+		}
+	}
+	if got := state(); got != transport.MessageAwaitingConfirm.String() {
+		t.Errorf("after bob's PENDING alice's entry is %s, want it awaiting the final confirmation", got)
+	}
+
+	// bob's final confirmation, as its data engine sends it once the
+	// update is through, under the ID the SYNC came with: it closes the entry
+	env.Bob.Bridge.sendRemoteConfirmation(&RemoteConfirmationDetail{OriginatingDistID: m.DistributionID,
+		OriginatingSender: alice, Zone: zone, Status: "SUCCESS"})
+	for deadline := time.Now().Add(integTestTimeout); state() != "gone"; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("bob's final confirmation did not close alice's queue entry: it is %s", state())
+		}
 	}
 }

@@ -194,11 +194,44 @@ func hasHSYNC3(apex *tdns.OwnerData) bool {
 // zone that is not known here or has no HSYNC3 RRset: that zone has no
 // standings, and elects as before.
 func votesInZone(zone ZoneName, id AgentId) bool {
-	apex := zoneApex(zone)
+	return votesInApex(zoneApex(zone), id)
+}
+
+// votesInApex is votesInZone for a caller that holds the apex of the copy
+// of the zone it judges by.
+func votesInApex(apex *tdns.OwnerData, id AgentId) bool {
 	if !hasHSYNC3(apex) {
 		return true
 	}
 	return zoneStanding(apex, string(id)) == standingVoting
+}
+
+// signingPeers are the zone's providers in signers= other than self,
+// resolved through its ON HSYNC3 records. None for a zone without an
+// HSYNCPARAM, which names no signer.
+func signingPeers(zone ZoneName, self AgentId) []AgentId {
+	apex := zoneApex(zone)
+	hp := apexHSYNCPARAM(apex)
+	if hp == nil {
+		return nil
+	}
+	labelToIdentity := map[string]string{}
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 {
+				labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
+			}
+		}
+	}
+	var out []AgentId
+	for _, label := range hp.GetSigners() {
+		id, ok := labelToIdentity[strings.TrimSuffix(label, ".")]
+		if !ok || isAmong([]string{string(self)}, AgentId(id)) || slices.Contains(out, AgentId(id)) {
+			continue
+		}
+		out = append(out, AgentId(id))
+	}
+	return out
 }
 
 // votingPeers are the zone's voting members other than self. For an agent

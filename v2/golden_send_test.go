@@ -58,6 +58,7 @@ func goldenSendMessages(t *testing.T) []struct {
 		{"send-sync-default", must(syncAppMessage(syncReq(""), you))},
 		{"send-update", must(syncAppMessage(syncReq("update"), you))},
 		{"send-rfi", must(syncAppMessage(syncReq("rfi"), you))},
+		{"send-rfi-noid", must(syncAppMessage(func() *PeerSyncRequest { r := syncReq("rfi"); r.DistributionID = ""; return r }(), you))},
 		{"send-keystate-inventory", must(keystateAppMessage(&PeerKeystateRequest{
 			SenderID: me, Zone: zone, Signal: "inventory", Message: "full set", Timestamp: ts,
 			KeyInventory: []KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
@@ -97,6 +98,7 @@ func TestGoldenWireSendPayloads(t *testing.T) {
 		"send-sync-default":       {"sync", "zone1.example.", "dist-001", false},
 		"send-update":             {"update", "zone1.example.", "dist-001", false},
 		"send-rfi":                {"rfi", "zone1.example.", "dist-001", false},
+		"send-rfi-noid":           {"rfi", "zone1.example.", "", false},
 		"send-keystate-inventory": {"keystate", "zone1.example.", "", false},
 		"send-keystate-signal":    {"keystate", "zone1.example.", "", false},
 		"send-edits":              {"edits", "zone1.example.", "", false},
