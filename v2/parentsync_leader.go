@@ -1201,7 +1201,22 @@ func (lem *LeaderElectionManager) ZoneLeader(zone ZoneName) (AgentId, bool) {
 }
 
 // GetAllLeaders returns the current leader status for all zones with an active leader.
+//
+// IsSelf is this agent's lead as IsLeader has it: a lease held in a zone
+// this agent does not vote in is no lead of its own (decision 34). That is
+// asked once the election locks are free, as IsLeader asks it.
 func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
+	result := lem.allLeases()
+	for i := range result {
+		if result[i].IsSelf && !votesInZone(result[i].Zone, lem.localID) {
+			result[i].IsSelf = false
+		}
+	}
+	return result
+}
+
+// allLeases is GetAllLeaders by the leases alone.
+func (lem *LeaderElectionManager) allLeases() []LeaderStatus {
 	lem.mu.RLock()
 	defer lem.mu.RUnlock()
 

@@ -227,8 +227,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		if !ok || zd == nil {
 			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
 		}
-		if !zd.Options[tdns.OptParentSync] {
-			lgAgent.Info("onLeaderElected: zone does not have OptParentSync, skipping", "zone", zone)
+		if applies, why := keySetupApplies(zd, lem.localID); !applies {
+			lgAgent.Info("onLeaderElected: "+why, "zone", zone)
 			return nil
 		}
 		if elected {
@@ -551,4 +551,19 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	}
 
 	return nil
+}
+
+// keySetupApplies: the leader's key setup is for a zone whose parentsync
+// option is on and in which this agent votes. A group's election makes its
+// winner the leader of every zone of the group, and the group's voters are
+// those of all its zones together: the winner may not vote in this one. For
+// such a zone it looks up no parent and asks no peer for the key.
+func keySetupApplies(zd *MPZoneData, self AgentId) (bool, string) {
+	if !zd.Options[tdns.OptParentSync] {
+		return false, "zone does not have OptParentSync, skipping"
+	}
+	if !votesInZone(ZoneName(zd.ZoneName), self) {
+		return false, "this agent does not vote in the zone; no key setup for it"
+	}
+	return true, ""
 }

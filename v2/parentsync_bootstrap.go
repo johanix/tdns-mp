@@ -57,8 +57,7 @@ func (conf *Config) keyPollOnce(ctx, runCtx context.Context, zone ZoneName, keyN
 	}
 	// The option says whether this agent may sync the zone at all: the
 	// zone's records name it, and HSYNCPARAM says parentsync=agent
-	// (followParentSyncParam). stillParticipates cannot tell that for a zone
-	// in which nobody takes part.
+	// (followParentSyncParam).
 	if zd, ok := Zones.Get(string(zone)); ok && ownerSyncsDelegation(zd.ZoneData) {
 		lgElect.Info("the key poll is not started: the zone's parentsync option is off", "zone", zone)
 		return false

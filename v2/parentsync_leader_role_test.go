@@ -695,20 +695,27 @@ func (r *keyPollRig) chains() int {
 
 // A refresh after which this agent no longer takes part in the zone, its
 // record OFF or its roles taken, ends the zone's chain and its key poll,
-// while the poll waits. The option stays on.
+// while the poll waits. The option stays on. Also when this agent is the
+// zone's only provider: then nobody takes part after the refresh.
 func TestAKeyPollEndsWhenThisAgentNoLongerTakesPart(t *testing.T) {
 	asMPAgent(t)
+	both, two := []h3rec{{usAgent, true}, {otherAgent, true}}, []string{usAgent, otherAgent}
+	alone, one := []h3rec{{usAgent, true}}, []string{usAgent}
 	for _, tc := range []struct {
-		name    string
-		recs    []h3rec
-		servers []string
+		name         string
+		startRecs    []h3rec
+		startServers []string
+		recs         []h3rec
+		servers      []string
 	}{
-		{"its record turns OFF", []h3rec{{usAgent, false}, {otherAgent, true}}, []string{usAgent, otherAgent}},
-		{"its roles are taken", []h3rec{{usAgent, true}, {otherAgent, true}}, []string{otherAgent}},
+		{"its record turns OFF", both, two, []h3rec{{usAgent, false}, {otherAgent, true}}, two},
+		{"its roles are taken", both, two, both, []string{otherAgent}},
+		{"the only provider's record turns OFF", alone, one, []h3rec{{usAgent, false}}, one},
+		{"the only provider's role is taken", alone, one, alone, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newKeyPollRig(t, "takespart.parentsync.example.")
-			servedMembers(t, r.mpzd, []h3rec{{usAgent, true}, {otherAgent, true}}, []string{usAgent, otherAgent})
+			servedMembers(t, r.mpzd, tc.startRecs, tc.startServers)
 			refreshed(t, r.conf, r.mpzd)
 			r.chain()
 			r.poll(t)
@@ -741,9 +748,12 @@ func TestAKeyPollIsNotStartedWhereThisAgentTakesNoPart(t *testing.T) {
 	}{
 		{"its record is OFF", []h3rec{{usAgent, false}, {otherAgent, true}}, []string{usAgent, otherAgent}},
 		{"it has no role", []h3rec{{usAgent, true}, {otherAgent, true}}, []string{otherAgent}},
-		// nobody takes part, so stillParticipates cannot tell; the option,
-		// off for a zone that does not name this agent, does
+		// nobody takes part: under an HSYNC3 RRset this agent does not
+		// either, and the option is off for a zone that does not name it
 		{"no record names it, and nobody takes part", []h3rec{{otherAgent, false}}, []string{otherAgent}},
+		// the only provider's record OFF, or its only role taken
+		{"it is the only provider and its record is OFF", []h3rec{{usAgent, false}}, []string{usAgent}},
+		{"it is the only provider and has no role", []h3rec{{usAgent, true}}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newKeyPollRig(t, "nopart.parentsync.example.")
@@ -856,12 +866,36 @@ func TestOneProviderAndAnAgentWithNoRoleHaveOneLeader(t *testing.T) {
 // A refresh after which this agent takes no part in the zone stops the sync
 // under way, as the owner's take-over does, here an UPDATE in tdns's retry
 // loop. That is no failure: nothing asks again, and no warning says that
-// the sync failed.
+// the sync failed. Also when this agent is the zone's only provider, and
+// nobody takes part after the refresh.
 func TestASyncStoppedBecauseThisAgentLeftIsNoFailure(t *testing.T) {
 	asMPAgent(t)
-	r := newNotifyRig(t, "left.update.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
+	for _, tc := range []struct {
+		name string
+		zone string
+		// the zone's records before and after the refresh, by who is
+		// us and who is the peer
+		before, after func(us, peer string) ([]h3rec, []string)
+	}{
+		{"its role is taken", "left.update.example.",
+			func(us, peer string) ([]h3rec, []string) { return []h3rec{{us, true}, {peer, true}}, []string{us, peer} },
+			func(us, peer string) ([]h3rec, []string) { return []h3rec{{us, true}, {peer, true}}, []string{peer} }},
+		{"the only provider's record turns OFF", "off.alone.update.example.",
+			func(us, _ string) ([]h3rec, []string) { return []h3rec{{us, true}}, []string{us} },
+			func(us, _ string) ([]h3rec, []string) { return []h3rec{{us, false}}, []string{us} }},
+		{"the only provider's role is taken", "norole.alone.update.example.",
+			func(us, _ string) ([]h3rec, []string) { return []h3rec{{us, true}}, []string{us} },
+			func(us, _ string) ([]h3rec, []string) { return []h3rec{{us, true}}, nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) { syncStoppedBecauseThisAgentLeft(t, tc.zone, tc.before, tc.after) })
+	}
+}
+
+func syncStoppedBecauseThisAgentLeft(t *testing.T, zone string, before, after func(us, peer string) ([]h3rec, []string)) {
+	r := newNotifyRig(t, zone, "UPDATE", repeat(30*time.Millisecond, 400)...)
 	us, peer := r.us.Identity, r.peer.Identity
-	servedMembers(t, r.mpzd, []h3rec{{us, true}, {peer, true}}, []string{us, peer})
+	recs, servers := before(us, peer)
+	servedMembers(t, r.mpzd, recs, servers)
 	refreshed(t, r.conf, r.mpzd)
 	r.propagation(time.Hour)
 	z := r.mpzd.ZoneName
@@ -887,7 +921,8 @@ func TestASyncStoppedBecauseThisAgentLeftIsNoFailure(t *testing.T) {
 		t.Fatal("the refused UPDATE is not being retried")
 	}
 
-	servedMembers(t, r.mpzd, []h3rec{{us, true}, {peer, true}}, []string{peer}) // its role is taken
+	recs, servers = after(us, peer)
+	servedMembers(t, r.mpzd, recs, servers)
 	refreshed(t, r.conf, r.mpzd)
 	for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
@@ -903,5 +938,29 @@ func TestASyncStoppedBecauseThisAgentLeftIsNoFailure(t *testing.T) {
 	}
 	if n := r.parent.updatesSeen(); n != 1 {
 		t.Errorf("the parent got %d UPDATEs, want the one sent before this agent left", n)
+	}
+}
+
+// The leader's key setup is for a zone in which this agent votes. A group's
+// winner that does not vote in one of the group's zones looks up no parent
+// and asks no peer for that zone's key.
+func TestTheKeySetupIsOnlyForAZoneThisAgentVotesIn(t *testing.T) {
+	const zone = "keysetup.role.example."
+	seedRoles(t, zone, []string{roleA}, nil, []string{roleN}).Options[tdns.OptParentSync] = true
+	mpzd, ok := Zones.Get(zone)
+	if !ok {
+		t.Fatal("the zone is not registered")
+	}
+	if ok, why := keySetupApplies(mpzd, AgentId(roleA)); !ok {
+		t.Errorf("the voting member gets no key setup: %s", why)
+	}
+	for _, id := range []string{roleN, "absent.role.example."} {
+		if ok, _ := keySetupApplies(mpzd, AgentId(id)); ok {
+			t.Errorf("%s, which does not vote in the zone, gets the key setup", id)
+		}
+	}
+	mpzd.Options[tdns.OptParentSync] = false
+	if ok, _ := keySetupApplies(mpzd, AgentId(roleA)); ok {
+		t.Error("a zone with the parentsync option off gets the key setup")
 	}
 }
