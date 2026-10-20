@@ -95,14 +95,10 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 		// body names the originator, which for an update an agent
 		// forwards to its combiner is the remote agent whose update it
 		// is. It goes in canonical form, the form a peer is known by;
-		// the certificate may spell the name otherwise. /hello is reached
-		// before the peer's TLSA is known; nothing has checked a
-		// certificate there, and the body names the sender.
+		// the certificate may spell the name otherwise.
 		var sender string
-		if kind != apiEndpointHello {
-			if cn, ok := clientIdentity(r); ok {
-				sender = core.CanonicalizeName(dns.Fqdn(cn))
-			}
+		if cn, ok := clientIdentity(r); ok {
+			sender = core.CanonicalizeName(dns.Fqdn(cn))
 		}
 		sink.your = AgentId(im.SenderID)
 		if sender != "" {
@@ -114,14 +110,14 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			_ = sink.fail(fmt.Sprintf("message type %q is not accepted on %s", im.Token(), r.URL.Path))
 			return
 		}
-		// On /beat and /sync/ping a peer speaks for itself: the sender the
-		// body names is the identity of the certificate the connection
-		// presented. The answer to a beat carries the gossip built for
-		// that sender (plan decision 26), so a peer must not get it by
-		// naming another. /msg is not held to this: an agent forwards a
-		// peer's update to its combiner under that peer's name. /hello is
-		// reached before the peer's certificate is known.
-		if kind == apiEndpointBeat || kind == apiEndpointPing {
+		// On /hello, /beat and /sync/ping a peer speaks for itself: the
+		// sender the body names is the identity of the certificate the
+		// connection presented. The answer to a beat carries the gossip
+		// built for that sender (plan decision 26), so a peer must not get
+		// it by naming another, and a hello introduces only the agent that
+		// sent it. /msg is not held to this: an agent forwards a peer's
+		// update to its combiner under that peer's name.
+		if kind == apiEndpointHello || kind == apiEndpointBeat || kind == apiEndpointPing {
 			if cn, ok := clientIdentity(r); ok && dns.CanonicalName(cn) != dns.CanonicalName(im.SenderID) {
 				lgApi.Warn("sync API request refused: the sender is not the client certificate's identity",
 					"path", r.URL.Path, "from", r.RemoteAddr, "sender", im.SenderID, "certificate", cn)
