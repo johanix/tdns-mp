@@ -1017,13 +1017,19 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 		}
 	}
 
-	// 1. Reload AgentContributions from the CombinerContributions snapshot.
+	// 1. Reload AgentContributions from the CombinerContributions snapshot,
+	// read under the zone's lock. An update changes a sender's
+	// contributions and saves them under that lock, so it comes wholly
+	// before this read or wholly after the reload. Read first, a snapshot
+	// could miss an update saved before the reload replaced what it put
+	// in memory, and roll the zone back. The lock order is the one an
+	// update has: the zone, then the database.
+	mpzd.Lock()
 	allContribs, err := LoadAllContributions(hdb)
 	if err != nil {
+		mpzd.Unlock()
 		return "", fmt.Errorf("failed to load contributions: %w", err)
 	}
-
-	mpzd.Lock()
 	mpzd.EnsureMP()
 	mpzd.MP.ContributionsRead = true // the store is read now, if it was not at the start
 	if zoneContribs, ok := allContribs[zone]; ok {
