@@ -559,3 +559,60 @@ func TestAZoneThatJoinsAGroupItsLeaderDoesNotVoteInIsNotTakenUp(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// A DNSKEY distribution derived while this provider had a role, and refused
+// by the data engine because the role was taken before it was applied, is
+// not left recorded as sent: once the role is back, the same inventory
+// distributes the keys.
+func TestADNSKEYDistributionRefusedAfterItsDerivationIsNotLeftAsSent(t *testing.T) {
+	asMPAgent(t)
+	yes := true
+	r := newLeaderSyncRig(t, "late.refused.dnskey.example.")
+	r.mpzd.Ready = true
+	z := r.mpzd.ZoneName
+	recs := []h3rec{{usAgent, true}, {otherAgent, true}}
+	ksk := invItem(t, z, 257, KeyStateActive, &yes)
+	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: z, Inventory: []KeyInventoryItem{ksk}, Received: time.Now()})
+
+	servedMembers(t, r.mpzd, recs, []string{usAgent, otherAgent})
+	changed, ds, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, nil)
+	if err != nil || !changed || ds == nil {
+		t.Fatalf("the derivation with the role: changed=%v err=%v", changed, err)
+	}
+	// the role is taken before the engine applies the distribution
+	servedMembers(t, r.mpzd, recs, []string{otherAgent})
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, msg, err := zdr.EvaluateUpdate(&SynchedDataUpdate{Zone: ZoneName(z), AgentId: usAgent, UpdateType: "local",
+		Update: &ZoneUpdate{Zone: ZoneName(z), AgentId: usAgent, Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{ksk.KeyRR}}}}})
+	if ok || err != nil || !strings.Contains(msg, "no role") {
+		t.Fatalf("the distribution after the role was taken: ok=%v msg=%q err=%v", ok, msg, err)
+	}
+	// the role is back: the same inventory distributes the keys
+	servedMembers(t, r.mpzd, recs, []string{usAgent, otherAgent})
+	if changed, ds, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, nil); err != nil || !changed || ds == nil || len(ds.CurrentLocalKeys) != 1 {
+		t.Errorf("the derivation once the role is back: changed=%v err=%v ds=%+v", changed, err, ds)
+	}
+}
+
+// With no transport, a bridge knows no identity of its agent's own, and does
+// not name the agent itself as a signing provider that has not spoken.
+func TestSilentProvidersAreNotNamedWithoutAnIdentity(t *testing.T) {
+	asMPAgent(t)
+	r := newLeaderSyncRig(t, "silent.noid.example.")
+	r.mpzd.Ready = true
+	z := r.mpzd.ZoneName
+	servedMembers(t, r.mpzd, []h3rec{{usAgent, true}, {otherAgent, true}}, []string{usAgent, otherAgent})
+	apex, _ := r.mpzd.OwnerForAnalysis(z)
+	hp := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNCPARAM).RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+	hp.Value = append(hp.Value, &core.HSYNCPARAMSigners{Signers: []string{memberLabel(usAgent), memberLabel(otherAgent)}})
+	r.mpzd.Data.Set(z, *apex)
+	r.mpzd.InstallInitialSnapshot()
+	tm := &MPTransportBridge{}
+	tm.logSilentAgents(ZoneName(z))
+	if said := tm.foreignSilentSaid[ZoneName(z)]; said != "" {
+		t.Errorf("a bridge with no identity named %q as silent", said)
+	}
+}
