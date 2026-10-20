@@ -84,6 +84,42 @@ func (zdr *ZoneDataRepo) noteCombinerConfirmed(zone ZoneName, distID string, at 
 	}
 }
 
+// setsNotHandedOver are those of types whose last change here, of agent's
+// set, this agent's combiner may not have. With failedOnly, only a set whose
+// hand-over failed (no distribution); else also one the combiner has not
+// confirmed yet. The repo has the set either way, so the repo alone does not
+// say the combiner does; the set note is the trace, for a set an omission or
+// an empty replace changed as much as for one with records.
+func (zdr *ZoneDataRepo) setsNotHandedOver(zone ZoneName, agent AgentId, types []uint16, failedOnly bool) map[uint16]bool {
+	var out map[uint16]bool
+	for _, t := range types {
+		n := zdr.notes[zone][agent][t]
+		if n == nil || (n.distID != "" && (failedOnly || !n.confirmed.IsZero())) {
+			continue
+		}
+		if out == nil {
+			out = map[uint16]bool{}
+		}
+		out[t] = true
+	}
+	return out
+}
+
+// recordsNotOfTypes are those of records whose type is not among types.
+func recordsNotOfTypes(records []string, types map[uint16]bool) []string {
+	if len(types) == 0 {
+		return records
+	}
+	var out []string
+	for _, s := range records {
+		if rr, err := dns.NewRR(s); err == nil && types[rr.Header().Rrtype] {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // mayApplyOwnRead: the combiner's answer to a request sent at sentAt may set
 // agent's set of rrtype. A set with no note, which no update has changed
 // since the agent started, may. A set whose last change the combiner had
