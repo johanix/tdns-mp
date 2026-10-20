@@ -117,7 +117,7 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 		return
 	}
 	e.conf.noteKeyInventory(ctx, zd, inventoryMsg)
-	changed, ds, err := zd.LocalDnskeysFromKeystate()
+	changed, ds, err := zd.LocalDnskeysFromKeystate(ourID, nil)
 	if err != nil || !changed {
 		return
 	}

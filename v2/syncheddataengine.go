@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -114,8 +115,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname, "weAreSigner", weAreSigner)
 				zd.RequestAndWaitForKeyInventory(ctx, conf.InternalMp.MPTransport)
 
-				changed, ds, err := zd.LocalDnskeysFromKeystate()
-				if err != nil {
+				changed, ds, err := zd.LocalDnskeysFromKeystate(AgentId(conf.MpConfig().Identity), nil)
+				if errors.Is(err, errNoRoleInZone) {
+					lgEngine.Debug("startup hydration: no DNSKEYs of this provider are distributed", "zone", zname, "reason", err)
+				} else if err != nil {
 					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
 				} else if changed && ds != nil {
 					localAgentID := AgentId(conf.MpConfig().Identity)
@@ -669,6 +672,17 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					continue
 				}
 
+				// An agent whose provider has no role in the zone sends none
+				// of its own data, to the other agents or to its combiner:
+				// an empty replace there would change what the provider
+				// contributed (decision 33). The other agents' data still
+				// goes to its combiner (2. below), which repairs the
+				// combiner and changes nothing of this provider's.
+				noRole := !votesInZone(sdcmd.Zone, myAgentId)
+				if noRole {
+					lgEngine.Info(noRolePushNote(sdcmd.Zone))
+				}
+
 				var totalRRs int
 
 				// 1. Send local data (excluding DNSKEY) to combiner.
@@ -680,7 +694,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					AgentId: myAgentId,
 				}
 				sentRRtypes := make(map[uint16]bool)
-				if nod, ok := agentRepo.Data.Get(myAgentId); ok {
+				if nod, ok := agentRepo.Data.Get(myAgentId); ok && !noRole {
 					for _, rrtype := range nod.RRtypes.Keys() {
 						if rrtype == dns.TypeDNSKEY {
 							continue // local DNSKEYs go via signer, not UPDATE
@@ -707,6 +721,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// This tells the combiner "I have zero records of this type"
 				// and cleans up stale contributions.
 				for rrtype := range AllowedLocalRRtypes {
+					if noRole {
+						break
+					}
 					if rrtype == dns.TypeDNSKEY {
 						continue // DNSKEYs go via signer
 					}
@@ -734,7 +751,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 				// Send all local data (including DNSKEY) to remote agents.
 				// Remote agents need our DNSKEYs to converge.
-				if nod, ok := agentRepo.Data.Get(myAgentId); ok {
+				if nod, ok := agentRepo.Data.Get(myAgentId); ok && !noRole {
 					agentZU := &ZoneUpdate{
 						Zone:    sdcmd.Zone,
 						AgentId: myAgentId,
@@ -811,14 +828,18 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					}
 				}
 
+				note := ""
+				if noRole {
+					note = noRolePushNote(sdcmd.Zone) + ". "
+				}
 				if totalRRs == 0 {
-					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No RRs to resync for zone %s", sdcmd.Zone)}
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: note + fmt.Sprintf("No RRs to resync for zone %s", sdcmd.Zone)}
 					continue
 				}
 
 				lgEngine.Info("resync complete", "zone", sdcmd.Zone, "rrs", totalRRs)
 				sdcmd.Response <- &SynchedDataCmdResponse{
-					Msg: fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
+					Msg: note + fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
 				}
 
 			case "resync-targeted":
@@ -837,6 +858,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					continue
 				}
 				myAgentId := AgentId(conf.MpConfig().Identity)
+				// It sends this agent's own data alone, which an agent
+				// whose provider has no role does not send (decision 33),
+				// whoever asks: the combiner's agent-resync asks this way.
+				if !votesInZone(sdcmd.Zone, myAgentId) {
+					lgEngine.Info(noRolePushNote(sdcmd.Zone), "target", sdcmd.TargetAgent)
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: noRolePushNote(sdcmd.Zone)}
+					continue
+				}
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
 				if !ok {
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local data for zone %s", sdcmd.Zone)}

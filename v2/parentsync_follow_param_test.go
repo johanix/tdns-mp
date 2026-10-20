@@ -650,8 +650,11 @@ func noLongerParticipates(t *testing.T, optionOn bool) {
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
 	r.mpzd.Data.Set(z, apex)
 	r.mpzd.InstallInitialSnapshot()
-	if !r.lem.IsLeader(ZoneName(z)) {
-		t.Fatal("the rig does not start as the zone's leader")
+	// the lease still names this agent; the lead no longer counts where it
+	// does not vote (IsLeader, decision 34), and the syncher's first test
+	// is whether it takes part at all
+	if leader, ok := r.lem.GetLeader(ZoneName(z)); !ok || leader != AgentId(r.us.Identity) {
+		t.Fatal("the rig does not start with this agent's lease for the zone")
 	}
 	if !optionOn {
 		r.mpzd.SetRuntimeOption(tdns.OptParentSync, false)
