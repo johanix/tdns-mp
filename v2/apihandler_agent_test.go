@@ -302,6 +302,13 @@ func TestAnAgentWhoseRolesAreGoneLeadsNoMore(t *testing.T) {
 	if !r.lem.IsLeader(z) {
 		t.Fatal("the agent with a role does not lead")
 	}
+	listed := false
+	for _, ls := range r.lem.GetAllLeaders() {
+		listed = listed || (ls.Zone == z && ls.IsSelf)
+	}
+	if !listed {
+		t.Fatal("the leader list does not show the lead of the agent with a role")
+	}
 
 	servedMembers(t, r.mpzd, recs, []string{otherAgent})
 	if r.lem.IsLeader(z) {
@@ -309,6 +316,12 @@ func TestAnAgentWhoseRolesAreGoneLeadsNoMore(t *testing.T) {
 	}
 	if st := r.lem.GetParentSyncStatus(z, nil, nil, nil, nil, nil); st.IsLeader || st.Leader != usAgent {
 		t.Errorf("the status: leader %q, this agent's lead %v", st.Leader, st.IsLeader)
+	}
+	// the leader list that the peer status publishes says the same
+	for _, ls := range r.lem.GetAllLeaders() {
+		if ls.Zone == z && (ls.IsSelf || ls.Leader != usAgent) {
+			t.Errorf("the leader list: leader %q, this agent's lead %v", ls.Leader, ls.IsSelf)
+		}
 	}
 	if r.conf.requestDelegationSync(r.ctx, string(z), "this agent was elected the zone's delegation sync leader") {
 		t.Error("a sync was asked for by an agent whose roles are gone")
