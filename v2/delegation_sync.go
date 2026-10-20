@@ -147,6 +147,53 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			case "EXPLICIT-SYNC-DELEGATION":
 				lg.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
 
+				// The reasons to send nothing come before the parent is
+				// asked, the hold among them: a leader's sync of a zone that
+				// is not caught up is owed, whether the parent answers or
+				// not (design 5.6). Their answer to the operator is the
+				// reason; the analysis is not made.
+				skipped := tdns.DelegationSyncStatus{ZoneName: ds.ZoneName, Time: time.Now()}
+				skip := func(msg string) {
+					skipped.Msg = msg
+					if ds.Response != nil {
+						ds.Response <- skipped
+					}
+				}
+				// An agent the zone no longer has first, as above
+				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
+					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncNotLeading(ds.ZoneName, false)
+					skip("this agent no longer participates in the zone, skipping DDNS")
+					continue
+				}
+				// No agent sends to the parent of a zone whose owner syncs its
+				// delegation; the request was queued before the owner took
+				// the sync over
+				if ownerSyncsDelegation(ds.ZoneData) {
+					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+					conf.delegationSyncOwnerSyncs(ds.ZoneName)
+					skip("the zone's owner syncs its delegation, skipping DDNS")
+					continue
+				}
+				// Only the elected leader of a multi-provider zone sends to the
+				// parent; a zone this daemon is primary for alone (its
+				// identity zone) has no election to wait for.
+				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
+					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
+						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
+						// a chain left from a term this agent led is over
+						conf.delegationSyncNotLeading(ds.ZoneName, false)
+						skip("not the delegation sync leader, skipping DDNS")
+						continue
+					}
+				}
+				// Held while the zone is not caught up: the operator is told
+				// so, with no error
+				if held, waiting := conf.holdLeaderSync(ds); held {
+					skip(fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting))
+					continue
+				}
+
 				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
@@ -156,61 +203,17 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						ds.Response <- syncstate
 					}
 					// the leader's sync of a multi-provider zone is asked
-					// again: whatever asked for it will not ask twice
+					// again: whatever asked for it will not ask twice. The
+					// retry gives up after a few; the sync is owed as well,
+					// as one held is, and asked again while it is owed and
+					// the zone is caught up, until the parent answers.
 					//
 					// A sync that was stopped because this agent no longer
 					// takes part in the zone (followParentSyncParam) is not a
 					// failure to ask again for.
 					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
-					}
-					continue
-				}
-
-				// An agent the zone no longer has first, as above
-				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
-					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
-					conf.delegationSyncNotLeading(ds.ZoneName, false)
-					syncstate.Msg = "this agent no longer participates in the zone, skipping DDNS"
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-				}
-				// No agent sends to the parent of a zone whose owner syncs its
-				// delegation; the request was queued before the owner took
-				// the sync over
-				if ownerSyncsDelegation(ds.ZoneData) {
-					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
-					conf.delegationSyncOwnerSyncs(ds.ZoneName)
-					syncstate.Msg = "the zone's owner syncs its delegation, skipping DDNS"
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-				}
-
-				// Only the elected leader of a multi-provider zone sends to the
-				// parent; a zone this daemon is primary for alone (its
-				// identity zone) has no election to wait for.
-				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
-					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
-						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
-						// a chain left from a term this agent led is over
-						conf.delegationSyncNotLeading(ds.ZoneName, false)
-						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
-						if ds.Response != nil {
-							ds.Response <- syncstate
-						}
-						continue
-					}
-				}
-				// Held while the zone is not caught up, before the parent is
-				// called in sync: the operator is told so, with no error
-				if held, waiting := conf.holdLeaderSync(ds); held {
-					syncstate.Msg = fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting)
-					if ds.Response != nil {
-						ds.Response <- syncstate
+						conf.InternalMp.CatchUp.owe(ZoneName(ds.ZoneName))
 					}
 					continue
 				}
