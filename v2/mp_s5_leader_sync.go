@@ -763,20 +763,26 @@ func (c *delegationSyncChains) endChainLocked(zone string) *delegationNotifyHold
 }
 
 // stillParticipates: one of this agent's identities has a role in the zone
-// (ParticipantsForZone: an HSYNCPARAM role through an ON HSYNC3 record). A
+// (zoneParticipants: an HSYNCPARAM role through an ON HSYNC3 record). A
 // refresh that removed this agent from the zone has published that before
 // PostRefresh queues anything, so the syncher reads it whatever the order of
 // the group recompute: PostRefresh queues a delegation sync before it applies
-// the HSYNC diff, and the syncher could judge the lead on the old groups. A
-// zone with no participants at all gives nothing to judge by.
+// the HSYNC diff, and the syncher could judge the lead on the old groups.
+//
+// A zone with no HSYNC3 RRset here (not loaded, or not a multi-provider
+// zone) gives nothing to judge by, and this agent takes part. A zone with
+// one does not count this agent when no participant is this agent, also
+// when there is no participant at all: the only provider's record set OFF,
+// or its only role taken, as votesInZone has it.
 func (conf *Config) stillParticipates(zone string) bool {
 	ids := ourHsyncIdentities(conf.MpConfig())
-	participants := ParticipantsForZone(ZoneName(zone))
-	if len(ids) == 0 || len(participants) == 0 {
+	apex := zoneApex(ZoneName(zone))
+	if len(ids) == 0 || !hasHSYNC3(apex) {
 		return true
 	}
+	participants, _ := zoneParticipants(apex)
 	for _, p := range participants {
-		if isAmong(ids, p) {
+		if isAmong(ids, AgentId(p)) {
 			return true
 		}
 	}
