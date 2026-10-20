@@ -103,6 +103,12 @@ type MPTransportBridge struct {
 	// rediscoveryInterval is the least time between two such lookups of one
 	// peer; zero means peerRediscoveryInterval.
 	rediscoveryInterval time.Duration
+
+	// confirmFallbackLogged is, per peer and mechanism, when a confirmation
+	// that failed on that mechanism and went on the other was last logged
+	// loudly (noteConfirmFallback).
+	confirmFallbackMu     sync.Mutex
+	confirmFallbackLogged map[string]time.Time
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -1579,29 +1585,73 @@ func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transp
 }
 
 // confirmOn sends a confirmation on t, the transport of its SYNC's mechanism
-// (confirmTransport). One that fails over HTTPS is sent over DNS when DNS
-// reaches the peer; whether it may be is not settled yet, and until it is
-// that stays as it was. The HTTPS try then gets half the time, so a peer
-// that hangs on it leaves DNS the rest. A confirmation over DNS has no
-// fallback: the SYNC came over DNS.
+// (confirmTransport): the first choice of path is the one the SYNC came on.
+// When that fails, the confirmation goes on the other mechanism, if that
+// reaches the peer. The first try then gets half the time, so a peer that
+// hangs on it leaves the other mechanism the rest.
 func (tm *MPTransportBridge) confirmOn(ctx context.Context, t transport.Transport, peer *transport.Peer, req *transport.ConfirmRequest) error {
-	if _, isAPI := t.(*transport.APITransport); !isAPI || tm.DNSTransport == nil || peer.CurrentAddress() == nil {
+	other := tm.otherConfirmTransport(t, peer)
+	if other == nil {
 		return t.Confirm(ctx, peer, req)
 	}
 	first, cancel := ctx, context.CancelFunc(func() {})
 	if deadline, ok := ctx.Deadline(); ok {
 		first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
 	}
-	apiErr := t.Confirm(first, peer, req)
+	err := t.Confirm(first, peer, req)
 	cancel()
-	if apiErr == nil {
+	if err == nil {
 		return nil
 	}
-	if dnsErr := tm.DNSTransport.Confirm(ctx, peer, req); dnsErr != nil {
-		return fmt.Errorf("API: %w; DNS: %w", apiErr, dnsErr)
+	if otherErr := other.Confirm(ctx, peer, req); otherErr != nil {
+		return fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), otherErr)
 	}
-	lgTransport.Info("confirmation sent over DNS, as HTTPS failed", "peer", peer.ID, "distributionID", req.DistributionID, "err", apiErr)
+	tm.noteConfirmFallback(peer.ID, t.Name(), other.Name(), err)
 	return nil
+}
+
+// otherConfirmTransport is the mechanism a confirmation falls back to from
+// t's: DNS when the peer has an address, HTTPS when it has an endpoint;
+// nil when there is none.
+func (tm *MPTransportBridge) otherConfirmTransport(t transport.Transport, peer *transport.Peer) transport.Transport {
+	switch t.(type) {
+	case *transport.APITransport:
+		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+			return tm.DNSTransport
+		}
+	case *transport.DNSTransport:
+		if tm.APITransport != nil && peer.GetAPIEndpoint() != "" {
+			return tm.APITransport
+		}
+	}
+	return nil
+}
+
+// noteConfirmFallback logs a confirmation to peer that failed on the
+// mechanism its SYNC came on and went on the other: loudly the first time
+// for that peer and mechanism and then at most hourly, quietly in between,
+// so a pair that works one way only shows without a line per confirmation.
+// It reports whether it logged loudly.
+func (tm *MPTransportBridge) noteConfirmFallback(peerID, failed, used string, err error) bool {
+	key := peerID + "|" + failed
+	now := time.Now()
+	tm.confirmFallbackMu.Lock()
+	last, seen := tm.confirmFallbackLogged[key]
+	loud := !seen || now.Sub(last) >= time.Hour
+	if loud {
+		if tm.confirmFallbackLogged == nil {
+			tm.confirmFallbackLogged = make(map[string]time.Time)
+		}
+		tm.confirmFallbackLogged[key] = now
+	}
+	tm.confirmFallbackMu.Unlock()
+	if loud {
+		lgTransport.Warn("confirmations to the peer fail on the mechanism their SYNC came on; sent on the other (logged again in an hour)",
+			"peer", peerID, "failed", failed, "used", used, "err", err)
+	} else {
+		lgTransport.Debug("confirmation sent on the other mechanism", "peer", peerID, "failed", failed, "used", used, "err", err)
+	}
+	return loud
 }
 
 // SelectTransport selects the appropriate transport for communicating with a peer.

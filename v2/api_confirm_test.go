@@ -1,12 +1,11 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * A SYNC's confirmations go back on the mechanism the SYNC arrived on: a
+ * A SYNC's confirmations go first on the mechanism the SYNC arrived on: a
  * SYNC over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS,
- * whatever else the originator offers. A confirmation that fails over
- * HTTPS goes over DNS (an open question; it stays as it was until settled).
- * A confirmation over HTTPS speaks for the client certificate's identity
- * only.
+ * whatever else the originator offers. A confirmation that fails there goes
+ * on the other mechanism. A confirmation over HTTPS speaks for the client
+ * certificate's identity only.
  */
 
 package tdnsmp
@@ -292,6 +291,64 @@ func TestConfirm_HangingHTTPSLeavesDNSTime(t *testing.T) {
 	}
 	if n := me.notifies.Load(); n != 1 {
 		t.Errorf("%d NOTIFYs, want the confirmation's", n)
+	}
+}
+
+// A confirmation that fails over DNS goes over HTTPS: alice's DNS address
+// at bob answers nothing, and both of bob's confirmations of a SYNC that
+// came over DNS reach her over HTTPS and close her entry.
+func TestConfirm_FailedDNSConfirmGoesOverHTTPS(t *testing.T) {
+	me := newMechanismEnv(t, "confirm-dns-fails.example.", httpsServes)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
+	ln.Close() // nothing listens there: every NOTIFY is refused
+	me.aliceAtBob.SetDiscoveryAddress(dead)
+	me.aliceAtBob.SetMechanismAddress("DNS", dead)
+
+	id := queueSync(t, me.integEnv, me.zone)
+	in := makeSyncIncomingMessage(t, me.alice, me.bob, me.zone, id,
+		map[string][]string{me.zone: {me.zone + " 3600 IN TXT \"dns fails\""}})
+	in.Mechanism = transport.MechanismDNS
+	me.Bob.Bridge.routeIncomingMessage(in)
+	m, ok := recvMsgWithin(t, me.Bob.MsgQs.Msg, integTestTimeout)
+	if !ok {
+		t.Fatal("the sync did not reach bob")
+	}
+	me.confirmed(t, id, transport.ConfirmPending)
+	me.finalFrom(m)
+	me.confirmed(t, id, transport.ConfirmSuccess)
+	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got != "gone" {
+		t.Errorf("after the final confirmation alice's entry is %s, want it closed", got)
+	}
+	if n := me.posts.Load(); n != 2 {
+		t.Errorf("alice got %d POSTs, want both confirmations over HTTPS", n)
+	}
+}
+
+// A confirmation that goes on the other mechanism is logged loudly the
+// first time for a peer and mechanism, and then not before an hour has
+// passed: a pair that works one way only shows, without a line per
+// confirmation.
+func TestConfirmFallbackIsLoggedOnceAnHour(t *testing.T) {
+	env := newIntegEnv(t, nil)
+	b := env.Bob.Bridge
+	if !b.noteConfirmFallback("alice.", "API", "DNS", nil) {
+		t.Error("the first fallback to a peer was not logged loudly")
+	}
+	if b.noteConfirmFallback("alice.", "API", "DNS", nil) {
+		t.Error("a second fallback within the hour was logged loudly")
+	}
+	if !b.noteConfirmFallback("alice.", "DNS", "API", nil) || !b.noteConfirmFallback("carol.", "API", "DNS", nil) {
+		t.Error("the first fallback on another mechanism, or to another peer, was not logged loudly")
+	}
+	b.confirmFallbackMu.Lock()
+	b.confirmFallbackLogged["alice.|API"] = time.Now().Add(-61 * time.Minute)
+	b.confirmFallbackMu.Unlock()
+	if !b.noteConfirmFallback("alice.", "API", "DNS", nil) {
+		t.Error("a fallback an hour later was not logged loudly")
 	}
 }
 
