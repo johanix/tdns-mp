@@ -94,6 +94,38 @@ func TestALeadersSyncIsHeldUntilTheZoneIsCaughtUp(t *testing.T) {
 	}
 }
 
+// A parent that does not answer, while the zone catches up and after: the
+// sync is not lost. While the zone is not caught up the sync is held, and
+// the parent is not asked. Once it is caught up, a query that fails leaves
+// the sync owed; it is asked again while it is owed, and sent once the
+// parent answers.
+func TestASyncWhoseParentDoesNotAnswerStaysOwed(t *testing.T) {
+	h := newHoldRig(t, "silent.owed.example.", "NOTIFY", false, repeat(time.Hour, 4)...)
+	h.parent.holdsDS() // the parent has no DS
+	h.parent.quiet(true)
+	before := h.parent.queriesSeen()
+	h.inventory(h.ksk) // the DS set changes: a sync is asked for
+	h.waitOwed(t, "the DS change")
+	time.Sleep(200 * time.Millisecond)
+	if n := h.parent.queriesSeen() - before; n != 0 {
+		t.Errorf("the parent was asked %d questions while the zone was not caught up", n)
+	}
+
+	h.caughtUp()
+	asked := h.parent.queriesSeen()
+	h.askOwed() // the parent does not answer
+	waitUntil(t, "the owed sync did not ask the parent", func() bool { return h.parent.queriesSeen() > asked })
+	h.waitOwed(t, "the sync whose query failed")
+	h.quiet(t, 200*time.Millisecond, "while the parent did not answer")
+
+	h.parent.quiet(false)
+	h.askOwed()
+	h.notified(t, "the owed sync, once the parent answers", dns.TypeCDS)
+	if h.owed() {
+		t.Error("the sync is still owed after it was sent")
+	}
+}
+
 // Both sync commands are held: the implicit sync of a refresh and the
 // explicit one, so that NS and glue wait as the DS does.
 func TestBothSyncCommandsAreHeld(t *testing.T) {

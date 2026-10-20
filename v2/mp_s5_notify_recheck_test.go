@@ -49,6 +49,8 @@ type fakeParent struct {
 	ds      []dns.RR
 	updates int
 	refuse  bool // answer an UPDATE REFUSED, as a parent that will not take it yet
+	queries int  // the questions it was asked
+	silent  bool // answer every question SERVFAIL, as a parent that does not answer
 }
 
 func newFakeParent(t *testing.T, child string) *fakeParent {
@@ -99,6 +101,12 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(m)
 		return
 	}
+	p.queries++
+	if p.silent {
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+		return
+	}
 	q := r.Question[0]
 	switch {
 	case q.Qtype == dns.TypeNS && q.Name == p.child:
@@ -132,6 +140,19 @@ func (p *fakeParent) refuses() {
 	p.mu.Lock()
 	p.refuse = true
 	p.mu.Unlock()
+}
+
+// quiet has the parent answer every question SERVFAIL, or answer again.
+func (p *fakeParent) quiet(on bool) {
+	p.mu.Lock()
+	p.silent = on
+	p.mu.Unlock()
+}
+
+func (p *fakeParent) queriesSeen() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.queries
 }
 
 func (p *fakeParent) updatesSeen() int {
