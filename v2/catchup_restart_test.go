@@ -96,7 +96,7 @@ func newRestartNet(t *testing.T, zone string) *restartNet {
 		return &EditsResponseMsg{SenderID: "combiner.alice.example.", Zone: zone, Message: editsLoaded}, time.Now(), nil
 	}
 	catchUp := newCatchUpTracker(AgentId(n.alice.Identity), conf.InternalMp.MPZoneNames, time.Hour)
-	catchUp.wire(n.alice.Bridge, n.alice.Registry)
+	catchUp.wire(conf, n.alice.Bridge, n.alice.Registry)
 	conf.InternalMp.CatchUp, n.alice.Bridge.catchUp = catchUp, catchUp
 	msgQs := n.alice.MsgQs
 	msgQs.SynchedDataUpdate = make(chan *SynchedDataUpdate, 16)

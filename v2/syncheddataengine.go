@@ -150,6 +150,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	// The own read of a zone that is not done is read again (own_read.go).
 	ownReadTicker := time.NewTicker(ownReadInterval)
 	defer ownReadTicker.Stop()
+	// An owed sync that found the delegation sync queue full is asked for
+	// again sooner than every tick of the own read (catchup.go).
+	owedRoomTicker := time.NewTicker(catchUpRoomRetry)
+	defer owedRoomTicker.Stop()
 	owner := newOwnReader(conf, msgQs, zdr)
 
 	for {
@@ -163,6 +167,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case <-ownReadTicker.C:
 			owner.tick(ctx)
+			// A zone can become caught up with no answer: a refresh that
+			// drops the member waited for, a forgotten peer, an inventory
+			// that arrives outside this engine. Its owed sync is asked for
+			// here.
+			conf.InternalMp.CatchUp.askAllOwed(ctx, false)
+
+		case <-owedRoomTicker.C:
+			if conf.InternalMp.CatchUp.roomWaits() {
+				conf.InternalMp.CatchUp.askAllOwed(ctx, true)
+			}
 
 		case synchedDataUpdate = <-SDupdateQ:
 			var change bool
@@ -345,6 +359,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// one, an answer or a distribution.
 					if err == nil && synchedDataUpdate.Update != nil {
 						conf.noteForeignAnswer(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations, synchedDataUpdate.CatchUp.IsComplete())
+					}
+					// The answer that completes the catch-up asks for an owed
+					// sync, once what it says about keys is noted: the sync
+					// computes the DS set from it.
+					if synchedDataUpdate.CatchUp != nil && err == nil {
+						conf.InternalMp.CatchUp.askOwed(ctx, synchedDataUpdate.Zone)
 					}
 					if change {
 						// Always forward remote updates to the local combiner for persistence.
@@ -891,6 +911,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					if zd, ok := Zones.Get(string(sdcmd.Zone)); ok {
 						applyOwnRead(zd, a, zdr, AgentId(conf.MpConfig().Identity))
 						conf.InternalMp.CatchUp.ownReadDone(sdcmd.Zone)
+						conf.InternalMp.CatchUp.askOwed(ctx, sdcmd.Zone)
 					}
 				}
 

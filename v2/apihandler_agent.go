@@ -521,6 +521,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
+			status.DSSet = conf.dsSetLine(zd.ZoneData)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 

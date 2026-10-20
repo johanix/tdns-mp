@@ -194,6 +194,13 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 // (mp_s5_leader_csync_test.go has what stands in for the providers).
 func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...time.Duration) *notifyRig {
 	t.Helper()
+	return newNotifyRigWith(t, zone, scheme, signed, nil, delays...)
+}
+
+// newNotifyRigWith is newNotifyRigFor with setup run on the rig before its
+// engines start: what they read from the config is in place by then.
+func newNotifyRigWith(t *testing.T, zone, scheme string, signed bool, setup func(r *notifyRig), delays ...time.Duration) *notifyRig {
+	t.Helper()
 	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
 	logsink := &lockedBuffer{}
 	delegationSyncNotifyDelays = delays
@@ -300,6 +307,10 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 	cached(target, dns.TypeA, &dns.A{Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600}, A: net.ParseIP("127.0.0.1")})
 	cached(target, dns.TypeAAAA)
 	r.conf.Config.Internal.ImrEngine = imr
+
+	if setup != nil {
+		setup(r)
+	}
 
 	// the syncher, and the DS engine it asks for the CDS before a NOTIFY(CDS),
 	// on the rig's ctx, which ends with the test

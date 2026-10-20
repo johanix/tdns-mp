@@ -112,6 +112,12 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						continue
 					}
 				}
+				// Nothing goes to the parent of a zone that is not caught up:
+				// the sync is owed, and the answer that completes the
+				// catch-up asks for it (design 5.6)
+				if held, _ := conf.holdLeaderSync(ds); held {
+					continue
+				}
 
 				zd := ds.ZoneData
 				if p := zd.GetParent(); p == "" || p == "." {
@@ -199,8 +205,29 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						continue
 					}
 				}
+				// Held while the zone is not caught up, before the parent is
+				// called in sync: the operator is told so, with no error
+				if held, waiting := conf.holdLeaderSync(ds); held {
+					syncstate.Msg = fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting)
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					continue
+				}
 
 				if syncstate.InSync {
+					// With no DS set to compare, for a zone that names a
+					// signer, NS and glue being in step is not "in sync"
+					if waiting, unknown := conf.dsSetUnknown(ds); unknown {
+						lg.Info("DelegationSyncher: NS and glue are in sync with the parent, the DS set is unknown",
+							"zone", syncstate.ZoneName, "waiting_for", waiting)
+						syncstate.Msg = fmt.Sprintf("NS and glue are in sync with the parent; the DS set is unknown, waiting for %s", waiting)
+						conf.delegationSyncInSync(ds.ZoneName)
+						if ds.Response != nil {
+							ds.Response <- syncstate
+						}
+						continue
+					}
 					lg.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
 						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
 					// This ends the zone's retries. It is also what a sync

@@ -1960,7 +1960,19 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// The zone's catch-up (catchup.go), which needs neither the zone's data
 	// nor the keystore.
 	if ar != nil && ar.MPTransport != nil {
-		status.CatchUp = ar.MPTransport.catchUp.Status(zone)
+		t := ar.MPTransport.catchUp
+		status.CatchUp = t.Status(zone)
+		if owed, room := t.owedState(zone); owed && status.IsLeader {
+			caughtUp, _ := t.CaughtUp(zone)
+			switch {
+			case !caughtUp:
+				status.ParentSync = "held until the zone is caught up"
+			case room:
+				status.ParentSync = "owed, the delegation sync queue is full"
+			default:
+				status.ParentSync = "owed"
+			}
+		}
 	}
 
 	if zd == nil || hdb == nil {
