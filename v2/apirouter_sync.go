@@ -112,18 +112,18 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 				return
 			}
 
-			if !peer.HasMechanismTLSA("API") || !passed.holds(tlsaVerdictPeer(peer), clientCert) {
+			err := passed.checkClient(peer, clientCert, func() error {
 				// Not the request's context: a client that hangs up
 				// mid-lookup must not cancel it (the checker bounds it).
 				ctx := context.WithoutCancel(r.Context())
-				if err := tm.APITransport.TLSA.CheckClient(ctx, peer, "API", clientCert); err != nil {
-					// The checker logs a missing TLSA, a mismatch and a
-					// failed lookup itself, rate-limited.
-					lgApi.Debug(apiName+": client certificate refused", "clientId", clientId, "err", err)
-					http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
-					return
-				}
-				passed.pass(tlsaVerdictPeer(peer), clientCert)
+				return tm.APITransport.TLSA.CheckClient(ctx, peer, "API", clientCert)
+			})
+			if err != nil {
+				// The checker logs a missing TLSA, a mismatch and a
+				// failed lookup itself, rate-limited.
+				lgApi.Debug(apiName+": client certificate refused", "clientId", clientId, "err", err)
+				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
+				return
 			}
 
 			next.ServeHTTP(w, r)
@@ -142,6 +142,25 @@ func tlsaVerdictPeer(peer *transport.Peer) string {
 	}
 	sort.Strings(parts)
 	return fmt.Sprintf("%s|%p|%s", peer.ID, peer, strings.Join(parts, ","))
+}
+
+// checkClient runs check on cert for peer unless a pass for it still
+// holds. A pass is remembered only if the TLSA set held is the one held
+// before the check: a set replaced while the check ran (by the check's own
+// lookup, or another writer) may not be the set cert was checked against,
+// and the next request is checked afresh.
+func (v *tlsaVerdicts) checkClient(peer *transport.Peer, cert *x509.Certificate, check func() error) error {
+	key := tlsaVerdictPeer(peer)
+	if peer.HasMechanismTLSA("API") && v.holds(key, cert) {
+		return nil
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if tlsaVerdictPeer(peer) == key {
+		v.pass(key, cert)
+	}
+	return nil
 }
 
 // tlsaVerdicts remembers, for a while, which certificate passed the TLSA

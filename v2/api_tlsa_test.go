@@ -387,3 +387,35 @@ func TestTLSA_AReplacedSetEndsAPass(t *testing.T) {
 		t.Fatalf("the old certificate after its TLSA set was replaced, within the pass's minute: %v, want a 401", err)
 	}
 }
+
+// A pass is remembered only for the TLSA set the certificate was checked
+// against: a set replaced while the check ran leaves no pass behind, and
+// the next request is checked afresh.
+func TestTLSAVerdictsRememberOnlyTheSetChecked(t *testing.T) {
+	now := time.Now()
+	v := &tlsaVerdicts{hold: time.Minute, now: func() time.Time { return now }}
+	cert := leaf(t, otherAgentCert(t))
+	peer := transport.NewPeer("alice.agent.example.")
+	setTLSA(peer, cert)
+	checks := 0
+	replacedMidCheck := func() error {
+		checks++
+		setTLSA(peer, cert, leaf(t, otherAgentCert(t))) // another set, stored while the check ran
+		return nil
+	}
+	if err := v.checkClient(peer, cert, replacedMidCheck); err != nil {
+		t.Fatal(err)
+	}
+	if v.holds(tlsaVerdictPeer(peer), cert) {
+		t.Error("a pass is remembered for a set the certificate was not checked against")
+	}
+	steady := func() error { checks++; return nil }
+	for i := 0; i < 2; i++ {
+		if err := v.checkClient(peer, cert, steady); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if checks != 2 {
+		t.Errorf("%d checks, want 2: the replaced set's, and one for the set now held, remembered after", checks)
+	}
+}
