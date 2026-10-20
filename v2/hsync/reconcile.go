@@ -5,6 +5,7 @@ package hsync
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -17,12 +18,12 @@ func (e *Engine) ReconcileZone(zone ZoneName) (added, removed int, err error) {
 	if !ok || zv == nil {
 		return 0, 0, nil
 	}
-	localIdentity := string(e.deps.LocalID)
+	local := e.deps.LocalID
 	expected := e.expectedPeers(zv)
 
 	var toRemove []PeerID
 	for _, peer := range e.registry.GetPeersForZone(zone) {
-		if localIdentity != "" && string(peer.ID) == localIdentity {
+		if local != "" && samePeer(peer.ID, local) {
 			continue
 		}
 		if _, ok := expected[peer.ID]; !ok {
@@ -64,27 +65,31 @@ func (e *Engine) expectedPeers(zv ZoneView) map[PeerID]struct{} {
 		return expected
 	}
 	for _, id := range zv.Participants() {
-		if id != local {
+		if local == "" || !samePeer(id, local) {
 			expected[id] = struct{}{}
 		}
 	}
 	return expected
 }
 
-// ZoneNamesPeer reports whether a multi-provider zone this agent holds names
-// id as a peer, by the test ReconcileZone makes. A discovery of an identity
-// that no zone names puts nothing in the registry (design 3.3). An engine
-// with no zones to ask (harnesses) counts every identity as named.
+// ZoneNamesPeer reports whether a zone this agent holds names id as a peer,
+// by the test ReconcileZone makes. A discovery of an identity that no zone
+// names puts nothing in the registry (design 3.3). Every zone the agent holds
+// is asked, as ApplyHsyncDiff registers peers for any zone whose HSYNC3
+// changes. An engine with no zones to ask (harnesses) counts every identity
+// as named.
 func (e *Engine) ZoneNamesPeer(id PeerID) bool {
 	if e == nil || e.deps.Zones == nil {
 		return true
 	}
 	for _, zv := range e.deps.Zones.Items() {
-		if zv == nil || !zv.IsMultiProvider() {
+		if zv == nil {
 			continue
 		}
-		if _, ok := e.expectedPeers(zv)[id]; ok {
-			return true
+		for named := range e.expectedPeers(zv) {
+			if samePeer(named, id) {
+				return true
+			}
 		}
 	}
 	return false
@@ -101,10 +106,13 @@ func (e *Engine) reconcileAllZones() {
 	}
 	held := make(map[ZoneName]bool)
 	for name, zv := range e.deps.Zones.Items() {
-		if zv == nil || !zv.IsMultiProvider() {
+		if zv == nil {
 			continue
 		}
 		held[ZoneName(name)] = true
+		if !zv.IsMultiProvider() {
+			continue
+		}
 		if _, _, err := e.ReconcileZone(ZoneName(name)); err != nil {
 			continue
 		}
@@ -114,8 +122,12 @@ func (e *Engine) reconcileAllZones() {
 }
 
 // dropZonesNotHeld takes off every peer the zones that are not in held: zones
-// that left the agent's config, or are no longer multi-provider. The pass over
-// the zones visits only the zones the agent has, so nothing else would.
+// that left the agent's config. The pass over the zones visits only the zones
+// the agent has, so nothing else would. A zone that is not multi-provider is
+// held all the same: ApplyHsyncDiff registers peers for any zone whose HSYNC3
+// changes, and dropping it at every pass would have it come and go. A zone
+// that is not in held but is there when its peer is looked at arrived after
+// the pass began, and stays.
 func (e *Engine) dropZonesNotHeld(held map[ZoneName]bool) {
 	for id, peer := range e.registry.S.Items() {
 		var gone []ZoneName
@@ -126,6 +138,10 @@ func (e *Engine) dropZonesNotHeld(held map[ZoneName]bool) {
 			}
 		}
 		peer.Mu.RUnlock()
+		gone = slices.DeleteFunc(gone, func(z ZoneName) bool {
+			zv, ok := e.deps.Zones.Get(string(z))
+			return ok && zv != nil
+		})
 		if len(gone) == 0 {
 			continue
 		}

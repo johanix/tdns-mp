@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,4 +282,71 @@ func TestAHeldPeerThatWasNeverDiscoveredGetsNoSyncIn(t *testing.T) {
 		t.Error("with her key: Bob's router read nothing from Alice, want the SYNC read and refused")
 	}
 	nothingForBob("with her key")
+}
+
+// The agent's combiner is named by its config, not by a zone: one that keeps
+// refusing our beats, after a change of its key, is looked up again
+// (PR #193), though no zone names it.
+func TestTheCombinerIsLookedUpAgainThoughNoZoneNamesIt(t *testing.T) {
+	const combiner = "combiner.endofcomms.example."
+	env := newIntegEnv(t, &integEnvConfig{CombinerID: combiner})
+	endOfCommsEngine(t, env)
+	looked := false
+	for i := 0; i < helloRefusalsBeforeRediscovery; i++ {
+		looked = env.Bob.Bridge.noteRefused(combiner, "beats")
+	}
+	if !looked {
+		t.Fatal("a combiner that keeps refusing our beats was not looked up again")
+	}
+}
+
+// Refusals from a peer that no zone names book no look-up: once a zone names
+// it, its next run of refusals has it looked up at once.
+func TestARefusalNoZoneNamesBooksNoLookup(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{})
+	alice := env.Alice.Identity
+	_, zones := endOfCommsEngine(t, env)
+	for i := 0; i < helloRefusalsBeforeRediscovery; i++ {
+		env.Bob.Bridge.noteRefused(alice, "beats")
+	}
+	zones.participants = append(zones.participants, hsync.PeerID(alice))
+	if !env.Bob.Bridge.noteRefused(alice, "beats") {
+		t.Fatal("a peer named again was not looked up: the refusals before booked a look-up that was not made")
+	}
+}
+
+// A discovery that completes for a peer the engine holds, found by the
+// operator and named by no zone, completes as any other: the peer's
+// mechanisms are what it offers, and one that is usable is KNOWN.
+func TestADiscoveryOfAPeerTheEngineHoldsCompletes(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{})
+	const carol = "carol.endofcomms.example."
+	engine, _ := endOfCommsEngine(t, env)
+	engine.MarkNeeded(hsync.PeerID(carol), "", nil)
+	p := env.Bob.Bridge.PeerRegistry.GetOrCreate(carol)
+	p.SetMechanismContactInfo("DNS", "complete")
+	env.Bob.Bridge.TransportManager.OnPeerDiscovered(p)
+	if st, _ := p.MechanismRawState("DNS"); st != transport.PeerStateKnown {
+		t.Errorf("the DNS mechanism of a held peer reads %v after its discovery, want KNOWN", st)
+	}
+	if v, ok := env.Bob.Registry.S.Get(carol); !ok || !v.DnsMethod || v.ApiMethod {
+		t.Errorf("the held peer's view after its discovery: %+v, want DNS only", v)
+	}
+}
+
+// An agent whose identity is configured without its trailing dot, or in
+// another case, still has its standing in a zone that lists it.
+func TestStandingIsReadOnTheCanonicalName(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{})
+	alice := env.Alice.Identity
+	zones := &namingZones{participants: []hsync.PeerID{hsync.PeerID(env.Bob.Identity), hsync.PeerID(alice)}}
+	for _, local := range []string{strings.TrimSuffix(env.Bob.Identity, "."), strings.ToUpper(env.Bob.Identity)} {
+		engine := hsync.NewEngine(hsync.Deps{LocalID: hsync.PeerID(local), Zones: zones}, hsync.DefaultConfig())
+		if !engine.ZoneNamesPeer(hsync.PeerID(alice)) {
+			t.Errorf("local identity %q: the zone that lists it names no peer", local)
+		}
+		if engine.ZoneNamesPeer(hsync.PeerID(strings.ToUpper(env.Bob.Identity))) {
+			t.Errorf("local identity %q: the agent is named as its own peer", local)
+		}
+	}
 }

@@ -1112,3 +1112,26 @@ func TestAZoneWithoutHSYNCPARAMIsNotAskedAtALoadOrABeat(t *testing.T) {
 		}
 	}
 }
+
+// The catch-up's requests are kept by identity. A peer the engine removes
+// whose identity a new peer object holds already, stored since the removal,
+// is not forgotten: the requests are the new peer's.
+func TestTheEnginesRemovalOfAReplacedPeerKeepsItsSuccessorsRequests(t *testing.T) {
+	const zone = "replaced.hook.example."
+	catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+	r := newTrackerRig(t, roleA)
+	r.t.Ask(zone, roleB, catchUpStart)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: roleA})
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: conf.MpConfig()}
+	ar.Registry = hsync.NewRegistry(hsync.PeerID(roleA), nil)
+	conf.InternalMp.AgentRegistry = ar
+	conf.InternalMp.CatchUp = r.t
+	deps, _ := buildHsyncEngineDeps(conf)
+	successor := hsync.NewPeer(hsync.PeerID(roleB))
+	ar.Registry.S.Set(successor.ID, successor)
+	deps.PeerHooks.OnPeerRemoved(hsync.NewPeer(hsync.PeerID(roleB)))
+	if e := r.entry(zone, roleB); e == nil {
+		t.Error("the removal of a replaced object forgot its successor's request")
+	}
+}

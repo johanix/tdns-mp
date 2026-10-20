@@ -216,6 +216,13 @@ func (e *Engine) BeatPeer(id PeerID) {
 	}
 	now := time.Now()
 	e.beatMu.Lock()
+	// The peer read above may have been removed since: RemovePeer drops the
+	// notes under this lock after it has taken the peer out, and a stamp
+	// made after that would hold back a successor's first beat back.
+	if !e.stillStored(peer) {
+		e.beatMu.Unlock()
+		return
+	}
 	busy := e.beatingBack[id]
 	if at, seen := e.beatBackAt[id]; !busy && seen && now.Sub(at) < e.beatBackSpacing() {
 		busy = true

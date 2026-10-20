@@ -51,12 +51,20 @@ func hsync3Of(rr dns.RR) (*core.HSYNC3, bool) {
 // participants have it: an ON record whose label HSYNCPARAM lists in
 // servers=, signers= or auditors=, or any ON record in a zone with no
 // HSYNCPARAM (decision 31). ReconcileZone and ApplyHsyncDiff's gate ask it
-// of the local identity, so an agent reads alike in both.
+// of the local identity, so an agent reads alike in both. Identities are
+// compared as canonical names: the auditor's engine is built before its
+// identity gets its trailing dot.
 func participates(zv ZoneView, id PeerID) bool {
 	if zv == nil || id == "" {
 		return false
 	}
-	return slices.Contains(zv.Participants(), id)
+	return slices.ContainsFunc(zv.Participants(), func(p PeerID) bool { return samePeer(p, id) })
+}
+
+// samePeer reports whether two identities name the same peer: equal as
+// canonical names (lower case, with the trailing dot).
+func samePeer(a, b PeerID) bool {
+	return dns.CanonicalName(string(a)) == dns.CanonicalName(string(b))
 }
 
 // ApplyHsyncDiff registers adds and removes for one zone.

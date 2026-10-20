@@ -9,6 +9,7 @@ package tdnsmp
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns/v2/core"
@@ -208,4 +209,36 @@ func TestAgentViewForPeer(t *testing.T) {
 			t.Fatal("view must be the stored, pointer-sharing one")
 		}
 	})
+}
+
+// A view made while the engine removes its peer is dropped with it, or not
+// made: the test that the engine holds the peer and the store of the view are
+// one step against removePeerView. Here the removal starts between the two;
+// without the lock it ran to its end there, and the view stored after it
+// outlived the peer.
+func TestAViewMadeWhileThePeerIsRemovedDoesNotOutliveIt(t *testing.T) {
+	const id = AgentId("agent.racing.e1b.test.")
+	ar := newE1bRegistry()
+	peer := enginePeer(ar, id)
+	removed := make(chan struct{})
+	var once sync.Once
+	afterViewTest = func(p *hsync.Peer) {
+		if p != peer {
+			return
+		}
+		once.Do(func() {
+			go func() {
+				defer close(removed)
+				ar.Registry.S.Remove(peer.ID)
+				ar.removePeerView(peer)
+			}()
+			time.Sleep(20 * time.Millisecond)
+		})
+	}
+	t.Cleanup(func() { afterViewTest = nil })
+	ar.materializeAgentView(peer)
+	<-removed
+	if v, ok := ar.S.Get(id); ok && v.Peer == peer {
+		t.Fatal("the view of the removed peer outlived its removal")
+	}
 }

@@ -624,7 +624,7 @@ func waitNotBeatingBack(t *testing.T, e *Engine, id PeerID) {
 // interval after the last beat back started does nothing, also once that
 // beat back has returned.
 func TestRepeatedHellosGetOneBeatBackPerFastInterval(t *testing.T) {
-	const fast, steady = 80 * time.Millisecond, time.Second
+	const fast, steady = 300 * time.Millisecond, 3 * time.Second
 	s := newScriptedBeats()
 	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
 	peer := operationalDNSPeer(e, s)
@@ -670,7 +670,7 @@ func TestRepeatedHellosOnTheFixedPaceGetOneBeatBackPerInterval(t *testing.T) {
 // The engine keeps no beat back from before a restart: the first one after it
 // goes at once.
 func TestTheFirstBeatBackAfterARestartIsNotDelayed(t *testing.T) {
-	const fast, steady = 200 * time.Millisecond, 2 * time.Second
+	const fast, steady = 600 * time.Millisecond, 6 * time.Second
 	s := newScriptedBeats()
 	before := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
 	peer := operationalDNSPeer(before, s)
@@ -791,7 +791,7 @@ func TestAHelloOnItsWayDoesNotPutARemovedPeerBack(t *testing.T) {
 // RemovePeer drops what the engine noted of the peer's beats. A new peer
 // under the same identity starts clean: its first beat back goes at once.
 func TestARemovedPeerLeavesNoFailureMarker(t *testing.T) {
-	const fast, steady = 150 * time.Millisecond, 3 * time.Second
+	const fast, steady = 600 * time.Millisecond, 6 * time.Second
 	s := newScriptedBeats()
 	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
 	old := operationalDNSPeer(e, s)

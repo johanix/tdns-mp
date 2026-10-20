@@ -145,6 +145,9 @@ func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
 			return nil
 		}
 	}
+	if afterViewTest != nil {
+		afterViewTest(peer)
+	}
 	return ar.S.Upsert(peer.ID, nil, func(exist bool, current *Agent, _ *Agent) *Agent {
 		if exist && current != nil {
 			if current.Peer == peer {
@@ -164,6 +167,10 @@ func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
 		return newAgentView(peer)
 	})
 }
+
+// afterViewTest, when set (tests), runs between materializeAgentView's test
+// that the engine holds the peer and its store of the view.
+var afterViewTest func(*hsync.Peer)
 
 // agentViewForIdentity returns the ar.S view for an identity, wrapping the
 // ENGINE's hsync.Peer — never allocating a second peer for a known identity
@@ -199,6 +206,17 @@ func (ar *AgentRegistry) agentViewForIdentity(id AgentId, apiSupported, dnsSuppo
 	return ar.materializeAgentView(hpeer)
 }
 
+// engineHoldsSuccessor reports whether the engine's registry holds another
+// peer object under the identity of the removed peer: one stored since the
+// removal, whose view, transport peer and catch-up requests are its own.
+func (ar *AgentRegistry) engineHoldsSuccessor(removed *hsync.Peer) bool {
+	if ar == nil || ar.Registry == nil || removed == nil {
+		return false
+	}
+	stored, ok := ar.Registry.S.Get(removed.ID)
+	return ok && stored != removed
+}
+
 // removePeerView drops the MP view and the transport peer for a removed
 // peer (Phase 3c: the engine's RemovePeer fires OnPeerRemoved, and the
 // removal propagates promptly instead of waiting for a scan). It holds viewMu,
@@ -213,13 +231,11 @@ func (ar *AgentRegistry) removePeerView(peer *hsync.Peer) {
 	ar.viewMu.Lock()
 	defer ar.viewMu.Unlock()
 	id := AgentId(peer.ID)
-	if ar.Registry != nil {
-		if _, back := ar.Registry.S.Get(peer.ID); back {
-			ar.S.RemoveCb(id, func(_ AgentId, v *Agent, ok bool) bool {
-				return ok && v != nil && v.Peer == peer
-			})
-			return
-		}
+	if ar.engineHoldsSuccessor(peer) {
+		ar.S.RemoveCb(id, func(_ AgentId, v *Agent, ok bool) bool {
+			return ok && v != nil && v.Peer == peer
+		})
+		return
 	}
 	ar.S.Remove(id)
 	if ar.TransportManager != nil {

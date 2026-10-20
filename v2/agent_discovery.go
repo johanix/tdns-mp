@@ -32,13 +32,36 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 }
 
 // zoneNamesPeer reports whether a zone this agent holds names the identity
-// as a peer, by the test the engine's ReconcileZone makes. With no engine
-// wired (harnesses) every identity counts as named.
+// as a peer, by the test the engine's ReconcileZone makes. The agent's
+// combiner and signer are named by its config, not by a zone, and count as
+// named: a combiner that refuses our beats after a change of its key is
+// looked up again (PR #193). With no engine wired (harnesses) every identity
+// counts as named.
 func (tm *MPTransportBridge) zoneNamesPeer(identity string) bool {
-	if tm.agentRegistry == nil || tm.agentRegistry.HsyncEngine == nil {
+	ar := tm.agentRegistry
+	if ar == nil || ar.HsyncEngine == nil {
 		return true
 	}
-	return tm.agentRegistry.HsyncEngine.ZoneNamesPeer(hsync.PeerID(dns.Fqdn(identity)))
+	id := AgentId(dns.Fqdn(identity))
+	if isAmong([]string{string(tm.combinerID), tm.signerID}, id) {
+		return true
+	}
+	if v, ok := ar.S.Get(id); ok && v.IsInfraPeer {
+		return true
+	}
+	return ar.HsyncEngine.ZoneNamesPeer(hsync.PeerID(id))
+}
+
+// engineHolds reports whether the engine's registry holds the identity: a
+// peer kept for the hold time, or one the operator found, which the engine
+// stores before its discovery. Their discoveries complete as any other's.
+func (tm *MPTransportBridge) engineHolds(identity string) bool {
+	ar := tm.agentRegistry
+	if ar == nil || ar.Registry == nil {
+		return false
+	}
+	_, ok := ar.Registry.S.Get(hsync.PeerID(dns.Fqdn(identity)))
+	return ok
 }
 
 // flushAndDiscover flushes the resolver cache for the peer's discovery names
@@ -184,19 +207,27 @@ func (tm *MPTransportBridge) noteRefused(peerID string, what string) bool {
 	r.inARow++
 	refused := r.inARow
 	due := refused >= helloRefusalsBeforeRediscovery && time.Since(r.rediscovered) >= interval
-	if due {
-		r.rediscovered = time.Now()
-	}
 	tm.refusedHellosMu.Unlock()
 	if !due {
 		return false
 	}
 	// A peer that no zone names any more is not looked up: at the end of
 	// comms the side that removes it last sees its beats refused (design 3.3).
+	// Asked before the look-up is booked, so that a peer named again soon
+	// after is not held back by a look-up that was not made.
 	if !tm.zoneNamesPeer(peerID) {
 		lgTransport.Debug("peer refuses our "+what+" and no zone names it any more, not looked up again",
 			"peer", peerID, "refused", refused)
 		return false
+	}
+	tm.refusedHellosMu.Lock()
+	due = time.Since(r.rediscovered) >= interval
+	if due {
+		r.rediscovered = time.Now()
+	}
+	tm.refusedHellosMu.Unlock()
+	if !due {
+		return false // another refusal booked the look-up meanwhile
 	}
 	lgTransport.Warn("peer keeps refusing our "+what+", flushing IMR cache and discovering it again: the key held for it may not be the one it uses",
 		"peer", peerID, "refused", refused)

@@ -434,7 +434,11 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 						"peer", peer.ID, "since", since)
 				}
 				ar.removePeerView(peer)
-				conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
+				// The catch-up's requests and sender are kept by identity:
+				// a new peer stored under it since the removal keeps them.
+				if !ar.engineHoldsSuccessor(peer) {
+					conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
+				}
 			},
 			// The end of comms (design 3.1): the reconcile loop keeps a peer
 			// that no zone names for the hold time, then removes it.

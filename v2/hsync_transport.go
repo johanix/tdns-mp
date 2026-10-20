@@ -517,10 +517,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// Discovery runs only for an identity that a zone names (design
 		// 3.3). A discovery that completes for one no zone names any more
 		// puts nothing in the registry and leaves the transport's peer as
-		// it is: a peer named only by authorized_peers, or found by the
-		// operator, too. The removed object itself is never stored again:
-		// agentViewForIdentity stores only a new peer.
-		if !tm.zoneNamesPeer(peer.ID) {
+		// it is: a peer named only by authorized_peers too. A peer the
+		// engine holds already, kept for the hold time or found by the
+		// operator, completes its discovery: nothing new is stored. The
+		// removed object itself is never stored again: agentViewForIdentity
+		// stores only a new peer.
+		if !tm.zoneNamesPeer(peer.ID) && !tm.engineHolds(peer.ID) {
 			lgTransport.Info("discovered peer is named by no zone this agent holds, not registered", "peer", peer.ID)
 			return
 		}

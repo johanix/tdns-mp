@@ -133,10 +133,14 @@ func (e *Engine) RemovePeer(id PeerID) {
 
 // afterRemoval runs once the registry no longer holds peer: it stops the
 // peer's hello retrier, drops the engine's notes of its beats, and fires the
-// hook. It runs outside the map's locks.
+// hook. It runs outside the map's locks. The notes are kept by identity: when
+// a new peer under the same identity was stored in the moment since the
+// removal, they may be the new peer's, and are left to it.
 func (e *Engine) afterRemoval(peer *Peer) {
 	e.registry.cancelHello(peer)
-	e.forgetBeats(peer.ID)
+	if _, successor := e.registry.S.Get(peer.ID); !successor {
+		e.forgetBeats(peer.ID)
+	}
 	if e.deps.PeerHooks.OnPeerRemoved != nil {
 		e.deps.PeerHooks.OnPeerRemoved(peer)
 	}

@@ -70,8 +70,9 @@ func pruneEngine(t *testing.T, removed *[]*Peer, unshared *[]bool, ids ...PeerID
 	return e, zl
 }
 
-// A zone the agent no longer holds, or no longer holds as a multi-provider
-// zone, is taken off its peers; the zones it holds stay.
+// A zone the agent no longer holds is taken off its peers; the zones it holds
+// stay, one that is not multi-provider included (ApplyHsyncDiff registers
+// peers for it), and so does one that arrives while the pass runs.
 func TestAZoneTheAgentNoLongerHoldsIsTakenOffItsPeers(t *testing.T) {
 	e, zl := pruneEngine(t, nil, nil)
 	zl["single.test."] = &mockZone{zone: "single.test."}
@@ -80,12 +81,21 @@ func TestAZoneTheAgentNoLongerHoldsIsTakenOffItsPeers(t *testing.T) {
 	fox.Mu.Lock()
 	fox.Zones["gone.test."] = true
 	fox.Zones["single.test."] = true
+	fox.Zones["late.test."] = true
 	fox.Mu.Unlock()
 
-	e.reconcileAllZones()
+	held := map[ZoneName]bool{"customer.test.": true, "single.test.": true}
+	zl["late.test."] = &mockZone{zone: "late.test."} // arrives after the pass read the zones
+	e.dropZonesNotHeld(held)
 	got := peerZones(t, e, "fox.agent.example.")
-	if len(got) != 1 || !got["customer.test."] {
-		t.Fatalf("fox's zones after the pass: %v, want only customer.test.", got)
+	if len(got) != 3 || !got["customer.test."] || !got["single.test."] || !got["late.test."] {
+		t.Fatalf("fox's zones after the pass: %v, want customer.test., single.test. and late.test.", got)
+	}
+
+	delete(zl, "late.test.")
+	e.reconcileAllZones()
+	if got := peerZones(t, e, "fox.agent.example."); got["late.test."] || got["gone.test."] {
+		t.Fatalf("fox's zones after the zones left: %v", got)
 	}
 }
 
@@ -130,7 +140,14 @@ func TestAPeerWithNoZoneIsRemovedAfterTheHoldTime(t *testing.T) {
 	}
 	e.retryPendingDiscoveries()
 	e.startHelloRetrier(peer)
+	beats := newScriptedBeats()
+	e.deps.Transport = beats
+	e.sendHeartbeats()
+	e.BeatPeer(peer.ID)
 	time.Sleep(20 * time.Millisecond)
+	if n := len(beats.beats()); n != 0 {
+		t.Errorf("%d beat(s) to the removed peer, want none", n)
+	}
 	if n := tb.count(string(peer.ID)); n != 0 {
 		t.Errorf("%d discoveries of the removed peer, want none", n)
 	}
@@ -258,5 +275,37 @@ func TestAnInfrastructurePeerIsNeverRemoved(t *testing.T) {
 	e.pruneUnsharedPeers(t0.Add(2 * hold))
 	if _, ok := e.registry.S.Get(infra.ID); !ok || len(removed) != 0 {
 		t.Fatal("an infrastructure peer was removed")
+	}
+}
+
+// A zone added to a peer while the peer is removed never stores the removed
+// object again. The add holds the peer's lock while the removal runs: the old
+// add had read the peer and stored it again after its change, over the
+// removal. Now the add runs under the shard's lock, which the removal waits
+// for.
+func TestAZoneAddedWhileThePeerIsRemovedDoesNotPutItBack(t *testing.T) {
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: &mockTransport{}}, DefaultConfig())
+	const id = PeerID("racing.example.")
+	old := NewPeer(id)
+	e.registry.S.Set(id, old)
+
+	old.Mu.Lock()
+	added := make(chan struct{})
+	go func() {
+		defer close(added)
+		e.registry.AddZoneToPeer(id, "z.example.")
+	}()
+	time.Sleep(20 * time.Millisecond) // the add waits for the peer's lock
+	removed := make(chan struct{})
+	go func() {
+		defer close(removed)
+		e.RemovePeer(id)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	old.Mu.Unlock()
+	<-added
+	<-removed
+	if stored, ok := e.registry.S.Get(id); ok && stored == old {
+		t.Fatal("a zone added during the removal stored the removed peer again")
 	}
 }
