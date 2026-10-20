@@ -356,19 +356,23 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// published here. Alone it waits for the combiner's word
 					// (waitForCombiner, below); beside a fresh part it is left
 					// out of the relayed confirmation, as a failed set is.
-					// A set in flight that an answer's forward brought has its
-					// own way: its keys are left out (staleWaiting), and the
-					// sender credits them from the asker's confirmation of the
-					// answer.
+					// A set in flight that an answer's forward brought is left
+					// out at once, with no wait: the sender credits its keys,
+					// a removal too, from the asker's confirmation of the
+					// answer (creditFromAnswerLocked).
 					var staleNotHeld map[uint16]bool
-					staleKeysWaitOn := ""
+					staleKeysWaitOn, staleKeysOfAnswer := "", false
 					for _, t := range updateRRtypes(&ZoneUpdate{Operations: synchedDataUpdate.staleOperations()}) {
 						if t == dns.TypeDNSKEY && !failedSets[t] {
-							if x := zdr.setInFlight(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, t); x != "" && !zdr.forwardOfAnswer(x) {
-								staleKeysWaitOn = x
+							if x := zdr.setInFlight(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, t); x != "" {
+								if zdr.forwardOfAnswer(x) {
+									staleKeysOfAnswer = true
+								} else {
+									staleKeysWaitOn = x
+								}
 							}
 						}
-						if failedSets[t] || (t == dns.TypeDNSKEY && staleKeysWaitOn != "") {
+						if failedSets[t] || (t == dns.TypeDNSKEY && (staleKeysWaitOn != "" || staleKeysOfAnswer)) {
 							if staleNotHeld == nil {
 								staleNotHeld = map[uint16]bool{}
 							}
@@ -556,6 +560,15 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							appliedRecords = recordsNotOfTypes(appliedRecords, failedSets)
 							removedRecords = recordsNotOfTypes(removedRecords, failedSets)
 							status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
+						}
+						// A DNSKEY set an answer's forward brought, which the
+						// combiner has not confirmed, is no word on the keys:
+						// none is named, removals included.
+						if staleKeysOfAnswer {
+							keys := map[uint16]bool{dns.TypeDNSKEY: true}
+							appliedRecords = recordsNotOfTypes(appliedRecords, keys)
+							removedRecords = recordsNotOfTypes(removedRecords, keys)
+							status, message = "PARTIAL", message+"; a DNSKEY set from an answer its combiner has not confirmed is not held"
 						}
 						if staleKeysWaitOn != "" {
 							// The sender has this agent's PENDING; the final
@@ -1069,12 +1082,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case detail := <-msgQs.Confirmation:
 			lgEngine.Info("received confirmation", "source", detail.Source, "distID", detail.DistributionID, "zone", detail.Zone, "status", detail.Status, "applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems), "truncated", detail.Truncated)
+			fromCombiner := false
 			if tm := conf.InternalMp.MPTransport; tm != nil && tm.combinerID != "" && detail.Source == string(tm.combinerID) && detail.Status != "PENDING" {
-				zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
+				fromCombiner = true
+				// A combiner that failed or refused the update as a whole,
+				// naming no record, does not hold the sets it carried: they
+				// are handed over again when they come again.
+				if (detail.Status == "FAILED" || detail.Status == "REJECTED") && len(detail.RejectedItems) == 0 {
+					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID)
+				} else {
+					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
+				}
 			}
 			zdr.ProcessConfirmation(detail, msgQs)
-			if tm := conf.InternalMp.MPTransport; tm != nil && tm.combinerID != "" && detail.Source == string(tm.combinerID) && detail.Status != "PENDING" {
-				zdr.releaseStaleWaits(detail.DistributionID, msgQs)
+			if fromCombiner {
+				zdr.releaseStaleWaits(detail, msgQs)
 			}
 			// the leader's CSYNC waits for its confirmations
 			conf.delegationCsyncProgress(ctx, zdr, detail.Zone, detail)

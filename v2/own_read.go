@@ -86,6 +86,22 @@ func (zdr *ZoneDataRepo) noteCombinerConfirmed(zone ZoneName, distID string, at 
 	}
 }
 
+// noteCombinerFailed notes that the combiner failed or refused the whole of
+// distID, naming no record: the sets it carried are not with the combiner,
+// as after a failed hand-over (setsNotHandedOver).
+func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string) {
+	if distID == "" {
+		return
+	}
+	for _, byType := range zdr.notes[zone] {
+		for _, n := range byType {
+			if n.distID == distID {
+				n.distID, n.confirmed = "", time.Time{}
+			}
+		}
+	}
+}
+
 // setsNotHandedOver are those of types whose last change here, of agent's
 // set, this agent's combiner may not have. With failedOnly, only a set whose
 // hand-over failed (no distribution); else also one the combiner has not
@@ -476,20 +492,24 @@ func (zdr *ZoneDataRepo) dropStaleWait(origDistID string, sender AgentId) {
 }
 
 // releaseStaleWaits sends the final confirmation of each stale replace that
-// waited for the combiner's word on distID, now that it has come. The
-// confirmation is made as the no-op path makes it, from what is held now:
-// the records the combiner rejected, keys an answer's forward brought that
+// waited for the combiner's word on its distribution, now that it has come
+// (cf). Only a success says the combiner holds the set: then the
+// confirmation is made as the no-op path makes it, from what is held now.
+// The records the combiner rejected, keys an answer's forward brought that
 // its combiner has not confirmed, and a set whose hand-over failed are not
-// named, and make it PARTIAL. A set changed again since, whose newer
-// hand-over the combiner has not confirmed, is waited for in turn.
-func (zdr *ZoneDataRepo) releaseStaleWaits(distID string, msgQs *MsgQs) {
+// named, and make it PARTIAL. An IGNORED is passed on as IGNORED. Any other
+// word names only what the combiner said it applied, and is PARTIAL. A set
+// changed again since, whose newer hand-over the combiner has not
+// confirmed, is waited for in turn.
+func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs) {
+	distID := cf.DistributionID
 	waits := zdr.staleWaits[distID]
 	if len(waits) == 0 {
 		return
 	}
 	delete(zdr.staleWaits, distID)
 	for _, w := range waits {
-		if next := zdr.setInFlight(w.zone, w.sender, dns.TypeDNSKEY); next != "" {
+		if next := zdr.setInFlight(w.zone, w.sender, dns.TypeDNSKEY); next != "" && next != distID {
 			zdr.waitForCombiner(next, w)
 			continue
 		}
@@ -497,6 +517,24 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(distID string, msgQs *MsgQs) {
 		waiting := zdr.dnskeyAwaitingAnswer(w.zone, w.sender, applied)
 		applied = withoutRecords(applied, waiting)
 		status, message := "ok", "desired state present at remote agent, confirmed by its combiner"
+		var ignored []string
+		switch cf.Status {
+		case "SUCCESS", "ok":
+		case "IGNORED", "ignored":
+			// the combiner takes no key of this sender's: say so, as it said
+			status, message = "IGNORED", "its combiner applies no key of the sender's"
+			ignored, applied, removed = applied, nil, nil
+		default:
+			// a combiner that applied less than the set: only what it says
+			// it applied is named
+			said := map[string]bool{}
+			for _, rec := range cf.AppliedRecords {
+				said[rec] = true
+			}
+			applied = slices.DeleteFunc(applied, func(rec string) bool { return !said[rec] })
+			removed = nil
+			status, message = "PARTIAL", "its combiner did not confirm the whole set ("+cf.Status+")"
+		}
 		if len(waiting) > 0 {
 			status, message = "PARTIAL", message+"; DNSKEY records from an answer not yet confirmed by its combiner"
 		}
@@ -506,9 +544,10 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(distID string, msgQs *MsgQs) {
 		if failed := zdr.setsNotHandedOver(w.zone, w.sender, updateRRtypes(&ZoneUpdate{Operations: w.ops}), true); len(failed) > 0 {
 			applied = recordsNotOfTypes(applied, failed)
 			removed = recordsNotOfTypes(removed, failed)
+			ignored = recordsNotOfTypes(ignored, failed)
 			status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
 		}
-		lgEngine.Info("the combiner confirmed the set that overtook a stale DNSKEY replace; confirming the replace",
+		lgEngine.Info("the combiner answered the set that overtook a stale DNSKEY replace; confirming the replace",
 			"zone", w.zone, "agent", w.sender, "originDistID", w.origDistID, "combinerDistID", distID,
 			"status", status, "applied", len(applied), "removed", len(removed))
 		if msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
@@ -520,6 +559,7 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(distID string, msgQs *MsgQs) {
 				Message:           message,
 				AppliedRecords:    applied,
 				RemovedRecords:    removed,
+				IgnoredRecords:    ignored,
 			})
 		}
 	}
