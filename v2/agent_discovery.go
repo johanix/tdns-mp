@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
@@ -28,6 +29,16 @@ func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, ident
 		return fmt.Errorf("no transport manager configured for discovery")
 	}
 	return tm.TransportManager.DiscoverAndRegisterPeer(ctx, identity)
+}
+
+// zoneNamesPeer reports whether a zone this agent holds names the identity
+// as a peer, by the test the engine's ReconcileZone makes. With no engine
+// wired (harnesses) every identity counts as named.
+func (tm *MPTransportBridge) zoneNamesPeer(identity string) bool {
+	if tm.agentRegistry == nil || tm.agentRegistry.HsyncEngine == nil {
+		return true
+	}
+	return tm.agentRegistry.HsyncEngine.ZoneNamesPeer(hsync.PeerID(dns.Fqdn(identity)))
 }
 
 // flushAndDiscover flushes the resolver cache for the peer's discovery names
@@ -164,8 +175,9 @@ func (tm *MPTransportBridge) noteBeatRefused(peerID string) {
 }
 
 // noteRefused counts a message of ours that the peer answered with REFUSED.
-// what names it in the log: "hello" or "beats".
-func (tm *MPTransportBridge) noteRefused(peerID string, what string) {
+// what names it in the log: "hello" or "beats". It reports whether it had the
+// peer looked up again.
+func (tm *MPTransportBridge) noteRefused(peerID string, what string) bool {
 	interval := tm.freshLookupInterval()
 	tm.refusedHellosMu.Lock()
 	r := tm.lookupBook(peerID)
@@ -177,11 +189,19 @@ func (tm *MPTransportBridge) noteRefused(peerID string, what string) {
 	}
 	tm.refusedHellosMu.Unlock()
 	if !due {
-		return
+		return false
+	}
+	// A peer that no zone names any more is not looked up: at the end of
+	// comms the side that removes it last sees its beats refused (design 3.3).
+	if !tm.zoneNamesPeer(peerID) {
+		lgTransport.Debug("peer refuses our "+what+" and no zone names it any more, not looked up again",
+			"peer", peerID, "refused", refused)
+		return false
 	}
 	lgTransport.Warn("peer keeps refusing our "+what+", flushing IMR cache and discovering it again: the key held for it may not be the one it uses",
 		"peer", peerID, "refused", refused)
 	go tm.flushAndDiscover(peerID)
+	return true
 }
 
 // noteHelloAccepted ends the peer's run of refused hellos and beats: the peer

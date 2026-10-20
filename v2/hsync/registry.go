@@ -122,14 +122,15 @@ func (r *Registry) clearHelloCancel(peer *Peer) {
 	}
 }
 
-// cancelHello stops any running hello retrier for the peer and clears its
-// registration (used by RemovePeer before dropping the peer object).
-func (r *Registry) cancelHello(id PeerID) {
+// cancelHello stops the hello retrier running for the removed peer object
+// and clears its registration. A retrier registered for a new object under
+// the same identity is left alone.
+func (r *Registry) cancelHello(peer *Peer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, ok := r.helloCancel[id]; ok {
-		existing.cancel()
-		delete(r.helloCancel, id)
+	if run, ok := r.helloCancel[peer.ID]; ok && run.peer == peer {
+		run.cancel()
+		delete(r.helloCancel, peer.ID)
 	}
 }
 

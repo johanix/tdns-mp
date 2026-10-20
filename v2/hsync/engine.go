@@ -33,6 +33,10 @@ type Engine struct {
 	beatingBack map[PeerID]bool
 	// beatBackAt: when the last beat back to each peer started (BeatPeer).
 	beatBackAt map[PeerID]time.Time
+
+	// beforePruneRemoval, when set (tests), runs between the prune's reading
+	// of a peer and its removal under the shard's lock.
+	beforePruneRemoval func(PeerID)
 }
 
 // NewEngine constructs an Engine. Gossip table may be nil until wired.

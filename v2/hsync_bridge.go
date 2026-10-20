@@ -358,6 +358,11 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 
 func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 	deps, cfg := buildHsyncEngineDeps(conf)
+	// The auditor has an ON record and auditors= in every zone it audits
+	// (guide/auditor.md). In a zone without them it expects no peers, as
+	// ReconcileZone has it, and an HSYNC3 add there marks no provider as
+	// needed: its hellos would be refused.
+	deps.GateOnLocalPresence = true
 	return hsync.NewEngine(deps, cfg)
 }
 
@@ -385,6 +390,7 @@ func hsyncConfigFromMp(mp *MultiProviderConf) hsync.Config {
 	secs(&cfg.RetryInterval, iv.DiscoveryRetry)
 	secs(&cfg.ReconcileInterval, iv.Reconcile)
 	secs(&cfg.HelloFastSpacing, iv.HelloFastInterval)
+	secs(&cfg.PeerHold, iv.PeerHold)
 	if iv.HelloFastAttempts > 0 {
 		cfg.HelloFastAttempts = iv.HelloFastAttempts
 	}
@@ -403,7 +409,8 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 		"hello_fast_interval", cfg.HelloFastSpacing,
 		"discoveryretry", cfg.RetryInterval,
 		"reconcile", cfg.ReconcileInterval,
-		"catchup_outage", catchUpOutageFor(mp))
+		"catchup_outage", catchUpOutageFor(mp),
+		"peer_hold", cfg.PeerHold)
 	deps := hsync.Deps{
 		LocalID:           hsync.PeerID(mp.Identity),
 		LocalBeatInterval: mp.Remote.BeatInterval,
@@ -419,8 +426,25 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 			// Phase 3c: prunes are events — drop the MP view + transport
 			// peer promptly when the engine removes a peer object.
 			OnPeerRemoved: func(peer *hsync.Peer) {
+				peer.Mu.RLock()
+				since := peer.Unshared
+				peer.Mu.RUnlock()
+				if !since.IsZero() {
+					lgEngine.Info("peer removed: no zone shared for the hold time",
+						"peer", peer.ID, "since", since)
+				}
 				ar.removePeerView(peer)
 				conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
+			},
+			// The end of comms (design 3.1): the reconcile loop keeps a peer
+			// that no zone names for the hold time, then removes it.
+			OnPeerUnshared: func(peer *hsync.Peer, unshared bool) {
+				if unshared {
+					lgEngine.Info("peer shares no zone with this agent any more, kept for the hold time",
+						"peer", peer.ID, "hold", cfg.PeerHold)
+					return
+				}
+				lgEngine.Info("peer is named by a zone again, kept", "peer", peer.ID)
 			},
 		},
 		Host: hsync.HostCallbacks{
