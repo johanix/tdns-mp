@@ -12,11 +12,15 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -129,7 +133,7 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 				return
 			}
 
-			if !peer.HasMechanismTLSA("API") || !passed.holds(clientId, clientCert) {
+			if !peer.HasMechanismTLSA("API") || !passed.holds(tlsaVerdictPeer(peer), clientCert) {
 				// Not the request's context: a client that hangs up
 				// mid-lookup must not cancel it (the checker bounds it).
 				ctx := context.WithoutCancel(r.Context())
@@ -140,12 +144,25 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 					http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 					return
 				}
-				passed.pass(clientId, clientCert)
+				passed.pass(tlsaVerdictPeer(peer), clientCert)
 			}
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// tlsaVerdictPeer names what a verdict holds for: this peer instance and
+// the TLSA set it was checked against. A set replaced by another, or a peer
+// removed and created again, is checked afresh.
+func tlsaVerdictPeer(peer *transport.Peer) string {
+	recs := peer.MechanismTLSA("API").Records
+	parts := make([]string, 0, len(recs))
+	for _, rr := range recs {
+		parts = append(parts, fmt.Sprintf("%d %d %d %s", rr.Usage, rr.Selector, rr.MatchingType, strings.ToLower(rr.Certificate)))
+	}
+	sort.Strings(parts)
+	return fmt.Sprintf("%s|%p|%s", peer.ID, peer, strings.Join(parts, ","))
 }
 
 // tlsaVerdicts remembers, for a while, which certificate passed the TLSA

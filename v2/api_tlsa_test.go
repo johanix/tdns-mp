@@ -373,3 +373,17 @@ func TestTLSA_RecipientReadyOverAPINeedsATLSA(t *testing.T) {
 		t.Error("a peer OPERATIONAL over API with no TLSA is ready")
 	}
 }
+
+// A pass held for a client ends when its TLSA set is replaced by another,
+// not only when it is emptied: the old certificate is refused at once.
+func TestTLSA_AReplacedSetEndsAPass(t *testing.T) {
+	te := newTLSAEnv(t, "tlsa-replaced.example.")
+	if resp, err := te.beat(t, te.Alice, te.Bob); err != nil || !resp.Ack {
+		t.Fatalf("a beat under alice's certificate: %+v %v", resp, err)
+	}
+	alice, _ := te.Bob.Bridge.PeerRegistry.Get(te.Alice.Identity)
+	setTLSA(alice, leaf(t, otherAgentCert(t))) // alice's key rotated away
+	if _, err := te.beat(t, te.Alice, te.Bob); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("the old certificate after its TLSA set was replaced, within the pass's minute: %v, want a 401", err)
+	}
+}
