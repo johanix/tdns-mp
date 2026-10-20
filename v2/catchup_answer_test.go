@@ -392,9 +392,26 @@ func TestAnAnswerWithADnskeyOperationIsRemembered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ans := r.conf.InternalMp.MPTransport.answersSent[r.zdr.catchUpAnswers[r.zone][asker]]
+	tm := r.conf.InternalMp.MPTransport
+	ans := tm.answersSent[r.zdr.catchUpAnswers[r.zone][asker]]
 	if ans == nil || ans.asker != asker || ans.zone != r.zone || !ans.keys[key.(*dns.DNSKEY).KeyTag()] {
 		t.Errorf("the answer is remembered as %+v, want its asker, zone and key", ans)
+	}
+	// one answer per zone and asker is remembered, the latest, however
+	// often the asker asks; another asker's is its own
+	for i := 2; i <= 20; i++ {
+		if _, err := r.conf.catchUpAnswer(r.zdr, r.zone, asker, &CatchUp{Request: fmt.Sprintf("r%d", i), Reason: "start"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.conf.catchUpAnswer(r.zdr, r.zone, "agent.p3.example.", &CatchUp{Request: "q1", Reason: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(tm.answersSent); n != 2 {
+		t.Errorf("%d answers remembered, want one per asker", n)
+	}
+	if tm.answersSent[r.zdr.catchUpAnswers[r.zone][asker]] == nil {
+		t.Error("the latest answer to the asker is not the one remembered")
 	}
 
 	s := newAnswerRig(t, "server.remembered.answer.example.", []string{"p2"})
