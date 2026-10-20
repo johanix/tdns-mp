@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -145,8 +146,8 @@ func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
 			return nil
 		}
 	}
-	if afterViewTest != nil {
-		afterViewTest(peer)
+	if f := afterViewTest.Load(); f != nil {
+		(*f)(peer)
 	}
 	return ar.S.Upsert(peer.ID, nil, func(exist bool, current *Agent, _ *Agent) *Agent {
 		if exist && current != nil {
@@ -169,8 +170,10 @@ func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
 }
 
 // afterViewTest, when set (tests), runs between materializeAgentView's test
-// that the engine holds the peer and its store of the view.
-var afterViewTest func(*hsync.Peer)
+// that the engine holds the peer and its store of the view. Atomic: a hello
+// retrier that an earlier test left running may make a view while a test
+// sets the hook.
+var afterViewTest atomic.Pointer[func(*hsync.Peer)]
 
 // agentViewForIdentity returns the ar.S view for an identity, wrapping the
 // ENGINE's hsync.Peer — never allocating a second peer for a known identity

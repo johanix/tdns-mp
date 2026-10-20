@@ -222,7 +222,7 @@ func TestAViewMadeWhileThePeerIsRemovedDoesNotOutliveIt(t *testing.T) {
 	peer := enginePeer(ar, id)
 	removed := make(chan struct{})
 	var once sync.Once
-	afterViewTest = func(p *hsync.Peer) {
+	hook := func(p *hsync.Peer) {
 		if p != peer {
 			return
 		}
@@ -235,7 +235,8 @@ func TestAViewMadeWhileThePeerIsRemovedDoesNotOutliveIt(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		})
 	}
-	t.Cleanup(func() { afterViewTest = nil })
+	afterViewTest.Store(&hook)
+	t.Cleanup(func() { afterViewTest.Store(nil) })
 	ar.materializeAgentView(peer)
 	<-removed
 	if v, ok := ar.S.Get(id); ok && v.Peer == peer {
