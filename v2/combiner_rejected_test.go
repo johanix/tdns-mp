@@ -11,6 +11,7 @@ package tdnsmp
 import (
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -589,5 +590,374 @@ func TestARecordTheCombinerRejectedIsNotNamedFromTheRepo(t *testing.T) {
 	cf := r.answered(t, d2)
 	if slices.Contains(cf.AppliedRecords, k.String()) || !slices.Contains(cf.AppliedRecords, crec) {
 		t.Errorf("the CSYNC's confirmation, made from the repo, is %+v: want the CSYNC and not the rejected key", *cf)
+	}
+}
+
+// staleWaitLine is the engine's line for a stale DNSKEY replace that waits.
+const staleWaitLine = "a stale DNSKEY replace waits for this agent's combiner to confirm the set that overtook it"
+
+// logCount is how many times the rig's log holds line.
+func (r *notifyRig) logCount(line string) int {
+	return strings.Count(r.log.String(), line)
+}
+
+// waitLog waits until the rig's log holds line n times.
+func (r *notifyRig) waitLog(t *testing.T, line string, n int) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if r.logCount(line) >= n {
+			return
+		}
+	}
+	t.Fatalf("the log never held %q %d times\n%s", line, n, r.log)
+}
+
+// A sender's DNSKEY distribution is overtaken by its next one, and this
+// agent's combiner, which is away, has confirmed neither. The queue sends the
+// first again, or it arrives only now: either way it is stale here, and its
+// set is the newer one's, which the combiner has not confirmed. No success,
+// and no key named, goes to the sender before the combiner's word: a sender
+// takes either as its keys published here (rig Z1). When the first was
+// handed over itself, the combiner's word on it is relayed as before, and
+// nothing more follows. When it was overtaken before it arrived, its final
+// word follows the combiner's on the set that overtook it. For a withdrawal
+// (a key left out) and for an introduction (a key added).
+func TestAStaleKeySetOvertakenInFlightWaitsForTheCombiner(t *testing.T) {
+	for _, kind := range []string{"a withdrawal", "an introduction"} {
+		for _, order := range []string{"handed over, then overtaken", "overtaken before it arrives", "overtaken twice before it arrives"} {
+			t.Run(kind+", "+order, func(t *testing.T) {
+				staleKeySetOvertakenInFlight(t, kind, order)
+			})
+		}
+	}
+}
+
+func staleKeySetOvertakenInFlight(t *testing.T, kind, order string) {
+	zone := map[string]string{"a withdrawal": "withdrawn", "an introduction": "introduced"}[kind] + "." +
+		map[string]string{"handed over, then overtaken": "inflight", "overtaken before it arrives": "late",
+			"overtaken twice before it arrives": "twice"}[order] + ".overtaken.example."
+	r := receivingRig(t, zone)
+	z := r.mpzd.ZoneName
+	signer, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+	k1, k2, k3 := testDnskey(t, z, 256), testDnskey(t, z, 256), testDnskey(t, z, 256)
+	var held, first []string
+	var keyTags, removedTags []uint16
+	if kind == "a withdrawal" {
+		held = []string{k1.String(), k2.String()}
+		first = []string{k1.String()} // k2 withdrawn
+		keyTags, removedTags = []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}
+	} else {
+		held = []string{k1.String()}
+		first = []string{k1.String(), k2.String()} // k2 introduced
+		keyTags = []uint16{k2.KeyTag()}
+	}
+	next := append(slices.Clone(first), k3.String())
+	replace := func(records []string) core.RROperation {
+		return core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: records}
+	}
+	// noFinal: no final word on d1 comes within d
+	noFinal := func(d1, when string, d time.Duration) {
+		t.Helper()
+		for end := time.Now().Add(d); time.Now().Before(end); {
+			cf, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+			if !ok {
+				return
+			}
+			if cf.DistributionID == d1 && cf.Status != "PENDING" {
+				t.Fatalf("%s, the sender got %+v", when, *cf)
+			}
+		}
+	}
+	final := func(d1, when string) *ConfirmationDetail {
+		t.Helper()
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); {
+			cf, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+			if !ok {
+				break
+			}
+			if cf.DistributionID == d1 && cf.Status != "PENDING" {
+				return cf
+			}
+		}
+		t.Fatalf("%s, no final word on the first distribution\n%s", when, r.log)
+		return nil
+	}
+
+	sent := time.Now().Add(-time.Minute)
+	d0 := nextDistributionID()
+	before := r.combinerDists()
+	r.receivesAt(t, string(signer), d0, sent, nil, replace(held))
+	c0 := r.newCombinerDist(before, 10*time.Second)
+	if c0 == "" {
+		t.Fatalf("the first set did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c0, held...)
+	r.answered(t, d0)
+
+	// the sender's propagation of the first distribution
+	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	d1 := nextDistributionID()
+	snd.TrackDnskeyPropagation(ZoneName(z), d1, keyTags, removedTags, []AgentId{us})
+	waiting := func() bool {
+		snd.dnskeyPropMu.Lock()
+		defer snd.dnskeyPropMu.Unlock()
+		_, ok := snd.pendingDnskeyPropagations[d1]
+		return ok
+	}
+
+	c1 := ""
+	if order == "handed over, then overtaken" {
+		before = r.combinerDists()
+		r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(first))
+		if c1 = r.newCombinerDist(before, 10*time.Second); c1 == "" {
+			t.Fatalf("the first distribution did not go to the combiner\n%s", r.log)
+		}
+	}
+	before = r.combinerDists()
+	r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(20*time.Second), nil, replace(next))
+	c2 := r.newCombinerDist(before, 10*time.Second)
+	if c2 == "" {
+		t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
+	}
+
+	// the first distribution, sent again or only now: stale here
+	waits := r.logCount(staleWaitLine)
+	r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(first))
+	r.waitLog(t, staleWaitLine, waits+1)
+	noFinal(d1, "while the combiner had confirmed no set", 300*time.Millisecond)
+
+	if order == "overtaken twice before it arrives" {
+		// the set changes again before the combiner's word on the newer one:
+		// that word says nothing of the set the repo holds now
+		k4 := testDnskey(t, z, 256)
+		last := append(slices.Clone(next), k4.String())
+		before = r.combinerDists()
+		r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(30*time.Second), nil, replace(last))
+		c3 := r.newCombinerDist(before, 10*time.Second)
+		if c3 == "" {
+			t.Fatalf("the newest set did not go to the combiner\n%s", r.log)
+		}
+		r.combinerTakes(c2, next...)
+		noFinal(d1, "after the combiner's word on a set overtaken in turn", 300*time.Millisecond)
+		r.combinerTakes(c3, last...)
+		cf := final(d1, "after the combiner took the newest set")
+		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+		if waiting() {
+			t.Errorf("after the combiner took the newest set the sender's propagation still waits (%+v)", *cf)
+		}
+		return
+	}
+	if c1 != "" {
+		// the combiner's word on the first hand-over is its word on that
+		// set, and is relayed; its word on the newer set adds nothing
+		r.combinerTakes(c1, first...)
+		cf := final(d1, "after the combiner took the first set")
+		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+		if waiting() {
+			t.Errorf("after the combiner took the first set the sender's propagation still waits (%+v)", *cf)
+		}
+		r.combinerTakes(c2, next...)
+		noFinal(d1, "after the relay, on the combiner's word on the newer set", 300*time.Millisecond)
+		return
+	}
+	r.combinerTakes(c2, next...)
+	cf := final(d1, "after the combiner took the newer set")
+	if cf.Status != "ok" && cf.Status != "SUCCESS" {
+		t.Errorf("after the combiner took the newer set the sender got %+v, want ok", *cf)
+	}
+	snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+	if waiting() {
+		t.Errorf("after the combiner took the newer set the sender's propagation still waits (%+v)", *cf)
+	}
+}
+
+// An update whose fresh part goes to the combiner, and whose stale replace is
+// of a key set that overtook it and that the combiner has not confirmed yet:
+// the final confirmation names none of that set and is PARTIAL, though the
+// combiner confirms the fresh part.
+func TestAStaleKeySetInFlightIsNotNamedBesideAFreshOne(t *testing.T) {
+	r := receivingRig(t, "mixed.inflight.handover.example.")
+	z := r.mpzd.ZoneName
+	signer := AgentId(r.peer.Identity)
+	r.leader(signer)
+	k1, k2 := testDnskey(t, z, 256), testDnskey(t, z, 256)
+	both := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String(), k2.String()}}
+	one := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String()}}
+	csync, crec := csyncOp(z, 1000)
+
+	sent := time.Now().Add(-time.Minute)
+	d0 := nextDistributionID()
+	before := r.combinerDists()
+	r.receivesAt(t, string(signer), d0, sent, nil, both)
+	c0 := r.newCombinerDist(before, 10*time.Second)
+	if c0 == "" {
+		t.Fatalf("the key set did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c0, k1.String(), k2.String())
+	r.answered(t, d0)
+
+	// a newer set drops k2; the combiner has not confirmed it
+	before = r.combinerDists()
+	r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(10*time.Second), nil, one)
+	if r.newCombinerDist(before, 10*time.Second) == "" {
+		t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
+	}
+
+	// an older update: the key set stale, the CSYNC fresh
+	d := nextDistributionID()
+	before = r.combinerDists()
+	r.receivesAt(t, string(signer), d, sent.Add(5*time.Second), nil, both, csync)
+	c := r.newCombinerDist(before, 10*time.Second)
+	if c == "" {
+		t.Fatalf("the CSYNC did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c, crec)
+	cf := r.answered(t, d)
+	if cf.Status != "PARTIAL" || slices.Contains(cf.AppliedRecords, k1.String()) || !slices.Contains(cf.AppliedRecords, crec) {
+		t.Errorf("the update got %+v, want PARTIAL with the CSYNC and without the key set", *cf)
+	}
+}
+
+// Only a success from the combiner says it holds the set that overtook a
+// stale DNSKEY replace. A combiner that fails the set, naming no record,
+// does not hold it: the stale replace names no key and is PARTIAL, and the
+// set is handed over again when it comes again. An IGNORED is passed on.
+func TestAStaleKeySetIsNotCreditedOnTheCombinersFailure(t *testing.T) {
+	for _, word := range []transport.ConfirmStatus{transport.ConfirmFailed, transport.ConfirmIgnored, transport.ConfirmPartial} {
+		t.Run(word.String(), func(t *testing.T) {
+			r := receivingRig(t, strings.ToLower(word.String())+".word.overtaken.example.")
+			z := r.mpzd.ZoneName
+			signer, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+			k1, k2, k3 := testDnskey(t, z, 256), testDnskey(t, z, 256), testDnskey(t, z, 256)
+			replace := func(records ...string) core.RROperation {
+				return core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: records}
+			}
+			sent := time.Now().Add(-time.Minute)
+			d0 := nextDistributionID()
+			before := r.combinerDists()
+			r.receivesAt(t, string(signer), d0, sent, nil, replace(k1.String(), k2.String()))
+			c0 := r.newCombinerDist(before, 10*time.Second)
+			r.combinerTakes(c0, k1.String(), k2.String())
+			r.answered(t, d0)
+
+			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+			d1 := nextDistributionID()
+			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
+
+			// the set that overtakes the withdrawal, then the withdrawal
+			d2 := nextDistributionID()
+			newer := replace(k1.String(), k3.String())
+			before = r.combinerDists()
+			r.receivesAt(t, string(signer), d2, sent.Add(20*time.Second), nil, newer)
+			c2 := r.newCombinerDist(before, 10*time.Second)
+			if c2 == "" {
+				t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
+			}
+			waits := r.logCount(staleWaitLine)
+			r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(k1.String()))
+			r.waitLog(t, staleWaitLine, waits+1)
+
+			var said []string // a PARTIAL names part of the set
+			if word == transport.ConfirmPartial {
+				said = []string{k1.String()}
+			}
+			r.us.Bridge.ChunkHandler.OnConfirmationReceived(c2, rigCombiner, word, r.mpzd.ZoneName,
+				said, nil, nil, nil, false, "zone not found on this combiner")
+			var cf *ConfirmationDetail
+			for end := time.Now().Add(10 * time.Second); time.Now().Before(end) && cf == nil; {
+				got, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+				if !ok {
+					break
+				}
+				if got.DistributionID == d1 && got.Status != "PENDING" {
+					cf = got
+				}
+			}
+			if cf == nil {
+				t.Fatalf("no final word on the withdrawal after the combiner's %s\n%s", word, r.log)
+			}
+			if cf.Status == "SUCCESS" || cf.Status == "ok" || len(cf.RemovedRecords) > 0 ||
+				slices.ContainsFunc(cf.AppliedRecords, func(rec string) bool { return !slices.Contains(said, rec) }) {
+				t.Fatalf("after the combiner's %s the sender got %+v, naming keys it did not", word, *cf)
+			}
+			if word == transport.ConfirmIgnored && cf.Status != "IGNORED" {
+				t.Errorf("after the combiner's IGNORED the sender got %+v, want IGNORED", *cf)
+			}
+			if word != transport.ConfirmIgnored {
+				snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+				snd.dnskeyPropMu.Lock()
+				_, waiting := snd.pendingDnskeyPropagations[d1]
+				snd.dnskeyPropMu.Unlock()
+				if !waiting {
+					t.Errorf("the withdrawal was credited though the combiner did not confirm the set (%+v)", *cf)
+				}
+			}
+			if word == transport.ConfirmFailed {
+				// the set the combiner failed goes to it again when it comes again
+				before = r.combinerDists()
+				r.receivesAt(t, string(signer), d2, sent.Add(20*time.Second), nil, newer)
+				if r.newCombinerDist(before, 10*time.Second) == "" {
+					t.Errorf("the set the combiner failed was not handed over again\n%s", r.log)
+				}
+			}
+		})
+	}
+}
+
+// A stale withdrawal arrives while an answer's forward of the set, which
+// drops the key, waits for the combiner. Its keys were accepted before, so
+// the forward marks none of them pending. The withdrawal names no key and is
+// PARTIAL; the sender credits the removal from the asker's confirmation of
+// the answer, once the combiner has the set.
+func TestAStaleWithdrawalBehindAnAnswersForwardIsNotCredited(t *testing.T) {
+	r := receivingRig(t, "answer.withdrawal.overtaken.example.")
+	z := r.mpzd.ZoneName
+	leader, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+	r.leader(leader)
+	k1, k2 := testDnskey(t, z, 257), testDnskey(t, z, 256)
+	both := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String(), k2.String()}}
+	one := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String()}}
+
+	sent := time.Now().Add(-time.Minute)
+	d0 := nextDistributionID()
+	before := r.combinerDists()
+	r.receivesAt(t, string(leader), d0, sent, nil, both)
+	c0 := r.newCombinerDist(before, 10*time.Second)
+	r.combinerTakes(c0, k1.String(), k2.String())
+	r.answered(t, d0)
+
+	lead := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	d, an := nextDistributionID(), nextDistributionID()
+	lead.TrackDnskeyPropagation(ZoneName(z), d, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
+	lead.noteCatchUpAnswer(an, ZoneName(z), us, map[uint16]bool{k1.KeyTag(): true})
+	waiting := func() bool {
+		lead.dnskeyPropMu.Lock()
+		defer lead.dnskeyPropMu.Unlock()
+		_, ok := lead.pendingDnskeyPropagations[d]
+		return ok
+	}
+
+	yes := true
+	before = r.combinerDists()
+	r.receivesAt(t, string(leader), an, sent.Add(30*time.Second), &CatchUp{Request: "r1", Complete: &yes}, one)
+	ca := r.newCombinerDist(before, 10*time.Second)
+	if ca == "" {
+		t.Fatalf("the answer was not forwarded\n%s", r.log)
+	}
+	r.receivesAt(t, string(leader), d, sent.Add(10*time.Second), nil, one)
+	c := r.answered(t, d)
+	if c.Status != "PARTIAL" || len(c.AppliedRecords) > 0 || len(c.RemovedRecords) > 0 {
+		t.Fatalf("the stale withdrawal got %+v, want PARTIAL naming no key", *c)
+	}
+	lead.ProcessDnskeyConfirmation(d, c.Source, c.Status, c.AppliedRecords, nil)
+	if !waiting() {
+		t.Fatal("the withdrawal was credited before the combiner had the answer's set")
+	}
+
+	r.combinerTakes(ca, k1.String())
+	cf := r.answered(t, an)
+	lead.ProcessDnskeyConfirmation(an, cf.Source, cf.Status, cf.AppliedRecords, nil)
+	if waiting() {
+		t.Errorf("after the asker confirmed the answer, the withdrawal still waits (%+v)", *cf)
 	}
 }
