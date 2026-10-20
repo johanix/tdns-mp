@@ -178,3 +178,28 @@ func TestAStaleReplaceBesideAFreshOneIsConfirmedWithIt(t *testing.T) {
 		t.Errorf("the sender got the final confirmation %+v, want the NS refused and the CSYNC applied", *c)
 	}
 }
+
+// A stale replace of a set, and an add to the same set in the same update:
+// the repo applies the add, and the add goes on to the combiner. Only the
+// replace goes no further, and it removes nothing.
+func TestAnAddBesideAStaleReplaceOfTheSameSetGoesOn(t *testing.T) {
+	r := receivingRig(t, "add.overtaken.example.")
+	z := r.mpzd.ZoneName
+	peer := AgentId(r.peer.Identity)
+	ns1 := fmt.Sprintf("%s\t3600\tIN\tNS\tns1.provider.example.", z)
+	ns2 := fmt.Sprintf("%s\t3600\tIN\tNS\tns2.provider.example.", z)
+
+	sent := time.Now().Add(-time.Minute)
+	r.receivesAt(t, string(peer), nextDistributionID(), sent.Add(30*time.Second), nil,
+		core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{ns1}})
+	r.heldBy(t, peer, dns.TypeNS, ns1)
+
+	r.receivesAt(t, string(peer), nextDistributionID(), sent, nil,
+		core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{}},
+		core.RROperation{Operation: "add", RRtype: "NS", Records: []string{ns2}})
+	held := r.heldBy(t, peer, dns.TypeNS, ns2)
+	if got := r.queuedFor(held.DistributionID); !slices.Equal(got, []string{rigCombiner}) {
+		t.Errorf("the add beside a stale replace is queued for %v, want our combiner\n%s", got, r.log)
+	}
+	r.heldBy(t, peer, dns.TypeNS, ns1)
+}
