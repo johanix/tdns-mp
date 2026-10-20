@@ -365,6 +365,7 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
 		return
 	}
+	readContributionsAgain(conf, zd, zone)
 	req := editsAnswerFor(zd, conf.MpConfig().Identity, zone, nonce)
 	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(req.AgentRecords))
 	if req.Message == editsNotLoaded {
@@ -399,6 +400,30 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 // request's nonce. Until the zone's stored contributions are read
 // (ContributionsRead) the answer says that they are not loaded, and
 // carries none: an empty map would read as the agent's own state.
+// readContributionsAgain reads the zone's stored contributions again, as the
+// operator's reapply does (CombinerReapplyContributions), when the read at
+// the zone's start failed: nothing else reads them again, and until they
+// are read every agent's own read of the zone stays not done. Only once the
+// zone has loaded: before, the read at its first load is still to come. A
+// read that fails again is tried at the next request.
+func readContributionsAgain(conf *Config, zd *MPZoneData, zone string) {
+	hdb := conf.InternalMp.HsyncDB
+	if hdb == nil || !zd.Ready {
+		return
+	}
+	zd.Lock()
+	read := zd.MP != nil && zd.MP.ContributionsRead
+	zd.Unlock()
+	if read {
+		return
+	}
+	if _, err := CombinerReapplyContributions(dns.Fqdn(zone), hdb); err != nil {
+		lgCombiner.Warn("RFI EDITS: the zone's stored contributions could not be read again", "zone", zone, "err", err)
+		return
+	}
+	lgCombiner.Info("RFI EDITS: the zone's stored contributions, not read at its start, are read now", "zone", zone)
+}
+
 func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest {
 	// Copy AgentContributions under lock, then convert outside the lock.
 	zd.Lock()

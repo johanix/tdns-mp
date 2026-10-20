@@ -452,3 +452,41 @@ func TestAReReadWithNoAnswerFreesItsZone(t *testing.T) {
 		t.Errorf("read after %d requests", n)
 	}
 }
+
+// A combiner whose read of its stored contributions failed at the zone's
+// start reads them again when an agent asks for its own state, once the
+// zone has loaded, and answers that they are loaded, with them.
+func TestACombinerWhoseStartReadFailedReadsAgainWhenAsked(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "readagain.combiner.example.", false, false)
+	z := mpzd.ZoneName
+	ns := z + "\t3600\tIN\tNS\tns.alpha.example."
+	rr, err := dns.NewRR(ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveContributions(hdb, z, csyncLeaderA, map[string]map[uint16]core.RRset{z: {dns.TypeNS: {RRs: []dns.RR{rr}}}}); err != nil {
+		t.Fatal(err)
+	}
+	mpzd.Lock()
+	mpzd.MP.ContributionsRead, mpzd.MP.AgentContributions = false, nil // the read at the start failed
+	mpzd.Unlock()
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.HsyncDB = hdb
+	conf.SetMpConfig(&MultiProviderConf{Role: "combiner", Identity: csyncCombinerID})
+	// the agent's request, as the combiner's message handler takes it (no
+	// transport here: the answer is built, and not sent)
+	ask := func() { sendEditsToAgent(context.Background(), conf, nil, csyncOurAgent, z, "n") }
+
+	// not before the zone has loaded
+	mpzd.Ready = false
+	ask()
+	if req := editsAnswerFor(mpzd, csyncCombinerID, z, "n"); req.Message != editsNotLoaded {
+		t.Fatalf("before the zone loaded: %q", req.Message)
+	}
+	mpzd.Ready = true
+	ask()
+	req := editsAnswerFor(mpzd, csyncCombinerID, z, "n")
+	if req.Message != editsLoaded || len(req.AgentRecords[csyncLeaderA][z]) != 1 {
+		t.Errorf("after the read again: %q, %v", req.Message, req.AgentRecords)
+	}
+}
