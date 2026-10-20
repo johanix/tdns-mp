@@ -389,12 +389,17 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// Remote update: only enqueue for combiner (not back to agents).
 							// The combiner deduplicates KEY/CDS contributions: local agent
 							// contributions take precedence over remote-forwarded ones.
-							distID, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
+							distID, err := enqueueForCombiner(tm, synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
 							if err != nil {
 								distID = ""
 							}
 							zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, distID)
 							if err != nil {
+								// The repo has the records, the combiner does not: they
+								// are not held, so the same records sent again go to
+								// the combiner, and no confirmation names them as applied.
+								zdr.markNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update,
+									"not handed to the combiner: "+err.Error())
 								lgEngine.Error("failed to enqueue remote update for combiner", "zone", synchedDataUpdate.Zone, "err", err)
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
@@ -1587,6 +1592,68 @@ func (zdr *ZoneDataRepo) inRepo(zone ZoneName, agentId AgentId) func(rrStr strin
 	}
 }
 
+// enqueueForCombiner is the remote update's hand-over to this agent's
+// combiner; a test makes it fail.
+var enqueueForCombiner = func(tm *MPTransportBridge, zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+	return tm.EnqueueForCombiner(zone, update, distID)
+}
+
+// markNotHandedOver: a remote update that ProcessUpdate put in the repo
+// could not be handed to this agent's combiner (its queue was full, say), so
+// the combiner does not have its records. Each add and replace record of the
+// update that its combiner neither holds nor is about to (accepted, or
+// pending from an earlier forward) is tracked as rejected, with the reason:
+// not held (rejectedByCombiner), it goes to the combiner when it is sent
+// again, and no confirmation names it as applied. Without this the next
+// identical update was a no-op, confirmed as applied from the repo alone,
+// and a DNSKEY sender took that as its key published here.
+func (zdr *ZoneDataRepo) markNotHandedOver(zone ZoneName, agentId AgentId, update *ZoneUpdate, reason string) {
+	if update == nil {
+		return
+	}
+	now := time.Now()
+	mark := func(rrtype uint16, rr dns.RR) {
+		tracked := zdr.getOrCreateTracking(zone, agentId, rrtype)
+		s := rr.String()
+		for i := range tracked.Tracked {
+			tr := &tracked.Tracked[i]
+			if tr.RR.String() != s {
+				continue
+			}
+			if tr.State == RRStateAccepted || tr.State == RRStatePending {
+				return
+			}
+			tr.State, tr.Reason, tr.UpdatedAt = RRStateRejected, reason, now
+			return
+		}
+		tracked.Tracked = append(tracked.Tracked, TrackedRR{RR: rr, State: RRStateRejected, Reason: reason, UpdatedAt: now})
+	}
+	for _, op := range update.Operations {
+		if op.Operation != "add" && op.Operation != "replace" {
+			continue
+		}
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			continue
+		}
+		for _, rrStr := range op.Records {
+			if rr, err := dns.NewRR(rrStr); err == nil {
+				mark(rrtype, rr)
+			}
+		}
+	}
+	if len(update.Operations) > 0 {
+		return
+	}
+	for rrtype, rrset := range update.RRsets {
+		for _, rr := range rrset.RRs {
+			if rr.Header().Class == dns.ClassINET {
+				mark(rrtype, rr)
+			}
+		}
+	}
+}
+
 // rejectedRecords are the add and replace records of ops that this agent's
 // combiner rejected for the agent (rejectedByCombiner).
 func (zdr *ZoneDataRepo) rejectedRecords(zone ZoneName, agentId AgentId, ops []core.RROperation) []string {
@@ -1613,9 +1680,10 @@ func (zdr *ZoneDataRepo) rejectedRecords(zone ZoneName, agentId AgentId, ops []c
 }
 
 // rejectedByCombiner: the agent's record that this agent's combiner
-// rejected, and that no send has put in its hands since. A rejection leaves
-// the record in the repo (the confirmation handler only sets its state), so
-// the repo alone does not say the combiner holds it. Tracking is the
+// rejected, or that was never handed to it (markNotHandedOver), and that no
+// send has put in its hands since. Either leaves the record in the repo (the
+// confirmation handler only sets its state), so the repo alone does not say
+// the combiner holds it. Tracking is the
 // engine's, as is every caller.
 func (zdr *ZoneDataRepo) rejectedByCombiner(zone ZoneName, agentId AgentId, rrtype uint16, rrStr string) bool {
 	tracked := zdr.Tracking[zone][agentId][rrtype]
