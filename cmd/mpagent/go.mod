@@ -52,5 +52,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+// Pinned at johanix/dns v1.1.72-johanix.4, the fork version tdns/v2 uses.
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
