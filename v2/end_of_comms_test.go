@@ -200,3 +200,85 @@ func TestARefusingPeerNoZoneNamesIsNotLookedUp(t *testing.T) {
 		}
 	}
 }
+
+// Admission is not trust. A peer this agent holds with no zone, as the
+// operator's discover leaves one before its discovery, passes check 2, the
+// gate before the crypto. Its signed SYNC still gets nowhere: without its
+// key the payload does not verify, and the message is dropped before any
+// handler runs. Once its key is known, the same SYNC reaches the handler and
+// is refused there: it shares no zone. So check 2 is no way in.
+func TestAHeldPeerThatWasNeverDiscoveredGetsNoSyncIn(t *testing.T) {
+	zone := newDiscoveryZone(t)
+	keys := map[string]*harnessKey{
+		"alice.agent.example.": newHarnessKey(t),
+		"bob.agent.example.":   newHarnessKey(t),
+	}
+	env := newIntegEnv(t, &integEnvConfig{
+		ChunkMode: "edns0", ControlZoneIsIdentity: true, Discovery: zone, Keys: keys,
+	})
+	alice, bob := env.Alice, env.Bob
+	zone.set(dnsDiscoveryRecords(bob.Identity, listenDNS(t, env, bob), keys[bob.Identity])...)
+	aliceAt := listenDNS(t, env, alice) // her records are not published yet
+
+	// Bob holds Alice, with no zone, and has never looked her up.
+	bobEngine, _ := endOfCommsEngine(t, env)
+	bobEngine.MarkNeeded(hsync.PeerID(alice.Identity), "", nil)
+	if ok, why := bob.Bridge.IsPeerAuthorized(alice.Identity, ""); !ok {
+		t.Fatalf("precondition: check 2 does not admit the held peer: %s", why)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+	defer cancel()
+	if err := alice.Bridge.DiscoverAndRegisterAgent(ctx, bob.Identity); err != nil {
+		t.Fatalf("Alice cannot look Bob up: %v", err)
+	}
+	toBob, _ := alice.Bridge.PeerRegistry.Get(bob.Identity)
+	const syncZone = "admission.endofcomms.example."
+	send := func() (*PeerSyncResponse, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+		defer cancel()
+		return alice.Bridge.SendSyncWithFallback(ctx, toBob, &PeerSyncRequest{
+			SenderID: alice.Identity, Zone: syncZone, MessageType: "sync", SyncType: PeerSyncTypeNS,
+			DistributionID: nextDistributionID(),
+			Records:        map[string][]string{syncZone: {syncZone + " 3600 IN NS ns.alice.example."}},
+		})
+	}
+	// What Bob's router saw from Alice: its stats count a message once it
+	// has been read, past the crypto.
+	routed := func() uint64 {
+		p, ok := bob.Bridge.PeerRegistry.Get(alice.Identity)
+		if !ok {
+			return 0
+		}
+		_, _, n := p.Stats.GetStats()
+		return uint64(n)
+	}
+	nothingForBob := func(when string) {
+		t.Helper()
+		select {
+		case m := <-bob.MsgQs.Msg:
+			t.Errorf("%s: a SYNC reached Bob's queue: %+v", when, m)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	if resp, err := send(); err == nil {
+		t.Errorf("without her key: Bob answered Alice's SYNC: %+v", resp)
+	}
+	if n := routed(); n != 0 {
+		t.Errorf("without her key: Bob's router read %d message(s) from Alice, want none", n)
+	}
+	nothingForBob("without her key")
+
+	// Bob gets her key: the SYNC is read, and the handler refuses it.
+	zone.set(dnsDiscoveryRecords(alice.Identity, aliceAt, keys[alice.Identity])...)
+	bob.Bridge.flushAndDiscover(alice.Identity) // past his cached miss
+	resp, err := send()
+	if err == nil && resp != nil && resp.Status == transport.ConfirmSuccess {
+		t.Errorf("with her key: Bob took a SYNC from a peer that shares no zone: %+v", resp)
+	}
+	if n := routed(); n == 0 {
+		t.Error("with her key: Bob's router read nothing from Alice, want the SYNC read and refused")
+	}
+	nothingForBob("with her key")
+}
