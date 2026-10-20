@@ -208,7 +208,10 @@ func TestConfirm_HTTPSSyncIsConfirmedOverHTTPS(t *testing.T) {
 	in.Mechanism = transport.MechanismAPI
 	me.Bob.Bridge.routeIncomingMessage(in)
 	m, ok := recvMsgWithin(t, me.Bob.MsgQs.Msg, integTestTimeout)
-	if !ok || m.Mechanism != transport.MechanismAPI {
+	if !ok {
+		t.Fatal("the sync did not reach bob")
+	}
+	if m.Mechanism != transport.MechanismAPI {
 		t.Fatalf("bob has the sync over %q, want API", m.Mechanism)
 	}
 

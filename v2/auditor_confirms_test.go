@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
 )
 
@@ -23,7 +24,7 @@ func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 		MessageType: core.AgentMsgNotify, OriginatorID: "agent.p1.example.", DeliveredBy: "agent.p1.example.",
 		Zone: "cell.example.", DistributionID: "d1",
 		Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{key.String()}}},
-	}}
+	}, Mechanism: transport.MechanismAPI}
 	e.onInboundMsg(&hsync.InboundMsg{MessageType: hsync.AgentMsg(msg.MessageType), Originator: hsync.PeerID(msg.OriginatorID), Zone: hsync.ZoneName(msg.Zone), Payload: msg})
 
 	if len(got) != 1 {
@@ -32,6 +33,9 @@ func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 	d := got[0]
 	if d.Status != "SUCCESS" || d.OriginatingDistID != "d1" || d.OriginatingSender != "agent.p1.example." || d.Zone != "cell.example." {
 		t.Errorf("confirmation %+v, want SUCCESS for d1 to agent.p1.example. for cell.example.", d)
+	}
+	if d.OriginatingMechanism != transport.MechanismAPI {
+		t.Errorf("the confirmation goes back over %q, want API, the mechanism the distribution came on", d.OriginatingMechanism)
 	}
 	if len(d.AppliedRecords) != 1 || len(d.IgnoredRecords) != 0 || len(d.RejectedItems) != 0 {
 		t.Errorf("records: applied %v ignored %v rejected %v, want the record done and nothing else", d.AppliedRecords, d.IgnoredRecords, d.RejectedItems)
