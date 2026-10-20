@@ -67,9 +67,9 @@ func samePeer(a, b PeerID) bool {
 	return dns.CanonicalName(string(a)) == dns.CanonicalName(string(b))
 }
 
-// ApplyHsyncDiff registers adds and removes for one zone.
-// Symmetric with tdnsmp UpdateAgents HSYNC add/remove passes; the agent re-homes
-// the RFI/election side effects via Host.OnHsyncMembersAdded.
+// ApplyHsyncDiff registers adds and removes for one zone, and recomputes the
+// provider groups (Host.OnHsync3Changed). The agent checks the zone's
+// election after it returns (zoneChanged, step 8).
 func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 	if e == nil || e.registry == nil {
 		return nil
@@ -120,7 +120,6 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 		return nil
 	}
 
-	localAdded := false
 	for _, rr := range diff.Adds {
 		h3, ok := hsync3Of(rr)
 		if !ok {
@@ -128,7 +127,6 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 		}
 		id := PeerID(h3.Identity)
 		if string(id) == local {
-			localAdded = true
 			continue
 		}
 		if members == nil {
@@ -169,14 +167,6 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 
 	if e.deps.Host.OnHsync3Changed != nil {
 		e.deps.Host.OnHsync3Changed(zone)
-	}
-
-	if (len(updated) > 0 || localAdded) && e.deps.Host.OnHsyncMembersAdded != nil {
-		added := make([]PeerID, 0, len(updated))
-		for id := range updated {
-			added = append(added, id)
-		}
-		e.deps.Host.OnHsyncMembersAdded(zone, added, localAdded)
 	}
 	return nil
 }

@@ -11,11 +11,8 @@ import (
 )
 
 type diffHooks struct {
-	hsync3Changed  int
-	localRemoved   int
-	membersAdded   int
-	lastAdded      []PeerID
-	lastLocalAdded bool
+	hsync3Changed int
+	localRemoved  int
 }
 
 func newDiffEngine(local string, gate bool, zones mapZoneLookup) (*Engine, *diffHooks) {
@@ -28,11 +25,6 @@ func newDiffEngine(local string, gate bool, zones mapZoneLookup) (*Engine, *diff
 		Host: HostCallbacks{
 			OnHsync3Changed: func(zone ZoneName) { h.hsync3Changed++ },
 			OnLocalRemoved:  func(zone ZoneName) { h.localRemoved++ },
-			OnHsyncMembersAdded: func(zone ZoneName, added []PeerID, localAdded bool) {
-				h.membersAdded++
-				h.lastAdded = added
-				h.lastLocalAdded = localAdded
-			},
 		},
 	}
 	return NewEngine(deps, DefaultConfig()), h
@@ -54,9 +46,6 @@ func TestApplyHsyncDiff_guardSkipsWhenLocalAbsent(t *testing.T) {
 	}
 	if h.hsync3Changed != 1 {
 		t.Fatalf("the groups are recomputed once when local is absent, fired %d", h.hsync3Changed)
-	}
-	if h.membersAdded != 0 {
-		t.Fatalf("OnHsyncMembersAdded must not fire when the guard trips, fired %d", h.membersAdded)
 	}
 }
 
@@ -94,8 +83,8 @@ func TestApplyHsyncDiff_guardRecomputesGroupsWhenLocalIsRemoved(t *testing.T) {
 	if h.hsync3Changed != 1 {
 		t.Fatalf("the groups are recomputed once when the local identity is removed, fired %d", h.hsync3Changed)
 	}
-	if h.membersAdded != 0 {
-		t.Fatalf("OnHsyncMembersAdded must not fire when the guard trips, fired %d", h.membersAdded)
+	if _, ok := e.registry.S.Get("rem.example."); ok {
+		t.Fatal("the remote peer was registered while the guard tripped")
 	}
 }
 
@@ -112,8 +101,8 @@ func TestApplyHsyncDiff_failsClosedWhenZoneViewMissing(t *testing.T) {
 	}
 }
 
-// Delta (b): a role-less (OFF) HSYNC3 add is excluded; a member add is registered
-// and surfaced (without the role-less one) to OnHsyncMembersAdded.
+// Delta (b): a role-less (OFF) HSYNC3 add is excluded; a member add is
+// registered, and the groups are recomputed once.
 func TestApplyHsyncDiff_roleLessAddExcluded(t *testing.T) {
 	local := mustHSYNC3RR(t, "loc", "local.example.")
 	member := mustHSYNC3RR(t, "mem", "mem.example.")
@@ -131,22 +120,23 @@ func TestApplyHsyncDiff_roleLessAddExcluded(t *testing.T) {
 	if _, ok := e.registry.S.Get("off.example."); ok {
 		t.Fatal("role-less (OFF) add must be excluded")
 	}
-	if h.membersAdded != 1 || len(h.lastAdded) != 1 || h.lastAdded[0] != "mem.example." {
-		t.Fatalf("OnHsyncMembersAdded should carry only the member add, fired=%d added=%v", h.membersAdded, h.lastAdded)
+	if h.hsync3Changed != 1 {
+		t.Fatalf("the groups are recomputed once after the adds, fired %d", h.hsync3Changed)
 	}
 }
 
-// The local identity's own add is signalled via localAdded (drives the upstream
-// CONFIG RFI re-home) and never registered as a remote peer.
-func TestApplyHsyncDiff_localAddSignalled(t *testing.T) {
+// The local identity's own add is never registered as a remote peer, and
+// the groups are recomputed. The agent checks the zone's election after the
+// diff (zoneChanged, step 8).
+func TestApplyHsyncDiff_localAddRecomputesAndRegistersNothing(t *testing.T) {
 	local := mustHSYNC3RR(t, "loc", "local.example.")
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local}}}
 	e, h := newDiffEngine("local.example.", true, zones)
 
 	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{local}})
 
-	if h.membersAdded != 1 || !h.lastLocalAdded {
-		t.Fatalf("local add should fire OnHsyncMembersAdded with localAdded=true, fired=%d localAdded=%v", h.membersAdded, h.lastLocalAdded)
+	if h.hsync3Changed != 1 {
+		t.Fatalf("the groups are recomputed once after the local add, fired %d", h.hsync3Changed)
 	}
 	if _, ok := e.registry.S.Get("local.example."); ok {
 		t.Fatal("local identity must not be registered as a remote peer")

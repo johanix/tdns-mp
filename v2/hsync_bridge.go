@@ -344,14 +344,12 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 	ar := conf.InternalMp.AgentRegistry
 	wireAgentGossipCallbacks(conf, ar)
 	deps, cfg := buildHsyncEngineDeps(conf)
-	// Agent-only: gate the diff on local HSYNC3 presence (weAreInHSYNC) and
-	// re-home the removal teardown + RFI/election side effects of UpdateAgents.
+	// Agent-only: gate the diff on the local agent's standing, and run the
+	// removal teardown. The zone's election is checked after the diff, by
+	// zoneChanged (step 8).
 	deps.GateOnLocalPresence = true
 	deps.Host.OnLocalRemoved = func(zone hsync.ZoneName) {
 		ar.localRemovedFromZone(ZoneName(zone))
-	}
-	deps.Host.OnHsyncMembersAdded = func(zone hsync.ZoneName, added []hsync.PeerID, localAdded bool) {
-		ar.reattachHsyncMemberAdds(ZoneName(zone), added, localAdded)
 	}
 	return hsync.NewEngine(deps, cfg)
 }

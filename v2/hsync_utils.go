@@ -1888,6 +1888,15 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 						Removes: analysis.HsyncStatus.HsyncRemoves,
 					})
 				}
+				// The one check of the zone's election (step 8), after the
+				// diff, which recomputed the groups: called before it, a
+				// zone reduced to one provider would still find its old
+				// group (#149). A first load reaches it too: it reports
+				// every HSYNC3 record as added.
+				zone := ZoneName(mpzd.ZoneName)
+				if lem := ar.LeaderElectionManager; lem != nil && mpzd.Options[tdns.OptParentSync] && hasHSYNC3(zoneApex(zone)) {
+					lem.zoneChanged(zone)
+				}
 			}
 			// parentsync=agent or not: followParentSyncParam, before this
 		case AppTypeMPAuditor:

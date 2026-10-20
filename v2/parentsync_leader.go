@@ -1004,9 +1004,11 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 	if leader, ok := lem.GetGroupLeader(to); !ok || leader != lem.localID {
 		return
 	}
-	// The group's voting members are the union of its zones' until the
-	// group is keyed on its make-up, so its leader can be one that does not
-	// vote in the zone that arrived. It does not lead that zone (IsLeader).
+	// Since step 8 every zone of a group has the group's voting members,
+	// so a group's elected leader votes in each of them. A leader record
+	// that names this agent for a group it does not vote in (one taken as
+	// an observer, or a stale one) does not make it take a zone up: it does
+	// not lead that zone (IsLeader). Kept as that guard.
 	if !votesInZone(zone, lem.localID) {
 		lgElect.Info("zone joined a group this agent leads, but this agent does not vote in the zone: it does not take the zone up",
 			"zone", zone, "group", shortHash(to))
@@ -1035,6 +1037,13 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 		return
 	}
 	zone := ZoneName(zd.ZoneName)
+	// A zone with an HSYNC3 RRset is checked by zoneChanged, from its first
+	// load's post-refresh, after the groups are recomputed (step 8). One
+	// with parentsync and no HSYNC3 RRset is no multi-provider zone, and
+	// elects here as before.
+	if hasHSYNC3(zoneApex(zone)) {
+		return
+	}
 	configured := lem.configuredPeers(zone)
 	if configured == 0 {
 		lem.StartElection(zone, 0)
@@ -1047,6 +1056,58 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 		}
 	}
 	lem.DeferElection(zone)
+}
+
+// zoneChanged is the one check of a zone's election (step 8, design 4.5),
+// at the zone's first load and at every change of its HSYNC3 or HSYNCPARAM
+// RRset, after the groups are recomputed. For a zone with an HSYNC3 RRset
+// and parentsync on:
+//
+//  1. this agent does not vote in the zone: nothing is started, and the
+//     zone's own election, if it holds one, is dropped;
+//  2. a group covers the zone: the zone's own election is dropped, and
+//     nothing else is done; the group's election decides;
+//  3. no group covers the zone and this agent is its only voting member:
+//     it elects itself, unless it leads already (#149).
+func (lem *LeaderElectionManager) zoneChanged(zone ZoneName) {
+	if !votesInZone(zone, lem.localID) {
+		lem.dropZoneElection(zone)
+		return
+	}
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			lem.dropZoneElection(zone)
+			return
+		}
+	}
+	if lem.configuredPeers(zone) == 0 && !lem.IsLeader(zone) {
+		lem.StartElection(zone, 0)
+	}
+}
+
+// dropZoneElection drops the zone's own election, its timers and a deferred
+// election: a group covers the zone now, or this agent does not vote in it.
+func (lem *LeaderElectionManager) dropZoneElection(zone ZoneName) {
+	lem.mu.Lock()
+	le, ok := lem.elections[zone]
+	delete(lem.elections, zone)
+	delete(lem.pendingElections, zone)
+	lem.mu.Unlock()
+	if !ok {
+		return
+	}
+	le.mu.Lock()
+	le.gone = true
+	for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
+		if tm != nil {
+			tm.Stop()
+		}
+	}
+	le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer = nil, nil, nil, nil
+	leader, term := le.Leader, le.Term
+	le.mu.Unlock()
+	lgElect.Info("the zone's own election is dropped: a group covers the zone, or this agent does not vote in it",
+		"zone", zone, "leader", leader, "term", term)
 }
 
 // DeferElection records a zone as needing an election once peers become operational.
@@ -1729,7 +1790,7 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 	armed := le.Term
 	le.ReelectTimer = time.AfterFunc(lem.renewalDelay(le.Leader, nil), func() {
 		le.mu.Lock()
-		movedOn := le.Active || le.Term != armed
+		movedOn := le.gone || le.Active || le.Term != armed
 		le.mu.Unlock()
 		if movedOn {
 			lgElect.Debug("lease already renewed, or an election is running; this renewal does nothing", "zone", zone)
