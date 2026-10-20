@@ -222,7 +222,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						lg.Info("DelegationSyncher: NS and glue are in sync with the parent, the DS set is unknown",
 							"zone", syncstate.ZoneName, "waiting_for", waiting)
 						syncstate.Msg = fmt.Sprintf("NS and glue are in sync with the parent; the DS set is unknown, waiting for %s", waiting)
-						conf.delegationSyncInSync(ds.ZoneName)
+						conf.delegationSyncInSync(ds.ZoneName, false)
 						if ds.Response != nil {
 							ds.Response <- syncstate
 						}
@@ -233,7 +233,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// This ends the zone's retries. It is also what a sync
 					// that went out as a NOTIFY waits for: the peers are
 					// told of that sync now
-					conf.delegationSyncInSync(ds.ZoneName)
+					conf.delegationSyncInSync(ds.ZoneName, true)
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}

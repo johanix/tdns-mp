@@ -498,6 +498,25 @@ func TestNSInSyncAndDSUnknownIsNotReportedInSync(t *testing.T) {
 		t.Errorf("the answer: %q, want %q", got.Msg, want)
 	}
 	h.quiet(t, 100*time.Millisecond, "an unknown DS set")
+
+	// A chain that sent a NOTIFY ends the same way, and nobody is told that
+	// the parent is in sync with the zone.
+	c := &h.conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	if c.zones == nil {
+		c.zones = map[string]*delegationSyncChain{}
+	}
+	c.zones[zone] = &delegationSyncChain{notified: "CSYNC", rechecks: 1}
+	c.mu.Unlock()
+	h.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zone, ZoneData: h.mpzd.ZoneData, Response: resp}
+	if got, ok = recvWithin(resp, 4*time.Second); !ok || got.Msg != want {
+		t.Fatalf("the answer after a NOTIFY: %q, want %q", got.Msg, want)
+	}
+	if notified, rechecks := h.chainNotified(zone); notified != "" || rechecks != 0 {
+		t.Errorf("the chain still has %q out with %d checks", notified, rechecks)
+	}
+	h.logged(t, 1, `msg="NS and glue are in sync with the parent after the NOTIFY; the DS set is unknown, so the peers are not told that the sync is done" zone=`+zone+" notify=CSYNC checks=1")
+	h.untold(t, 300*time.Millisecond, "the DS set unknown after a NOTIFY")
 }
 
 // The answer that completes the catch-up asks, from the data engine, for the

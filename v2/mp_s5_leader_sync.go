@@ -833,7 +833,12 @@ func (conf *Config) delegationSyncSucceeded(zone string) (notified string, reche
 // the zone. It ends the zone's chain. If the chain had sent a NOTIFY, this
 // is when that sync is done, so the peers are told now, once; a sync that
 // never sent anything tells them nothing, as before.
-func (conf *Config) delegationSyncInSync(zone string) {
+//
+// dsKnown is false when NS and glue are in step with the parent and the DS
+// set is unknown. The chain ends all the same: the set turning known asks
+// for a sync again. But the parent is not in sync with the zone, and
+// nobody is told that it is.
+func (conf *Config) delegationSyncInSync(zone string, dsKnown bool) {
 	// The difference the zone's CSYNC was made for is gone. The same
 	// difference at a later time is a new change, and gets a new CSYNC.
 	c := &conf.InternalMp.delegationSyncChains
@@ -842,6 +847,11 @@ func (conf *Config) delegationSyncInSync(zone string) {
 	c.mu.Unlock()
 	sent, checks := conf.delegationSyncSucceeded(zone)
 	if sent == "" {
+		return
+	}
+	if !dsKnown {
+		lgEngine.Info("NS and glue are in sync with the parent after the NOTIFY; the DS set is unknown, so the peers are not told that the sync is done",
+			"zone", zone, "notify", sent, "checks", checks)
 		return
 	}
 	lgEngine.Info("the parent is in sync with the zone after the NOTIFY", "zone", zone, "notify", sent, "checks", checks)
