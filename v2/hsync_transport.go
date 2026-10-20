@@ -434,7 +434,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 
 	// Wire remote confirmation callback (two-phase protocol: Phase 7).
 	// When this agent's combiner confirms a sync that originated from another agent,
-	// send the final confirmation NOTIFY back to the originating agent.
+	// send the final confirmation back to the originating agent.
 	if tm.msgQs != nil {
 		tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
 			go tm.sendRemoteConfirmation(detail)
@@ -1447,7 +1447,7 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
-// NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
+// confirmations in the two-phase remote confirmation protocol (Phase 5).
 func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) {
 	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
@@ -1485,9 +1485,9 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) 
 	}
 }
 
-// sendRemoteConfirmation sends the final confirmation NOTIFY back to the originating agent
+// sendRemoteConfirmation sends the final confirmation back to the originating agent
 // after the remote agent's combiner has confirmed the sync. This is the second of two
-// NOTIFYs in the two-phase remote confirmation protocol (Phase 7).
+// confirmations in the two-phase remote confirmation protocol (Phase 7).
 func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
 	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
