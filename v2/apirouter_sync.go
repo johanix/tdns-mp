@@ -9,10 +9,16 @@ package tdnsmp
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gorilla/mux"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -58,9 +64,15 @@ func (conf *Config) SetupCombinerSyncRouter(ctx context.Context) (*mux.Router, e
 	return r, nil
 }
 
-// tlsaVerificationMiddleware returns middleware that verifies client
-// certificates against TLSA records in the AgentRegistry.
+// tlsaVerificationMiddleware returns middleware that checks the client's
+// certificate against the client's TLSA RRset, with the transport's checker
+// (the sending end uses the same one): any usable record of the set may
+// match, the set is looked up through the resolver within its TTL, and an
+// answer DNSSEC has not validated is refused unless validation is off. A
+// passed check holds for a minute for that peer and certificate, so a burst
+// of requests means one check; a peer whose set is empty is refused at once.
 func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFunc {
+	passed := &tlsaVerdicts{hold: time.Minute}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v1/hello" {
@@ -74,36 +86,90 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 			}
 			clientCert := r.TLS.PeerCertificates[0]
 
-			clientId := clientCert.Subject.CommonName
+			// The name as the receive pipeline reads it (api_receive.go):
+			// the certificate may leave out the trailing dot.
+			clientId := core.CanonicalizeName(dns.Fqdn(clientCert.Subject.CommonName))
 			ar := conf.InternalMp.AgentRegistry
+			if ar == nil || ar.TransportManager == nil || ar.TransportManager.APITransport == nil || ar.TransportManager.APITransport.TLSA == nil {
+				lgApi.Warn(apiName+": no agent registry or TLSA checker, client refused", "clientId", clientId)
+				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
+				return
+			}
 			if _, ok := ar.S.Get(AgentId(clientId)); !ok {
 				lgApi.Warn(apiName+": unknown remote agent identity", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
+			tm := ar.TransportManager
+			peer, ok := tm.PeerRegistry.Get(clientId)
+			if !ok {
+				lgApi.Warn(apiName+": client not in the peer registry", "clientId", clientId)
+				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
+				return
+			}
 
-			// Phase 2/2.5 (operator-decided): TLSA presence + certificate
-			// verification IS the gate. The TLSA lives on transport.Peer's
-			// per-mechanism crypto slots (self-locking accessor).
-			var tlsaRR *dns.TLSA
-			if ar.TransportManager != nil {
-				if peer, ok := ar.TransportManager.PeerRegistry.Get(clientId); ok {
-					tlsaRR = peer.MechanismTLSA("API")
+			if !peer.HasMechanismTLSA("API") || !passed.holds(clientId, clientCert) {
+				// Not the request's context: a client that hangs up
+				// mid-lookup must not cancel it (the checker bounds it).
+				ctx := context.WithoutCancel(r.Context())
+				if err := tm.APITransport.TLSA.CheckClient(ctx, peer, "API", clientCert); err != nil {
+					// The checker logs a missing TLSA, a mismatch and a
+					// failed lookup itself, rate-limited.
+					lgApi.Debug(apiName+": client certificate refused", "clientId", clientId, "err", err)
+					http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
+					return
 				}
-			}
-			if tlsaRR == nil {
-				lgApi.Warn(apiName+": no TLSA record for client", "clientId", clientId)
-				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			if err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert); err != nil {
-				lgApi.Warn(apiName+": certificate verification failed", "clientId", clientId, "err", err)
-				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
-				return
+				passed.pass(clientId, clientCert)
 			}
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// tlsaVerdicts remembers, for a while, which certificate passed the TLSA
+// check for which peer.
+type tlsaVerdicts struct {
+	hold time.Duration
+	now  func() time.Time // nil: time.Now
+	mu   sync.Mutex
+	at   map[string]time.Time
+}
+
+func tlsaVerdictKey(peer string, cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return peer + "|" + hex.EncodeToString(sum[:])
+}
+
+func (v *tlsaVerdicts) clock() time.Time {
+	if v.now != nil {
+		return v.now()
+	}
+	return time.Now()
+}
+
+// holds reports whether cert passed for peer less than hold ago.
+func (v *tlsaVerdicts) holds(peer string, cert *x509.Certificate) bool {
+	now := v.clock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	at, ok := v.at[tlsaVerdictKey(peer, cert)]
+	return ok && now.Sub(at) < v.hold
+}
+
+// pass notes that cert passed for peer now, and forgets verdicts too old to
+// hold.
+func (v *tlsaVerdicts) pass(peer string, cert *x509.Certificate) {
+	now := v.clock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.at == nil {
+		v.at = make(map[string]time.Time)
+	}
+	for k, at := range v.at {
+		if now.Sub(at) >= v.hold {
+			delete(v.at, k)
+		}
+	}
+	v.at[tlsaVerdictKey(peer, cert)] = now
 }
