@@ -187,14 +187,21 @@ type ownReadAnswer struct {
 	resp   *EditsResponseMsg
 	sentAt time.Time
 	err    error
+	reread bool // the re-read's (ownReader), not the start-up read's or a resync's
 }
 
 // applyOwnRead applies an answer of the combiner to the agent's data and
 // says whether it counts as the agent's own read. Only the combiner's word
 // editsLoaded counts. editsNotLoaded is applied to nothing. Any other word
-// is from a combiner older than the agent: it is applied as such answers
-// always were, and does not count. self is this agent: its own DNSKEY set
-// is never applied (applyEditsToSDE). The apply makes no note.
+// is from a combiner older than the agent, and does not count: its answer
+// is applied once for the zone, at its first read, as such answers always
+// were, and again at a resync; and only when it carries records. An empty
+// one is what such a combiner sends after a failed read of its store, and
+// would drop records this agent holds. The re-read, which runs every
+// ownReadInterval while the own read is not done, applies no such answer
+// after the first: it would apply it again and again. self is this agent:
+// its own DNSKEY set is never applied (applyEditsToSDE). The apply makes no
+// note.
 func applyOwnRead(zd *MPZoneData, a *ownReadAnswer, zdr *ZoneDataRepo, self AgentId) {
 	if !a.asked {
 		return
@@ -212,10 +219,17 @@ func applyOwnRead(zd *MPZoneData, a *ownReadAnswer, zdr *ZoneDataRepo, self Agen
 		applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, zdr, self, a.sentAt)
 		zdr.markOwnState(a.zone, true, "")
 	default:
-		applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, zdr, self, a.sentAt)
+		applied := editsRecordCount(a.resp.AgentRecords) > 0 && !(a.reread && zdr.olderApplied[a.zone])
+		if applied {
+			applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, zdr, self, a.sentAt)
+			if zdr.olderApplied == nil {
+				zdr.olderApplied = map[ZoneName]bool{}
+			}
+			zdr.olderApplied[a.zone] = true
+		}
 		why := "the combiner answered without the loaded token: is it older than the agent?"
 		zdr.markOwnState(a.zone, false, why)
-		lgEngine.Warn("the combiner's answer does not say that its stored contributions are loaded; this agent's own state is not read", "zone", a.zone, "why", why)
+		lgEngine.Warn("the combiner's answer does not say that its stored contributions are loaded; this agent's own state is not read", "zone", a.zone, "why", why, "applied", applied)
 	}
 }
 
@@ -300,7 +314,7 @@ func (r *ownReader) read(ctx context.Context, zd *MPZoneData, combiner, signer b
 	a := &ownReadAnswer{zone: zone}
 	if combiner {
 		resp, sentAt, err := r.conf.editsRequester()(ctx, zd.ZoneData, tm, r.msgQs)
-		a = &ownReadAnswer{zone: zone, asked: true, resp: resp, sentAt: sentAt, err: err}
+		a = &ownReadAnswer{zone: zone, asked: true, resp: resp, sentAt: sentAt, err: err, reread: true}
 	}
 	select {
 	case r.msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "own-read", Zone: zone, ownRead: a}:
@@ -340,4 +354,15 @@ func (mpzd *MPZoneData) signsWithoutInventory() bool {
 	signs := mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.ZoneSigned && mpzd.MP.MPdata.WeAreSigner
 	mpzd.Unlock()
 	return signs && mpzd.GetLastKeyInventory() == nil
+}
+
+// editsRecordCount is the number of records in an EDITS answer.
+func editsRecordCount(recs map[string]map[string][]string) int {
+	n := 0
+	for _, owners := range recs {
+		for _, rrs := range owners {
+			n += len(rrs)
+		}
+	}
+	return n
 }

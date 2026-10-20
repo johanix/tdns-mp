@@ -103,7 +103,16 @@ func newOwnRig(t *testing.T, zone string) *ownRig {
 }
 
 func (r *ownRig) apply(word string, sentAt time.Time, recs map[string]map[string][]string) {
-	applyOwnRead(r.mpzd, &ownReadAnswer{zone: r.zone, asked: true, sentAt: sentAt,
+	r.applyAs(false, word, sentAt, recs)
+}
+
+// reread is apply for the answer to a re-read (ownReader).
+func (r *ownRig) reread(word string, sentAt time.Time, recs map[string]map[string][]string) {
+	r.applyAs(true, word, sentAt, recs)
+}
+
+func (r *ownRig) applyAs(reread bool, word string, sentAt time.Time, recs map[string]map[string][]string) {
+	applyOwnRead(r.mpzd, &ownReadAnswer{zone: r.zone, asked: true, sentAt: sentAt, reread: reread,
 		resp: &EditsResponseMsg{SenderID: ownCombiner, Zone: string(r.zone), AgentRecords: recs, Message: word}}, r.zdr, roleA)
 }
 
@@ -164,6 +173,35 @@ func TestAnEditsAnswerWithoutTheLoadedTokenIsNotTheOwnRead(t *testing.T) {
 	}
 	if why := r.zdr.ownStateWhy(r.zone); !strings.Contains(why, "older than the agent") {
 		t.Errorf("the reason: %q", why)
+	}
+}
+
+// An older combiner's answer is applied once for the zone, and only when it
+// carries records. Its empty answer, after a failed read of its store,
+// clears nothing: not at a resync, and not at the re-reads that follow
+// every ownReadInterval. Nor does a re-read apply records the first read
+// did not have.
+func TestAnOlderCombinersAnswerIsNotAppliedAgainOnEveryReRead(t *testing.T) {
+	r := newOwnRig(t, "oldempty.own.example.")
+	ns := string(r.zone) + " 3600 IN NS ns.a.role.example."
+	r.apply("current contributions", time.Now(), r.records(roleA, ns))
+	if got := r.holds(roleA, dns.TypeNS); len(got) != 1 {
+		t.Fatalf("the start-up read's answer was not applied: %v", got)
+	}
+	r.apply("current contributions", time.Now(), nil) // a resync, empty
+	for i := 0; i < 2; i++ {
+		r.reread("current contributions", time.Now(), nil)
+	}
+	if got := r.holds(roleA, dns.TypeNS); len(got) != 1 {
+		t.Errorf("an older combiner's empty answer cleared the record: %v", got)
+	}
+	ns2 := string(r.zone) + " 3600 IN NS ns2.a.role.example."
+	r.reread("current contributions", time.Now(), r.records(roleA, ns2))
+	if got := r.holds(roleA, dns.TypeNS); len(got) != 1 || !strings.Contains(got[0], "ns.a.role") {
+		t.Errorf("a re-read applied an older combiner's answer: %v", got)
+	}
+	if r.zdr.OwnStateRead(r.zone) {
+		t.Error("an older combiner's answer counted as the own read")
 	}
 }
 
@@ -536,5 +574,55 @@ func TestAReloadOfTheContributionsDoesNotRollBackAnUpdate(t *testing.T) {
 	mpzd.Unlock()
 	if len(got) != 1 || got[0].String() != newer.String() {
 		t.Errorf("after the reload the zone holds %v, want the update's %s", got, newer)
+	}
+}
+
+// held is what the engine's repo holds of the agent's records of a type.
+func (r *reReadRig) held(t *testing.T, agent AgentId, rrtype uint16) []string {
+	t.Helper()
+	resp := make(chan *SynchedDataCmdResponse, 1)
+	r.msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "dump-zonedatarepo", Zone: r.zone, Response: resp}
+	got, ok := recvWithin(resp, 5*time.Second)
+	if !ok {
+		t.Fatal("the engine did not answer")
+	}
+	var out []string
+	for _, info := range got.ZDR[r.zone][agent][rrtype] {
+		out = append(out, info.RR)
+	}
+	return out
+}
+
+// An older combiner's answer is applied once for the zone, at its first
+// read: here the zone loads after the engine's start, and its first read is
+// the re-read's. The re-reads that follow, every ownReadInterval while the
+// own read is not done, apply none of its answers: an empty one clears
+// nothing, and one with other records does not replace what the first
+// brought.
+func TestTheReReadAppliesNoAnswerOfAnOlderCombiner(t *testing.T) {
+	const zone = "older.reread.example."
+	ns := zone + "\t3600\tIN\tNS\tns.a.role.example."
+	ns2 := zone + "\t3600\tIN\tNS\tns2.a.role.example."
+	r := newReReadRig(t, zone, func(_ context.Context, n int32) (*EditsResponseMsg, error) {
+		recs := map[string]map[string][]string{roleA: {zone: {ns}}}
+		switch {
+		case n == 1: // the zone's first read
+		case n%2 == 0:
+			recs = nil // an empty answer
+		default:
+			recs = map[string]map[string][]string{roleA: {zone: {ns2}}}
+		}
+		return &EditsResponseMsg{SenderID: ownCombiner, Message: "current contributions", AgentRecords: recs}, nil
+	})
+	for deadline := time.Now().Add(5 * time.Second); r.asks.Load() < 6; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d requests, want six", r.asks.Load())
+		}
+	}
+	if got := r.held(t, roleA, dns.TypeNS); len(got) != 1 || got[0] != ns {
+		t.Errorf("after the re-reads the repo holds %v, want the first read's %s", got, ns)
+	}
+	if r.ownRead() {
+		t.Error("an older combiner's answer counted as the own read")
 	}
 }

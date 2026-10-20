@@ -375,3 +375,33 @@ func TestANewerAnswerReplacesTheOlderOneStillQueued(t *testing.T) {
 		t.Errorf("after the asker confirmed an answer, the next request left %v queued, want its own answer", got)
 	}
 }
+
+// An answer that carries a DNSKEY operation is remembered with its keys,
+// for the asker's confirmation of it (creditFromAnswerLocked); an answer
+// without one is not.
+func TestAnAnswerWithADnskeyOperationIsRemembered(t *testing.T) {
+	yes := true
+	const asker = AgentId("agent.p2.example.")
+	r := newAnswerRig(t, "remembered.answer.example.", []string{"us"})
+	k := invItem(t, string(r.zone), 257, KeyStateActive, &yes)
+	r.inventory(t, k)
+	if _, err := r.conf.catchUpAnswer(r.zdr, r.zone, asker, &CatchUp{Request: "r1", Reason: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	key, err := dns.NewRR(k.KeyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ans := r.conf.InternalMp.MPTransport.answersSent[r.zdr.catchUpAnswers[r.zone][asker]]
+	if ans == nil || ans.asker != asker || ans.zone != r.zone || !ans.keys[key.(*dns.DNSKEY).KeyTag()] {
+		t.Errorf("the answer is remembered as %+v, want its asker, zone and key", ans)
+	}
+
+	s := newAnswerRig(t, "server.remembered.answer.example.", []string{"p2"})
+	if _, err := s.conf.catchUpAnswer(s.zdr, s.zone, asker, &CatchUp{Request: "r1", Reason: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s.conf.InternalMp.MPTransport.answersSent); n != 0 {
+		t.Errorf("%d answers remembered for a server's answer, which has no DNSKEY operation", n)
+	}
+}
