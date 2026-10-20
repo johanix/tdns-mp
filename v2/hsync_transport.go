@@ -1537,10 +1537,10 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	t := tm.confirmTransport(detail.OriginatingMechanism)
+	t := tm.confirmTransport(detail.Mechanism)
 	if t == nil {
 		lgTransport.Error("cannot send remote confirmation, no transport for the sync's mechanism",
-			"distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender, "mechanism", detail.OriginatingMechanism)
+			"distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender, "mechanism", detail.Mechanism)
 		return
 	}
 	err := tm.confirmOn(ctx, t, peer, &transport.ConfirmRequest{

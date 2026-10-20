@@ -34,8 +34,8 @@ func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 	if d.Status != "SUCCESS" || d.OriginatingDistID != "d1" || d.OriginatingSender != "agent.p1.example." || d.Zone != "cell.example." {
 		t.Errorf("confirmation %+v, want SUCCESS for d1 to agent.p1.example. for cell.example.", d)
 	}
-	if d.OriginatingMechanism != transport.MechanismAPI {
-		t.Errorf("the confirmation goes back over %q, want API, the mechanism the distribution came on", d.OriginatingMechanism)
+	if d.Mechanism != transport.MechanismAPI {
+		t.Errorf("the confirmation goes back over %q, want API, the mechanism the distribution came on", d.Mechanism)
 	}
 	if len(d.AppliedRecords) != 1 || len(d.IgnoredRecords) != 0 || len(d.RejectedItems) != 0 {
 		t.Errorf("records: applied %v ignored %v rejected %v, want the record done and nothing else", d.AppliedRecords, d.IgnoredRecords, d.RejectedItems)

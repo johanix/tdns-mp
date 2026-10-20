@@ -23,9 +23,7 @@ type SynchedDataUpdate struct {
 	UpdateType        string // "local" or "remote"
 	Update            *ZoneUpdate
 	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
-	// OriginatingMechanism is the mechanism the remote update arrived on;
-	// its final confirmation goes back on it.
-	OriginatingMechanism string
+	Mechanism         string // The mechanism a remote update arrived on: its final confirmation's first choice of path
 	// OriginatingTime is when the originating agent enqueued a remote
 	// update: the wire timestamp, stable across the sender's retries. With
 	// OriginatingDistID it orders REPLACEs from one agent (see
@@ -97,27 +95,25 @@ type replaceOrigin struct {
 }
 
 type PendingRemoteConfirmation struct {
-	OriginatingDistID    string
-	OriginatingSender    string
-	OriginatingMechanism string
-	Zone                 ZoneName
-	CreatedAt            time.Time
+	OriginatingDistID string
+	OriginatingSender string
+	Mechanism         string
+	Zone              ZoneName
+	CreatedAt         time.Time
 }
 
 type RemoteConfirmationDetail struct {
 	OriginatingDistID string
 	OriginatingSender string
-	// OriginatingMechanism is the mechanism the SYNC arrived on, and the
-	// one the confirmation goes back on.
-	OriginatingMechanism string
-	Zone                 ZoneName
-	Status               string
-	Message              string
-	AppliedRecords       []string
-	RemovedRecords       []string
-	RejectedItems        []RejectedItemInfo
-	IgnoredRecords       []string
-	Truncated            bool
+	Mechanism         string // The mechanism the SYNC arrived on: the confirmation's first choice of path
+	Zone              ZoneName
+	Status            string
+	Message           string
+	AppliedRecords    []string
+	RemovedRecords    []string
+	RejectedItems     []RejectedItemInfo
+	IgnoredRecords    []string
+	Truncated         bool
 }
 
 type AgentRepo struct {

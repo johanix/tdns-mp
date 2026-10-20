@@ -480,13 +480,13 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		// to the agent that sent it, which need not be the one it names
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-			OriginatingDistID:    u.OriginatingDistID,
-			OriginatingSender:    string(sender),
-			OriginatingMechanism: u.OriginatingMechanism,
-			Zone:                 u.Zone,
-			Status:               "REJECTED",
-			Message:              reason,
-			RejectedItems:        refused,
+			OriginatingDistID: u.OriginatingDistID,
+			OriginatingSender: string(sender),
+			Mechanism:         u.Mechanism,
+			Zone:              u.Zone,
+			Status:            "REJECTED",
+			Message:           reason,
+			RejectedItems:     refused,
 		})
 	}
 	return reason

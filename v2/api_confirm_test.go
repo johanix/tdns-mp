@@ -150,7 +150,7 @@ func newMechanismEnv(t *testing.T, zone string, mode httpsMode) *mechanismEnv {
 // it over once his combiner has applied the records.
 func (me *mechanismEnv) finalFrom(m *AgentMsgPostPlus) {
 	me.Bob.MsgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-		OriginatingDistID: m.DistributionID, OriginatingSender: string(m.OriginatorID), OriginatingMechanism: m.Mechanism,
+		OriginatingDistID: m.DistributionID, OriginatingSender: string(m.OriginatorID), Mechanism: m.Mechanism,
 		Zone: m.Zone, Status: "SUCCESS", AppliedRecords: m.Records[string(m.Zone)]})
 }
 
@@ -283,7 +283,7 @@ func TestConfirm_HangingHTTPSLeavesDNSTime(t *testing.T) {
 	me := newMechanismEnv(t, "confirm-hang.example.", httpsHangs)
 	id := queueSync(t, me.integEnv, me.zone)
 	me.Bob.MsgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-		OriginatingDistID: id, OriginatingSender: me.alice, OriginatingMechanism: transport.MechanismAPI,
+		OriginatingDistID: id, OriginatingSender: me.alice, Mechanism: transport.MechanismAPI,
 		Zone: ZoneName(me.zone), Status: "SUCCESS"})
 	me.confirmed(t, id, transport.ConfirmSuccess)
 	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got != "gone" {
