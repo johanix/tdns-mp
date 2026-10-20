@@ -134,8 +134,9 @@ func TestAGroupThatLosesItsLastZoneHoldsNoElection(t *testing.T) {
 //
 // And for an election that was called in the moment the group went, by a
 // caller that had read the group just before: the word that the group is
-// gone came before the election and found nothing to drop. The election gets
-// no answer, and its retry drops what it left.
+// gone came before the election and found nothing to drop. The election
+// reads the group itself, finds it gone and starts nothing, so nothing is
+// left to drop.
 func TestTheRetryOfAnElectionStartsNothingOnceTheGroupIsGone(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -174,8 +175,12 @@ func TestTheRetryOfAnElectionStartsNothingOnceTheGroupIsGone(t *testing.T) {
 
 			// The retry fires within 1.5 s of the abort.
 			time.Sleep(1700 * time.Millisecond)
-			if through := calls(); len(through) != 1 {
-				t.Errorf("elections were called through %v, want the first one only: the retry is for a group that is gone", through)
+			want := 1
+			if tc.goneBefore {
+				want = 0 // the election finds the group gone
+			}
+			if through := calls(); len(through) != want {
+				t.Errorf("elections were called through %v, want %d: the retry is for a group that is gone", through, want)
 			}
 			r.holdNothing(t, "after the retry fired for the group that is gone")
 		})

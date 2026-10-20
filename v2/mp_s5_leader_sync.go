@@ -580,6 +580,20 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	}
 }
 
+// endDelegationSyncWork ends what this agent has scheduled for the zone's
+// parent, as delegationSyncOwnerSyncs does: the chain, a held NOTIFY with it,
+// and every sync under way, the key poll included, under the chains' lock at
+// once. It says whether there was a chain or a run to end.
+func (conf *Config) endDelegationSyncWork(zone string) bool {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	_, chained := c.zones[zone]
+	c.endChainLocked(zone)
+	n := c.cancelRunsLocked(zone)
+	c.mu.Unlock()
+	return chained || n > 0
+}
+
 // delegationSyncRun gives a leader sync of the zone a context of its own,
 // which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
 // over. A sync can sit in tdns's UPDATE retry loop for a minute or more after
@@ -667,20 +681,26 @@ func (c *delegationSyncChains) endChainLocked(zone string) *delegationNotifyHold
 }
 
 // stillParticipates: one of this agent's identities has a role in the zone
-// (ParticipantsForZone: an HSYNCPARAM role through an ON HSYNC3 record). A
+// (zoneParticipants: an HSYNCPARAM role through an ON HSYNC3 record). A
 // refresh that removed this agent from the zone has published that before
 // PostRefresh queues anything, so the syncher reads it whatever the order of
 // the group recompute: PostRefresh queues a delegation sync before it applies
-// the HSYNC diff, and the syncher could judge the lead on the old groups. A
-// zone with no participants at all gives nothing to judge by.
+// the HSYNC diff, and the syncher could judge the lead on the old groups.
+//
+// A zone with no HSYNC3 RRset here (not loaded, or not a multi-provider
+// zone) gives nothing to judge by, and this agent takes part. A zone with
+// one does not count this agent when no participant is this agent, also
+// when there is no participant at all: the only provider's record set OFF,
+// or its only role taken, as votesInZone has it.
 func (conf *Config) stillParticipates(zone string) bool {
 	ids := ourHsyncIdentities(conf.MpConfig())
-	participants := ParticipantsForZone(ZoneName(zone))
-	if len(ids) == 0 || len(participants) == 0 {
+	apex := zoneApex(ZoneName(zone))
+	if len(ids) == 0 || !hasHSYNC3(apex) {
 		return true
 	}
+	participants, _ := zoneParticipants(apex)
 	for _, p := range participants {
-		if isAmong(ids, p) {
+		if isAmong(ids, AgentId(p)) {
 			return true
 		}
 	}

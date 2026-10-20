@@ -84,6 +84,10 @@ type MPState struct {
 	// first run is the zone's first load, which has no leader yet and is no
 	// give-back. Read and written only by the zone's post-refresh callback.
 	ParentSyncFollowed bool
+	// ParentSyncNamed: the zone's records named this agent at the last run
+	// of followParentSyncParam. An option that comes on because a refresh
+	// names this agent where the last one did not is no give-back.
+	ParentSyncNamed bool
 
 	// absentForeign: the signer's foreign rows whose keys the last incoming
 	// zone lacked, kept because foreignKeyWithdrawn did not let them go

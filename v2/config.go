@@ -7,6 +7,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"sort"
 	"sync/atomic"
 
@@ -330,4 +331,7 @@ type InternalMpConf struct {
 	// held no SIG(0) key for them, and whose key it is asking its peers for
 	// (parentsync_utils.go).
 	zoneKeyWaits zoneKeyWaits
+	// keyPoll stands in for tdns's poll of the parent for a zone's SIG(0)
+	// key in a test (ParentSyncAfterKeyPublication). Nil runs tdns's.
+	keyPoll func(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8)
 }
