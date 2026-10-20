@@ -15,7 +15,7 @@ func TestIdentitiesFromRRset(t *testing.T) {
 		mustHSYNC3RR(t, "fox", "fox.example."),
 		mustHSYNC3RR(t, "hare", "hare.example."),
 	}
-	got := IdentitiesFromRRset(rrs, "fox.example.")
+	got := IdentitiesFromRRset(rrs, "Fox.Example") // as configured: no dot, another case
 	if len(got) != 1 {
 		t.Fatalf("got %d identities, want 1", len(got))
 	}
