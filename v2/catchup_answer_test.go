@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -321,5 +322,56 @@ func TestAnAnswerCarriesTheKeyStates(t *testing.T) {
 	}
 	if s := states[next.KeyTag]; s.State != KeyStatePublished || s.DS != nil {
 		t.Errorf("the published KSK: %+v, want its ds unset", s)
+	}
+}
+
+// An asker whose answers do not reach it asks again and again. Each new
+// answer takes the older one, still queued for that asker and zone, out of
+// the queue, so one answer waits there, the latest. An answer for another
+// asker, or for another zone, stays; and once the asker has confirmed an
+// answer, the next one is queued as before.
+func TestANewerAnswerReplacesTheOlderOneStillQueued(t *testing.T) {
+	r := newAnswerRig(t, "replaced.answer.example.", []string{"p2"})
+	r.holds(t, r.ns("ns.us.example."))
+	const p2, p3 = AgentId("agent.p2.example."), AgentId("agent.p3.example.")
+	ask := func(zone ZoneName, peer AgentId, req string) {
+		t.Helper()
+		if _, err := r.conf.catchUpAnswer(r.zdr, zone, peer, &CatchUp{Request: req, Reason: "start"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queued := func(zone ZoneName, peer AgentId) []string {
+		var ids []string
+		for _, m := range r.queue.GetPendingMessages() {
+			if m.Zone == string(zone) && m.RecipientID == string(peer) {
+				ids = append(ids, m.DistributionID)
+			}
+		}
+		return ids
+	}
+
+	other := ZoneName("other.answer.example.")
+	ask(r.zone, p3, "q1")
+	ask(other, p2, "o1")
+	ask(r.zone, p2, "r1")
+	first := queued(r.zone, p2)
+	for i := 2; i <= 50; i++ {
+		ask(r.zone, p2, fmt.Sprintf("r%d", i))
+	}
+	last := queued(r.zone, p2)
+	if len(last) != 1 || slices.Equal(last, first) {
+		t.Fatalf("after 50 requests the queue holds %v for the asker, want one answer, not the first (%v)", last, first)
+	}
+	if last[0] != r.zdr.catchUpAnswers[r.zone][p2] {
+		t.Errorf("the answer queued is %s, want the latest (%s)", last[0], r.zdr.catchUpAnswers[r.zone][p2])
+	}
+	if n, m := len(queued(r.zone, p3)), len(queued(other, p2)); n != 1 || m != 1 {
+		t.Errorf("another asker's answer (%d queued) or another zone's (%d) was taken out", n, m)
+	}
+
+	r.queue.MarkConfirmed(last[0], string(p2))
+	ask(r.zone, p2, "r51")
+	if got := queued(r.zone, p2); len(got) != 1 || got[0] == last[0] {
+		t.Errorf("after the asker confirmed an answer, the next request left %v queued, want its own answer", got)
 	}
 }

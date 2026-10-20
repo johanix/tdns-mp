@@ -63,6 +63,23 @@ func (u *SynchedDataUpdate) dropStaleOperations() {
 	}
 }
 
+// staleOperations are the update's operations whose type the repo found
+// stale. What the repo holds of them goes in the update's confirmation all
+// the same: a newer message put it there, and the sender tracks its
+// distribution by the records it lists.
+func (u *SynchedDataUpdate) staleOperations() []core.RROperation {
+	if u.Update == nil || len(u.staleTypes) == 0 {
+		return nil
+	}
+	var out []core.RROperation
+	for _, op := range u.Update.Operations {
+		if t, ok := dns.StringToType[op.RRtype]; ok && u.staleTypes[t] {
+			out = append(out, op)
+		}
+	}
+	return out
+}
+
 // freshOperations are the update's operations whose type the repo did not
 // find stale.
 func (u *SynchedDataUpdate) freshOperations() []core.RROperation {
@@ -133,6 +150,10 @@ type ZoneDataRepo struct {
 	// syncher and the status read them (own_read.go).
 	ownState     map[ZoneName]time.Time
 	ownStateNote map[ZoneName]string
+	// catchUpAnswers: per zone and asker, the distribution ID of the last
+	// answer to a request for the zone's state. A newer answer takes the
+	// older one out of the queue (catchUpAnswer). Engine only.
+	catchUpAnswers map[ZoneName]map[AgentId]string
 	// notes: per zone, agent and type, the last change the engine stored
 	// and passed to its combiner (setNote). Engine only.
 	notes map[ZoneName]map[AgentId]map[uint16]*setNote
@@ -148,6 +169,10 @@ type PendingRemoteConfirmation struct {
 	OriginatingSender string
 	Zone              ZoneName
 	CreatedAt         time.Time
+	// StaleHeld: the records of the update's stale replaces that the repo
+	// holds. They did not go to the combiner; the confirmation to the
+	// sender names them beside what the combiner applied.
+	StaleHeld []string
 }
 
 type RemoteConfirmationDetail struct {
