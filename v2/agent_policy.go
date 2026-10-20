@@ -91,6 +91,47 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 // own leaves its agent for it (the membership design, 2.3; issue 137, item 2).
 var errNoRoleInZone = errors.New("this provider has no role in the zone (it is listed under neither servers= nor signers=)")
 
+// forgetRefusedDnskeys: a local update with this provider's DNSKEYs that is
+// refused for want of a role was derived while the provider had one, and
+// LocalDnskeysFromKeystate has recorded its keys and key states as
+// distributed. They were not. They are forgotten, so that the next
+// derivation, once the role is back (the signer's resend, or its next
+// inventory), finds the whole set new and distributes it.
+func forgetRefusedDnskeys(u *SynchedDataUpdate) {
+	if u.Update == nil || !updateCarriesDnskey(u.Update) {
+		return
+	}
+	mpzd, ok := Zones.Get(string(u.Zone))
+	if !ok {
+		return
+	}
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP != nil {
+		mpzd.MP.LocalDNSKEYs, mpzd.MP.LocalKeyStates = nil, nil
+	}
+}
+
+// updateCarriesDnskey: the update has a DNSKEY operation or record.
+func updateCarriesDnskey(u *ZoneUpdate) bool {
+	for _, op := range u.Operations {
+		if op.RRtype == "DNSKEY" {
+			return true
+		}
+	}
+	for _, rr := range u.RRs {
+		if rr.Header().Rrtype == dns.TypeDNSKEY {
+			return true
+		}
+	}
+	for t := range u.RRsets {
+		if t == dns.TypeDNSKEY {
+			return true
+		}
+	}
+	return false
+}
+
 // noRoleEditRefusal is the answer to an edit of the zone by the operator of
 // a provider that has no role in it.
 func noRoleEditRefusal(zone ZoneName) string {
@@ -184,6 +225,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		// design, 2.3). A refusal, not an error: the data engine answers
 		// nothing for an evaluation error.
 		if !votesInZone(synchedDataUpdate.Zone, synchedDataUpdate.AgentId) {
+			forgetRefusedDnskeys(synchedDataUpdate)
 			return false, noRoleEditRefusal(synchedDataUpdate.Zone), nil
 		}
 		rrs := append([]dns.RR{}, synchedDataUpdate.Update.RRs...)

@@ -2570,11 +2570,12 @@ func (tm *MPTransportBridge) foreignWordFor(zone ZoneName) (keys []core.ForeignK
 // does not sign holds no key. Logged when the set changes, not with every
 // hand-over.
 func (tm *MPTransportBridge) logSilentAgents(zone ZoneName) {
-	var self AgentId
-	if tm.TransportManager != nil {
-		self = AgentId(tm.LocalID)
+	// With no transport there is no identity of this agent's to leave
+	// out, and it would be named as a provider that has not spoken.
+	if tm.TransportManager == nil {
+		return
 	}
-	all := signingPeers(zone, self)
+	all := signingPeers(zone, AgentId(tm.LocalID))
 	tm.foreignKeyStatesMu.Lock()
 	defer tm.foreignKeyStatesMu.Unlock()
 	var silent []string
