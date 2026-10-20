@@ -124,6 +124,24 @@ type engineRig struct {
 	confs chan *RemoteConfirmationDetail
 }
 
+// runEngine runs the agent's data engine until the test ends, and waits for
+// it to stop before the test's cleanup goes on: an engine still running after
+// its test reads package state, the engine's logger among them, that the next
+// test's set-up writes.
+func runEngine(t *testing.T, conf *Config, msgQs *MsgQs) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conf.SynchedDataEngine(ctx, msgQs)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
 func newEngineRig(t *testing.T, zone string) *engineRig {
 	t.Helper()
 	return newEngineRigWith(t, zone, nil)
