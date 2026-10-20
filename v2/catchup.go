@@ -265,7 +265,11 @@ func (t *catchUpTracker) entryLocked(zone ZoneName, peer AgentId) *catchUpPeer {
 // complete answer is less than a minute old. The minute holds neither
 // manual (decision 38) nor peer-start: a peer that restarted within the
 // minute of its answer has lost its queue since, and asking it back is the
-// only way to its last change (design 5.1).
+// only way to its last change (design 5.1). Nor does an outstanding
+// request hold peer-start: it is made anew, under a new name, so that an
+// answer the peer's earlier process built, still on its way, names a
+// request that is no longer outstanding and counts for nothing. A
+// peer-start already outstanding is the restarted process's, and stands.
 // A request clears Complete. To a peer that is not OPERATIONAL it is noted,
 // and goes out at PeerOperational. Ask only records: the peer's sender
 // sends.
@@ -278,7 +282,11 @@ func (t *catchUpTracker) Ask(zone ZoneName, peer AgentId, reason string) askResu
 	defer t.mu.Unlock()
 	e := t.entryLocked(zone, peer)
 	if e.outstanding() {
-		return askOutstanding
+		if reason != catchUpPeerStart || e.Reason == catchUpPeerStart {
+			return askOutstanding
+		}
+		lgCatchUp.Info("a peer started while a request to it was outstanding; the request is made anew", "zone", zone, "peer", peer,
+			"replaced", e.Request, "reason", e.Reason)
 	}
 	if reason != catchUpManual && reason != catchUpPeerStart && e.Complete && time.Since(e.Answered) < catchUpRecent {
 		return askRecent
@@ -357,12 +365,15 @@ func (t *catchUpTracker) PeerOperational(peer AgentId) {
 }
 
 // sharedZones are the multi-provider zones that have loaded here and in
-// which both this agent and peer vote.
+// which both this agent and peer vote, by the test AskZone asks at a load:
+// the zone's records as loaded, not its provider data. A zone with HSYNC3
+// records and no HSYNCPARAM, in which every ON record votes, has no
+// provider data of this agent's, and is shared all the same.
 func (t *catchUpTracker) sharedZones(peer AgentId) []ZoneName {
 	var out []ZoneName
 	for _, name := range Zones.Keys() {
 		zd, ok := Zones.Get(name)
-		if !ok || !zd.Options[tdns.OptMultiProvider] || !zd.loadedForCatchUp() {
+		if !ok || !zd.Options[tdns.OptMultiProvider] || !zd.Ready {
 			continue
 		}
 		zone := ZoneName(zd.ZoneName)

@@ -311,3 +311,97 @@ func TestAPeerThatRestartsWithinTheMinuteIsAskedBack(t *testing.T) {
 		return len(got) == 1 && strings.Contains(got[0], "ns2.bob.agent.example.")
 	})
 }
+
+// A peer that restarts while this agent's request to it is outstanding is
+// asked back. The answer its earlier process built arrives after the
+// start, and counts for nothing; the ask-back's answer brings the change
+// the peer made before it stopped.
+func TestAPeerThatRestartsWhileAskedIsAskedBack(t *testing.T) {
+	n := newRestartNet(t, "restart.asked.example.")
+	alice, bob := AgentId(dns.Fqdn(n.alice.Identity)), AgentId(dns.Fqdn(n.bob.Identity))
+	tr := n.conf.InternalMp.CatchUp
+	waitUntil(t, "alice's own read was not done", func() bool { _, w := tr.CaughtUp(n.zone); return w.OwnRead })
+	yes := true
+	answer := func(req *AgentMsgPostPlus, ns string) {
+		t.Helper()
+		zu := &ZoneUpdate{Zone: n.zone, AgentId: bob, CatchUp: &CatchUp{Request: req.CatchUp.Request, Complete: &yes},
+			Operations: []core.RROperation{{Operation: "replace", RRtype: "NS", Records: []string{string(n.zone) + " 3600 IN NS " + ns}},
+				{Operation: "replace", RRtype: "CDS", Records: []string{}}}}
+		if err := n.bob.Bridge.EnqueueForSpecificAgent(n.zone, alice, zu, transport.GenerateDistributionID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bobsNS := func() []string {
+		resp := make(chan *SynchedDataCmdResponse, 1)
+		n.conf.InternalMp.MsgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "dump-zonedatarepo", Zone: n.zone, Response: resp}
+		got, ok := recvWithin(resp, 5*time.Second)
+		if !ok {
+			return nil
+		}
+		var out []string
+		for _, rr := range got.ZDR[n.zone][bob][dns.TypeNS] {
+			out = append(out, rr.RR)
+		}
+		return out
+	}
+	entry := func() catchUpPeer {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		if e := tr.peers[n.zone][bob]; e != nil {
+			return *e
+		}
+		return catchUpPeer{}
+	}
+
+	// alice asks bob; bob's process builds its answer, and has not sent it
+	tr.afterRefresh(n.zone, &ZoneRefreshAnalysis{FirstLoad: true})
+	agent, _ := n.alice.Registry.S.Get(bob)
+	if _, err := n.alice.Bridge.SendBeatWithFallback(context.Background(), agent, 1); err != nil {
+		t.Fatalf("the beat: %v", err)
+	}
+	req, ok := recvMsgWithin(t, n.bob.MsgQs.Msg, 10*time.Second)
+	if !ok || req.CatchUp == nil {
+		t.Fatalf("bob got %+v", req)
+	}
+
+	// bob changes its NS, loses the change in a restart, and asks at its start
+	back, _ := n.bob.Registry.S.Get(alice)
+	if _, err := n.bob.Registry.sendRfiToAgent(back, &AgentMsgPost{MessageType: AgentMsgRfi, OriginatorID: bob, YourIdentity: alice,
+		Zone: n.zone, RfiType: "SYNC", CatchUp: &CatchUp{Request: "bob-restarted", Reason: catchUpStart}}); err != nil {
+		t.Fatalf("bob's request: %v", err)
+	}
+	var askedBack *AgentMsgPostPlus
+	for askedBack == nil {
+		m, ok := recvMsgWithin(t, n.bob.MsgQs.Msg, 10*time.Second)
+		if !ok {
+			t.Fatal("alice did not ask bob back while its request was outstanding")
+		}
+		if m.CatchUp != nil && m.CatchUp.Reason == catchUpPeerStart {
+			askedBack = m
+		}
+	}
+	if askedBack.CatchUp.Request == req.CatchUp.Request {
+		t.Fatalf("the ask-back has the outstanding request's name %s", req.CatchUp.Request)
+	}
+
+	// the earlier process's answer arrives now: its data is taken, its
+	// answer counts for nothing
+	answer(req, "ns1.bob.agent.example.")
+	waitUntil(t, "the earlier answer's data was not taken", func() bool {
+		got := bobsNS()
+		return len(got) == 1 && strings.Contains(got[0], "ns1.bob.agent.example.")
+	})
+	if e := entry(); e.Complete || !e.outstanding() || e.Request != askedBack.CatchUp.Request {
+		t.Errorf("the earlier process's answer counted: %+v", e)
+	}
+	if up, _ := tr.CaughtUp(n.zone); up {
+		t.Error("the zone is caught up on the earlier process's answer")
+	}
+
+	answer(askedBack, "ns2.bob.agent.example.")
+	waitUntil(t, "alice did not get bob's change", func() bool {
+		got := bobsNS()
+		return len(got) == 1 && strings.Contains(got[0], "ns2.bob.agent.example.")
+	})
+	waitUntil(t, "the ask-back's answer did not end the request", func() bool { e := entry(); return e.Complete && !e.outstanding() })
+}
