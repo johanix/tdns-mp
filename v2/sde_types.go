@@ -49,8 +49,9 @@ type SynchedDataUpdate struct {
 	CatchUp  *CatchUp `json:"catch_up,omitempty"`
 	Response chan *AgentMsgResponse
 	// staleTypes: the types whose replace the repo found older than the
-	// one it has applied (noteReplaceOrigin). What they say about keys is
-	// not noted either (freshOperations).
+	// one it has applied (noteReplaceOrigin). What those replaces say about
+	// keys is not noted either (freshOperations). An add or a delete of the
+	// same type in the same update is not stale: the repo applied it.
 	staleTypes map[uint16]bool
 }
 
@@ -73,15 +74,21 @@ func (u *SynchedDataUpdate) staleOperations() []core.RROperation {
 	}
 	var out []core.RROperation
 	for _, op := range u.Update.Operations {
-		if t, ok := dns.StringToType[op.RRtype]; ok && u.staleTypes[t] {
+		if u.isStale(op) {
 			out = append(out, op)
 		}
 	}
 	return out
 }
 
-// freshOperations are the update's operations whose type the repo did not
-// find stale.
+// isStale: the operation is a replace whose type the repo found stale.
+func (u *SynchedDataUpdate) isStale(op core.RROperation) bool {
+	t, ok := dns.StringToType[op.RRtype]
+	return ok && op.Operation == "replace" && u.staleTypes[t]
+}
+
+// freshOperations are the update's operations other than its stale
+// replaces.
 func (u *SynchedDataUpdate) freshOperations() []core.RROperation {
 	if u.Update == nil {
 		return nil
@@ -91,7 +98,7 @@ func (u *SynchedDataUpdate) freshOperations() []core.RROperation {
 	}
 	var out []core.RROperation
 	for _, op := range u.Update.Operations {
-		if t, ok := dns.StringToType[op.RRtype]; ok && u.staleTypes[t] {
+		if u.isStale(op) {
 			continue
 		}
 		out = append(out, op)
