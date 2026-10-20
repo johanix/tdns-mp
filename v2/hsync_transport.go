@@ -1476,13 +1476,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	t := tm.confirmTransport(mechanism)
-	if t == nil {
-		lgTransport.Error("cannot send immediate confirmation, no transport for the sync's mechanism",
-			"distributionID", payload.DistributionID, "peer", senderID, "mechanism", mechanism)
-		return
-	}
-	err := tm.confirmOn(ctx, t, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, mechanism, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
@@ -1537,13 +1531,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	t := tm.confirmTransport(detail.Mechanism)
-	if t == nil {
-		lgTransport.Error("cannot send remote confirmation, no transport for the sync's mechanism",
-			"distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender, "mechanism", detail.Mechanism)
-		return
-	}
-	err := tm.confirmOn(ctx, t, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, detail.Mechanism, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(detail.Zone),
 		DistributionID: detail.OriginatingDistID, // Use the originating agent's distID
@@ -1565,11 +1553,11 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	}
 }
 
-// confirmTransport is the transport a SYNC's confirmations go back on: the
-// mechanism the SYNC arrived on, whatever else the peer offers. A SYNC over
-// DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents that
-// share a mechanism use that path both ways. nil when the mechanism is
-// unknown or this bridge has no transport for it: then nothing is sent.
+// confirmTransport is the transport a SYNC's confirmations go back on first:
+// the mechanism the SYNC arrived on, whatever else the peer offers. A SYNC
+// over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents
+// that share a mechanism use that path both ways. nil when the mechanism is
+// not known or this bridge has no transport for it.
 func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transport {
 	switch mechanism {
 	case transport.MechanismAPI:
@@ -1584,12 +1572,20 @@ func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transp
 	return nil
 }
 
-// confirmOn sends a confirmation on t, the transport of its SYNC's mechanism
-// (confirmTransport): the first choice of path is the one the SYNC came on.
-// When that fails, the confirmation goes on the other mechanism, if that
-// reaches the peer. The first try then gets half the time, so a peer that
-// hangs on it leaves the other mechanism the rest.
-func (tm *MPTransportBridge) confirmOn(ctx context.Context, t transport.Transport, peer *transport.Peer, req *transport.ConfirmRequest) error {
+// confirmOn sends a confirmation of a SYNC that arrived on mechanism. The
+// first choice of path is the one the SYNC came on (confirmTransport). When
+// that fails, the confirmation goes on the other mechanism, if that reaches
+// the peer; the first try then gets half the time, so a peer that hangs on
+// it leaves the other mechanism the rest. When the mechanism is not known,
+// the manager picks by what the peer offers, with the same fallback: a
+// confirmation that is not sent leaves the sender sending its SYNC again.
+func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
+	t := tm.confirmTransport(mechanism)
+	if t == nil {
+		lgTransport.Debug("the sync's mechanism is not known; the confirmation goes by what the peer offers",
+			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism)
+		return tm.Confirm(ctx, peer, req)
+	}
 	other := tm.otherConfirmTransport(t, peer)
 	if other == nil {
 		return t.Confirm(ctx, peer, req)

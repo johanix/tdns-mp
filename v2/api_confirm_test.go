@@ -352,19 +352,45 @@ func TestConfirmFallbackIsLoggedOnceAnHour(t *testing.T) {
 	}
 }
 
-// A confirmation whose SYNC's mechanism is not known goes nowhere: it is
-// not guessed.
-func TestConfirm_UnknownMechanismSendsNothing(t *testing.T) {
+// A confirmation whose SYNC's mechanism is not known still goes: by what
+// the peer offers, HTTPS first when she has an endpoint. Not sent, it would
+// leave alice sending her SYNC again.
+func TestConfirm_UnknownMechanismGoesByThePeersOffer(t *testing.T) {
 	me := newMechanismEnv(t, "confirm-unknown.example.", httpsServes)
 	id := queueSync(t, me.integEnv, me.zone)
 	me.Bob.MsgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 		OriginatingDistID: id, OriginatingSender: me.alice, Zone: ZoneName(me.zone), Status: "SUCCESS"})
-	time.Sleep(300 * time.Millisecond) // time for a confirmation that must not come
-	if p, n := me.posts.Load(), me.notifies.Load(); p != 0 || n != 0 {
-		t.Errorf("a confirmation with no mechanism went out: %d POSTs, %d NOTIFYs", p, n)
+	me.confirmed(t, id, transport.ConfirmSuccess)
+	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got != "gone" {
+		t.Errorf("alice's entry is %s, want it closed", got)
 	}
-	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got == "gone" {
-		t.Error("alice's entry closed")
+	if p, n := me.posts.Load(), me.notifies.Load(); p != 1 || n != 0 {
+		t.Errorf("%d POSTs and %d NOTIFYs, want the confirmation over HTTPS, which alice offers", p, n)
+	}
+}
+
+// The engine carries the mechanism a remote update arrived on to its final
+// confirmation: when this agent's combiner confirms the forward, the
+// confirmation to the originator names the mechanism to go back on.
+func TestTheEngineCarriesTheSyncsMechanismToTheFinalConfirmation(t *testing.T) {
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const zone = ZoneName("carry.example.")
+	zdr.Tracking[zone] = map[AgentId]map[uint16]*TrackedRRset{}
+	zdr.PendingRemoteConfirms = map[string]*PendingRemoteConfirmation{
+		"to-combiner": {OriginatingDistID: "from-alice", OriginatingSender: "alice.agent.example.", Mechanism: transport.MechanismAPI, Zone: zone},
+	}
+	var got []*RemoteConfirmationDetail
+	msgQs := &MsgQs{OnRemoteConfirmationReady: func(d *RemoteConfirmationDetail) { got = append(got, d) }}
+	zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: "to-combiner", Zone: zone, Source: "combiner.example.",
+		Status: "SUCCESS", AppliedRecords: []string{"carry.example.\t3600\tIN\tTXT\t\"x\""}}, msgQs)
+	if len(got) != 1 {
+		t.Fatalf("%d confirmations to the originator, want 1", len(got))
+	}
+	if got[0].OriginatingDistID != "from-alice" || got[0].Mechanism != transport.MechanismAPI {
+		t.Errorf("the confirmation to the originator: %+v, want from-alice over API", got[0])
 	}
 }
 
