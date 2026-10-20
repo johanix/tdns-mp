@@ -1449,7 +1449,7 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
 func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) {
-	if tm.DNSTransport == nil {
+	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
@@ -1468,7 +1468,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.Confirm(ctx, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
@@ -1489,7 +1489,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) 
 // after the remote agent's combiner has confirmed the sync. This is the second of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 7).
 func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
-	if tm.DNSTransport == nil {
+	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
@@ -1522,7 +1522,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.Confirm(ctx, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(detail.Zone),
 		DistributionID: detail.OriginatingDistID, // Use the originating agent's distID

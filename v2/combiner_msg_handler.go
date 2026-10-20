@@ -25,7 +25,7 @@ var lgCombiner = tdns.Logger("combiner")
 // CombinerMsgHandler consumes beat, hello, ping, and sync messages from MsgQs.
 // Updates PeerRegistry liveness on beats and logs hello/ping messages.
 // Processes sync messages asynchronously: applies zone updates via CombinerProcessUpdate
-// and sends detailed confirmation back to the agent via DNSTransport.Confirm().
+// and sends detailed confirmation back to the agent via TransportManager.Confirm().
 func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	protectedNamespaces []string, errorJournal *ErrorJournal) {
 	if msgQs == nil {
@@ -274,7 +274,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems), "ignored", len(resp.IgnoredRecords))
 
-			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
+			// Send detailed confirmation back to the delivering agent via TransportManager.Confirm()
 			combinerSendConfirmation(tm, deliveredBy, resp)
 
 			// No NOTIFY here: the publish CombinerProcessUpdate makes is the
@@ -284,10 +284,10 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 }
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
-// Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
+// Uses the same TransportManager.Confirm() as sendRemoteConfirmation in hsync_transport.go.
 func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
-	if tm == nil || tm.DNSTransport == nil {
-		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
+	if tm == nil || (tm.DNSTransport == nil && tm.APITransport == nil) {
+		lgCombiner.Warn("cannot send confirmation, no transport", "sender", senderID, "distrib", resp.DistributionID)
 		return
 	}
 
@@ -320,7 +320,7 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 	confirmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(confirmCtx, peer, &transport.ConfirmRequest{
+	err := tm.Confirm(confirmCtx, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           resp.Zone,
 		DistributionID: resp.DistributionID,
