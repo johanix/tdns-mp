@@ -66,8 +66,11 @@ type MPTransportBridge struct {
 	dnskeyPropMu              sync.Mutex
 	// answersSent: the answers to requests for a zone's state that this
 	// agent sent, by distribution ID, with the keys of their DNSKEY
-	// operation (noteCatchUpAnswer). Under dnskeyPropMu.
+	// operation (noteCatchUpAnswer); answerTo: the distribution ID of the
+	// latest one per zone and asker, the only one remembered. Under
+	// dnskeyPropMu.
 	answersSent map[string]*sentAnswer
+	answerTo    map[ZoneName]map[AgentId]string
 	// what the other providers said about their keys, per zone and
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
@@ -2479,26 +2482,32 @@ type sentAnswer struct {
 	keys  map[uint16]bool
 }
 
-// answersKept is how long an answer sent is remembered for the asker's
-// final confirmation of it.
-const answersKept = 24 * time.Hour
-
 // noteCatchUpAnswer remembers an answer with a DNSKEY operation, so that the
 // asker's final confirmation of it counts for the DNSKEY propagations it
-// overtook (creditFromAnswerLocked).
+// overtook (creditFromAnswerLocked). One answer per zone and asker is
+// remembered, the latest: a newer one takes the older one's place, as it
+// takes its place in the queue (catchUpAnswer). What is kept is then
+// bounded by the zones and the peers, however often a peer asks. An older
+// answer that was delivered before it was replaced, and is confirmed,
+// credits nothing; the newer answer's confirmation does, and a key left
+// waiting is sent again by the signer's resend.
 func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, asker AgentId, keys map[uint16]bool) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 	if tm.answersSent == nil {
 		tm.answersSent = map[string]*sentAnswer{}
 	}
-	now := time.Now()
-	for id, a := range tm.answersSent {
-		if now.Sub(a.at) > answersKept {
-			delete(tm.answersSent, id)
-		}
+	if tm.answerTo == nil {
+		tm.answerTo = map[ZoneName]map[AgentId]string{}
 	}
-	tm.answersSent[distID] = &sentAnswer{zone: zone, asker: asker, at: now, keys: keys}
+	if tm.answerTo[zone] == nil {
+		tm.answerTo[zone] = map[AgentId]string{}
+	}
+	if older := tm.answerTo[zone][asker]; older != "" {
+		delete(tm.answersSent, older)
+	}
+	tm.answerTo[zone][asker] = distID
+	tm.answersSent[distID] = &sentAnswer{zone: zone, asker: asker, at: time.Now(), keys: keys}
 }
 
 // creditFromAnswerLocked takes the asker's final confirmation of an answer
