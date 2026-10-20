@@ -177,6 +177,32 @@ func (conf *Config) zoneUsesKey(ctx context.Context, zone ZoneName) bool {
 	return err == nil
 }
 
+// zoneKeyUse is zoneUsesKey for the key rounds, which must not read a
+// failed look-up as "no key needed": a voting member that stopped asking
+// would hold no key until the next KEY change. known is false when the
+// parent's DSYNC records could not be read (no resolver yet, a failed
+// look-up); then the rounds go on asking, and no key is made.
+func (conf *Config) zoneKeyUse(ctx context.Context, zone ZoneName) (uses, known bool) {
+	mpzd, ok := Zones.Get(string(zone))
+	if !ok || mpzd == nil || mpzd.ZoneData == nil || !mpzd.Options[tdns.OptParentSync] {
+		return false, true
+	}
+	if conf.Config == nil || conf.Config.Internal.ImrEngine == nil {
+		return false, false
+	}
+	imr := &Imr{conf.Config.Internal.ImrEngine}
+	res, err := imr.DsyncDiscovery(ctx, string(zone), false)
+	if err != nil {
+		return false, false
+	}
+	for _, d := range res.Rdata {
+		if d != nil && d.Scheme == core.SchemeUpdate && d.Type == dns.TypeANY && d.Usable() {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // keyHoldReason says why the leader's sync of the zone waits for the zone's
 // key, or "" when it does not. It reads the keystore and asks the resolver:
 // never called under a lock of the catch-up tracker. It does not read tdns's

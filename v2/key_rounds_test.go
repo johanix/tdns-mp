@@ -234,6 +234,7 @@ func TestAnAnswerWithNoDataIsNotNoKey(t *testing.T) {
 		{"a refusal", &ConfigResponseMsg{ConfigData: map[string]string{configRefusedKey: "denied"}}, keyRefused},
 		{"no data", &ConfigResponseMsg{}, keyNoData},
 		{"no key here", noKeyHere(), keyNone},
+		{"several KEYs at the holder's apex", &ConfigResponseMsg{ConfigData: map[string]string{"status": sig0StatusSeveral}}, keySeveral},
 		{"a key", &ConfigResponseMsg{ConfigData: map[string]string{"keyrr": "k"}}, keyGot},
 	} {
 		if got := classifyKeyAnswer(c.resp).outcome; got != c.want {
@@ -545,4 +546,64 @@ func TestAKeyAsksCloseIsIdempotent(t *testing.T) {
 	if !tab.confirmExpected("c.agent.example.", "dist-1") {
 		t.Error("a confirmation from the peer in another case is not let in")
 	}
+}
+
+// More key requests to one peer than it has slots for all go out: an answer
+// frees a slot, and the next request is sent then, not counted as silence.
+func TestMoreKeyRequestsThanSlotsAreAllSent(t *testing.T) {
+	shortKeyTimers(t, 5*time.Second, 2*time.Second)
+	f := newFakeKeyHooks(krB)
+	var zones []ZoneName
+	for i := range 3 * keyInFlight / 2 {
+		z := ZoneName(fmtZone(i))
+		zones = append(zones, z)
+		f.wants[z] = true
+	}
+	tr := newKeyTracker(t, f, krB)
+	go func() {
+		// the first answers wait until every slot is taken, so that the
+		// requests after them wait for a slot
+		var first []*keyReq
+		full := false
+		for kr := range f.sent {
+			if !full {
+				first = append(first, kr)
+				if len(first) == keyInFlight {
+					full = true
+					time.Sleep(50 * time.Millisecond) // the sender has gone to sleep
+					for _, h := range first {
+						f.answer(h, noKeyHere())
+					}
+				}
+				continue
+			}
+			f.answer(kr, noKeyHere())
+		}
+	}()
+	for _, z := range zones {
+		tr.keyCheck(z)
+	}
+	for range zones {
+		d := decidedWithin(t, f, "a zone's round")
+		if a := d.answers[krB]; a.outcome != keyNone {
+			t.Errorf("%s: %+v, want the peer's answer", d.zone, a)
+		}
+	}
+}
+
+func fmtZone(i int) string {
+	return "z" + string(rune('a'+i%26)) + string(rune('a'+i/26)) + ".slots.example."
+}
+
+// A check of the key brings forward a round that is due later: a KEY
+// operation or a changed apex KEY is a sign the key may be there now.
+func TestACheckBringsTheNextRoundForward(t *testing.T) {
+	shortKeyTimers(t, 5*time.Second, 5*time.Second, time.Hour)
+	f := newFakeKeyHooks(krB)
+	tr := newKeyTracker(t, f, krB)
+	tr.keyCheck(krZone)
+	f.answer(sentWithin(t, f, "the first round"), noKeyHere())
+	decidedWithin(t, f, "the first round")
+	tr.keyCheck(krZone)
+	sentWithin(t, f, "the round a check brings forward")
 }

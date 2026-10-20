@@ -108,7 +108,9 @@ func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
 	if apex == nil || !hasHSYNC3(apex) || !votesInApex(apex, conf.localAgentID()) {
 		return false
 	}
-	if !conf.zoneUsesKey(ctx, zone) {
+	// a parent that takes no UPDATE needs no key; one whose DSYNC records
+	// could not be read may, so the asking goes on
+	if uses, known := conf.zoneKeyUse(ctx, zone); known && !uses {
 		return false
 	}
 	kdb := conf.zoneKeyDB(zone)
@@ -247,6 +249,9 @@ func (conf *Config) decideZoneKey(ctx context.Context, zone ZoneName, answers ma
 	if askSync {
 		conf.requestDelegationSync(ctx, string(zone), "the zone's SIG(0) key is held now")
 	}
+	// a sync that came while a count was up is asked for when the hold is
+	// over, not only at the next tick
+	conf.releaseKeyHold(ctx, zone)
 	return done
 }
 
@@ -271,20 +276,24 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 		return true, false // held meanwhile: the leader's set-up publishes it
 	}
 
-	// The leader's sync waits from here until the poll this decision
-	// starts has ended (keyPolls): counted before a key is taken or made.
+	// The leader's sync waits from when a key is taken or made until the
+	// poll this decision starts has ended (keyPolls): counted before the
+	// key is taken or made, and only then.
 	var tk *keyPollToken
 	unpublished := false
-	if leads {
-		tk = conf.InternalMp.keyPolls.begin(zone)
-		defer func() { tk.end(unpublished) }()
+	begin := func() {
+		if leads && tk == nil {
+			tk = conf.InternalMp.keyPolls.begin(zone)
+		}
 	}
+	defer func() { tk.end(unpublished) }()
 
 	for _, peer := range sortedPeers(answers) {
 		a := answers[peer]
 		if a.outcome != keyGot {
 			continue
 		}
+		begin()
 		if err := importSig0KeyFromPeer(hdb, string(zone), a.data); err != nil {
 			lgAgent.Error("failed to import SIG(0) key from peer", "zone", zone, "peer", peer, "err", err)
 			answers[peer] = keyReply{outcome: keyNotImported, detail: err.Error()}
@@ -334,6 +343,13 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 			return false, false // deciding that no key exists waits for the catch-up
 		}
 	}
+	// a key is made only for a parent known to take UPDATE
+	if uses, known := conf.zoneKeyUse(ctx, zone); !known {
+		return false, false
+	} else if !uses {
+		return true, false
+	}
+	begin()
 	made, madeKeyid, err := conf.makeZoneKey(hdb, zone, len(zk.active) == 0)
 	if err != nil {
 		lgAgent.Error("the zone's SIG(0) key could not be made", "zone", zone, "err", err)

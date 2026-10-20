@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -52,10 +53,6 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	if kdb == nil {
 		return fmt.Errorf("onLeaderElected: no keystore for zone %s", zone)
 	}
-	// The leader's sync of the zone waits from here until the poll this
-	// set-up starts has ended (keyPolls).
-	tk := conf.InternalMp.keyPolls.begin(zone)
-	defer tk.end(false)
 	// The zone's key, if this agent holds it (readZoneKey): an active local
 	// key the zone does not publish is not used.
 	zk, err := readZoneKey(kdb, zone)
@@ -83,7 +80,14 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 		return nil
 	}
 	lgAgent.Info("leader has local SIG(0) key, proceeding to publish", "zone", zone, "keyid", zk.held.keyid)
-	return conf.publishZoneKey(ctx, zone, tk, false, 0)
+	// The leader's sync of the zone waits from here until the poll this
+	// set-up starts has ended (keyPolls). Counted after the renewal's test:
+	// a plain renewal holds no sync. A publication that failed keeps the
+	// zone held (unpublished) until a later set-up publishes the key.
+	tk := conf.InternalMp.keyPolls.begin(zone)
+	err = conf.publishZoneKey(ctx, zone, tk, false, 0)
+	tk.end(err != nil && !errors.Is(err, errLeadMoved))
+	return err
 }
 
 // makeZoneKey makes the zone's first SIG(0) key. made and madeKeyid name the
@@ -147,8 +151,11 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	if err != nil || zk.held == nil || zk.held.key == nil {
 		return fmt.Errorf("onLeaderElected: the zone's SIG(0) key is not held after the setup for zone %s (%v)", zone, err)
 	}
-	if only, err := retireOtherActiveKeys(kdb, zone, zk); err != nil || !only {
-		lgAgent.Warn("an active SIG(0) key that is not the zone's key could not be retired; the sync with the parent waits", "zone", zone, "keyid", zk.held.keyid, "err", err)
+	// tdns's bootstrap uploads the first active key: while another one is
+	// active, the key is neither published nor polled
+	if only, err := retireOthers(kdb, zone, zk); err != nil || !only {
+		lgAgent.Warn("an active SIG(0) key that is not the zone's key could not be retired; the key is not published, and the sync with the parent waits", "zone", zone, "keyid", zk.held.keyid, "err", err)
+		return errOtherKeysActive
 	}
 	held := *zk.held
 	keyRR := held.key
@@ -193,3 +200,10 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	}
 	return nil
 }
+
+// errOtherKeysActive: the zone's key is not its only active key, and could
+// not be made so; nothing is published or polled.
+var errOtherKeysActive = errors.New("another active SIG(0) key of the zone could not be retired")
+
+// retireOthers is retireOtherActiveKeys; a test stands in for it.
+var retireOthers = retireOtherActiveKeys

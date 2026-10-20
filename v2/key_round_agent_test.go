@@ -430,3 +430,65 @@ func TestARemoteKEYOperationChecksTheKey(t *testing.T) {
 		t.Errorf("a remote KEY replace did not check the zone's key; the repo holds %+v", r.repo(t))
 	}
 }
+
+// A publication that failed keeps the leader's sync held: the key was
+// neither published nor polled in this lead.
+func TestAFailedPublicationKeepsTheSyncHeld(t *testing.T) {
+	r := newKeyRoundRig(t, "failed.publish.example.", "UPDATE")
+	k := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, k)
+	if err := importSig0KeyFromPeer(NewHsyncDB(r.mpzd.KeyDB), string(r.zone), keyData(k)); err != nil {
+		t.Fatal(err)
+	}
+	r.caughtUp()
+	r.notifyRig.us.Bridge.combinerID = "" // no combiner to publish to
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); err == nil {
+		t.Fatal("the publication with no combiner did not fail")
+	}
+	r.notPolled(t, "a failed publication")
+	if why := r.conf.keyHoldReason(r.ctx, r.zone); why != "not published" {
+		t.Errorf("after a failed publication the hold is %q, want not published", why)
+	}
+}
+
+// While another active key cannot be retired, the zone's key is neither
+// published nor polled: tdns's bootstrap would upload the first active key.
+func TestAKeyIsNotPublishedWhileAnotherIsActive(t *testing.T) {
+	r := newKeyRoundRig(t, "other.active.example.", "UPDATE")
+	k := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, k)
+	if err := importSig0KeyFromPeer(NewHsyncDB(r.mpzd.KeyDB), string(r.zone), keyData(k)); err != nil {
+		t.Fatal(err)
+	}
+	r.caughtUp()
+	saved := retireOthers
+	retireOthers = func(*tdns.KeyDB, ZoneName, *zoneKey) (bool, error) { return false, nil }
+	t.Cleanup(func() { retireOthers = saved })
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); !errors.Is(err, errOtherKeysActive) {
+		t.Errorf("the set-up with another key active: %v, want errOtherKeysActive", err)
+	}
+	r.notPolled(t, "another key active")
+	if why := r.conf.keyHoldReason(r.ctx, r.zone); why == "" {
+		t.Error("the sync is not held while another key is active")
+	}
+}
+
+// A parent whose DSYNC records cannot be read is not "no key needed": the
+// member goes on asking, and no key is made until the parent is known to
+// take UPDATE.
+func TestAnUnreadableParentKeepsAskingAndMakesNoKey(t *testing.T) {
+	r := newKeyRoundRig(t, "unknown.parent.example.", "UPDATE")
+	r.caughtUp()
+	imr := r.conf.Config.Internal.ImrEngine
+	r.conf.Config.Internal.ImrEngine = nil // no resolver yet
+	if !r.conf.wantsZoneKey(r.ctx, r.zone) {
+		t.Error("a member stopped asking while the parent could not be looked up")
+	}
+	if r.decide(map[AgentId]keyReply{r.them: {outcome: keyNone}}) || len(r.active(t)) != 0 {
+		t.Error("a key was made for a parent not known to take UPDATE")
+	}
+	r.conf.Config.Internal.ImrEngine = imr
+	if !r.decide(map[AgentId]keyReply{r.them: {outcome: keyNone}}) || len(r.active(t)) != 1 {
+		t.Error("with the parent known, no key was made")
+	}
+}

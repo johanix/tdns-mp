@@ -63,7 +63,12 @@ const (
 	keySilent      = "silence"      // no answer in time, or not OPERATIONAL
 	keyNotTaken    = "not taken"    // the request was not delivered
 	keyNoData      = "no data"      // an answer with no data: not "no key"
+	keySeveral     = "several KEYs" // its apex carries several KEYs: not "no key"
 )
+
+// sig0StatusSeveral is the holder's status when the apex of its copy of the
+// zone carries several KEYs.
+const sig0StatusSeveral = "several KEYs at the apex"
 
 type keyReply struct {
 	outcome string
@@ -220,6 +225,11 @@ func (t *catchUpTracker) keyPass(ctx context.Context) {
 				t.keyWanted = map[ZoneName]*keyRound{}
 			}
 			t.keyWanted[zone] = &keyRound{gen: t.keyGen, next: time.Now()}
+			due = append(due, zone)
+		} else if wants && r != nil && !r.out && r.next.After(time.Now()) {
+			// a check is a sign the key may be there now (a KEY
+			// operation, a changed apex KEY): the next round asks at once
+			r.next = time.Now()
 			due = append(due, zone)
 		} else if !wants && r != nil {
 			delete(t.keyWanted, zone)
@@ -379,8 +389,11 @@ func classifyKeyAnswer(resp *ConfigResponseMsg) keyReply {
 	if len(resp.ConfigData) == 0 {
 		return keyReply{outcome: keyNoData}
 	}
-	if resp.ConfigData["status"] == "no sig0 key for zone" {
+	switch resp.ConfigData["status"] {
+	case "no sig0 key for zone":
 		return keyReply{outcome: keyNone}
+	case sig0StatusSeveral:
+		return keyReply{outcome: keySeveral}
 	}
 	return keyReply{outcome: keyGot, data: resp.ConfigData}
 }
@@ -392,6 +405,11 @@ func (t *catchUpTracker) keyRecord(ctx context.Context, kr *keyReq, a keyReply) 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.dropKeyReqLocked(kr)
+	if kr.sent {
+		// a slot is free: the next request to the peer goes out now, not
+		// when the peer's sender next wakes for something else
+		t.kickLocked(kr.peer)
+	}
 	r := t.keyWanted[kr.zone]
 	if r == nil || r.gen != kr.gen {
 		return nil

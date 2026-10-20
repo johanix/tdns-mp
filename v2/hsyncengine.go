@@ -334,6 +334,9 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 					zk, err := readZoneKey(zd.KeyDB, ampp.Zone)
 					if err != nil {
 						configErr = fmt.Sprintf("error looking up SIG(0) key: %v", err)
+					} else if zk.several() {
+						// not "no key": its keystore may hold one of them
+						configData = map[string]string{"status": sig0StatusSeveral}
 					} else if zk.held == nil {
 						configData = map[string]string{"status": "no sig0 key for zone"}
 					} else {

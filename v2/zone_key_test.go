@@ -102,6 +102,15 @@ func TestTheHolderHandsOverThePublishedKey(t *testing.T) {
 		}
 	}
 
+	// a holder whose apex carries several KEYs does not say "no key": its
+	// keystore may hold one of them
+	const several = "several.holder.example."
+	skdb := newMPTestKeyDB(t)
+	keyZone(t, several, testSig0Key(t, skdb, several), testSig0Key(t, newMPTestKeyDB(t), several)).KeyDB = skdb
+	if got := ask(several); got["status"] != sig0StatusSeveral || got["privatekey"] != "" {
+		t.Errorf("a holder whose apex carries two KEYs answered %v, want %q", got, sig0StatusSeveral)
+	}
+
 	const zone = "unpublished.example."
 	kdb, other := newMPTestKeyDB(t), newMPTestKeyDB(t)
 	testSig0Key(t, kdb, zone)
