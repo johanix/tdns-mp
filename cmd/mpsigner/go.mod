@@ -23,7 +23,7 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261020171149-7df92977ee06 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261020175224-aca05a37ec7e // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20261020103408-abe102e3ff8f // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20261020103408-abe102e3ff8f // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20261020103408-abe102e3ff8f // indirect
