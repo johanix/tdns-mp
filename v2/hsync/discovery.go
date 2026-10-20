@@ -20,33 +20,31 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 		return
 	}
 
-	peer, exists := r.S.Get(id)
-	if exists {
+	// A known peer takes the zone and the task in place. A new peer is stored
+	// only where none is: if another caller stored one first, this one adds to
+	// it and leaves the discovery to that caller. Neither stores a peer that
+	// was removed again (#132). Each pass of the loop that does not return
+	// found a peer stored or removed by another caller in between.
+	var peer *Peer
+	for {
+		if e.addToStoredPeer(id, zone, task) {
+			return
+		}
+		peer = NewPeer(id)
+		if e.deps.Transport != nil {
+			peer.DnsMethod = e.deps.Transport.MechanismSupported("dns")
+			peer.ApiMethod = e.deps.Transport.MechanismSupported("api")
+		}
 		if zone != "" {
-			r.AddZoneToPeer(id, zone)
+			peer.Zones[zone] = true
 		}
 		if task != nil {
-			peer.Mu.Lock()
 			peer.Deferred = append(peer.Deferred, *task)
-			peer.Mu.Unlock()
-			r.S.Set(id, peer)
 		}
-		e.storeHook(peer)
-		return
+		if r.S.SetIfAbsent(id, peer) {
+			break
+		}
 	}
-
-	peer = NewPeer(id)
-	if e.deps.Transport != nil {
-		peer.DnsMethod = e.deps.Transport.MechanismSupported("dns")
-		peer.ApiMethod = e.deps.Transport.MechanismSupported("api")
-	}
-	if zone != "" {
-		peer.Zones[zone] = true
-	}
-	if task != nil {
-		peer.Deferred = append(peer.Deferred, *task)
-	}
-	r.S.Set(id, peer)
 	e.storeHook(peer)
 	// Same concurrency limit as retryPendingDiscoveries, acquired inside
 	// the goroutine so MarkNeeded itself never blocks (ReconcileZone calls
@@ -57,6 +55,31 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 		defer func() { <-sem }()
 		e.attemptDiscovery(p, api, dns)
 	}(peer, peer.ApiMethod, peer.DnsMethod)
+}
+
+// addToStoredPeer adds the zone and the task to the peer the registry holds,
+// under the lock of its shard, and reports whether it held one.
+func (e *Engine) addToStoredPeer(id PeerID, zone ZoneName, task *DeferredTask) bool {
+	var stored *Peer
+	ok := e.registry.S.UpdateIf(id, func(peer *Peer) (*Peer, bool) {
+		peer.Mu.Lock()
+		if zone != "" {
+			if peer.Zones == nil {
+				peer.Zones = make(map[ZoneName]bool)
+			}
+			peer.Zones[zone] = true
+		}
+		if task != nil {
+			peer.Deferred = append(peer.Deferred, *task)
+		}
+		peer.Mu.Unlock()
+		stored = peer
+		return peer, true
+	})
+	if ok {
+		e.storeHook(stored)
+	}
+	return ok
 }
 
 // Rediscover forces a fresh discovery pass for an already-known peer (the
@@ -76,10 +99,11 @@ func (e *Engine) Rediscover(id PeerID) {
 		e.MarkNeeded(id, "", nil)
 		return
 	}
+	// The peer is not stored back: the object is the stored one, or the peer
+	// is gone and the discovery starts no hello for it (#132).
 	peer.Mu.Lock()
 	peer.LastState = time.Now() // the reset is a state event for the display
 	peer.Mu.Unlock()
-	e.registry.S.Set(id, peer)
 	e.storeHook(peer)
 	go e.attemptDiscovery(peer, peer.ApiMethod, peer.DnsMethod)
 }
@@ -108,6 +132,7 @@ func (e *Engine) RemovePeer(id PeerID) {
 	// Stop any hello retrier running for this peer before dropping it.
 	e.registry.cancelHello(id)
 	e.registry.S.Remove(id)
+	e.forgetBeats(id)
 	if e.deps.PeerHooks.OnPeerRemoved != nil {
 		e.deps.PeerHooks.OnPeerRemoved(peer)
 	}
@@ -217,6 +242,10 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	if !apiNeedsHello && !dnsNeedsHello {
 		return
 	}
+	// A peer removed while it was looked up gets no hello (#132).
+	if !e.stillStored(peer) {
+		return
+	}
 
 	e.startHelloRetrier(peer)
 }
@@ -228,10 +257,9 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 // kick). The hello-launch is thus state-driven (KNOWN ⇒ hello), not tied to who
 // discovered the peer.
 func (e *Engine) startHelloRetrier(peer *Peer) {
-	if e.registry.hasHelloCancel(peer.ID) {
+	helloCtx, ok := e.registry.registerHello(peer)
+	if !ok {
 		return
 	}
-	helloCtx, helloCancel := context.WithCancel(context.Background())
-	e.registry.setHelloCancel(peer.ID, helloCancel)
 	go e.helloRetrierNG(helloCtx, peer)
 }

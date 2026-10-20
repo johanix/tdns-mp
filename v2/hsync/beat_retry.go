@@ -61,11 +61,28 @@ func (e *Engine) baseCtx() context.Context {
 	return e.runCtx
 }
 
+// stillStored reports whether the registry holds this very peer object. A
+// peer that RemovePeer took out, or one that a new object under the same
+// identity replaced, is not beaten, greeted or noted through the old object,
+// and nothing stores the old object again (#132).
+func (e *Engine) stillStored(peer *Peer) bool {
+	if peer == nil || e.registry == nil {
+		return false
+	}
+	stored, ok := e.registry.S.Get(peer.ID)
+	return ok && stored == peer
+}
+
 // noteBeatFailed records a failed beat to peer and starts the peer's retrier
 // when it is the first failure since a success. It reports whether it started
-// the retrier.
+// the retrier. A peer the registry no longer holds gets no note: RemovePeer
+// clears the notes under the same lock, after it has taken the peer out.
 func (e *Engine) noteBeatFailed(peer *Peer) bool {
 	e.beatMu.Lock()
+	if !e.stillStored(peer) {
+		e.beatMu.Unlock()
+		return false
+	}
 	first := !e.beatFailing[peer.ID]
 	e.beatFailing[peer.ID] = true
 	start := first && !e.beatRetrying[peer.ID] && e.fastBeatsOn()
@@ -79,10 +96,25 @@ func (e *Engine) noteBeatFailed(peer *Peer) bool {
 	return start
 }
 
-// noteBeatSucceeded ends the peer's episode of failed beats.
+// noteBeatSucceeded ends the peer's episode of failed beats. A beat through an
+// object that was replaced says nothing of the new one.
 func (e *Engine) noteBeatSucceeded(peer *Peer) {
 	e.beatMu.Lock()
-	delete(e.beatFailing, peer.ID)
+	if e.stillStored(peer) {
+		delete(e.beatFailing, peer.ID)
+	}
+	e.beatMu.Unlock()
+}
+
+// forgetBeats drops what the engine noted of a removed peer's beats: the
+// failure that would hold back a new peer's first retries, and the time of the
+// last beat back, which a new peer under the same identity does not inherit.
+// A retrier or a beat back still running for the old object stops at its next
+// test of stillStored.
+func (e *Engine) forgetBeats(id PeerID) {
+	e.beatMu.Lock()
+	delete(e.beatFailing, id)
+	delete(e.beatBackAt, id)
 	e.beatMu.Unlock()
 }
 
@@ -95,8 +127,9 @@ func (e *Engine) beatStillFailing(id PeerID) bool {
 
 // beatRetrier beats one peer again after a failed beat: after the fast
 // interval, then at doubling gaps. It stops when a beat succeeds (its own, or a
-// round's), when the gap reaches the beat interval, when the peer is gone or
-// no longer past its hello, or when the engine stops.
+// round's), when the gap reaches the beat interval, when the registry no
+// longer holds this peer object or the peer is no longer past its hello, or
+// when the engine stops.
 func (e *Engine) beatRetrier(peer *Peer) {
 	// The outage this retrier was started for is over once a beat has
 	// succeeded, its own or a round's.
@@ -113,7 +146,7 @@ func (e *Engine) beatRetrier(peer *Peer) {
 			over = true
 			return
 		}
-		if _, ok := e.registry.S.Get(peer.ID); !ok || !e.peerAnyTransportReady(peer) {
+		if !e.stillStored(peer) || !e.peerAnyTransportReady(peer) {
 			return
 		}
 		beatCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -131,17 +164,20 @@ func (e *Engine) beatRetrier(peer *Peer) {
 // the moment between this retrier's success and its exit: noteBeatFailed then
 // saw a retrier still running and started none, though the failure opens a new
 // outage. When the old outage is over and the peer is failing again, the
-// retries for the new one start here.
+// retries for the new one start here. So they do when a new object under the
+// same identity replaced this retrier's peer, whose failures found this
+// retrier running too. The retries go to the object the registry holds.
 func (e *Engine) endBeatRetrier(peer *Peer, over bool) {
 	e.beatMu.Lock()
 	delete(e.beatRetrying, peer.ID)
-	again := over && e.beatFailing[peer.ID] && e.fastBeatsOn()
+	stored, held := e.registry.S.Get(peer.ID)
+	again := held && (over || stored != peer) && e.beatFailing[peer.ID] && e.fastBeatsOn()
 	if again {
 		e.beatRetrying[peer.ID] = true
 	}
 	e.beatMu.Unlock()
 	if again {
-		go e.beatRetrier(peer)
+		go e.beatRetrier(stored)
 	}
 }
 
@@ -240,7 +276,7 @@ func (e *Engine) beatBack(peer *Peer) {
 		if !e.beatStillFailing(peer.ID) {
 			return
 		}
-		if _, ok := e.registry.S.Get(peer.ID); !ok || !e.peerAnyTransportReady(peer) {
+		if !e.stillStored(peer) || !e.peerAnyTransportReady(peer) {
 			return
 		}
 	}

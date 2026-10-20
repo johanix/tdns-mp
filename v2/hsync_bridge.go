@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -70,6 +71,10 @@ func rearmFailedDiscovery(reg *transport.PeerRegistry, identity string) {
 	p.SetState(transport.PeerStateNeeded, "discovery retry after a failed discovery")
 }
 
+// errPeerNotHeld is a send to a peer object the engine no longer holds: the
+// peer was removed while the send was on its way, and nothing is sent (#132).
+var errPeerNotHeld = errors.New("peer is no longer held by the engine")
+
 // agentViewForPeer returns the persistent ar.S view for the peer (materializing
 // it if needed), or a transient unstored view when no AgentRegistry is wired
 // (test harnesses). E1.b: the view shares the peer pointer, so there is no
@@ -89,6 +94,9 @@ func (b *mpHsyncBridge) SendHello(ctx context.Context, peer *hsync.Peer, sharedZ
 		return nil
 	}
 	agent := agentViewForPeer(b.ar, peer)
+	if agent == nil {
+		return errPeerNotHeld
+	}
 	_, err := b.tm.SendHelloWithFallback(ctx, agent, sharedZones)
 	return err
 }
@@ -98,6 +106,9 @@ func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence
 		return false, "", nil
 	}
 	agent := agentViewForPeer(b.ar, peer)
+	if agent == nil {
+		return false, "", errPeerNotHeld
+	}
 	tp := b.tm.GetOrCreatePeer(agent)
 	beforeAPI := tp.MechanismBeatSequence("API")
 	beforeDNS := tp.MechanismBeatSequence("DNS")
@@ -408,7 +419,7 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 			// Phase 3c: prunes are events — drop the MP view + transport
 			// peer promptly when the engine removes a peer object.
 			OnPeerRemoved: func(peer *hsync.Peer) {
-				ar.removePeerView(peer.ID)
+				ar.removePeerView(peer)
 				conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
 			},
 		},

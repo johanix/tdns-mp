@@ -314,7 +314,7 @@ func startHarnessEngine(t *testing.T, env *integEnv, pe *peerEnv, cfg hsync.Conf
 		Transport: &mpHsyncBridge{ar: ar, tm: pe.Bridge},
 		PeerHooks: hsync.PeerHooks{
 			OnPeerStored:  func(peer *hsync.Peer) { ar.materializeAgentView(peer) },
-			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer.ID) },
+			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer) },
 		},
 	}
 	for _, adjust := range with {

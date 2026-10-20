@@ -20,12 +20,20 @@ func newE1bRegistry() *AgentRegistry {
 	return ar
 }
 
+// enginePeer stores a new peer in the engine's registry, as the engine does
+// before anything materializes its view.
+func enginePeer(ar *AgentRegistry, id AgentId) *hsync.Peer {
+	peer := hsync.NewPeer(id)
+	ar.Registry.S.Set(peer.ID, peer)
+	return peer
+}
+
 func TestMaterializeAgentView(t *testing.T) {
 	const id = AgentId("agent.e1b.test.")
 
 	t.Run("creates a view sharing the peer pointer", func(t *testing.T) {
 		ar := newE1bRegistry()
-		peer := hsync.NewPeer(id)
+		peer := enginePeer(ar, id)
 		view := ar.materializeAgentView(peer)
 		if view == nil || view.Peer != peer {
 			t.Fatal("view must share the exact hsync.Peer pointer")
@@ -38,7 +46,7 @@ func TestMaterializeAgentView(t *testing.T) {
 
 	t.Run("idempotent: never replaces, MP-only fields survive", func(t *testing.T) {
 		ar := newE1bRegistry()
-		peer := hsync.NewPeer(id)
+		peer := enginePeer(ar, id)
 		first := ar.materializeAgentView(peer)
 		first.ErrorMsg = "marker"
 		first.InitialZone = "zone.marker.test."
@@ -54,7 +62,7 @@ func TestMaterializeAgentView(t *testing.T) {
 
 	t.Run("concurrent materialization converges on one view", func(t *testing.T) {
 		ar := newE1bRegistry()
-		peer := hsync.NewPeer(id)
+		peer := enginePeer(ar, id)
 		views := make([]*Agent, 16)
 		var wg sync.WaitGroup
 		for i := range views {
@@ -71,6 +79,59 @@ func TestMaterializeAgentView(t *testing.T) {
 			}
 		}
 	})
+
+	// A beat, a hello or a discovery on its way when the engine removed the
+	// peer does not bring its view back (#132).
+	t.Run("no view for a peer the engine does not hold", func(t *testing.T) {
+		ar := newE1bRegistry()
+		peer := hsync.NewPeer(id)
+		if view := ar.materializeAgentView(peer); view != nil {
+			t.Fatal("a view was made for a peer the engine does not hold")
+		}
+		if _, ok := ar.S.Get(id); ok {
+			t.Fatal("a view was stored for a peer the engine does not hold")
+		}
+	})
+
+	t.Run("no view for a removed object, a fresh one for its successor", func(t *testing.T) {
+		ar := newE1bRegistry()
+		old := enginePeer(ar, id)
+		oldView := ar.materializeAgentView(old)
+		ar.Registry.S.Remove(old.ID)
+		successor := enginePeer(ar, id)
+		if view := ar.materializeAgentView(old); view != nil {
+			t.Fatal("a view was made through the removed object")
+		}
+		view := ar.materializeAgentView(successor)
+		if view == nil || view == oldView || view.Peer != successor {
+			t.Fatal("the successor must get a view of its own, not the removed object's")
+		}
+	})
+}
+
+// removePeerView drops the view and the transport peer of a removed peer. A
+// successor stored under the same identity after the removal keeps its own.
+func TestRemovePeerViewKeepsASuccessorsView(t *testing.T) {
+	const id = AgentId("agent.successor.e1b.test.")
+	ar := newE1bRegistry()
+
+	gone := enginePeer(ar, id)
+	ar.materializeAgentView(gone)
+	ar.Registry.S.Remove(gone.ID)
+	ar.removePeerView(gone)
+	if _, ok := ar.S.Get(id); ok {
+		t.Fatal("the removed peer's view is still there")
+	}
+
+	old := enginePeer(ar, id)
+	ar.materializeAgentView(old)
+	ar.Registry.S.Remove(old.ID)
+	successor := enginePeer(ar, id)
+	view := ar.materializeAgentView(successor)
+	ar.removePeerView(old)
+	if stored, ok := ar.S.Get(id); !ok || stored != view {
+		t.Fatal("the hook for the removed object dropped its successor's view")
+	}
 }
 
 func TestAgentViewForIdentity(t *testing.T) {
@@ -140,6 +201,7 @@ func TestAgentViewForPeer(t *testing.T) {
 
 	t.Run("with registry delegates to materialization", func(t *testing.T) {
 		ar := newE1bRegistry()
+		ar.Registry.S.Set(peer.ID, peer)
 		view := agentViewForPeer(ar, peer)
 		stored, ok := ar.S.Get(id)
 		if !ok || stored != view || view.Peer != peer {
