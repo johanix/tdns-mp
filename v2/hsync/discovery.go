@@ -15,8 +15,7 @@ func (e *Engine) MarkNeeded(id PeerID, zone ZoneName, task *DeferredTask) {
 		return
 	}
 	r := e.registry
-	local := string(r.LocalID)
-	if local != "" && string(id) == local {
+	if isLocal(r.LocalID, id) {
 		return
 	}
 

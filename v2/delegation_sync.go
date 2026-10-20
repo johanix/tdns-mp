@@ -209,26 +209,36 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
-					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
 					syncstate.ErrorMsg = err.Error()
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
-					// the leader's sync of a multi-provider zone is asked
-					// again: whatever asked for it will not ask twice. The
-					// retry gives up after a few; the sync is owed as well,
-					// as one held is, and asked again while it is owed and
-					// the zone is caught up, until the parent answers.
+					// The leader's sync of a multi-provider zone that could
+					// not ask the parent is owed, and asked again every 30 s
+					// while it is owed and the zone is caught up, until the
+					// parent answers. That is its retry: it does not count
+					// as a failed sync, so an outage does not grow the
+					// backoff that the first real failure after it would
+					// wait (the rig's parent-unreach). One line an hour says
+					// the parent does not answer, not one per try.
 					//
 					// A sync that was stopped because this agent no longer
 					// takes part in the zone (followParentSyncParam) is not a
 					// failure to ask again for.
 					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
-						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
-						conf.InternalMp.CatchUp.owe(ZoneName(ds.ZoneName))
+						if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), err); logIt {
+							lg.Error("DelegationSyncher: the parent's delegation cannot be analysed; the sync is owed, and asked for again every 30 s while the zone is caught up",
+								"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", err)
+						}
+					} else {
+						lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					}
 					continue
+				}
+				if was, since := conf.InternalMp.CatchUp.parentAnswered(ZoneName(ds.ZoneName)); was {
+					lg.Info("DelegationSyncher: the parent's delegation can be analysed again", "zone", ds.ZoneName,
+						"down_since", since.UTC().Format(time.RFC3339))
 				}
 
 				if syncstate.InSync {

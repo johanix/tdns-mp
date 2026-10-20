@@ -152,3 +152,28 @@ func TestApplyHsyncDiff_localAddSignalled(t *testing.T) {
 		t.Fatal("local identity must not be registered as a remote peer")
 	}
 }
+
+// A local identity configured without the trailing dot, or in another case,
+// is the zone's record of it: its add is never registered as a peer, its
+// removal runs the teardown, and MarkNeeded stores no peer for it.
+func TestApplyHsyncDiff_localIdentityComparedCanonically(t *testing.T) {
+	local := mustHSYNC3RR(t, "loc", "Local.Example.")
+	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local}}}
+	e, h := newDiffEngine("local.example", true, zones)
+
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{local}})
+	for _, id := range []PeerID{"Local.Example.", "local.example.", "local.example"} {
+		if _, ok := e.registry.S.Get(id); ok {
+			t.Errorf("the local identity was registered as peer %q", id)
+		}
+	}
+	e.MarkNeeded("LOCAL.example.", "z.test.", nil)
+	if n := len(e.registry.S.Keys()); n != 0 {
+		t.Errorf("MarkNeeded stored %d peer(s) for the local identity", n)
+	}
+
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Removes: []dns.RR{local}})
+	if h.localRemoved != 1 {
+		t.Errorf("the local identity's removal ran the teardown %d times, want once", h.localRemoved)
+	}
+}
