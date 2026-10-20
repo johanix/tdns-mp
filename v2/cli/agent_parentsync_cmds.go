@@ -271,6 +271,9 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	if s.ParentSync != "" {
 		fmt.Fprintf(w, "  parent sync:    %s\n", termSafe(s.ParentSync))
 	}
+	if s.KeyHold != "" {
+		fmt.Fprintf(w, "  parent sync:    %s\n", termSafe(s.KeyHold))
+	}
 	if s.DSSet != "" {
 		fmt.Fprintf(w, "  DS set:         %s\n", termSafe(s.DSSet))
 	}

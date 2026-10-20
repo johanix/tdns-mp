@@ -140,6 +140,11 @@ type LeaderElection struct {
 	// while an election is running and after one that was aborted: the
 	// leader then is still the one of the term before.
 	leaderTerm uint64
+	// leadStart is the term in which this agent's present lead began: a
+	// renewal, which names this agent again while its lease runs, keeps it;
+	// a lead that follows another agent's, an invalidated or a lapsed one
+	// starts anew. Zero while another agent leads (noteLeaderLocked).
+	leadStart uint64
 	// gone: the provider group of this election is gone, and the manager
 	// has dropped the entry (groupGone). Nothing starts on it any more.
 	gone bool
@@ -225,6 +230,9 @@ type ParentSyncStatus struct {
 	// the zone is caught up, or is owed and waits for room in the delegation
 	// sync queue (step 5). Empty when neither.
 	ParentSync string `json:"parent_sync,omitempty"`
+	// KeyHold: the leader's sync waits for the zone's SIG(0) key, and why
+	// (step 7b). Empty when it does not.
+	KeyHold string `json:"key_hold,omitempty"`
 	// DSSet is "known", or "unknown, waiting for" whom, for a zone that
 	// names a signer. Empty for one that names none.
 	DSSet string `json:"ds_set,omitempty"`

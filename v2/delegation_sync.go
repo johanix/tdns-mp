@@ -118,6 +118,12 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if held, _ := conf.holdLeaderSync(ds); held {
 					continue
 				}
+				// Nor while the zone's SIG(0) key is not held, not the one
+				// tdns signs with, or being bootstrapped (step 7b): owed, and
+				// asked for when the key's hold ends
+				if held, _ := conf.holdForZoneKey(ctx, ds); held {
+					continue
+				}
 
 				zd := ds.ZoneData
 				if p := zd.GetParent(); p == "" || p == "." {
@@ -191,6 +197,13 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				// so, with no error
 				if held, waiting := conf.holdLeaderSync(ds); held {
 					skip(fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting))
+					continue
+				}
+				// Held for the zone's SIG(0) key (step 7b): answered at once,
+				// also when it is the key poll's own sync after the parent
+				// trusts the key, sent while the poll still counts as running
+				if held, why := conf.holdForZoneKey(ctx, ds); held {
+					skip("the sync with the parent waits for the zone's SIG(0) key (" + why + ")")
 					continue
 				}
 

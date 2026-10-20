@@ -158,6 +158,10 @@ type catchUpTracker struct {
 // and the delegation sync queue was full.
 type owedSync struct {
 	room bool
+	// key: the sync was held for the zone's SIG(0) key (holdForZoneKey).
+	// askOwed leaves it, caught up or not, until the key's hold is
+	// released (releaseKeyHold).
+	key bool
 }
 
 // owedResult is what one ask for an owed sync did.
@@ -882,6 +886,54 @@ func (t *catchUpTracker) owe(zone ZoneName) {
 
 // clearOwed drops the zone's owed sync: the zone's chain has ended, and
 // whoever leads it now has its own.
+// oweForKey marks the zone's sync owed, held for the zone's SIG(0) key.
+func (t *catchUpTracker) oweForKey(zone ZoneName) {
+	if t == nil {
+		return
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.owed[zone] == nil {
+		t.owed[zone] = &owedSync{}
+	}
+	t.owed[zone].key = true
+}
+
+// releaseKeyOwed takes the key off the zone's owed mark, and reports whether
+// it was there. What else holds the sync, the catch-up, holds it still.
+func (t *catchUpTracker) releaseKeyOwed(zone ZoneName) bool {
+	if t == nil {
+		return false
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	o := t.owed[zone]
+	if o == nil || !o.key {
+		return false
+	}
+	o.key = false
+	return true
+}
+
+// keyOwedZones are the zones whose sync is held for the zone's key.
+func (t *catchUpTracker) keyOwedZones() []ZoneName {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ZoneName
+	for zone, o := range t.owed {
+		if o.key {
+			out = append(out, zone)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 func (t *catchUpTracker) clearOwed(zone ZoneName) {
 	if t == nil {
 		return
@@ -939,6 +991,9 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 		// agent that does not lead asks nothing, and shows nothing owed
 		if !t.owedApplies(ctx, zone) {
 			delete(t.owed, zone)
+			continue
+		}
+		if t.owed[zone].key {
 			continue
 		}
 		if ok, _ := t.caughtUpLocked(zone); !ok {

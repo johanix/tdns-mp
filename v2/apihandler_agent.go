@@ -522,6 +522,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
 			status.DSSet = conf.dsSetLine(zd.ZoneData)
+			// the leader's sync held for the zone's SIG(0) key (step 7b),
+			// beside the catch-up's hold: its own line
+			if lem.IsLeader(amp.Zone) {
+				if why := conf.keyHoldReason(ctx, amp.Zone); why != "" {
+					status.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (" + why + ")"
+				}
+			}
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -636,7 +643,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			// The bootstrap runs async, past the end of this request, so not
 			// r.Context(); the lifecycle ctx stops its IMR wait and retries
 			// at shutdown.
-			go conf.ParentSyncAfterKeyPublication(ctx, amp.Zone, string(amp.Zone), keyid, algorithm)
+			conf.launchKeyPoll(ctx, nil, amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":

@@ -173,6 +173,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// that arrives outside this engine. Its owed sync is asked for
 			// here.
 			conf.InternalMp.CatchUp.askAllOwed(ctx, false)
+			// the backstop for the syncs held for a zone's SIG(0) key, off
+			// this goroutine: the test reads the keystore and asks the
+			// resolver
+			conf.retestKeyHoldsInBackground(ctx)
 
 		case <-owedRoomTicker.C:
 			if conf.InternalMp.CatchUp.roomWaits() {

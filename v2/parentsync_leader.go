@@ -154,6 +154,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 
 	// Single agent: self-elect immediately
 	if expectedPeers == 0 {
+		lem.noteLeaderLocked(le, lem.localID, time.Now())
 		le.Leader = lem.localID
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -586,6 +587,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		return
 	}
 
+	lem.noteLeaderLocked(le, agreedWinner, time.Now())
 	le.Leader = agreedWinner
 	le.leaderTerm = le.Term
 	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -812,6 +814,7 @@ func (lem *LeaderElectionManager) InvalidateGroupLeader(groupHash string) {
 	}
 	lgElect.Info("invalidating group leader due to degraded state",
 		"group", groupHash[:8], "was", le.Leader, "term", le.Term)
+	lem.noteLeaderLocked(le, "", time.Now())
 	le.Leader = ""
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
@@ -904,8 +907,9 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 			"group", groupHash[:8], "leader", state.Leader,
 			"term", state.Term, "expiry", state.LeaderExpiry)
 
-		le.Leader = AgentId(state.Leader)
 		le.Term = uint64(state.Term)
+		lem.noteLeaderLocked(le, AgentId(state.Leader), time.Now())
+		le.Leader = AgentId(state.Leader)
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = state.LeaderExpiry
 		le.Active = false
@@ -1158,6 +1162,47 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 	return le.Leader, true
 }
 
+// noteLeaderLocked keeps le.leadStart, the term in which this agent's present
+// lead began, as an election names its leader (under le.mu, with le.Term the
+// new term). A renewal names this agent again while its lease runs, and keeps
+// the start; a lead after another agent's, an invalidated or a lapsed one
+// starts anew; another agent's lead clears it.
+func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
+	if leader != lem.localID {
+		le.leadStart = 0
+		return
+	}
+	if le.Leader != lem.localID || le.leadStart == 0 || now.After(le.LeaderExpiry) {
+		le.leadStart = le.Term
+	}
+}
+
+// LeadStart is the term in which this agent's present lead of the zone
+// began, as IsLeader finds the zone's election: its provider group's, else
+// the zone's own. Zero when it does not lead the zone.
+func (lem *LeaderElectionManager) LeadStart(zone ZoneName) uint64 {
+	if !lem.IsLeader(zone) {
+		return 0
+	}
+	lem.mu.RLock()
+	le, ok := (*LeaderElection)(nil), false
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			le, ok = lem.groupElections[pg.GroupHash]
+		}
+	}
+	if !ok {
+		le, ok = lem.elections[zone]
+	}
+	lem.mu.RUnlock()
+	if !ok || le == nil {
+		return 0
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	return le.leadStart
+}
+
 // IsLeader returns true if the local agent is the current leader for a zone.
 //
 // An agent that does not vote in a multi-provider zone does not lead it,
@@ -1314,6 +1359,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 
 	// Single agent: become leader immediately
 	if expectedPeers == 0 {
+		lem.noteLeaderLocked(le, lem.localID, time.Now())
 		le.Leader = lem.localID
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -1648,6 +1694,7 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 		return
 	}
 
+	lem.noteLeaderLocked(le, agreedWinner, time.Now())
 	le.Leader = agreedWinner
 	le.leaderTerm = le.Term
 	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)

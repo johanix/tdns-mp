@@ -341,6 +341,10 @@ type InternalMpConf struct {
 	// keyPoll stands in for tdns's poll of the parent for a zone's SIG(0)
 	// key in a test (ParentSyncAfterKeyPublication). Nil runs tdns's.
 	keyPoll func(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8)
+	// keyPolls: per zone, the polls of the zone's SIG(0) key with its parent
+	// that run in this process, and what the hold of the leader's sync for
+	// the key needs besides (step 7b, key_hold.go).
+	keyPolls keyPollBook
 	// ownReads counts the re-reads of the agents' own state under way
 	// (own_read.go), until each has handed its answer back.
 	ownReads sync.WaitGroup

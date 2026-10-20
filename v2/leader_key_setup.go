@@ -9,7 +9,6 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // leaderKeySetup runs when the local agent wins a zone's leader election:
@@ -43,15 +42,8 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 		lgAgent.Info("zone joined a group this agent leads: processing", "zone", zone)
 	}
 
-	if tdns.Globals.ImrEngine == nil {
-		lgAgent.Debug("onLeaderElected: IMR not available, skipping DSYNC bootstrap", "zone", zone)
-		return nil
-	}
-	imr := &Imr{tdns.Globals.ImrEngine}
-	_, err := imr.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
-	if err != nil {
-		lgAgent.Info("onLeaderElected: parent does not advertise DSYNC UPDATE scheme, skipping SIG(0) key setup",
-			"zone", zone, "err", err)
+	if !conf.zoneUsesKey(ctx, zone) {
+		lgAgent.Info("onLeaderElected: the zone uses no SIG(0) key (no parent that takes UPDATE, or no resolver), skipping SIG(0) key setup", "zone", zone)
 		return nil
 	}
 
@@ -62,14 +54,35 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	// A key this setup makes in step c, which the lead may not outlast.
 	var made bool
 	var madeKeyid uint16
-	// Step a: check local keystore
-	sak, err := hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
-	// a clean read that found none: only then can a key made below be
-	// told for the one this setup made
-	readEmpty := err == nil && sak != nil && len(sak.Keys) == 0
-	if err == nil && len(sak.Keys) > 0 {
+	// The leader's sync of the zone waits from here until the poll this
+	// set-up starts has ended (step 7b, keyPolls): counted before a key is
+	// made or taken. A key made or taken whose publication fails keeps the
+	// zone held (unpublished) until a later set-up publishes it.
+	tk := conf.InternalMp.keyPolls.begin(zone)
+	unpublished := false
+	defer func() { tk.end(unpublished) }()
+	// Step a: the zone's key, if this agent holds it (readZoneKey): an
+	// active local key the zone does not publish is not used.
+	zk, err := readZoneKey(hdb.KeyDB, zone)
+	if err != nil {
+		return fmt.Errorf("onLeaderElected: reading the SIG(0) keys of %s: %v", zone, err)
+	}
+	// a clean read that found no active key: only then can a key made
+	// below be told for the one this setup made
+	readEmpty := len(zk.active) == 0
+	if zk.held != nil {
+		// A renewal of a lead whose poll of this key has ended in this
+		// process, with the key published, changes nothing: no publication
+		// again and no poll, whatever the poll's outcome. A new lead, a new
+		// or taken key, and a restart publish and poll as before.
+		_, _, ended := conf.InternalMp.keyPolls.state(zone)
+		if renewalKeepsKey(zk, ended, lem.LeadStart(zone)) {
+			lgAgent.Info("a renewal of the lead keeps the zone's SIG(0) key as it is: published, and bootstrapped in this lead",
+				"zone", zone, "keyid", zk.held.keyid)
+			return nil
+		}
 		lgAgent.Info("leader has local SIG(0) key, proceeding to publish",
-			"zone", zone, "keyid", sak.Keys[0].KeyId)
+			"zone", zone, "keyid", zk.held.keyid)
 		goto publish
 	}
 	// Step b: ask peers via RFI CONFIG subtype=sig0key.
@@ -115,6 +128,7 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 						continue
 					}
 					lgAgent.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.ID)
+					unpublished = true // a key taken counts as unpublished until it is
 					goto publish
 				}
 				lgAgent.Info("peer does not have SIG(0) key", "zone", zone, "peer", agent.ID)
@@ -163,6 +177,7 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 			return fmt.Errorf("onLeaderElected: failed to generate SIG(0) keypair: %v", err)
 		}
 		lgAgent.Info("generated SIG(0) keypair", "zone", zone, "msg", resp.Msg)
+		unpublished = true
 		// The key made is the one new active key, and only when there was
 		// none before. A key another writer added meanwhile, or one a
 		// failed read hid, is never taken for it: what this names is what
@@ -181,16 +196,23 @@ publish:
 		lgAgent.Info("onLeaderElected: this agent no longer leads the zone; its KEY is not published", "zone", zone)
 		if made {
 			dropKeyMadeForALostLead(hdb, zd.ZoneName, keyName, madeKeyid)
+			unpublished = false // the key is gone
 		}
 		return errLeadMoved
 	}
-	// Step d: get the active key and publish to combiner + remote agents
-	sak, err = hdb.GetSig0Keys(keyName, tdns.Sig0StateActive)
-	if err != nil || len(sak.Keys) == 0 {
-		return fmt.Errorf("onLeaderElected: no active SIG(0) key after generation for zone %s", zone)
+	// Step d: the zone's key, the only active one, published to the combiner
+	// and the remote agents. The others are retired first: tdns signs with
+	// the first active row and bootstraps it (step 7b, one active key).
+	zk, err = readZoneKey(hdb.KeyDB, zone)
+	if err != nil || zk.held == nil || zk.held.key == nil {
+		return fmt.Errorf("onLeaderElected: the zone's SIG(0) key is not held after the setup for zone %s (%v)", zone, err)
 	}
-	keyRR := &sak.Keys[0].KeyRR
-	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", sak.Keys[0].KeyId)
+	if only, err := retireOtherActiveKeys(hdb.KeyDB, zone, zk); err != nil || !only {
+		lgAgent.Warn("an active SIG(0) key that is not the zone's key could not be retired; the sync with the parent waits", "zone", zone, "keyid", zk.held.keyid, "err", err)
+	}
+	held := *zk.held
+	keyRR := held.key
+	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
 
 	zu := &ZoneUpdate{
 		Zone: zone,
@@ -210,6 +232,8 @@ publish:
 		return err
 	}
 	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
+	unpublished = false
+	conf.InternalMp.keyPolls.published(zone)
 
 	agentUpdate := &ZoneUpdate{
 		Zone: zone,
@@ -223,11 +247,10 @@ publish:
 		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
 	}
 
-	// Step e: trigger KeyState inquiry + bootstrap with parent (async)
+	// Step e: trigger KeyState inquiry + bootstrap with parent (async), for
+	// the zone's key: the poll takes this set-up's count (keyPolls)
 	if zd.Options[tdns.OptParentSync] {
-		keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-		algorithm := sak.Keys[0].KeyRR.Algorithm
-		go conf.ParentSyncAfterKeyPublication(ctx, zone, keyName, keyid, algorithm)
+		conf.launchKeyPoll(ctx, tk, zone, keyName, held.keyid, keyRR.Algorithm)
 	}
 
 	return nil
