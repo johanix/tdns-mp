@@ -146,6 +146,10 @@ type catchUpTracker struct {
 	// owed: the zones whose leader sync with the parent was held because
 	// the zone was not caught up (step 5). askSync asks for it once.
 	owed    map[ZoneName]*owedSync
+	// parentDown: the zones whose parent's delegation could not be
+	// analysed, since when, the last error and when that was last logged.
+	// It outlasts the owed asks, and ends when the parent answers.
+	parentDown map[ZoneName]*parentDown
 	askSync func(ctx context.Context, zone ZoneName) owedResult
 	// owedApplies: an owed sync of the zone may still be asked for (the
 	// engine runs, the zone is here and synced by its agents, this agent
@@ -203,6 +207,7 @@ func newCatchUpTracker(self AgentId, startZones []string, outage time.Duration) 
 		senders:     map[AgentId]*catchUpSender{},
 		caught:      map[ZoneName]bool{},
 		owed:        map[ZoneName]*owedSync{},
+		parentDown:  map[ZoneName]*parentDown{},
 		askSync:     func(context.Context, ZoneName) owedResult { return owedNotAsked },
 		owedApplies: func(context.Context, ZoneName) bool { return true },
 	}
@@ -984,7 +989,80 @@ func (t *catchUpTracker) clearOwed(zone ZoneName) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.owed, ZoneName(dns.Fqdn(string(zone))))
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	delete(t.owed, zone)
+	delete(t.parentDown, zone)
+}
+
+// parentDown is a zone whose parent's delegation could not be analysed.
+type parentDown struct {
+	since   time.Time
+	lastErr string
+	logged  time.Time
+}
+
+// parentDownLogEvery: how often a parent that stays down is logged.
+var parentDownLogEvery = time.Hour
+
+// oweAfterFailedAnalysis owes the zone's sync after an analysis of its
+// parent's delegation failed, and notes the failure. It says whether the
+// failure is to be logged (the first, then once an hour) and since when the
+// parent has not answered.
+func (t *catchUpTracker) oweAfterFailedAnalysis(zone ZoneName, err error) (logIt bool, since time.Time) {
+	if t == nil {
+		return true, time.Now()
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.owed[zone] == nil {
+		t.owed[zone] = &owedSync{}
+	}
+	now := time.Now()
+	pd := t.parentDown[zone]
+	if pd == nil {
+		pd = &parentDown{since: now}
+		t.parentDown[zone] = pd
+	}
+	if err != nil {
+		pd.lastErr = err.Error()
+	}
+	if pd.logged.IsZero() || now.Sub(pd.logged) >= parentDownLogEvery {
+		pd.logged = now
+		logIt = true
+	}
+	return logIt, pd.since
+}
+
+// parentAnswered ends the zone's parent-down note: an analysis of the
+// parent's delegation worked. It says whether there was one, and since when.
+func (t *catchUpTracker) parentAnswered(zone ZoneName) (was bool, since time.Time) {
+	if t == nil {
+		return false, time.Time{}
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pd := t.parentDown[zone]
+	if pd == nil {
+		return false, time.Time{}
+	}
+	delete(t.parentDown, zone)
+	return true, pd.since
+}
+
+// parentDownState is the zone's parent-down note, for the status.
+func (t *catchUpTracker) parentDownState(zone ZoneName) (down bool, since time.Time, lastErr string) {
+	if t == nil {
+		return false, time.Time{}, ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pd := t.parentDown[ZoneName(dns.Fqdn(string(zone)))]
+	if pd == nil {
+		return false, time.Time{}, ""
+	}
+	return true, pd.since, pd.lastErr
 }
 
 // owedState says whether the zone's sync is owed, and whether it waits for
@@ -1046,7 +1124,11 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 		switch t.askSync(ctx, zone) {
 		case owedQueued:
 			delete(t.owed, zone)
-			lg.Info("the zone is caught up, asking for the sync that was owed", "zone", zone)
+			// while the parent does not answer, the hourly line of the
+			// failed analysis says so; not a line per ask
+			if t.parentDown[zone] == nil {
+				lg.Info("the zone is caught up, asking for the sync that was owed", "zone", zone)
+			}
 		case owedNotAsked:
 			delete(t.owed, zone)
 		case owedQueueFull:
