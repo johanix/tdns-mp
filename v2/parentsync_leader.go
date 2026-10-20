@@ -1867,7 +1867,7 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		State:           tdns.Sig0StateActive,
 		PrivateKeyCache: pkc,
 	}
-	resp, err := hdb.Sig0KeyMgmt(nil, kp)
+	resp, err := sig0KeyMgmtRetried(hdb.KeyDB, kp)
 	if err != nil {
 		return fmt.Errorf("Sig0KeyMgmt add failed: %v", err)
 	}
@@ -1875,6 +1875,15 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("Sig0KeyMgmt add error: %s", resp.ErrorMsg)
 	}
 	lgElect.Info("imported SIG(0) key from peer", "name", keyName, "algorithm", algorithm, "keyid", pkc.KeyId)
+	// One active key per zone (step 7b): with the key added, every other
+	// active key is retired, so that a failed import never leaves the agent
+	// without one. A retire that fails leaves the zone's key not held; it is
+	// tried again at the next check of the key.
+	if zk, err := readZoneKey(hdb.KeyDB, ZoneName(keyName)); err == nil && zk.held != nil && zk.held.keyid == pkc.KeyId {
+		if only, err := retireOtherActiveKeys(hdb.KeyDB, ZoneName(keyName), zk); err != nil || !only {
+			lgElect.Warn("the imported SIG(0) key is not yet the zone's only active key", "zone", keyName, "keyid", pkc.KeyId, "err", err)
+		}
+	}
 	return nil
 }
 

@@ -328,17 +328,20 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				} else if zd, ok := Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
 					configErr = "zone or KeyDB not available"
 				} else {
-					algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), tdns.Sig0StateActive)
+					// The key handed over is the zone's key (readZoneKey), not
+					// the first active row: an active key the zone does not
+					// publish is no key of the zone's (step 7b).
+					zk, err := readZoneKey(zd.KeyDB, ampp.Zone)
 					if err != nil {
 						configErr = fmt.Sprintf("error looking up SIG(0) key: %v", err)
-					} else if !found {
+					} else if zk.held == nil {
 						configData = map[string]string{"status": "no sig0 key for zone"}
 					} else {
-						lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID)
+						lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID, "keyid", zk.held.keyid)
 						configData = map[string]string{
-							"algorithm":  algorithm,
-							"privatekey": privatekey,
-							"keyrr":      keyrr,
+							"algorithm":  zk.held.algorithm,
+							"privatekey": zk.held.privatekey,
+							"keyrr":      zk.held.keyrr,
 						}
 					}
 				}

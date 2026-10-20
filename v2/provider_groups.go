@@ -314,24 +314,20 @@ func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous []*Agen
 }
 
 // zoneTakesKey: the zone publishes no KEY at its apex, or it publishes
-// this one (same flags, protocol, algorithm and public key). A zone that has
-// not loaded here publishes nothing to compare with.
+// this one alone (same flags, protocol, algorithm and public key). A zone
+// that has not loaded here publishes nothing to compare with. A zone that
+// publishes several KEYs takes none: no local key is then the zone's key,
+// and no answer can say which one the parent trusts (step 7b).
 func zoneTakesKey(zone ZoneName, key *dns.KEY) bool {
-	apex := zoneApex(zone)
-	if apex == nil {
+	published := publishedKeys(zone)
+	switch len(published) {
+	case 0:
 		return true
+	case 1:
+		return sameKey(published[0], key)
+	default:
+		return false
 	}
-	published := apex.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs
-	if len(published) == 0 {
-		return true
-	}
-	for _, rr := range published {
-		if k, ok := rr.(*dns.KEY); ok && k.Flags == key.Flags && k.Protocol == key.Protocol &&
-			k.Algorithm == key.Algorithm && k.PublicKey == key.PublicKey {
-			return true
-		}
-	}
-	return false
 }
 
 // zoneListsAgent: the zone's HSYNC3 RRset has an ON record for the agent,
