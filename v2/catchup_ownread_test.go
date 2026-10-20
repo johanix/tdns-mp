@@ -490,3 +490,51 @@ func TestACombinerWhoseStartReadFailedReadsAgainWhenAsked(t *testing.T) {
 		t.Errorf("after the read again: %q, %v", req.Message, req.AgentRecords)
 	}
 }
+
+// A reload of the stored contributions and an update are taken one after
+// the other. An update that holds the zone while the reload starts, and
+// saves a newer set, is in what the reload reads: the reload does not
+// roll the zone back to the set it would have read before.
+func TestAReloadOfTheContributionsDoesNotRollBackAnUpdate(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "reload.combiner.example.", false, false)
+	z := mpzd.ZoneName
+	nsRR := func(name string) dns.RR {
+		rr, err := dns.NewRR(z + "\t3600\tIN\tNS\t" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rr
+	}
+	older, newer := nsRR("ns1.alpha.example."), nsRR("ns2.alpha.example.")
+	if err := SaveContributions(hdb, z, csyncLeaderA, map[string]map[uint16]core.RRset{z: {dns.TypeNS: {RRs: []dns.RR{older}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// the update holds the zone as the reload starts
+	mpzd.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := CombinerReapplyContributions(z, hdb)
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // the reload has started, and waits for the zone
+	mpzd.EnsureMP()
+	if mpzd.MP.AgentContributions == nil {
+		mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{}
+	}
+	mpzd.MP.AgentContributions[csyncLeaderA] = map[string]map[uint16]core.RRset{z: {dns.TypeNS: {RRs: []dns.RR{newer}}}}
+	err := SaveContributions(hdb, z, csyncLeaderA, mpzd.MP.AgentContributions[csyncLeaderA])
+	mpzd.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err, ok := recvWithin(done, 10*time.Second); !ok || err != nil {
+		t.Fatalf("the reload: done %v, err %v", ok, err)
+	}
+	mpzd.Lock()
+	got := mpzd.MP.AgentContributions[csyncLeaderA][z][dns.TypeNS].RRs
+	mpzd.Unlock()
+	if len(got) != 1 || got[0].String() != newer.String() {
+		t.Errorf("after the reload the zone holds %v, want the update's %s", got, newer)
+	}
+}
