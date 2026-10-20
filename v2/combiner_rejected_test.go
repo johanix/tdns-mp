@@ -9,7 +9,9 @@
 package tdnsmp
 
 import (
+	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,5 +155,132 @@ func TestARecordItsCombinerRejectedIsAChangeInEveryForm(t *testing.T) {
 		if process() {
 			t.Errorf("%s: the record the combiner took, sent again, is a change", name)
 		}
+	}
+}
+
+// A distribution whose hand-over to this agent's combiner fails (its queue
+// full while the combiner is away) leaves the key in the repo and not with
+// the combiner. The same set sent again was a no-op, confirmed as applied
+// from the repo alone, and the sender took the key as published here. Now
+// the key is not held: the resend goes to the combiner, and the sender's
+// propagation ends only when the combiner has taken it.
+func TestADnskeyNotHandedToTheCombinerIsSentToItAgain(t *testing.T) {
+	r := receivingRig(t, "unhanded.dnskey.example.")
+	z := r.mpzd.ZoneName
+	signer, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+	key := testDnskey(t, z, 256)
+	rec, kt := key.String(), key.KeyTag()
+	op := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{rec}}
+
+	var failing atomic.Bool
+	failing.Store(true)
+	saved := enqueueForCombiner
+	enqueueForCombiner = func(tm *MPTransportBridge, zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+		if failing.Load() {
+			return "", errors.New("queue full")
+		}
+		return saved(tm, zone, update, distID)
+	}
+	t.Cleanup(func() { enqueueForCombiner = saved })
+
+	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	d1, d2 := nextDistributionID(), nextDistributionID()
+	snd.TrackDnskeyPropagation(ZoneName(z), d2, []uint16{kt}, nil, []AgentId{us})
+	waiting := func() bool {
+		snd.dnskeyPropMu.Lock()
+		defer snd.dnskeyPropMu.Unlock()
+		_, ok := snd.pendingDnskeyPropagations[d2]
+		return ok
+	}
+
+	sent := time.Now().Add(-time.Minute)
+	r.receivesAt(t, string(signer), d1, sent, nil, op)
+	var first TrackedRRInfo
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if first = r.heldBy(t, signer, dns.TypeDNSKEY, rec); first.State == RRStateRejected.String() {
+			break
+		}
+	}
+	if first.State != RRStateRejected.String() {
+		t.Fatalf("a key the combiner was never handed is tracked as %+v, want rejected\n%s", first, r.log)
+	}
+
+	// the combiner's queue has room again; the same set, newer
+	failing.Store(false)
+	r.receivesAt(t, string(signer), d2, sent.Add(10*time.Second), nil, op)
+	var again TrackedRRInfo
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if again = r.heldBy(t, signer, dns.TypeDNSKEY, rec); again.State == RRStatePending.String() {
+			break
+		}
+	}
+	if again.State != RRStatePending.String() || again.DistributionID == "" {
+		t.Fatalf("the resend did not go to the combiner: the key is tracked as %+v\n%s", again, r.log)
+	}
+	for end := time.Now().Add(300 * time.Millisecond); time.Now().Before(end); {
+		c, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+		if !ok {
+			break
+		}
+		if c.DistributionID != d2 {
+			continue
+		}
+		if slices.Contains(c.AppliedRecords, rec) {
+			t.Fatalf("before the combiner took the key, the sender got %+v", *c)
+		}
+		snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil)
+	}
+	if !waiting() {
+		t.Fatal("the sender's propagation of the key ended before this agent's combiner had it")
+	}
+
+	r.confirms(rigCombiner, again.DistributionID, rec)
+	c := r.answered(t, d2)
+	if !slices.Contains(c.AppliedRecords, rec) {
+		t.Fatalf("after the combiner took the key, the sender got %+v", *c)
+	}
+	snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil)
+	if waiting() {
+		t.Error("the sender's propagation of the key still waits after this agent confirmed it")
+	}
+}
+
+// A record the combiner holds, or that an earlier forward still carries to
+// it, stays as tracked when a later hand-over fails; the others, a record
+// removed before and sent again among them, are marked not held.
+func TestAFailedHandOverLeavesHeldRecordsAlone(t *testing.T) {
+	const zone, agent = ZoneName("handover.forms.example."), AgentId("agent.peer.example.")
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := func(s string) dns.RR {
+		r, err := dns.NewRR(string(zone) + " 3600 IN TXT \"" + s + "\"")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	held, pending, removed, fresh := rr("held"), rr("pending"), rr("removed"), rr("fresh")
+	zdr.getOrCreateTracking(zone, agent, dns.TypeTXT).Tracked = []TrackedRR{
+		{RR: held, State: RRStateAccepted},
+		{RR: pending, State: RRStatePending},
+		{RR: removed, State: RRStateRemoved},
+	}
+	zdr.markNotHandedOver(zone, agent, &ZoneUpdate{Operations: []core.RROperation{{Operation: "replace", RRtype: "TXT",
+		Records: []string{held.String(), pending.String(), removed.String(), fresh.String()}}}}, "not handed to the combiner")
+	for _, c := range []struct {
+		rr   dns.RR
+		want bool
+	}{{held, false}, {pending, false}, {removed, true}, {fresh, true}} {
+		if got := zdr.rejectedByCombiner(zone, agent, dns.TypeTXT, c.rr.String()); got != c.want {
+			t.Errorf("%s: not held %v, want %v", c.rr.String(), got, c.want)
+		}
+	}
+	// the class-tagged form: the RRsets' IN records
+	legacy := rr("legacy")
+	zdr.markNotHandedOver(zone, agent, &ZoneUpdate{RRsets: map[uint16]core.RRset{dns.TypeTXT: {RRs: []dns.RR{legacy}}}}, "not handed to the combiner")
+	if !zdr.rejectedByCombiner(zone, agent, dns.TypeTXT, legacy.String()) {
+		t.Errorf("%s, in the RRsets form, is held after a failed hand-over", legacy.String())
 	}
 }
