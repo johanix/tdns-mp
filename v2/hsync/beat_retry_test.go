@@ -594,3 +594,109 @@ func TestAPeerBackLateInTheIntervalDoesNotReadAsDegraded(t *testing.T) {
 		}
 	}
 }
+
+// waitNotBeatingBack waits until no beat back to the peer is on its way.
+func waitNotBeatingBack(t *testing.T, e *Engine, id PeerID) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		e.beatMu.Lock()
+		busy := e.beatingBack[id]
+		e.beatMu.Unlock()
+		if !busy {
+			return
+		}
+	}
+	t.Fatal("the beat back did not end")
+}
+
+// A peer that repeats its hello faster than the fast interval gets one beat
+// back per fast interval, not one per hello (#131): a call less than one fast
+// interval after the last beat back started does nothing, also once that
+// beat back has returned.
+func TestRepeatedHellosGetOneBeatBackPerFastInterval(t *testing.T) {
+	const fast, steady = 80 * time.Millisecond, time.Second
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, 1, time.Second)
+	waitNotBeatingBack(t, e, peer.ID)
+	for i := 0; i < 3; i++ {
+		e.BeatPeer(peer.ID)
+	}
+	time.Sleep(fast / 4)
+	if got := len(s.beats()); got != 1 {
+		t.Fatalf("%d beats for hellos within one fast interval, want 1", got)
+	}
+
+	time.Sleep(fast)
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, 2, time.Second)
+}
+
+// With the fixed pace there is no fast interval: one beat back per beat
+// interval.
+func TestRepeatedHellosOnTheFixedPaceGetOneBeatBackPerInterval(t *testing.T) {
+	const steady = 300 * time.Millisecond
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(0, steady))
+	peer := operationalDNSPeer(e, s)
+
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, 1, time.Second)
+	waitNotBeatingBack(t, e, peer.ID)
+	time.Sleep(steady / 3)
+	e.BeatPeer(peer.ID)
+	time.Sleep(steady / 6)
+	if got := len(s.beats()); got != 1 {
+		t.Fatalf("%d beats for two hellos within one beat interval, want 1", got)
+	}
+	time.Sleep(steady)
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, 2, time.Second)
+}
+
+// The engine keeps no beat back from before a restart: the first one after it
+// goes at once.
+func TestTheFirstBeatBackAfterARestartIsNotDelayed(t *testing.T) {
+	const fast, steady = 200 * time.Millisecond, 2 * time.Second
+	s := newScriptedBeats()
+	before := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(before, s)
+	before.BeatPeer(peer.ID)
+	s.waitBeats(t, 1, time.Second)
+
+	// the agent restarts: a new engine, the same peer
+	after := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	after.registry.S.Set(peer.ID, peer)
+	start := time.Now()
+	after.BeatPeer(peer.ID)
+	b := s.waitBeats(t, 2, time.Second)
+	if wait := b[1].Sub(start); wait > fast/2 {
+		t.Errorf("the first beat back after a restart left %v after the hello, want at once", wait)
+	}
+}
+
+// A beat back that is refused is sent again after the fast interval: its
+// retries are its own, and the bound on new beats back does not cut them
+// short. A hello in between starts no second one.
+func TestARetriedBeatBackIsNotCutShort(t *testing.T) {
+	const fast, steady = 40 * time.Millisecond, 300 * time.Millisecond
+	s := newScriptedBeats()
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: s}, retryConfig(fast, steady))
+	peer := operationalDNSPeer(e, s)
+	n := outageWithTheRetriesSpent(t, e, s, peer)
+
+	s.failing.Store(false)
+	s.failOnce.Store(true)
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, n+1, time.Second)
+	e.BeatPeer(peer.ID)
+	s.waitBeats(t, n+2, time.Second)
+	waitBeatBackDone(t, e, peer.ID)
+	time.Sleep(2 * fast)
+	if got := len(s.beats()) - n; got != 2 {
+		t.Errorf("%d beats for a beat back refused once, with a hello in between; want 2", got)
+	}
+}

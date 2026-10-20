@@ -40,6 +40,16 @@ func (e *Engine) fastBeatsOn() bool {
 	return e.cfg.BeatIntervalMin > 0 && e.cfg.BeatIntervalMin < e.cfg.BeatInterval
 }
 
+// beatBackSpacing is the least time between the starts of two beats back to
+// one peer: the fast interval, or with the fixed pace, which has none, the
+// beat interval.
+func (e *Engine) beatBackSpacing() time.Duration {
+	if e.fastBeatsOn() {
+		return e.cfg.BeatIntervalMin
+	}
+	return e.cfg.BeatInterval
+}
+
 // baseCtx is the context Run was given, for work that outlives one beat round;
 // before Run, the background context.
 func (e *Engine) baseCtx() context.Context {
@@ -154,8 +164,12 @@ const beatBackRetries = 2
 // costs one beat back for each, to that peer alone, and never more than one at
 // a time: while one is on its way, or waits to be sent again (beatBack), a
 // further call does nothing, so hellos that come faster than a beat returns
-// cannot pile beats up. A peer the engine does not know, or one not past its
-// hello, gets none.
+// cannot pile beats up. Nor do hellos that come faster than the fast
+// interval: a call less than one fast interval after the last beat back to
+// that peer started does nothing (#131). The first beat back after a restart
+// has no earlier one and goes at once. The retries of a beat back run inside
+// it, and are not held to this. A peer the engine does not know, or one not
+// past its hello, gets none.
 func (e *Engine) BeatPeer(id PeerID) {
 	if e == nil || e.registry == nil {
 		return
@@ -164,10 +178,15 @@ func (e *Engine) BeatPeer(id PeerID) {
 	if !ok || peer.IsInfraPeer || !e.peerAnyTransportReady(peer) {
 		return
 	}
+	now := time.Now()
 	e.beatMu.Lock()
 	busy := e.beatingBack[id]
+	if at, seen := e.beatBackAt[id]; !busy && seen && now.Sub(at) < e.beatBackSpacing() {
+		busy = true
+	}
 	if !busy {
 		e.beatingBack[id] = true
+		e.beatBackAt[id] = now
 	}
 	e.beatMu.Unlock()
 	if busy {
