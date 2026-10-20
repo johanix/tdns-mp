@@ -477,7 +477,20 @@ func TestAResendWhileTheCombinerHasNotConfirmedGoesToItAgain(t *testing.T) {
 // The set's keys were accepted before, so no record of it is marked: only
 // the set's note says the combiner may not have it.
 func TestAStaleSetWhoseHandOverFailedIsNotNamedBesideAFreshOne(t *testing.T) {
-	r := receivingRig(t, "mixed.handover.example.")
+	// The combiner names what it applied, or names nothing (a no-op), or
+	// ignores the update naming nothing: then the records are made from the
+	// repo, which holds the failed set too.
+	for _, answer := range []string{"names the CSYNC", "names nothing", "ignores it"} {
+		t.Run("the combiner "+answer, func(t *testing.T) {
+			staleSetBesideAFreshOne(t, answer)
+		})
+	}
+}
+
+func staleSetBesideAFreshOne(t *testing.T, answer string) {
+	zone := map[string]string{"names the CSYNC": "mixed.handover.example.", "names nothing": "mixed.noop.handover.example.",
+		"ignores it": "mixed.ignored.handover.example."}[answer]
+	r := receivingRig(t, zone)
 	z := r.mpzd.ZoneName
 	signer := AgentId(r.peer.Identity)
 	r.leader(signer)
@@ -526,9 +539,55 @@ func TestAStaleSetWhoseHandOverFailedIsNotNamedBesideAFreshOne(t *testing.T) {
 	if c == "" {
 		t.Fatalf("the CSYNC did not go to the combiner\n%s", r.log)
 	}
-	r.combinerTakes(c, crec)
+	switch answer {
+	case "names the CSYNC":
+		r.combinerTakes(c, crec)
+	case "names nothing":
+		r.combinerTakes(c)
+	case "ignores it":
+		r.us.Bridge.ChunkHandler.OnConfirmationReceived(c, rigCombiner, transport.ConfirmIgnored, r.mpzd.ZoneName,
+			nil, nil, nil, nil, false, "")
+	}
 	cf := r.answered(t, d)
+	if answer == "ignores it" {
+		if slices.Contains(cf.IgnoredRecords, k1.String()) || slices.Contains(cf.AppliedRecords, k1.String()) {
+			t.Errorf("the ignored update got %+v, naming the key set", *cf)
+		}
+		return
+	}
 	if cf.Status != "PARTIAL" || slices.Contains(cf.AppliedRecords, k1.String()) || !slices.Contains(cf.AppliedRecords, crec) {
 		t.Errorf("the update got %+v, want PARTIAL with the CSYNC and without the key set", *cf)
+	}
+}
+
+// A record the combiner rejected stays in the repo. A later update of
+// another type, which the combiner confirms naming nothing, is confirmed with
+// records made from the repo: the rejected record is not among them.
+func TestARecordTheCombinerRejectedIsNotNamedFromTheRepo(t *testing.T) {
+	r := receivingRig(t, "rejected.noop.example.")
+	z := r.mpzd.ZoneName
+	signer := AgentId(r.peer.Identity)
+	r.leader(signer)
+	k := testDnskey(t, z, 256)
+	sent := time.Now().Add(-time.Minute)
+
+	d1 := nextDistributionID()
+	r.receivesAt(t, string(signer), d1, sent, nil, core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k.String()}})
+	first := r.heldBy(t, signer, dns.TypeDNSKEY, k.String())
+	r.rejects(rigCombiner, first.DistributionID, k.String(), "DNSKEY rejected: sender is not a signer")
+	r.answered(t, d1)
+
+	csync, crec := csyncOp(z, 1000)
+	d2 := nextDistributionID()
+	before := r.combinerDists()
+	r.receivesAt(t, string(signer), d2, sent.Add(10*time.Second), nil, csync)
+	c := r.newCombinerDist(before, 10*time.Second)
+	if c == "" {
+		t.Fatalf("the CSYNC did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c)
+	cf := r.answered(t, d2)
+	if slices.Contains(cf.AppliedRecords, k.String()) || !slices.Contains(cf.AppliedRecords, crec) {
+		t.Errorf("the CSYNC's confirmation, made from the repo, is %+v: want the CSYNC and not the rejected key", *cf)
 	}
 }
