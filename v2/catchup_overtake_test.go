@@ -203,3 +203,59 @@ func TestAnAddBesideAStaleReplaceOfTheSameSetGoesOn(t *testing.T) {
 	}
 	r.heldBy(t, peer, dns.TypeNS, ns1)
 }
+
+// The leader's DNSKEY distribution D is overtaken at this agent by the
+// leader's answer to its request, which carries the same key. D is stale
+// here, and its key is in the repo only through the answer's forward,
+// which this agent's combiner has not confirmed. D's confirmation closes
+// the leader's queue entry, but it is PARTIAL and does not name the key,
+// so the leader's propagation tracking does not take the key as applied.
+// When the combiner confirms the answer, this agent's final confirmation of
+// the answer is its word that the key is here, and the propagation ends.
+func TestADnskeyDistributionOvertakenByAnAnswerWaitsForTheCombiner(t *testing.T) {
+	r := receivingRig(t, "dnskey.overtaken.example.")
+	z := r.mpzd.ZoneName
+	leader, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+	r.leader(leader)
+	key := testDnskey(t, z, 257)
+	rec, kt := key.String(), key.KeyTag()
+	op := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{rec}}
+
+	// the leader's side: D's propagation tracking, and the answer it sent
+	lead := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	d, an := nextDistributionID(), nextDistributionID()
+	lead.TrackDnskeyPropagation(ZoneName(z), d, []uint16{kt}, nil, []AgentId{us})
+	lead.noteCatchUpAnswer(an, ZoneName(z), us, map[uint16]bool{kt: true})
+	result := func() (string, bool) {
+		lead.dnskeyPropMu.Lock()
+		defer lead.dnskeyPropMu.Unlock()
+		prop, waiting := lead.pendingDnskeyPropagations[d]
+		if !waiting {
+			return "", false
+		}
+		return prop.Results[us][kt], true
+	}
+
+	sent := time.Now().Add(-time.Minute)
+	yes := true
+	r.receivesAt(t, string(leader), an, sent.Add(30*time.Second), &CatchUp{Request: "r1", Complete: &yes}, op)
+	held := r.heldBy(t, leader, dns.TypeDNSKEY, rec)
+	r.receivesAt(t, string(leader), d, sent, nil, op)
+	c := r.answered(t, d)
+	if c.Status != "PARTIAL" || slices.Contains(c.AppliedRecords, rec) {
+		t.Fatalf("the leader got the final confirmation %+v of its DNSKEY, want PARTIAL without the key", *c)
+	}
+	lead.ProcessDnskeyConfirmation(d, c.Source, c.Status, c.AppliedRecords, nil)
+	if got, waiting := result(); !waiting || got != "" {
+		t.Fatalf("before this agent's combiner confirmed, the leader's tracking has %q for the key (waiting %v)", got, waiting)
+	}
+
+	// the combiner confirms the answer's forward; this agent then confirms
+	// the answer
+	r.confirms(rigCombiner, held.DistributionID, rec)
+	ca := r.answered(t, an)
+	lead.ProcessDnskeyConfirmation(an, ca.Source, ca.Status, ca.AppliedRecords, nil)
+	if got, waiting := result(); waiting {
+		t.Errorf("after this agent confirmed the answer, the propagation still waits (%q for the key)", got)
+	}
+}

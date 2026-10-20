@@ -157,6 +157,9 @@ type ZoneDataRepo struct {
 	// syncher and the status read them (own_read.go).
 	ownState     map[ZoneName]time.Time
 	ownStateNote map[ZoneName]string
+	// olderApplied: the zones for which an answer of a combiner older than
+	// this agent has been applied (applyOwnRead). Engine only.
+	olderApplied map[ZoneName]bool
 	// catchUpAnswers: per zone and asker, the distribution ID of the last
 	// answer to a request for the zone's state. A newer answer takes the
 	// older one out of the queue (catchUpAnswer). Engine only.
@@ -180,6 +183,13 @@ type PendingRemoteConfirmation struct {
 	// holds. They did not go to the combiner; the confirmation to the
 	// sender names them beside what the combiner applied.
 	StaleHeld []string
+	// StaleWaiting: DNSKEY records of the update's stale replaces that an
+	// answer's forward, not confirmed yet, put in the repo
+	// (dnskeyAwaitingAnswer). Not named; a success becomes PARTIAL.
+	StaleWaiting []string
+	// FromAnswer: the forward is of an answer to a request for the zone's
+	// state.
+	FromAnswer bool
 }
 
 type RemoteConfirmationDetail struct {
