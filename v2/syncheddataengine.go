@@ -366,9 +366,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						failedSets = zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
 							updateRRtypes(&ZoneUpdate{Operations: received, RRsets: synchedDataUpdate.Update.RRsets}), true)
 					}
-					staleNotHeld := false
+					var staleNotHeld map[uint16]bool
 					for _, t := range updateRRtypes(&ZoneUpdate{Operations: synchedDataUpdate.staleOperations()}) {
-						staleNotHeld = staleNotHeld || failedSets[t]
+						if failedSets[t] {
+							if staleNotHeld == nil {
+								staleNotHeld = map[uint16]bool{}
+							}
+							staleNotHeld[t] = true
+						}
 					}
 					staleHeld = recordsNotOfTypes(staleHeld, failedSets)
 					synchedDataUpdate.dropStaleOperations()
@@ -459,7 +464,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										CreatedAt:         time.Now(),
 										StaleHeld:         staleHeld,
 										StaleWaiting:      staleWaiting,
-										StaleNotHeld:      staleNotHeld,
+										NotHeldTypes:      staleNotHeld,
 										FromAnswer:        synchedDataUpdate.CatchUp != nil,
 									}
 									zdr.mu.Unlock()
@@ -1583,8 +1588,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 			status = "PARTIAL" // keys an answer's forward has not brought yet
 			appliedRecords = withoutRecords(appliedRecords, prc.StaleWaiting)
 		}
-		if prc.StaleNotHeld && (status == "SUCCESS" || status == "ok") {
-			status = "PARTIAL" // a stale set the combiner may not have
+		// A stale set whose hand-over failed is named nowhere, also not
+		// from the repo: a PARTIAL that names a key credits it.
+		if len(prc.NotHeldTypes) > 0 {
+			appliedRecords = recordsNotOfTypes(appliedRecords, prc.NotHeldTypes)
+			ignoredRecords = recordsNotOfTypes(ignoredRecords, prc.NotHeldTypes)
+			if status == "SUCCESS" || status == "ok" {
+				status = "PARTIAL" // a stale set the combiner may not have
+			}
 		}
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
@@ -1831,7 +1842,12 @@ func (zdr *ZoneDataRepo) reconstructRecordsFromRepo(prc *PendingRemoteConfirmati
 					continue
 				}
 				for _, rr := range rrset.RRs {
-					records = append(records, rr.String())
+					// a record the combiner rejected, or was never
+					// handed, is not held: named, its sender would
+					// take it as published here
+					if s := rr.String(); !zdr.rejectedByCombiner(prc.Zone, agentId, rrtype, s) {
+						records = append(records, s)
+					}
 				}
 			}
 			lgEngine.Debug("reconstructed records from repo for relay",
