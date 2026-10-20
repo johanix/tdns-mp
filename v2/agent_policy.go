@@ -423,6 +423,9 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 							} else if synchedDataUpdate.Force {
 								lgAgent.Debug("RR already present but --force set, marking changed", "rr", rr.String())
 								changed = true
+							} else if zdr.rejectedByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String()) {
+								lgAgent.Info("RR present but rejected by the combiner, sending it again", "rr", rr.String())
+								changed = true
 							} else {
 								lgAgent.Debug("RR already present, skipping", "rr", rr.String())
 							}
@@ -488,6 +491,9 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 					changed = true
 				} else if synchedDataUpdate.Force {
 					lgAgent.Debug("RR already present but --force set, marking changed", "rr", rr.String())
+					changed = true
+				} else if zdr.rejectedByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String()) {
+					lgAgent.Info("RR present but rejected by the combiner, sending it again", "rr", rr.String())
 					changed = true
 				}
 			}
@@ -610,6 +616,20 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 		}
 	} else {
 		changed = len(newRRs) > 0
+	}
+	// The same set again is still a change while this agent's combiner has
+	// rejected one of its records: the repo holds it, the combiner does not,
+	// and only a send gets it there (a combiner that had not loaded the
+	// owner's edit that made the sender a signer).
+	if !changed {
+		for _, rr := range newRRs {
+			if zdr.rejectedByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String()) {
+				lgAgent.Info("replace of a set whose record the combiner rejected, sending it again",
+					"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId, "rrtype", dns.TypeToString[rrtype], "rr", rr.String())
+				changed = true
+				break
+			}
+		}
 	}
 
 	if changed {
