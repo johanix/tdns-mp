@@ -30,6 +30,13 @@ import (
 // 27). It is enqueued for the asker alone and not tracked: tracking it
 // would put another distribution ID on the records the leader's CSYNC is
 // tracked under. The asker's confirmation closes its queue entry.
+//
+// At most one answer per zone and asker waits in the queue: a newer answer
+// takes the older one out. The asker counts only the answer to its latest
+// request, and it asks again every five minutes while it has none, also
+// when the answers cannot reach it; each answer would wait in the queue
+// for a day, and a full queue takes nothing more, this agent's own
+// updates to its combiner included.
 func (conf *Config) catchUpAnswer(zdr *ZoneDataRepo, zone ZoneName, target AgentId, req *CatchUp) (string, error) {
 	tm := conf.InternalMp.MPTransport
 	if tm == nil {
@@ -43,10 +50,20 @@ func (conf *Config) catchUpAnswer(zdr *ZoneDataRepo, zone ZoneName, target Agent
 	}
 	lgEngine.Info("answering a request for the zone's state", "zone", zone, "peer", target,
 		"reason", req.Reason, "request", req.Request, "complete", complete, "why", why, "detail", detail)
+	if older := zdr.catchUpAnswers[zone][target]; older != "" && tm.MarkDeliveryConfirmed(older, string(target)) {
+		lgEngine.Info("an answer to a request for the zone's state replaces the older one still queued", "zone", zone, "peer", target, "older", older)
+	}
 	distID := transport.GenerateDistributionID()
 	if err := tm.EnqueueForSpecificAgent(zone, target, zu, distID); err != nil {
 		return "", err
 	}
+	if zdr.catchUpAnswers == nil {
+		zdr.catchUpAnswers = map[ZoneName]map[AgentId]string{}
+	}
+	if zdr.catchUpAnswers[zone] == nil {
+		zdr.catchUpAnswers[zone] = map[AgentId]string{}
+	}
+	zdr.catchUpAnswers[zone][target] = distID
 	if !complete {
 		return fmt.Sprintf("answered %s for zone %s: not complete (%s)", target, zone, why), nil
 	}

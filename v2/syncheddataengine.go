@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -323,6 +324,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
 					stored := time.Now()
+					// The operations as they arrived, stale replaces too:
+					// the confirmation to the sender names what the repo
+					// holds of each. A stale replace's records are there
+					// when a newer message, an answer to a request for the
+					// zone's state or a later distribution, put them there.
+					var received []core.RROperation
+					if synchedDataUpdate.Update != nil {
+						received = synchedDataUpdate.Update.Operations
+					}
+					staleHeld, _ := zdr.heldRecords(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.staleOperations())
 					synchedDataUpdate.dropStaleOperations()
 					if err != nil {
 						lgEngine.Error("failed to add remote update to agent data repo", "err", err)
@@ -386,6 +397,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										OriginatingSender: string(synchedDataUpdate.AgentId),
 										Zone:              synchedDataUpdate.Zone,
 										CreatedAt:         time.Now(),
+										StaleHeld:         staleHeld,
 									}
 									zdr.mu.Unlock()
 									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
@@ -413,28 +425,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// is gone, rolled the set back.
 						zone := synchedDataUpdate.Zone
 						agentId := synchedDataUpdate.AgentId
-						var nod *OwnerData
-						if agentRepo, ok := zdr.Repo.Get(zone); ok {
-							nod, _ = agentRepo.Get(agentId)
-						}
 						var appliedRecords, removedRecords []string
-						// inRepo reports whether an RR (in ClassINET form)
-						// is present in the agent's repo.
-						inRepo := func(rrStr string, rrtype uint16) bool {
-							if nod == nil {
-								return false
-							}
-							repoRRset, exists := nod.RRtypes.Get(rrtype)
-							if !exists {
-								return false
-							}
-							for _, repoRR := range repoRRset.RRs {
-								if repoRR.String() == rrStr {
-									return true
-								}
-							}
-							return false
-						}
+						inRepo := zdr.inRepo(zone, agentId)
 						// A no-op confirmation reports the desired post-state:
 						// add/replace records already present -> Applied;
 						// delete records already absent -> Removed (the sender
@@ -442,31 +434,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// path is Operations (apihandler_agent.go emits a
 						// "replace"), which takes precedence in ProcessUpdate;
 						// the legacy class-overloaded RRsets/RRs form is only a
-						// fallback.
-						if upd := synchedDataUpdate.Update; upd != nil && len(upd.Operations) > 0 {
-							for _, op := range upd.Operations {
-								rrtype, ok := dns.StringToType[op.RRtype]
-								if !ok {
-									continue
-								}
-								for _, rrStr := range op.Records {
-									rr, err := dns.NewRR(rrStr)
-									if err != nil {
-										continue
-									}
-									s := rr.String()
-									switch op.Operation {
-									case "add", "replace":
-										if inRepo(s, rrtype) {
-											appliedRecords = append(appliedRecords, s)
-										}
-									case "delete":
-										if !inRepo(s, rrtype) {
-											removedRecords = append(removedRecords, s)
-										}
-									}
-								}
-							}
+						// fallback. The operations are the ones that arrived:
+						// a stale replace confirmed with no record left the
+						// sender waiting for this agent for good (the leader's
+						// CSYNC, overtaken by its answer to a request).
+						if upd := synchedDataUpdate.Update; upd != nil && len(received) > 0 {
+							appliedRecords, removedRecords = zdr.heldRecords(zone, agentId, received)
 						} else if upd != nil {
 							// Legacy class-overloaded form (no Operations).
 							confirm := func(rr dns.RR) {
@@ -1492,15 +1465,24 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 		// If the combiner returned SUCCESS but with no AppliedRecords (no-op),
 		// reconstruct from our local repo so the originating agent can match.
-		// Same for IGNORED with no IgnoredRecords.
+		// Same for IGNORED with no IgnoredRecords. Otherwise the records the
+		// update's stale replaces held, which the combiner was not sent,
+		// are named as applied beside what the combiner said, whatever it
+		// said: this agent holds them.
+		reconstructed := false
 		if detail.Status == "SUCCESS" || detail.Status == "ok" {
 			if len(appliedRecords) == 0 {
 				appliedRecords = zdr.reconstructRecordsFromRepo(prc)
+				reconstructed = true
 			}
 		} else if detail.Status == "IGNORED" || detail.Status == "ignored" {
 			if len(ignoredRecords) == 0 {
 				ignoredRecords = zdr.reconstructRecordsFromRepo(prc)
+				reconstructed = true
 			}
+		}
+		if !reconstructed && len(prc.StaleHeld) > 0 {
+			appliedRecords = append(slices.Clone(appliedRecords), prc.StaleHeld...)
 		}
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
@@ -1523,6 +1505,61 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		delete(zdr.PendingRemoteConfirms, detail.DistributionID)
 		zdr.mu.Unlock()
 	}
+}
+
+// inRepo reports whether an RR (in ClassINET form) is present in the
+// agent's repo for the zone, as the repo holds it now.
+func (zdr *ZoneDataRepo) inRepo(zone ZoneName, agentId AgentId) func(rrStr string, rrtype uint16) bool {
+	var nod *OwnerData
+	if agentRepo, ok := zdr.Repo.Get(zone); ok {
+		nod, _ = agentRepo.Get(agentId)
+	}
+	return func(rrStr string, rrtype uint16) bool {
+		if nod == nil {
+			return false
+		}
+		repoRRset, exists := nod.RRtypes.Get(rrtype)
+		if !exists {
+			return false
+		}
+		for _, repoRR := range repoRRset.RRs {
+			if repoRR.String() == rrStr {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// heldRecords are the records of ops that the agent's repo holds as the ops
+// ask: an add's or a replace's record present (applied), a delete's record
+// absent (removed), in ClassINET form.
+func (zdr *ZoneDataRepo) heldRecords(zone ZoneName, agentId AgentId, ops []core.RROperation) (applied, removed []string) {
+	inRepo := zdr.inRepo(zone, agentId)
+	for _, op := range ops {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			continue
+		}
+		for _, rrStr := range op.Records {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				continue
+			}
+			s := rr.String()
+			switch op.Operation {
+			case "add", "replace":
+				if inRepo(s, rrtype) {
+					applied = append(applied, s)
+				}
+			case "delete":
+				if !inRepo(s, rrtype) {
+					removed = append(removed, s)
+				}
+			}
+		}
+	}
+	return applied, removed
 }
 
 // reconstructRecordsFromRepo builds an RR string list from the local repo for
