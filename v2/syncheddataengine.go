@@ -336,7 +336,40 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					staleHeld, _ := zdr.heldRecords(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.staleOperations())
 					staleWaiting := zdr.dnskeyAwaitingAnswer(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, staleHeld)
 					staleHeld = withoutRecords(staleHeld, staleWaiting)
+					// A set whose last hand-over to the combiner failed is not
+					// with the combiner, whatever the repo holds, and a removal
+					// (a key left out of a replace, an empty replace) leaves
+					// no record to mark. A stale replace of such a set is not
+					// handed over (it would roll the set back), names none of
+					// its records, and is PARTIAL. A fresh one that matches
+					// the repo is handed over again, below; so is one whose
+					// last hand-over the combiner has not confirmed yet, as
+					// that forward may carry an older set. A stale replace of
+					// a set in flight is confirmed with what the repo holds,
+					// as before: the leader's CSYNC waits on that.
+					var failedSets map[uint16]bool
+					if err == nil && synchedDataUpdate.Update != nil {
+						failedSets = zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
+							updateRRtypes(&ZoneUpdate{Operations: received, RRsets: synchedDataUpdate.Update.RRsets}), true)
+					}
+					staleNotHeld := false
+					for _, t := range updateRRtypes(&ZoneUpdate{Operations: synchedDataUpdate.staleOperations()}) {
+						staleNotHeld = staleNotHeld || failedSets[t]
+					}
+					staleHeld = recordsNotOfTypes(staleHeld, failedSets)
 					synchedDataUpdate.dropStaleOperations()
+					if err == nil && !change && synchedDataUpdate.Update != nil {
+						fresh := updateRRtypes(synchedDataUpdate.Update)
+						inFlight := zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, fresh, false)
+						for _, t := range fresh {
+							if inFlight[t] {
+								lgEngine.Info("remote update matches the repo, but the combiner may not have the set: handing it over again",
+									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId, "rrtype", dns.TypeToString[t])
+								change = true
+								break
+							}
+						}
+					}
 					if err != nil {
 						lgEngine.Error("failed to add remote update to agent data repo", "err", err)
 						resp.Error = true
@@ -406,6 +439,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										CreatedAt:         time.Now(),
 										StaleHeld:         staleHeld,
 										StaleWaiting:      staleWaiting,
+										StaleNotHeld:      staleNotHeld,
 										FromAnswer:        synchedDataUpdate.CatchUp != nil,
 									}
 									zdr.mu.Unlock()
@@ -496,6 +530,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// propagated.
 						if len(combinerRejected) > 0 {
 							status, message = "PARTIAL", message+"; records its combiner rejected are not held"
+						}
+						// So is a set whose last hand-over to the combiner
+						// failed (only a stale replace of one gets here: a
+						// fresh one is handed over again).
+						if len(failedSets) > 0 {
+							appliedRecords = recordsNotOfTypes(appliedRecords, failedSets)
+							removedRecords = recordsNotOfTypes(removedRecords, failedSets)
+							status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
 						}
 						if msgQs.OnRemoteConfirmationReady != nil {
 							lgEngine.Info("remote update already in desired state, sending immediate confirmation",
@@ -1519,6 +1561,9 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		if len(prc.StaleWaiting) > 0 && (status == "SUCCESS" || status == "ok") {
 			status = "PARTIAL" // keys an answer's forward has not brought yet
 			appliedRecords = withoutRecords(appliedRecords, prc.StaleWaiting)
+		}
+		if prc.StaleNotHeld && (status == "SUCCESS" || status == "ok") {
+			status = "PARTIAL" // a stale set the combiner may not have
 		}
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
