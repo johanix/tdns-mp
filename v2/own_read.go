@@ -86,9 +86,9 @@ func (zdr *ZoneDataRepo) noteCombinerConfirmed(zone ZoneName, distID string, at 
 	}
 }
 
-// noteCombinerFailed notes that the combiner failed or refused the whole of
-// distID, naming no record: the sets it carried are not with the combiner,
-// as after a failed hand-over (setsNotHandedOver).
+// noteCombinerFailed notes that the combiner's word on distID was not a
+// success: the sets it carried are not held by the combiner, as after a
+// failed hand-over (setsNotHandedOver).
 func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string) {
 	if distID == "" {
 		return
@@ -491,6 +491,29 @@ func (zdr *ZoneDataRepo) dropStaleWait(origDistID string, sender AgentId) {
 	}
 }
 
+// dnskeyRecordsNotHeld are the records of the update's DNSKEY add and
+// replace operations that the repo does not hold for agent, rejected or
+// absent.
+func (zdr *ZoneDataRepo) dnskeyRecordsNotHeld(zone ZoneName, agent AgentId, ops []core.RROperation) []string {
+	inRepo := zdr.inRepo(zone, agent)
+	var out []string
+	for _, op := range ops {
+		if op.RRtype != "DNSKEY" || (op.Operation != "add" && op.Operation != "replace") {
+			continue
+		}
+		for _, rrStr := range op.Records {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				continue
+			}
+			if s := rr.String(); !inRepo(s, dns.TypeDNSKEY) {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 // releaseStaleWaits sends the final confirmation of each stale replace that
 // waited for the combiner's word on its distribution, now that it has come
 // (cf). Only a success says the combiner holds the set: then the
@@ -520,10 +543,30 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 		var ignored []string
 		switch cf.Status {
 		case "SUCCESS", "ok":
+			// a success covers every key of the replace: one whose records
+			// are not all held (the newer set dropped a key this one added)
+			// is PARTIAL, naming the keys that are held
+			if missing := zdr.dnskeyRecordsNotHeld(w.zone, w.sender, w.ops); len(missing) > 0 {
+				status, message = "PARTIAL", message+"; DNSKEY records of the replace not held here"
+			}
 		case "IGNORED", "ignored":
 			// the combiner takes no key of this sender's: say so, as it said
 			status, message = "IGNORED", "its combiner applies no key of the sender's"
 			ignored, applied, removed = applied, nil, nil
+			lgEngine.Info("the combiner answered the set that overtook a stale DNSKEY replace; confirming the replace",
+				"zone", w.zone, "agent", w.sender, "originDistID", w.origDistID, "combinerDistID", distID,
+				"status", status, "ignored", len(ignored))
+			if msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
+				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+					OriginatingDistID: w.origDistID,
+					OriginatingSender: string(w.sender),
+					Zone:              w.zone,
+					Status:            status,
+					Message:           message,
+					IgnoredRecords:    ignored,
+				})
+			}
+			continue
 		default:
 			// a combiner that applied less than the set: only what it says
 			// it applied is named

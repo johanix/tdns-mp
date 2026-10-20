@@ -961,3 +961,126 @@ func TestAStaleWithdrawalBehindAnAnswersForwardIsNotCredited(t *testing.T) {
 		t.Errorf("after the asker confirmed the answer, the withdrawal still waits (%+v)", *cf)
 	}
 }
+
+// Only a success from the combiner says it holds a set. After a PARTIAL or an
+// IGNORED, the key lifecycle's resend of the same set, a new distribution that
+// matches the repo, goes to the combiner again: confirmed "ok" from the repo,
+// it would cover every key, though the combiner applied part of the set or
+// none of it (the reviewer's first case).
+func TestAResendAfterTheCombinersPartialWordGoesToItAgain(t *testing.T) {
+	for _, word := range []transport.ConfirmStatus{transport.ConfirmPartial, transport.ConfirmIgnored} {
+		t.Run(word.String(), func(t *testing.T) {
+			r := receivingRig(t, strings.ToLower(word.String())+".resend.combiner.example.")
+			z := r.mpzd.ZoneName
+			signer := AgentId(r.peer.Identity)
+			k1, k2 := testDnskey(t, z, 256), testDnskey(t, z, 256)
+			set := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String(), k2.String()}}
+			sent := time.Now().Add(-time.Minute)
+
+			d1 := nextDistributionID()
+			before := r.combinerDists()
+			r.receivesAt(t, string(signer), d1, sent, nil, set)
+			c1 := r.newCombinerDist(before, 10*time.Second)
+			if c1 == "" {
+				t.Fatalf("the set did not go to the combiner\n%s", r.log)
+			}
+			var said []string
+			if word == transport.ConfirmPartial {
+				said = []string{k1.String()}
+			}
+			r.us.Bridge.ChunkHandler.OnConfirmationReceived(c1, rigCombiner, word, r.mpzd.ZoneName,
+				said, nil, nil, nil, false, "")
+			if cf := r.answered(t, d1); cf.Status == "SUCCESS" || cf.Status == "ok" {
+				t.Fatalf("the combiner's %s was relayed as %+v", word, *cf)
+			}
+
+			// the key lifecycle sends the same set again, a new distribution
+			d2 := nextDistributionID()
+			before = r.combinerDists()
+			r.receivesAt(t, string(signer), d2, sent.Add(time.Minute), nil, set)
+			if r.newCombinerDist(before, 10*time.Second) == "" {
+				t.Fatalf("after the combiner's %s the resend was not handed over again\n%s", word, r.log)
+			}
+			for end := time.Now().Add(300 * time.Millisecond); time.Now().Before(end); {
+				cf, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+				if !ok {
+					break
+				}
+				if cf.DistributionID == d2 && (cf.Status == "SUCCESS" || cf.Status == "ok") {
+					t.Fatalf("after the combiner's %s the resend was confirmed %+v from the repo", word, *cf)
+				}
+			}
+		})
+	}
+}
+
+// A stale distribution added a key that the newer set, now held, dropped.
+// Its confirmation names only the keys that are held and is PARTIAL: a
+// success would tell the sender the dropped key is published here. Released
+// after the combiner's word on the newer set, and arriving after it alike
+// (the reviewer's second case).
+func TestAStaleSetWhoseKeyTheNewerSetDroppedIsNotASuccess(t *testing.T) {
+	for _, order := range []string{"released", "after the word"} {
+		t.Run(order, func(t *testing.T) {
+			r := receivingRig(t, map[string]string{"released": "released", "after the word": "late"}[order]+".dropped.overtaken.example.")
+			z := r.mpzd.ZoneName
+			signer, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+			k1, k2, k3 := testDnskey(t, z, 256), testDnskey(t, z, 256), testDnskey(t, z, 256)
+			replace := func(records ...string) core.RROperation {
+				return core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: records}
+			}
+			sent := time.Now().Add(-time.Minute)
+			d0 := nextDistributionID()
+			before := r.combinerDists()
+			r.receivesAt(t, string(signer), d0, sent, nil, replace(k1.String()))
+			c0 := r.newCombinerDist(before, 10*time.Second)
+			r.combinerTakes(c0, k1.String())
+			r.answered(t, d0)
+
+			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+			d1 := nextDistributionID()
+			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, nil, []AgentId{us})
+
+			// the newer set, which drops k2 (and adds k3)
+			before = r.combinerDists()
+			r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(20*time.Second), nil, replace(k1.String(), k3.String()))
+			c2 := r.newCombinerDist(before, 10*time.Second)
+			if c2 == "" {
+				t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
+			}
+			if order == "after the word" {
+				r.combinerTakes(c2, k1.String(), k3.String())
+			}
+			// the stale distribution, which added k2
+			waits := r.logCount(staleWaitLine)
+			r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(k1.String(), k2.String()))
+			if order == "released" {
+				r.waitLog(t, staleWaitLine, waits+1)
+				r.combinerTakes(c2, k1.String(), k3.String())
+			}
+			var cf *ConfirmationDetail
+			for end := time.Now().Add(10 * time.Second); time.Now().Before(end) && cf == nil; {
+				got, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+				if !ok {
+					break
+				}
+				if got.DistributionID == d1 && got.Status != "PENDING" {
+					cf = got
+				}
+			}
+			if cf == nil {
+				t.Fatalf("no final word on the stale distribution\n%s", r.log)
+			}
+			if cf.Status == "SUCCESS" || cf.Status == "ok" || slices.Contains(cf.AppliedRecords, k2.String()) {
+				t.Fatalf("the stale distribution got %+v: a word that k2 is published here", *cf)
+			}
+			snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+			snd.dnskeyPropMu.Lock()
+			_, waiting := snd.pendingDnskeyPropagations[d1]
+			snd.dnskeyPropMu.Unlock()
+			if !waiting {
+				t.Errorf("k2's propagation ended though the combiner holds a set without it (%+v)", *cf)
+			}
+		})
+	}
+}
