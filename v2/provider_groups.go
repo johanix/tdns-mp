@@ -588,6 +588,44 @@ func zonesThatJoined(before, after map[string]*ProviderGroup) []zoneGroupChange 
 	return joined
 }
 
+// zonesThatLeft compares the group map before a recompute with the one
+// after it, and returns each zone that was in a group before and is not in
+// that group after: in another group (to), or in none (to empty), as a zone
+// reduced to one provider is (#149). zonesThatJoined reports only a zone
+// that lands in a group.
+func zonesThatLeft(before, after map[string]*ProviderGroup) []zoneGroupChange {
+	now := make(map[ZoneName]string)
+	for hash, pg := range after {
+		for _, z := range pg.Zones {
+			now[z] = hash
+		}
+	}
+	var left []zoneGroupChange
+	for hash, pg := range before {
+		for _, z := range pg.Zones {
+			if now[z] != hash {
+				left = append(left, zoneGroupChange{zone: z, from: hash, to: now[z]})
+			}
+		}
+	}
+	sort.Slice(left, func(i, j int) bool {
+		return left[i].zone < left[j].zone
+	})
+	return left
+}
+
+// SetOnZoneLeftGroup sets the callback that RecomputeGroups tells of each
+// zone it has taken out of a group (zonesThatLeft). It is told as the
+// callback of SetOnZoneJoinedGroup is, before it: once the new group map is
+// in place, with the manager's lock free, and it must not start a
+// recompute. The zones that left are told before the groups that are gone:
+// whoever is told may still need to read who led the group a zone left.
+func (pgm *ProviderGroupManager) SetOnZoneLeftGroup(f func(zone ZoneName, from, to string)) {
+	pgm.mu.Lock()
+	defer pgm.mu.Unlock()
+	pgm.onZoneLeftGroup = f
+}
+
 // RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
 // and rebuilds the provider group map. This is a pure function of zone data.
 // The zones it moves into a group are reported to the callback set with
@@ -690,6 +728,11 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 			pg.Name = existing.Name
 		}
 	}
+	onLeft := pgm.onZoneLeftGroup
+	var left []zoneGroupChange
+	if onLeft != nil {
+		left = zonesThatLeft(pgm.Groups, newGroups)
+	}
 	onJoined := pgm.onZoneJoinedGroup
 	var joined []zoneGroupChange
 	if onJoined != nil {
@@ -705,7 +748,11 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 	pgm.installedScan = scan
 
 	// Told with the manager's lock free, and with the new map in place:
-	// whoever is told may look the zone's group up.
+	// whoever is told may look the zone's group up. The zones that left
+	// first, then those that joined, then the groups that are gone.
+	for _, l := range left {
+		onLeft(l.zone, l.from, l.to)
+	}
 	for _, j := range joined {
 		onJoined(j.zone, j.from, j.to)
 	}

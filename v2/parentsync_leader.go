@@ -39,6 +39,37 @@ func (lem *LeaderElectionManager) SetProviderGroupManager(pgm *ProviderGroupMana
 	lem.providerGroupMgr = pgm
 	if pgm != nil {
 		pgm.SetOnZoneJoinedGroup(lem.zoneJoinedGroup)
+		pgm.SetOnZoneLeftGroup(lem.zoneLeftGroup)
+	}
+}
+
+// SetOnZoneLeft sets what is done for a zone that has left its group and
+// that this agent does not lead now (zoneLeftGroup): it ends what this
+// agent has scheduled for the zone's parent, and says whether there was
+// anything to end. It is called from a recompute and must not start one.
+func (lem *LeaderElectionManager) SetOnZoneLeft(f func(zone ZoneName) bool) {
+	lem.onZoneLeft = f
+}
+
+// zoneLeftGroup is the group manager's word that a recompute took a zone
+// out of its group (step 8, design 4.1). When this agent does not lead the
+// zone now, whatever it has scheduled for the zone's parent ends: a sync
+// chain from a lead it held, its owed sync, and every sync under way, which
+// is cancelled (onZoneLeft). Decided by the state now, not by who led the
+// group the zone left: a lease timer can drop that group's election first.
+// It covers a zone that lands in no group (#149) as well; zoneChanged then
+// elects the one voting member, which asks anew.
+func (lem *LeaderElectionManager) zoneLeftGroup(zone ZoneName, from, to string) {
+	if lem.onZoneLeft == nil || lem.IsLeader(zone) {
+		return
+	}
+	if lem.onZoneLeft(zone) {
+		now := "no group"
+		if to != "" {
+			now = shortHash(to)
+		}
+		lgElect.Info("zone left a group this agent leads, dropping its delegation sync",
+			"zone", zone, "group", shortHash(from), "now_in", now)
 	}
 }
 

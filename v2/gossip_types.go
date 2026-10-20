@@ -116,6 +116,9 @@ type ProviderGroupManager struct {
 	// onZoneJoinedGroup is told of each zone a recompute has put into a
 	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
 	onZoneJoinedGroup func(zone ZoneName, from, to string)
+	// onZoneLeftGroup is told of each zone a recompute has taken out of the
+	// group it was in, wherever it went: another group, or none (step 8).
+	onZoneLeftGroup func(zone ZoneName, from, to string)
 	// onGroupGone is told of each group a recompute has dropped: its last
 	// zone has left it (SetOnGroupGone). Guarded by mu.
 	onGroupGone func(groupHash string)
@@ -183,6 +186,7 @@ type LeaderElectionManager struct {
 	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
+	onZoneLeft           func(zone ZoneName) bool  // ends what is scheduled for the parent of a zone that left its group (step 8)
 	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
 	providerGroupMgr     *ProviderGroupManager
 }

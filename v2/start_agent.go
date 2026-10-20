@@ -340,6 +340,12 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	// zone that publishes none (step 7b). The sync is asked for whatever the
 	// set-up said: while the zone's key is not held, or still bootstrapped,
 	// it waits for it (holdForZoneKey), and goes out when the hold ends.
+	// A zone that left its group and that this agent does not lead now:
+	// what it scheduled for the zone's parent ends, a sync under way
+	// included (step 8).
+	lem.SetOnZoneLeft(func(zone ZoneName) bool {
+		return conf.delegationSyncZoneLeft(string(zone))
+	})
 	lem.SetOnZoneJoined(func(zone ZoneName) error {
 		// The arrival is reported after the recompute, and this runs on its
 		// own: a refresh can have moved the zone on by now. An agent that no

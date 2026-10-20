@@ -659,6 +659,31 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	}
 }
 
+// delegationSyncZoneLeft ends what this agent has scheduled for the parent
+// of a zone that has left its group and that it does not lead now (step 8):
+// the chain, a held NOTIFY with it, the owed sync, and every sync under way,
+// cancelled under the chains' lock at once. A sync can sit in tdns's UPDATE
+// retry loop for a minute or more after a REFUSED, and the loop asks only
+// its context whether to go on: ending the chain alone would leave it
+// sending after the lead has moved. It says whether there was a chain or a
+// run to end.
+func (conf *Config) delegationSyncZoneLeft(zone string) bool {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	_, chained := c.zones[zone]
+	hold := c.endChainLocked(zone)
+	n := c.cancelRunsLocked(zone)
+	c.mu.Unlock()
+	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
+	if hold != nil {
+		lgEngine.Info("the held NOTIFY is dropped: this agent no longer leads the zone", "zone", zone, "notify", notifyTypes(hold.notifies))
+	}
+	if n > 0 {
+		lgEngine.Info("the delegation sync under way is stopped: this agent no longer leads the zone", "zone", zone, "syncs", n)
+	}
+	return chained || n > 0
+}
+
 // endDelegationSyncWork ends what this agent has scheduled for the zone's
 // parent, as delegationSyncOwnerSyncs does: the chain, a held NOTIFY with it,
 // and every sync under way, the key poll included, under the chains' lock at
@@ -1045,6 +1070,13 @@ func forwardNotifies(ctx context.Context, out chan tdns.NotifyRequest, notifies 
 // parent through its agents, which is the sync requestDelegationSync asks
 // for, and the one whose failure is asked again and whose NOTIFY is checked
 // at the parent.
+// stillLeads: this agent leads the zone, as the election manager has it
+// now. With no election manager (a zone tdns runs alone) it does.
+func (conf *Config) stillLeads(zone string) bool {
+	lem := conf.InternalMp.LeaderElectionManager
+	return lem == nil || lem.IsLeader(ZoneName(zone))
+}
+
 func mpLeaderSync(conf *Config, ds tdns.DelegationSyncRequest) bool {
 	return conf != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && ds.ZoneData.Options[tdns.OptParentSync]
 }
