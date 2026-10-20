@@ -7,8 +7,9 @@
  * (DNSTransport.Sync/Keystate/Edits/Config/Audit/SendStatusUpdate) and
  * built the wire payload from core.* structs itself. Since C2 transport
  * carries one opaque AppMessage; the payload builders live here and
- * marshal the SAME core.* structs the typed methods did, so the bytes on
- * the wire are unchanged (locked by golden_send_test.go).
+ * marshal the same core.* structs the typed methods did, with what
+ * tdns-mp adds beside them (the sync family's distribution ID, KEYSTATE's
+ * ForeignSpoken). golden_send_test.go locks the bytes.
  */
 
 package tdnsmp
@@ -23,26 +24,30 @@ import (
 	"github.com/johanix/tdns/v2/core"
 )
 
-// syncAppMessage builds the sync-family carrier ("sync", "update", "rfi")
-// exactly as DNSTransport.Sync marshalled it: a core.AgentMsgPost.
+// syncAppMessage builds the sync-family carrier ("sync", "update", "rfi"):
+// a core.AgentMsgPost, as DNSTransport.Sync marshalled it, and the sender's
+// distribution ID beside it (syncWirePayload).
 func syncAppMessage(req *PeerSyncRequest, peerID string) (*transport.AppMessage, error) {
 	messageType := core.AgentMsg(req.MessageType)
 	if messageType == "" {
 		messageType = core.AgentMsgNotify // default to sync
 	}
-	payload := &core.AgentMsgPost{
-		MessageType:  messageType,
-		OriginatorID: req.SenderID,
-		YourIdentity: peerID,
-		Zone:         req.Zone,
-		Records:      req.Records,
-		Operations:   req.Operations,
-		Time:         req.Timestamp,
-		RfiType:      req.RfiType,
-		RfiSubtype:   req.RfiSubtype,
-		Nonce:        req.Nonce,
-		ZoneClass:    req.ZoneClass,
-		Publish:      req.Publish,
+	payload := &syncWirePayload{
+		AgentMsgPost: &core.AgentMsgPost{
+			MessageType:  messageType,
+			OriginatorID: req.SenderID,
+			YourIdentity: peerID,
+			Zone:         req.Zone,
+			Records:      req.Records,
+			Operations:   req.Operations,
+			Time:         req.Timestamp,
+			RfiType:      req.RfiType,
+			RfiSubtype:   req.RfiSubtype,
+			Nonce:        req.Nonce,
+			ZoneClass:    req.ZoneClass,
+			Publish:      req.Publish,
+		},
+		DistributionID: req.DistributionID,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -69,6 +74,18 @@ func syncResponseFromApp(req *PeerSyncRequest, resp *transport.AppResponse) *Pee
 		RejectedItems:  resp.RejectedItems,
 		Truncated:      resp.Truncated,
 	}
+}
+
+// syncWirePayload is a sync-family message as it goes on the wire: tdns's
+// core.AgentMsgPost, and beside it the sender's distribution ID. Over DNS the
+// ID travels in the query name as well. Over HTTPS the payload travels
+// alone, the receiver gave the message an ID of its own, and its
+// confirmation matched nothing at the sender (issue #221). The receiver's
+// DnsSyncPayload takes the field, and routeSyncMessage keeps it. A message
+// sent without an ID (most RFIs) carries none.
+type syncWirePayload struct {
+	*core.AgentMsgPost
+	DistributionID string `json:"distribution_id,omitempty"`
 }
 
 // keystateWirePayload is the KEYSTATE message as it goes on the wire:
