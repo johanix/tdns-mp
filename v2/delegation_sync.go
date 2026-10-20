@@ -44,11 +44,11 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			switch ds.Command {
 
 			case "DELEGATION-SYNC-SETUP":
-				// on a multi-provider zone the setup (a SIG(0) key, published
-				// and sent to the parent) is the leader's, like the sync it
-				// serves; a peer that is elected later runs it then (R10)
-				if !mpSetupAllowed(conf, zd) {
-					lg.Info("DelegationSyncher: not the delegation sync leader, skipping the setup", "zone", ds.ZoneName)
+				// a multi-provider zone's SIG(0) key is the leader's key
+				// set-up's alone (step 7b): tdns's setup would make a key
+				// when none is held, or publish another beside the zone's
+				if !setupArmRuns(zd) {
+					lg.Info("DelegationSyncher: a multi-provider zone's SIG(0) key is the leader's key set-up's, skipping the setup", "zone", ds.ZoneName)
 					continue
 				}
 				err = zd.DelegationSyncSetup(ctx, hdb.KeyDB)
@@ -477,17 +477,14 @@ func syncherPublishesDNSKEYCDS(conf *Config, zd *tdns.ZoneData) bool {
 	return true
 }
 
-// mpSetupAllowed: delegation-sync setup on a multi-provider zone runs on
-// the elected leader only; a zone tdns runs alone is not gated.
-func mpSetupAllowed(conf *Config, zd *tdns.ZoneData) bool {
-	if zd == nil || !zd.Options[tdns.OptMultiProvider] || conf == nil {
-		return true
-	}
-	lem := conf.InternalMp.LeaderElectionManager
-	if lem == nil {
-		return true
-	}
-	return lem.IsLeader(ZoneName(zd.ZoneName))
+// setupArmRuns: tdns's delegation-sync setup runs for a zone tdns runs
+// alone. For a zone with the multi-provider option, one with a single
+// provider included, it does nothing (step 7b): through tdns's
+// Sig0KeyPreparation it makes a key when none is held, and publishes another
+// active key beside a published KEY it holds no private part for. The zone's
+// key is the leader's key set-up's (leaderKeySetup, decideZoneKey).
+func setupArmRuns(zd *tdns.ZoneData) bool {
+	return zd == nil || !zd.Options[tdns.OptMultiProvider]
 }
 
 // delegationSyncBeforeHandoff runs in a leader sync after its last look at

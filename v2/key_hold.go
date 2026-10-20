@@ -179,41 +179,39 @@ func (conf *Config) zoneUsesKey(ctx context.Context, zone ZoneName) bool {
 
 // keyHoldReason says why the leader's sync of the zone waits for the zone's
 // key, or "" when it does not. It reads the keystore and asks the resolver:
-// never called under a lock of the catch-up tracker.
+// never called under a lock of the catch-up tracker. It does not read tdns's
+// cache of the keys it signs with (KeystoreSig0Cache), a map tdns keeps no
+// lock around: only the syncher's own goroutine, where tdns signs, reads it
+// (signingKeyCached).
 func (conf *Config) keyHoldReason(ctx context.Context, zone ZoneName) string {
+	_, why := conf.keyHold(ctx, zone)
+	return why
+}
+
+// keyHold is keyHoldReason, and whether the zone uses a key at all.
+func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why string) {
 	if !conf.zoneUsesKey(ctx, zone) {
-		return ""
+		return false, ""
 	}
-	// the keystore that signs the zone's UPDATE: the zone's own, else the
-	// agent's
-	var kdb *tdns.KeyDB
-	if mpzd, ok := Zones.Get(string(zone)); ok && mpzd != nil && mpzd.ZoneData != nil && mpzd.KeyDB != nil {
-		kdb = mpzd.KeyDB
-	} else if conf.Config != nil {
-		kdb = conf.Config.Internal.KeyDB
-	}
+	kdb := conf.zoneKeyDB(zone)
 	if kdb == nil {
-		return "not held"
+		return true, "not held"
 	}
 	zk, err := readZoneKey(kdb, zone)
 	if err != nil || zk.held == nil {
-		return "not held"
+		return true, "not held"
 	}
 	if len(zk.active) != 1 {
-		return "signing key differs"
-	}
-	if sak, err := kdb.GetSig0Keys(dns.Fqdn(string(zone)), tdns.Sig0StateActive); err != nil || sak == nil ||
-		len(sak.Keys) == 0 || sak.Keys[0].KeyId != zk.held.keyid {
-		return "signing key differs"
+		return true, "signing key differs"
 	}
 	running, unpublished, _ := conf.InternalMp.keyPolls.state(zone)
 	if running > 0 {
-		return "poll running"
+		return true, "poll running"
 	}
 	if unpublished {
-		return "not published"
+		return true, "not published"
 	}
-	return ""
+	return true, ""
 }
 
 // holdForZoneKey holds the leader's sync of a multi-provider zone while the
@@ -227,7 +225,10 @@ func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRe
 		return false, ""
 	}
 	zone := ZoneName(ds.ZoneName)
-	why = conf.keyHoldReason(ctx, zone)
+	uses, why := conf.keyHold(ctx, zone)
+	if uses && why == "" && !conf.signingKeyCached(zone) {
+		why = "signing key differs"
+	}
 	if why == "" {
 		return false, ""
 	}
@@ -254,6 +255,30 @@ func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRe
 		lgAgent.Info("the sync with the parent waits for the zone's SIG(0) key", "zone", zone, "reason", why)
 	}
 	return true, why
+}
+
+// signingKeyCached: the key tdns signs the zone's UPDATE with, read through
+// its cache as tdns reads it (GetSig0Keys), is the zone's only active key. A
+// cache that still holds a retired key (tdns #943) is cleared once, and read
+// again. Called on the syncher's goroutine only, where tdns signs: the cache
+// is a map tdns keeps no lock around.
+func (conf *Config) signingKeyCached(zone ZoneName) bool {
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return false
+	}
+	active, err := activeSig0Rows(kdb, zone)
+	if err != nil || len(active) != 1 {
+		return false
+	}
+	for try := 0; try < 2; try++ {
+		sak, err := kdb.GetSig0Keys(dns.Fqdn(string(zone)), tdns.Sig0StateActive)
+		if err == nil && sak != nil && len(sak.Keys) > 0 && sak.Keys[0].KeyId == active[0].keyid {
+			return true
+		}
+		delete(kdb.KeystoreSig0Cache, dns.Fqdn(string(zone))+"+"+tdns.Sig0StateActive)
+	}
+	return false
 }
 
 // releaseKeyHold asks for the sync held for the zone's key, when the key's

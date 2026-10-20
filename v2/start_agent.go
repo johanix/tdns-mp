@@ -230,38 +230,27 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	})
 	// A zone that joins a group this agent already leads is asked for the
 	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
-	// it is: the key this agent holds is used, a peer is asked for one it
-	// does not hold, and a new one is made only for a zone that publishes
-	// none.
-	//
-	// When the zone has a key and no peer hands it over, the sync is not
-	// asked for yet: it could not be signed. The peers are asked again until
-	// one of them hands the key over, and the sync is asked for then
-	// (zoneKeyWaits). A parent that takes no UPDATE needs no key, and the key
-	// setup says so by finding nothing to do.
+	// it is: the key this agent holds is published, and one it does not
+	// hold is asked for by the key rounds, which make a new one only for a
+	// zone that publishes none (step 7b). The sync is asked for whatever the
+	// set-up said: while the zone's key is not held, or still bootstrapped,
+	// it waits for it (holdForZoneKey), and goes out when the hold ends.
 	lem.SetOnZoneJoined(func(zone ZoneName) error {
 		// The arrival is reported after the recompute, and this runs on its
 		// own: a refresh can have moved the zone on by now. An agent that no
-		// longer leads it asks its peers for nothing.
+		// longer leads it asks for nothing.
 		if !lem.IsLeader(zone) {
 			lgAgent.Info("a zone that joined a group this agent leads has moved on; nothing is set up for it", "zone", zone)
 			return nil
 		}
-		ask := func() {
-			conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
-		}
 		err := leaderKeySetup(zone, false)
-		if err != nil && !errors.Is(err, errZoneKeyNotHeld) && !errors.Is(err, errLeadMoved) {
-			lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; it is tried again before the sync is asked for", "zone", zone, "err", err)
+		if errors.Is(err, errLeadMoved) {
+			return nil // a sync asked for now would go out from nobody
 		}
-		afterArrivalSetup(err, ask, func() {
-			conf.InternalMp.zoneKeyWaits.await(ctx, zone, zoneKeyWaitDelays,
-				func() bool { return lem.IsLeader(zone) },
-				func() error {
-					return lem.inKeySetup(zone, func() error { return leaderKeySetup(zone, false) })
-				},
-				ask)
-		})
+		if err != nil && !errors.Is(err, errZoneKeyNotHeld) {
+			lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; the sync waits for the key", "zone", zone, "err", err)
+		}
+		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		return nil
 	})
 

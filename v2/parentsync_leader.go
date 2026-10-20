@@ -78,7 +78,7 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 // inKeySetup runs f with the zone's key-setup lock held. Every setup of a
 // zone's SIG(0) key takes it: the leader's after an election, a renewal or a
 // sync given back (SetOnLeaderElected), the one at an arrival
-// (SetOnZoneJoined), and that one's later rounds (zoneKeyWaits). For one zone
+// (SetOnZoneJoined), and a key round's decision (decideZoneKey). For one zone
 // they run one at a time, so that two of them never both find no key and
 // each make one, and a setup's clean-up of a key it made for a lead that
 // moved never takes a key another setup has just adopted. It is taken once
@@ -2090,8 +2090,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// 3. Check apex records
 	owner, err := zd.GetOwner(zd.ZoneName)
 	if err == nil && owner != nil {
-		if _, keyExists := owner.RRtypes.Get(dns.TypeKEY); keyExists {
+		if keys, keyExists := owner.RRtypes.Get(dns.TypeKEY); keyExists {
 			status.ApexPublished = true
+			status.ApexKeys = len(keys.RRs)
 		}
 		if cdsRRset, exists := owner.RRtypes.Get(dns.TypeCDS); exists && len(cdsRRset.RRs) > 0 {
 			status.CdsPublished = true

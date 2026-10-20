@@ -152,6 +152,15 @@ type catchUpTracker struct {
 	// leads it). One that may not is dropped whether the zone is caught up
 	// or not.
 	owedApplies func(ctx context.Context, zone ZoneName) bool
+
+	// The rounds for the zones' SIG(0) keys (step 7b, key_rounds.go).
+	keyWanted map[ZoneName]*keyRound
+	keyChecks map[ZoneName]bool
+	keyReqs   map[AgentId][]*keyReq
+	keyGen    uint64
+	keyWake   chan struct{}
+	hooks     *keyHooks
+	keyLogs   hourlyLog
 }
 
 // owedSync is a sync with the parent that is owed. room: it was asked for,
@@ -213,6 +222,7 @@ func (t *catchUpTracker) wire(conf *Config, tm *MPTransportBridge, ar *AgentRegi
 	}
 	t.askSync = conf.askOwedDelegationSync
 	t.owedApplies = conf.owedSyncApplies
+	t.hooks = conf.keyRoundHooks()
 	t.send = func(ctx context.Context, zone ZoneName, peer AgentId, cu *CatchUp) error {
 		agent, ok := ar.S.Get(peer)
 		if !ok {
@@ -240,6 +250,11 @@ func (t *catchUpTracker) run(ctx context.Context, zdr *ZoneDataRepo) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.ctx, t.zdr = ctx, zdr
+	if t.hooks != nil && t.keyWake == nil {
+		t.keyWake = make(chan struct{}, 1)
+		t.wg.Add(1)
+		go t.keyLoop(ctx)
+	}
 	for _, byPeer := range t.peers {
 		for peer, e := range byPeer {
 			if e.State == catchUpDue {
@@ -467,7 +482,6 @@ func (t *catchUpTracker) Forget(peer AgentId) {
 	}
 	peer = AgentId(dns.Fqdn(string(peer)))
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	delete(t.seen, peer)
 	if s, ok := t.senders[peer]; ok {
 		close(s.stop)
@@ -478,6 +492,19 @@ func (t *catchUpTracker) Forget(peer AgentId) {
 			delete(byPeer, peer)
 			t.noteCaughtUpLocked(zone)
 		}
+	}
+	// its key requests end too, as silence (step 7b)
+	var decisions []func()
+	if t.ctx != nil && t.ctx.Err() == nil {
+		decisions = t.forgetKeyReqsLocked(t.ctx, peer)
+		t.wg.Add(len(decisions))
+	}
+	t.mu.Unlock()
+	for _, decide := range decisions {
+		go func(d func()) {
+			defer t.wg.Done()
+			d()
+		}(decide)
 	}
 }
 
@@ -549,6 +576,10 @@ func (t *catchUpTracker) noteCaughtUpLocked(zone ZoneName) {
 	if ok, _ := t.caughtUpLocked(zone); ok {
 		t.caught[zone] = true
 		lgCatchUp.Info("the zone is caught up", "zone", zone)
+		// the zone's key is checked, and a round for it asks at once
+		// (step 7b): this covers a start, a join and a first role
+		t.keyCheckLocked(zone)
+		t.keyAskNowLocked(zone)
 	}
 }
 
@@ -610,7 +641,15 @@ func (t *catchUpTracker) afterRefresh(zone ZoneName, a *ZoneRefreshAnalysis) {
 			reason = catchUpStart
 		}
 		t.AskZone(zone, reason)
+		t.keyCheck(zone)
 		return
+	}
+	// the zone's voting members changed: its key's entry starts over; and
+	// its apex KEY changed: the key is checked again (step 7b)
+	if a.HsyncChanged || len(a.NewVoters) > 0 || a.StandingBefore != a.StandingAfter {
+		t.keyRestart(zone)
+	} else if a.KeyChanged {
+		t.keyCheck(zone)
 	}
 	t.prune(zone)
 	switch {
@@ -662,6 +701,11 @@ func (t *catchUpTracker) kickLocked(peer AgentId) {
 func (t *catchUpTracker) sender(ctx context.Context, peer AgentId, s *catchUpSender) {
 	defer t.wg.Done()
 	for {
+		// a key request first: one at a time, as the catch-up's (step 7b)
+		if kr := t.nextKeyReq(peer); kr != nil {
+			kr.result <- t.hooks.send(ctx, kr)
+			continue
+		}
 		zone, cu, next := t.step(peer, time.Now())
 		if cu != nil {
 			err := t.send(ctx, zone, peer, cu)

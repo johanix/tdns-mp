@@ -5,7 +5,6 @@ package tdnsmp
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -25,7 +24,8 @@ import (
 //     KEY record is that one, compared as zoneTakesKey compares.
 //   - The zone publishes none: a key rolled at the parent need not be
 //     published (design 4.1). The zone's key is then the active key tdns
-//     signs with, the one GetSig0Keys returns; the others are retired.
+//     signs with, the first row of the store's query that GetSig0Keys makes;
+//     the others are retired.
 //   - The zone publishes several: no local key is the zone's key. The agent
 //     holds none, imports nothing, retires nothing, and the leader makes no
 //     key; an operator has to bring the apex to one KEY.
@@ -130,15 +130,11 @@ func readZoneKey(kdb *tdns.KeyDB, zone ZoneName) (*zoneKey, error) {
 			}
 		}
 	case len(active) > 0:
-		// tdns signs with the row GetSig0Keys returns; that one is kept
+		// tdns signs with the first row its own query of the store reads
+		// (GetSig0Keys, on a cache miss): the same query, so the same row.
+		// tdns's cache is not read here: a map tdns keeps no lock around,
+		// and this runs on goroutines other than the one tdns signs on.
 		z.held = &active[0]
-		if sak, err := kdb.GetSig0Keys(dns.Fqdn(string(zone)), tdns.Sig0StateActive); err == nil && sak != nil && len(sak.Keys) > 0 {
-			for i := range active {
-				if active[i].keyid == sak.Keys[0].KeyId {
-					z.held = &active[i]
-				}
-			}
-		}
 	}
 	return z, nil
 }
@@ -177,9 +173,11 @@ func sig0KeyMgmtRetried(kdb *tdns.KeyDB, kp tdns.KeystorePost) (*tdns.KeystoreRe
 // zone's key: tdns signs with the first active row GetSig0Keys reads, and
 // BootstrapSig0KeyWithParent uploads it. Every other active key is retired,
 // not deleted. It reports whether the zone's key is now the only active one,
-// read back from the keystore; a retire that fails leaves it not held. The
-// cache is cleared again when it still holds a retired key (tdns #943: the
-// cache is cleared before the keystore's commit).
+// read back from the keystore; a retire that fails leaves it not held. A
+// cache of tdns's that still holds a retired key (tdns #943: it is cleared
+// before the keystore's commit) is cleared by the syncher before it signs
+// (signingKeyCached), on its own goroutine: the cache is a map tdns keeps no
+// lock around.
 func retireOtherActiveKeys(kdb *tdns.KeyDB, zone ZoneName, z *zoneKey) (bool, error) {
 	if z == nil || z.held == nil {
 		return false, nil
@@ -207,11 +205,6 @@ func retireOtherActiveKeys(kdb *tdns.KeyDB, zone ZoneName, z *zoneKey) (bool, er
 	}
 	if len(active) != 1 || active[0].keyid != keep {
 		return false, nil
-	}
-	cacheKey := dns.Fqdn(string(zone)) + "+" + tdns.Sig0StateActive
-	if cached, ok := kdb.KeystoreSig0Cache[cacheKey]; ok && cached != nil &&
-		slices.ContainsFunc(cached.Keys, func(k *tdns.PrivateKeyCache) bool { return k == nil || k.KeyId != keep }) {
-		delete(kdb.KeystoreSig0Cache, cacheKey)
 	}
 	return true, nil
 }

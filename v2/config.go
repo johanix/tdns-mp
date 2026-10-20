@@ -334,10 +334,9 @@ type InternalMpConf struct {
 	// went to the parent as a NOTIFY, and how often, for the asks that
 	// follow, and what is scheduled for them (mp_s5_leader_sync.go)
 	delegationSyncChains delegationSyncChains
-	// zoneKeyWaits: the zones that joined a group this agent leads while it
-	// held no SIG(0) key for them, and whose key it is asking its peers for
-	// (parentsync_utils.go).
-	zoneKeyWaits zoneKeyWaits
+	// keyLogs: when the key rounds' lines were last logged (step 7b, the
+	// first time and then once an hour).
+	keyLogs hourlyLog
 	// keyPoll stands in for tdns's poll of the parent for a zone's SIG(0)
 	// key in a test (ParentSyncAfterKeyPublication). Nil runs tdns's.
 	keyPoll func(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8)

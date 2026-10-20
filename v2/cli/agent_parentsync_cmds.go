@@ -292,7 +292,12 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 			fmt.Fprintf(w, "  parent state:   %s (%d), as last recorded\n", termSafe(s.ParentStateName), s.ParentState)
 		}
 	}
-	fmt.Fprintf(w, "  KEY at apex:    %s\n", publishedOrNot(s.ApexPublished))
+	if s.ApexKeys > 1 {
+		// no zone key at all (step 7b): the sync waits until one is left
+		fmt.Fprintf(w, "  KEY at apex:    several (%d); an operator has to leave one\n", s.ApexKeys)
+	} else {
+		fmt.Fprintf(w, "  KEY at apex:    %s\n", publishedOrNot(s.ApexPublished))
+	}
 	fmt.Fprintf(w, "  CDS at apex:    %s\n", publishedOrNot(s.CdsPublished))
 	fmt.Fprintf(w, "  CSYNC at apex:  %s\n", publishedOrNot(s.CsyncPublished))
 	if s.ZoneSigned {

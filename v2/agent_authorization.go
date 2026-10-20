@@ -303,7 +303,7 @@ func (t *keyAskTable) expectConfirm(peer, id string) {
 			delete(t.confirms, k)
 		}
 	}
-	t.confirms[id] = keyConfirm{peer: dns.Fqdn(peer), expires: now.Add(keyConfirmWait)}
+	t.confirms[id] = keyConfirm{peer: dns.CanonicalName(peer), expires: now.Add(keyConfirmWait)}
 }
 
 // confirmExpected: a delivery confirmation from peer for id is due.
@@ -314,12 +314,16 @@ func (t *keyAskTable) confirmExpected(peer, id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c, ok := t.confirms[id]
-	return ok && c.peer == dns.Fqdn(peer) && time.Now().Before(c.expires)
+	return ok && c.peer == dns.CanonicalName(peer) && time.Now().Before(c.expires)
 }
 
-func keyAskKey(peer, zone string) string { return dns.Fqdn(peer) + " " + dns.Fqdn(zone) }
+// keyAskKey: identities and zone names compare as canonical names, so a
+// peer configured in another case is the same peer.
+func keyAskKey(peer, zone string) string { return dns.CanonicalName(peer) + " " + dns.CanonicalName(zone) }
 
-// start notes a request out, and returns the call that ends it.
+// start notes a request out, and returns the call that ends it. The call
+// ends that request once, however often it is made: a second call never
+// ends another request to the same peer for the same zone.
 func (t *keyAskTable) start(peer, zone string) func() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -328,12 +332,15 @@ func (t *keyAskTable) start(peer, zone string) func() {
 	}
 	k := keyAskKey(peer, zone)
 	t.asks[k]++
+	var once sync.Once
 	return func() {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		if t.asks[k]--; t.asks[k] <= 0 {
-			delete(t.asks, k)
-		}
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.asks[k]--; t.asks[k] <= 0 {
+				delete(t.asks, k)
+			}
+		})
 	}
 }
 
