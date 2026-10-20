@@ -567,6 +567,13 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// it closes the sender's queue entry, and is no word
 						// that the keys have propagated (dnskeyAwaitingAnswer).
 						status, message := "ok", "desired state already present at remote agent"
+						// A success covers every key of a DNSKEY replace: one
+						// whose records are not all held (a newer set dropped
+						// a key this one added) is confirmed PARTIAL, naming
+						// the keys that are held.
+						if missing := zdr.dnskeyRecordsNotHeld(zone, agentId, received); len(missing) > 0 {
+							status, message = "PARTIAL", message+"; DNSKEY records of the update not held here"
+						}
 						if len(staleWaiting) > 0 {
 							status, message = "PARTIAL", "desired state already present at remote agent; DNSKEY records from an answer not yet confirmed by its combiner"
 						}
@@ -1113,13 +1120,17 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			fromCombiner := false
 			if tm := conf.InternalMp.MPTransport; tm != nil && tm.combinerID != "" && detail.Source == string(tm.combinerID) && detail.Status != "PENDING" {
 				fromCombiner = true
-				// A combiner that failed or refused the update as a whole,
-				// naming no record, does not hold the sets it carried: they
-				// are handed over again when they come again.
-				if (detail.Status == "FAILED" || detail.Status == "REJECTED") && len(detail.RejectedItems) == 0 {
-					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID)
-				} else {
+				// Only a success says the combiner holds the sets it was
+				// handed. After any other word (it applied part of a set,
+				// ignored it, failed or refused it) the sets are handed over
+				// again when they come again, and a stale replace of one
+				// names none of it: a later delivery of the same set, matching
+				// the repo, would otherwise be confirmed "ok", which covers
+				// every key.
+				if detail.Status == "SUCCESS" || detail.Status == "ok" {
 					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
+				} else {
+					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID)
 				}
 			}
 			zdr.ProcessConfirmation(detail, msgQs)
