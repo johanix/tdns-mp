@@ -32,12 +32,13 @@ func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, senderID, zone string)
 		recorded = append(recorded, op.Records...)
 	}
 	msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-		OriginatingDistID: msg.DistributionID,
-		OriginatingSender: senderID,
-		Zone:              ZoneName(zone),
-		Status:            "SUCCESS",
-		Message:           "auditor: recorded",
-		AppliedRecords:    recorded,
+		OriginatingDistID:    msg.DistributionID,
+		OriginatingSender:    senderID,
+		OriginatingMechanism: msg.Mechanism,
+		Zone:                 ZoneName(zone),
+		Status:               "SUCCESS",
+		Message:              "auditor: recorded",
+		AppliedRecords:       recorded,
 	})
 	lgAuditor.Info("confirmed to the originator: recorded", "zone", zone, "originator", senderID, "distrib", msg.DistributionID, "records", len(recorded))
 }

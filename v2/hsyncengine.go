@@ -162,14 +162,15 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
-			Zone:              ampp.Zone,
-			AgentId:           ampp.OriginatorID,
-			UpdateType:        "remote",
-			Update:            zu,
-			OriginatingDistID: ampp.DistributionID,
-			OriginatingTime:   ampp.Time,
-			DeliveredBy:       ampp.DeliveredBy,
-			Response:          cresp,
+			Zone:                 ampp.Zone,
+			AgentId:              ampp.OriginatorID,
+			UpdateType:           "remote",
+			Update:               zu,
+			OriginatingDistID:    ampp.DistributionID,
+			OriginatingMechanism: ampp.Mechanism,
+			OriginatingTime:      ampp.Time,
+			DeliveredBy:          ampp.DeliveredBy,
+			Response:             cresp,
 		}
 		select {
 		case r := <-cresp:

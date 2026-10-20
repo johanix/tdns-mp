@@ -349,10 +349,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										zdr.PendingRemoteConfirms = make(map[string]*PendingRemoteConfirmation)
 									}
 									zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
-										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-										OriginatingSender: string(synchedDataUpdate.AgentId),
-										Zone:              synchedDataUpdate.Zone,
-										CreatedAt:         time.Now(),
+										OriginatingDistID:    synchedDataUpdate.OriginatingDistID,
+										OriginatingSender:    string(synchedDataUpdate.AgentId),
+										OriginatingMechanism: synchedDataUpdate.OriginatingMechanism,
+										Zone:                 synchedDataUpdate.Zone,
+										CreatedAt:            time.Now(),
 									}
 									zdr.mu.Unlock()
 									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
@@ -454,13 +455,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										"applied", len(appliedRecords), "removed", len(removedRecords),
 										"originDistID", synchedDataUpdate.OriginatingDistID)
 									msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-										OriginatingSender: string(agentId),
-										Zone:              zone,
-										Status:            "ok",
-										Message:           "desired state already present at remote agent",
-										AppliedRecords:    appliedRecords,
-										RemovedRecords:    removedRecords,
+										OriginatingDistID:    synchedDataUpdate.OriginatingDistID,
+										OriginatingSender:    string(agentId),
+										OriginatingMechanism: synchedDataUpdate.OriginatingMechanism,
+										Zone:                 zone,
+										Status:               "ok",
+										Message:              "desired state already present at remote agent",
+										AppliedRecords:       appliedRecords,
+										RemovedRecords:       removedRecords,
 									})
 								}
 							}
@@ -1405,16 +1407,17 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
-			OriginatingDistID: prc.OriginatingDistID,
-			OriginatingSender: prc.OriginatingSender,
-			Zone:              prc.Zone,
-			Status:            detail.Status,
-			Message:           detail.Message,
-			AppliedRecords:    appliedRecords,
-			RemovedRecords:    detail.RemovedRecords,
-			RejectedItems:     detail.RejectedItems,
-			IgnoredRecords:    ignoredRecords,
-			Truncated:         detail.Truncated,
+			OriginatingDistID:    prc.OriginatingDistID,
+			OriginatingSender:    prc.OriginatingSender,
+			OriginatingMechanism: prc.OriginatingMechanism,
+			Zone:                 prc.Zone,
+			Status:               detail.Status,
+			Message:              detail.Message,
+			AppliedRecords:       appliedRecords,
+			RemovedRecords:       detail.RemovedRecords,
+			RejectedItems:        detail.RejectedItems,
+			IgnoredRecords:       ignoredRecords,
+			Truncated:            detail.Truncated,
 		}
 		if msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 			msgQs.OnRemoteConfirmationReady(remoteDetail)
