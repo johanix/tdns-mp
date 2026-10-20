@@ -221,7 +221,7 @@ func (e *Engine) mergeGossipFromBeat(report *InboundReport) {
 		for i := range abp.Gossip {
 			pg := e.deps.ProviderGroups.GetGroup(abp.Gossip[i].GroupHash)
 			if pg != nil {
-				e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.Members)
+				e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 			}
 		}
 	}

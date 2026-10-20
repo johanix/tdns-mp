@@ -431,7 +431,11 @@ func (gst *GossipStateTable) forgetGroup(groupHash string) {
 	delete(gst.Elections, groupHash)
 }
 
-// CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
+// CheckGroupState checks if all cells in the NxN matrix for a group are
+// OPERATIONAL. Its callers pass the group's voting members (step 8, design
+// 4.3): an auditor that is down holds no election back, and does not take a
+// leader's group out of mutual OPERATIONAL. With one voting member, its own
+// row opens the gate.
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
 	gst.mu.Lock()
 

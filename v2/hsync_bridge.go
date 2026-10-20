@@ -470,7 +470,7 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 				// for this round, the callback's read waited for the
 				// recompute, and the agent beat no more (tdns-mp #180).
 				for _, pg := range ar.ProviderGroupManager.GetGroups() {
-					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 				}
 			},
 		},

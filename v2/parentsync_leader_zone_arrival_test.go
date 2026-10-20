@@ -136,13 +136,26 @@ type groupRig struct {
 }
 
 // newGroupRig makes the agents. electing are the members of the group whose
-// election the rig carries: each of them is among the agents, except in a
-// rig of one agent, which hears of its peers through gossip only.
+// election the rig carries, every one of them a voting member: each of them
+// is among the agents, except in a rig of one agent, which hears of its
+// peers through gossip only.
 func newGroupRig(t *testing.T, electing []string, agents ...string) *groupRig {
+	t.Helper()
+	return newGroupRigOf(t, ComputeGroupHash(electing, nil, nil), electing, agents...)
+}
+
+// newAuditedGroupRig is newGroupRig for a group with auditors: its make-up
+// is these voting members and these auditors (step 8).
+func newAuditedGroupRig(t *testing.T, voting, auditors []string, agents ...string) *groupRig {
+	t.Helper()
+	return newGroupRigOf(t, ComputeGroupHash(voting, auditors, nil), append(slices.Clone(voting), auditors...), agents...)
+}
+
+func newGroupRigOf(t *testing.T, group string, electing []string, agents ...string) *groupRig {
 	t.Helper()
 	r := &groupRig{
 		net: &electionNet{
-			group:   ComputeGroupHash(electing),
+			group:   group,
 			members: electing,
 			mgrs:    map[AgentId]*LeaderElectionManager{},
 			wake:    make(chan struct{}, 1),
@@ -282,7 +295,7 @@ func (r *groupRig) take(want int) []asked {
 func inGroup(t *testing.T, pgm *ProviderGroupManager, zone *tdns.ZoneData, providers ...string) {
 	t.Helper()
 	pg := pgm.GetGroupForZone(ZoneName(zone.ZoneName))
-	if pg == nil || pg.GroupHash != ComputeGroupHash(providers) {
+	if pg == nil || pg.GroupHash != ComputeGroupHash(providers, nil, nil) {
 		t.Fatalf("%s has %s in group %+v, want the group of %v", pgm.LocalID, zone.ZoneName, pg, providers)
 	}
 }
@@ -488,7 +501,7 @@ func TestARefreshThatMovesAZoneHasItsNewLeaderSyncIt(t *testing.T) {
 	// The zones are loaded, and a peer's beat says that this agent leads the
 	// group of a and b.
 	pgm.RecomputeGroups()
-	ar.GossipStateTable.mergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB}),
+	ar.GossipStateTable.mergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB}, nil, nil),
 		Election: GroupElectionState{Leader: arrivalA, Term: 3, LeaderExpiry: time.Now().Add(time.Hour)}})
 	if !lem.IsLeader(ZoneName(stays.ZoneName)) || lem.IsLeader(ZoneName(mover.ZoneName)) {
 		t.Fatalf("before the edit this agent leads %s: %v, %s: %v; want the first only",

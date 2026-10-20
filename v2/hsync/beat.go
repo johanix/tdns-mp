@@ -30,7 +30,7 @@ func (e *Engine) sendHeartbeats() string {
 	} else if e.deps.Gossip != nil && e.deps.ProviderGroups != nil {
 		e.deps.Gossip.RefreshLocalStates(e.registry, e.deps.ProviderGroups, e.deps.LocalBeatInterval)
 		for _, pg := range e.deps.ProviderGroups.Groups() {
-			e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.Members)
+			e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 		}
 	}
 

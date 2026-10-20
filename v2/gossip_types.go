@@ -62,7 +62,8 @@ type GossipStateTable struct {
 // --- From provider_groups.go ---
 
 // ProviderGroup represents a set of providers that together serve a group of zones.
-// The group is identified by a hash of the sorted member identities.
+// The group is its make-up (step 8): who votes, who audits and who is listed
+// with no role, and it is identified by a hash of the three lists.
 //
 // Locking: read or modify any *ProviderGroup field only while
 // holding pgm.mu (RLock for read, Lock for write). RecomputeGroups
@@ -70,18 +71,21 @@ type GossipStateTable struct {
 // NameProposal in place — so callers cannot assume the struct is
 // immutable once stored. Snapshot fields under the lock.
 type ProviderGroup struct {
-	GroupHash string     // truncated SHA-256 of sorted member identities
+	GroupHash string     // truncated SHA-256 of the make-up (ComputeGroupHash)
 	Name      string     // human-friendly name (resolved via naming protocol)
-	Members   []string   // sorted provider identities (FQDNs) — all HSYNC3 participants regardless of role
-	Zones     []ZoneName // zones served by this exact set of providers
-	// VotingMembers is the subset of Members that may participate
-	// in leader elections — derived from union(HSYNCPARAM.signers,
-	// HSYNCPARAM.servers) translated through HSYNC3 labels to
-	// identities. Non-voting roles (e.g. auditors) appear in
-	// Members but not here. Quorum computations and initiator
+	Members   []string   // sorted provider identities (FQDNs): every member, whatever its role (the gossip membership)
+	Zones     []ZoneName // zones of this exact make-up
+	// VotingMembers is the subset of Members that may participate in
+	// leader elections: HSYNCPARAM's servers and signers, translated
+	// through HSYNC3 labels to identities. Every zone of the group has the
+	// same ones. Quorum computations, the election gate and initiator
 	// selection MUST use VotingMembers, not Members.
 	VotingMembers []string
-	NameProposal  *GroupNameProposal // our proposal for this group's name
+	// Auditors: the members in auditors= only. NoRole: members listed with
+	// no role, empty until step 10.
+	Auditors     []string
+	NoRole       []string
+	NameProposal *GroupNameProposal // our proposal for this group's name
 }
 
 // ProviderGroupManager manages provider group computation and naming.

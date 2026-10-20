@@ -26,27 +26,64 @@ func NewProviderGroupManager(localIdentity string) *ProviderGroupManager {
 	}
 }
 
-// ComputeGroupHash computes a deterministic hash from a sorted,
-// deduplicated list of provider identities. Uses length-prefixed
-// encoding to prevent collisions (e.g., ["a","bb"] vs ["ab","b"]).
-func ComputeGroupHash(identities []string) string {
-	sorted := make([]string, len(identities))
-	copy(sorted, identities)
-	slices.Sort(sorted)
-	// Deduplicate
-	deduped := sorted[:0]
-	for i, id := range sorted {
-		if i == 0 || id != sorted[i-1] {
-			deduped = append(deduped, id)
+// ComputeGroupHash computes a deterministic hash of a group's make-up (step
+// 8, design 4.3): its voting members, its auditors and its members with no
+// role, each list sorted and deduplicated, under a label of its own. Two
+// groups of the same providers with another make-up are two groups. Each
+// list is written as its label, its length and its length-prefixed
+// identities, so no two make-ups write the same bytes (e.g. ["a","bb"] vs
+// ["ab","b"], or one identity moved from one list to another).
+func ComputeGroupHash(voting, auditors, noRole []string) string {
+	h := sha256.New()
+	for _, l := range []struct {
+		label byte
+		ids   []string
+	}{{'v', voting}, {'a', auditors}, {'n', noRole}} {
+		ids := sortedUnique(l.ids)
+		h.Write([]byte{l.label})
+		binary.Write(h, binary.BigEndian, uint16(len(ids)))
+		for _, id := range ids {
+			binary.Write(h, binary.BigEndian, uint16(len(id)))
+			h.Write([]byte(id))
 		}
 	}
-	h := sha256.New()
-	for _, id := range deduped {
-		// Length-prefix each identity to prevent concatenation collisions
-		binary.Write(h, binary.BigEndian, uint16(len(id)))
-		h.Write([]byte(id))
-	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func sortedUnique(ids []string) []string {
+	out := append([]string(nil), ids...)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// groupMakeUp is a zone's make-up: who votes, who audits, and who is listed
+// with no role. Until step 10 the third list is empty: a member with no role
+// is no member.
+type groupMakeUp struct {
+	voting, auditors, noRole []string
+}
+
+// zoneMakeUp reads the zone's make-up from its apex, each list sorted and
+// deduplicated.
+func zoneMakeUp(apex *tdns.OwnerData) groupMakeUp {
+	participants, voting := zoneParticipants(apex)
+	var auditors []string
+	for _, id := range participants {
+		if !slices.Contains(voting, id) {
+			auditors = append(auditors, id)
+		}
+	}
+	return groupMakeUp{voting: voting, auditors: auditors}
+}
+
+// key is the make-up as a map key: each list under its label.
+func (m groupMakeUp) key() string {
+	return "v=" + strings.Join(m.voting, ",") + ";a=" + strings.Join(m.auditors, ",") + ";n=" + strings.Join(m.noRole, ",")
+}
+
+// members is every member, whatever its role: the gossip membership.
+func (m groupMakeUp) members() []string {
+	return sortedUnique(append(append(append([]string(nil), m.voting...), m.auditors...), m.noRole...))
 }
 
 // apexHSYNCPARAM returns the zone apex's HSYNCPARAM, or nil if absent.
@@ -583,9 +620,8 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 	scan := pgm.scansBegun.Add(1)
 
 	type zoneGroup struct {
-		identities    []string
-		votingMembers []string // union of voting identities across zones in this group
-		zones         []ZoneName
+		makeUp groupMakeUp
+		zones  []ZoneName
 	}
 	groupMap := make(map[string]*zoneGroup)
 
@@ -603,41 +639,26 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 		// zone's ON HSYNC3 label→identity map), NOT by the raw HSYNC3
 		// identity set. An identity with an HSYNC3 record but no HSYNCPARAM
 		// role is not a member. participants/voting are sorted+deduped.
-		identities, votingMembers := zoneParticipants(apex)
-		if len(identities) < 2 {
+		// The group is the make-up (step 8): zones with the same providers
+		// and another split of who votes and who audits are two groups,
+		// and every zone of a group agrees on who votes.
+		makeUp := zoneMakeUp(apex)
+		if len(makeUp.members()) < 2 {
 			continue
 		}
-		key := strings.Join(identities, ",")
-
+		key := makeUp.key()
 		if zg, exists := groupMap[key]; exists {
 			zg.zones = append(zg.zones, ZoneName(zname))
-			// Union voting members across zones in the group.
-			// Compare incoming-vs-existing directly (rather than
-			// merged-vs-existing) so subset disagreements still
-			// warn — iteration order over Zones.Items() is
-			// randomized and the merged-equals-existing path
-			// would silence the warning depending on which zone
-			// happened to be processed first.
-			if len(zg.votingMembers) > 0 && !slices.Equal(votingMembers, zg.votingMembers) {
-				lgProviderGroup.Warn("voting members differ across zones in the same provider group; using union",
-					"group_key", key, "zone", zname, "previous", zg.votingMembers, "current", votingMembers)
-			}
-			merged := append(append([]string(nil), zg.votingMembers...), votingMembers...)
-			slices.Sort(merged)
-			zg.votingMembers = slices.Compact(merged)
 		} else {
-			groupMap[key] = &zoneGroup{
-				identities:    identities,
-				votingMembers: votingMembers,
-				zones:         []ZoneName{ZoneName(zname)},
-			}
+			groupMap[key] = &zoneGroup{makeUp: makeUp, zones: []ZoneName{ZoneName(zname)}}
 		}
 	}
 
 	// Build provider groups
 	newGroups := make(map[string]*ProviderGroup)
 	for _, zg := range groupMap {
-		hash := ComputeGroupHash(zg.identities)
+		m := zg.makeUp
+		hash := ComputeGroupHash(m.voting, m.auditors, m.noRole)
 
 		sort.Slice(zg.zones, func(i, j int) bool {
 			return zg.zones[i] < zg.zones[j]
@@ -645,8 +666,10 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 
 		pg := &ProviderGroup{
 			GroupHash:     hash,
-			Members:       zg.identities,
-			VotingMembers: zg.votingMembers,
+			Members:       m.members(),
+			VotingMembers: m.voting,
+			Auditors:      m.auditors,
+			NoRole:        m.noRole,
 			Zones:         zg.zones,
 			Name:          hash[:8],
 		}
@@ -717,6 +740,8 @@ func cloneProviderGroup(pg *ProviderGroup) *ProviderGroup {
 	cp := *pg
 	cp.Members = append([]string(nil), pg.Members...)
 	cp.VotingMembers = append([]string(nil), pg.VotingMembers...)
+	cp.Auditors = append([]string(nil), pg.Auditors...)
+	cp.NoRole = append([]string(nil), pg.NoRole...)
 	cp.Zones = append([]ZoneName(nil), pg.Zones...)
 	if pg.NameProposal != nil {
 		np := *pg.NameProposal

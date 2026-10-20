@@ -35,7 +35,7 @@ func TestAnAgentTakenOutOfAZoneInOneEditLeavesTheZonesGroup(t *testing.T) {
 	// The zones are loaded, and a peer's beat says that this agent leads the
 	// group of the three.
 	pgm.RecomputeGroups()
-	ar.GossipStateTable.mergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB, arrivalC}),
+	ar.GossipStateTable.mergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB, arrivalC}, nil, nil),
 		Election: GroupElectionState{Leader: arrivalA, Term: 3, LeaderExpiry: time.Now().Add(time.Hour)}})
 	if !lem.IsLeader(ZoneName(leaves.ZoneName)) || !lem.IsLeader(ZoneName(stays.ZoneName)) {
 		t.Fatalf("before the edit this agent does not lead both zones of its group")
