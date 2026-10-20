@@ -331,6 +331,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						received = synchedDataUpdate.Update.Operations
 					}
 					staleHeld, _ := zdr.heldRecords(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.staleOperations())
+					staleWaiting := zdr.dnskeyAwaitingAnswer(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, staleHeld)
+					staleHeld = withoutRecords(staleHeld, staleWaiting)
 					synchedDataUpdate.dropStaleOperations()
 					if err != nil {
 						lgEngine.Error("failed to add remote update to agent data repo", "err", err)
@@ -394,6 +396,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										Zone:              synchedDataUpdate.Zone,
 										CreatedAt:         time.Now(),
 										StaleHeld:         staleHeld,
+										StaleWaiting:      staleWaiting,
+										FromAnswer:        synchedDataUpdate.CatchUp != nil,
 									}
 									zdr.mu.Unlock()
 									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
@@ -436,6 +440,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// CSYNC, overtaken by its answer to a request).
 						if upd := synchedDataUpdate.Update; upd != nil && len(received) > 0 {
 							appliedRecords, removedRecords = zdr.heldRecords(zone, agentId, received)
+							appliedRecords = withoutRecords(appliedRecords, staleWaiting)
 						} else if upd != nil {
 							// Legacy class-overloaded form (no Operations).
 							confirm := func(rr dns.RR) {
@@ -463,17 +468,26 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								confirm(rr)
 							}
 						}
+						// DNSKEY records that only an answer's forward, not
+						// confirmed by this agent's combiner yet, put in the
+						// repo are left out, and the confirmation is PARTIAL:
+						// it closes the sender's queue entry, and is no word
+						// that the keys have propagated (dnskeyAwaitingAnswer).
+						status, message := "ok", "desired state already present at remote agent"
+						if len(staleWaiting) > 0 {
+							status, message = "PARTIAL", "desired state already present at remote agent; DNSKEY records from an answer not yet confirmed by its combiner"
+						}
 						if msgQs.OnRemoteConfirmationReady != nil {
 							lgEngine.Info("remote update already in desired state, sending immediate confirmation",
 								"zone", zone, "agent", agentId,
-								"applied", len(appliedRecords), "removed", len(removedRecords),
+								"applied", len(appliedRecords), "removed", len(removedRecords), "awaiting_combiner", len(staleWaiting),
 								"originDistID", synchedDataUpdate.OriginatingDistID)
 							msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 								OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 								OriginatingSender: string(agentId),
 								Zone:              zone,
-								Status:            "ok",
-								Message:           "desired state already present at remote agent",
+								Status:            status,
+								Message:           message,
 								AppliedRecords:    appliedRecords,
 								RemovedRecords:    removedRecords,
 							})
@@ -1477,13 +1491,18 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		if !reconstructed && len(prc.StaleHeld) > 0 {
 			appliedRecords = append(slices.Clone(appliedRecords), prc.StaleHeld...)
 		}
+		status := detail.Status
+		if len(prc.StaleWaiting) > 0 && (status == "SUCCESS" || status == "ok") {
+			status = "PARTIAL" // keys an answer's forward has not brought yet
+			appliedRecords = withoutRecords(appliedRecords, prc.StaleWaiting)
+		}
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
 			OriginatingDistID: prc.OriginatingDistID,
 			OriginatingSender: prc.OriginatingSender,
 			Zone:              prc.Zone,
-			Status:            detail.Status,
+			Status:            status,
 			Message:           detail.Message,
 			AppliedRecords:    appliedRecords,
 			RemovedRecords:    detail.RemovedRecords,
@@ -1522,6 +1541,49 @@ func (zdr *ZoneDataRepo) inRepo(zone ZoneName, agentId AgentId) func(rrStr strin
 		}
 		return false
 	}
+}
+
+// dnskeyAwaitingAnswer are those of records, held for the agent, that are
+// DNSKEY records which an answer to a request for the zone's state put in
+// the repo, and whose forward to this agent's combiner is not confirmed
+// yet. A distribution of the agent's that the answer overtook is stale
+// here, and holds its keys in the repo only: confirmed as applied, its
+// sender would take the keys as propagated before this agent's combiner
+// has them. The sender takes them from this agent's final confirmation of
+// the answer instead (creditFromAnswerLocked).
+func (zdr *ZoneDataRepo) dnskeyAwaitingAnswer(zone ZoneName, agent AgentId, records []string) []string {
+	var out []string
+	for _, rec := range records {
+		rr, err := dns.NewRR(rec)
+		if err != nil || rr.Header().Rrtype != dns.TypeDNSKEY {
+			continue
+		}
+		tr := zdr.trackedRR(zone, agent, dns.TypeDNSKEY, rr.String())
+		if tr == nil || tr.State != RRStatePending {
+			continue
+		}
+		zdr.mu.Lock()
+		prc := zdr.PendingRemoteConfirms[tr.DistributionID]
+		zdr.mu.Unlock()
+		if prc != nil && prc.FromAnswer {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// withoutRecords is records without those in drop.
+func withoutRecords(records, drop []string) []string {
+	if len(drop) == 0 {
+		return records
+	}
+	var out []string
+	for _, r := range records {
+		if !slices.Contains(drop, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // heldRecords are the records of ops that the agent's repo holds as the ops

@@ -57,6 +57,14 @@ func (conf *Config) catchUpAnswer(zdr *ZoneDataRepo, zone ZoneName, target Agent
 	if err := tm.EnqueueForSpecificAgent(zone, target, zu, distID); err != nil {
 		return "", err
 	}
+	// An answer with a DNSKEY operation is remembered: the asker's final
+	// confirmation of it is its word on the keys of the distributions it
+	// overtook there (creditFromAnswerLocked).
+	for _, op := range zu.Operations {
+		if op.RRtype == "DNSKEY" {
+			tm.noteCatchUpAnswer(distID, zone, target, dnskeyKeyTagsOf(op.Records))
+		}
+	}
 	if zdr.catchUpAnswers == nil {
 		zdr.catchUpAnswers = map[ZoneName]map[AgentId]string{}
 	}

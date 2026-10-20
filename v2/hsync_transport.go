@@ -60,6 +60,10 @@ type MPTransportBridge struct {
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
 	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
 	dnskeyPropMu              sync.Mutex
+	// answersSent: the answers to requests for a zone's state that this
+	// agent sent, by distribution ID, with the keys of their DNSKEY
+	// operation (noteCatchUpAnswer). Under dnskeyPropMu.
+	answersSent map[string]*sentAnswer
 	// what the other providers said about their keys, per zone and
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
@@ -2339,6 +2343,9 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 
 	prop, exists := tm.pendingDnskeyPropagations[distID]
 	if !exists {
+		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
+		}
 		return false // Not a DNSKEY propagation confirmation
 	}
 	agentID := AgentId(source)
@@ -2415,11 +2422,18 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	} else {
 		lgTransport.Info("DNSKEY confirmation not final for every key; still waiting", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
 	}
+	tm.finishDnskeyPropagationLocked(distID, prop)
+	return true
+}
 
+// finishDnskeyPropagationLocked sends each key's result to the signer once
+// every expected agent has answered, and ends the tracking. Under
+// dnskeyPropMu.
+func (tm *MPTransportBridge) finishDnskeyPropagationLocked(distID string, prop *PendingDnskeyPropagation) {
 	// Check if all agents have answered
 	for _, confirmed := range prop.ExpectedAgents {
 		if !confirmed {
-			return true // Still waiting for more confirmations
+			return // Still waiting for more confirmations
 		}
 	}
 
@@ -2444,8 +2458,98 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			tm.sendKeystateToSigner(zone, removed, "removed", "all remote agents confirmed the removal", sentAt)
 		}
 	}()
+}
 
-	return true
+// sentAnswer is an answer to a request for a zone's state that this agent
+// sent: the zone, the asker, when, and the keys of its DNSKEY operation,
+// which is this agent's whole DNSKEY set as its signer's inventory had it.
+type sentAnswer struct {
+	zone  ZoneName
+	asker AgentId
+	at    time.Time
+	keys  map[uint16]bool
+}
+
+// answersKept is how long an answer sent is remembered for the asker's
+// final confirmation of it.
+const answersKept = 24 * time.Hour
+
+// noteCatchUpAnswer remembers an answer with a DNSKEY operation, so that the
+// asker's final confirmation of it counts for the DNSKEY propagations it
+// overtook (creditFromAnswerLocked).
+func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, asker AgentId, keys map[uint16]bool) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	if tm.answersSent == nil {
+		tm.answersSent = map[string]*sentAnswer{}
+	}
+	now := time.Now()
+	for id, a := range tm.answersSent {
+		if now.Sub(a.at) > answersKept {
+			delete(tm.answersSent, id)
+		}
+	}
+	tm.answersSent[distID] = &sentAnswer{zone: zone, asker: asker, at: now, keys: keys}
+}
+
+// creditFromAnswerLocked takes the asker's final confirmation of an answer
+// as its word on the keys of every DNSKEY propagation of the zone, made
+// before the answer, that still waits for that agent. An answer can reach
+// the asker before a distribution of the same keys; that distribution is
+// then stale there, and the asker leaves out of its confirmation the keys
+// that only the answer's forward, not yet confirmed by its combiner, has
+// brought (dnskeyAwaitingAnswer). The answer's final confirmation follows
+// that combiner's. A success says the asker's combiner holds the answer's
+// set: a key added that is in it is applied, and a key removed that is not
+// in it is removed. A rejection names its keys; an "ignored" covers the
+// answer's keys as a direct answer does. Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, rejectedItems []RejectedItemInfo) {
+	var rejectedRecords []string
+	for _, ri := range rejectedItems {
+		rejectedRecords = append(rejectedRecords, ri.Record)
+	}
+	rejectedTags := dnskeyKeyTagsOf(rejectedRecords)
+	success := status == transport.ConfirmSuccess.String()
+	ignored := status == transport.ConfirmIgnored.String() && len(rejectedItems) == 0
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if prop.Zone != ans.zone || prop.CreatedAt.After(ans.at) {
+			continue
+		}
+		if answered, expected := prop.ExpectedAgents[agent]; !expected || answered {
+			continue
+		}
+		if prop.Results == nil {
+			prop.Results = map[AgentId]map[uint16]string{}
+		}
+		results := prop.Results[agent]
+		if results == nil {
+			results = map[uint16]string{}
+			prop.Results[agent] = results
+		}
+		for _, kt := range prop.KeyTags {
+			if results[kt] != "" {
+				continue
+			}
+			covered := ans.keys[kt] != prop.Removed[kt] // an add in the set, a removal not in it
+			switch {
+			case rejectedTags[kt]:
+				results[kt] = "rejected"
+				prop.Rejected = true
+				if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
+					prop.RejectionMsg = rejectedItems[0].Reason
+				}
+			case success && covered:
+				results[kt] = "applied"
+			case ignored && covered:
+				results[kt] = "ignored"
+			}
+		}
+		lgTransport.Info("DNSKEY propagation answered by the asker's confirmation of an answer it overtook", "zone", prop.Zone, "distributionID", distID, "agent", agent, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
+		if len(results) == len(prop.KeyTags) && len(prop.KeyTags) > 0 {
+			prop.ExpectedAgents[agent] = true
+		}
+		tm.finishDnskeyPropagationLocked(distID, prop)
+	}
 }
 
 // NoteForeignKeyStates records what a provider says about its keys in a
