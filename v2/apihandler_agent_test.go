@@ -352,7 +352,7 @@ func TestResyncPushFromAnAgentWithNoRoleSendsNoOwnDataToPeersOrItsCombiner(t *te
 	}
 	msgQs := &MsgQs{SynchedDataUpdate: make(chan *SynchedDataUpdate, 4), SynchedDataCmd: make(chan *SynchedDataCmd, 4)}
 	conf.InternalMp.MsgQs = msgQs
-	go conf.SynchedDataEngine(t.Context(), msgQs)
+	runEngine(t, conf, msgQs)
 
 	// this provider's CDS, stored while it had its role
 	cds := &dns.CDS{DS: *testDnskey(t, zone, 257).ToDS(dns.SHA256)}
