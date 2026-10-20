@@ -140,10 +140,12 @@ type LeaderElection struct {
 	// while an election is running and after one that was aborted: the
 	// leader then is still the one of the term before.
 	leaderTerm uint64
-	// leadStart is the term in which this agent's present lead began: a
-	// renewal, which names this agent again while its lease runs, keeps it;
-	// a lead that follows another agent's, an invalidated or a lapsed one
-	// starts anew. Zero while another agent leads (noteLeaderLocked).
+	// leadStart is one above the term in which this agent's present lead
+	// began, so that a lead at term 0 (a lone voter's self-election) is not
+	// read as no lead: a renewal, which names this agent again while its
+	// lease runs, keeps it; a lead that follows another agent's, an
+	// invalidated or a lapsed one starts anew. Zero while another agent
+	// leads (noteLeaderLocked).
 	leadStart uint64
 	// gone: the provider group of this election is gone, and the manager
 	// has dropped the entry (groupGone). Nothing starts on it any more.

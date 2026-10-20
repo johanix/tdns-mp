@@ -172,8 +172,10 @@ func TestARenewalKeepsTheZonesKeyAsItIs(t *testing.T) {
 	}
 }
 
-// The term a lead began in: a renewal keeps it, another agent's lead clears
-// it, a lead after another's or after a lapsed lease starts anew.
+// The term a lead began in (one above it): a renewal keeps it, another
+// agent's lead clears it, a lead after another's or after a lapsed lease
+// starts anew. A lone voter's lead at term 0 is a lead, and its renewals,
+// which keep term 0, keep it.
 func TestALeadStartsAtItsFirstTermAndARenewalKeepsIt(t *testing.T) {
 	lem := &LeaderElectionManager{localID: "us.example."}
 	le := &LeaderElection{}
@@ -184,20 +186,36 @@ func TestALeadStartsAtItsFirstTermAndARenewalKeepsIt(t *testing.T) {
 		le.Leader, le.LeaderExpiry = leader, now.Add(lease)
 		return le.leadStart
 	}
-	if got := lead("us.example.", 1, time.Hour); got != 1 {
-		t.Errorf("a first lead starts at %d, want 1", got)
+	if got := lead("us.example.", 1, time.Hour); got != 2 {
+		t.Errorf("a first lead at term 1 is %d, want 2", got)
 	}
-	if got := lead("us.example.", 2, time.Hour); got != 1 {
-		t.Errorf("a renewal starts the lead at %d, want 1", got)
+	if got := lead("us.example.", 2, time.Hour); got != 2 {
+		t.Errorf("a renewal makes the lead %d, want 2", got)
 	}
 	if got := lead("them.example.", 3, time.Hour); got != 0 {
 		t.Errorf("another agent's lead leaves %d, want 0", got)
 	}
-	if got := lead("us.example.", 4, -time.Second); got != 4 {
-		t.Errorf("a lead after another's starts at %d, want 4", got)
+	if got := lead("us.example.", 4, -time.Second); got != 5 {
+		t.Errorf("a lead after another's is %d, want 5", got)
 	}
-	if got := lead("us.example.", 5, time.Hour); got != 5 {
-		t.Errorf("a lead after a lapsed lease starts at %d, want 5", got)
+	if got := lead("us.example.", 5, time.Hour); got != 6 {
+		t.Errorf("a lead after a lapsed lease is %d, want 6", got)
+	}
+
+	// a lone voter: its self-election and its renewals stay at term 0
+	lone := &LeaderElection{}
+	at0 := func() uint64 {
+		now := time.Now()
+		lem.noteLeaderLocked(lone, "us.example.", now)
+		lone.Leader, lone.LeaderExpiry = "us.example.", now.Add(time.Hour)
+		return lone.leadStart
+	}
+	first := at0()
+	if first == 0 {
+		t.Fatal("a lead at term 0 reads as no lead")
+	}
+	if got := at0(); got != first {
+		t.Errorf("a renewal at term 0 starts the lead anew (%d, was %d): it republishes the key and polls again", got, first)
 	}
 }
 
