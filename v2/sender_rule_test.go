@@ -869,6 +869,31 @@ func TestAManualApprovalZoneKeepsNoEditOfAnOriginThatDoesNotVote(t *testing.T) {
 			t.Errorf("an edit of an origin that does not vote is kept for approval: %+v", e)
 		}
 	}
+
+	// the zone named without its trailing dot is the same zone; the voting
+	// origin's next edit, which follows it in the queue, shows it was taken
+	bare := strings.TrimSuffix(mpzd.ZoneName, ".")
+	kept := len(edits)
+	for _, m := range []struct{ origin, zone, rec string }{
+		{"agent.gamma.example.", bare, mpzd.ZoneName + " 3600 IN NS ns2.gamma.example."},
+		{csyncLeaderA, mpzd.ZoneName, mpzd.ZoneName + " 3600 IN NS ns2.alpha.example."},
+	} {
+		msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(m.origin), DeliveredBy: csyncOurAgent,
+			Zone: ZoneName(m.zone), DistributionID: nextDistributionID(),
+			Operations: []core.RROperation{{Operation: "add", RRtype: "NS", Records: []string{m.rec}}}}}
+	}
+	waitUntil(t, "the voting origin's next edit was not kept for approval", func() bool {
+		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
+		return len(edits) > kept
+	})
+	for _, z := range []string{mpzd.ZoneName, bare} {
+		edits, _ := ListPendingEdits(hdb, z)
+		for _, e := range edits {
+			if e.SenderID == "agent.gamma.example." {
+				t.Errorf("an edit of an origin that does not vote, for the zone named %q, is kept for approval: %+v", z, e)
+			}
+		}
+	}
 }
 
 // The middleware compares with the transport's sender when the context
@@ -911,6 +936,14 @@ func TestTheAgentsOwnSignerIsNotHeldToTheRFIRules(t *testing.T) {
 // The operator is told that a request the peer refused on the wire was not
 // taken, with the error, not that its answer timed out.
 func TestTheOperatorIsToldARefusedRequestWasNotTaken(t *testing.T) {
+	// with no message queues nothing is sent, and the operator is told so,
+	// not that the peer did not answer
+	if _, err := requestConfig(nil, NewAgent("bob.agent.example."), "nottaken.config.example.", "upstream", nil); err == nil {
+		t.Error("a CONFIG request with no message queues: no error")
+	}
+	if _, err := requestAudit(nil, NewAgent("bob.agent.example."), "nottaken.config.example.", nil); err == nil {
+		t.Error("an AUDIT request with no message queues: no error")
+	}
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})
 	alice, bob := env.Alice.Identity, env.Bob.Identity
 	const zone = "nottaken.config.example."

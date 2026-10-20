@@ -591,7 +591,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 func requestConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) (*ConfigResponseMsg, error) {
 	if msgQs == nil {
 		lgEngine.Warn("RequestAndWaitForConfig: no MsgQs available")
-		return nil, nil
+		return nil, fmt.Errorf("this agent has no message queues")
 	}
 
 	// Several requests can be out at once (one per zone when a group elects
@@ -655,7 +655,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 func requestAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) (*AuditResponseMsg, error) {
 	if msgQs == nil {
 		lgEngine.Warn("RequestAndWaitForAudit: no MsgQs available")
-		return nil, nil
+		return nil, fmt.Errorf("this agent has no message queues")
 	}
 
 	nonce := newRfiNonce()
