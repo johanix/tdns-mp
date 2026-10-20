@@ -12,9 +12,11 @@ package tdnsmp
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -401,4 +403,124 @@ func editsRecordCount(recs map[string]map[string][]string) int {
 		}
 	}
 	return n
+}
+
+// setInFlight is the distribution to this agent's combiner of the last change
+// of agent's set of rrtype here, while the combiner has not confirmed it: ""
+// when it has, when the hand-over failed, when no change is noted, and once
+// the queue has given the message up (noteMaxAge).
+func (zdr *ZoneDataRepo) setInFlight(zone ZoneName, agent AgentId, rrtype uint16) string {
+	n := zdr.notes[zone][agent][rrtype]
+	if n == nil || n.distID == "" || !n.confirmed.IsZero() || time.Since(n.changed) >= noteMaxAge {
+		return ""
+	}
+	return n.distID
+}
+
+// forwardOfAnswer reports whether distID is this agent's hand-over to its
+// combiner of a peer's answer to a request for the zone's state.
+func (zdr *ZoneDataRepo) forwardOfAnswer(distID string) bool {
+	zdr.mu.Lock()
+	defer zdr.mu.Unlock()
+	prc := zdr.PendingRemoteConfirms[distID]
+	return prc != nil && prc.FromAnswer
+}
+
+// staleWait is a stale DNSKEY replace whose final confirmation waits for this
+// agent's combiner to confirm the set that overtook it: the sender's
+// distribution, the sender, the zone, and the operations that arrived.
+type staleWait struct {
+	origDistID string
+	sender     AgentId
+	zone       ZoneName
+	ops        []core.RROperation
+	at         time.Time
+}
+
+// waitForCombiner has w wait for the combiner's word on distID. A resend of
+// the same distribution that waits already adds nothing; one that has waited
+// for longer than the queue keeps a message is dropped.
+func (zdr *ZoneDataRepo) waitForCombiner(distID string, w *staleWait) {
+	if zdr.staleWaits == nil {
+		zdr.staleWaits = map[string][]*staleWait{}
+	}
+	for d, ws := range zdr.staleWaits {
+		ws = slices.DeleteFunc(ws, func(o *staleWait) bool { return time.Since(o.at) >= noteMaxAge })
+		if len(ws) == 0 {
+			delete(zdr.staleWaits, d)
+		} else {
+			zdr.staleWaits[d] = ws
+		}
+	}
+	for _, ws := range zdr.staleWaits {
+		for _, o := range ws {
+			if o.origDistID == w.origDistID && o.sender == w.sender {
+				return
+			}
+		}
+	}
+	zdr.staleWaits[distID] = append(zdr.staleWaits[distID], w)
+}
+
+// dropStaleWait drops what waits for the sender's distribution: its final
+// confirmation has gone by the relay of its own hand-over.
+func (zdr *ZoneDataRepo) dropStaleWait(origDistID string, sender AgentId) {
+	for d, ws := range zdr.staleWaits {
+		ws = slices.DeleteFunc(ws, func(o *staleWait) bool { return o.origDistID == origDistID && o.sender == sender })
+		if len(ws) == 0 {
+			delete(zdr.staleWaits, d)
+		} else {
+			zdr.staleWaits[d] = ws
+		}
+	}
+}
+
+// releaseStaleWaits sends the final confirmation of each stale replace that
+// waited for the combiner's word on distID, now that it has come. The
+// confirmation is made as the no-op path makes it, from what is held now:
+// the records the combiner rejected, keys an answer's forward brought that
+// its combiner has not confirmed, and a set whose hand-over failed are not
+// named, and make it PARTIAL. A set changed again since, whose newer
+// hand-over the combiner has not confirmed, is waited for in turn.
+func (zdr *ZoneDataRepo) releaseStaleWaits(distID string, msgQs *MsgQs) {
+	waits := zdr.staleWaits[distID]
+	if len(waits) == 0 {
+		return
+	}
+	delete(zdr.staleWaits, distID)
+	for _, w := range waits {
+		if next := zdr.setInFlight(w.zone, w.sender, dns.TypeDNSKEY); next != "" {
+			zdr.waitForCombiner(next, w)
+			continue
+		}
+		applied, removed := zdr.heldRecords(w.zone, w.sender, w.ops)
+		waiting := zdr.dnskeyAwaitingAnswer(w.zone, w.sender, applied)
+		applied = withoutRecords(applied, waiting)
+		status, message := "ok", "desired state present at remote agent, confirmed by its combiner"
+		if len(waiting) > 0 {
+			status, message = "PARTIAL", message+"; DNSKEY records from an answer not yet confirmed by its combiner"
+		}
+		if rejected := zdr.rejectedRecords(w.zone, w.sender, w.ops); len(rejected) > 0 {
+			status, message = "PARTIAL", message+"; records its combiner rejected are not held"
+		}
+		if failed := zdr.setsNotHandedOver(w.zone, w.sender, updateRRtypes(&ZoneUpdate{Operations: w.ops}), true); len(failed) > 0 {
+			applied = recordsNotOfTypes(applied, failed)
+			removed = recordsNotOfTypes(removed, failed)
+			status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
+		}
+		lgEngine.Info("the combiner confirmed the set that overtook a stale DNSKEY replace; confirming the replace",
+			"zone", w.zone, "agent", w.sender, "originDistID", w.origDistID, "combinerDistID", distID,
+			"status", status, "applied", len(applied), "removed", len(removed))
+		if msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
+			msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+				OriginatingDistID: w.origDistID,
+				OriginatingSender: string(w.sender),
+				Zone:              w.zone,
+				Status:            status,
+				Message:           message,
+				AppliedRecords:    applied,
+				RemovedRecords:    removed,
+			})
+		}
+	}
 }

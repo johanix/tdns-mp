@@ -591,3 +591,210 @@ func TestARecordTheCombinerRejectedIsNotNamedFromTheRepo(t *testing.T) {
 		t.Errorf("the CSYNC's confirmation, made from the repo, is %+v: want the CSYNC and not the rejected key", *cf)
 	}
 }
+
+// A sender's DNSKEY distribution is overtaken by its next one, and this
+// agent's combiner, which is away, has confirmed neither. The queue sends the
+// first again, or it arrives only now: either way it is stale here, and its
+// set is the newer one's, which the combiner has not confirmed. No success,
+// and no key named, goes to the sender before the combiner's word: a sender
+// takes either as its keys published here (rig Z1). When the first was
+// handed over itself, the combiner's word on it is relayed as before, and
+// nothing more follows. When it was overtaken before it arrived, its final
+// word follows the combiner's on the set that overtook it. For a withdrawal
+// (a key left out) and for an introduction (a key added).
+func TestAStaleKeySetOvertakenInFlightWaitsForTheCombiner(t *testing.T) {
+	for _, kind := range []string{"a withdrawal", "an introduction"} {
+		for _, order := range []string{"handed over, then overtaken", "overtaken before it arrives", "overtaken twice before it arrives"} {
+			t.Run(kind+", "+order, func(t *testing.T) {
+				staleKeySetOvertakenInFlight(t, kind, order)
+			})
+		}
+	}
+}
+
+func staleKeySetOvertakenInFlight(t *testing.T, kind, order string) {
+	zone := map[string]string{"a withdrawal": "withdrawn", "an introduction": "introduced"}[kind] + "." +
+		map[string]string{"handed over, then overtaken": "inflight", "overtaken before it arrives": "late",
+			"overtaken twice before it arrives": "twice"}[order] + ".overtaken.example."
+	r := receivingRig(t, zone)
+	z := r.mpzd.ZoneName
+	signer, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+	k1, k2, k3 := testDnskey(t, z, 256), testDnskey(t, z, 256), testDnskey(t, z, 256)
+	var held, first []string
+	var keyTags, removedTags []uint16
+	if kind == "a withdrawal" {
+		held = []string{k1.String(), k2.String()}
+		first = []string{k1.String()} // k2 withdrawn
+		keyTags, removedTags = []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}
+	} else {
+		held = []string{k1.String()}
+		first = []string{k1.String(), k2.String()} // k2 introduced
+		keyTags = []uint16{k2.KeyTag()}
+	}
+	next := append(slices.Clone(first), k3.String())
+	replace := func(records []string) core.RROperation {
+		return core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: records}
+	}
+	// noFinal: no final word on d1 comes within d
+	noFinal := func(d1, when string, d time.Duration) {
+		t.Helper()
+		for end := time.Now().Add(d); time.Now().Before(end); {
+			cf, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+			if !ok {
+				return
+			}
+			if cf.DistributionID == d1 && cf.Status != "PENDING" {
+				t.Fatalf("%s, the sender got %+v", when, *cf)
+			}
+		}
+	}
+	final := func(d1, when string) *ConfirmationDetail {
+		t.Helper()
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); {
+			cf, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+			if !ok {
+				break
+			}
+			if cf.DistributionID == d1 && cf.Status != "PENDING" {
+				return cf
+			}
+		}
+		t.Fatalf("%s, no final word on the first distribution\n%s", when, r.log)
+		return nil
+	}
+
+	sent := time.Now().Add(-time.Minute)
+	d0 := nextDistributionID()
+	before := r.combinerDists()
+	r.receivesAt(t, string(signer), d0, sent, nil, replace(held))
+	c0 := r.newCombinerDist(before, 10*time.Second)
+	if c0 == "" {
+		t.Fatalf("the first set did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c0, held...)
+	r.answered(t, d0)
+
+	// the sender's propagation of the first distribution
+	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	d1 := nextDistributionID()
+	snd.TrackDnskeyPropagation(ZoneName(z), d1, keyTags, removedTags, []AgentId{us})
+	waiting := func() bool {
+		snd.dnskeyPropMu.Lock()
+		defer snd.dnskeyPropMu.Unlock()
+		_, ok := snd.pendingDnskeyPropagations[d1]
+		return ok
+	}
+
+	c1 := ""
+	if order == "handed over, then overtaken" {
+		before = r.combinerDists()
+		r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(first))
+		if c1 = r.newCombinerDist(before, 10*time.Second); c1 == "" {
+			t.Fatalf("the first distribution did not go to the combiner\n%s", r.log)
+		}
+	}
+	before = r.combinerDists()
+	r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(20*time.Second), nil, replace(next))
+	c2 := r.newCombinerDist(before, 10*time.Second)
+	if c2 == "" {
+		t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
+	}
+
+	// the first distribution, sent again or only now: stale here
+	r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(first))
+	noFinal(d1, "while the combiner had confirmed no set", 400*time.Millisecond)
+	if !waiting() {
+		t.Fatal("the sender's propagation ended while the combiner had confirmed no set")
+	}
+
+	if order == "overtaken twice before it arrives" {
+		// the set changes again before the combiner's word on the newer one:
+		// that word says nothing of the set the repo holds now
+		k4 := testDnskey(t, z, 256)
+		last := append(slices.Clone(next), k4.String())
+		before = r.combinerDists()
+		r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(30*time.Second), nil, replace(last))
+		c3 := r.newCombinerDist(before, 10*time.Second)
+		if c3 == "" {
+			t.Fatalf("the newest set did not go to the combiner\n%s", r.log)
+		}
+		r.combinerTakes(c2, next...)
+		noFinal(d1, "after the combiner's word on a set overtaken in turn", 300*time.Millisecond)
+		r.combinerTakes(c3, last...)
+		cf := final(d1, "after the combiner took the newest set")
+		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+		if waiting() {
+			t.Errorf("after the combiner took the newest set the sender's propagation still waits (%+v)", *cf)
+		}
+		return
+	}
+	if c1 != "" {
+		// the combiner's word on the first hand-over is its word on that
+		// set, and is relayed; its word on the newer set adds nothing
+		r.combinerTakes(c1, first...)
+		cf := final(d1, "after the combiner took the first set")
+		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+		if waiting() {
+			t.Errorf("after the combiner took the first set the sender's propagation still waits (%+v)", *cf)
+		}
+		r.combinerTakes(c2, next...)
+		noFinal(d1, "after the relay, on the combiner's word on the newer set", 300*time.Millisecond)
+		return
+	}
+	r.combinerTakes(c2, next...)
+	cf := final(d1, "after the combiner took the newer set")
+	if cf.Status != "ok" && cf.Status != "SUCCESS" {
+		t.Errorf("after the combiner took the newer set the sender got %+v, want ok", *cf)
+	}
+	snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+	if waiting() {
+		t.Errorf("after the combiner took the newer set the sender's propagation still waits (%+v)", *cf)
+	}
+}
+
+// An update whose fresh part goes to the combiner, and whose stale replace is
+// of a key set that overtook it and that the combiner has not confirmed yet:
+// the final confirmation names none of that set and is PARTIAL, though the
+// combiner confirms the fresh part.
+func TestAStaleKeySetInFlightIsNotNamedBesideAFreshOne(t *testing.T) {
+	r := receivingRig(t, "mixed.inflight.handover.example.")
+	z := r.mpzd.ZoneName
+	signer := AgentId(r.peer.Identity)
+	r.leader(signer)
+	k1, k2 := testDnskey(t, z, 256), testDnskey(t, z, 256)
+	both := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String(), k2.String()}}
+	one := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{k1.String()}}
+	csync, crec := csyncOp(z, 1000)
+
+	sent := time.Now().Add(-time.Minute)
+	d0 := nextDistributionID()
+	before := r.combinerDists()
+	r.receivesAt(t, string(signer), d0, sent, nil, both)
+	c0 := r.newCombinerDist(before, 10*time.Second)
+	if c0 == "" {
+		t.Fatalf("the key set did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c0, k1.String(), k2.String())
+	r.answered(t, d0)
+
+	// a newer set drops k2; the combiner has not confirmed it
+	before = r.combinerDists()
+	r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(10*time.Second), nil, one)
+	if r.newCombinerDist(before, 10*time.Second) == "" {
+		t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
+	}
+
+	// an older update: the key set stale, the CSYNC fresh
+	d := nextDistributionID()
+	before = r.combinerDists()
+	r.receivesAt(t, string(signer), d, sent.Add(5*time.Second), nil, both, csync)
+	c := r.newCombinerDist(before, 10*time.Second)
+	if c == "" {
+		t.Fatalf("the CSYNC did not go to the combiner\n%s", r.log)
+	}
+	r.combinerTakes(c, crec)
+	cf := r.answered(t, d)
+	if cf.Status != "PARTIAL" || slices.Contains(cf.AppliedRecords, k1.String()) || !slices.Contains(cf.AppliedRecords, crec) {
+		t.Errorf("the update got %+v, want PARTIAL with the CSYNC and without the key set", *cf)
+	}
+}

@@ -167,6 +167,10 @@ type ZoneDataRepo struct {
 	// notes: per zone, agent and type, the last change the engine stored
 	// and passed to its combiner (setNote). Engine only.
 	notes map[ZoneName]map[AgentId]map[uint16]*setNote
+	// staleWaits: per distribution to this agent's combiner, the stale
+	// DNSKEY replaces whose final confirmation waits for the combiner's word
+	// on that distribution's set (waitForCombiner). Engine only.
+	staleWaits map[string][]*staleWait
 }
 
 type replaceOrigin struct {

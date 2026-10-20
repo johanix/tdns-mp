@@ -349,9 +349,26 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						failedSets = zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
 							updateRRtypes(&ZoneUpdate{Operations: received, RRsets: synchedDataUpdate.Update.RRsets}), true)
 					}
+					// A stale replace of the DNSKEY set while the set that
+					// overtook it is on its way to the combiner is no word on
+					// the keys either: the combiner may not have that set yet,
+					// and a sender takes a success, or a key named, as its key
+					// published here. Alone it waits for the combiner's word
+					// (waitForCombiner, below); beside a fresh part it is left
+					// out of the relayed confirmation, as a failed set is.
+					// A set in flight that an answer's forward brought has its
+					// own way: its keys are left out (staleWaiting), and the
+					// sender credits them from the asker's confirmation of the
+					// answer.
 					var staleNotHeld map[uint16]bool
+					staleKeysWaitOn := ""
 					for _, t := range updateRRtypes(&ZoneUpdate{Operations: synchedDataUpdate.staleOperations()}) {
-						if failedSets[t] {
+						if t == dns.TypeDNSKEY && !failedSets[t] {
+							if x := zdr.setInFlight(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, t); x != "" && !zdr.forwardOfAnswer(x) {
+								staleKeysWaitOn = x
+							}
+						}
+						if failedSets[t] || (t == dns.TypeDNSKEY && staleKeysWaitOn != "") {
 							if staleNotHeld == nil {
 								staleNotHeld = map[uint16]bool{}
 							}
@@ -540,7 +557,22 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							removedRecords = recordsNotOfTypes(removedRecords, failedSets)
 							status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
 						}
-						if msgQs.OnRemoteConfirmationReady != nil {
+						if staleKeysWaitOn != "" {
+							// The sender has this agent's PENDING; the final
+							// word follows the combiner's on the set that
+							// overtook this one. Closing the sender's entry
+							// now with a PARTIAL would leave its propagation
+							// of these keys waiting for good.
+							zdr.waitForCombiner(staleKeysWaitOn, &staleWait{
+								origDistID: synchedDataUpdate.OriginatingDistID,
+								sender:     agentId,
+								zone:       zone,
+								ops:        received,
+								at:         time.Now(),
+							})
+							lgEngine.Info("a stale DNSKEY replace waits for this agent's combiner to confirm the set that overtook it",
+								"zone", zone, "agent", agentId, "originDistID", synchedDataUpdate.OriginatingDistID, "combinerDistID", staleKeysWaitOn)
+						} else if msgQs.OnRemoteConfirmationReady != nil {
 							lgEngine.Info("remote update already in desired state, sending immediate confirmation",
 								"zone", zone, "agent", agentId,
 								"applied", len(appliedRecords), "removed", len(removedRecords), "awaiting_combiner", len(staleWaiting),
@@ -1041,6 +1073,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
 			}
 			zdr.ProcessConfirmation(detail, msgQs)
+			if tm := conf.InternalMp.MPTransport; tm != nil && tm.combinerID != "" && detail.Source == string(tm.combinerID) && detail.Status != "PENDING" {
+				zdr.releaseStaleWaits(detail.DistributionID, msgQs)
+			}
 			// the leader's CSYNC waits for its confirmations
 			conf.delegationCsyncProgress(ctx, zdr, detail.Zone, detail)
 		}
@@ -1589,6 +1624,9 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		zdr.mu.Lock()
 		delete(zdr.PendingRemoteConfirms, detail.DistributionID)
 		zdr.mu.Unlock()
+		// A resend of the same distribution that waits as a stale replace
+		// has its final word now (waitForCombiner).
+		zdr.dropStaleWait(prc.OriginatingDistID, AgentId(prc.OriginatingSender))
 	}
 }
 
