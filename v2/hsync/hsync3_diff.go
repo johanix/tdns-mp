@@ -10,7 +10,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// IdentitiesFromRRset returns remote HSYNC3 identities, excluding localIdentity.
+// IdentitiesFromRRset returns remote HSYNC3 identities, excluding localIdentity
+// (isLocal: compared as a canonical name).
 func IdentitiesFromRRset(rrs []dns.RR, localIdentity string) map[PeerID]struct{} {
 	out := make(map[PeerID]struct{})
 	for _, rr := range rrs {
@@ -22,7 +23,7 @@ func IdentitiesFromRRset(rrs []dns.RR, localIdentity string) map[PeerID]struct{}
 		if !ok || h3.Identity == "" {
 			continue
 		}
-		if localIdentity != "" && h3.Identity == localIdentity {
+		if isLocal(PeerID(localIdentity), PeerID(h3.Identity)) {
 			continue
 		}
 		out[PeerID(h3.Identity)] = struct{}{}
