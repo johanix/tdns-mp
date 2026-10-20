@@ -725,6 +725,8 @@ Log, info, logger `zones`: "thawing the zone" (`zone`, `from`, `to`); "the zone'
 
 ### S10. One reader at the combiner
 
+This step also closes tdns-mp #235 (2026-10-20): a combiner whose copy of the zone lags its agent's rejects a new signer's DNSKEYs as "not a signer", and nothing judges them again once it catches up. Judged by the sets its agent hands it, the combiner is never behind its agent.
+
 **Before it:** S3. Membership step 3 (the sync wrapper, the own read, and its own flag that the stored contributions were read; PR #167's `contributionsLoaded` is not that flag, membership plan step 3). PR #208, whose restore before the first load is in the same function. It can be built beside S5a to S9, and is on a fleet before S7.
 
 **Changes.**
