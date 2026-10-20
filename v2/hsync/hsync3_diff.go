@@ -67,6 +67,13 @@ func samePeer(a, b PeerID) bool {
 	return dns.CanonicalName(string(a)) == dns.CanonicalName(string(b))
 }
 
+// isLocal: id names the local agent. An engine with no local identity has
+// none. Compared as canonical names: a local identity configured without
+// the trailing dot, or in another case, is the zone's record of it.
+func isLocal(local, id PeerID) bool {
+	return local != "" && samePeer(id, local)
+}
+
 // ApplyHsyncDiff registers adds and removes for one zone.
 // Symmetric with tdnsmp UpdateAgents HSYNC add/remove passes; the agent re-homes
 // the RFI/election side effects via Host.OnHsyncMembersAdded.
@@ -107,7 +114,7 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 	// in some other zone recomputed the groups (tdns-mp #183).
 	if e.deps.GateOnLocalPresence && !participates(zv, PeerID(local)) {
 		for _, rr := range diff.Removes {
-			if h3, ok := hsync3Of(rr); ok && h3.Identity == local {
+			if h3, ok := hsync3Of(rr); ok && isLocal(PeerID(local), PeerID(h3.Identity)) {
 				if e.deps.Host.OnLocalRemoved != nil {
 					e.deps.Host.OnLocalRemoved(zone)
 				}
@@ -127,7 +134,7 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 			continue
 		}
 		id := PeerID(h3.Identity)
-		if string(id) == local {
+		if isLocal(PeerID(local), id) {
 			localAdded = true
 			continue
 		}
@@ -152,7 +159,7 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 		if updated[id] {
 			continue
 		}
-		if string(id) == local {
+		if isLocal(PeerID(local), id) {
 			if e.deps.Host.OnLocalRemoved != nil {
 				e.deps.Host.OnLocalRemoved(zone)
 			}
