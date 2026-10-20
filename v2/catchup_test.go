@@ -1019,31 +1019,44 @@ func TestAPeerStartReplacesTheOutstandingRequest(t *testing.T) {
 }
 
 // A zone with HSYNC3 records and no HSYNCPARAM, in which every ON record
-// votes, is shared with a peer at a beat as at a load: its first beat asks
-// start, and a beat after an outage asks outage.
-func TestAZoneWithoutHSYNCPARAMIsAskedAtABeat(t *testing.T) {
-	const zone = "legacy.beat.example."
+// votes, is not a multi-provider zone here: the load gives it no provider
+// data, and no agent can answer for it complete. It is asked about neither
+// at its load nor at a beat, first or after an outage; a zone with
+// HSYNCPARAM beside it is.
+func TestAZoneWithoutHSYNCPARAMIsNotAskedAtALoadOrABeat(t *testing.T) {
+	const zone, mp = "legacy.beat.example.", "withparam.beat.example."
 	asMPAgent(t)
 	zd := seedZoneWithHSYNC3(t, zone, roleA, roleB)
 	zd.Options[tdns.OptMultiProvider] = true
 	mpzd, _ := Zones.Get(zone)
 	mpzd.EnsureMP()
-	mpzd.MP.MPdata = nil // no provider data: populateMPdata takes it as no multi-provider zone
+	mpzd.MP.MPdata = nil // populateMPdata takes it as no multi-provider zone
+	catchUpZone(t, mp, []string{roleA, roleB}, nil, nil)
 	r := newTrackerRig(t, roleA)
 	r.t.outage = 50 * time.Millisecond
 	catchUpRecent = time.Millisecond
 	t.Cleanup(func() { catchUpRecent = time.Minute })
 	r.setUp(roleB, true)
 	r.run()
+	if asked := r.t.AskZone(zone, catchUpStart); len(asked) != 0 {
+		t.Errorf("the load asked about the zone without HSYNCPARAM: %v", asked)
+	}
 	r.t.PeerOperational(roleB)
 	sent := r.waitSends(t, 1)
-	if sent[0].reason != catchUpStart || sent[0].zone != zone {
-		t.Fatalf("the first beat asked %+v, want start for the zone", sent[0])
+	if sent[0].zone != mp || sent[0].reason != catchUpStart {
+		t.Fatalf("the first beat asked %+v, want start for the zone with HSYNCPARAM only", sent[0])
 	}
-	r.t.Answered(zone, roleB, completeAnswer(sent[0].request))
+	r.t.Answered(mp, roleB, completeAnswer(sent[0].request))
 	time.Sleep(60 * time.Millisecond)
 	r.t.PeerOperational(roleB)
-	if got := r.waitSends(t, 2); got[1].reason != catchUpOutage {
-		t.Errorf("the beat after the outage asked %+v, want outage", got[1])
+	got := r.waitSends(t, 2)
+	if got[1].zone != mp || got[1].reason != catchUpOutage {
+		t.Errorf("the beat after the outage asked %+v, want outage for the zone with HSYNCPARAM only", got[1])
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, s := range r.sent() {
+		if s.zone == zone {
+			t.Errorf("the zone without HSYNCPARAM was asked about: %+v", s)
+		}
 	}
 }
