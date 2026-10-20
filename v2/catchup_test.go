@@ -981,3 +981,69 @@ func TestTheEnginesRemovalOfAPeerForgetsIt(t *testing.T) {
 		t.Errorf("the removed peer's request is kept: %+v", e)
 	}
 }
+
+// A peer that starts while a request to it is outstanding is asked again,
+// under a new name: the answer its earlier process built, still on its
+// way, names the replaced request and counts for nothing. A start that
+// comes while the ask-back is outstanding leaves it as it is.
+func TestAPeerStartReplacesTheOutstandingRequest(t *testing.T) {
+	const zone = "replaced.start.example."
+	catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+	r := newTrackerRig(t, roleA)
+	r.setUp(roleB, true)
+	r.run()
+	r.t.Ask(zone, roleB, catchUpStart)
+	first := r.waitSends(t, 1)[0]
+
+	// the peer restarts, and asks at its start
+	r.t.Requested(zone, roleB, &CatchUp{Request: "b-started", Reason: catchUpStart})
+	again := r.waitSends(t, 2)[1]
+	if again.reason != catchUpPeerStart || again.request == first.request {
+		t.Fatalf("after the peer's start the agent asked %+v, want peer-start under a new name", again)
+	}
+	// the earlier process's answer arrives: it counts for nothing
+	r.t.Answered(zone, roleB, completeAnswer(first.request))
+	if e := r.entry(zone, roleB); e == nil || e.Complete || !e.outstanding() || e.Request != again.request {
+		t.Errorf("the replaced request's answer counted: %+v", e)
+	}
+	// another start while the ask-back is outstanding leaves it
+	r.t.Requested(zone, roleB, &CatchUp{Request: "b-start-retried", Reason: catchUpStart})
+	time.Sleep(50 * time.Millisecond)
+	if n := len(r.sent()); n != 2 {
+		t.Errorf("a start while the ask-back was outstanding replaced it: %+v", r.sent())
+	}
+	r.t.Answered(zone, roleB, completeAnswer(again.request))
+	if e := r.entry(zone, roleB); e == nil || !e.Complete || e.outstanding() {
+		t.Errorf("the ask-back's answer did not end the request: %+v", e)
+	}
+}
+
+// A zone with HSYNC3 records and no HSYNCPARAM, in which every ON record
+// votes, is shared with a peer at a beat as at a load: its first beat asks
+// start, and a beat after an outage asks outage.
+func TestAZoneWithoutHSYNCPARAMIsAskedAtABeat(t *testing.T) {
+	const zone = "legacy.beat.example."
+	asMPAgent(t)
+	zd := seedZoneWithHSYNC3(t, zone, roleA, roleB)
+	zd.Options[tdns.OptMultiProvider] = true
+	mpzd, _ := Zones.Get(zone)
+	mpzd.EnsureMP()
+	mpzd.MP.MPdata = nil // no provider data: populateMPdata takes it as no multi-provider zone
+	r := newTrackerRig(t, roleA)
+	r.t.outage = 50 * time.Millisecond
+	catchUpRecent = time.Millisecond
+	t.Cleanup(func() { catchUpRecent = time.Minute })
+	r.setUp(roleB, true)
+	r.run()
+	r.t.PeerOperational(roleB)
+	sent := r.waitSends(t, 1)
+	if sent[0].reason != catchUpStart || sent[0].zone != zone {
+		t.Fatalf("the first beat asked %+v, want start for the zone", sent[0])
+	}
+	r.t.Answered(zone, roleB, completeAnswer(sent[0].request))
+	time.Sleep(60 * time.Millisecond)
+	r.t.PeerOperational(roleB)
+	if got := r.waitSends(t, 2); got[1].reason != catchUpOutage {
+		t.Errorf("the beat after the outage asked %+v, want outage", got[1])
+	}
+}
