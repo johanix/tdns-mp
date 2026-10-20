@@ -1979,11 +1979,14 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 		status.CatchUp = t.Status(zone)
 		if owed, room := t.owedState(zone); owed && status.IsLeader {
 			caughtUp, _ := t.CaughtUp(zone)
+			down, since, lastErr := t.parentDownState(zone)
 			switch {
 			case !caughtUp:
 				status.ParentSync = "held until the zone is caught up"
 			case room:
 				status.ParentSync = "owed, the delegation sync queue is full"
+			case down:
+				status.ParentSync = fmt.Sprintf("owed since %s: the parent's analysis fails (%s)", since.UTC().Format(time.RFC3339), lastErr)
 			default:
 				status.ParentSync = "owed"
 			}
