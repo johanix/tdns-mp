@@ -197,7 +197,28 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage, from string, group 
 	case fromAnswer:
 		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
 	}
-	gst.mergeGossip(&taken)
+	// An agent that does not vote in the group is an observer (design 4.7)
+	gst.mergeGossipAs(&taken, !isAmong(group.VotingMembers, AgentId(gst.LocalID)))
+}
+
+// observerTakes: an observer of a group, an agent that does not vote in it,
+// takes an election record with a term at or below the one it holds once
+// the lease it holds has run out (step 8, design 4.7): voting members that
+// have all restarted elect at term 1 again. The same term is news when it
+// names another leader or a later end of the lease. A voting member never
+// takes a lower term. The lease's end is the telling agent's clock: a clock
+// that is off moves the moment by as much.
+func observerTakes(observer bool, rec GroupElectionState, heldTerm uint64, heldLeader string, heldExpiry time.Time, now time.Time) bool {
+	if !observer || !now.After(heldExpiry) {
+		return false
+	}
+	switch {
+	case uint64(rec.Term) < heldTerm:
+		return true
+	case uint64(rec.Term) == heldTerm:
+		return rec.Leader != heldLeader || rec.LeaderExpiry.After(heldExpiry)
+	}
+	return false
 }
 
 func msgGroup(msg *GossipMessage) string {
@@ -208,9 +229,15 @@ func msgGroup(msg *GossipMessage) string {
 }
 
 // mergeGossip merges gossip into the local state table as it is, with no
-// rule of its own. For each member's state entry, keep the one with the
-// latest timestamp.
+// rule of its own, as a voting member does. For each member's state entry,
+// keep the one with the latest timestamp.
 func (gst *GossipStateTable) mergeGossip(msg *GossipMessage) {
+	gst.mergeGossipAs(msg, false)
+}
+
+// mergeGossipAs is mergeGossip for an agent that is, or is not, an observer
+// of the group (observerTakes).
+func (gst *GossipStateTable) mergeGossipAs(msg *GossipMessage, observer bool) {
 	var electionCallback func(string, GroupElectionState)
 	var electionHash string
 	var electionState GroupElectionState
@@ -234,12 +261,15 @@ func (gst *GossipStateTable) mergeGossip(msg *GossipMessage) {
 		}
 	}
 
-	// Merge election state (higher term wins). A record without a leader is
-	// no election's result. Stored, it would stand for its term and keep out
-	// the result that follows it, which is of the same term (#154).
+	// Merge election state (higher term wins; an observer also takes a
+	// lower or the same term once the lease it holds has run out). A record
+	// without a leader is no election's result. Stored, it would stand for
+	// its term and keep out the result that follows it, which is of the same
+	// term (#154).
 	if msg.Election.Term > 0 && msg.Election.Leader != "" {
 		existing := gst.Elections[groupHash]
-		if existing == nil || msg.Election.Term > existing.Term {
+		if existing == nil || msg.Election.Term > existing.Term ||
+			observerTakes(observer, msg.Election, uint64(existing.Term), existing.Leader, existing.LeaderExpiry, time.Now()) {
 			elCopy := msg.Election
 			gst.Elections[groupHash] = &elCopy
 			if gst.onElectionUpdate != nil {

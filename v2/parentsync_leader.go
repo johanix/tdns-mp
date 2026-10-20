@@ -152,8 +152,11 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 		return
 	}
 
-	// Single agent: self-elect immediately
+	// Single agent: self-elect immediately, at the next term (step 8,
+	// design 4.6): a self-election is a term like any other, so a member
+	// that does not vote learns it, and every renewal is a new term.
 	if expectedPeers == 0 {
+		le.Term++
 		lem.noteLeaderLocked(le, lem.localID, time.Now())
 		le.Leader = lem.localID
 		le.leaderTerm = le.Term
@@ -895,13 +898,24 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 	}
 	lem.mu.Unlock()
 
+	// Whether this agent votes in the group: an observer takes what the
+	// gossip table took on the same rule (observerTakes). A group not
+	// known here counts as one it votes in, the careful reading.
+	observer := false
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroup(groupHash); pg != nil {
+			observer = !isAmong(pg.VotingMembers, lem.localID)
+		}
+	}
+
 	le.mu.Lock()
 	defer le.mu.Unlock()
 
-	if uint64(state.Term) < le.Term {
+	news := uint64(state.Term) > le.Term ||
+		observerTakes(observer, state, le.Term, string(le.Leader), le.LeaderExpiry, time.Now())
+	if !news && uint64(state.Term) < le.Term {
 		return
 	}
-	news := uint64(state.Term) > le.Term
 	if news {
 		lgElect.Info("accepted leader from gossip",
 			"group", groupHash[:8], "leader", state.Leader,
@@ -1419,8 +1433,10 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 		return
 	}
 
-	// Single agent: become leader immediately
+	// Single agent: become leader immediately, at the next term (step 8,
+	// design 4.6)
 	if expectedPeers == 0 {
+		le.Term++
 		lem.noteLeaderLocked(le, lem.localID, time.Now())
 		le.Leader = lem.localID
 		le.leaderTerm = le.Term
