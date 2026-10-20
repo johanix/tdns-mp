@@ -355,6 +355,33 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 	return nil
 }
 
+// originVoteRefusal: the origin of a zone's operations is a voting member of
+// the zone (design 3.3), compared as canonical names; otherwise every
+// record is refused with the reason. A provider zone is not judged by it,
+// and a zone the combiner takes by HSYNC or HSYNC2 records alone has no
+// standings and is left as it is (votesInZone). What the combiner already
+// stores of an origin that stops voting stays (decision 37). Nil when the
+// origin may contribute.
+func originVoteRefusal(zoneClass, zone, origin string, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+	if zoneClass == "provider" || votesInZone(ZoneName(zone), AgentId(origin)) {
+		return nil
+	}
+	reason := fmt.Sprintf("origin %s is not a voting member of zone %s", origin, zone)
+	lgCombiner.Warn("rejecting contribution", "zone", zone, "sender", origin, "reason", reason)
+	resp := &CombinerSyncResponse{Zone: zone, Status: "error", Message: reason, Timestamp: time.Now()}
+	for _, op := range ops {
+		for _, rr := range op.Records {
+			resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: rr, Reason: reason})
+		}
+	}
+	for _, rrs := range records {
+		for _, rr := range rrs {
+			resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: rr, Reason: reason})
+		}
+	}
+	return resp
+}
+
 func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	totalRecords := 0
 	for _, rrs := range req.Records {
@@ -414,6 +441,11 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			}
 			return resp
 		}
+	}
+
+	if refusal := originVoteRefusal(req.ZoneClass, zonename, req.SenderID, req.Operations, req.Records); refusal != nil {
+		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
+		return refusal
 	}
 
 	policy := mpzd.getEditPolicy()

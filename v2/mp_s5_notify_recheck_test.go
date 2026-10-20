@@ -1021,7 +1021,7 @@ func TestThePropagationDelayIsAnnouncedInTheBeatsGossip(t *testing.T) {
 		t.Errorf("the gossip API shows a propagation delay bob did not announce: %v", row)
 	}
 	// a row that is older than the one held does not take its place
-	theirs.MergeGossip(&GossipMessage{GroupHash: group, Members: map[string]*MemberState{
+	theirs.mergeGossip(&GossipMessage{GroupHash: group, Members: map[string]*MemberState{
 		alice.Identity: {Identity: alice.Identity, Timestamp: time.Now().Add(-time.Hour), PropagationDelay: 1}}})
 	if d, _ := theirs.AnnouncedPropagationDelay(alice.Identity); d != 7*time.Minute {
 		t.Errorf("an older row replaced alice's propagation delay: %s", d)
@@ -1102,7 +1102,7 @@ func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.
 	const group = "0123456789abcdef"
 	announce := func(label string, seconds uint32) {
 		id := "agent." + label + ".example."
-		gst.MergeGossip(&GossipMessage{GroupHash: group, Members: map[string]*MemberState{
+		gst.mergeGossip(&GossipMessage{GroupHash: group, Members: map[string]*MemberState{
 			id: {Identity: id, Timestamp: time.Now(), PropagationDelay: seconds}}})
 	}
 	announce("p2", 120)
@@ -1120,7 +1120,7 @@ func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.
 		t.Errorf("the wait is %s, by %s; want this agent's own five minutes", wait, of)
 	}
 	// a provider's newer word counts, also when it comes in another group's gossip
-	gst.MergeGossip(&GossipMessage{GroupHash: "fedcba9876543210", Members: map[string]*MemberState{
+	gst.mergeGossip(&GossipMessage{GroupHash: "fedcba9876543210", Members: map[string]*MemberState{
 		"agent.p2.example.": {Identity: "agent.p2.example.", Timestamp: time.Now().Add(time.Second), PropagationDelay: 600}}})
 	if wait, of := conf.delegationNotifyWait(z); wait != 10*time.Minute || of != "agent.p2.example." {
 		t.Errorf("the wait is %s, by %s; want p2's ten minutes", wait, of)
@@ -1128,7 +1128,7 @@ func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.
 	// nobody says anything: no wait
 	gst.SetPropagationDelay(0)
 	announce("p2", 0)
-	gst.MergeGossip(&GossipMessage{GroupHash: "fedcba9876543210", Members: map[string]*MemberState{
+	gst.mergeGossip(&GossipMessage{GroupHash: "fedcba9876543210", Members: map[string]*MemberState{
 		"agent.p2.example.": {Identity: "agent.p2.example.", Timestamp: time.Now().Add(2 * time.Second)}}})
 	if wait, _ := conf.delegationNotifyWait(z); wait != 0 {
 		t.Errorf("the wait is %s with no propagation delay known, want none", wait)

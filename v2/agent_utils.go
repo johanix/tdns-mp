@@ -198,11 +198,11 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 	}
 
 	// Build label->Identity map so we can resolve Upstream labels to FQDNs.
-	// Kept complete (all HSYNC3 records) so Upstream resolution still works.
+	// ON records only: an OFF record is nobody's upstream or downstream.
 	labelToIdentity := map[string]string{}
 	for _, rr := range hsyncRRset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 {
 				labelToIdentity[h3.Label] = h3.Identity
 			}
 		}
@@ -220,11 +220,14 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 	for _, rr := range hsyncRRset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				on := hsync3.State != 0
 				// Skip if this is our own identity
-				if hsync3.Identity == ar.LocalAgent.Identity {
-					zad.MyUpstream = AgentId(labelToIdentity[hsync3.Upstream])
+				if isAmong([]string{hsync3.Identity}, AgentId(ar.LocalAgent.Identity)) {
+					if on {
+						zad.MyUpstream = AgentId(labelToIdentity[hsync3.Upstream])
+					}
 					continue // don't add ourselves to the list of agents
-				} else if labelToIdentity[hsync3.Upstream] == ar.LocalAgent.Identity {
+				} else if on && isAmong([]string{labelToIdentity[hsync3.Upstream]}, AgentId(ar.LocalAgent.Identity)) {
 					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync3.Identity))
 				}
 				// Skip identities with no HSYNCPARAM role — they have an

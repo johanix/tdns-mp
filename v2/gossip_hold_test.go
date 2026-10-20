@@ -69,7 +69,7 @@ func TestAnOwnRowHeardInGossipDoesNotEndTheHold(t *testing.T) {
 
 	gst := NewGossipStateTable("a.example.")
 	gst.HoldFirstLocalRows(now.Add(30 * time.Second))
-	gst.MergeGossip(&GossipMessage{
+	gst.mergeGossip(&GossipMessage{
 		GroupHash: group,
 		Members: map[string]*MemberState{
 			"a.example.": {Identity: "a.example.", PeerStates: map[string]string{"b.example.": op},

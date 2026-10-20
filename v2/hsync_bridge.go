@@ -240,9 +240,10 @@ func (p pgmHsyncLookup) Groups() []hsync.ProviderGroupInfo {
 			zones[i] = hsync.ZoneName(z)
 		}
 		out = append(out, hsync.ProviderGroupInfo{
-			GroupHash: hash,
-			Members:   pg.Members,
-			Zones:     zones,
+			GroupHash:     hash,
+			Members:       pg.Members,
+			VotingMembers: pg.VotingMembers,
+			Zones:         zones,
 		})
 	}
 	return out
@@ -261,9 +262,10 @@ func (p pgmHsyncLookup) GetGroup(groupHash string) *hsync.ProviderGroupInfo {
 		zones[i] = hsync.ZoneName(z)
 	}
 	info := &hsync.ProviderGroupInfo{
-		GroupHash: pg.GroupHash,
-		Members:   pg.Members,
-		Zones:     zones,
+		GroupHash:     pg.GroupHash,
+		Members:       pg.Members,
+		VotingMembers: pg.VotingMembers,
+		Zones:         zones,
 	}
 	return info
 }

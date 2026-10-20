@@ -581,9 +581,17 @@ func requestEdits(ctx context.Context, zd *tdns.ZoneData, tm *MPTransportBridge,
 // agent's config response for this zone and subtype. Returns the config data or
 // nil on timeout/error.
 func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) *ConfigResponseMsg {
+	resp, _ := requestConfig(ar, agent, zone, subtype, msgQs)
+	return resp
+}
+
+// requestConfig is RequestAndWaitForConfig with the error of a request the
+// peer did not take: refused on the wire (step 6's rules), or not
+// delivered. The operator is told that, not a time-out.
+func requestConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) (*ConfigResponseMsg, error) {
 	if msgQs == nil {
 		lgEngine.Warn("RequestAndWaitForConfig: no MsgQs available")
-		return nil
+		return nil, nil
 	}
 
 	// Several requests can be out at once (one per zone when a group elects
@@ -616,7 +624,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.ID, "zone", zone, "subtype", subtype, "err", err)
-		return nil
+		return nil, err
 	}
 
 	// Wait for the config response (peer sends it as a separate CONFIG message)
@@ -626,11 +634,11 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 	select {
 	case resp := <-answer:
 		lgEngine.Info("RequestAndWaitForConfig: received config response", "sender", resp.SenderID, "zone", resp.Zone, "subtype", resp.Subtype)
-		return resp
+		return resp, nil
 
 	case <-timeout.C:
 		lgEngine.Warn("RequestAndWaitForConfig: timeout waiting for config response (15s)", "zone", zone, "subtype", subtype)
-		return nil
+		return nil, nil
 	}
 }
 
@@ -638,9 +646,16 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 // agent's audit response for this zone. Returns the audit data or nil on
 // timeout/error.
 func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) *AuditResponseMsg {
+	resp, _ := requestAudit(ar, agent, zone, msgQs)
+	return resp
+}
+
+// requestAudit is RequestAndWaitForAudit with the error of a request the
+// peer did not take.
+func requestAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) (*AuditResponseMsg, error) {
 	if msgQs == nil {
 		lgEngine.Warn("RequestAndWaitForAudit: no MsgQs available")
-		return nil
+		return nil, nil
 	}
 
 	nonce := newRfiNonce()
@@ -658,7 +673,7 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 	})
 	if err != nil {
 		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.ID, "zone", zone, "err", err)
-		return nil
+		return nil, err
 	}
 
 	// Wait for the audit response (peer sends it as a separate AUDIT message)
@@ -668,11 +683,11 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 	select {
 	case resp := <-answer:
 		lgEngine.Info("RequestAndWaitForAudit: received audit response", "sender", resp.SenderID, "zone", resp.Zone)
-		return resp
+		return resp, nil
 
 	case <-timeout.C:
 		lgEngine.Warn("RequestAndWaitForAudit: timeout waiting for audit response (15s)", "zone", zone)
-		return nil
+		return nil, nil
 	}
 }
 

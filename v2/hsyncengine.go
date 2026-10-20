@@ -515,10 +515,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[ar.effectiveAgentState(agent.ID)])
 					return
 				}
-				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
+				configResp, sendErr := requestConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
 				if configResp == nil {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.ID)
+					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: %s", msg.Zone, agent.ID, notTaken(sendErr))
 					return
 				}
 				if why := configResp.Refused(); why != "" {
@@ -541,9 +541,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[ar.effectiveAgentState(agent.ID)])}
 						continue
 					}
-					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
+					configResp, sendErr := requestConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
 					if configResp == nil {
-						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: notTaken(sendErr)}
 						continue
 					}
 					if why := configResp.Refused(); why != "" {
@@ -557,14 +557,16 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 
 			case "sig0key":
-				for _, agent := range zad.Agents {
+				// the voting members, as the leader's own request asks
+				// (sig0KeyPeers); not the agents the zone lists with no role
+				for _, agent := range sig0KeyPeers(msg.Zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
 					if !ar.isAgentOperational(agent.ID) {
 						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)])}
 						continue
 					}
-					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
+					configResp, sendErr := requestConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
 					if configResp == nil {
-						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: notTaken(sendErr)}
 						continue
 					}
 					if why := configResp.Refused(); why != "" {
@@ -611,9 +613,16 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			resp.Msg = fmt.Sprintf("zone %s: a request for the zone's state to %d voting members; agent parentsync status shows what became of each", msg.Zone, len(asked))
 
 		case "AUDIT":
-			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
-			lgEngine.Info("sending AUDIT RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
+			// Send RFI AUDIT to the zone's voting members, using the
+			// two-phase pattern. The auditor, which never answered one, is
+			// not asked.
+			lgEngine.Info("sending AUDIT RFI to the zone's voting members", "zone", msg.Zone)
+			asked := 0
 			for _, agent := range zad.Agents {
+				if !isVotingMember(msg.Zone, string(agent.ID)) {
+					continue
+				}
+				asked++
 				if !ar.isAgentOperational(agent.ID) {
 					resp.RfiResponse[agent.ID] = &RfiData{
 						Error:    true,
@@ -621,12 +630,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					}
 					continue
 				}
-				auditResp := RequestAndWaitForAudit(ar, agent, string(msg.Zone), msgQs)
+				auditResp, sendErr := requestAudit(ar, agent, string(msg.Zone), msgQs)
 				if auditResp == nil {
-					resp.RfiResponse[agent.ID] = &RfiData{
-						Error:    true,
-						ErrorMsg: "timeout or error waiting for AUDIT response",
-					}
+					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: notTaken(sendErr)}
 					continue
 				}
 				rfiData := &RfiData{
@@ -638,7 +644,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				resp.RfiResponse[agent.ID] = rfiData
 			}
-			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
+			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d voting members for zone %s", asked, msg.Zone)
 
 		default:
 			resp.Error = true
@@ -784,4 +790,14 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	case <-time.After(1 * time.Second): // Don't block forever
 		lgEngine.Warn("STATUS response timed out")
 	}
+}
+
+// notTaken is what the operator is told of a request with no answer: that
+// the peer did not take it (refused on the wire, by the rules for senders,
+// or not delivered), with the error, or that the answer did not come.
+func notTaken(err error) string {
+	if err != nil {
+		return "not taken: " + err.Error()
+	}
+	return "no response (timeout)"
 }

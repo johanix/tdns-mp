@@ -662,6 +662,12 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// A message let in for a zone's SIG(0) key alone is refused before any
 	// verb handler takes it, unless it is the request for the key or its
 	// answer (keyHandOverGate).
+	// On an agent and an auditor a payload that names another sender than
+	// the one the transport established is refused first, before anything
+	// judges the message by that name (refuseNamedSender).
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		tm.Router.Use(tm.refuseNamedSender)
+	}
 	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
@@ -715,8 +721,9 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
-	// Messages reaching routeHelloMessage have passed middleware auth.
-	senderID := payload.GetSenderID()
+	// Messages reaching routeHelloMessage have passed middleware auth. The
+	// sender is the one the parser and refuseNamedSender checked.
+	senderID := msg.SenderID
 	lgTransport.Debug("processing authorized DNS hello", "sender", senderID)
 
 	// DNS-37: inbound DNS hello accepted → INTRODUCING on the canonical
@@ -843,7 +850,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	senderID := msg.SenderID // the sender the parser and refuseNamedSender checked
 
 	// DNS-51: Authorization check for Beat messages
 	// Beat includes Zones field (list of zones sender believes are shared)
@@ -870,7 +877,11 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 		var gossipMsgs []GossipMessage
 		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
 			for i := range gossipMsgs {
-				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+				var group *ProviderGroup
+				if pgm := tm.agentRegistry.ProviderGroupManager; pgm != nil {
+					group = pgm.GetGroup(gossipMsgs[i].GroupHash)
+				}
+				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], senderID, group, false)
 			}
 			lgTransport.Debug("merged gossip from incoming DNS beat", "sender", senderID, "groups", len(gossipMsgs))
 
@@ -985,7 +996,11 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		payload.DistributionID = msg.DistributionID
 	}
 
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	// The sender the parser and refuseNamedSender checked. On an agent or
+	// an auditor a payload that names none is refused before this; on a
+	// combiner or a signer, where no such check runs, the deliverer is the
+	// only sender such a payload has.
+	senderID := msg.SenderID
 	if senderID == "" && msg.TransportSender != "" {
 		senderID = msg.TransportSender // Fallback to transport-level sender (from QNAME)
 		lgTransport.Debug("payload had empty sender, using transport sender", "sender", senderID)
@@ -1090,7 +1105,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		// Only agents acting as relay (with an agentRegistry) send this — the combiner already
 		// returned a "pending" ACK inline in the DNS response.
 		if tm.agentRegistry != nil {
-			go tm.sendImmediateConfirmation(payload)
+			go tm.sendImmediateConfirmation(payload, senderID)
 		}
 	default:
 		lgTransport.Warn("message channel full, dropping message", "msgType", msgTypeStr, "sender", senderID)
@@ -1419,13 +1434,17 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
-	// Messages reaching routeRelocateMessage have passed middleware auth.
-	lgTransport.Debug("processing authorized DNS relocate", "sender", payload.SenderID)
+	// Messages reaching routeRelocateMessage have passed middleware auth. The
+	// sender is the one the parser and refuseNamedSender checked, whichever
+	// field of the payload named it: a relocate moves its sender's own
+	// address, and no other.
+	senderID := msg.SenderID
+	lgTransport.Debug("processing authorized DNS relocate", "sender", senderID)
 
 	// Update peer's operational address
-	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
+	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		peer = tm.PeerRegistry.GetOrCreate(payload.SenderID)
+		peer = tm.PeerRegistry.GetOrCreate(senderID)
 	}
 
 	peer.SetOperationalAddress(&transport.Address{
@@ -1435,7 +1454,7 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 		Path:      payload.NewAddress.Path,
 	})
 
-	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
+	lgTransport.Info("updated operational address", "peer", senderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
 
 // settleQueuedMessage tells the reliable queue what a confirmation means
@@ -1457,12 +1476,11 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
-func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) {
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, senderID string) {
 	if tm.DNSTransport == nil {
 		return
 	}
 
-	senderID := payload.GetSenderID()
 	if payload.DistributionID == "" {
 		lgTransport.Warn("cannot send immediate confirmation, no distribution ID", "sender", senderID)
 		return
@@ -1839,9 +1857,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			var gossipMsgs []GossipMessage
 			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
 				for i := range gossipMsgs {
-					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
-					// Re-evaluate group state after merge (may trigger elections)
+					// the answer of the peer that was beaten: rows only
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], string(agent.ID), pg, true)
+					// Re-evaluate group state after merge (may trigger elections)
 					if pg != nil {
 						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.Members)
 					}

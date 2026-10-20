@@ -31,9 +31,10 @@ type ZoneLookup interface {
 
 // ProviderGroupInfo is a snapshot of one provider group.
 type ProviderGroupInfo struct {
-	GroupHash string
-	Members   []string
-	Zones     []ZoneName
+	GroupHash     string
+	Members       []string
+	VotingMembers []string // the members in servers= or signers=
+	Zones         []ZoneName
 }
 
 // ProviderGroupLookup supplies group membership for gossip.
