@@ -3,9 +3,10 @@
  *
  * A SYNC's confirmations go back on the mechanism the SYNC arrived on: a
  * SYNC over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS,
- * whatever else the originator offers. A confirmation that fails is not
- * sent on the other mechanism. A confirmation over HTTPS speaks for the
- * client certificate's identity only.
+ * whatever else the originator offers. A confirmation that fails over
+ * HTTPS goes over DNS (an open question; it stays as it was until settled).
+ * A confirmation over HTTPS speaks for the client certificate's identity
+ * only.
  */
 
 package tdnsmp
@@ -54,11 +55,19 @@ func queueSync(t *testing.T, env *integEnv, zone string) string {
 	return id
 }
 
+// alice's /msg: it serves, refuses every message, or hangs.
+type httpsMode int
+
+const (
+	httpsServes httpsMode = iota
+	httpsRefuses
+	httpsHangs
+)
+
 // mechanismEnv is alice and bob sharing zone, alice reachable at bob over
 // both mechanisms: her sync API endpoints over HTTPS and her receive
 // pipeline over DNS, each counting what reaches it. Bob reaches alice's
-// HTTPS with his own certificate. With refuseHTTPS alice's /msg refuses
-// every message.
+// HTTPS with his own certificate; mode says what her /msg does.
 type mechanismEnv struct {
 	*integEnv
 	zone       string
@@ -69,7 +78,7 @@ type mechanismEnv struct {
 	aliceAtBob *transport.Peer
 }
 
-func newMechanismEnv(t *testing.T, zone string, refuseHTTPS bool) *mechanismEnv {
+func newMechanismEnv(t *testing.T, zone string, mode httpsMode) *mechanismEnv {
 	t.Helper()
 	me := &mechanismEnv{
 		integEnv: newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true}),
@@ -82,18 +91,28 @@ func newMechanismEnv(t *testing.T, zone string, refuseHTTPS bool) *mechanismEnv 
 	conf := &Config{}
 	conf.InternalMp.MPTransport = me.Alice.Bridge
 	msg := conf.apiSyncEndpoint(apiEndpointMsg)
+	release := make(chan struct{})
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		me.posts.Add(1)
-		if refuseHTTPS {
+		switch mode {
+		case httpsRefuses:
 			sink := &apiReplySink{kind: apiEndpointMsg, w: w, local: AgentId(me.alice)}
 			_ = sink.fail("refused")
-			return
+		case httpsHangs:
+			// The body read, the server sees the client go.
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		default:
+			msg(w, r)
 		}
-		msg(w, r)
 	}))
 	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs first
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -113,6 +132,10 @@ func newMechanismEnv(t *testing.T, zone string, refuseHTTPS bool) *mechanismEnv 
 	})
 
 	me.Bob.Bridge.APITransport = apiSender(srv, me.bob, clientCert(t, me.bob))
+	if mode == httpsHangs {
+		// as an agent's: longer than the time a confirmation has
+		me.Bob.Bridge.APITransport.HTTPClient.Timeout = 10 * time.Second
+	}
 	me.aliceAtBob = transport.NewPeer(me.alice)
 	me.aliceAtBob.APIEndpoint = srv.URL + "/api/v1"
 	addr := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
@@ -149,7 +172,7 @@ func (me *mechanismEnv) confirmed(t *testing.T, id string, status transport.Conf
 // the final word, though alice offers HTTPS too: nothing is posted to her.
 // The SYNC goes over the wire from alice's own sender.
 func TestConfirm_DNSSyncIsConfirmedByDNS(t *testing.T) {
-	me := newMechanismEnv(t, "confirm-dns.example.", false)
+	me := newMechanismEnv(t, "confirm-dns.example.", httpsServes)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +224,7 @@ func TestConfirm_DNSSyncIsConfirmedByDNS(t *testing.T) {
 // puts its distribution ID in the payload (plan decision 41, PR #224);
 // before that, bob would confirm under an ID of his own.
 func TestConfirm_HTTPSSyncIsConfirmedOverHTTPS(t *testing.T) {
-	me := newMechanismEnv(t, "confirm-https.example.", false)
+	me := newMechanismEnv(t, "confirm-https.example.", httpsServes)
 	id := queueSync(t, me.integEnv, me.zone)
 	in := makeSyncIncomingMessage(t, me.alice, me.bob, me.zone, id,
 		map[string][]string{me.zone: {me.zone + " 3600 IN TXT \"sync over https\""}})
@@ -229,11 +252,11 @@ func TestConfirm_HTTPSSyncIsConfirmedOverHTTPS(t *testing.T) {
 	}
 }
 
-// A confirmation that fails over HTTPS is not sent over DNS: alice's /msg
-// refuses both of bob's, no NOTIFY follows, and alice's entry stays for her
-// queue to send the SYNC again.
-func TestConfirm_FailedHTTPSConfirmIsNotSentOverDNS(t *testing.T) {
-	me := newMechanismEnv(t, "confirm-no-fallback.example.", true)
+// A confirmation that fails over HTTPS goes over DNS: alice's /msg, from
+// before confirmations went over HTTPS, refuses both of bob's, and both
+// reach her by NOTIFY and close her entry.
+func TestConfirm_RefusedHTTPSConfirmGoesOverDNS(t *testing.T) {
+	me := newMechanismEnv(t, "confirm-refused.example.", httpsRefuses)
 	id := queueSync(t, me.integEnv, me.zone)
 	in := makeSyncIncomingMessage(t, me.alice, me.bob, me.zone, id,
 		map[string][]string{me.zone: {me.zone + " 3600 IN TXT \"refused\""}})
@@ -243,31 +266,39 @@ func TestConfirm_FailedHTTPSConfirmIsNotSentOverDNS(t *testing.T) {
 	if !ok {
 		t.Fatal("the sync did not reach bob")
 	}
+	me.confirmed(t, id, transport.ConfirmPending)
 	me.finalFrom(m)
+	me.confirmed(t, id, transport.ConfirmSuccess)
+	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got != "gone" {
+		t.Errorf("after the final confirmation alice's entry is %s, want it closed", got)
+	}
+	if p, n := me.posts.Load(), me.notifies.Load(); p != 2 || n != 2 {
+		t.Errorf("%d POSTs and %d NOTIFYs, want each confirmation refused over HTTPS and sent by NOTIFY", p, n)
+	}
+}
 
-	deadline := time.Now().Add(confirmWait)
-	for me.posts.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+// A peer that hangs on HTTPS leaves DNS time: the HTTPS try gets half of
+// the confirmation's time, though its own timeout is longer, and the
+// NOTIFY carries the confirmation.
+func TestConfirm_HangingHTTPSLeavesDNSTime(t *testing.T) {
+	me := newMechanismEnv(t, "confirm-hang.example.", httpsHangs)
+	id := queueSync(t, me.integEnv, me.zone)
+	me.Bob.MsgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+		OriginatingDistID: id, OriginatingSender: me.alice, OriginatingMechanism: transport.MechanismAPI,
+		Zone: ZoneName(me.zone), Status: "SUCCESS"})
+	me.confirmed(t, id, transport.ConfirmSuccess)
+	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got != "gone" {
+		t.Errorf("alice's entry is %s, want it closed", got)
 	}
-	if n := me.posts.Load(); n != 2 {
-		t.Fatalf("alice's /msg got %d POSTs, want the PENDING and the final word", n)
-	}
-	time.Sleep(300 * time.Millisecond) // time for a NOTIFY that must not come
-	if n := me.notifies.Load(); n != 0 {
-		t.Errorf("a refused HTTPS confirmation was sent over DNS: %d NOTIFYs", n)
-	}
-	if c, ok := recvConfirmWithin(t, me.Alice.MsgQs.Confirmation, 10*time.Millisecond); ok {
-		t.Errorf("alice booked a confirmation she refused: %+v", c)
-	}
-	if got := queueState(me.Alice.Bridge.ReliableQueue, id); got == "gone" {
-		t.Error("a refused confirmation closed alice's entry")
+	if n := me.notifies.Load(); n != 1 {
+		t.Errorf("%d NOTIFYs, want the confirmation's", n)
 	}
 }
 
 // A confirmation whose SYNC's mechanism is not known goes nowhere: it is
 // not guessed.
 func TestConfirm_UnknownMechanismSendsNothing(t *testing.T) {
-	me := newMechanismEnv(t, "confirm-unknown.example.", false)
+	me := newMechanismEnv(t, "confirm-unknown.example.", httpsServes)
 	id := queueSync(t, me.integEnv, me.zone)
 	me.Bob.MsgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 		OriginatingDistID: id, OriginatingSender: me.alice, Zone: ZoneName(me.zone), Status: "SUCCESS"})

@@ -1476,7 +1476,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, 
 			"distributionID", payload.DistributionID, "peer", senderID, "mechanism", mechanism)
 		return
 	}
-	err := t.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, t, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
@@ -1537,7 +1537,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 			"distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender, "mechanism", detail.OriginatingMechanism)
 		return
 	}
-	err := t.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, t, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(detail.Zone),
 		DistributionID: detail.OriginatingDistID, // Use the originating agent's distID
@@ -1562,10 +1562,8 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 // confirmTransport is the transport a SYNC's confirmations go back on: the
 // mechanism the SYNC arrived on, whatever else the peer offers. A SYNC over
 // DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents that
-// share a mechanism use that path both ways. There is no fallback to the
-// other mechanism: a confirmation that fails is not sent again, and the
-// sender's reliable queue sends the SYNC again, on the mechanism it chooses.
-// nil when the mechanism is unknown or this bridge has no transport for it.
+// share a mechanism use that path both ways. nil when the mechanism is
+// unknown or this bridge has no transport for it: then nothing is sent.
 func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transport {
 	switch mechanism {
 	case transport.MechanismAPI:
@@ -1577,6 +1575,32 @@ func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transp
 			return tm.DNSTransport
 		}
 	}
+	return nil
+}
+
+// confirmOn sends a confirmation on t, the transport of its SYNC's mechanism
+// (confirmTransport). One that fails over HTTPS is sent over DNS when DNS
+// reaches the peer; whether it may be is not settled yet, and until it is
+// that stays as it was. The HTTPS try then gets half the time, so a peer
+// that hangs on it leaves DNS the rest. A confirmation over DNS has no
+// fallback: the SYNC came over DNS.
+func (tm *MPTransportBridge) confirmOn(ctx context.Context, t transport.Transport, peer *transport.Peer, req *transport.ConfirmRequest) error {
+	if _, isAPI := t.(*transport.APITransport); !isAPI || tm.DNSTransport == nil || peer.CurrentAddress() == nil {
+		return t.Confirm(ctx, peer, req)
+	}
+	first, cancel := ctx, context.CancelFunc(func() {})
+	if deadline, ok := ctx.Deadline(); ok {
+		first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+	}
+	apiErr := t.Confirm(first, peer, req)
+	cancel()
+	if apiErr == nil {
+		return nil
+	}
+	if dnsErr := tm.DNSTransport.Confirm(ctx, peer, req); dnsErr != nil {
+		return fmt.Errorf("API: %w; DNS: %w", apiErr, dnsErr)
+	}
+	lgTransport.Info("confirmation sent over DNS, as HTTPS failed", "peer", peer.ID, "distributionID", req.DistributionID, "err", apiErr)
 	return nil
 }
 
