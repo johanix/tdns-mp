@@ -811,23 +811,39 @@ func TestTheAgentsOwnCombinerIsNotHeldToTheRFIRules(t *testing.T) {
 	}
 }
 
-// A provider zone is not judged by its origin's standing at the combiner:
+// The combiner judges a zone by its records as loaded, not by the class the
+// payload gives it. A provider zone, one the combiner is configured with as
+// such, has no HSYNC3 RRset, and is not judged by its origin's standing:
 // what agents contribute of its record types, the _signal KEYs among them,
-// is not a member's zone data.
-func TestTheCombinerTakesAProviderZoneFromAnyOrigin(t *testing.T) {
-	mpzd, hdb := csyncCombinerZone(t, "provider.origin.example.", false, false)
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNC3,
-		Class: dns.ClassINET, Ttl: 3600}, Data: &core.HSYNC3{State: 1, Label: "us", Identity: csyncOurAgent, Upstream: "."}}}})
-	mpzd.Data.Set(mpzd.ZoneName, *apex)
-	mpzd.ZoneData.InstallInitialSnapshot()
-	resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: "agent.gamma.example.", DeliveredBy: csyncOurAgent, Zone: mpzd.ZoneName, ZoneClass: "provider",
-		Operations:     []core.RROperation{{Operation: "add", RRtype: "TXT", Records: []string{mpzd.ZoneName + " 3600 IN TXT \"p\""}}},
-		DistributionID: nextDistributionID(), Timestamp: time.Now()}, nil, map[string]bool{csyncOurAgent: true}, hdb, nil)
-	for _, r := range resp.RejectedItems {
-		if strings.Contains(r.Reason, "voting member") {
-			t.Errorf("a provider zone's contribution was refused for its origin's standing: %+v", r)
-		}
+// is not a member's zone data. A customer zone with HSYNC3 is judged
+// whatever the payload says: an update from an origin that does not vote,
+// marked as a provider zone's, is refused for the origin's standing.
+func TestTheCombinerJudgesAZoneByItsRecordsNotThePayloadsClass(t *testing.T) {
+	update := func(zone, origin string, hdb *HsyncDB) *CombinerSyncResponse {
+		return CombinerProcessUpdate(&CombinerSyncRequest{SenderID: origin, DeliveredBy: csyncOurAgent, Zone: zone, ZoneClass: "provider",
+			Operations:     []core.RROperation{{Operation: "add", RRtype: "TXT", Records: []string{zone + " 3600 IN TXT \"p\""}}},
+			DistributionID: nextDistributionID(), Timestamp: time.Now()}, nil, map[string]bool{csyncOurAgent: true}, hdb, nil)
+	}
+
+	pz, phdb := csyncCombinerZone(t, "provider.origin.example.", false, false)
+	RegisterProviderZoneRRtypes(ProviderZoneConf{Zone: pz.ZoneName, AllowedRRtypes: []string{"TXT"}})
+	if resp := update(pz.ZoneName, "agent.gamma.example.", phdb); resp.Status == "error" || len(resp.RejectedItems) != 0 {
+		t.Errorf("a provider zone's contribution was refused: %+v", resp)
+	}
+
+	cz, chdb := csyncCombinerZone(t, "customer.origin.example.", false, false)
+	apex, _ := cz.OwnerForAnalysis(cz.ZoneName)
+	var rrs []dns.RR
+	for _, l := range []string{"us", "alpha", "beta"} {
+		rrs = append(rrs, &dns.PrivateRR{Hdr: dns.RR_Header{Name: cz.ZoneName, Rrtype: core.TypeHSYNC3, Class: dns.ClassINET, Ttl: 3600},
+			Data: &core.HSYNC3{State: 1, Label: l, Identity: "agent." + l + ".example.", Upstream: "."}})
+	}
+	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: rrs})
+	cz.Data.Set(cz.ZoneName, *apex)
+	cz.ZoneData.InstallInitialSnapshot()
+	resp := update(cz.ZoneName, "agent.gamma.example.", chdb)
+	if resp.Status != "error" || len(resp.RejectedItems) != 1 || !strings.Contains(resp.RejectedItems[0].Reason, "agent.gamma.example. is not a voting member of zone") {
+		t.Errorf("an origin that does not vote, its payload marked provider, in a zone with HSYNC3: %+v", resp)
 	}
 }
 
@@ -870,16 +886,19 @@ func TestAManualApprovalZoneKeepsNoEditOfAnOriginThatDoesNotVote(t *testing.T) {
 		}
 	}
 
-	// the zone named without its trailing dot is the same zone; the voting
-	// origin's next edit, which follows it in the queue, shows it was taken
+	// the zone named without its trailing dot is the same zone, and a
+	// payload that calls the zone a provider zone's does not make it one;
+	// the voting origin's next edit, which follows them in the queue, shows
+	// they were taken
 	bare := strings.TrimSuffix(mpzd.ZoneName, ".")
 	kept := len(edits)
-	for _, m := range []struct{ origin, zone, rec string }{
-		{"agent.gamma.example.", bare, mpzd.ZoneName + " 3600 IN NS ns2.gamma.example."},
-		{csyncLeaderA, mpzd.ZoneName, mpzd.ZoneName + " 3600 IN NS ns2.alpha.example."},
+	for _, m := range []struct{ origin, zone, class, rec string }{
+		{"agent.gamma.example.", bare, "", mpzd.ZoneName + " 3600 IN NS ns2.gamma.example."},
+		{"agent.gamma.example.", mpzd.ZoneName, "provider", mpzd.ZoneName + " 3600 IN NS ns3.gamma.example."},
+		{csyncLeaderA, mpzd.ZoneName, "", mpzd.ZoneName + " 3600 IN NS ns2.alpha.example."},
 	} {
 		msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(m.origin), DeliveredBy: csyncOurAgent,
-			Zone: ZoneName(m.zone), DistributionID: nextDistributionID(),
+			Zone: ZoneName(m.zone), ZoneClass: m.class, DistributionID: nextDistributionID(),
 			Operations: []core.RROperation{{Operation: "add", RRtype: "NS", Records: []string{m.rec}}}}}
 	}
 	waitUntil(t, "the voting origin's next edit was not kept for approval", func() bool {

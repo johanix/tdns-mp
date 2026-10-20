@@ -357,13 +357,15 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 
 // originVoteRefusal: the origin of a zone's operations is a voting member of
 // the zone (design 3.3), compared as canonical names; otherwise every
-// record is refused with the reason. A provider zone is not judged by it,
-// and a zone the combiner takes by HSYNC or HSYNC2 records alone has no
-// standings and is left as it is (votesInZone). What the combiner already
-// stores of an origin that stops voting stays (decision 37). Nil when the
-// origin may contribute.
-func originVoteRefusal(zoneClass, zone, origin string, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
-	if zoneClass == "provider" || votesInZone(ZoneName(zone), AgentId(origin)) {
+// record is refused with the reason. The zone is judged by its HSYNC3 RRset
+// as loaded here, whatever class the payload gives it: that is the
+// sender's word. A provider zone has no HSYNC3, and a zone the combiner
+// takes by HSYNC or HSYNC2 records alone has no standings; both are left as
+// they are (votesInZone). What the combiner already stores of an origin
+// that stops voting stays (decision 37). Nil when the origin may
+// contribute.
+func originVoteRefusal(zone, origin string, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+	if votesInZone(ZoneName(zone), AgentId(origin)) {
 		return nil
 	}
 	reason := fmt.Sprintf("origin %s is not a voting member of zone %s", origin, zone)
@@ -420,7 +422,10 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		return resp
 	}
 
-	if req.ZoneClass != "provider" {
+	// A provider zone, one this combiner is configured with as such, has no
+	// HSYNC records to authorize by. The payload's zone class, the sender's
+	// word, does not decide that.
+	if GetProviderZoneRRtypes(zonename) == nil {
 		if err := mpzd.checkMPauthorization(); err != nil {
 			lgCombiner.Warn("rejecting contribution", "zone", req.Zone, "sender", req.SenderID, "reason", err)
 			resp.Status = "error"
@@ -443,7 +448,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(req.ZoneClass, zonename, req.SenderID, req.Operations, req.Records); refusal != nil {
+	if refusal := originVoteRefusal(zonename, req.SenderID, req.Operations, req.Records); refusal != nil {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}
