@@ -151,6 +151,10 @@ type LeaderElection struct {
 	// invalidated or a lapsed one starts anew. Zero while another agent
 	// leads (noteLeaderLocked).
 	leadStart uint64
+	// startZones: the group's zones when its election started (step 8,
+	// design 4.1). The election's end tells a zone that arrived during it
+	// from the zones it was held for.
+	startZones []ZoneName
 	// gone: the provider group of this election is gone, and the manager
 	// has dropped the entry (groupGone). Nothing starts on it any more.
 	gone bool

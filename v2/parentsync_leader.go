@@ -181,6 +181,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 
 	// Reset election state
 	le.Active = true
+	le.startZones = slices.Clone(zones)
 	le.Term++
 	le.MyVote = rand.Uint32()
 	le.Votes = map[AgentId]uint32{lem.localID: le.MyVote}
@@ -334,6 +335,7 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	}
 
 	le.Active = true
+	le.startZones = slices.Clone(zones)
 	le.Term = term
 	le.MyVote = rand.Uint32()
 	// Record both our own vote and the initiator's vote (included in ELECT-CALL).
@@ -603,10 +605,36 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	}
 
 	lem.scheduleGroupReelection(le, groupHash, members)
+	started := le.startZones
 	le.mu.Unlock()
 
-	if isUs && lem.onLeaderElected != nil {
-		for _, zone := range zones {
+	if !isUs {
+		return
+	}
+	// The group's zones now, from the group manager: a zone that arrived
+	// during the election is taken up as an arrival (onZoneJoined), the
+	// zones the election was held for as its own (onLeaderElected), and a
+	// zone that left is not asked for. A zone that arrives after this finds
+	// a leader, and zoneJoinedGroup asks for it. Asked twice at that seam
+	// costs nothing: the key set-up finds the key it has, and the sync
+	// sends only a difference.
+	now := zones
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroup(groupHash); pg != nil {
+			now = pg.Zones
+		}
+	}
+	for _, zone := range now {
+		arrived := started != nil && !slices.Contains(started, zone)
+		switch {
+		case arrived && lem.onZoneJoined != nil:
+			lgElect.Info("a zone that arrived during the group's election is taken up as an arrival", "zone", zone, "group", shortHash(groupHash))
+			go func(z ZoneName) {
+				if err := lem.onZoneJoined(z); err != nil {
+					lgElect.Error("onZoneJoined callback failed", "zone", z, "group", shortHash(groupHash), "error", err)
+				}
+			}(zone)
+		case !arrived && lem.onLeaderElected != nil:
 			go func(z ZoneName) {
 				if err := lem.onLeaderElected(z); err != nil {
 					lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
