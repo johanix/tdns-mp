@@ -442,9 +442,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// a stale replace confirmed with no record left the
 						// sender waiting for this agent for good (the leader's
 						// CSYNC, overtaken by its answer to a request).
+						var combinerRejected []string
 						if upd := synchedDataUpdate.Update; upd != nil && len(received) > 0 {
 							appliedRecords, removedRecords = zdr.heldRecords(zone, agentId, received)
 							appliedRecords = withoutRecords(appliedRecords, staleWaiting)
+							combinerRejected = zdr.rejectedRecords(zone, agentId, received)
 						} else if upd != nil {
 							// Legacy class-overloaded form (no Operations).
 							confirm := func(rr dns.RR) {
@@ -453,6 +455,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									s := rr.String()
 									if inRepo(s, rr.Header().Rrtype) {
 										appliedRecords = append(appliedRecords, s)
+									} else if zdr.rejectedByCombiner(zone, agentId, rr.Header().Rrtype, s) {
+										combinerRejected = append(combinerRejected, s)
 									}
 								case dns.ClassNONE:
 									m := dns.Copy(rr)
@@ -481,10 +485,18 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						if len(staleWaiting) > 0 {
 							status, message = "PARTIAL", "desired state already present at remote agent; DNSKEY records from an answer not yet confirmed by its combiner"
 						}
+						// A record this agent's combiner rejected is not held
+						// either, and a plain success would cover it: a DNSKEY
+						// sender takes "ok" as every key of the distribution
+						// propagated.
+						if len(combinerRejected) > 0 {
+							status, message = "PARTIAL", message+"; records its combiner rejected are not held"
+						}
 						if msgQs.OnRemoteConfirmationReady != nil {
 							lgEngine.Info("remote update already in desired state, sending immediate confirmation",
 								"zone", zone, "agent", agentId,
 								"applied", len(appliedRecords), "removed", len(removedRecords), "awaiting_combiner", len(staleWaiting),
+								"combiner_rejected", len(combinerRejected),
 								"originDistID", synchedDataUpdate.OriginatingDistID)
 							msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 								OriginatingDistID: synchedDataUpdate.OriginatingDistID,
@@ -1526,8 +1538,9 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	}
 }
 
-// inRepo reports whether an RR (in ClassINET form) is present in the
-// agent's repo for the zone, as the repo holds it now.
+// inRepo reports whether an RR (in ClassINET form) is held for the agent:
+// present in its repo for the zone, as the repo holds it now, and not
+// rejected by this agent's combiner (rejectedByCombiner).
 func (zdr *ZoneDataRepo) inRepo(zone ZoneName, agentId AgentId) func(rrStr string, rrtype uint16) bool {
 	var nod *OwnerData
 	if agentRepo, ok := zdr.Repo.Get(zone); ok {
@@ -1543,11 +1556,57 @@ func (zdr *ZoneDataRepo) inRepo(zone ZoneName, agentId AgentId) func(rrStr strin
 		}
 		for _, repoRR := range repoRRset.RRs {
 			if repoRR.String() == rrStr {
-				return true
+				// a record this agent's combiner rejected stays in the
+				// repo, but is not held: confirmed as applied, it would
+				// tell the sender its combiner has it
+				return !zdr.rejectedByCombiner(zone, agentId, rrtype, rrStr)
 			}
 		}
 		return false
 	}
+}
+
+// rejectedRecords are the add and replace records of ops that this agent's
+// combiner rejected for the agent (rejectedByCombiner).
+func (zdr *ZoneDataRepo) rejectedRecords(zone ZoneName, agentId AgentId, ops []core.RROperation) []string {
+	var out []string
+	for _, op := range ops {
+		if op.Operation != "add" && op.Operation != "replace" {
+			continue
+		}
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			continue
+		}
+		for _, rrStr := range op.Records {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				continue
+			}
+			if s := rr.String(); zdr.rejectedByCombiner(zone, agentId, rrtype, s) {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+// rejectedByCombiner: the agent's record that this agent's combiner
+// rejected, and that no send has put in its hands since. A rejection leaves
+// the record in the repo (the confirmation handler only sets its state), so
+// the repo alone does not say the combiner holds it. Tracking is the
+// engine's, as is every caller.
+func (zdr *ZoneDataRepo) rejectedByCombiner(zone ZoneName, agentId AgentId, rrtype uint16, rrStr string) bool {
+	tracked := zdr.Tracking[zone][agentId][rrtype]
+	if tracked == nil {
+		return false
+	}
+	for i := range tracked.Tracked {
+		if tracked.Tracked[i].State == RRStateRejected && tracked.Tracked[i].RR.String() == rrStr {
+			return true
+		}
+	}
+	return false
 }
 
 // dnskeyAwaitingAnswer are those of records, held for the agent, that are
