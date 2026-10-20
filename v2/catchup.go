@@ -275,8 +275,17 @@ func (t *catchUpTracker) Ask(zone ZoneName, peer AgentId, reason string) askResu
 // asks with role when the role comes. The auditor holds nothing and asks
 // nothing (decision 36). It returns what each Ask did, nil where nothing is
 // asked.
+//
+// Only a zone that is multi-provider here is asked about: one to which the
+// load gave provider data (populateMPdata). A zone with HSYNC3 records and
+// no HSYNCPARAM has none, and no agent can answer for it complete: asking
+// would repeat every five minutes for ever. Whether such a zone is
+// multi-provider is the transitions design's question.
 func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askResult {
 	if t == nil || !isVotingMember(zone, string(t.self)) {
+		return nil
+	}
+	if zd, ok := Zones.Get(string(zone)); !ok || !zd.hasProviderData() {
 		return nil
 	}
 	out := map[AgentId]askResult{}
@@ -331,16 +340,15 @@ func (t *catchUpTracker) PeerOperational(peer AgentId) {
 	}
 }
 
-// sharedZones are the multi-provider zones that have loaded here and in
-// which both this agent and peer vote, by the test AskZone asks at a load:
-// the zone's records as loaded, not its provider data. A zone with HSYNC3
-// records and no HSYNCPARAM, in which every ON record votes, has no
-// provider data of this agent's, and is shared all the same.
+// sharedZones are the multi-provider zones that have loaded here, with the
+// provider data AskZone asks for at a load, and in which both this agent
+// and peer vote. A zone with HSYNC3 records and no HSYNCPARAM has no
+// provider data, and is asked about neither at a load nor at a beat.
 func (t *catchUpTracker) sharedZones(peer AgentId) []ZoneName {
 	var out []ZoneName
 	for _, name := range Zones.Keys() {
 		zd, ok := Zones.Get(name)
-		if !ok || !zd.Options[tdns.OptMultiProvider] || !zd.Ready {
+		if !ok || !zd.Options[tdns.OptMultiProvider] || !zd.loadedForCatchUp() {
 			continue
 		}
 		zone := ZoneName(zd.ZoneName)
