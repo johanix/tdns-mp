@@ -199,7 +199,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 		le.Active = false
-		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8])
+		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8], "term", le.Term)
 		lem.scheduleGroupReelection(le, groupHash, members)
 		le.askedTerm = le.Term // asked below; gossip echoing this term asks nothing more
 		le.mu.Unlock()
@@ -1507,7 +1507,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
 		le.Active = false
-		lgElect.Info("single agent, self-elected as leader", "zone", zone)
+		lgElect.Info("single agent, self-elected as leader", "zone", zone, "term", le.Term)
 		lem.scheduleReelection(le)
 		le.mu.Unlock()
 
