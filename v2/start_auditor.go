@@ -139,16 +139,24 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		StartAuditEventPruner(ctx, kdb, retention, pruneInterval)
 	}
 
-	// Anomaly detectors: provider-silent + missing-provider.
+	// Anomaly detectors: provider-silent + missing-provider +
+	// waiting-distribution.
 	silenceThreshold := viper.GetDuration("audit.silence_threshold")
 	if silenceThreshold <= 0 {
 		silenceThreshold = 90 * time.Second
+	}
+	// How long a distribution may wait for a member's confirmation before
+	// the auditor says so. The default is the wait after which the sender
+	// itself sends the distribution again.
+	pendingThreshold := viper.GetDuration("audit.pending_threshold")
+	if pendingThreshold <= 0 {
+		pendingThreshold = 2 * time.Minute
 	}
 	detectorInterval := viper.GetDuration("audit.detector_interval")
 	if detectorInterval <= 0 {
 		detectorInterval = 30 * time.Second
 	}
-	StartAuditDetectors(ctx, stateManager, silenceThreshold, detectorInterval)
+	StartAuditDetectors(ctx, stateManager, silenceThreshold, pendingThreshold, detectorInterval)
 
 	msgQs := conf.InternalMp.MsgQs
 	tdns.StartEngineNoError(&tdns.Globals.App, "AuditorEngine", func() {

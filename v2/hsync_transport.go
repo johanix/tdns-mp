@@ -444,7 +444,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// send the final confirmation NOTIFY back to the originating agent.
 	if tm.msgQs != nil {
 		tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
-			go tm.sendRemoteConfirmation(detail)
+			go func() {
+				tm.sendRemoteConfirmation(detail)
+				// The zone's auditors get a copy, whatever became of the
+				// originator's (tdns-mp #152).
+				tm.copyConfirmationToAuditors(detail)
+			}()
 		}
 	}
 
@@ -1516,20 +1521,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		rejItems = append(rejItems, transport.RejectedItemDTO{Record: ri.Record, Reason: ri.Reason})
 	}
 
-	// Map status string back to ConfirmStatus
-	status := transport.ConfirmFailed
-	switch detail.Status {
-	case "SUCCESS", "ok":
-		status = transport.ConfirmSuccess
-	case "PARTIAL":
-		status = transport.ConfirmPartial
-	case "FAILED":
-		status = transport.ConfirmFailed
-	case "REJECTED":
-		status = transport.ConfirmRejected
-	case "IGNORED":
-		status = transport.ConfirmIgnored
-	}
+	status := remoteConfirmStatus(detail.Status)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1554,6 +1546,160 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		lgTransport.Info("sent remote confirmation", "distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender,
 			"applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems))
 	}
+}
+
+// remoteConfirmStatus maps the status of a final confirmation, as its
+// RemoteConfirmationDetail words it, back to the transport's ConfirmStatus.
+func remoteConfirmStatus(s string) transport.ConfirmStatus {
+	switch s {
+	case "SUCCESS", "ok":
+		return transport.ConfirmSuccess
+	case "PARTIAL":
+		return transport.ConfirmPartial
+	case "REJECTED":
+		return transport.ConfirmRejected
+	case "IGNORED":
+		return transport.ConfirmIgnored
+	}
+	return transport.ConfirmFailed
+}
+
+// copyConfirmationToAuditors sends a copy of this agent's final confirmation
+// of a distribution to every auditor of the zone (tdns-mp #152). Without it
+// only the originator knew who had answered: an auditor saw the distribution
+// start and could not say that it was blocked, for how long, or on whom.
+// With each member's final word it can, from its own clock, without asking
+// anybody and whether or not the originator is still up.
+//
+// The copy is the confirmation itself with the originator named
+// (DnsConfirmCopyPayload). DNSTransport.Confirm builds its payload from a
+// fixed set of fields, so the copy is built here and travels the same way:
+// one NOTIFY(CHUNK) with the confirm verb, answered by nothing and sent
+// once. A copy that is lost is not sent again.
+//
+// The immediate PENDING is not copied: it says only that the message
+// arrived. An auditor copies nothing, its own confirmation is no member's
+// answer. A provider that the zone lists as an auditor too gets the
+// distribution in its own right and no copy (AuditorsForZone), and neither
+// do the originator or we ourselves.
+func (tm *MPTransportBridge) copyConfirmationToAuditors(detail *RemoteConfirmationDetail) {
+	if tm.DNSTransport == nil || tm.role != roleAgent {
+		return
+	}
+	auditors := AuditorsForZone(detail.Zone)
+	if len(auditors) == 0 {
+		return
+	}
+
+	var rejItems []transport.RejectedItemDTO
+	for _, ri := range detail.RejectedItems {
+		rejItems = append(rejItems, transport.RejectedItemDTO{Record: ri.Record, Reason: ri.Reason})
+	}
+	body, err := json.Marshal(&DnsConfirmCopyPayload{
+		DnsConfirmPayload: transport.DnsConfirmPayload{
+			Type:           transport.VerbConfirm,
+			SenderID:       tm.LocalID,
+			Zone:           string(detail.Zone),
+			DistributionID: detail.OriginatingDistID,
+			Status:         remoteConfirmStatus(detail.Status).String(),
+			Message:        detail.Message,
+			AppliedCount:   len(detail.AppliedRecords),
+			RemovedCount:   len(detail.RemovedRecords),
+			RejectedCount:  len(rejItems),
+			AppliedRecords: detail.AppliedRecords,
+			RemovedRecords: detail.RemovedRecords,
+			RejectedItems:  rejItems,
+			IgnoredCount:   len(detail.IgnoredRecords),
+			IgnoredRecords: detail.IgnoredRecords,
+			Truncated:      detail.Truncated,
+			Timestamp:      time.Now().Unix(),
+		},
+		Originator: detail.OriginatingSender,
+	})
+	if err != nil {
+		lgTransport.Error("failed to build the auditors' copy of a confirmation", "distributionID", detail.OriginatingDistID, "err", err)
+		return
+	}
+
+	for _, auditor := range auditors {
+		id := string(auditor)
+		if dns.Fqdn(id) == dns.Fqdn(tm.LocalID) || dns.Fqdn(id) == dns.Fqdn(detail.OriginatingSender) {
+			continue
+		}
+		peer, exists := tm.PeerRegistry.Get(id)
+		if !exists {
+			lgTransport.Warn("cannot copy the confirmation to the auditor, peer not in registry", "distributionID", detail.OriginatingDistID, "auditor", id)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := tm.DNSTransport.SendApp(ctx, peer, &transport.AppMessage{
+			Scope:          string(detail.Zone),
+			TypeToken:      transport.VerbConfirm,
+			Payload:        body,
+			DistributionID: detail.OriginatingDistID,
+			FireAndForget:  true,
+		})
+		cancel()
+		if err != nil {
+			lgTransport.Warn("failed to copy the confirmation to the auditor", "distributionID", detail.OriginatingDistID, "auditor", id, "err", err)
+		} else {
+			lgTransport.Debug("copied the confirmation to the auditor", "distributionID", detail.OriginatingDistID, "auditor", id, "originator", detail.OriginatingSender)
+		}
+	}
+}
+
+// routeConfirmMessage is the auditor's part in a confirmation (tdns-mp
+// #152). The verb is the transport's own: its handler has already run the
+// confirmation through OnConfirmationReceived, and on an agent that is all
+// there is to do, so this returns at once. An auditor distributes nothing
+// and has nothing of its own to be confirmed; a confirmation that reaches it
+// is a member's copy of its final word on somebody else's distribution, and
+// names that originator (DnsConfirmCopyPayload). The auditor books it for
+// that distribution.
+//
+// Who confirmed is the copy's sender as the transport established it, and
+// only that: a copy that comes with no transport sender is not believed,
+// whatever its payload says of itself. A payload that names another sender
+// is not believed, and neither is one whose originator is no voting member
+// of the zone, or is the confirming member itself.
+func (tm *MPTransportBridge) routeConfirmMessage(msg *transport.IncomingMessage) {
+	if tm.agentRegistry == nil || tm.agentRegistry.AuditState == nil {
+		return
+	}
+	var copied DnsConfirmCopyPayload
+	if err := json.Unmarshal(msg.Payload, &copied); err != nil {
+		lgTransport.Error("failed to parse confirmation payload", "err", err)
+		return
+	}
+	if copied.Originator == "" || copied.DistributionID == "" || copied.Zone == "" {
+		return // a plain confirmation, not a copy
+	}
+	confirmer := msg.TransportSender
+	if confirmer == "" {
+		lgTransport.Warn("confirmation copy without a transport sender, ignoring",
+			"named", copied.SenderID, "zone", copied.Zone, "distributionID", copied.DistributionID)
+		return
+	}
+	if dns.Fqdn(confirmer) != dns.Fqdn(copied.SenderID) {
+		lgTransport.Warn("confirmation copy names a sender other than the one that sent it, ignoring",
+			"sender", confirmer, "named", copied.SenderID, "zone", copied.Zone, "distributionID", copied.DistributionID)
+		return
+	}
+	zone := ZoneName(dns.Fqdn(copied.Zone))
+	originator := dns.Fqdn(copied.Originator)
+	if originator == dns.Fqdn(confirmer) || !isVotingMember(zone, originator) {
+		lgTransport.Warn("confirmation copy does not name another voting member of the zone as originator, ignoring",
+			"sender", confirmer, "originator", copied.Originator, "zone", copied.Zone, "distributionID", copied.DistributionID)
+		return
+	}
+	var rejItems []RejectedItemInfo
+	for _, ri := range copied.RejectedItems {
+		rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
+	}
+	tm.agentRegistry.AuditState.NoteConfirmation(string(zone),
+		copied.DistributionID, originator, confirmer, copied.Status, copied.Message, rejItems)
+	lgTransport.Debug("booked a member's confirmation copy", "zone", zone, "distributionID", copied.DistributionID,
+		"originator", originator, "member", confirmer, "status", copied.Status)
 }
 
 // SelectTransport selects the appropriate transport for communicating with a peer.

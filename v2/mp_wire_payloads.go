@@ -13,6 +13,7 @@ package tdnsmp
 import (
 	"encoding/json"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
 )
 
@@ -61,6 +62,19 @@ func (c *CatchUp) IsComplete() bool {
 // GetPublish returns the publish instruction (may be nil).
 func (d *DnsSyncPayload) GetPublish() *core.PublishInstruction {
 	return d.Publish
+}
+
+// DnsConfirmCopyPayload is a final confirmation as the confirming agent
+// copies it to the zone's auditors (tdns-mp #152): transport's confirmation,
+// field for field, and the agent it answers. The distribution ID alone does
+// not say whose distribution was confirmed: every agent numbers its own from
+// the second it started, so two agents' IDs coincide, and the copy's sender
+// is the confirming agent, not the originator. Originator is the one new
+// field. A receiver that does not know it reads the payload as the
+// confirmation it otherwise is.
+type DnsConfirmCopyPayload struct {
+	transport.DnsConfirmPayload
+	Originator string `json:"originator,omitempty"`
 }
 
 // DnsAddress represents an address in DNS payloads.
