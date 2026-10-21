@@ -4,9 +4,8 @@
 package tdnsmp
 
 import (
-	"log/slog"
 	"slices"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +16,32 @@ import (
 // Step 8, design 4.1: a zone that leaves its group. When this agent does not
 // lead the zone now, what it scheduled for the zone's parent ends: the
 // chain, the owed sync, and a sync under way, which is cancelled.
+
+// leftCalls records the zone-left callback's calls and what each ended. The
+// plan's line ("zone left a group this agent leads, dropping its delegation
+// sync") is logged exactly when the callback says it ended something. The
+// tests do not swap the election logger: timers of other tests' elections
+// read it.
+type leftCalls struct {
+	mu    sync.Mutex
+	ended []bool
+}
+
+func (l *leftCalls) wrap(f func(ZoneName) bool) func(ZoneName) bool {
+	return func(z ZoneName) bool {
+		got := f(z)
+		l.mu.Lock()
+		l.ended = append(l.ended, got)
+		l.mu.Unlock()
+		return got
+	}
+}
+
+func (l *leftCalls) list() []bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.ended)
+}
 
 // zonesThatLeft reports each zone taken out of its group, to another group
 // or to none, and zonesThatJoined only a zone that lands in one.
@@ -49,10 +74,6 @@ func TestAnAgentThatLedTheGroupAZoneLeftDropsItsSync(t *testing.T) {
 }
 
 func zoneLeftDropsItsSync(t *testing.T, zone string, toNoGroup bool) {
-	elog := &lockedBuffer{}
-	saved := lgElect
-	lgElect = slog.New(slog.NewTextHandler(elog, nil))
-	t.Cleanup(func() { lgElect = saved })
 	r := newNotifyRig(t, zone, "UPDATE", repeat(30*time.Millisecond, 400)...)
 	us, peer := r.us.Identity, r.peer.Identity
 	servedMembers(t, r.mpzd, []h3rec{{us, true}, {peer, true}}, []string{us, peer})
@@ -64,7 +85,8 @@ func zoneLeftDropsItsSync(t *testing.T, zone string, toNoGroup bool) {
 	// drops it once a group covers the zone)
 	pgm := NewProviderGroupManager(us)
 	r.lem.SetProviderGroupManager(pgm)
-	r.lem.SetOnZoneLeft(func(zn ZoneName) bool { return r.conf.delegationSyncZoneLeft(string(zn)) })
+	calls := &leftCalls{}
+	r.lem.SetOnZoneLeft(calls.wrap(func(zn ZoneName) bool { return r.conf.delegationSyncZoneLeft(string(zn)) }))
 	pgm.RecomputeGroups()
 	pg := pgm.GetGroupForZone(ZoneName(z))
 	if pg == nil {
@@ -113,25 +135,22 @@ func zoneLeftDropsItsSync(t *testing.T, zone string, toNoGroup bool) {
 	if owed, _ := r.conf.InternalMp.CatchUp.owedState(ZoneName(z)); owed {
 		t.Error("the sync is still owed")
 	}
-	if !strings.Contains(elog.String(), "zone left a group this agent leads, dropping its delegation sync") {
-		t.Errorf("no line says the zone left a group this agent leads:\n%s", elog)
+	if got := calls.list(); !slices.Equal(got, []bool{true}) {
+		t.Errorf("the zone-left callback ended %v, want one call that ended the sync (the line is logged then)", got)
 	}
 }
 
 // A zone that leaves a group this agent does not lead, and holds nothing for
 // its parent here, is no news: no line.
 func TestAZoneThatLeftAGroupThisAgentDidNotLeadSaysNothing(t *testing.T) {
-	elog := &lockedBuffer{}
-	saved := lgElect
-	lgElect = slog.New(slog.NewTextHandler(elog, nil))
-	t.Cleanup(func() { lgElect = saved })
 	lem := NewLeaderElectionManager(arrivalA, time.Hour, func(ZoneName, string, map[string][]string) error { return nil })
 	t.Cleanup(func() { stopElectionTimers(lem) })
 	conf := &Config{Config: &tdns.Config{}}
-	lem.SetOnZoneLeft(func(zn ZoneName) bool { return conf.delegationSyncZoneLeft(string(zn)) })
-	lem.zoneLeftGroup("quiet.left.example.", "1111111111111111", "")
-	if strings.Contains(elog.String(), "zone left a group") {
-		t.Errorf("a zone with nothing scheduled here was logged:\n%s", elog)
+	calls := &leftCalls{}
+	lem.SetOnZoneLeft(calls.wrap(func(zn ZoneName) bool { return conf.delegationSyncZoneLeft(string(zn)) }))
+	lem.zoneLeftGroup("quiet.left.example.", "1111111111111111", "2222222222222222") // to a group this agent does not lead
+	if got := calls.list(); !slices.Equal(got, []bool{false}) {
+		t.Errorf("the zone-left callback ended %v, want one call that ended nothing (no line)", got)
 	}
 }
 
@@ -171,10 +190,6 @@ func TestAZoneThatMovesToAGroupThisAgentLeadsKeepsItsSync(t *testing.T) {
 // provider leads it next, so what it scheduled for the parent stays, and it
 // does not say it dropped anything.
 func TestTheSoleRemainingVoterKeepsItsSync(t *testing.T) {
-	elog := &lockedBuffer{}
-	saved := lgElect
-	lgElect = slog.New(slog.NewTextHandler(elog, nil))
-	t.Cleanup(func() { lgElect = saved })
 	zd := providerZone(t, "sole.remaining.example.", arrivalA, arrivalB)
 	r := newZoneChangeRig(t, zd)
 	zone := ZoneName(zd.ZoneName)
@@ -184,7 +199,8 @@ func TestTheSoleRemainingVoterKeepsItsSync(t *testing.T) {
 		t.Fatal("the zone of two providers is in no group")
 	}
 	r.lem.ApplyGossipElection(pg.GroupHash, GroupElectionState{Leader: arrivalA, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)})
-	r.lem.SetOnZoneLeft(func(zn ZoneName) bool { return r.conf.delegationSyncZoneLeft(string(zn)) })
+	calls := &leftCalls{}
+	r.lem.SetOnZoneLeft(calls.wrap(func(zn ZoneName) bool { return r.conf.delegationSyncZoneLeft(string(zn)) }))
 	c := &r.conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
 	c.of(string(zone))
@@ -198,7 +214,7 @@ func TestTheSoleRemainingVoterKeepsItsSync(t *testing.T) {
 	if !kept {
 		t.Error("the sole remaining voter dropped its own sync chain")
 	}
-	if strings.Contains(elog.String(), "zone left a group this agent leads") {
-		t.Errorf("the sole remaining voter said it dropped its sync:\n%s", elog)
+	if got := calls.list(); len(got) != 0 {
+		t.Errorf("the zone-left callback ran for the sole remaining voter: %v", got)
 	}
 }
