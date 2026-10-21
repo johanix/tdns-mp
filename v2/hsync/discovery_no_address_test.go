@@ -64,3 +64,47 @@ func TestTheDiscoveryRetryTakesAMechanismWithNoAddress(t *testing.T) {
 		t.Errorf("%d discoveries of a peer whose introduced mechanism has its address, want none", got)
 	}
 }
+
+// A peer the engine has removed is not discovered by a pass that saw it
+// before the removal: its removal dropped its transport peer, and a
+// discovery would make that peer again, so the comms that ended would not
+// stay ended (W1). A peer the engine holds is discovered as before.
+func TestARemovedPeerIsNotDiscoveredByAPassThatSawItBefore(t *testing.T) {
+	c := &discoveryCounter{d25Transport: newD25Transport(), asked: map[string]int{}}
+	e := NewEngine(Deps{LocalID: "local.example.", Transport: c}, DefaultConfig())
+
+	gone := NewPeer("gone.example.")
+	gone.DnsMethod = true
+	e.registry.S.Set(gone.ID, gone)
+	held := NewPeer("held.example.")
+	held.DnsMethod = true
+	e.registry.S.Set(held.ID, held)
+
+	e.RemovePeer(gone.ID) // the pass took its list before this
+	e.attemptDiscovery(gone, false, true)
+	e.attemptDiscovery(held, false, true)
+
+	if got := c.count("gone.example."); got != 0 {
+		t.Errorf("%d discoveries of a peer removed since the pass began, want none", got)
+	}
+	if _, ok := c.reg.Get("gone.example."); ok {
+		t.Error("the removed peer's transport peer was made again")
+	}
+	if got := c.count("held.example."); got != 1 {
+		t.Errorf("%d discoveries of a peer the engine holds, want 1", got)
+	}
+
+	// a new peer under the removed one's identity is discovered: the old
+	// object is not, the new one is
+	again := NewPeer("gone.example.")
+	again.DnsMethod = true
+	e.registry.S.Set(again.ID, again)
+	e.attemptDiscovery(gone, false, true)
+	if got := c.count("gone.example."); got != 0 {
+		t.Errorf("the removed object was discovered once a new peer took its identity: %d", got)
+	}
+	e.attemptDiscovery(again, false, true)
+	if got := c.count("gone.example."); got != 1 {
+		t.Errorf("%d discoveries of the new peer under the identity, want 1", got)
+	}
+}
