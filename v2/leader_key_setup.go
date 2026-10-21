@@ -45,7 +45,7 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	}
 
 	if !conf.zoneUsesKey(ctx, zone) {
-		lgAgent.Info("onLeaderElected: the zone uses no SIG(0) key (no parent that takes UPDATE, or no resolver), skipping SIG(0) key setup", "zone", zone)
+		lgAgent.Info("onLeaderElected: the zone uses no SIG(0) key (its parent takes no UPDATE), skipping SIG(0) key setup", "zone", zone)
 		return nil
 	}
 

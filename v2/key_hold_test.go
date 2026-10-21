@@ -335,3 +335,29 @@ func TestLeadStartFindsTheElectionIsLeaderFinds(t *testing.T) {
 		t.Errorf("with the group led by this agent, the lead is %d, want the group's %d", lem.LeadStart(zone), byGroup)
 	}
 }
+
+// A parent whose DSYNC records cannot be read (no resolver yet) is not "no
+// key": the leader's sync is held as for a parent that takes UPDATE, here
+// while an old key the zone does not publish is active too, and the
+// leader's set-up runs. Read as "no key", the sync went out signed by the
+// old key, and BADKEY uploaded it. The set-up asks the same test.
+func TestAnUnreadableParentHoldsTheSync(t *testing.T) {
+	r := newKeyHoldRig(t, "unread.hold.example.")
+	testSig0Key(t, r.mpzd.KeyDB, string(r.zone)) // an old key, active too
+	imr := r.conf.Config.Internal.ImrEngine
+	r.conf.Config.Internal.ImrEngine = nil // no resolver yet
+	defer func() { r.conf.Config.Internal.ImrEngine = imr }()
+
+	if !r.conf.zoneUsesKey(r.ctx, r.zone) {
+		t.Fatal("a parent not read is taken as one that takes no UPDATE")
+	}
+	if got := r.explicit(t); !strings.Contains(got.Msg, "(signing key differs)") {
+		t.Errorf("with the parent not read and two active keys, the explicit sync's answer: %q", got.Msg)
+	}
+	if !r.keyOwed() {
+		t.Error("the sync is not owed for the key")
+	}
+	if uses, known := r.conf.zoneKeyUse(r.ctx, r.zone); uses || known {
+		t.Errorf("the rounds read the parent as uses %v, known %v; want not known", uses, known)
+	}
+}
