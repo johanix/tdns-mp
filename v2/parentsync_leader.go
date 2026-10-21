@@ -128,6 +128,15 @@ func (lem *LeaderElectionManager) inKeySetup(zone ZoneName, f func() error) erro
 	return f()
 }
 
+// SetOnLeadLost sets the callback invoked when another agent is named leader
+// in an election where this agent held the lead (noteLeaderLocked): by the
+// election, by gossip of a newer term, or after an invalidation. A renewal
+// of this agent's lead, or its re-election, invokes nothing. It runs in a
+// goroutine of its own.
+func (lem *LeaderElectionManager) SetOnLeadLost(f func(lead uint64)) {
+	lem.onLeadLost = f
+}
+
 // SetOnZoneJoined sets the callback invoked when a zone joins a provider
 // group that the local agent already leads (zoneJoinedGroup). It is not the
 // election's callback: a zone that arrives has had a leader before, and what
@@ -1327,11 +1336,30 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 // the number; a lead after another agent's, an invalidated or a lapsed one
 // gets the next number of the manager's (leads), unique across every
 // election here; another agent's lead clears it.
+//
+// Another agent named leader ends the lead this agent held, and what it began
+// for the parent in that lead is stopped (onLeadLost). An invalidation names
+// nobody: the lead it ends is kept until an agent is named, and ends then if
+// that agent is another.
 func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
 	if leader != lem.localID {
+		lost := le.leadStart
+		if lost == 0 {
+			lost = le.endedLead
+		}
+		switch {
+		case leader == "":
+			le.endedLead = lost
+		case lost != 0:
+			le.endedLead = 0
+			if lem.onLeadLost != nil {
+				go lem.onLeadLost(lost)
+			}
+		}
 		le.leadStart = 0
 		return
 	}
+	le.endedLead = 0
 	if le.Leader != lem.localID || le.leadStart == 0 || now.After(le.LeaderExpiry) {
 		le.leadStart = lem.leads.Add(1)
 	}
