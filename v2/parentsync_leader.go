@@ -366,8 +366,20 @@ func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash 
 	term := parseUint64(records, "_term")
 	le.mu.Lock()
 
-	if le.Active && le.Term >= term {
+	// A call at or below the term this agent holds is not joined, whether
+	// or not an election runs: a voting member never takes a lower term
+	// (design 4.6), and a term names one leader. A member that restarted
+	// calls from term 0. Joined, its call took the group's term back, and
+	// the retry after it used a term again for another leader. Refused, the
+	// caller learns the group's term from its peers' gossip
+	// (ApplyGossipElection): a leader back inside its lease leads on, and
+	// one whose group has moved on leads nothing. A call above it is joined
+	// as before, so a group whose leader is gone still elects.
+	if le.Term >= term {
+		ourTerm := le.Term
 		le.mu.Unlock()
+		lgElect.Info("group election: a call at a term not above ours, not joined",
+			"group", groupHash[:8], "from", senderID, "term", term, "our_term", ourTerm)
 		return
 	}
 
@@ -1610,10 +1622,13 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 	le := lem.getOrCreate(zone)
 	le.mu.Lock()
 
-	if le.Active && le.Term >= term {
+	// A call at or below the term this agent holds is not joined, whether
+	// or not an election runs, as for a group's (handleGroupCall).
+	if le.Term >= term {
 		ourTerm := le.Term
 		le.mu.Unlock()
-		lgElect.Debug("ignoring ELECT-CALL with stale term", "zone", zone, "our_term", ourTerm, "their_term", term)
+		lgElect.Info("election: a call at a term not above ours, not joined",
+			"zone", zone, "from", senderID, "term", term, "our_term", ourTerm)
 		return
 	}
 
