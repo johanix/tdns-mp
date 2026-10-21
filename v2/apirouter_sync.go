@@ -116,7 +116,11 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 					go func() {
 						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
-						if _, err := tm.DiscoverPeer(ctx, clientId); err != nil {
+						// Discovery itself, not DiscoverPeer: a sender known
+						// on DNS alone, its API never seen, would be returned
+						// without a lookup, and a TLSA it publishes now never
+						// found.
+						if err := tm.DiscoverAndRegisterPeer(ctx, clientId); err != nil {
 							lgApi.Debug(apiName+": looking up a hello's sender failed", "clientId", clientId, "err", err)
 						}
 					}()

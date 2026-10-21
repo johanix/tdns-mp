@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/miekg/dns"
 )
 
 // hello sends a hello for the env's zone to bob, naming from as its sender,
@@ -97,11 +98,18 @@ func TestHello_BodyMustNameTheCertificatesAgent(t *testing.T) {
 
 // A hello that comes before the receiver has the sender's TLSA is refused
 // retryably (503). A sender the receiver knows is looked up, so a later
-// hello passes; one it does not know is not.
+// hello passes; one it does not know is not. Carol is known on DNS alone,
+// her API never seen: she is looked up all the same.
 func TestHello_RefusedRetryablyUntilTheTLSAIsKnown(t *testing.T) {
 	te := newTLSAEnv(t, "hello-early.example.")
 	const carol, dave = "carol.agent.example.", "dave.agent.example."
+	zone := newDiscoveryZone(t)
+	imr := harnessImr(t, zone)
+	te.Bob.Bridge.TransportManager.GetImr = func() *transport.Imr { return &transport.Imr{Imr: imr.Imr} }
 	te.Bob.Registry.S.Set(AgentId(carol), NewAgent(AgentId(carol)))
+	known := te.Bob.Bridge.PeerRegistry.GetOrCreate(carol)
+	known.SetState(transport.PeerStateKnown, "test")
+	known.SetMechanismState("DNS", transport.PeerStateOperational, "test")
 	_, _, carolCert := writeAgentCert(t, carol)
 	_, _, daveCert := writeAgentCert(t, dave)
 
@@ -120,18 +128,16 @@ func TestHello_RefusedRetryablyUntilTheTLSAIsKnown(t *testing.T) {
 	}
 	te.noHello(t, "a hello before the TLSA is known")
 
+	lookups := func(id string) int { return zone.asked("_https._tcp."+id, dns.TypeURI) }
 	deadline := time.Now().Add(integTestTimeout)
-	for {
-		if _, ok := te.Bob.Bridge.PeerRegistry.Get(carol); ok {
-			break
-		}
+	for lookups(carol) == 0 {
 		if time.Now().After(deadline) {
-			t.Fatal("bob did not look up carol, an agent it knows, after her early hello")
+			t.Fatal("bob did not look up carol, an agent it knows on DNS, after her early hello")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, ok := te.Bob.Bridge.PeerRegistry.Get(dave); ok {
-		t.Error("bob looked up dave, an agent it does not know, on his hello")
+	if n := lookups(dave); n != 0 {
+		t.Errorf("bob looked up dave, an agent it does not know, on his hello (%d times)", n)
 	}
 
 	// Once bob has carol's TLSA, her hello passes the middleware.
