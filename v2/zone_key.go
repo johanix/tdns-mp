@@ -220,3 +220,23 @@ func retireOtherActiveKeys(kdb *tdns.KeyDB, zone ZoneName, z *zoneKey) (bool, er
 	}
 	return true, nil
 }
+
+// bootstrapKey is the key the operator's parentsync-bootstrap polls with
+// the parent: the zone's key, and only while it is the only active key, as
+// the leader's set-up has it (publishZoneKey). tdns's bootstrap uploads the
+// first active key, so with another one active it could bootstrap a key the
+// zone does not publish. refusal says why there is none.
+func bootstrapKey(kdb *tdns.KeyDB, zone ZoneName) (*sig0Row, string) {
+	zk, err := readZoneKey(kdb, zone)
+	switch {
+	case err != nil:
+		return nil, fmt.Sprintf("the SIG(0) keys of zone %s cannot be read: %v", zone, err)
+	case zk.several():
+		return nil, fmt.Sprintf("zone %s publishes several SIG(0) KEYs; an operator has to leave one", zone)
+	case zk.held == nil || zk.held.key == nil:
+		return nil, fmt.Sprintf("this agent does not hold the SIG(0) key of zone %s", zone)
+	case len(zk.active) != 1:
+		return nil, fmt.Sprintf("zone %s has %d active SIG(0) keys; tdns would bootstrap the first, not necessarily the zone's key", zone, len(zk.active))
+	}
+	return zk.held, ""
+}
