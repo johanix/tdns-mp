@@ -1133,8 +1133,13 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 	// A zone with an HSYNC3 RRset is checked by zoneChanged, from its first
 	// load's post-refresh, after the groups are recomputed (step 8). One
 	// with parentsync and no HSYNC3 RRset is no multi-provider zone, and
-	// elects here as before.
+	// elects here as before. The post-refresh asks only when the option is
+	// on, and the first load's parentsync detection, which runs after it,
+	// can turn it on (followParentSyncParam could not read the zone's
+	// HSYNCPARAM), so the check is made here again. It changes nothing for
+	// a zone already led, or that a group covers.
 	if hasHSYNC3(zoneApex(zone)) {
+		lem.zoneChanged(zone)
 		return
 	}
 	configured := lem.configuredPeers(zone)

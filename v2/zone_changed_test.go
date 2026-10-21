@@ -127,6 +127,29 @@ func TestAZoneWithParentsyncAndNoHSYNC3StillElectsAtItsFirstLoad(t *testing.T) {
 	r.electedWithin(t, ZoneName(zd.ZoneName), "the plain zone's first load")
 }
 
+// A zone whose parentsync option the first load's detection turns on, after
+// the post-refresh found it off and so made no check: the first-load
+// election makes it, and the zone's one voting member leads it. A second
+// check changes nothing.
+func TestAZoneWhoseParentsyncComesOnAfterItsPostRefreshIsStillElected(t *testing.T) {
+	zd := providerZone(t, "late.option.firstload.example.", arrivalA)
+	r := newZoneChangeRig(t, zd)
+	zone := ZoneName(zd.ZoneName)
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA}, serving: []string{arrivalA}})
+	if r.lem.IsLeader(zone) {
+		t.Fatal("precondition: the zone has a leader before its parentsync option is on")
+	}
+	zd.SetRuntimeOption(tdns.OptParentSync, true) // as the first-load detection does
+	r.lem.electAtFirstLoad(zd)
+	r.electedWithin(t, zone, "the zone whose option came on after its post-refresh")
+	r.lem.electAtFirstLoad(zd)
+	select {
+	case z := <-r.elected:
+		t.Errorf("a second first-load check elected again for %s", z)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 // The election manager, its callbacks and the zones' first-load callbacks
 // are in place before RefreshEngine starts (setUpLeaderElection), so a first
 // load gets all three: the parentsync detection, the first-load election,
