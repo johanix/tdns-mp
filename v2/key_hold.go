@@ -125,9 +125,12 @@ func (b *keyPollBook) published(zone ZoneName) {
 	delete(b.unpublished, canonZone(zone))
 }
 
-// pollEnded ends a poll, notes the key and the lead it ran in, and says how
-// many still run.
-func (b *keyPollBook) pollEnded(zone ZoneName, keyid uint16, leadStart uint64) int {
+// pollEnded ends a poll, and says how many still run. A poll that ran to its
+// end in the lead it started in notes the key and that lead (finished): a
+// renewal of the lead keeps the key. One that returned because the lead
+// moved notes nothing: the poll did not run to its end, and a later lead,
+// or the same one taking the zone up again, polls anew.
+func (b *keyPollBook) pollEnded(zone ZoneName, keyid uint16, leadStart uint64, finished bool) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.init()
@@ -135,7 +138,9 @@ func (b *keyPollBook) pollEnded(zone ZoneName, keyid uint16, leadStart uint64) i
 	if b.running[zone] > 0 {
 		b.running[zone]--
 	}
-	b.ended[zone] = keyPollEnd{keyid: keyid, leadStart: leadStart}
+	if finished {
+		b.ended[zone] = keyPollEnd{keyid: keyid, leadStart: leadStart}
+	}
 	return b.running[zone]
 }
 
@@ -379,7 +384,13 @@ func (conf *Config) launchKeyPoll(ctx context.Context, tk *keyPollToken, zone Zo
 	}
 	go func() {
 		defer func() {
-			if left := b.pollEnded(zone, keyid, leadStart); left == 0 {
+			// finished: this agent still leads the zone in the lead the
+			// poll started in
+			finished := true
+			if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+				finished = leadStart != 0 && lem.LeadStart(zone) == leadStart
+			}
+			if left := b.pollEnded(zone, keyid, leadStart, finished); left == 0 {
 				conf.releaseKeyHold(ctx, zone)
 			}
 		}()

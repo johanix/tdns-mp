@@ -1162,25 +1162,25 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 	return le.Leader, true
 }
 
-// noteLeaderLocked keeps le.leadStart, one above the term in which this
-// agent's present lead began, as an election names its leader (under le.mu,
-// with le.Term the new term). A renewal names this agent again while its
-// lease runs, and keeps the start; a lead after another agent's, an
-// invalidated or a lapsed one starts anew; another agent's lead clears it.
-// One above, so that a lead at term 0 is a lead.
+// noteLeaderLocked keeps le.leadStart, the number of this agent's present
+// lead, as an election names its leader (under le.mu, with le.Term the new
+// term). A renewal names this agent again while its lease runs, and keeps
+// the number; a lead after another agent's, an invalidated or a lapsed one
+// gets the next number of the manager's (leads), unique across every
+// election here; another agent's lead clears it.
 func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
 	if leader != lem.localID {
 		le.leadStart = 0
 		return
 	}
 	if le.Leader != lem.localID || le.leadStart == 0 || now.After(le.LeaderExpiry) {
-		le.leadStart = le.Term + 1
+		le.leadStart = lem.leads.Add(1)
 	}
 }
 
-// LeadStart names this agent's present lead of the zone (one above the term
-// it began in), as IsLeader finds the zone's election: its provider group's,
-// else the zone's own. Zero when it does not lead the zone.
+// LeadStart names this agent's present lead of the zone (noteLeaderLocked),
+// as IsLeader finds the zone's election: its provider group's, else the
+// zone's own. Zero when it does not lead the zone.
 func (lem *LeaderElectionManager) LeadStart(zone ZoneName) uint64 {
 	if !lem.IsLeader(zone) {
 		return 0

@@ -172,10 +172,9 @@ func TestARenewalKeepsTheZonesKeyAsItIs(t *testing.T) {
 	}
 }
 
-// The term a lead began in (one above it): a renewal keeps it, another
-// agent's lead clears it, a lead after another's or after a lapsed lease
-// starts anew. A lone voter's lead at term 0 is a lead, and its renewals,
-// which keep term 0, keep it.
+// A lead's number: a renewal keeps it, another agent's lead clears it, a
+// lead after another's or after a lapsed lease gets a new one. A lone
+// voter's lead at term 0 is a lead, and its renewals keep it.
 func TestALeadStartsAtItsFirstTermAndARenewalKeepsIt(t *testing.T) {
 	lem := &LeaderElectionManager{localID: "us.example."}
 	le := &LeaderElection{}
@@ -186,20 +185,22 @@ func TestALeadStartsAtItsFirstTermAndARenewalKeepsIt(t *testing.T) {
 		le.Leader, le.LeaderExpiry = leader, now.Add(lease)
 		return le.leadStart
 	}
-	if got := lead("us.example.", 1, time.Hour); got != 2 {
-		t.Errorf("a first lead at term 1 is %d, want 2", got)
+	first := lead("us.example.", 1, time.Hour)
+	if first == 0 {
+		t.Fatal("a first lead has no number")
 	}
-	if got := lead("us.example.", 2, time.Hour); got != 2 {
-		t.Errorf("a renewal makes the lead %d, want 2", got)
+	if got := lead("us.example.", 2, time.Hour); got != first {
+		t.Errorf("a renewal makes the lead %d, want %d as it was", got, first)
 	}
 	if got := lead("them.example.", 3, time.Hour); got != 0 {
 		t.Errorf("another agent's lead leaves %d, want 0", got)
 	}
-	if got := lead("us.example.", 4, -time.Second); got != 5 {
-		t.Errorf("a lead after another's is %d, want 5", got)
+	after := lead("us.example.", 4, -time.Second)
+	if after == 0 || after == first {
+		t.Errorf("a lead after another's is %d, want a new number (was %d)", after, first)
 	}
-	if got := lead("us.example.", 5, time.Hour); got != 6 {
-		t.Errorf("a lead after a lapsed lease is %d, want 6", got)
+	if got := lead("us.example.", 5, time.Hour); got == 0 || got == after {
+		t.Errorf("a lead after a lapsed lease is %d, want a new number (was %d)", got, after)
 	}
 
 	// a lone voter: its self-election and its renewals stay at term 0
@@ -210,12 +211,62 @@ func TestALeadStartsAtItsFirstTermAndARenewalKeepsIt(t *testing.T) {
 		lone.Leader, lone.LeaderExpiry = "us.example.", now.Add(time.Hour)
 		return lone.leadStart
 	}
-	first := at0()
-	if first == 0 {
+	l0 := at0()
+	if l0 == 0 {
 		t.Fatal("a lead at term 0 reads as no lead")
 	}
-	if got := at0(); got != first {
-		t.Errorf("a renewal at term 0 starts the lead anew (%d, was %d): it republishes the key and polls again", got, first)
+	if got := at0(); got != l0 {
+		t.Errorf("a renewal at term 0 starts the lead anew (%d, was %d): it republishes the key and polls again", got, l0)
+	}
+}
+
+// Leads in two elections, two groups or a group and a zone's own, never
+// share a number, also when each began at the same term: a lead in the
+// group a zone moved to is never taken for a renewal of the lead in the
+// group it left.
+func TestLeadsInTwoElectionsNeverShareANumber(t *testing.T) {
+	lem := &LeaderElectionManager{localID: "us.example."}
+	g1, g2 := &LeaderElection{Term: 1}, &LeaderElection{Term: 1}
+	lem.noteLeaderLocked(g1, "us.example.", time.Now())
+	lem.noteLeaderLocked(g2, "us.example.", time.Now())
+	if g1.leadStart == 0 || g1.leadStart == g2.leadStart {
+		t.Errorf("two leads at term 1 in two elections are %d and %d", g1.leadStart, g2.leadStart)
+	}
+}
+
+// A poll that returns because the lead moved (the zone left its group, its
+// run cancelled) did not run to its end: nothing is noted, and a later lead,
+// or the same lead taking the zone up again, publishes and polls anew. A poll
+// that ends in the lead it started in is noted.
+func TestAPollEndedByAMovedLeadIsNoRenewal(t *testing.T) {
+	for _, moved := range []bool{true, false} {
+		r := newKeyRoundRig(t, map[bool]string{true: "moved.poll.example.", false: "kept.poll.example."}[moved], "UPDATE")
+		release := make(chan struct{})
+		started := make(chan struct{}, 1)
+		r.conf.InternalMp.keyPoll = func(ctx context.Context, _ ZoneName, _ string, _ uint16, _ uint8) {
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+		k := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+		r.conf.launchKeyPoll(r.ctx, nil, r.zone, string(r.zone), k.keyid, k.key.Algorithm)
+		if _, ok := recvWithin(started, 5*time.Second); !ok {
+			t.Fatal("the poll did not start")
+		}
+		if moved {
+			r.leader(r.them)
+		}
+		close(release)
+		waitUntil(t, "the poll ended", func() bool { n, _, _ := r.conf.InternalMp.keyPolls.state(r.zone); return n == 0 })
+		_, _, ended := r.conf.InternalMp.keyPolls.state(r.zone)
+		if moved && ended.leadStart != 0 {
+			t.Errorf("a poll whose lead moved was noted as ended in lead %d", ended.leadStart)
+		}
+		if !moved && (ended.leadStart == 0 || ended.keyid != k.keyid) {
+			t.Errorf("a poll that ran to its end in its lead was not noted: %+v", ended)
+		}
 	}
 }
 

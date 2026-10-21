@@ -140,12 +140,13 @@ type LeaderElection struct {
 	// while an election is running and after one that was aborted: the
 	// leader then is still the one of the term before.
 	leaderTerm uint64
-	// leadStart is one above the term in which this agent's present lead
-	// began, so that a lead at term 0 (a lone voter's self-election) is not
-	// read as no lead: a renewal, which names this agent again while its
-	// lease runs, keeps it; a lead that follows another agent's, an
-	// invalidated or a lapsed one starts anew. Zero while another agent
-	// leads (noteLeaderLocked).
+	// leadStart names this agent's present lead: a number given when the
+	// lead began, unique in this process across every election, so that a
+	// lead in one group is never taken for a lead in another, and a lead at
+	// term 0 (a lone voter's self-election) is a lead. A renewal, which
+	// names this agent again while its lease runs, keeps it; a lead that
+	// follows another agent's, an invalidated or a lapsed one gets a new
+	// one. Zero while another agent leads (noteLeaderLocked).
 	leadStart uint64
 	// gone: the provider group of this election is gone, and the manager
 	// has dropped the entry (groupGone). Nothing starts on it any more.
@@ -164,6 +165,10 @@ type LeaderElection struct {
 // When a ProviderGroupManager is set, elections are per-group and the leader
 // covers all zones in the group. IsLeader checks group membership first.
 type LeaderElectionManager struct {
+	// leads numbers this agent's leads in this process, across every
+	// election, the groups' and the zones' own (noteLeaderLocked): two
+	// leads never share a number.
+	leads                atomic.Uint64
 	mu                   sync.RWMutex
 	elections            map[ZoneName]*LeaderElection
 	pendingElections     map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
