@@ -632,10 +632,10 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
 				return
 			}
-			key, err := firstActiveSig0Key(hdb.KeyDB, string(amp.Zone))
-			if err != nil || key == nil {
+			key, refusal := bootstrapKey(hdb.KeyDB, amp.Zone)
+			if refusal != "" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				resp.ErrorMsg = refusal
 				return
 			}
 			keyid := key.key.KeyTag()

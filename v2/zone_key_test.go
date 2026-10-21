@@ -261,3 +261,33 @@ func TestOnlyTheSyncherTouchesTdnssKeyCache(t *testing.T) {
 		}
 	}
 }
+
+// The operator's parentsync-bootstrap polls the zone's key, and only while
+// it is the only active key: tdns's bootstrap uploads the first active key,
+// which need not be the one the zone publishes.
+func TestTheOperatorsBootstrapPollsOnlyTheZonesOnlyKey(t *testing.T) {
+	const zone = "bootstrap.only.example."
+	kdb := newMPTestKeyDB(t)
+	old := testSig0Key(t, kdb, zone) // the first active row
+	mine := testSig0Key(t, kdb, zone)
+	keyZone(t, zone, mine) // the zone publishes the second
+
+	if key, refusal := bootstrapKey(kdb, zone); key != nil || !strings.Contains(refusal, "2 active SIG(0) keys") {
+		t.Errorf("with two active keys: key %v, refusal %q; want a refusal", key, refusal)
+	}
+	if _, err := kdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate", Zone: zone, Keyname: zone,
+		Keyid: old.keyid, State: tdns.Sig0StateRetired}); err != nil {
+		t.Fatal(err)
+	}
+	if key, refusal := bootstrapKey(kdb, zone); refusal != "" || key == nil || key.keyid != mine.keyid {
+		t.Errorf("with the zone's key the only active one: key %v, refusal %q; want %d", key, refusal, mine.keyid)
+	}
+
+	const other = "bootstrap.notheld.example."
+	notMine := testSig0Key(t, newMPTestKeyDB(t), other)
+	keyZone(t, other, notMine)
+	testSig0Key(t, kdb, other) // an active key the zone does not publish
+	if key, refusal := bootstrapKey(kdb, other); key != nil || !strings.Contains(refusal, "does not hold") {
+		t.Errorf("a zone whose key this agent does not hold: key %v, refusal %q", key, refusal)
+	}
+}
