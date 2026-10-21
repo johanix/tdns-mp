@@ -112,6 +112,18 @@ func activeSig0Rows(kdb *tdns.KeyDB, zone ZoneName) ([]sig0Row, error) {
 	return out, rows.Err()
 }
 
+// firstActiveSig0Key is name's first active key, the one tdns signs with
+// (GetSig0Keys), read with a query of its own: tdns's cache of those keys is
+// a map with no lock (johanix/tdns#943), which only the syncher's goroutine
+// reads here (signingKeyCached). Nil when there is none.
+func firstActiveSig0Key(kdb *tdns.KeyDB, name string) (*sig0Row, error) {
+	active, err := activeSig0Rows(kdb, ZoneName(name))
+	if err != nil || len(active) == 0 || active[0].key == nil {
+		return nil, err
+	}
+	return &active[0], nil
+}
+
 // readZoneKey reads what this agent holds of the zone's SIG(0) key.
 func readZoneKey(kdb *tdns.KeyDB, zone ZoneName) (*zoneKey, error) {
 	z := &zoneKey{published: publishedKeys(zone)}

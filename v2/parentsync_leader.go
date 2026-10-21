@@ -1319,20 +1319,26 @@ func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader Ag
 }
 
 // LeadStart names this agent's present lead of the zone (noteLeaderLocked),
-// as IsLeader finds the zone's election: its provider group's, else the
-// zone's own. Zero when it does not lead the zone.
+// as IsLeader finds the zone's election: its provider group's when that has
+// a leader, else the zone's own. Zero when it does not lead the zone.
 func (lem *LeaderElectionManager) LeadStart(zone ZoneName) uint64 {
 	if !lem.IsLeader(zone) {
 		return 0
 	}
-	lem.mu.RLock()
-	le, ok := (*LeaderElection)(nil), false
+	group := ""
 	if lem.providerGroupMgr != nil {
 		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
-			le, ok = lem.groupElections[pg.GroupHash]
+			if _, led := lem.GetGroupLeader(pg.GroupHash); led {
+				group = pg.GroupHash
+			}
 		}
 	}
-	if !ok {
+	lem.mu.RLock()
+	var le *LeaderElection
+	var ok bool
+	if group != "" {
+		le, ok = lem.groupElections[group]
+	} else {
 		le, ok = lem.elections[zone]
 	}
 	lem.mu.RUnlock()
@@ -2219,17 +2225,15 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	if targetName == "" {
 		targetName = string(zone)
 	}
-	sak, err := hdb.GetSig0Keys(targetName, tdns.Sig0StateActive)
-	if err == nil && len(sak.Keys) > 0 {
-		key := sak.Keys[0]
-		status.KeyAlgorithm = dns.AlgorithmToString[key.Algorithm]
-		status.KeyID = key.KeyId
-		status.KeyRR = key.KeyRR.String()
+	if key, err := firstActiveSig0Key(hdb.KeyDB, targetName); err == nil && key != nil {
+		status.KeyAlgorithm = dns.AlgorithmToString[key.key.Algorithm]
+		status.KeyID = key.keyid
+		status.KeyRR = key.key.String()
 
 		// Read parent_state from keystore
 		var parentState int
 		row := hdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
-			targetName, key.KeyId)
+			targetName, key.keyid)
 		if err := row.Scan(&parentState); err == nil {
 			status.ParentState = uint8(parentState)
 			status.ParentStateName = edns0.KeyStateToString(uint8(parentState))

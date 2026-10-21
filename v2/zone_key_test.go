@@ -4,7 +4,13 @@
 package tdnsmp
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,5 +204,60 @@ func TestSeveralPublishedKEYsAreNoZoneKey(t *testing.T) {
 	}
 	if got, _ := activeSig0Rows(hdb.KeyDB, zone); !slices.Equal(keyIDs(got), []uint16{mine.keyid}) {
 		t.Errorf("the active keys are %v, want %d as it was", keyIDs(got), mine.keyid)
+	}
+}
+
+// The status reads the zone's key with a query of its own, and leaves tdns's
+// cache of the keys alone: that is a map with no lock (johanix/tdns#943),
+// and the status is read on an API request's goroutine.
+func TestTheStatusReadsTheKeyWithoutTdnssCache(t *testing.T) {
+	const zone = "status.nocache.example."
+	kdb := newMPTestKeyDB(t)
+	k := testSig0Key(t, kdb, zone)
+	zd := keyZone(t, zone, k)
+	delete(kdb.KeystoreSig0Cache, zone+"+"+tdns.Sig0StateActive)
+	lem := NewLeaderElectionManager("alice.agent.example.", time.Hour, func(ZoneName, string, map[string][]string) error { return nil })
+	st := lem.GetParentSyncStatus(ZoneName(zone), zd, NewHsyncDB(kdb), nil, nil, nil)
+	if st.KeyID != k.keyid || st.KeyRR == "" {
+		t.Errorf("the status shows key %d (%q), want %d", st.KeyID, st.KeyRR, k.keyid)
+	}
+	if _, cached := kdb.KeystoreSig0Cache[zone+"+"+tdns.Sig0StateActive]; cached {
+		t.Error("the status read the key through tdns's cache")
+	}
+}
+
+// Only signingKeyCached, on the syncher's goroutine, reads or changes tdns's
+// cache of SIG(0) keys (GetSig0Keys, KeystoreSig0Cache): the API's requests
+// and every other goroutine read the keystore with a query of their own.
+func TestOnlyTheSyncherTouchesTdnssKeyCache(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Name.Name == "signingKeyCached" {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && (sel.Sel.Name == "GetSig0Keys" || sel.Sel.Name == "KeystoreSig0Cache") {
+					t.Errorf("%s: %s uses tdns's key cache (%s)", fset.Position(sel.Pos()), fd.Name.Name, sel.Sel.Name)
+				}
+				return true
+			})
+		}
 	}
 }
