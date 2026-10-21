@@ -44,6 +44,10 @@ type SynchedDataUpdate struct {
 	// (a state, a ds) with the DNSKEY set as it was; the REPLACE goes to
 	// the other providers all the same, for the key states it carries.
 	KeyStatesChanged bool
+	// Resend: a distribution the signer's key lifecycle sends again
+	// (#256). The update goes to the peers, tracked, even when the repo
+	// already held it.
+	Resend bool
 	// CatchUp: the update is the answer to a request for the zone's state
 	// (the membership design, 5.4).
 	CatchUp  *CatchUp `json:"catch_up,omitempty"`
@@ -392,4 +396,13 @@ type DnskeyStatus struct {
 	// differ from what was last sent, though the key set may not.
 	CurrentKeyStates []core.KeyState
 	StatesChanged    bool
+	// Resend: the signer sends keys of LocalAdds, or the removals of
+	// ResendRemovedTags, again (#256); the set is distributed even when
+	// nothing changed.
+	Resend bool
+	// ResendRemovedTags: this provider's withdrawn keys whose removal the
+	// signer sends again. The removal travels in the REPLACE of the current
+	// set, without a delete record: the repo no longer holds the key, and a
+	// local delete of a record this agent does not own is refused.
+	ResendRemovedTags []uint16
 }

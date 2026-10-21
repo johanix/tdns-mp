@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,10 @@ type MPTransportBridge struct {
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
 	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
 	dnskeyPropMu              sync.Mutex
+	// supersededBy: a DNSKEY propagation that a resend of its keys took
+	// over (foldIntoResend), to the resend's distribution ID, so that a late
+	// answer to it still counts there. Under dnskeyPropMu.
+	supersededBy map[string]supersession
 	// answersSent: the answers to requests for a zone's state that this
 	// agent sent, by distribution ID, with the keys of their DNSKEY
 	// operation (noteCatchUpAnswer); answerTo: the distribution ID of the
@@ -1190,6 +1195,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Zone:      payload.Zone,
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
+		Resend:    payload.Resend,
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -1199,8 +1205,11 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 
 	// If there's a pending RFI request waiting for this zone's inventory,
-	// route there. Zone mismatches fall through to the shared channel.
-	if ch, ok := tm.getKeystateRfi(payload.Zone); ok {
+	// route there. Zone mismatches fall through to the shared channel. An
+	// inventory with keys marked as sent again is the signer's push, not an
+	// RFI's answer: it goes to the agent's handler, which distributes them
+	// (#256); a waiter would record it and drop the mark.
+	if ch, ok := tm.getKeystateRfi(payload.Zone); ok && len(payload.Resend) == 0 {
 		select {
 		case ch <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
@@ -2234,6 +2243,115 @@ type PendingDnskeyPropagation struct {
 	CreatedAt    time.Time
 }
 
+// foldIntoResend lets the resend of keys (#256), tracked as resendID, take
+// over the zone's pending DNSKEY propagations of the same distribution: the
+// same key tags, removing the same of them. Each such tracking ends here,
+// which a final word that credited nothing left open: otherwise one more
+// stayed with every resend. What its agents had answered positively
+// (applied, ignored) is carried over, and its ID points at the resend's
+// (supersededBy), so an answer to it that comes late still counts. An agent
+// slower than the resend interval is then not asked over and over to no
+// end. A rejection is not carried: the resend asks again, and its answer
+// decides. Any other tracking is left to finish on its own: an add's
+// "applied" is not a removal's, and a late success is scored against every
+// key of the resend, so a tracking of fewer keys would credit the rest.
+func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	resend := tm.pendingDnskeyPropagations[resendID]
+	if resend == nil {
+		return
+	}
+	tm.pruneSupersededLocked(time.Now())
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if distID == resendID || prop.Zone != zone || len(prop.KeyTags) == 0 {
+			continue
+		}
+		if !sameDistribution(prop, resend) {
+			continue
+		}
+		for agent, results := range prop.Results {
+			for kt, r := range results {
+				if r == "applied" || r == "ignored" {
+					resend.setResultLocked(agent, kt, r)
+				}
+			}
+		}
+		delete(tm.pendingDnskeyPropagations, distID)
+		if tm.supersededBy == nil {
+			tm.supersededBy = map[string]supersession{}
+		}
+		for old, s := range tm.supersededBy {
+			if s.to == distID {
+				tm.supersededBy[old] = supersession{to: resendID, at: s.at}
+			}
+		}
+		tm.supersededBy[distID] = supersession{to: resendID, at: time.Now()}
+		lgTransport.Info("a DNSKEY propagation is superseded by a resend of its keys", "zone", zone, "distributionID", distID, "resend", resendID, "keyTags", len(prop.KeyTags))
+	}
+	tm.finishDnskeyPropagationLocked(resendID, resend)
+}
+
+// supersession: the resend that took a DNSKEY propagation over, and when.
+// No answer to the earlier distribution comes after the reliable queue has
+// given it up (noteMaxAge), so the alias is dropped then: a key that is
+// resent for as long as its tracking stays open leaves no more aliases than
+// a day's resends.
+type supersession struct {
+	to string
+	at time.Time
+}
+
+// pruneSupersededLocked drops the aliases no late answer can use any more.
+// Under dnskeyPropMu.
+func (tm *MPTransportBridge) pruneSupersededLocked(now time.Time) {
+	for old, s := range tm.supersededBy {
+		if now.Sub(s.at) > noteMaxAge {
+			delete(tm.supersededBy, old)
+		}
+	}
+}
+
+// sameDistribution is whether two DNSKEY propagations carry the same key
+// tags and remove the same of them.
+func sameDistribution(a, b *PendingDnskeyPropagation) bool {
+	if len(a.KeyTags) != len(b.KeyTags) {
+		return false
+	}
+	for _, kt := range a.KeyTags {
+		if !slices.Contains(b.KeyTags, kt) || a.Removed[kt] != b.Removed[kt] {
+			return false
+		}
+	}
+	for _, kt := range b.KeyTags {
+		if !slices.Contains(a.KeyTags, kt) {
+			return false
+		}
+	}
+	return true
+}
+
+// setResultLocked records an agent's answer for a key of the propagation,
+// unless it has one, and marks the agent answered once every key has one.
+// Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, result string) {
+	if _, expected := prop.ExpectedAgents[agent]; !expected || !slices.Contains(prop.KeyTags, kt) {
+		return
+	}
+	if prop.Results == nil {
+		prop.Results = map[AgentId]map[uint16]string{}
+	}
+	if prop.Results[agent] == nil {
+		prop.Results[agent] = map[uint16]string{}
+	}
+	if prop.Results[agent][kt] == "" {
+		prop.Results[agent][kt] = result
+	}
+	if len(prop.Results[agent]) == len(prop.KeyTags) {
+		prop.ExpectedAgents[agent] = true
+	}
+}
+
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
 // Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
 func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags, removedTags []uint16, agents []AgentId) {
@@ -2361,6 +2479,18 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	defer tm.dnskeyPropMu.Unlock()
 
 	prop, exists := tm.pendingDnskeyPropagations[distID]
+	// a late answer to a propagation a resend of its keys took over counts
+	// there, but only for what it applied: the resend's own answer decides
+	// a rejection (foldIntoResend)
+	late := false
+	if !exists {
+		if s, ok := tm.supersededBy[distID]; ok {
+			if prop, exists = tm.pendingDnskeyPropagations[s.to]; exists {
+				late = true
+				distID = s.to
+			}
+		}
+	}
 	if !exists {
 		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
 			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
@@ -2417,6 +2547,8 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			continue // a key's first final answer from an agent stands
 		}
 		switch {
+		case late && (rejectedTags[kt] || (wholeRejection && !doneTags[kt])):
+			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
 			prop.Rejected = true
@@ -2462,6 +2594,11 @@ func (tm *MPTransportBridge) finishDnskeyPropagationLocked(distID string, prop *
 	sentAt := prop.CreatedAt
 	propagated, removed, rejected, rejectionMsg := prop.outcome()
 	delete(tm.pendingDnskeyPropagations, distID)
+	for old, s := range tm.supersededBy {
+		if s.to == distID {
+			delete(tm.supersededBy, old)
+		}
+	}
 
 	// Send KEYSTATE asynchronously (don't hold the mutex); the kind of
 	// distribution each key's answer is about travels as the signal:
