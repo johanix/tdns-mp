@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var myIdentity, notifyRRtype, rfitype, rfisubtype string
+var notifyRRtype, rfitype, rfisubtype string
 
 // debugAgentLeaves are the mp-specific leaves of the agent "debug"
 // subtree. They are handed to tdns's NewDebugCmd as extras, so that one
@@ -49,7 +49,9 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 		Use:   "send-notify",
 		Short: "Tell agent to send a NOTIFY message to the other agents",
 		Run: func(cmd *cobra.Command, args []string) {
-			tdnscli.PrepArgs("zonename", "identity")
+			// The agent sends to every agent of the zone: there is no
+			// recipient to name (PrepArgs has no "identity" any more).
+			tdnscli.PrepArgs("zonename")
 
 			notifyRRtype = strings.ToUpper(notifyRRtype)
 			if notifyRRtype != "NS" && notifyRRtype != "DNSKEY" {
@@ -79,7 +81,6 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 				MessageType: AgentMsgNotify,
 				RRType:      rrtype,
 				Zone:        ZoneName(tdns.Globals.Zonename),
-				AgentId:     AgentId(string(tdns.Globals.AgentId)),
 				RRs:         rrs,
 			}
 
@@ -89,7 +90,6 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 			}
 		},
 	}
-	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	c.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	c.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
 	return c
@@ -98,9 +98,13 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "send-rfi",
-		Short: "Tell agent to send an RFI message to another agent",
+		Short: "Tell agent to send an RFI message to the agents of the zone it concerns",
+		Long: `Tell agent to send an RFI message for the zone. The agent picks the recipients
+from the zone: CONFIG upstream goes to its upstream, CONFIG downstream to its
+downstreams, CONFIG sig0key and AUDIT to every agent of the zone, SYNC to the
+voting members.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			tdnscli.PrepArgs("zonename", "identity")
+			tdnscli.PrepArgs("zonename")
 
 			rfitype = strings.ToUpper(rfitype)
 			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
@@ -119,7 +123,6 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 				RfiType:     rfitype,
 				RfiSubtype:  rfisubtype,
 				Zone:        ZoneName(tdns.Globals.Zonename),
-				AgentId:     AgentId(string(tdns.Globals.AgentId)),
 			}
 
 			amr, err := SendAgentDebugCmd(cmd, req, false)
@@ -210,7 +213,6 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 			}
 		},
 	}
-	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
 	c.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
 	return c
