@@ -199,6 +199,10 @@ type PendingRemoteConfirmation struct {
 	// FromAnswer: the forward is of an answer to a request for the zone's
 	// state.
 	FromAnswer bool
+	// DnskeyOps: the update's DNSKEY add and replace operations. The
+	// combiner's success is checked against what the repo holds when it
+	// comes (heldSuccess): a newer set may have dropped a key since.
+	DnskeyOps []core.RROperation
 }
 
 type RemoteConfirmationDetail struct {
