@@ -172,7 +172,9 @@ func recipientTransportReady(ar *AgentRegistry, peers *transport.PeerRegistry, r
 	if !ok {
 		return false
 	}
-	return isTransportReady(peer, "DNS") || isTransportReady(peer, "API")
+	// API counts only with a TLSA to check the peer against: a hello on
+	// the unauthenticated /hello introduces API without one.
+	return isTransportReady(peer, "DNS") || (isTransportReady(peer, "API") && peer.APIUsable())
 }
 
 func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
@@ -302,26 +304,43 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// remote agents that serve API. supported_mechanisms controls the server role, not
 	// the client role.
 	apiTLSConfig := &tls.Config{
-		// Peer certificates are validated against TLSA records (discovered via DNS),
-		// not against the system CA store. Self-signed certs are the norm here.
+		// Self-signed certificates are the norm here: the transport checks
+		// each peer's certificate against the peer's TLSA RRset (DANE-EE),
+		// not against a CA.
 		InsecureSkipVerify: true, //nolint:gosec
 		MinVersion:         tls.VersionTLS13,
 	}
-	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
+	if cfg.ClientCertFile != "" || cfg.ClientKeyFile != "" {
 		clientCert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
-			lgTransport.Error("failed to load API client certificate, outbound mTLS will not work",
-				"certFile", cfg.ClientCertFile, "keyFile", cfg.ClientKeyFile, "err", err)
-		} else {
-			apiTLSConfig.Certificates = []tls.Certificate{clientCert}
-			lgTransport.Info("API client certificate loaded", "certFile", cfg.ClientCertFile)
+			return nil, fmt.Errorf("API client certificate (cert %q, key %q): %w", cfg.ClientCertFile, cfg.ClientKeyFile, err)
+		}
+		apiTLSConfig.Certificates = []tls.Certificate{clientCert}
+		lgTransport.Info("API client certificate loaded", "certFile", cfg.ClientCertFile)
+	} else if tm.role == "" || tm.role == roleAgent || tm.role == roleAuditor {
+		lgTransport.Warn("no API client certificate: every peer refuses this node's HTTPS (401), and each such send falls back to DNS")
+	}
+	// The resolver starts after the bridge: late-bound, for discovery and
+	// for the TLSA checks.
+	var getImr func() *transport.Imr
+	if cfg.GetImrEngine != nil {
+		getImrEngine := cfg.GetImrEngine
+		getImr = func() *transport.Imr {
+			mpImr := getImrEngine()
+			if mpImr == nil || mpImr.Imr == nil {
+				return nil
+			}
+			return &transport.Imr{Imr: mpImr.Imr}
 		}
 	}
 	tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: cfg.APITimeout,
 		TLSConfig:      apiTLSConfig,
+		GetImr:         getImr,
 	})
+	// A peer's HTTPS client goes with the peer.
+	peerRegistry.OnRemove = tm.APITransport.ForgetPeer
 	lgTransport.Info("API client transport enabled")
 
 	// Create DNS transport if control zone is configured AND supported
@@ -602,16 +621,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// accessor (the resolver starts asynchronously). The TEMPORARY
 	// DiscoveryDriver seam and MP's RunDiscovery are gone.
 	tm.TransportManager.SetSupportedMechanisms(supportedMechanisms)
-	if cfg.GetImrEngine != nil {
-		getImr := cfg.GetImrEngine
-		tm.TransportManager.GetImr = func() *transport.Imr {
-			mpImr := getImr()
-			if mpImr == nil || mpImr.Imr == nil {
-				return nil
-			}
-			return &transport.Imr{Imr: mpImr.Imr}
-		}
-	}
+	tm.TransportManager.GetImr = getImr
 
 	return tm, nil
 }
@@ -1560,33 +1570,6 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	}
 }
 
-// SelectTransport selects the appropriate transport for communicating with a peer.
-func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Transport {
-	apiEndpoint := peer.GetAPIEndpoint()
-
-	// Check peer's preferred transport
-	switch peer.GetPreferredTransport() {
-	case "DNS":
-		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-			return tm.DNSTransport
-		}
-	case "API":
-		if tm.APITransport != nil && apiEndpoint != "" {
-			return tm.APITransport
-		}
-	}
-
-	// Default: try API first (more reliable), then DNS
-	if tm.APITransport != nil && apiEndpoint != "" {
-		return tm.APITransport
-	}
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-		return tm.DNSTransport
-	}
-
-	return nil
-}
-
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
 func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *PeerSyncRequest) (*PeerSyncResponse, error) {
 	// Bite 3: delegate to the generic primary-then-fallback path on
@@ -1661,7 +1644,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// transport's SendAll — every eligible mechanism is tried, in order,
 	// and each outcome is applied below exactly as before.
 	apiGate, _ := mechStateForGate(peer, "API")
-	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && apiGate == AgentStateKnown
+	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIUsable() && apiGate == AgentStateKnown
 	dnsGate, _ := mechStateForGate(peer, "DNS")
 	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
 	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
@@ -1787,7 +1770,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		return st == AgentStateOperational || st == AgentStateIntroduced || st == AgentStateLegacy || st == AgentStateDegraded || st == AgentStateInterrupted
 	}
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && beatable(apiBeatGate)
+	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIUsable() && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
 	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
 	apiRaw, _ := peer.MechanismRawState("API")

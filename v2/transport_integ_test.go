@@ -239,6 +239,7 @@ func TestTransportBoundary_SyncFallback(t *testing.T) {
 	// transport reports as non-retryable but still propagates).
 	bob := env.Alice.Bridge.PeerRegistry.GetOrCreate(env.Bob.Identity)
 	bob.APIEndpoint = srv.URL
+	setTLSA(bob, srv.Certificate())
 	bob.PreferredTransport = "API"
 
 	req := &PeerSyncRequest{

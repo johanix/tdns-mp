@@ -67,6 +67,7 @@ func TestABeatCountsForEveryZoneItNames(t *testing.T) {
 		}
 		peer := transport.NewPeer(auditor)
 		peer.APIEndpoint = srv.URL + "/api/v1"
+		setTLSA(peer, srv.Certificate())
 		sctx, scancel := context.WithTimeout(ctx, integTestTimeout)
 		defer scancel()
 		resp, err := apiSender(srv, sender).Beat(sctx, peer, &transport.BeatRequest{SenderID: sender, Zones: named, Timestamp: time.Now()})
@@ -172,6 +173,7 @@ func TestABeatIsNotBookedForAZoneItsSenderIsNoMemberOf(t *testing.T) {
 
 	peer := transport.NewPeer(auditor)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	sctx, scancel := context.WithTimeout(ctx, integTestTimeout)
 	defer scancel()
 	resp, err := apiSender(srv, stranger).Beat(sctx, peer, &transport.BeatRequest{SenderID: stranger, Zones: []string{shared, closed, "absent.beats.example."}, Timestamp: time.Now()})
