@@ -614,7 +614,7 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// The catch-up tracker, before the refresh engine starts: a zone's
 	// first load asks through it.
 	catchUp := newCatchUpTracker(AgentId(mp.Identity), conf.InternalMp.MPZoneNames, catchUpOutageFor(mp))
-	catchUp.wire(tm, conf.InternalMp.AgentRegistry)
+	catchUp.wire(conf, tm, conf.InternalMp.AgentRegistry)
 	conf.InternalMp.CatchUp, tm.catchUp = catchUp, catchUp
 	// the DS set of a zone our own signer does not own (Amendment 2), and
 	// the other providers' word on the one it owns (#207)

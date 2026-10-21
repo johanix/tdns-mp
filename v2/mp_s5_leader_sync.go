@@ -123,6 +123,70 @@ func (conf *Config) waitDelegationSyncTimers() {
 	conf.InternalMp.delegationSyncChains.timers.Wait()
 }
 
+// askOwedDelegationSync asks, once and with no retry, for a sync that was
+// held because the zone was not caught up, now that it is (design 5.6). It
+// makes the checks of requestDelegationSync and tries the queue once. The
+// explicit sync looks at the parent first, and sends only the difference.
+// requestDelegationSync's own retry is not used: it gives up after five
+// tries, and the owed mark is kept for as long as the queue is full
+// (decision 44).
+func (conf *Config) askOwedDelegationSync(ctx context.Context, zone ZoneName) owedResult {
+	if !conf.owedSyncApplies(ctx, zone) {
+		return owedNotAsked
+	}
+	mpzd, _ := Zones.Get(string(zone))
+	if queueExplicitDelegationSync(mpzd) {
+		return owedQueued
+	}
+	return owedQueueFull
+}
+
+// owedSyncApplies is askOwedDelegationSync's checks: the engine runs, the
+// zone is here and syncs with its parent through its agents, and this
+// agent leads it.
+func (conf *Config) owedSyncApplies(ctx context.Context, zone ZoneName) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if _, held := tdns.Zones.Get(string(zone)); !held {
+		return false
+	}
+	mpzd, ok := Zones.Get(string(zone))
+	if !ok || mpzd == nil || mpzd.ZoneData == nil || mpzd.DelegationSyncQ == nil || !mpzd.Options[tdns.OptParentSync] {
+		return false
+	}
+	if lem := conf.InternalMp.LeaderElectionManager; lem != nil && !lem.IsLeader(zone) {
+		return false
+	}
+	return true
+}
+
+// holdLeaderSync holds the leader's sync of a multi-provider zone while the
+// zone is not caught up (design 5.6): it notes the sync as owed, says whom
+// it waits for, and reports that nothing is to be sent. Called by the
+// syncher after the check of the lead. Where there is no tracker nothing is
+// held. A chain with a NOTIFY out forgets it: the owed sync, when it comes,
+// is not the chain's own check of that NOTIFY, and an NS change made during
+// the hold gets its CSYNC and its wait (#151).
+func (conf *Config) holdLeaderSync(ds tdns.DelegationSyncRequest) (held bool, waitingFor string) {
+	t := conf.InternalMp.CatchUp
+	if t == nil || !mpLeaderSync(conf, ds) {
+		return false, ""
+	}
+	held, w := t.holdUnlessCaughtUp(ZoneName(ds.ZoneName))
+	if !held {
+		return false, ""
+	}
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	if ch := c.zones[ds.ZoneName]; ch != nil {
+		ch.notified, ch.rechecks = "", 0
+	}
+	c.mu.Unlock()
+	lg.Info("DelegationSyncher: the sync with the parent is held until the zone is caught up", "zone", ds.ZoneName, "waiting_for", w.String())
+	return true, w.String()
+}
+
 // queueExplicitDelegationSync puts an explicit sync on the zone's queue
 // without waiting for room.
 func queueExplicitDelegationSync(mpzd *MPZoneData) bool {
@@ -520,6 +584,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 	conf.delegationSyncAfter(ctx, sent.wait, func() {
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
+		caughtUp, waiting := conf.InternalMp.CatchUp.CaughtUp(ZoneName(zone))
 		c.mu.Lock()
 		ch := c.zones[zone]
 		if ch == nil || ch.ask != ask || ch.hold == nil || ch.hold.awaiting {
@@ -529,6 +594,19 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		if stopped || !leads {
 			c.mu.Unlock()
 			conf.delegationSyncNotLeading(zone, stopped)
+			return
+		}
+		if !caughtUp {
+			// The zone stopped being caught up while the NOTIFY waited: it is
+			// dropped, and the sync is owed. The chain forgets its NOTIFY and
+			// its checks, as the release does below; the zone's CSYNC is kept,
+			// so that an unchanged difference makes no new one.
+			hold := ch.hold
+			ch.hold, ch.waiting, ch.notified, ch.rechecks = nil, false, "", 0
+			c.mu.Unlock()
+			conf.InternalMp.CatchUp.owe(ZoneName(zone))
+			lgEngine.Info("the held NOTIFY is dropped: the zone is not caught up; the sync is owed", "zone", zone,
+				"notify", notifyTypes(hold.notifies), "waiting_for", waiting.String())
 			return
 		}
 		hold := ch.hold
@@ -572,6 +650,7 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	hold := c.endChainLocked(zone)
 	n := c.cancelRunsLocked(zone)
 	c.mu.Unlock()
+	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
 	if hold != nil {
 		lgEngine.Info("the held NOTIFY is dropped: the zone's owner syncs its delegation", "zone", zone, "notify", notifyTypes(hold.notifies))
 	}
@@ -591,6 +670,7 @@ func (conf *Config) endDelegationSyncWork(zone string) bool {
 	c.endChainLocked(zone)
 	n := c.cancelRunsLocked(zone)
 	c.mu.Unlock()
+	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
 	return chained || n > 0
 }
 
@@ -660,13 +740,15 @@ func (conf *Config) delegationSyncGivenBack(zone string) {
 	}()
 }
 
-// endDelegationSyncChain forgets the zone's chain and its CSYNC, and returns
-// the hold the chain had, if any.
+// endDelegationSyncChain forgets the zone's chain, its CSYNC and its owed
+// sync, and returns the hold the chain had, if any.
 func (conf *Config) endDelegationSyncChain(zone string) *delegationNotifyHold {
 	c := &conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.endChainLocked(zone)
+	hold := c.endChainLocked(zone)
+	c.mu.Unlock()
+	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
+	return hold
 }
 
 // endChainLocked is endDelegationSyncChain for a caller that holds mu.
@@ -757,7 +839,12 @@ func (conf *Config) delegationSyncSucceeded(zone string) (notified string, reche
 // the zone. It ends the zone's chain. If the chain had sent a NOTIFY, this
 // is when that sync is done, so the peers are told now, once; a sync that
 // never sent anything tells them nothing, as before.
-func (conf *Config) delegationSyncInSync(zone string) {
+//
+// dsKnown is false when NS and glue are in step with the parent and the DS
+// set is unknown. The chain ends all the same: the set turning known asks
+// for a sync again. But the parent is not in sync with the zone, and
+// nobody is told that it is.
+func (conf *Config) delegationSyncInSync(zone string, dsKnown bool) {
 	// The difference the zone's CSYNC was made for is gone. The same
 	// difference at a later time is a new change, and gets a new CSYNC.
 	c := &conf.InternalMp.delegationSyncChains
@@ -766,6 +853,11 @@ func (conf *Config) delegationSyncInSync(zone string) {
 	c.mu.Unlock()
 	sent, checks := conf.delegationSyncSucceeded(zone)
 	if sent == "" {
+		return
+	}
+	if !dsKnown {
+		lgEngine.Info("NS and glue are in sync with the parent after the NOTIFY; the DS set is unknown, so the peers are not told that the sync is done",
+			"zone", zone, "notify", sent, "checks", checks)
 		return
 	}
 	lgEngine.Info("the parent is in sync with the zone after the NOTIFY", "zone", zone, "notify", sent, "checks", checks)

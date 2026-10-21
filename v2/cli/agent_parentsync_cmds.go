@@ -268,6 +268,12 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 			fmt.Fprintf(w, "  catch-up:       not caught up, waiting for %s\n", termSafe(c.WaitingFor))
 		}
 	}
+	if s.ParentSync != "" {
+		fmt.Fprintf(w, "  parent sync:    %s\n", termSafe(s.ParentSync))
+	}
+	if s.DSSet != "" {
+		fmt.Fprintf(w, "  DS set:         %s\n", termSafe(s.DSSet))
+	}
 
 	if s.KeyAlgorithm == "" {
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")

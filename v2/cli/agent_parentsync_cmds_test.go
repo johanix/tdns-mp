@@ -521,4 +521,17 @@ func TestParentSyncStatusShowsTheCatchUp(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 	wantLines(t, "status, not voting", out, "  catch-up:       none: this agent does not vote in the zone, and asks nothing")
+
+	// the leader's sync is held, and the DS set is unknown
+	report.CatchUp = &tdnsmp.CatchUpStatus{WaitingFor: "agent.bravo.example."}
+	report.ParentSync = "held until the zone is caught up"
+	report.DSSet = "unknown, waiting for agent.bravo.example. (not spoken)"
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, held", out,
+		"  catch-up:       not caught up, waiting for agent.bravo.example.",
+		"  parent sync:    held until the zone is caught up",
+		"  DS set:         unknown, waiting for agent.bravo.example. (not spoken)")
 }
