@@ -137,7 +137,10 @@ func TestHello_RefusedRetryablyUntilTheTLSAIsKnown(t *testing.T) {
 	// Once bob has carol's TLSA, her hello passes the middleware.
 	peer, _ := te.Bob.Bridge.PeerRegistry.Get(carol)
 	setTLSA(peer, leaf(t, carolCert))
-	if _, err := te.hello(t, agentClient(carol, carolCert), carol); err != nil && strings.Contains(err.Error(), "503") {
-		t.Errorf("carol's hello after bob has her TLSA: %v", err)
+	// The pipeline may still turn her down (she shares no zone); the
+	// middleware must not.
+	if _, err := te.hello(t, agentClient(carol, carolCert), carol); err != nil &&
+		(strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "401")) {
+		t.Errorf("carol's hello after bob has her TLSA was refused by the middleware: %v", err)
 	}
 }
