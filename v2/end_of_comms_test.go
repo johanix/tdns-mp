@@ -129,7 +129,7 @@ func TestADiscoveryForAnIdentityNoZoneNamesIsDropped(t *testing.T) {
 	env := newIntegEnv(t, &integEnvConfig{})
 	const carol = "carol.endofcomms.example."
 	endOfCommsEngine(t, env)
-	env.Bob.Bridge.TransportManager.OnPeerDiscovered(transport.NewPeer(carol))
+	env.Bob.Bridge.TransportManager.OnPeerDiscovered(env.Bob.Bridge.PeerRegistry.GetOrCreate(carol))
 	if _, ok := env.Bob.Registry.S.Get(carol); ok {
 		t.Error("the agent's registry holds an identity no zone names")
 	}
@@ -151,7 +151,7 @@ func TestADiscoveryOnItsWayDoesNotPutARemovedPeerBack(t *testing.T) {
 	zones.participants = zones.participants[:1] // alice is named no more
 	engine.RemovePeer(hsync.PeerID(alice))
 
-	env.Bob.Bridge.TransportManager.OnPeerDiscovered(transport.NewPeer(alice))
+	env.Bob.Bridge.TransportManager.OnPeerDiscovered(env.Bob.Bridge.PeerRegistry.GetOrCreate(alice))
 	if _, ok := env.Bob.Registry.S.Get(AgentId(alice)); ok {
 		t.Error("the discovery put the removed peer's view back")
 	}
@@ -160,9 +160,39 @@ func TestADiscoveryOnItsWayDoesNotPutARemovedPeerBack(t *testing.T) {
 	}
 
 	zones.participants = append(zones.participants, hsync.PeerID(alice))
-	env.Bob.Bridge.TransportManager.OnPeerDiscovered(transport.NewPeer(alice))
+	env.Bob.Bridge.TransportManager.OnPeerDiscovered(env.Bob.Bridge.PeerRegistry.GetOrCreate(alice))
 	if _, ok := env.Bob.Registry.S.Get(AgentId(alice)); !ok {
 		t.Error("a discovery of an identity a zone names again was dropped")
+	}
+}
+
+// A registration that held a transport peer since replaced under its
+// identity does not write that peer's mechanisms into the view of the peer
+// that replaced it. The current transport peer's registration does.
+func TestAStaleRegistrationDoesNotSpeakForTheIdentity(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{})
+	alice := env.Alice.Identity
+	engine, _ := endOfCommsEngine(t, env, alice)
+	engine.MarkNeeded(hsync.PeerID(alice), "named.endofcomms.example.", nil)
+	reg := env.Bob.Bridge.PeerRegistry
+	stale := reg.GetOrCreate(alice)
+	stale.SetMechanismContactInfo("DNS", "complete")
+	reg.Remove(alice)
+	current := reg.GetOrCreate(alice)
+	current.SetMechanismContactInfo("API", "complete")
+
+	env.Bob.Bridge.TransportManager.OnPeerDiscovered(stale)
+	v, ok := env.Bob.Registry.S.Get(AgentId(alice))
+	if !ok {
+		t.Fatal("setup: alice has no view at bob")
+	}
+	if v.DnsMethod {
+		t.Error("a stale registration wrote its DNS mechanism into the current peer's view")
+	}
+
+	env.Bob.Bridge.TransportManager.OnPeerDiscovered(current)
+	if v, _ = env.Bob.Registry.S.Get(AgentId(alice)); !v.ApiMethod || v.DnsMethod {
+		t.Errorf("the current peer's registration: %+v, want API only", v)
 	}
 }
 

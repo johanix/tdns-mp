@@ -33,6 +33,81 @@ func (c *discoveryCounter) count(identity string) int {
 	return c.asked[identity]
 }
 
+// removingTransport runs during while it looks a peer up, and then makes the
+// transport peer again, as a registration that ends after a removal does.
+type removingTransport struct {
+	*d25Transport
+	during func()
+}
+
+func (r *removingTransport) DiscoverPeer(ctx context.Context, identity string) (*transport.Peer, error) {
+	r.reg.GetOrCreate(identity)
+	if r.during != nil {
+		r.during()
+	}
+	return r.reg.GetOrCreate(identity), nil
+}
+
+// A discovery during which the peer is removed tells the application, which
+// drops the transport peer the lookup made again, as the removal did. A new
+// peer stored under the identity meanwhile keeps its own transport peer, and
+// a discovery of a peer the engine still holds tells nothing (W1).
+func TestADiscoveryThatOutlivesItsPeersRemovalLeavesNoTransportPeer(t *testing.T) {
+	tr := &removingTransport{d25Transport: newD25Transport()}
+	var e *Engine
+	var told []*Peer
+	drop := func(p *Peer) { // the agent's removePeerView, for the transport peer
+		if _, successor := e.registry.S.Get(p.ID); !successor {
+			tr.reg.Remove(string(p.ID))
+		}
+	}
+	e = NewEngine(Deps{LocalID: "local.example.", Transport: tr, PeerHooks: PeerHooks{
+		OnPeerRemoved:           drop,
+		OnRemovedPeerDiscovered: func(p *Peer) { told = append(told, p); drop(p) },
+	}}, DefaultConfig())
+
+	gone := NewPeer("gone.example.")
+	gone.DnsMethod = true
+	e.registry.S.Set(gone.ID, gone)
+	tr.during = func() { e.RemovePeer(gone.ID) }
+	e.attemptDiscovery(gone, false, true)
+	if len(told) != 1 || told[0] != gone {
+		t.Fatalf("told of %d removed peers' discoveries, want the removed peer's", len(told))
+	}
+	if _, ok := tr.reg.Get("gone.example."); ok {
+		t.Error("the transport peer of a peer removed during its discovery was left")
+	}
+
+	old := NewPeer("swap.example.")
+	old.DnsMethod = true
+	e.registry.S.Set(old.ID, old)
+	successor := NewPeer("swap.example.")
+	tr.during = func() {
+		e.RemovePeer(old.ID)
+		e.registry.S.Set(successor.ID, successor)
+		tr.reg.GetOrCreate("swap.example.")
+	}
+	e.attemptDiscovery(old, false, true)
+	if len(told) != 2 || told[1] != old {
+		t.Fatalf("the replaced peer's discovery was not told as the removed object's")
+	}
+	if _, ok := tr.reg.Get("swap.example."); !ok {
+		t.Error("the new peer's transport peer was dropped")
+	}
+
+	held := NewPeer("held.example.")
+	held.DnsMethod = true
+	e.registry.S.Set(held.ID, held)
+	tr.during = nil
+	e.attemptDiscovery(held, false, true)
+	if len(told) != 2 {
+		t.Error("a held peer's discovery was told as a removed peer's")
+	}
+	if _, ok := tr.reg.Get("held.example."); !ok {
+		t.Error("a held peer's transport peer is missing after its discovery")
+	}
+}
+
 // The discovery retry goes by the address as well as the state: a mechanism
 // that is past NEEDED and has no address is discovered again, since nothing
 // can be sent to it and nothing else looks the peer up (tdns-mp #84). One

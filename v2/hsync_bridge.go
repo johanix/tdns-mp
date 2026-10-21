@@ -451,6 +451,9 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 					conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
 				}
 			},
+			// A discovery that outlived the peer's removal: drop the
+			// transport peer it made again, as the removal did.
+			OnRemovedPeerDiscovered: func(peer *hsync.Peer) { ar.removePeerView(peer) },
 			// The end of comms (design 3.1): the reconcile loop keeps a peer
 			// that no zone names for the hold time, then removes it.
 			OnPeerUnshared: func(peer *hsync.Peer, unshared bool) {

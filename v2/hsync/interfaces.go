@@ -84,6 +84,11 @@ type PeerHooks struct {
 	// (Phase 3c / A5 residue: prunes are EVENTS, not reconcile-only). The
 	// application uses it to drop its own view of the peer promptly.
 	OnPeerRemoved func(*Peer)
+	// OnRemovedPeerDiscovered fires when a discovery that began before the
+	// peer's removal ends after it. The lookup may have made the transport
+	// peer again that the removal had dropped; the application drops it,
+	// unless a new peer stored under the identity since owns it.
+	OnRemovedPeerDiscovered func(*Peer)
 	// OnPeerUnshared fires when the reconcile loop finds that no zone names
 	// the peer any more (unshared true: it is kept for the hold time), or
 	// that one names it again before its removal (false).
