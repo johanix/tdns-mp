@@ -1149,6 +1149,15 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				stats.TotalPending, stats.TotalDelivered, stats.TotalFailed, stats.TotalExpired)
 			resp.Status = "ok"
 
+		case "inject-named-sender":
+			conf.debugInjectNamedSender(amp, &resp)
+
+		case "inject-combiner-origin":
+			conf.debugInjectCombinerOrigin(amp, &resp)
+
+		case "inject-peer-keystate":
+			conf.debugInjectPeerKeystate(mp, amp, &resp)
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)
