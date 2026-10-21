@@ -65,6 +65,56 @@ func (tm *MPTransportBridge) refuseNamedSender(ctx *transport.MessageContext, ne
 	return nil
 }
 
+// keystateSenderRefusal is the rule for a KEYSTATE's sender (the membership
+// design, 3): an agent takes one only from its own signer, and a signer only
+// from its own agents, the ones its configuration names. A KEYSTATE moves
+// the zone's key inventory, its own read and its DS intent at an agent, and
+// the key lifecycle at a signer; admission lets in every member of a zone
+// and a held peer, which is not that. The other roles keep what admission
+// lets in.
+func (tm *MPTransportBridge) keystateSenderRefusal(role, sender string) string {
+	switch role {
+	case roleAgent:
+		if sender == "" || tm.signerID == "" || canonicalName(sender) != canonicalName(tm.signerID) {
+			return fmt.Sprintf("keystate refused: %s is not this agent's signer", sender)
+		}
+	case roleSigner:
+		if sender != "" && tm.authorizedPeers != nil {
+			for _, a := range tm.authorizedPeers() {
+				if canonicalName(a) == canonicalName(sender) {
+					return ""
+				}
+			}
+		}
+		return fmt.Sprintf("keystate refused: %s is not one of this signer's agents", sender)
+	}
+	return ""
+}
+
+// refuseForeignKeystate is the router middleware of an agent and a signer
+// for a KEYSTATE's sender (keystateSenderRefusal). It runs before the
+// message is handled and routed: a refusal is REFUSED and a warning, as the
+// other sender rules refuse, and nothing goes on, so no handler error is
+// logged and the message reaches no queue. The sender is the one the
+// transport established.
+func (tm *MPTransportBridge) refuseForeignKeystate(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
+	msg, ok := ctx.Incoming()
+	if !ok || msg.Token() != "keystate" {
+		return next(ctx)
+	}
+	sender := ctx.PeerID
+	if sender == "" {
+		sender = msg.TransportSender
+	}
+	if why := tm.keystateSenderRefusal(tm.role, sender); why != "" {
+		lgTransport.Warn("keystate refused: not from this agent's signer or this signer's agent",
+			"role", tm.role, "sender", sender, "zone", msg.Zone, "reason", why)
+		ctx.SetResponseRcode(dns.RcodeRefused)
+		return nil
+	}
+	return next(ctx)
+}
+
 // refuseWithReason answers a message with a refusal that carries its
 // reason, as the refusal of a LEGACY peer's sync does: REFUSED, and a
 // payload that says why.
