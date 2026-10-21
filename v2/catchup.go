@@ -1077,6 +1077,17 @@ func (t *catchUpTracker) owedState(zone ZoneName) (owed, room bool) {
 	return o != nil, o != nil && o.room
 }
 
+// owedForKey: the zone's sync is owed for its SIG(0) key (the key's hold).
+func (t *catchUpTracker) owedForKey(zone ZoneName) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	o := t.owed[ZoneName(dns.Fqdn(string(zone)))]
+	return o != nil && o.key
+}
+
 // roomWaits: an owed sync waits for room in the delegation sync queue.
 func (t *catchUpTracker) roomWaits() bool {
 	if t == nil {
@@ -1137,7 +1148,9 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 			waiting := 0
 			for _, z := range zones[i:] {
 				z = ZoneName(dns.Fqdn(string(z)))
-				if o := t.owed[z]; o != nil {
+				// a sync owed for the zone's key waits for the key, not
+				// for room: it is not asked until the key's hold ends
+				if o := t.owed[z]; o != nil && !o.key {
 					if ok, _ := t.caughtUpLocked(z); ok {
 						o.room = true
 						waiting++

@@ -361,3 +361,39 @@ func TestAnUnreadableParentHoldsTheSync(t *testing.T) {
 		t.Errorf("the rounds read the parent as uses %v, known %v; want not known", uses, known)
 	}
 }
+
+// A sync owed for the zone's key waits for the key, not for room in the
+// delegation sync queue. A pass that finds the queue full marks the caught-up
+// zones after it as waiting for room, but not this one: it is not asked
+// until the key's hold ends, so the mark would stay, and the status would
+// say the queue is full while the key is what it waits for.
+func TestASyncOwedForTheKeyDoesNotWaitForRoom(t *testing.T) {
+	r, tr := owedRig(t, "a.room.key.example.", true)
+	second := newLeaderSyncRig(t, "b.room.key.example.")
+	second.mpzd.Ready = true
+	second.mpzd.DelegationSyncQ = r.q
+	z1, z2 := ZoneName(r.mpzd.ZoneName), ZoneName(second.mpzd.ZoneName)
+	r.lem.mu.Lock()
+	r.lem.elections[z2] = &LeaderElection{Zone: z2, Leader: usAgent, LeaderExpiry: time.Now().Add(time.Hour)}
+	r.lem.mu.Unlock()
+	tr.zdr.markOwnState(z2, true, "")
+	for range cap(r.q) {
+		r.q <- tdns.DelegationSyncRequest{Command: "SYNC-DNSKEY-RRSET", ZoneName: string(z1)}
+	}
+	tr.owe(z1)
+	tr.oweForKey(z2)
+	tr.askAllOwed(r.ctx, false)
+	if _, room := tr.owedState(z1); !room {
+		t.Fatal("precondition: the zone that found the queue full does not wait for room")
+	}
+	if owed, room := tr.owedState(z2); !owed || room {
+		t.Errorf("the sync owed for the key: owed=%v, waits for room=%v; want owed, not waiting for room", owed, room)
+	}
+	if !tr.owedForKey(z2) {
+		t.Error("the sync is not owed for the key")
+	}
+	ar := &AgentRegistry{MPTransport: &MPTransportBridge{catchUp: tr}}
+	if st := r.lem.GetParentSyncStatus(z2, nil, nil, nil, ar, nil); st.ParentSync != "owed for the zone's SIG(0) key" {
+		t.Errorf("the status says %q, want the key", st.ParentSync)
+	}
+}

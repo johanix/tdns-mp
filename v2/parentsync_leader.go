@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -168,7 +169,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 			for _, zone := range zones {
 				go func(z ZoneName) {
 					if err := lem.onLeaderElected(z); err != nil {
-						lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+						logLeaderCallback("onLeaderElected", err, "zone", z, "group", groupHash[:8])
 					}
 				}(zone)
 			}
@@ -606,7 +607,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		for _, zone := range zones {
 			go func(z ZoneName) {
 				if err := lem.onLeaderElected(z); err != nil {
-					lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+					logLeaderCallback("onLeaderElected", err, "zone", z, "group", groupHash[:8])
 				}
 			}(zone)
 		}
@@ -933,7 +934,7 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 			for _, zone := range pg.Zones {
 				go func(z ZoneName) {
 					if err := lem.onLeaderElected(z); err != nil {
-						lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+						logLeaderCallback("onLeaderElected", err, "zone", z, "group", groupHash[:8])
 					}
 				}(zone)
 			}
@@ -1020,7 +1021,7 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 		"zone", zone, "group", shortHash(to), "was_in", was)
 	go func() {
 		if err := lem.onZoneJoined(zone); err != nil {
-			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
+			logLeaderCallback("onZoneJoined", err, "zone", zone, "group", shortHash(to))
 		}
 	}()
 }
@@ -1378,7 +1379,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 		if lem.onLeaderElected != nil {
 			go func() {
 				if err := lem.onLeaderElected(zone); err != nil {
-					lgElect.Error("onLeaderElected callback failed", "zone", zone, "error", err)
+					logLeaderCallback("onLeaderElected", err, "zone", zone)
 				}
 			}()
 		}
@@ -1717,7 +1718,7 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 	if isUs && lem.onLeaderElected != nil {
 		go func() {
 			if err := lem.onLeaderElected(zone); err != nil {
-				lgElect.Error("onLeaderElected callback failed", "zone", zone, "error", err)
+				logLeaderCallback("onLeaderElected", err, "zone", zone)
 			}
 		}()
 	}
@@ -2061,6 +2062,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 			switch {
 			case !caughtUp:
 				status.ParentSync = "held until the zone is caught up"
+			case t.owedForKey(zone):
+				// why it waits is the key hold's line (KeyHold)
+				status.ParentSync = "owed for the zone's SIG(0) key"
 			case room:
 				status.ParentSync = "owed, the delegation sync queue is full"
 			case down:
@@ -2246,4 +2250,17 @@ func pickActiveSyncScheme(schemes []string, rdata []*core.DSYNC) string {
 		}
 	}
 	return ""
+}
+
+// logLeaderCallback logs a leader's callback that failed (onLeaderElected,
+// onZoneJoined). A zone whose SIG(0) key this agent does not hold yet is an
+// expected state of the key's set-up: the set-up says so at INFO, the sync
+// is held for the key, and the rounds ask for it. That one is DEBUG here;
+// anything else is an error.
+func logLeaderCallback(callback string, err error, args ...any) {
+	if errors.Is(err, errZoneKeyNotHeld) {
+		lgElect.Debug(callback+": the zone's SIG(0) key is not held yet", append(args, "error", err)...)
+		return
+	}
+	lgElect.Error(callback+" callback failed", append(args, "error", err)...)
 }
