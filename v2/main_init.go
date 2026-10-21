@@ -307,9 +307,7 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 			})
 			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
-		if agentConf.ApiBaseUrl != "" {
-			agentPeer.SetAPIEndpoint(agentConf.ApiBaseUrl)
-		}
+		warnConfiguredAPIEndpoint("signer", peerID, agentConf.ApiBaseUrl)
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
 		}
@@ -432,12 +430,8 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			})
 			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
-		if agentConf.ApiBaseUrl != "" {
-			agentPeer.SetAPIEndpoint(agentConf.ApiBaseUrl)
-			agentPeer.SetPreferredTransport("API")
-		} else {
-			agentPeer.SetPreferredTransport("DNS")
-		}
+		warnConfiguredAPIEndpoint("combiner", peerID, agentConf.ApiBaseUrl)
+		agentPeer.SetPreferredTransport("DNS")
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, err)
 		}
@@ -754,4 +748,16 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 		return host
 	}
 	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+}
+
+// warnConfiguredAPIEndpoint says that a configured agent's api_base_url is
+// not used. A configured agent has no discovered TLSA, so its certificate
+// cannot be checked and HTTPS to it cannot be authenticated: the combiner
+// and the signer talk to it over DNS.
+func warnConfiguredAPIEndpoint(role, peerID, apiBaseURL string) {
+	if apiBaseURL == "" {
+		return
+	}
+	lgTransport.Warn("api_base_url ignored: a configured agent has no TLSA, so HTTPS to it cannot be authenticated; DNS is used",
+		"role", role, "agent", peerID, "api_base_url", apiBaseURL)
 }
