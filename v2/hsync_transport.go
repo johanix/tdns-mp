@@ -675,6 +675,11 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	if tm.role == roleAgent || tm.role == roleAuditor {
 		tm.Router.Use(tm.refuseNamedSender)
 	}
+	// On an agent a KEYSTATE is taken only from its own signer, and on a
+	// signer only from its own agents (refuseForeignKeystate).
+	if tm.role == roleAgent || tm.role == roleSigner {
+		tm.Router.Use(tm.refuseForeignKeystate)
+	}
 	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
