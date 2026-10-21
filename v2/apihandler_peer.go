@@ -10,15 +10,14 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -172,48 +171,38 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *PeerResponse {
 	}
 
 	if useAPI {
-		apiEndpoint := peer.GetAPIEndpoint()
-		if apiEndpoint == "" {
+		// Through the API transport: the peer's certificate is checked
+		// against its TLSA, this node presents its client certificate, and
+		// the address dialed is the one discovery found.
+		if tm.APITransport == nil {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %q has no API endpoint configured", peerID)
+			resp.ErrorMsg = "API transport not configured"
 			return resp
 		}
-		url := strings.TrimSuffix(apiEndpoint, "/") + "/ping"
-		body := tdns.PingPost{Msg: fmt.Sprintf("peer ping %s", peerID), Pings: 1}
-		data, _ := json.Marshal(body)
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
-		if err != nil {
+		nonce := make([]byte, 8)
+		if _, err := rand.Read(nonce); err != nil {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("build request: %v", err)
+			resp.ErrorMsg = fmt.Sprintf("ping nonce: %v", err)
 			return resp
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-		res, err := client.Do(req)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		pingResp, err := tm.APITransport.Ping(ctx, peer, &transport.PingRequest{
+			SenderID:  tm.LocalID,
+			Nonce:     hex.EncodeToString(nonce),
+			Timestamp: time.Now(),
+		})
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("apiping to %s failed: %v", peerID, err)
 			return resp
 		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
+		if !pingResp.OK {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %s API returned %d", peerID, res.StatusCode)
+			resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
 			return resp
 		}
-		var pr tdns.PingResponse
-		if err := json.NewDecoder(res.Body).Decode(&pr); err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("decode ping response from %s: %v", peerID, err)
-			return resp
-		}
-		resp.Msg = fmt.Sprintf("ping ok (api transport): %s responded", peerID)
+		resp.Msg = fmt.Sprintf("ping ok (api transport): %s echoed nonce %s rtt=%s", pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
 		return resp
 	}
 
