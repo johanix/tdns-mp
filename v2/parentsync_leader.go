@@ -63,6 +63,12 @@ func (lem *LeaderElectionManager) zoneLeftGroup(zone ZoneName, from, to string) 
 	if lem.onZoneLeft == nil || lem.IsLeader(zone) {
 		return
 	}
+	// A zone that lands in no group with this agent its only voting member
+	// is led by it next (zoneChanged elects it after the recompute, #149):
+	// what it scheduled for the parent stays, not cut to be asked anew.
+	if to == "" && votesInZone(zone, lem.localID) && lem.configuredPeers(zone) == 0 {
+		return
+	}
 	if lem.onZoneLeft(zone) {
 		now := "no group"
 		if to != "" {
@@ -1860,6 +1866,9 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
+	}
+	if le.gone {
+		return // the zone's own election was dropped (dropZoneElection)
 	}
 	zone := le.Zone
 	armed := le.Term

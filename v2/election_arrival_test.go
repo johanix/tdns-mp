@@ -40,8 +40,18 @@ func arrivalLEM(t *testing.T, zones ...string) (*LeaderElectionManager, string, 
 	t.Cleanup(func() { stopElectionTimers(lem) })
 	lem.SetProviderGroupManager(pgm)
 	calls := &arrivalCalls{}
-	lem.SetOnLeaderElected(func(z ZoneName) error { calls.mu.Lock(); calls.elected = append(calls.elected, z); calls.mu.Unlock(); return nil })
-	lem.SetOnZoneJoined(func(z ZoneName) error { calls.mu.Lock(); calls.joined = append(calls.joined, z); calls.mu.Unlock(); return nil })
+	lem.SetOnLeaderElected(func(z ZoneName) error {
+		calls.mu.Lock()
+		calls.elected = append(calls.elected, z)
+		calls.mu.Unlock()
+		return nil
+	})
+	lem.SetOnZoneJoined(func(z ZoneName) error {
+		calls.mu.Lock()
+		calls.joined = append(calls.joined, z)
+		calls.mu.Unlock()
+		return nil
+	})
 	return lem, ComputeGroupHash([]string{arrivalA, arrivalB}, nil, nil), calls
 }
 

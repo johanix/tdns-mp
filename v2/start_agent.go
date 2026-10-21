@@ -142,7 +142,6 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
 	}
 
-
 	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so
 	// the leader can send NOTIFY(CDS), but writes no CDS for a
 	// multi-provider zone: it holds none of the zone's keys and signs none
@@ -333,6 +332,12 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		}
 		return err
 	})
+	// A zone that left its group and that this agent does not lead now:
+	// what it scheduled for the zone's parent ends, a sync under way
+	// included (step 8).
+	lem.SetOnZoneLeft(func(zone ZoneName) bool {
+		return conf.delegationSyncZoneLeft(string(zone))
+	})
 	// A zone that joins a group this agent already leads is asked for the
 	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
 	// it is: the key this agent holds is published, and one it does not
@@ -340,12 +345,6 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	// zone that publishes none (step 7b). The sync is asked for whatever the
 	// set-up said: while the zone's key is not held, or still bootstrapped,
 	// it waits for it (holdForZoneKey), and goes out when the hold ends.
-	// A zone that left its group and that this agent does not lead now:
-	// what it scheduled for the zone's parent ends, a sync under way
-	// included (step 8).
-	lem.SetOnZoneLeft(func(zone ZoneName) bool {
-		return conf.delegationSyncZoneLeft(string(zone))
-	})
 	lem.SetOnZoneJoined(func(zone ZoneName) error {
 		// The arrival is reported after the recompute, and this runs on its
 		// own: a refresh can have moved the zone on by now. An agent that no

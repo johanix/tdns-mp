@@ -166,3 +166,39 @@ func TestAZoneThatMovesToAGroupThisAgentLeadsKeepsItsSync(t *testing.T) {
 		t.Error("the sync chain of a zone this agent leads in its new group was dropped")
 	}
 }
+
+// A zone reduced to one provider lands in no group (#149): the remaining
+// provider leads it next, so what it scheduled for the parent stays, and it
+// does not say it dropped anything.
+func TestTheSoleRemainingVoterKeepsItsSync(t *testing.T) {
+	elog := &lockedBuffer{}
+	saved := lgElect
+	lgElect = slog.New(slog.NewTextHandler(elog, nil))
+	t.Cleanup(func() { lgElect = saved })
+	zd := providerZone(t, "sole.remaining.example.", arrivalA, arrivalB)
+	r := newZoneChangeRig(t, zd)
+	zone := ZoneName(zd.ZoneName)
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA, arrivalB}, serving: []string{arrivalA, arrivalB}, parentsync: true})
+	pg := r.pgm.GetGroupForZone(zone)
+	if pg == nil {
+		t.Fatal("the zone of two providers is in no group")
+	}
+	r.lem.ApplyGossipElection(pg.GroupHash, GroupElectionState{Leader: arrivalA, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)})
+	r.lem.SetOnZoneLeft(func(zn ZoneName) bool { return r.conf.delegationSyncZoneLeft(string(zn)) })
+	c := &r.conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	c.of(string(zone))
+	c.mu.Unlock()
+
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA, arrivalB}, serving: []string{arrivalA}, parentsync: true})
+	r.electedWithin(t, zone, "the zone reduced to one provider")
+	c.mu.Lock()
+	_, kept := c.zones[string(zone)]
+	c.mu.Unlock()
+	if !kept {
+		t.Error("the sole remaining voter dropped its own sync chain")
+	}
+	if strings.Contains(elog.String(), "zone left a group this agent leads") {
+		t.Errorf("the sole remaining voter said it dropped its sync:\n%s", elog)
+	}
+}

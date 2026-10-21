@@ -209,13 +209,18 @@ func newGroupRigOf(t *testing.T, group string, electing []string, agents ...stri
 // holds the election's, and a cleanup can run while one is delivered.
 func stopElectionTimers(lem *LeaderElectionManager) {
 	lem.mu.RLock()
-	les := make([]*LeaderElection, 0, len(lem.groupElections))
+	les := make([]*LeaderElection, 0, len(lem.groupElections)+len(lem.elections))
 	for _, le := range lem.groupElections {
+		les = append(les, le)
+	}
+	// the zones' own elections too: a lone voter's renewal re-arms itself
+	for _, le := range lem.elections {
 		les = append(les, le)
 	}
 	lem.mu.RUnlock()
 	for _, le := range les {
 		le.mu.Lock()
+		le.gone = true // a timer that has fired already arms nothing more
 		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()

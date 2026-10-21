@@ -220,3 +220,22 @@ func TestTheElectionIsSetUpBeforeTheRefreshEngineStarts(t *testing.T) {
 		t.Errorf("StartMPAgent starts RefreshEngine (%v) before it sets the election up (%v)", fset.Position(refresh), fset.Position(setUp))
 	}
 }
+
+// The owner removes every provider's record of a zone this agent led alone,
+// and puts them back: the lead is dropped while nobody is listed, and the
+// return elects anew, so the new lead's set-up runs. A lead kept from
+// before would have skipped it until its next renewal.
+func TestAZoneWhoseRecordsAllGoAndComeBackGetsANewLead(t *testing.T) {
+	zd := providerZone(t, "gone.back.records.example.", arrivalA)
+	r := newZoneChangeRig(t, zd)
+	zone := ZoneName(zd.ZoneName)
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA}, serving: []string{arrivalA}, parentsync: true})
+	r.electedWithin(t, zone, "the zone of one provider")
+
+	refreshWith(t, zd, zoneEdit{parentsync: true}) // no HSYNC3 record left
+	if r.holdsZoneElection(zone) {
+		t.Fatal("the lead outlived the removal of every provider's record")
+	}
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA}, serving: []string{arrivalA}, parentsync: true})
+	r.electedWithin(t, zone, "the records back")
+}

@@ -668,13 +668,7 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 // sending after the lead has moved. It says whether there was a chain or a
 // run to end.
 func (conf *Config) delegationSyncZoneLeft(zone string) bool {
-	c := &conf.InternalMp.delegationSyncChains
-	c.mu.Lock()
-	_, chained := c.zones[zone]
-	hold := c.endChainLocked(zone)
-	n := c.cancelRunsLocked(zone)
-	c.mu.Unlock()
-	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
+	hold, chained, n := conf.endDelegationSyncWorkOf(zone)
 	if hold != nil {
 		lgEngine.Info("the held NOTIFY is dropped: this agent no longer leads the zone", "zone", zone, "notify", notifyTypes(hold.notifies))
 	}
@@ -689,14 +683,21 @@ func (conf *Config) delegationSyncZoneLeft(zone string) bool {
 // and every sync under way, the key poll included, under the chains' lock at
 // once. It says whether there was a chain or a run to end.
 func (conf *Config) endDelegationSyncWork(zone string) bool {
+	_, chained, n := conf.endDelegationSyncWorkOf(zone)
+	return chained || n > 0
+}
+
+// endDelegationSyncWorkOf is endDelegationSyncWork, with the hold the chain
+// had, whether there was a chain, and how many runs it cancelled.
+func (conf *Config) endDelegationSyncWorkOf(zone string) (hold *delegationNotifyHold, chained bool, runs int) {
 	c := &conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
-	_, chained := c.zones[zone]
-	c.endChainLocked(zone)
-	n := c.cancelRunsLocked(zone)
+	_, chained = c.zones[zone]
+	hold = c.endChainLocked(zone)
+	runs = c.cancelRunsLocked(zone)
 	c.mu.Unlock()
 	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
-	return chained || n > 0
+	return hold, chained, runs
 }
 
 // delegationSyncRun gives a leader sync of the zone a context of its own,
@@ -1066,10 +1067,6 @@ func forwardNotifies(ctx context.Context, out chan tdns.NotifyRequest, notifies 
 	}
 }
 
-// mpLeaderSync: the request is for a multi-provider zone that syncs with its
-// parent through its agents, which is the sync requestDelegationSync asks
-// for, and the one whose failure is asked again and whose NOTIFY is checked
-// at the parent.
 // stillLeads: this agent leads the zone, as the election manager has it
 // now. With no election manager (a zone tdns runs alone) it does.
 func (conf *Config) stillLeads(zone string) bool {
@@ -1077,6 +1074,10 @@ func (conf *Config) stillLeads(zone string) bool {
 	return lem == nil || lem.IsLeader(ZoneName(zone))
 }
 
+// mpLeaderSync: the request is for a multi-provider zone that syncs with its
+// parent through its agents, which is the sync requestDelegationSync asks
+// for, and the one whose failure is asked again and whose NOTIFY is checked
+// at the parent.
 func mpLeaderSync(conf *Config, ds tdns.DelegationSyncRequest) bool {
 	return conf != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && ds.ZoneData.Options[tdns.OptParentSync]
 }

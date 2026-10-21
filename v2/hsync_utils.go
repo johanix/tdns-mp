@@ -1894,8 +1894,17 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 				// group (#149). A first load reaches it too: it reports
 				// every HSYNC3 record as added.
 				zone := ZoneName(mpzd.ZoneName)
-				if lem := ar.LeaderElectionManager; lem != nil && mpzd.Options[tdns.OptParentSync] && hasHSYNC3(zoneApex(zone)) {
-					lem.zoneChanged(zone)
+				if lem := ar.LeaderElectionManager; lem != nil {
+					switch {
+					case mpzd.Options[tdns.OptParentSync] && hasHSYNC3(zoneApex(zone)):
+						lem.zoneChanged(zone)
+					case mpzd.Options[tdns.OptMultiProvider] && !hasHSYNC3(zoneApex(zone)):
+						// The owner removed every provider's record: nobody
+						// leads the zone now. When records come back,
+						// zoneChanged elects anew, and the new lead's set-up
+						// runs: a lead kept from before would skip it.
+						lem.dropZoneElection(zone)
+					}
 				}
 			}
 			// parentsync=agent or not: followParentSyncParam, before this
