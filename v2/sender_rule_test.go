@@ -202,6 +202,7 @@ func TestAnAPIMsgThatNamesAnotherMemberIsRefused(t *testing.T) {
 	srv := apiEndpointsServer(t, env.Bob)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	send := apiSender(srv, alice, clientCert(t, alice))
 	for _, tc := range []struct {
 		named string
@@ -236,6 +237,7 @@ func TestAnAPIHelloIsNotHeldToItsCertificate(t *testing.T) {
 	alice, bob := dns.Fqdn(env.Alice.Identity), dns.Fqdn(env.Bob.Identity)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
 	defer cancel()
 	if _, err := apiSender(srv, alice, clientCert(t, "carol.agent.example.")).Hello(ctx, peer,
@@ -703,6 +705,7 @@ func TestAnAnswersGossipBringsNoElectionRecord(t *testing.T) {
 				env.Alice.Bridge.TransportManager.APITransport = tr
 				peer := transport.NewPeer(bob)
 				peer.APIEndpoint = srv.URL + "/api/v1"
+				setTLSA(peer, srv.Certificate())
 				peer.SetMechanismState("API", transport.PeerStateIntroducing, "said hello")
 				if err := env.Alice.Bridge.PeerRegistry.Add(peer); err != nil {
 					t.Fatal(err)
