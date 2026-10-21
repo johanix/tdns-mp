@@ -394,7 +394,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						apiAddr = "-"
 					}
 					// Phase 2.5: crypto presence from transport.Peer's slots.
-					hasTLSA := apiPeer != nil && apiPeer.MechanismTLSA("API") != nil
+					hasTLSA := apiPeer != nil && apiPeer.HasMechanismTLSA("API")
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,

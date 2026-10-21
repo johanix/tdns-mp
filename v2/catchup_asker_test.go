@@ -171,7 +171,16 @@ func newEngineRigWith(t *testing.T, zone string, setup func(conf *Config)) *engi
 	if setup != nil {
 		setup(conf)
 	}
-	runEngine(t, conf, msgQs)
+	// the engine, and the re-reads it started, end with the test: nothing
+	// of it reads the logger or the settings the next test puts in place
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); conf.SynchedDataEngine(ctx, msgQs) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		conf.InternalMp.ownReads.Wait()
+	})
 	return &engineRig{conf: conf, tm: tm, msgQs: msgQs, zone: ZoneName(zone), confs: confs}
 }
 

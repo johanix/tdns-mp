@@ -140,6 +140,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 		}
 		lgEngine.Info("startup hydration complete")
 	}
+	// The catch-up tracker sends from here on: answers to its requests,
+	// and requests back, no longer wait on this loop.
+	conf.InternalMp.CatchUp.run(ctx, zdr)
 
 	// Periodic eviction of stale tracking entries (terminal states older than 1 hour).
 	trackingEvictTicker := time.NewTicker(5 * time.Minute)
@@ -148,6 +151,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	// The own read of a zone that is not done is read again (own_read.go).
 	ownReadTicker := time.NewTicker(ownReadInterval)
 	defer ownReadTicker.Stop()
+	// An owed sync that found the delegation sync queue full is asked for
+	// again sooner than every tick of the own read (catchup.go).
+	owedRoomTicker := time.NewTicker(catchUpRoomRetry)
+	defer owedRoomTicker.Stop()
 	owner := newOwnReader(conf, msgQs, zdr)
 
 	for {
@@ -161,6 +168,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case <-ownReadTicker.C:
 			owner.tick(ctx)
+			// A zone can become caught up with no answer: a refresh that
+			// drops the member waited for, a forgotten peer, an inventory
+			// that arrives outside this engine. Its owed sync is asked for
+			// here.
+			conf.InternalMp.CatchUp.askAllOwed(ctx, false)
+
+		case <-owedRoomTicker.C:
+			if conf.InternalMp.CatchUp.roomWaits() {
+				conf.InternalMp.CatchUp.askAllOwed(ctx, true)
+			}
 
 		case synchedDataUpdate = <-SDupdateQ:
 			var change bool
@@ -411,6 +428,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					if cu := synchedDataUpdate.CatchUp; cu != nil && err == nil {
 						lgEngine.Info("a peer answered a request for the zone's state", "zone", synchedDataUpdate.Zone,
 							"peer", synchedDataUpdate.AgentId, "request", cu.Request, "complete", cu.IsComplete(), "why", cu.Why)
+						conf.InternalMp.CatchUp.Answered(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, cu)
 					}
 					// What a replace the repo found stale says about keys is
 					// stale too (it is out of the update by now): an older
@@ -418,6 +436,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// one, an answer or a distribution.
 					if err == nil && synchedDataUpdate.Update != nil {
 						conf.noteForeignAnswer(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations, synchedDataUpdate.CatchUp.IsComplete())
+					}
+					// The answer that completes the catch-up asks for an owed
+					// sync, once what it says about keys is noted: the sync
+					// computes the DS set from it.
+					if synchedDataUpdate.CatchUp != nil && err == nil {
+						conf.InternalMp.CatchUp.askOwed(ctx, synchedDataUpdate.Zone)
 					}
 					if change {
 						// Always forward remote updates to the local combiner for persistence.
@@ -993,6 +1017,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				if a := sdcmd.ownRead; a != nil {
 					if zd, ok := Zones.Get(string(sdcmd.Zone)); ok {
 						applyOwnRead(zd, a, zdr, AgentId(conf.MpConfig().Identity))
+						conf.InternalMp.CatchUp.ownReadDone(sdcmd.Zone)
+						conf.InternalMp.CatchUp.askOwed(ctx, sdcmd.Zone)
 					}
 				}
 
@@ -1032,6 +1058,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						continue
 					}
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: msg}
+					// a peer that started is asked back (peer-start)
+					conf.InternalMp.CatchUp.Requested(sdcmd.Zone, sdcmd.TargetAgent, sdcmd.CatchUp)
 					continue
 				}
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)

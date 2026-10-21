@@ -121,6 +121,7 @@ func TestAPIReceive_SenderToPipeline(t *testing.T) {
 	tr := apiSender(srv, alice)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
 	defer cancel()
 
@@ -317,6 +318,7 @@ func TestAPIReceive_BeatAnswerCarriesGossip(t *testing.T) {
 	env.Alice.Bridge.TransportManager.APITransport = tr
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	peer.SetMechanismState("API", transport.PeerStateIntroducing, "said hello")
 	if err := env.Alice.Bridge.PeerRegistry.Add(peer); err != nil {
 		t.Fatalf("the peer: %v", err)
@@ -361,6 +363,7 @@ func TestAPIReceive_SenderIsTheClientCertificate(t *testing.T) {
 	bob := dns.Fqdn(env.Bob.Identity)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
 	defer cancel()
 
@@ -445,6 +448,7 @@ func TestAPIReceive_ASyncIsConfirmedUnderTheSendersDistributionID(t *testing.T) 
 	srv := apiEndpointsServer(t, env.Bob)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 
 	// the SYNC in alice's queue, as the reliable queue holds it while it is
 	// out (its worker is not running here)

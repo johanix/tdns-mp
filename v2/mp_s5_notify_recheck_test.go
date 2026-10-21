@@ -49,6 +49,8 @@ type fakeParent struct {
 	ds      []dns.RR
 	updates int
 	refuse  bool // answer an UPDATE REFUSED, as a parent that will not take it yet
+	queries int  // the questions it was asked
+	silent  bool // answer every question SERVFAIL, as a parent that does not answer
 }
 
 func newFakeParent(t *testing.T, child string) *fakeParent {
@@ -99,6 +101,12 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(m)
 		return
 	}
+	p.queries++
+	if p.silent {
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+		return
+	}
 	q := r.Question[0]
 	switch {
 	case q.Qtype == dns.TypeNS && q.Name == p.child:
@@ -132,6 +140,19 @@ func (p *fakeParent) refuses() {
 	p.mu.Lock()
 	p.refuse = true
 	p.mu.Unlock()
+}
+
+// quiet has the parent answer every question SERVFAIL, or answer again.
+func (p *fakeParent) quiet(on bool) {
+	p.mu.Lock()
+	p.silent = on
+	p.mu.Unlock()
+}
+
+func (p *fakeParent) queriesSeen() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.queries
 }
 
 func (p *fakeParent) updatesSeen() int {
@@ -193,6 +214,13 @@ func newNotifyRig(t *testing.T, zone, scheme string, delays ...time.Duration) *n
 // then also runs the leader's data engine, which distributes it
 // (mp_s5_leader_csync_test.go has what stands in for the providers).
 func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...time.Duration) *notifyRig {
+	t.Helper()
+	return newNotifyRigWith(t, zone, scheme, signed, nil, delays...)
+}
+
+// newNotifyRigWith is newNotifyRigFor with setup run on the rig before its
+// engines start: what they read from the config is in place by then.
+func newNotifyRigWith(t *testing.T, zone, scheme string, signed bool, setup func(r *notifyRig), delays ...time.Duration) *notifyRig {
 	t.Helper()
 	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
 	logsink := &lockedBuffer{}
@@ -300,6 +328,10 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 	cached(target, dns.TypeA, &dns.A{Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600}, A: net.ParseIP("127.0.0.1")})
 	cached(target, dns.TypeAAAA)
 	r.conf.Config.Internal.ImrEngine = imr
+
+	if setup != nil {
+		setup(r)
+	}
 
 	// the syncher, and the DS engine it asks for the CDS before a NOTIFY(CDS),
 	// on the rig's ctx, which ends with the test

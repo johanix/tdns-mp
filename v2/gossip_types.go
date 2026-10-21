@@ -220,4 +220,12 @@ type ParentSyncStatus struct {
 	CsyncPublished  bool              `json:"csync_published"`
 	ZoneSigned      bool              `json:"zone_signed"`
 	Peers           []PeerSyncInfo    `json:"peers,omitempty"`
+	CatchUp         *CatchUpStatus    `json:"catch_up,omitempty"`
+	// ParentSync says that the leader's sync with the parent is held until
+	// the zone is caught up, or is owed and waits for room in the delegation
+	// sync queue (step 5). Empty when neither.
+	ParentSync string `json:"parent_sync,omitempty"`
+	// DSSet is "known", or "unknown, waiting for" whom, for a zone that
+	// names a signer. Empty for one that names none.
+	DSSet string `json:"ds_set,omitempty"`
 }

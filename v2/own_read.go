@@ -401,6 +401,15 @@ func (mpzd *MPZoneData) loadedForCatchUp() bool {
 	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.WeAreProvider
 }
 
+// hasProviderData: the load gave the zone provider data (populateMPdata):
+// it is a multi-provider zone that names this agent. Before the first load
+// that is main_init's stub.
+func (mpzd *MPZoneData) hasProviderData() bool {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	return mpzd.MP != nil && mpzd.MP.MPdata != nil
+}
+
 // signsWithoutInventory: this provider signs the zone, and its signer's
 // inventory has not been received.
 func (mpzd *MPZoneData) signsWithoutInventory() bool {

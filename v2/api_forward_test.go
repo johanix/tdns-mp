@@ -53,7 +53,9 @@ func TestAPIReceive_ForwardedUpdateIsDeliveredByTheForwarder(t *testing.T) {
 			agent.Bridge.APITransport = tr
 			agent.Bridge.TransportManager.APITransport = tr
 			agent.Registry.S.Set(AgentId(combiner), NewAgent(AgentId(combiner)))
-			agent.Bridge.PeerRegistry.GetOrCreate(combiner).APIEndpoint = srv.URL + "/api/v1"
+			peer := agent.Bridge.PeerRegistry.GetOrCreate(combiner)
+			peer.APIEndpoint = srv.URL + "/api/v1"
+			setTLSA(peer, srv.Certificate())
 
 			err := agent.Bridge.deliverGenericMessage(ctx, &transport.OutgoingMessage{
 				DistributionID: "api-forward-1",
@@ -104,6 +106,7 @@ func TestAPIReceive_MemberCannotBeatAsAnother(t *testing.T) {
 	srv := apiEndpointsServer(t, env.Bob)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
 	defer cancel()
 	tr := apiSender(srv, dave, clientCert(t, dave))

@@ -347,4 +347,7 @@ type InternalMpConf struct {
 	// editsRequest stands in for requestEdits, the own read's request to the
 	// combiner, in a test.
 	editsRequest func(ctx context.Context, zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) (*EditsResponseMsg, time.Time, error)
+	// CatchUp is the agent's catch-up tracker (catchup.go); nil on every
+	// other role.
+	CatchUp *catchUpTracker
 }
