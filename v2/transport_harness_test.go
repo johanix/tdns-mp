@@ -20,6 +20,7 @@ package tdnsmp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -50,6 +51,10 @@ type peerEnv struct {
 	Registry *AgentRegistry
 	Bridge   *MPTransportBridge
 	MsgQs    *MsgQs
+
+	// Cert is the peer's own certificate, when integEnvConfig.Certificates
+	// gave it one: its bridge loaded it from files, as an agent does.
+	Cert tls.Certificate
 }
 
 // integEnv is the two-peer fixture returned by newIntegEnv. Both peers
@@ -109,6 +114,10 @@ type integEnvConfig struct {
 
 	// CombinerID is the agent's combiner, as the agent's config names it.
 	CombinerID string
+
+	// Certificates gives each peer a self-signed certificate of its own,
+	// which its bridge loads from files as its HTTPS client certificate.
+	Certificates bool
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -231,6 +240,9 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 	}
 	if cfg != nil && cfg.Keys[identity] != nil {
 		bridgeCfg.PayloadCrypto = cfg.Keys[identity].payloadCrypto(t)
+	}
+	if cfg != nil && cfg.Certificates {
+		bridgeCfg.ClientCertFile, bridgeCfg.ClientKeyFile, pe.Cert = writeAgentCert(t, identity)
 	}
 	bridge, err := NewMPTransportBridge(bridgeCfg)
 	if err != nil {
