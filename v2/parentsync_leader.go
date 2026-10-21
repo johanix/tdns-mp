@@ -681,7 +681,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 			lgElect.Info("a zone that arrived during the group's election is taken up as an arrival", "zone", zone, "group", shortHash(groupHash))
 			go func(z ZoneName) {
 				if err := lem.onZoneJoined(z); err != nil {
-					lgElect.Error("onZoneJoined callback failed", "zone", z, "group", shortHash(groupHash), "error", err)
+					logLeaderCallback("onZoneJoined", err, "zone", z, "group", shortHash(groupHash))
 				}
 			}(zone)
 		case !arrived && lem.onLeaderElected != nil:
