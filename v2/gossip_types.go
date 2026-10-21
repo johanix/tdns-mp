@@ -223,18 +223,18 @@ type DsyncSchemeInfo struct {
 
 // ParentSyncStatus holds on-demand status information about parent delegation sync for a zone.
 type ParentSyncStatus struct {
-	Zone            ZoneName          `json:"zone"`
-	Leader          AgentId           `json:"leader"`
-	LeaderExpiry    time.Time         `json:"leader_expiry"`
-	ElectionTerm    uint64            `json:"election_term"`
-	IsLeader        bool              `json:"is_leader"`
-	KeyAlgorithm    string            `json:"key_algorithm,omitempty"`
-	KeyID           uint16            `json:"key_id,omitempty"`
-	KeyRR           string            `json:"key_rr,omitempty"`
-	ApexPublished   bool              `json:"apex_published"`
+	Zone          ZoneName  `json:"zone"`
+	Leader        AgentId   `json:"leader"`
+	LeaderExpiry  time.Time `json:"leader_expiry"`
+	ElectionTerm  uint64    `json:"election_term"`
+	IsLeader      bool      `json:"is_leader"`
+	KeyAlgorithm  string    `json:"key_algorithm,omitempty"`
+	KeyID         uint16    `json:"key_id,omitempty"`
+	KeyRR         string    `json:"key_rr,omitempty"`
+	ApexPublished bool      `json:"apex_published"`
 	// ApexKeys: how many KEY records the apex carries. More than one is no
 	// zone key at all (step 7b): an operator has to leave one.
-	ApexKeys int `json:"apex_keys,omitempty"`
+	ApexKeys        int               `json:"apex_keys,omitempty"`
 	ParentState     uint8             `json:"parent_state"`
 	ParentStateName string            `json:"parent_state_name,omitempty"`
 	ChildNS         []string          `json:"child_ns,omitempty"`

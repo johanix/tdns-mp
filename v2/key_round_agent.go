@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns-transport/v2/transport"
+	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
 

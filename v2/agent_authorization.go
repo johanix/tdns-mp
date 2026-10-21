@@ -319,7 +319,9 @@ func (t *keyAskTable) confirmExpected(peer, id string) bool {
 
 // keyAskKey: identities and zone names compare as canonical names, so a
 // peer configured in another case is the same peer.
-func keyAskKey(peer, zone string) string { return dns.CanonicalName(peer) + " " + dns.CanonicalName(zone) }
+func keyAskKey(peer, zone string) string {
+	return dns.CanonicalName(peer) + " " + dns.CanonicalName(zone)
+}
 
 // start notes a request out, and returns the call that ends it. The call
 // ends that request once, however often it is made: a second call never

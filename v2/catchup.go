@@ -145,12 +145,12 @@ type catchUpTracker struct {
 
 	// owed: the zones whose leader sync with the parent was held because
 	// the zone was not caught up (step 5). askSync asks for it once.
-	owed    map[ZoneName]*owedSync
+	owed map[ZoneName]*owedSync
 	// parentDown: the zones whose parent's delegation could not be
 	// analysed, since when, the last error and when that was last logged.
 	// It outlasts the owed asks, and ends when the parent answers.
 	parentDown map[ZoneName]*parentDown
-	askSync func(ctx context.Context, zone ZoneName) owedResult
+	askSync    func(ctx context.Context, zone ZoneName) owedResult
 	// owedApplies: an owed sync of the zone may still be asked for (the
 	// engine runs, the zone is here and synced by its agents, this agent
 	// leads it). One that may not is dropped whether the zone is caught up
