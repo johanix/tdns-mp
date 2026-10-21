@@ -298,10 +298,17 @@ type delegationSyncChains struct {
 	// timers counts what is scheduled for later, for every zone, until it
 	// has returned (delegationSyncAfter)
 	timers sync.WaitGroup
-	// runs holds a cancel for each leader sync under way, per zone, until it
-	// has returned (delegationSyncRun)
-	runs  map[string]map[uint64]context.CancelFunc
+	// runs holds each leader sync under way, per zone, until it has
+	// returned (delegationSyncRun)
+	runs  map[string]map[uint64]delegationRun
 	runID uint64
+}
+
+// delegationRun is a leader sync under way: its cancel, and the lead it
+// began in (LeadStart; zero when this agent did not lead the zone then).
+type delegationRun struct {
+	cancel context.CancelFunc
+	lead   uint64
 }
 
 type delegationSyncChain struct {
@@ -676,23 +683,30 @@ func (conf *Config) endDelegationSyncWork(zone string) bool {
 
 // delegationSyncRun gives a leader sync of the zone a context of its own,
 // which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
-// over. A sync can sit in tdns's UPDATE retry loop for a minute or more after
-// a REFUSED, and the loop asks only its context whether to go on. done ends
+// over, and stopRunsOfLostLead when another agent takes the lead it began in.
+// A sync can sit in tdns's UPDATE retry loop for a minute or more after a
+// REFUSED, and the loop asks only its context whether to go on. done ends
 // the run.
 func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx context.Context, done func()) {
 	c := &conf.InternalMp.delegationSyncChains
 	runCtx, cancel := context.WithCancel(ctx)
+	lead := conf.leadOf(zone)
 	c.mu.Lock()
 	if c.runs == nil {
-		c.runs = map[string]map[uint64]context.CancelFunc{}
+		c.runs = map[string]map[uint64]delegationRun{}
 	}
 	if c.runs[zone] == nil {
-		c.runs[zone] = map[uint64]context.CancelFunc{}
+		c.runs[zone] = map[uint64]delegationRun{}
 	}
 	c.runID++
 	id := c.runID
-	c.runs[zone][id] = cancel
+	c.runs[zone][id] = delegationRun{cancel: cancel, lead: lead}
 	c.mu.Unlock()
+	// A lead lost while the run was being listed was stopped without it
+	// (stopRunsOfLostLead): the run stops itself.
+	if lead != 0 && conf.leadOf(zone) != lead {
+		cancel()
+	}
 	return runCtx, func() {
 		c.mu.Lock()
 		delete(c.runs[zone], id)
@@ -708,10 +722,45 @@ func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx 
 // many there were. Each leaves the list when it has returned. The caller
 // holds mu.
 func (c *delegationSyncChains) cancelRunsLocked(zone string) int {
-	for _, cancel := range c.runs[zone] {
-		cancel()
+	for _, run := range c.runs[zone] {
+		run.cancel()
 	}
 	return len(c.runs[zone])
+}
+
+// leadOf is this agent's present lead of the zone (LeadStart): zero when it
+// does not lead the zone, or no election runs here.
+func (conf *Config) leadOf(zone string) uint64 {
+	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+		return lem.LeadStart(ZoneName(zone))
+	}
+	return 0
+}
+
+// stopRunsOfLostLead stops the leader syncs under way that began in lead,
+// a lead this agent has lost to another agent (SetOnLeadLost): an UPDATE that
+// tdns is still retrying, and the poll of the parent's trust in the zone's
+// SIG(0) key, which bootstraps the key when the poll's wait ends. A former
+// leader sent both on after the new leader's own: the key a second time, and
+// a DS change the new leader may have overtaken since. The chain and the
+// owed syncs are left to the new leader, which brings the parent in line
+// (onLeaderElected).
+func (conf *Config) stopRunsOfLostLead(lead uint64) {
+	c := &conf.InternalMp.delegationSyncChains
+	stopped := map[string]int{}
+	c.mu.Lock()
+	for zone, runs := range c.runs {
+		for _, run := range runs {
+			if run.lead == lead {
+				run.cancel()
+				stopped[zone]++
+			}
+		}
+	}
+	c.mu.Unlock()
+	for zone, n := range stopped {
+		lgEngine.Info("the delegation sync under way is stopped: another agent leads the zone now", "zone", zone, "syncs", n)
+	}
 }
 
 // delegationSyncGivenBack runs the leader's setup when the zone's HSYNCPARAM
