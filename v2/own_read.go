@@ -500,6 +500,36 @@ func (zdr *ZoneDataRepo) dropStaleWait(origDistID string, sender AgentId) {
 	}
 }
 
+// dnskeySetOps are the update's DNSKEY add and replace operations.
+func dnskeySetOps(ops []core.RROperation) []core.RROperation {
+	var out []core.RROperation
+	for _, op := range ops {
+		if op.RRtype == "DNSKEY" && (op.Operation == "add" || op.Operation == "replace") {
+			out = append(out, op)
+		}
+	}
+	return out
+}
+
+// heldSuccess is the rule every success to a DNSKEY sender keeps, on each
+// path that makes one: the no-op path, the release of a stale replace, and
+// the relay of the combiner's word on a hand-over. A success covers every
+// key of the update's DNSKEY add and replace sets, so a word on a set whose
+// records are not all held here (a newer set dropped a key before this copy
+// came, or before the combiner answered) is PARTIAL, and names only the
+// records held. Any other word, and a success whose keys are all held, is
+// left as it is.
+func (zdr *ZoneDataRepo) heldSuccess(zone ZoneName, agent AgentId, ops []core.RROperation, status, message string, applied []string) (string, string, []string) {
+	if status != "SUCCESS" && status != "ok" {
+		return status, message, applied
+	}
+	missing := zdr.dnskeyRecordsNotHeld(zone, agent, ops)
+	if len(missing) == 0 {
+		return status, message, applied
+	}
+	return "PARTIAL", message + "; DNSKEY records of the update not held here", withoutRecords(applied, missing)
+}
+
 // dnskeyRecordsNotHeld are the records of the update's DNSKEY add and
 // replace operations that the repo does not hold for agent, rejected or
 // absent.
@@ -555,9 +585,7 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 			// a success covers every key of the replace: one whose records
 			// are not all held (the newer set dropped a key this one added)
 			// is PARTIAL, naming the keys that are held
-			if missing := zdr.dnskeyRecordsNotHeld(w.zone, w.sender, w.ops); len(missing) > 0 {
-				status, message = "PARTIAL", message+"; DNSKEY records of the replace not held here"
-			}
+			status, message, applied = zdr.heldSuccess(w.zone, w.sender, w.ops, status, message, applied)
 		case "IGNORED", "ignored":
 			// the combiner takes no key of this sender's: say so, as it said
 			status, message = "IGNORED", "its combiner applies no key of the sender's"
