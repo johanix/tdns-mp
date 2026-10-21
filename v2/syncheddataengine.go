@@ -487,6 +487,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										StaleWaiting:      staleWaiting,
 										NotHeldTypes:      staleNotHeld,
 										FromAnswer:        synchedDataUpdate.CatchUp != nil,
+										DnskeyOps:         dnskeySetOps(synchedDataUpdate.Update.Operations),
 									}
 									zdr.mu.Unlock()
 									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
@@ -571,9 +572,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						// whose records are not all held (a newer set dropped
 						// a key this one added) is confirmed PARTIAL, naming
 						// the keys that are held.
-						if missing := zdr.dnskeyRecordsNotHeld(zone, agentId, received); len(missing) > 0 {
-							status, message = "PARTIAL", message+"; DNSKEY records of the update not held here"
-						}
+						status, message, appliedRecords = zdr.heldSuccess(zone, agentId, received, status, message, appliedRecords)
 						if len(staleWaiting) > 0 {
 							status, message = "PARTIAL", "desired state already present at remote agent; DNSKEY records from an answer not yet confirmed by its combiner"
 						}
@@ -1666,13 +1665,22 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 			}
 		}
 
-		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
+		// A success covers every key of the update's DNSKEY sets. A key the
+		// repo no longer holds, because a newer set dropped it before the
+		// combiner answered this hand-over (one queued while the combiner
+		// was away, answered after the set that overtook it), is not
+		// published here: the word is PARTIAL and names the keys that are
+		// held, as on the other paths (heldSuccess).
+		var message string
+		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, AgentId(prc.OriginatingSender), prc.DnskeyOps, status, detail.Message, appliedRecords)
+
+		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "status", status, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
 			OriginatingDistID: prc.OriginatingDistID,
 			OriginatingSender: prc.OriginatingSender,
 			Zone:              prc.Zone,
 			Status:            status,
-			Message:           detail.Message,
+			Message:           message,
 			AppliedRecords:    appliedRecords,
 			RemovedRecords:    detail.RemovedRecords,
 			RejectedItems:     detail.RejectedItems,

@@ -1084,3 +1084,82 @@ func TestAStaleSetWhoseKeyTheNewerSetDroppedIsNotASuccess(t *testing.T) {
 		})
 	}
 }
+
+// The combiner answers a hand-over late, after the set that overtook it: a
+// newer set dropped the key the handed-over one added while the combiner was
+// away. Its success, which names nothing (a no-op to it), is relayed as
+// PARTIAL with the keys the repo holds, so the sender does not take the
+// dropped key as published here. The same with the sender's resend of the
+// older set waiting as a stale replace meanwhile, which is how an end-to-end
+// run met it (heldSuccess on the relay).
+func TestALateCombinerSuccessOnASetWhoseKeyWasDroppedIsNotASuccess(t *testing.T) {
+	for _, resend := range []bool{false, true} {
+		name := map[bool]string{false: "no resend", true: "a resend waits"}[resend]
+		t.Run(name, func(t *testing.T) {
+			r := receivingRig(t, map[bool]string{false: "plain", true: "resend"}[resend]+".late.dropped.example.")
+			z := r.mpzd.ZoneName
+			signer, us := AgentId(r.peer.Identity), AgentId(r.us.Identity)
+			k1, k2, k3 := testDnskey(t, z, 256), testDnskey(t, z, 256), testDnskey(t, z, 256)
+			replace := func(records ...string) core.RROperation {
+				return core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: records}
+			}
+			sent := time.Now().Add(-time.Minute)
+			d0 := nextDistributionID()
+			before := r.combinerDists()
+			r.receivesAt(t, string(signer), d0, sent, nil, replace(k1.String()))
+			c0 := r.newCombinerDist(before, 10*time.Second)
+			r.combinerTakes(c0, k1.String())
+			r.answered(t, d0)
+
+			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+			// the set that adds k2, handed over; the combiner is away
+			d1 := nextDistributionID()
+			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, nil, []AgentId{us})
+			before = r.combinerDists()
+			r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(k1.String(), k2.String()))
+			c1 := r.newCombinerDist(before, 10*time.Second)
+			// the newer set, which drops k2 and adds k3, handed over too
+			before = r.combinerDists()
+			r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(20*time.Second), nil, replace(k1.String(), k3.String()))
+			c2 := r.newCombinerDist(before, 10*time.Second)
+			if c1 == "" || c2 == "" {
+				t.Fatalf("the sets did not go to the combiner (%q, %q)\n%s", c1, c2, r.log)
+			}
+			if resend {
+				waits := r.logCount(staleWaitLine)
+				r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(k1.String(), k2.String()))
+				r.waitLog(t, staleWaitLine, waits+1)
+			}
+			// the combiner is back: the newer set, then the older hand-over,
+			// which changes nothing for it
+			r.combinerTakes(c2, k1.String(), k3.String())
+			r.combinerTakes(c1)
+
+			var words []*ConfirmationDetail
+			for end := time.Now().Add(3 * time.Second); time.Now().Before(end); {
+				got, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
+				if !ok {
+					break
+				}
+				if got.DistributionID == d1 && got.Status != "PENDING" {
+					words = append(words, got)
+					snd.ProcessDnskeyConfirmation(d1, got.Source, got.Status, got.AppliedRecords, nil)
+				}
+			}
+			if len(words) == 0 {
+				t.Fatalf("no final word on the older set\n%s", r.log)
+			}
+			for _, cf := range words {
+				if cf.Status == "SUCCESS" || cf.Status == "ok" || slices.Contains(cf.AppliedRecords, k2.String()) {
+					t.Errorf("the older set got %+v: a word that k2 is published here", *cf)
+				}
+			}
+			snd.dnskeyPropMu.Lock()
+			_, waiting := snd.pendingDnskeyPropagations[d1]
+			snd.dnskeyPropMu.Unlock()
+			if !waiting {
+				t.Error("k2's propagation ended though the combiner holds a set without it")
+			}
+		})
+	}
+}
