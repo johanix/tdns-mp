@@ -112,8 +112,7 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 			tm := ar.TransportManager
 			peer, ok := tm.PeerRegistry.Get(clientId)
 			if hello && (!ok || !peer.HasMechanismTLSA("API")) {
-				if known && !lookedUp.holdsKey(clientId) {
-					lookedUp.passKey(clientId)
+				if known && lookedUp.takeKey(clientId) {
 					go func() {
 						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
@@ -225,11 +224,31 @@ func (v *tlsaVerdicts) holdsKey(key string) bool {
 	return ok && now.Sub(at) < v.hold
 }
 
+// takeKey notes key now and reports true, unless it was noted less than
+// hold ago: then it reports false and changes nothing. The check and the
+// note are one step, so of callers racing for one key only one wins.
+func (v *tlsaVerdicts) takeKey(key string) bool {
+	now := v.clock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if at, ok := v.at[key]; ok && now.Sub(at) < v.hold {
+		return false
+	}
+	v.passLocked(key, now)
+	return true
+}
+
 // passKey notes key now, and forgets entries too old to hold.
 func (v *tlsaVerdicts) passKey(key string) {
 	now := v.clock()
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.passLocked(key, now)
+}
+
+// passLocked notes key at now and forgets entries too old to hold. The
+// caller holds v.mu.
+func (v *tlsaVerdicts) passLocked(key string, now time.Time) {
 	if v.at == nil {
 		v.at = make(map[string]time.Time)
 	}

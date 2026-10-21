@@ -144,3 +144,33 @@ func TestHello_RefusedRetryablyUntilTheTLSAIsKnown(t *testing.T) {
 		t.Errorf("carol's hello after bob has her TLSA was refused by the middleware: %v", err)
 	}
 }
+
+// Of callers racing to look one sender up, one wins until the minute is
+// over: the check and the note are one step.
+func TestHello_OneLookUpPerSenderAMinute(t *testing.T) {
+	now := time.Now()
+	v := &tlsaVerdicts{hold: time.Minute, now: func() time.Time { return now }}
+	const callers = 64
+	start := make(chan struct{})
+	won := make(chan bool, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-start
+			won <- v.takeKey("carol.agent.example.")
+		}()
+	}
+	close(start)
+	winners := 0
+	for i := 0; i < callers; i++ {
+		if <-won {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Errorf("%d of %d racing callers won the look-up, want 1", winners, callers)
+	}
+	now = now.Add(time.Minute)
+	if !v.takeKey("carol.agent.example.") {
+		t.Error("no look-up after the minute is over")
+	}
+}
