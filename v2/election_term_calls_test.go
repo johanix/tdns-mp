@@ -189,3 +189,39 @@ func TestVotersThatAllRestartedElectAtTermOne(t *testing.T) {
 	n.mgrs[termA].StartGroupElection(n.group, n.members, n.zones)
 	n.waitSettled(t, 1, 3*time.Second)
 }
+
+// An agent that restarted inside its group's lease has the group's term and
+// leader from its peers' gossip before the beats find the group mutually
+// OPERATIONAL. As the group's initiator it then starts no election, and the
+// group stays at its term and leader. A lease that has run out elects, as a
+// group with no leader does (#253, the operational start).
+func TestARestartedInitiatorElectsNothingWhileTheLeaseRuns(t *testing.T) {
+	members := []string{arrivalA, arrivalB}
+	for _, c := range []struct {
+		name  string
+		lease time.Duration
+		term  uint64 // the term the group settles at
+	}{{"the lease runs", time.Hour, 2}, {"the lease has run out", -time.Second, 3}} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newGroupRig(t, members, arrivalA, arrivalB)
+			zone := providerZone(t, "restart."+strconv.Itoa(int(c.term))+".lease.example.", members...)
+			r.refresh()
+			inGroup(t, r.pgms[arrivalA], zone, members...)
+			// B holds A's lead at term 2; A, restarted, has it from B's gossip
+			word := GroupElectionState{Leader: arrivalA, Term: 2, LeaderExpiry: time.Now().Add(c.lease)}
+			for _, m := range members {
+				r.gsts[AgentId(m)].mergeGossip(&GossipMessage{GroupHash: r.net.group, Election: word})
+			}
+			r.operational()
+			r.net.waitSettled(t, c.term, 3*time.Second)
+			time.Sleep(100 * time.Millisecond)
+			calls := r.net.callers()
+			if c.term == 2 && len(calls) != 0 {
+				t.Errorf("the restarted initiator called an election inside the lease: %v", calls)
+			}
+			if c.term == 3 && len(calls) != 1 {
+				t.Errorf("calls after the lease ran out: %v, want one", calls)
+			}
+		})
+	}
+}

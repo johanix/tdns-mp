@@ -313,9 +313,22 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 				initiator = m
 			}
 		}
-		if dns.Fqdn(string(lem.localID)) == dns.Fqdn(initiator) {
-			lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
+		if dns.Fqdn(string(lem.localID)) != dns.Fqdn(initiator) {
+			return
 		}
+		// A leader whose lease runs is held already when this agent
+		// restarted inside it: a beat merges the peers' gossip, and with it
+		// the group's term and leader (ApplyGossipElection), before the
+		// matrix is checked. An election now would end that lease early.
+		// A group that degraded had its leader cleared
+		// (InvalidateGroupLeader), and a new group has none: those elect.
+		// The operator's election is started elsewhere, and still is.
+		if leader, ok := lem.GetGroupLeader(groupHash); ok {
+			lgElect.Info("group operational with a leader whose lease runs, no election",
+				"group", shortHash(groupHash), "leader", leader)
+			return
+		}
+		lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
 	})
 	ar.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
 		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {

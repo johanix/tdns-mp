@@ -1081,13 +1081,14 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // the zone too. Those are two asks from one agent with one view of the zone,
 // and the sync sends only a difference, so the second sends nothing.
 //
-// Not covered: the agent that led the group the zone left. It stops acting
-// for the zone when its own refresh moves the zone, and until then it reads
-// itself as the zone's leader. A lease renewal of its group in that time asks
-// for a sync from the view it still has, and a difference computed from that
-// view undoes what was sent from here; the parent keeps what arrives last.
-// Nothing in this function can see that agent's view. A leader that acts only
-// when the views of a zone agree is what closes it (the membership design).
+// The agent that led the group the zone left ends what it scheduled for the
+// zone on its own refresh, which moves the zone (zoneLeftGroup). Until that
+// refresh it reads itself as the zone's leader: a lease renewal of its group
+// in that time asks for a sync from the view it still has, and a difference
+// computed from that view undoes what was sent from here; the parent keeps
+// what arrives last. Nothing in this function can see that agent's view. A
+// leader that acts only when the views of a zone agree is what closes that
+// window (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
 	if lem.onZoneJoined == nil {
 		return
