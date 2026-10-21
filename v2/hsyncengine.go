@@ -460,15 +460,12 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			if ar.TransportManager != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				peer := ar.MPTransport.GetOrCreatePeer(agent)
-				syncReq := &PeerSyncRequest{
-					SenderID:    ar.LocalAgent.Identity,
-					Zone:        string(msg.Zone),
-					SyncType:    PeerSyncTypeNS,
-					Records:     groupRRStringsByOwner(msg.RRs),
-					Timestamp:   time.Now(),
-					MessageType: "sync",
+				syncReq, err := debugSyncRequest(ar.LocalAgent.Identity, string(msg.Zone), msg.RRs, "")
+				var syncResp *PeerSyncResponse
+				if err == nil {
+					syncReq.Timestamp = time.Now()
+					syncResp, err = ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				}
-				syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				cancel()
 				if err != nil {
 					syncErr = err

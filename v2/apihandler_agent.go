@@ -1093,13 +1093,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 			// Create sync request
-			syncReq := &PeerSyncRequest{
-				SenderID:       mp.Identity,
-				Zone:           string(amp.Zone),
-				SyncType:       PeerSyncTypeNS, // Default to NS, could be detected from RRs
-				Records:        groupRRStringsByOwner(amp.RRs),
-				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
-				MessageType:    "sync",
+			syncReq, err := debugSyncRequest(mp.Identity, string(amp.Zone), amp.RRs,
+				fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()))
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
 			}
 
 			lgApi.Info("sending sync to agent", "target", amp.AgentId, "zone", amp.Zone, "rrs", len(amp.RRs))

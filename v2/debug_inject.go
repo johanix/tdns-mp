@@ -18,18 +18,34 @@ import (
 	"github.com/miekg/dns"
 )
 
-// injectNamedSenderRequest is the SYNC send-sync-to sends, with one
-// difference: the payload names named. syncAppMessage puts that name in
-// OriginatorID. The transport still sends as this agent.
-func injectNamedSenderRequest(zone, named string, rrs []string, distID string) *PeerSyncRequest {
-	return &PeerSyncRequest{
-		SenderID:       named,
+// debugSyncRequest is the SYNC send-sync-to sends: one add per RR type, as
+// operations. A receiving agent takes what a SYNC carries from its
+// operations only (MsgHandler); records grouped by owner are not read, and
+// a SYNC that carried only those arrived empty.
+func debugSyncRequest(sender, zone string, rrs []string, distID string) (*PeerSyncRequest, error) {
+	req := &PeerSyncRequest{
+		SenderID:       sender,
 		Zone:           zone,
 		SyncType:       PeerSyncTypeNS,
-		Records:        groupRRStringsByOwner(rrs),
 		DistributionID: distID,
 		MessageType:    "sync",
 	}
+	if len(rrs) == 0 {
+		return req, nil
+	}
+	ops, err := injectAddOperations(rrs)
+	if err != nil {
+		return nil, err
+	}
+	req.Operations = ops
+	return req, nil
+}
+
+// injectNamedSenderRequest is the SYNC send-sync-to sends, with one
+// difference: the payload names named. syncAppMessage puts that name in
+// OriginatorID. The transport still sends as this agent.
+func injectNamedSenderRequest(zone, named string, rrs []string, distID string) (*PeerSyncRequest, error) {
+	return debugSyncRequest(named, zone, rrs, distID)
 }
 
 // injectCombinerUpdate is an update for this agent's own combiner whose
@@ -168,7 +184,12 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 	}
 
 	distID := fmt.Sprintf("debug-inject-named-sender-%d", time.Now().Unix())
-	syncReq := injectNamedSenderRequest(string(amp.Zone), named, amp.RRs, distID)
+	syncReq, err := injectNamedSenderRequest(string(amp.Zone), named, amp.RRs, distID)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = err.Error()
+		return
+	}
 	peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 	syncResp, via, err := conf.InternalMp.MPTransport.sendSyncOnce(context.Background(), peer, syncReq)
