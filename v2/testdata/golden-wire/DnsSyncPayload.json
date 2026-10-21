@@ -35,5 +35,11 @@
       "at-apex",
       "at-ns"
     ]
+  },
+  "catch_up": {
+    "request": "req-001",
+    "reason": "start",
+    "complete": false,
+    "why": "own-state-not-read"
   }
 }

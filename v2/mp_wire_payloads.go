@@ -32,6 +32,30 @@ type DnsSyncPayload struct {
 	DistributionID string                   `json:"distribution_id"`
 	ZoneClass      string                   `json:"zone_class,omitempty"`
 	Publish        *core.PublishInstruction `json:"publish,omitempty"`
+	CatchUp        *CatchUp                 `json:"catch_up,omitempty"`
+}
+
+// CatchUp travels on an RFI SYNC, a request for the zone's state, and on
+// the SYNC that answers it (the membership design, 5.3 and 5.4).
+type CatchUp struct {
+	// Request is the request's name, chosen by the asker: 128 random bits,
+	// unique across the asker's restarts, since an answer can be sent
+	// again for up to a day.
+	Request string `json:"request"`
+	// Reason, on the request: start, join, role, peer-role, peer-start,
+	// outage or manual.
+	Reason string `json:"reason,omitempty"`
+	// Complete, on the answer: the answer is the answering agent's whole
+	// state for the zone. Absent reads as not complete.
+	Complete *bool `json:"complete,omitempty"`
+	// Why, on an answer that is not complete: no-inventory,
+	// own-state-not-read or zone-not-loaded.
+	Why string `json:"why,omitempty"`
+}
+
+// IsComplete: the answer says it is complete.
+func (c *CatchUp) IsComplete() bool {
+	return c != nil && c.Complete != nil && *c.Complete
 }
 
 // GetPublish returns the publish instruction (may be nil).

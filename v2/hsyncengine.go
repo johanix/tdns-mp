@@ -159,6 +159,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		}
 
 		zu.Operations = ampp.Operations
+		zu.CatchUp = ampp.CatchUp
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
@@ -169,6 +170,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			OriginatingDistID: ampp.DistributionID,
 			OriginatingTime:   ampp.Time,
 			DeliveredBy:       ampp.DeliveredBy,
+			CatchUp:           ampp.CatchUp,
 			Response:          cresp,
 		}
 		select {
@@ -188,27 +190,21 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		switch ampp.RfiType {
 		case "SYNC":
-			// Remote agent asks us to re-send our local data — respond only to the requester.
-			lgEngine.Info("RFI SYNC triggering targeted resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
-			sdcmd := &SynchedDataCmd{
+			// Another agent asks for this agent's state of the zone: a
+			// catch-up request, or its operator's resync --pull. The
+			// answer goes to the requester alone, as a SYNC of its own
+			// (catchUpAnswer). The router has acknowledged the request
+			// already, so the command's answer reaches nobody, and it is
+			// not waited for here, on the loop that also sends the beats.
+			lgEngine.Info("RFI SYNC: a peer asks for the zone's state", "from", ampp.OriginatorID, "zone", ampp.Zone)
+			synchedDataCmdQ <- &SynchedDataCmd{
 				Cmd:         "resync-targeted",
 				Zone:        ZoneName(ampp.Zone),
 				TargetAgent: ampp.OriginatorID,
+				CatchUp:     ampp.CatchUp,
 				Response:    make(chan *SynchedDataCmdResponse, 1),
 			}
-			synchedDataCmdQ <- sdcmd
-			select {
-			case sdResp := <-sdcmd.Response:
-				if sdResp.Error {
-					resp.Error = true
-					resp.ErrorMsg = sdResp.ErrorMsg
-				} else {
-					resp.Msg = fmt.Sprintf("Resync triggered: %s", sdResp.Msg)
-				}
-			case <-time.After(10 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "Timeout waiting for resync"
-			}
+			resp.Msg = "the request for the zone's state is taken"
 
 		case "AUDIT":
 			// Remote agent wants audit data for this zone.
@@ -589,9 +585,17 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			resp.Msg = fmt.Sprintf("CONFIG %s RFI sent for zone %s", msg.RfiSubtype, msg.Zone)
 
 		case "SYNC":
-			// Send RFI SYNC to all remote agents for this zone.
+			// The operator's resync --pull: a request for the zone's state
+			// to each voting member (the membership design, 3.3), with a
+			// catch-up object of reason manual. The auditor, which holds
+			// none of the zone's data, is not asked.
 			lgEngine.Info("sending SYNC RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
+			asked := 0
 			for _, agent := range zad.Agents {
+				if !isVotingMember(msg.Zone, string(agent.ID)) {
+					continue
+				}
+				asked++
 				if !ar.isAgentOperational(agent.ID) {
 					resp.RfiResponse[agent.ID] = &RfiData{
 						Error:    true,
@@ -605,6 +609,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					YourIdentity: agent.ID,
 					Zone:         msg.Zone,
 					RfiType:      "SYNC",
+					CatchUp:      &CatchUp{Request: newRfiNonce(), Reason: "manual"},
 				})
 				if err != nil {
 					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: err.Error()}
@@ -612,7 +617,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				resp.RfiResponse[agent.ID] = &RfiData{Status: "ok", Msg: amr.Msg}
 			}
-			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
+			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d voting members for zone %s", asked, msg.Zone)
 
 		case "AUDIT":
 			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
@@ -747,6 +752,7 @@ func rfiSyncRequest(localID string, msg *AgentMsgPost) *PeerSyncRequest {
 		// set by a sender that must know it in advance; empty, the
 		// transport makes one
 		DistributionID: msg.DistributionID,
+		CatchUp:        msg.CatchUp,
 	}
 }
 

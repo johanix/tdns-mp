@@ -48,6 +48,7 @@ func syncAppMessage(req *PeerSyncRequest, peerID string) (*transport.AppMessage,
 			Publish:      req.Publish,
 		},
 		DistributionID: req.DistributionID,
+		CatchUp:        req.CatchUp,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -85,7 +86,8 @@ func syncResponseFromApp(req *PeerSyncRequest, resp *transport.AppResponse) *Pee
 // sent without an ID (most RFIs) carries none.
 type syncWirePayload struct {
 	*core.AgentMsgPost
-	DistributionID string `json:"distribution_id,omitempty"`
+	DistributionID string   `json:"distribution_id,omitempty"`
+	CatchUp        *CatchUp `json:"catch_up,omitempty"`
 }
 
 // keystateWirePayload is the KEYSTATE message as it goes on the wire:

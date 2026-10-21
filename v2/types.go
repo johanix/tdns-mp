@@ -246,6 +246,7 @@ type ZoneUpdate struct {
 	RRs        []dns.RR                 // local updates can be per RR
 	Operations []core.RROperation       // explicit operations (takes precedence over RRsets/RRs)
 	Publish    *core.PublishInstruction // KEY/CDS publication instruction for combiner
+	CatchUp    *CatchUp                 `json:"catch_up,omitempty"` // on the answer to a request for the zone's state
 }
 
 // OwnerData matches tdns.OwnerData; alias keeps *tdns.ZoneData.Data map types aligned.
