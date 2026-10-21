@@ -169,28 +169,23 @@ func renewalKeepsKey(zk *zoneKey, ended keyPollEnd, leadStart uint64) bool {
 }
 
 // zoneUsesKey: the zone syncs with its parent through its agents
-// (parentsync=agent) and the parent advertises the DSYNC UPDATE scheme. For
-// any other zone nothing of the key's hold applies: a parent that takes
-// NOTIFY only needs no SIG(0) key. A zone whose parent cannot be asked (no
-// resolver) uses none here.
+// (parentsync=agent) and the parent advertises the DSYNC UPDATE scheme, or
+// the parent's DSYNC records cannot be read yet (no resolver, a failed
+// look-up). For the hold and the leader's set-up a parent not read is one
+// that may take UPDATE: the sync waits, and the set-up publishes the key
+// and polls, until a read says otherwise. Read as "no key", the set-up was
+// skipped and the sync went out on whatever key was active (plan, step 7b).
+// A parent known to take NOTIFY only needs no SIG(0) key.
 func (conf *Config) zoneUsesKey(ctx context.Context, zone ZoneName) bool {
-	mpzd, ok := Zones.Get(string(zone))
-	if !ok || mpzd == nil || mpzd.ZoneData == nil || !mpzd.Options[tdns.OptParentSync] {
-		return false
-	}
-	if conf.Config == nil || conf.Config.Internal.ImrEngine == nil {
-		return false
-	}
-	imr := &Imr{conf.Config.Internal.ImrEngine}
-	_, err := imr.LookupDSYNCTarget(ctx, string(zone), dns.TypeANY, core.SchemeUpdate)
-	return err == nil
+	uses, known := conf.zoneKeyUse(ctx, zone)
+	return uses || !known
 }
 
-// zoneKeyUse is zoneUsesKey for the key rounds, which must not read a
-// failed look-up as "no key needed": a voting member that stopped asking
-// would hold no key until the next KEY change. known is false when the
-// parent's DSYNC records could not be read (no resolver yet, a failed
-// look-up); then the rounds go on asking, and no key is made.
+// zoneKeyUse says whether the parent takes UPDATE (uses), and whether that
+// is known. known is false when the parent's DSYNC records could not be
+// read (no resolver yet, a failed look-up). The key rounds then go on
+// asking, and make no key; the hold and the set-up take the zone as one
+// that uses a key (zoneUsesKey).
 func (conf *Config) zoneKeyUse(ctx context.Context, zone ZoneName) (uses, known bool) {
 	mpzd, ok := Zones.Get(string(zone))
 	if !ok || mpzd == nil || mpzd.ZoneData == nil || !mpzd.Options[tdns.OptParentSync] {
