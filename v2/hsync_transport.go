@@ -2228,15 +2228,18 @@ type PendingDnskeyPropagation struct {
 }
 
 // foldIntoResend lets the resend of keys (#256), tracked as resendID, take
-// over the zone's pending DNSKEY propagations that track only keys among
-// tags. Each such tracking ends here, which a final word that credited
-// nothing left open: otherwise one more stayed with every resend. What its
-// agents had answered positively (applied, ignored) is carried over, and
-// its ID points at the resend's (supersededBy), so an answer to it that
-// comes late still counts. An agent slower than the resend interval is
-// then not asked over and over to no end. A rejection is not carried: the
-// resend asks again, and its answer decides.
-func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string, tags []uint16) {
+// over the zone's pending DNSKEY propagations of the same distribution: the
+// same key tags, removing the same of them. Each such tracking ends here,
+// which a final word that credited nothing left open: otherwise one more
+// stayed with every resend. What its agents had answered positively
+// (applied, ignored) is carried over, and its ID points at the resend's
+// (supersededBy), so an answer to it that comes late still counts. An agent
+// slower than the resend interval is then not asked over and over to no
+// end. A rejection is not carried: the resend asks again, and its answer
+// decides. Any other tracking is left to finish on its own: an add's
+// "applied" is not a removal's, and a late success is scored against every
+// key of the resend, so a tracking of fewer keys would credit the rest.
+func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 	resend := tm.pendingDnskeyPropagations[resendID]
@@ -2247,14 +2250,7 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string, tags
 		if distID == resendID || prop.Zone != zone || len(prop.KeyTags) == 0 {
 			continue
 		}
-		covered := true
-		for _, kt := range prop.KeyTags {
-			if !slices.Contains(tags, kt) {
-				covered = false
-				break
-			}
-		}
-		if !covered {
+		if !sameDistribution(prop, resend) {
 			continue
 		}
 		for agent, results := range prop.Results {
@@ -2277,6 +2273,25 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string, tags
 		lgTransport.Info("a DNSKEY propagation is superseded by a resend of its keys", "zone", zone, "distributionID", distID, "resend", resendID, "keyTags", len(prop.KeyTags))
 	}
 	tm.finishDnskeyPropagationLocked(resendID, resend)
+}
+
+// sameDistribution is whether two DNSKEY propagations carry the same key
+// tags and remove the same of them.
+func sameDistribution(a, b *PendingDnskeyPropagation) bool {
+	if len(a.KeyTags) != len(b.KeyTags) {
+		return false
+	}
+	for _, kt := range a.KeyTags {
+		if !slices.Contains(b.KeyTags, kt) || a.Removed[kt] != b.Removed[kt] {
+			return false
+		}
+	}
+	for _, kt := range b.KeyTags {
+		if !slices.Contains(a.KeyTags, kt) {
+			return false
+		}
+	}
+	return true
 }
 
 // setResultLocked records an agent's answer for a key of the propagation,

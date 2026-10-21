@@ -252,7 +252,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								} else if len(agents) > 0 {
 									tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
 									if synchedDataUpdate.Resend {
-										tm.foldIntoResend(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags)
+										tm.foldIntoResend(synchedDataUpdate.Zone, distID)
 									}
 								}
 							}

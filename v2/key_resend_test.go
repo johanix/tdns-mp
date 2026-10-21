@@ -347,7 +347,7 @@ func TestALateAnswerToASupersededDistributionStillCounts(t *testing.T) {
 			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
 			// the signer sends the key again
 			tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
-			tm.foldIntoResend(zone, "resend", []uint16{k})
+			tm.foldIntoResend(zone, "resend")
 			tm.dnskeyPropMu.Lock()
 			_, first := tm.pendingDnskeyPropagations["first"]
 			r := tm.pendingDnskeyPropagations["resend"]
@@ -363,6 +363,50 @@ func TestALateAnswerToASupersededDistributionStillCounts(t *testing.T) {
 			tm.dnskeyPropMu.Unlock()
 			if open == c.done {
 				t.Errorf("after %s to the superseded distribution, the resend's tracking is still open: %v, want %v", c.late, open, !c.done)
+			}
+		})
+	}
+}
+
+// A resend takes over only a tracking of the same distribution. An open add
+// of a key is not the removal resent for it: what a peer applied of the add
+// is not a removal, and a late success on the add must not complete the
+// removal. A tracking of fewer keys than the resend is not taken over
+// either: a late success on it would credit the keys it did not carry.
+func TestAResendTakesOverOnlyTheSameDistribution(t *testing.T) {
+	const zone ZoneName = "other.superseded.example."
+	const fast, slow = "agent.fast.example.", "agent.slow.example."
+	const k, j uint16 = 4242, 4343
+	for _, c := range []struct {
+		name            string
+		tags, removed   []uint16
+		rtags, rremoved []uint16
+	}{
+		{"an add, then the removal resent", []uint16{k}, nil, []uint16{k}, []uint16{k}},
+		{"fewer keys than the resend", []uint16{k}, nil, []uint16{k, j}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+			tm.TrackDnskeyPropagation(zone, "first", c.tags, c.removed, []AgentId{fast, slow})
+			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
+			tm.TrackDnskeyPropagation(zone, "resend", c.rtags, c.rremoved, []AgentId{fast, slow})
+			tm.foldIntoResend(zone, "resend")
+			tm.dnskeyPropMu.Lock()
+			_, first := tm.pendingDnskeyPropagations["first"]
+			carried := len(tm.pendingDnskeyPropagations["resend"].Results) > 0
+			alias := tm.supersededBy["first"]
+			tm.dnskeyPropMu.Unlock()
+			if !first || carried || alias != "" {
+				t.Fatalf("after the resend: first still tracked %v (want true), answers carried %v, alias %q (want none)", first, carried, alias)
+			}
+			// the slow agent answers the first distribution, late
+			tm.ProcessDnskeyConfirmation("first", slow, "SUCCESS", nil, nil)
+			tm.dnskeyPropMu.Lock()
+			_, first = tm.pendingDnskeyPropagations["first"]
+			_, open := tm.pendingDnskeyPropagations["resend"]
+			tm.dnskeyPropMu.Unlock()
+			if first || !open {
+				t.Errorf("after the late success on the first distribution: first still tracked %v (want false), the resend still open %v (want true)", first, open)
 			}
 		})
 	}
