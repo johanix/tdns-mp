@@ -252,9 +252,18 @@ var SignerOptionToString = map[SignerOption]string{}
 var StringToSignerOption = map[string]SignerOption{}
 
 // AgentOption identifies an agent-specific behaviour flag.
-// No options defined yet; the type and maps exist for symmetry and
-// future expansion.
 type AgentOption uint8
 
-var AgentOptionToString = map[AgentOption]string{}
-var StringToAgentOption = map[string]AgentOption{}
+const (
+	// AgentOptAllowInject lets the debug injector send the three messages
+	// no honest daemon sends (tdns-mp #261). Off, those commands are refused.
+	AgentOptAllowInject AgentOption = iota + 1
+)
+
+var AgentOptionToString = map[AgentOption]string{
+	AgentOptAllowInject: "allow-inject",
+}
+
+var StringToAgentOption = map[string]AgentOption{
+	"allow-inject": AgentOptAllowInject,
+}

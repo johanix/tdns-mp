@@ -36,6 +36,7 @@ func debugAgentLeaves(kind string) []*cobra.Command {
 		newDebugAgentShowSyncedDataCmd(kind),
 		newDebugAgentShowCombinerDataCmd(kind),
 		newDebugAgentSendSyncToCmd(kind),
+		newDebugAgentInjectCmd(kind),
 		newDebugAgentRegistryCmd(kind),
 		newDebugAgentSyncStateCmd(kind),
 		newDebugAgentResyncCmd(kind),
@@ -516,6 +517,161 @@ Example:
 	c.Flags().String("to", "", "Target agent ID")
 	c.Flags().String("zone", "", "Zone name")
 	return c
+}
+
+// newDebugAgentInjectCmd is the parent of the three sends no honest daemon
+// makes (tdns-mp #261). The payload lies; the transport does not.
+func newDebugAgentInjectCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "inject",
+		Short: "Send a message whose payload lies, for the sender-rule tests",
+		Long: `Send one of the three messages no honest daemon sends. The transport,
+this agent's identity and its keys stay real; only the payload lies. The
+command exits 0 whether the recipient takes the message or refuses it.
+The agent refuses the send unless its multi-provider agent-options list
+includes allow-inject.
+
+  tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
+  tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
+  tdns-mpcli agent debug inject peer-keystate --to <agent> --zone <zone>`,
+	}
+	c.AddCommand(
+		newDebugInjectNamedSenderCmd(),
+		newDebugInjectCombinerOriginCmd(),
+		newDebugInjectPeerKeystateCmd(),
+	)
+	return c
+}
+
+func newDebugInjectNamedSenderCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "named-sender <RR> [<RR>...]",
+		Short: "Send a SYNC whose payload names another sender",
+		Args:  cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			toAgent := requiredInjectFlag(cmd, "to")
+			zone := requiredInjectFlag(cmd, "zone")
+			as := requiredInjectFlag(cmd, "as")
+			finishInject(cmd, AgentMgmtPost{
+				Command: "inject-named-sender",
+				Zone:    ZoneName(zone),
+				AgentId: AgentId(toAgent),
+				RRs:     parsedInjectRRs(args),
+				Data:    map[string]interface{}{"as": dns.Fqdn(as)},
+			}, "named-sender", toAgent, zone)
+		},
+	}
+	c.Flags().String("to", "", "Target agent ID")
+	c.Flags().String("zone", "", "Zone name")
+	c.Flags().String("as", "", "Sender the payload names")
+	return c
+}
+
+func newDebugInjectCombinerOriginCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "combiner-origin <RR> [<RR>...]",
+		Short: "Send this agent's combiner an update from another origin",
+		Args:  cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			zone := requiredInjectFlag(cmd, "zone")
+			origin := requiredInjectFlag(cmd, "origin")
+			finishInject(cmd, AgentMgmtPost{
+				Command: "inject-combiner-origin",
+				Zone:    ZoneName(zone),
+				RRs:     parsedInjectRRs(args),
+				Data:    map[string]interface{}{"origin": dns.Fqdn(origin)},
+			}, "combiner-origin", "", zone)
+		},
+	}
+	c.Flags().String("zone", "", "Zone name")
+	c.Flags().String("origin", "", "Originator the update names")
+	return c
+}
+
+func newDebugInjectPeerKeystateCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "peer-keystate",
+		Short: "Send an empty KEYSTATE inventory to another provider's agent",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			toAgent := requiredInjectFlag(cmd, "to")
+			zone := requiredInjectFlag(cmd, "zone")
+			finishInject(cmd, AgentMgmtPost{
+				Command: "inject-peer-keystate",
+				Zone:    ZoneName(zone),
+				AgentId: AgentId(toAgent),
+			}, "peer-keystate", toAgent, zone)
+		},
+	}
+	c.Flags().String("to", "", "Target agent ID")
+	c.Flags().String("zone", "", "Zone name")
+	return c
+}
+
+func requiredInjectFlag(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	if v == "" {
+		log.Fatalf("Error: --%s is required", name)
+	}
+	return v
+}
+
+func parsedInjectRRs(args []string) []string {
+	var validRRs []string
+	for _, rrStr := range args {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			log.Fatalf("Error: Invalid DNS record %q: %v", rrStr, err)
+		}
+		validRRs = append(validRRs, rr.String())
+	}
+	return validRRs
+}
+
+func finishInject(cmd *cobra.Command, req AgentMgmtPost, kind, recipient, zone string) {
+	amr, err := SendAgentDebugCmd(cmd, req, false)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+	if amr.Error {
+		log.Fatalf("Error: %s", amr.ErrorMsg)
+	}
+	fmt.Println(injectReport(amr, kind, recipient, zone))
+}
+
+// injectReport is the one line an inject prints. A refusal is an outcome,
+// not a failure of the command.
+func injectReport(amr *AgentMgmtResponse, kind, recipient, zone string) string {
+	var m map[string]interface{}
+	if amr != nil {
+		m, _ = amr.Data.(map[string]interface{})
+	}
+	if r := injectMapString(m, "target"); r != "" {
+		recipient = r
+	}
+	if r := injectMapString(m, "combiner"); r != "" {
+		recipient = r
+	}
+	if z := injectMapString(m, "zone"); z != "" {
+		zone = z
+	}
+	outcome := strings.TrimSpace(injectMapString(m, "status") + " " + injectMapString(m, "message"))
+	if errMsg := injectMapString(m, "error"); errMsg != "" {
+		outcome = "error: " + errMsg
+	}
+	line := fmt.Sprintf("inject %s: %s zone %s", kind, recipient, zone)
+	if dist := injectMapString(m, "distribution_id"); dist != "" {
+		line += " distribution " + dist
+	}
+	return strings.TrimSpace(line + ": " + outcome)
+}
+
+func injectMapString(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
 }
 
 func newDebugAgentResyncCmd(kind string) *cobra.Command {
