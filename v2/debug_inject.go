@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -90,7 +91,46 @@ func debugPostString(data map[string]interface{}, key string) string {
 	return s
 }
 
+// injectRefused reports that this agent will not forge a payload. The
+// management key can already ask for send-sync-to; these three commands
+// put words in another identity's mouth, so they stay off unless
+// agent-options lists allow-inject.
+func (conf *Config) injectRefused(resp *AgentMgmtResponse) bool {
+	mp := conf.MpConfig()
+	if mp != nil && mp.AgentOptions[AgentOptAllowInject] {
+		return false
+	}
+	resp.Error = true
+	resp.ErrorMsg = "inject is refused unless agent-options includes allow-inject"
+	return true
+}
+
+// sendSyncOnce sends the SYNC on the mechanism SelectTransport picks and
+// not on the other one. A NOTIFY answered REFUSED is a retryable error, so
+// Send would deliver the same lie again on the fallback.
+func (tm *MPTransportBridge) sendSyncOnce(ctx context.Context, peer *transport.Peer, req *PeerSyncRequest) (*PeerSyncResponse, error) {
+	msg, err := syncAppMessage(req, peer.ID)
+	if err != nil {
+		return nil, err
+	}
+	if tm == nil || tm.TransportManager == nil || peer == nil {
+		return nil, fmt.Errorf("no transport for peer")
+	}
+	primary := tm.TransportManager.SelectTransport(peer)
+	if primary == nil {
+		return nil, fmt.Errorf("no usable transport for peer %s", peer.ID)
+	}
+	resp, err := primary.SendApp(ctx, peer, msg)
+	if err != nil {
+		return nil, err
+	}
+	return syncResponseFromApp(req, resp), nil
+}
+
 func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtResponse) {
+	if conf.injectRefused(resp) {
+		return
+	}
 	if amp.AgentId == "" {
 		resp.Error = true
 		resp.ErrorMsg = "target agent ID (--to) is required"
@@ -138,7 +178,7 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 		"zone":            string(amp.Zone),
 		"named":           named,
 	}
-	syncResp, err := conf.InternalMp.MPTransport.SendSyncWithFallback(context.Background(), peer, syncReq)
+	syncResp, err := conf.InternalMp.MPTransport.sendSyncOnce(context.Background(), peer, syncReq)
 	if err != nil {
 		data["error"] = err.Error()
 	} else if syncResp != nil {
@@ -151,6 +191,9 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 }
 
 func (conf *Config) debugInjectCombinerOrigin(amp AgentMgmtPost, resp *AgentMgmtResponse) {
+	if conf.injectRefused(resp) {
+		return
+	}
 	if amp.Zone == "" {
 		resp.Error = true
 		resp.ErrorMsg = "zone is required"
@@ -198,6 +241,9 @@ func (conf *Config) debugInjectCombinerOrigin(amp AgentMgmtPost, resp *AgentMgmt
 }
 
 func (conf *Config) debugInjectPeerKeystate(mp *MultiProviderConf, amp AgentMgmtPost, resp *AgentMgmtResponse) {
+	if conf.injectRefused(resp) {
+		return
+	}
 	if amp.AgentId == "" {
 		resp.Error = true
 		resp.ErrorMsg = "target agent ID (--to) is required"
@@ -236,6 +282,10 @@ func (conf *Config) debugInjectPeerKeystate(mp *MultiProviderConf, amp AgentMgmt
 		data["error"] = err.Error()
 	} else if ksResp != nil {
 		data["accepted"] = ksResp.Accepted
+		data["status"] = "NOT ACCEPTED"
+		if ksResp.Accepted {
+			data["status"] = "ACCEPTED"
+		}
 		data["message"] = ksResp.Message
 	}
 	resp.Data = data

@@ -44,6 +44,28 @@ func TestInjectReport(t *testing.T) {
 	if enqueued != wantEnqueued {
 		t.Errorf("enqueued line %q, want %q", enqueued, wantEnqueued)
 	}
+
+	takenKeystate := injectReport(&AgentMgmtResponse{Data: map[string]interface{}{
+		"target":   "agent.b.example.",
+		"zone":     "z.example.",
+		"accepted": true,
+		"status":   "ACCEPTED",
+	}}, "peer-keystate", "agent.b.example.", "z.example.")
+	const wantTakenKeystate = "inject peer-keystate: agent.b.example. zone z.example.: ACCEPTED"
+	if takenKeystate != wantTakenKeystate {
+		t.Errorf("taken keystate line %q, want %q", takenKeystate, wantTakenKeystate)
+	}
+
+	declined := injectReport(&AgentMgmtResponse{Data: map[string]interface{}{
+		"target":  "agent.b.example.",
+		"zone":    "z.example.",
+		"status":  "NOT ACCEPTED",
+		"message": "empty inventory",
+	}}, "peer-keystate", "", "")
+	const wantDeclined = "inject peer-keystate: agent.b.example. zone z.example.: NOT ACCEPTED empty inventory"
+	if declined != wantDeclined {
+		t.Errorf("declined keystate line %q, want %q", declined, wantDeclined)
+	}
 }
 
 func TestDebugInjectCommandsAreWired(t *testing.T) {

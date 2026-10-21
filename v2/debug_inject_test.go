@@ -6,6 +6,7 @@ package tdnsmp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -113,5 +114,37 @@ func TestInjectKeystateRequestIsThisAgentWithAnEmptyInventory(t *testing.T) {
 	}
 	if payload.MyIdentity != self || payload.Signal != "inventory" || len(payload.KeyInventory) != 0 {
 		t.Errorf("wire sender %q signal %q keys %d", payload.MyIdentity, payload.Signal, len(payload.KeyInventory))
+	}
+}
+
+// The injector stays off unless the agent's options list names it. A closed
+// agent refuses before it looks for a transport.
+func TestInjectIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
+	conf := &Config{}
+	amp := AgentMgmtPost{
+		AgentId: "agent.b.example.",
+		Zone:    "z.example.",
+		RRs:     []string{"z.example. 60 IN NS ns9.injected.example."},
+		Data:    map[string]interface{}{"as": "agent.c.example."},
+	}
+	resp := &AgentMgmtResponse{}
+	conf.debugInjectNamedSender(amp, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "allow-inject") {
+		t.Fatalf("a closed injector answered %+v", resp)
+	}
+
+	mp := &MultiProviderConf{AgentOptionsStrs: []string{"allow-inject"}}
+	parseMultiProviderOptions(mp)
+	if !mp.AgentOptions[AgentOptAllowInject] {
+		t.Fatal("allow-inject did not parse")
+	}
+	conf.InternalMp.mpConfig.Store(mp)
+	resp = &AgentMgmtResponse{}
+	conf.debugInjectNamedSender(amp, resp)
+	if strings.Contains(resp.ErrorMsg, "allow-inject") {
+		t.Fatalf("an allowed injector was refused: %s", resp.ErrorMsg)
+	}
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "TransportManager") {
+		t.Fatalf("an allowed injector with no transport answered %+v", resp)
 	}
 }

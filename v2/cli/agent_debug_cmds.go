@@ -528,6 +528,8 @@ func newDebugAgentInjectCmd(kind string) *cobra.Command {
 		Long: `Send one of the three messages no honest daemon sends. The transport,
 this agent's identity and its keys stay real; only the payload lies. The
 command exits 0 whether the recipient takes the message or refuses it.
+The agent refuses the send unless its multi-provider agent-options list
+includes allow-inject.
 
   tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
   tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
@@ -657,8 +659,11 @@ func injectReport(amr *AgentMgmtResponse, kind, recipient, zone string) string {
 	if errMsg := injectMapString(m, "error"); errMsg != "" {
 		outcome = "error: " + errMsg
 	}
-	return strings.TrimSpace(fmt.Sprintf("inject %s: %s zone %s distribution %s: %s",
-		kind, recipient, zone, injectMapString(m, "distribution_id"), outcome))
+	line := fmt.Sprintf("inject %s: %s zone %s", kind, recipient, zone)
+	if dist := injectMapString(m, "distribution_id"); dist != "" {
+		line += " distribution " + dist
+	}
+	return strings.TrimSpace(line + ": " + outcome)
 }
 
 func injectMapString(m map[string]interface{}, key string) string {
