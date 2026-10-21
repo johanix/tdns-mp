@@ -586,38 +586,29 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 		case "SYNC":
 			// The operator's resync --pull: a request for the zone's state
-			// to each voting member (the membership design, 3.3), with a
-			// catch-up object of reason manual. The auditor, which holds
-			// none of the zone's data, is not asked.
-			lgEngine.Info("sending SYNC RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
-			asked := 0
-			for _, agent := range zad.Agents {
-				if !isVotingMember(msg.Zone, string(agent.ID)) {
-					continue
-				}
-				asked++
-				if !ar.isAgentOperational(agent.ID) {
-					resp.RfiResponse[agent.ID] = &RfiData{
-						Error:    true,
-						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)]),
-					}
-					continue
-				}
-				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
-					MessageType:  AgentMsgRfi,
-					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.ID,
-					Zone:         msg.Zone,
-					RfiType:      "SYNC",
-					CatchUp:      &CatchUp{Request: newRfiNonce(), Reason: "manual"},
-				})
-				if err != nil {
-					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: err.Error()}
-					continue
-				}
-				resp.RfiResponse[agent.ID] = &RfiData{Status: "ok", Msg: amr.Msg}
+			// to each voting member (the membership design, 3.3), of
+			// reason manual, made by the catch-up tracker. The answer says
+			// what became of each request here; whether it was sent, and
+			// what it brought, shows in agent parentsync status. The
+			// auditor, which holds none of the zone's data, is not asked.
+			var catchUp *catchUpTracker
+			if ar.MPTransport != nil {
+				catchUp = ar.MPTransport.catchUp
 			}
-			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d voting members for zone %s", asked, msg.Zone)
+			if catchUp == nil {
+				resp.Error = true
+				resp.ErrorMsg = "this agent has no catch-up tracker"
+				return
+			}
+			if !isVotingMember(msg.Zone, ar.LocalAgent.Identity) {
+				resp.Msg = fmt.Sprintf("zone %s: nothing is sent: this agent does not vote in the zone (it is in neither servers= nor signers=)", msg.Zone)
+				return
+			}
+			asked := catchUp.AskZone(msg.Zone, catchUpManual)
+			for id, r := range asked {
+				resp.RfiResponse[id] = &RfiData{Status: "ok", Msg: r.String()}
+			}
+			resp.Msg = fmt.Sprintf("zone %s: a request for the zone's state to %d voting members; agent parentsync status shows what became of each", msg.Zone, len(asked))
 
 		case "AUDIT":
 			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
@@ -711,11 +702,17 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 // transport manager, which picks the mechanism and falls back to the other
 // (cleanup step 5: the application keeps no API sender of its own).
 func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
+	return ar.sendRfiToAgentCtx(context.Background(), agent, msg)
+}
+
+// sendRfiToAgentCtx is sendRfiToAgent under the caller's context, bounded
+// by the same 15 s.
+func (ar *AgentRegistry) sendRfiToAgentCtx(ctx context.Context, agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	if ar.TransportManager == nil || ar.MPTransport == nil {
 		return nil, fmt.Errorf("no transport available for agent %q (no transport manager)", agent.ID)
 	}
 	peer := ar.MPTransport.GetOrCreatePeer(agent)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, rfiSyncRequest(ar.LocalAgent.Identity, msg))

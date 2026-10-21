@@ -62,7 +62,7 @@ func TestParseMultiProviderSyncengineIntervals(t *testing.T) {
 	}{
 		{"documented keys", map[string]interface{}{
 			"beatinterval": 10, "beat_fast_interval": 1, "helloretry": 5, "discoveryretry": 6, "reconcile": 7,
-			"hello_fast_attempts": 3, "hello_fast_interval": 2}, nil, 10},
+			"hello_fast_attempts": 3, "hello_fast_interval": 2, "catchup_outage": 600}, nil, 10},
 		{"remote.beatinterval alone", nil, map[string]interface{}{"beatinterval": 20}, 20},
 		{"documented beatinterval wins", map[string]interface{}{"beatinterval": 10},
 			map[string]interface{}{"beatinterval": 20}, 10},
@@ -90,8 +90,11 @@ func TestParseMultiProviderSyncengineIntervals(t *testing.T) {
 			iv := mp.Syncengine.Intervals
 			if tc.name == "documented keys" {
 				if iv.BeatInterval != 10 || iv.BeatFastInterval != 1 || iv.HelloRetry != 5 || iv.DiscoveryRetry != 6 || iv.Reconcile != 7 ||
-					iv.HelloFastAttempts != 3 || iv.HelloFastInterval != 2 {
+					iv.HelloFastAttempts != 3 || iv.HelloFastInterval != 2 || iv.CatchupOutage != 600 {
 					t.Errorf("intervals = %+v", iv)
+				}
+				if got := catchUpOutageFor(mp); got != 600*time.Second {
+					t.Errorf("the catch-up's outage time = %s, want 10m0s", got)
 				}
 				cfg := hsyncConfigFromMp(mp)
 				if cfg.BeatInterval != 10*time.Second || cfg.BeatIntervalMin != 1*time.Second || cfg.HelloRetryInterval != 5*time.Second ||
@@ -131,5 +134,32 @@ func TestValidateSyncengineIntervals(t *testing.T) {
 	err := ValidateSyncengineIntervals(&mp)
 	if err == nil || !strings.Contains(err.Error(), "hello_fast_attempts") {
 		t.Fatalf("negative hello_fast_attempts: err = %v", err)
+	}
+}
+
+// catchup_outage defaults to an hour, and is refused when it is not above
+// the beat interval: every gap between two beats would be an outage.
+func TestTheCatchUpOutageIsAboveTheBeatInterval(t *testing.T) {
+	var mp MultiProviderConf
+	if got := catchUpOutageFor(&mp); got != time.Hour {
+		t.Errorf("the default: %s, want 1h0m0s", got)
+	}
+	for _, tc := range []struct {
+		beat, outage int
+		ok           bool
+	}{
+		{0, 30, false}, // the beat interval's default is 30 s
+		{0, 31, true},
+		{60, 60, false},
+		{60, 61, true},
+		{60, -1, false},
+	} {
+		mp := MultiProviderConf{}
+		mp.Remote.BeatInterval = uint32(tc.beat)
+		mp.Syncengine.Intervals.CatchupOutage = tc.outage
+		err := ValidateSyncengineIntervals(&mp)
+		if (err == nil) != tc.ok || (err != nil && !strings.Contains(err.Error(), "catchup_outage")) {
+			t.Errorf("beat %d, outage %d: err = %v", tc.beat, tc.outage, err)
+		}
 	}
 }

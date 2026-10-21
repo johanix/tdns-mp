@@ -220,4 +220,5 @@ type ParentSyncStatus struct {
 	CsyncPublished  bool              `json:"csync_published"`
 	ZoneSigned      bool              `json:"zone_signed"`
 	Peers           []PeerSyncInfo    `json:"peers,omitempty"`
+	CatchUp         *CatchUpStatus    `json:"catch_up,omitempty"`
 }

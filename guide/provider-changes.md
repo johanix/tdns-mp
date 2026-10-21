@@ -75,18 +75,19 @@ start. Charlie's agent asks the others for the current
 state of the zone: what each has contributed, and the
 DNSKEYs with their key states.
 
-**Today:** nothing sends that request. Run it by hand on
-charlie once it is a member:
+**Today:** charlie's agent does not ask while charlie has
+no role: the others would refuse the request
+([issue 158](https://github.com/johanix/tdns-mp/issues/158)).
+It asks by itself once charlie has its role (step 3.4),
+and each answer carries the DNSKEYs with their key states.
+To ask again by hand:
 
 ```sh
 tdns-mpcli agent peer resync -z example.com. --pull
 ```
 
-Its answer carries the DNSKEYs and not their key states
-([issue 157](https://github.com/johanix/tdns-mp/issues/157)).
-While charlie has no role the others refuse the request
-([issue 158](https://github.com/johanix/tdns-mp/issues/158)),
-so today it only works after step 3.4.
+`tdns-mpcli agent parentsync status` shows, per voting
+member, whether its answer is complete.
 
 ### 3.3 Charlie serves the zone correctly
 

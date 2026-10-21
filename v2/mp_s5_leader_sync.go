@@ -991,6 +991,8 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	}
 	prev := zd.GetLastKeyInventory()
 	zd.SetLastKeyInventory(snap)
+	// the signer's half of the zone's own read: the zone may be caught up
+	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
 	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
 		return

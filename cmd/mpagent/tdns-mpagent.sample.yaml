@@ -76,6 +76,7 @@ multi-provider:
          reconcile:           60
          hello_fast_attempts: 3
          hello_fast_interval: 2
+         catchup_outage:      3600
 
 service:
    name:           TDNS-MPAGENT
