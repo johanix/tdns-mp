@@ -64,7 +64,7 @@ type MPTransportBridge struct {
 	// supersededBy: a DNSKEY propagation that a resend of its keys took
 	// over (foldIntoResend), to the resend's distribution ID, so that a late
 	// answer to it still counts there. Under dnskeyPropMu.
-	supersededBy map[string]string
+	supersededBy map[string]supersession
 	// answersSent: the answers to requests for a zone's state that this
 	// agent sent, by distribution ID, with the keys of their DNSKEY
 	// operation (noteCatchUpAnswer); answerTo: the distribution ID of the
@@ -2246,6 +2246,7 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 	if resend == nil {
 		return
 	}
+	tm.pruneSupersededLocked(time.Now())
 	for distID, prop := range tm.pendingDnskeyPropagations {
 		if distID == resendID || prop.Zone != zone || len(prop.KeyTags) == 0 {
 			continue
@@ -2262,17 +2263,37 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 		}
 		delete(tm.pendingDnskeyPropagations, distID)
 		if tm.supersededBy == nil {
-			tm.supersededBy = map[string]string{}
+			tm.supersededBy = map[string]supersession{}
 		}
-		for old, to := range tm.supersededBy {
-			if to == distID {
-				tm.supersededBy[old] = resendID
+		for old, s := range tm.supersededBy {
+			if s.to == distID {
+				tm.supersededBy[old] = supersession{to: resendID, at: s.at}
 			}
 		}
-		tm.supersededBy[distID] = resendID
+		tm.supersededBy[distID] = supersession{to: resendID, at: time.Now()}
 		lgTransport.Info("a DNSKEY propagation is superseded by a resend of its keys", "zone", zone, "distributionID", distID, "resend", resendID, "keyTags", len(prop.KeyTags))
 	}
 	tm.finishDnskeyPropagationLocked(resendID, resend)
+}
+
+// supersession: the resend that took a DNSKEY propagation over, and when.
+// No answer to the earlier distribution comes after the reliable queue has
+// given it up (noteMaxAge), so the alias is dropped then: a key that is
+// resent for as long as its tracking stays open leaves no more aliases than
+// a day's resends.
+type supersession struct {
+	to string
+	at time.Time
+}
+
+// pruneSupersededLocked drops the aliases no late answer can use any more.
+// Under dnskeyPropMu.
+func (tm *MPTransportBridge) pruneSupersededLocked(now time.Time) {
+	for old, s := range tm.supersededBy {
+		if now.Sub(s.at) > noteMaxAge {
+			delete(tm.supersededBy, old)
+		}
+	}
 }
 
 // sameDistribution is whether two DNSKEY propagations carry the same key
@@ -2447,10 +2468,10 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	// a rejection (foldIntoResend)
 	late := false
 	if !exists {
-		if to := tm.supersededBy[distID]; to != "" {
-			if prop, exists = tm.pendingDnskeyPropagations[to]; exists {
+		if s, ok := tm.supersededBy[distID]; ok {
+			if prop, exists = tm.pendingDnskeyPropagations[s.to]; exists {
 				late = true
-				distID = to
+				distID = s.to
 			}
 		}
 	}
@@ -2557,8 +2578,8 @@ func (tm *MPTransportBridge) finishDnskeyPropagationLocked(distID string, prop *
 	sentAt := prop.CreatedAt
 	propagated, removed, rejected, rejectionMsg := prop.outcome()
 	delete(tm.pendingDnskeyPropagations, distID)
-	for old, to := range tm.supersededBy {
-		if to == distID {
+	for old, s := range tm.supersededBy {
+		if s.to == distID {
 			delete(tm.supersededBy, old)
 		}
 	}

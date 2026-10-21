@@ -394,7 +394,7 @@ func TestAResendTakesOverOnlyTheSameDistribution(t *testing.T) {
 			tm.dnskeyPropMu.Lock()
 			_, first := tm.pendingDnskeyPropagations["first"]
 			carried := len(tm.pendingDnskeyPropagations["resend"].Results) > 0
-			alias := tm.supersededBy["first"]
+			alias := tm.supersededBy["first"].to
 			tm.dnskeyPropMu.Unlock()
 			if !first || carried || alias != "" {
 				t.Fatalf("after the resend: first still tracked %v (want true), answers carried %v, alias %q (want none)", first, carried, alias)
@@ -409,5 +409,45 @@ func TestAResendTakesOverOnlyTheSameDistribution(t *testing.T) {
 				t.Errorf("after the late success on the first distribution: first still tracked %v (want false), the resend still open %v (want true)", first, open)
 			}
 		})
+	}
+}
+
+// An alias of a superseded distribution is dropped once no answer to it can
+// come any more, a day after the resend took it over, so a key resent for as
+// long as its tracking stays open leaves no more aliases than a day's
+// resends. A younger alias stays, and still leads a late answer home.
+func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
+	const zone ZoneName = "alias.age.example."
+	const fast, slow = "agent.fast.example.", "agent.slow.example."
+	const k uint16 = 4242
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.TrackDnskeyPropagation(zone, "second", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.foldIntoResend(zone, "second")
+	tm.dnskeyPropMu.Lock()
+	s := tm.supersededBy["first"]
+	s.at = s.at.Add(-noteMaxAge - time.Minute) // first was taken over a day ago
+	tm.supersededBy["first"] = s
+	tm.dnskeyPropMu.Unlock()
+
+	tm.TrackDnskeyPropagation(zone, "third", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.foldIntoResend(zone, "third")
+	tm.dnskeyPropMu.Lock()
+	_, old := tm.supersededBy["first"]
+	young := tm.supersededBy["second"]
+	tm.dnskeyPropMu.Unlock()
+	if old {
+		t.Errorf("an alias older than the reliable queue's lifetime was kept")
+	}
+	if young.to != "third" {
+		t.Fatalf("the younger alias: %+v, want it to lead to the third", young)
+	}
+	// a late answer to the second still counts at the third
+	tm.ProcessDnskeyConfirmation("second", fast, "SUCCESS", nil, nil)
+	tm.dnskeyPropMu.Lock()
+	applied := tm.pendingDnskeyPropagations["third"].Results[fast][k]
+	tm.dnskeyPropMu.Unlock()
+	if applied != "applied" {
+		t.Errorf("a late answer to a superseded distribution, through a young alias: %q, want applied", applied)
 	}
 }
