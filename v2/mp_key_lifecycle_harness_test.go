@@ -137,6 +137,9 @@ func (w *harnessWire) send(keyid uint16, removal bool) {
 
 func (w *harnessWire) Distribute(zone string, keyid uint16)        { w.send(keyid, false) }
 func (w *harnessWire) DistributeRemoval(zone string, keyid uint16) { w.send(keyid, true) }
+func (w *harnessWire) Resend(zone string, keyid uint16, removal bool) {
+	w.send(keyid, removal)
+}
 func (w *harnessWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) {
 	// the parent follows the provider's own DS intent one tick behind
 	// (syncParent): it serves exactly the ds=1 KSKs as of the last tick's end

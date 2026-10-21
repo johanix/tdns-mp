@@ -5,8 +5,11 @@ package tdnsmp
 
 import (
 	"context"
+	"slices"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
+	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // HsyncDataEngine is the agent-only shell around hsync.Engine (SDE feeding,
@@ -118,7 +121,18 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	}
 	e.conf.noteKeyInventory(ctx, zd, inventoryMsg)
 	changed, ds, err := zd.LocalDnskeysFromKeystate(ourID, nil)
-	if err != nil || !changed {
+	if err != nil {
+		return
+	}
+	// The keys the signer sends again go to the peers again, tracked for
+	// them, whether or not the key set changed: unmarked, an unchanged
+	// inventory distributes nothing, and the key lifecycle's resend never
+	// left this agent (#256).
+	if resendKeys(ds, inventoryMsg.Resend, inventoryMsg.Inventory) {
+		lgEngine.Info("the signer sends keys again: distributing them to the peers again", "zone", inventoryMsg.Zone, "keys", inventoryMsg.Resend)
+		changed = true
+	}
+	if !changed {
 		return
 	}
 	e.conf.InternalMp.AgentRegistry.SyncRequestHandler(ourID, SyncRequest{
@@ -132,6 +146,54 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 			CurrentLocalKeys: ds.CurrentLocalKeys,
 			CurrentKeyStates: ds.CurrentKeyStates,
 			StatesChanged:    ds.StatesChanged,
+			Resend:           ds.Resend,
+
+			ResendRemovedTags: ds.ResendRemovedTags,
 		},
 	}, synchedDataUpdateQ, msgQs)
+}
+
+// resendKeys adds to ds the keys whose distribution the signer's key
+// lifecycle sends again (tags): a key this provider serves as an add, and
+// one of its own it has withdrawn (mpremove, removed) as a removal, by its
+// tag alone (ResendRemovedTags). Each is then a key the distribution is
+// tracked for (DnskeyKeyTags), and ds is marked as a resend, which the data
+// engine distributes even when its repo already holds the set. A tag that is
+// neither, another provider's key among them, is not named. False when no
+// key of tags is named.
+func resendKeys(ds *DnskeyStatus, tags []uint16, inv []KeyInventoryItem) bool {
+	if ds == nil || len(tags) == 0 {
+		return false
+	}
+	find := func(rrs []dns.RR, tag uint16) dns.RR {
+		for _, rr := range rrs {
+			if k, ok := rr.(*dns.DNSKEY); ok && k.KeyTag() == tag {
+				return rr
+			}
+		}
+		return nil
+	}
+	named := false
+	for _, tag := range tags {
+		if find(ds.LocalAdds, tag) != nil || find(ds.LocalRemoves, tag) != nil || slices.Contains(ds.ResendRemovedTags, tag) {
+			named = true // in this distribution already
+			continue
+		}
+		if rr := find(ds.CurrentLocalKeys, tag); rr != nil {
+			ds.LocalAdds = append(ds.LocalAdds, rr)
+			named = true
+			continue
+		}
+		withdrawn := slices.ContainsFunc(inv, func(it KeyInventoryItem) bool {
+			return it.KeyTag == tag && (it.State == DnskeyStateMpremove || it.State == tdns.DnskeyStateRemoved)
+		})
+		if withdrawn {
+			ds.ResendRemovedTags = append(ds.ResendRemovedTags, tag)
+			named = true
+		}
+	}
+	if named {
+		ds.Resend = true
+	}
+	return named
 }

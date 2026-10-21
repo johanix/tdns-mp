@@ -200,7 +200,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						resp.ErrorMsg = err.Error()
 						resp.Msg = msg
 					}
-					if change || synchedDataUpdate.KeyStatesChanged {
+					// a resend (#256) goes to the peers even when the repo
+					// held the set already
+					if change || synchedDataUpdate.KeyStatesChanged || synchedDataUpdate.Resend {
 						tm := conf.InternalMp.MPTransport
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Generate a single shared distID for combiner + all agents
@@ -248,6 +250,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								if err != nil {
 									lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
 								} else if len(agents) > 0 {
+									if synchedDataUpdate.Resend {
+										tm.supersedeDnskeyPropagations(synchedDataUpdate.Zone, synchedDataUpdate.DnskeyKeyTags)
+									}
 									tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
 								}
 							}

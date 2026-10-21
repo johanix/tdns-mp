@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1156,6 +1157,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Zone:      payload.Zone,
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
+		Resend:    payload.Resend,
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -1165,8 +1167,11 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 
 	// If there's a pending RFI request waiting for this zone's inventory,
-	// route there. Zone mismatches fall through to the shared channel.
-	if ch, ok := tm.getKeystateRfi(payload.Zone); ok {
+	// route there. Zone mismatches fall through to the shared channel. An
+	// inventory with keys marked as sent again is the signer's push, not an
+	// RFI's answer: it goes to the agent's handler, which distributes them
+	// (#256); a waiter would record it and drop the mark.
+	if ch, ok := tm.getKeystateRfi(payload.Zone); ok && len(payload.Resend) == 0 {
 		select {
 		case ch <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
@@ -2216,6 +2221,32 @@ type PendingDnskeyPropagation struct {
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
+}
+
+// supersedeDnskeyPropagations drops the zone's pending DNSKEY propagations
+// that track only keys among tags. A resend of those keys (#256) is tracked
+// anew; the earlier tracking, which a final word that credited nothing left
+// open, would otherwise stay, one more with every resend. A late answer to
+// it finds nothing and changes nothing.
+func (tm *MPTransportBridge) supersedeDnskeyPropagations(zone ZoneName, tags []uint16) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if prop.Zone != zone || len(prop.KeyTags) == 0 {
+			continue
+		}
+		covered := true
+		for _, kt := range prop.KeyTags {
+			if !slices.Contains(tags, kt) {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			delete(tm.pendingDnskeyPropagations, distID)
+			lgTransport.Info("a DNSKEY propagation is superseded by a resend of its keys", "zone", zone, "distributionID", distID, "keyTags", len(prop.KeyTags))
+		}
+	}
 }
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
