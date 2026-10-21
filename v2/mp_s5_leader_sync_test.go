@@ -65,8 +65,11 @@ func waitDelegationSyncTimers(t *testing.T, conf *Config) {
 }
 
 func (r *leaderSyncRig) leader(who AgentId) {
+	le := &LeaderElection{Zone: ZoneName(r.mpzd.ZoneName)}
+	r.lem.noteLeaderLocked(le, who, time.Now()) // as an election names its leader
+	le.Leader, le.LeaderExpiry = who, time.Now().Add(time.Hour)
 	r.lem.mu.Lock()
-	r.lem.elections[ZoneName(r.mpzd.ZoneName)] = &LeaderElection{Zone: ZoneName(r.mpzd.ZoneName), Leader: who, LeaderExpiry: time.Now().Add(time.Hour)}
+	r.lem.elections[ZoneName(r.mpzd.ZoneName)] = le
 	r.lem.mu.Unlock()
 }
 
