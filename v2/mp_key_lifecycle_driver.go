@@ -53,6 +53,10 @@ type Wire interface {
 	// come back through ZoneKeyLifecycle.Confirm.
 	Distribute(zone string, keyid uint16)
 	DistributeRemoval(zone string, keyid uint16)
+	// Resend sends a distribution in flight again (E12, T6', or after a
+	// restart): the key, or its removal, must reach the peers again even
+	// though the signer's key set has not changed (#256).
+	Resend(zone string, keyid uint16, removal bool)
 	// ParentDS is the parent's DS RRset for the zone as the signer's own
 	// resolver sees it: the key tags served, and the RRset's TTL. Known is
 	// false when the parent could not be asked (no resolver, one not ready
@@ -462,8 +466,9 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	case "T6":
 		// a fresh distribution for the current signers, the rejection gone;
 		// on a key already serving it is the record a joiner must confirm;
-		// on a key being removed it is the removal sent again
-		l.startDistribution(keyid, k.State == KeyStateMpremove)
+		// on a key being removed it is the removal sent again. The agent's
+		// key set has not changed, so it goes as a resend (#256).
+		l.startDistribution(keyid, k.State == KeyStateMpremove, true)
 		return k.State, next, nil
 	case "T6'":
 		l.resend(keyid)
@@ -539,7 +544,7 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	}
 	switch next {
 	case KeyStateMpdist:
-		l.startDistribution(keyid, false)
+		l.startDistribution(keyid, false, false)
 		if len(l.dist[keyid].Expected) == 0 {
 			// nobody to wait for (T3'): published at once
 			if _, _, err := l.applyLocked(keyid, EvDistributed); err != nil {
@@ -593,7 +598,7 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 		l.Wire.Resign(l.Zone)
 	case KeyStateMpremove:
 		delete(l.dsGone, keyid)
-		l.startDistribution(keyid, true)
+		l.startDistribution(keyid, true, false)
 		if len(l.dist[keyid].Expected) == 0 {
 			if _, _, err := l.applyLocked(keyid, EvDistributed); err != nil {
 				return k.State, next, err
@@ -655,14 +660,15 @@ func (l *ZoneKeyLifecycle) resend(keyid uint16) {
 	// time: the answer a slow signer gives to the first send is not stale
 	d.LastSent = l.Clock.Now()
 	l.saveDist(keyid)
-	if d.Removal {
-		l.Wire.DistributeRemoval(l.Zone, keyid)
-	} else {
-		l.Wire.Distribute(l.Zone, keyid)
-	}
+	l.Wire.Resend(l.Zone, keyid, d.Removal)
 }
 
-func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal bool) {
+// startDistribution starts the key's distribution, or its removal's. resend:
+// the agent's key set has not changed with it (an operator's retry, a
+// restart with no record of the distribution), so it is sent as a resend,
+// which the agent distributes anyway (#256). A first distribution goes with
+// the key's row change, which changes the agent's set.
+func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal, resend bool) {
 	now := l.Clock.Now()
 	d := &distribution{Removal: removal, SentAt: now, LastSent: now, Expected: map[string]bool{}, Applied: map[string]bool{}, Pending: map[string]bool{}, Rejected: map[string]bool{}}
 	for _, p := range l.Wire.OtherSigners(l.Zone) {
@@ -670,9 +676,12 @@ func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal bool) {
 	}
 	l.dist[keyid] = d
 	l.saveDist(keyid)
-	if removal {
+	switch {
+	case resend:
+		l.Wire.Resend(l.Zone, keyid, removal)
+	case removal:
 		l.Wire.DistributeRemoval(l.Zone, keyid)
-	} else {
+	default:
 		l.Wire.Distribute(l.Zone, keyid)
 	}
 }
@@ -849,13 +858,17 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 			}
 			if k.State == KeyStatePublished || k.State == KeyStateStandby || k.State == KeyStateActive || k.State == KeyStateRetired {
 				d := &distribution{SentAt: l.Clock.Now(), LastSent: l.Clock.Now(), Expected: map[string]bool{}, Applied: map[string]bool{}, Pending: map[string]bool{}, Rejected: map[string]bool{}}
-				for p := range joiners {
+				// every signer now: the pass below would add the others and
+				// send it a second time
+				for p := range now {
 					d.Expected[p] = true
 				}
 				l.dist[keyid] = d
 				l.saveDist(keyid)
 				l.logf("key lifecycle: a signer joined; the served key must be applied there", "zone", l.Zone, "keyid", keyid, "joiners", joinSet(joiners), "state", k.State)
-				l.Wire.Distribute(l.Zone, keyid)
+				// the agent serves the key already: only a resend makes it
+				// distribute the set again (#256)
+				l.Wire.Resend(l.Zone, keyid, false)
 			}
 		}
 	}
@@ -1285,7 +1298,9 @@ func (l *ZoneKeyLifecycle) Reload() error {
 		switch k.State {
 		case KeyStateMpdist, KeyStateMpremove:
 			if d == nil {
-				l.startDistribution(keyid, k.State == KeyStateMpremove)
+				// a key in flight with no record of its distribution: the
+				// agent's set has it as it was, so it goes as a resend
+				l.startDistribution(keyid, k.State == KeyStateMpremove, true)
 				continue
 			}
 			if len(d.Rejected) > 0 {

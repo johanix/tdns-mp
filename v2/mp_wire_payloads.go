@@ -116,9 +116,12 @@ type DnsKeystatePayload struct {
 	// included (S7). An older agent does not send it, and an older signer
 	// ignores it.
 	ForeignSpoken []string `json:"ForeignSpoken,omitempty"`
-	Owned         bool     `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
-	Time          string   `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
-	Timestamp     int64    `json:"timestamp"`       // Unix timestamp
+	// Resend: with Signal "inventory", the keys the signer's key lifecycle
+	// sends again (#256). An older agent ignores it.
+	Resend    []uint16 `json:"Resend,omitempty"`
+	Owned     bool     `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time      string   `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
+	Timestamp int64    `json:"timestamp"`       // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"
