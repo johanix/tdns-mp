@@ -41,7 +41,8 @@ type KeystateInventoryMsg struct {
 	SenderID  string
 	Zone      string
 	Inventory []KeyInventoryItem
-	Owned     bool // the signer's own state machine runs the zone's keys (S3)
+	Owned     bool     // the signer's own state machine runs the zone's keys (S3)
+	Resend    []uint16 // keys the signer sends again: distributed even unchanged (#256)
 }
 
 type KeystateSignalMsg struct {
