@@ -77,6 +77,20 @@ back yet.
 `-v` adds full per-peer detail: published address, JWK
 KeyID, last successful round-trip, error counters.
 
+A state with a mark after it is about the peer's DNSSEC
+chain: `(-)` means the peer's DNS data (its URI, SVCB,
+TLSA and JWK records) is not validated, `(!)` that it
+fails validation. `NEEDED(-)` is a peer this agent
+refuses because its chain is broken and
+`imrengine.require-dnssec-validation` is on;
+`OPERATIONAL(-)` is a peer in use on data nobody
+validated, because the setting is off. The Discovery
+column, shown when a peer has something in it, names the
+record and what is wrong with it, for example
+`URI at _https._tcp.agent.bravo.example.: answer
+insecure, DNSSEC validation required`. With validation
+off, the list ends with a warning that says so.
+
 ### 2.2 Ping a specific peer
 
 ```sh
@@ -201,6 +215,14 @@ cell with low AGE values. Common failure patterns:
 - **Asymmetric — alpha sees bravo OPERATIONAL but bravo
   sees alpha NEEDED**: one direction of the transport
   works, the other does not. Often firewall.
+- **A cell marked `(-)` or `(!)`**: the reporter cannot
+  validate that peer's DNS data (`(!)`: it fails
+  validation). `NEEDED(-)` means the reporter refuses the
+  peer for it; `OPERATIONAL(-)` that the reporter runs
+  with DNSSEC validation off, and the warning under the
+  matrix names every member where it is off. Fix the
+  peer's chain (usually a missing DS at its parent), and
+  turn validation back on.
 
 `Leader: ... expires in ...` shows the current leader
 election state. `no election held` means the group has

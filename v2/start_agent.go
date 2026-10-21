@@ -70,6 +70,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
+		conf.warnWhileDnssecValidationOff(ctx, lgAgent)
 	} else {
 		lgAgent.Info("NOT starting imrengine (explicitly set to false)",
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
@@ -134,6 +135,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// Start the reliable message queue (must be after combiner peer initialization)
 	if conf.InternalMp.TransportManager != nil {
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
+		// A discovered peer is looked up again when its DNS data expires
+		// from the resolver's cache, so that it is not used on data whose
+		// chain has broken since (#260).
+		conf.InternalMp.TransportManager.StartDiscoveryRefresh(ctx)
 	}
 
 	// Leader election manager for coordinated parent delegation sync (DDNS)

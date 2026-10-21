@@ -105,6 +105,15 @@ func writePeerListResponse(conf *Config, w http.ResponseWriter, respTime time.Ti
 		if !peer.LastUsed.IsZero() {
 			peerMaps[i]["last_used"] = peer.LastUsed.Format(time.RFC3339)
 		}
+		if peer.DNSSEC != "" {
+			peerMaps[i]["dnssec"] = peer.DNSSEC
+		}
+		if peer.DiscoveryReason != "" {
+			peerMaps[i]["discovery_reason"] = peer.DiscoveryReason
+		}
+		if !peer.DiscoveryExpires.IsZero() {
+			peerMaps[i]["discovery_expires"] = peer.DiscoveryExpires.Format(time.RFC3339)
+		}
 	}
 
 	// Leader-election status per zone — both active leaders and
@@ -151,6 +160,9 @@ func writePeerListResponse(conf *Config, w http.ResponseWriter, respTime time.Ti
 		"peers":            peerMaps,
 		"leaders":          leaderInfo,
 		"parentsync_zones": parentsyncZones,
+		// The CLI warns while the resolver takes discovery data it could
+		// not validate (#260).
+		"dnssec_validation_off": conf.DnssecValidationOff(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

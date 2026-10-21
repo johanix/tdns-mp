@@ -53,6 +53,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
+		conf.warnWhileDnssecValidationOff(ctx, lgAuditor)
 	} else {
 		lgAuditor.Info("NOT starting imrengine (explicitly set to false)",
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
@@ -99,6 +100,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// Reliable message queue for outbound BEATs/HELLOs.
 	if conf.InternalMp.TransportManager != nil {
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
+		// Discovered peers are looked up again when their DNS data expires,
+		// as the agent's are (#260).
+		conf.InternalMp.TransportManager.StartDiscoveryRefresh(ctx)
 	}
 
 	// Provider group recomputation. HSYNC changes reach RecomputeGroups

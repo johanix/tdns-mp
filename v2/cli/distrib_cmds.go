@@ -507,10 +507,14 @@ func ListDistribPeers(cmd *cobra.Command, component string) {
 	}
 
 	// Get peers list
+	validationOff, _ := resp["dnssec_validation_off"].(bool)
 	if peersRaw, ok := resp["peers"].([]interface{}); ok && len(peersRaw) > 0 {
-		displayPeers(peersRaw, verbose)
+		displayPeers(peersRaw, verbose, validationOff)
 	} else {
 		fmt.Println("No peers found")
+		if validationOff {
+			printDnssecNotes([]string{"this node"}, false)
+		}
 	}
 
 	// Show leader election status
@@ -550,9 +554,24 @@ func ListDistribPeers(cmd *cobra.Command, component string) {
 	}
 }
 
-func displayPeers(peers []interface{}, verbose bool) {
+// displayPeers prints the peers, a state with its DNSSEC mark (chainMark).
+// After them it warns when validationOff (this node's resolver takes data it
+// could not validate), and explains the marks when a state carries one.
+func displayPeers(peers []interface{}, verbose bool, validationOff bool) {
 	// Sort peers: combiners first, then by state priority (OPERATIONAL > INTRODUCED > KNOWN > NEEDED)
 	sortedPeers := sortPeersForDisplay(peers)
+
+	marked := false
+	for _, pRaw := range sortedPeers {
+		if p, ok := pRaw.(map[string]interface{}); ok && chainMark(getStringValue(p, "dnssec")) != "" {
+			marked = true
+		}
+	}
+	var off []string
+	if validationOff {
+		off = []string{"this node"}
+	}
+	defer printDnssecNotes(off, marked)
 
 	if verbose {
 		// Verbose mode: show detailed information for each peer
@@ -567,9 +586,20 @@ func displayPeers(peers []interface{}, verbose bool) {
 		return
 	}
 
-	// Compact mode: use tabular format
+	// Compact mode: use tabular format. The Discovery column, what is wrong
+	// with a peer's DNS data, is there when a row has something in it.
+	withReason := false
+	for _, pRaw := range sortedPeers {
+		if p, ok := pRaw.(map[string]interface{}); ok && getStringValue(p, "discovery_reason") != "" {
+			withReason = true
+		}
+	}
 	var rows []string
-	rows = append(rows, "Identity | Type | Transport | Address | Crypto | State")
+	header := "Identity | Type | Transport | Address | Crypto | State"
+	if withReason {
+		header += " | Discovery"
+	}
+	rows = append(rows, header)
 
 	for _, pRaw := range sortedPeers {
 		if p, ok := pRaw.(map[string]interface{}); ok {
@@ -602,8 +632,17 @@ func displayPeers(peers []interface{}, verbose bool) {
 			if state == "" {
 				state = "-"
 			}
+			state += chainMark(getStringValue(p, "dnssec"))
 
-			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state))
+			row := fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state)
+			if withReason {
+				reason := getStringValue(p, "discovery_reason")
+				if reason == "" {
+					reason = "-"
+				}
+				row += " | " + reason
+			}
+			rows = append(rows, row)
 		}
 	}
 
@@ -764,10 +803,19 @@ func displayPeerVerbose(p map[string]interface{}) {
 
 	// State information
 	if state := getStringValue(p, "state"); state != "" {
-		fmt.Printf("  State:          %s\n", state)
+		fmt.Printf("  State:          %s%s\n", state, chainMark(getStringValue(p, "dnssec")))
 	}
 	if contactInfo := getStringValue(p, "contact_info"); contactInfo != "" {
 		fmt.Printf("  Contact Info:   %s\n", contactInfo)
+	}
+	if chain := getStringValue(p, "dnssec"); chain != "" {
+		fmt.Printf("  DNSSEC:         %s\n", chain)
+	}
+	if reason := getStringValue(p, "discovery_reason"); reason != "" {
+		fmt.Printf("  Discovery:      %s\n", reason)
+	}
+	if expires := getStringValue(p, "discovery_expires"); expires != "" {
+		fmt.Printf("  DNS data until: %s\n", expires)
 	}
 
 	// Partial discovery warning

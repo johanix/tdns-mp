@@ -410,6 +410,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					}
 					if apiPeer != nil {
 						peerInfo.ContactInfo = apiPeer.MechanismContactInfo("API")
+						peerInfo.setDiscovery(apiPeer, "API")
 						s := apiPeer.Stats.GetDetailedStats()
 						peerInfo.HelloSent = s.HelloSent
 						peerInfo.HelloReceived = s.HelloReceived
@@ -503,6 +504,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					}
 					if dnsPeer != nil {
 						peerInfo.ContactInfo = dnsPeer.MechanismContactInfo("DNS")
+						peerInfo.setDiscovery(dnsPeer, "DNS")
 						s := dnsPeer.Stats.GetDetailedStats()
 						peerInfo.HelloSent = s.HelloSent
 						peerInfo.HelloReceived = s.HelloReceived

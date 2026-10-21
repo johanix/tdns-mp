@@ -120,12 +120,56 @@ func runGossipZoneState(cmd *cobra.Command, kind, zone string) {
 		return
 	}
 
+	matrix, _ := data["matrix"].([]interface{})
+	printGossipMatrix(members, matrix)
+}
+
+// printGossipMatrix prints the group's state matrix: a row per reporter, a
+// column per member, and after it the notes on DNSSEC (printDnssecNotes).
+func printGossipMatrix(members []string, matrix []interface{}) {
 	shortNames := shortenMemberNames(members)
+
+	// A cell is the reporter's state for the peer with the DNSSEC mark of
+	// the peer's chain as the reporter sees it (chainMark). Where a
+	// reporter's resolver takes data it could not validate, the notes after
+	// the matrix say so.
+	cells := make(map[string]map[string]string, len(matrix))
+	var off []string
+	marked := false
+	for _, row := range matrix {
+		r, ok := row.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		reporter, _ := r["reporter"].(string)
+		peerStates, _ := r["peer_states"].(map[string]interface{})
+		peerChains, _ := r["peer_chains"].(map[string]interface{})
+		if v, _ := r["dnssec_validation_off"].(bool); v {
+			off = append(off, shortNames[reporter])
+		}
+		cells[reporter] = make(map[string]string, len(peerStates))
+		for m, st := range peerStates {
+			state, _ := st.(string)
+			chain, _ := peerChains[m].(string)
+			if mark := chainMark(chain); mark != "" {
+				state += mark
+				marked = true
+			}
+			cells[reporter][m] = state
+		}
+	}
 
 	colWidth := 14
 	for _, sn := range shortNames {
 		if len(sn)+2 > colWidth {
 			colWidth = len(sn) + 2
+		}
+	}
+	for _, row := range cells {
+		for _, c := range row {
+			if len(c)+2 > colWidth {
+				colWidth = len(c) + 2
+			}
 		}
 	}
 
@@ -135,7 +179,6 @@ func runGossipZoneState(cmd *cobra.Command, kind, zone string) {
 	}
 	fmt.Printf("%-6s\n", "AGE")
 
-	matrix, _ := data["matrix"].([]interface{})
 	for _, row := range matrix {
 		r, ok := row.(map[string]interface{})
 		if !ok {
@@ -143,7 +186,6 @@ func runGossipZoneState(cmd *cobra.Command, kind, zone string) {
 		}
 		reporter, _ := r["reporter"].(string)
 		age, _ := r["age"].(string)
-		peerStates, _ := r["peer_states"].(map[string]interface{})
 		beatInterval := 0
 		if v, ok := r["beat_interval"].(float64); ok {
 			beatInterval = int(v)
@@ -153,7 +195,7 @@ func runGossipZoneState(cmd *cobra.Command, kind, zone string) {
 		for _, m := range members {
 			if m == reporter {
 				fmt.Printf("%-*s", colWidth, "—")
-			} else if state, ok := peerStates[m].(string); ok {
+			} else if state, ok := cells[reporter][m]; ok {
 				fmt.Printf("%-*s", colWidth, state)
 			} else {
 				fmt.Printf("%-*s", colWidth, "?")
@@ -165,6 +207,7 @@ func runGossipZoneState(cmd *cobra.Command, kind, zone string) {
 			fmt.Printf("%-6s\n", age)
 		}
 	}
+	printDnssecNotes(off, marked)
 }
 
 // shortenMemberNames returns a map from full identity to a display

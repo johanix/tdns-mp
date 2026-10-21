@@ -482,6 +482,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// (delegationNotifyWait).
 	if ar := conf.InternalMp.AgentRegistry; ar != nil {
 		ar.GossipStateTable.SetPropagationDelay(conf.Config.KaspPropagationDelay())
+		// Whether our resolver takes discovery data it could not validate
+		// goes out too, so every member's matrix shows it (#260).
+		ar.GossipStateTable.SetDnssecValidationOff(conf.Config.DnssecValidationOff())
 	}
 
 	// The first hello waits for the identity zone; SetupAgent opens this.
@@ -634,6 +637,9 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	}
 
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
+	// Its gossip rows say whether its resolver takes discovery data it could
+	// not validate, as an agent's do (#260).
+	conf.InternalMp.AgentRegistry.GossipStateTable.SetDnssecValidationOff(conf.Config.DnssecValidationOff())
 
 	// The auditor sets its identity up through SetupAgent as the agent does,
 	// so its first hello waits for the same gate; SetupAgent opens it.

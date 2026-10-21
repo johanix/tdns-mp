@@ -9,6 +9,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
 )
 
@@ -48,6 +49,14 @@ type PeerInfo struct {
 	Partial      bool      // Whether discovery was partial
 	State        string    // Agent state
 	ContactInfo  string    // Contact info status
+
+	// What the last discovery found out about the mechanism's DNS data
+	// (#260): the DNSSEC verdict on it ("secure", "insecure", "bogus"; ""
+	// when not known), what is wrong with it in words, and when it expires
+	// from the resolver's cache.
+	DNSSEC           string
+	DiscoveryReason  string
+	DiscoveryExpires time.Time
 
 	// Per-message-type statistics
 	HelloSent     uint64
@@ -231,4 +240,19 @@ type AgentDistribResponse struct {
 	Distributions []string               `json:"distributions,omitempty"` // For backward compatibility
 	Data          []interface{}          `json:"data,omitempty"`          // For peer-zones command
 	Agents        []string               `json:"agents,omitempty"`        // For zone-agents command
+}
+
+// setDiscovery fills in what the last discovery of peer found out about the
+// DNS data of its mechanism ("API", "DNS"): the DNSSEC verdict, what is
+// wrong with the data, and when it expires (#260).
+func (pi *PeerInfo) setDiscovery(peer *transport.Peer, mechanism string) {
+	if peer == nil {
+		return
+	}
+	s := peer.DiscoveryStatus()
+	if c := s.MechanismChain(mechanism); c != transport.ChainUnknown {
+		pi.DNSSEC = c.String()
+	}
+	pi.DiscoveryReason = s.MechanismReason(mechanism)
+	pi.DiscoveryExpires = s.Expires
 }
