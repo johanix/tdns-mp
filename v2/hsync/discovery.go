@@ -163,6 +163,12 @@ func (e *Engine) retryPendingDiscoveries() {
 		return
 	}
 	for _, peer := range e.registry.S.Items() {
+		// A peer removed since the pass began has no transport entry either,
+		// and would read NEEDED below: discovering it would make the transport
+		// peer again that its removal had just dropped.
+		if !e.holds(peer) {
+			continue
+		}
 		// State reads the canonical transport.Peer (END.0). A peer with no
 		// transport entry maps to NEEDED — exactly the peers needing discovery.
 		peer.Mu.RLock()
@@ -211,8 +217,21 @@ func (e *Engine) discoverySem() chan struct{} {
 	return e.discSem
 }
 
+// holds reports whether the registry still holds this very peer object: not
+// removed, and not replaced by a new peer under the same identity.
+func (e *Engine) holds(peer *Peer) bool {
+	cur, ok := e.registry.S.Get(peer.ID)
+	return ok && cur == peer
+}
+
 func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	if e.deps.Transport == nil {
+		return
+	}
+	// The pass that launched this may have seen the peer before its
+	// removal: comms with it have ended, and a discovery now would make its
+	// transport peer again (W1, a peer no zone names any more).
+	if !e.holds(peer) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
