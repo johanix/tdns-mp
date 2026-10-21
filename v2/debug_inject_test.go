@@ -5,10 +5,12 @@
 package tdnsmp
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
 
@@ -114,6 +116,16 @@ func TestInjectKeystateRequestIsThisAgentWithAnEmptyInventory(t *testing.T) {
 	}
 	if payload.MyIdentity != self || payload.Signal != "inventory" || len(payload.KeyInventory) != 0 {
 		t.Errorf("wire sender %q signal %q keys %d", payload.MyIdentity, payload.Signal, len(payload.KeyInventory))
+	}
+}
+
+// A nil peer is an error. The check is before the payload is built, so it
+// does not panic on peer.ID.
+func TestSendSyncOnceRejectsANilPeer(t *testing.T) {
+	tm := &MPTransportBridge{TransportManager: &transport.TransportManager{}}
+	resp, via, err := tm.sendSyncOnce(context.Background(), nil, &PeerSyncRequest{SenderID: "agent.c.example."})
+	if err == nil || resp != nil || via != "" {
+		t.Fatalf("nil peer: resp %v transport %q err %v", resp, via, err)
 	}
 }
 

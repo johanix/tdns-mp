@@ -107,24 +107,25 @@ func (conf *Config) injectRefused(resp *AgentMgmtResponse) bool {
 
 // sendSyncOnce sends the SYNC on the mechanism SelectTransport picks and
 // not on the other one. A NOTIFY answered REFUSED is a retryable error, so
-// Send would deliver the same lie again on the fallback.
-func (tm *MPTransportBridge) sendSyncOnce(ctx context.Context, peer *transport.Peer, req *PeerSyncRequest) (*PeerSyncResponse, error) {
-	msg, err := syncAppMessage(req, peer.ID)
-	if err != nil {
-		return nil, err
-	}
+// Send would deliver the same lie again on the fallback. The returned name
+// is that mechanism, so the caller can say which receive path was tested.
+func (tm *MPTransportBridge) sendSyncOnce(ctx context.Context, peer *transport.Peer, req *PeerSyncRequest) (*PeerSyncResponse, string, error) {
 	if tm == nil || tm.TransportManager == nil || peer == nil {
-		return nil, fmt.Errorf("no transport for peer")
+		return nil, "", fmt.Errorf("no transport for peer")
 	}
 	primary := tm.TransportManager.SelectTransport(peer)
 	if primary == nil {
-		return nil, fmt.Errorf("no usable transport for peer %s", peer.ID)
+		return nil, "", fmt.Errorf("no usable transport for peer %s", peer.ID)
+	}
+	msg, err := syncAppMessage(req, peer.ID)
+	if err != nil {
+		return nil, primary.Name(), err
 	}
 	resp, err := primary.SendApp(ctx, peer, msg)
 	if err != nil {
-		return nil, err
+		return nil, primary.Name(), err
 	}
-	return syncResponseFromApp(req, resp), nil
+	return syncResponseFromApp(req, resp), primary.Name(), nil
 }
 
 func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtResponse) {
@@ -170,15 +171,16 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 	syncReq := injectNamedSenderRequest(string(amp.Zone), named, amp.RRs, distID)
 	peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
-	lgApi.Warn("inject: named-sender", "target", amp.AgentId, "zone", amp.Zone, "named", named)
+	syncResp, via, err := conf.InternalMp.MPTransport.sendSyncOnce(context.Background(), peer, syncReq)
+	lgApi.Warn("inject: named-sender", "target", amp.AgentId, "zone", amp.Zone, "named", named, "transport", via)
 
 	data := map[string]interface{}{
 		"distribution_id": distID,
 		"target":          string(amp.AgentId),
 		"zone":            string(amp.Zone),
 		"named":           named,
+		"transport":       via,
 	}
-	syncResp, err := conf.InternalMp.MPTransport.sendSyncOnce(context.Background(), peer, syncReq)
 	if err != nil {
 		data["error"] = err.Error()
 	} else if syncResp != nil {
