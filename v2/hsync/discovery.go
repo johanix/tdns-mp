@@ -238,6 +238,15 @@ func (e *Engine) attemptDiscovery(peer *Peer, discoverAPI, discoverDNS bool) {
 	defer cancel()
 
 	_, err := e.deps.Transport.DiscoverPeer(ctx, string(peer.ID))
+	// A removal while the lookup ran dropped the transport peer, and the
+	// lookup may have made it again: the application drops what the lookup
+	// left, as the removal would have done had it come after (W1).
+	if !e.holds(peer) {
+		if e.deps.PeerHooks.OnRemovedPeerDiscovered != nil {
+			e.deps.PeerHooks.OnRemovedPeerDiscovered(peer)
+		}
+		return
+	}
 	if err == nil {
 		e.deps.Transport.AfterDiscoverPeer(peer)
 	}
