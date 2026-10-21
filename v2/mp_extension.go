@@ -84,6 +84,12 @@ type MPState struct {
 	// first run is the zone's first load, which has no leader yet and is no
 	// give-back. Read and written only by the zone's post-refresh callback.
 	ParentSyncFollowed bool
+	// ContributionsRead: a combiner has read the zone's stored contributions
+	// without an error, also when it found none (restoreContributions,
+	// CombinerReapplyContributions). Until then its answer to RFI EDITS is
+	// that they are not loaded, not an empty map that an agent would take
+	// as its own state. Guarded by the zone's lock.
+	ContributionsRead bool
 	// ParentSyncNamed: the zone's records named this agent at the last run
 	// of followParentSyncParam. An option that comes on because a refresh
 	// names this agent where the last one did not is no give-back.

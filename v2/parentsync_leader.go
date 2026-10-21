@@ -1972,6 +1972,27 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// as this agent's.
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry) && votesInZone(zone, lem.localID)
 
+	// The zone's catch-up (catchup.go), which needs neither the zone's data
+	// nor the keystore.
+	if ar != nil && ar.MPTransport != nil {
+		t := ar.MPTransport.catchUp
+		status.CatchUp = t.Status(zone)
+		if owed, room := t.owedState(zone); owed && status.IsLeader {
+			caughtUp, _ := t.CaughtUp(zone)
+			down, since, lastErr := t.parentDownState(zone)
+			switch {
+			case !caughtUp:
+				status.ParentSync = "held until the zone is caught up"
+			case room:
+				status.ParentSync = "owed, the delegation sync queue is full"
+			case down:
+				status.ParentSync = fmt.Sprintf("owed since %s: the parent's analysis fails (%s)", since.UTC().Format(time.RFC3339), lastErr)
+			default:
+				status.ParentSync = "owed"
+			}
+		}
+	}
+
 	if zd == nil || hdb == nil {
 		return status
 	}

@@ -41,7 +41,8 @@ type KeystateInventoryMsg struct {
 	SenderID  string
 	Zone      string
 	Inventory []KeyInventoryItem
-	Owned     bool // the signer's own state machine runs the zone's keys (S3)
+	Owned     bool     // the signer's own state machine runs the zone's keys (S3)
+	Resend    []uint16 // keys the signer sends again: distributed even unchanged (#256)
 }
 
 type KeystateSignalMsg struct {
@@ -63,7 +64,22 @@ type EditsResponseMsg struct {
 	SenderID     string
 	Zone         string
 	AgentRecords map[string]map[string][]string
+	// Message is the combiner's word on its answer: editsLoaded or
+	// editsNotLoaded, or anything else from a combiner that has neither.
+	Message string
 }
+
+// The combiner's word on its answer to RFI EDITS. An agent takes the answer
+// as its own state only on editsLoaded. editsNotLoaded is applied to
+// nothing. Any other word, from a combiner older than its agent, is applied
+// as it always was, and does not count as the agent's own read: an agent
+// whose combiner has failed to read its store would otherwise answer a
+// request for the zone's state with empty sets, and remove its records at
+// every peer.
+const (
+	editsLoaded    = "contributions-loaded"
+	editsNotLoaded = "contributions-not-loaded"
+)
 
 type ConfigResponseMsg struct {
 	SenderID   string

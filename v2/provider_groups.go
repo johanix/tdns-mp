@@ -172,6 +172,12 @@ const (
 // legacy case: every ON record votes.
 func zoneStanding(apex *tdns.OwnerData, identity string) standing {
 	participants, voting := zoneParticipants(apex)
+	return standingIn(apex, participants, voting, identity)
+}
+
+// standingIn is zoneStanding for a caller that has read the zone's
+// participants already.
+func standingIn(apex *tdns.OwnerData, participants, voting []string, identity string) standing {
 	switch {
 	case isAmong(voting, AgentId(identity)):
 		return standingVoting

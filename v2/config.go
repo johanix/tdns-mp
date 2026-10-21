@@ -9,7 +9,9 @@ package tdnsmp
 import (
 	"context"
 	"sort"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
@@ -168,7 +170,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 			continue
 		}
 		conf.InternalMp.onFirstLoadRegistered[zoneName] = true
-		mpzd.restoreContributions(hdb, allContribs[zoneName])
+		mpzd.restoreContributions(hdb, allContribs[zoneName], err == nil)
 
 		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 			if !zd.Options[tdns.OptMultiProvider] {
@@ -268,7 +270,9 @@ func atNSSendersOf(stored map[string]*StoredPublishInstruction) []string {
 // puts its persisted contributions back in AgentContributions, before
 // anything is combined for the zone (RegisterCombinerOnFirstLoad).
 // zoneContribs is the zone's part of the snapshot, nil when it has none.
-func (mpzd *MPZoneData) restoreContributions(hdb *HsyncDB, zoneContribs map[string]map[string]map[uint16]core.RRset) {
+// read says that the snapshot was read without an error: only then is the
+// zone's store read (ContributionsRead), also when it holds nothing.
+func (mpzd *MPZoneData) restoreContributions(hdb *HsyncDB, zoneContribs map[string]map[string]map[uint16]core.RRset, read bool) {
 	mpzd.Lock()
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
@@ -276,6 +280,9 @@ func (mpzd *MPZoneData) restoreContributions(hdb *HsyncDB, zoneContribs map[stri
 		mpzd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
 			return SaveContributions(hdb, zone, senderID, contribs)
 		}
+	}
+	if read {
+		mpzd.MP.ContributionsRead = true
 	}
 	if mpzd.MP.AgentContributions != nil || len(zoneContribs) == 0 {
 		return
@@ -334,4 +341,13 @@ type InternalMpConf struct {
 	// keyPoll stands in for tdns's poll of the parent for a zone's SIG(0)
 	// key in a test (ParentSyncAfterKeyPublication). Nil runs tdns's.
 	keyPoll func(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8)
+	// ownReads counts the re-reads of the agents' own state under way
+	// (own_read.go), until each has handed its answer back.
+	ownReads sync.WaitGroup
+	// editsRequest stands in for requestEdits, the own read's request to the
+	// combiner, in a test.
+	editsRequest func(ctx context.Context, zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) (*EditsResponseMsg, time.Time, error)
+	// CatchUp is the agent's catch-up tracker (catchup.go); nil on every
+	// other role.
+	CatchUp *catchUpTracker
 }

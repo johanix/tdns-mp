@@ -32,8 +32,10 @@ func (c *fakeClock) Advance(d time.Duration) {
 type fakeWire struct {
 	mu        sync.Mutex
 	signers   []string
-	dist      []uint16 // Distribute calls, in order
-	removals  []uint16
+	dist      []uint16        // Distribute calls, in order, and the resends of a key
+	removals  []uint16        // DistributeRemoval calls, and the resends of a removal
+	resends   []uint16        // Resend calls, in order (#256)
+	resentRm  []uint16        // those of resends that were removals
 	parentDS  map[uint16]bool // what the parent serves; absent = not served
 	parentOff bool            // the parent cannot be asked
 	parentTTL time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
@@ -63,6 +65,30 @@ func (w *fakeWire) DistributeRemoval(zone string, keyid uint16) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.removals = append(w.removals, keyid)
+}
+
+// Resend is a send like the first one (a key, or its removal), and noted as
+// a resend: the agent must distribute it even unchanged (#256).
+func (w *fakeWire) Resend(zone string, keyid uint16, removal bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if removal {
+		w.removals = append(w.removals, keyid)
+		w.resentRm = append(w.resentRm, keyid)
+	} else {
+		w.dist = append(w.dist, keyid)
+	}
+	w.resends = append(w.resends, keyid)
+}
+func (w *fakeWire) resentRemovals() []uint16 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]uint16(nil), w.resentRm...)
+}
+func (w *fakeWire) resent() []uint16 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]uint16(nil), w.resends...)
 }
 func (w *fakeWire) ParentDS(zone string) (map[uint16]bool, time.Duration, bool) {
 	w.mu.Lock()
@@ -465,6 +491,11 @@ func TestDriverLateRejectionAndStaleAnswers(t *testing.T) {
 	if err := r.l.SignersChanged(); err != nil {
 		t.Fatal(err)
 	}
+	// the agent serves the key already: only a resend makes it distribute
+	// the set to the joiner (#256)
+	if n := countOf(r.wire.resent(), sb[0]); n != 1 {
+		t.Errorf("the served standby key went to the joiner as %d resend(s), want one (resent %v)", n, r.wire.resent())
+	}
 	if _, _, err := r.l.Confirm(sb[0], "p3", "rejected", "not for me"); err != nil {
 		t.Fatal(err)
 	}
@@ -474,12 +505,15 @@ func TestDriverLateRejectionAndStaleAnswers(t *testing.T) {
 		t.Errorf("a standby key a joiner rejected was promoted to %s (P1, P8)", st)
 	}
 	// the operator retries: a fresh distribution; once p3 applies, the roll goes
-	before := len(r.wire.distributions())
+	before, resentBefore := len(r.wire.distributions()), len(r.wire.resent())
 	if _, _, err := r.l.Apply(sb[0], CmdRetry); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.wire.distributions()) != before+1 {
 		t.Error("retry did not distribute the standby key again")
+	}
+	if len(r.wire.resent()) != resentBefore+1 {
+		t.Error("the operator's retry went unmarked: the agent, its set unchanged, would distribute nothing (#256)")
 	}
 	if _, _, err := r.l.Confirm(sb[0], "p3", "applied", ""); err != nil {
 		t.Fatal(err)
@@ -692,4 +726,14 @@ func TestDriverPushesTheInventoryOnEveryWrite(t *testing.T) {
 	if r.wire.changes != 8 {
 		t.Errorf("after the promotion %d changes reported, want 8", r.wire.changes)
 	}
+}
+
+func countOf(s []uint16, v uint16) int {
+	n := 0
+	for _, x := range s {
+		if x == v {
+			n++
+		}
+	}
+	return n
 }

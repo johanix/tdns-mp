@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,10 @@ type MPTransportBridge struct {
 	// (keyHandOverAdmits)
 	keyAsks keyAskTable
 
+	// catchUp is the agent's catch-up tracker (catchup.go), as
+	// conf.InternalMp.CatchUp; nil on every other role.
+	catchUp *catchUpTracker
+
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
 
@@ -60,6 +65,17 @@ type MPTransportBridge struct {
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
 	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
 	dnskeyPropMu              sync.Mutex
+	// supersededBy: a DNSKEY propagation that a resend of its keys took
+	// over (foldIntoResend), to the resend's distribution ID, so that a late
+	// answer to it still counts there. Under dnskeyPropMu.
+	supersededBy map[string]supersession
+	// answersSent: the answers to requests for a zone's state that this
+	// agent sent, by distribution ID, with the keys of their DNSKEY
+	// operation (noteCatchUpAnswer); answerTo: the distribution ID of the
+	// latest one per zone and asker, the only one remembered. Under
+	// dnskeyPropMu.
+	answersSent map[string]*sentAnswer
+	answerTo    map[ZoneName]map[AgentId]string
 	// what the other providers said about their keys, per zone and
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
@@ -1078,6 +1094,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
 			ZoneClass:      payload.ZoneClass,
 			Publish:        payload.GetPublish(),
+			CatchUp:        payload.CatchUp,
 		},
 	}
 
@@ -1158,6 +1175,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Zone:      payload.Zone,
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
+		Resend:    payload.Resend,
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -1167,8 +1185,11 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 
 	// If there's a pending RFI request waiting for this zone's inventory,
-	// route there. Zone mismatches fall through to the shared channel.
-	if ch, ok := tm.getKeystateRfi(payload.Zone); ok {
+	// route there. Zone mismatches fall through to the shared channel. An
+	// inventory with keys marked as sent again is the signer's push, not an
+	// RFI's answer: it goes to the agent's handler, which distributes them
+	// (#256); a waiter would record it and drop the mark.
+	if ch, ok := tm.getKeystateRfi(payload.Zone); ok && len(payload.Resend) == 0 {
 		select {
 		case ch <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
@@ -1211,6 +1232,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		SenderID:     senderID,
 		Zone:         payload.Zone,
 		AgentRecords: payload.AgentRecords,
+		Message:      payload.Message,
 	}
 
 	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
@@ -1803,6 +1825,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			}
 		}
 	}
+	// A beat that succeeded, on one mechanism or both, is one successful
+	// beat to the peer for the catch-up tracker.
+	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
+		tm.catchUp.PeerOperational(agent.ID)
+	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
 			if resp == nil || len(resp.Gossip) == 0 {
@@ -1946,6 +1973,9 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 	}
 	if update != nil {
 		syncReq.Operations = update.Operations
+		if !isCombiner {
+			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
+		}
 		if isCombiner {
 			syncReq.ZoneClass = update.ZoneClass
 			if update.Publish != nil {
@@ -2189,6 +2219,115 @@ type PendingDnskeyPropagation struct {
 	CreatedAt    time.Time
 }
 
+// foldIntoResend lets the resend of keys (#256), tracked as resendID, take
+// over the zone's pending DNSKEY propagations of the same distribution: the
+// same key tags, removing the same of them. Each such tracking ends here,
+// which a final word that credited nothing left open: otherwise one more
+// stayed with every resend. What its agents had answered positively
+// (applied, ignored) is carried over, and its ID points at the resend's
+// (supersededBy), so an answer to it that comes late still counts. An agent
+// slower than the resend interval is then not asked over and over to no
+// end. A rejection is not carried: the resend asks again, and its answer
+// decides. Any other tracking is left to finish on its own: an add's
+// "applied" is not a removal's, and a late success is scored against every
+// key of the resend, so a tracking of fewer keys would credit the rest.
+func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	resend := tm.pendingDnskeyPropagations[resendID]
+	if resend == nil {
+		return
+	}
+	tm.pruneSupersededLocked(time.Now())
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if distID == resendID || prop.Zone != zone || len(prop.KeyTags) == 0 {
+			continue
+		}
+		if !sameDistribution(prop, resend) {
+			continue
+		}
+		for agent, results := range prop.Results {
+			for kt, r := range results {
+				if r == "applied" || r == "ignored" {
+					resend.setResultLocked(agent, kt, r)
+				}
+			}
+		}
+		delete(tm.pendingDnskeyPropagations, distID)
+		if tm.supersededBy == nil {
+			tm.supersededBy = map[string]supersession{}
+		}
+		for old, s := range tm.supersededBy {
+			if s.to == distID {
+				tm.supersededBy[old] = supersession{to: resendID, at: s.at}
+			}
+		}
+		tm.supersededBy[distID] = supersession{to: resendID, at: time.Now()}
+		lgTransport.Info("a DNSKEY propagation is superseded by a resend of its keys", "zone", zone, "distributionID", distID, "resend", resendID, "keyTags", len(prop.KeyTags))
+	}
+	tm.finishDnskeyPropagationLocked(resendID, resend)
+}
+
+// supersession: the resend that took a DNSKEY propagation over, and when.
+// No answer to the earlier distribution comes after the reliable queue has
+// given it up (noteMaxAge), so the alias is dropped then: a key that is
+// resent for as long as its tracking stays open leaves no more aliases than
+// a day's resends.
+type supersession struct {
+	to string
+	at time.Time
+}
+
+// pruneSupersededLocked drops the aliases no late answer can use any more.
+// Under dnskeyPropMu.
+func (tm *MPTransportBridge) pruneSupersededLocked(now time.Time) {
+	for old, s := range tm.supersededBy {
+		if now.Sub(s.at) > noteMaxAge {
+			delete(tm.supersededBy, old)
+		}
+	}
+}
+
+// sameDistribution is whether two DNSKEY propagations carry the same key
+// tags and remove the same of them.
+func sameDistribution(a, b *PendingDnskeyPropagation) bool {
+	if len(a.KeyTags) != len(b.KeyTags) {
+		return false
+	}
+	for _, kt := range a.KeyTags {
+		if !slices.Contains(b.KeyTags, kt) || a.Removed[kt] != b.Removed[kt] {
+			return false
+		}
+	}
+	for _, kt := range b.KeyTags {
+		if !slices.Contains(a.KeyTags, kt) {
+			return false
+		}
+	}
+	return true
+}
+
+// setResultLocked records an agent's answer for a key of the propagation,
+// unless it has one, and marks the agent answered once every key has one.
+// Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, result string) {
+	if _, expected := prop.ExpectedAgents[agent]; !expected || !slices.Contains(prop.KeyTags, kt) {
+		return
+	}
+	if prop.Results == nil {
+		prop.Results = map[AgentId]map[uint16]string{}
+	}
+	if prop.Results[agent] == nil {
+		prop.Results[agent] = map[uint16]string{}
+	}
+	if prop.Results[agent][kt] == "" {
+		prop.Results[agent][kt] = result
+	}
+	if len(prop.Results[agent]) == len(prop.KeyTags) {
+		prop.ExpectedAgents[agent] = true
+	}
+}
+
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
 // Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
 func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags, removedTags []uint16, agents []AgentId) {
@@ -2316,7 +2455,22 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	defer tm.dnskeyPropMu.Unlock()
 
 	prop, exists := tm.pendingDnskeyPropagations[distID]
+	// a late answer to a propagation a resend of its keys took over counts
+	// there, but only for what it applied: the resend's own answer decides
+	// a rejection (foldIntoResend)
+	late := false
 	if !exists {
+		if s, ok := tm.supersededBy[distID]; ok {
+			if prop, exists = tm.pendingDnskeyPropagations[s.to]; exists {
+				late = true
+				distID = s.to
+			}
+		}
+	}
+	if !exists {
+		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
+		}
 		return false // Not a DNSKEY propagation confirmation
 	}
 	agentID := AgentId(source)
@@ -2369,6 +2523,8 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			continue // a key's first final answer from an agent stands
 		}
 		switch {
+		case late && (rejectedTags[kt] || (wholeRejection && !doneTags[kt])):
+			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
 			prop.Rejected = true
@@ -2393,11 +2549,18 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	} else {
 		lgTransport.Info("DNSKEY confirmation not final for every key; still waiting", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
 	}
+	tm.finishDnskeyPropagationLocked(distID, prop)
+	return true
+}
 
+// finishDnskeyPropagationLocked sends each key's result to the signer once
+// every expected agent has answered, and ends the tracking. Under
+// dnskeyPropMu.
+func (tm *MPTransportBridge) finishDnskeyPropagationLocked(distID string, prop *PendingDnskeyPropagation) {
 	// Check if all agents have answered
 	for _, confirmed := range prop.ExpectedAgents {
 		if !confirmed {
-			return true // Still waiting for more confirmations
+			return // Still waiting for more confirmations
 		}
 	}
 
@@ -2407,6 +2570,11 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	sentAt := prop.CreatedAt
 	propagated, removed, rejected, rejectionMsg := prop.outcome()
 	delete(tm.pendingDnskeyPropagations, distID)
+	for old, s := range tm.supersededBy {
+		if s.to == distID {
+			delete(tm.supersededBy, old)
+		}
+	}
 
 	// Send KEYSTATE asynchronously (don't hold the mutex); the kind of
 	// distribution each key's answer is about travels as the signal:
@@ -2422,8 +2590,104 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			tm.sendKeystateToSigner(zone, removed, "removed", "all remote agents confirmed the removal", sentAt)
 		}
 	}()
+}
 
-	return true
+// sentAnswer is an answer to a request for a zone's state that this agent
+// sent: the zone, the asker, when, and the keys of its DNSKEY operation,
+// which is this agent's whole DNSKEY set as its signer's inventory had it.
+type sentAnswer struct {
+	zone  ZoneName
+	asker AgentId
+	at    time.Time
+	keys  map[uint16]bool
+}
+
+// noteCatchUpAnswer remembers an answer with a DNSKEY operation, so that the
+// asker's final confirmation of it counts for the DNSKEY propagations it
+// overtook (creditFromAnswerLocked). One answer per zone and asker is
+// remembered, the latest: a newer one takes the older one's place, as it
+// takes its place in the queue (catchUpAnswer). What is kept is then
+// bounded by the zones and the peers, however often a peer asks. An older
+// answer that was delivered before it was replaced, and is confirmed,
+// credits nothing; the newer answer's confirmation does, and a key left
+// waiting is sent again by the signer's resend.
+func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, asker AgentId, keys map[uint16]bool) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	if tm.answersSent == nil {
+		tm.answersSent = map[string]*sentAnswer{}
+	}
+	if tm.answerTo == nil {
+		tm.answerTo = map[ZoneName]map[AgentId]string{}
+	}
+	if tm.answerTo[zone] == nil {
+		tm.answerTo[zone] = map[AgentId]string{}
+	}
+	if older := tm.answerTo[zone][asker]; older != "" {
+		delete(tm.answersSent, older)
+	}
+	tm.answerTo[zone][asker] = distID
+	tm.answersSent[distID] = &sentAnswer{zone: zone, asker: asker, at: time.Now(), keys: keys}
+}
+
+// creditFromAnswerLocked takes the asker's final confirmation of an answer
+// as its word on the keys of every DNSKEY propagation of the zone, made
+// before the answer, that still waits for that agent. An answer can reach
+// the asker before a distribution of the same keys; that distribution is
+// then stale there, and the asker leaves out of its confirmation the keys
+// that only the answer's forward, not yet confirmed by its combiner, has
+// brought (dnskeyAwaitingAnswer). The answer's final confirmation follows
+// that combiner's. A success says the asker's combiner holds the answer's
+// set: a key added that is in it is applied, and a key removed that is not
+// in it is removed. A rejection names its keys; an "ignored" covers the
+// answer's keys as a direct answer does. Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, rejectedItems []RejectedItemInfo) {
+	var rejectedRecords []string
+	for _, ri := range rejectedItems {
+		rejectedRecords = append(rejectedRecords, ri.Record)
+	}
+	rejectedTags := dnskeyKeyTagsOf(rejectedRecords)
+	success := status == transport.ConfirmSuccess.String()
+	ignored := status == transport.ConfirmIgnored.String() && len(rejectedItems) == 0
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if prop.Zone != ans.zone || prop.CreatedAt.After(ans.at) {
+			continue
+		}
+		if answered, expected := prop.ExpectedAgents[agent]; !expected || answered {
+			continue
+		}
+		if prop.Results == nil {
+			prop.Results = map[AgentId]map[uint16]string{}
+		}
+		results := prop.Results[agent]
+		if results == nil {
+			results = map[uint16]string{}
+			prop.Results[agent] = results
+		}
+		for _, kt := range prop.KeyTags {
+			if results[kt] != "" {
+				continue
+			}
+			covered := ans.keys[kt] != prop.Removed[kt] // an add in the set, a removal not in it
+			switch {
+			case rejectedTags[kt]:
+				results[kt] = "rejected"
+				prop.Rejected = true
+				if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
+					prop.RejectionMsg = rejectedItems[0].Reason
+				}
+			case success && covered:
+				results[kt] = "applied"
+			case ignored && covered:
+				results[kt] = "ignored"
+			}
+		}
+		lgTransport.Info("DNSKEY propagation answered by the asker's confirmation of an answer it overtook", "zone", prop.Zone, "distributionID", distID, "agent", agent, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
+		if len(results) == len(prop.KeyTags) && len(prop.KeyTags) > 0 {
+			prop.ExpectedAgents[agent] = true
+		}
+		tm.finishDnskeyPropagationLocked(distID, prop)
+	}
 }
 
 // NoteForeignKeyStates records what a provider says about its keys in a
@@ -2440,6 +2704,20 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // from it. The entry stays, with no key in it: the provider has spoken,
 // and the signer is told so by name (S7, the empty-share clause of A2.2).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
+	tm.noteForeignKeyStates(zone, from, ops, false)
+}
+
+// noteForeignKeyStates is NoteForeignKeyStates for an update that may be a
+// complete answer to a request for the zone's state. A complete answer
+// whose DNSKEY operation lists no key state says that its provider has
+// spoken and holds no key, also when it has not been heard from before:
+// that is what makes the providers speak after the leader's restart. A
+// complete answer with no DNSKEY operation says nothing about keys: its
+// sender's copy of the zone does not list it in signers=. Where the
+// asker's copy does, the provider stays silent and the zone's DS set
+// unknown, which holds the leader's sync, and never removes the
+// provider's DS at the parent.
+func (tm *MPTransportBridge) noteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation, complete bool) {
 	var states []core.KeyState
 	// endsEmpty: the last DNSKEY operation replaces the whole set by no
 	// record. That is what the operations leave, whatever came before it
@@ -2483,6 +2761,9 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 		if _, spoke := tm.foreignKeyStates[zone][from]; spoke {
 			found, emptied = true, true
 		}
+	}
+	if !found && complete && records {
+		found = true
 	}
 	if !found {
 		tm.foreignKeyStatesMu.Unlock()
@@ -2712,7 +2993,8 @@ func peerAddressLookup(reg *transport.PeerRegistry) func(senderID string) (strin
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).
 // Returns the ACK from the signer. The actual data comes back as a separate KEYSTATE message.
-func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error {
+// The send is bounded at 10 s under ctx, whose end stops it.
+func (tm *MPTransportBridge) sendRfiToSigner(ctx context.Context, zone string, rfiType string) error {
 	if tm.signerID == "" || tm.signerAddress == "" {
 		return fmt.Errorf("no signer configured (signerID=%q, signerAddress=%q)", tm.signerID, tm.signerAddress)
 	}
@@ -2734,7 +3016,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 		RfiType:     rfiType,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -2748,7 +3030,8 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonce string) error {
+// The send is bounded at 10 s under ctx, whose end stops it.
+func (tm *MPTransportBridge) sendRfiToCombiner(ctx context.Context, zone string, rfiType string, nonce string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
@@ -2772,7 +3055,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonc
 		Nonce:       nonce,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -2904,6 +3187,12 @@ func helloResult(r transport.MechanismResult) (*transport.HelloResponse, error) 
 	}
 	resp, _ := r.Response.(*transport.HelloResponse)
 	return resp, nil
+}
+
+// beatSucceeded: a beat's round trip succeeded, as SendBeatWithFallback
+// takes it: no error, and no answer that withholds its acknowledgement.
+func beatSucceeded(resp *transport.BeatResponse, err error) bool {
+	return err == nil && (resp == nil || resp.Ack)
 }
 
 func beatResult(r transport.MechanismResult) (*transport.BeatResponse, error) {

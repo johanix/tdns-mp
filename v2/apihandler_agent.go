@@ -521,6 +521,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
+			status.DSSet = conf.dsSetLine(zd.ZoneData)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -1140,6 +1141,15 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("Queue: %d pending, %d delivered, %d failed, %d expired",
 				stats.TotalPending, stats.TotalDelivered, stats.TotalFailed, stats.TotalExpired)
 			resp.Status = "ok"
+
+		case "inject-named-sender":
+			conf.debugInjectNamedSender(amp, &resp)
+
+		case "inject-combiner-origin":
+			conf.debugInjectCombinerOrigin(amp, &resp)
+
+		case "inject-peer-keystate":
+			conf.debugInjectPeerKeystate(mp, amp, &resp)
 
 		default:
 			resp.Error = true

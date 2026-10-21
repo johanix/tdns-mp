@@ -236,38 +236,7 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate(self AgentId, apex *tdns.OwnerD
 		ZoneName: mpzd.ZoneName,
 	}
 
-	// Extract local keys from the KEYSTATE inventory.
-	// Skip states that should NOT be in the DNSKEY RRset:
-	// - foreign: belongs to another signer
-	// - created: not yet staged for distribution
-	// - mpremove: being removed, awaiting agent confirmation
-	// - removed: already removed
-	// Include: published, standby, active, retired, mpdist
-	var newLocalKeys []dns.RR
-	var newStates []core.KeyState
-	for _, entry := range inv.Inventory {
-		switch entry.State {
-		case DnskeyStateForeign, tdns.DnskeyStateCreated, DnskeyStateMpremove, tdns.DnskeyStateRemoved:
-			continue
-		}
-		if entry.KeyRR == "" {
-			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: skipping key %d with empty KeyRR",
-				mpzd.ZoneName, entry.KeyTag)
-			continue
-		}
-		rr, err := dns.NewRR(entry.KeyRR)
-		if err != nil {
-			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: failed to parse KeyRR for key %d: %v",
-				mpzd.ZoneName, entry.KeyTag, err)
-			continue
-		}
-		newLocalKeys = append(newLocalKeys, rr)
-		// what this provider says about the key to the others (#58): its
-		// state, and its ds as the signer's row has it (unset when the
-		// row's is: nobody here has decided, so nobody there should)
-		newStates = append(newStates, core.KeyState{KeyTag: entry.KeyTag, State: entry.State, DS: entry.DS})
-	}
-	sort.Slice(newStates, func(i, j int) bool { return newStates[i].KeyTag < newStates[j].KeyTag })
+	newLocalKeys, newStates := mpzd.inventoryKeys(inv)
 
 	mpzd.EnsureMP()
 	oldLocalKeys := mpzd.MP.LocalDNSKEYs
@@ -308,6 +277,45 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate(self AgentId, apex *tdns.OwnerD
 	// a state or a ds that changed with the key set as it was goes to the
 	// other providers too: their DS set follows it (#58, D4)
 	return differ || ds.StatesChanged, ds, nil
+}
+
+// inventoryKeys are the local keys of the signer's inventory that this
+// provider serves, and what it says about each (#58), as
+// LocalDnskeysFromKeystate distributes them. It touches nothing that function
+// remembers, so a catch-up answer can name them (catchUpAnswer). The states
+// are sorted by key tag.
+//
+// Skipped are the states that are not in the DNSKEY RRset: foreign (another
+// signer's), created (not yet staged), mpremove (being removed, awaiting the
+// agents' confirmation) and removed. Included: published, standby, active,
+// retired, mpdist.
+func (mpzd *MPZoneData) inventoryKeys(inv *KeyInventorySnapshot) ([]dns.RR, []core.KeyState) {
+	var keys []dns.RR
+	var states []core.KeyState
+	for _, entry := range inv.Inventory {
+		switch entry.State {
+		case DnskeyStateForeign, tdns.DnskeyStateCreated, DnskeyStateMpremove, tdns.DnskeyStateRemoved:
+			continue
+		}
+		if entry.KeyRR == "" {
+			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: skipping key %d with empty KeyRR",
+				mpzd.ZoneName, entry.KeyTag)
+			continue
+		}
+		rr, err := dns.NewRR(entry.KeyRR)
+		if err != nil {
+			mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: failed to parse KeyRR for key %d: %v",
+				mpzd.ZoneName, entry.KeyTag, err)
+			continue
+		}
+		keys = append(keys, rr)
+		// what this provider says about the key to the others (#58): its
+		// state, and its ds as the signer's row has it (unset when the
+		// row's is: nobody here has decided, so nobody there should)
+		states = append(states, core.KeyState{KeyTag: entry.KeyTag, State: entry.State, DS: entry.DS})
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].KeyTag < states[j].KeyTag })
+	return keys, states
 }
 
 // keyStatesEqual: the same keys with the same state and ds (both sorted
@@ -359,6 +367,55 @@ func (mpzd *MPZoneData) recordRequestedInventory(ctx context.Context, tm *MPTran
 	})
 }
 
+// requestKeyInventory asks the signer for the zone's key inventory for the
+// own read (ownReader), and returns it without recording it: its caller
+// hands it on as a pushed inventory, which the hsync data engine records.
+// The request takes the zone's slot only when it is free, in one step, so
+// that it never stands in for the answer refresh-keys or a refresh waits
+// for, and frees it only while it still holds its own channel. nil when the
+// slot is taken, the send fails, or no answer comes within 15 s or ctx.
+func (mpzd *MPZoneData) requestKeyInventory(ctx context.Context, tm *MPTransportBridge) *KeystateInventoryMsg {
+	if tm == nil {
+		return nil
+	}
+	rfiChan := make(chan *KeystateInventoryMsg, 1)
+	tm.keystateRfiMu.Lock()
+	if _, taken := tm.keystateRfiState[mpzd.ZoneName]; taken {
+		tm.keystateRfiMu.Unlock()
+		return nil
+	}
+	if tm.keystateRfiState == nil {
+		tm.keystateRfiState = make(map[string]chan *KeystateInventoryMsg)
+	}
+	tm.keystateRfiState[mpzd.ZoneName] = rfiChan
+	tm.keystateRfiMu.Unlock()
+	defer func() {
+		tm.keystateRfiMu.Lock()
+		if tm.keystateRfiState[mpzd.ZoneName] == rfiChan {
+			delete(tm.keystateRfiState, mpzd.ZoneName)
+		}
+		tm.keystateRfiMu.Unlock()
+	}()
+
+	if err := tm.sendRfiToSigner(ctx, mpzd.ZoneName, "KEYSTATE"); err != nil {
+		lgEngine.Debug("the own read's request for the key inventory failed", "zone", mpzd.ZoneName, "err", err)
+		return nil
+	}
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+	select {
+	case inv := <-rfiChan:
+		if inv == nil || inv.Zone != mpzd.ZoneName {
+			return nil
+		}
+		return inv
+	case <-ctx.Done():
+		return nil
+	case <-timeout.C:
+		return nil
+	}
+}
+
 // RequestAndWaitForKeyInventory sends an RFI KEYSTATE to the signer and waits
 // for the inventory response. Uses the inventory to populate zd.RemoteDNSKEYs
 // by matching foreign key tags against the actual DNSKEY RRset in the zone.
@@ -386,7 +443,7 @@ func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *M
 	defer tm.deleteKeystateRfi(mpzd.ZoneName)
 
 	// Send RFI KEYSTATE to signer
-	if err := tm.sendRfiToSigner(mpzd.ZoneName, "KEYSTATE"); err != nil {
+	if err := tm.sendRfiToSigner(ctx, mpzd.ZoneName, "KEYSTATE"); err != nil {
 		mpzd.SetKeystateOK(false)
 		mpzd.SetKeystateError(fmt.Sprintf("RFI KEYSTATE send failed: %v", err))
 		mpzd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", mpzd.ZoneName, mpzd.GetKeystateError())
@@ -442,25 +499,46 @@ func (mpzd *MPZoneData) RequestAndWaitForKeyInventory(ctx context.Context, tm *M
 }
 
 // RequestAndWaitForEdits sends an RFI EDITS to the combiner and waits for the
-// contributions response. Applies the received records to the SynchedDataEngine
-// as confirmed data (the combiner already has them).
+// contributions response, then applies it to the SynchedDataEngine as
+// confirmed data (the combiner already has them), as the own read does
+// (applyOwnRead): an answer that says the combiner has not loaded its
+// stored contributions is applied to nothing, and only one that says it has
+// counts as this agent's own read. The start-up hydration and resync wait
+// here, in the engine; the re-read waits on a goroutine of its own
+// (ownReader).
 //
 // Modeled on RequestAndWaitForKeyInventory.
-func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge, msgQs *MsgQs, zdr *ZoneDataRepo) {
+func (conf *Config) RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransportBridge, msgQs *MsgQs, zdr *ZoneDataRepo, self AgentId) {
+	resp, sentAt, err := conf.editsRequester()(ctx, zd, tm, msgQs)
+	mpzd, ok := Zones.Get(zd.ZoneName)
+	if !ok {
+		return
+	}
+	applyOwnRead(mpzd, &ownReadAnswer{zone: ZoneName(zd.ZoneName), asked: true, resp: resp, sentAt: sentAt, err: err}, zdr, self)
+}
+
+// editsRequester is requestEdits, or what a test has put in its place.
+func (conf *Config) editsRequester() func(context.Context, *tdns.ZoneData, *MPTransportBridge, *MsgQs) (*EditsResponseMsg, time.Time, error) {
+	if hook := conf.InternalMp.editsRequest; hook != nil {
+		return hook
+	}
+	return requestEdits
+}
+
+// requestEdits asks the combiner for the zone's contributions and waits for
+// its answer: up to 10 s to send and 15 s for the answer, and no longer than
+// ctx. sentAt is the time just before the request was sent, which the apply
+// judges the answer by (mayApplyOwnRead).
+func requestEdits(ctx context.Context, zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs) (resp *EditsResponseMsg, sentAt time.Time, err error) {
 	if tm == nil {
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
-		return
+		return nil, sentAt, fmt.Errorf("no TransportManager available")
 	}
-
 	if msgQs == nil {
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no MsgQs available", zd.ZoneName)
-		return
+		return nil, sentAt, fmt.Errorf("no MsgQs available")
 	}
-
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: %v", zd.ZoneName, err)
-		return
+		return nil, sentAt, err
 	}
 
 	// Take only the combiner's answer to this request: an answer to an
@@ -470,10 +548,10 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 	answer, cancel := msgQs.editsWaiters.register(rfiWaitKey(string(combinerID), zd.ZoneName, "", nonce))
 	defer cancel()
 
-	// Send RFI EDITS to combiner
-	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS", nonce); err != nil {
+	sentAt = time.Now()
+	if err := tm.sendRfiToCombiner(ctx, zd.ZoneName, "EDITS", nonce); err != nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
-		return
+		return nil, sentAt, fmt.Errorf("the request to the combiner failed: %w", err)
 	}
 
 	// Wait for the contributions response (combiner sends it as a separate EDITS message)
@@ -482,26 +560,20 @@ func RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Context, tm *MPTransp
 
 	select {
 	case resp := <-answer:
-		// Count total records for logging
-		totalAgents := len(resp.AgentRecords)
 		totalRRs := 0
 		for _, ownerMap := range resp.AgentRecords {
 			for _, rrs := range ownerMap {
 				totalRRs += len(rrs)
 			}
 		}
-
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received edits from combiner (%d agents, %d RRs)",
-			zd.ZoneName, totalAgents, totalRRs)
-
-		// Apply to SDE with per-agent attribution
-		applyEditsToSDE(zd, resp.AgentRecords, zdr)
-
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received edits from combiner (%d agents, %d RRs, %q)",
+			zd.ZoneName, len(resp.AgentRecords), totalRRs, resp.Message)
+		return resp, sentAt, nil
 	case <-ctx.Done():
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: cancelled", zd.ZoneName)
-
+		return nil, sentAt, ctx.Err()
 	case <-timeout.C:
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: timeout waiting for combiner EDITS response (15s)", zd.ZoneName)
+		return nil, sentAt, fmt.Errorf("the combiner did not answer within 15 s")
 	}
 }
 
@@ -624,13 +696,26 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs 
 // Per-RRtype scope: replace operates within a single
 // (agent, rrtype) bucket, mirroring the combiner's own per-agent
 // per-rrtype REPLACE semantics in AgentContributions.
-func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string, zdr *ZoneDataRepo) {
+//
+// Two kinds of set are left alone (leave). This agent's own DNSKEY set: the
+// agent never sends it to its combiner (SkipCombiner), so no answer holds
+// it, and an answer applied after an inventory would drop the keys the
+// hydration or the inventory put there. And a set the engine changed, or
+// whose change its combiner had not confirmed, before the request was sent
+// at sentAt (mayApplyOwnRead): the answer can predate it.
+func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string, zdr *ZoneDataRepo, self AgentId, sentAt time.Time) {
 	if zdr == nil {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
 		return
 	}
 
 	zone := ZoneName(zd.ZoneName)
+	leave := func(agent AgentId, rrtype uint16) bool {
+		if rrtype == dns.TypeDNSKEY && isAmong([]string{string(self)}, agent) {
+			return true
+		}
+		return !zdr.mayApplyOwnRead(zone, agent, rrtype, sentAt)
+	}
 
 	// 1. Build a fast-lookup index of the snapshot:
 	//    snapshot[agentID][rrtype][rrStr] = true
@@ -685,6 +770,9 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 				continue
 			}
 			for _, rrtype := range ownerData.RRtypes.Keys() {
+				if leave(agentID, rrtype) {
+					continue
+				}
 				key := bucketKey{agent: agentID, rrtype: rrtype}
 				snapForBucket := snapshotRRs[key]
 
@@ -745,6 +833,9 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 	//    call — so guard with a presence check on the data side.
 	added := 0
 	for key, rrs := range parsedSnapshot {
+		if leave(key.agent, key.rrtype) {
+			continue
+		}
 		var existing core.RRset
 		hasExisting := false
 		if agentRepo, ok := zdr.Get(zone); ok {
@@ -1382,6 +1473,28 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 	}
 
+	// The catch-up's reasons at a refresh (catchup.go, afterRefresh): the
+	// agent's standing in the served zone and in the incoming one, read as
+	// HsyncChanged reads them, and the identities that became voting
+	// members. Whether this is the zone's first load is kept until a
+	// PostRefresh takes it: PostRefresh has no such signal of its own, and
+	// at a first load tdns runs it only once the zone is ready.
+	if tdns.Globals.App.Type == AppTypeMPAgent && mp != nil {
+		oldApex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
+		pBefore, before := zoneParticipants(oldApex)
+		pAfter, after := zoneParticipants(newApex)
+		analysis.StandingBefore = standingIn(oldApex, pBefore, before, mp.Identity)
+		analysis.StandingAfter = standingIn(newApex, pAfter, after, mp.Identity)
+		prev := mpzd.MP.RefreshAnalysis
+		analysis.FirstLoad = mpzd.FirstZoneLoad || (prev != nil && prev.FirstLoad)
+		for _, id := range after {
+			if !isAmong(before, AgentId(id)) {
+				analysis.NewVoters = append(analysis.NewVoters, AgentId(id))
+			}
+		}
+	}
+
 	// DNSKEY change detection — only for roles that actually act on
 	// DNSKEY data (signer signs zones; agent contributes its own
 	// DNSKEYs; combiner needs awareness). The auditor observes
@@ -1779,5 +1892,12 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 		}
 		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
 		// is done in MPPreRefresh on new_zd before the flip.
+	}
+
+	// What the refresh calls for of the catch-up: the requests of the
+	// zone's first load, of a standing that rose and of a new voting
+	// member, and the end of those that no longer apply.
+	if tdns.Globals.App.Type == AppTypeMPAgent && tm != nil && mpzd.Options[tdns.OptMultiProvider] {
+		tm.catchUp.afterRefresh(ZoneName(mpzd.ZoneName), analysis)
 	}
 }
