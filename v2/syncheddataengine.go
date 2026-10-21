@@ -250,10 +250,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								if err != nil {
 									lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
 								} else if len(agents) > 0 {
-									if synchedDataUpdate.Resend {
-										tm.supersedeDnskeyPropagations(synchedDataUpdate.Zone, synchedDataUpdate.DnskeyKeyTags)
-									}
 									tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
+									if synchedDataUpdate.Resend {
+										tm.foldIntoResend(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags)
+									}
 								}
 							}
 

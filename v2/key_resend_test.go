@@ -327,3 +327,43 @@ func TestAMarkedPushIsNotTakenByAnRFIWaiter(t *testing.T) {
 		t.Error("an unmarked inventory did not reach the RFI waiter")
 	}
 }
+
+// A resend takes over the earlier tracking of its keys: what an agent had
+// applied is carried over, and an answer to the earlier distribution that
+// comes late still counts, so an agent slower than the resend interval does
+// not hold the key back for good. A late rejection does not count: the
+// resend's own answer decides.
+func TestALateAnswerToASupersededDistributionStillCounts(t *testing.T) {
+	const zone ZoneName = "late.superseded.example."
+	const fast, slow = "agent.fast.example.", "agent.slow.example."
+	const k uint16 = 4242
+	for _, c := range []struct {
+		name, late string
+		done       bool
+	}{{"a late success", "SUCCESS", true}, {"a late rejection", "REJECTED", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+			tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
+			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
+			// the signer sends the key again
+			tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
+			tm.foldIntoResend(zone, "resend", []uint16{k})
+			tm.dnskeyPropMu.Lock()
+			_, first := tm.pendingDnskeyPropagations["first"]
+			r := tm.pendingDnskeyPropagations["resend"]
+			carried := r != nil && r.Results[fast][k] == "applied" && r.ExpectedAgents[fast]
+			tm.dnskeyPropMu.Unlock()
+			if first || !carried {
+				t.Fatalf("after the resend: first still tracked %v, the fast agent's answer carried %v", first, carried)
+			}
+			// the slow agent answers the first distribution, late
+			tm.ProcessDnskeyConfirmation("first", slow, c.late, nil, nil)
+			tm.dnskeyPropMu.Lock()
+			_, open := tm.pendingDnskeyPropagations["resend"]
+			tm.dnskeyPropMu.Unlock()
+			if open == c.done {
+				t.Errorf("after %s to the superseded distribution, the resend's tracking is still open: %v, want %v", c.late, open, !c.done)
+			}
+		})
+	}
+}
