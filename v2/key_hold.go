@@ -154,14 +154,18 @@ func (b *keyPollBook) state(zone ZoneName) (running int, unpublished bool, ended
 }
 
 // renewalKeepsKey: the lead is the one the zone's key was last polled in, in
-// this process, and the key is the zone's, published. A renewal then
+// this process, and the key is the zone's, published, and its only active
+// key. A renewal then
 // neither publishes the key again nor starts a poll, whatever that poll's
 // outcome: a parent that has lost trust in the key shows as BADKEY at the
 // next sync. A new lead (leadStart differs), a new or taken key, and a
-// restart (nothing ended in this process) publish and poll.
+// restart (nothing ended in this process) publish and poll. So does a
+// renewal while another key is active: the set-up retires it, and the hold
+// waits for that.
 func renewalKeepsKey(zk *zoneKey, ended keyPollEnd, leadStart uint64) bool {
 	return zk != nil && zk.held != nil && leadStart != 0 && ended.leadStart == leadStart &&
-		ended.keyid == zk.held.keyid && len(zk.published) == 1 && sameKey(zk.published[0], zk.held.key)
+		ended.keyid == zk.held.keyid && len(zk.active) == 1 &&
+		len(zk.published) == 1 && sameKey(zk.published[0], zk.held.key)
 }
 
 // zoneUsesKey: the zone syncs with its parent through its agents

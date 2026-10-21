@@ -152,6 +152,8 @@ func TestARenewalKeepsTheZonesKeyAsItIs(t *testing.T) {
 		t.Fatalf("the zone's key: %v", err)
 	}
 	unpublished := &zoneKey{held: zk.held, active: zk.active}
+	// another key active beside the zone's: the renewal's set-up retires it
+	twoActive := &zoneKey{held: zk.held, active: append(append([]sig0Row{}, zk.active...), other), published: zk.published}
 	for _, c := range []struct {
 		name      string
 		zk        *zoneKey
@@ -165,6 +167,7 @@ func TestARenewalKeepsTheZonesKeyAsItIs(t *testing.T) {
 		{"after a restart", zk, keyPollEnd{}, 5, false},
 		{"not leading", zk, keyPollEnd{k.keyid, 5}, 0, false},
 		{"the key not published", unpublished, keyPollEnd{k.keyid, 5}, 5, false},
+		{"another key active too", twoActive, keyPollEnd{k.keyid, 5}, 5, false},
 	} {
 		if got := renewalKeepsKey(c.zk, c.ended, c.leadStart); got != c.keeps {
 			t.Errorf("%s: keeps the key %v, want %v", c.name, got, c.keeps)
@@ -291,5 +294,44 @@ func TestABadkeyWithNoActiveKeyMakesNoKey(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("BADKEY with no active key left %d SIG(0) key(s) in the keystore, want none", n)
+	}
+}
+
+// LeadStart finds the zone's election as IsLeader does: its provider group's
+// when that has a leader, else the zone's own. A group with no leader yet
+// leaves the zone's own lead its number, so its renewal keeps the key.
+func TestLeadStartFindsTheElectionIsLeaderFinds(t *testing.T) {
+	zd := providerZone(t, "leadstart.group.example.", arrivalA, arrivalB)
+	zone := ZoneName(zd.ZoneName)
+	lem := NewLeaderElectionManager(arrivalA, time.Hour, func(ZoneName, string, map[string][]string) error { return nil })
+	t.Cleanup(func() { stopElectionTimers(lem) })
+	pgm := NewProviderGroupManager(arrivalA)
+	lem.SetProviderGroupManager(pgm)
+	pgm.RecomputeGroups()
+	inGroup(t, pgm, zd, arrivalA, arrivalB)
+	group := pgm.GetGroupForZone(zone).GroupHash
+
+	lead := func(le *LeaderElection) uint64 {
+		le.mu.Lock()
+		defer le.mu.Unlock()
+		le.Term++
+		now := time.Now()
+		lem.noteLeaderLocked(le, arrivalA, now)
+		le.Leader, le.LeaderExpiry = arrivalA, now.Add(time.Hour)
+		return le.leadStart
+	}
+	own := lead(lem.getOrCreate(zone))
+	ge := &LeaderElection{Zone: ZoneName(group)}
+	lem.mu.Lock()
+	lem.groupElections[group] = ge // the group's election, with no leader yet
+	lem.mu.Unlock()
+	if !lem.IsLeader(zone) {
+		t.Fatal("precondition: this agent does not lead the zone by its own election")
+	}
+	if got := lem.LeadStart(zone); got != own {
+		t.Errorf("with the group's election not decided, the lead is %d, want the zone's own %d", got, own)
+	}
+	if byGroup := lead(ge); lem.LeadStart(zone) != byGroup {
+		t.Errorf("with the group led by this agent, the lead is %d, want the group's %d", lem.LeadStart(zone), byGroup)
 	}
 }

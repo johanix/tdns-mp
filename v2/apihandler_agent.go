@@ -592,13 +592,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = "IMR cache not available"
 				return
 			}
-			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
-			if err != nil || len(sak.Keys) == 0 {
+			key, err := firstActiveSig0Key(hdb.KeyDB, string(amp.Zone))
+			if err != nil || key == nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
 				return
 			}
-			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			keyid := key.key.KeyTag()
 			keyState, extra, authenticated, err := queryParentKeyStateDetailed(r.Context(), hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
@@ -632,14 +632,14 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
 				return
 			}
-			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
-			if err != nil || len(sak.Keys) == 0 {
+			key, err := firstActiveSig0Key(hdb.KeyDB, string(amp.Zone))
+			if err != nil || key == nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
 				return
 			}
-			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			algorithm := sak.Keys[0].KeyRR.Algorithm
+			keyid := key.key.KeyTag()
+			algorithm := key.key.Algorithm
 			// The bootstrap runs async, past the end of this request, so not
 			// r.Context(); the lifecycle ctx stops its IMR wait and retries
 			// at shutdown.
