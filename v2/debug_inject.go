@@ -76,6 +76,10 @@ func injectAddOperations(rrs []string) ([]core.RROperation, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse RR %q: %v", rrStr, err)
 		}
+		if rr == nil {
+			// An empty or comment-only string parses to no record and no error.
+			return nil, fmt.Errorf("no RR in %q", rrStr)
+		}
 		t := rr.Header().Rrtype
 		if _, seen := records[t]; !seen {
 			order = append(order, t)

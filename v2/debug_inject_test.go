@@ -75,6 +75,20 @@ func TestDebugSyncRequestCarriesTheRRsAsOperations(t *testing.T) {
 	}
 }
 
+// A string with no record in it, empty or only a comment, parses to no RR and
+// no error. The debug commands answer it with an error. They took its header
+// and panicked, send-notify's in the engine's command handler.
+func TestADebugSyncWithAnEmptyRRIsAnError(t *testing.T) {
+	for _, rr := range []string{"", "; only a comment"} {
+		if _, err := debugSyncRequest("agent.a.example.", "z.example.", []string{rr}, ""); err == nil {
+			t.Errorf("a SYNC of %q built with no error", rr)
+		}
+		if _, err := injectCombinerUpdate("z.example.", "agent.d.example.", []string{rr}); err == nil {
+			t.Errorf("a combiner update of %q built with no error", rr)
+		}
+	}
+}
+
 // assertSyncCarriesNSAdd decodes a SYNC payload as the receiver does and
 // wants the one NS add of rr in its operations.
 func assertSyncCarriesNSAdd(t *testing.T, payload []byte, rr string) {
