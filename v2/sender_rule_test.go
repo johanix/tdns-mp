@@ -228,24 +228,32 @@ func TestAnAPIMsgThatNamesAnotherMemberIsRefused(t *testing.T) {
 	}
 }
 
-// /hello has no certificate sender (the peer's TLSA need not be known when
-// its hello arrives): the middleware compares the body with itself, and a
-// hello under another certificate is not refused for it.
-func TestAnAPIHelloIsNotHeldToItsCertificate(t *testing.T) {
+// /hello is held to its certificate, as /beat and /sync/ping are (#56): a
+// hello under carol's certificate that names alice is refused before it
+// reaches the pipeline, and the same hello under alice's own certificate
+// passes.
+func TestAnAPIHelloIsHeldToItsCertificate(t *testing.T) {
 	const zone = "apihello.sender.example."
 	env, srv, _ := apiGossipEnv(t, zone)
 	alice, bob := dns.Fqdn(env.Alice.Identity), dns.Fqdn(env.Bob.Identity)
 	peer := transport.NewPeer(bob)
 	peer.APIEndpoint = srv.URL + "/api/v1"
 	setTLSA(peer, srv.Certificate())
-	ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
-	defer cancel()
-	if _, err := apiSender(srv, alice, clientCert(t, "carol.agent.example.")).Hello(ctx, peer,
-		&transport.HelloRequest{SenderID: alice, SharedZones: []string{zone}, Timestamp: time.Now()}); err != nil {
-		t.Logf("hello: %v", err)
-	}
-	if _, ok := recvWithin(env.Bob.MsgQs.Hello, integTestTimeout); !ok {
-		t.Error("alice's hello under another certificate did not reach MsgQs.Hello")
+	for _, tc := range []struct {
+		cert string
+		pass bool
+		wait time.Duration
+	}{
+		{"carol.agent.example.", false, 300 * time.Millisecond},
+		{alice, true, integTestTimeout},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), integTestTimeout)
+		_, err := apiSender(srv, alice, clientCert(t, tc.cert)).Hello(ctx, peer,
+			&transport.HelloRequest{SenderID: alice, SharedZones: []string{zone}, Timestamp: time.Now()})
+		cancel()
+		if _, delivered := recvWithin(env.Bob.MsgQs.Hello, tc.wait); delivered != tc.pass {
+			t.Errorf("alice's hello under %s's certificate: delivered=%v, want %v (hello: %v)", tc.cert, delivered, tc.pass, err)
+		}
 	}
 }
 

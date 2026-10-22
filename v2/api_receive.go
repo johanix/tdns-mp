@@ -45,10 +45,11 @@ const (
 )
 
 // endpointVerbs are the verbs each endpoint takes, as before the endpoints
-// entered the pipeline. The endpoints sit behind different middleware
-// (/hello is reachable before the peer's TLSA is known), so the endpoint,
-// not the body, decides what may enter through it. /msg takes the sync
-// family the HTTPS sender posts there, and the confirmations of it.
+// entered the pipeline. Each endpoint has checks of its own (a hello must
+// introduce the certificate's agent, a beat's answer carries gossip), so
+// the endpoint, not the body, decides what may enter through it. /msg
+// takes the sync family the HTTPS sender posts there, and the
+// confirmations of it.
 var endpointVerbs = map[apiEndpointKind][]string{
 	apiEndpointHello: {"hello"},
 	apiEndpointBeat:  {"beat"},
@@ -95,14 +96,10 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 		// body names the originator, which for an update an agent
 		// forwards to its combiner is the remote agent whose update it
 		// is. It goes in canonical form, the form a peer is known by;
-		// the certificate may spell the name otherwise. /hello is reached
-		// before the peer's TLSA is known; nothing has checked a
-		// certificate there, and the body names the sender.
+		// the certificate may spell the name otherwise.
 		var sender string
-		if kind != apiEndpointHello {
-			if cn, ok := clientIdentity(r); ok {
-				sender = core.CanonicalizeName(dns.Fqdn(cn))
-			}
+		if cn, ok := clientIdentity(r); ok {
+			sender = core.CanonicalizeName(dns.Fqdn(cn))
 		}
 		sink.your = AgentId(im.SenderID)
 		if sender != "" {
@@ -114,21 +111,38 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			_ = sink.fail(fmt.Sprintf("message type %q is not accepted on %s", im.Token(), r.URL.Path))
 			return
 		}
-		// On /beat and /sync/ping a peer speaks for itself: the sender the
-		// body names is the identity of the certificate the connection
-		// presented. The answer to a beat carries the gossip built for
-		// that sender (plan decision 26), so a peer must not get it by
-		// naming another. A confirmation speaks for its sender too: the
-		// confirm handler books it as the named sender's word on a
-		// distribution. The rest of /msg is not held to this: an agent
-		// forwards a peer's update to its combiner under that peer's name.
-		// /hello is reached before the peer's certificate is known.
-		if kind == apiEndpointBeat || kind == apiEndpointPing || im.Token() == transport.VerbConfirm {
+		// On /hello, /beat and /sync/ping a peer speaks for itself: the
+		// sender the body names is the identity of the certificate the
+		// connection presented. The answer to a beat carries the gossip
+		// built for that sender (plan decision 26), so a peer must not get
+		// it by naming another, and a hello introduces only the agent that
+		// sent it. A confirmation speaks for its sender too: the confirm
+		// handler books it as the named sender's word on a distribution.
+		// The rest of /msg is not held to this: an agent forwards a peer's
+		// update to its combiner under that peer's name.
+		if kind == apiEndpointHello || kind == apiEndpointBeat || kind == apiEndpointPing || im.Token() == transport.VerbConfirm {
 			if cn, ok := clientIdentity(r); ok && dns.CanonicalName(cn) != dns.CanonicalName(im.SenderID) {
 				lgApi.Warn("sync API request refused: the sender is not the client certificate's identity",
 					"path", r.URL.Path, "from", r.RemoteAddr, "sender", im.SenderID, "certificate", cn)
 				_ = sink.fail(fmt.Sprintf("sender %q is not the client certificate's identity", im.SenderID))
 				return
+			}
+		}
+		// A hello introduces the agent its body names in MyIdentity (the
+		// hello handler reads that field), which the check above need not
+		// have seen: the parser reads OriginatorID first. So a hello must
+		// name the certificate's agent in MyIdentity; one that leaves it
+		// empty, or names another, is refused.
+		if kind == apiEndpointHello {
+			if cn, ok := clientIdentity(r); ok {
+				var hello struct{ MyIdentity string }
+				_ = json.Unmarshal(body, &hello)
+				if hello.MyIdentity == "" || dns.CanonicalName(cn) != dns.CanonicalName(hello.MyIdentity) {
+					lgApi.Warn("sync API hello refused: it does not introduce the client certificate's agent",
+						"path", r.URL.Path, "from", r.RemoteAddr, "introduces", hello.MyIdentity, "certificate", cn)
+					_ = sink.fail(fmt.Sprintf("hello introduces %q, not the client certificate's identity", hello.MyIdentity))
+					return
+				}
 			}
 		}
 		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your, "originator", im.SenderID)

@@ -33,12 +33,12 @@ func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, erro
 		http.Error(w, "AgentSyncApi: Root endpoint is not allowed", http.StatusForbidden)
 	})
 
-	sr := r.PathPrefix("/api/v1").Subrouter()
-	sr.HandleFunc("/hello", conf.apiSyncEndpoint(apiEndpointHello)).Methods("POST")
-
+	// Every endpoint, /hello included, takes a client certificate the
+	// TLSA middleware has checked.
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(conf.tlsaVerificationMiddleware("AgentSyncApi"))
 
+	secureRouter.HandleFunc("/hello", conf.apiSyncEndpoint(apiEndpointHello)).Methods("POST")
 	secureRouter.HandleFunc("/ping", tdns.APIping(conf.Config)).Methods("POST")
 	secureRouter.HandleFunc("/sync/ping", conf.apiSyncEndpoint(apiEndpointPing)).Methods("POST")
 	secureRouter.HandleFunc("/beat", conf.apiSyncEndpoint(apiEndpointBeat)).Methods("POST")
@@ -54,12 +54,12 @@ func (conf *Config) SetupCombinerSyncRouter(ctx context.Context) (*mux.Router, e
 		http.Error(w, "CombinerSyncApi: Root endpoint is not allowed", http.StatusForbidden)
 	})
 
-	sr := r.PathPrefix("/api/v1").Subrouter()
-	sr.HandleFunc("/hello", conf.apiSyncEndpoint(apiEndpointHello)).Methods("POST")
-
+	// Every endpoint, /hello included, takes a client certificate the
+	// TLSA middleware has checked.
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(conf.tlsaVerificationMiddleware("CombinerSyncApi"))
 
+	secureRouter.HandleFunc("/hello", conf.apiSyncEndpoint(apiEndpointHello)).Methods("POST")
 	secureRouter.HandleFunc("/ping", tdns.APIping(conf.Config)).Methods("POST")
 	secureRouter.HandleFunc("/sync/ping", conf.apiSyncEndpoint(apiEndpointPing)).Methods("POST")
 	secureRouter.HandleFunc("/beat", conf.apiSyncEndpoint(apiEndpointBeat)).Methods("POST")
@@ -75,14 +75,18 @@ func (conf *Config) SetupCombinerSyncRouter(ctx context.Context) (*mux.Router, e
 // answer DNSSEC has not validated is refused unless validation is off. A
 // passed check holds for a minute for that peer and certificate, so a burst
 // of requests means one check; a peer whose set is empty is refused at once.
+//
+// A hello may come from an agent this one does not know yet, or before this
+// one has the sender's TLSA. It is checked like any request when the TLSA
+// is known. When it is not, the hello is refused retryably (503), and an
+// agent this one knows is looked up, at most once a minute, so that a later
+// hello passes (#56).
 func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFunc {
 	passed := &tlsaVerdicts{hold: time.Minute}
+	lookedUp := &tlsaVerdicts{hold: time.Minute} // by identity
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/hello" {
-				next.ServeHTTP(w, r)
-				return
-			}
+			hello := r.URL.Path == "/api/v1/hello"
 
 			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 				http.Error(w, apiName+": Client certificate required", http.StatusUnauthorized)
@@ -99,13 +103,33 @@ func (conf *Config) tlsaVerificationMiddleware(apiName string) mux.MiddlewareFun
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
-			if _, ok := ar.S.Get(AgentId(clientId)); !ok {
+			_, known := ar.S.Get(AgentId(clientId))
+			if !known && !hello {
 				lgApi.Warn(apiName+": unknown remote agent identity", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
 				return
 			}
 			tm := ar.TransportManager
 			peer, ok := tm.PeerRegistry.Get(clientId)
+			if hello && (!ok || !peer.HasMechanismTLSA("API")) {
+				if known && lookedUp.takeKey(clientId) {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						// Discovery itself, not DiscoverPeer: a sender known
+						// on DNS alone, its API never seen, would be returned
+						// without a lookup, and a TLSA it publishes now never
+						// found.
+						if err := tm.DiscoverAndRegisterPeer(ctx, clientId); err != nil {
+							lgApi.Debug(apiName+": looking up a hello's sender failed", "clientId", clientId, "err", err)
+						}
+					}()
+				}
+				lgApi.Debug(apiName+": hello refused until the sender's TLSA is known", "clientId", clientId, "known", known)
+				w.Header().Set("Retry-After", "15")
+				http.Error(w, apiName+": the sender's TLSA is not known yet; try again", http.StatusServiceUnavailable)
+				return
+			}
 			if !ok {
 				lgApi.Warn(apiName+": client not in the peer registry", "clientId", clientId)
 				http.Error(w, apiName+": Unauthorized", http.StatusUnauthorized)
@@ -186,19 +210,49 @@ func (v *tlsaVerdicts) clock() time.Time {
 
 // holds reports whether cert passed for peer less than hold ago.
 func (v *tlsaVerdicts) holds(peer string, cert *x509.Certificate) bool {
-	now := v.clock()
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	at, ok := v.at[tlsaVerdictKey(peer, cert)]
-	return ok && now.Sub(at) < v.hold
+	return v.holdsKey(tlsaVerdictKey(peer, cert))
 }
 
 // pass notes that cert passed for peer now, and forgets verdicts too old to
 // hold.
 func (v *tlsaVerdicts) pass(peer string, cert *x509.Certificate) {
+	v.passKey(tlsaVerdictKey(peer, cert))
+}
+
+// holdsKey reports whether key was noted less than hold ago.
+func (v *tlsaVerdicts) holdsKey(key string) bool {
 	now := v.clock()
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	at, ok := v.at[key]
+	return ok && now.Sub(at) < v.hold
+}
+
+// takeKey notes key now and reports true, unless it was noted less than
+// hold ago: then it reports false and changes nothing. The check and the
+// note are one step, so of callers racing for one key only one wins.
+func (v *tlsaVerdicts) takeKey(key string) bool {
+	now := v.clock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if at, ok := v.at[key]; ok && now.Sub(at) < v.hold {
+		return false
+	}
+	v.passLocked(key, now)
+	return true
+}
+
+// passKey notes key now, and forgets entries too old to hold.
+func (v *tlsaVerdicts) passKey(key string) {
+	now := v.clock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.passLocked(key, now)
+}
+
+// passLocked notes key at now and forgets entries too old to hold. The
+// caller holds v.mu.
+func (v *tlsaVerdicts) passLocked(key string, now time.Time) {
 	if v.at == nil {
 		v.at = make(map[string]time.Time)
 	}
@@ -207,5 +261,5 @@ func (v *tlsaVerdicts) pass(peer string, cert *x509.Certificate) {
 			delete(v.at, k)
 		}
 	}
-	v.at[tlsaVerdictKey(peer, cert)] = now
+	v.at[key] = now
 }
