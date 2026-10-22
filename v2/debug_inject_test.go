@@ -23,15 +23,15 @@ func TestInjectNamedSenderRequestNamesAnotherSender(t *testing.T) {
 		rr    = "z.example. 60 IN NS ns9.injected.example."
 		dist  = "debug-inject-named-sender-1"
 	)
-	req := injectNamedSenderRequest(zone, named, []string{rr}, dist)
+	req, err := injectNamedSenderRequest(zone, named, []string{rr}, dist)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if req.SenderID != named {
 		t.Errorf("SenderID %q, want the named sender %q", req.SenderID, named)
 	}
 	if req.MessageType != "sync" || req.DistributionID != dist || req.Zone != zone {
 		t.Errorf("request %+v", req)
-	}
-	if got := req.Records["z.example."]; len(got) != 1 || got[0] != rr {
-		t.Errorf("records %v, want %q under z.example.", req.Records, rr)
 	}
 
 	msg, err := syncAppMessage(req, "agent.b.example.")
@@ -47,6 +47,60 @@ func TestInjectNamedSenderRequestNamesAnotherSender(t *testing.T) {
 	}
 	if payload.OriginatorID != named || payload.DistributionID != dist {
 		t.Errorf("wire originator %q distribution %q, want %q and %q", payload.OriginatorID, payload.DistributionID, named, dist)
+	}
+	assertSyncCarriesNSAdd(t, msg.Payload, rr)
+}
+
+// A debug SYNC carries its RRs as operations, the only part of a SYNC a
+// receiving agent reads (MsgHandler). With the records alone the receiver
+// got an empty update and applied nothing.
+func TestDebugSyncRequestCarriesTheRRsAsOperations(t *testing.T) {
+	const rr = "z.example. 60 IN NS ns9.example."
+	req, err := debugSyncRequest("agent.a.example.", "z.example.", []string{rr}, "debug-send-sync-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.SenderID != "agent.a.example." {
+		t.Errorf("SenderID %q, want this agent", req.SenderID)
+	}
+	msg, err := syncAppMessage(req, "agent.b.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSyncCarriesNSAdd(t, msg.Payload, rr)
+
+	empty, err := debugSyncRequest("agent.a.example.", "z.example.", nil, "")
+	if err != nil || len(empty.Operations) != 0 {
+		t.Errorf("a SYNC with no RRs: %+v, %v; want one with no operations", empty, err)
+	}
+}
+
+// A string with no record in it, empty or only a comment, parses to no RR and
+// no error. The debug commands answer it with an error. They took its header
+// and panicked, send-notify's in the engine's command handler.
+func TestADebugSyncWithAnEmptyRRIsAnError(t *testing.T) {
+	for _, rr := range []string{"", "; only a comment"} {
+		if _, err := debugSyncRequest("agent.a.example.", "z.example.", []string{rr}, ""); err == nil {
+			t.Errorf("a SYNC of %q built with no error", rr)
+		}
+		if _, err := injectCombinerUpdate("z.example.", "agent.d.example.", []string{rr}); err == nil {
+			t.Errorf("a combiner update of %q built with no error", rr)
+		}
+	}
+}
+
+// assertSyncCarriesNSAdd decodes a SYNC payload as the receiver does and
+// wants the one NS add of rr in its operations.
+func assertSyncCarriesNSAdd(t *testing.T, payload []byte, rr string) {
+	t.Helper()
+	p, err := ParseSyncPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := p.GetOperations()
+	want, _ := dns.NewRR(rr)
+	if len(ops) != 1 || ops[0].Operation != "add" || ops[0].RRtype != "NS" || len(ops[0].Records) != 1 || ops[0].Records[0] != want.String() {
+		t.Errorf("operations on the wire %+v, want one NS add of %q", ops, want.String())
 	}
 }
 

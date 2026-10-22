@@ -2226,23 +2226,6 @@ func (tm *MPTransportBridge) GetDistributionRecipients(zone ZoneName, skipCombin
 	return recipients
 }
 
-// groupRRStringsByOwner converts a flat list of RR strings to records grouped by owner name.
-// Used when converting from management commands (AgentMgmtPost.RRs []string) to the
-// grouped format used by AgentMsgPost.Records and SyncRequest.Records.
-func groupRRStringsByOwner(rrStrings []string) map[string][]string {
-	records := make(map[string][]string)
-	for _, rrStr := range rrStrings {
-		rr, err := dns.NewRR(rrStr)
-		if err != nil {
-			lgTransport.Warn("skipping unparseable RR", "rr", rrStr, "err", err)
-			continue
-		}
-		owner := rr.Header().Name
-		records[owner] = append(records[owner], rrStr)
-	}
-	return records
-}
-
 // --- Phase 6: DNSKEY Propagation Tracking and KEYSTATE Signaling ---
 
 // PendingDnskeyPropagation tracks a DNSKEY distribution awaiting confirmation from all remote agents.
