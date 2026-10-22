@@ -192,6 +192,7 @@ type LeaderElectionManager struct {
 	onLeaderNamed        func()                    // called when an election names a leader, this agent or another (SetOnLeaderNamed)
 	onLeadLost           func(hold uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)
 	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
+	hooks                sync.WaitGroup            // the callbacks that run in goroutines of their own (onLeadLost, onLeaderNamed), until each has returned
 	providerGroupMgr     *ProviderGroupManager
 }
 

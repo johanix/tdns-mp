@@ -1212,13 +1212,21 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 // another.
 func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
 	if leader != "" && lem.onLeaderNamed != nil {
-		go lem.onLeaderNamed()
+		lem.hooks.Add(1)
+		go func() {
+			defer lem.hooks.Done()
+			lem.onLeaderNamed()
+		}()
 	}
 	if leader != lem.localID {
 		if lost := le.holdStart; leader != "" && lost != 0 {
 			le.holdStart = 0
 			if lem.onLeadLost != nil {
-				go lem.onLeadLost(lost)
+				lem.hooks.Add(1)
+				go func() {
+					defer lem.hooks.Done()
+					lem.onLeadLost(lost)
+				}()
 			}
 		}
 		le.leadStart = 0

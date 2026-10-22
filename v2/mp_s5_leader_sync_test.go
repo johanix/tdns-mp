@@ -43,6 +43,9 @@ func newLeaderSyncRigAs(t *testing.T, zone string, identity AgentId) *leaderSync
 	conf.InternalMp.AgentRegistry = &AgentRegistry{}
 	lem := NewLeaderElectionManager(identity, time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
 	conf.InternalMp.LeaderElectionManager = lem
+	// The election's callbacks run in goroutines of their own and log as
+	// they end: they are waited for before a rig puts its logger back.
+	t.Cleanup(lem.hooks.Wait)
 	waitDelegationSyncTimers(t, conf)
 	return &leaderSyncRig{conf: conf, e: &HsyncDataEngine{conf: conf}, mpzd: mpzd, q: q, lem: lem, sdq: make(chan *SynchedDataUpdate, 8), ctx: t.Context()}
 }
