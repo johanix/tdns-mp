@@ -83,7 +83,12 @@ Wrong before this change:
 | 3 | tdns-mp, pinned to both heads | open |
 | 4 | merge #947; re-pin #37 to its merge commit; merge #37 | waiting |
 | 5 | re-pin tdns-mp to both merge commits; merge | waiting |
-| 6 | rig run, below | not run |
+| 6 | rig run, below | running on x400 (rig suites dnssec-ctl, dnssec) |
+
+Review, 2026-10-22: #37 fixed at affbb6a (the TLSA checker's refusal takes
+the mechanism out of use; a refusal does not put off the refresh; a lookup
+that could not run keeps the verdict; MechanismExpires). The design's
+amendment section has the rules.
 
 ## Rig cases
 

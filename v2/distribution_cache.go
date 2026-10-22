@@ -53,7 +53,8 @@ type PeerInfo struct {
 	// What the last discovery found out about the mechanism's DNS data
 	// (#260): the DNSSEC verdict on it ("secure", "insecure", "bogus"; ""
 	// when not known), what is wrong with it in words, and when it expires
-	// from the resolver's cache.
+	// from the resolver's cache (the mechanism's own data; the peer is
+	// looked up again when the first of its mechanisms' data does).
 	DNSSEC           string
 	DiscoveryReason  string
 	DiscoveryExpires time.Time
@@ -254,5 +255,5 @@ func (pi *PeerInfo) setDiscovery(peer *transport.Peer, mechanism string) {
 		pi.DNSSEC = c.String()
 	}
 	pi.DiscoveryReason = s.MechanismReason(mechanism)
-	pi.DiscoveryExpires = s.Expires
+	pi.DiscoveryExpires = s.MechanismExpires(mechanism)
 }

@@ -137,3 +137,21 @@ without asking:
 - A URI that disappears, with a validated denial, does not take a mechanism
   out of use. Only a refusal for want of validation, or a withdrawn TLSA,
   does.
+
+## Amendment, 2026-10-22 (review of tdns #947, tdns-transport #37, tdns-mp #263)
+
+- **The TLSA checker refuses as discovery does.** The TLSA set is read
+  through the cache before every use. When that answer is refused for
+  want of validation, the mechanism goes back to NEEDED and the set it held
+  is dropped, so it is not used, as when discovery refuses its data. The
+  first version left the mechanism in use and the set held, and `peer list`
+  showed `OPERATIONAL(-)`, which reads as validation being off.
+- **A refusal does not put off the refresh.** A lookup that gave nothing
+  to use leaves the time of the next refresh where it was.
+- **A lookup that could not run keeps the verdict.** It says nothing about
+  the data, which stays in use. The verdict and the expiry of the lookup
+  before it stay, and so do the marks the operator sees.
+- **A row's expiry is its mechanism's.** `peer list -v` shows when that
+  mechanism's data expires. The peer is looked up again when the first of
+  its mechanisms' data does.
+

@@ -59,8 +59,8 @@ func TestPeerInfoCarriesTheVerdict(t *testing.T) {
 	if want := "URI at _https._tcp.b.example.: answer insecure, accepted as DNSSEC validation is off"; pi.DiscoveryReason != want {
 		t.Errorf("reason %q, want %q", pi.DiscoveryReason, want)
 	}
-	if pi.DiscoveryExpires.IsZero() {
-		t.Error("no expiry")
+	if want := p.DiscoveryStatus().MechanismExpires("API"); pi.DiscoveryExpires.IsZero() || !pi.DiscoveryExpires.Equal(want) {
+		t.Errorf("expiry %v, want the API data's, %v", pi.DiscoveryExpires, want)
 	}
 
 	// A mechanism discovery has said nothing about has no verdict.
