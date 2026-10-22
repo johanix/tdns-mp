@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -639,9 +640,24 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// a peer that was never established — same truth-model principle as
 		// Fix A/C: a failure on one path must not assert state over a peer
 		// another path just proved good.
-		if peer.GetState() >= transport.PeerStateKnown || peer.CurrentAddress() != nil {
+		// ERROR sorts above KNOWN, and is no sign of an established peer:
+		// it is what this hook wrote for an earlier failure.
+		st := peer.GetState()
+		if (st >= transport.PeerStateKnown && st != transport.PeerStateError) || peer.CurrentAddress() != nil {
 			lgTransport.Warn("peer discovery failed but peer already established; not regressing to ERROR",
-				"peer", peer.ID, "state", peer.GetState(), "err", err)
+				"peer", peer.ID, "state", st, "err", err)
+			return
+		}
+		// A refusal for want of DNSSEC validation is an answer about the
+		// peer, not a failure to find it: the peer is NEEDED until its
+		// chain validates, as peer list and the gossip matrix show it
+		// (NEEDED(-), #260), and the retrier asks for it again.
+		var de *transport.DiscoveryError
+		if errors.As(err, &de) && de.Failure() == transport.FailureNotValidated {
+			if peer.GetState() != transport.PeerStateNeeded {
+				peer.SetState(transport.PeerStateNeeded, err.Error())
+			}
+			lgTransport.Warn("peer discovery refused: its DNS data is not DNSSEC-validated", "peer", peer.ID, "err", err)
 			return
 		}
 		peer.SetState(transport.PeerStateError, err.Error())
