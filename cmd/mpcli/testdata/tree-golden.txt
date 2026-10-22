@@ -374,7 +374,7 @@ long: |
   downstreams, CONFIG sig0key and AUDIT to every agent of the zone, SYNC to the
   voting members.
 flags: |
-      --rfi string       RFI type (CONFIG|SYNC|AUDIT|EDITS)
+      --rfi string       RFI type (CONFIG|SYNC|AUDIT)
       --subtype string   RFI subtype for CONFIG (upstream|downstream|sig0key)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)

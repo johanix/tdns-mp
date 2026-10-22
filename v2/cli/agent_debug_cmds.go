@@ -107,9 +107,9 @@ voting members.`,
 			tdnscli.PrepArgs("zonename")
 
 			rfitype = strings.ToUpper(rfitype)
-			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
+			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true}
 			if !validRfiTypes[rfitype] {
-				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC, AUDIT, or EDITS (is %q)", rfitype)
+				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC or AUDIT (is %q); this agent's edits are read back from its combiner by agent debug resync", rfitype)
 			}
 
 			if rfitype == "CONFIG" && rfisubtype == "" {
@@ -198,22 +198,13 @@ voting members.`,
 							}
 						}
 					}
-
-				case rfitype == "EDITS":
-					for aid, rfidata := range amr.RfiResponse {
-						if rfidata.Error {
-							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-						} else {
-							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
-						}
-					}
 				}
 			} else {
 				fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)
 			}
 		},
 	}
-	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
+	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT)")
 	c.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
 	return c
 }
