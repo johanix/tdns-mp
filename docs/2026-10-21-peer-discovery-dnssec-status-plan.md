@@ -71,23 +71,26 @@ Wrong before this change:
 - The agent and the auditor start the transport's refresh loop, and warn at
   start and hourly while validation is not enforced
   (`warnWhileDnssecNotEnforced`).
-- Pins: tdns at #947's head and tdns-transport at #37's head, in every
-  module. To be re-pinned to the merge commits.
+- Pins: tdns at #947's merge (9036c644) and tdns-transport at #37's merge
+  (dfd51bb), in every module.
 
 ## Steps
 
 | step | what | state |
 |------|------|-------|
-| 1 | tdns #947 | open |
-| 2 | tdns-transport #37, pinned to #947's head | open |
-| 3 | tdns-mp, pinned to both heads | open |
-| 4 | merge #947; re-pin #37 to its merge commit; merge #37 | waiting |
-| 5 | re-pin tdns-mp to both merge commits; merge | waiting |
-| 6 | rig run, below | running on x400 (rig suites dnssec-ctl, dnssec) |
+| 1 | tdns #947 | merged 2026-10-22 (9036c644) |
+| 2 | tdns-transport #37, pinned to #947's head | merged 2026-10-22 (dfd51bb) |
+| 3 | tdns-mp, pinned to both heads | done |
+| 4 | merge #947; re-pin #37 to its merge commit; merge #37 | done |
+| 5 | re-pin tdns-mp to both merge commits; merge | re-pinned, main merged forward; the merge waits for step 6 |
+| 6 | rig run, below | green on the stack; one run at the merge commits owed |
 
-Review, 2026-10-22: #37 fixed at affbb6a (the TLSA checker's refusal takes
+Reviews, 2026-10-22: #37 fixed at affbb6a (the TLSA checker's refusal takes
 the mechanism out of use; a refusal does not put off the refresh; a lookup
-that could not run keeps the verdict; MechanismExpires). The design's
+that could not run keeps the verdict; MechanismExpires), 5cd80e0 (a stale
+ERROR does not stand in for the peer) and c99ac1e (a refused mechanism is
+demoted before registration can return). #947 matches a response to its own
+cache entry (lookupEntry: a8cade54, 3b4f5cc5, 6b9c65e7). The design's
 amendment section has the rules.
 
 ## Rig cases
@@ -107,6 +110,12 @@ fleet, since this is a security path:
    peer goes to `NEEDED(-)`. It comes back when the DS is restored.
 4. A control run on a secure fleet: no marks, no legend, no warning, no
    Discovery notes.
+
+The rig caps the resolver cache (`imrengine.tuning.cache-max-ttl`) alike on
+every participant, the auditor included, so that discovery data expires at
+the same pace everywhere. With only the agents capped, the auditor kept a
+withdrawn DS for its whole TTL, an hour: correct, but its view and the
+agents' disagreed for that long. Case 3 also reads the auditor's cell.
 
 ## Open
 
