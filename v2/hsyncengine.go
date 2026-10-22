@@ -173,6 +173,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			UpdateType:        "remote",
 			Update:            zu,
 			OriginatingDistID: ampp.DistributionID,
+			Mechanism:         ampp.Mechanism,
 			OriginatingTime:   ampp.Time,
 			DeliveredBy:       ampp.DeliveredBy,
 			CatchUp:           ampp.CatchUp,

@@ -294,7 +294,9 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 }
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
-// Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
+// It goes over DNS, not on the mechanism its SYNC came on as an agent's confirmations do
+// (confirmTransport): an agent knows no TLSA for its combiner, so it would refuse a
+// confirmation the combiner sent over HTTPS.
 func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)

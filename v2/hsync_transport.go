@@ -119,6 +119,12 @@ type MPTransportBridge struct {
 	// rediscoveryInterval is the least time between two such lookups of one
 	// peer; zero means peerRediscoveryInterval.
 	rediscoveryInterval time.Duration
+
+	// confirmFallbackLogged is, per peer and mechanism, when a confirmation
+	// that failed on that mechanism and went on the other was last logged
+	// loudly (noteConfirmFallback).
+	confirmFallbackMu     sync.Mutex
+	confirmFallbackLogged map[string]time.Time
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -469,7 +475,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 
 	// Wire remote confirmation callback (two-phase protocol: Phase 7).
 	// When this agent's combiner confirms a sync that originated from another agent,
-	// send the final confirmation NOTIFY back to the originating agent.
+	// send the final confirmation back to the originating agent.
 	if tm.msgQs != nil {
 		tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
 			go tm.sendRemoteConfirmation(detail)
@@ -523,6 +529,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
 		return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
 	}
+	tm.Router.Use(logConfirmationReceived)
 
 	// Phase 2.6: the discovery-completion callback is now LIVE — transport's
 	// RegisterDiscoveredPeer fires it after the process completes (it was
@@ -1137,6 +1144,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
 		},
+		Mechanism: msg.Mechanism,
 	}
 
 	if tm.msgQs == nil {
@@ -1153,7 +1161,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		// Only agents acting as relay (with an agentRegistry) send this — the combiner already
 		// returned a "pending" ACK inline in the DNS response.
 		if tm.agentRegistry != nil {
-			go tm.sendImmediateConfirmation(payload, senderID)
+			go tm.sendImmediateConfirmation(payload, senderID, msg.Mechanism)
 		}
 	default:
 		lgTransport.Warn("message channel full, dropping message", "msgType", msgTypeStr, "sender", senderID)
@@ -1527,9 +1535,10 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
-// NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
-func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, senderID string) {
-	if tm.DNSTransport == nil {
+// confirmations in the two-phase remote confirmation protocol (Phase 5). It goes to
+// senderID, back on mechanism, the one the sync arrived on (confirmTransport).
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, senderID, mechanism string) {
+	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
@@ -1547,7 +1556,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, mechanism, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
@@ -1564,11 +1573,12 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, 
 	}
 }
 
-// sendRemoteConfirmation sends the final confirmation NOTIFY back to the originating agent
+// sendRemoteConfirmation sends the final confirmation back to the originating agent
 // after the remote agent's combiner has confirmed the sync. This is the second of two
-// NOTIFYs in the two-phase remote confirmation protocol (Phase 7).
+// confirmations in the two-phase remote confirmation protocol (Phase 7). It goes back on
+// the mechanism the sync arrived on (confirmTransport).
 func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
-	if tm.DNSTransport == nil {
+	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
@@ -1601,7 +1611,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, detail.Mechanism, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(detail.Zone),
 		DistributionID: detail.OriginatingDistID, // Use the originating agent's distID
@@ -1621,6 +1631,131 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		lgTransport.Info("sent remote confirmation", "distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender,
 			"applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems))
 	}
+}
+
+// logConfirmationReceived logs every confirmation the router handles, with
+// the mechanism it arrived on, so that which way a confirmation went shows at
+// both ends ("confirmation sent" at the other).
+func logConfirmationReceived(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
+	err := next(ctx)
+	in, ok := ctx.Incoming()
+	if !ok || in.Token() != transport.VerbConfirm || err != nil {
+		return err
+	}
+	var c transport.DnsConfirmPayload
+	if json.Unmarshal(ctx.ChunkPayload, &c) == nil {
+		lgTransport.Info("confirmation received", "distributionID", c.DistributionID, "sender", c.SenderID,
+			"status", c.Status, "mechanism", in.Mechanism)
+	}
+	return err
+}
+
+// confirmTransport is the transport a SYNC's confirmations go back on first:
+// the mechanism the SYNC arrived on, whatever else the peer offers. A SYNC
+// over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents
+// that share a mechanism use that path both ways. nil when the mechanism is
+// not known or this bridge has no transport for it.
+func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transport {
+	switch mechanism {
+	case transport.MechanismAPI:
+		if tm.APITransport != nil {
+			return tm.APITransport
+		}
+	case transport.MechanismDNS:
+		if tm.DNSTransport != nil {
+			return tm.DNSTransport
+		}
+	}
+	return nil
+}
+
+// confirmOn sends a confirmation of a SYNC that arrived on mechanism. The
+// first choice of path is the one the SYNC came on (confirmTransport). When
+// that fails, the confirmation goes on the other mechanism, if that reaches
+// the peer; the first try then gets half the time, so a peer that hangs on
+// it leaves the other mechanism the rest. When the mechanism is not known,
+// the first choice is what the peer offers (SelectTransport), with the same
+// fallback: a confirmation that is not sent leaves the sender sending its
+// SYNC again. A confirmation sent is logged with the mechanism that carried
+// it.
+func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
+	t := tm.confirmTransport(mechanism)
+	if t == nil {
+		t = tm.SelectTransport(peer)
+		if t == nil {
+			return fmt.Errorf("no transport reaches peer %s", peer.ID)
+		}
+		lgTransport.Debug("the sync's mechanism is not known; the confirmation goes by what the peer offers",
+			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism, "first", t.Name())
+	}
+	used := t
+	if other := tm.otherConfirmTransport(t, peer); other == nil {
+		if err := t.Confirm(ctx, peer, req); err != nil {
+			return err
+		}
+	} else {
+		first, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok {
+			first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		}
+		err := t.Confirm(first, peer, req)
+		cancel()
+		if err != nil {
+			if otherErr := other.Confirm(ctx, peer, req); otherErr != nil {
+				return fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), otherErr)
+			}
+			tm.noteConfirmFallback(peer.ID, t.Name(), other.Name(), err)
+			used = other
+		}
+	}
+	lgTransport.Info("confirmation sent", "distributionID", req.DistributionID, "peer", peer.ID,
+		"status", req.Status.String(), "mechanism", used.Name())
+	return nil
+}
+
+// otherConfirmTransport is the mechanism a confirmation falls back to from
+// t's: DNS when the peer has an address, HTTPS when it has an endpoint and a
+// usable TLSA to check its certificate against (APIUsable); nil when there is
+// none.
+func (tm *MPTransportBridge) otherConfirmTransport(t transport.Transport, peer *transport.Peer) transport.Transport {
+	switch t.(type) {
+	case *transport.APITransport:
+		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+			return tm.DNSTransport
+		}
+	case *transport.DNSTransport:
+		if tm.APITransport != nil && peer.APIUsable() {
+			return tm.APITransport
+		}
+	}
+	return nil
+}
+
+// noteConfirmFallback logs a confirmation to peer that failed on the
+// mechanism its SYNC came on and went on the other: loudly the first time
+// for that peer and mechanism and then at most hourly, quietly in between,
+// so a pair that works one way only shows without a line per confirmation.
+// It reports whether it logged loudly.
+func (tm *MPTransportBridge) noteConfirmFallback(peerID, failed, used string, err error) bool {
+	key := peerID + "|" + failed
+	now := time.Now()
+	tm.confirmFallbackMu.Lock()
+	last, seen := tm.confirmFallbackLogged[key]
+	loud := !seen || now.Sub(last) >= time.Hour
+	if loud {
+		if tm.confirmFallbackLogged == nil {
+			tm.confirmFallbackLogged = make(map[string]time.Time)
+		}
+		tm.confirmFallbackLogged[key] = now
+	}
+	tm.confirmFallbackMu.Unlock()
+	if loud {
+		lgTransport.Warn("confirmations to the peer fail on the mechanism their SYNC came on; sent on the other (logged again in an hour)",
+			"peer", peerID, "failed", failed, "used", used, "err", err)
+	} else {
+		lgTransport.Debug("confirmation sent on the other mechanism", "peer", peerID, "failed", failed, "used", used, "err", err)
+	}
+	return loud
 }
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.

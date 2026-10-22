@@ -200,6 +200,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		TypeToken: "keystate",
 		SenderID:  keystate.GetSenderID(),
 		Zone:      keystate.Zone,
+		Mechanism: arrivedOn(ctx),
 		Payload:   ctx.ChunkPayload,
 	})
 
@@ -268,6 +269,7 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		SenderID:        edits.GetSenderID(),
 		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
 		Zone:            edits.Zone,
+		Mechanism:       arrivedOn(ctx),
 		Payload:         ctx.ChunkPayload,
 	})
 
@@ -325,6 +327,7 @@ func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error
 		SenderID:        config.GetSenderID(),
 		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
 		Zone:            config.Zone,
+		Mechanism:       arrivedOn(ctx),
 		Payload:         ctx.ChunkPayload,
 	})
 
@@ -381,6 +384,7 @@ func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		SenderID:        audit.GetSenderID(),
 		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
 		Zone:            audit.Zone,
+		Mechanism:       arrivedOn(ctx),
 		Payload:         ctx.ChunkPayload,
 	})
 
@@ -437,6 +441,7 @@ func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext)
 		TypeToken: "status-update",
 		SenderID:  statusUpdate.GetSenderID(),
 		Zone:      statusUpdate.Zone,
+		Mechanism: arrivedOn(ctx),
 		Payload:   ctx.ChunkPayload,
 	})
 
@@ -483,4 +488,14 @@ func handleAppRelocate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 
 	lgTransport.Debug("relocate processed", "peer", ctx.PeerID)
 	return nil
+}
+
+// arrivedOn is the mechanism the message in ctx arrived on, for a handler
+// that sets a rebuilt message in its place: a SYNC's confirmations go back
+// on it.
+func arrivedOn(ctx *transport.MessageContext) string {
+	if in, ok := ctx.Incoming(); ok {
+		return in.Mechanism
+	}
+	return ""
 }

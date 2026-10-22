@@ -354,7 +354,10 @@ type AgentMsgPost struct {
 
 type AgentMsgPostPlus struct {
 	AgentMsgPost
-	Response chan *AgentMsgResponse
+	// Mechanism is the one the message arrived on ("DNS" or "API"). A
+	// SYNC's confirmations go back on it.
+	Mechanism string
+	Response  chan *AgentMsgResponse
 }
 
 type AgentMsgResponse struct {

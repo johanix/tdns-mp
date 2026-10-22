@@ -498,6 +498,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
 										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 										OriginatingSender: string(synchedDataUpdate.AgentId),
+										Mechanism:         synchedDataUpdate.Mechanism,
 										Zone:              synchedDataUpdate.Zone,
 										CreatedAt:         time.Now(),
 										StaleHeld:         staleHeld,
@@ -628,6 +629,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								sender:     agentId,
 								zone:       zone,
 								ops:        received,
+								mechanism:  synchedDataUpdate.Mechanism,
 								at:         time.Now(),
 							})
 							lgEngine.Info("a stale DNSKEY replace waits for this agent's combiner to confirm the set that overtook it",
@@ -641,6 +643,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 								OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 								OriginatingSender: string(agentId),
+								Mechanism:         synchedDataUpdate.Mechanism,
 								Zone:              zone,
 								Status:            status,
 								Message:           message,
@@ -1703,6 +1706,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		remoteDetail := &RemoteConfirmationDetail{
 			OriginatingDistID: prc.OriginatingDistID,
 			OriginatingSender: prc.OriginatingSender,
+			Mechanism:         prc.Mechanism,
 			Zone:              prc.Zone,
 			Status:            status,
 			Message:           message,
