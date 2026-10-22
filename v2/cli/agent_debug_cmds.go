@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var myIdentity, notifyRRtype, rfitype, rfisubtype string
+var notifyRRtype, rfitype, rfisubtype string
 
 // debugAgentLeaves are the mp-specific leaves of the agent "debug"
 // subtree. They are handed to tdns's NewDebugCmd as extras, so that one
@@ -50,7 +50,9 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 		Use:   "send-notify",
 		Short: "Tell agent to send a NOTIFY message to the other agents",
 		Run: func(cmd *cobra.Command, args []string) {
-			tdnscli.PrepArgs("zonename", "identity")
+			// The agent sends to every agent of the zone: there is no
+			// recipient to name (PrepArgs has no "identity" any more).
+			tdnscli.PrepArgs("zonename")
 
 			notifyRRtype = strings.ToUpper(notifyRRtype)
 			if notifyRRtype != "NS" && notifyRRtype != "DNSKEY" {
@@ -80,7 +82,6 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 				MessageType: AgentMsgNotify,
 				RRType:      rrtype,
 				Zone:        ZoneName(tdns.Globals.Zonename),
-				AgentId:     AgentId(string(tdns.Globals.AgentId)),
 				RRs:         rrs,
 			}
 
@@ -90,7 +91,6 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 			}
 		},
 	}
-	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	c.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	c.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
 	return c
@@ -99,14 +99,18 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "send-rfi",
-		Short: "Tell agent to send an RFI message to another agent",
+		Short: "Tell agent to send an RFI message to the agents of the zone it concerns",
+		Long: `Tell agent to send an RFI message for the zone. The agent picks the recipients
+from the zone: CONFIG upstream goes to its upstream, CONFIG downstream to its
+downstreams, CONFIG sig0key and AUDIT to every agent of the zone, SYNC to the
+voting members.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			tdnscli.PrepArgs("zonename", "identity")
+			tdnscli.PrepArgs("zonename")
 
 			rfitype = strings.ToUpper(rfitype)
-			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
+			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true}
 			if !validRfiTypes[rfitype] {
-				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC, AUDIT, or EDITS (is %q)", rfitype)
+				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC or AUDIT (is %q); this agent's edits are read back from its combiner by agent debug resync", rfitype)
 			}
 
 			if rfitype == "CONFIG" && rfisubtype == "" {
@@ -120,7 +124,6 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 				RfiType:     rfitype,
 				RfiSubtype:  rfisubtype,
 				Zone:        ZoneName(tdns.Globals.Zonename),
-				AgentId:     AgentId(string(tdns.Globals.AgentId)),
 			}
 
 			amr, err := SendAgentDebugCmd(cmd, req, false)
@@ -196,23 +199,13 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 							}
 						}
 					}
-
-				case rfitype == "EDITS":
-					for aid, rfidata := range amr.RfiResponse {
-						if rfidata.Error {
-							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-						} else {
-							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
-						}
-					}
 				}
 			} else {
 				fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)
 			}
 		},
 	}
-	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
-	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
+	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT)")
 	c.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
 	return c
 }
