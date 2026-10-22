@@ -14,7 +14,9 @@ package tdnsmp
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -179,4 +181,28 @@ func TestHello_OneLookUpPerSenderAMinute(t *testing.T) {
 	if !v.takeKey("carol.agent.example.") {
 		t.Error("no look-up after the minute is over")
 	}
+}
+
+// A hello introduces the agent it names in MyIdentity. One that names the
+// certificate's agent only in OriginatorID, MyIdentity empty, is refused:
+// it would pass the sender check and introduce no one.
+func TestHello_MustIntroduceTheCertificatesAgent(t *testing.T) {
+	te := newTLSAEnv(t, "hello-myidentity.example.")
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{te.Alice.Cert}}}} //nolint:gosec
+	body := `{"MessageType":"hello","OriginatorID":"` + te.Alice.Identity + `","YourIdentity":"` + te.Bob.Identity + `","Zone":"` + te.zone + `"}`
+	res, err := client.Post(te.srv[te.Bob.Identity].URL+"/api/v1/hello", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply struct {
+		Error    bool
+		ErrorMsg string
+	}
+	err = json.NewDecoder(res.Body).Decode(&reply)
+	res.Body.Close()
+	if err != nil || !reply.Error {
+		t.Errorf("a hello naming alice only in OriginatorID, MyIdentity empty: %+v %v, want it refused", reply, err)
+	}
+	te.noHello(t, "a hello with MyIdentity empty")
 }

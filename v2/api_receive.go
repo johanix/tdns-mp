@@ -125,6 +125,23 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 				return
 			}
 		}
+		// A hello introduces the agent its body names in MyIdentity (the
+		// hello handler reads that field), which the check above need not
+		// have seen: the parser reads OriginatorID first. So a hello must
+		// name the certificate's agent in MyIdentity; one that leaves it
+		// empty, or names another, is refused.
+		if kind == apiEndpointHello {
+			if cn, ok := clientIdentity(r); ok {
+				var hello struct{ MyIdentity string }
+				_ = json.Unmarshal(body, &hello)
+				if hello.MyIdentity == "" || dns.CanonicalName(cn) != dns.CanonicalName(hello.MyIdentity) {
+					lgApi.Warn("sync API hello refused: it does not introduce the client certificate's agent",
+						"path", r.URL.Path, "from", r.RemoteAddr, "introduces", hello.MyIdentity, "certificate", cn)
+					_ = sink.fail(fmt.Sprintf("hello introduces %q, not the client certificate's identity", hello.MyIdentity))
+					return
+				}
+			}
+		}
 		lgApi.Debug("received sync API request", "path", r.URL.Path, "from", r.RemoteAddr, "sender", sink.your, "originator", im.SenderID)
 		if err := handler.RouteAPIPayload(r.Context(), body, r.RemoteAddr, sender, sink); err != nil {
 			lgApi.Warn("sync API request failed", "path", r.URL.Path, "from", r.RemoteAddr, "err", err)
