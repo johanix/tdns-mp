@@ -344,6 +344,7 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	// group's lead, or ends it where another agent leads that group.
 	lem.SetOnLeadLost(conf.stopRunsOfLostLead)
 	lem.SetOnZoneRegrouped(conf.retieRuns)
+	lem.SetOnLeaderNamed(conf.retieAllRuns)
 	// A zone that joins a group this agent already leads is asked for the
 	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
 	// it is: the key this agent holds is published, and one it does not

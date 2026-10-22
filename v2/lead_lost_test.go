@@ -264,6 +264,111 @@ func TestEveryZoneThatEntersAGroupIsToldOf(t *testing.T) {
 	}
 }
 
+// groupLeadMovesTo names who the leader of the group's election, as an
+// election or the gossip of one does: under the election's lock.
+func (r *leaderSyncRig) groupLeadMovesTo(group string, who AgentId) {
+	r.lem.mu.Lock()
+	le, ok := r.lem.groupElections[group]
+	if !ok {
+		le = &LeaderElection{Zone: ZoneName(group), Votes: map[AgentId]uint32{}, Confirms: map[AgentId]AgentId{}}
+		r.lem.groupElections[group] = le
+	}
+	r.lem.mu.Unlock()
+	le.mu.Lock()
+	r.lem.noteLeaderLocked(le, who, time.Now())
+	le.Leader, le.LeaderExpiry = who, time.Now().Add(time.Hour)
+	le.mu.Unlock()
+}
+
+// A zone enters a provider group that has no leader yet, with an UPDATE
+// begun under the zone's own election still being retried. The group's
+// election that follows moves the zone's lead without a loss of the hold
+// the UPDATE began in. When another agent wins the group, the UPDATE stops.
+// When this agent wins it, the UPDATE is tied to the group's hold, and stops
+// when another agent takes the group's lead later. It went on in both.
+func TestARunFollowsItsZoneIntoAGroupWithNoLeaderYet(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		wins bool
+	}{
+		{"another agent wins the group", false},
+		{"this agent wins the group, then loses it", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, underWay := updateBeingRetried(t, "unled.group.example.")
+			z := r.mpzd.ZoneName
+			const group = "group-not-yet-led"
+			pgm := NewProviderGroupManager(string(r.lem.localID))
+			pgm.Groups = map[string]*ProviderGroup{group: {GroupHash: group, Zones: []ZoneName{ZoneName(z)}}}
+			r.lem.SetProviderGroupManager(pgm)
+			r.lem.SetOnZoneRegrouped(r.conf.retieRuns)
+			r.lem.SetOnLeaderNamed(r.conf.retieAllRuns)
+			began := r.conf.holdOf(z)
+
+			r.lem.zoneJoinedGroup(ZoneName(z), "", group)
+			if underWay() != 1 {
+				t.Fatal("the run stopped as its zone entered a group with no leader")
+			}
+			if c.wins {
+				r.groupLeadMovesTo(group, r.lem.localID)
+				won := r.lem.LeadHold(ZoneName(z))
+				if won == 0 || won == began {
+					t.Fatalf("this agent's lead of the zone in the group is hold %d, want the group's own, not %d", won, began)
+				}
+				for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+					c := &r.conf.InternalMp.delegationSyncChains
+					c.mu.Lock()
+					var held uint64
+					for _, run := range c.runs[z] {
+						held = run.hold
+					}
+					c.mu.Unlock()
+					if held == won {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("the run is tied to hold %d after this agent won the group, want the group's %d", held, won)
+					}
+				}
+				if underWay() != 1 {
+					t.Fatal("this agent's own win of the group stopped the run")
+				}
+			}
+			r.groupLeadMovesTo(group, AgentId(r.peer.Identity))
+			for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the run went on after another agent took the lead of the group its zone entered")
+				}
+			}
+		})
+	}
+}
+
+// A retie that read the zone's lead before the lead moved records a hold
+// that is lost by the time it lands, after the loss went by the run. The
+// election that moved the lead asks for a retie of its own, which runs after
+// the stale one and reads the lead as it is: it stops the run.
+func TestALateRetieIsSetRightByTheRetieOfTheChangeItMissed(t *testing.T) {
+	r, underWay := updateBeingRetried(t, "stale.retie.example.")
+	z := r.mpzd.ZoneName
+	const group = "group-taken-over"
+	pgm := NewProviderGroupManager(string(r.lem.localID))
+	pgm.Groups = map[string]*ProviderGroup{group: {GroupHash: group, Zones: []ZoneName{ZoneName(z)}}}
+	r.lem.SetProviderGroupManager(pgm)
+	r.groupLeadMovesTo(group, AgentId(r.peer.Identity)) // no retie wired: this one is missed
+
+	r.conf.retieRunsTo(z, 9, false) // a retie that read this agent's lead of the group before the move
+	if underWay() != 1 {
+		t.Fatal("the stale retie stopped the run itself")
+	}
+	r.conf.retieAllRuns() // the retie the election that moved the lead asks for
+	for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the retie after the move left the run going on a lead that another agent holds")
+		}
+	}
+}
+
 // A run follows its zone into a provider group: tied to the new group's hold
 // from then on, so that the loss of the group's lead stops it, and the loss
 // of the hold it began in does not. A zone whose new group another agent
@@ -289,7 +394,7 @@ func TestARunFollowsItsZoneIntoAGroup(t *testing.T) {
 	}
 
 	moved, untied := run(7), run(0)
-	conf.retieRunsTo(zone, 9)
+	conf.retieRunsTo(zone, 9, false)
 	conf.stopRunsOfLostLead(7)
 	if moved.Err() != nil {
 		t.Fatal("the loss of the hold the run began in stopped it after its zone moved to another group's lead")
@@ -303,9 +408,13 @@ func TestARunFollowsItsZoneIntoAGroup(t *testing.T) {
 	}
 
 	led := run(11)
-	conf.retieRunsTo(zone, 0)
+	conf.retieRunsTo(zone, 0, false)
+	if led.Err() != nil {
+		t.Error("a run was stopped while nobody leads its zone: an invalidation, or a group not yet led")
+	}
+	conf.retieRunsTo(zone, 0, true)
 	if led.Err() == nil {
-		t.Error("a zone that entered a group another agent leads kept its run")
+		t.Error("a zone that another agent leads now kept its run")
 	}
 	if untied.Err() != nil {
 		t.Error("a run begun with no lead was stopped when its zone's new group is another agent's")
