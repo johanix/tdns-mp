@@ -43,6 +43,9 @@ func newLeaderSyncRigAs(t *testing.T, zone string, identity AgentId) *leaderSync
 	conf.InternalMp.AgentRegistry = &AgentRegistry{}
 	lem := NewLeaderElectionManager(identity, time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
 	conf.InternalMp.LeaderElectionManager = lem
+	// The election's callbacks run in goroutines of their own and log as
+	// they end: they are waited for before a rig puts its logger back.
+	t.Cleanup(lem.hooks.Wait)
 	waitDelegationSyncTimers(t, conf)
 	return &leaderSyncRig{conf: conf, e: &HsyncDataEngine{conf: conf}, mpzd: mpzd, q: q, lem: lem, sdq: make(chan *SynchedDataUpdate, 8), ctx: t.Context()}
 }
@@ -65,8 +68,11 @@ func waitDelegationSyncTimers(t *testing.T, conf *Config) {
 }
 
 func (r *leaderSyncRig) leader(who AgentId) {
+	le := &LeaderElection{Zone: ZoneName(r.mpzd.ZoneName)}
+	r.lem.noteLeaderLocked(le, who, time.Now()) // as an election names its leader
+	le.Leader, le.LeaderExpiry = who, time.Now().Add(time.Hour)
 	r.lem.mu.Lock()
-	r.lem.elections[ZoneName(r.mpzd.ZoneName)] = &LeaderElection{Zone: ZoneName(r.mpzd.ZoneName), Leader: who, LeaderExpiry: time.Now().Add(time.Hour)}
+	r.lem.elections[ZoneName(r.mpzd.ZoneName)] = le
 	r.lem.mu.Unlock()
 }
 

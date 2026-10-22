@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -78,7 +79,7 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 // inKeySetup runs f with the zone's key-setup lock held. Every setup of a
 // zone's SIG(0) key takes it: the leader's after an election, a renewal or a
 // sync given back (SetOnLeaderElected), the one at an arrival
-// (SetOnZoneJoined), and that one's later rounds (zoneKeyWaits). For one zone
+// (SetOnZoneJoined), and a key round's decision (decideZoneKey). For one zone
 // they run one at a time, so that two of them never both find no key and
 // each make one, and a setup's clean-up of a key it made for a lead that
 // moved never takes a key another setup has just adopted. It is taken once
@@ -88,6 +89,32 @@ func (lem *LeaderElectionManager) inKeySetup(zone ZoneName, f func() error) erro
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 	return f()
+}
+
+// SetOnLeadLost sets the callback invoked when another agent is named leader
+// in an election where this agent held the lead (noteLeaderLocked): by the
+// election, by gossip of a newer term, or after an invalidation. It names
+// the hold that ended (LeadHold). A renewal of this agent's lead, or its
+// re-election, invokes nothing. It runs in a goroutine of its own.
+func (lem *LeaderElectionManager) SetOnLeadLost(f func(hold uint64)) {
+	lem.onLeadLost = f
+}
+
+// SetOnZoneRegrouped sets the callback invoked when a zone enters a provider
+// group, whoever leads the group or none (zoneJoinedGroup): the zone's lead
+// is the new group's from then on. It runs before the arrival's callback, in
+// the provider group manager's recompute, with that manager's lock free.
+func (lem *LeaderElectionManager) SetOnZoneRegrouped(f func(zone ZoneName)) {
+	lem.onZoneRegrouped = f
+}
+
+// SetOnLeaderNamed sets the callback invoked when an election names a
+// leader, this agent or another, by the election, by gossip or by a renewal
+// (noteLeaderLocked). A zone's lead can move without a lead of this agent's
+// being lost: a zone that entered a group with no leader yet has the group's
+// lead once the group elects. It runs in a goroutine of its own.
+func (lem *LeaderElectionManager) SetOnLeaderNamed(f func()) {
+	lem.onLeaderNamed = f
 }
 
 // SetOnZoneJoined sets the callback invoked when a zone joins a provider
@@ -154,6 +181,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 
 	// Single agent: self-elect immediately
 	if expectedPeers == 0 {
+		lem.noteLeaderLocked(le, lem.localID, time.Now())
 		le.Leader = lem.localID
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -167,7 +195,7 @@ func (lem *LeaderElectionManager) startGroupElection(groupHash string, members [
 			for _, zone := range zones {
 				go func(z ZoneName) {
 					if err := lem.onLeaderElected(z); err != nil {
-						lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+						logLeaderCallback("onLeaderElected", err, "zone", z, "group", groupHash[:8])
 					}
 				}(zone)
 			}
@@ -586,6 +614,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		return
 	}
 
+	lem.noteLeaderLocked(le, agreedWinner, time.Now())
 	le.Leader = agreedWinner
 	le.leaderTerm = le.Term
 	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -604,7 +633,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 		for _, zone := range zones {
 			go func(z ZoneName) {
 				if err := lem.onLeaderElected(z); err != nil {
-					lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+					logLeaderCallback("onLeaderElected", err, "zone", z, "group", groupHash[:8])
 				}
 			}(zone)
 		}
@@ -812,6 +841,7 @@ func (lem *LeaderElectionManager) InvalidateGroupLeader(groupHash string) {
 	}
 	lgElect.Info("invalidating group leader due to degraded state",
 		"group", groupHash[:8], "was", le.Leader, "term", le.Term)
+	lem.noteLeaderLocked(le, "", time.Now())
 	le.Leader = ""
 	if le.ReelectTimer != nil {
 		le.ReelectTimer.Stop()
@@ -904,8 +934,9 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 			"group", groupHash[:8], "leader", state.Leader,
 			"term", state.Term, "expiry", state.LeaderExpiry)
 
-		le.Leader = AgentId(state.Leader)
 		le.Term = uint64(state.Term)
+		lem.noteLeaderLocked(le, AgentId(state.Leader), time.Now())
+		le.Leader = AgentId(state.Leader)
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = state.LeaderExpiry
 		le.Active = false
@@ -929,7 +960,7 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 			for _, zone := range pg.Zones {
 				go func(z ZoneName) {
 					if err := lem.onLeaderElected(z); err != nil {
-						lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+						logLeaderCallback("onLeaderElected", err, "zone", z, "group", groupHash[:8])
 					}
 				}(zone)
 			}
@@ -994,6 +1025,13 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // Nothing in this function can see that agent's view. A leader that acts only
 // when the views of a zone agree is what closes it (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	// The parent work under way for the zone belongs to the hold of the lead
+	// it began in, the zone's own election's or the group's it left. From
+	// now on a loss of the new group's lead is the one that ends this
+	// agent's lead of the zone.
+	if lem.onZoneRegrouped != nil {
+		lem.onZoneRegrouped(zone)
+	}
 	if lem.onZoneJoined == nil {
 		return
 	}
@@ -1016,7 +1054,7 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 		"zone", zone, "group", shortHash(to), "was_in", was)
 	go func() {
 		if err := lem.onZoneJoined(zone); err != nil {
-			lgElect.Error("onZoneJoined callback failed", "zone", zone, "group", shortHash(to), "error", err)
+			logLeaderCallback("onZoneJoined", err, "zone", zone, "group", shortHash(to))
 		}
 	}()
 }
@@ -1156,6 +1194,98 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 		return "", false
 	}
 	return le.Leader, true
+}
+
+// noteLeaderLocked keeps le.leadStart, the number of this agent's present
+// lead, as an election names its leader (under le.mu, with le.Term the new
+// term). A renewal names this agent again while its lease runs, and keeps
+// the number; a lead after another agent's, an invalidated or a lapsed one
+// gets the next number of the manager's (leads), unique across every
+// election here; another agent's lead clears it.
+//
+// It keeps le.holdStart too, the lead that began this agent's present hold:
+// every lead this agent takes until another agent leads belongs to the hold,
+// a new number after an invalidation or a lapsed lease included. Another
+// agent named leader ends the hold, and what this agent began for the parent
+// in any lead of it is stopped (onLeadLost). An invalidation names nobody: the
+// hold is kept until an agent is named, and ends then if that agent is
+// another.
+func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
+	if leader != "" && lem.onLeaderNamed != nil {
+		lem.hooks.Add(1)
+		go func() {
+			defer lem.hooks.Done()
+			lem.onLeaderNamed()
+		}()
+	}
+	if leader != lem.localID {
+		if lost := le.holdStart; leader != "" && lost != 0 {
+			le.holdStart = 0
+			if lem.onLeadLost != nil {
+				lem.hooks.Add(1)
+				go func() {
+					defer lem.hooks.Done()
+					lem.onLeadLost(lost)
+				}()
+			}
+		}
+		le.leadStart = 0
+		return
+	}
+	if le.Leader != lem.localID || le.leadStart == 0 || now.After(le.LeaderExpiry) {
+		le.leadStart = lem.leads.Add(1)
+	}
+	if le.holdStart == 0 {
+		le.holdStart = le.leadStart
+	}
+}
+
+// LeadStart names this agent's present lead of the zone (noteLeaderLocked),
+// as IsLeader finds the zone's election: its provider group's when that has
+// a leader, else the zone's own. Zero when it does not lead the zone.
+func (lem *LeaderElectionManager) LeadStart(zone ZoneName) uint64 {
+	lead, _ := lem.leadNumbers(zone)
+	return lead
+}
+
+// LeadHold names this agent's present hold of the zone's lead (holdStart):
+// what stays the same while this agent leads, through the new numbers it
+// takes on the way, and what onLeadLost names when another agent takes the
+// lead. Zero when it does not lead the zone.
+func (lem *LeaderElectionManager) LeadHold(zone ZoneName) uint64 {
+	_, hold := lem.leadNumbers(zone)
+	return hold
+}
+
+// leadNumbers is this agent's present lead of the zone and the hold it
+// belongs to, from the election IsLeader finds.
+func (lem *LeaderElectionManager) leadNumbers(zone ZoneName) (lead, hold uint64) {
+	if !lem.IsLeader(zone) {
+		return 0, 0
+	}
+	group := ""
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			if _, led := lem.GetGroupLeader(pg.GroupHash); led {
+				group = pg.GroupHash
+			}
+		}
+	}
+	lem.mu.RLock()
+	var le *LeaderElection
+	var ok bool
+	if group != "" {
+		le, ok = lem.groupElections[group]
+	} else {
+		le, ok = lem.elections[zone]
+	}
+	lem.mu.RUnlock()
+	if !ok || le == nil {
+		return 0, 0
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	return le.leadStart, le.holdStart
 }
 
 // IsLeader returns true if the local agent is the current leader for a zone.
@@ -1314,6 +1444,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 
 	// Single agent: become leader immediately
 	if expectedPeers == 0 {
+		lem.noteLeaderLocked(le, lem.localID, time.Now())
 		le.Leader = lem.localID
 		le.leaderTerm = le.Term
 		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -1325,7 +1456,7 @@ func (lem *LeaderElectionManager) startElection(zone ZoneName, expectedPeers int
 		if lem.onLeaderElected != nil {
 			go func() {
 				if err := lem.onLeaderElected(zone); err != nil {
-					lgElect.Error("onLeaderElected callback failed", "zone", zone, "error", err)
+					logLeaderCallback("onLeaderElected", err, "zone", zone)
 				}
 			}()
 		}
@@ -1648,6 +1779,7 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 		return
 	}
 
+	lem.noteLeaderLocked(le, agreedWinner, time.Now())
 	le.Leader = agreedWinner
 	le.leaderTerm = le.Term
 	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
@@ -1663,7 +1795,7 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 	if isUs && lem.onLeaderElected != nil {
 		go func() {
 			if err := lem.onLeaderElected(zone); err != nil {
-				lgElect.Error("onLeaderElected callback failed", "zone", zone, "error", err)
+				logLeaderCallback("onLeaderElected", err, "zone", zone)
 			}
 		}()
 	}
@@ -1867,7 +1999,7 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		State:           tdns.Sig0StateActive,
 		PrivateKeyCache: pkc,
 	}
-	resp, err := hdb.Sig0KeyMgmt(nil, kp)
+	resp, err := sig0KeyMgmtRetried(hdb.KeyDB, kp)
 	if err != nil {
 		return fmt.Errorf("Sig0KeyMgmt add failed: %v", err)
 	}
@@ -1875,6 +2007,15 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("Sig0KeyMgmt add error: %s", resp.ErrorMsg)
 	}
 	lgElect.Info("imported SIG(0) key from peer", "name", keyName, "algorithm", algorithm, "keyid", pkc.KeyId)
+	// One active key per zone (step 7b): with the key added, every other
+	// active key is retired, so that a failed import never leaves the agent
+	// without one. A retire that fails leaves the zone's key not held; it is
+	// tried again at the next check of the key.
+	if zk, err := readZoneKey(hdb.KeyDB, ZoneName(keyName)); err == nil && zk.held != nil && zk.held.keyid == pkc.KeyId {
+		if only, err := retireOtherActiveKeys(hdb.KeyDB, ZoneName(keyName), zk); err != nil || !only {
+			lgElect.Warn("the imported SIG(0) key is not yet the zone's only active key", "zone", keyName, "keyid", pkc.KeyId, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -1998,6 +2139,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 			switch {
 			case !caughtUp:
 				status.ParentSync = "held until the zone is caught up"
+			case t.owedForKey(zone):
+				// why it waits is the key hold's line (KeyHold)
+				status.ParentSync = "owed for the zone's SIG(0) key"
 			case room:
 				status.ParentSync = "owed, the delegation sync queue is full"
 			case down:
@@ -2017,17 +2161,15 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	if targetName == "" {
 		targetName = string(zone)
 	}
-	sak, err := hdb.GetSig0Keys(targetName, tdns.Sig0StateActive)
-	if err == nil && len(sak.Keys) > 0 {
-		key := sak.Keys[0]
-		status.KeyAlgorithm = dns.AlgorithmToString[key.Algorithm]
-		status.KeyID = key.KeyId
-		status.KeyRR = key.KeyRR.String()
+	if key, err := firstActiveSig0Key(hdb.KeyDB, targetName); err == nil && key != nil {
+		status.KeyAlgorithm = dns.AlgorithmToString[key.key.Algorithm]
+		status.KeyID = key.keyid
+		status.KeyRR = key.key.String()
 
 		// Read parent_state from keystore
 		var parentState int
 		row := hdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
-			targetName, key.KeyId)
+			targetName, key.keyid)
 		if err := row.Scan(&parentState); err == nil {
 			status.ParentState = uint8(parentState)
 			status.ParentStateName = edns0.KeyStateToString(uint8(parentState))
@@ -2037,8 +2179,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// 3. Check apex records
 	owner, err := zd.GetOwner(zd.ZoneName)
 	if err == nil && owner != nil {
-		if _, keyExists := owner.RRtypes.Get(dns.TypeKEY); keyExists {
+		if keys, keyExists := owner.RRtypes.Get(dns.TypeKEY); keyExists {
 			status.ApexPublished = true
+			status.ApexKeys = len(keys.RRs)
 		}
 		if cdsRRset, exists := owner.RRtypes.Get(dns.TypeCDS); exists && len(cdsRRset.RRs) > 0 {
 			status.CdsPublished = true
@@ -2184,4 +2327,17 @@ func pickActiveSyncScheme(schemes []string, rdata []*core.DSYNC) string {
 		}
 	}
 	return ""
+}
+
+// logLeaderCallback logs a leader's callback that failed (onLeaderElected,
+// onZoneJoined). A zone whose SIG(0) key this agent does not hold yet is an
+// expected state of the key's set-up: the set-up says so at INFO, the sync
+// is held for the key, and the rounds ask for it. That one is DEBUG here;
+// anything else is an error.
+func logLeaderCallback(callback string, err error, args ...any) {
+	if errors.Is(err, errZoneKeyNotHeld) {
+		lgElect.Debug(callback+": the zone's SIG(0) key is not held yet", append(args, "error", err)...)
+		return
+	}
+	lgElect.Error(callback+" callback failed", append(args, "error", err)...)
 }

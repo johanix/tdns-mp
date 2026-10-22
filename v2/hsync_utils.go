@@ -1508,6 +1508,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 				analysis.NewVoters = append(analysis.NewVoters, AgentId(id))
 			}
 		}
+		analysis.KeyChanged = !sameKeyRRset(oldApex, newApex)
 	}
 
 	// DNSKEY change detection — only for roles that actually act on

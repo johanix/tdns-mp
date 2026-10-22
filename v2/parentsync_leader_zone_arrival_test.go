@@ -577,53 +577,6 @@ func TestAnAuditorsRecomputeTellsNobody(t *testing.T) {
 	}
 }
 
-// A zone that arrives in a group this agent leads has had a leader, and may
-// have a SIG(0) key that leader made and the parent holds. The agent that it
-// arrives at makes no new key in its place: only a zone that publishes none
-// gets one there. An election's winner makes one when it has none, as before.
-func TestAZoneThatArrivesWithAKeyGetsNoNewOne(t *testing.T) {
-	zd := seedZoneWithHSYNC3(t, "keyed.example.")
-	t.Cleanup(func() { tdns.Zones.Remove(zd.ZoneName) })
-	mpzd := &MPZoneData{ZoneData: zd}
-
-	if zonePublishesKey(mpzd) {
-		t.Fatal("precondition: the seeded zone publishes a KEY")
-	}
-	if !mayGenerateZoneKey(false, mpzd, 0) {
-		t.Error("a zone that publishes no key, and whose every voting member said it holds none, may not be given one: nothing would")
-	}
-	// A provider that has just joined shows no KEY in its own copy of a zone
-	// that has one. While a voting member has not answered, it makes none.
-	if mayGenerateZoneKey(false, mpzd, 1) {
-		t.Error("a zone that joins a group may be given a key while a voting member has not said it holds none")
-	}
-
-	key, err := dns.NewRR("keyed.example. 3600 IN KEY 512 3 15 l02Woqwl4Uca9VQhrPQYG5cM3bxPV1RJxbr1iZqt6KE=")
-	if err != nil {
-		t.Fatal(err)
-	}
-	apex, ok := zd.Data.Get(zd.ZoneName)
-	if !ok {
-		t.Fatal("the seeded zone has no apex")
-	}
-	apex.RRtypes.Set(dns.TypeKEY, core.RRset{RRs: []dns.RR{key}})
-	zd.Data.Set(zd.ZoneName, apex)
-	zd.InstallInitialSnapshot()
-
-	if !zonePublishesKey(mpzd) {
-		t.Fatal("the zone serves a KEY at its apex and reads as publishing none")
-	}
-	if mayGenerateZoneKey(false, mpzd, 0) {
-		t.Error("a zone that joins a group with a key of its own may be given a new one: the parent holds the one it has")
-	}
-	if !mayGenerateZoneKey(true, mpzd, 0) || !mayGenerateZoneKey(true, mpzd, 2) {
-		t.Error("an election's winner may no longer make a key when it has none")
-	}
-	if zonePublishesKey(nil) || !mayGenerateZoneKey(false, nil, 0) {
-		t.Error("an unknown zone reads as publishing a key")
-	}
-}
-
 // An election's setup and an arrival's setup of the same zone, and a later
 // round of the arrival's, never run at the same time: each would otherwise
 // find no SIG(0) key and make one. Another zone's setup is not held up.

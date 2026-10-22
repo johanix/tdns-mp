@@ -173,6 +173,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// that arrives outside this engine. Its owed sync is asked for
 			// here.
 			conf.InternalMp.CatchUp.askAllOwed(ctx, false)
+			// the backstop for the syncs held for a zone's SIG(0) key, off
+			// this goroutine: the test reads the keystore and asks the
+			// resolver
+			conf.retestKeyHoldsInBackground(ctx)
 
 		case <-owedRoomTicker.C:
 			if conf.InternalMp.CatchUp.roomWaits() {
@@ -343,6 +347,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
 					stored := time.Now()
+					// A remote KEY operation that changed this agent's data is
+					// the first sign of a new zone key: the leader's replace
+					// reaches every member. The key is checked (step 7b); the
+					// rounds run on the tracker's goroutine.
+					if err == nil && change && synchedDataUpdate.Update != nil &&
+						slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
+						conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+					}
 					// The operations as they arrived, stale replaces too:
 					// the confirmation to the sender names what the repo
 					// holds of each. A stale replace's records are there
