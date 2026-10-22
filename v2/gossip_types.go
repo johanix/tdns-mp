@@ -62,7 +62,8 @@ type GossipStateTable struct {
 // --- From provider_groups.go ---
 
 // ProviderGroup represents a set of providers that together serve a group of zones.
-// The group is identified by a hash of the sorted member identities.
+// The group is its make-up (step 8): who votes, who audits and who is listed
+// with no role, and it is identified by a hash of the three lists.
 //
 // Locking: read or modify any *ProviderGroup field only while
 // holding pgm.mu (RLock for read, Lock for write). RecomputeGroups
@@ -70,18 +71,21 @@ type GossipStateTable struct {
 // NameProposal in place — so callers cannot assume the struct is
 // immutable once stored. Snapshot fields under the lock.
 type ProviderGroup struct {
-	GroupHash string     // truncated SHA-256 of sorted member identities
+	GroupHash string     // truncated SHA-256 of the make-up (ComputeGroupHash)
 	Name      string     // human-friendly name (resolved via naming protocol)
-	Members   []string   // sorted provider identities (FQDNs) — all HSYNC3 participants regardless of role
-	Zones     []ZoneName // zones served by this exact set of providers
-	// VotingMembers is the subset of Members that may participate
-	// in leader elections — derived from union(HSYNCPARAM.signers,
-	// HSYNCPARAM.servers) translated through HSYNC3 labels to
-	// identities. Non-voting roles (e.g. auditors) appear in
-	// Members but not here. Quorum computations and initiator
+	Members   []string   // sorted provider identities (FQDNs): every member, whatever its role (the gossip membership)
+	Zones     []ZoneName // zones of this exact make-up
+	// VotingMembers is the subset of Members that may participate in
+	// leader elections: HSYNCPARAM's servers and signers, translated
+	// through HSYNC3 labels to identities. Every zone of the group has the
+	// same ones. Quorum computations, the election gate and initiator
 	// selection MUST use VotingMembers, not Members.
 	VotingMembers []string
-	NameProposal  *GroupNameProposal // our proposal for this group's name
+	// Auditors: the members in auditors= only. NoRole: members listed with
+	// no role, empty until step 10.
+	Auditors     []string
+	NoRole       []string
+	NameProposal *GroupNameProposal // our proposal for this group's name
 }
 
 // ProviderGroupManager manages provider group computation and naming.
@@ -112,6 +116,9 @@ type ProviderGroupManager struct {
 	// onZoneJoinedGroup is told of each zone a recompute has put into a
 	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
 	onZoneJoinedGroup func(zone ZoneName, from, to string)
+	// onZoneLeftGroup is told of each zone a recompute has taken out of the
+	// group it was in, wherever it went: another group, or none (step 8).
+	onZoneLeftGroup func(zone ZoneName, from, to string)
 	// onGroupGone is told of each group a recompute has dropped: its last
 	// zone has left it (SetOnGroupGone). Guarded by mu.
 	onGroupGone func(groupHash string)
@@ -148,6 +155,10 @@ type LeaderElection struct {
 	// follows another agent's, an invalidated or a lapsed one gets a new
 	// one. Zero while another agent leads (noteLeaderLocked).
 	leadStart uint64
+	// startZones: the group's zones when its election started (step 8,
+	// design 4.1). The election's end tells a zone that arrived during it
+	// from the zones it was held for.
+	startZones []ZoneName
 	// holdStart names this agent's present hold of the lead: the lead
 	// (leadStart) that began it. A renewal keeps it, and so does every new
 	// lead this agent takes while no other agent has led in between: an
@@ -188,6 +199,7 @@ type LeaderElectionManager struct {
 	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
+	onZoneLeft           func(zone ZoneName) bool  // ends what is scheduled for the parent of a zone that left its group (step 8)
 	onZoneRegrouped      func(zone ZoneName)       // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
 	onLeaderNamed        func()                    // called when an election names a leader, this agent or another (SetOnLeaderNamed)
 	onLeadLost           func(hold uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)

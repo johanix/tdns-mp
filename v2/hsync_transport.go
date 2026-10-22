@@ -938,7 +938,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 				for i := range gossipMsgs {
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
 					if pg != nil {
-						tm.agentRegistry.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+						tm.agentRegistry.GossipStateTable.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 					}
 				}
 			}
@@ -1887,7 +1887,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], string(agent.ID), pg, true)
 					// Re-evaluate group state after merge (may trigger elections)
 					if pg != nil {
-						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.Members)
+						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.VotingMembers)
 					}
 				}
 				lgTransport.Debug("merged gossip from beat response EDNS(0) CHUNK", "peer", peer.ID, "groups", len(gossipMsgs))

@@ -313,9 +313,22 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 				initiator = m
 			}
 		}
-		if dns.Fqdn(string(lem.localID)) == dns.Fqdn(initiator) {
-			lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
+		if dns.Fqdn(string(lem.localID)) != dns.Fqdn(initiator) {
+			return
 		}
+		// A leader whose lease runs is held already when this agent
+		// restarted inside it: a beat merges the peers' gossip, and with it
+		// the group's term and leader (ApplyGossipElection), before the
+		// matrix is checked. An election now would end that lease early.
+		// A group that degraded had its leader cleared
+		// (InvalidateGroupLeader), and a new group has none: those elect.
+		// The operator's election is started elsewhere, and still is.
+		if leader, ok := lem.GetGroupLeader(groupHash); ok {
+			lgElect.Info("group operational with a leader whose lease runs, no election",
+				"group", shortHash(groupHash), "leader", leader)
+			return
+		}
+		lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
 	})
 	ar.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
 		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
@@ -344,14 +357,12 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 	ar := conf.InternalMp.AgentRegistry
 	wireAgentGossipCallbacks(conf, ar)
 	deps, cfg := buildHsyncEngineDeps(conf)
-	// Agent-only: gate the diff on local HSYNC3 presence (weAreInHSYNC) and
-	// re-home the removal teardown + RFI/election side effects of UpdateAgents.
+	// Agent-only: gate the diff on the local agent's standing, and run the
+	// removal teardown. The zone's election is checked after the diff, by
+	// zoneChanged (step 8).
 	deps.GateOnLocalPresence = true
 	deps.Host.OnLocalRemoved = func(zone hsync.ZoneName) {
 		ar.localRemovedFromZone(ZoneName(zone))
-	}
-	deps.Host.OnHsyncMembersAdded = func(zone hsync.ZoneName, added []hsync.PeerID, localAdded bool) {
-		ar.reattachHsyncMemberAdds(ZoneName(zone), added, localAdded)
 	}
 	return hsync.NewEngine(deps, cfg)
 }
@@ -473,7 +484,7 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 				// for this round, the callback's read waited for the
 				// recompute, and the agent beat no more (tdns-mp #180).
 				for _, pg := range ar.ProviderGroupManager.GetGroups() {
-					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 				}
 			},
 		},

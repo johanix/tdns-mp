@@ -278,9 +278,10 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// without the DS set until the keys change again
 					//
 					// A sync that was stopped because this agent no longer
-					// takes part in the zone (followParentSyncParam) is not a
-					// failure to ask again for.
-					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
+					// takes part in the zone (followParentSyncParam), or no
+					// longer leads it (the zone left the group it led, step
+					// 8), is not a failure to ask again for.
+					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName) {
 						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
 					}
 				} else {

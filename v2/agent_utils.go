@@ -269,36 +269,6 @@ func (ar *AgentRegistry) localRemovedFromZone(zone ZoneName) {
 	ar.CleanupZoneRelationships(zone)
 }
 
-// reattachHsyncMemberAdds re-homes the membership-change election kick that used
-// to live in UpdateAgents. It is driven by the member-add set ApplyHsyncDiff
-// already computed (HSYNCPARAM-gated), so a role-less identity does not kick an
-// election. Discovery of the added members is ApplyHsyncDiff's MarkNeeded, with
-// the periodic ReconcileZone behind it.
-//
-// UpdateAgents also queued a CONFIG upstream/downstream RFI here for a new
-// upstream or downstream. Nothing ever consumed the answer, and since
-// CommandHandler switches on Command the request was dropped unsent, so those
-// tasks are gone. The debug CLI's send-rfi still asks for CONFIG on demand.
-func (ar *AgentRegistry) reattachHsyncMemberAdds(zonename ZoneName, added []hsync.PeerID, localAdded bool) {
-	if len(added) == 0 && !localAdded {
-		return
-	}
-
-	// Membership changed (HSYNC3 identity add): a zone without peers elects
-	// its one agent here. A zone in a provider group starts nothing here:
-	// its election is the group's (leaveElectionToGroup).
-	if ar.LeaderElectionManager != nil {
-		lem := ar.LeaderElectionManager
-		if lem.configuredPeers(zonename) == 0 {
-			lem.StartElection(zonename, 0)
-		} else if ar.ProviderGroupManager != nil {
-			if pg := ar.ProviderGroupManager.GetGroupForZone(zonename); pg != nil {
-				lem.leaveElectionToGroup(pg.GroupHash)
-			}
-		}
-	}
-}
-
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.Mu.Lock()
 	agent.Deferred = append(agent.Deferred, *task)

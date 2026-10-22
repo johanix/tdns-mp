@@ -671,19 +671,45 @@ func (conf *Config) delegationSyncOwnerSyncs(zone string) {
 	}
 }
 
+// delegationSyncZoneLeft ends what this agent has scheduled for the parent
+// of a zone that has left its group and that it does not lead now (step 8):
+// the chain, a held NOTIFY with it, the owed sync, and every sync under way,
+// cancelled under the chains' lock at once. A sync can sit in tdns's UPDATE
+// retry loop for a minute or more after a REFUSED, and the loop asks only
+// its context whether to go on: ending the chain alone would leave it
+// sending after the lead has moved. It says whether there was a chain or a
+// run to end.
+func (conf *Config) delegationSyncZoneLeft(zone string) bool {
+	hold, chained, n := conf.endDelegationSyncWorkOf(zone)
+	if hold != nil {
+		lgEngine.Info("the held NOTIFY is dropped: this agent no longer leads the zone", "zone", zone, "notify", notifyTypes(hold.notifies))
+	}
+	if n > 0 {
+		lgEngine.Info("the delegation sync under way is stopped: this agent no longer leads the zone", "zone", zone, "syncs", n)
+	}
+	return chained || n > 0
+}
+
 // endDelegationSyncWork ends what this agent has scheduled for the zone's
 // parent, as delegationSyncOwnerSyncs does: the chain, a held NOTIFY with it,
 // and every sync under way, the key poll included, under the chains' lock at
 // once. It says whether there was a chain or a run to end.
 func (conf *Config) endDelegationSyncWork(zone string) bool {
+	_, chained, n := conf.endDelegationSyncWorkOf(zone)
+	return chained || n > 0
+}
+
+// endDelegationSyncWorkOf is endDelegationSyncWork, with the hold the chain
+// had, whether there was a chain, and how many runs it cancelled.
+func (conf *Config) endDelegationSyncWorkOf(zone string) (hold *delegationNotifyHold, chained bool, runs int) {
 	c := &conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
-	_, chained := c.zones[zone]
-	c.endChainLocked(zone)
-	n := c.cancelRunsLocked(zone)
+	_, chained = c.zones[zone]
+	hold = c.endChainLocked(zone)
+	runs = c.cancelRunsLocked(zone)
 	c.mu.Unlock()
 	conf.InternalMp.CatchUp.clearOwed(ZoneName(zone))
-	return chained || n > 0
+	return hold, chained, runs
 }
 
 // delegationSyncRun gives a leader sync of the zone a context of its own,
@@ -1174,6 +1200,13 @@ func forwardNotifies(ctx context.Context, out chan tdns.NotifyRequest, notifies 
 			return
 		}
 	}
+}
+
+// stillLeads: this agent leads the zone, as the election manager has it
+// now. With no election manager (a zone tdns runs alone) it does.
+func (conf *Config) stillLeads(zone string) bool {
+	lem := conf.InternalMp.LeaderElectionManager
+	return lem == nil || lem.IsLeader(ZoneName(zone))
 }
 
 // mpLeaderSync: the request is for a multi-provider zone that syncs with its

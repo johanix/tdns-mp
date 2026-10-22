@@ -75,12 +75,6 @@ type HostCallbacks struct {
 	OnElectionGossip   func(groupHash string, state GroupElectionState)
 	OnLocalRemoved     func(zone ZoneName)
 	BeforeHeartbeats   func()
-	// OnHsyncMembersAdded fires after ApplyHsyncDiff has registered member
-	// adds for a zone, carrying the (HSYNCPARAM-gated, non-local) added
-	// identities and whether the local identity was itself added. The agent
-	// uses it to re-home the upstream/downstream CONFIG RFI deferred tasks and
-	// the membership-change election kick that used to live in UpdateAgents.
-	OnHsyncMembersAdded func(zone ZoneName, added []PeerID, localAdded bool)
 }
 
 // PeerHooks are optional callbacks when registry peers change.

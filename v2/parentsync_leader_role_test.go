@@ -168,11 +168,12 @@ func zoneState(lem *LeaderElectionManager, zone ZoneName) (term uint64, active b
 }
 
 // An agent with a record and no role in a zone starts no election for it,
-// from any of the six callers. Its count is not zero: it counts the zone's
+// from any of its callers. Its count is not zero: it counts the zone's
 // voting member. From the lease renewal, the operator's parentsync-election,
 // NotifyPeerOperational and the retry after no consensus it is the guard in
-// startElection that stops it. The first-load callback defers, and the hook
-// for an HSYNC3 add starts nothing; neither calls StartElection.
+// startElection that stops it. At the first load and at every HSYNC change
+// zoneChanged drops the zone's own election and starts nothing (step 8), and
+// the first-load callback does nothing for a zone with an HSYNC3 RRset.
 func TestAnAgentWithNoRoleStartsNoElection(t *testing.T) {
 	const ttl = 300 * time.Millisecond
 	zoneName := "norole.elect.example."
@@ -246,20 +247,25 @@ func TestAnAgentWithNoRoleStartsNoElection(t *testing.T) {
 		quiet(t, lem, rec, 1)
 	})
 
-	t.Run("the first load", func(t *testing.T) {
+	t.Run("the first load and an HSYNC change", func(t *testing.T) {
 		zd := seedRoles(t, zoneName, []string{roleA}, nil, []string{roleN})
 		zd.Options[tdns.OptParentSync] = true
 		lem, rec := newRoleLEM(t, roleN, ttl)
+		// a per-zone result it holds from before it lost its role
+		le := lem.getOrCreate(zone)
+		le.mu.Lock()
+		le.Leader, le.leaderTerm = AgentId(roleN), 0
+		le.LeaderExpiry = time.Now().Add(time.Hour)
+		le.mu.Unlock()
 		lem.electAtFirstLoad(zd)
+		lem.zoneChanged(zone)
 		quiet(t, lem, rec, 0)
-	})
-
-	t.Run("an HSYNC3 add", func(t *testing.T) {
-		seedRoles(t, zoneName, []string{roleA}, nil, []string{roleN})
-		lem, rec := newRoleLEM(t, roleN, ttl)
-		ar := &AgentRegistry{LeaderElectionManager: lem}
-		ar.reattachHsyncMemberAdds(zone, nil, true)
-		quiet(t, lem, rec, 0)
+		lem.mu.RLock()
+		_, held := lem.elections[zone]
+		lem.mu.RUnlock()
+		if held {
+			t.Error("the agent with no role still holds the zone's own election")
+		}
 	})
 }
 
@@ -821,9 +827,10 @@ func TestACancelledKeyPollStartsAgainOnlyWhenCancelled(t *testing.T) {
 }
 
 // A zone with one provider, and a second agent that has a record and no
-// role, has one leader: the provider's agent. The other agent counts the
-// provider, defers, and starts nothing when the provider is OPERATIONAL. At
-// each lease renewal the provider elects itself again, and nobody else.
+// role, has one leader: the provider's agent. At the first load zoneChanged
+// elects the provider's agent, and starts nothing at the other (step 8); the
+// other starts nothing either when the provider is OPERATIONAL. At each
+// lease renewal the provider elects itself again, and nobody else.
 func TestOneProviderAndAnAgentWithNoRoleHaveOneLeader(t *testing.T) {
 	const ttl = 400 * time.Millisecond
 	zd := seedRoles(t, "zone.example.", []string{roleA}, nil, []string{roleN})
@@ -836,8 +843,8 @@ func TestOneProviderAndAnAgentWithNoRoleHaveOneLeader(t *testing.T) {
 		t.Fatalf("the counts are %d and %d, want 0 for the provider and 1 for the agent with no role", ca, cn)
 	}
 
-	a.electAtFirstLoad(zd)
-	other.electAtFirstLoad(zd)
+	a.zoneChanged(n.zone)
+	other.zoneChanged(n.zone)
 	other.NotifyPeerOperational([]ZoneName{n.zone})
 	if _, _, leader := n.state(AgentId(roleA)); leader != AgentId(roleA) {
 		t.Errorf("the provider's agent did not elect itself: leader %q", leader)

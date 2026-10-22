@@ -334,7 +334,7 @@ func TestALeaseRenewalIsForTheGroupAsItIsThen(t *testing.T) {
 // from when the timer was armed.
 func TestAOneVoterGroupRenewsForAZoneAddedSince(t *testing.T) {
 	const ttl = 2 * time.Second
-	r := newGroupRig(t, []string{arrivalA, arrivalX}, arrivalA)
+	r := newAuditedGroupRig(t, []string{arrivalA}, []string{arrivalX}, arrivalA)
 	r.leases(ttl)
 	first := providerZone(t, "first.onevoter.example.", arrivalA)
 	voteless(t, first, serve(arrivalA), arrivalX)
@@ -367,13 +367,15 @@ func TestAOneVoterGroupRenewsForAZoneAddedSince(t *testing.T) {
 }
 
 // A member whose vote the owner has taken away renews nothing. Here the
-// group's one voter and its member without a vote change places: the group
-// is the same, and this agent, which led it, is no longer among its voting
-// members when its renewal is due. It used to elect itself once more, from
-// the list of voting members it had when the timer was armed.
+// group's one voter and its member without a vote change places. Since step
+// 8 the group is its make-up, so that is another group: the one this agent
+// led is gone, with its election and its timers, and in the new one this
+// agent has no vote and starts nothing. It used to be the same group, and
+// this agent elected itself once more from the list of voting members it had
+// when the timer was armed.
 func TestAGroupMemberWithoutAVoteRenewsNothing(t *testing.T) {
 	const ttl = 2 * time.Second
-	r := newGroupRig(t, []string{arrivalA, arrivalX}, arrivalA)
+	r := newAuditedGroupRig(t, []string{arrivalA}, []string{arrivalX}, arrivalA)
 	r.leases(ttl)
 	zone := providerZone(t, "roles.onevoter.example.", arrivalA)
 	voteless(t, zone, serve(arrivalA), arrivalX)
@@ -385,8 +387,13 @@ func TestAGroupMemberWithoutAVoteRenewsNothing(t *testing.T) {
 
 	voteless(t, zone, serve(arrivalX), arrivalA)
 	r.refresh()
-	if pg := r.pgms[arrivalA].GetGroup(r.net.group); pg == nil || !slices.Equal(pg.VotingMembers, []string{arrivalX}) {
-		t.Fatalf("after the roles changed the group is %+v, want it with %s as its one voting member", pg, arrivalX)
+	if pg := r.pgms[arrivalA].GetGroup(r.net.group); pg != nil {
+		t.Fatalf("after the roles changed the group this agent led is still there: %+v", pg)
+	}
+	swapped := ComputeGroupHash([]string{arrivalX}, []string{arrivalA}, nil)
+	if pg := r.pgms[arrivalA].GetGroupForZone(ZoneName(zone.ZoneName)); pg == nil || pg.GroupHash != swapped ||
+		!slices.Equal(pg.VotingMembers, []string{arrivalX}) {
+		t.Fatalf("after the roles changed the zone's group is %+v, want the group with %s as its one voting member", pg, arrivalX)
 	}
 
 	// Past the end of the lease.
@@ -394,8 +401,10 @@ func TestAGroupMemberWithoutAVoteRenewsNothing(t *testing.T) {
 	if got := r.take(0); len(got) != 0 {
 		t.Errorf("the member without a vote renewed the lease and asked %+v", got)
 	}
-	if leader, ok := r.lems[arrivalA].GetGroupLeader(r.net.group); ok {
-		t.Errorf("past the lease the group's leader here is %s, want none: the member without a vote elected nobody", leader)
+	for _, hash := range []string{r.net.group, swapped} {
+		if leader, ok := r.lems[arrivalA].GetGroupLeader(hash); ok {
+			t.Errorf("past the lease group %s's leader here is %s, want none: the member without a vote elected nobody", hash, leader)
+		}
 	}
 }
 

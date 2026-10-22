@@ -114,6 +114,13 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// (NewHsyncDataEngine sets it). Same order as the auditor since #39.
 	dataEngine := NewHsyncDataEngine(conf)
 
+	// The leader election manager, its callbacks and the zones' first-load
+	// callbacks are in place before RefreshEngine starts: a first load it
+	// handles before them would skip the election's check of the zone
+	// (zoneChanged), the first-load election and the parentsync detection
+	// (step 8; the hsync engine moved for the same reason, #39).
+	conf.setUpLeaderElection(ctx, mp)
+
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
 	})
@@ -135,7 +142,104 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
 	}
 
-	// Leader election manager for coordinated parent delegation sync (DDNS)
+	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so
+	// the leader can send NOTIFY(CDS), but writes no CDS for a
+	// multi-provider zone: it holds none of the zone's keys and signs none
+	// of them, so the CDS such a zone serves is the signers' (design §4.1,
+	// arrow 1), and the DS set the agent hands the parent goes through the
+	// owner's DS-intent provider (arrow 2). The one zone the engine writes
+	// a CDS for is the agent's own identity zone (T5.6).
+	//
+	// Agent-specific engines (the hsync data engine itself was constructed
+	// above, before RefreshEngine)
+	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
+		dataEngine.Run(ctx, conf.InternalMp.MsgQs)
+	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "InfraBeatLoop", func() {
+		conf.InternalMp.AgentRegistry.StartInfraBeatLoop(ctx)
+	})
+	tdns.StartEngineNoError(&tdns.Globals.App, "SynchedDataEngine", func() {
+		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
+	})
+
+	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
+	if err != nil {
+		return fmt.Errorf("error setting up agent-to-agent sync router: %v", err)
+	}
+	tdns.StartEngine(&tdns.Globals.App, "APIdispatcherNG", func() error {
+		lgAgent.Info("starting agent-to-agent sync engine",
+			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
+		return tdns.APIdispatcherNG(conf.Config, syncrtr,
+			mp.Api.Addresses.Listen,
+			mp.Api.CertFile,
+			mp.Api.KeyFile,
+			conf.Config.Internal.APIStopCh)
+	})
+
+	tdns.StartEngineNoError(&tdns.Globals.App, "AuthQueryEngine", func() {
+		tdns.AuthQueryEngine(ctx, conf.Config.Internal.AuthQueryQ)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "ScannerEngine", func() error {
+		return tdns.ScannerEngine(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
+		return hdb.ZoneUpdaterEngine(ctx)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
+		return tdns.UpdateHandler(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
+		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
+	})
+	// tdns's DS engine. The syncher asks it for the CDS before every
+	// NOTIFY(CDS), and with no engine to answer, the leader sent none: a
+	// parent that offers only the NOTIFY scheme never got the zone's DS
+	// (tdns-mp #150). For a multi-provider zone, which the agent does not
+	// sign, the engine publishes nothing: its answer is the CDS that the
+	// agent's copy of the zone carries, the one the signers serve (key
+	// lifecycle ownership design §4.1, Amendment 3). The zone it does write
+	// a CDS for is the agent's own identity zone (startIdentityParentSync).
+	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
+		return hdb.DSEngine(ctx)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
+		return tdns.NotifyHandler(ctx, conf.Config)
+	})
+	tdns.StartEngine(&tdns.Globals.App, "DnsEngine", func() error {
+		return tdns.DnsEngine(ctx, conf.Config)
+	})
+
+	// Setup agent identity and publish transport records. Must run after
+	// ZoneUpdaterEngine is started, because PublishUriRR/PublishAddrRR/etc.
+	// send on KeyDB.UpdateQ and block until a consumer drains it.
+	if err := conf.SetupAgent(ctx, conf.Config.Internal.AllZones); err != nil {
+		return fmt.Errorf("SetupAgent: %w", err)
+	}
+
+	return nil
+}
+
+// keySetupApplies: the leader's key setup is for a zone whose parentsync
+// option is on and in which this agent votes. A group's election makes its
+// winner the leader of every zone of the group; since step 8 the winner
+// votes in each of them, and the test guards against a leader record that
+// names this agent for a zone it does not vote in. For such a zone it looks
+// up no parent and asks no peer for the key.
+func keySetupApplies(zd *MPZoneData, self AgentId) (bool, string) {
+	if !zd.Options[tdns.OptParentSync] {
+		return false, "zone does not have OptParentSync, skipping"
+	}
+	if !votesInZone(ZoneName(zd.ZoneName), self) {
+		return false, "this agent does not vote in the zone; no key setup for it"
+	}
+	return true, ""
+}
+
+// setUpLeaderElection makes the leader election manager for coordinated
+// parent delegation sync (DDNS), wires it, sets its callbacks, and attaches
+// the zones' first-load callbacks. StartMPAgent runs it before RefreshEngine
+// starts.
+func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderConf) *LeaderElectionManager {
 	ar := conf.InternalMp.AgentRegistry
 	lem := NewLeaderElectionManager(
 		AgentId(mp.Identity), leaderElectionTTL(),
@@ -228,6 +332,12 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		}
 		return err
 	})
+	// A zone that left its group and that this agent does not lead now:
+	// what it scheduled for the zone's parent ends, a sync under way
+	// included (step 8).
+	lem.SetOnZoneLeft(func(zone ZoneName) bool {
+		return conf.delegationSyncZoneLeft(string(zone))
+	})
 	// A lead this agent lost to another agent ends what it began for the
 	// parent in that lead: the new leader's sync is the one that counts. A
 	// zone that enters a provider group takes that work along to the new
@@ -260,95 +370,5 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		return nil
 	})
-
-	// The agent runs tdns's DS engine (below; design Amendment 3, #161) so
-	// the leader can send NOTIFY(CDS), but writes no CDS for a
-	// multi-provider zone: it holds none of the zone's keys and signs none
-	// of them, so the CDS such a zone serves is the signers' (design §4.1,
-	// arrow 1), and the DS set the agent hands the parent goes through the
-	// owner's DS-intent provider (arrow 2). The one zone the engine writes
-	// a CDS for is the agent's own identity zone (T5.6).
-	//
-	// Agent-specific engines (the hsync data engine itself was constructed
-	// above, before RefreshEngine)
-	tdns.StartEngineNoError(&tdns.Globals.App, "HsyncDataEngine", func() {
-		dataEngine.Run(ctx, conf.InternalMp.MsgQs)
-	})
-	tdns.StartEngineNoError(&tdns.Globals.App, "InfraBeatLoop", func() {
-		conf.InternalMp.AgentRegistry.StartInfraBeatLoop(ctx)
-	})
-	tdns.StartEngineNoError(&tdns.Globals.App, "SynchedDataEngine", func() {
-		conf.SynchedDataEngine(ctx, conf.InternalMp.MsgQs)
-	})
-
-	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
-	if err != nil {
-		return fmt.Errorf("error setting up agent-to-agent sync router: %v", err)
-	}
-	tdns.StartEngine(&tdns.Globals.App, "APIdispatcherNG", func() error {
-		lgAgent.Info("starting agent-to-agent sync engine",
-			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
-		return tdns.APIdispatcherNG(conf.Config, syncrtr,
-			mp.Api.Addresses.Listen,
-			mp.Api.CertFile,
-			mp.Api.KeyFile,
-			conf.Config.Internal.APIStopCh)
-	})
-
-	tdns.StartEngineNoError(&tdns.Globals.App, "AuthQueryEngine", func() {
-		tdns.AuthQueryEngine(ctx, conf.Config.Internal.AuthQueryQ)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "ScannerEngine", func() error {
-		return tdns.ScannerEngine(ctx, conf.Config)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "ZoneUpdaterEngine", func() error {
-		return hdb.ZoneUpdaterEngine(ctx)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "UpdateHandler", func() error {
-		return tdns.UpdateHandler(ctx, conf.Config)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
-		return hdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf)
-	})
-	// tdns's DS engine. The syncher asks it for the CDS before every
-	// NOTIFY(CDS), and with no engine to answer, the leader sent none: a
-	// parent that offers only the NOTIFY scheme never got the zone's DS
-	// (tdns-mp #150). For a multi-provider zone, which the agent does not
-	// sign, the engine publishes nothing: its answer is the CDS that the
-	// agent's copy of the zone carries, the one the signers serve (key
-	// lifecycle ownership design §4.1, Amendment 3). The zone it does write
-	// a CDS for is the agent's own identity zone (startIdentityParentSync).
-	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
-		return hdb.DSEngine(ctx)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "NotifyHandler", func() error {
-		return tdns.NotifyHandler(ctx, conf.Config)
-	})
-	tdns.StartEngine(&tdns.Globals.App, "DnsEngine", func() error {
-		return tdns.DnsEngine(ctx, conf.Config)
-	})
-
-	// Setup agent identity and publish transport records. Must run after
-	// ZoneUpdaterEngine is started, because PublishUriRR/PublishAddrRR/etc.
-	// send on KeyDB.UpdateQ and block until a consumer drains it.
-	if err := conf.SetupAgent(ctx, conf.Config.Internal.AllZones); err != nil {
-		return fmt.Errorf("SetupAgent: %w", err)
-	}
-
-	return nil
-}
-
-// keySetupApplies: the leader's key setup is for a zone whose parentsync
-// option is on and in which this agent votes. A group's election makes its
-// winner the leader of every zone of the group, and the group's voters are
-// those of all its zones together: the winner may not vote in this one. For
-// such a zone it looks up no parent and asks no peer for the key.
-func keySetupApplies(zd *MPZoneData, self AgentId) (bool, string) {
-	if !zd.Options[tdns.OptParentSync] {
-		return false, "zone does not have OptParentSync, skipping"
-	}
-	if !votesInZone(ZoneName(zd.ZoneName), self) {
-		return false, "this agent does not vote in the zone; no key setup for it"
-	}
-	return true, ""
+	return lem
 }
