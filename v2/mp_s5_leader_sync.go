@@ -302,6 +302,10 @@ type delegationSyncChains struct {
 	// returned (delegationSyncRun)
 	runs  map[string]map[uint64]delegationRun
 	runID uint64
+	// retieMu holds one retie at a time, from its reading of the zones'
+	// leads to its change of the runs, so that an older reading does not
+	// undo a newer one (retieRuns, retieAllRuns)
+	retieMu sync.Mutex
 }
 
 // delegationRun is a leader sync under way: its cancel, and the hold of the
@@ -741,36 +745,80 @@ func (conf *Config) holdOf(zone string) uint64 {
 	return 0
 }
 
-// retieRuns ties the zone's leader syncs under way to this agent's present
-// hold of the zone's lead, after the zone entered a provider group
-// (SetOnZoneRegrouped). A run keeps the hold it began in, of the zone's own
-// election or of the group the zone left, and the new group's loss of the
-// lead names the new group's hold: without this a former leader went on
-// with the run after another agent took the new group's lead. Where this
-// agent does not lead the zone in its new group, the runs are stopped. A run
-// begun with no lead is left as it is.
+// retieRuns ties the zone's leader syncs under way to the lead of the zone
+// as it is now (retieRunsTo). It runs when the zone enters a provider group
+// (SetOnZoneRegrouped): a run keeps the hold it began in, of the zone's own
+// election or of the group the zone left, and from then on the new group's
+// loss of the lead is the one that ends this agent's lead of the zone.
 func (conf *Config) retieRuns(zone ZoneName) {
-	conf.retieRunsTo(string(zone), conf.holdOf(string(zone)))
+	c := &conf.InternalMp.delegationSyncChains
+	c.retieMu.Lock()
+	defer c.retieMu.Unlock()
+	hold, other := conf.zoneLeadNow(string(zone))
+	conf.retieRunsTo(string(zone), hold, other)
 }
 
-func (conf *Config) retieRunsTo(zone string, hold uint64) {
+// retieAllRuns ties every leader sync under way to the lead of its zone as
+// it is now. It runs when an election names a leader (SetOnLeaderNamed): a
+// zone that entered a group with no leader yet kept its run on the hold of
+// its own election, and the group's election that followed moved the zone's
+// lead, to this agent under a hold of the group's or to another agent,
+// without a loss of the hold the run began in.
+func (conf *Config) retieAllRuns() {
+	c := &conf.InternalMp.delegationSyncChains
+	c.retieMu.Lock()
+	defer c.retieMu.Unlock()
+	c.mu.Lock()
+	zones := make([]string, 0, len(c.runs))
+	for zone := range c.runs {
+		zones = append(zones, zone)
+	}
+	c.mu.Unlock()
+	for _, zone := range zones {
+		hold, other := conf.zoneLeadNow(zone)
+		conf.retieRunsTo(zone, hold, other)
+	}
+}
+
+// zoneLeadNow is this agent's present hold of the zone's lead (holdOf), and,
+// when it holds none, whether another agent is the zone's leader now
+// (ZoneLeader) rather than nobody: an invalidation, or a group not yet led.
+func (conf *Config) zoneLeadNow(zone string) (hold uint64, other bool) {
+	hold = conf.holdOf(zone)
+	if hold != 0 {
+		return hold, false
+	}
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil {
+		return 0, false
+	}
+	leader, ok := lem.ZoneLeader(ZoneName(zone))
+	return 0, ok && leader != "" && leader != lem.localID
+}
+
+// retieRunsTo ties the zone's runs to hold, where this agent holds the
+// zone's lead. Where another agent leads the zone (other), the runs are
+// stopped. Where nobody does, an invalidation or a group not yet led, they
+// are left: the election that follows names the leader, and that ties or
+// stops them. A run begun with no lead is left as it is.
+func (conf *Config) retieRunsTo(zone string, hold uint64, other bool) {
 	c := &conf.InternalMp.delegationSyncChains
 	stopped := 0
 	c.mu.Lock()
 	for id, run := range c.runs[zone] {
 		switch {
 		case run.hold == 0 || run.hold == hold:
-		case hold == 0:
-			run.cancel()
-			stopped++
-		default:
+		case hold != 0:
 			run.hold = hold
 			c.runs[zone][id] = run
+		case other:
+			run.cancel()
+			stopped++
 		}
 	}
 	c.mu.Unlock()
 	if stopped > 0 {
-		lgEngine.Info("the delegation sync under way is stopped: the zone's new provider group is led by another agent", "zone", zone, "syncs", stopped)
+		lgEngine.Info("the delegation sync under way is stopped: another agent leads the zone now", "zone", zone, "syncs", stopped)
 	}
 }
 

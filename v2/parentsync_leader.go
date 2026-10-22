@@ -108,6 +108,15 @@ func (lem *LeaderElectionManager) SetOnZoneRegrouped(f func(zone ZoneName)) {
 	lem.onZoneRegrouped = f
 }
 
+// SetOnLeaderNamed sets the callback invoked when an election names a
+// leader, this agent or another, by the election, by gossip or by a renewal
+// (noteLeaderLocked). A zone's lead can move without a lead of this agent's
+// being lost: a zone that entered a group with no leader yet has the group's
+// lead once the group elects. It runs in a goroutine of its own.
+func (lem *LeaderElectionManager) SetOnLeaderNamed(f func()) {
+	lem.onLeaderNamed = f
+}
+
 // SetOnZoneJoined sets the callback invoked when a zone joins a provider
 // group that the local agent already leads (zoneJoinedGroup). It is not the
 // election's callback: a zone that arrives has had a leader before, and what
@@ -1202,6 +1211,9 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 // hold is kept until an agent is named, and ends then if that agent is
 // another.
 func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
+	if leader != "" && lem.onLeaderNamed != nil {
+		go lem.onLeaderNamed()
+	}
 	if leader != lem.localID {
 		if lost := le.holdStart; leader != "" && lost != 0 {
 			le.holdStart = 0
