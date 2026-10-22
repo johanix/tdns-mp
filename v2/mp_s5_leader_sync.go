@@ -767,6 +767,39 @@ func (conf *Config) holdOf(zone string) uint64 {
 	return 0
 }
 
+// retieRuns ties the zone's leader syncs under way to this agent's present
+// hold of the zone's lead, after the zone entered a provider group
+// (SetOnZoneRegrouped). A run keeps the hold it began in, of the zone's own
+// election or of the group the zone left, and the new group's loss of the
+// lead names the new group's hold: without this a former leader went on
+// with the run after another agent took the new group's lead. Where this
+// agent does not lead the zone in its new group, the runs are stopped. A run
+// begun with no lead is left as it is.
+func (conf *Config) retieRuns(zone ZoneName) {
+	conf.retieRunsTo(string(zone), conf.holdOf(string(zone)))
+}
+
+func (conf *Config) retieRunsTo(zone string, hold uint64) {
+	c := &conf.InternalMp.delegationSyncChains
+	stopped := 0
+	c.mu.Lock()
+	for id, run := range c.runs[zone] {
+		switch {
+		case run.hold == 0 || run.hold == hold:
+		case hold == 0:
+			run.cancel()
+			stopped++
+		default:
+			run.hold = hold
+			c.runs[zone][id] = run
+		}
+	}
+	c.mu.Unlock()
+	if stopped > 0 {
+		lgEngine.Info("the delegation sync under way is stopped: the zone's new provider group is led by another agent", "zone", zone, "syncs", stopped)
+	}
+}
+
 // stopRunsOfLostLead stops the leader syncs under way that began in hold,
 // a hold of the lead that this agent has lost to another agent, in any of
 // its leads (SetOnLeadLost): an UPDATE that

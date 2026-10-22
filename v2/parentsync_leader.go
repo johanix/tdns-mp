@@ -137,6 +137,14 @@ func (lem *LeaderElectionManager) SetOnLeadLost(f func(hold uint64)) {
 	lem.onLeadLost = f
 }
 
+// SetOnZoneRegrouped sets the callback invoked when a zone enters a provider
+// group, whoever leads the group or none (zoneJoinedGroup): the zone's lead
+// is the new group's from then on. It runs before the arrival's callback, in
+// the provider group manager's recompute, with that manager's lock free.
+func (lem *LeaderElectionManager) SetOnZoneRegrouped(f func(zone ZoneName)) {
+	lem.onZoneRegrouped = f
+}
+
 // SetOnZoneJoined sets the callback invoked when a zone joins a provider
 // group that the local agent already leads (zoneJoinedGroup). It is not the
 // election's callback: a zone that arrives has had a leader before, and what
@@ -1100,6 +1108,13 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // leader that acts only when the views of a zone agree is what closes that
 // window (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	// The parent work under way for the zone belongs to the hold of the lead
+	// it began in, the zone's own election's or the group's it left. From
+	// now on a loss of the new group's lead is the one that ends this
+	// agent's lead of the zone.
+	if lem.onZoneRegrouped != nil {
+		lem.onZoneRegrouped(zone)
+	}
 	if lem.onZoneJoined == nil {
 		return
 	}
