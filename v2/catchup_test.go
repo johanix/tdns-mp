@@ -942,6 +942,12 @@ func TestTheOperatorsResyncPullAsksTheVotingMembers(t *testing.T) {
 	if got.Error || len(got.RfiResponse) != 0 || !strings.Contains(got.Msg, "nothing is sent") {
 		t.Errorf("a pull where this agent does not vote: %+v", got)
 	}
+	// this agent's identity configured in another case than the zone's
+	// record names it: it votes all the same
+	ar.LocalAgent = &MultiProviderConf{Identity: strings.ToUpper(roleA)}
+	if got := pull(zone); strings.Contains(got.Msg, "nothing is sent") || got.RfiResponse[roleB] == nil {
+		t.Errorf("a pull by an identity configured in another case: %+v", got)
+	}
 	time.Sleep(30 * time.Millisecond)
 	if n := len(r.sent()); n != 1 {
 		t.Errorf("%d requests sent", n)

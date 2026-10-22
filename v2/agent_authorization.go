@@ -222,11 +222,14 @@ func (tm *MPTransportBridge) admittedForKeyOnly(senderID, zone string) bool {
 // keyHandOverGate is the router middleware that applies keyHandOverOnly
 // before the verb handlers run: a message let in for the zone's SIG(0) key
 // alone that is not about the key is refused, and no handler takes it or
-// acknowledges it as taken.
+// acknowledges it as taken. As in refuseNamedSender, the refusal is the
+// rcode the outermost reply middleware answers with, and keyHandOverOnly's
+// warning is its log line: nothing goes on to the next middleware, so no
+// handler error is logged.
 func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
 	if msg, ok := ctx.Incoming(); ok && !tm.keyHandOverOnly(msg) {
 		ctx.SetResponseRcode(dns.RcodeRefused)
-		return fmt.Errorf("a message let in for zone %s's SIG(0) key alone is not about the key", msg.Zone)
+		return nil
 	}
 	return next(ctx)
 }
@@ -265,7 +268,7 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 			return true
 		}
 	}
-	lgAgent.Warn("a message let in for the zone's SIG(0) key alone is not about the key, dropping",
+	lgAgent.Warn("a message let in for the zone's SIG(0) key alone is not about the key, refusing",
 		"sender", sender, "zone", msg.Zone, "type", msg.Token())
 	return false
 }

@@ -237,7 +237,7 @@ func (r *groupRig) operational() {
 	}
 	for _, m := range r.net.members {
 		gst := r.gsts[AgentId(m)]
-		gst.MergeGossip(&GossipMessage{GroupHash: r.net.group, Members: rows})
+		gst.mergeGossip(&GossipMessage{GroupHash: r.net.group, Members: rows})
 		gst.CheckGroupState(r.net.group, r.net.members)
 	}
 }
@@ -245,7 +245,7 @@ func (r *groupRig) operational() {
 // gossipLeader is the word of the group's election as it reaches an agent in
 // a peer's beat.
 func (r *groupRig) gossipLeader(agent, leader string, term uint32) {
-	r.gsts[AgentId(agent)].MergeGossip(&GossipMessage{GroupHash: r.net.group,
+	r.gsts[AgentId(agent)].mergeGossip(&GossipMessage{GroupHash: r.net.group,
 		Election: GroupElectionState{Leader: leader, Term: term, LeaderExpiry: time.Now().Add(time.Hour)}})
 }
 
@@ -488,7 +488,7 @@ func TestARefreshThatMovesAZoneHasItsNewLeaderSyncIt(t *testing.T) {
 	// The zones are loaded, and a peer's beat says that this agent leads the
 	// group of a and b.
 	pgm.RecomputeGroups()
-	ar.GossipStateTable.MergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB}),
+	ar.GossipStateTable.mergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB}),
 		Election: GroupElectionState{Leader: arrivalA, Term: 3, LeaderExpiry: time.Now().Add(time.Hour)}})
 	if !lem.IsLeader(ZoneName(stays.ZoneName)) || lem.IsLeader(ZoneName(mover.ZoneName)) {
 		t.Fatalf("before the edit this agent leads %s: %v, %s: %v; want the first only",

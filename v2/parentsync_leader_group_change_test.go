@@ -82,7 +82,7 @@ func voteless(t *testing.T, zd *tdns.ZoneData, e zoneEdit, auditor string) {
 func (r *groupRig) alone(agent, peer string) {
 	op := AgentStateToString[AgentStateOperational]
 	gst := r.gsts[AgentId(agent)]
-	gst.MergeGossip(&GossipMessage{GroupHash: r.net.group, Members: map[string]*MemberState{
+	gst.mergeGossip(&GossipMessage{GroupHash: r.net.group, Members: map[string]*MemberState{
 		agent: {Identity: agent, PeerStates: map[string]string{peer: op}, Timestamp: time.Now()},
 		peer:  {Identity: peer, PeerStates: map[string]string{agent: op}, Timestamp: time.Now()},
 	}})

@@ -436,11 +436,12 @@ func VotingMembersForZone(zone ZoneName) []AgentId {
 }
 
 // isVotingMember reports whether identity is one of the zone's voting
-// members, identities compared as FQDNs.
+// members, identities compared as canonical names (lower case, with the
+// trailing dot), as every standing check compares them (isAmong).
 func isVotingMember(zone ZoneName, identity string) bool {
-	identity = dns.Fqdn(identity)
+	identity = canonicalName(identity)
 	for _, id := range VotingMembersForZone(zone) {
-		if dns.Fqdn(string(id)) == identity {
+		if canonicalName(string(id)) == identity {
 			return true
 		}
 	}

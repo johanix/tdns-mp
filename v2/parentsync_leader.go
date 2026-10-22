@@ -246,13 +246,13 @@ func (lem *LeaderElectionManager) groupVoters(groupHash string, members []string
 }
 
 // isAmong: whether id is one of a group's voting members. Names are compared
-// as FQDNs, as the authorization of a sender is: the members come from zone
-// data and carry the trailing dot, an identity from a config or a message
-// need not. One comparison for the sender and for this agent itself: with two,
+// as canonical names, in any case and as FQDNs, as the authorization of a
+// sender is: the members come from zone data and carry the trailing dot, an
+// identity from a config or a message need not. One comparison for the sender and for this agent itself: with two,
 // an agent whose configured identity lacked the dot was counted by its peers
 // and took itself for an observer.
 func isAmong(members []string, id AgentId) bool {
-	return slices.ContainsFunc(members, func(m string) bool { return dns.Fqdn(m) == dns.Fqdn(string(id)) })
+	return slices.ContainsFunc(members, func(m string) bool { return strings.EqualFold(dns.Fqdn(m), dns.Fqdn(string(id))) })
 }
 
 // HandleGroupMessage dispatches an election message that carries a _group record.
@@ -1878,17 +1878,16 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 	return nil
 }
 
-// broadcastElectToZone sends an election RFI message to all agents in a zone.
+// broadcastElectToZone sends an election RFI message to the zone's voting
+// members and its auditors (the plan's 3.2), by an explicit test: Agents
+// holds the role holders today, and every member from the switch on.
 func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, records map[string][]string) error {
 	zad, err := ar.GetZoneAgentData(zone)
 	if err != nil {
 		return fmt.Errorf("broadcastElectToZone: %w", err)
 	}
 
-	for _, agent := range zad.Agents {
-		if AgentId(agent.ID) == AgentId(ar.LocalAgent.Identity) {
-			continue // don't send to ourselves
-		}
+	for _, agent := range electRecipients(zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
 		if !ar.isAgentOperational(agent.ID) {
 			lgElect.Debug("skipping non-operational agent", "agent", agent.ID)
 			continue
@@ -1908,6 +1907,22 @@ func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, rec
 		}(agent)
 	}
 	return nil
+}
+
+// electRecipients are the agents an election message goes to: the zone's
+// voting members and its auditors, other than self.
+func electRecipients(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
+	apex := zoneApex(zone)
+	var out []*Agent
+	for _, agent := range agents {
+		if isAmong([]string{string(agent.ID)}, self) {
+			continue
+		}
+		if st := zoneStanding(apex, string(agent.ID)); st == standingVoting || st == standingAuditor {
+			out = append(out, agent)
+		}
+	}
+	return out
 }
 
 // Helper functions for parsing records

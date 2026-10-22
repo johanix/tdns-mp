@@ -131,6 +131,16 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 
+			// An origin that does not vote in the zone is refused at once,
+			// before its edit is kept: also on a zone whose edits wait for
+			// manual approval, where it would otherwise wait to be refused
+			// only when approved.
+			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, msg.Operations, msg.Records); refusal != nil {
+				refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
+				combinerSendConfirmation(tm, deliveredBy, refusal)
+				continue
+			}
+
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
 			if hdb != nil {
