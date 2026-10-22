@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
@@ -212,5 +213,69 @@ func TestInjectIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
 	}
 	if !resp.Error || !strings.Contains(resp.ErrorMsg, "TransportManager") {
 		t.Fatalf("an allowed injector with no transport answered %+v", resp)
+	}
+}
+
+// An inject hello stays off unless the agent's options list names it, as the
+// other injectors do. An allowed one reads its bounds before it looks for a
+// transport, so a value out of bounds is refused with nothing sent.
+func TestInjectHelloIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
+	conf := &Config{}
+	amp := AgentMgmtPost{AgentId: "agent.b.example.", Data: map[string]interface{}{"count": "3"}}
+	resp := &AgentMgmtResponse{}
+	conf.debugInjectHello(context.Background(), amp, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "allow-inject") {
+		t.Fatalf("a closed injector answered %+v", resp)
+	}
+
+	mp := &MultiProviderConf{AgentOptionsStrs: []string{"allow-inject"}}
+	parseMultiProviderOptions(mp)
+	conf.InternalMp.mpConfig.Store(mp)
+	resp = &AgentMgmtResponse{}
+	conf.debugInjectHello(context.Background(), AgentMgmtPost{AgentId: "agent.b.example.", Data: map[string]interface{}{"count": "201"}}, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "count") || resp.Data != nil {
+		t.Fatalf("a count out of bounds answered %+v", resp)
+	}
+	resp = &AgentMgmtResponse{}
+	conf.debugInjectHello(context.Background(), amp, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "TransportManager") || resp.Data != nil {
+		t.Fatalf("an allowed injector with no transport answered %+v", resp)
+	}
+}
+
+// The count, the interval and the mechanism default as the CLI does, and a
+// value outside the bounds, or one that does not parse, is refused.
+func TestInjectHelloParamsKeepToTheBounds(t *testing.T) {
+	count, interval, mech, err := injectHelloParams(nil)
+	if err != nil || count != 40 || interval != 500*time.Millisecond || mech != "DNS" {
+		t.Errorf("defaults: %d %s %s %v, want 40 500ms DNS", count, interval, mech, err)
+	}
+	count, interval, mech, err = injectHelloParams(map[string]interface{}{"count": "200", "interval": "100ms", "mechanism": "API"})
+	if err != nil || count != 200 || interval != 100*time.Millisecond || mech != "API" {
+		t.Errorf("the edges: %d %s %s %v, want 200 100ms API", count, interval, mech, err)
+	}
+	for _, bad := range []map[string]interface{}{
+		{"count": "0"}, {"count": "201"}, {"count": "many"},
+		{"interval": "50ms"}, {"interval": "11s"}, {"interval": "soon"},
+		{"mechanism": "smtp"},
+	} {
+		if _, _, _, err := injectHelloParams(bad); err == nil {
+			t.Errorf("%v was taken", bad)
+		}
+	}
+}
+
+// The hello an injector sends is this agent's, with the zones it shares with
+// the target: only its rate lies.
+func TestInjectHelloRequestIsThisAgents(t *testing.T) {
+	req := injectHelloRequest("agent.a.example.", []ZoneName{"z1.example.", "z2.example."})
+	if req.SenderID != "agent.a.example." {
+		t.Errorf("SenderID %q, want this agent", req.SenderID)
+	}
+	if strings.Join(req.SharedZones, " ") != "z1.example. z2.example." {
+		t.Errorf("shared zones %v", req.SharedZones)
+	}
+	if strings.Join(req.Capabilities, " ") != "sync beat relocate" || req.Timestamp.IsZero() {
+		t.Errorf("request %+v, want the capabilities and a time as SendHelloWithFallback sends", req)
 	}
 }
