@@ -104,9 +104,10 @@ CLI adds a mark to the state:
 So `NEEDED(-)` is a peer refused because its chain is not validated, and
 `OPERATIONAL(-)` a peer in use on data nobody validated.
 
-`peer list` marks each mechanism's state, and has a Discovery column with
-the reason when any peer has one. `peer list -v` shows the verdict, the
-reason and when the data expires.
+`peer list` marks each mechanism's state, and lists the reasons under the
+table ("Discovery:", one line per peer and mechanism that has one). The
+state stays the table's last column, as scripts read it. `peer list -v`
+shows the verdict, the reason and when the data expires.
 
 `gossip state` marks each cell with the verdict as the reporter sees it.
 Each member's gossip row carries its verdicts for its peers, and whether its

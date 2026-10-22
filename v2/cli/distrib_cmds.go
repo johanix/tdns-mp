@@ -586,20 +586,11 @@ func displayPeers(peers []interface{}, verbose bool, validationOff bool) {
 		return
 	}
 
-	// Compact mode: use tabular format. The Discovery column, what is wrong
-	// with a peer's DNS data, is there when a row has something in it.
-	withReason := false
-	for _, pRaw := range sortedPeers {
-		if p, ok := pRaw.(map[string]interface{}); ok && getStringValue(p, "discovery_reason") != "" {
-			withReason = true
-		}
-	}
-	var rows []string
-	header := "Identity | Type | Transport | Address | Crypto | State"
-	if withReason {
-		header += " | Discovery"
-	}
-	rows = append(rows, header)
+	// Compact mode: use tabular format. State stays the last column, as
+	// scripts read it; what is wrong with a peer's DNS data goes in notes
+	// under the table, one line per row that has something to say.
+	var rows, reasons []string
+	rows = append(rows, "Identity | Type | Transport | Address | Crypto | State")
 
 	for _, pRaw := range sortedPeers {
 		if p, ok := pRaw.(map[string]interface{}); ok {
@@ -634,21 +625,23 @@ func displayPeers(peers []interface{}, verbose bool, validationOff bool) {
 			}
 			state += chainMark(getStringValue(p, "dnssec"))
 
-			row := fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state)
-			if withReason {
-				reason := getStringValue(p, "discovery_reason")
-				if reason == "" {
-					reason = "-"
-				}
-				row += " | " + reason
+			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state))
+			if reason := getStringValue(p, "discovery_reason"); reason != "" {
+				reasons = append(reasons, fmt.Sprintf("  %s %s: %s", peerID, transport, reason))
 			}
-			rows = append(rows, row)
 		}
 	}
 
 	if len(rows) > 1 {
 		output := columnize.SimpleFormat(rows)
 		fmt.Println(output)
+	}
+	if len(reasons) > 0 {
+		fmt.Println()
+		fmt.Println("Discovery:")
+		for _, r := range reasons {
+			fmt.Println(r)
+		}
 	}
 }
 

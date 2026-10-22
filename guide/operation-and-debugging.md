@@ -84,8 +84,8 @@ fails validation. `NEEDED(-)` is a peer this agent
 refuses because its chain is broken and
 `imrengine.require-dnssec-validation` is on;
 `OPERATIONAL(-)` is a peer in use on data nobody
-validated, because the setting is off. The Discovery
-column, shown when a peer has something in it, names the
+validated, because the setting is off. Under the table,
+"Discovery:" lists, for each peer that has one, the
 record and what is wrong with it, for example
 `URI at _https._tcp.agent.bravo.example.: answer
 insecure, DNSSEC validation required`. With validation

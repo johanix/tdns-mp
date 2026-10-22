@@ -32,9 +32,21 @@ func TestPeerListMarksAPeerWhoseChainIsNotSecure(t *testing.T) {
 			peerRow("d.example.", "OPERATIONAL", "secure", ""),
 		}, false, false)
 	})
-	for _, want := range []string{"NEEDED(-)", "OPERATIONAL(!)", "Discovery", reason, chainLegend[0], chainLegend[1]} {
+	for _, want := range []string{"NEEDED(-)", "OPERATIONAL(!)", "Discovery:", "b.example. API: " + reason, chainLegend[0], chainLegend[1]} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	// State is each row's last field, as scripts read it ($NF), the mark
+	// included, and the reasons are not in the table.
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 6 && strings.HasSuffix(f[0], ".example.") {
+			if st := f[5]; st != "NEEDED(-)" && st != "OPERATIONAL(!)" && st != "OPERATIONAL" {
+				t.Errorf("row %q: last field %q is not the state", line, st)
+			}
+		} else if len(f) > 6 && strings.HasSuffix(f[0], ".example.") && f[1] == "agent" {
+			t.Errorf("row %q has more than the six columns", line)
 		}
 	}
 	if strings.Contains(out, "OPERATIONAL(-)") || strings.Contains(out, "WARNING") {
@@ -47,7 +59,7 @@ func TestPeerListWithNothingToMarkHasNoNotes(t *testing.T) {
 		displayPeers([]interface{}{peerRow("d.example.", "OPERATIONAL", "secure", "")}, false, false)
 	})
 	if strings.Contains(out, "(-)") || strings.Contains(out, "Discovery") || strings.Contains(out, "DNSSEC") {
-		t.Errorf("notes or a Discovery column for a secure peer:\n%s", out)
+		t.Errorf("notes for a secure peer:\n%s", out)
 	}
 }
 

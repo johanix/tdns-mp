@@ -99,8 +99,8 @@ fleet, since this is a security path:
 3. Validation required, the chain secure, then broken while the peer is
    OPERATIONAL (the DS removed from the parent): once the TTLs run out, the
    peer goes to `NEEDED(-)`. It comes back when the DS is restored.
-4. A control run on a secure fleet: no marks, no notes, no Discovery
-   column.
+4. A control run on a secure fleet: no marks, no legend, no warning, no
+   Discovery notes.
 
 ## Open
 
