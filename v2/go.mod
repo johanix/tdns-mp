@@ -6,7 +6,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261022082939-affbb6a19b5b
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261022084833-5cd80e0df5c0
 	github.com/johanix/tdns/v2 v2.0.0-20261021184231-42d0f0a7577b
 	github.com/johanix/tdns/v2/cache v0.0.0-20261021184231-42d0f0a7577b
 	github.com/johanix/tdns/v2/cli v0.0.0-20261021184231-42d0f0a7577b
