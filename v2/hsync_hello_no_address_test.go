@@ -349,6 +349,9 @@ func TestALookupPastTheCacheForAHelloCountsForRefusedHellosToo(t *testing.T) {
 
 	sayHello(t, s.bob, s.alice)
 	waitForLookups(t, "Bob's JWK record", jwkLookups, 2)
+	// Bob holds no peer: his hello gave him a view of Alice, and a peer he
+	// holds is admitted whatever its state (#178 step 7).
+	s.bob.Registry.S.Remove(AgentId(s.alice.Identity))
 
 	s.zone.set(s.bobAddress)
 	waitForRefusals(t, s.alice, s.bob.Identity, helloRefusalsBeforeRediscovery+3)

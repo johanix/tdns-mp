@@ -534,4 +534,25 @@ func TestParentSyncStatusShowsTheCatchUp(t *testing.T) {
 		"  catch-up:       not caught up, waiting for agent.bravo.example.",
 		"  parent sync:    held until the zone is caught up",
 		"  DS set:         unknown, waiting for agent.bravo.example. (not spoken)")
+
+	// held for the zone's SIG(0) key as well (step 7b): its own line
+	report.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (poll running)"
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, held for the key", out,
+		"  parent sync:    held until the zone is caught up",
+		"  parent sync:    held until the zone's SIG(0) key is held and bootstrapped (poll running)")
+
+	// several KEYs at the apex: no zone key at all (step 7b)
+	report.ApexPublished, report.ApexKeys = true, 2
+	report.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (not held)"
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, several KEYs", out,
+		"  KEY at apex:    several (2); an operator has to leave one",
+		"  parent sync:    held until the zone's SIG(0) key is held and bootstrapped (not held)")
 }

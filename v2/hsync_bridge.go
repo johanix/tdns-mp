@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -70,6 +71,10 @@ func rearmFailedDiscovery(reg *transport.PeerRegistry, identity string) {
 	p.SetState(transport.PeerStateNeeded, "discovery retry after a failed discovery")
 }
 
+// errPeerNotHeld is a send to a peer object the engine no longer holds: the
+// peer was removed while the send was on its way, and nothing is sent (#132).
+var errPeerNotHeld = errors.New("peer is no longer held by the engine")
+
 // agentViewForPeer returns the persistent ar.S view for the peer (materializing
 // it if needed), or a transient unstored view when no AgentRegistry is wired
 // (test harnesses). E1.b: the view shares the peer pointer, so there is no
@@ -89,6 +94,9 @@ func (b *mpHsyncBridge) SendHello(ctx context.Context, peer *hsync.Peer, sharedZ
 		return nil
 	}
 	agent := agentViewForPeer(b.ar, peer)
+	if agent == nil {
+		return errPeerNotHeld
+	}
 	_, err := b.tm.SendHelloWithFallback(ctx, agent, sharedZones)
 	return err
 }
@@ -98,6 +106,9 @@ func (b *mpHsyncBridge) SendBeat(ctx context.Context, peer *hsync.Peer, sequence
 		return false, "", nil
 	}
 	agent := agentViewForPeer(b.ar, peer)
+	if agent == nil {
+		return false, "", errPeerNotHeld
+	}
 	tp := b.tm.GetOrCreatePeer(agent)
 	beforeAPI := tp.MechanismBeatSequence("API")
 	beforeDNS := tp.MechanismBeatSequence("DNS")
@@ -240,9 +251,10 @@ func (p pgmHsyncLookup) Groups() []hsync.ProviderGroupInfo {
 			zones[i] = hsync.ZoneName(z)
 		}
 		out = append(out, hsync.ProviderGroupInfo{
-			GroupHash: hash,
-			Members:   pg.Members,
-			Zones:     zones,
+			GroupHash:     hash,
+			Members:       pg.Members,
+			VotingMembers: pg.VotingMembers,
+			Zones:         zones,
 		})
 	}
 	return out
@@ -261,9 +273,10 @@ func (p pgmHsyncLookup) GetGroup(groupHash string) *hsync.ProviderGroupInfo {
 		zones[i] = hsync.ZoneName(z)
 	}
 	info := &hsync.ProviderGroupInfo{
-		GroupHash: pg.GroupHash,
-		Members:   pg.Members,
-		Zones:     zones,
+		GroupHash:     pg.GroupHash,
+		Members:       pg.Members,
+		VotingMembers: pg.VotingMembers,
+		Zones:         zones,
 	}
 	return info
 }
@@ -300,9 +313,22 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 				initiator = m
 			}
 		}
-		if dns.Fqdn(string(lem.localID)) == dns.Fqdn(initiator) {
-			lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
+		if dns.Fqdn(string(lem.localID)) != dns.Fqdn(initiator) {
+			return
 		}
+		// A leader whose lease runs is held already when this agent
+		// restarted inside it: a beat merges the peers' gossip, and with it
+		// the group's term and leader (ApplyGossipElection), before the
+		// matrix is checked. An election now would end that lease early.
+		// A group that degraded had its leader cleared
+		// (InvalidateGroupLeader), and a new group has none: those elect.
+		// The operator's election is started elsewhere, and still is.
+		if leader, ok := lem.GetGroupLeader(groupHash); ok {
+			lgElect.Info("group operational with a leader whose lease runs, no election",
+				"group", shortHash(groupHash), "leader", leader)
+			return
+		}
+		lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
 	})
 	ar.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
 		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
@@ -331,20 +357,23 @@ func newAgentHsyncEngine(conf *Config) *hsync.Engine {
 	ar := conf.InternalMp.AgentRegistry
 	wireAgentGossipCallbacks(conf, ar)
 	deps, cfg := buildHsyncEngineDeps(conf)
-	// Agent-only: gate the diff on local HSYNC3 presence (weAreInHSYNC) and
-	// re-home the removal teardown + RFI/election side effects of UpdateAgents.
+	// Agent-only: gate the diff on the local agent's standing, and run the
+	// removal teardown. The zone's election is checked after the diff, by
+	// zoneChanged (step 8).
 	deps.GateOnLocalPresence = true
 	deps.Host.OnLocalRemoved = func(zone hsync.ZoneName) {
 		ar.localRemovedFromZone(ZoneName(zone))
-	}
-	deps.Host.OnHsyncMembersAdded = func(zone hsync.ZoneName, added []hsync.PeerID, localAdded bool) {
-		ar.reattachHsyncMemberAdds(ZoneName(zone), added, localAdded)
 	}
 	return hsync.NewEngine(deps, cfg)
 }
 
 func newAuditorHsyncEngine(conf *Config) *hsync.Engine {
 	deps, cfg := buildHsyncEngineDeps(conf)
+	// The auditor has an ON record and auditors= in every zone it audits
+	// (guide/auditor.md). In a zone without them it expects no peers, as
+	// ReconcileZone has it, and an HSYNC3 add there marks no provider as
+	// needed: its hellos would be refused.
+	deps.GateOnLocalPresence = true
 	return hsync.NewEngine(deps, cfg)
 }
 
@@ -372,6 +401,7 @@ func hsyncConfigFromMp(mp *MultiProviderConf) hsync.Config {
 	secs(&cfg.RetryInterval, iv.DiscoveryRetry)
 	secs(&cfg.ReconcileInterval, iv.Reconcile)
 	secs(&cfg.HelloFastSpacing, iv.HelloFastInterval)
+	secs(&cfg.PeerHold, iv.PeerHold)
 	if iv.HelloFastAttempts > 0 {
 		cfg.HelloFastAttempts = iv.HelloFastAttempts
 	}
@@ -390,7 +420,8 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 		"hello_fast_interval", cfg.HelloFastSpacing,
 		"discoveryretry", cfg.RetryInterval,
 		"reconcile", cfg.ReconcileInterval,
-		"catchup_outage", catchUpOutageFor(mp))
+		"catchup_outage", catchUpOutageFor(mp),
+		"peer_hold", cfg.PeerHold)
 	deps := hsync.Deps{
 		LocalID:           hsync.PeerID(mp.Identity),
 		LocalBeatInterval: mp.Remote.BeatInterval,
@@ -406,8 +437,32 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 			// Phase 3c: prunes are events — drop the MP view + transport
 			// peer promptly when the engine removes a peer object.
 			OnPeerRemoved: func(peer *hsync.Peer) {
-				ar.removePeerView(peer.ID)
-				conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
+				peer.Mu.RLock()
+				since := peer.Unshared
+				peer.Mu.RUnlock()
+				if !since.IsZero() {
+					lgEngine.Info("peer removed: no zone shared for the hold time",
+						"peer", peer.ID, "since", since)
+				}
+				ar.removePeerView(peer)
+				// The catch-up's requests and sender are kept by identity:
+				// a new peer stored under it since the removal keeps them.
+				if !ar.engineHoldsSuccessor(peer) {
+					conf.InternalMp.CatchUp.Forget(AgentId(peer.ID))
+				}
+			},
+			// A discovery that outlived the peer's removal: drop the
+			// transport peer it made again, as the removal did.
+			OnRemovedPeerDiscovered: func(peer *hsync.Peer) { ar.removePeerView(peer) },
+			// The end of comms (design 3.1): the reconcile loop keeps a peer
+			// that no zone names for the hold time, then removes it.
+			OnPeerUnshared: func(peer *hsync.Peer, unshared bool) {
+				if unshared {
+					lgEngine.Info("peer shares no zone with this agent any more, kept for the hold time",
+						"peer", peer.ID, "hold", cfg.PeerHold)
+					return
+				}
+				lgEngine.Info("peer is named by a zone again, kept", "peer", peer.ID)
 			},
 		},
 		Host: hsync.HostCallbacks{
@@ -429,7 +484,7 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 				// for this round, the callback's read waited for the
 				// recompute, and the agent beat no more (tdns-mp #180).
 				for _, pg := range ar.ProviderGroupManager.GetGroups() {
-					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+					ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 				}
 			},
 		},

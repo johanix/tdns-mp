@@ -45,15 +45,16 @@ const (
 )
 
 // endpointVerbs are the verbs each endpoint takes, as before the endpoints
-// entered the pipeline. The endpoints sit behind different middleware
-// (/hello is reachable before the peer's TLSA is known), so the endpoint,
-// not the body, decides what may enter through it. /msg takes the sync
-// family the HTTPS sender posts there.
+// entered the pipeline. Each endpoint has checks of its own (a hello must
+// introduce the certificate's agent, a beat's answer carries gossip), so
+// the endpoint, not the body, decides what may enter through it. /msg
+// takes the sync family the HTTPS sender posts there, and the
+// confirmations of it.
 var endpointVerbs = map[apiEndpointKind][]string{
 	apiEndpointHello: {"hello"},
 	apiEndpointBeat:  {"beat"},
 	apiEndpointPing:  {"ping"},
-	apiEndpointMsg:   {"sync", "update", "rfi"},
+	apiEndpointMsg:   {"sync", "update", "rfi", transport.VerbConfirm},
 }
 
 // maxAPIBody bounds a request body; a DNS-carried payload is bounded by
@@ -115,9 +116,11 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 		// connection presented. The answer to a beat carries the gossip
 		// built for that sender (plan decision 26), so a peer must not get
 		// it by naming another, and a hello introduces only the agent that
-		// sent it. /msg is not held to this: an agent forwards a peer's
+		// sent it. A confirmation speaks for its sender too: the confirm
+		// handler books it as the named sender's word on a distribution.
+		// The rest of /msg is not held to this: an agent forwards a peer's
 		// update to its combiner under that peer's name.
-		if kind == apiEndpointHello || kind == apiEndpointBeat || kind == apiEndpointPing {
+		if kind == apiEndpointHello || kind == apiEndpointBeat || kind == apiEndpointPing || im.Token() == transport.VerbConfirm {
 			if cn, ok := clientIdentity(r); ok && dns.CanonicalName(cn) != dns.CanonicalName(im.SenderID) {
 				lgApi.Warn("sync API request refused: the sender is not the client certificate's identity",
 					"path", r.URL.Path, "from", r.RemoteAddr, "sender", im.SenderID, "certificate", cn)

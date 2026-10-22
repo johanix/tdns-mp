@@ -36,8 +36,8 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 	// "a retrier is currently running" — otherwise startHelloRetrier would
 	// permanently skip a peer that finished one handshake (e.g. after a reset
 	// drops it back to KNOWN, the retrier must be able to start again).
-	defer e.registry.clearHelloCancel(peer.ID)
-	if !e.agentNeedsHello(peer) {
+	defer e.registry.clearHelloCancel(peer)
+	if !e.stillStored(peer) || !e.agentNeedsHello(peer) {
 		return
 	}
 	// Not before this agent can be found: the first hello to any peer waits
@@ -55,6 +55,9 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 				return
 			case <-time.After(fastInterval):
 			}
+		}
+		if !e.stillStored(peer) {
+			return
 		}
 		if !e.agentNeedsHello(peer) {
 			e.fastBeatAttempts(ctx, peer)
@@ -82,6 +85,9 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 			return
 		case <-ticker.C:
 		}
+		if !e.stillStored(peer) {
+			return
+		}
 		if !e.agentNeedsHello(peer) {
 			e.fastBeatAttempts(ctx, peer)
 			return
@@ -95,15 +101,16 @@ func (e *Engine) helloRetrierNG(ctx context.Context, peer *Peer) {
 }
 
 func (e *Engine) sendHelloToPeer(peer *Peer) {
-	if e.deps.Transport == nil {
+	if e.deps.Transport == nil || !e.stillStored(peer) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 	zones := e.registry.sharedZones(peer)
 	before := e.peerView(peer.ID)
+	// The hello does not store the peer back: the object is the stored one,
+	// or the peer is gone (#132).
 	_ = e.deps.Transport.SendHello(ctx, peer, zones)
-	e.registry.S.Set(peer.ID, peer)
 	if e.peerView(peer.ID) != before {
 		e.KickBeats()
 	}

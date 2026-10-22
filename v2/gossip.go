@@ -170,9 +170,74 @@ func (gst *GossipStateTable) AnnouncedPropagationDelay(identity string) (time.Du
 	return time.Duration(newest.PropagationDelay) * time.Second, true
 }
 
-// MergeGossip merges received gossip into the local state table.
-// For each member's state entry, keep the one with the latest timestamp.
-func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
+// MergeGossip merges gossip that from sent, about group, into the local
+// state table, by the sender rule (the plan's 3.2, decision 10 and 35). It
+// takes nothing for a group this agent does not have (group nil), or of
+// which from is not a member. From a member that does not vote it takes
+// that member's own row and nothing else. From the answer to a beat
+// (fromAnswer, from the peer that was beaten, which nothing authenticates)
+// it takes the rows only: no election record and no term, whoever the
+// answer names. Election records come in every peer's own beats.
+func (gst *GossipStateTable) MergeGossip(msg *GossipMessage, from string, group *ProviderGroup, fromAnswer bool) {
+	if msg == nil || group == nil || group.GroupHash != msg.GroupHash || !isAmong(group.Members, AgentId(from)) {
+		lgGossip.Debug("gossip not taken: the group is not known here, or the sender is not its member", "group", msgGroup(msg), "from", from)
+		return
+	}
+	taken := *msg
+	switch {
+	case !isAmong(group.VotingMembers, AgentId(from)):
+		// its own row only
+		taken.Members = map[string]*MemberState{}
+		for id, ms := range msg.Members {
+			if isAmong([]string{id}, AgentId(from)) {
+				taken.Members[id] = ms
+			}
+		}
+		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
+	case fromAnswer:
+		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
+	}
+	// An agent that does not vote in the group is an observer (design 4.7)
+	gst.mergeGossipAs(&taken, !isAmong(group.VotingMembers, AgentId(gst.LocalID)))
+}
+
+// observerTakes: an observer of a group, an agent that does not vote in it,
+// takes an election record with a term at or below the one it holds once
+// the lease it holds has run out (step 8, design 4.7): voting members that
+// have all restarted elect at term 1 again. The same term is news when it
+// names another leader or a later end of the lease. A voting member never
+// takes a lower term. The lease's end is the telling agent's clock: a clock
+// that is off moves the moment by as much.
+func observerTakes(observer bool, rec GroupElectionState, heldTerm uint64, heldLeader string, heldExpiry time.Time, now time.Time) bool {
+	if !observer || !now.After(heldExpiry) {
+		return false
+	}
+	switch {
+	case uint64(rec.Term) < heldTerm:
+		return true
+	case uint64(rec.Term) == heldTerm:
+		return rec.Leader != heldLeader || rec.LeaderExpiry.After(heldExpiry)
+	}
+	return false
+}
+
+func msgGroup(msg *GossipMessage) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.GroupHash
+}
+
+// mergeGossip merges gossip into the local state table as it is, with no
+// rule of its own, as a voting member does. For each member's state entry,
+// keep the one with the latest timestamp.
+func (gst *GossipStateTable) mergeGossip(msg *GossipMessage) {
+	gst.mergeGossipAs(msg, false)
+}
+
+// mergeGossipAs is mergeGossip for an agent that is, or is not, an observer
+// of the group (observerTakes).
+func (gst *GossipStateTable) mergeGossipAs(msg *GossipMessage, observer bool) {
 	var electionCallback func(string, GroupElectionState)
 	var electionHash string
 	var electionState GroupElectionState
@@ -196,12 +261,15 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 		}
 	}
 
-	// Merge election state (higher term wins). A record without a leader is
-	// no election's result. Stored, it would stand for its term and keep out
-	// the result that follows it, which is of the same term (#154).
+	// Merge election state (higher term wins; an observer also takes a
+	// lower or the same term once the lease it holds has run out). A record
+	// without a leader is no election's result. Stored, it would stand for
+	// its term and keep out the result that follows it, which is of the same
+	// term (#154).
 	if msg.Election.Term > 0 && msg.Election.Leader != "" {
 		existing := gst.Elections[groupHash]
-		if existing == nil || msg.Election.Term > existing.Term {
+		if existing == nil || msg.Election.Term > existing.Term ||
+			observerTakes(observer, msg.Election, uint64(existing.Term), existing.Leader, existing.LeaderExpiry, time.Now()) {
 			elCopy := msg.Election
 			gst.Elections[groupHash] = &elCopy
 			if gst.onElectionUpdate != nil {
@@ -393,7 +461,11 @@ func (gst *GossipStateTable) forgetGroup(groupHash string) {
 	delete(gst.Elections, groupHash)
 }
 
-// CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
+// CheckGroupState checks if all cells in the NxN matrix for a group are
+// OPERATIONAL. Its callers pass the group's voting members (step 8, design
+// 4.3): an auditor that is down holds no election back, and does not take a
+// leader's group out of mutual OPERATIONAL. With one voting member, its own
+// row opens the gate.
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
 	gst.mu.Lock()
 

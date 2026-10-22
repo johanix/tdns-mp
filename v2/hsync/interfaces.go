@@ -31,9 +31,10 @@ type ZoneLookup interface {
 
 // ProviderGroupInfo is a snapshot of one provider group.
 type ProviderGroupInfo struct {
-	GroupHash string
-	Members   []string
-	Zones     []ZoneName
+	GroupHash     string
+	Members       []string
+	VotingMembers []string // the members in servers= or signers=
+	Zones         []ZoneName
 }
 
 // ProviderGroupLookup supplies group membership for gossip.
@@ -74,12 +75,6 @@ type HostCallbacks struct {
 	OnElectionGossip   func(groupHash string, state GroupElectionState)
 	OnLocalRemoved     func(zone ZoneName)
 	BeforeHeartbeats   func()
-	// OnHsyncMembersAdded fires after ApplyHsyncDiff has registered member
-	// adds for a zone, carrying the (HSYNCPARAM-gated, non-local) added
-	// identities and whether the local identity was itself added. The agent
-	// uses it to re-home the upstream/downstream CONFIG RFI deferred tasks and
-	// the membership-change election kick that used to live in UpdateAgents.
-	OnHsyncMembersAdded func(zone ZoneName, added []PeerID, localAdded bool)
 }
 
 // PeerHooks are optional callbacks when registry peers change.
@@ -89,6 +84,15 @@ type PeerHooks struct {
 	// (Phase 3c / A5 residue: prunes are EVENTS, not reconcile-only). The
 	// application uses it to drop its own view of the peer promptly.
 	OnPeerRemoved func(*Peer)
+	// OnRemovedPeerDiscovered fires when a discovery that began before the
+	// peer's removal ends after it. The lookup may have made the transport
+	// peer again that the removal had dropped; the application drops it,
+	// unless a new peer stored under the identity since owns it.
+	OnRemovedPeerDiscovered func(*Peer)
+	// OnPeerUnshared fires when the reconcile loop finds that no zone names
+	// the peer any more (unshared true: it is kept for the hold time), or
+	// that one names it again before its removal (false).
+	OnPeerUnshared func(peer *Peer, unshared bool)
 }
 
 // Deps bundles injected dependencies for NewEngine.
@@ -102,12 +106,13 @@ type Deps struct {
 	Elections         ElectionStateLookup
 	Host              HostCallbacks
 	PeerHooks         PeerHooks
-	// GateOnLocalPresence makes ApplyHsyncDiff mirror the legacy weAreInHSYNC
-	// abort: when the local identity is absent from the zone's current HSYNC3
-	// RRset, skip remote add/remove processing (a local-remove RR still fires
-	// OnLocalRemoved, and the groups are still recomputed through
-	// OnHsync3Changed). Set by the agent; the auditor observes zones it is
-	// not a member of, so it leaves this false.
+	// GateOnLocalPresence makes ApplyHsyncDiff skip remote add/remove
+	// processing in a zone where the local identity has no standing
+	// (participates), the test ReconcileZone makes too (a local-remove RR
+	// still fires OnLocalRemoved, and the groups are still recomputed through
+	// OnHsync3Changed). The agent and the auditor both set it: an auditor has
+	// an ON record and auditors= in every zone it audits, and in a zone
+	// without them its hellos would be refused.
 	GateOnLocalPresence bool
 	// HelloReady, when set, is waited on before the engine's first hello to a
 	// peer. The agent sets it to the publication of its own identity zone: a

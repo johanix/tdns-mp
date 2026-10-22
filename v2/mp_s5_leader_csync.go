@@ -482,6 +482,7 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 			OriginatingDistID: u.OriginatingDistID,
 			OriginatingSender: string(sender),
+			Mechanism:         u.Mechanism,
 			Zone:              u.Zone,
 			Status:            "REJECTED",
 			Message:           reason,

@@ -27,6 +27,7 @@ func TestHsyncConfigFromMp(t *testing.T) {
 	mp.Syncengine.Intervals.Reconcile = 7
 	mp.Syncengine.Intervals.HelloFastAttempts = 3
 	mp.Syncengine.Intervals.HelloFastInterval = 2
+	mp.Syncengine.Intervals.PeerHold = 300
 	want := hsync.Config{
 		RetryInterval:      6 * time.Second,
 		ReconcileInterval:  7 * time.Second,
@@ -36,6 +37,7 @@ func TestHsyncConfigFromMp(t *testing.T) {
 		HelloFastAttempts:  3,
 		HelloFastSpacing:   2 * time.Second,
 		DiscoverySemLimit:  def.DiscoverySemLimit,
+		PeerHold:           300 * time.Second,
 	}
 	if got := hsyncConfigFromMp(&mp); got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
@@ -161,5 +163,30 @@ func TestTheCatchUpOutageIsAboveTheBeatInterval(t *testing.T) {
 		if (err == nil) != tc.ok || (err != nil && !strings.Contains(err.Error(), "catchup_outage")) {
 			t.Errorf("beat %d, outage %d: err = %v", tc.beat, tc.outage, err)
 		}
+	}
+}
+
+// peer_hold is how long a peer that no zone names is kept: a day unless it is
+// set, in seconds when it is, and refused when negative.
+func TestThePeerHoldTimeIsReadFromTheConfig(t *testing.T) {
+	var mp MultiProviderConf
+	if got := hsyncConfigFromMp(&mp).PeerHold; got != 24*time.Hour {
+		t.Errorf("the default: %s, want 24h0m0s", got)
+	}
+	block := map[string]interface{}{
+		"role":       "agent",
+		"identity":   "agent.example.",
+		"syncengine": map[string]interface{}{"intervals": map[string]interface{}{"peer_hold": 300}},
+	}
+	parsed, err := parseMultiProvider(map[string]interface{}{"multi-provider": block})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hsyncConfigFromMp(parsed).PeerHold; got != 5*time.Minute {
+		t.Errorf("peer_hold 300: %s, want 5m0s", got)
+	}
+	mp.Syncengine.Intervals.PeerHold = -1
+	if err := ValidateSyncengineIntervals(&mp); err == nil || !strings.Contains(err.Error(), "peer_hold") {
+		t.Errorf("negative peer_hold: err = %v", err)
 	}
 }
