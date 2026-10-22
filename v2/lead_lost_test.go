@@ -29,9 +29,9 @@ func (r *leaderSyncRig) leadMovesTo(who AgentId) {
 }
 
 // The election tells of a lead this agent lost only when another agent is
-// named: with the number of the lead it lost, also when an invalidation came
-// in between. A renewal, a re-election, and an invalidation alone tell
-// nothing.
+// named: with the hold it lost, the lead that began it, also when an
+// invalidation or a lapsed lease gave this agent a new lead in between. A
+// renewal, a re-election, and an invalidation alone tell nothing.
 func TestALeadIsLostOnlyToAnotherAgent(t *testing.T) {
 	lem := NewLeaderElectionManager("agent.us.example.", time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
 	lost := make(chan uint64, 8)
@@ -76,15 +76,30 @@ func TestALeadIsLostOnlyToAnotherAgent(t *testing.T) {
 	told(0, "an invalidation")
 	name("agent.us.example.")
 	told(0, "a re-election after an invalidation")
-	third := le.leadStart
-	if third == second {
+	if le.leadStart == second {
 		t.Errorf("the lead after an invalidation kept the number of the one before")
+	}
+	if le.holdStart != second {
+		t.Errorf("the re-election after an invalidation is hold %d, want the hold it continues, %d", le.holdStart, second)
 	}
 	name("")
 	name("agent.them.example.")
-	told(third, "another agent named after an invalidation")
+	told(second, "another agent named after an invalidation and a re-election")
 	name("agent.them.example.")
 	told(0, "another agent's renewal")
+
+	name("agent.us.example.")
+	fourth := le.leadStart
+	le.mu.Lock()
+	le.LeaderExpiry = time.Now().Add(-time.Second)
+	le.mu.Unlock()
+	name("agent.us.example.")
+	told(0, "a re-election after a lapsed lease")
+	if le.leadStart == fourth || le.holdStart != fourth {
+		t.Errorf("after a lapsed lease the lead is %d in hold %d, want a new lead in hold %d", le.leadStart, le.holdStart, fourth)
+	}
+	name("agent.them.example.")
+	told(fourth, "another agent named after a lapsed lease")
 }
 
 // A former leader does not send an UPDATE on that tdns is still retrying: the
@@ -92,33 +107,8 @@ func TestALeadIsLostOnlyToAnotherAgent(t *testing.T) {
 // the one that counts. It sent it on: a DS change the new leader had
 // overtaken could reach the parent after the new leader's own.
 func TestALeadLostToAnotherAgentStopsAnUpdateBeingRetried(t *testing.T) {
-	asMPAgent(t)
-	r := newNotifyRig(t, "leadlost.update.example.", "UPDATE", repeat(30*time.Millisecond, 400)...)
-	r.lem.SetOnLeadLost(r.conf.stopRunsOfLostLead)
-	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
-	r.propagation(time.Hour)
+	r, underWay := updateBeingRetried(t, "leadlost.update.example.")
 	z := r.mpzd.ZoneName
-	if _, err := r.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
-		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
-		t.Fatalf("the zone's SIG(0) key: %v", err)
-	}
-	r.parent.refuses()
-	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
-	underWay := func() int {
-		c := &r.conf.InternalMp.delegationSyncChains
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return len(c.runs[z])
-	}
-	for deadline := time.Now().Add(10 * time.Second); r.parent.updatesSeen() == 0; time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("no UPDATE reached the parent")
-		}
-	}
-	if underWay() != 1 {
-		t.Fatal("the refused UPDATE is not being retried")
-	}
 
 	r.leadMovesTo(AgentId(r.peer.Identity)) // before the retry's wait is over
 	for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
@@ -132,6 +122,93 @@ func TestALeadLostToAnotherAgentStopsAnUpdateBeingRetried(t *testing.T) {
 	if n := r.parent.updatesSeen(); n != 1 {
 		t.Errorf("the parent got %d UPDATEs, want the one sent before the lead moved", n)
 	}
+}
+
+// An UPDATE begun in one lead is stopped when another agent takes the lead,
+// though this agent took a new lead in between: elected again after an
+// invalidation, or after its lease lapsed. The run belongs to the hold, not
+// to the lead's number. It went on: the loss named only the new number.
+func TestALeadLostAfterThisAgentLedAgainStopsAnUpdateBegunBefore(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		again func(r *notifyRig)
+	}{
+		{"after an invalidation", func(r *notifyRig) {
+			r.leadMovesTo("")
+			r.leadMovesTo(r.lem.localID)
+		}},
+		{"after a lapsed lease", func(r *notifyRig) {
+			r.lem.mu.RLock()
+			le := r.lem.elections[ZoneName(r.mpzd.ZoneName)]
+			r.lem.mu.RUnlock()
+			le.mu.Lock()
+			le.LeaderExpiry = time.Now().Add(-time.Second)
+			le.mu.Unlock()
+			r.leadMovesTo(r.lem.localID)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, underWay := updateBeingRetried(t, "leadagain.update.example.")
+			z := r.mpzd.ZoneName
+			first := r.lem.LeadStart(ZoneName(z))
+			c.again(r)
+			if r.lem.LeadStart(ZoneName(z)) == first {
+				t.Fatalf("this agent leads with the same number %d: the case is not a new lead", first)
+			}
+			if h := r.conf.holdOf(z); h != first {
+				t.Errorf("a run begun now belongs to %d, want the hold begun in lead %d", h, first)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if underWay() != 1 {
+				t.Fatal("this agent's own new lead stopped the sync under way")
+			}
+
+			r.leadMovesTo(AgentId(r.peer.Identity))
+			for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the sync begun before this agent led again went on after another agent took the lead")
+				}
+			}
+			if l := r.log.String(); !strings.Contains(l, logLeadLostStop+" zone="+z+" syncs=1") {
+				t.Errorf("the lost lead did not stop the sync under way:\n%s", l)
+			}
+		})
+	}
+}
+
+// updateBeingRetried is a leader sync of zone whose UPDATE the parent has
+// refused once and tdns is retrying, with the lead lost to another agent
+// stopping what began in it; underWay counts the zone's runs.
+func updateBeingRetried(t *testing.T, zone string) (r *notifyRig, underWay func() int) {
+	t.Helper()
+	asMPAgent(t)
+	r = newNotifyRig(t, zone, "UPDATE", repeat(30*time.Millisecond, 400)...)
+	r.lem.SetOnLeadLost(r.conf.stopRunsOfLostLead)
+	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
+	r.propagation(time.Hour)
+	z := r.mpzd.ZoneName
+	if _, err := r.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
+		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+		t.Fatalf("the zone's SIG(0) key: %v", err)
+	}
+	r.parent.refuses()
+	r.parent.holdsNS("ns1."+z, r.oldNS)
+	r.hint()
+	underWay = func() int {
+		c := &r.conf.InternalMp.delegationSyncChains
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.runs[z])
+	}
+	for deadline := time.Now().Add(10 * time.Second); r.parent.updatesSeen() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no UPDATE reached the parent")
+		}
+	}
+	if underWay() != 1 {
+		t.Fatal("the refused UPDATE is not being retried")
+	}
+	return r, underWay
 }
 
 // A former leader does not bootstrap the zone's SIG(0) key with the parent:

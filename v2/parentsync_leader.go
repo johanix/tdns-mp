@@ -93,10 +93,10 @@ func (lem *LeaderElectionManager) inKeySetup(zone ZoneName, f func() error) erro
 
 // SetOnLeadLost sets the callback invoked when another agent is named leader
 // in an election where this agent held the lead (noteLeaderLocked): by the
-// election, by gossip of a newer term, or after an invalidation. A renewal
-// of this agent's lead, or its re-election, invokes nothing. It runs in a
-// goroutine of its own.
-func (lem *LeaderElectionManager) SetOnLeadLost(f func(lead uint64)) {
+// election, by gossip of a newer term, or after an invalidation. It names
+// the hold that ended (LeadHold). A renewal of this agent's lead, or its
+// re-election, invokes nothing. It runs in a goroutine of its own.
+func (lem *LeaderElectionManager) SetOnLeadLost(f func(hold uint64)) {
 	lem.onLeadLost = f
 }
 
@@ -1179,21 +1179,17 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 // gets the next number of the manager's (leads), unique across every
 // election here; another agent's lead clears it.
 //
-// Another agent named leader ends the lead this agent held, and what it began
-// for the parent in that lead is stopped (onLeadLost). An invalidation names
-// nobody: the lead it ends is kept until an agent is named, and ends then if
-// that agent is another.
+// It keeps le.holdStart too, the lead that began this agent's present hold:
+// every lead this agent takes until another agent leads belongs to the hold,
+// a new number after an invalidation or a lapsed lease included. Another
+// agent named leader ends the hold, and what this agent began for the parent
+// in any lead of it is stopped (onLeadLost). An invalidation names nobody: the
+// hold is kept until an agent is named, and ends then if that agent is
+// another.
 func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader AgentId, now time.Time) {
 	if leader != lem.localID {
-		lost := le.leadStart
-		if lost == 0 {
-			lost = le.endedLead
-		}
-		switch {
-		case leader == "":
-			le.endedLead = lost
-		case lost != 0:
-			le.endedLead = 0
+		if lost := le.holdStart; leader != "" && lost != 0 {
+			le.holdStart = 0
 			if lem.onLeadLost != nil {
 				go lem.onLeadLost(lost)
 			}
@@ -1201,9 +1197,11 @@ func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader Ag
 		le.leadStart = 0
 		return
 	}
-	le.endedLead = 0
 	if le.Leader != lem.localID || le.leadStart == 0 || now.After(le.LeaderExpiry) {
 		le.leadStart = lem.leads.Add(1)
+	}
+	if le.holdStart == 0 {
+		le.holdStart = le.leadStart
 	}
 }
 
@@ -1211,8 +1209,24 @@ func (lem *LeaderElectionManager) noteLeaderLocked(le *LeaderElection, leader Ag
 // as IsLeader finds the zone's election: its provider group's when that has
 // a leader, else the zone's own. Zero when it does not lead the zone.
 func (lem *LeaderElectionManager) LeadStart(zone ZoneName) uint64 {
+	lead, _ := lem.leadNumbers(zone)
+	return lead
+}
+
+// LeadHold names this agent's present hold of the zone's lead (holdStart):
+// what stays the same while this agent leads, through the new numbers it
+// takes on the way, and what onLeadLost names when another agent takes the
+// lead. Zero when it does not lead the zone.
+func (lem *LeaderElectionManager) LeadHold(zone ZoneName) uint64 {
+	_, hold := lem.leadNumbers(zone)
+	return hold
+}
+
+// leadNumbers is this agent's present lead of the zone and the hold it
+// belongs to, from the election IsLeader finds.
+func (lem *LeaderElectionManager) leadNumbers(zone ZoneName) (lead, hold uint64) {
 	if !lem.IsLeader(zone) {
-		return 0
+		return 0, 0
 	}
 	group := ""
 	if lem.providerGroupMgr != nil {
@@ -1232,11 +1246,11 @@ func (lem *LeaderElectionManager) LeadStart(zone ZoneName) uint64 {
 	}
 	lem.mu.RUnlock()
 	if !ok || le == nil {
-		return 0
+		return 0, 0
 	}
 	le.mu.Lock()
 	defer le.mu.Unlock()
-	return le.leadStart
+	return le.leadStart, le.holdStart
 }
 
 // IsLeader returns true if the local agent is the current leader for a zone.
