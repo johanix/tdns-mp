@@ -25,6 +25,7 @@ func TestConfirm_HTTPSSyncRoundTrip(t *testing.T) {
 	me.Alice.Bridge.APITransport = apiSender(srvB, me.alice, clientCert(t, me.alice))
 	bobAtAlice := transport.NewPeer(me.bob)
 	bobAtAlice.APIEndpoint = srvB.URL + "/api/v1"
+	setTLSA(bobAtAlice, srvB.Certificate())
 
 	id := queueSync(t, me.integEnv, me.zone)
 	records := map[string][]string{me.zone: {me.zone + " 3600 IN TXT \"sync over https\""}}

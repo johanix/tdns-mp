@@ -170,9 +170,47 @@ func (gst *GossipStateTable) AnnouncedPropagationDelay(identity string) (time.Du
 	return time.Duration(newest.PropagationDelay) * time.Second, true
 }
 
-// MergeGossip merges received gossip into the local state table.
-// For each member's state entry, keep the one with the latest timestamp.
-func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
+// MergeGossip merges gossip that from sent, about group, into the local
+// state table, by the sender rule (the plan's 3.2, decision 10 and 35). It
+// takes nothing for a group this agent does not have (group nil), or of
+// which from is not a member. From a member that does not vote it takes
+// that member's own row and nothing else. From the answer to a beat
+// (fromAnswer, from the peer that was beaten, which nothing authenticates)
+// it takes the rows only: no election record and no term, whoever the
+// answer names. Election records come in every peer's own beats.
+func (gst *GossipStateTable) MergeGossip(msg *GossipMessage, from string, group *ProviderGroup, fromAnswer bool) {
+	if msg == nil || group == nil || group.GroupHash != msg.GroupHash || !isAmong(group.Members, AgentId(from)) {
+		lgGossip.Debug("gossip not taken: the group is not known here, or the sender is not its member", "group", msgGroup(msg), "from", from)
+		return
+	}
+	taken := *msg
+	switch {
+	case !isAmong(group.VotingMembers, AgentId(from)):
+		// its own row only
+		taken.Members = map[string]*MemberState{}
+		for id, ms := range msg.Members {
+			if isAmong([]string{id}, AgentId(from)) {
+				taken.Members[id] = ms
+			}
+		}
+		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
+	case fromAnswer:
+		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
+	}
+	gst.mergeGossip(&taken)
+}
+
+func msgGroup(msg *GossipMessage) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.GroupHash
+}
+
+// mergeGossip merges gossip into the local state table as it is, with no
+// rule of its own. For each member's state entry, keep the one with the
+// latest timestamp.
+func (gst *GossipStateTable) mergeGossip(msg *GossipMessage) {
 	var electionCallback func(string, GroupElectionState)
 	var electionHash string
 	var electionState GroupElectionState

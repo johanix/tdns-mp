@@ -30,7 +30,9 @@ multi-provider:
       address:                 '127.0.0.1:8053'
       long_term_jose_pub_key:  /etc/tdns/keys/signer.jose.pub.json
    # Agent identities authorized to communicate with this agent, in
-   # addition to those found through HSYNC3.
+   # addition to those found through HSYNC3. This says who may talk to
+   # the agent, not that a link to it is kept: a peer that no zone names
+   # is removed after peer_hold, as any other peer is.
    # authorized_peers:
    #    - agent.bravo.example.
    # The agent's identity zone, created and signed at startup.
@@ -76,6 +78,8 @@ multi-provider:
          reconcile:           60
          hello_fast_attempts: 3
          hello_fast_interval: 2
+         catchup_outage:      3600
+         peer_hold:           86400
 
 service:
    name:           TDNS-MPAGENT

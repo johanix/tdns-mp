@@ -87,6 +87,7 @@ func goldenWirePayloads() []struct {
 				CDSRRs:    []string{"zone1.example. 3600 IN CDS 12345 15 2 abcd"},
 				Locations: []string{"at-apex", "at-ns"},
 			},
+			CatchUp: &CatchUp{Request: "req-001", Reason: "start", Complete: new(bool), Why: "own-state-not-read"},
 		}},
 		{"DnsRelocatePayload", &DnsRelocatePayload{
 			Type: "relocate", SenderID: "me.example.",

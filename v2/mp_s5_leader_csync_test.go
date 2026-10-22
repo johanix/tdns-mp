@@ -153,7 +153,16 @@ func awaitedEvery(t *testing.T, d time.Duration) {
 func TestTheNotifyOfAnNSChangeWaitsForTheCsyncsConfirmationsAndThenForTheWait(t *testing.T) {
 	const wait, delay = 500 * time.Millisecond, 300 * time.Millisecond
 	awaitedEvery(t, time.Hour)
-	r := newNotifyRigFor(t, "confirmed.csync.example.", "NOTIFY", true, repeat(delay, 400)...)
+	// the zone's DS set is known, and the parent holds it: our signer's
+	// KSK, and the other signing provider has spoken with no key; with the
+	// set unknown the parent is not called in sync, and the peers are not
+	// told
+	r := newNotifyRigWith(t, "confirmed.csync.example.", "NOTIFY", true, func(r *notifyRig) {
+		z := ZoneName(r.mpzd.ZoneName)
+		r.conf.InternalMp.KeyLifecycleOwner.SetInventory(string(z), &KeyInventorySnapshot{Zone: string(z), Inventory: []KeyInventoryItem{r.ksk}})
+		r.conf.InternalMp.MPTransport.noteForeignKeyStates(z, AgentId(r.peer.Identity),
+			[]core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{}}}, true)
+	}, repeat(delay, 400)...)
 	r.propagation(wait)
 	z := r.mpzd.ZoneName
 	peer := r.peer.Identity

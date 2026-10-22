@@ -4,11 +4,14 @@
 package hsync
 
 import (
+	"slices"
+
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
-// IdentitiesFromRRset returns remote HSYNC3 identities, excluding localIdentity.
+// IdentitiesFromRRset returns remote HSYNC3 identities, excluding localIdentity
+// (isLocal: compared as a canonical name).
 func IdentitiesFromRRset(rrs []dns.RR, localIdentity string) map[PeerID]struct{} {
 	out := make(map[PeerID]struct{})
 	for _, rr := range rrs {
@@ -20,7 +23,7 @@ func IdentitiesFromRRset(rrs []dns.RR, localIdentity string) map[PeerID]struct{}
 		if !ok || h3.Identity == "" {
 			continue
 		}
-		if localIdentity != "" && h3.Identity == localIdentity {
+		if isLocal(PeerID(localIdentity), PeerID(h3.Identity)) {
 			continue
 		}
 		out[PeerID(h3.Identity)] = struct{}{}
@@ -44,18 +47,32 @@ func hsync3Of(rr dns.RR) (*core.HSYNC3, bool) {
 	return h3, ok
 }
 
-// localInHsync3 reports whether local appears in the zone view's current HSYNC3
-// RRset (raw co-presence, no role filter — mirrors the legacy weAreInHSYNC check).
-func localInHsync3(zv ZoneView, local string) bool {
-	if zv == nil || local == "" {
+// participates reports whether id has standing in the zone that admission
+// lets in. Until the switch that standing is a role, as the zone's
+// participants have it: an ON record whose label HSYNCPARAM lists in
+// servers=, signers= or auditors=, or any ON record in a zone with no
+// HSYNCPARAM (decision 31). ReconcileZone and ApplyHsyncDiff's gate ask it
+// of the local identity, so an agent reads alike in both. Identities are
+// compared as canonical names: the auditor's engine is built before its
+// identity gets its trailing dot.
+func participates(zv ZoneView, id PeerID) bool {
+	if zv == nil || id == "" {
 		return false
 	}
-	for _, rr := range zv.HSYNC3() {
-		if h3, ok := hsync3Of(rr); ok && h3.Identity == local {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(zv.Participants(), func(p PeerID) bool { return samePeer(p, id) })
+}
+
+// samePeer reports whether two identities name the same peer: equal as
+// canonical names (lower case, with the trailing dot).
+func samePeer(a, b PeerID) bool {
+	return dns.CanonicalName(string(a)) == dns.CanonicalName(string(b))
+}
+
+// isLocal: id names the local agent. An engine with no local identity has
+// none. Compared as canonical names: a local identity configured without
+// the trailing dot, or in another case, is the zone's record of it.
+func isLocal(local, id PeerID) bool {
+	return local != "" && samePeer(id, local)
 }
 
 // ApplyHsyncDiff registers adds and removes for one zone.
@@ -85,9 +102,9 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 		}
 	}
 
-	// Agent-only pre-diff guard: mirror the legacy weAreInHSYNC abort. When the
-	// local identity is absent from the zone's current HSYNC3 RRset, skip remote
-	// add/remove processing. An explicit local-remove RR still fires
+	// Pre-diff guard: in a zone where the local identity has no standing
+	// (participates), skip remote add/remove processing; ReconcileZone
+	// expects no peers there either. An explicit local-remove RR still fires
 	// OnLocalRemoved so the one-time teardown hook runs.
 	//
 	// The provider groups are recomputed on this path too. They are made from
@@ -96,9 +113,9 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 	// removed in one edit kept the zone in the group it had been in, and went
 	// on answering that it led the zone if it led that group, until a change
 	// in some other zone recomputed the groups (tdns-mp #183).
-	if e.deps.GateOnLocalPresence && !localInHsync3(zv, local) {
+	if e.deps.GateOnLocalPresence && !participates(zv, PeerID(local)) {
 		for _, rr := range diff.Removes {
-			if h3, ok := hsync3Of(rr); ok && h3.Identity == local {
+			if h3, ok := hsync3Of(rr); ok && isLocal(PeerID(local), PeerID(h3.Identity)) {
 				if e.deps.Host.OnLocalRemoved != nil {
 					e.deps.Host.OnLocalRemoved(zone)
 				}
@@ -118,7 +135,7 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 			continue
 		}
 		id := PeerID(h3.Identity)
-		if string(id) == local {
+		if isLocal(PeerID(local), id) {
 			localAdded = true
 			continue
 		}
@@ -143,7 +160,7 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 		if updated[id] {
 			continue
 		}
-		if string(id) == local {
+		if isLocal(PeerID(local), id) {
 			if e.deps.Host.OnLocalRemoved != nil {
 				e.deps.Host.OnLocalRemoved(zone)
 			}

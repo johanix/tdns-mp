@@ -29,6 +29,9 @@ import (
 // through tdns.
 type signerWire struct {
 	conf *Config
+	// push sends the inventory to the agents, the keys sent again marked;
+	// nil is pushKeystateInventory (a seam for tests)
+	push func(conf *Config, zone string, resend []uint16)
 }
 
 func (w *signerWire) mpzd(zone string) *MPZoneData {
@@ -127,6 +130,17 @@ func (w *signerWire) Distribute(zone string, keyid uint16) {
 }
 func (w *signerWire) DistributeRemoval(zone string, keyid uint16) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+}
+
+// Resend pushes the inventory with the key marked as sent again: the agent
+// distributes it to the peers again whether or not its key set changed. An
+// unmarked push of an unchanged inventory distributes nothing (#256).
+func (w *signerWire) Resend(zone string, keyid uint16, removal bool) {
+	push := w.push
+	if push == nil {
+		push = pushKeystateInventory
+	}
+	go push(w.conf, dns.Fqdn(zone), []uint16{keyid})
 }
 
 // ParentDS asks the resolver for the zone's DS RRset: the key tags it holds

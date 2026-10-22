@@ -467,3 +467,71 @@ func TestParentSyncStatusPrintsEveryPartOfTheReport(t *testing.T) {
 	wantLines(t, "status with an expired lease", out,
 		"  leader:         none (the lease of agent.bravo.example. has expired)")
 }
+
+// The zone's catch-up: whether it is caught up and whom it waits for, and a
+// row per voting member, with why an answer is not complete or a request
+// failed.
+func TestParentSyncStatusShowsTheCatchUp(t *testing.T) {
+	const zone = "catchup.parentsync.example."
+	checked := time.Date(2026, 10, 12, 15, 4, 0, 0, time.UTC)
+	asked, answered := checked.Add(5*time.Second), checked.Add(6*time.Second)
+	report := tdnsmp.ParentSyncStatus{
+		Zone:        zone,
+		LastChecked: checked,
+		CatchUp: &tdnsmp.CatchUpStatus{
+			WaitingFor: "agent.bravo.example., agent.charlie.example.",
+			Peers: []tdnsmp.CatchUpPeerStatus{
+				{Identity: "agent.alpha.example.", Answer: "complete", Asked: asked, Answered: answered, Reason: "start"},
+				{Identity: "agent.bravo.example.", Answer: "not complete", Asked: asked, Answered: answered, Reason: "start", Note: "no-inventory"},
+				{Identity: "agent.charlie.example.", Answer: "none", Asked: asked, Reason: "peer-start", Note: "refused"},
+			},
+		},
+	}
+	agent := func(report tdnsmp.ParentSyncStatus) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			resp := tdnsmp.AgentMgmtResponse{Identity: "agent.delta.example.", Time: checked, Data: report}
+			if err := json.NewEncoder(w).Encode(tdns.SanitizeForJSON(resp)); err != nil {
+				t.Errorf("encode the response: %v", err)
+			}
+		}
+	}
+	out, err := parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status", out,
+		"  catch-up:       not caught up, waiting for agent.bravo.example., agent.charlie.example.",
+		"Catch-up, per voting member:",
+		"  Answer        Asked     Answered  Reason      Identity",
+		"  complete      15:04:05  15:04:06  start       agent.alpha.example.",
+		"  not complete  15:04:05  15:04:06  start       agent.bravo.example.  (no-inventory)",
+		"  none          15:04:05  -         peer-start  agent.charlie.example.  (refused)")
+
+	report.CatchUp = &tdnsmp.CatchUpStatus{CaughtUp: true}
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, caught up", out, "  catch-up:       caught up")
+
+	report.CatchUp = &tdnsmp.CatchUpStatus{NotVoting: true}
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, not voting", out, "  catch-up:       none: this agent does not vote in the zone, and asks nothing")
+
+	// the leader's sync is held, and the DS set is unknown
+	report.CatchUp = &tdnsmp.CatchUpStatus{WaitingFor: "agent.bravo.example."}
+	report.ParentSync = "held until the zone is caught up"
+	report.DSSet = "unknown, waiting for agent.bravo.example. (not spoken)"
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, held", out,
+		"  catch-up:       not caught up, waiting for agent.bravo.example.",
+		"  parent sync:    held until the zone is caught up",
+		"  DS set:         unknown, waiting for agent.bravo.example. (not spoken)")
+}

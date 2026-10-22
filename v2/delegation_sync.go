@@ -112,6 +112,12 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						continue
 					}
 				}
+				// Nothing goes to the parent of a zone that is not caught up:
+				// the sync is owed, and the answer that completes the
+				// catch-up asks for it (design 5.6)
+				if held, _ := conf.holdLeaderSync(ds); held {
+					continue
+				}
 
 				zd := ds.ZoneData
 				if p := zd.GetParent(); p == "" || p == "." {
@@ -141,34 +147,23 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			case "EXPLICIT-SYNC-DELEGATION":
 				lg.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
-				if err != nil {
-					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
+				// The reasons to send nothing come before the parent is
+				// asked, the hold among them: a leader's sync of a zone that
+				// is not caught up is owed, whether the parent answers or
+				// not (design 5.6). Their answer to the operator is the
+				// reason; the analysis is not made.
+				skipped := tdns.DelegationSyncStatus{ZoneName: ds.ZoneName, Time: time.Now()}
+				skip := func(msg string) {
+					skipped.Msg = msg
 					if ds.Response != nil {
-						ds.Response <- syncstate
+						ds.Response <- skipped
 					}
-					// the leader's sync of a multi-provider zone is asked
-					// again: whatever asked for it will not ask twice
-					//
-					// A sync that was stopped because this agent no longer
-					// takes part in the zone (followParentSyncParam) is not a
-					// failure to ask again for.
-					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
-						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
-					}
-					continue
 				}
-
 				// An agent the zone no longer has first, as above
 				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
 					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
 					conf.delegationSyncNotLeading(ds.ZoneName, false)
-					syncstate.Msg = "this agent no longer participates in the zone, skipping DDNS"
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
+					skip("this agent no longer participates in the zone, skipping DDNS")
 					continue
 				}
 				// No agent sends to the parent of a zone whose owner syncs its
@@ -177,13 +172,9 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if ownerSyncsDelegation(ds.ZoneData) {
 					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
 					conf.delegationSyncOwnerSyncs(ds.ZoneName)
-					syncstate.Msg = "the zone's owner syncs its delegation, skipping DDNS"
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
+					skip("the zone's owner syncs its delegation, skipping DDNS")
 					continue
 				}
-
 				// Only the elected leader of a multi-provider zone sends to the
 				// parent; a zone this daemon is primary for alone (its
 				// identity zone) has no election to wait for.
@@ -192,21 +183,70 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
 						// a chain left from a term this agent led is over
 						conf.delegationSyncNotLeading(ds.ZoneName, false)
-						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
+						skip("not the delegation sync leader, skipping DDNS")
+						continue
+					}
+				}
+				// Held while the zone is not caught up: the operator is told
+				// so, with no error
+				if held, waiting := conf.holdLeaderSync(ds); held {
+					skip(fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting))
+					continue
+				}
+
+				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
+				if err != nil {
+					syncstate.Error = true
+					syncstate.ErrorMsg = err.Error()
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					// The leader's sync of a multi-provider zone that could
+					// not ask the parent is owed, and asked again every 30 s
+					// while it is owed and the zone is caught up, until the
+					// parent answers. That is its retry: it does not count
+					// as a failed sync, so an outage does not grow the
+					// backoff that the first real failure after it would
+					// wait (the rig's parent-unreach). One line an hour says
+					// the parent does not answer, not one per try.
+					//
+					// A sync that was stopped because this agent no longer
+					// takes part in the zone (followParentSyncParam) is not a
+					// failure to ask again for.
+					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
+						if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), err); logIt {
+							lg.Error("DelegationSyncher: the parent's delegation cannot be analysed; the sync is owed, and asked for again every 30 s while the zone is caught up",
+								"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", err)
+						}
+					} else {
+						lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+					}
+					continue
+				}
+				if was, since := conf.InternalMp.CatchUp.parentAnswered(ZoneName(ds.ZoneName)); was {
+					lg.Info("DelegationSyncher: the parent's delegation can be analysed again", "zone", ds.ZoneName,
+						"down_since", since.UTC().Format(time.RFC3339))
+				}
+
+				if syncstate.InSync {
+					// With no DS set to compare, for a zone that names a
+					// signer, NS and glue being in step is not "in sync"
+					if waiting, unknown := conf.dsSetUnknown(ds); unknown {
+						lg.Info("DelegationSyncher: NS and glue are in sync with the parent, the DS set is unknown",
+							"zone", syncstate.ZoneName, "waiting_for", waiting)
+						syncstate.Msg = fmt.Sprintf("NS and glue are in sync with the parent; the DS set is unknown, waiting for %s", waiting)
+						conf.delegationSyncInSync(ds.ZoneName, false)
 						if ds.Response != nil {
 							ds.Response <- syncstate
 						}
 						continue
 					}
-				}
-
-				if syncstate.InSync {
 					lg.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
 						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
 					// This ends the zone's retries. It is also what a sync
 					// that went out as a NOTIFY waits for: the peers are
 					// told of that sync now
-					conf.delegationSyncInSync(ds.ZoneName)
+					conf.delegationSyncInSync(ds.ZoneName, true)
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}

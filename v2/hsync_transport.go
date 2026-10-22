@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,10 @@ type MPTransportBridge struct {
 	// (keyHandOverAdmits)
 	keyAsks keyAskTable
 
+	// catchUp is the agent's catch-up tracker (catchup.go), as
+	// conf.InternalMp.CatchUp; nil on every other role.
+	catchUp *catchUpTracker
+
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
 
@@ -60,6 +65,17 @@ type MPTransportBridge struct {
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
 	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
 	dnskeyPropMu              sync.Mutex
+	// supersededBy: a DNSKEY propagation that a resend of its keys took
+	// over (foldIntoResend), to the resend's distribution ID, so that a late
+	// answer to it still counts there. Under dnskeyPropMu.
+	supersededBy map[string]supersession
+	// answersSent: the answers to requests for a zone's state that this
+	// agent sent, by distribution ID, with the keys of their DNSKEY
+	// operation (noteCatchUpAnswer); answerTo: the distribution ID of the
+	// latest one per zone and asker, the only one remembered. Under
+	// dnskeyPropMu.
+	answersSent map[string]*sentAnswer
+	answerTo    map[ZoneName]map[AgentId]string
 	// what the other providers said about their keys, per zone and
 	// sending agent, for our signer (tdns-mp #58)
 	foreignKeyStatesMu sync.Mutex
@@ -167,7 +183,9 @@ func recipientTransportReady(ar *AgentRegistry, peers *transport.PeerRegistry, r
 	if !ok {
 		return false
 	}
-	return isTransportReady(peer, "DNS") || isTransportReady(peer, "API")
+	// API counts only with a TLSA to check the peer against: a hello on
+	// the unauthenticated /hello introduces API without one.
+	return isTransportReady(peer, "DNS") || (isTransportReady(peer, "API") && peer.APIUsable())
 }
 
 func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
@@ -297,26 +315,43 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// remote agents that serve API. supported_mechanisms controls the server role, not
 	// the client role.
 	apiTLSConfig := &tls.Config{
-		// Peer certificates are validated against TLSA records (discovered via DNS),
-		// not against the system CA store. Self-signed certs are the norm here.
+		// Self-signed certificates are the norm here: the transport checks
+		// each peer's certificate against the peer's TLSA RRset (DANE-EE),
+		// not against a CA.
 		InsecureSkipVerify: true, //nolint:gosec
 		MinVersion:         tls.VersionTLS13,
 	}
-	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
+	if cfg.ClientCertFile != "" || cfg.ClientKeyFile != "" {
 		clientCert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
-			lgTransport.Error("failed to load API client certificate, outbound mTLS will not work",
-				"certFile", cfg.ClientCertFile, "keyFile", cfg.ClientKeyFile, "err", err)
-		} else {
-			apiTLSConfig.Certificates = []tls.Certificate{clientCert}
-			lgTransport.Info("API client certificate loaded", "certFile", cfg.ClientCertFile)
+			return nil, fmt.Errorf("API client certificate (cert %q, key %q): %w", cfg.ClientCertFile, cfg.ClientKeyFile, err)
+		}
+		apiTLSConfig.Certificates = []tls.Certificate{clientCert}
+		lgTransport.Info("API client certificate loaded", "certFile", cfg.ClientCertFile)
+	} else if tm.role == "" || tm.role == roleAgent || tm.role == roleAuditor {
+		lgTransport.Warn("no API client certificate: every peer refuses this node's HTTPS (401), and each such send falls back to DNS")
+	}
+	// The resolver starts after the bridge: late-bound, for discovery and
+	// for the TLSA checks.
+	var getImr func() *transport.Imr
+	if cfg.GetImrEngine != nil {
+		getImrEngine := cfg.GetImrEngine
+		getImr = func() *transport.Imr {
+			mpImr := getImrEngine()
+			if mpImr == nil || mpImr.Imr == nil {
+				return nil
+			}
+			return &transport.Imr{Imr: mpImr.Imr}
 		}
 	}
 	tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: cfg.APITimeout,
 		TLSConfig:      apiTLSConfig,
+		GetImr:         getImr,
 	})
+	// A peer's HTTPS client goes with the peer.
+	peerRegistry.OnRemove = tm.APITransport.ForgetPeer
 	lgTransport.Info("API client transport enabled")
 
 	// Create DNS transport if control zone is configured AND supported
@@ -510,6 +545,27 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		if tm.agentRegistry == nil {
 			return
 		}
+		// A registration that held a transport peer since removed, or
+		// replaced under its identity, does not speak for the identity: its
+		// flags are not the current peer's.
+		if reg := tm.TransportManager.PeerRegistry; reg != nil {
+			if cur, ok := reg.Get(peer.ID); !ok || cur != peer {
+				lgTransport.Debug("discovered peer is no longer the transport's peer for its identity, ignored", "peer", peer.ID)
+				return
+			}
+		}
+		// Discovery runs only for an identity that a zone names (design
+		// 3.3). A discovery that completes for one no zone names any more
+		// puts nothing in the registry and leaves the transport's peer as
+		// it is: a peer named only by authorized_peers too. A peer the
+		// engine holds already, kept for the hold time or found by the
+		// operator, completes its discovery: nothing new is stored. The
+		// removed object itself is never stored again: agentViewForIdentity
+		// stores only a new peer.
+		if !tm.zoneNamesPeer(peer.ID) && !tm.engineHolds(peer.ID) {
+			lgTransport.Info("discovered peer is named by no zone this agent holds, not registered", "peer", peer.ID)
+			return
+		}
 		agent := tm.agentRegistry.agentViewForIdentity(AgentId(peer.ID),
 			tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
 		if agent == nil {
@@ -598,16 +654,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// accessor (the resolver starts asynchronously). The TEMPORARY
 	// DiscoveryDriver seam and MP's RunDiscovery are gone.
 	tm.TransportManager.SetSupportedMechanisms(supportedMechanisms)
-	if cfg.GetImrEngine != nil {
-		getImr := cfg.GetImrEngine
-		tm.TransportManager.GetImr = func() *transport.Imr {
-			mpImr := getImr()
-			if mpImr == nil || mpImr.Imr == nil {
-				return nil
-			}
-			return &transport.Imr{Imr: mpImr.Imr}
-		}
-	}
+	tm.TransportManager.GetImr = getImr
 
 	return tm, nil
 }
@@ -665,6 +712,17 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// A message let in for a zone's SIG(0) key alone is refused before any
 	// verb handler takes it, unless it is the request for the key or its
 	// answer (keyHandOverGate).
+	// On an agent and an auditor a payload that names another sender than
+	// the one the transport established is refused first, before anything
+	// judges the message by that name (refuseNamedSender).
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		tm.Router.Use(tm.refuseNamedSender)
+	}
+	// On an agent a KEYSTATE is taken only from its own signer, and on a
+	// signer only from its own agents (refuseForeignKeystate).
+	if tm.role == roleAgent || tm.role == roleSigner {
+		tm.Router.Use(tm.refuseForeignKeystate)
+	}
 	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
@@ -718,8 +776,9 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
-	// Messages reaching routeHelloMessage have passed middleware auth.
-	senderID := payload.GetSenderID()
+	// Messages reaching routeHelloMessage have passed middleware auth. The
+	// sender is the one the parser and refuseNamedSender checked.
+	senderID := msg.SenderID
 	lgTransport.Debug("processing authorized DNS hello", "sender", senderID)
 
 	// DNS-37: inbound DNS hello accepted → INTRODUCING on the canonical
@@ -846,7 +905,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	senderID := msg.SenderID // the sender the parser and refuseNamedSender checked
 
 	// DNS-51: Authorization check for Beat messages
 	// Beat includes Zones field (list of zones sender believes are shared)
@@ -873,7 +932,11 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 		var gossipMsgs []GossipMessage
 		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
 			for i := range gossipMsgs {
-				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+				var group *ProviderGroup
+				if pgm := tm.agentRegistry.ProviderGroupManager; pgm != nil {
+					group = pgm.GetGroup(gossipMsgs[i].GroupHash)
+				}
+				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], senderID, group, false)
 			}
 			lgTransport.Debug("merged gossip from incoming DNS beat", "sender", senderID, "groups", len(gossipMsgs))
 
@@ -988,7 +1051,11 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		payload.DistributionID = msg.DistributionID
 	}
 
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	// The sender the parser and refuseNamedSender checked. On an agent or
+	// an auditor a payload that names none is refused before this; on a
+	// combiner or a signer, where no such check runs, the deliverer is the
+	// only sender such a payload has.
+	senderID := msg.SenderID
 	if senderID == "" && msg.TransportSender != "" {
 		senderID = msg.TransportSender // Fallback to transport-level sender (from QNAME)
 		lgTransport.Debug("payload had empty sender, using transport sender", "sender", senderID)
@@ -1075,6 +1142,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
 			ZoneClass:      payload.ZoneClass,
 			Publish:        payload.GetPublish(),
+			CatchUp:        payload.CatchUp,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -1093,7 +1161,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		// Only agents acting as relay (with an agentRegistry) send this — the combiner already
 		// returned a "pending" ACK inline in the DNS response.
 		if tm.agentRegistry != nil {
-			go tm.sendImmediateConfirmation(payload, msg.Mechanism)
+			go tm.sendImmediateConfirmation(payload, senderID, msg.Mechanism)
 		}
 	default:
 		lgTransport.Warn("message channel full, dropping message", "msgType", msgTypeStr, "sender", senderID)
@@ -1156,6 +1224,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Zone:      payload.Zone,
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
+		Resend:    payload.Resend,
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -1165,8 +1234,11 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 
 	// If there's a pending RFI request waiting for this zone's inventory,
-	// route there. Zone mismatches fall through to the shared channel.
-	if ch, ok := tm.getKeystateRfi(payload.Zone); ok {
+	// route there. Zone mismatches fall through to the shared channel. An
+	// inventory with keys marked as sent again is the signer's push, not an
+	// RFI's answer: it goes to the agent's handler, which distributes them
+	// (#256); a waiter would record it and drop the mark.
+	if ch, ok := tm.getKeystateRfi(payload.Zone); ok && len(payload.Resend) == 0 {
 		select {
 		case ch <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
@@ -1209,6 +1281,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		SenderID:     senderID,
 		Zone:         payload.Zone,
 		AgentRecords: payload.AgentRecords,
+		Message:      payload.Message,
 	}
 
 	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
@@ -1421,13 +1494,17 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
-	// Messages reaching routeRelocateMessage have passed middleware auth.
-	lgTransport.Debug("processing authorized DNS relocate", "sender", payload.SenderID)
+	// Messages reaching routeRelocateMessage have passed middleware auth. The
+	// sender is the one the parser and refuseNamedSender checked, whichever
+	// field of the payload named it: a relocate moves its sender's own
+	// address, and no other.
+	senderID := msg.SenderID
+	lgTransport.Debug("processing authorized DNS relocate", "sender", senderID)
 
 	// Update peer's operational address
-	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
+	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		peer = tm.PeerRegistry.GetOrCreate(payload.SenderID)
+		peer = tm.PeerRegistry.GetOrCreate(senderID)
 	}
 
 	peer.SetOperationalAddress(&transport.Address{
@@ -1437,7 +1514,7 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 		Path:      payload.NewAddress.Path,
 	})
 
-	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
+	lgTransport.Info("updated operational address", "peer", senderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
 
 // settleQueuedMessage tells the reliable queue what a confirmation means
@@ -1458,14 +1535,13 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
-// confirmations in the two-phase remote confirmation protocol (Phase 5). It goes back on
-// mechanism, the one the sync arrived on (confirmTransport).
-func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, mechanism string) {
+// confirmations in the two-phase remote confirmation protocol (Phase 5). It goes to
+// senderID, back on mechanism, the one the sync arrived on (confirmTransport).
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, senderID, mechanism string) {
 	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
-	senderID := payload.GetSenderID()
 	if payload.DistributionID == "" {
 		lgTransport.Warn("cannot send immediate confirmation, no distribution ID", "sender", senderID)
 		return
@@ -1638,8 +1714,9 @@ func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, pe
 }
 
 // otherConfirmTransport is the mechanism a confirmation falls back to from
-// t's: DNS when the peer has an address, HTTPS when it has an endpoint;
-// nil when there is none.
+// t's: DNS when the peer has an address, HTTPS when it has an endpoint and a
+// usable TLSA to check its certificate against (APIUsable); nil when there is
+// none.
 func (tm *MPTransportBridge) otherConfirmTransport(t transport.Transport, peer *transport.Peer) transport.Transport {
 	switch t.(type) {
 	case *transport.APITransport:
@@ -1647,7 +1724,7 @@ func (tm *MPTransportBridge) otherConfirmTransport(t transport.Transport, peer *
 			return tm.DNSTransport
 		}
 	case *transport.DNSTransport:
-		if tm.APITransport != nil && peer.GetAPIEndpoint() != "" {
+		if tm.APITransport != nil && peer.APIUsable() {
 			return tm.APITransport
 		}
 	}
@@ -1679,33 +1756,6 @@ func (tm *MPTransportBridge) noteConfirmFallback(peerID, failed, used string, er
 		lgTransport.Debug("confirmation sent on the other mechanism", "peer", peerID, "failed", failed, "used", used, "err", err)
 	}
 	return loud
-}
-
-// SelectTransport selects the appropriate transport for communicating with a peer.
-func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Transport {
-	apiEndpoint := peer.GetAPIEndpoint()
-
-	// Check peer's preferred transport
-	switch peer.GetPreferredTransport() {
-	case "DNS":
-		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-			return tm.DNSTransport
-		}
-	case "API":
-		if tm.APITransport != nil && apiEndpoint != "" {
-			return tm.APITransport
-		}
-	}
-
-	// Default: try API first (more reliable), then DNS
-	if tm.APITransport != nil && apiEndpoint != "" {
-		return tm.APITransport
-	}
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-		return tm.DNSTransport
-	}
-
-	return nil
 }
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
@@ -1782,7 +1832,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// transport's SendAll — every eligible mechanism is tried, in order,
 	// and each outcome is applied below exactly as before.
 	apiGate, _ := mechStateForGate(peer, "API")
-	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && apiGate == AgentStateKnown
+	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIUsable() && apiGate == AgentStateKnown
 	dnsGate, _ := mechStateForGate(peer, "DNS")
 	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
 	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
@@ -1908,7 +1958,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		return st == AgentStateOperational || st == AgentStateIntroduced || st == AgentStateLegacy || st == AgentStateDegraded || st == AgentStateInterrupted
 	}
 	apiBeatGate, _ := mechStateForGate(peer, "API")
-	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.GetAPIEndpoint() != "" && beatable(apiBeatGate)
+	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIUsable() && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
 	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
 	apiRaw, _ := peer.MechanismRawState("API")
@@ -1954,6 +2004,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			}
 		}
 	}
+	// A beat that succeeded, on one mechanism or both, is one successful
+	// beat to the peer for the catch-up tracker.
+	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
+		tm.catchUp.PeerOperational(agent.ID)
+	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
 			if resp == nil || len(resp.Gossip) == 0 {
@@ -1962,9 +2017,10 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			var gossipMsgs []GossipMessage
 			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
 				for i := range gossipMsgs {
-					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
-					// Re-evaluate group state after merge (may trigger elections)
+					// the answer of the peer that was beaten: rows only
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], string(agent.ID), pg, true)
+					// Re-evaluate group state after merge (may trigger elections)
 					if pg != nil {
 						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.Members)
 					}
@@ -2097,6 +2153,9 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 	}
 	if update != nil {
 		syncReq.Operations = update.Operations
+		if !isCombiner {
+			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
+		}
 		if isCombiner {
 			syncReq.ZoneClass = update.ZoneClass
 			if update.Publish != nil {
@@ -2302,23 +2361,6 @@ func (tm *MPTransportBridge) GetDistributionRecipients(zone ZoneName, skipCombin
 	return recipients
 }
 
-// groupRRStringsByOwner converts a flat list of RR strings to records grouped by owner name.
-// Used when converting from management commands (AgentMgmtPost.RRs []string) to the
-// grouped format used by AgentMsgPost.Records and SyncRequest.Records.
-func groupRRStringsByOwner(rrStrings []string) map[string][]string {
-	records := make(map[string][]string)
-	for _, rrStr := range rrStrings {
-		rr, err := dns.NewRR(rrStr)
-		if err != nil {
-			lgTransport.Warn("skipping unparseable RR", "rr", rrStr, "err", err)
-			continue
-		}
-		owner := rr.Header().Name
-		records[owner] = append(records[owner], rrStr)
-	}
-	return records
-}
-
 // --- Phase 6: DNSKEY Propagation Tracking and KEYSTATE Signaling ---
 
 // PendingDnskeyPropagation tracks a DNSKEY distribution awaiting confirmation from all remote agents.
@@ -2338,6 +2380,115 @@ type PendingDnskeyPropagation struct {
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
+}
+
+// foldIntoResend lets the resend of keys (#256), tracked as resendID, take
+// over the zone's pending DNSKEY propagations of the same distribution: the
+// same key tags, removing the same of them. Each such tracking ends here,
+// which a final word that credited nothing left open: otherwise one more
+// stayed with every resend. What its agents had answered positively
+// (applied, ignored) is carried over, and its ID points at the resend's
+// (supersededBy), so an answer to it that comes late still counts. An agent
+// slower than the resend interval is then not asked over and over to no
+// end. A rejection is not carried: the resend asks again, and its answer
+// decides. Any other tracking is left to finish on its own: an add's
+// "applied" is not a removal's, and a late success is scored against every
+// key of the resend, so a tracking of fewer keys would credit the rest.
+func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	resend := tm.pendingDnskeyPropagations[resendID]
+	if resend == nil {
+		return
+	}
+	tm.pruneSupersededLocked(time.Now())
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if distID == resendID || prop.Zone != zone || len(prop.KeyTags) == 0 {
+			continue
+		}
+		if !sameDistribution(prop, resend) {
+			continue
+		}
+		for agent, results := range prop.Results {
+			for kt, r := range results {
+				if r == "applied" || r == "ignored" {
+					resend.setResultLocked(agent, kt, r)
+				}
+			}
+		}
+		delete(tm.pendingDnskeyPropagations, distID)
+		if tm.supersededBy == nil {
+			tm.supersededBy = map[string]supersession{}
+		}
+		for old, s := range tm.supersededBy {
+			if s.to == distID {
+				tm.supersededBy[old] = supersession{to: resendID, at: s.at}
+			}
+		}
+		tm.supersededBy[distID] = supersession{to: resendID, at: time.Now()}
+		lgTransport.Info("a DNSKEY propagation is superseded by a resend of its keys", "zone", zone, "distributionID", distID, "resend", resendID, "keyTags", len(prop.KeyTags))
+	}
+	tm.finishDnskeyPropagationLocked(resendID, resend)
+}
+
+// supersession: the resend that took a DNSKEY propagation over, and when.
+// No answer to the earlier distribution comes after the reliable queue has
+// given it up (noteMaxAge), so the alias is dropped then: a key that is
+// resent for as long as its tracking stays open leaves no more aliases than
+// a day's resends.
+type supersession struct {
+	to string
+	at time.Time
+}
+
+// pruneSupersededLocked drops the aliases no late answer can use any more.
+// Under dnskeyPropMu.
+func (tm *MPTransportBridge) pruneSupersededLocked(now time.Time) {
+	for old, s := range tm.supersededBy {
+		if now.Sub(s.at) > noteMaxAge {
+			delete(tm.supersededBy, old)
+		}
+	}
+}
+
+// sameDistribution is whether two DNSKEY propagations carry the same key
+// tags and remove the same of them.
+func sameDistribution(a, b *PendingDnskeyPropagation) bool {
+	if len(a.KeyTags) != len(b.KeyTags) {
+		return false
+	}
+	for _, kt := range a.KeyTags {
+		if !slices.Contains(b.KeyTags, kt) || a.Removed[kt] != b.Removed[kt] {
+			return false
+		}
+	}
+	for _, kt := range b.KeyTags {
+		if !slices.Contains(a.KeyTags, kt) {
+			return false
+		}
+	}
+	return true
+}
+
+// setResultLocked records an agent's answer for a key of the propagation,
+// unless it has one, and marks the agent answered once every key has one.
+// Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, result string) {
+	if _, expected := prop.ExpectedAgents[agent]; !expected || !slices.Contains(prop.KeyTags, kt) {
+		return
+	}
+	if prop.Results == nil {
+		prop.Results = map[AgentId]map[uint16]string{}
+	}
+	if prop.Results[agent] == nil {
+		prop.Results[agent] = map[uint16]string{}
+	}
+	if prop.Results[agent][kt] == "" {
+		prop.Results[agent][kt] = result
+	}
+	if len(prop.Results[agent]) == len(prop.KeyTags) {
+		prop.ExpectedAgents[agent] = true
+	}
 }
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
@@ -2467,7 +2618,22 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	defer tm.dnskeyPropMu.Unlock()
 
 	prop, exists := tm.pendingDnskeyPropagations[distID]
+	// a late answer to a propagation a resend of its keys took over counts
+	// there, but only for what it applied: the resend's own answer decides
+	// a rejection (foldIntoResend)
+	late := false
 	if !exists {
+		if s, ok := tm.supersededBy[distID]; ok {
+			if prop, exists = tm.pendingDnskeyPropagations[s.to]; exists {
+				late = true
+				distID = s.to
+			}
+		}
+	}
+	if !exists {
+		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
+		}
 		return false // Not a DNSKEY propagation confirmation
 	}
 	agentID := AgentId(source)
@@ -2520,6 +2686,8 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			continue // a key's first final answer from an agent stands
 		}
 		switch {
+		case late && (rejectedTags[kt] || (wholeRejection && !doneTags[kt])):
+			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
 			prop.Rejected = true
@@ -2544,11 +2712,18 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	} else {
 		lgTransport.Info("DNSKEY confirmation not final for every key; still waiting", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
 	}
+	tm.finishDnskeyPropagationLocked(distID, prop)
+	return true
+}
 
+// finishDnskeyPropagationLocked sends each key's result to the signer once
+// every expected agent has answered, and ends the tracking. Under
+// dnskeyPropMu.
+func (tm *MPTransportBridge) finishDnskeyPropagationLocked(distID string, prop *PendingDnskeyPropagation) {
 	// Check if all agents have answered
 	for _, confirmed := range prop.ExpectedAgents {
 		if !confirmed {
-			return true // Still waiting for more confirmations
+			return // Still waiting for more confirmations
 		}
 	}
 
@@ -2558,6 +2733,11 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	sentAt := prop.CreatedAt
 	propagated, removed, rejected, rejectionMsg := prop.outcome()
 	delete(tm.pendingDnskeyPropagations, distID)
+	for old, s := range tm.supersededBy {
+		if s.to == distID {
+			delete(tm.supersededBy, old)
+		}
+	}
 
 	// Send KEYSTATE asynchronously (don't hold the mutex); the kind of
 	// distribution each key's answer is about travels as the signal:
@@ -2573,8 +2753,104 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			tm.sendKeystateToSigner(zone, removed, "removed", "all remote agents confirmed the removal", sentAt)
 		}
 	}()
+}
 
-	return true
+// sentAnswer is an answer to a request for a zone's state that this agent
+// sent: the zone, the asker, when, and the keys of its DNSKEY operation,
+// which is this agent's whole DNSKEY set as its signer's inventory had it.
+type sentAnswer struct {
+	zone  ZoneName
+	asker AgentId
+	at    time.Time
+	keys  map[uint16]bool
+}
+
+// noteCatchUpAnswer remembers an answer with a DNSKEY operation, so that the
+// asker's final confirmation of it counts for the DNSKEY propagations it
+// overtook (creditFromAnswerLocked). One answer per zone and asker is
+// remembered, the latest: a newer one takes the older one's place, as it
+// takes its place in the queue (catchUpAnswer). What is kept is then
+// bounded by the zones and the peers, however often a peer asks. An older
+// answer that was delivered before it was replaced, and is confirmed,
+// credits nothing; the newer answer's confirmation does, and a key left
+// waiting is sent again by the signer's resend.
+func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, asker AgentId, keys map[uint16]bool) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	if tm.answersSent == nil {
+		tm.answersSent = map[string]*sentAnswer{}
+	}
+	if tm.answerTo == nil {
+		tm.answerTo = map[ZoneName]map[AgentId]string{}
+	}
+	if tm.answerTo[zone] == nil {
+		tm.answerTo[zone] = map[AgentId]string{}
+	}
+	if older := tm.answerTo[zone][asker]; older != "" {
+		delete(tm.answersSent, older)
+	}
+	tm.answerTo[zone][asker] = distID
+	tm.answersSent[distID] = &sentAnswer{zone: zone, asker: asker, at: time.Now(), keys: keys}
+}
+
+// creditFromAnswerLocked takes the asker's final confirmation of an answer
+// as its word on the keys of every DNSKEY propagation of the zone, made
+// before the answer, that still waits for that agent. An answer can reach
+// the asker before a distribution of the same keys; that distribution is
+// then stale there, and the asker leaves out of its confirmation the keys
+// that only the answer's forward, not yet confirmed by its combiner, has
+// brought (dnskeyAwaitingAnswer). The answer's final confirmation follows
+// that combiner's. A success says the asker's combiner holds the answer's
+// set: a key added that is in it is applied, and a key removed that is not
+// in it is removed. A rejection names its keys; an "ignored" covers the
+// answer's keys as a direct answer does. Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, rejectedItems []RejectedItemInfo) {
+	var rejectedRecords []string
+	for _, ri := range rejectedItems {
+		rejectedRecords = append(rejectedRecords, ri.Record)
+	}
+	rejectedTags := dnskeyKeyTagsOf(rejectedRecords)
+	success := status == transport.ConfirmSuccess.String()
+	ignored := status == transport.ConfirmIgnored.String() && len(rejectedItems) == 0
+	for distID, prop := range tm.pendingDnskeyPropagations {
+		if prop.Zone != ans.zone || prop.CreatedAt.After(ans.at) {
+			continue
+		}
+		if answered, expected := prop.ExpectedAgents[agent]; !expected || answered {
+			continue
+		}
+		if prop.Results == nil {
+			prop.Results = map[AgentId]map[uint16]string{}
+		}
+		results := prop.Results[agent]
+		if results == nil {
+			results = map[uint16]string{}
+			prop.Results[agent] = results
+		}
+		for _, kt := range prop.KeyTags {
+			if results[kt] != "" {
+				continue
+			}
+			covered := ans.keys[kt] != prop.Removed[kt] // an add in the set, a removal not in it
+			switch {
+			case rejectedTags[kt]:
+				results[kt] = "rejected"
+				prop.Rejected = true
+				if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
+					prop.RejectionMsg = rejectedItems[0].Reason
+				}
+			case success && covered:
+				results[kt] = "applied"
+			case ignored && covered:
+				results[kt] = "ignored"
+			}
+		}
+		lgTransport.Info("DNSKEY propagation answered by the asker's confirmation of an answer it overtook", "zone", prop.Zone, "distributionID", distID, "agent", agent, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
+		if len(results) == len(prop.KeyTags) && len(prop.KeyTags) > 0 {
+			prop.ExpectedAgents[agent] = true
+		}
+		tm.finishDnskeyPropagationLocked(distID, prop)
+	}
 }
 
 // NoteForeignKeyStates records what a provider says about its keys in a
@@ -2591,6 +2867,20 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 // from it. The entry stays, with no key in it: the provider has spoken,
 // and the signer is told so by name (S7, the empty-share clause of A2.2).
 func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation) {
+	tm.noteForeignKeyStates(zone, from, ops, false)
+}
+
+// noteForeignKeyStates is NoteForeignKeyStates for an update that may be a
+// complete answer to a request for the zone's state. A complete answer
+// whose DNSKEY operation lists no key state says that its provider has
+// spoken and holds no key, also when it has not been heard from before:
+// that is what makes the providers speak after the leader's restart. A
+// complete answer with no DNSKEY operation says nothing about keys: its
+// sender's copy of the zone does not list it in signers=. Where the
+// asker's copy does, the provider stays silent and the zone's DS set
+// unknown, which holds the leader's sync, and never removes the
+// provider's DS at the parent.
+func (tm *MPTransportBridge) noteForeignKeyStates(zone ZoneName, from AgentId, ops []core.RROperation, complete bool) {
 	var states []core.KeyState
 	// endsEmpty: the last DNSKEY operation replaces the whole set by no
 	// record. That is what the operations leave, whatever came before it
@@ -2634,6 +2924,9 @@ func (tm *MPTransportBridge) NoteForeignKeyStates(zone ZoneName, from AgentId, o
 		if _, spoke := tm.foreignKeyStates[zone][from]; spoke {
 			found, emptied = true, true
 		}
+	}
+	if !found && complete && records {
+		found = true
 	}
 	if !found {
 		tm.foreignKeyStatesMu.Unlock()
@@ -2863,7 +3156,8 @@ func peerAddressLookup(reg *transport.PeerRegistry) func(senderID string) (strin
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).
 // Returns the ACK from the signer. The actual data comes back as a separate KEYSTATE message.
-func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error {
+// The send is bounded at 10 s under ctx, whose end stops it.
+func (tm *MPTransportBridge) sendRfiToSigner(ctx context.Context, zone string, rfiType string) error {
 	if tm.signerID == "" || tm.signerAddress == "" {
 		return fmt.Errorf("no signer configured (signerID=%q, signerAddress=%q)", tm.signerID, tm.signerAddress)
 	}
@@ -2885,7 +3179,7 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 		RfiType:     rfiType,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -2899,7 +3193,8 @@ func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error 
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonce string) error {
+// The send is bounded at 10 s under ctx, whose end stops it.
+func (tm *MPTransportBridge) sendRfiToCombiner(ctx context.Context, zone string, rfiType string, nonce string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
@@ -2923,7 +3218,7 @@ func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string, nonc
 		Nonce:       nonce,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -3055,6 +3350,12 @@ func helloResult(r transport.MechanismResult) (*transport.HelloResponse, error) 
 	}
 	resp, _ := r.Response.(*transport.HelloResponse)
 	return resp, nil
+}
+
+// beatSucceeded: a beat's round trip succeeded, as SendBeatWithFallback
+// takes it: no error, and no answer that withholds its acknowledgement.
+func beatSucceeded(resp *transport.BeatResponse, err error) bool {
+	return err == nil && (resp == nil || resp.Ack)
 }
 
 func beatResult(r transport.MechanismResult) (*transport.BeatResponse, error) {

@@ -32,7 +32,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		}
 
 		ds := req.DnskeyStatus
-		totalChanges := len(ds.LocalAdds) + len(ds.LocalRemoves)
+		totalChanges := len(ds.LocalAdds) + len(ds.LocalRemoves) + len(ds.ResendRemovedTags)
 		if totalChanges == 0 && !ds.StatesChanged {
 			lgEngine.Debug("DNSKEY changed but no local key changes (remote keys only), ignoring", "zone", req.ZoneName)
 			break
@@ -59,6 +59,10 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 				removedTags = append(removedTags, dnskey.KeyTag())
 			}
 		}
+		// a removal the signer sends again: tracked by its tag, carried by
+		// the REPLACE below with no delete record (#256)
+		keyTags = append(keyTags, ds.ResendRemovedTags...)
+		removedTags = append(removedTags, ds.ResendRemovedTags...)
 
 		// Build REPLACE operation: the complete current set of local DNSKEYs.
 		// Remote agents receive "here are all our DNSKEYs — make yours match"
@@ -104,6 +108,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			DnskeyKeyTags:        keyTags,
 			DnskeyRemovedKeyTags: removedTags,
 			KeyStatesChanged:     ds.StatesChanged,
+			Resend:               ds.Resend,
 		}
 
 	default:
@@ -159,6 +164,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		}
 
 		zu.Operations = ampp.Operations
+		zu.CatchUp = ampp.CatchUp
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
@@ -170,6 +176,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			Mechanism:         ampp.Mechanism,
 			OriginatingTime:   ampp.Time,
 			DeliveredBy:       ampp.DeliveredBy,
+			CatchUp:           ampp.CatchUp,
 			Response:          cresp,
 		}
 		select {
@@ -189,27 +196,21 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		switch ampp.RfiType {
 		case "SYNC":
-			// Remote agent asks us to re-send our local data — respond only to the requester.
-			lgEngine.Info("RFI SYNC triggering targeted resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
-			sdcmd := &SynchedDataCmd{
+			// Another agent asks for this agent's state of the zone: a
+			// catch-up request, or its operator's resync --pull. The
+			// answer goes to the requester alone, as a SYNC of its own
+			// (catchUpAnswer). The router has acknowledged the request
+			// already, so the command's answer reaches nobody, and it is
+			// not waited for here, on the loop that also sends the beats.
+			lgEngine.Info("RFI SYNC: a peer asks for the zone's state", "from", ampp.OriginatorID, "zone", ampp.Zone)
+			synchedDataCmdQ <- &SynchedDataCmd{
 				Cmd:         "resync-targeted",
 				Zone:        ZoneName(ampp.Zone),
 				TargetAgent: ampp.OriginatorID,
+				CatchUp:     ampp.CatchUp,
 				Response:    make(chan *SynchedDataCmdResponse, 1),
 			}
-			synchedDataCmdQ <- sdcmd
-			select {
-			case sdResp := <-sdcmd.Response:
-				if sdResp.Error {
-					resp.Error = true
-					resp.ErrorMsg = sdResp.ErrorMsg
-				} else {
-					resp.Msg = fmt.Sprintf("Resync triggered: %s", sdResp.Msg)
-				}
-			case <-time.After(10 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "Timeout waiting for resync"
-			}
+			resp.Msg = "the request for the zone's state is taken"
 
 		case "AUDIT":
 			// Remote agent wants audit data for this zone.
@@ -460,15 +461,12 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			if ar.TransportManager != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				peer := ar.MPTransport.GetOrCreatePeer(agent)
-				syncReq := &PeerSyncRequest{
-					SenderID:    ar.LocalAgent.Identity,
-					Zone:        string(msg.Zone),
-					SyncType:    PeerSyncTypeNS,
-					Records:     groupRRStringsByOwner(msg.RRs),
-					Timestamp:   time.Now(),
-					MessageType: "sync",
+				syncReq, err := debugSyncRequest(ar.LocalAgent.Identity, string(msg.Zone), msg.RRs, "")
+				var syncResp *PeerSyncResponse
+				if err == nil {
+					syncReq.Timestamp = time.Now()
+					syncResp, err = ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				}
-				syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				cancel()
 				if err != nil {
 					syncErr = err
@@ -520,10 +518,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[ar.effectiveAgentState(agent.ID)])
 					return
 				}
-				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
+				configResp, sendErr := requestConfig(ar, agent, string(msg.Zone), "upstream", msgQs)
 				if configResp == nil {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.ID)
+					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: %s", msg.Zone, agent.ID, notTaken(sendErr))
 					return
 				}
 				if why := configResp.Refused(); why != "" {
@@ -546,9 +544,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[ar.effectiveAgentState(agent.ID)])}
 						continue
 					}
-					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
+					configResp, sendErr := requestConfig(ar, agent, string(msg.Zone), "downstream", msgQs)
 					if configResp == nil {
-						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: notTaken(sendErr)}
 						continue
 					}
 					if why := configResp.Refused(); why != "" {
@@ -562,14 +560,16 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 
 			case "sig0key":
-				for _, agent := range zad.Agents {
+				// the voting members, as the leader's own request asks
+				// (sig0KeyPeers); not the agents the zone lists with no role
+				for _, agent := range sig0KeyPeers(msg.Zone, zad.Agents, AgentId(ar.LocalAgent.Identity)) {
 					if !ar.isAgentOperational(agent.ID) {
 						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)])}
 						continue
 					}
-					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
+					configResp, sendErr := requestConfig(ar, agent, string(msg.Zone), "sig0key", msgQs)
 					if configResp == nil {
-						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: notTaken(sendErr)}
 						continue
 					}
 					if why := configResp.Refused(); why != "" {
@@ -590,35 +590,42 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			resp.Msg = fmt.Sprintf("CONFIG %s RFI sent for zone %s", msg.RfiSubtype, msg.Zone)
 
 		case "SYNC":
-			// Send RFI SYNC to all remote agents for this zone.
-			lgEngine.Info("sending SYNC RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
-			for _, agent := range zad.Agents {
-				if !ar.isAgentOperational(agent.ID) {
-					resp.RfiResponse[agent.ID] = &RfiData{
-						Error:    true,
-						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.ID, AgentStateToString[ar.effectiveAgentState(agent.ID)]),
-					}
-					continue
-				}
-				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
-					MessageType:  AgentMsgRfi,
-					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.ID,
-					Zone:         msg.Zone,
-					RfiType:      "SYNC",
-				})
-				if err != nil {
-					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: err.Error()}
-					continue
-				}
-				resp.RfiResponse[agent.ID] = &RfiData{Status: "ok", Msg: amr.Msg}
+			// The operator's resync --pull: a request for the zone's state
+			// to each voting member (the membership design, 3.3), of
+			// reason manual, made by the catch-up tracker. The answer says
+			// what became of each request here; whether it was sent, and
+			// what it brought, shows in agent parentsync status. The
+			// auditor, which holds none of the zone's data, is not asked.
+			var catchUp *catchUpTracker
+			if ar.MPTransport != nil {
+				catchUp = ar.MPTransport.catchUp
 			}
-			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
+			if catchUp == nil {
+				resp.Error = true
+				resp.ErrorMsg = "this agent has no catch-up tracker"
+				return
+			}
+			if !isVotingMember(msg.Zone, ar.LocalAgent.Identity) {
+				resp.Msg = fmt.Sprintf("zone %s: nothing is sent: this agent does not vote in the zone (it is in neither servers= nor signers=)", msg.Zone)
+				return
+			}
+			asked := catchUp.AskZone(msg.Zone, catchUpManual)
+			for id, r := range asked {
+				resp.RfiResponse[id] = &RfiData{Status: "ok", Msg: r.String()}
+			}
+			resp.Msg = fmt.Sprintf("zone %s: a request for the zone's state to %d voting members; agent parentsync status shows what became of each", msg.Zone, len(asked))
 
 		case "AUDIT":
-			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
-			lgEngine.Info("sending AUDIT RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
+			// Send RFI AUDIT to the zone's voting members, using the
+			// two-phase pattern. The auditor, which never answered one, is
+			// not asked.
+			lgEngine.Info("sending AUDIT RFI to the zone's voting members", "zone", msg.Zone)
+			asked := 0
 			for _, agent := range zad.Agents {
+				if !isVotingMember(msg.Zone, string(agent.ID)) {
+					continue
+				}
+				asked++
 				if !ar.isAgentOperational(agent.ID) {
 					resp.RfiResponse[agent.ID] = &RfiData{
 						Error:    true,
@@ -626,12 +633,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					}
 					continue
 				}
-				auditResp := RequestAndWaitForAudit(ar, agent, string(msg.Zone), msgQs)
+				auditResp, sendErr := requestAudit(ar, agent, string(msg.Zone), msgQs)
 				if auditResp == nil {
-					resp.RfiResponse[agent.ID] = &RfiData{
-						Error:    true,
-						ErrorMsg: "timeout or error waiting for AUDIT response",
-					}
+					resp.RfiResponse[agent.ID] = &RfiData{Error: true, ErrorMsg: notTaken(sendErr)}
 					continue
 				}
 				rfiData := &RfiData{
@@ -643,7 +647,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				resp.RfiResponse[agent.ID] = rfiData
 			}
-			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
+			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d voting members for zone %s", asked, msg.Zone)
 
 		default:
 			resp.Error = true
@@ -707,11 +711,17 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 // transport manager, which picks the mechanism and falls back to the other
 // (cleanup step 5: the application keeps no API sender of its own).
 func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
+	return ar.sendRfiToAgentCtx(context.Background(), agent, msg)
+}
+
+// sendRfiToAgentCtx is sendRfiToAgent under the caller's context, bounded
+// by the same 15 s.
+func (ar *AgentRegistry) sendRfiToAgentCtx(ctx context.Context, agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	if ar.TransportManager == nil || ar.MPTransport == nil {
 		return nil, fmt.Errorf("no transport available for agent %q (no transport manager)", agent.ID)
 	}
 	peer := ar.MPTransport.GetOrCreatePeer(agent)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, rfiSyncRequest(ar.LocalAgent.Identity, msg))
@@ -748,6 +758,7 @@ func rfiSyncRequest(localID string, msg *AgentMsgPost) *PeerSyncRequest {
 		// set by a sender that must know it in advance; empty, the
 		// transport makes one
 		DistributionID: msg.DistributionID,
+		CatchUp:        msg.CatchUp,
 	}
 }
 
@@ -782,4 +793,14 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	case <-time.After(1 * time.Second): // Don't block forever
 		lgEngine.Warn("STATUS response timed out")
 	}
+}
+
+// notTaken is what the operator is told of a request with no answer: that
+// the peer did not take it (refused on the wire, by the rules for senders,
+// or not delivered), with the error, or that the answer did not come.
+func notTaken(err error) string {
+	if err != nil {
+		return "not taken: " + err.Error()
+	}
+	return "no response (timeout)"
 }

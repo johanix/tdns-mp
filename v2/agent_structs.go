@@ -7,6 +7,8 @@ package tdnsmp
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -124,24 +126,54 @@ func newAgentView(peer *hsync.Peer) *Agent {
 // the dead shadows) accumulate on the one view — the pre-E1.b bridge rebuilt
 // and re-Set a fresh wrapper on every store/hello/beat, silently wiping them.
 // Atomic via Upsert so concurrent materializations converge on a single view.
+//
+// A view is made only while the engine's registry holds this very peer
+// object, and it returns nil otherwise: a beat, a hello or a discovery on its
+// way when the engine removed the peer does not bring the view back (#132).
+// The test and the store hold viewMu, which removePeerView holds to drop the
+// view, and the engine takes the peer out before its hook runs: a view is
+// made before the hook drops it, or not at all. The view of a removed object
+// is replaced by one over the object that the engine now holds under the same
+// identity. With no engine wired (harnesses) there is nothing to test.
 func (ar *AgentRegistry) materializeAgentView(peer *hsync.Peer) *Agent {
 	if ar == nil || peer == nil {
 		return nil
 	}
+	ar.viewMu.Lock()
+	defer ar.viewMu.Unlock()
+	if ar.Registry != nil {
+		if stored, ok := ar.Registry.S.Get(peer.ID); !ok || stored != peer {
+			return nil
+		}
+	}
+	if f := afterViewTest.Load(); f != nil {
+		(*f)(peer)
+	}
 	return ar.S.Upsert(peer.ID, nil, func(exist bool, current *Agent, _ *Agent) *Agent {
 		if exist && current != nil {
-			if current.Peer != peer {
+			if current.Peer == peer {
+				return current
+			}
+			if ar.Registry == nil {
 				// Every create path shares the pointer post-E1.b, so this is
 				// a divergent allocation — keep the stored view (live readers
 				// hold it) and log loudly.
 				lgAgent.Error("agent view wraps a different hsync.Peer allocation; keeping the stored view",
 					"peer", peer.ID)
+				return current
 			}
-			return current
+			// The stored view wraps a peer object the engine removed: the
+			// engine holds this one now.
 		}
 		return newAgentView(peer)
 	})
 }
+
+// afterViewTest, when set (tests), runs between materializeAgentView's test
+// that the engine holds the peer and its store of the view. Atomic: a hello
+// retrier that an earlier test left running may make a view while a test
+// sets the hook.
+var afterViewTest atomic.Pointer[func(*hsync.Peer)]
 
 // agentViewForIdentity returns the ar.S view for an identity, wrapping the
 // ENGINE's hsync.Peer — never allocating a second peer for a known identity
@@ -177,11 +209,35 @@ func (ar *AgentRegistry) agentViewForIdentity(id AgentId, apiSupported, dnsSuppo
 	return ar.materializeAgentView(hpeer)
 }
 
+// engineHoldsSuccessor reports whether the engine's registry holds another
+// peer object under the identity of the removed peer: one stored since the
+// removal, whose view, transport peer and catch-up requests are its own.
+func (ar *AgentRegistry) engineHoldsSuccessor(removed *hsync.Peer) bool {
+	if ar == nil || ar.Registry == nil || removed == nil {
+		return false
+	}
+	stored, ok := ar.Registry.S.Get(removed.ID)
+	return ok && stored != removed
+}
+
 // removePeerView drops the MP view and the transport peer for a removed
 // peer (Phase 3c: the engine's RemovePeer fires OnPeerRemoved, and the
-// removal propagates promptly instead of waiting for a scan).
-func (ar *AgentRegistry) removePeerView(id AgentId) {
-	if ar == nil {
+// removal propagates promptly instead of waiting for a scan). It holds viewMu,
+// as materializeAgentView does. When the engine already holds a new peer
+// object under the same identity, stored after the removal, only a view of
+// the removed object is dropped: the new peer's view and its transport peer
+// are its own (#132).
+func (ar *AgentRegistry) removePeerView(peer *hsync.Peer) {
+	if ar == nil || peer == nil {
+		return
+	}
+	ar.viewMu.Lock()
+	defer ar.viewMu.Unlock()
+	id := AgentId(peer.ID)
+	if ar.engineHoldsSuccessor(peer) {
+		ar.S.RemoveCb(id, func(_ AgentId, v *Agent, ok bool) bool {
+			return ok && v != nil && v.Peer == peer
+		})
 		return
 	}
 	ar.S.Remove(id)
@@ -212,7 +268,10 @@ type AgentRegistry struct {
 	// map (ar.Registry.S) holds the *hsync.Peer each view embeds — two maps
 	// joined by the shared pointer (E1.b), no outer mutex (Phase 3d).
 	*hsync.Registry
-	S                     core.ConcurrentMap[AgentId, *Agent]
+	S core.ConcurrentMap[AgentId, *Agent]
+	// viewMu makes the test that the engine holds a peer and the store of
+	// its view in S one step, against removePeerView (#132).
+	viewMu                sync.Mutex
 	LocalAgent            *MultiProviderConf
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
@@ -290,6 +349,7 @@ type AgentMsgPost struct {
 	Nonce          string
 	ZoneClass      string
 	Publish        *core.PublishInstruction
+	CatchUp        *CatchUp `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
 }
 
 type AgentMsgPostPlus struct {

@@ -521,6 +521,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
+			status.DSSet = conf.dsSetLine(zd.ZoneData)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -1092,13 +1093,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 			// Create sync request
-			syncReq := &PeerSyncRequest{
-				SenderID:       mp.Identity,
-				Zone:           string(amp.Zone),
-				SyncType:       PeerSyncTypeNS, // Default to NS, could be detected from RRs
-				Records:        groupRRStringsByOwner(amp.RRs),
-				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
-				MessageType:    "sync",
+			syncReq, err := debugSyncRequest(mp.Identity, string(amp.Zone), amp.RRs,
+				fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()))
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
 			}
 
 			lgApi.Info("sending sync to agent", "target", amp.AgentId, "zone", amp.Zone, "rrs", len(amp.RRs))
@@ -1140,6 +1140,15 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("Queue: %d pending, %d delivered, %d failed, %d expired",
 				stats.TotalPending, stats.TotalDelivered, stats.TotalFailed, stats.TotalExpired)
 			resp.Status = "ok"
+
+		case "inject-named-sender":
+			conf.debugInjectNamedSender(amp, &resp)
+
+		case "inject-combiner-origin":
+			conf.debugInjectCombinerOrigin(amp, &resp)
+
+		case "inject-peer-keystate":
+			conf.debugInjectPeerKeystate(mp, amp, &resp)
 
 		default:
 			resp.Error = true

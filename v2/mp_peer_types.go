@@ -63,6 +63,7 @@ type PeerSyncRequest struct {
 	RfiSubtype     string                   // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
 	ZoneClass      string                   // "mp" (default) or "provider"
 	Publish        *core.PublishInstruction // KEY/CDS publication instruction for combiner
+	CatchUp        *CatchUp                 `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
 }
 
 // PeerSyncResponse is the receiver's confirmation of a PeerSyncRequest.
@@ -94,8 +95,13 @@ type PeerKeystateRequest struct {
 	// signer tells that provider's empty word from silence by it (only
 	// when Signal == "foreign"; S7)
 	ForeignSpoken []string
-	Owned         bool      // the sender's own state machine runs the zone's keys (S3)
-	Timestamp     time.Time // Request timestamp
+	Owned         bool // the sender's own state machine runs the zone's keys (S3)
+	// Resend: with Signal "inventory", the keys whose distribution the
+	// signer's key lifecycle sends again (E12, T6', or after a restart).
+	// The agent distributes those keys to the peers again, as a tracked
+	// distribution, even when its key set has not changed (#256).
+	Resend    []uint16
+	Timestamp time.Time // Request timestamp
 }
 
 type PeerKeystateResponse struct {

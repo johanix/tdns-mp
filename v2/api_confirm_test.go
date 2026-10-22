@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -66,7 +67,8 @@ const (
 // mechanismEnv is alice and bob sharing zone, alice reachable at bob over
 // both mechanisms: her sync API endpoints over HTTPS and her receive
 // pipeline over DNS, each counting what reaches it. Bob reaches alice's
-// HTTPS with his own certificate; mode says what her /msg does.
+// HTTPS with his own certificate, and checks hers against the TLSA he
+// holds for her; mode says what her /msg does.
 type mechanismEnv struct {
 	*integEnv
 	zone       string
@@ -137,6 +139,7 @@ func newMechanismEnv(t *testing.T, zone string, mode httpsMode) *mechanismEnv {
 	}
 	me.aliceAtBob = transport.NewPeer(me.alice)
 	me.aliceAtBob.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(me.aliceAtBob, srv.Certificate())
 	addr := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
 	me.aliceAtBob.SetDiscoveryAddress(addr)
 	me.aliceAtBob.SetMechanismAddress("DNS", addr)
@@ -328,6 +331,21 @@ func TestConfirm_FailedDNSConfirmGoesOverHTTPS(t *testing.T) {
 	}
 }
 
+// A confirmation that fails over DNS falls back to HTTPS only when the
+// peer's API is usable: an endpoint alone, with no TLSA to check its
+// certificate against, is no fallback, and the NOTIFY keeps all the time.
+func TestConfirm_NoHTTPSFallbackWithoutATLSA(t *testing.T) {
+	me := newMechanismEnv(t, "confirm-no-tlsa.example.", httpsServes)
+	b := me.Bob.Bridge
+	if got := b.otherConfirmTransport(b.DNSTransport, me.aliceAtBob); got != b.APITransport {
+		t.Fatalf("alice with an endpoint and a TLSA: the fallback from DNS is %v, want HTTPS", got)
+	}
+	me.aliceAtBob.SetMechanismTLSA("API", transport.TLSASet{})
+	if got := b.otherConfirmTransport(b.DNSTransport, me.aliceAtBob); got != nil {
+		t.Errorf("alice with an endpoint and no TLSA: the fallback from DNS is %s, want none", got.Name())
+	}
+}
+
 // A confirmation that goes on the other mechanism is logged loudly the
 // first time for a peer and mechanism, and then not before an hour has
 // passed: a pair that works one way only shows, without a line per
@@ -410,6 +428,7 @@ func TestAPIConfirm_SenderIsTheClientCertificate(t *testing.T) {
 	srv := apiEndpointsServer(t, env.Alice)
 	peer := transport.NewPeer(alice)
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	ctx, cancel := context.WithTimeout(context.Background(), confirmWait)
 	defer cancel()
 
@@ -451,6 +470,7 @@ func TestGoldenAPIConfirmRequest(t *testing.T) {
 	t.Cleanup(srv.Close)
 	peer := transport.NewPeer("b.example.")
 	peer.APIEndpoint = srv.URL + "/api/v1"
+	setTLSA(peer, srv.Certificate())
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	err := apiSender(srv, "a.example.").Confirm(context.Background(), peer, &transport.ConfirmRequest{
 		SenderID: "a.example.", Zone: "z.example.", DistributionID: "d-1", Nonce: "n-1", Status: transport.ConfirmSuccess,
@@ -468,5 +488,24 @@ func TestGoldenAPIConfirmRequest(t *testing.T) {
 	im, err := parseAppPayload("", body, "127.0.0.1:0")
 	if err != nil || im.Token() != transport.VerbConfirm || im.SenderID != "a.example." || im.Zone != "z.example." {
 		t.Errorf("the receiver's parser reads %+v, %v", im, err)
+	}
+}
+
+// A remote update that changes nothing is confirmed at once (decision 42).
+// That confirmation, too, goes back on the mechanism the update arrived on.
+func TestTheNoOpConfirmationGoesBackOnTheArrivalMechanism(t *testing.T) {
+	r := newEngineRig(t, "noop.mechanism.example.")
+	done := make(chan *AgentMsgResponse, 1)
+	r.msgQs.SynchedDataUpdate <- &SynchedDataUpdate{Zone: r.zone, AgentId: roleB, UpdateType: "remote", DeliveredBy: roleB,
+		OriginatingDistID: "d1", OriginatingTime: time.Now(), Mechanism: transport.MechanismAPI,
+		Update: &ZoneUpdate{Zone: r.zone, AgentId: roleB,
+			Operations: []core.RROperation{{Operation: "replace", RRtype: "CDS", Records: []string{}}}},
+		Response: done}
+	if _, ok := recvWithin(done, 5*time.Second); !ok {
+		t.Fatal("the engine did not answer")
+	}
+	d, ok := recvWithin(r.confs, time.Second)
+	if !ok || d.OriginatingDistID != "d1" || d.Status != "ok" || d.Mechanism != transport.MechanismAPI {
+		t.Errorf("the confirmation of an update that changes nothing: confirmed=%v %+v, want d1 ok back over API", ok, d)
 	}
 }

@@ -78,7 +78,7 @@ func TestAHeartbeatRoundIsNotStoppedByARecomputeOfTheGroups(t *testing.T) {
 	// mutually OPERATIONAL at the next round.
 	holdFirstLocalRows(r.conf.InternalMp.AgentRegistry, time.Minute)
 	op := AgentStateToString[AgentStateOperational]
-	r.gst.MergeGossip(&GossipMessage{GroupHash: r.group, Members: map[string]*MemberState{
+	r.gst.mergeGossip(&GossipMessage{GroupHash: r.group, Members: map[string]*MemberState{
 		arrivalA: {Identity: arrivalA, PeerStates: map[string]string{arrivalB: op}, Timestamp: time.Now()},
 		arrivalB: {Identity: arrivalB, PeerStates: map[string]string{arrivalA: op}, Timestamp: time.Now()},
 	}})
