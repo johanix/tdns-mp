@@ -162,7 +162,7 @@ func writePeerListResponse(conf *Config, w http.ResponseWriter, respTime time.Ti
 		"parentsync_zones": parentsyncZones,
 		// The CLI warns while the resolver takes discovery data it could
 		// not validate (#260).
-		"dnssec_validation_off": conf.DnssecValidationOff(),
+		"dnssec_validation_not_enforced": conf.DnssecValidationNotEnforced(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

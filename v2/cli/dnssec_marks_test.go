@@ -9,8 +9,8 @@ import (
 )
 
 // #260: a peer whose DNS data is not secure has a mark after its state, and
-// a table or matrix with a mark, or from a node with DNSSEC validation off,
-// is followed by the legend and, when validation is off, a warning.
+// a table or matrix with a mark, or from a node with DNSSEC validation not enforced,
+// is followed by the legend and, when validation is not enforced, a warning.
 
 func peerRow(id, state, chain, reason string) map[string]interface{} {
 	p := map[string]interface{}{"peer_id": id, "peer_type": "agent", "transport": "API", "address": "-", "crypto_type": "TLS", "state": state}
@@ -28,7 +28,7 @@ func TestPeerListMarksAPeerWhoseChainIsNotSecure(t *testing.T) {
 	out := printed(t, func() {
 		displayPeers([]interface{}{
 			peerRow("b.example.", "NEEDED", "insecure", reason),
-			peerRow("c.example.", "OPERATIONAL", "bogus", "SVCB at api.c.example.: answer bogus, accepted as DNSSEC validation is off"),
+			peerRow("c.example.", "OPERATIONAL", "bogus", "SVCB at api.c.example.: answer bogus, accepted as DNSSEC validation is not enforced"),
 			peerRow("d.example.", "OPERATIONAL", "secure", ""),
 		}, false, false)
 	})
@@ -72,8 +72,8 @@ func TestPeerListWarnsWhenValidationIsOff(t *testing.T) {
 		out := printed(t, func() {
 			displayPeers([]interface{}{peerRow("d.example.", "OPERATIONAL", "secure", "")}, verbose, true)
 		})
-		if !strings.Contains(out, "WARNING: DNSSEC validation is OFF on this node") || !strings.Contains(out, chainLegend[0]) {
-			t.Errorf("verbose=%v: no warning or legend with validation off:\n%s", verbose, out)
+		if !strings.Contains(out, "WARNING: DNSSEC validation is not enforced on this node") || !strings.Contains(out, chainLegend[0]) {
+			t.Errorf("verbose=%v: no warning or legend with validation not enforced:\n%s", verbose, out)
 		}
 	}
 }
@@ -97,8 +97,8 @@ func TestGossipMatrixMarksCellsAndNamesWhereValidationIsOff(t *testing.T) {
 			"age":         "1s",
 			"peer_states": map[string]interface{}{"b.example.": "OPERATIONAL", "c.example.": "NEEDED"},
 			"peer_chains": map[string]interface{}{"b.example.": "insecure", "c.example.": "bogus"},
-			// a takes b's unvalidated data: its validation is off
-			"dnssec_validation_off": true,
+			// a takes b's unvalidated data: its validation is not enforced
+			"dnssec_validation_not_enforced": true,
 		},
 		map[string]interface{}{
 			"reporter":    "b.example.",
@@ -107,7 +107,7 @@ func TestGossipMatrixMarksCellsAndNamesWhereValidationIsOff(t *testing.T) {
 		},
 	}
 	out := printed(t, func() { printGossipMatrix(members, matrix) })
-	for _, want := range []string{"OPERATIONAL(-)", "NEEDED(!)", "WARNING: DNSSEC validation is OFF on a", chainLegend[0], chainLegend[1]} {
+	for _, want := range []string{"OPERATIONAL(-)", "NEEDED(!)", "WARNING: DNSSEC validation is not enforced on a", chainLegend[0], chainLegend[1]} {
 		if !strings.Contains(out, want) {
 			t.Errorf("matrix lacks %q:\n%s", want, out)
 		}

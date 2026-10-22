@@ -205,8 +205,8 @@ func gossipMatrixRow(reporter string, ms *MemberState) map[string]interface{} {
 	if ms.PropagationDelay > 0 {
 		row["propagation_delay"] = ms.PropagationDelay
 	}
-	if ms.DnssecValidationOff {
-		row["dnssec_validation_off"] = true
+	if ms.DnssecValidationNotEnforced {
+		row["dnssec_validation_not_enforced"] = true
 	}
 	if len(ms.PeerChains) > 0 {
 		row["peer_chains"] = ms.PeerChains

@@ -53,7 +53,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
-		conf.warnWhileDnssecValidationOff(ctx, lgAuditor)
+		conf.warnWhileDnssecNotEnforced(ctx, lgAuditor)
 	} else {
 		lgAuditor.Info("NOT starting imrengine (explicitly set to false)",
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])

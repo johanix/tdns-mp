@@ -84,7 +84,8 @@ fails validation. `NEEDED(-)` is a peer this agent
 refuses because its chain is broken and
 `imrengine.require-dnssec-validation` is on;
 `OPERATIONAL(-)` is a peer in use on data nobody
-validated, because the setting is off. Under the table,
+validated, because `imrengine.require-dnssec-validation`
+is false. Under the table,
 "Discovery:" lists, for each peer that has one, the
 record and what is wrong with it, for example
 `URI at _https._tcp.agent.bravo.example.: answer
@@ -219,8 +220,9 @@ cell with low AGE values. Common failure patterns:
   validate that peer's DNS data (`(!)`: it fails
   validation). `NEEDED(-)` means the reporter refuses the
   peer for it; `OPERATIONAL(-)` that the reporter runs
-  with DNSSEC validation off, and the warning under the
-  matrix names every member where it is off. Fix the
+  with DNSSEC validation not enforced, and the warning under the
+  matrix names every member where validation is not
+  enforced. Fix the
   peer's chain (usually a missing DS at its parent), and
   turn validation back on.
 

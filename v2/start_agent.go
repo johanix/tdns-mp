@@ -70,7 +70,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
-		conf.warnWhileDnssecValidationOff(ctx, lgAgent)
+		conf.warnWhileDnssecNotEnforced(ctx, lgAgent)
 	} else {
 		lgAgent.Info("NOT starting imrengine (explicitly set to false)",
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])

@@ -144,7 +144,7 @@ func printGossipMatrix(members []string, matrix []interface{}) {
 		reporter, _ := r["reporter"].(string)
 		peerStates, _ := r["peer_states"].(map[string]interface{})
 		peerChains, _ := r["peer_chains"].(map[string]interface{})
-		if v, _ := r["dnssec_validation_off"].(bool); v {
+		if v, _ := r["dnssec_validation_not_enforced"].(bool); v {
 			off = append(off, shortNames[reporter])
 		}
 		cells[reporter] = make(map[string]string, len(peerStates))

@@ -507,12 +507,12 @@ func ListDistribPeers(cmd *cobra.Command, component string) {
 	}
 
 	// Get peers list
-	validationOff, _ := resp["dnssec_validation_off"].(bool)
+	notEnforced, _ := resp["dnssec_validation_not_enforced"].(bool)
 	if peersRaw, ok := resp["peers"].([]interface{}); ok && len(peersRaw) > 0 {
-		displayPeers(peersRaw, verbose, validationOff)
+		displayPeers(peersRaw, verbose, notEnforced)
 	} else {
 		fmt.Println("No peers found")
-		if validationOff {
+		if notEnforced {
 			printDnssecNotes([]string{"this node"}, false)
 		}
 	}
@@ -555,9 +555,9 @@ func ListDistribPeers(cmd *cobra.Command, component string) {
 }
 
 // displayPeers prints the peers, a state with its DNSSEC mark (chainMark).
-// After them it warns when validationOff (this node's resolver takes data it
+// After them it warns when notEnforced (this node's resolver takes data it
 // could not validate), and explains the marks when a state carries one.
-func displayPeers(peers []interface{}, verbose bool, validationOff bool) {
+func displayPeers(peers []interface{}, verbose bool, notEnforced bool) {
 	// Sort peers: combiners first, then by state priority (OPERATIONAL > INTRODUCED > KNOWN > NEEDED)
 	sortedPeers := sortPeersForDisplay(peers)
 
@@ -568,7 +568,7 @@ func displayPeers(peers []interface{}, verbose bool, validationOff bool) {
 		}
 	}
 	var off []string
-	if validationOff {
+	if notEnforced {
 		off = []string{"this node"}
 	}
 	defer printDnssecNotes(off, marked)

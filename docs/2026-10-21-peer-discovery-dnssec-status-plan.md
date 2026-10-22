@@ -36,8 +36,8 @@ Wrong before this change:
   answer or the denial, read after validation. Set on every return of
   `ImrQuery`/`ImrQueryFresh` and on the recursor's cache hits.
 - `CommandResponse.Warnings`, printed first by `daemon status`, and
-  `Config.DnssecValidationOff()`; `daemon status` warns while validation is
-  off.
+  `Config.DnssecValidationNotEnforced()`; `daemon status` warns while
+  validation is not enforced.
 
 ### tdns-transport (#37)
 
@@ -60,17 +60,17 @@ Wrong before this change:
 
 - `PeerInfo` carries `DNSSEC`, `DiscoveryReason` and `DiscoveryExpires` per
   mechanism (`setDiscovery`); the peer-list response carries them, and
-  `dnssec_validation_off` at the top.
-- Gossip: `MemberState.DnssecValidationOff` and `MemberState.PeerChains`
+  `dnssec_validation_not_enforced` at the top.
+- Gossip: `MemberState.DnssecValidationNotEnforced` and `MemberState.PeerChains`
   (both omitted when empty). The table sets our own row's from
-  `SetDnssecValidationOff` (agent and auditor init) and from the transport
+  `SetDnssecValidationNotEnforced` (agent and auditor init) and from the transport
   peers (`RefreshLocalStates`, `AgentRegistry.peerChain`). The copies copy
   them, and the matrix rows return them.
 - CLI: `chainMark`, `printDnssecNotes`; `peer list` (compact and `-v`) and
   `gossip state` (`printGossipMatrix`, split out of `runGossipZoneState`).
 - The agent and the auditor start the transport's refresh loop, and warn at
-  start and hourly while validation is off
-  (`warnWhileDnssecValidationOff`).
+  start and hourly while validation is not enforced
+  (`warnWhileDnssecNotEnforced`).
 - Pins: tdns at #947's head and tdns-transport at #37's head, in every
   module. To be re-pinned to the merge commits.
 
@@ -98,9 +98,10 @@ fleet, since this is a security path:
 1. Validation required, a peer's identity zone under an unsigned
    delegation: `peer list` shows the peer `NEEDED(-)` with
    `answer insecure, DNSSEC validation required`, at the default log level.
-2. Validation off, the same zone: the peer is `OPERATIONAL(-)` in
+2. Validation not enforced, the same zone: the peer is `OPERATIONAL(-)` in
    `peer list` and in every member's `gossip state`. The warning names the
-   node, `daemon status` starts with the OFF line, and the log repeats it.
+   node, `daemon status` starts with the not-enforced line, and the log
+   repeats it.
 3. Validation required, the chain secure, then broken while the peer is
    OPERATIONAL (the DS removed from the parent): once the TTLs run out, the
    peer goes to `NEEDED(-)`. It comes back when the DS is restored.

@@ -23,7 +23,7 @@ Both cases used to be invisible:
   default log said "no contact endpoints found (no API or DNS URI records)"
   although the records were served and signed. Only a debug log showed the
   refusal.
-- With validation off, nothing said so. A node that takes discovery data
+- With validation not enforced, nothing said so. A node that takes discovery data
   nobody could validate is exposed, and a setting turned off to get past a
   broken chain is easily forgotten.
 
@@ -43,7 +43,7 @@ too: the verdict on its proof.
 The verdict describes the peer's chain, not what the local setting did with
 it. The state of the peer says that:
 
-| chain    | validation required          | validation off     |
+| chain    | validation required          | validation not enforced     |
 |----------|------------------------------|--------------------|
 | secure   | used                         | used               |
 | insecure | refused: the peer is NEEDED  | used, and marked   |
@@ -113,21 +113,21 @@ shows the verdict, the reason and when the data expires.
 
 `gossip state` marks each cell with the verdict as the reporter sees it.
 Each member's gossip row carries its verdicts for its peers, and whether its
-own validation is off.
+own validation is not enforced.
 
-After either view, when a state is marked or validation is off on a node in
+After either view, when a state is marked or validation is not enforced on a node in
 it, the CLI prints:
 
-- a warning naming where validation is off, for example
-  `WARNING: DNSSEC validation is OFF on agent-a: peers are discovered on DNS
+- a warning naming where validation is not enforced, for example
+  `WARNING: DNSSEC validation is not enforced on agent-a: peers are discovered on DNS
   data that is not validated`;
 - the legend of the marks.
 
-Wherever validation is off, it is also said where the operator looks
+Wherever validation is not enforced, it is also said where the operator looks
 without asking:
 
 - `daemon status` starts with
-  `DNSSEC validation: OFF (imrengine.require-dnssec-validation: false)`;
+  `DNSSEC validation: not enforced (imrengine.require-dnssec-validation: false)`;
 - the daemon logs a warning at start and then every hour.
 
 ## Not covered
@@ -154,4 +154,17 @@ without asking:
 - **A row's expiry is its mechanism's.** `peer list -v` shows when that
   mechanism's data expires. The peer is looked up again when the first of
   its mechanisms' data does.
+
+## Amendment, 2026-10-22: "not enforced", not "off"
+
+With `require-dnssec-validation: false` the resolver still validates every
+answer and says what it found; it only does not refuse the answers that
+fail. Every message the operator sees says so (Johan, on the first fleet
+with the marks): `daemon status` starts with `DNSSEC validation: not
+enforced (imrengine.require-dnssec-validation: false)`; the CLI warns that
+validation is not enforced on a node and that a peer is used there even
+when its DNS data does not validate; a note says "accepted as DNSSEC
+validation is not enforced". The legend ties the mark to the peer: "(-) =
+the peer's DNSSEC chain is insecure: its DNS data cannot be validated". The
+gossip and API fields are `dnssec_validation_not_enforced`.
 

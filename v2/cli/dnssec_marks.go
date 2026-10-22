@@ -29,13 +29,13 @@ func chainMark(chain string) string {
 
 // chainLegend explains the marks.
 var chainLegend = []string{
-	"(-) = DNSSEC chain insecure: the peer's DNS data is not validated",
-	"(!) = DNSSEC chain bogus: the peer's DNS data fails validation",
+	"(-) = the peer's DNSSEC chain is insecure: its DNS data cannot be validated",
+	"(!) = the peer's DNSSEC chain is bogus: its DNS data fails validation",
 }
 
 // printDnssecNotes prints what goes after a peer table or matrix when a
-// state carries a mark or DNSSEC validation is off somewhere (the nodes
-// named in off): the warning that validation is off, when it is, and the
+// state carries a mark or DNSSEC validation is not enforced somewhere (the nodes
+// named in off): the warning that validation is not enforced, when it is, and the
 // legend of the marks.
 func printDnssecNotes(off []string, marked bool) {
 	if len(off) == 0 && !marked {
@@ -43,7 +43,7 @@ func printDnssecNotes(off []string, marked bool) {
 	}
 	fmt.Println()
 	if len(off) > 0 {
-		fmt.Printf("WARNING: DNSSEC validation is OFF on %s: peers are discovered on DNS data that is not validated\n",
+		fmt.Printf("WARNING: DNSSEC validation is not enforced on %s: a peer is used even when its DNS data does not validate\n",
 			strings.Join(off, ", "))
 	}
 	for _, l := range chainLegend {

@@ -22,11 +22,11 @@ func shortHash(h string) string {
 // deepCopyMemberState returns an independent copy of a MemberState.
 func deepCopyMemberState(src *MemberState) *MemberState {
 	dst := &MemberState{
-		Identity:            src.Identity,
-		Timestamp:           src.Timestamp,
-		BeatInterval:        src.BeatInterval,
-		PropagationDelay:    src.PropagationDelay,
-		DnssecValidationOff: src.DnssecValidationOff,
+		Identity:                    src.Identity,
+		Timestamp:                   src.Timestamp,
+		BeatInterval:                src.BeatInterval,
+		PropagationDelay:            src.PropagationDelay,
+		DnssecValidationNotEnforced: src.DnssecValidationNotEnforced,
 	}
 	if src.PeerStates != nil {
 		dst.PeerStates = make(map[string]string, len(src.PeerStates))
@@ -138,9 +138,9 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		BeatInterval: beatInterval,
 		// whole seconds on the wire, rounded up: a delay below a second is
 		// not announced as none
-		PropagationDelay:    uint32((gst.propagationDelay + time.Second - 1) / time.Second),
-		DnssecValidationOff: gst.dnssecValidationOff,
-		PeerChains:          chains,
+		PropagationDelay:            uint32((gst.propagationDelay + time.Second - 1) / time.Second),
+		DnssecValidationNotEnforced: gst.dnssecValidationNotEnforced,
+		PeerChains:                  chains,
 	}
 	if gst.localWritten == nil {
 		gst.localWritten = make(map[string]bool)
@@ -160,14 +160,14 @@ func (gst *GossipStateTable) SetPropagationDelay(d time.Duration) {
 	gst.propagationDelay = max(d, 0)
 }
 
-// SetDnssecValidationOff sets whether our resolver takes data it could not
+// SetDnssecValidationNotEnforced sets whether our resolver takes data it could not
 // validate (imrengine.require-dnssec-validation: false). It rides in gossip,
 // in our own row of every group, so that the gossip matrix of every member
-// shows where validation is off (#260).
-func (gst *GossipStateTable) SetDnssecValidationOff(off bool) {
+// shows where validation is not enforced (#260).
+func (gst *GossipStateTable) SetDnssecValidationNotEnforced(off bool) {
 	gst.mu.Lock()
 	defer gst.mu.Unlock()
-	gst.dnssecValidationOff = off
+	gst.dnssecValidationNotEnforced = off
 }
 
 // setPeerChains sets the DNSSEC verdicts our own rows carry: for each peer
