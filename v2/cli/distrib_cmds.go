@@ -627,7 +627,9 @@ func displayPeers(peers []interface{}, verbose bool, validationOff bool) {
 
 			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state))
 			if reason := getStringValue(p, "discovery_reason"); reason != "" {
-				reasons = append(reasons, fmt.Sprintf("  %s %s: %s", peerID, transport, reason))
+				// The mechanism first: a script matches a row by its first
+				// field, the identity, and a note must not look like one.
+				reasons = append(reasons, fmt.Sprintf("  %s to %s: %s", transport, peerID, reason))
 			}
 		}
 	}

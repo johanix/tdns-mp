@@ -105,8 +105,10 @@ So `NEEDED(-)` is a peer refused because its chain is not validated, and
 `OPERATIONAL(-)` a peer in use on data nobody validated.
 
 `peer list` marks each mechanism's state, and lists the reasons under the
-table ("Discovery:", one line per peer and mechanism that has one). The
-state stays the table's last column, as scripts read it. `peer list -v`
+table ("Discovery:", a line per peer and mechanism that has one, such as
+`API to agent.example.: ...`). The table is unchanged but for the marks:
+scripts find a peer's row by its first field, the identity, and read its
+state as the last. `peer list -v`
 shows the verdict, the reason and when the data expires.
 
 `gossip state` marks each cell with the verdict as the reporter sees it.
