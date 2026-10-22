@@ -159,10 +159,14 @@ type LeaderElection struct {
 	// design 4.1). The election's end tells a zone that arrived during it
 	// from the zones it was held for.
 	startZones []ZoneName
-	// endedLead is the lead this agent held when an invalidation named no
-	// leader: the next agent named leads after it, and that ends it as
-	// another agent's election would have (noteLeaderLocked).
-	endedLead uint64
+	// holdStart names this agent's present hold of the lead: the lead
+	// (leadStart) that began it. A renewal keeps it, and so does every new
+	// lead this agent takes while no other agent has led in between: an
+	// election after an invalidation that names it again, or one after its
+	// lease lapsed. An invalidation keeps it too: the next agent named leads
+	// after it. Another agent named leader ends the hold (onLeadLost). Zero
+	// while another agent leads (noteLeaderLocked).
+	holdStart uint64
 	// gone: the provider group of this election is gone, and the manager
 	// has dropped the entry (groupGone). Nothing starts on it any more.
 	gone bool
@@ -196,7 +200,7 @@ type LeaderElectionManager struct {
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
 	onZoneLeft           func(zone ZoneName) bool  // ends what is scheduled for the parent of a zone that left its group (step 8)
-	onLeadLost           func(lead uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)
+	onLeadLost           func(hold uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)
 	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
 	providerGroupMgr     *ProviderGroupManager
 }

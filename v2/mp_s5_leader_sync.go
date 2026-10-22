@@ -304,11 +304,12 @@ type delegationSyncChains struct {
 	runID uint64
 }
 
-// delegationRun is a leader sync under way: its cancel, and the lead it
-// began in (LeadStart; zero when this agent did not lead the zone then).
+// delegationRun is a leader sync under way: its cancel, and the hold of the
+// lead it began in (LeadHold; zero when this agent did not lead the zone
+// then).
 type delegationRun struct {
 	cancel context.CancelFunc
-	lead   uint64
+	hold   uint64
 }
 
 type delegationSyncChain struct {
@@ -716,7 +717,7 @@ func (conf *Config) endDelegationSyncWorkOf(zone string) (hold *delegationNotify
 func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx context.Context, done func()) {
 	c := &conf.InternalMp.delegationSyncChains
 	runCtx, cancel := context.WithCancel(ctx)
-	lead := conf.leadOf(zone)
+	hold := conf.holdOf(zone)
 	c.mu.Lock()
 	if c.runs == nil {
 		c.runs = map[string]map[uint64]delegationRun{}
@@ -726,11 +727,11 @@ func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx 
 	}
 	c.runID++
 	id := c.runID
-	c.runs[zone][id] = delegationRun{cancel: cancel, lead: lead}
+	c.runs[zone][id] = delegationRun{cancel: cancel, hold: hold}
 	c.mu.Unlock()
 	// A lead lost while the run was being listed was stopped without it
 	// (stopRunsOfLostLead): the run stops itself.
-	if lead != 0 && conf.leadOf(zone) != lead {
+	if hold != 0 && conf.holdOf(zone) != hold {
 		cancel()
 	}
 	return runCtx, func() {
@@ -754,30 +755,34 @@ func (c *delegationSyncChains) cancelRunsLocked(zone string) int {
 	return len(c.runs[zone])
 }
 
-// leadOf is this agent's present lead of the zone (LeadStart): zero when it
-// does not lead the zone, or no election runs here.
-func (conf *Config) leadOf(zone string) uint64 {
+// holdOf is this agent's present hold of the zone's lead (LeadHold): zero
+// when it does not lead the zone, or no election runs here. A run is tied
+// to the hold, not to the lead's number: a new number this agent takes
+// while it still leads, after an invalidation or a lapsed lease, does not
+// part a run from the loss that ends the hold.
+func (conf *Config) holdOf(zone string) uint64 {
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
-		return lem.LeadStart(ZoneName(zone))
+		return lem.LeadHold(ZoneName(zone))
 	}
 	return 0
 }
 
-// stopRunsOfLostLead stops the leader syncs under way that began in lead,
-// a lead this agent has lost to another agent (SetOnLeadLost): an UPDATE that
+// stopRunsOfLostLead stops the leader syncs under way that began in hold,
+// a hold of the lead that this agent has lost to another agent, in any of
+// its leads (SetOnLeadLost): an UPDATE that
 // tdns is still retrying, and the poll of the parent's trust in the zone's
 // SIG(0) key, which bootstraps the key when the poll's wait ends. A former
 // leader sent both on after the new leader's own: the key a second time, and
 // a DS change the new leader may have overtaken since. The chain and the
 // owed syncs are left to the new leader, which brings the parent in line
 // (onLeaderElected).
-func (conf *Config) stopRunsOfLostLead(lead uint64) {
+func (conf *Config) stopRunsOfLostLead(hold uint64) {
 	c := &conf.InternalMp.delegationSyncChains
 	stopped := map[string]int{}
 	c.mu.Lock()
 	for zone, runs := range c.runs {
 		for _, run := range runs {
-			if run.lead == lead {
+			if run.hold == hold {
 				run.cancel()
 				stopped[zone]++
 			}
