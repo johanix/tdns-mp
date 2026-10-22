@@ -538,6 +538,27 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		if tm.agentRegistry == nil {
 			return
 		}
+		// A registration that held a transport peer since removed, or
+		// replaced under its identity, does not speak for the identity: its
+		// flags are not the current peer's.
+		if reg := tm.TransportManager.PeerRegistry; reg != nil {
+			if cur, ok := reg.Get(peer.ID); !ok || cur != peer {
+				lgTransport.Debug("discovered peer is no longer the transport's peer for its identity, ignored", "peer", peer.ID)
+				return
+			}
+		}
+		// Discovery runs only for an identity that a zone names (design
+		// 3.3). A discovery that completes for one no zone names any more
+		// puts nothing in the registry and leaves the transport's peer as
+		// it is: a peer named only by authorized_peers too. A peer the
+		// engine holds already, kept for the hold time or found by the
+		// operator, completes its discovery: nothing new is stored. The
+		// removed object itself is never stored again: agentViewForIdentity
+		// stores only a new peer.
+		if !tm.zoneNamesPeer(peer.ID) && !tm.engineHolds(peer.ID) {
+			lgTransport.Info("discovered peer is named by no zone this agent holds, not registered", "peer", peer.ID)
+			return
+		}
 		agent := tm.agentRegistry.agentViewForIdentity(AgentId(peer.ID),
 			tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
 		if agent == nil {

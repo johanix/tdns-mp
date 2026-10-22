@@ -13,22 +13,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
-	agent, exists := ar.S.Get(identity)
-	if !exists {
-		return
-	}
-
-	agent.Mu.Lock()
-	if agent.Zones == nil {
-		agent.Zones = make(map[ZoneName]bool)
-	}
-	agent.Zones[zone] = true
-	agent.Mu.Unlock()
-
-	ar.S.Set(identity, agent)
-}
-
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	members := participantFQDNSetForApex(zoneApex(zone))
 	var agents []*Agent

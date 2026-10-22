@@ -44,18 +44,15 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 		return true, "authorized via configured peer"
 	}
 
-	// Check 2: LEGACY state agents (established relationship, zero zones)
-	// These agents were previously in HSYNC3 but all shared zones have been removed
-	// We still allow beat messages to maintain the relationship. LEGACY is now a
-	// derived overlay (END.0): an established peer with zero participations,
-	// computed by effectiveAgentState from the canonical transport.Peer store.
-	if tm.agentRegistry != nil {
-		id := AgentId(dns.Fqdn(senderID))
-		if _, exists := tm.agentRegistry.S.Get(id); exists {
-			if tm.agentRegistry.effectiveAgentState(id) == AgentStateLegacy {
-				return true, "authorized via LEGACY state (established relationship, zero shared zones)"
-			}
-		}
+	// Check 2: a peer this agent holds that shares no zone with it, whatever
+	// its state. Such a peer is kept for the hold time and then removed (the
+	// end of comms, design 3.1, decision 11); until then its hellos and beats
+	// are taken, also once its beats have failed for a while and it reads
+	// DEGRADED, a hello after its restart included. Every rule that asks for
+	// a member refuses it. A removed peer is not in the registry, and is
+	// refused here.
+	if tm.agentRegistry.isKnownLegacy(senderID) {
+		return true, "authorized via LEGACY state (a held peer with zero shared zones, whatever its state)"
 	}
 
 	// Check 3: Implicit authorization via HSYNC3 membership
@@ -209,11 +206,8 @@ func (tm *MPTransportBridge) admittedForKeyOnly(senderID, zone string) bool {
 	if zone == "" || tm.isAuthorizedPeer(senderID) {
 		return false
 	}
-	if tm.agentRegistry != nil {
-		id := AgentId(dns.Fqdn(senderID))
-		if _, exists := tm.agentRegistry.S.Get(id); exists && tm.agentRegistry.effectiveAgentState(id) == AgentStateLegacy {
-			return false
-		}
+	if tm.agentRegistry.isKnownLegacy(senderID) {
+		return false
 	}
 	ok, _ := tm.isInHSYNC(senderID, zone)
 	return !ok

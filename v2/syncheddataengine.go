@@ -1536,6 +1536,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
+		// An answer to a request for the zone's state is not tracked
+		// (catchUpAnswer), and the asker confirms it as it confirms any
+		// update. In a zone where this agent tracks nothing that is no loss
+		// of tracking.
+		if zdr.catchUpAnswers[ZoneName(detail.Zone)][AgentId(source)] == detail.DistributionID && detail.DistributionID != "" {
+			lgEngine.Debug("confirmation of an answer to a request for the zone's state", "source", source, "zone", detail.Zone, "distID", detail.DistributionID)
+			return
+		}
 		lgEngine.Warn("no tracking data for zone", "source", source, "zone", detail.Zone)
 		return
 	}
