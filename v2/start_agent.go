@@ -229,8 +229,11 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		return err
 	})
 	// A lead this agent lost to another agent ends what it began for the
-	// parent in that lead: the new leader's sync is the one that counts.
+	// parent in that lead: the new leader's sync is the one that counts. A
+	// zone that enters a provider group takes that work along to the new
+	// group's lead, or ends it where another agent leads that group.
 	lem.SetOnLeadLost(conf.stopRunsOfLostLead)
+	lem.SetOnZoneRegrouped(conf.retieRuns)
 	// A zone that joins a group this agent already leads is asked for the
 	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
 	// it is: the key this agent holds is published, and one it does not

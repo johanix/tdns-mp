@@ -248,3 +248,66 @@ func TestALeadLostToAnotherAgentEndsTheKeyPoll(t *testing.T) {
 		t.Errorf("the lost lead did not stop the key poll:\n%s", l)
 	}
 }
+
+// Every zone that enters a provider group is told of, whoever leads the group
+// or none: a group led by another agent, or not led yet, ends or moves this
+// agent's lead of the zone as much as one this agent leads.
+func TestEveryZoneThatEntersAGroupIsToldOf(t *testing.T) {
+	lem := NewLeaderElectionManager("agent.us.example.", time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
+	var told []ZoneName
+	lem.SetOnZoneRegrouped(func(zone ZoneName) { told = append(told, zone) })
+	lem.zoneJoinedGroup("unled.example.", "", "group-without-leader")
+	lem.SetOnZoneJoined(func(ZoneName) error { return nil })
+	lem.zoneJoinedGroup("moved.example.", "group-before", "group-without-leader")
+	if len(told) != 2 || told[0] != "unled.example." || told[1] != "moved.example." {
+		t.Errorf("the zones told of are %v, want both that entered a group", told)
+	}
+}
+
+// A run follows its zone into a provider group: tied to the new group's hold
+// from then on, so that the loss of the group's lead stops it, and the loss
+// of the hold it began in does not. A zone whose new group another agent
+// leads has its runs stopped. A run begun with no lead is left alone.
+func TestARunFollowsItsZoneIntoAGroup(t *testing.T) {
+	const zone = "regroup.example."
+	conf := &Config{Config: &tdns.Config{}}
+	c := &conf.InternalMp.delegationSyncChains
+	run := func(hold uint64) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		c.mu.Lock()
+		if c.runs == nil {
+			c.runs = map[string]map[uint64]delegationRun{}
+		}
+		if c.runs[zone] == nil {
+			c.runs[zone] = map[uint64]delegationRun{}
+		}
+		c.runID++
+		c.runs[zone][c.runID] = delegationRun{cancel: cancel, hold: hold}
+		c.mu.Unlock()
+		return ctx
+	}
+
+	moved, untied := run(7), run(0)
+	conf.retieRunsTo(zone, 9)
+	conf.stopRunsOfLostLead(7)
+	if moved.Err() != nil {
+		t.Fatal("the loss of the hold the run began in stopped it after its zone moved to another group's lead")
+	}
+	conf.stopRunsOfLostLead(9)
+	if moved.Err() == nil {
+		t.Error("the loss of the new group's lead did not stop the run that moved with its zone")
+	}
+	if untied.Err() != nil {
+		t.Error("a run begun with no lead was stopped")
+	}
+
+	led := run(11)
+	conf.retieRunsTo(zone, 0)
+	if led.Err() == nil {
+		t.Error("a zone that entered a group another agent leads kept its run")
+	}
+	if untied.Err() != nil {
+		t.Error("a run begun with no lead was stopped when its zone's new group is another agent's")
+	}
+}
