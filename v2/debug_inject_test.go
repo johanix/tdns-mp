@@ -241,6 +241,15 @@ func TestInjectHelloIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
 	if !resp.Error || !strings.Contains(resp.ErrorMsg, "TransportManager") || resp.Data != nil {
 		t.Fatalf("an allowed injector with no transport answered %+v", resp)
 	}
+
+	// A mechanism the agent is not configured to use is refused, though its
+	// client exists: only the rate lies.
+	conf.InternalMp.MPTransport = &MPTransportBridge{SupportedMechanisms: []string{"dns"}}
+	resp = &AgentMgmtResponse{}
+	conf.debugInjectHello(context.Background(), AgentMgmtPost{AgentId: "agent.b.example.", Data: map[string]interface{}{"mechanism": "api"}}, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "supported_mechanisms") || resp.Data != nil {
+		t.Fatalf("a mechanism the agent does not use answered %+v", resp)
+	}
 }
 
 // The count, the interval and the mechanism default as the CLI does, and a

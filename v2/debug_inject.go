@@ -406,6 +406,14 @@ func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, 
 		return
 	}
 	tm := conf.InternalMp.MPTransport
+	// The mechanisms this agent is configured to use (supported_mechanisms)
+	// bound the injector too: the API client exists whatever the
+	// configuration says. Only the rate lies, not the mechanism.
+	if tm != nil && !tm.isTransportSupported(strings.ToLower(mech)) {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("this agent does not use the %s mechanism (supported_mechanisms)", strings.ToLower(mech))
+		return
+	}
 	if conf.InternalMp.TransportManager == nil || tm == nil || tm.TransportManager == nil {
 		resp.Error = true
 		resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
