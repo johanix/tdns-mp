@@ -453,12 +453,14 @@ func (zdr *ZoneDataRepo) forwardOfAnswer(distID string) bool {
 
 // staleWait is a stale DNSKEY replace whose final confirmation waits for this
 // agent's combiner to confirm the set that overtook it: the sender's
-// distribution, the sender, the zone, and the operations that arrived.
+// distribution, the sender, the zone, the operations that arrived, and the
+// mechanism they arrived on, which the confirmation goes back on first.
 type staleWait struct {
 	origDistID string
 	sender     AgentId
 	zone       ZoneName
 	ops        []core.RROperation
+	mechanism  string
 	at         time.Time
 }
 
@@ -597,6 +599,7 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 					OriginatingDistID: w.origDistID,
 					OriginatingSender: string(w.sender),
+					Mechanism:         w.mechanism,
 					Zone:              w.zone,
 					Status:            status,
 					Message:           message,
@@ -634,6 +637,7 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 			msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 				OriginatingDistID: w.origDistID,
 				OriginatingSender: string(w.sender),
+				Mechanism:         w.mechanism,
 				Zone:              w.zone,
 				Status:            status,
 				Message:           message,

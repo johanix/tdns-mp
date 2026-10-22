@@ -41,7 +41,7 @@ func newBeatRig(t *testing.T, zoneName string) *beatRig {
 		pgm:   ar.ProviderGroupManager,
 		gst:   ar.GossipStateTable,
 		lem:   lem,
-		group: ComputeGroupHash([]string{arrivalA, arrivalB}),
+		group: ComputeGroupHash([]string{arrivalA, arrivalB}, nil, nil),
 		round: deps.Host.BeforeHeartbeats,
 	}
 }

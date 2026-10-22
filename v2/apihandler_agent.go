@@ -522,6 +522,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
 			status.DSSet = conf.dsSetLine(zd.ZoneData)
+			// the leader's sync held for the zone's SIG(0) key (step 7b),
+			// beside the catch-up's hold: its own line
+			if lem.IsLeader(amp.Zone) {
+				if why := conf.keyHoldReason(ctx, amp.Zone); why != "" {
+					status.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (" + why + ")"
+				}
+			}
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -585,13 +592,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = "IMR cache not available"
 				return
 			}
-			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
-			if err != nil || len(sak.Keys) == 0 {
+			key, err := firstActiveSig0Key(hdb.KeyDB, string(amp.Zone))
+			if err != nil || key == nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
 				return
 			}
-			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			keyid := key.key.KeyTag()
 			keyState, extra, authenticated, err := queryParentKeyStateDetailed(r.Context(), hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
@@ -625,18 +632,18 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
 				return
 			}
-			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
-			if err != nil || len(sak.Keys) == 0 {
+			key, refusal := bootstrapKey(hdb.KeyDB, amp.Zone)
+			if refusal != "" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				resp.ErrorMsg = refusal
 				return
 			}
-			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			algorithm := sak.Keys[0].KeyRR.Algorithm
+			keyid := key.key.KeyTag()
+			algorithm := key.key.Algorithm
 			// The bootstrap runs async, past the end of this request, so not
 			// r.Context(); the lifecycle ctx stops its IMR wait and retries
 			// at shutdown.
-			go conf.ParentSyncAfterKeyPublication(ctx, amp.Zone, string(amp.Zone), keyid, algorithm)
+			conf.launchKeyPoll(ctx, nil, amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
@@ -1093,13 +1100,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 			// Create sync request
-			syncReq := &PeerSyncRequest{
-				SenderID:       mp.Identity,
-				Zone:           string(amp.Zone),
-				SyncType:       PeerSyncTypeNS, // Default to NS, could be detected from RRs
-				Records:        groupRRStringsByOwner(amp.RRs),
-				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
-				MessageType:    "sync",
+			syncReq, err := debugSyncRequest(mp.Identity, string(amp.Zone), amp.RRs,
+				fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()))
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
 			}
 
 			lgApi.Info("sending sync to agent", "target", amp.AgentId, "zone", amp.Zone, "rrs", len(amp.RRs))

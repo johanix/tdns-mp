@@ -80,8 +80,8 @@ func TestOfTwoGroupRecomputesTheOneThatScannedLastIsInPlace(t *testing.T) {
 	defer mu.Unlock()
 	want := []zoneGroupChange{{
 		zone: ZoneName(zone.ZoneName),
-		from: ComputeGroupHash([]string{arrivalA, arrivalB, arrivalC}),
-		to:   ComputeGroupHash([]string{arrivalA, arrivalB}),
+		from: ComputeGroupHash([]string{arrivalA, arrivalB, arrivalC}, nil, nil),
+		to:   ComputeGroupHash([]string{arrivalA, arrivalB}, nil, nil),
 	}}
 	if !slices.Equal(told, want) {
 		t.Errorf("the zone's move was reported as %+v, want it reported once: %+v", told, want)

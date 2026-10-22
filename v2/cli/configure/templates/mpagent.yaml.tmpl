@@ -86,6 +86,7 @@ multi-provider:
          hello_fast_attempts: 3    # initial fast HELLO attempts before backoff
          hello_fast_interval: 2    # between the first N HELLO attempts
          catchup_outage:      3600 # a peer back after a longer silence is asked for the zones' state
+         peer_hold:           86400 # a peer no zone names any more is kept this long, then removed
 
 service:
    name:           TDNS-MPAGENT

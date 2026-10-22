@@ -44,18 +44,15 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 		return true, "authorized via configured peer"
 	}
 
-	// Check 2: LEGACY state agents (established relationship, zero zones)
-	// These agents were previously in HSYNC3 but all shared zones have been removed
-	// We still allow beat messages to maintain the relationship. LEGACY is now a
-	// derived overlay (END.0): an established peer with zero participations,
-	// computed by effectiveAgentState from the canonical transport.Peer store.
-	if tm.agentRegistry != nil {
-		id := AgentId(dns.Fqdn(senderID))
-		if _, exists := tm.agentRegistry.S.Get(id); exists {
-			if tm.agentRegistry.effectiveAgentState(id) == AgentStateLegacy {
-				return true, "authorized via LEGACY state (established relationship, zero shared zones)"
-			}
-		}
+	// Check 2: a peer this agent holds that shares no zone with it, whatever
+	// its state. Such a peer is kept for the hold time and then removed (the
+	// end of comms, design 3.1, decision 11); until then its hellos and beats
+	// are taken, also once its beats have failed for a while and it reads
+	// DEGRADED, a hello after its restart included. Every rule that asks for
+	// a member refuses it. A removed peer is not in the registry, and is
+	// refused here.
+	if tm.agentRegistry.isKnownLegacy(senderID) {
+		return true, "authorized via LEGACY state (a held peer with zero shared zones, whatever its state)"
 	}
 
 	// Check 3: Implicit authorization via HSYNC3 membership
@@ -209,11 +206,8 @@ func (tm *MPTransportBridge) admittedForKeyOnly(senderID, zone string) bool {
 	if zone == "" || tm.isAuthorizedPeer(senderID) {
 		return false
 	}
-	if tm.agentRegistry != nil {
-		id := AgentId(dns.Fqdn(senderID))
-		if _, exists := tm.agentRegistry.S.Get(id); exists && tm.agentRegistry.effectiveAgentState(id) == AgentStateLegacy {
-			return false
-		}
+	if tm.agentRegistry.isKnownLegacy(senderID) {
+		return false
 	}
 	ok, _ := tm.isInHSYNC(senderID, zone)
 	return !ok
@@ -309,7 +303,7 @@ func (t *keyAskTable) expectConfirm(peer, id string) {
 			delete(t.confirms, k)
 		}
 	}
-	t.confirms[id] = keyConfirm{peer: dns.Fqdn(peer), expires: now.Add(keyConfirmWait)}
+	t.confirms[id] = keyConfirm{peer: dns.CanonicalName(peer), expires: now.Add(keyConfirmWait)}
 }
 
 // confirmExpected: a delivery confirmation from peer for id is due.
@@ -320,12 +314,18 @@ func (t *keyAskTable) confirmExpected(peer, id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c, ok := t.confirms[id]
-	return ok && c.peer == dns.Fqdn(peer) && time.Now().Before(c.expires)
+	return ok && c.peer == dns.CanonicalName(peer) && time.Now().Before(c.expires)
 }
 
-func keyAskKey(peer, zone string) string { return dns.Fqdn(peer) + " " + dns.Fqdn(zone) }
+// keyAskKey: identities and zone names compare as canonical names, so a
+// peer configured in another case is the same peer.
+func keyAskKey(peer, zone string) string {
+	return dns.CanonicalName(peer) + " " + dns.CanonicalName(zone)
+}
 
-// start notes a request out, and returns the call that ends it.
+// start notes a request out, and returns the call that ends it. The call
+// ends that request once, however often it is made: a second call never
+// ends another request to the same peer for the same zone.
 func (t *keyAskTable) start(peer, zone string) func() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -334,12 +334,15 @@ func (t *keyAskTable) start(peer, zone string) func() {
 	}
 	k := keyAskKey(peer, zone)
 	t.asks[k]++
+	var once sync.Once
 	return func() {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		if t.asks[k]--; t.asks[k] <= 0 {
-			delete(t.asks, k)
-		}
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.asks[k]--; t.asks[k] <= 0 {
+				delete(t.asks, k)
+			}
+		})
 	}
 }
 

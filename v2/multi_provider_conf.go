@@ -133,6 +133,9 @@ type MultiProviderConf struct {
 			// CatchupOutage: a peer back after a longer gap between two
 			// successful beats is asked for the zones' state (catchup.go).
 			CatchupOutage int `yaml:"catchup_outage" mapstructure:"catchup_outage"`
+			// PeerHold: a peer that no zone names any more is kept this long,
+			// and then removed (the end of comms, design 3.1).
+			PeerHold int `yaml:"peer_hold" mapstructure:"peer_hold"`
 		} `yaml:"intervals" mapstructure:"intervals"`
 	} `yaml:"syncengine" mapstructure:"syncengine"`
 	Api LocalAgentApiConf

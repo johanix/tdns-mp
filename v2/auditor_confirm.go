@@ -34,6 +34,7 @@ func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, senderID, zone string)
 	msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 		OriginatingDistID: msg.DistributionID,
 		OriginatingSender: senderID,
+		Mechanism:         msg.Mechanism,
 		Zone:              ZoneName(zone),
 		Status:            "SUCCESS",
 		Message:           "auditor: recorded",

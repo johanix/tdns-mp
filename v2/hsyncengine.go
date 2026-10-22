@@ -173,6 +173,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			UpdateType:        "remote",
 			Update:            zu,
 			OriginatingDistID: ampp.DistributionID,
+			Mechanism:         ampp.Mechanism,
 			OriginatingTime:   ampp.Time,
 			DeliveredBy:       ampp.DeliveredBy,
 			CatchUp:           ampp.CatchUp,
@@ -333,17 +334,23 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				} else if zd, ok := Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
 					configErr = "zone or KeyDB not available"
 				} else {
-					algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), tdns.Sig0StateActive)
+					// The key handed over is the zone's key (readZoneKey), not
+					// the first active row: an active key the zone does not
+					// publish is no key of the zone's (step 7b).
+					zk, err := readZoneKey(zd.KeyDB, ampp.Zone)
 					if err != nil {
 						configErr = fmt.Sprintf("error looking up SIG(0) key: %v", err)
-					} else if !found {
+					} else if zk.several() {
+						// not "no key": its keystore may hold one of them
+						configData = map[string]string{"status": sig0StatusSeveral}
+					} else if zk.held == nil {
 						configData = map[string]string{"status": "no sig0 key for zone"}
 					} else {
-						lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID)
+						lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID, "keyid", zk.held.keyid)
 						configData = map[string]string{
-							"algorithm":  algorithm,
-							"privatekey": privatekey,
-							"keyrr":      keyrr,
+							"algorithm":  zk.held.algorithm,
+							"privatekey": zk.held.privatekey,
+							"keyrr":      zk.held.keyrr,
 						}
 					}
 				}
@@ -460,15 +467,12 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			if ar.TransportManager != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				peer := ar.MPTransport.GetOrCreatePeer(agent)
-				syncReq := &PeerSyncRequest{
-					SenderID:    ar.LocalAgent.Identity,
-					Zone:        string(msg.Zone),
-					SyncType:    PeerSyncTypeNS,
-					Records:     groupRRStringsByOwner(msg.RRs),
-					Timestamp:   time.Now(),
-					MessageType: "sync",
+				syncReq, err := debugSyncRequest(ar.LocalAgent.Identity, string(msg.Zone), msg.RRs, "")
+				var syncResp *PeerSyncResponse
+				if err == nil {
+					syncReq.Timestamp = time.Now()
+					syncResp, err = ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				}
-				syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				cancel()
 				if err != nil {
 					syncErr = err
