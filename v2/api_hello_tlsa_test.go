@@ -206,3 +206,15 @@ func TestHello_MustIntroduceTheCertificatesAgent(t *testing.T) {
 	}
 	te.noHello(t, "a hello with MyIdentity empty")
 }
+
+// The comparison is canonical: an honest hello whose MyIdentity has another
+// case and no trailing dot, as an identity taken from configuration may,
+// names the certificate's agent all the same and is taken.
+func TestHello_MyIdentityIsComparedCanonically(t *testing.T) {
+	te := newTLSAEnv(t, "hello-canonical.example.")
+	spelled := strings.ToUpper(strings.TrimSuffix(te.Alice.Identity, "."))
+	resp, err := te.hello(t, te.Alice.Bridge.APITransport, spelled)
+	if err != nil || !resp.Accepted {
+		t.Fatalf("a hello naming %q under alice's certificate: %+v %v, want it taken", spelled, resp, err)
+	}
+}
