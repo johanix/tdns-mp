@@ -223,7 +223,7 @@ func TestInjectHelloIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
 	conf := &Config{}
 	amp := AgentMgmtPost{AgentId: "agent.b.example.", Data: map[string]interface{}{"count": "3"}}
 	resp := &AgentMgmtResponse{}
-	conf.debugInjectHello(amp, resp)
+	conf.debugInjectHello(context.Background(), amp, resp)
 	if !resp.Error || !strings.Contains(resp.ErrorMsg, "allow-inject") {
 		t.Fatalf("a closed injector answered %+v", resp)
 	}
@@ -232,12 +232,12 @@ func TestInjectHelloIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
 	parseMultiProviderOptions(mp)
 	conf.InternalMp.mpConfig.Store(mp)
 	resp = &AgentMgmtResponse{}
-	conf.debugInjectHello(AgentMgmtPost{AgentId: "agent.b.example.", Data: map[string]interface{}{"count": "201"}}, resp)
+	conf.debugInjectHello(context.Background(), AgentMgmtPost{AgentId: "agent.b.example.", Data: map[string]interface{}{"count": "201"}}, resp)
 	if !resp.Error || !strings.Contains(resp.ErrorMsg, "count") || resp.Data != nil {
 		t.Fatalf("a count out of bounds answered %+v", resp)
 	}
 	resp = &AgentMgmtResponse{}
-	conf.debugInjectHello(amp, resp)
+	conf.debugInjectHello(context.Background(), amp, resp)
 	if !resp.Error || !strings.Contains(resp.ErrorMsg, "TransportManager") || resp.Data != nil {
 		t.Fatalf("an allowed injector with no transport answered %+v", resp)
 	}

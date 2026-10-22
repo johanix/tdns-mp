@@ -388,7 +388,9 @@ func injectHelloRequest(sender string, shared []ZoneName) *transport.HelloReques
 // bounds those beats back. The injector changes nothing in this agent's view
 // of the target: no mechanism state, no note of an accepted or refused hello.
 // A failed or refused hello is an outcome, not an error of the command.
-func (conf *Config) debugInjectHello(amp AgentMgmtPost, resp *AgentMgmtResponse) {
+// The loop runs under the API request's context: a request that is given up
+// stops it.
+func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, resp *AgentMgmtResponse) {
 	if conf.injectRefused(resp) {
 		return
 	}
@@ -430,7 +432,7 @@ func (conf *Config) debugInjectHello(amp AgentMgmtPost, resp *AgentMgmtResponse)
 	shared := ar.sharedParticipantZones(amp.AgentId)
 
 	lgApi.Warn("inject: hello", "target", amp.AgentId, "mechanism", mech, "count", count, "interval", interval)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(count)*(interval+5*time.Second))
+	ctx, cancel := context.WithTimeout(parent, time.Duration(count)*(interval+5*time.Second))
 	defer cancel()
 	sent, accepted, failed, firstErr := 0, 0, 0, ""
 	for i := 0; i < count && ctx.Err() == nil; i++ {

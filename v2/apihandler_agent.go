@@ -1158,7 +1158,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			conf.debugInjectPeerKeystate(mp, amp, &resp)
 
 		case "inject-hello":
-			conf.debugInjectHello(amp, &resp)
+			conf.debugInjectHello(r.Context(), amp, &resp)
 
 		default:
 			resp.Error = true
