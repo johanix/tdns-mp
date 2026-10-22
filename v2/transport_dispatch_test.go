@@ -199,7 +199,9 @@ func dispatchCases() []dispatchCase {
 					t.Errorf("refused update leaked to MsgQs.Msg: %+v", m.AgentMsgPost)
 				}
 			}},
-		{name: "keystate-inventory", verb: "keystate", wantAck: "keystate inventory received",
+		{name: "keystate-inventory", verb: "keystate",
+			before:  func(env *integEnv, alice string) { env.Bob.Bridge.signerID = alice }, // a KEYSTATE comes from Bob's own signer (#254)
+			wantAck: "keystate inventory received",
 			build: func(a, b, d string) interface{} {
 				return &DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Signal: "inventory", Timestamp: time.Now().Unix(),
@@ -215,7 +217,9 @@ func dispatchCases() []dispatchCase {
 					t.Errorf("keystate inventory: %+v", *m)
 				}
 			}},
-		{name: "keystate-signal", verb: "keystate", wantAck: "keystate propagated received",
+		{name: "keystate-signal", verb: "keystate",
+			before:  func(env *integEnv, alice string) { env.Bob.Bridge.signerID = alice }, // a KEYSTATE comes from Bob's own signer (#254)
+			wantAck: "keystate propagated received",
 			build: func(a, b, d string) interface{} {
 				return &DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Signal: "propagated", KeyTag: 12345, Algorithm: 15, Timestamp: time.Now().Unix()}

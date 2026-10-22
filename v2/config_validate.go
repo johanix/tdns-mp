@@ -67,6 +67,7 @@ func ValidateSyncengineIntervals(mp *MultiProviderConf) error {
 		{"hello_fast_attempts", iv.HelloFastAttempts},
 		{"hello_fast_interval", iv.HelloFastInterval},
 		{"catchup_outage", iv.CatchupOutage},
+		{"peer_hold", iv.PeerHold},
 	} {
 		if k.v < 0 {
 			return fmt.Errorf("multi-provider.syncengine.intervals.%s: %d is negative", k.name, k.v)

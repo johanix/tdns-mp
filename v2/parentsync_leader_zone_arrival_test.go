@@ -136,13 +136,26 @@ type groupRig struct {
 }
 
 // newGroupRig makes the agents. electing are the members of the group whose
-// election the rig carries: each of them is among the agents, except in a
-// rig of one agent, which hears of its peers through gossip only.
+// election the rig carries, every one of them a voting member: each of them
+// is among the agents, except in a rig of one agent, which hears of its
+// peers through gossip only.
 func newGroupRig(t *testing.T, electing []string, agents ...string) *groupRig {
+	t.Helper()
+	return newGroupRigOf(t, ComputeGroupHash(electing, nil, nil), electing, agents...)
+}
+
+// newAuditedGroupRig is newGroupRig for a group with auditors: its make-up
+// is these voting members and these auditors (step 8).
+func newAuditedGroupRig(t *testing.T, voting, auditors []string, agents ...string) *groupRig {
+	t.Helper()
+	return newGroupRigOf(t, ComputeGroupHash(voting, auditors, nil), append(slices.Clone(voting), auditors...), agents...)
+}
+
+func newGroupRigOf(t *testing.T, group string, electing []string, agents ...string) *groupRig {
 	t.Helper()
 	r := &groupRig{
 		net: &electionNet{
-			group:   ComputeGroupHash(electing),
+			group:   group,
 			members: electing,
 			mgrs:    map[AgentId]*LeaderElectionManager{},
 			wake:    make(chan struct{}, 1),
@@ -196,13 +209,18 @@ func newGroupRig(t *testing.T, electing []string, agents ...string) *groupRig {
 // holds the election's, and a cleanup can run while one is delivered.
 func stopElectionTimers(lem *LeaderElectionManager) {
 	lem.mu.RLock()
-	les := make([]*LeaderElection, 0, len(lem.groupElections))
+	les := make([]*LeaderElection, 0, len(lem.groupElections)+len(lem.elections))
 	for _, le := range lem.groupElections {
+		les = append(les, le)
+	}
+	// the zones' own elections too: a lone voter's renewal re-arms itself
+	for _, le := range lem.elections {
 		les = append(les, le)
 	}
 	lem.mu.RUnlock()
 	for _, le := range les {
 		le.mu.Lock()
+		le.gone = true // a timer that has fired already arms nothing more
 		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
@@ -237,7 +255,7 @@ func (r *groupRig) operational() {
 	}
 	for _, m := range r.net.members {
 		gst := r.gsts[AgentId(m)]
-		gst.MergeGossip(&GossipMessage{GroupHash: r.net.group, Members: rows})
+		gst.mergeGossip(&GossipMessage{GroupHash: r.net.group, Members: rows})
 		gst.CheckGroupState(r.net.group, r.net.members)
 	}
 }
@@ -245,7 +263,7 @@ func (r *groupRig) operational() {
 // gossipLeader is the word of the group's election as it reaches an agent in
 // a peer's beat.
 func (r *groupRig) gossipLeader(agent, leader string, term uint32) {
-	r.gsts[AgentId(agent)].MergeGossip(&GossipMessage{GroupHash: r.net.group,
+	r.gsts[AgentId(agent)].mergeGossip(&GossipMessage{GroupHash: r.net.group,
 		Election: GroupElectionState{Leader: leader, Term: term, LeaderExpiry: time.Now().Add(time.Hour)}})
 }
 
@@ -282,7 +300,7 @@ func (r *groupRig) take(want int) []asked {
 func inGroup(t *testing.T, pgm *ProviderGroupManager, zone *tdns.ZoneData, providers ...string) {
 	t.Helper()
 	pg := pgm.GetGroupForZone(ZoneName(zone.ZoneName))
-	if pg == nil || pg.GroupHash != ComputeGroupHash(providers) {
+	if pg == nil || pg.GroupHash != ComputeGroupHash(providers, nil, nil) {
 		t.Fatalf("%s has %s in group %+v, want the group of %v", pgm.LocalID, zone.ZoneName, pg, providers)
 	}
 }
@@ -488,7 +506,7 @@ func TestARefreshThatMovesAZoneHasItsNewLeaderSyncIt(t *testing.T) {
 	// The zones are loaded, and a peer's beat says that this agent leads the
 	// group of a and b.
 	pgm.RecomputeGroups()
-	ar.GossipStateTable.MergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB}),
+	ar.GossipStateTable.mergeGossip(&GossipMessage{GroupHash: ComputeGroupHash([]string{arrivalA, arrivalB}, nil, nil),
 		Election: GroupElectionState{Leader: arrivalA, Term: 3, LeaderExpiry: time.Now().Add(time.Hour)}})
 	if !lem.IsLeader(ZoneName(stays.ZoneName)) || lem.IsLeader(ZoneName(mover.ZoneName)) {
 		t.Fatalf("before the edit this agent leads %s: %v, %s: %v; want the first only",
@@ -574,53 +592,6 @@ func TestAnAuditorsRecomputeTellsNobody(t *testing.T) {
 	}
 	if ar.LeaderElectionManager != nil || conf.InternalMp.LeaderElectionManager != nil {
 		t.Errorf("the auditor has an election manager")
-	}
-}
-
-// A zone that arrives in a group this agent leads has had a leader, and may
-// have a SIG(0) key that leader made and the parent holds. The agent that it
-// arrives at makes no new key in its place: only a zone that publishes none
-// gets one there. An election's winner makes one when it has none, as before.
-func TestAZoneThatArrivesWithAKeyGetsNoNewOne(t *testing.T) {
-	zd := seedZoneWithHSYNC3(t, "keyed.example.")
-	t.Cleanup(func() { tdns.Zones.Remove(zd.ZoneName) })
-	mpzd := &MPZoneData{ZoneData: zd}
-
-	if zonePublishesKey(mpzd) {
-		t.Fatal("precondition: the seeded zone publishes a KEY")
-	}
-	if !mayGenerateZoneKey(false, mpzd, 0) {
-		t.Error("a zone that publishes no key, and whose every voting member said it holds none, may not be given one: nothing would")
-	}
-	// A provider that has just joined shows no KEY in its own copy of a zone
-	// that has one. While a voting member has not answered, it makes none.
-	if mayGenerateZoneKey(false, mpzd, 1) {
-		t.Error("a zone that joins a group may be given a key while a voting member has not said it holds none")
-	}
-
-	key, err := dns.NewRR("keyed.example. 3600 IN KEY 512 3 15 l02Woqwl4Uca9VQhrPQYG5cM3bxPV1RJxbr1iZqt6KE=")
-	if err != nil {
-		t.Fatal(err)
-	}
-	apex, ok := zd.Data.Get(zd.ZoneName)
-	if !ok {
-		t.Fatal("the seeded zone has no apex")
-	}
-	apex.RRtypes.Set(dns.TypeKEY, core.RRset{RRs: []dns.RR{key}})
-	zd.Data.Set(zd.ZoneName, apex)
-	zd.InstallInitialSnapshot()
-
-	if !zonePublishesKey(mpzd) {
-		t.Fatal("the zone serves a KEY at its apex and reads as publishing none")
-	}
-	if mayGenerateZoneKey(false, mpzd, 0) {
-		t.Error("a zone that joins a group with a key of its own may be given a new one: the parent holds the one it has")
-	}
-	if !mayGenerateZoneKey(true, mpzd, 0) || !mayGenerateZoneKey(true, mpzd, 2) {
-		t.Error("an election's winner may no longer make a key when it has none")
-	}
-	if zonePublishesKey(nil) || !mayGenerateZoneKey(false, nil, 0) {
-		t.Error("an unknown zone reads as publishing a key")
 	}
 }
 

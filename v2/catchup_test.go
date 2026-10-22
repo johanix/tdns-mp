@@ -942,6 +942,12 @@ func TestTheOperatorsResyncPullAsksTheVotingMembers(t *testing.T) {
 	if got.Error || len(got.RfiResponse) != 0 || !strings.Contains(got.Msg, "nothing is sent") {
 		t.Errorf("a pull where this agent does not vote: %+v", got)
 	}
+	// this agent's identity configured in another case than the zone's
+	// record names it: it votes all the same
+	ar.LocalAgent = &MultiProviderConf{Identity: strings.ToUpper(roleA)}
+	if got := pull(zone); strings.Contains(got.Msg, "nothing is sent") || got.RfiResponse[roleB] == nil {
+		t.Errorf("a pull by an identity configured in another case: %+v", got)
+	}
 	time.Sleep(30 * time.Millisecond)
 	if n := len(r.sent()); n != 1 {
 		t.Errorf("%d requests sent", n)
@@ -1104,5 +1110,28 @@ func TestAZoneWithoutHSYNCPARAMIsNotAskedAtALoadOrABeat(t *testing.T) {
 		if s.zone == zone {
 			t.Errorf("the zone without HSYNCPARAM was asked about: %+v", s)
 		}
+	}
+}
+
+// The catch-up's requests are kept by identity. A peer the engine removes
+// whose identity a new peer object holds already, stored since the removal,
+// is not forgotten: the requests are the new peer's.
+func TestTheEnginesRemovalOfAReplacedPeerKeepsItsSuccessorsRequests(t *testing.T) {
+	const zone = "replaced.hook.example."
+	catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+	r := newTrackerRig(t, roleA)
+	r.t.Ask(zone, roleB, catchUpStart)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: roleA})
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: conf.MpConfig()}
+	ar.Registry = hsync.NewRegistry(hsync.PeerID(roleA), nil)
+	conf.InternalMp.AgentRegistry = ar
+	conf.InternalMp.CatchUp = r.t
+	deps, _ := buildHsyncEngineDeps(conf)
+	successor := hsync.NewPeer(hsync.PeerID(roleB))
+	ar.Registry.S.Set(successor.ID, successor)
+	deps.PeerHooks.OnPeerRemoved(hsync.NewPeer(hsync.PeerID(roleB)))
+	if e := r.entry(zone, roleB); e == nil {
+		t.Error("the removal of a replaced object forgot its successor's request")
 	}
 }

@@ -173,6 +173,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// that arrives outside this engine. Its owed sync is asked for
 			// here.
 			conf.InternalMp.CatchUp.askAllOwed(ctx, false)
+			// the backstop for the syncs held for a zone's SIG(0) key, off
+			// this goroutine: the test reads the keystore and asks the
+			// resolver
+			conf.retestKeyHoldsInBackground(ctx)
 
 		case <-owedRoomTicker.C:
 			if conf.InternalMp.CatchUp.roomWaits() {
@@ -343,6 +347,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
 					stored := time.Now()
+					// A remote KEY operation that changed this agent's data is
+					// the first sign of a new zone key: the leader's replace
+					// reaches every member. The key is checked (step 7b); the
+					// rounds run on the tracker's goroutine.
+					if err == nil && change && synchedDataUpdate.Update != nil &&
+						slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
+						conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+					}
 					// The operations as they arrived, stale replaces too:
 					// the confirmation to the sender names what the repo
 					// holds of each. A stale replace's records are there
@@ -486,6 +498,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
 										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 										OriginatingSender: string(synchedDataUpdate.AgentId),
+										Mechanism:         synchedDataUpdate.Mechanism,
 										Zone:              synchedDataUpdate.Zone,
 										CreatedAt:         time.Now(),
 										StaleHeld:         staleHeld,
@@ -616,6 +629,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								sender:     agentId,
 								zone:       zone,
 								ops:        received,
+								mechanism:  synchedDataUpdate.Mechanism,
 								at:         time.Now(),
 							})
 							lgEngine.Info("a stale DNSKEY replace waits for this agent's combiner to confirm the set that overtook it",
@@ -629,6 +643,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 								OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 								OriginatingSender: string(agentId),
+								Mechanism:         synchedDataUpdate.Mechanism,
 								Zone:              zone,
 								Status:            status,
 								Message:           message,
@@ -1536,6 +1551,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
+		// An answer to a request for the zone's state is not tracked
+		// (catchUpAnswer), and the asker confirms it as it confirms any
+		// update. In a zone where this agent tracks nothing that is no loss
+		// of tracking.
+		if zdr.catchUpAnswers[ZoneName(detail.Zone)][AgentId(source)] == detail.DistributionID && detail.DistributionID != "" {
+			lgEngine.Debug("confirmation of an answer to a request for the zone's state", "source", source, "zone", detail.Zone, "distID", detail.DistributionID)
+			return
+		}
 		lgEngine.Warn("no tracking data for zone", "source", source, "zone", detail.Zone)
 		return
 	}
@@ -1683,6 +1706,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		remoteDetail := &RemoteConfirmationDetail{
 			OriginatingDistID: prc.OriginatingDistID,
 			OriginatingSender: prc.OriginatingSender,
+			Mechanism:         prc.Mechanism,
 			Zone:              prc.Zone,
 			Status:            status,
 			Message:           message,

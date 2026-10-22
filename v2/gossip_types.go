@@ -69,7 +69,8 @@ type GossipStateTable struct {
 // --- From provider_groups.go ---
 
 // ProviderGroup represents a set of providers that together serve a group of zones.
-// The group is identified by a hash of the sorted member identities.
+// The group is its make-up (step 8): who votes, who audits and who is listed
+// with no role, and it is identified by a hash of the three lists.
 //
 // Locking: read or modify any *ProviderGroup field only while
 // holding pgm.mu (RLock for read, Lock for write). RecomputeGroups
@@ -77,18 +78,21 @@ type GossipStateTable struct {
 // NameProposal in place — so callers cannot assume the struct is
 // immutable once stored. Snapshot fields under the lock.
 type ProviderGroup struct {
-	GroupHash string     // truncated SHA-256 of sorted member identities
+	GroupHash string     // truncated SHA-256 of the make-up (ComputeGroupHash)
 	Name      string     // human-friendly name (resolved via naming protocol)
-	Members   []string   // sorted provider identities (FQDNs) — all HSYNC3 participants regardless of role
-	Zones     []ZoneName // zones served by this exact set of providers
-	// VotingMembers is the subset of Members that may participate
-	// in leader elections — derived from union(HSYNCPARAM.signers,
-	// HSYNCPARAM.servers) translated through HSYNC3 labels to
-	// identities. Non-voting roles (e.g. auditors) appear in
-	// Members but not here. Quorum computations and initiator
+	Members   []string   // sorted provider identities (FQDNs): every member, whatever its role (the gossip membership)
+	Zones     []ZoneName // zones of this exact make-up
+	// VotingMembers is the subset of Members that may participate in
+	// leader elections: HSYNCPARAM's servers and signers, translated
+	// through HSYNC3 labels to identities. Every zone of the group has the
+	// same ones. Quorum computations, the election gate and initiator
 	// selection MUST use VotingMembers, not Members.
 	VotingMembers []string
-	NameProposal  *GroupNameProposal // our proposal for this group's name
+	// Auditors: the members in auditors= only. NoRole: members listed with
+	// no role, empty until step 10.
+	Auditors     []string
+	NoRole       []string
+	NameProposal *GroupNameProposal // our proposal for this group's name
 }
 
 // ProviderGroupManager manages provider group computation and naming.
@@ -119,6 +123,9 @@ type ProviderGroupManager struct {
 	// onZoneJoinedGroup is told of each zone a recompute has put into a
 	// group it was not in before (SetOnZoneJoinedGroup). Guarded by mu.
 	onZoneJoinedGroup func(zone ZoneName, from, to string)
+	// onZoneLeftGroup is told of each zone a recompute has taken out of the
+	// group it was in, wherever it went: another group, or none (step 8).
+	onZoneLeftGroup func(zone ZoneName, from, to string)
 	// onGroupGone is told of each group a recompute has dropped: its last
 	// zone has left it (SetOnGroupGone). Guarded by mu.
 	onGroupGone func(groupHash string)
@@ -147,6 +154,26 @@ type LeaderElection struct {
 	// while an election is running and after one that was aborted: the
 	// leader then is still the one of the term before.
 	leaderTerm uint64
+	// leadStart names this agent's present lead: a number given when the
+	// lead began, unique in this process across every election, so that a
+	// lead in one group is never taken for a lead in another, and a lead at
+	// term 0 (a lone voter's self-election) is a lead. A renewal, which
+	// names this agent again while its lease runs, keeps it; a lead that
+	// follows another agent's, an invalidated or a lapsed one gets a new
+	// one. Zero while another agent leads (noteLeaderLocked).
+	leadStart uint64
+	// startZones: the group's zones when its election started (step 8,
+	// design 4.1). The election's end tells a zone that arrived during it
+	// from the zones it was held for.
+	startZones []ZoneName
+	// holdStart names this agent's present hold of the lead: the lead
+	// (leadStart) that began it. A renewal keeps it, and so does every new
+	// lead this agent takes while no other agent has led in between: an
+	// election after an invalidation that names it again, or one after its
+	// lease lapsed. An invalidation keeps it too: the next agent named leads
+	// after it. Another agent named leader ends the hold (onLeadLost). Zero
+	// while another agent leads (noteLeaderLocked).
+	holdStart uint64
 	// gone: the provider group of this election is gone, and the manager
 	// has dropped the entry (groupGone). Nothing starts on it any more.
 	gone bool
@@ -164,6 +191,10 @@ type LeaderElection struct {
 // When a ProviderGroupManager is set, elections are per-group and the leader
 // covers all zones in the group. IsLeader checks group membership first.
 type LeaderElectionManager struct {
+	// leads numbers this agent's leads in this process, across every
+	// election, the groups' and the zones' own (noteLeaderLocked): two
+	// leads never share a number.
+	leads                atomic.Uint64
 	mu                   sync.RWMutex
 	elections            map[ZoneName]*LeaderElection
 	pendingElections     map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
@@ -175,7 +206,12 @@ type LeaderElectionManager struct {
 	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
+	onZoneLeft           func(zone ZoneName) bool  // ends what is scheduled for the parent of a zone that left its group (step 8)
+	onZoneRegrouped      func(zone ZoneName)       // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
+	onLeaderNamed        func()                    // called when an election names a leader, this agent or another (SetOnLeaderNamed)
+	onLeadLost           func(hold uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)
 	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
+	hooks                sync.WaitGroup            // the callbacks that run in goroutines of their own (onLeadLost, onLeaderNamed), until each has returned
 	providerGroupMgr     *ProviderGroupManager
 }
 
@@ -206,15 +242,18 @@ type DsyncSchemeInfo struct {
 
 // ParentSyncStatus holds on-demand status information about parent delegation sync for a zone.
 type ParentSyncStatus struct {
-	Zone            ZoneName          `json:"zone"`
-	Leader          AgentId           `json:"leader"`
-	LeaderExpiry    time.Time         `json:"leader_expiry"`
-	ElectionTerm    uint64            `json:"election_term"`
-	IsLeader        bool              `json:"is_leader"`
-	KeyAlgorithm    string            `json:"key_algorithm,omitempty"`
-	KeyID           uint16            `json:"key_id,omitempty"`
-	KeyRR           string            `json:"key_rr,omitempty"`
-	ApexPublished   bool              `json:"apex_published"`
+	Zone          ZoneName  `json:"zone"`
+	Leader        AgentId   `json:"leader"`
+	LeaderExpiry  time.Time `json:"leader_expiry"`
+	ElectionTerm  uint64    `json:"election_term"`
+	IsLeader      bool      `json:"is_leader"`
+	KeyAlgorithm  string    `json:"key_algorithm,omitempty"`
+	KeyID         uint16    `json:"key_id,omitempty"`
+	KeyRR         string    `json:"key_rr,omitempty"`
+	ApexPublished bool      `json:"apex_published"`
+	// ApexKeys: how many KEY records the apex carries. More than one is no
+	// zone key at all (step 7b): an operator has to leave one.
+	ApexKeys        int               `json:"apex_keys,omitempty"`
 	ParentState     uint8             `json:"parent_state"`
 	ParentStateName string            `json:"parent_state_name,omitempty"`
 	ChildNS         []string          `json:"child_ns,omitempty"`
@@ -232,6 +271,9 @@ type ParentSyncStatus struct {
 	// the zone is caught up, or is owed and waits for room in the delegation
 	// sync queue (step 5). Empty when neither.
 	ParentSync string `json:"parent_sync,omitempty"`
+	// KeyHold: the leader's sync waits for the zone's SIG(0) key, and why
+	// (step 7b). Empty when it does not.
+	KeyHold string `json:"key_hold,omitempty"`
 	// DSSet is "known", or "unknown, waiting for" whom, for a zone that
 	// names a signer. Empty for one that names none.
 	DSSet string `json:"ds_set,omitempty"`

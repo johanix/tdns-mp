@@ -19,6 +19,7 @@ package tdnsmp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -426,6 +427,29 @@ func TestTransportBoundary_LegacySyncRejection(t *testing.T) {
 	// Confirm no message leaked onto MsgQs.Msg.
 	if _, leaked := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); leaked {
 		t.Errorf("rejected sync should not reach MsgQs.Msg, but it did")
+	}
+
+	// The RFI verbs: the environment authorizes every peer, and no such
+	// peer is exempt from the RFI rules (step 6), so a LEGACY peer's
+	// request for a zone's state, its audit and its config are refused
+	// too, each with its reason, and reach nothing.
+	for _, rfi := range [][2]string{{"SYNC", ""}, {"AUDIT", ""}, {"CONFIG", "upstream"}} {
+		body, err := json.Marshal(&DnsSyncPayload{MessageType: "rfi", OriginatorID: env.Alice.Identity, YourIdentity: env.Bob.Identity,
+			Zone: zone, RfiType: rfi[0], RfiSubtype: rfi[1], Timestamp: time.Now().Unix(), DistributionID: nextDistributionID()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rctx, msgType := buildDispatchContext(t, env.Bob.Bridge, env.Alice.Identity, nextDistributionID(), body)
+		rctx.Peer = alicePeer
+		if err := env.Bob.Bridge.Router.Route(rctx, msgType); err == nil {
+			t.Errorf("RFI %s %s from a LEGACY peer was not refused", rfi[0], rfi[1])
+		}
+		if r, _ := rctx.Data["response"].([]byte); !strings.Contains(string(r), "refused") {
+			t.Errorf("RFI %s %s: the refusal says %q", rfi[0], rfi[1], r)
+		}
+		if _, leaked := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); leaked {
+			t.Errorf("a refused RFI %s from a LEGACY peer reached MsgQs.Msg", rfi[0])
+		}
 	}
 }
 

@@ -156,12 +156,25 @@ type catchUpTracker struct {
 	// leads it). One that may not is dropped whether the zone is caught up
 	// or not.
 	owedApplies func(ctx context.Context, zone ZoneName) bool
+
+	// The rounds for the zones' SIG(0) keys (step 7b, key_rounds.go).
+	keyWanted map[ZoneName]*keyRound
+	keyChecks map[ZoneName]bool
+	keyReqs   map[AgentId][]*keyReq
+	keyGen    uint64
+	keyWake   chan struct{}
+	hooks     *keyHooks
+	keyLogs   hourlyLog
 }
 
 // owedSync is a sync with the parent that is owed. room: it was asked for,
 // and the delegation sync queue was full.
 type owedSync struct {
 	room bool
+	// key: the sync was held for the zone's SIG(0) key (holdForZoneKey).
+	// askOwed leaves it, caught up or not, until the key's hold is
+	// released (releaseKeyHold).
+	key bool
 }
 
 // owedResult is what one ask for an owed sync did.
@@ -214,6 +227,7 @@ func (t *catchUpTracker) wire(conf *Config, tm *MPTransportBridge, ar *AgentRegi
 	}
 	t.askSync = conf.askOwedDelegationSync
 	t.owedApplies = conf.owedSyncApplies
+	t.hooks = conf.keyRoundHooks()
 	t.send = func(ctx context.Context, zone ZoneName, peer AgentId, cu *CatchUp) error {
 		agent, ok := ar.S.Get(peer)
 		if !ok {
@@ -241,6 +255,11 @@ func (t *catchUpTracker) run(ctx context.Context, zdr *ZoneDataRepo) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.ctx, t.zdr = ctx, zdr
+	if t.hooks != nil && t.keyWake == nil {
+		t.keyWake = make(chan struct{}, 1)
+		t.wg.Add(1)
+		go t.keyLoop(ctx)
+	}
 	for _, byPeer := range t.peers {
 		for peer, e := range byPeer {
 			if e.State == catchUpDue {
@@ -468,7 +487,6 @@ func (t *catchUpTracker) Forget(peer AgentId) {
 	}
 	peer = AgentId(dns.Fqdn(string(peer)))
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	delete(t.seen, peer)
 	if s, ok := t.senders[peer]; ok {
 		close(s.stop)
@@ -479,6 +497,19 @@ func (t *catchUpTracker) Forget(peer AgentId) {
 			delete(byPeer, peer)
 			t.noteCaughtUpLocked(zone)
 		}
+	}
+	// its key requests end too, as silence (step 7b)
+	var decisions []func()
+	if t.ctx != nil && t.ctx.Err() == nil {
+		decisions = t.forgetKeyReqsLocked(t.ctx, peer)
+		t.wg.Add(len(decisions))
+	}
+	t.mu.Unlock()
+	for _, decide := range decisions {
+		go func(d func()) {
+			defer t.wg.Done()
+			d()
+		}(decide)
 	}
 }
 
@@ -550,6 +581,10 @@ func (t *catchUpTracker) noteCaughtUpLocked(zone ZoneName) {
 	if ok, _ := t.caughtUpLocked(zone); ok {
 		t.caught[zone] = true
 		lgCatchUp.Info("the zone is caught up", "zone", zone)
+		// the zone's key is checked, and a round for it asks at once
+		// (step 7b): this covers a start, a join and a first role
+		t.keyCheckLocked(zone)
+		t.keyAskNowLocked(zone)
 	}
 }
 
@@ -611,7 +646,15 @@ func (t *catchUpTracker) afterRefresh(zone ZoneName, a *ZoneRefreshAnalysis) {
 			reason = catchUpStart
 		}
 		t.AskZone(zone, reason)
+		t.keyCheck(zone)
 		return
+	}
+	// the zone's voting members changed: its key's entry starts over; and
+	// its apex KEY changed: the key is checked again (step 7b)
+	if a.HsyncChanged || len(a.NewVoters) > 0 || a.StandingBefore != a.StandingAfter {
+		t.keyRestart(zone)
+	} else if a.KeyChanged {
+		t.keyCheck(zone)
 	}
 	t.prune(zone)
 	switch {
@@ -663,6 +706,11 @@ func (t *catchUpTracker) kickLocked(peer AgentId) {
 func (t *catchUpTracker) sender(ctx context.Context, peer AgentId, s *catchUpSender) {
 	defer t.wg.Done()
 	for {
+		// a key request first: one at a time, as the catch-up's (step 7b)
+		if kr := t.nextKeyReq(peer); kr != nil {
+			kr.result <- t.hooks.send(ctx, kr)
+			continue
+		}
 		zone, cu, next := t.step(peer, time.Now())
 		if cu != nil {
 			err := t.send(ctx, zone, peer, cu)
@@ -887,6 +935,54 @@ func (t *catchUpTracker) owe(zone ZoneName) {
 
 // clearOwed drops the zone's owed sync: the zone's chain has ended, and
 // whoever leads it now has its own.
+// oweForKey marks the zone's sync owed, held for the zone's SIG(0) key.
+func (t *catchUpTracker) oweForKey(zone ZoneName) {
+	if t == nil {
+		return
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.owed[zone] == nil {
+		t.owed[zone] = &owedSync{}
+	}
+	t.owed[zone].key = true
+}
+
+// releaseKeyOwed takes the key off the zone's owed mark, and reports whether
+// it was there. What else holds the sync, the catch-up, holds it still.
+func (t *catchUpTracker) releaseKeyOwed(zone ZoneName) bool {
+	if t == nil {
+		return false
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	o := t.owed[zone]
+	if o == nil || !o.key {
+		return false
+	}
+	o.key = false
+	return true
+}
+
+// keyOwedZones are the zones whose sync is held for the zone's key.
+func (t *catchUpTracker) keyOwedZones() []ZoneName {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ZoneName
+	for zone, o := range t.owed {
+		if o.key {
+			out = append(out, zone)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 func (t *catchUpTracker) clearOwed(zone ZoneName) {
 	if t == nil {
 		return
@@ -981,6 +1077,17 @@ func (t *catchUpTracker) owedState(zone ZoneName) (owed, room bool) {
 	return o != nil, o != nil && o.room
 }
 
+// owedForKey: the zone's sync is owed for its SIG(0) key (the key's hold).
+func (t *catchUpTracker) owedForKey(zone ZoneName) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	o := t.owed[ZoneName(dns.Fqdn(string(zone)))]
+	return o != nil && o.key
+}
+
 // roomWaits: an owed sync waits for room in the delegation sync queue.
 func (t *catchUpTracker) roomWaits() bool {
 	if t == nil {
@@ -1019,6 +1126,9 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 			delete(t.owed, zone)
 			continue
 		}
+		if t.owed[zone].key {
+			continue
+		}
 		if ok, _ := t.caughtUpLocked(zone); !ok {
 			continue
 		}
@@ -1038,7 +1148,9 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 			waiting := 0
 			for _, z := range zones[i:] {
 				z = ZoneName(dns.Fqdn(string(z)))
-				if o := t.owed[z]; o != nil {
+				// a sync owed for the zone's key waits for the key, not
+				// for room: it is not asked until the key's hold ends
+				if o := t.owed[z]; o != nil && !o.key {
 					if ok, _ := t.caughtUpLocked(z); ok {
 						o.room = true
 						waiting++

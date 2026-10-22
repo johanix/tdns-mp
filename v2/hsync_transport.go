@@ -120,6 +120,12 @@ type MPTransportBridge struct {
 	// rediscoveryInterval is the least time between two such lookups of one
 	// peer; zero means peerRediscoveryInterval.
 	rediscoveryInterval time.Duration
+
+	// confirmFallbackLogged is, per peer and mechanism, when a confirmation
+	// that failed on that mechanism and went on the other was last logged
+	// loudly (noteConfirmFallback).
+	confirmFallbackMu     sync.Mutex
+	confirmFallbackLogged map[string]time.Time
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -470,7 +476,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 
 	// Wire remote confirmation callback (two-phase protocol: Phase 7).
 	// When this agent's combiner confirms a sync that originated from another agent,
-	// send the final confirmation NOTIFY back to the originating agent.
+	// send the final confirmation back to the originating agent.
 	if tm.msgQs != nil {
 		tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
 			go tm.sendRemoteConfirmation(detail)
@@ -524,6 +530,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	if err := tm.RegisterAppVerbs(tm.Router, tm.role); err != nil {
 		return nil, fmt.Errorf("application verb registration (%s): %w", tm.role, err)
 	}
+	tm.Router.Use(logConfirmationReceived)
 
 	// Phase 2.6: the discovery-completion callback is now LIVE — transport's
 	// RegisterDiscoveredPeer fires it after the process completes (it was
@@ -537,6 +544,27 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	// self-sufficient for tests that drive it directly.
 	tm.TransportManager.OnPeerDiscovered = func(peer *transport.Peer) {
 		if tm.agentRegistry == nil {
+			return
+		}
+		// A registration that held a transport peer since removed, or
+		// replaced under its identity, does not speak for the identity: its
+		// flags are not the current peer's.
+		if reg := tm.TransportManager.PeerRegistry; reg != nil {
+			if cur, ok := reg.Get(peer.ID); !ok || cur != peer {
+				lgTransport.Debug("discovered peer is no longer the transport's peer for its identity, ignored", "peer", peer.ID)
+				return
+			}
+		}
+		// Discovery runs only for an identity that a zone names (design
+		// 3.3). A discovery that completes for one no zone names any more
+		// puts nothing in the registry and leaves the transport's peer as
+		// it is: a peer named only by authorized_peers too. A peer the
+		// engine holds already, kept for the hold time or found by the
+		// operator, completes its discovery: nothing new is stored. The
+		// removed object itself is never stored again: agentViewForIdentity
+		// stores only a new peer.
+		if !tm.zoneNamesPeer(peer.ID) && !tm.engineHolds(peer.ID) {
+			lgTransport.Info("discovered peer is named by no zone this agent holds, not registered", "peer", peer.ID)
 			return
 		}
 		agent := tm.agentRegistry.agentViewForIdentity(AgentId(peer.ID),
@@ -700,6 +728,17 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// A message let in for a zone's SIG(0) key alone is refused before any
 	// verb handler takes it, unless it is the request for the key or its
 	// answer (keyHandOverGate).
+	// On an agent and an auditor a payload that names another sender than
+	// the one the transport established is refused first, before anything
+	// judges the message by that name (refuseNamedSender).
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		tm.Router.Use(tm.refuseNamedSender)
+	}
+	// On an agent a KEYSTATE is taken only from its own signer, and on a
+	// signer only from its own agents (refuseForeignKeystate).
+	if tm.role == roleAgent || tm.role == roleSigner {
+		tm.Router.Use(tm.refuseForeignKeystate)
+	}
 	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
@@ -753,8 +792,9 @@ func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
-	// Messages reaching routeHelloMessage have passed middleware auth.
-	senderID := payload.GetSenderID()
+	// Messages reaching routeHelloMessage have passed middleware auth. The
+	// sender is the one the parser and refuseNamedSender checked.
+	senderID := msg.SenderID
 	lgTransport.Debug("processing authorized DNS hello", "sender", senderID)
 
 	// DNS-37: inbound DNS hello accepted → INTRODUCING on the canonical
@@ -881,7 +921,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	senderID := msg.SenderID // the sender the parser and refuseNamedSender checked
 
 	// DNS-51: Authorization check for Beat messages
 	// Beat includes Zones field (list of zones sender believes are shared)
@@ -908,7 +948,11 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 		var gossipMsgs []GossipMessage
 		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
 			for i := range gossipMsgs {
-				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+				var group *ProviderGroup
+				if pgm := tm.agentRegistry.ProviderGroupManager; pgm != nil {
+					group = pgm.GetGroup(gossipMsgs[i].GroupHash)
+				}
+				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], senderID, group, false)
 			}
 			lgTransport.Debug("merged gossip from incoming DNS beat", "sender", senderID, "groups", len(gossipMsgs))
 
@@ -917,7 +961,7 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 				for i := range gossipMsgs {
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
 					if pg != nil {
-						tm.agentRegistry.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+						tm.agentRegistry.GossipStateTable.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 					}
 				}
 			}
@@ -1023,7 +1067,11 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		payload.DistributionID = msg.DistributionID
 	}
 
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	// The sender the parser and refuseNamedSender checked. On an agent or
+	// an auditor a payload that names none is refused before this; on a
+	// combiner or a signer, where no such check runs, the deliverer is the
+	// only sender such a payload has.
+	senderID := msg.SenderID
 	if senderID == "" && msg.TransportSender != "" {
 		senderID = msg.TransportSender // Fallback to transport-level sender (from QNAME)
 		lgTransport.Debug("payload had empty sender, using transport sender", "sender", senderID)
@@ -1112,6 +1160,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
 		},
+		Mechanism: msg.Mechanism,
 	}
 
 	if tm.msgQs == nil {
@@ -1128,7 +1177,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		// Only agents acting as relay (with an agentRegistry) send this — the combiner already
 		// returned a "pending" ACK inline in the DNS response.
 		if tm.agentRegistry != nil {
-			go tm.sendImmediateConfirmation(payload)
+			go tm.sendImmediateConfirmation(payload, senderID, msg.Mechanism)
 		}
 	default:
 		lgTransport.Warn("message channel full, dropping message", "msgType", msgTypeStr, "sender", senderID)
@@ -1461,13 +1510,17 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
-	// Messages reaching routeRelocateMessage have passed middleware auth.
-	lgTransport.Debug("processing authorized DNS relocate", "sender", payload.SenderID)
+	// Messages reaching routeRelocateMessage have passed middleware auth. The
+	// sender is the one the parser and refuseNamedSender checked, whichever
+	// field of the payload named it: a relocate moves its sender's own
+	// address, and no other.
+	senderID := msg.SenderID
+	lgTransport.Debug("processing authorized DNS relocate", "sender", senderID)
 
 	// Update peer's operational address
-	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
+	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		peer = tm.PeerRegistry.GetOrCreate(payload.SenderID)
+		peer = tm.PeerRegistry.GetOrCreate(senderID)
 	}
 
 	peer.SetOperationalAddress(&transport.Address{
@@ -1477,7 +1530,7 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 		Path:      payload.NewAddress.Path,
 	})
 
-	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
+	lgTransport.Info("updated operational address", "peer", senderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
 
 // settleQueuedMessage tells the reliable queue what a confirmation means
@@ -1498,13 +1551,13 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
-// NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
-func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) {
-	if tm.DNSTransport == nil {
+// confirmations in the two-phase remote confirmation protocol (Phase 5). It goes to
+// senderID, back on mechanism, the one the sync arrived on (confirmTransport).
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, senderID, mechanism string) {
+	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
-	senderID := payload.GetSenderID()
 	if payload.DistributionID == "" {
 		lgTransport.Warn("cannot send immediate confirmation, no distribution ID", "sender", senderID)
 		return
@@ -1519,7 +1572,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, mechanism, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
@@ -1536,11 +1589,12 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload) 
 	}
 }
 
-// sendRemoteConfirmation sends the final confirmation NOTIFY back to the originating agent
+// sendRemoteConfirmation sends the final confirmation back to the originating agent
 // after the remote agent's combiner has confirmed the sync. This is the second of two
-// NOTIFYs in the two-phase remote confirmation protocol (Phase 7).
+// confirmations in the two-phase remote confirmation protocol (Phase 7). It goes back on
+// the mechanism the sync arrived on (confirmTransport).
 func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
-	if tm.DNSTransport == nil {
+	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
 	}
 
@@ -1573,7 +1627,7 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+	err := tm.confirmOn(ctx, detail.Mechanism, peer, &transport.ConfirmRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(detail.Zone),
 		DistributionID: detail.OriginatingDistID, // Use the originating agent's distID
@@ -1593,6 +1647,131 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 		lgTransport.Info("sent remote confirmation", "distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender,
 			"applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems))
 	}
+}
+
+// logConfirmationReceived logs every confirmation the router handles, with
+// the mechanism it arrived on, so that which way a confirmation went shows at
+// both ends ("confirmation sent" at the other).
+func logConfirmationReceived(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
+	err := next(ctx)
+	in, ok := ctx.Incoming()
+	if !ok || in.Token() != transport.VerbConfirm || err != nil {
+		return err
+	}
+	var c transport.DnsConfirmPayload
+	if json.Unmarshal(ctx.ChunkPayload, &c) == nil {
+		lgTransport.Info("confirmation received", "distributionID", c.DistributionID, "sender", c.SenderID,
+			"status", c.Status, "mechanism", in.Mechanism)
+	}
+	return err
+}
+
+// confirmTransport is the transport a SYNC's confirmations go back on first:
+// the mechanism the SYNC arrived on, whatever else the peer offers. A SYNC
+// over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents
+// that share a mechanism use that path both ways. nil when the mechanism is
+// not known or this bridge has no transport for it.
+func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transport {
+	switch mechanism {
+	case transport.MechanismAPI:
+		if tm.APITransport != nil {
+			return tm.APITransport
+		}
+	case transport.MechanismDNS:
+		if tm.DNSTransport != nil {
+			return tm.DNSTransport
+		}
+	}
+	return nil
+}
+
+// confirmOn sends a confirmation of a SYNC that arrived on mechanism. The
+// first choice of path is the one the SYNC came on (confirmTransport). When
+// that fails, the confirmation goes on the other mechanism, if that reaches
+// the peer; the first try then gets half the time, so a peer that hangs on
+// it leaves the other mechanism the rest. When the mechanism is not known,
+// the first choice is what the peer offers (SelectTransport), with the same
+// fallback: a confirmation that is not sent leaves the sender sending its
+// SYNC again. A confirmation sent is logged with the mechanism that carried
+// it.
+func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
+	t := tm.confirmTransport(mechanism)
+	if t == nil {
+		t = tm.SelectTransport(peer)
+		if t == nil {
+			return fmt.Errorf("no transport reaches peer %s", peer.ID)
+		}
+		lgTransport.Debug("the sync's mechanism is not known; the confirmation goes by what the peer offers",
+			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism, "first", t.Name())
+	}
+	used := t
+	if other := tm.otherConfirmTransport(t, peer); other == nil {
+		if err := t.Confirm(ctx, peer, req); err != nil {
+			return err
+		}
+	} else {
+		first, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok {
+			first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		}
+		err := t.Confirm(first, peer, req)
+		cancel()
+		if err != nil {
+			if otherErr := other.Confirm(ctx, peer, req); otherErr != nil {
+				return fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), otherErr)
+			}
+			tm.noteConfirmFallback(peer.ID, t.Name(), other.Name(), err)
+			used = other
+		}
+	}
+	lgTransport.Info("confirmation sent", "distributionID", req.DistributionID, "peer", peer.ID,
+		"status", req.Status.String(), "mechanism", used.Name())
+	return nil
+}
+
+// otherConfirmTransport is the mechanism a confirmation falls back to from
+// t's: DNS when the peer has an address, HTTPS when it has an endpoint and a
+// usable TLSA to check its certificate against (APIUsable); nil when there is
+// none.
+func (tm *MPTransportBridge) otherConfirmTransport(t transport.Transport, peer *transport.Peer) transport.Transport {
+	switch t.(type) {
+	case *transport.APITransport:
+		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+			return tm.DNSTransport
+		}
+	case *transport.DNSTransport:
+		if tm.APITransport != nil && peer.APIUsable() {
+			return tm.APITransport
+		}
+	}
+	return nil
+}
+
+// noteConfirmFallback logs a confirmation to peer that failed on the
+// mechanism its SYNC came on and went on the other: loudly the first time
+// for that peer and mechanism and then at most hourly, quietly in between,
+// so a pair that works one way only shows without a line per confirmation.
+// It reports whether it logged loudly.
+func (tm *MPTransportBridge) noteConfirmFallback(peerID, failed, used string, err error) bool {
+	key := peerID + "|" + failed
+	now := time.Now()
+	tm.confirmFallbackMu.Lock()
+	last, seen := tm.confirmFallbackLogged[key]
+	loud := !seen || now.Sub(last) >= time.Hour
+	if loud {
+		if tm.confirmFallbackLogged == nil {
+			tm.confirmFallbackLogged = make(map[string]time.Time)
+		}
+		tm.confirmFallbackLogged[key] = now
+	}
+	tm.confirmFallbackMu.Unlock()
+	if loud {
+		lgTransport.Warn("confirmations to the peer fail on the mechanism their SYNC came on; sent on the other (logged again in an hour)",
+			"peer", peerID, "failed", failed, "used", used, "err", err)
+	} else {
+		lgTransport.Debug("confirmation sent on the other mechanism", "peer", peerID, "failed", failed, "used", used, "err", err)
+	}
+	return loud
 }
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
@@ -1854,11 +2033,12 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			var gossipMsgs []GossipMessage
 			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
 				for i := range gossipMsgs {
-					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
-					// Re-evaluate group state after merge (may trigger elections)
+					// the answer of the peer that was beaten: rows only
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], string(agent.ID), pg, true)
+					// Re-evaluate group state after merge (may trigger elections)
 					if pg != nil {
-						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.Members)
+						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.VotingMembers)
 					}
 				}
 				lgTransport.Debug("merged gossip from beat response EDNS(0) CHUNK", "peer", peer.ID, "groups", len(gossipMsgs))
@@ -2195,23 +2375,6 @@ func (tm *MPTransportBridge) GetDistributionRecipients(zone ZoneName, skipCombin
 	}
 
 	return recipients
-}
-
-// groupRRStringsByOwner converts a flat list of RR strings to records grouped by owner name.
-// Used when converting from management commands (AgentMgmtPost.RRs []string) to the
-// grouped format used by AgentMsgPost.Records and SyncRequest.Records.
-func groupRRStringsByOwner(rrStrings []string) map[string][]string {
-	records := make(map[string][]string)
-	for _, rrStr := range rrStrings {
-		rr, err := dns.NewRR(rrStr)
-		if err != nil {
-			lgTransport.Warn("skipping unparseable RR", "rr", rrStr, "err", err)
-			continue
-		}
-		owner := rr.Header().Name
-		records[owner] = append(records[owner], rrStr)
-	}
-	return records
 }
 
 // --- Phase 6: DNSKEY Propagation Tracking and KEYSTATE Signaling ---

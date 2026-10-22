@@ -222,6 +222,9 @@ func TestAFewRefusedHellosStartNoLookup(t *testing.T) {
 	s.publishBob(s.bobKey)
 	s.discovers(t, s.alice, s.bob)
 	s.discovers(t, s.bob, s.alice)
+	// Bob holds no peer: a peer he holds is admitted whatever its state
+	// until the hold time is over (#178 step 7). Her key stays with him.
+	s.engines[s.bob].RemovePeer(hsync.PeerID(s.alice.Identity))
 	s.release()
 
 	waitForRefusals(t, s.alice, s.bob.Identity, helloRefusalsBeforeRediscovery-1)
