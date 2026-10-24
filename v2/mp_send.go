@@ -273,9 +273,14 @@ func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer
 	}, nil
 }
 
-func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, req *PeerConfigRequest) (*PeerConfigResponse, error) {
+// sendConfig sends a CONFIG answer on mechanism first, then the other
+// (sendAppOn). mechanism is the one the RFI CONFIG arrived on (#238).
+func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerConfigRequest) (*PeerConfigResponse, error) {
 	msg, err := configAppMessage(req, peer.ID)
-	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := tm.sendAppOn(ctx, mechanism, peer, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -288,9 +293,14 @@ func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Pee
 	}, nil
 }
 
-func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer, req *PeerAuditRequest) (*PeerAuditResponse, error) {
+// sendAudit sends an AUDIT answer on mechanism first, then the other
+// (sendAppOn). mechanism is the one the RFI AUDIT arrived on (#238).
+func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerAuditRequest) (*PeerAuditResponse, error) {
 	msg, err := auditAppMessage(req, peer.ID)
-	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := tm.sendAppOn(ctx, mechanism, peer, msg)
 	if err != nil {
 		return nil, err
 	}

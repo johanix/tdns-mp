@@ -237,7 +237,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 						lgEngine.Error("RFI AUDIT: failed to get audit data", "zone", ampp.Zone, "err", sdResp.ErrorMsg)
 						return
 					}
-					sendAuditToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.Nonce, sdResp.ZDR)
+					sendAuditToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.Nonce, ampp.Mechanism, sdResp.ZDR)
 				case <-time.After(5 * time.Second):
 					lgEngine.Error("RFI AUDIT: timeout getting audit data", "zone", ampp.Zone)
 				}
@@ -382,7 +382,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.Msg = "CONFIG request failed: transport unavailable"
 				return
 			}
-			go answerConfigRequest(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, ampp.Nonce, configData)
+			go answerConfigRequest(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, ampp.Nonce, ampp.Mechanism, configData)
 			if configErr == "" {
 				resp.Msg = fmt.Sprintf("CONFIG %s request received, response pending", ampp.RfiSubtype)
 			}

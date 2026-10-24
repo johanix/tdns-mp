@@ -6,12 +6,12 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261021093326-a93a14b88a7a
-	github.com/johanix/tdns/v2 v2.0.0-20261021093337-51eb09882fad
-	github.com/johanix/tdns/v2/cache v0.0.0-20261021093337-51eb09882fad
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261024120657-23dbf32291f1
+	github.com/johanix/tdns/v2 v2.0.0-20261022134243-9036c644f36f
+	github.com/johanix/tdns/v2/cache v0.0.0-20261022134243-9036c644f36f
 	github.com/johanix/tdns/v2/cli v0.0.0-20261021093337-51eb09882fad
-	github.com/johanix/tdns/v2/core v0.0.0-20261021093337-51eb09882fad
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261021093337-51eb09882fad
+	github.com/johanix/tdns/v2/core v0.0.0-20261022134243-9036c644f36f
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261022134243-9036c644f36f
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible
