@@ -48,13 +48,13 @@ const (
 // entered the pipeline. Each endpoint has checks of its own (a hello must
 // introduce the certificate's agent, a beat's answer carries gossip), so
 // the endpoint, not the body, decides what may enter through it. /msg
-// takes the sync family the HTTPS sender posts there, and the
-// confirmations of it.
+// takes the sync family the HTTPS sender posts there (including config
+// and audit answers to RFI), and the confirmations of it.
 var endpointVerbs = map[apiEndpointKind][]string{
 	apiEndpointHello: {"hello"},
 	apiEndpointBeat:  {"beat"},
 	apiEndpointPing:  {"ping"},
-	apiEndpointMsg:   {"sync", "update", "rfi", transport.VerbConfirm},
+	apiEndpointMsg:   {"sync", "update", "rfi", "config", "audit", transport.VerbConfirm},
 }
 
 // maxAPIBody bounds a request body; a DNS-carried payload is bounded by
