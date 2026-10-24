@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: implementation plan
 
-**Status:** PLAN, 2026-10-18, for revision 5 of the design. No step is started. Section 5 holds the status of each step.
+**Status:** PLAN, 2026-10-18, for revision 5 of the design. Section 5 holds the status of each step (refreshed 2026-10-24): P1’s key and membership’s ground are done on main; S1–S22 and the remaining P steps are not started.
 
 This is the plan for the design in `2026-10-18-owner-instruction-transitions-design.md`, revision 5 ("the design" below; its sections are named "design N"). The design describes how a change of the zone owner's HSYNC3 or HSYNCPARAM records is numbered, agreed and carried out, as it is meant to stand. This document holds what is dated: what exists, what is wrong today, where each rule lands in the code, the steps, and the decisions the design rests on.
 
@@ -182,29 +182,31 @@ Each step is one pull request. Each is safe to merge once what its "Needs first"
 
 The sizes are estimates from reading the code, tests apart: files touched, and lines new and changed. They are an order of magnitude, not a count. They are de-duplicated: where two readings proposed the same change, it is counted once, in the step that makes it.
 
+**Status column (2026-10-24).** Checked against tdns-mp `main` @ `5209e32` and the pins in §7.1. Membership steps 1–8 and 7b are on main and are no longer listed under "Needs first". P1’s key (#928) and #926 are in the pin; the draft’s assignment of key 8 is still open. Nothing of S1–S22 is implemented.
+
 | Step | What | Needs first | Files | New | Changed | Status |
 |---|---|---|---|---|---|---|
-| P1 | tdns: the HSYNCPARAM `serial` key; the draft's number | The draft's number | tdns: 1 | 60 | 10 | Not started |
+| P1 | tdns: the HSYNCPARAM `serial` key; the draft's number | The draft's number (key shipped as 8) | tdns: 1 | 60 | 10 | **Done in tdns** (#928, #929 in pin). Draft PR #3 still open. |
 | P2 | tdns-transport: an application field on confirmations | Nothing | tdns-transport: 5 | 45 | 25 | Not started |
-| P3 | tdns: `parentsync` asked of the application; tdns #926 | #926 (open) | tdns: 2 | 20 | 10 | Not started |
-| P4 | The owner's tools raise the serial | P1 at the owner's primary | Outside the repositories | - | - | Not started |
-| P5 | tdns: keys published before a signer serves its signatures (#160); a policy bound when signing starts (#146) | Nothing | tdns: not established | - | - | Not started |
+| P3 | tdns: `parentsync` asked of the application; tdns #926 | Nothing (#926 done) | tdns: 2 | 20 | 10 | **#926 done.** Hook (P3 proper) not started. |
+| P4 | The owner's tools raise the serial | P1 at the owner's primary (key available) | Outside the repositories | - | - | Not started |
+| P5 | tdns: keys published before a signer serves its signatures (#160); a policy bound when signing starts (#146) | Nothing | tdns: not established | - | - | Not started (#160, #146 open) |
 | P6 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy of a multi-provider zone; on them before S7 | Nothing | tdns: 2 | 30 | 10 | Not started |
-| S1 | The canonical reading and its digest | P1; PR #209 | 8 | 240 | 30 | Not started |
-| S2 | Versions per zone on disk, shown | S1; membership steps 1 to 8 | 16 | 365 | 85 | Not started |
-| S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3; tdns before #916 or with #917's child side; membership steps 4 and 8; PRs #185, #186, #208 | 30 | 345 | 450 | Not started |
+| S1 | The canonical reading and its digest | P1's key on the pin (#209 done) | 8 | 240 | 30 | Not started (unblocked) |
+| S2 | Versions per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | Not started |
+| S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | Not started |
 | S4 | Owner errors and refused transitions | S3 | 9 | 245 | 60 | Not started |
-| S5a | Stamps in beats; each member's version; the fetch; nothing taken from an answer | S2, S4; membership step 6 | 15 | 530 | 140 | Not started |
-| S5b | Stamps on messages and confirmations | S5a; P2; membership step 3 | 8 | 190 | 85 | Not started |
-| S6 | The freeze | S4, S5b; membership steps 3 and 5 | 17 | 605 | 140 | Not started |
+| S5a | Stamps in beats; each member's version; the fetch; nothing taken from an answer | S2, S4 (membership step 6 done) | 15 | 530 | 140 | Not started |
+| S5b | Stamps on messages and confirmations | S5a; P2 (membership step 3 done) | 8 | 190 | 85 | Not started |
+| S6 | The freeze | S4, S5b (membership steps 3 and 5 done) | 17 | 605 | 140 | Not started |
 | S7 | The thaw | S6; S10 and S11 on the fleet first; P6 at the providers' nameservers; out with S8 and S9 | 19 | 815 | 145 | Not started |
-| S8 | Messages between versions | S7; PR #169's copy to the auditors | 10 | 440 | 105 | Not started |
-| S9 | The restart rule | S8; membership step 4 | 9 | 325 | 65 | Not started |
-| S10 | One reader at the combiner | S3; membership step 3; PR #208 | 18 | 580 | 180 | Not started |
+| S8 | Messages between versions | S7; PR #169's copy to the auditors (still draft) | 10 | 440 | 105 | Not started |
+| S9 | The restart rule | S8 (membership step 4 done) | 9 | 325 | 65 | Not started |
+| S10 | One reader at the combiner | S3 (#208 and membership step 3 done) | 18 | 580 | 180 | Not started |
 | S11 | One reader at the signer | S10, S6 | 16 | 430 | 150 | Not started |
 | S12 | The reconciliation core | S9, S10, S11 | 13 | 545 | 105 | Not started |
-| S13 | Steps reach the parts; the DS set follows the step | S12; PR #208 | 11 | 305 | 130 | Not started |
-| S14 | The zone's SIG(0) key: what membership step 7b leaves | S8, S9; membership steps 4 to 7b | 7 | 120 | 45 | Not started |
+| S13 | Steps reach the parts; the DS set follows the step | S12 (#208 done) | 11 | 305 | 130 | Not started |
+| S14 | The zone's SIG(0) key: what membership step 7b leaves | S8, S9 (membership 4–7b done) | 7 | 120 | 45 | Not started |
 | S15 | The switch: every HSYNC3 provider is a member | S12, S14 | 10 | 140 | 165 | Not started |
 | S16 | The leader's withdrawal | S8, S10, S15 | 12 | 265 | 125 | Not started |
 | S17a | The leader's roll of the zone's SIG(0) key | S7, S14, S16 | 8 | 270 | 70 | Not started |
@@ -212,9 +214,9 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S18a | A record, a server role, a provider put back | S13, S15, S16 | 6 | 190 | 40 | Not started |
 | S18b | A signer added; a server becomes a signer | S18a, S11, S12; P5 | 6 | 290 | 75 | Not started |
 | S19 | NS management | S5a, S10, S12 | 5 | 130 | 40 | Not started |
-| S20 | Parent sync | S12, S14, S17a; P3; PR #209 | 7 | 220 | 60 | Not started |
-| S21 | An upstream; `pubkey` and `pubcds` | S18a, S12; P6; PR #167 | 7 | 170 | 40 | Not started |
-| S22 | Tellings by interest | S5a, S12; membership step 8 | 5 | 90 | 60 | Not started |
+| S20 | Parent sync | S12, S14, S17a; P3 (#209 done) | 7 | 220 | 60 | Not started |
+| S21 | An upstream; `pubkey` and `pubcds` | S18a, S12; P6 (#167 done) | 7 | 170 | 40 | Not started |
+| S22 | Tellings by interest | S5a, S12 (membership step 8 done) | 5 | 90 | 60 | Not started |
 
 **Totals.** S1 to S22, in tdns-mp: about 8,520 new and 2,720 changed lines, in 25 pull requests, or 26 if S7's parent work goes first as a pull request of its own. Of that, the core (S1 to S9) is about 4,100 new and 1,305 changed; the parts (S10 to S13) about 1,860 and 565; the key, the switch and the kinds of change (S14 to S22) about 2,560 and 850. P1 to P3 and P6, in tdns and tdns-transport: about 155 new and 55 changed. Tests: two to three times the 11,240 lines of code, so about 22,500 to 33,700 lines. Membership decision 46 (2026-10-19) moved about 155 new and 45 changed lines of S14 into membership step 7b; they are counted there, not here.
 
@@ -229,9 +231,11 @@ For comparison: the membership plan sized its steps 9, 9b and 10 at about 1,100 
 - The zone's SIG(0) key (S14) and the switch (S15) come before the withdrawal and the removal. The removal starts with the roll of the key, which builds on membership step 7b (every voting member holds the key, one active key per zone) and on S14 (the KEY as the group's). And a provider whose roles are taken away must stay a member, with no role, to apply the withdrawal of its own records and to follow the steps: before the switch it is no member at all (`ec1c6b3:v2/provider_groups.go:82-144` returns role holders only), and nothing reaches it after the thaw.
 - The removal is two steps: the roll (S17a) has never been run in tdns-mp (membership decision 22) and is judged alone on a fleet first.
 - The additions are two steps: a signer role needs P5, which is outside tdns-mp and not established. Until then S4 refuses it.
-- tdns is re-pinned in two moves. S1 raises only the core module, which P1 changes and which tdns/v2 takes through a local replace (tdns `3615261f:v2/go.mod:7, 18`). The re-pin of tdns/v2 goes with P3 in S3, where it is needed, and waits for a tdns without #916 or with #917's child side (7.1).
+- tdns is re-pinned in two moves. S1 was to raise only the core module for P1; **P1’s key is already in the pin** (#928), so S1 consumes `GetSerial` and re-pins only if the pin has moved. The re-pin of tdns/v2 goes with P3 in S3, where it is needed; #916 and #917’s child side (#933) are already in the lineage (7.1).
 
 ### P1. The HSYNCPARAM `serial` key (tdns, and the draft)
+
+**Status (2026-10-24):** **Done in tdns.** #928 and #929 are merged and in tdns-mp’s pinned core. The draft’s assignment of key 8 and the Label rules remains open ([draft PR #3](https://github.com/johanix/draft-leon-dnsop-signaling-zone-owner-intent/pull/3)). No further tdns code for P1; S1 uses the key.
 
 **Before it:** the draft assigns the key's number. Proposed: 8, the next after `pubcds` (tdns `3615261f:v2/core/rr_hsyncparam.go:56-65`). A private-use number does not fit: the draft allows one only within one administrative domain, and tdns never acts on such a key (`:34-36`).
 
@@ -244,19 +248,21 @@ For comparison: the membership plan sized its steps 9, 9b and 10 at about 1,100 
 - **Lists are Labels, and a malformed list is refused** (the project owner, 2026-10-19; tdns#928 at `e6d64979`). A Label is 1 to 16 characters, each a lowercase ASCII letter, a digit or a hyphen, so Labels compare octet by octet with no case folding. `servers`, `signers` and `auditors` are Labels separated by commas and nothing else, the same on the wire and in text. The wire decoder, the text parser and the encoder refuse an empty item, a space, an uppercase letter, more than 16 characters and any other character; the text parser no longer drops empty items or trims spaces. An empty value is the empty list. The draft (#3) defines the same Label syntax, and a receiver MUST reject a malformed list. tdns#929, stacked on #928, puts HSYNC3's label and upstream under the same rule (an upstream may also be "."): `Parse`, `Unpack` and `Pack` refuse anything else, and the label is stored as written, so "alpha." is refused where it used to be stored and sent as "alpha." after `dns.Fqdn`. HSYNC3's state field and a new name for the RRtype wait for a new codepoint, later.
 - **The upgrade order this sets.** HSYNC3 records written by today's tdns carry the trailing dot on the wire. With #929 the parts refuse them, so the owner's primary must run a tdns with #929 before any part re-pins, and every copy of the zone must be reloaded from source or transferred again. The owner's primary is outside the providers' fleet; the guide must say this to the owner (P4). Checked (tdns#929, "Upgrade order (hard)"): one refused record fails the whole transfer, since the dns library stops at the first record it cannot unpack and tdns's AXFR and IXFR give up, so one dotted label stops every update of the zone at every upgraded part. The order is upstream first: the owner's primary, then each part in the order the zone flows. An old part that restarts reloads its saved copy through the old parser, which puts the dot back, and so breaks only a new part downstream of it, which that order rules out.
 
-Then a new pseudo-version of the core module. tdns-mp re-pins only the core module in S1.
+Then a new pseudo-version of the core module. tdns-mp re-pins only the core module in S1. *(Done: the pin already carries #928/#929; S1 does not invent the key.)*
 
 **Names.** The key name `serial`.
 
-**Tests.** Unit: `TestHsyncparamKeyNumbersMatchTheDraft` (`rr_hsyncparam_test.go:18`) gets key 8; `TestHsyncparamWireEncoding` gets `00 08 00 04 00 00 00 07`; `TestHsyncparamPresentationRoundTrip`. New: `TestHsyncparamSerialRefusesBadValues` (empty, -1, 1.5, 0x10, 4294967296, "7 8"), `TestHsyncparamSerialWireLengthIsFour`, `TestHsyncparamParseRefusesARepeatedKey`, `TestHsyncparamKey8FromAnOlderWriterIsTheSerial`.
+**Tests.** Unit: `TestHsyncparamKeyNumbersMatchTheDraft` (`rr_hsyncparam_test.go:18`) gets key 8; `TestHsyncparamWireEncoding` gets `00 08 00 04 00 00 00 07`; `TestHsyncparamPresentationRoundTrip`. New: `TestHsyncparamSerialRefusesBadValues` (empty, -1, 1.5, 0x10, 4294967296, "7 8"), `TestHsyncparamSerialWireLengthIsFour`, `TestHsyncparamParseRefusesARepeatedKey`, `TestHsyncparamKey8FromAnOlderWriterIsTheSerial`. *(These landed with #928.)*
 
 **Fleet.** A zone with `serial="1"` loads at a tdns-auth primary built with this, and reaches every agent through combiners and signers on the old pin, unchanged. With #929: a primary on the new tdns and parts on the old pin still exchange the zone (the old `Unpack` takes an undotted label as it is, and tdns-mp's trims are no-ops on it; checked on the core tdns-mp pins); a primary on the old tdns and parts on the new pin do not, which is the order above.
 
-**Done when** merged and tagged, and the draft has the number.
+**Done when** merged and tagged, and the draft has the number. *(tdns half met; draft number still open.)*
 
 **Size.** tdns: 1 file and its test; about 60 new and 10 changed lines.
 
 ### P2. tdns-transport: an application field on confirmations
+
+**Status (2026-10-24):** Not started.
 
 **Before it:** nothing.
 
@@ -270,7 +276,9 @@ Then a new pseudo-version of the core module. tdns-mp re-pins only the core modu
 
 ### P3. tdns: `parentsync` asked of the application, and tdns #926
 
-**Before it:** tdns #926 (`e7bfb9fa`), which stops the key poll when the owner takes the sync over, merged.
+**Status (2026-10-24):** **#926 done** (in the pin). The application hook is **not started**; tdns still reads `parentsync` from the zone copy.
+
+**Before it:** tdns #926 (`e7bfb9fa`), which stops the key poll when the owner takes the sync over — merged and pinned.
 
 **Changes.** `ZoneHasParentSyncAgent` (tdns `3615261f:v2/parentsync_bootstrap.go:445-472`) reads `parentsync` from the zone's copy, first record only. It is called by `ParentSyncAfterKeyPublication` (`:53`), which tdns-mp starts (`ec1c6b3:v2/start_agent.go:376`), and by #926's poll (`e7bfb9fa:v2/parentsync_bootstrap.go`, `agentKeyStatePoll`). A hook, proposed `ParentSyncAgentFunc func(ZoneName) bool`, set by the application; when unset, the copy as today. tdns-mp re-pins tdns/v2 and sets the hook in S3.
 
@@ -280,9 +288,13 @@ Then a new pseudo-version of the core module. tdns-mp re-pins only the core modu
 
 ### P4. The owner's tools
 
+**Status (2026-10-24):** Not started (configure templates still have no `serial=`).
+
 Every zone that is to change its providers carries `serial`. The owner's zone generators raise it at every edit of HSYNC3 or HSYNCPARAM, and never by 2^31 or more at once (RFC 1982's undefined half is never adopted; an agent left behind by such a jump needs S2's forget command). A primary that does not know HSYNCPARAM gets the RFC 3597 form with key 8. The owner keeps the order of records and roles, does not revoke a leaving provider's access to the zone before "done", and waits for "done" before the next edit (an edit made earlier waits at the agents anyway, design 3.3). Under `nsmgmt=owner` it drops a leaving provider's NS records from its own NS RRset in the edit that takes the provider's server role away (design 3.7, 5.2). After a change of `parentsync` from agent to owner it writes to the parent only after "done"; on an interim build that refuses the change it does not write to the parent at all (design 3.7). In tdns-mp itself, S1 changes the two files an owner's tool reads (the configure example zone, the policy matrix generator), and S4, S17b and S20 the guide. Not sized.
 
 ### P5. tdns: what a signer role needs
+
+**Status (2026-10-24):** Not started; tdns-mp issues #160 and #146 remain open.
 
 Two preconditions of a signer role (design 5.1, 5.3), outside tdns-mp:
 
@@ -292,6 +304,8 @@ Two preconditions of a signer role (design 5.1, 5.3), outside tdns-mp:
 Needed by S18b only. Until then S4 refuses a move into `signers=`.
 
 ### P6. tdns: the provider's nameservers and `pubkey`, `pubcds`
+
+**Status (2026-10-24):** Not started.
 
 **Before it:** nothing. Needed on the providers' nameservers before S7 (section 4), and by S21.
 
@@ -304,6 +318,8 @@ The provider's nameservers are a reader of the owner's instructions (design 1, r
 **Size.** tdns: 2 files, about 30 new and 10 changed lines.
 
 ### S1. The canonical reading and its digest
+
+**Status (2026-10-24):** Not started. Unblocked: P1’s key and #209 are on main.
 
 **Before it:** P1, pinned. PR #209, which moves the `PostRefresh` block that S3 moves again (`6eeb002`). No membership step is needed; it lands after them to keep conflicts out of `mplist`.
 
