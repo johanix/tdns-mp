@@ -1270,30 +1270,34 @@ Taken while revising the plan for revision 5, each *taken without the project ow
 
 ### 7.1 To be done first
 
-| What | State, 2026-10-19 | Needed by |
+Refreshed 2026-10-24 against tdns-mp `main` @ `5209e32` (pins tdns/core `v0.0.0-20261021093337-51eb09882fad`, which includes #928 and #926; tdns-transport `v2.0.0-20261021093326-a93a14b88a7a`). The membership work (#178’s steps 1–8 and 7b) finished on main after this plan’s 2026-10-19 table; the rows below say what is still open for *this* plan.
+
+| What | State, 2026-10-24 | Needed by |
 |---|---|---|
-| The membership plan's steps 1 to 8, step 7b included (membership decision 46) | Not started; PR 178 holds the plan | Every step from S2; S14, S17a and S20 build on step 7b's key set-up |
-| tdns: the HSYNCPARAM `serial` key (P1), a new core pseudo-version | Nothing exists (tdns `3615261f:v2/core/rr_hsyncparam.go:56-65`) | S1, which re-pins the core module only |
-| The draft: the key's number (8 proposed) and its rules: raised at every edit, RFC 1982, absent is 0, one HSYNCPARAM, one record per label in any state | Not in the draft | P1 |
-| tdns: `parentsync` asked of the application (P3), and the re-pin of tdns/v2 | No PR | S3 |
-| tdns #926 (the key poll checks `parentsync` before every step) | Merged (`9febcafd`); pinned since tdns-mp #216 | P3, S20 |
-| tdns: a context per zone | Not needed: tdns's calls take the caller's context (decision 33) | S7 |
-| tdns #916 (KeyState answered by the parent side when the server hosts the child too) | Merged; pinned since tdns-mp PR #219 | Correct on the wire. S3's re-pin of tdns/v2 goes to a tdns without it, or with #917's child side (tdns PR #933, merged 2026-10-19 and pinned with it): past it the child's bootstrap race (#917) shows. Met since tdns-mp PR #219 |
-| tdns #917, both sides | Child side: tdns #933, merged and pinned since tdns-mp #219. Parent side: issue, no PR | The parent side for the recovery of a lost key (7.4) |
-| tdns: #160's mode and #146's policy binding (P5) | Not established | S18b |
-| tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy (P6) | No PR; to be read first (P6) | S7 (on the nameservers before it), S21 |
-| tdns-transport: an application field on confirmations, with the message (P2) | No PR | S5b, S8 |
-| The owner's tools (P4): the serial in every zone, raised at every edit | Nothing | Before S7 reaches a fleet |
-| tdns-mp #209 (#200 item 1) | Merged 2026-10-19 (`dcbe015`, main `e0c2d35`) | S1, S3, S20 |
-| tdns-mp #167 (`contributionsLoaded`; the combiner's `lacksPubkeyConsent`, `09dffcd:v2/combiner_chunk.go:670-673`) | Open, `09dffcd`. Membership step 3 does not use it and brings a flag of its own; no membership step needs it since 2026-10-18 (membership plan 7.1) | S21 |
-| tdns-mp #208 (#207) | Open, `b7534c3`; no review, no fleet run. The triage puts it before membership steps 3 and 5. It marks a zone registered even when the read of the contributions failed, so the read is not tried again (`b7534c3:v2/config.go:128-144`) | S3, S10, S13 |
-| tdns-mp #206 (the at-ns KEY is published only under the leader's nameservers) | Issue, open | S14 (fixed there or before), S17a, S21 |
-| tdns-mp #147 (a provider taken out of `signers=` stops signing at once) | Issue, open | Closed by S11 and S13 |
-| tdns-mp #185 (#179) and #186 (#180 to #183) | Merged 2026-10-19 (main `1b57dcb`, `25c6cd5`) | Membership steps 7b and 8; S3 |
-| tdns-mp #217 (#179: the key set-up also asks every agent listed ON with no role) | Merged 2026-10-19 (main `9969013`) | Membership step 7b; S3 (its readers take the active reading); S15 (its admission for the key alone becomes ordinary admission) |
-| tdns-mp #219 (tdns pinned at main `38faefbb`: #931, #933, #916, #932 and #935) | Merged 2026-10-19 (main `0fc5366`) | S3, whose condition on #916 it meets; S14 (#933's wait before a bootstrap) |
-| tdns-mp #169 | Draft | Its three helpers come with membership step 1; its copy of a confirmation to the auditors (`copyConfirmationToAuditors`, `db29f4b:v2/hsync_transport.go:1474-1556`) is needed by S8, for #152 |
-| tdns-mp #152 (the auditor's view does not say that a member keeps a distribution) | Issue, open; the membership plan hands it here (its 7.5) | Closed by S8, with #169 |
+| The membership plan's steps 1 to 8, step 7b included (membership decision 46) | **Done** on main: PRs #222–#228, #250–#252 (step 8 merge `30c28c3`). Ground for this plan. | Every step from S2; S14, S17a and S20 build on step 7b's key set-up |
+| tdns: the HSYNCPARAM `serial` key (P1) | **Done** in tdns: #928 merged (`219121ae`); in the pinned core (`HSYNCPARAM_SERIAL`, `GetSerial`). tdns-mp does not call it yet: that is S1. No new core key work. | S1 (consume `GetSerial`; re-pin only if the pin has moved) |
+| The draft: the key's number (8 proposed) and its rules: raised at every edit, RFC 1982, absent is 0, one HSYNCPARAM, one record per label in any state | **Still open:** [draft PR #3](https://github.com/johanix/draft-leon-dnsop-signaling-zone-owner-intent/pull/3) (not merged). tdns already ships key 8. | P1 / interop docs |
+| tdns: `parentsync` asked of the application (P3), and the re-pin of tdns/v2 | **Still missing.** No PR. tdns still reads `GetParentSync` from the zone copy (`parentsync_bootstrap.go`). | S3 |
+| tdns #926 (the key poll checks `parentsync` before every step) | **Done.** Merged (`9febcafd`); present in the current pin. | P3, S20 |
+| tdns: a context per zone | **Not needed:** tdns's calls take the caller's context (decision 33). Unchanged. | S7 |
+| tdns #916 (KeyState answered by the parent side when the server hosts the child too) | **Done.** Merged; on main since tdns-mp #219 (and later pins). | S3 / correct on the wire |
+| tdns #917, both sides | **Child done:** tdns #933 merged and in the pin. **Parent side still open:** issue #917, no PR. | Parent side for the recovery of a lost key (7.4) |
+| tdns: #160's mode and #146's policy binding (P5) | **Still not established.** tdns-mp issues #160 and #146 remain open; no implementing PR. | S18b |
+| tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy (P6) | **Still missing.** No PR. `use-hsyncparam` / `signal_republish.go` still act on the nameserver's own copy. | S7 (on the nameservers before it), S21 |
+| tdns-transport: an application field on confirmations, with the message (P2) | **Still missing.** No PR. `IncomingConfirmation` has no application stamp field. | S5b, S8 |
+| The owner's tools (P4): the serial in every zone, raised at every edit | **Still missing.** Configure example zone and templates have no `serial=` on HSYNCPARAM. | Before S7 reaches a fleet |
+| tdns-mp #209 (#200 item 1) | **Done.** Merged 2026-10-19; `followParentSyncParam` on main. | S1, S3, S20 |
+| tdns-mp #167 (`contributionsLoaded`; the combiner's `lacksPubkeyConsent`) | **Done.** Merged 2026-10-19; both helpers on main (`combiner_chunk.go`). | S21 |
+| tdns-mp #208 (#207) | **Done.** Merged 2026-10-18 (`1d49624` on main). | S3, S10, S13 |
+| tdns-mp #206 (the at-ns KEY is published only under the leader's nameservers) | **Still open** (issue). | S14 (fixed there or before), S17a, S21 |
+| tdns-mp #147 (a provider taken out of `signers=` stops signing at once) | **Still open** (issue). | Closed by S11 and S13 |
+| tdns-mp #185 (#179) and #186 (#180 to #183) | **Done.** Merged 2026-10-19. | Membership steps 7b and 8; S3 |
+| tdns-mp #217 (#179: the key set-up also asks every agent listed ON with no role) | **Done.** Merged 2026-10-19; `zoneKeyPeers` / `roleLessKeyHolders` on main. | Membership step 7b; S3; S15 |
+| tdns-mp #219 (tdns pinned at main `38faefbb`: #931, #933, #916, #932 and #935) | **Done.** Merged 2026-10-19. Later pins moved past that SHA; the named tdns PRs remain in the lineage. | S3; S14 |
+| tdns-mp #169 | **Still draft**, open. Membership step 1 did not land `copyConfirmationToAuditors` on main; that copy path is still this PR’s. | S8, for #152 |
+| tdns-mp #152 (the auditor's view does not say that a member keeps a distribution) | **Still open** (issue); closed by S8 with #169. | S8 |
+
+**Still blocking a first fleet that can change providers:** P2, P3, P4, P6, and (for signer-add) P5; plus #169/#152 for auditor visibility of kept distributions. Membership, P1’s key, #167, #208, #209, #185, #186, #217, #219, #916, #926, and #917’s child side are no longer prerequisites to start S1–S6 against main.
 
 Needed by no step: tdns-mp #166, #189, #190; tdns #922, #923, #924, #891, #886, #791, #789, #634, #395.
 
