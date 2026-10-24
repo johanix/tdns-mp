@@ -27,7 +27,7 @@ func SaveReplaceOrigin(hdb *HsyncDB, zone, agentID string, rrtype uint16, origin
 		ON CONFLICT(zone, agent_id, rrtype) DO UPDATE SET
 			origin_time = excluded.origin_time,
 			dist_id = excluded.dist_id`,
-		zone, agentID, rrtype, origin.Time.Unix(), origin.DistID)
+		zone, agentID, rrtype, origin.Time.UnixNano(), origin.DistID)
 	if err != nil {
 		return fmt.Errorf("SaveReplaceOrigin: upsert: %w", err)
 	}
@@ -55,7 +55,7 @@ func LoadAllReplaceOrigins(hdb *HsyncDB) (map[string]replaceOrigin, error) {
 			return nil, fmt.Errorf("LoadAllReplaceOrigins: scan: %w", err)
 		}
 		key := zone + "|" + agentID + "|" + dns.TypeToString[rrtype]
-		result[key] = replaceOrigin{Time: time.Unix(originTime, 0), DistID: distID}
+		result[key] = replaceOrigin{Time: time.Unix(0, originTime), DistID: distID}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("LoadAllReplaceOrigins: rows: %w", err)

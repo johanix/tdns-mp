@@ -225,7 +225,7 @@ var HsyncTables = map[string]string{
 		zone        TEXT NOT NULL,
 		agent_id    TEXT NOT NULL,
 		rrtype      INTEGER NOT NULL,
-		origin_time INTEGER NOT NULL,
+		origin_time INTEGER NOT NULL, -- unix nanoseconds; the wire Time is RFC3339Nano
 		dist_id     TEXT NOT NULL,
 		UNIQUE(zone, agent_id, rrtype)
 	)`,
