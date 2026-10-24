@@ -83,6 +83,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 		lgEngine.Error("failed to create zone data repo", "err", err)
 		return
 	}
+	// Restore the replace-order guard before any remote update is applied
+	// (tdns-mp #249): without it, a queued older distribution can roll a
+	// set back after a restart.
+	zdr.attachHsyncDB(conf.InternalMp.HsyncDB)
 
 	conf.InternalMp.ZoneDataRepo = zdr
 
