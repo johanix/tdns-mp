@@ -51,6 +51,48 @@ func injectNamedSenderRequest(zone, named string, rrs []string, distID string) (
 	return debugSyncRequest(named, zone, rrs, distID)
 }
 
+// injectReplaceRequest is a SYNC from sender whose one operation replaces
+// sender's set of one RR type with rrs, and whose time is origin. An honest
+// agent stamps a REPLACE with the time it enqueued it. The recipient keeps,
+// per zone, sending agent and RR type, the origin of the last REPLACE it
+// applied, and ignores an older one (#249); this one claims any origin, so
+// a test can send one older, or newer, than that.
+func injectReplaceRequest(sender, zone string, rrs []string, origin time.Time, distID string) (*PeerSyncRequest, error) {
+	if len(rrs) == 0 {
+		return nil, fmt.Errorf("at least one RR is required")
+	}
+	var rrtype uint16
+	records := make([]string, 0, len(rrs))
+	for _, rrStr := range rrs {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse RR %q: %v", rrStr, err)
+		}
+		if rr == nil {
+			return nil, fmt.Errorf("no RR in %q", rrStr)
+		}
+		t := rr.Header().Rrtype
+		if rrtype != 0 && t != rrtype {
+			return nil, fmt.Errorf("a replace carries one RR type, not %s and %s",
+				dns.TypeToString[rrtype], dns.TypeToString[t])
+		}
+		rrtype = t
+		records = append(records, rr.String())
+	}
+	return &PeerSyncRequest{
+		SenderID: sender,
+		Zone:     zone,
+		Operations: []core.RROperation{{
+			Operation: "replace",
+			RRtype:    dns.TypeToString[rrtype],
+			Records:   records,
+		}},
+		Timestamp:      origin,
+		DistributionID: distID,
+		MessageType:    "sync",
+	}, nil
+}
+
 // injectCombinerUpdate is an update for this agent's own combiner whose
 // originator is origin. deliverGenericMessage sends an update to the
 // combiner with SenderID set from AgentId.
@@ -217,6 +259,80 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 	}
 	resp.Data = data
 	resp.Msg = fmt.Sprintf("inject named-sender to %s for zone %s", amp.AgentId, amp.Zone)
+	resp.Status = "ok"
+}
+
+// debugInjectReplace sends the target one REPLACE from this agent that
+// claims the origin the operator gave. The sender is this agent, under its
+// own identity and keys; only the time lies.
+func (conf *Config) debugInjectReplace(parent context.Context, mp *MultiProviderConf, amp AgentMgmtPost, resp *AgentMgmtResponse) {
+	if conf.injectRefused(resp) {
+		return
+	}
+	if amp.AgentId == "" {
+		resp.Error = true
+		resp.ErrorMsg = "target agent ID (--to) is required"
+		return
+	}
+	if amp.Zone == "" {
+		resp.Error = true
+		resp.ErrorMsg = "zone is required"
+		return
+	}
+	originStr := debugPostString(amp.Data, "origin_time")
+	if originStr == "" {
+		resp.Error = true
+		resp.ErrorMsg = "origin time (--origin-time) is required"
+		return
+	}
+	origin, err := time.Parse(time.RFC3339Nano, originStr)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("origin time %q is not RFC 3339: %v", originStr, err)
+		return
+	}
+	distID := fmt.Sprintf("debug-inject-replace-%d", time.Now().UnixNano())
+	syncReq, err := injectReplaceRequest(mp.Identity, string(amp.Zone), amp.RRs, origin, distID)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = err.Error()
+		return
+	}
+	if conf.InternalMp.TransportManager == nil || conf.InternalMp.MPTransport == nil {
+		resp.Error = true
+		resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
+		return
+	}
+	agent, exists := conf.InternalMp.AgentRegistry.S.Get(amp.AgentId)
+	if !exists {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("target agent %q not found in registry", amp.AgentId)
+		return
+	}
+	peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
+	rrtype := syncReq.Operations[0].RRtype
+	originOut := origin.UTC().Format(time.RFC3339Nano)
+
+	syncResp, via, err := conf.InternalMp.MPTransport.sendSyncOnce(parent, peer, syncReq)
+	lgApi.Warn("inject: replace", "target", amp.AgentId, "zone", amp.Zone, "rrtype", rrtype,
+		"origin", originOut, "transport", via)
+
+	data := map[string]interface{}{
+		"distribution_id": distID,
+		"target":          string(amp.AgentId),
+		"zone":            string(amp.Zone),
+		"rrtype":          rrtype,
+		"origin_time":     originOut,
+		"transport":       via,
+	}
+	if err != nil {
+		data["error"] = err.Error()
+	} else if syncResp != nil {
+		data["status"] = syncResp.Status.String()
+		data["message"] = syncResp.Message
+	}
+	resp.Data = data
+	resp.Msg = fmt.Sprintf("inject replace of %s to %s for zone %s", rrtype, amp.AgentId, amp.Zone)
 	resp.Status = "ok"
 }
 

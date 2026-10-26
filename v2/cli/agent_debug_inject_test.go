@@ -78,7 +78,7 @@ func TestDebugInjectCommandsAreWired(t *testing.T) {
 			for _, sub := range c.Commands() {
 				got[sub.Name()] = true
 			}
-			for _, name := range []string{"named-sender", "combiner-origin", "peer-keystate"} {
+			for _, name := range []string{"named-sender", "combiner-origin", "peer-keystate", "hello", "replace"} {
 				if !got[name] {
 					t.Errorf("inject is missing %s", name)
 				}
@@ -111,5 +111,22 @@ func TestInjectHelloPostAndReport(t *testing.T) {
 	const want = "inject hello: agent.b.example. mechanism DNS: sent 40 of 40, accepted 39, failed 1: first error: NOTIFY returned rcode REFUSED"
 	if line != want {
 		t.Errorf("line %q, want %q", line, want)
+	}
+}
+
+// An inject replace posts the target and the zone with their dots, and the
+// origin as given; one that is not RFC 3339 goes nowhere.
+func TestInjectReplacePost(t *testing.T) {
+	rrs := []string{"z.example.\t60\tIN\tNS\tns1.example."}
+	post, err := injectReplacePost("agent.b.example", "z.example", "2026-10-26T17:00:00.5Z", rrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post.Command != "inject-replace" || post.AgentId != "agent.b.example." || post.Zone != "z.example." ||
+		post.Data["origin_time"] != "2026-10-26T17:00:00.5Z" || len(post.RRs) != 1 {
+		t.Errorf("post %+v", post)
+	}
+	if _, err := injectReplacePost("agent.b.example.", "z.example.", "2026-10-26 17:00", rrs); err == nil {
+		t.Error("an origin that is not RFC 3339 was posted")
 	}
 }
