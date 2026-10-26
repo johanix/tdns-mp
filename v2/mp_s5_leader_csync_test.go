@@ -478,8 +478,9 @@ func TestACheckThatFindsTheParentPartWayMakesNoNewCsync(t *testing.T) {
 }
 
 // receives hands a SYNC from another agent to the agent's transport as it
-// arrives there, sender established, and to the agent's message handler,
-// as the agent's sync engine does with what the transport queues.
+// arrives there over DNS, sender established, and to the agent's message
+// handler, as the agent's sync engine does with what the transport queues.
+// The agent's confirmations go back over DNS, the SYNC's mechanism.
 func (r *notifyRig) receives(t *testing.T, originator, transportSender string, ops ...core.RROperation) string {
 	t.Helper()
 	distID := nextDistributionID()
@@ -501,6 +502,7 @@ func (r *notifyRig) receives(t *testing.T, originator, transportSender string, o
 		DistributionID:  distID,
 		SenderID:        originator,
 		TransportSender: transportSender,
+		Mechanism:       transport.MechanismDNS,
 		Zone:            r.mpzd.ZoneName,
 		Payload:         body,
 		ReceivedAt:      time.Now(),

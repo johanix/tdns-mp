@@ -538,16 +538,22 @@ func TestAtARefreshTheIncomingCopyDecidesTheDNSKEYDistribution(t *testing.T) {
 	}
 }
 
-// A zone that joins a group this agent leads, and in which this agent does
-// not vote, is not taken up here: the group's voting members are the union
-// of its zones' until step 8, and this agent does not lead that zone.
+// A zone that joins a group whose leader record names this agent, and in
+// which this agent does not vote, is not taken up here. Since step 8 the
+// group is its make-up, so this agent, an auditor of the zone, does not vote
+// in the group either: the record is one it took as an observer, or a stale
+// one, and it does not lead the zone.
 func TestAZoneThatJoinsAGroupItsLeaderDoesNotVoteInIsNotTakenUp(t *testing.T) {
-	const group = "0123456789abcdef"
 	const zone = "joins.novote.example."
-	seedRoles(t, zone, []string{roleB}, nil, []string{roleA})
+	seedRoles(t, zone, []string{roleB}, []string{roleA}, nil)
 	lem, _ := newRoleLEM(t, roleA, time.Minute)
 	pgm := NewProviderGroupManager(roleA)
-	pgm.Groups[group] = &ProviderGroup{GroupHash: group, Members: []string{roleA, roleB}, VotingMembers: []string{roleA, roleB}, Zones: []ZoneName{zone}}
+	pgm.RecomputeGroups()
+	pg := pgm.GetGroupForZone(zone)
+	if pg == nil || pg.GroupHash != ComputeGroupHash([]string{roleB}, []string{roleA}, nil) {
+		t.Fatalf("the zone's group is %+v, want the make-up of %s voting and %s auditing", pg, roleB, roleA)
+	}
+	group := pg.GroupHash
 	lem.SetProviderGroupManager(pgm)
 	lem.ApplyGossipElection(group, GroupElectionState{Leader: roleA, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)})
 	taken := make(chan ZoneName, 1)

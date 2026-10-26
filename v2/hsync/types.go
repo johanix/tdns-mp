@@ -59,6 +59,9 @@ type Peer struct {
 	Zones       map[ZoneName]bool
 	LastState   time.Time
 	Deferred    []DeferredTask
+	// Unshared is since when no zone names the peer, as the reconcile loop
+	// found it; zero while one does (pruneUnsharedPeers). In memory only.
+	Unshared time.Time
 }
 
 func NewPeer(id PeerID) *Peer {

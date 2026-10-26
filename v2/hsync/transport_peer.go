@@ -211,13 +211,17 @@ func (e *Engine) mergeGossipFromBeat(report *InboundReport) {
 		return
 	}
 	for i := range abp.Gossip {
-		e.deps.Gossip.MergeGossip(&abp.Gossip[i])
+		var group *ProviderGroupInfo
+		if e.deps.ProviderGroups != nil {
+			group = e.deps.ProviderGroups.GetGroup(abp.Gossip[i].GroupHash)
+		}
+		e.deps.Gossip.MergeGossip(&abp.Gossip[i], string(report.Identity), group, false)
 	}
 	if e.deps.ProviderGroups != nil {
 		for i := range abp.Gossip {
 			pg := e.deps.ProviderGroups.GetGroup(abp.Gossip[i].GroupHash)
 			if pg != nil {
-				e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.Members)
+				e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 			}
 		}
 	}

@@ -184,6 +184,37 @@ func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *tes
 	}
 }
 
+// The gate's refusal is REFUSED on the wire and no handler error: the
+// router logs a handler error, and a message refused by the rule is no
+// failure of this agent's. The request for the key gets no rcode from the
+// gate.
+func TestTheKeyGatesRefusalIsNoHandlerError(t *testing.T) {
+	moved, _ := handoverZones(t)
+	c := handoverBridge(arrivalC)
+	gate := func(msg *transport.IncomingMessage) (*transport.MessageContext, bool, error) {
+		ctx := &transport.MessageContext{Data: map[string]interface{}{}}
+		ctx.SetIncoming(msg)
+		handled := false
+		err := c.keyHandOverGate(ctx, func(*transport.MessageContext) error { handled = true; return nil })
+		return ctx, handled, err
+	}
+	rcode := func(ctx *transport.MessageContext) (int, bool) {
+		rc, ok := ctx.Data["response_rcode"].(int)
+		return rc, ok
+	}
+	ctx, handled, err := gate(rfiMessage(t, arrivalA, moved, "upstream"))
+	if err != nil {
+		t.Errorf("the refusal is a handler error: %v", err)
+	}
+	if rc, _ := rcode(ctx); rc != dns.RcodeRefused || handled {
+		t.Errorf("another request from A: rcode %d, handled %v; want REFUSED and no handler", rc, handled)
+	}
+	ctx, handled, err = gate(rfiMessage(t, arrivalA, moved, "sig0key"))
+	if _, set := rcode(ctx); err != nil || set || !handled {
+		t.Errorf("the request for the key: err %v, rcode set %v, handled %v", err, set, handled)
+	}
+}
+
 // An RFI is routed by its payload's MessageType, and one with none is taken
 // as a sync, whose records and operations are applied. Such a message, sent
 // as an RFI with the key's markers, passed the check for the key alone and

@@ -27,9 +27,10 @@ import (
 // the poll gave up, or a poll for the key already runs (tdns holds one per
 // key, and a new call while the slot is held would spin).
 //
-// If leadership is lost mid-retry inside the base version's loop,
-// the attempt still executes. This is acceptable: a duplicate
-// bootstrap is harmless, and leadership loss mid-loop is rare.
+// A lead lost to another agent while the poll runs cancels its run
+// (stopRunsOfLostLead), from any of its waits: a former leader does not
+// bootstrap the key after the new leader has. The poll is not started
+// again: the next pass finds this agent no leader.
 func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
 	for {
 		runCtx, done := conf.delegationSyncRun(ctx, string(zone))

@@ -43,7 +43,9 @@ func TestHeartbeatHandler_dnsBeatMergesGossip(t *testing.T) {
 // since D0 (the application wires its port).
 type stubGossipPort struct{ merged []*GossipMessage }
 
-func (s *stubGossipPort) MergeGossip(m *GossipMessage)                              { s.merged = append(s.merged, m) }
+func (s *stubGossipPort) MergeGossip(m *GossipMessage, _ string, _ *ProviderGroupInfo, _ bool) {
+	s.merged = append(s.merged, m)
+}
 func (s *stubGossipPort) CheckGroupState(string, []string)                          {}
 func (s *stubGossipPort) RefreshLocalStates(*Registry, ProviderGroupLookup, uint32) {}
 func (s *stubGossipPort) SetOnGroupOperational(func(string))                        {}

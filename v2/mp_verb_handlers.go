@@ -70,6 +70,13 @@ func handleAppSync(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 		return fmt.Errorf("invalid message type for sync handler: %s", syncMsg.Token())
 	}
 
+	// A SYNC's sender is a voting member of the zone (design 3.3). The
+	// refusal is on the wire, with its reason.
+	if why := syncSenderRefusal(ZoneName(syncMsg.Zone), syncMsg.SenderID); why != "" {
+		lgTransport.Warn(why, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+		return refuseWithReason(ctx, why)
+	}
+
 	ctx.SetHandledType("sync")
 
 	// Create sync acknowledgment response — format must match extractConfirmFromResponse
@@ -106,6 +113,18 @@ func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 
 	if rfiMsg.Token() != "rfi" {
 		return fmt.Errorf("invalid message type for rfi handler: %s", rfiMsg.Token())
+	}
+
+	// On an agent and an auditor an RFI from a peer is held to its
+	// sender's standing in the zone, by the RFI's type (the plan's 3.2).
+	// The agent's own combiner and signer are not peers.
+	if tm != nil && (tm.role == roleAgent || tm.role == roleAuditor) && !tm.ownInfraPeer(rfiMsg.SenderID) {
+		if p, err := ParseSyncPayload(rfiMsg.Payload); err == nil {
+			if why := tm.rfiSenderRefusal(ZoneName(rfiMsg.Zone), rfiMsg.SenderID, p.RfiType, p.RfiSubtype); why != "" {
+				lgTransport.Warn(why, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+				return refuseWithReason(ctx, why)
+			}
+		}
 	}
 
 	ctx.SetHandledType("rfi")
@@ -181,6 +200,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		TypeToken: "keystate",
 		SenderID:  keystate.GetSenderID(),
 		Zone:      keystate.Zone,
+		Mechanism: arrivedOn(ctx),
 		Payload:   ctx.ChunkPayload,
 	})
 
@@ -249,6 +269,7 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		SenderID:        edits.GetSenderID(),
 		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
 		Zone:            edits.Zone,
+		Mechanism:       arrivedOn(ctx),
 		Payload:         ctx.ChunkPayload,
 	})
 
@@ -306,6 +327,7 @@ func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error
 		SenderID:        config.GetSenderID(),
 		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
 		Zone:            config.Zone,
+		Mechanism:       arrivedOn(ctx),
 		Payload:         ctx.ChunkPayload,
 	})
 
@@ -362,6 +384,7 @@ func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 		SenderID:        audit.GetSenderID(),
 		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
 		Zone:            audit.Zone,
+		Mechanism:       arrivedOn(ctx),
 		Payload:         ctx.ChunkPayload,
 	})
 
@@ -418,6 +441,7 @@ func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext)
 		TypeToken: "status-update",
 		SenderID:  statusUpdate.GetSenderID(),
 		Zone:      statusUpdate.Zone,
+		Mechanism: arrivedOn(ctx),
 		Payload:   ctx.ChunkPayload,
 	})
 
@@ -464,4 +488,14 @@ func handleAppRelocate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 
 	lgTransport.Debug("relocate processed", "peer", ctx.PeerID)
 	return nil
+}
+
+// arrivedOn is the mechanism the message in ctx arrived on, for a handler
+// that sets a rebuilt message in its place: a SYNC's confirmations go back
+// on it.
+func arrivedOn(ctx *transport.MessageContext) string {
+	if in, ok := ctx.Incoming(); ok {
+		return in.Mechanism
+	}
+	return ""
 }

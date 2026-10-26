@@ -268,6 +268,8 @@ type ZoneRefreshAnalysis struct {
 	StandingAfter  standing
 	FirstLoad      bool
 	NewVoters      []AgentId
+	// KeyChanged: the apex KEY RRset changed (step 7b's key check).
+	KeyChanged bool
 }
 
 // Transaction API types
