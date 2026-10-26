@@ -358,12 +358,13 @@ func (mpzd *MPZoneData) recordRequestedInventory(ctx context.Context, tm *MPTran
 		tm.onKeyInventory(ctx, mpzd, inv)
 		return
 	}
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{
+	mpzd.setLastKeyInventoryUnlessOlder(&KeyInventorySnapshot{
 		SenderID:  inv.SenderID,
 		Zone:      inv.Zone,
 		Inventory: inv.Inventory,
 		Owned:     inv.Owned,
 		Received:  time.Now(),
+		seq:       inv.seq,
 	})
 }
 

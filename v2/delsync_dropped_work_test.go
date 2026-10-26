@@ -379,3 +379,36 @@ func TestAFullRFIWaiterDoesNotDropTheNewerInventory(t *testing.T) {
 		t.Error("the newer inventory did not reach the agent's handler")
 	}
 }
+
+// #210, CodeRabbit on #274: an RFI requester that has its answer holds an
+// older inventory while a newer push goes to the engine. The own read hands
+// the older one on afterwards: it is not recorded over the newer one, and
+// the peers are not sent its key set.
+func TestAnRFIAnswerOlderThanAPushIsNotRecordedOverIt(t *testing.T) {
+	r := newLeaderSyncRig(t, "rfi.order.example.")
+	z := r.mpzd.ZoneName
+	q := &MsgQs{KeystateInventory: make(chan *KeystateInventoryMsg, 4)}
+	agent := &MPTransportBridge{msgQs: q}
+	waiter := make(chan *KeystateInventoryMsg, 1)
+	agent.setKeystateRfi(z, waiter)
+	k1, k2 := invItem(t, z, 256, KeyStateActive, nil), invItem(t, z, 256, KeyStateActive, nil)
+	agent.routeKeystateMessage(keystateMsg(t, z, []KeyInventoryItem{k1}, nil))     // the RFI's answer
+	agent.routeKeystateMessage(keystateMsg(t, z, []KeyInventoryItem{k1, k2}, nil)) // a newer push
+	older, ok := recvWithin(waiter, time.Second)
+	if !ok {
+		t.Fatal("the RFI waiter got no answer")
+	}
+	for _, m := range engineReads(q) {
+		r.e.handleKeystateInventory(r.ctx, "agent.us.example.", m, r.sdq, q)
+	}
+	for len(r.sdq) > 0 {
+		<-r.sdq
+	}
+	r.e.handleKeystateInventory(r.ctx, "agent.us.example.", older, r.sdq, q) // as the own read hands it on
+	if snap := r.mpzd.GetLastKeyInventory(); snap == nil || len(snap.Inventory) != 2 {
+		t.Errorf("the recorded inventory after the older answer: %+v, want the newer push's two keys", snap)
+	}
+	if n := len(r.sdq); n != 0 {
+		t.Errorf("the older answer sent %d updates to the peers, want none", n)
+	}
+}

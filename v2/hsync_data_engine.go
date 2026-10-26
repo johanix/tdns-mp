@@ -130,7 +130,9 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	if !exists {
 		return
 	}
-	e.conf.noteKeyInventory(ctx, zd, inventoryMsg)
+	if !e.conf.noteKeyInventory(ctx, zd, inventoryMsg) {
+		return // older than the zone's recorded inventory
+	}
 	changed, ds, err := zd.LocalDnskeysFromKeystate(ourID, nil)
 	if err != nil {
 		return

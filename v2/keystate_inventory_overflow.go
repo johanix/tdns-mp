@@ -3,9 +3,14 @@ package tdnsmp
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
+
+// keystateInventorySeq counts the KEYSTATE inventories the agent's
+// transport receives (KeystateInventoryMsg.seq).
+var keystateInventorySeq atomic.Uint64
 
 // inventoryOverflow holds the KEYSTATE inventories that found the data
 // engine's queue (MsgQs.KeystateInventory) full: one per zone, the newest, so

@@ -86,8 +86,9 @@ type MPTransportBridge struct {
 	foreignDnskeys map[ZoneName]map[AgentId][]*dns.DNSKEY
 	// onKeyInventory records an inventory that answered this agent's own
 	// request as a pushed one is recorded (Config.noteKeyInventory); set
-	// where the agent's bridge is made.
-	onKeyInventory    func(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg)
+	// where the agent's bridge is made. False: an older inventory than the
+	// one recorded, not recorded.
+	onKeyInventory    func(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg) bool
 	foreignSilentSaid map[ZoneName]string // the silent agents last logged, per zone
 
 	// authorizedPeers returns the list of peer identities authorized via config.
@@ -1225,6 +1226,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
 		Resend:    payload.Resend,
+		seq:       keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:

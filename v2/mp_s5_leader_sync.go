@@ -1262,9 +1262,11 @@ func mpLeaderSync(conf *Config, ds tdns.DelegationSyncRequest) bool {
 // had no DS set the syncher would act on, whatever its keys were, so the
 // take asks for a sync even with every key as it was. The same holds for
 // the first inventory after a start: there is no inventory before it.
-func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg) {
+// Reports whether it was recorded: one older than the zone's recorded
+// inventory is not, and asks for nothing.
+func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg) bool {
 	if conf == nil || zd == nil || msg == nil {
-		return
+		return false
 	}
 	snap := &KeyInventorySnapshot{
 		SenderID:  msg.SenderID,
@@ -1272,14 +1274,20 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		Inventory: msg.Inventory,
 		Owned:     msg.Owned,
 		Received:  time.Now(),
+		seq:       msg.seq,
 	}
-	prev := zd.GetLastKeyInventory()
-	zd.SetLastKeyInventory(snap)
+	// An RFI's answer can come after a newer push that found the requester
+	// answered (routeKeystateMessage): the older one changes nothing
+	prev, ok := zd.setLastKeyInventoryUnlessOlder(snap)
+	if !ok {
+		lgEngine.Info("a KEYSTATE inventory older than the zone's recorded one is not recorded", "zone", msg.Zone, "sender", msg.SenderID)
+		return false
+	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
 	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
-		return
+		return true
 	}
 	var before tdns.DSIntent
 	if prev != nil && prev.Owned {
@@ -1295,4 +1303,5 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		// our provider's share of the computed DS set (Amendment 2)
 		conf.noteComputedDSSet(ctx, msg.Zone, computedBefore)
 	}
+	return true
 }
