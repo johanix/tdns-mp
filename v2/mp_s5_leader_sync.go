@@ -1276,12 +1276,22 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		Received:  time.Now(),
 		seq:       msg.seq,
 	}
+	// One inventory of the zone at a time, from the check to the owner's
+	// copy: the engine and a refresh-keys RFI record from goroutines of
+	// their own, and an older one between the two steps of a newer one
+	// would leave the owner the older inventory
+	mu := inventoryLock(zd.ZoneName)
+	mu.Lock()
+	defer mu.Unlock()
 	// An RFI's answer can come after a newer push that found the requester
 	// answered (routeKeystateMessage): the older one changes nothing
 	prev, ok := zd.setLastKeyInventoryUnlessOlder(snap)
 	if !ok {
 		lgEngine.Info("a KEYSTATE inventory older than the zone's recorded one is not recorded", "zone", msg.Zone, "sender", msg.SenderID)
 		return false
+	}
+	if inventoryRecordedHook != nil {
+		inventoryRecordedHook(msg)
 	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))

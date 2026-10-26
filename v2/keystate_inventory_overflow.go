@@ -12,6 +12,20 @@ import (
 // transport receives (KeystateInventoryMsg.seq).
 var keystateInventorySeq atomic.Uint64
 
+// inventoryLocks is a lock per zone (dns.CanonicalName), held while an
+// inventory of the zone is recorded (noteKeyInventory). Taken by nothing
+// else, and first: it cannot reverse the order of the locks taken under it.
+var inventoryLocks sync.Map
+
+func inventoryLock(zone string) *sync.Mutex {
+	m, _ := inventoryLocks.LoadOrStore(dns.CanonicalName(zone), &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// inventoryRecordedHook, when set, runs in noteKeyInventory between the
+// snapshot and the owner's copy (a seam for tests).
+var inventoryRecordedHook func(msg *KeystateInventoryMsg)
+
 // inventoryOverflow holds the KEYSTATE inventories that found the data
 // engine's queue (MsgQs.KeystateInventory) full: one per zone, the newest, so
 // that a burst (every zone's standby key in the same second) loses none

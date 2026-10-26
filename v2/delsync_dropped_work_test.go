@@ -459,3 +459,40 @@ func TestAGiveUpHoldsWhenTheSyncAskedAgainItself(t *testing.T) {
 		t.Error("a failure syncDelegation did not ask again for started no chain")
 	}
 }
+
+// CodeRabbit on #274 (6907110): two inventories of a zone recorded at once,
+// by the engine and by a refresh-keys RFI. The older one, between its
+// snapshot and the owner's copy, does not leave the owner its inventory
+// once the newer one has been recorded.
+func TestTwoInventoriesRecordedAtOnceLeaveTheOwnerTheNewer(t *testing.T) {
+	r := newLeaderSyncRig(t, "inventory.race.example.")
+	z := r.mpzd.ZoneName
+	k1, k2 := invItem(t, z, 256, KeyStateActive, nil), invItem(t, z, 256, KeyStateActive, nil)
+	older := &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z, Inventory: []KeyInventoryItem{k1}, Owned: true, seq: 1}
+	newer := &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z, Inventory: []KeyInventoryItem{k1, k2}, Owned: true, seq: 2}
+	inWindow, release := make(chan struct{}), make(chan struct{})
+	inventoryRecordedHook = func(msg *KeystateInventoryMsg) {
+		if msg == older {
+			close(inWindow)
+			<-release
+		}
+	}
+	t.Cleanup(func() { inventoryRecordedHook = nil })
+	doneA, doneB := make(chan struct{}), make(chan struct{})
+	go func() { r.conf.noteKeyInventory(r.ctx, r.mpzd, older); close(doneA) }()
+	<-inWindow
+	go func() { r.conf.noteKeyInventory(r.ctx, r.mpzd, newer); close(doneB) }()
+	select {
+	case <-doneB:
+	case <-time.After(200 * time.Millisecond): // the newer one waits for the older
+	}
+	close(release)
+	<-doneA
+	<-doneB
+	if inv := r.conf.InternalMp.KeyLifecycleOwner.inventoryOf(z); inv == nil || len(inv.Inventory) != 2 {
+		t.Errorf("the owner's inventory: %+v, want the newer one's two keys", inv)
+	}
+	if snap := r.mpzd.GetLastKeyInventory(); snap == nil || len(snap.Inventory) != 2 {
+		t.Errorf("the zone's snapshot: %+v, want the newer one's two keys", snap)
+	}
+}
