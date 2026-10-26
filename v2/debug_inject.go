@@ -291,6 +291,13 @@ func (conf *Config) debugInjectReplace(parent context.Context, mp *MultiProvider
 		resp.ErrorMsg = fmt.Sprintf("origin time %q is not RFC 3339: %v", originStr, err)
 		return
 	}
+	// The recipient judges a REPLACE only when its origin is set: a zero
+	// origin (0001-01-01T00:00:00Z) would be applied unjudged.
+	if origin.IsZero() {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("origin time %q is the zero time, which the recipient does not judge", originStr)
+		return
+	}
 	distID := fmt.Sprintf("debug-inject-replace-%d", time.Now().UnixNano())
 	syncReq, err := injectReplaceRequest(mp.Identity, string(amp.Zone), amp.RRs, origin, distID)
 	if err != nil {

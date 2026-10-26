@@ -709,8 +709,12 @@ one it holds.`,
 // checked here and again by the agent, and passed on as given, fraction
 // and all: the target compares the whole time.
 func injectReplacePost(to, zone, origin string, rrs []string) (AgentMgmtPost, error) {
-	if _, err := time.Parse(time.RFC3339Nano, origin); err != nil {
+	t, err := time.Parse(time.RFC3339Nano, origin)
+	if err != nil {
 		return AgentMgmtPost{}, fmt.Errorf("--origin-time %q is not RFC 3339: %v", origin, err)
+	}
+	if t.IsZero() {
+		return AgentMgmtPost{}, fmt.Errorf("--origin-time %q is the zero time, which the target does not judge", origin)
 	}
 	return AgentMgmtPost{
 		Command: "inject-replace",

@@ -129,4 +129,7 @@ func TestInjectReplacePost(t *testing.T) {
 	if _, err := injectReplacePost("agent.b.example.", "z.example.", "2026-10-26 17:00", rrs); err == nil {
 		t.Error("an origin that is not RFC 3339 was posted")
 	}
+	if _, err := injectReplacePost("agent.b.example.", "z.example.", "0001-01-01T00:00:00Z", rrs); err == nil {
+		t.Error("the zero origin was posted")
+	}
 }

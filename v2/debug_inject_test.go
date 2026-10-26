@@ -380,6 +380,7 @@ func TestInjectReplaceIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
 	}{
 		{"no origin", nil, amp.RRs, "--origin-time"},
 		{"an origin that is not a time", map[string]interface{}{"origin_time": "yesterday"}, amp.RRs, "RFC 3339"},
+		{"the zero origin", map[string]interface{}{"origin_time": "0001-01-01T00:00:00Z"}, amp.RRs, "zero time"},
 		{"two RR types", amp.Data, append([]string{"z.example. 60 IN TXT \"x\""}, amp.RRs...), "one RR type"},
 		{"no transport", amp.Data, amp.RRs, "TransportManager"},
 	} {
