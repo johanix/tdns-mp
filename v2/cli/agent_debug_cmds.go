@@ -102,8 +102,9 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 		Short: "Tell agent to send an RFI message to the agents of the zone it concerns",
 		Long: `Tell agent to send an RFI message for the zone. The agent picks the recipients
 from the zone: CONFIG upstream goes to its upstream, CONFIG downstream to its
-downstreams, CONFIG sig0key and AUDIT to every agent of the zone, SYNC to the
-voting members.`,
+downstreams. CONFIG sig0key goes to the other agents that may hold the zone's
+SIG(0) key: the voting members. AUDIT and SYNC go to the voting members; the
+auditor is not asked.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			tdnscli.PrepArgs("zonename")
 
