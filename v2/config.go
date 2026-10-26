@@ -85,6 +85,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
 					givenBack := conf.followParentSyncParam(mpzd)
 					mpzd.PostRefresh(tm, msgQs)
+					conf.afterSigningSetChange(mpzd)
 					if givenBack {
 						// after PostRefresh, which applies this refresh's
 						// HSYNC3 change and recomputes the groups: who leads

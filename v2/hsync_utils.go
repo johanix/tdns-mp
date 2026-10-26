@@ -1586,7 +1586,10 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			kdb = mpzd.KeyDB
 		}
 		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
-		signing := mpzd.advanceSigningSet(newApex, kdb)
+		signing, changed := mpzd.advanceSigningSet(newApex, kdb)
+		if changed {
+			mpzd.MP.SigningChanged = true
+		}
 		newMpzd := &MPZoneData{
 			ZoneData:  new_zd,
 			MP:        &MPState{},

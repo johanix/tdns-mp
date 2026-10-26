@@ -156,10 +156,13 @@ func (mpzd *MPZoneData) leavingSigner() bool {
 // the one the zone's last copy gave. At the zone's first copy here that is
 // the one the keystore keeps, so that a restart does not forget a provider
 // that is leaving; a changed set is kept again. With no keystore (kdb nil)
-// nothing is kept, and a restart starts from signers=.
-func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB) signingSet {
+// nothing is kept, and a restart starts from signers=. changed says that a
+// live refresh changed the set: not the first copy here, whose election
+// runs the leader's sync anyway (afterSigningSetChange).
+func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB) (next signingSet, changed bool) {
 	var prev signingSet
-	if mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Signing != nil {
+	live := mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Signing != nil
+	if live {
 		prev = mpzd.MP.MPdata.Signing
 	} else if kdb != nil {
 		var err error
@@ -167,9 +170,9 @@ func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB)
 			lg.Error("the zone's signing providers could not be read from the keystore; starting from signers=", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
-	next := nextSigningSet(apex, prev)
+	next = nextSigningSet(apex, prev)
 	if maps.Equal(prev, next) {
-		return next
+		return next, false
 	}
 	lg.Info("the providers that sign the zone changed; one out of signers= signs on until the owner removes its HSYNC3 record (#147)",
 		"zone", mpzd.ZoneName, "signing", strings.Join(slices.Sorted(maps.Keys(next)), " "),
@@ -179,7 +182,23 @@ func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB)
 			lg.Error("the zone's signing providers could not be kept in the keystore; a restart starts from signers=", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
-	return next
+	return next, live
+}
+
+// afterSigningSetChange runs after a refresh (the post-refresh callback): when
+// the refresh changed the zone's signing set (MPState.SigningChanged, which
+// it clears), it asks the leader's delegation sync. The DS set follows the
+// signing set, and can change with no key and no inventory changing: when
+// the owner removes a leaving provider's HSYNC3 record its DS leaves the
+// set, and nothing else would ask for the sync (#147). The sync is explicit,
+// an update only where the parent differs; an agent that does not lead, and
+// a zone whose parent the owner syncs, ask for nothing.
+func (conf *Config) afterSigningSetChange(mpzd *MPZoneData) {
+	if mpzd == nil || mpzd.MP == nil || !mpzd.MP.SigningChanged {
+		return
+	}
+	mpzd.MP.SigningChanged = false
+	conf.requestDelegationSync(nil, mpzd.ZoneName, "the zone's signing set changed: a provider left signers=, or a leaving one's HSYNC3 record went (#147)")
 }
 
 // The signing set is kept as one row per zone, "label=identity" pairs
