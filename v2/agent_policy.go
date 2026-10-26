@@ -23,8 +23,9 @@ const (
 // noteReplaceOrigin answers whether a remote REPLACE is older than the one
 // last applied for the same (zone, agent, rrtype), and records it as the
 // newest when it is not. Older = an earlier originating time, or the same
-// second (the wire carries seconds) and a lower distribution id, which the
-// sender hands out in increasing order. When the map is updated, the origin
+// time and a lower distribution id, which the sender hands out in
+// increasing order. The time is compared whole: the wire carries it to the
+// nanosecond (RFC 3339 with a fraction). When the map is updated, the origin
 // is persisted to HsyncDB (best-effort) so a restart still rejects older
 // replaces (tdns-mp #249).
 func (zdr *ZoneDataRepo) noteReplaceOrigin(u *SynchedDataUpdate, rrtype uint16) (bool, replaceOrigin) {
@@ -607,8 +608,8 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 			synchedDataUpdate.staleTypes[rrtype] = true
 			msg = fmt.Sprintf("Ignored a stale REPLACE of %s %s from agent %q: originated %s (%s), one from %s (%s) is already applied",
 				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId,
-				synchedDataUpdate.OriginatingTime.UTC().Format(time.RFC3339), synchedDataUpdate.OriginatingDistID,
-				applied.Time.UTC().Format(time.RFC3339), applied.DistID)
+				synchedDataUpdate.OriginatingTime.UTC().Format(time.RFC3339Nano), synchedDataUpdate.OriginatingDistID,
+				applied.Time.UTC().Format(time.RFC3339Nano), applied.DistID)
 			lgAgent.Warn(msg)
 			return false, msg
 		}

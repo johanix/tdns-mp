@@ -683,8 +683,10 @@ agent's set of one RR type with the RRs given, and whose origin is
 --origin-time (RFC 3339, with a fraction of a second if wanted), not the
 time it is sent. The target keeps, per zone, sending agent and RR type, the
 origin of the last REPLACE it applied, and ignores an older one (#249); this
-sends one older, or newer, than that. The line printed carries the target's
-answer.`,
+sends one older, or newer, than that. The line printed is the target's
+receipt of the SYNC, not its verdict: the target applies the REPLACE after
+it answers, and logs "Ignored a stale REPLACE ..." when it is older than the
+one it holds.`,
 		Args: cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			toAgent := requiredInjectFlag(cmd, "to")
