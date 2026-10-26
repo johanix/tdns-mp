@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 5.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26).
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -12,7 +12,7 @@ It builds on the membership design, `2026-10-12-membership-and-catch-up-design.m
 - the switch of its rule 1 in the code: every provider with an HSYNC3 record is a member;
 - the rest of a removal (its section 7), which here is what the leader carries out after an edit that takes a provider's roles away.
 
-Revision 2 took an adversarial reading and six code readings of revision 1. Revision 3 took three critics' readings of revision 2 and of the plan. Revision 4 took a check of revision 3. Revision 5 takes a check of revision 4 (2026-10-18).
+Revision 2 took an adversarial reading and six code readings of revision 1. Revision 3 took three critics' readings of revision 2 and of the plan. Revision 4 took a check of revision 3. Revision 5 takes a check of revision 4 (2026-10-18). Revision 6 takes an external review of revision 5 (2026-10-24) and the project owner's answers to it (2026-10-26): agreeing targets the highest version the judge accepts (3.1), 3.7 says why a telling must be fresh, and the plan's readings of the leader a member with no record listens to (3.4), of where an older version is fetched (3.1), and of the order of the NS RRsets in a removal (5.2) are now the design's.
 
 ## 1. Why
 
@@ -28,7 +28,7 @@ Every corner case found in the membership work came from that. A guard per kind 
    - whether an HSYNCPARAM record is present at all (HSYNC3 without HSYNCPARAM is the legacy case, in which every ON record votes);
    - each known HSYNCPARAM key except the serial, with absent keys read as their defaults and the provider lists as sorted sets.
 
-   Unknown and private-use keys, TTLs and signatures are not in it. A version is named by the pair (serial, digest). Records are compared by label and identity together: an identity changed under a label is the removal of one provider's record and the addition of another's.
+   Unknown and private-use keys, TTLs and signatures are not in it. The reading and its digest are tdns-mp's own: the draft does not define them, so only agents of tdns-mp compare digests. A version is named by the pair (serial, digest). Records are compared by label and identity together: an identity changed under a label is the removal of one provider's record and the addition of another's.
 
    These are **owner errors**, and each holds the zone (3.6):
    - two voting members tell the same serial with different digests, or a voting member tells a digest for the active serial that differs from this agent's own copy: an edit without a raised serial. A member that does not vote and tells a conflict is shown, and holds nothing;
@@ -37,9 +37,9 @@ Every corner case found in the membership work came from that. A guard per kind 
 
    A copy whose serial is lower than the highest the agent has held is not adopted, with a warning; an owner who wants old instructions back publishes them with a new, higher serial. A zone whose HSYNCPARAM has no serial is at serial 0, and a change of its instructions at serial 0 is an edit without a raised serial: the key is required for a zone that is to change its providers.
 3. **Each agent keeps versions per zone, on disk.** The **active** version it acts by, with its instructions; the version it was thawed from, with its instructions, until the transition is done; every newer version it has held and told, with its instructions, until a transition passes it; the highest serial it has ever held; the last thaw it heard; and the zone's phase, its current step and that step's sets (3.5). Each agent's combiner and signer keep, on disk, the last version and the sets their agent handed them. None of this is lost at a restart. An operator command forgets a zone's stored versions; it is for a steady zone only, run at every agent of the zone together. A zone that leaves an agent's configuration takes its versions with it. An agent changes its active version only as 3.2 and 3.4 say: at the leader's word, a voting member's first-hand relay of it, or, for a zone with no voting member under N, the tellings of every voting member under the new version.
-4. **What an agent tells, it tells first hand.** Every message an agent sends carries, for the zone it concerns: its active (serial, digest), its newest (serial, digest), the last thaw it heard, whether it refuses its newest version and why, and whether its provider has a key rollover under way. With it, each agent tells its own provider's nameserver names, from its configuration, and the removals under way it holds, with the step it holds. A telling counts for the thaw only while it is fresh: heard within the configured time of 3.2. A beat carries this for each zone the sender has something to do for: every zone that is not steady at it, every zone with an owner error or a refused version, and every zone with work owed, kept or under way (membership decision 24). A zone steady at both agents with nothing to do needs nothing told. A receiver knows at once whether the two are in step, and if not, which of them lags.
+4. **What an agent tells, it tells first hand.** Every message an agent sends carries, for the zone it concerns: its active (serial, digest), its newest (serial, digest), the version it agrees on (serial, digest; 3.1), the last thaw it heard, whether it refuses its newest version and why, and whether its provider has a key rollover under way. With it, each agent tells its own provider's nameserver names, from its configuration, and the removals under way it holds, with the step it holds. A telling counts for the thaw only while it is fresh: heard within the configured time of 3.2, since what it says of rollovers can change after it was sent (3.7). A beat carries this for each zone the sender has something to do for: every zone that is not steady at it, every zone with an owner error or a refused version, and every zone with work owed, kept or under way (membership decision 24). A zone steady at both agents with nothing to do needs nothing told. A receiver knows at once whether the two are in step, and if not, which of them lags.
 
-   What changes state is taken only from a message its sender sent: a telling, the leader's word, a rollover flag, a refusal, an election record and its term. The answer to a beat counts for nothing until the transport checks who answered it: over HTTPS the client does not verify the server, and over DNS an answer without the payload envelope is accepted. Gossip in an answer is shown and changes nothing. The argument of 3.7 needs payload encryption between agents: a zone with a voting member that has it off is not thawed, and its status says why.
+   What changes state is taken only from a message its sender sent: a telling, the leader's word, a rollover flag, a refusal, an election record and its term. The answer to a beat counts for nothing. Over HTTPS both ends now check the other's certificate against its TLSA record (tdns-mp #242 and #246), but over DNS an answer without the payload envelope is still accepted, and one rule for both mechanisms is simpler. Gossip in an answer is shown and changes nothing. The argument of 3.7 needs payload encryption between agents: a zone with a voting member that has it off is not thawed, and its status says why.
 5. **One reader.** Nothing in tdns-mp, and nothing in tdns that the agent calls, reads HSYNC3 or HSYNCPARAM from the zone to decide something, except the transition machinery. Every decision reads the agent's active instructions through one accessor, and every step's sets: groups and elections, admission and discovery, the recipients of a distribution, the delegation sync option, the DS set, the expected confirmations of a key's distribution, the edit policy, the key's hand-over, and the hooks of membership steps 4 and 8, which run when the active version changes and at every first load, not at a refresh. The combiner, the signer and the provider's nameservers take what they need from their agent (3.5). A part that has never been handed anything: for a zone whose copy carries no serial (the first start after the upgrade), it acts by its own copy until its agent hands it a version; for a zone whose copy carries a serial, it asks its agent before its first combine or signing, and meanwhile serves what it last served.
 6. **Messages between versions.**
    - A confirmation reports a fact and is always taken. For a decision, an answer stamped with an active version that differs from the stamp of the send it answers is a "not yet": the sender asks again once the two are in step, at once if they already are when the answer comes. An auditor's confirmation counts whatever versions it holds: it changes nothing.
@@ -53,7 +53,7 @@ The membership rules stand where this design does not change them: safety before
 | Phase | Begins | What holds | Ends |
 |---|---|---|---|
 | Steady at N | | Everything runs by N | An agent holds a version above N |
-| Agreeing | At each agent, when it holds a version above N | Nothing new starts; work under way finishes by N; the providers agree on the next version | The thaw |
+| Agreeing | At each agent, when it holds a version above N that the judge accepts (3.1) | Nothing new starts; work under way finishes by N; the providers agree on the next version | The thaw |
 | Reconciling | At the thaw | The leader carries out what the new version calls for, step by step; nothing else new starts | "Done" |
 | Steady at V | | Everything runs by V | |
 
@@ -61,28 +61,28 @@ Every group with two or more voting members elects a leader, whatever its `paren
 
 ### 3.1 Agreeing
 
-An agent enters this phase for a zone when it holds a version above its active one: from its own copy, or after it has heard of one first hand and fetched it. A fetch goes down the provider's chain (the agent asks its signer and its combiner to fetch from the owner) and is paced, so that an upstream that keeps serving an old copy causes no fetch at every beat. The status names a member that tells a version nobody else holds.
+An agent enters this phase for a zone when it holds a version above its active one that the judge accepts against it (below): from its own copy, or after it has heard of one first hand and fetched it. A fetch goes down the provider's chain (the agent asks its signer and its combiner to fetch from the owner) and is paced, so that an upstream that keeps serving an old copy causes no fetch at every beat. The status names a member that tells a version nobody else holds.
 
 - **Nothing new starts for the zone.** No operator edit, no distribution of the agent's own, no new key rollover, no new sync with the parent, no new offer of the zone's SIG(0) key. The agent tells its signer to start no new rollover, and its tellings count for the thaw only once its signer has confirmed that hold. What would have started is kept on disk, in order, apart from the data that catch-up answers and syncs read, and handled when the transition is done, by its instructions. An operator is told that the edit is kept and why.
 - **Work under way finishes, by N.** A key rollover under way runs to its end, every phase of it, its distributions and its syncs of the delegation included; such a sync carries the whole delegation by the sets the parts hold (3.3), not by a version's lists. While a rollover waits for the parent to trust a key just made, that key's offers and bootstrap go on too. Distributions stamped N between agents whose active version is N are taken as before.
 - **An emergency rollover may start**, by N. Its distributions and its parent syncs are exempt from the freeze, and the thaw waits for it. A provider that has lost its roles, or that the version being agreed takes away, makes none: its keys go with its removal.
 - **What is not held:** the owner's zone itself (transferred, signed and served as it comes), beats and gossip, elections, catch-up requests and their answers (membership 5), and the requests for the zone's SIG(0) key.
-- **The providers agree.** Every agent tells its newest version in every beat. Each holds its active instructions and every newer version it has held, so each computes the same difference between them.
-- **An unsafe transition is refused.** The difference is judged by a function of the two versions alone, so every agent judges alike, and each tells its refusal. A member that moves straight to a version on a first-hand thaw (3.2) judges the thaw's own pair, from and to, with the from-version fetched if it lacks it, never its own older active version against the new one; it refuses only a version it cannot read. Refused is a transition that:
+- **The providers agree.** Every agent tells its newest version, and the version it agrees on, in every beat. Each holds its active instructions and every newer version it has held, so each computes the same difference between them.
+- **An unsafe transition is refused.** The difference is judged by a function of the two versions alone, so every agent judges alike, and each tells its refusal. A member that moves straight to a version on a first-hand thaw (3.2) judges the thaw's own pair, from and to, with the from-version fetched if it lacks it, never its own older active version against the new one; it refuses only a version it cannot read. The from-version is fetched from the leader, or from a voting member that tells it as its active version or as its last thaw's from, and checked against its digest: the owner serves only its newest copy. Refused is a transition that:
   - removes the ON record of a provider that has a role under N, or gives a role to a label that has no ON record under N. The owner's order, a record before a role and roles before a record, is thereby a rule. (An edit that removes a record while that provider's removal is under way waits for "done", as every newer serial during a reconciliation does: 3.3);
   - changes the identity under a label that has a role;
   - moves a signer to `servers=` only, or empties `signers=` of a signed zone;
   - leaves an ON record whose upstream names a label that is not in `signers=` under V or has no ON record under V, or removes a signer that is a remaining server's upstream;
   - needs a step that cannot be carried out yet (5.1, 5.3, 5.6).
 
-  The zone stays steady at N. It is not frozen: nobody acts on a refused version.
-- **A newer serial during agreeing** becomes the version agreed on. The versions in between are kept until a thaw passes them.
+  An agent that holds no version above N that the judge accepts keeps the zone steady at N. It is not frozen: nobody acts on a refused version.
+- **The version agreed on** is the highest version the agent holds that the judge accepts against N. A newer serial that the judge accepts becomes the version agreed on. A newer serial that it refuses does not replace it: the agent holds it, tells it as its newest with its refusal, and judges it again against the version agreed on once that transition is done (3.3). So an owner who publishes a record and then its role before the first is thawed loses neither. An agent told first hand, by a voting member, a higher version agreed on than its own, which it does not hold, fetches it from that member, as it fetches a from-version. The versions in between are kept until a thaw passes them.
 
 ### 3.2 The thaw
 
 The leader of the zone's group under N thaws the zone to a version V when all of these hold:
 
-- every voting member under N, the leader included, tells, first hand and in its latest message, active N and newest V, by serial and digest, refuses nothing, and has its signer's hold confirmed; the leader holds V too;
+- every voting member under N, the leader included, tells, first hand and in its latest message, active N and that it agrees on V, by serial and digest, and has its signer's hold confirmed; a refusal of a version above V holds nothing; the leader agrees on V too;
 - no key rollover is under way in the zone, by every voting member's latest telling, an emergency rollover included;
 - the leader has nothing in flight towards the parent: no sync, no retry of an UPDATE, no offer of the zone's key, no NOTIFY waiting. Entering agreeing, the leader stops starting such work except for a rollover under way, and cancels what it has left at the thaw's turn through a context of its own for the zone. The same drain is made at every hand-over of the zone's leadership.
 
@@ -104,7 +104,7 @@ If the leader under N is lost before it thaws, its group elects again and the ne
 
 The leader under V carries out what the difference between N and V calls for, starting from what is actually in place, and keeps what it needs to go on after a restart or a change of leader (the leaving providers' nameserver names, its step) on disk. Each step is sent to every member and confirmed. An agent confirms a step only once its combiner and its signer hold the step's sets. What the steps are for each kind of change is section 5.
 
-- **Until the first step, the parts keep the sets they hold.** Nobody leaves or enters a set it holds, for any purpose, until a step of the leader's says so. At the thaw the sets held are N's: a thaw never hands a version's lists at once. The sets name each provider by label and identity, fixed when the step that made them was taken. The purposes of 3.5, `nsmgmt` and `parentsync` among them, change only at a step; groups, admission and discovery follow the activation. An agent that restarts during the reconciliation hands its parts nothing new until it has the current step's sets again.
+- **Until the first step, the parts keep the sets they hold.** Nobody leaves or enters a set it holds, for any purpose, until a step of the leader's says so. At the thaw the sets held are N's: a thaw never hands a version's lists at once. A build that lacks the steps of a kind of change refuses that kind (3.1), so every transition such a build lets through changes no set of 3.5. The sets name each provider by label and identity, fixed when the step that made them was taken. The purposes of 3.5, `nsmgmt` and `parentsync` among them, change only at a step; groups, admission and discovery follow the activation. An agent that restarts during the reconciliation hands its parts nothing new until it has the current step's sets again.
 - **No new key rollover starts** until the transition is done. An emergency rollover may start at any time; every DS and DNSKEY step, of an addition or a removal, waits for it, the others do not.
 - **Nothing else new starts.** Operator edits are kept, on disk, until "done".
 - **A provider whose removal is under way stays a member,** with no role, until its removal is done. Every agent keeps the removal's state on disk, from the leader's first-hand steps, and tells it in its stamp. An agent that missed the end drops it when the leader's first-hand stamp shows the transition done. A leader without the state takes it from the members' stamps.
@@ -117,9 +117,9 @@ The leader under V carries out what the difference between N and V calls for, st
 An agent that starts reads its stored versions. It votes, beats, gossips, catches up, and answers and asks for the zone's key, as always. It starts nothing for a zone until it knows the zone's active version, and keeps what it receives meanwhile (rule 6):
 
 - an agent with a stored record knows it from that record;
-- a member with no record takes the leader's word only, first hand;
+- a member with no record takes the leader's word only, first hand: the word of the agent that leads the zone's group under the version the word names, by the election records it has heard first hand;
 - a leader with no record takes the active version that every voting member with a record tells, when there is at least one and they all agree, the last thaw told breaking a tie; a member that has no record counts as no objection. Otherwise it waits, names who differs, and the status names the forget command as the operator's remedy;
-- at the first start after the upgrade, when no record exists anywhere, the leader makes active the newest version every voting member tells, with no rollover or parent condition: nothing is active yet to protect.
+- at the first start after the upgrade, when no record exists anywhere, the zones are placed in groups by their newest copy, and the leader of that group makes active the newest version every voting member tells, with no rollover or parent condition: nothing is active yet to protect.
 
 A member whose copy is older than the active version starts nothing and fetches until it holds it. A newcomer of a version is in the same position: it may talk, from its newest copy, and starts nothing until it hears the active version. A member's tellings count only from its last start: it announces each start (membership 5.1).
 
@@ -138,26 +138,26 @@ During a removal the leaving provider leaves these one at a time (5.2). A combin
 
 ### 3.6 Owner errors and refusals
 
-An owner error (rule 2) holds the zone as agreeing does: nothing new starts, work under way finishes by the active version. It ends only at a higher serial, never when the contents are reverted at the same serial. A refused transition (3.1) leaves the zone steady at N, and an agent never makes active a version it has refused.
+An owner error (rule 2) holds the zone as agreeing does: nothing new starts, work under way finishes by the active version. It ends only at a higher serial, never when the contents are reverted at the same serial. A refused transition (3.1) leaves the zone steady at N, unless a version between N and it is accepted, and an agent never makes active a version it has refused.
 
 ### 3.7 Why it holds
 
-Nobody acts by V until every voting member under N, but an excused leaving member, has told active N and newest V first hand. An agent that has told V holds it on disk, and a held version is never given up: a higher serial wins and a lower one is refused, also across a restart. So once a voting member under N has told V, and its signer has confirmed the hold, it starts nothing more by N except a rollover under way or an emergency rollover, and the thaw waits for both. The forget command (rule 3) is the one exception to never giving a version up, and it is for a steady zone only. Before the thaw the only agents that can start anything are those that have not seen V, and they all act by the same N. The leader under N has nothing in flight at the parent when it thaws. After the thaw agents act by V, and until the leader's first step their parts keep the sets they hold. A message made under one version and received under another is caught by its stamp (rule 4) and kept or answered by rule 6. Nothing that changes state is taken from an unauthenticated answer.
+Nobody acts by V until every voting member under N, but an excused leaving member, has told active N and that it agrees on V, first hand. An agent that has told V holds it on disk, and a held version is never given up: a higher serial wins and a lower one is refused, also across a restart. So once a voting member under N has told V, and its signer has confirmed the hold, it starts nothing more by N except a rollover under way or an emergency rollover, and the thaw waits for both. The forget command (rule 3) is the one exception to never giving a version up, and it is for a steady zone only. Before the thaw the only agents that can start anything are those that have not seen V, and they all act by the same N. The leader under N has nothing in flight at the parent when it thaws. After the thaw agents act by V, and until the leader's first step their parts keep the sets they hold. A message made under one version and received under another is caught by its stamp (rule 4) and kept or answered by rule 6. Nothing that changes state is taken from an unauthenticated answer.
 
 Two things follow that the hold of membership 4.9 could not give:
 
-- **No fixed time, and no time a telling counts.** A make-up can go back and forth, so a telling of it had to be heard again and again. A serial only goes forward, so a voting member that has told V has told it for good.
+- **No fixed hold.** A make-up can go back and forth, so membership 4.9 had to hear a telling of it again and again, for a fixed time. A serial only goes forward, so the version a voting member has told stays told: it need not be repeated to stay true. What a telling says of rollovers is not like that: a member may start an emergency rollover after its last telling. So the thaw reads every voting member's latest telling, and counts it only while it is fresh (rule 4). In a fleet whose members are heard, that costs no time; a member that is not heard holds the zone (3.8).
 - **The roles of the whole set exchanged in one edit, with the records kept, is covered.** The new side cannot act before the thaw, and the thaw needs every voting member of the old side. Under the owner's order of 3.1 every voting member under V was a member under N and hears the thaw there, and every voting member under N stays a member through its removal. A stuck old member stalls the zone, safely, at N. A gone or stuck leaving member that is not the leader is excused; a heard, stuck leaving leader stalls the zone until it is stopped.
 
 What no rule between agents covers is the owner's own action at the parent and in its own NS RRset:
 
 - After an edit that takes the parent sync over, the owner writes to the parent only after "done" (5.5). On a build where the steps of 5.5 do not exist yet, the edit is refused and the owner must not write to the parent.
-- Under `nsmgmt=owner`, the owner drops a leaving provider's NS records from its NS RRset in the edit that takes the provider's server role away.
+- Under `nsmgmt=owner`, the owner drops a leaving provider's NS records from its NS RRset in the edit that takes the provider's server role away. On a build where the steps of 5.2 do not exist yet, that edit is refused, and the owner keeps the provider's NS records in its NS RRset and at the parent.
 - Under `nsmgmt=owner` the owner's NS RRset is served by every provider as it comes. It may name a provider's nameservers only once that provider's role transition is done; every agent reports an NS RRset that names the servers of a provider whose role is not done.
 
 ### 3.8 What it costs
 
-- After an edit, nothing that a provider makes happens for the zone until the last voting member under N has loaded the edit and its signer has confirmed the hold, a rollover under way has ended (a KSK or algorithm rollover can take DS TTLs), the leader's work at the parent has drained, and the reconciliation's steps are done. The status names what holds the zone: a member, a rollover, the parent.
+- After an edit, nothing that a provider makes happens for the zone until the last voting member under N has loaded the edit and its signer has confirmed the hold, a rollover under way has ended (a KSK or algorithm rollover can take DS TTLs), the leader's work at the parent has drained, and the reconciliation's steps are done. A removal holds the zone through the parent's NS TTL and then its DS TTL, which can be days. The status names what holds the zone: a member, a rollover, the parent, a wait and when it ends.
 - A voting member that cannot be heard, or that is stuck on an old copy, holds the zone at N for as long, unless it is a leaving member that is not the leader and whose telling has not counted for the configured time. A heard, stuck leaving leader holds the zone until its operator stops it.
 - The owner raises the serial at every edit, follows the order of records and roles, does not revoke a leaving provider's access before "done", and waits for "done" before the next edit.
 
@@ -195,7 +195,7 @@ The owner's order stays: the roles first, the record later. The leader under V r
 
 **The record.** Last, after every cache has expired: a transition of its own, with nothing to carry out. Comms with the provider end after the membership design's hold time.
 
-**The order of the zone's NS RRset and the parent's** stays open (plan section 7).
+**The order of the zone's NS RRset and the parent's.** Under `nsmgmt=agent` the zone's NS RRset goes first: the leader's withdrawal at every member; then the leader's explicit sync with the parent; then a watch on the parent until its NS RRset no longer names the leaving provider's nameservers. Under `nsmgmt=owner` the order is the owner's: its edit drops the names from the zone first.
 
 ### 5.3 A provider changes roles
 
@@ -223,6 +223,8 @@ A change of `parentsync`.
 
 The rules of membership 4.1 for the key stand as written there, now under this design. A voting member asks for a key it does not hold; during a transition it asks every voting member under both versions. The key is the group's, published by the leader. When a voting member leaves, the key is rolled, first in the removal and as the zone's obligation (5.2). A new key is made only when every voting member has answered that it holds none, and a parent judges a bootstrap by what it finds (tdns #917). The zone's key is set up only by the leader's key set-up; tdns's own set-up path makes no key for a multi-provider zone.
 
+- A zone whose apex publishes several KEYs has no zone key: nothing is imported, retired or made, no sync that needs the key is asked for, and the status tells the operator to leave one. Nothing picks one for the operator.
+- A leader whose zone key the parent refuses (BADKEY, and a re-bootstrap the parent refuses) takes no action of its own: the syncs that need the key stay held, and the status says that the parent refuses the zone's key. It stays so until tdns parents judge a bootstrap by what they find (tdns #917), when the recovery below applies.
 - The key's offers and its bootstrap are held during a transition like every other change, except as a step of the reconciliation (5.2 step 1, 5.5) and while a rollover under way waits for the parent to trust a key just made (3.1).
 - The recovery of a lost key (a new KEY published beside one that nobody holds, then bootstrapped, then the old one deleted) is a leader action of its own. It starts only in a steady zone, is held during a transition, and is built once tdns parents judge a bootstrap by what they find.
 
@@ -230,7 +232,7 @@ The rules of membership 4.1 for the key stand as written there, now under this d
 
 - **What the parent's scan does** with a nameserver that lacks a record, or does not answer. It decides the outcome after the time-out of 5.2.
 - **The timing and the operator's view of removing a provider that does not cooperate.** The leader's withdrawal does not depend on the provider, and a gone or stuck leaving member is excused from the thaw, so the mechanism serves that case.
-- **Who answered a beat.** Until the transport checks it (over HTTPS against the peer's TLSA record, over DNS by refusing an answer without the payload envelope), answers count for nothing (rule 4).
+- **Who answered a beat.** Over HTTPS the transport now checks it against the peer's TLSA record (tdns-mp #242 and #246); over DNS it does not yet refuse an answer without the payload envelope. Answers count for nothing either way (rule 4).
 - **The transfer set-up asked for by a member itself** (the asking half of membership decision 6). Today the operator sets it up, and the steps of 5.1 and 5.6 wait for its agent's confirmation.
 - **The end of multi-provider service.** The owner reduces the zone to one provider by transitions, and then removes its HSYNC3 and HSYNCPARAM records. With one provider nothing needs agreeing.
 - **A transition the owner asks to be rolled back** other than by a new, higher serial.
