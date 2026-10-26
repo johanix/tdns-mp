@@ -3241,6 +3241,85 @@ inherited: |
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
 
+=== tdns-mpcli auditor imr
+use: imr
+short: IMR (Internal Recursive Resolver) cache commands
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr dump-tuning
+use: dump-tuning
+short: Show effective IMR tuning values (backoff policy, family, discovery, etc.)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr dump-zone-backoffs
+use: dump-zone-backoffs [zone]
+short: Show zone-scoped lame-delegation backoffs (per zone, per address)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr flush
+use: flush <qname>
+short: Flush IMR cache entries at and below qname
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr query
+use: query <qname> <qtype>
+short: Query the IMR cache (cache-only, no external queries)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr reset
+use: reset
+short: Flush entire IMR cache and re-prime (preserves root NS)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr show
+use: show
+short: Show IMR cache entries related to agent discovery
+flags: |
+      --id string   Agent identity to show cache entries for (required)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli auditor keystore
 use: keystore
 short: Prefix command to access different features of the keystore
