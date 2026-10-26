@@ -125,11 +125,25 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 
+				// The refresh's request has nobody that asks again: a leader's
+				// sync of a multi-provider zone that fails here is owed or
+				// retried as the explicit arm's is (#247), unless this agent
+				// no longer takes part in the zone or leads it by then. The
+				// retry is an explicit sync, which compares with the parent,
+				// not with what this refresh changed.
+				retried := func() bool {
+					return mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName)
+				}
 				zd := ds.ZoneData
 				if p := zd.GetParent(); p == "" || p == "." {
 					parent, perr := imr().Imr.ParentZone(zd.ZoneName)
 					if perr != nil {
-						lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", perr)
+						if !retried() {
+							lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", perr)
+						} else if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), perr); logIt {
+							lg.Error("DelegationSyncher: the zone's parent cannot be found; the sync is owed, and asked for again every 30 s while the zone is caught up",
+								"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", perr)
+						}
 						continue
 					}
 					zd.SetParent(parent)
@@ -137,7 +151,15 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 
 				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, ds.SyncStatus, imr().Imr)
 				if err != nil {
-					lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+					if !retried() {
+						lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+						continue
+					}
+					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
+					// syncDelegation has asked again itself for a NOTIFY it
+					// did not send on; a second ask while that one waits
+					// changes nothing (delegationSyncFailedWith)
+					conf.delegationSyncFailed(ctx, ds.ZoneName, err)
 					continue
 				}
 				ds.SyncStatus.UpdateResult = ur

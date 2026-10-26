@@ -193,7 +193,7 @@ func updateBeingRetried(t *testing.T, zone string) (r *notifyRig, underWay func(
 	}
 	r.parent.refuses()
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	underWay = func() int {
 		c := &r.conf.InternalMp.delegationSyncChains
 		c.mu.Lock()

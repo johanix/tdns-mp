@@ -34,6 +34,10 @@ type MsgQs struct {
 	configWaiters rfiWaiters[*ConfigResponseMsg]
 	auditWaiters  rfiWaiters[*AuditResponseMsg]
 
+	// The KEYSTATE inventories that found KeystateInventory full, the
+	// newest of each zone (#210).
+	keystateOverflow inventoryOverflow
+
 	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
 }
 

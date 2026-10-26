@@ -912,7 +912,7 @@ func syncStoppedBecauseThisAgentLeft(t *testing.T, zone string, before, after fu
 	}
 	r.parent.refuses()
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	underWay := func() int {
 		c := &r.conf.InternalMp.delegationSyncChains
 		c.mu.Lock()

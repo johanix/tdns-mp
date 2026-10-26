@@ -28,9 +28,11 @@ import (
 )
 
 // delegationSyncRetryDelay and delegationSyncRetries bound what happens
-// when the syncher's queue is full: the request is tried again after the
-// delay, that many times, and then given up with a warning (the next
-// change of the DS set, or an election, asks anew).
+// when the syncher's queue is full and the zone has no owed mark to carry
+// the request (no catch-up tracker, or not a multi-provider zone): the
+// request is tried again after the delay, that many times, and then given
+// up with a warning (the next change of the DS set, or an election, asks
+// anew).
 var (
 	delegationSyncRetryDelay = 30 * time.Second
 	delegationSyncRetries    = 5
@@ -51,7 +53,11 @@ type delegationSyncRetryPolicy struct {
 // explicit sync: analysis first, an update only for a difference, so
 // asking twice sends once. It does not wait: the callers are engines'
 // loops. ctx is the asking engine's: a retry ends with it, and asks for
-// nothing after it has ended. Reports whether a request was queued now.
+// nothing after it has ended. A multi-provider zone's request that finds
+// the queue full is owed (#220): the catch-up tracker asks for it every few
+// seconds while the queue stays full, with no bound, one warning a pass for
+// all the zones that wait. Reports whether a request was queued now, or is
+// owed.
 func (conf *Config) requestDelegationSync(ctx context.Context, zone string, why string) bool {
 	return conf.requestDelegationSyncAttempt(ctx, zone, why, 0,
 		delegationSyncRetryPolicy{delay: delegationSyncRetryDelay, retries: delegationSyncRetries})
@@ -75,6 +81,10 @@ func (conf *Config) requestDelegationSyncAttempt(ctx context.Context, zone strin
 	}
 	if queueExplicitDelegationSync(mpzd) {
 		lgEngine.Info("delegation sync requested", "zone", zone, "why", why, "attempt", attempt+1)
+		return true
+	}
+	if conf.oweForRoom(mpzd) {
+		lgEngine.Debug("the delegation sync queue is full; the sync is owed, and asked for when there is room", "zone", zone, "why", why)
 		return true
 	}
 	if attempt >= policy.retries {
@@ -139,6 +149,18 @@ func (conf *Config) askOwedDelegationSync(ctx context.Context, zone ZoneName) ow
 		return owedQueued
 	}
 	return owedQueueFull
+}
+
+// oweForRoom notes a multi-provider zone's sync as owed and waiting for room
+// in the delegation sync queue, where there is a catch-up tracker to ask for
+// it. Reports whether it was noted.
+func (conf *Config) oweForRoom(mpzd *MPZoneData) bool {
+	t := conf.InternalMp.CatchUp
+	if t == nil || !mpzd.Options[tdns.OptMultiProvider] {
+		return false
+	}
+	t.oweForRoom(ZoneName(mpzd.ZoneName))
+	return true
 }
 
 // owedSyncApplies is askOwedDelegationSync's checks: the engine runs, the
@@ -401,12 +423,14 @@ func (conf *Config) delegationSyncAskAfter(ctx context.Context, zone string, ask
 		ch.waiting = false
 		c.mu.Unlock()
 		if !conf.requestDelegationSync(ctx, zone, why) {
-			// The ask was not queued now: not the leader any more, the
-			// zone gone, the engine ended, or the syncher's queue full
-			// (the ask retries the queue by itself for a while). This
-			// chain ends here: whoever leads now has its own, and a sync
-			// that fails, or sends a NOTIFY, after a queued retry starts a
-			// new chain from the first delay.
+			// The ask was neither queued nor owed: not the leader any
+			// more, the zone gone, the engine ended, or the syncher's
+			// queue full for a zone with no owed mark (the ask retries the
+			// queue by itself for a while). This chain ends here: whoever
+			// leads now has its own, and a sync that fails, or sends a
+			// NOTIFY, after a queued retry starts a new chain from the
+			// first delay. An owed ask keeps the chain: the sync it brings
+			// counts on from this one's failures.
 			conf.delegationSyncSucceeded(zone)
 		}
 	})
