@@ -52,6 +52,8 @@ func asMPDaemon(t *testing.T, app tdns.AppType) {
 type mpUpstream struct {
 	zone    string
 	signers string
+	without string   // a label whose HSYNC3 record the zone leaves out
+	extra   []string // more records, in zone file form
 	key     *dns.DNSKEY
 	priv    crypto.Signer
 	addr    string
@@ -65,9 +67,16 @@ func (u *mpUpstream) zoneText(t *testing.T, serial uint32) string {
 	soa := fmt.Sprintf("%s 3600 IN SOA ns1.%s hostmaster.%s %d 7200 1800 604800 7200", z, z, z, serial)
 	fmt.Fprintln(&b, soa)
 	fmt.Fprintf(&b, "%s 3600 IN NS ns1.%s\nns1.%s 3600 IN A 192.0.2.1\nwww.%s 3600 IN A 192.0.2.2\n", z, z, z, z)
-	fmt.Fprintf(&b, "%s 300 IN HSYNC3 ON alpha %s .\n", z, relayOther)
-	fmt.Fprintf(&b, "%s 300 IN HSYNC3 ON beta %s .\n", z, relayUs)
+	if u.without != "alpha" {
+		fmt.Fprintf(&b, "%s 300 IN HSYNC3 ON alpha %s .\n", z, relayOther)
+	}
+	if u.without != "beta" {
+		fmt.Fprintf(&b, "%s 300 IN HSYNC3 ON beta %s .\n", z, relayUs)
+	}
 	fmt.Fprintf(&b, "%s 300 IN HSYNCPARAM servers=\"alpha,beta\" signers=\"%s\"\n", z, u.signers)
+	for _, rr := range u.extra {
+		fmt.Fprintln(&b, rr)
+	}
 	if u.key != nil {
 		soaRR, err := dns.NewRR(soa)
 		if err != nil {
