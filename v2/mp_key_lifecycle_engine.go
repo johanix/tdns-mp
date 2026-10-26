@@ -352,6 +352,33 @@ type KeyLifecycleEngine struct {
 	zones   map[string]*ZoneKeyLifecycle
 	waiting map[string]string // configured zones not ready to take, with why (logged once per reason)
 	refused map[string]bool   // configured zones that are not multi-provider: never taken
+
+	// kept is what arrived for a zone while its rollovers pause (#147,
+	// signerWire.leavers): the agents' confirmations, in order, and the
+	// other providers' latest word. Applied at the first tick after the
+	// pause, before the tick. Kept in memory only: after a restart the
+	// distributions still in flight are sent again once the pause is over,
+	// and the agents answer again.
+	keptMu sync.Mutex
+	kept   map[string]*keptWhilePaused
+}
+
+// keptWhilePaused is what keptMu guards for one zone.
+type keptWhilePaused struct {
+	signals []keptSignal
+	word    *keptWord // the latest; a word replaces the one before
+}
+
+type keptSignal struct {
+	keytag          uint16
+	signal, message string
+	at              time.Time
+}
+
+type keptWord struct {
+	keys      []core.ForeignKeyState
+	spoken    []string
+	hasSpoken bool // ForeignWord's; Foreign's names no spoken providers
 }
 
 func NewKeyLifecycleEngine(conf *Config, owner *MPKeyLifecycleOwner) *KeyLifecycleEngine {
@@ -419,7 +446,11 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 // Signal routes a KEYSTATE signal from an agent to the zone's driver:
 // "propagated" is every expected signer's applied confirmation (the agent
 // aggregates them), "rejected" one rejection. Reports whether the zone is
-// owned, so the caller can keep today's path for one that is not.
+// owned, so the caller can keep today's path for one that is not. While
+// the zone's rollovers pause for a provider leaving the signing set (#147)
+// the signal is kept, not applied: a confirmation would carry a rollover
+// under way on (a key sent again, a DS withdrawn, a key moved to its next
+// state). tickOwned applies it once the pause is over.
 func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message string, at time.Time) bool {
 	l, owned := e.driverState(zone)
 	if !owned {
@@ -432,6 +463,20 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 		lgSigner.Warn("key lifecycle: signal dropped, the zone's driver is not running", "zone", zone, "keytag", keytag, "signal", signal)
 		return true
 	}
+	if leavers := e.wire.leavers(zone); len(leavers) > 0 {
+		e.keep(zone, func(k *keptWhilePaused) {
+			k.signals = append(k.signals, keptSignal{keytag: keytag, signal: signal, message: message, at: at})
+		})
+		lgSigner.Info("key lifecycle: a confirmation is kept, not applied, while the rollovers pause; applied when the leave is over (#147)",
+			"zone", zone, "keytag", keytag, "signal", signal, "leaving", strings.Join(leavers, " "))
+		return true
+	}
+	e.applySignal(l, zone, keytag, signal, message, at)
+	return true
+}
+
+// applySignal feeds one signal to the zone's driver.
+func (e *KeyLifecycleEngine) applySignal(l *ZoneKeyLifecycle, zone string, keytag uint16, signal, message string, at time.Time) {
 	// the signal names the kind of distribution it answers: "propagated"
 	// a key's, "removed" its removal (the agent of the same release); a
 	// rejection says nothing of the kind
@@ -445,7 +490,7 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	case "rejected":
 		_, _, err = l.ConfirmAllAt(keytag, "rejected", message, at, nil)
 	default:
-		return true
+		return
 	}
 	switch {
 	case err == nil:
@@ -457,7 +502,51 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	default:
 		lgSigner.Warn("key lifecycle: signal not applied", "zone", zone, "keytag", keytag, "signal", signal, "err", err)
 	}
-	return true
+}
+
+// keep records something for a zone whose rollovers pause.
+func (e *KeyLifecycleEngine) keep(zone string, f func(*keptWhilePaused)) {
+	zone = dns.Fqdn(zone)
+	e.keptMu.Lock()
+	defer e.keptMu.Unlock()
+	if e.kept == nil {
+		e.kept = map[string]*keptWhilePaused{}
+	}
+	k := e.kept[zone]
+	if k == nil {
+		k = &keptWhilePaused{}
+		e.kept[zone] = k
+	}
+	f(k)
+}
+
+// applyKept applies what was kept for a zone while its rollovers paused:
+// the other providers' latest word, then the confirmations in the order
+// they came. Run by tickOwned before the zone's first tick after the pause.
+func (e *KeyLifecycleEngine) applyKept(l *ZoneKeyLifecycle, zone string) {
+	zone = dns.Fqdn(zone)
+	e.keptMu.Lock()
+	k := e.kept[zone]
+	delete(e.kept, zone)
+	e.keptMu.Unlock()
+	if k == nil {
+		return
+	}
+	lgSigner.Info("key lifecycle: applying what was kept while the rollovers paused (#147)", "zone", zone, "confirmations", len(k.signals), "word", k.word != nil)
+	if w := k.word; w != nil {
+		var err error
+		if w.hasSpoken {
+			err = l.SetForeignWord(w.keys, w.spoken)
+		} else {
+			err = l.SetForeignStates(w.keys)
+		}
+		if err != nil {
+			lgSigner.Error("key lifecycle: recording the other providers' key states failed", "zone", zone, "err", err)
+		}
+	}
+	for _, s := range k.signals {
+		e.applySignal(l, zone, s.keytag, s.signal, s.message, s.at)
+	}
 }
 
 // Foreign hands the zone's driver what the other providers said about
@@ -471,6 +560,9 @@ func (e *KeyLifecycleEngine) Foreign(zone string, keys []core.ForeignKeyState) b
 	}
 	if l == nil {
 		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
+		return true
+	}
+	if e.keepWordWhilePaused(zone, keys, nil, false) {
 		return true
 	}
 	if err := l.SetForeignStates(keys); err != nil {
@@ -527,6 +619,7 @@ func (e *KeyLifecycleEngine) tickOwned(paused map[string]keyPause) {
 			delete(paused, zone)
 			lgSigner.Info("key lifecycle: key rollovers resumed: nobody is leaving the signing set", "zone", zone)
 		}
+		e.applyKept(l, zone)
 		if err := l.Tick(); err != nil {
 			lgSigner.Error("key lifecycle: tick failed", "zone", zone, "err", err)
 		}

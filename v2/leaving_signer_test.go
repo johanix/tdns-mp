@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -445,6 +446,61 @@ func TestEveryKeyMachineOfTheZonePausesWhileAProviderLeaves(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The review's S1: while the rollovers pause, a confirmation must not carry
+// a rollover under way on, and the other providers' word must not change a
+// ds bit. Both are kept: a key in mpdist stays there through the pause,
+// with the agents' "propagated" in hand, and the word is not recorded.
+// Once the leaver's record goes, the first tick applies them: the key is
+// published (T3), and the word is recorded.
+func TestAConfirmationDuringThePauseIsKeptAndAppliedAfterTheLeave(t *testing.T) {
+	asMPDaemon(t, AppTypeMPSigner)
+	signer := &MultiProviderConf{Role: "signer", Identity: "signer.us.example.", Agents: []*PeerConf{{Identity: "agent.us.example."}}}
+	kdb := newMPTestKeyDB(t)
+	mpzd := leaveTestZone(t, "kept.leaving.example.", kdb, signer, []string{"us", "p2"}, []string{"us", "p2"})
+	z := mpzd.ZoneName
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(signer)
+	conf.Config.Internal.KeyDB = kdb
+	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+	e := NewKeyLifecycleEngine(conf, owner)
+	e.wire.push = func(*Config, string, []uint16) {}
+	owner.Take(z)
+
+	// before the leave: the first keys are minted and sent to p2
+	paused := map[string]keyPause{}
+	e.tickOwned(paused)
+	var keyid int
+	if err := kdb.DB.QueryRow(`SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state=? LIMIT 1`, z, KeyStateMpdist).Scan(&keyid); err != nil {
+		t.Fatalf("no key in %s after the first tick: %v", KeyStateMpdist, err)
+	}
+	kt := uint16(keyid)
+
+	// p3, a signer before, leaves: the rollovers pause
+	leaveSigners(t, mpzd, signer, "us", "p2", "p3")
+	yes := true
+	word := []core.ForeignKeyState{{Provider: "p2", KeyState: core.KeyState{KeyTag: 4711, State: KeyStateActive, DS: &yes}}}
+	if !e.Signal(z, kt, "propagated", "", time.Time{}) || !e.ForeignWord(z, word, []string{"p2"}) {
+		t.Fatal("a signal or a word for an owned zone was not claimed")
+	}
+	e.tickOwned(paused)
+	if st := mpKeyState(t, kdb, z, kt); st != KeyStateMpdist {
+		t.Fatalf("a confirmation during the pause moved key %d to %s: the rollover went on", kt, st)
+	}
+	if w, err := readForeignWord(kdb, z); err != nil || len(w) != 0 {
+		t.Fatalf("the other providers' word was recorded during the pause: %v (err %v)", w, err)
+	}
+
+	// the leaver's record goes: what was kept is applied
+	leaveSigners(t, mpzd, signer, "us", "p2")
+	e.tickOwned(paused)
+	if st := mpKeyState(t, kdb, z, kt); st != KeyStatePublished {
+		t.Errorf("after the leave the kept confirmation left key %d in %s, want %s", kt, st, KeyStatePublished)
+	}
+	if w, err := readForeignWord(kdb, z); err != nil || w[4711].Provider != "p2" {
+		t.Errorf("after the leave the kept word was not recorded: %v (err %v)", w, err)
 	}
 }
 
