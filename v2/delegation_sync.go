@@ -156,10 +156,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 						continue
 					}
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
-					// syncDelegation has asked again itself for a NOTIFY it
-					// did not send on; a second ask while that one waits
-					// changes nothing (delegationSyncFailedWith)
-					conf.delegationSyncFailed(ctx, ds.ZoneName, err)
+					conf.leaderSyncFailed(ctx, ds, err)
 					continue
 				}
 				ds.SyncStatus.UpdateResult = ur
@@ -303,9 +300,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// takes part in the zone (followParentSyncParam), or no
 					// longer leads it (the zone left the group it led, step
 					// 8), is not a failure to ask again for.
-					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName) {
-						conf.delegationSyncFailed(ctx, ds.ZoneName, err)
-					}
+					conf.leaderSyncFailed(ctx, ds, err)
 				} else {
 					lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
 					// A sync sent as a NOTIFY is not done, and the peers
@@ -433,10 +428,11 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 			// made again for a zone whose owner syncs it.
 			return msg, rcode, ur, false, failed
 		}
-		// The NOTIFY is not sent on. Asked again here, and not left to the
-		// caller: the request of a refresh has no caller that asks again.
+		// The NOTIFY is not sent on. Asked again here, and the caller is
+		// told so (syncAskedAgain): a second ask after the failure that
+		// gives the zone up would start a new chain.
 		conf.delegationSyncFailed(ctx, ds.ZoneName, failed)
-		return msg, rcode, ur, false, failed
+		return msg, rcode, ur, false, syncAskedAgain{failed}
 	}
 	if held {
 		// tdns's message says the NOTIFY was sent; whoever asked for the
@@ -444,6 +440,29 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 		msg += " (held: it leaves when the zone's nameservers have had time to serve the change)"
 	}
 	return msg, rcode, ur, true, nil
+}
+
+// syncAskedAgain is an error of syncDelegation's that it has asked again
+// for itself (a NOTIFY it did not send on). The caller does not ask again:
+// on the failure that reaches the bound, delegationSyncFailed gives the
+// zone up and ends its chain, and a second ask would start a new chain at
+// the first failure, so the give-up would not hold.
+type syncAskedAgain struct{ err error }
+
+func (e syncAskedAgain) Error() string { return e.err.Error() }
+func (e syncAskedAgain) Unwrap() error { return e.err }
+
+// leaderSyncFailed asks again for a leader's sync that failed in the
+// syncher's arm: a multi-provider zone that this agent still takes part in
+// and still leads, unless syncDelegation has asked again already.
+func (conf *Config) leaderSyncFailed(ctx context.Context, ds tdns.DelegationSyncRequest, err error) {
+	var asked syncAskedAgain
+	if errors.As(err, &asked) {
+		return
+	}
+	if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName) {
+		conf.delegationSyncFailed(ctx, ds.ZoneName, err)
+	}
 }
 
 // notifyPeersParentSyncDone sends STATUS-UPDATE("parentsync-done") to all

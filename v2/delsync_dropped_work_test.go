@@ -412,3 +412,50 @@ func TestAnRFIAnswerOlderThanAPushIsNotRecordedOverIt(t *testing.T) {
 		t.Errorf("the older answer sent %d updates to the peers, want none", n)
 	}
 }
+
+// #274's review, S1: a failed sync that syncDelegation has asked again for
+// itself (a NOTIFY it did not send on) is not asked again by the syncher's
+// arm. The failures run to the bound, and the zone stays given up: asked
+// twice, the failure that gives the zone up ends its chain, and the second
+// ask starts a new one at the first failure.
+func TestAGiveUpHoldsWhenTheSyncAskedAgainItself(t *testing.T) {
+	failureDelays(t, 10*time.Millisecond)
+	r := newLeaderSyncRig(t, "giveup.holds.example.")
+	r.leader(usAgent)
+	z := r.mpzd.ZoneName
+	ds := tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData}
+	cause := errors.New("a provider rejected the zone's CSYNC")
+	chained := func() bool {
+		c := &r.conf.InternalMp.delegationSyncChains
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.zones[z] != nil
+	}
+	for i := 0; ; i++ {
+		// what syncDelegation does when the NOTIFY is not sent on, and then
+		// what the arm does with the error it returns
+		r.conf.delegationSyncFailed(r.ctx, z, cause)
+		r.conf.leaderSyncFailed(r.ctx, ds, syncAskedAgain{cause})
+		if i == len(delegationSyncFailureDelays) {
+			break // the failure that reaches the bound
+		}
+		select {
+		case <-r.q: // the chain's ask, taken as the syncher takes it
+		case <-time.After(2 * time.Second):
+			t.Fatalf("failure %d: the chain asked for nothing", i+1)
+		}
+	}
+	if chained() {
+		t.Error("the zone has a chain after its give-up")
+	}
+	select {
+	case req := <-r.q:
+		t.Errorf("asked again after the give-up: %+v", req)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// an UPDATE that failed is the arm's to ask again for: a new chain
+	r.conf.leaderSyncFailed(r.ctx, ds, cause)
+	if !chained() {
+		t.Error("a failure syncDelegation did not ask again for started no chain")
+	}
+}
