@@ -153,9 +153,11 @@ type ZoneDataRepo struct {
 	// distribution id. A REPLACE carries the sender's whole set, so one
 	// that was sent earlier but arrives later -- the retry of a message
 	// the peer had rejected while it did not yet hold the zone -- must not
-	// roll the set back to what it was. Keyed under mu; in memory only:
-	// after a restart the peers re-announce.
+	// roll the set back to what it was. Keyed under mu; persisted in
+	// ZoneDataReplaceOrigin so a restart still rejects an older replace
+	// (tdns-mp #249). hdb is the store used by noteReplaceOrigin / load.
 	lastReplace map[string]replaceOrigin
+	hdb         *HsyncDB
 	// ownState: when this agent last read its own state of each zone from
 	// its combiner, with the combiner's word that its stored contributions
 	// were loaded; ownStateNote: why not, when it has not. Under mu: the

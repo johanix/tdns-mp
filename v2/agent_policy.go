@@ -24,21 +24,70 @@ const (
 // last applied for the same (zone, agent, rrtype), and records it as the
 // newest when it is not. Older = an earlier originating time, or the same
 // second (the wire carries seconds) and a lower distribution id, which the
-// sender hands out in increasing order.
+// sender hands out in increasing order. When the map is updated, the origin
+// is persisted to HsyncDB (best-effort) so a restart still rejects older
+// replaces (tdns-mp #249).
 func (zdr *ZoneDataRepo) noteReplaceOrigin(u *SynchedDataUpdate, rrtype uint16) (bool, replaceOrigin) {
 	key := string(u.Zone) + "|" + string(u.AgentId) + "|" + dns.TypeToString[rrtype]
 	zdr.mu.Lock()
-	defer zdr.mu.Unlock()
 	if cur, ok := zdr.lastReplace[key]; ok {
 		if cur.Time.After(u.OriginatingTime) || (cur.Time.Equal(u.OriginatingTime) && cur.DistID > u.OriginatingDistID) {
+			zdr.mu.Unlock()
 			return true, cur
 		}
 	}
 	if zdr.lastReplace == nil {
 		zdr.lastReplace = make(map[string]replaceOrigin)
 	}
-	zdr.lastReplace[key] = replaceOrigin{Time: u.OriginatingTime, DistID: u.OriginatingDistID}
+	origin := replaceOrigin{Time: u.OriginatingTime, DistID: u.OriginatingDistID}
+	zdr.lastReplace[key] = origin
+	hdb := zdr.hdb
+	zdr.mu.Unlock()
+
+	if hdb != nil {
+		if err := SaveReplaceOrigin(hdb, string(u.Zone), string(u.AgentId), rrtype, origin); err != nil {
+			lgAgent.Error("failed to persist replace origin",
+				"zone", u.Zone, "agent", u.AgentId, "rrtype", dns.TypeToString[rrtype], "err", err)
+		}
+	}
 	return false, replaceOrigin{}
+}
+
+// loadReplaceOrigins hydrates lastReplace from HsyncDB. Called once at
+// SynchedDataEngine start after attachHsyncDB.
+func (zdr *ZoneDataRepo) loadReplaceOrigins(hdb *HsyncDB) error {
+	origins, err := LoadAllReplaceOrigins(hdb)
+	if err != nil {
+		return err
+	}
+	zdr.mu.Lock()
+	defer zdr.mu.Unlock()
+	if zdr.lastReplace == nil {
+		zdr.lastReplace = make(map[string]replaceOrigin, len(origins))
+	}
+	for k, v := range origins {
+		zdr.lastReplace[k] = v
+	}
+	return nil
+}
+
+// attachHsyncDB sets the store used to persist lastReplace and loads any
+// rows already there. hdb may be nil (tests without a KeyDB).
+func (zdr *ZoneDataRepo) attachHsyncDB(hdb *HsyncDB) {
+	zdr.hdb = hdb
+	if hdb == nil {
+		return
+	}
+	if err := zdr.loadReplaceOrigins(hdb); err != nil {
+		lgEngine.Error("failed to load replace origins", "err", err)
+		return
+	}
+	zdr.mu.Lock()
+	n := len(zdr.lastReplace)
+	zdr.mu.Unlock()
+	if n > 0 {
+		lgEngine.Info("loaded replace origins", "count", n)
+	}
 }
 
 // --- AgentRepo and ZoneDataRepo helper methods ---
