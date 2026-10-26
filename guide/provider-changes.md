@@ -248,6 +248,13 @@ Charlie's combiner refuses its own agent's operations,
 and charlie is no longer a provider of the zone. Its
 operator then takes the zone out of service (4.5).
 
+For a few seconds the parent may still hold charlie's DS
+after the other signers have dropped its keys. The other
+DS records keep the chain. That holds when the remaining
+signers use charlie's algorithm. A validator that guards
+against algorithm downgrade can fail on a DS of an
+algorithm no DNSKEY has.
+
 ## 5. Changing a Provider's Role
 
 The role is the zone owner's decision, made in
