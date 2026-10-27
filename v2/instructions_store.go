@@ -1,0 +1,607 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johani@johani.org
+ *
+ * The serials an agent keeps per zone, on disk (design rule 3, plan S2): the
+ * active serial and its instructions, the serial it was thawed from until the
+ * transition is done, every newer serial held, the last thaw, an owner error,
+ * the step and its sets, and the removals under way. Kept on the agent and on
+ * the auditor. Until the thaw enforces it (S7), the active serial follows the
+ * copy, because the readers still read the copy: the store classifies each
+ * copy and shows it, "not enforced".
+ */
+package tdnsmp
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+)
+
+// SerialDigest names a set of the owner's instructions: its serial, checked
+// by its digest (design rule 2).
+type SerialDigest struct {
+	Serial uint32 `json:"serial"`
+	Digest string `json:"digest"`
+}
+
+func (sd SerialDigest) String() string { return fmt.Sprintf("%d (%s)", sd.Serial, sd.Digest) }
+
+// Thaw is a thaw's pair of serials, from N to V (design 3.2).
+type Thaw struct {
+	From SerialDigest `json:"from"`
+	To   SerialDigest `json:"to"`
+}
+
+// heldSerial is a serial the agent holds, with its instructions, and the
+// judge's refusal of it (S4), if any.
+type heldSerial struct {
+	SerialDigest
+	Reading *Instructions `json:"reading"`
+	Refused string        `json:"refused,omitempty"`
+	Since   time.Time     `json:"since"`
+}
+
+// Removal is a leaving provider's removal under way, as the leader's first
+// step names it (S12, S17b): its label and identity, the step this agent
+// holds, and its nameserver names.
+type Removal struct {
+	Label    string    `json:"label"`
+	Identity string    `json:"identity"`
+	Step     int       `json:"step"`
+	NSNames  []string  `json:"ns_names,omitempty"`
+	Since    time.Time `json:"since"`
+}
+
+// zoneSerials is what the agent keeps of one zone's instructions. Its phase
+// follows from it (phase).
+type zoneSerials struct {
+	Copy      SerialDigest `json:"copy"`                 // the copy as last noted
+	CopyError string       `json:"copy_error,omitempty"` // or why it has no reading
+	Active    *heldSerial  `json:"active,omitempty"`
+	From      *heldSerial  `json:"from,omitempty"` // thawed from, until "done"
+	Held      []heldSerial `json:"held,omitempty"` // above Active, lowest first
+	LastThaw  *Thaw        `json:"last_thaw,omitempty"`
+	// OwnerError holds the zone (design 3.6) until a copy above ErrorAt is
+	// noted; ErrorAt nil: nothing was held when it was noted. Conflict is
+	// the digests seen at ErrorAt for "one serial, two digests".
+	OwnerError string   `json:"owner_error,omitempty"`
+	ErrorAt    *uint32  `json:"error_at,omitempty"`
+	Conflict   []string `json:"conflict,omitempty"`
+	// Step and Sets are the reconciliation's step and the sets the parts
+	// hold, each provider by label and identity (S3 and S12 fill them).
+	Step int             `json:"step,omitempty"`
+	Sets json.RawMessage `json:"sets,omitempty"`
+	// Enforced: the active serial is the leader's (S7). Until then it
+	// follows the copy.
+	Enforced bool      `json:"enforced"`
+	Removals []Removal `json:"-"` // in MPZoneRemovals
+	Since    time.Time `json:"since"`
+}
+
+// The phases of a zone (design 3).
+const (
+	PhaseSteady      = "steady"
+	PhaseAgreeing    = "agreeing"
+	PhaseReconciling = "reconciling"
+	PhaseOwnerError  = "owner error"
+)
+
+func (z *zoneSerials) phase() string {
+	switch {
+	case z.OwnerError != "":
+		return PhaseOwnerError
+	case z.From != nil || len(z.Removals) > 0:
+		return PhaseReconciling
+	case slices.ContainsFunc(z.Held, func(h heldSerial) bool { return h.Refused == "" }):
+		return PhaseAgreeing
+	}
+	return PhaseSteady
+}
+
+// held returns the serial held at serial, the active one or a newer one.
+func (z *zoneSerials) held(serial uint32) *heldSerial {
+	if z.Active != nil && z.Active.Serial == serial {
+		return z.Active
+	}
+	for i := range z.Held {
+		if z.Held[i].Serial == serial {
+			return &z.Held[i]
+		}
+	}
+	return nil
+}
+
+// highest is the highest serial held: the newest, or the active one.
+func (z *zoneSerials) highest() *heldSerial {
+	if n := len(z.Held); n > 0 {
+		return &z.Held[n-1]
+	}
+	return z.Active
+}
+
+// dropAtOrBelow drops the newer serials held at or below serial.
+func (z *zoneSerials) dropAtOrBelow(serial uint32) {
+	z.Held = slices.DeleteFunc(z.Held, func(h heldSerial) bool { return CompareSerial(h.Serial, serial) <= 0 })
+}
+
+// InstructionStore keeps every zone's serials, in memory and in HsyncDB.
+// Every change is written before it returns, so before it can be told.
+type InstructionStore struct {
+	mu        sync.Mutex
+	hdb       *HsyncDB // nil: in memory only
+	zones     map[string]*zoneSerials
+	warnedOld map[string]time.Time // the last "not adopted" warning per zone
+}
+
+// LoadInstructionStore reads every zone's stored serials, before the zones'
+// first load.
+func LoadInstructionStore(hdb *HsyncDB) (*InstructionStore, error) {
+	s := &InstructionStore{hdb: hdb, zones: map[string]*zoneSerials{}, warnedOld: map[string]time.Time{}}
+	if hdb == nil {
+		return s, nil
+	}
+	hdb.Lock()
+	defer hdb.Unlock()
+	rows, err := hdb.DB.Query(`SELECT zonename, state FROM MPZoneInstructions`)
+	if err != nil {
+		return nil, fmt.Errorf("reading the zones' serials: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var zone, state string
+		if err := rows.Scan(&zone, &state); err != nil {
+			return nil, fmt.Errorf("reading the zones' serials: %w", err)
+		}
+		z := &zoneSerials{}
+		if err := json.Unmarshal([]byte(state), z); err != nil {
+			return nil, fmt.Errorf("the stored serials of %s: %w", zone, err)
+		}
+		s.zones[zone] = z
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading the zones' serials: %w", err)
+	}
+	rrows, err := hdb.DB.Query(`SELECT zonename, label, identity, step, ns_names, since FROM MPZoneRemovals ORDER BY zonename, label`)
+	if err != nil {
+		return nil, fmt.Errorf("reading the removals under way: %w", err)
+	}
+	defer rrows.Close()
+	for rrows.Next() {
+		var zone, nsNames, since string
+		var r Removal
+		if err := rrows.Scan(&zone, &r.Label, &r.Identity, &r.Step, &nsNames, &since); err != nil {
+			return nil, fmt.Errorf("reading the removals under way: %w", err)
+		}
+		if nsNames != "" {
+			if err := json.Unmarshal([]byte(nsNames), &r.NSNames); err != nil {
+				return nil, fmt.Errorf("the nameserver names of %s's removal in %s: %w", r.Label, zone, err)
+			}
+		}
+		r.Since, _ = time.Parse(time.RFC3339, since)
+		if z := s.zones[zone]; z != nil {
+			z.Removals = append(z.Removals, r)
+		}
+	}
+	return s, rrows.Err()
+}
+
+// persist writes zone's serials, or deletes them when z is nil. Called with
+// s.mu held.
+func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
+	if s.hdb == nil {
+		return nil
+	}
+	s.hdb.Lock()
+	defer s.hdb.Unlock()
+	tx, err := s.hdb.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("keeping the serials of %s: %w", zone, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM MPZoneRemovals WHERE zonename = ?`, zone); err != nil {
+		return fmt.Errorf("keeping the removals of %s: %w", zone, err)
+	}
+	if z == nil {
+		if _, err := tx.Exec(`DELETE FROM MPZoneInstructions WHERE zonename = ?`, zone); err != nil {
+			return fmt.Errorf("forgetting the serials of %s: %w", zone, err)
+		}
+		return tx.Commit()
+	}
+	state, err := json.Marshal(z)
+	if err != nil {
+		return fmt.Errorf("keeping the serials of %s: %w", zone, err)
+	}
+	var active sql.NullInt64
+	var digest string
+	if z.Active != nil {
+		active = sql.NullInt64{Int64: int64(z.Active.Serial), Valid: true}
+		digest = z.Active.Digest
+	}
+	if _, err := tx.Exec(`INSERT INTO MPZoneInstructions (zonename, active, digest, phase, enforced, state, since) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(zonename) DO UPDATE SET active = excluded.active, digest = excluded.digest, phase = excluded.phase,
+		enforced = excluded.enforced, state = excluded.state, since = excluded.since`,
+		zone, active, digest, z.phase(), z.Enforced, string(state), z.Since.UTC().Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("keeping the serials of %s: %w", zone, err)
+	}
+	for _, r := range z.Removals {
+		ns, err := json.Marshal(r.NSNames)
+		if err != nil {
+			return fmt.Errorf("keeping %s's removal in %s: %w", r.Label, zone, err)
+		}
+		if _, err := tx.Exec(`INSERT INTO MPZoneRemovals (zonename, label, identity, step, ns_names, since) VALUES (?, ?, ?, ?, ?, ?)`,
+			zone, r.Label, r.Identity, r.Step, string(ns), r.Since.UTC().Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("keeping %s's removal in %s: %w", r.Label, zone, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// update applies f to zone's serials, creating them if needed, and writes
+// the result; f returning an error changes nothing, and so does a result
+// equal to what was kept (a refresh that brings the same copy).
+func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.zones[zone]
+	z := &zoneSerials{}
+	if old != nil {
+		z = old.clone()
+	}
+	if err := f(z); err != nil {
+		return err
+	}
+	if old != nil {
+		z.Since = old.Since
+		if reflect.DeepEqual(z, old) {
+			return nil
+		}
+	}
+	z.Since = time.Now()
+	if err := s.persist(zone, z); err != nil {
+		return err
+	}
+	s.zones[zone] = z
+	return nil
+}
+
+// clone copies what f may change in place; a reading is never changed.
+func (z *zoneSerials) clone() *zoneSerials {
+	c := *z
+	if z.Active != nil {
+		a := *z.Active
+		c.Active = &a
+	}
+	if z.From != nil {
+		f := *z.From
+		c.From = &f
+	}
+	c.Held = slices.Clone(z.Held)
+	c.Conflict = slices.Clone(z.Conflict)
+	c.Removals = slices.Clone(z.Removals)
+	return &c
+}
+
+// ownerError notes an owner error that holds the zone until a copy above the
+// highest serial held now (design 3.6). Called inside update.
+func (z *zoneSerials) ownerError(zone, msg string) {
+	if z.OwnerError != msg {
+		lg.Warn("owner error in the zone's instructions", "zone", zone, "error", msg)
+	}
+	z.OwnerError = msg
+	if z.ErrorAt == nil {
+		if h := z.highest(); h != nil {
+			at := h.Serial
+			z.ErrorAt = &at
+		}
+	}
+}
+
+// Note classifies a copy of the zone's instructions, at its first load and
+// at every refresh (plan S2): its reading, or the error that it has none
+// (readErr), or neither for a copy with neither record.
+func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
+	if s == nil {
+		return
+	}
+	if in == nil && readErr == nil {
+		s.mu.Lock()
+		_, kept := s.zones[zone]
+		s.mu.Unlock()
+		if !kept {
+			return
+		}
+	}
+	err := s.update(zone, func(z *zoneSerials) error {
+		switch {
+		case readErr != nil:
+			z.Copy, z.CopyError = SerialDigest{}, readErr.Error()
+			z.ownerError(zone, readErr.Error())
+			return nil
+		case in == nil:
+			if z.Active != nil && len(z.Active.Reading.Records) > 1 {
+				z.Copy, z.CopyError = SerialDigest{}, "no HSYNC3 and no HSYNCPARAM"
+				z.ownerError(zone, fmt.Sprintf("HSYNC3 and HSYNCPARAM dropped while serial %d lists %d providers", z.Active.Serial, len(z.Active.Reading.Records)))
+				return nil
+			}
+			return errEndOfService
+		}
+		cp := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
+		z.Copy, z.CopyError = cp, ""
+		if !in.HasParam && (z.Active != nil && z.Active.Reading.HasParam ||
+			slices.ContainsFunc(z.Held, func(h heldSerial) bool { return h.Reading.HasParam })) {
+			z.ownerError(zone, fmt.Sprintf("HSYNCPARAM dropped at serial %d while HSYNC3 stays", in.Serial))
+			return nil
+		}
+		if h := z.held(in.Serial); h != nil {
+			if h.Digest != cp.Digest {
+				// an edit without a raised serial; at serial 0, a change of a
+				// zone that has no serial key
+				if z.ErrorAt == nil || *z.ErrorAt != in.Serial {
+					z.Conflict = []string{h.Digest}
+				}
+				if !slices.Contains(z.Conflict, cp.Digest) {
+					z.Conflict = append(z.Conflict, cp.Digest)
+				}
+				at := in.Serial
+				z.ErrorAt = &at
+				digests := fmt.Sprintf("%d digests", len(z.Conflict))
+				if len(z.Conflict) == 2 {
+					digests = "two digests"
+				}
+				z.ownerError(zone, fmt.Sprintf("serial %d with %s (%s)", in.Serial, digests, strings.Join(z.Conflict, ", ")))
+			}
+			return nil
+		}
+		if top := z.highest(); top != nil && CompareSerial(in.Serial, top.Serial) <= 0 {
+			if time.Since(s.warnedOld[zone]) >= time.Hour {
+				lg.Warn("a copy of the zone's instructions below the highest held is not adopted", "zone", zone, "copy", in.Serial, "highest", top.Serial)
+				s.warnedOld[zone] = time.Now()
+			}
+			return nil
+		}
+		// A newer serial. An owner error ends at a serial above the one it
+		// was noted at.
+		if z.OwnerError != "" && (z.ErrorAt == nil || CompareSerial(in.Serial, *z.ErrorAt) > 0) {
+			z.OwnerError, z.ErrorAt, z.Conflict = "", nil, nil
+		}
+		h := heldSerial{SerialDigest: cp, Reading: in, Since: time.Now()}
+		if z.Active == nil || !z.Enforced {
+			// Not enforced: the active serial follows the copy.
+			z.Active = &h
+			z.dropAtOrBelow(in.Serial)
+			return nil
+		}
+		z.Held = append(z.Held, h)
+		return nil
+	})
+	switch {
+	case errors.Is(err, errEndOfService):
+		// The end of multi-provider service (design 7): the zone's serials end.
+		lg.Info("the zone's HSYNC3 and HSYNCPARAM records are gone with at most one provider listed; its serials end", "zone", zone)
+		if err := s.forget(zone); err != nil {
+			lg.Error("the zone's serials could not be dropped", "zone", zone, "err", err)
+		}
+	case err != nil:
+		lg.Error("the zone's serials could not be kept", "zone", zone, "err", err)
+	}
+}
+
+var errEndOfService = errors.New("the zone's instructions are gone")
+
+// Activate makes the thaw's target the zone's active serial (S7). It
+// succeeds only when the target is held, above the active serial and not
+// refused, and the thaw's from-serial is held: the active one, or for a
+// member behind it, a newer one (design 3.2). The from-serial is kept until
+// "done"; serials at or below the target are dropped. The step's sets stay
+// as they are, step 0 of the new transition (design 3.3), and what the
+// transition before it left (an agent that missed its end) is dropped.
+func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
+	return s.update(zone, func(z *zoneSerials) error {
+		if z.Active == nil {
+			return fmt.Errorf("zone %s: no active serial", zone)
+		}
+		to := z.held(thaw.To.Serial)
+		switch {
+		case to == nil || to.SerialDigest != thaw.To:
+			return fmt.Errorf("zone %s: serial %s is not held", zone, thaw.To)
+		case CompareSerial(to.Serial, z.Active.Serial) <= 0:
+			return fmt.Errorf("zone %s: serial %d is not above the active serial %d", zone, to.Serial, z.Active.Serial)
+		case to.Refused != "":
+			return fmt.Errorf("zone %s: serial %d is refused: %s", zone, to.Serial, to.Refused)
+		}
+		from := z.held(thaw.From.Serial)
+		if from == nil || from.SerialDigest != thaw.From || CompareSerial(from.Serial, to.Serial) >= 0 {
+			return fmt.Errorf("zone %s: the thaw's from-serial %s is not held below its target", zone, thaw.From)
+		}
+		f, t := *from, *to
+		t.Since = time.Now()
+		z.From, z.Active = &f, &t
+		z.dropAtOrBelow(t.Serial)
+		z.Step, z.Removals = 0, nil
+		z.LastThaw = &thaw
+		z.Enforced = true
+		return nil
+	})
+}
+
+// Done ends the zone's transition, on the leader's first-hand stamp that
+// shows it done (S12): the from-serial, the step and every removal still
+// held go.
+func (s *InstructionStore) Done(zone string) error {
+	return s.update(zone, func(z *zoneSerials) error {
+		z.From, z.Step, z.Removals = nil, 0, nil
+		return nil
+	})
+}
+
+var errNotSteady = errors.New("the zone is not steady at this agent")
+
+// Forget clears a zone's stored serials (design rule 3, the one exception to
+// never giving a serial up). It is for a steady zone only: it refuses one
+// that agrees, reconciles, holds a removal or an owner error.
+func (s *InstructionStore) Forget(zone string) error {
+	if s == nil {
+		return fmt.Errorf("this daemon keeps no serials")
+	}
+	s.mu.Lock()
+	z := s.zones[zone]
+	s.mu.Unlock()
+	if z == nil {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	if p := z.phase(); p != PhaseSteady {
+		return fmt.Errorf("zone %s: %w (%s)", zone, errNotSteady, p)
+	}
+	return s.forget(zone)
+}
+
+func (s *InstructionStore) forget(zone string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.persist(zone, nil); err != nil {
+		return err
+	}
+	delete(s.zones, zone)
+	delete(s.warnedOld, zone)
+	return nil
+}
+
+// Prune drops the serials of every zone that keep says has left the
+// configuration (design rule 3).
+func (s *InstructionStore) Prune(keep func(zone string) bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	var gone []string
+	for zone := range s.zones {
+		if !keep(zone) {
+			gone = append(gone, zone)
+		}
+	}
+	s.mu.Unlock()
+	for _, zone := range gone {
+		lg.Info("the zone left the configuration; its serials go with it", "zone", zone)
+		if err := s.forget(zone); err != nil {
+			lg.Error("the serials of a zone that left the configuration could not be dropped", "zone", zone, "err", err)
+		}
+	}
+}
+
+// InstructionsStatus is what the agent keeps of a zone's instructions, as
+// `agent parentsync status`, `zone mplist` and the auditor show it.
+type InstructionsStatus struct {
+	Phase      string        `json:"phase"`
+	Active     *SerialDigest `json:"active,omitempty"`
+	Newest     *SerialDigest `json:"newest,omitempty"`
+	Refused    string        `json:"refused,omitempty"` // the newest serial's refusal
+	Copy       SerialDigest  `json:"copy"`
+	CopyError  string        `json:"copy_error,omitempty"`
+	From       *SerialDigest `json:"from,omitempty"`
+	LastThaw   *Thaw         `json:"last_thaw,omitempty"`
+	OwnerError string        `json:"owner_error,omitempty"`
+	Enforced   bool          `json:"enforced"`
+	Removals   []Removal     `json:"removals,omitempty"`
+}
+
+// Status is the zone's kept serials, or nil when none are kept.
+func (s *InstructionStore) Status(zone string) *InstructionsStatus {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	z := s.zones[zone]
+	if z == nil {
+		return nil
+	}
+	st := &InstructionsStatus{
+		Phase:      z.phase(),
+		Copy:       z.Copy,
+		CopyError:  z.CopyError,
+		LastThaw:   z.LastThaw,
+		OwnerError: z.OwnerError,
+		Enforced:   z.Enforced,
+		Removals:   slices.Clone(z.Removals),
+	}
+	if z.Active != nil {
+		a := z.Active.SerialDigest
+		st.Active = &a
+	}
+	if h := z.highest(); h != nil {
+		n := h.SerialDigest
+		st.Newest = &n
+		st.Refused = h.Refused
+	}
+	if z.From != nil {
+		f := z.From.SerialDigest
+		st.From = &f
+	}
+	return st
+}
+
+// Line is the status in one line, as `agent parentsync status` prints it.
+func (st *InstructionsStatus) Line() string {
+	if st == nil {
+		return "none kept"
+	}
+	if st.OwnerError != "" {
+		return "owner error: " + st.OwnerError
+	}
+	var parts []string
+	if st.Active != nil {
+		parts = append(parts, "active "+st.Active.String())
+	}
+	if st.From != nil {
+		parts = append(parts, fmt.Sprintf("thawed from %d", st.From.Serial))
+	}
+	if st.Newest != nil && (st.Active == nil || *st.Newest != *st.Active) {
+		n := "newest " + st.Newest.String()
+		if st.Refused != "" {
+			n += ", refused: " + st.Refused
+		}
+		parts = append(parts, n)
+	}
+	parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
+	line := strings.Join(parts, ", ")
+	if st.Phase != PhaseSteady {
+		line += "; " + st.Phase
+	}
+	if !st.Enforced {
+		line += "; not enforced"
+	}
+	return line
+}
+
+// fillMPZoneInfo adds the zone's kept serials to its mplist row.
+func (s *InstructionStore) fillMPZoneInfo(zone string, info *MPZoneInfo) {
+	st := s.Status(zone)
+	if st == nil {
+		return
+	}
+	info.Active, info.Newest = st.Active, st.Newest
+	if info.OwnerError == "" {
+		info.OwnerError = st.OwnerError
+	}
+}
+
+// noteInstructions has the store classify the zone's copy as a refresh left
+// it, at the first load and at every refresh (the post-refresh callback).
+func (conf *Config) noteInstructions(mpzd *MPZoneData) {
+	s := conf.InternalMp.Instructions
+	if s == nil {
+		return
+	}
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
+		return
+	}
+	in, err := ReadInstructions(apex)
+	s.Note(mpzd.ZoneName, in, err)
+}

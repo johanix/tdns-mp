@@ -444,6 +444,9 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 		local = sm.LocalIdentity
 	}
 	d.MPView = SnapshotZoneMPView(zone, sm, ar, local)
+	if d.MPView != nil {
+		d.MPView.Instructions = s.conf.InternalMp.Instructions.Status(zone).Line()
+	}
 	d.Gossip = SnapshotGossipForZone(ar, zone)
 	if sm != nil {
 		d.ZoneConfigErrors = sm.SnapshotZoneConfigErrors(zone)

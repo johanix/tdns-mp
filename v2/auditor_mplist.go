@@ -111,6 +111,9 @@ type ZoneMPViewDTO struct {
 	Auditors   []string            `json:"auditors"`
 	Options    []string            `json:"options,omitempty"`
 	Members    []ZoneMemberRoleDTO `json:"members"`
+	// Instructions is what the auditor keeps of the zone's instructions,
+	// in the line `agent parentsync status` prints.
+	Instructions string `json:"instructions,omitempty"`
 }
 
 func labelInRoleList(list []string, label string) bool {

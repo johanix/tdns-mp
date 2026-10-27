@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: implementation plan
 
-**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 is built (2026-10-27, its pull request carries this line); S2–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
+**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 and S2 are built (2026-10-27, each in its own pull request); S3–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
 
 This is the plan for the design in `2026-10-18-owner-instruction-transitions-design.md`, revision 6 ("the design" below; its sections are named "design N"). The design describes how a change of the zone owner's HSYNC3 or HSYNCPARAM records is numbered, agreed and carried out, as it is meant to stand. This document holds what is dated: what exists, what is wrong today, where each rule lands in the code, the steps, and the decisions the design rests on.
 
@@ -180,7 +180,7 @@ Each step is one pull request. Each is safe to merge once what its "Needs first"
 
 The sizes are estimates from reading the code, tests apart: files touched, and lines new and changed. They are an order of magnitude, not a count. They are de-duplicated: where two readings proposed the same change, it is counted once, in the step that makes it.
 
-**Status column (2026-10-27).** Checked against tdns-mp `main` @ `d2cc1d8` and the pins in §7.1. Membership steps 1–8 and 7b are on main and are no longer listed under "Needs first". P1’s key (#928) and #926 are in the pin; the draft’s assignment of key 8 is still open. Of S1–S22, S1 is built (2026-10-27); nothing else is implemented. Since 2026-10-24 the mop-up of tdns-mp #267 has merged #269, #271, #272, #274, #275 and #263, and has tdns-mp #270, #278 and #279 and tdns-transport #41, #42 (a design) and #43 open. What touches a step is in its row and in 7.1.
+**Status column (2026-10-27).** Checked against tdns-mp `main` @ `d2cc1d8` and the pins in §7.1. Membership steps 1–8 and 7b are on main and are no longer listed under "Needs first". P1’s key (#928) and #926 are in the pin; the draft’s assignment of key 8 is still open. Of S1–S22, S1 and S2 are built (2026-10-27); nothing else is implemented. Since 2026-10-24 the mop-up of tdns-mp #267 has merged #269, #271, #272, #274, #275 and #263, and has tdns-mp #270, #278 and #279 and tdns-transport #41, #42 (a design) and #43 open. What touches a step is in its row and in 7.1.
 
 | Step | What | Needs first | Files | New | Changed | Status |
 |---|---|---|---|---|---|---|
@@ -191,7 +191,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | P5 | tdns: keys published before a signer serves its signatures (#160); a policy bound when signing starts (#146) | Nothing | tdns: not established | - | - | Not started (#160, #146 open) |
 | P6 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy of a multi-provider zone; on them before S7 | Nothing | tdns: 2 | 30 | 10 | Not started |
 | S1 | The canonical reading and its digest | P1's key on the pin (#209 done) | 8 | 240 | 30 | **Built** (2026-10-27): its pull request carries this cell. Golden digest `d7294061a3f8f5af` |
-| S2 | Serials per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | Not started |
+| S2 | Serials per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | **Built** (2026-10-27): its pull request, stacked on S1's, carries this cell. Active follows the copy, "not enforced" |
 | S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | Not started. Also moves #275's signing-set reader (S3) |
 | S4 | Owner errors and refused transitions | S3 | 9 | 245 | 60 | Not started |
 | S5a | Stamps in beats; each member's serial; the fetch; nothing taken from an answer | S2, S4 (membership step 6 done) | 15 | 530 | 140 | Not started |
@@ -382,6 +382,14 @@ No decision reads the reading yet.
 **Size.** 8 files, about 240 new and 30 changed lines.
 
 ### S2. Serials per zone on disk, shown
+
+**Status (2026-10-27):** Built, on S1's branch. Where the text left a choice:
+
+- Storage: `MPZoneInstructions` has one row per zone: the active serial, its digest, the phase and `enforced` in columns of their own, and the whole state as JSON (the newer serials held with their readings, the from-serial, the last thaw, the owner error, the step and its sets). `MPZoneRemovals` is as proposed. The phase follows from the state; the column is for reading the table. The highest serial ever held is the newest held or the active one: a held serial goes only at a thaw at or below its target, or by forget.
+- The copy is read in the post-refresh callback, after `PostRefresh`, from the zone as served; `MPPreRefresh` is not changed. A refresh that brings the same copy writes nothing.
+- An owner error ends at a copy above the serial held when it was noted; with nothing held then, at the next copy that reads.
+- `Activate` takes the thaw's pair, from and to: the from-serial is the active one, or for a member behind it, a newer one it holds. It sets `enforced`.
+- Forget does not note the copy again; the next load does (`zone reload`). On the auditor, only the two tables are created.
 
 **Before it:** S1. Membership steps 1 to 8, only to keep conflicts out of `ParentSyncStatus` and `mplist`.
 
