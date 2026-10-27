@@ -116,7 +116,7 @@ def cell_zone(c):
         up = c["upstreams"].get(p, ".")
         lines.append(f"{z} 300 IN HSYNC3 ON {p} {ident('agent', p)} {up}")
     lines.append(f"{z} 300 IN HSYNC3 ON aud {AUDITOR_ID} .")
-    params = [f'servers="{",".join(c["providers"])}"']
+    params = ['serial="1"', f'servers="{",".join(c["providers"])}"']
     if c["signers"]:
         params.append(f'signers="{",".join(c["signers"])}"')
     params += [f'nsmgmt="{c["nsmgmt"]}"', 'parentsync="owner"', 'auditors="aud"']

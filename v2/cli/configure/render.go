@@ -19,9 +19,9 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"text/template"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -151,11 +151,28 @@ func providerLabel(agentIdentity string) string {
 	switch {
 	case len(labels) == 0:
 		return "provider"
-	case len(labels) >= 2 && strings.EqualFold(labels[0], "agent"):
-		return strings.ToLower(labels[1])
+	case len(labels) >= 2 && core.EqualNames(labels[0], "agent"):
+		return core.CanonicalizeName(labels[1])
 	default:
-		return strings.ToLower(labels[0])
+		return core.CanonicalizeName(labels[0])
 	}
+}
+
+// checkProviderLabel refuses an agent identity whose provider label is not
+// a Label: 1 to 16 characters, each a lowercase letter, a digit or a hyphen.
+// tdns refuses any other label in HSYNC3 and HSYNCPARAM, so the example zone
+// would not load.
+func checkProviderLabel(agentIdentity string) error {
+	label := providerLabel(agentIdentity)
+	ok := len(label) >= 1 && len(label) <= 16
+	for i := 0; ok && i < len(label); i++ {
+		c := label[i]
+		ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+	}
+	if !ok {
+		return fmt.Errorf("agent identity %s gives the provider label %q, which is not a Label (1-16 of a-z, 0-9, -): choose an identity whose label is shorter, of those characters only", agentIdentity, label)
+	}
+	return nil
 }
 
 // auditorLabel is the auditor's HSYNC3 label, kept distinct from the
@@ -273,6 +290,9 @@ func renderAllIn(cv CoordinatedValues, l fsLayout) (map[string]string, error) {
 
 // renderExampleZone renders the example zone's zone file.
 func renderExampleZone(cv CoordinatedValues, l fsLayout) (string, error) {
+	if err := checkProviderLabel(cv.Agent.Identity); err != nil {
+		return "", err
+	}
 	return renderTemplate("templates/mptest.example.zone.tmpl", makeRenderCtx(cv, l))
 }
 

@@ -2,6 +2,7 @@ package configure
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,43 @@ func TestEnsureExampleZoneChecksHsync3Identities(t *testing.T) {
 			}
 			if string(after) != content {
 				t.Errorf("existing zone file was modified")
+			}
+		})
+	}
+}
+
+// The provider's label is a Label, or the example zone would not load: tdns
+// refuses any other label in HSYNC3 and HSYNCPARAM. An agent identity that
+// gives another label is refused, and no file is written.
+func TestTheExampleZoneRefusesAProviderLabelThatIsNotALabel(t *testing.T) {
+	for _, tc := range []struct {
+		identity string
+		label    string // "" when refused
+	}{
+		{"agent.alpha.example.", "alpha"},
+		{"Agent.ALPHA.example.", "alpha"},
+		{"ns-1.example.", "ns-1"},
+		{"agent.averyveryverylongname.example.", ""},
+		{"agent.under_score.example.", ""},
+	} {
+		t.Run(tc.identity, func(t *testing.T) {
+			l := testLayout(t.TempDir())
+			cv := CoordinatedValues{Agent: AgentValues{Identity: tc.identity}}
+			gen, err := ensureExampleZone(cv, l, io.Discard)
+			if tc.label == "" {
+				if err == nil || gen || !strings.Contains(err.Error(), "not a Label") {
+					t.Fatalf("generated=%v err=%v; want refused", gen, err)
+				}
+				if _, statErr := os.Stat(l.exampleZoneFile()); !os.IsNotExist(statErr) {
+					t.Errorf("a refused identity left a zone file: %v", statErr)
+				}
+				return
+			}
+			if err != nil || !gen {
+				t.Fatalf("generated=%v err=%v", gen, err)
+			}
+			if got := providerLabel(tc.identity); got != tc.label {
+				t.Errorf("label %q, want %q", got, tc.label)
 			}
 		})
 	}

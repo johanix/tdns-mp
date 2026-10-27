@@ -24,8 +24,16 @@ func CheckZoneHSYNCConfig(zone string) []string {
 	return checkMPZoneHSYNCConfig(mpzd)
 }
 
+// checkMPZoneHSYNCConfig lists the owner error of the zone's copy first, if
+// it has one: hsync3IdentitiesByLabel keeps one record per label, so the
+// checks below cannot see two records with one label.
 func checkMPZoneHSYNCConfig(mpzd *MPZoneData) []string {
-	return checkHSYNCConfig(MPZoneInfoFromMPZoneData(mpzd), mpzd.hsync3IdentitiesByLabel())
+	info := MPZoneInfoFromMPZoneData(mpzd)
+	errs := checkHSYNCConfig(info, mpzd.hsync3IdentitiesByLabel())
+	if info.OwnerError != "" {
+		errs = append([]string{info.OwnerError}, errs...)
+	}
+	return errs
 }
 
 func checkHSYNCConfig(info MPZoneInfo, byLabel map[string]string) []string {
