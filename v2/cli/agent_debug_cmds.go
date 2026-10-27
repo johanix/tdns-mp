@@ -531,13 +531,15 @@ allow-inject.
   tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
   tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
   tdns-mpcli agent debug inject peer-keystate --to <agent> --zone <zone>
-  tdns-mpcli agent debug inject hello --to <agent> [--count N] [--interval D] [--mechanism dns|api]`,
+  tdns-mpcli agent debug inject hello --to <agent> [--count N] [--interval D] [--mechanism dns|api]
+  tdns-mpcli agent debug inject replace --to <agent> --zone <zone> --origin-time <time> <RR> [<RR>...]`,
 	}
 	c.AddCommand(
 		newDebugInjectNamedSenderCmd(),
 		newDebugInjectCombinerOriginCmd(),
 		newDebugInjectPeerKeystateCmd(),
 		newDebugInjectHelloCmd(),
+		newDebugInjectReplaceCmd(),
 	)
 	return c
 }
@@ -670,6 +672,57 @@ func injectHelloReport(amr *AgentMgmtResponse, recipient string) string {
 		line += ": first error: " + e
 	}
 	return line
+}
+
+func newDebugInjectReplaceCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "replace <RR> [<RR>...]",
+		Short: "Send a REPLACE of one RR type that claims the origin time given",
+		Long: `Send the target a SYNC from this agent whose one operation replaces this
+agent's set of one RR type with the RRs given, and whose origin is
+--origin-time (RFC 3339, with a fraction of a second if wanted), not the
+time it is sent. The target keeps, per zone, sending agent and RR type, the
+origin of the last REPLACE it applied, and ignores an older one (#249); this
+sends one older, or newer, than that. The line printed is the target's
+receipt of the SYNC, not its verdict: the target applies the REPLACE after
+it answers, and logs "Ignored a stale REPLACE ..." when it is older than the
+one it holds.`,
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			toAgent := requiredInjectFlag(cmd, "to")
+			zone := requiredInjectFlag(cmd, "zone")
+			origin := requiredInjectFlag(cmd, "origin-time")
+			post, err := injectReplacePost(toAgent, zone, origin, parsedInjectRRs(args))
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			finishInject(cmd, post, "replace", string(post.AgentId), string(post.Zone))
+		},
+	}
+	c.Flags().String("to", "", "Target agent ID")
+	c.Flags().String("zone", "", "Zone name")
+	c.Flags().String("origin-time", "", "Origin the REPLACE claims, RFC 3339 (e.g. 2026-10-26T17:00:00.5Z)")
+	return c
+}
+
+// injectReplacePost is the post an inject replace sends. The origin is
+// checked here and again by the agent, and passed on as given, fraction
+// and all: the target compares the whole time.
+func injectReplacePost(to, zone, origin string, rrs []string) (AgentMgmtPost, error) {
+	t, err := time.Parse(time.RFC3339Nano, origin)
+	if err != nil {
+		return AgentMgmtPost{}, fmt.Errorf("--origin-time %q is not RFC 3339: %v", origin, err)
+	}
+	if t.IsZero() {
+		return AgentMgmtPost{}, fmt.Errorf("--origin-time %q is the zero time, which the target does not judge", origin)
+	}
+	return AgentMgmtPost{
+		Command: "inject-replace",
+		Zone:    ZoneName(dns.Fqdn(zone)),
+		AgentId: AgentId(dns.Fqdn(to)),
+		RRs:     rrs,
+		Data:    map[string]interface{}{"origin_time": origin},
+	}, nil
 }
 
 func requiredInjectFlag(cmd *cobra.Command, name string) string {

@@ -288,3 +288,108 @@ func TestInjectHelloRequestIsThisAgents(t *testing.T) {
 		t.Errorf("request %+v, want the capabilities and a time as SendHelloWithFallback sends", req)
 	}
 }
+
+// An inject replace is one REPLACE of one RR type from this agent, and its
+// time is the origin given, fraction and all, as the receiver decodes it
+// (ParseSyncPayload, then the RFC 3339 parse routeSyncMessage makes). The
+// receiver's replace-order guard compares the whole time (#249).
+func TestInjectReplaceRequestClaimsTheOrigin(t *testing.T) {
+	const (
+		sender = "agent.a.example."
+		zone   = "z.example."
+		dist   = "debug-inject-replace-1"
+	)
+	rrs := []string{"z.example. 60 IN NS ns1.example.", "z.example. 60 IN NS ns2.example."}
+	origin := time.Date(2026, 10, 26, 17, 0, 0, 900_000_000, time.UTC)
+	req, err := injectReplaceRequest(sender, zone, rrs, origin, dist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.SenderID != sender || req.Zone != zone || req.MessageType != "sync" || req.DistributionID != dist {
+		t.Errorf("request %+v", req)
+	}
+	if len(req.Operations) != 1 {
+		t.Fatalf("operations %+v, want one", req.Operations)
+	}
+	op := req.Operations[0]
+	if op.Operation != "replace" || op.RRtype != "NS" || len(op.Records) != 2 {
+		t.Errorf("operation %+v, want a replace of both NS", op)
+	}
+
+	msg, err := syncAppMessage(req, "agent.b.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParseSyncPayload(msg.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := time.Parse(time.RFC3339Nano, p.Time)
+	if err != nil {
+		t.Fatalf("wire time %q: %v", p.Time, err)
+	}
+	if !got.Equal(origin) {
+		t.Errorf("wire time %s, want the origin %s", got.Format(time.RFC3339Nano), origin.Format(time.RFC3339Nano))
+	}
+	if p.OriginatorID != sender || p.DistributionID != dist {
+		t.Errorf("wire originator %q distribution %q", p.OriginatorID, p.DistributionID)
+	}
+	if ops := p.Operations; len(ops) != 1 || ops[0].Operation != "replace" || ops[0].RRtype != "NS" {
+		t.Errorf("wire operations %+v", ops)
+	}
+}
+
+// A replace carries one RR type and at least one RR.
+func TestInjectReplaceRequestTakesOneRRType(t *testing.T) {
+	origin := time.Now()
+	if _, err := injectReplaceRequest("agent.a.example.", "z.example.", nil, origin, "d"); err == nil {
+		t.Error("an empty replace was built")
+	}
+	mixed := []string{"z.example. 60 IN NS ns1.example.", "z.example. 60 IN TXT \"x\""}
+	if _, err := injectReplaceRequest("agent.a.example.", "z.example.", mixed, origin, "d"); err == nil || !strings.Contains(err.Error(), "one RR type") {
+		t.Errorf("a replace of NS and TXT: err %v", err)
+	}
+}
+
+// An inject replace stays off unless the agent's options list names it. An
+// allowed one checks the origin and the RRs before it looks for a
+// transport, so a bad one is refused with nothing sent.
+func TestInjectReplaceIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
+	conf := &Config{}
+	amp := AgentMgmtPost{
+		AgentId: "agent.b.example.",
+		Zone:    "z.example.",
+		RRs:     []string{"z.example. 60 IN NS ns9.injected.example."},
+		Data:    map[string]interface{}{"origin_time": "2026-10-26T17:00:00.5Z"},
+	}
+	resp := &AgentMgmtResponse{}
+	conf.debugInjectReplace(context.Background(), nil, amp, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "allow-inject") {
+		t.Fatalf("a closed injector answered %+v", resp)
+	}
+
+	mp := &MultiProviderConf{Identity: "agent.a.example.", AgentOptionsStrs: []string{"allow-inject"}}
+	parseMultiProviderOptions(mp)
+	conf.InternalMp.mpConfig.Store(mp)
+
+	for _, tc := range []struct {
+		name string
+		data map[string]interface{}
+		rrs  []string
+		want string
+	}{
+		{"no origin", nil, amp.RRs, "--origin-time"},
+		{"an origin that is not a time", map[string]interface{}{"origin_time": "yesterday"}, amp.RRs, "RFC 3339"},
+		{"the zero origin", map[string]interface{}{"origin_time": "0001-01-01T00:00:00Z"}, amp.RRs, "zero time"},
+		{"two RR types", amp.Data, append([]string{"z.example. 60 IN TXT \"x\""}, amp.RRs...), "one RR type"},
+		{"no transport", amp.Data, amp.RRs, "TransportManager"},
+	} {
+		bad := amp
+		bad.Data, bad.RRs = tc.data, tc.rrs
+		resp = &AgentMgmtResponse{}
+		conf.debugInjectReplace(context.Background(), mp, bad, resp)
+		if !resp.Error || !strings.Contains(resp.ErrorMsg, tc.want) || resp.Data != nil {
+			t.Errorf("%s: answered %+v, want an error naming %q", tc.name, resp, tc.want)
+		}
+	}
+}

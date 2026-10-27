@@ -305,6 +305,7 @@ long: |
     tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
     tdns-mpcli agent debug inject peer-keystate --to <agent> --zone <zone>
     tdns-mpcli agent debug inject hello --to <agent> [--count N] [--interval D] [--mechanism dns|api]
+    tdns-mpcli agent debug inject replace --to <agent> --zone <zone> --origin-time <time> <RR> [<RR>...]
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -376,6 +377,32 @@ short: Send an empty KEYSTATE inventory to another provider's agent
 flags: |
       --to string     Target agent ID
       --zone string   Zone name
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+
+=== tdns-mpcli agent debug inject replace
+use: replace <RR> [<RR>...]
+short: Send a REPLACE of one RR type that claims the origin time given
+long: |
+  Send the target a SYNC from this agent whose one operation replaces this
+  agent's set of one RR type with the RRs given, and whose origin is
+  --origin-time (RFC 3339, with a fraction of a second if wanted), not the
+  time it is sent. The target keeps, per zone, sending agent and RR type, the
+  origin of the last REPLACE it applied, and ignores an older one (#249); this
+  sends one older, or newer, than that. The line printed is the target's
+  receipt of the SYNC, not its verdict: the target applies the REPLACE after
+  it answers, and logs "Ignored a stale REPLACE ..." when it is older than the
+  one it holds.
+flags: |
+      --origin-time string   Origin the REPLACE claims, RFC 3339 (e.g. 2026-10-26T17:00:00.5Z)
+      --to string            Target agent ID
+      --zone string          Zone name
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
