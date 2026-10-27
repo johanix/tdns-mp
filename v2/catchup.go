@@ -933,6 +933,22 @@ func (t *catchUpTracker) owe(zone ZoneName) {
 	}
 }
 
+// oweForRoom notes that the zone's sync was asked for and found the
+// delegation sync queue full (#220): it is owed, and the room ticker asks for
+// it within seconds, for as long as the queue stays full.
+func (t *catchUpTracker) oweForRoom(zone ZoneName) {
+	if t == nil {
+		return
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.owed[zone] == nil {
+		t.owed[zone] = &owedSync{}
+	}
+	t.owed[zone].room = true
+}
+
 // clearOwed drops the zone's owed sync: the zone's chain has ended, and
 // whoever leads it now has its own.
 // oweForKey marks the zone's sync owed, held for the zone's SIG(0) key.

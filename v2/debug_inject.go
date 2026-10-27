@@ -1,9 +1,10 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * Debug injector for the three sender-rule cases no honest daemon sends
- * (tdns-mp #261). The transport, the keys and this agent's identity stay
- * real. Only the payload lies.
+ * Debug injector for the messages no honest daemon sends: the three
+ * sender-rule cases (tdns-mp #261), and hellos at a rate no honest agent
+ * sends them (#265). The transport, the keys and this agent's identity stay
+ * real. Only the payload lies, or the rate.
  */
 
 package tdnsmp
@@ -11,6 +12,8 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -46,6 +49,48 @@ func debugSyncRequest(sender, zone string, rrs []string, distID string) (*PeerSy
 // OriginatorID. The transport still sends as this agent.
 func injectNamedSenderRequest(zone, named string, rrs []string, distID string) (*PeerSyncRequest, error) {
 	return debugSyncRequest(named, zone, rrs, distID)
+}
+
+// injectReplaceRequest is a SYNC from sender whose one operation replaces
+// sender's set of one RR type with rrs, and whose time is origin. An honest
+// agent stamps a REPLACE with the time it enqueued it. The recipient keeps,
+// per zone, sending agent and RR type, the origin of the last REPLACE it
+// applied, and ignores an older one (#249); this one claims any origin, so
+// a test can send one older, or newer, than that.
+func injectReplaceRequest(sender, zone string, rrs []string, origin time.Time, distID string) (*PeerSyncRequest, error) {
+	if len(rrs) == 0 {
+		return nil, fmt.Errorf("at least one RR is required")
+	}
+	var rrtype uint16
+	records := make([]string, 0, len(rrs))
+	for _, rrStr := range rrs {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse RR %q: %v", rrStr, err)
+		}
+		if rr == nil {
+			return nil, fmt.Errorf("no RR in %q", rrStr)
+		}
+		t := rr.Header().Rrtype
+		if rrtype != 0 && t != rrtype {
+			return nil, fmt.Errorf("a replace carries one RR type, not %s and %s",
+				dns.TypeToString[rrtype], dns.TypeToString[t])
+		}
+		rrtype = t
+		records = append(records, rr.String())
+	}
+	return &PeerSyncRequest{
+		SenderID: sender,
+		Zone:     zone,
+		Operations: []core.RROperation{{
+			Operation: "replace",
+			RRtype:    dns.TypeToString[rrtype],
+			Records:   records,
+		}},
+		Timestamp:      origin,
+		DistributionID: distID,
+		MessageType:    "sync",
+	}, nil
 }
 
 // injectCombinerUpdate is an update for this agent's own combiner whose
@@ -217,6 +262,87 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 	resp.Status = "ok"
 }
 
+// debugInjectReplace sends the target one REPLACE from this agent that
+// claims the origin the operator gave. The sender is this agent, under its
+// own identity and keys; only the time lies.
+func (conf *Config) debugInjectReplace(parent context.Context, mp *MultiProviderConf, amp AgentMgmtPost, resp *AgentMgmtResponse) {
+	if conf.injectRefused(resp) {
+		return
+	}
+	if amp.AgentId == "" {
+		resp.Error = true
+		resp.ErrorMsg = "target agent ID (--to) is required"
+		return
+	}
+	if amp.Zone == "" {
+		resp.Error = true
+		resp.ErrorMsg = "zone is required"
+		return
+	}
+	originStr := debugPostString(amp.Data, "origin_time")
+	if originStr == "" {
+		resp.Error = true
+		resp.ErrorMsg = "origin time (--origin-time) is required"
+		return
+	}
+	origin, err := time.Parse(time.RFC3339Nano, originStr)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("origin time %q is not RFC 3339: %v", originStr, err)
+		return
+	}
+	// The recipient judges a REPLACE only when its origin is set: a zero
+	// origin (0001-01-01T00:00:00Z) would be applied unjudged.
+	if origin.IsZero() {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("origin time %q is the zero time, which the recipient does not judge", originStr)
+		return
+	}
+	distID := fmt.Sprintf("debug-inject-replace-%d", time.Now().UnixNano())
+	syncReq, err := injectReplaceRequest(mp.Identity, string(amp.Zone), amp.RRs, origin, distID)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = err.Error()
+		return
+	}
+	if conf.InternalMp.TransportManager == nil || conf.InternalMp.MPTransport == nil {
+		resp.Error = true
+		resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
+		return
+	}
+	agent, exists := conf.InternalMp.AgentRegistry.S.Get(amp.AgentId)
+	if !exists {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("target agent %q not found in registry", amp.AgentId)
+		return
+	}
+	peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
+	rrtype := syncReq.Operations[0].RRtype
+	originOut := origin.UTC().Format(time.RFC3339Nano)
+
+	syncResp, via, err := conf.InternalMp.MPTransport.sendSyncOnce(parent, peer, syncReq)
+	lgApi.Warn("inject: replace", "target", amp.AgentId, "zone", amp.Zone, "rrtype", rrtype,
+		"origin", originOut, "transport", via)
+
+	data := map[string]interface{}{
+		"distribution_id": distID,
+		"target":          string(amp.AgentId),
+		"zone":            string(amp.Zone),
+		"rrtype":          rrtype,
+		"origin_time":     originOut,
+		"transport":       via,
+	}
+	if err != nil {
+		data["error"] = err.Error()
+	} else if syncResp != nil {
+		data["status"] = syncResp.Status.String()
+		data["message"] = syncResp.Message
+	}
+	resp.Data = data
+	resp.Msg = fmt.Sprintf("inject replace of %s to %s for zone %s", rrtype, amp.AgentId, amp.Zone)
+	resp.Status = "ok"
+}
+
 func (conf *Config) debugInjectCombinerOrigin(amp AgentMgmtPost, resp *AgentMgmtResponse) {
 	if conf.injectRefused(resp) {
 		return
@@ -317,5 +443,169 @@ func (conf *Config) debugInjectPeerKeystate(mp *MultiProviderConf, amp AgentMgmt
 	}
 	resp.Data = data
 	resp.Msg = fmt.Sprintf("inject peer-keystate to %s for zone %s", amp.AgentId, amp.Zone)
+	resp.Status = "ok"
+}
+
+// The bounds of an inject hello: enough hellos to show the bound on the beats
+// back they draw (#131), and never a flood.
+const (
+	injectHelloDefaultCount    = 40
+	injectHelloMaxCount        = 200
+	injectHelloDefaultInterval = 500 * time.Millisecond
+	injectHelloMinInterval     = 100 * time.Millisecond
+	injectHelloMaxInterval     = 10 * time.Second
+)
+
+// injectHelloParams reads an inject hello's count, interval and mechanism
+// from the post's data, with the CLI's defaults, and refuses a value outside
+// the bounds. The mechanism is the transport manager's name for it.
+func injectHelloParams(data map[string]interface{}) (count int, interval time.Duration, mech string, err error) {
+	count, interval, mech = injectHelloDefaultCount, injectHelloDefaultInterval, "DNS"
+	if s := debugPostString(data, "count"); s != "" {
+		if count, err = strconv.Atoi(s); err != nil {
+			return 0, 0, "", fmt.Errorf("count %q: %v", s, err)
+		}
+	}
+	if count < 1 || count > injectHelloMaxCount {
+		return 0, 0, "", fmt.Errorf("count %d: must be 1 to %d", count, injectHelloMaxCount)
+	}
+	if s := debugPostString(data, "interval"); s != "" {
+		if interval, err = time.ParseDuration(s); err != nil {
+			return 0, 0, "", fmt.Errorf("interval %q: %v", s, err)
+		}
+	}
+	if interval < injectHelloMinInterval || interval > injectHelloMaxInterval {
+		return 0, 0, "", fmt.Errorf("interval %s: must be %s to %s", interval, injectHelloMinInterval, injectHelloMaxInterval)
+	}
+	switch m := strings.ToLower(debugPostString(data, "mechanism")); m {
+	case "", "dns":
+		mech = "DNS"
+	case "api":
+		mech = "API"
+	default:
+		return 0, 0, "", fmt.Errorf("mechanism %q: must be dns or api", m)
+	}
+	return count, interval, mech, nil
+}
+
+// injectHelloRequest is the hello SendHelloWithFallback sends: it names this
+// agent, not the target, and the zones the two share.
+func injectHelloRequest(sender string, shared []ZoneName) *transport.HelloRequest {
+	zones := make([]string, 0, len(shared))
+	for _, z := range shared {
+		zones = append(zones, string(z))
+	}
+	return &transport.HelloRequest{
+		SenderID:     sender,
+		Capabilities: []string{"sync", "beat", "relocate"},
+		SharedZones:  zones,
+		Timestamp:    time.Now(),
+	}
+}
+
+// debugInjectHello sends the target a hello count times, interval apart, on
+// one mechanism, whatever this agent's reading of the target: an honest
+// agent sends a hello only on a mechanism that is not introduced yet
+// (SendHelloWithFallback), and no faster than hello_fast_interval. The
+// target beats back on each hello from a peer it has introduced, and #131
+// bounds those beats back. The injector changes nothing in this agent's view
+// of the target: no mechanism state, no note of an accepted or refused hello.
+// A failed or refused hello is an outcome, not an error of the command.
+// The loop runs under the API request's context: a request that is given up
+// stops it.
+func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, resp *AgentMgmtResponse) {
+	if conf.injectRefused(resp) {
+		return
+	}
+	if amp.AgentId == "" {
+		resp.Error = true
+		resp.ErrorMsg = "target agent ID (--to) is required"
+		return
+	}
+	count, interval, mech, err := injectHelloParams(amp.Data)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = err.Error()
+		return
+	}
+	tm := conf.InternalMp.MPTransport
+	// The mechanisms this agent is configured to use (supported_mechanisms)
+	// bound the injector too: the API client exists whatever the
+	// configuration says. Only the rate lies, not the mechanism.
+	if tm != nil && !tm.isTransportSupported(strings.ToLower(mech)) {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("this agent does not use the %s mechanism (supported_mechanisms)", strings.ToLower(mech))
+		return
+	}
+	if conf.InternalMp.TransportManager == nil || tm == nil || tm.TransportManager == nil {
+		resp.Error = true
+		resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
+		return
+	}
+	if (mech == "DNS" && tm.DNSTransport == nil) || (mech == "API" && tm.APITransport == nil) {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("this agent has no %s transport", mech)
+		return
+	}
+	ar := conf.InternalMp.AgentRegistry
+	if ar == nil {
+		resp.Error = true
+		resp.ErrorMsg = "agent registry not available"
+		return
+	}
+	agent, exists := ar.S.Get(amp.AgentId)
+	if !exists {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("target agent %q not found in registry", amp.AgentId)
+		return
+	}
+	peer := tm.GetOrCreatePeer(agent)
+	shared := ar.sharedParticipantZones(amp.AgentId)
+
+	lgApi.Warn("inject: hello", "target", amp.AgentId, "mechanism", mech, "count", count, "interval", interval)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(count)*(interval+5*time.Second))
+	defer cancel()
+	sent, accepted, failed, firstErr := 0, 0, 0, ""
+	for i := 0; i < count && ctx.Err() == nil; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(interval):
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		results := tm.TransportManager.SendAll(ctx, peer, []string{mech}, injectHelloRequest(tm.LocalID, shared))
+		sent++
+		r, err := helloResult(results[mech])
+		switch {
+		case err != nil:
+			failed++
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+		case r == nil || !r.Accepted:
+			failed++
+			if firstErr == "" {
+				firstErr = "not accepted"
+				if r != nil && r.RejectReason != "" {
+					firstErr = "not accepted: " + r.RejectReason
+				}
+			}
+		default:
+			accepted++
+		}
+	}
+	resp.Data = map[string]interface{}{
+		"target":      string(amp.AgentId),
+		"mechanism":   mech,
+		"count":       strconv.Itoa(count),
+		"sent":        strconv.Itoa(sent),
+		"accepted":    strconv.Itoa(accepted),
+		"failed":      strconv.Itoa(failed),
+		"first_error": firstErr,
+	}
+	resp.Msg = fmt.Sprintf("inject hello to %s: %d sent", amp.AgentId, sent)
 	resp.Status = "ok"
 }

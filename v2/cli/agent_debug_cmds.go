@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gookit/goutil/dump"
 	tdnsmp "github.com/johanix/tdns-mp/v2"
@@ -20,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var myIdentity, notifyRRtype, rfitype, rfisubtype string
+var notifyRRtype, rfitype, rfisubtype string
 
 // debugAgentLeaves are the mp-specific leaves of the agent "debug"
 // subtree. They are handed to tdns's NewDebugCmd as extras, so that one
@@ -50,7 +52,9 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 		Use:   "send-notify",
 		Short: "Tell agent to send a NOTIFY message to the other agents",
 		Run: func(cmd *cobra.Command, args []string) {
-			tdnscli.PrepArgs("zonename", "identity")
+			// The agent sends to every agent of the zone: there is no
+			// recipient to name (PrepArgs has no "identity" any more).
+			tdnscli.PrepArgs("zonename")
 
 			notifyRRtype = strings.ToUpper(notifyRRtype)
 			if notifyRRtype != "NS" && notifyRRtype != "DNSKEY" {
@@ -80,7 +84,6 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 				MessageType: AgentMsgNotify,
 				RRType:      rrtype,
 				Zone:        ZoneName(tdns.Globals.Zonename),
-				AgentId:     AgentId(string(tdns.Globals.AgentId)),
 				RRs:         rrs,
 			}
 
@@ -90,7 +93,6 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 			}
 		},
 	}
-	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	c.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	c.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
 	return c
@@ -99,14 +101,19 @@ func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {
 func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "send-rfi",
-		Short: "Tell agent to send an RFI message to another agent",
+		Short: "Tell agent to send an RFI message to the agents of the zone it concerns",
+		Long: `Tell agent to send an RFI message for the zone. The agent picks the recipients
+from the zone: CONFIG upstream goes to its upstream, CONFIG downstream to its
+downstreams. CONFIG sig0key goes to the other agents that may hold the zone's
+SIG(0) key: the voting members. AUDIT and SYNC go to the voting members; the
+auditor is not asked.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			tdnscli.PrepArgs("zonename", "identity")
+			tdnscli.PrepArgs("zonename")
 
 			rfitype = strings.ToUpper(rfitype)
-			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
+			validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true}
 			if !validRfiTypes[rfitype] {
-				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC, AUDIT, or EDITS (is %q)", rfitype)
+				log.Fatalf("Error: RFI type must be one of CONFIG, SYNC or AUDIT (is %q); this agent's edits are read back from its combiner by agent debug resync", rfitype)
 			}
 
 			if rfitype == "CONFIG" && rfisubtype == "" {
@@ -120,7 +127,6 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 				RfiType:     rfitype,
 				RfiSubtype:  rfisubtype,
 				Zone:        ZoneName(tdns.Globals.Zonename),
-				AgentId:     AgentId(string(tdns.Globals.AgentId)),
 			}
 
 			amr, err := SendAgentDebugCmd(cmd, req, false)
@@ -196,23 +202,13 @@ func newDebugAgentSendRfiCmd(kind string) *cobra.Command {
 							}
 						}
 					}
-
-				case rfitype == "EDITS":
-					for aid, rfidata := range amr.RfiResponse {
-						if rfidata.Error {
-							fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
-						} else {
-							fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
-						}
-					}
 				}
 			} else {
 				fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)
 			}
 		},
 	}
-	c.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
-	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
+	c.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT)")
 	c.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
 	return c
 }
@@ -524,21 +520,26 @@ Example:
 func newDebugAgentInjectCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "inject",
-		Short: "Send a message whose payload lies, for the sender-rule tests",
-		Long: `Send one of the three messages no honest daemon sends. The transport,
-this agent's identity and its keys stay real; only the payload lies. The
-command exits 0 whether the recipient takes the message or refuses it.
-The agent refuses the send unless its multi-provider agent-options list
-includes allow-inject.
+		Short: "Send a message no honest daemon sends, for the end-to-end tests",
+		Long: `Send a message no honest daemon sends: one whose payload lies, or hellos
+at a rate no honest agent sends them. The transport, this agent's identity
+and its keys stay real; only the payload lies, or the rate. The command
+exits 0 whether the recipient takes the message or refuses it. The agent
+refuses the send unless its multi-provider agent-options list includes
+allow-inject.
 
   tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
   tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
-  tdns-mpcli agent debug inject peer-keystate --to <agent> --zone <zone>`,
+  tdns-mpcli agent debug inject peer-keystate --to <agent> --zone <zone>
+  tdns-mpcli agent debug inject hello --to <agent> [--count N] [--interval D] [--mechanism dns|api]
+  tdns-mpcli agent debug inject replace --to <agent> --zone <zone> --origin-time <time> <RR> [<RR>...]`,
 	}
 	c.AddCommand(
 		newDebugInjectNamedSenderCmd(),
 		newDebugInjectCombinerOriginCmd(),
 		newDebugInjectPeerKeystateCmd(),
+		newDebugInjectHelloCmd(),
+		newDebugInjectReplaceCmd(),
 	)
 	return c
 }
@@ -606,6 +607,122 @@ func newDebugInjectPeerKeystateCmd() *cobra.Command {
 	c.Flags().String("to", "", "Target agent ID")
 	c.Flags().String("zone", "", "Zone name")
 	return c
+}
+
+func newDebugInjectHelloCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "hello",
+		Short: "Send another agent a hello again and again, faster than an honest agent would",
+		Long: `Send the target a hello --count times, --interval apart, on one mechanism,
+whatever this agent's reading of the target. An honest agent sends a hello
+only on a mechanism not yet introduced, and no faster than
+hello_fast_interval. The target beats back on each hello from a peer it has
+introduced; this is for testing the bound on those beats back (#131).`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			toAgent := requiredInjectFlag(cmd, "to")
+			count, _ := cmd.Flags().GetInt("count")
+			interval, _ := cmd.Flags().GetDuration("interval")
+			mechanism, _ := cmd.Flags().GetString("mechanism")
+			amr, err := SendAgentDebugCmd(cmd, injectHelloPost(toAgent, count, interval, mechanism), false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			if amr.Error {
+				log.Fatalf("Error: %s", amr.ErrorMsg)
+			}
+			fmt.Println(injectHelloReport(amr, toAgent))
+		},
+	}
+	c.Flags().String("to", "", "Target agent ID")
+	c.Flags().Int("count", 40, "Hellos to send, 1 to 200")
+	c.Flags().Duration("interval", 500*time.Millisecond, "Gap between the hellos, 100ms to 10s")
+	c.Flags().String("mechanism", "dns", "Mechanism to send on: dns or api")
+	return c
+}
+
+// injectHelloPost is the post an inject hello sends: the agent checks the
+// bounds, so the CLI passes the values as given.
+func injectHelloPost(to string, count int, interval time.Duration, mechanism string) AgentMgmtPost {
+	return AgentMgmtPost{
+		Command: "inject-hello",
+		AgentId: AgentId(dns.Fqdn(to)),
+		Data: map[string]interface{}{
+			"count":     strconv.Itoa(count),
+			"interval":  interval.String(),
+			"mechanism": strings.ToLower(mechanism),
+		},
+	}
+}
+
+// injectHelloReport is the one line an inject hello prints. A refused or
+// failed hello is an outcome, not a failure of the command.
+func injectHelloReport(amr *AgentMgmtResponse, recipient string) string {
+	var m map[string]interface{}
+	if amr != nil {
+		m, _ = amr.Data.(map[string]interface{})
+	}
+	if r := injectMapString(m, "target"); r != "" {
+		recipient = r
+	}
+	line := fmt.Sprintf("inject hello: %s mechanism %s: sent %s of %s, accepted %s, failed %s",
+		recipient, injectMapString(m, "mechanism"), injectMapString(m, "sent"),
+		injectMapString(m, "count"), injectMapString(m, "accepted"), injectMapString(m, "failed"))
+	if e := injectMapString(m, "first_error"); e != "" {
+		line += ": first error: " + e
+	}
+	return line
+}
+
+func newDebugInjectReplaceCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "replace <RR> [<RR>...]",
+		Short: "Send a REPLACE of one RR type that claims the origin time given",
+		Long: `Send the target a SYNC from this agent whose one operation replaces this
+agent's set of one RR type with the RRs given, and whose origin is
+--origin-time (RFC 3339, with a fraction of a second if wanted), not the
+time it is sent. The target keeps, per zone, sending agent and RR type, the
+origin of the last REPLACE it applied, and ignores an older one (#249); this
+sends one older, or newer, than that. The line printed is the target's
+receipt of the SYNC, not its verdict: the target applies the REPLACE after
+it answers, and logs "Ignored a stale REPLACE ..." when it is older than the
+one it holds.`,
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			toAgent := requiredInjectFlag(cmd, "to")
+			zone := requiredInjectFlag(cmd, "zone")
+			origin := requiredInjectFlag(cmd, "origin-time")
+			post, err := injectReplacePost(toAgent, zone, origin, parsedInjectRRs(args))
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			finishInject(cmd, post, "replace", string(post.AgentId), string(post.Zone))
+		},
+	}
+	c.Flags().String("to", "", "Target agent ID")
+	c.Flags().String("zone", "", "Zone name")
+	c.Flags().String("origin-time", "", "Origin the REPLACE claims, RFC 3339 (e.g. 2026-10-26T17:00:00.5Z)")
+	return c
+}
+
+// injectReplacePost is the post an inject replace sends. The origin is
+// checked here and again by the agent, and passed on as given, fraction
+// and all: the target compares the whole time.
+func injectReplacePost(to, zone, origin string, rrs []string) (AgentMgmtPost, error) {
+	t, err := time.Parse(time.RFC3339Nano, origin)
+	if err != nil {
+		return AgentMgmtPost{}, fmt.Errorf("--origin-time %q is not RFC 3339: %v", origin, err)
+	}
+	if t.IsZero() {
+		return AgentMgmtPost{}, fmt.Errorf("--origin-time %q is the zero time, which the target does not judge", origin)
+	}
+	return AgentMgmtPost{
+		Command: "inject-replace",
+		Zone:    ZoneName(dns.Fqdn(zone)),
+		AgentId: AgentId(dns.Fqdn(to)),
+		RRs:     rrs,
+		Data:    map[string]interface{}{"origin_time": origin},
+	}, nil
 }
 
 func requiredInjectFlag(cmd *cobra.Command, name string) string {

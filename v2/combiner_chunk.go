@@ -78,6 +78,7 @@ func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address str
 type editPolicy struct {
 	ZoneSigned  bool
 	WeAreSigner bool
+	Leaving     bool  // a signer out of signers= that signs on (#147): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
 }
@@ -139,6 +140,9 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 //   - DNSKEY: only signers may submit
 //   - CDS/CSYNC: only signers AND parentsync == agent
 //
+// A signer leaving signers= (#147) signs on and its combiner applies as
+// before, but it starts nothing: it submits no DNSKEY, CDS or CSYNC.
+//
 // Whether the local combiner applies the contribution is a separate
 // question (canApply). A submission may be persisted-but-not-applied
 // (IGNORED) by the local combiner while still being applied by a
@@ -151,9 +155,9 @@ func (p *editPolicy) canSubmit(rrtype uint16) bool {
 	case dns.TypeKEY:
 		return p.ParentSync == core.HsyncParentSyncAgent
 	case dns.TypeDNSKEY:
-		return p.WeAreSigner
+		return p.WeAreSigner && !p.Leaving
 	case dns.TypeCDS, dns.TypeCSYNC:
-		return p.WeAreSigner && p.ParentSync == core.HsyncParentSyncAgent
+		return p.WeAreSigner && !p.Leaving && p.ParentSync == core.HsyncParentSyncAgent
 	}
 	return true
 }
@@ -167,6 +171,7 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 	if zd.MP != nil && zd.MP.MPdata != nil {
 		p.ZoneSigned = zd.MP.MPdata.ZoneSigned
 		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
+		p.Leaving = zd.MP.MPdata.Leaving
 	}
 	// Extract NSmgmt and ParentSync from HSYNCPARAM. The analysis reader,
 	// because this runs on the incoming zone during the pre-refresh combine
@@ -362,10 +367,15 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 // sender's word. A provider zone has no HSYNC3, and a zone the combiner
 // takes by HSYNC or HSYNC2 records alone has no standings; both are left as
 // they are (votesInZone). What the combiner already stores of an origin
-// that stops voting stays (decision 37). Nil when the origin may
-// contribute.
-func originVoteRefusal(zone, origin string, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+// that stops voting stays (decision 37). One exception: while its provider
+// is out of signers= and signs on (#147), the combiner takes its own
+// agent's operations (local, one of its configured agents), so that what
+// it serves does not go stale. Nil when the origin may contribute.
+func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
 	if votesInZone(ZoneName(zone), AgentId(origin)) {
+		return nil
+	}
+	if mpzd, ok := Zones.Get(zone); local && ok && mpzd.leavingSigner() {
 		return nil
 	}
 	reason := fmt.Sprintf("origin %s is not a voting member of zone %s", origin, zone)
@@ -448,7 +458,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, req.Operations, req.Records); refusal != nil {
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}

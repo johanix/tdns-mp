@@ -358,12 +358,13 @@ func (mpzd *MPZoneData) recordRequestedInventory(ctx context.Context, tm *MPTran
 		tm.onKeyInventory(ctx, mpzd, inv)
 		return
 	}
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{
+	mpzd.setLastKeyInventoryUnlessOlder(&KeyInventorySnapshot{
 		SenderID:  inv.SenderID,
 		Zone:      inv.Zone,
 		Inventory: inv.Inventory,
 		Owned:     inv.Owned,
 		Received:  time.Now(),
+		seq:       inv.seq,
 	})
 }
 
@@ -1267,7 +1268,11 @@ func (mpzd *MPZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel str
 //	signed and we are not a signer), auditors may not.
 //
 // If guard 1-3 fails, zd.MP.MPdata is set to nil.
-func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
+//
+// signing is the zone's signing set by this copy (advanceSigningSet): for a
+// zone with HSYNC3 and HSYNCPARAM, a provider signs when it is in it, in
+// signers= or leaving it (#147).
+func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet) {
 	mpzd.EnsureMP()
 	// Guard 1: static config must declare this as an MP zone
 	if !mpzd.Options[tdns.OptMultiProvider] {
@@ -1330,6 +1335,17 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
 		mpzd.MP.MPdata = nil
 		return
 	}
+	// A provider out of signers= that the zone's HSYNC3 RRset still lists
+	// signs on, as before (#147): the signing set says who signs.
+	leaving := false
+	var leavers []string
+	if h3exists && hpExists {
+		_, weShouldSign = signing[trimDot(ourLabel)]
+		leaving = weShouldSign && !mpzd.isSigner(ourLabel)
+		otherSigners = len(signing.others(ourLabel))
+		zoneSigned = len(signing) > 0
+		leavers = signing.leavers(mpzd.getHSYNCPARAM())
+	}
 
 	// Determine editing rights based on role.
 	// Non-signer servers in signed zones get disallow-edits but MPdata is
@@ -1369,10 +1385,13 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf) {
 		WeAreSigner:   weShouldSign,
 		OtherSigners:  otherSigners,
 		ZoneSigned:    zoneSigned,
+		Signing:       signing,
+		Leaving:       leaving,
+		Leavers:       leavers,
 		Options:       mpOpts,
 	}
-	mpzd.Logger.Printf("populateMPdata: zone %s: label=%q server=%v signer=%v auditor=%v otherSigners=%d zoneSigned=%v",
-		mpzd.ZoneName, ourLabel, weAreServer, weShouldSign, weAreAuditor, otherSigners, zoneSigned)
+	mpzd.Logger.Printf("populateMPdata: zone %s: label=%q server=%v signer=%v leaving=%v auditor=%v otherSigners=%d zoneSigned=%v",
+		mpzd.ZoneName, ourLabel, weAreServer, weShouldSign, leaving, weAreAuditor, otherSigners, zoneSigned)
 }
 
 // weAreASigner is a convenience wrapper that checks provider membership first,
@@ -1563,12 +1582,21 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// Use a temporary wrapper around new_zd to run populateMPdata, then
 	// copy computed state to the persistent mpzd.
 	if new_zd.Options[tdns.OptMultiProvider] {
+		kdb := new_zd.KeyDB
+		if kdb == nil {
+			kdb = mpzd.KeyDB
+		}
+		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
+		signing, changed := mpzd.advanceSigningSet(newApex, kdb)
+		if changed {
+			mpzd.MP.SigningChanged = true
+		}
 		newMpzd := &MPZoneData{
 			ZoneData:  new_zd,
 			MP:        &MPState{},
 			MPOptions: make(map[tdns.ZoneOption]bool),
 		}
-		newMpzd.populateMPdata(mp)
+		newMpzd.populateMPdata(mp, signing)
 		mpzd.MP.MPdata = newMpzd.MP.MPdata
 		mpzd.MPOptions = newMpzd.MPOptions
 	}
@@ -1614,9 +1642,10 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			// from the next publish, never signing. A refresh collects its
 			// DNSKEY RRset before this callback, so a change here is served
 			// by the re-sign requested below rather than by this refresh.
-			// The other signers are the ones the incoming zone names.
+			// The other signers are the incoming zone's signing set: the
+			// ones its signers= names, and those leaving it (#147).
 			if shouldSign {
-				others, _ := otherSignerLabels(&MPZoneData{ZoneData: new_zd}, mp)
+				others := mpzd.MP.MPdata.Signing.others(mpzd.MP.MPdata.OurLabel)
 				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS, others); err != nil {
 					lg.Error("syncing foreign DNSKEYs failed", "zone", mpzd.ZoneName, "err", err)
 				} else if changed {

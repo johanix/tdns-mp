@@ -112,7 +112,7 @@ func (c *consentCombiner) load(name, text string) *MPZoneData {
 		c.t.Fatalf("no MPZoneData for %s", name)
 	}
 	mpzd.snapshotUpstreamData(zd)
-	mpzd.populateMPdata(c.mp)
+	mpzd.populateMPdata(c.mp, mpzd.signingSet())
 	zd.InstallInitialSnapshot()
 	callbacks := zd.OnFirstLoad
 	zd.OnFirstLoad = nil

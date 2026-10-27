@@ -169,7 +169,7 @@ func TestTheNotifyOfAnNSChangeWaitsForTheCsyncsConfirmationsAndThenForTheWait(t 
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 
 	before := uint32(time.Now().Unix())
-	r.hint()
+	r.ask()
 	info, csync := r.csync(t, "")
 	if csync.Flags != csyncFlagImmediate || csync.Hdr.Ttl != 120 || !slices.Equal(csync.TypeBitMap, []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA}) {
 		t.Errorf("the leader made the CSYNC %s, want the immediate flag only, the types A NS AAAA and TTL 120", info.RR)
@@ -233,7 +233,7 @@ func TestANotifyDoesNotLeaveWhileAProviderHasNotConfirmedTheCsync(t *testing.T) 
 	peer := r.peer.Identity
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 
-	r.hint()
+	r.ask()
 	info, csync := r.csync(t, "")
 	r.confirms(rigCombiner, info.DistributionID, info.RR)
 	// the other provider's agent says it has the SYNC and is working on it:
@@ -293,7 +293,7 @@ func rejectedCsync(t *testing.T, zone string, reject func(r *notifyRig, distID, 
 	peer := r.peer.Identity
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 
-	r.hint()
+	r.ask()
 	first, csync := r.csync(t, "")
 	r.logged(t, 1, logCsyncWaits)
 	r.confirms(rigCombiner, first.DistributionID, first.RR)
@@ -328,7 +328,7 @@ func TestAnUpdateGoesAtOnceAndTheCsyncIsDistributedBesideIt(t *testing.T) {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	// no provider confirms anything, and the UPDATE is answered
 	if m := r.told(t, "the UPDATE answered"); !strings.Contains(m.Msg, "SendUpdate(") {
 		t.Errorf("the peer was told %+v", *m)
@@ -367,14 +367,14 @@ func TestASecondChangeDuringTheDistributionReplacesTheCsync(t *testing.T) {
 	peer := r.peer.Identity
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 
-	r.hint()
+	r.ask()
 	first, csync1 := r.csync(t, "")
 	r.logged(t, 1, logCsyncWaits)
 	r.confirms(rigCombiner, first.DistributionID, first.RR)
 
 	// the difference to the parent is another one now
 	r.parent.holdsNS("ns1."+z, r.oldNS, "gone2.provider.example.")
-	r.hint()
+	r.ask()
 	second, csync2 := r.csync(t, first.RR)
 	if !serialNewer(csync2.Serial, csync1.Serial) {
 		t.Errorf("the second CSYNC has serial %d, the first %d", csync2.Serial, csync1.Serial)
@@ -424,7 +424,7 @@ func TestAnElectionDuringTheWaitMakesNoNewCsync(t *testing.T) {
 		}
 	}
 
-	r.hint()
+	r.ask()
 	info, _ := r.csync(t, "")
 	r.logged(t, 1, logCsyncWaits)
 	ask("while the confirmations were awaited")
@@ -457,7 +457,7 @@ func TestACheckThatFindsTheParentPartWayMakesNoNewCsync(t *testing.T) {
 	z := r.mpzd.ZoneName
 	r.parent.holdsNS("ns1."+z, r.oldNS, "gone2.provider.example.")
 
-	r.hint()
+	r.ask()
 	info, _ := r.csync(t, "")
 	r.confirms(rigCombiner, info.DistributionID, info.RR)
 	r.confirms(r.peer.Identity, info.DistributionID, info.RR)
@@ -718,7 +718,7 @@ func TestANewLeadersCsyncIsNewerThanThePreviousLeaders(t *testing.T) {
 	}
 
 	r.leader(r.lem.localID)
-	r.hint()
+	r.ask()
 	info, csync := r.csync(t, "")
 	if csync.Serial != ahead+1 {
 		t.Errorf("the new leader's CSYNC is %s, want serial %d: one more than the previous leader's", info.RR, ahead+1)
