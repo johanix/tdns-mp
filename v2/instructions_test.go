@@ -380,6 +380,13 @@ func TestAnIdentityChangedUnderALabelIsARemovalAndAnAddition(t *testing.T) {
 	if !slices.Equal(c.Removed, wantRemoved) || !slices.Equal(c.Added, wantAdded) {
 		t.Errorf("removed %v added %v; want removed %v added %v", c.Removed, c.Added, wantRemoved, wantAdded)
 	}
+	// An upstream changed under the same label and identity removes and adds
+	// no record; S4's judge reads upstreams from the records themselves.
+	up := CompareSerials(held, readOf(t, instrBase[0], `3600 IN HSYNC3 ON beta agent.beta.example. .`, instrBase[2],
+		strings.Replace(instrBase[3], `serial="7"`, `serial="8"`, 1)))
+	if up.Order != SerialNewer || len(up.Added)+len(up.Removed) != 0 {
+		t.Errorf("an upstream changed: %v added %v removed %v; want newer, none", up.Order, up.Added, up.Removed)
+	}
 	// The identity's case is no change of identity.
 	same := CompareSerials(held, readOf(t, instrBase[0], `3600 IN HSYNC3 ON beta Agent.Beta.Example. alpha`, instrBase[2], instrBase[3]))
 	if same.Order != SerialSame || len(same.Added)+len(same.Removed) != 0 {
