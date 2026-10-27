@@ -400,11 +400,13 @@ func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
 }
 
 func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owned bool) {
-	zone = dns.Fqdn(zone)
+	zone = lifecycleZoneName(zone)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	zd, ok := tdns.Zones.Get(zone)
-	if !ok || zd == nil || !e.owner.Owns(zd) {
+	// a zone named in key-lifecycle-zones is owned before it is taken
+	// (#191), but its driver runs from the take (TakeConfiguredZones)
+	if !ok || zd == nil || !e.owner.Owns(zd) || !e.owner.taken(zone) {
 		delete(e.zones, zone)
 		return nil, false
 	}
@@ -643,7 +645,9 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 		e.waiting = map[string]string{}
 	}
 	for _, z := range mp.KeyLifecycleZones {
-		zone := dns.Fqdn(z)
+		// as tdns keys its zones and as the rollout gate reads the
+		// list: "A.EXAMPLE." names a.example.
+		zone := lifecycleZoneName(z)
 		if e.owner.taken(zone) {
 			continue
 		}
