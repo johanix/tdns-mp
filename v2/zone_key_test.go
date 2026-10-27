@@ -81,7 +81,7 @@ func TestTheHolderHandsOverThePublishedKey(t *testing.T) {
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true})
 	answers := make(chan keyAnswer, 4)
 	saved := answerConfigRequest
-	answerConfigRequest = func(_ *MPTransportBridge, _ *AgentRegistry, requester, _, subtype, nonce string, data map[string]string) {
+	answerConfigRequest = func(_ *MPTransportBridge, _ *AgentRegistry, requester, _, subtype, nonce, _ string, data map[string]string) {
 		answers <- keyAnswer{requester, subtype, nonce, data}
 	}
 	t.Cleanup(func() { answerConfigRequest = saved })

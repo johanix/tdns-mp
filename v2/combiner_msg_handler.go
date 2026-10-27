@@ -295,7 +295,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
 // It goes over DNS, not on the mechanism its SYNC came on as an agent's confirmations do
-// (confirmTransport): an agent knows no TLSA for its combiner, so it would refuse a
+// (confirmOn): an agent knows no TLSA for its combiner, so it would refuse a
 // confirmation the combiner sent over HTTPS.
 func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {

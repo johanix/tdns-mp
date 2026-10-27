@@ -152,6 +152,7 @@ type PeerConfigResponse struct {
 	Zone        string
 	Accepted    bool
 	Message     string
+	Mechanism   string // the mechanism that carried the answer, or refused it
 	Timestamp   time.Time
 }
 
@@ -170,5 +171,6 @@ type PeerAuditResponse struct {
 	Zone        string
 	Accepted    bool
 	Message     string
+	Mechanism   string // the mechanism that carried the answer, or refused it
 	Timestamp   time.Time
 }
