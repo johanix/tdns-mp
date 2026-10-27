@@ -5,7 +5,8 @@
  * docs/2026-10-27-dns-carrier-address.md). A peer that offers only the API
  * has no DNS carrier address. The sites that ask whether there is anywhere
  * to send to a peer ask Addressable: they count such a peer while its API
- * is usable, and no longer once its TLSA is withdrawn.
+ * is usable, and no longer once its TLSA is withdrawn. The ping operation
+ * goes over the transport the operator names, and that one only.
  */
 package tdnsmp
 
@@ -150,18 +151,29 @@ func TestDelivererDiscoveryAsksAddressable(t *testing.T) {
 	}
 }
 
-// The ping operation refuses a peer with nowhere to send to, before it
-// tries. An API-only peer with a usable API gets as far as the send, which
-// fails here only for want of a transport.
-func TestPingAsksAddressable(t *testing.T) {
-	for _, tc := range apiOnlyCases {
+// The ping operation goes over the transport the operator names, and that
+// one only. Over DNS, an API-only peer has no address to ping, and its
+// HTTPS address is not dialled in its place, whatever its API's state.
+// Over the API with its TLSA withdrawn, it is not dialled either.
+func TestPingGoesOverTheNamedTransportOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		usable    bool
+		transport string
+		want      string
+	}{
+		{"usable API, --dns", true, "dns", "ping over dns failed"},
+		{"TLSA withdrawn, --dns", false, "dns", "ping over dns failed"},
+		{"TLSA withdrawn, --api", false, "api", "ping over api failed"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
+			env := newIntegEnv(t, nil)
 			conf := &Config{Config: &tdns.Config{}}
-			conf.SetMpConfig(&MultiProviderConf{Identity: "test-agent.example."})
-			conf.InternalMp.TransportManager = &transport.TransportManager{PeerRegistry: transport.NewPeerRegistry()}
+			conf.SetMpConfig(&MultiProviderConf{Identity: env.Alice.Identity})
+			conf.InternalMp.TransportManager = env.Alice.Bridge.TransportManager
 			apiOnly(t, conf.InternalMp.TransportManager.PeerRegistry.GetOrCreate("api-only.example."), tc.usable)
 
-			body, err := json.Marshal(AgentDistribPost{Command: "op", Op: "ping", To: "api-only.example."})
+			body, err := json.Marshal(AgentDistribPost{Command: "op", Op: "ping", To: "api-only.example.", PingTransport: tc.transport})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,12 +183,11 @@ func TestPingAsksAddressable(t *testing.T) {
 			if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			want := "ping failed: "
-			if !tc.usable {
-				want = `peer "api-only.example." has no address to send to`
+			if !resp.Error || !strings.Contains(resp.ErrorMsg, tc.want) {
+				t.Errorf("error %v %q, want one with %q", resp.Error, resp.ErrorMsg, tc.want)
 			}
-			if !resp.Error || !strings.HasPrefix(resp.ErrorMsg, want) {
-				t.Errorf("error %v %q, want %q", resp.Error, resp.ErrorMsg, want)
+			if tc.transport == "dns" && !strings.Contains(resp.ErrorMsg, "no address available") {
+				t.Errorf("the DNS ping found an address to dial: %q", resp.ErrorMsg)
 			}
 		})
 	}

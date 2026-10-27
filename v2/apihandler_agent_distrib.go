@@ -135,14 +135,17 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			switch opName {
 			case "ping":
+				// The transport the operator named, and that one only: --api
+				// or --dns (the default).
+				useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
 				if toIdentity == "combiner" {
-					useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
 					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
 					resp.Error = pingResp.Error
 					resp.ErrorMsg = pingResp.ErrorMsg
 					resp.Msg = pingResp.Msg
 				} else {
-					// Ping to peer agent: same mechanism as combiner (SendPing); lookup peer by FQDN identity
+					// Ping to a peer agent, looked up by FQDN identity (discovered if
+					// unknown), over the transport named, as to the combiner (pingOn).
 					if conf.InternalMp.TransportManager == nil {
 						resp.Error = true
 						resp.ErrorMsg = "TransportManager not configured"
@@ -182,29 +185,15 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						}
 						lgApi.Info("discovered and registered agent", "agent", toFqdn)
 					}
-					// Addressable: a DNS carrier address or a usable API.
-					// SendPing goes through Send and can use either.
-					if !peer.Addressable() {
-						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("peer %q has no address to send to", req.To)
-						return
-					}
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
-					pingResp, err := conf.InternalMp.TransportManager.SendPing(ctx, peer)
+					msg, err := pingOn(ctx, conf.InternalMp.TransportManager, peer, useAPI)
 					if err != nil {
 						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("ping failed: %v", err)
+						resp.ErrorMsg = fmt.Sprintf("ping to %s: %v", toFqdn, err)
 						return
 					}
-					if !pingResp.OK {
-						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("peer did not acknowledge (responder: %s)", pingResp.ResponderID)
-						return
-					}
-					// SendPing does not say which mechanism carried the
-					// ping, so the reply names none.
-					resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce", pingResp.ResponderID)
+					resp.Msg = msg
 				}
 			default:
 				resp.Error = true

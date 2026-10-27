@@ -168,7 +168,7 @@ func newAgentDistribOpCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "op [operation]",
 		Short: "Run an operation toward a peer",
-		Long:  `Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping (use --dns or --api for combiner ping).`,
+		Long:  `Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping, over DNS (--dns, the default) or the API (--api), and that transport only.`,
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			runDistribOp(cmd, args[0])
