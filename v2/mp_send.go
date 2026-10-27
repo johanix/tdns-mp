@@ -273,14 +273,40 @@ func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer
 	}, nil
 }
 
-// sendConfig sends a CONFIG answer on mechanism first, then the other
-// (sendAppOn). mechanism is the one the RFI CONFIG arrived on (#238).
+// sendAnswer sends msg, the answer to an RFI that arrived on mechanism, on
+// that mechanism first (#238). The transport's SendOn does the rest: a
+// failure to deliver, or a /msg that does not take the verb, goes on the
+// other mechanism, and a refusal the asker judged stops there. That refusal
+// comes back as the asker's response, not accepted, as a refusal over DNS
+// always has. It returns the mechanism that carried the answer, or the one
+// that was refused.
+func (tm *MPTransportBridge) sendAnswer(ctx context.Context, mechanism string, peer *transport.Peer, msg *transport.AppMessage) (*transport.AppResponse, string, error) {
+	resp, out, err := tm.TransportManager.SendOn(ctx, peer, mechanism, msg)
+	appResp, _ := resp.(*transport.AppResponse)
+	if err != nil {
+		if transportErrorAnswered(err) && appResp != nil {
+			return appResp, out.First, nil
+		}
+		return nil, "", err
+	}
+	if appResp == nil {
+		return nil, "", fmt.Errorf("%s answer to %s: unexpected response %T", msg.TypeToken, peer.ID, resp)
+	}
+	if out.Carrier != out.First {
+		lgTransport.Debug("answer sent on the other mechanism", "peer", peer.ID, "verb", msg.TypeToken,
+			"failed", out.First, "used", out.Carrier, "err", out.FirstErr)
+	}
+	return appResp, out.Carrier, nil
+}
+
+// sendConfig sends a CONFIG answer on mechanism first, the one the RFI
+// CONFIG arrived on (sendAnswer).
 func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerConfigRequest) (*PeerConfigResponse, error) {
 	msg, err := configAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := tm.sendAppOn(ctx, mechanism, peer, msg)
+	resp, used, err := tm.sendAnswer(ctx, mechanism, peer, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -289,18 +315,19 @@ func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Pee
 		Zone:        req.Zone,
 		Accepted:    resp.Status == transport.ConfirmSuccess,
 		Message:     resp.Message,
+		Mechanism:   used,
 		Timestamp:   time.Now(),
 	}, nil
 }
 
-// sendAudit sends an AUDIT answer on mechanism first, then the other
-// (sendAppOn). mechanism is the one the RFI AUDIT arrived on (#238).
+// sendAudit sends an AUDIT answer on mechanism first, the one the RFI AUDIT
+// arrived on (sendAnswer).
 func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerAuditRequest) (*PeerAuditResponse, error) {
 	msg, err := auditAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := tm.sendAppOn(ctx, mechanism, peer, msg)
+	resp, used, err := tm.sendAnswer(ctx, mechanism, peer, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +336,7 @@ func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer
 		Zone:        req.Zone,
 		Accepted:    resp.Status == transport.ConfirmSuccess,
 		Message:     resp.Message,
+		Mechanism:   used,
 		Timestamp:   time.Now(),
 	}, nil
 }

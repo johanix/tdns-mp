@@ -1395,10 +1395,10 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 	}
 
 	if !resp.Accepted {
-		lgTransport.Error("sendConfigToAgent: config not accepted", "requester", requesterID, "zone", zone, "subtype", subtype, "accepted", resp.Accepted)
+		lgTransport.Error("sendConfigToAgent: config not accepted", "requester", requesterID, "zone", zone, "subtype", subtype, "mechanism", resp.Mechanism, "msg", resp.Message)
 		return
 	}
-	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype, "mechanism", mechanism)
+	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype, "mechanism", resp.Mechanism)
 }
 
 // routeAuditMessage routes an incoming AUDIT response message from a peer agent
@@ -1504,10 +1504,10 @@ func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID stri
 	}
 
 	if !resp.Accepted {
-		lgTransport.Error("sendAuditToAgent: audit not accepted", "requester", requesterID, "zone", zone, "accepted", resp.Accepted)
+		lgTransport.Error("sendAuditToAgent: audit not accepted", "requester", requesterID, "zone", zone, "mechanism", resp.Mechanism, "msg", resp.Message)
 		return
 	}
-	lgTransport.Info("sendAuditToAgent: sent audit to requester", "requester", requesterID, "zone", zone, "mechanism", mechanism)
+	lgTransport.Info("sendAuditToAgent: sent audit to requester", "requester", requesterID, "zone", zone, "mechanism", resp.Mechanism)
 }
 
 // routeRelocateMessage handles a relocate request.
@@ -1561,7 +1561,7 @@ func settleQueuedMessage(q *transport.ReliableMessageQueue, distributionID, send
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // confirmations in the two-phase remote confirmation protocol (Phase 5). It goes to
-// senderID, back on mechanism, the one the sync arrived on (confirmTransport).
+// senderID, back on mechanism, the one the sync arrived on (confirmOn).
 func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, senderID, mechanism string) {
 	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
@@ -1601,7 +1601,7 @@ func (tm *MPTransportBridge) sendImmediateConfirmation(payload *DnsSyncPayload, 
 // sendRemoteConfirmation sends the final confirmation back to the originating agent
 // after the remote agent's combiner has confirmed the sync. This is the second of two
 // confirmations in the two-phase remote confirmation protocol (Phase 7). It goes back on
-// the mechanism the sync arrived on (confirmTransport).
+// the mechanism the sync arrived on (confirmOn).
 func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
 	if tm.DNSTransport == nil && tm.APITransport == nil {
 		return
@@ -1675,79 +1675,38 @@ func logConfirmationReceived(ctx *transport.MessageContext, next transport.Messa
 	return err
 }
 
-// confirmTransport is the transport a SYNC's confirmations go back on first:
-// the mechanism the SYNC arrived on, whatever else the peer offers. A SYNC
-// over DNS is confirmed by NOTIFY, a SYNC over HTTPS over HTTPS. Two agents
-// that share a mechanism use that path both ways. nil when the mechanism is
-// not known or this bridge has no transport for it.
-func (tm *MPTransportBridge) confirmTransport(mechanism string) transport.Transport {
-	switch mechanism {
-	case transport.MechanismAPI:
-		if tm.APITransport != nil {
-			return tm.APITransport
-		}
-	case transport.MechanismDNS:
-		if tm.DNSTransport != nil {
-			return tm.DNSTransport
-		}
-	}
-	return nil
-}
-
 // confirmOn sends a confirmation of a SYNC that arrived on mechanism. The
-// first choice of path is the one the SYNC came on (confirmTransport). When
-// that fails to deliver, the confirmation goes on the other mechanism, if
-// that reaches the peer; the first try then gets half the time, so a peer
-// that hangs on it leaves the other mechanism the rest. A recipient's
-// Answered refusal is not a delivery failure: no fallback, and no failure
-// count (tdns-transport #36). A delivery failure of the first choice is
-// counted against that mechanism so the gossip matrix shows one-way pairs
-// (tdns-mp #236). When the mechanism is not known, the first choice is what
-// the peer offers (SelectTransport), with the same fallback: a confirmation
-// that is not sent leaves the sender sending its SYNC again. A confirmation
-// sent is logged with the mechanism that carried it.
+// first choice of path is the one the SYNC came on: a SYNC over DNS is
+// confirmed by NOTIFY, a SYNC over HTTPS over HTTPS, whatever else the
+// originator offers, so two agents that share a mechanism use that path both
+// ways. When the mechanism is not known, or does not reach the peer, the
+// first choice is what the peer offers: a confirmation that is not sent
+// leaves the sender sending its SYNC again.
+//
+// The transport's SendOn does the rest. A failure to deliver, or a /msg that
+// does not take confirmations, goes on the other mechanism when that reaches
+// the peer (DNS with an address, HTTPS with an endpoint and a usable TLSA),
+// and the first try then gets half the time, so a peer that hangs on it
+// leaves the other mechanism the rest. A refusal the recipient judged is not
+// sent again (tdns-transport #36). A failure to deliver on the first choice
+// counts against that mechanism, so the gossip matrix shows a pair that works
+// one way only, and the mechanism that carries the confirmation has its count
+// cleared (#236). A confirmation sent is logged with the mechanism that
+// carried it.
 func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
-	t := tm.confirmTransport(mechanism)
-	if t == nil {
-		t = tm.SelectTransport(peer)
-		if t == nil {
-			return fmt.Errorf("no transport reaches peer %s", peer.ID)
-		}
-		lgTransport.Debug("the sync's mechanism is not known; the confirmation goes by what the peer offers",
-			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism, "first", t.Name())
+	_, out, err := tm.TransportManager.SendOn(ctx, peer, mechanism, req)
+	if out.First != "" && out.First != mechanism {
+		lgTransport.Debug("the sync's mechanism is not known or does not reach the peer; the confirmation goes by what the peer offers",
+			"peer", peer.ID, "distributionID", req.DistributionID, "mechanism", mechanism, "first", out.First)
 	}
-	used := t
-	if other := tm.otherConfirmTransport(t, peer); other == nil {
-		if err := t.Confirm(ctx, peer, req); err != nil {
-			if !transportErrorAnswered(err) {
-				peer.RecordMechanismFailure(t.Name())
-			}
-			return err
-		}
-		peer.RecordMechanismSuccess(t.Name())
-	} else {
-		first, cancel := ctx, context.CancelFunc(func() {})
-		if deadline, ok := ctx.Deadline(); ok {
-			first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
-		}
-		err := t.Confirm(first, peer, req)
-		cancel()
-		if err != nil {
-			if transportErrorAnswered(err) {
-				return err
-			}
-			peer.RecordMechanismFailure(t.Name())
-			if otherErr := other.Confirm(ctx, peer, req); otherErr != nil {
-				return fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), otherErr)
-			}
-			tm.noteConfirmFallback(peer.ID, t.Name(), other.Name(), err)
-			used = other
-		} else {
-			peer.RecordMechanismSuccess(t.Name())
-		}
+	if err != nil {
+		return err
+	}
+	if out.Carrier != out.First {
+		tm.noteConfirmFallback(peer.ID, out.First, out.Carrier, out.FirstErr)
 	}
 	lgTransport.Info("confirmation sent", "distributionID", req.DistributionID, "peer", peer.ID,
-		"status", req.Status.String(), "mechanism", used.Name())
+		"status", req.Status.String(), "mechanism", out.Carrier)
 	return nil
 }
 
@@ -1757,63 +1716,6 @@ func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, pe
 func transportErrorAnswered(err error) bool {
 	var te *transport.TransportError
 	return errors.As(err, &te) && te.Answered
-}
-
-// sendAppOn sends an application message on mechanism first, then the other
-// when that fails to deliver — the same rule confirmOn uses for
-// confirmations. A recipient's Answered refusal does not fall back
-// (tdns-mp #238, tdns-transport #36).
-func (tm *MPTransportBridge) sendAppOn(ctx context.Context, mechanism string, peer *transport.Peer, msg *transport.AppMessage) (*transport.AppResponse, error) {
-	t := tm.confirmTransport(mechanism)
-	if t == nil {
-		t = tm.SelectTransport(peer)
-		if t == nil {
-			return nil, fmt.Errorf("no transport reaches peer %s", peer.ID)
-		}
-		lgTransport.Debug("the request's mechanism is not known; the answer goes by what the peer offers",
-			"peer", peer.ID, "verb", msg.TypeToken, "mechanism", mechanism, "first", t.Name())
-	}
-	other := tm.otherConfirmTransport(t, peer)
-	if other == nil {
-		return t.SendApp(ctx, peer, msg)
-	}
-	first, cancel := ctx, context.CancelFunc(func() {})
-	if deadline, ok := ctx.Deadline(); ok {
-		first, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
-	}
-	resp, err := t.SendApp(first, peer, msg)
-	cancel()
-	if err == nil {
-		return resp, nil
-	}
-	if transportErrorAnswered(err) {
-		return resp, err
-	}
-	resp2, err2 := other.SendApp(ctx, peer, msg)
-	if err2 != nil {
-		return resp2, fmt.Errorf("%s: %w; %s: %w", t.Name(), err, other.Name(), err2)
-	}
-	lgTransport.Debug("application answer sent on the other mechanism",
-		"peer", peer.ID, "verb", msg.TypeToken, "failed", t.Name(), "used", other.Name(), "err", err)
-	return resp2, nil
-}
-
-// otherConfirmTransport is the mechanism a confirmation falls back to from
-// t's: DNS when the peer has an address, HTTPS when it has an endpoint and a
-// usable TLSA to check its certificate against (APIUsable); nil when there is
-// none.
-func (tm *MPTransportBridge) otherConfirmTransport(t transport.Transport, peer *transport.Peer) transport.Transport {
-	switch t.(type) {
-	case *transport.APITransport:
-		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-			return tm.DNSTransport
-		}
-	case *transport.DNSTransport:
-		if tm.APITransport != nil && peer.APIUsable() {
-			return tm.APITransport
-		}
-	}
-	return nil
 }
 
 // noteConfirmFallback logs a confirmation to peer that failed on the
