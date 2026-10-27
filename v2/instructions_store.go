@@ -244,7 +244,8 @@ func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
 
 // update applies f to zone's serials, creating them if needed, and writes
 // the result; f returning an error changes nothing, and so does a result
-// equal to what was kept (a refresh that brings the same copy).
+// equal to what was kept (a refresh that brings the same copy). f returning
+// errEndOfService drops the zone's serials, under the same lock.
 func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -254,6 +255,11 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 		z = old.clone()
 	}
 	if err := f(z); err != nil {
+		if errors.Is(err, errEndOfService) {
+			if ferr := s.forgetLocked(zone); ferr != nil {
+				return fmt.Errorf("dropping the zone's serials: %w", ferr)
+			}
+		}
 		return err
 	}
 	if old != nil {
@@ -382,11 +388,9 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	})
 	switch {
 	case errors.Is(err, errEndOfService):
-		// The end of multi-provider service (design 7): the zone's serials end.
+		// The end of multi-provider service (design 7): update dropped the
+		// zone's serials.
 		lg.Info("the zone's HSYNC3 and HSYNCPARAM records are gone with at most one provider listed; its serials end", "zone", zone)
-		if err := s.forget(zone); err != nil {
-			lg.Error("the zone's serials could not be dropped", "zone", zone, "err", err)
-		}
 	case err != nil:
 		lg.Error("the zone's serials could not be kept", "zone", zone, "err", err)
 	}
@@ -444,26 +448,28 @@ var errNotSteady = errors.New("the zone is not steady at this agent")
 
 // Forget clears a zone's stored serials (design rule 3, the one exception to
 // never giving a serial up). It is for a steady zone only: it refuses one
-// that agrees, reconciles, holds a removal or an owner error.
+// that agrees, reconciles, holds a removal or an owner error. The check and
+// the drop are one step under the store's lock, so no copy noted between
+// them is lost.
 func (s *InstructionStore) Forget(zone string) error {
 	if s == nil {
 		return fmt.Errorf("this daemon keeps no serials")
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	z := s.zones[zone]
-	s.mu.Unlock()
 	if z == nil {
 		return fmt.Errorf("zone %s: no serials kept", zone)
 	}
 	if p := z.phase(); p != PhaseSteady {
 		return fmt.Errorf("zone %s: %w (%s)", zone, errNotSteady, p)
 	}
-	return s.forget(zone)
+	return s.forgetLocked(zone)
 }
 
-func (s *InstructionStore) forget(zone string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// forgetLocked drops zone's serials, on disk and in memory. Called with s.mu
+// held.
+func (s *InstructionStore) forgetLocked(zone string) error {
 	if err := s.persist(zone, nil); err != nil {
 		return err
 	}
@@ -479,16 +485,13 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 		return
 	}
 	s.mu.Lock()
-	var gone []string
+	defer s.mu.Unlock()
 	for zone := range s.zones {
-		if !keep(zone) {
-			gone = append(gone, zone)
+		if keep(zone) {
+			continue
 		}
-	}
-	s.mu.Unlock()
-	for _, zone := range gone {
 		lg.Info("the zone left the configuration; its serials go with it", "zone", zone)
-		if err := s.forget(zone); err != nil {
+		if err := s.forgetLocked(zone); err != nil {
 			lg.Error("the serials of a zone that left the configuration could not be dropped", "zone", zone, "err", err)
 		}
 	}
