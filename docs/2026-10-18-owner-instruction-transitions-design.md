@@ -175,8 +175,8 @@ The leader orders a transition that changes several things: additions first, the
 The owner's order is a rule (3.1): the HSYNC3 record first, a role later, each its own edit and its own transition.
 
 - **The record.** The newcomer is a member with no role: discovery, comms and catch-up run with it, and it changes nothing (membership 1 and 2). The transition is done once the parts hold the new serial. A newcomer whose agent is not running yet holds nothing up. Before the owner gives it a role, the owner checks that it has caught up: every agent's status shows that.
-- **A role, as a server.** Its servers must serve its upstream's copy before anything points at them. Its operator sets that transfer up (the asking half of membership decision 6 is not designed), and the step waits until its agent confirms that it receives the zone from its upstream at a serial no lower than the zone's.
-- **A role, as a signer.** In order, each confirmed, the DNSKEY and DS steps waiting for an emergency rollover: its signer makes its first keys, which the signer's hold lets it do as a step of the leader's; every signer publishes them; its DS goes to the parent; the caches' time passes; its own signatures are served. The last needs its signer to run its key machine and have its keys published before it serves its own signatures (#160), and its servers to serve its own signer's copy at a serial above the one they served. Until those exist the transition that needs them is refused. Its NS records reach the zone and the parent last, by its operator's choice (membership rule 7).
+- **A role, as a server.** Its servers must serve its upstream's copy before anything points at them. Its operator sets that transfer up (the asking half of membership decision 6 is not designed), and the step waits until its agent confirms that it receives the zone from its upstream at an SOA serial no lower than the zone's.
+- **A role, as a signer.** In order, each confirmed, the DNSKEY and DS steps waiting for an emergency rollover: its signer makes its first keys, which the signer's hold lets it do as a step of the leader's; every signer publishes them; its DS goes to the parent; the caches' time passes; its own signatures are served. The last needs its signer to run its key machine and have its keys published before it serves its own signatures (#160), and its servers to serve its own signer's copy at an SOA serial above the one they served. Until those exist the transition that needs them is refused. Its NS records reach the zone and the parent last, by its operator's choice (membership rule 7).
 - **A provider put back** into `servers=` or `signers=` after its records were withdrawn: its own agent sends a complete `replace` of what it contributes, and every agent asks it for the zone's state, as for a peer given its first role (membership 5.1, whose `peer-role` this widens).
 
 ### 5.2 A provider's roles are taken away
@@ -215,7 +215,7 @@ A change of `parentsync`.
 
 ### 5.6 Other keys
 
-- **An upstream.** The downstream provider's servers move to another signer's chain. The step waits until its agent confirms that it receives the zone from the new upstream at a serial no lower than the one it serves. Until that check exists the transition is refused.
+- **An upstream.** The downstream provider's servers move to another signer's chain. The step waits until its agent confirms that it receives the zone from the new upstream at an SOA serial no lower than the one it serves. Until that check exists the transition is refused.
 - **`pubkey` and `pubcds`.** A step publishes or withdraws the zone's KEY, or its CDS, at the providers' `_signal` names. The providers' nameservers take this from their agent, not from their own copy.
 - **The auditors**, and `suffix`, which decides nothing today: a transition with nothing to carry out.
 
