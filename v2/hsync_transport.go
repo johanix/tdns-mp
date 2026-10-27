@@ -86,8 +86,9 @@ type MPTransportBridge struct {
 	foreignDnskeys map[ZoneName]map[AgentId][]*dns.DNSKEY
 	// onKeyInventory records an inventory that answered this agent's own
 	// request as a pushed one is recorded (Config.noteKeyInventory); set
-	// where the agent's bridge is made.
-	onKeyInventory    func(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg)
+	// where the agent's bridge is made. False: an older inventory than the
+	// one recorded, not recorded.
+	onKeyInventory    func(ctx context.Context, zd *MPZoneData, msg *KeystateInventoryMsg) bool
 	foreignSilentSaid map[ZoneName]string // the silent agents last logged, per zone
 
 	// authorizedPeers returns the list of peer identities authorized via config.
@@ -1225,6 +1226,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
 		Resend:    payload.Resend,
+		seq:       keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -1238,21 +1240,26 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	// inventory with keys marked as sent again is the signer's push, not an
 	// RFI's answer: it goes to the agent's handler, which distributes them
 	// (#256); a waiter would record it and drop the mark.
+	// A requester that has its answer already gets no second one: this
+	// newer inventory goes to the agent's handler, as a pushed one does.
 	if ch, ok := tm.getKeystateRfi(payload.Zone); ok && len(payload.Resend) == 0 {
 		select {
 		case ch <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
+			return
 		default:
-			lgTransport.Warn("keystateRfiChan full, dropping inventory", "sender", senderID)
 		}
-		return
 	}
 
-	select {
-	case tm.msgQs.KeystateInventory <- inventoryMsg:
+	// Never dropped (#210): one that finds the queue full waits, the newest
+	// of each zone
+	switch waits, replaced := tm.msgQs.offerKeystateInventory(inventoryMsg); {
+	case !waits:
 		lgTransport.Info("routed KEYSTATE inventory to agent", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
+	case replaced:
+		lgTransport.Info("the KEYSTATE inventory queue is full; this inventory replaces the zone's older one that waits", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
 	default:
-		lgTransport.Warn("KeystateInventory channel full, dropping inventory", "sender", senderID)
+		lgTransport.Info("the KEYSTATE inventory queue is full; the inventory waits for room", "sender", senderID, "zone", payload.Zone, "keys", len(inventoryMsg.Inventory))
 	}
 }
 

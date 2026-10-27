@@ -175,7 +175,7 @@ func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 	r.propagation(wait)
 	z := r.mpzd.ZoneName
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	r.logged(t, 1, logHeld)
 
 	servedParentSync(t, r.mpzd, &parentSyncOwner, false) // before the wait is over
@@ -189,7 +189,7 @@ func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 	if r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {
 		t.Error("a lease renewal asked for a sync of a zone whose owner syncs it")
 	}
-	r.hint()
+	r.ask()
 	r.quiet(t, wait+300*time.Millisecond, "for a zone whose owner syncs it")
 	r.untold(t, 0, "for a zone whose owner syncs it")
 	if r.chains() != 0 {
@@ -202,7 +202,7 @@ func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
 	refreshed(t, r.conf, r.mpzd)
 	r.propagation(0)
-	r.hint()
+	r.ask()
 	r.notified(t, "the agents sync the zone again", dns.TypeCSYNC)
 }
 
@@ -372,7 +372,7 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 	}
 	r.parent.refuses()
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	underWay := func() int {
 		c := &r.conf.InternalMp.delegationSyncChains
 		c.mu.Lock()

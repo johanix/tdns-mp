@@ -225,6 +225,7 @@ type KeyInventorySnapshot struct {
 	Inventory []KeyInventoryItem
 	Owned     bool // the signer's own state machine runs the zone's keys (S3): the DS set's source (S5)
 	Received  time.Time
+	seq       uint64 // the inventory's KeystateInventoryMsg.seq
 }
 
 // END.1 (E1.a): AgentId and ZoneName are now ALIASES of the hsync types, so the

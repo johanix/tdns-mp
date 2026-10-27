@@ -358,11 +358,10 @@ func (r *ownReader) read(ctx context.Context, zd *MPZoneData, combiner, signer b
 	zone := ZoneName(zd.ZoneName)
 	tm := r.conf.InternalMp.MPTransport
 	if signer {
+		// the way a pushed one goes, so that the zone's inventories are
+		// handled in the order they came (#210)
 		if inv := zd.requestKeyInventory(ctx, tm); inv != nil && r.msgQs.KeystateInventory != nil {
-			select {
-			case r.msgQs.KeystateInventory <- inv:
-			case <-ctx.Done():
-			}
+			r.msgQs.offerKeystateInventory(inv)
 		}
 	}
 	a := &ownReadAnswer{zone: zone}

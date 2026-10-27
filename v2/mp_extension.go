@@ -148,6 +148,21 @@ func (mpzd *MPZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
 	mpzd.MP.LastKeyInventory = inv
 }
 
+// setLastKeyInventoryUnlessOlder records inv unless the recorded inventory
+// came later (both counted, the recorded one's seq higher), in one step.
+// Reports the inventory recorded before, and whether inv was recorded.
+func (mpzd *MPZoneData) setLastKeyInventoryUnlessOlder(inv *KeyInventorySnapshot) (prev *KeyInventorySnapshot, ok bool) {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	mpzd.EnsureMP()
+	prev = mpzd.MP.LastKeyInventory
+	if prev != nil && inv.seq != 0 && prev.seq > inv.seq {
+		return prev, false
+	}
+	mpzd.MP.LastKeyInventory = inv
+	return prev, true
+}
+
 func (mpzd *MPZoneData) GetKeystateOK() bool {
 	mpzd.Lock()
 	defer mpzd.Unlock()
