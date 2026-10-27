@@ -1157,6 +1157,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 		case "inject-peer-keystate":
 			conf.debugInjectPeerKeystate(mp, amp, &resp)
 
+		case "inject-hello":
+			conf.debugInjectHello(r.Context(), amp, &resp)
+
+		case "inject-replace":
+			conf.debugInjectReplace(r.Context(), mp, amp, &resp)
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)

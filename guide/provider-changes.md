@@ -181,12 +181,22 @@ Charlie answers correctly, and keeps signing if it signs,
 for the NS RRset's TTL plus a safety period of its own.
 It notes any query that still arrives.
 
-**Today:** a provider taken out of `signers=` stops
-signing at its next zone refresh and serves an unsigned
-copy
+**Today:** a provider taken out of `signers=` goes on
+signing for as long as its HSYNC3 record stays
 ([issue 147](https://github.com/johanix/tdns-mp/issues/147)).
-Removing a signing provider is not safe until that is
-fixed.
+Its combiner applies what it is sent, and the other
+providers treat it as a signer. It starts nothing of its
+own: no keys, no rollover. Section 4.6 gives the order
+of the owner's edits.
+
+Charlie takes no key distribution from the others, so
+while it leaves, **no signer of the zone rolls a key**.
+Every signer's key machine pauses, an emergency rollover
+included, and `tdns-mpcli signer key status` says
+"key rollovers paused: agent.charlie.example. is leaving
+the signing set". The rollovers resume when the owner
+removes charlie's HSYNC3 record. To end the pause early,
+finish the leave.
 
 ### 4.4 For a signer: NS first, DS second
 
@@ -200,10 +210,13 @@ fixed.
 Charlie's DS has to outlive its NS because every signer
 signs its DNSKEY RRset with its own KSK.
 
-**Today:** the remaining signers drop charlie's keys with
-the owner's edit, and nothing removes its DS in this
-order
-([issue 138](https://github.com/johanix/tdns-mp/issues/138)).
+**Today:** while charlie's HSYNC3 record stays, the other
+signers keep its DNSKEYs and its DS stays in the zone's
+DS set. Both go at once when the owner removes the
+record (4.6). The steps above, each at its own time, are
+not built yet
+([issue 138](https://github.com/johanix/tdns-mp/issues/138),
+[issue 211](https://github.com/johanix/tdns-mp/pull/211)).
 
 ### 4.5 "Safe to remove"
 
@@ -218,6 +231,29 @@ Count the waits by hand.
 ### 4.6 The owner removes the HSYNC3 record
 
 Last, after every cache has expired.
+
+**Today**, the owner's order for a signer:
+
+1. Take charlie out of `signers=` and `servers=`. Under
+   `nsmgmt=owner`, drop charlie's NS records from the
+   owner's NS RRset in the same edit.
+2. Wait until the parent no longer lists charlie's NS
+   records. Then wait the NS TTL, then the DS TTL.
+3. Only then remove charlie's HSYNC3 record.
+
+Removing the record ends everything at once. Charlie's DS
+leaves the DS set, and the leader removes it at the
+parent. The other signers drop charlie's DNSKEYs.
+Charlie's combiner refuses its own agent's operations,
+and charlie is no longer a provider of the zone. Its
+operator then takes the zone out of service (4.5).
+
+For a few seconds the parent may still hold charlie's DS
+after the other signers have dropped its keys. The other
+DS records keep the chain. That holds when the remaining
+signers use charlie's algorithm. A validator that guards
+against algorithm downgrade can fail on a DS of an
+algorithm no DNSKEY has.
 
 ## 5. Changing a Provider's Role
 
@@ -251,8 +287,10 @@ and its operator is told. To get there, the owner removes
 the provider completely (section 4) and adds it back as a
 server (section 3).
 
-**Today:** the provider stops signing
-([issue 147](https://github.com/johanix/tdns-mp/issues/147)).
+**Today:** the edit is not refused, and nobody is told.
+The provider keeps signing for as long as its HSYNC3
+record stays, as a leaving signer does (4.3,
+[issue 147](https://github.com/johanix/tdns-mp/issues/147)).
 
 ## 6. Open Points
 

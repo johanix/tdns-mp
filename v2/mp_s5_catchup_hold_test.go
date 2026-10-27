@@ -276,7 +276,7 @@ func TestALeaderThatIsNotCaughtUpMakesNoCSYNC(t *testing.T) {
 	h := newHoldRig(t, "nocsync.held.example.", "NOTIFY", true, repeat(time.Hour, 4)...)
 	z := h.mpzd.ZoneName
 	h.parent.holdsNS("ns1."+z, h.oldNS)
-	h.hint()
+	h.ask()
 	h.waitOwed(t, "the NS change")
 	time.Sleep(200 * time.Millisecond)
 	if l := h.log.String(); strings.Contains(l, logCsyncMade) {
@@ -302,7 +302,7 @@ func TestAnNSChangeDuringTheHoldGetsANewCSYNCAndAHeldNotify(t *testing.T) {
 	peer := h.peer.Identity
 	h.caughtUp()
 	h.parent.holdsNS("ns1."+z, h.oldNS)
-	h.hint()
+	h.ask()
 	info, _ := h.csync(t, "")
 	h.confirms(rigCombiner, info.DistributionID, info.RR)
 	h.confirms(peer, info.DistributionID, info.RR)
@@ -311,7 +311,7 @@ func TestAnNSChangeDuringTheHoldGetsANewCSYNCAndAHeldNotify(t *testing.T) {
 	// the zone stops being caught up, and a sync is held while the chain's
 	// NOTIFY is out
 	h.notCaughtUp()
-	h.hint()
+	h.ask()
 	h.waitOwed(t, "the held sync")
 	if notified, rechecks := h.chainNotified(z); notified != "" || rechecks != 0 {
 		t.Fatalf("the chain still has its NOTIFY(%s) out, with %d checks, after the hold", notified, rechecks)

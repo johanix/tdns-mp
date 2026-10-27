@@ -49,6 +49,7 @@ type fakeParent struct {
 	ds      []dns.RR
 	updates int
 	refuse  bool // answer an UPDATE REFUSED, as a parent that will not take it yet
+	fail    int  // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
 	queries int  // the questions it was asked
 	silent  bool // answer every question SERVFAIL, as a parent that does not answer
 }
@@ -95,8 +96,11 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 	defer p.mu.Unlock()
 	if r.Opcode == dns.OpcodeUpdate {
 		p.updates++
-		if p.refuse {
+		switch {
+		case p.refuse:
 			m.Rcode = dns.RcodeRefused
+		case p.fail != 0:
+			m.Rcode = p.fail
 		}
 		_ = w.WriteMsg(m)
 		return
@@ -139,6 +143,14 @@ func (p *fakeParent) holdsDS(ds ...dns.RR) {
 func (p *fakeParent) refuses() {
 	p.mu.Lock()
 	p.refuse = true
+	p.mu.Unlock()
+}
+
+// fails has the parent answer every UPDATE with rcode, at once final for
+// tdns; 0 has it take them again.
+func (p *fakeParent) fails(rcode int) {
+	p.mu.Lock()
+	p.fail = rcode
 	p.mu.Unlock()
 }
 
@@ -375,10 +387,11 @@ func (r *notifyRig) inventory(items ...KeyInventoryItem) {
 		Inventory: items, Owned: true}, r.sdq, nil)
 }
 
-// hint is the combiner's word that the zone's NS set changed, as the
-// agent's engine handles it.
-func (r *notifyRig) hint() {
-	r.e.handleStatusUpdate(r.ctx, &StatusUpdateMsg{Zone: r.mpzd.ZoneName, SubType: "ns-changed"})
+// ask is an ask for the leader's explicit sync, as an election or a change
+// of the DS set makes it. (The combiner's "ns-changed" hint asked for it
+// too, until the refresh became the one trigger for NS and glue, #248.)
+func (r *notifyRig) ask() {
+	r.conf.requestDelegationSync(r.ctx, r.mpzd.ZoneName, "test")
 }
 
 // notified waits for one sync's NOTIFYs to reach the notifier, in order.
@@ -538,7 +551,7 @@ func TestAnUpdateIsDoneWhenTheParentHasAnswered(t *testing.T) {
 	// the parent takes the UPDATE and goes on listing the old nameserver:
 	// if anything looked again, it would send again
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	if m := r.told(t, "the UPDATE answered"); !strings.Contains(m.Msg, "SendUpdate(") {
 		t.Errorf("the peer was told %+v", *m)
 	}
@@ -590,7 +603,7 @@ func TestLosingTheLeadershipEndsTheChecksOfANotify(t *testing.T) {
 	z := r.mpzd.ZoneName
 	us := r.lem.localID
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	r.notified(t, "the first sync", dns.TypeCSYNC)
 	r.leader(AgentId(r.peer.Identity)) // before the check comes due
 	r.logged(t, 1, logCheckAgain)
@@ -602,7 +615,7 @@ func TestLosingTheLeadershipEndsTheChecksOfANotify(t *testing.T) {
 		t.Errorf("%d chains left after the leadership was lost", n)
 	}
 
-	r.hint()
+	r.ask()
 	r.notified(t, "leading again", dns.TypeCSYNC)
 	r.logged(t, 2, logCheckAgain+" zone="+z+" notify=CSYNC check=1 in=300ms")
 }
@@ -645,7 +658,7 @@ func TestASecondAskWhileACheckWaitsStartsNoSecondChain(t *testing.T) {
 	z := r.mpzd.ZoneName
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	// both are on the syncher's queue before it has sent for the first
-	r.hint()
+	r.ask()
 	if !r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {
 		t.Fatal("the second request was not queued")
 	}
@@ -817,7 +830,7 @@ func TestAZoneThatIsNotMultiProviderIsNeitherHeldNorChecked(t *testing.T) {
 	z := r.mpzd.ZoneName
 	r.mpzd.Options[tdns.OptMultiProvider] = false
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	r.notified(t, "the sync", dns.TypeCSYNC) // at once: the rig waits ten seconds, not the hour
 	if m := r.told(t, "when the NOTIFY was sent"); !strings.Contains(m.Msg, "Sent NOTIFY(CSYNC)") {
 		t.Errorf("the peer was told %+v", *m)
@@ -877,7 +890,7 @@ func TestAChangeDuringAHoldReplacesTheHeldNotifyAndStartsTheWaitAnew(t *testing.
 	r.parent.holdsDS()
 
 	// the NS set changed: NOTIFY(CSYNC), held
-	r.hint()
+	r.ask()
 	r.logged(t, 1, logHeld+" zone="+z+" notify=CSYNC wait=1s")
 	// the DS set changes while that waits: the sync finds both differing now
 	again := time.Now()
@@ -906,7 +919,7 @@ func TestASyncThatFindsTheSameDifferenceDoesNotStartTheWaitAnew(t *testing.T) {
 	r.propagation(wait)
 	z := r.mpzd.ZoneName
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	r.logged(t, 1, logHeld)
 	if !r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {
 		t.Fatal("the election's request was not queued")
@@ -933,7 +946,7 @@ func TestLosingTheLeadershipDuringAHoldDropsTheNotify(t *testing.T) {
 	z := r.mpzd.ZoneName
 	us := r.lem.localID
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	r.logged(t, 1, logHeld)
 	r.leader(AgentId(r.peer.Identity)) // before the wait is over
 	r.logged(t, 1, logDropped+" zone="+z+" notify=CSYNC")
@@ -957,7 +970,7 @@ func TestAParentFoundInSyncDuringAHoldNeedsNoNotify(t *testing.T) {
 	r.propagation(wait)
 	z := r.mpzd.ZoneName
 	r.parent.holdsNS("ns1."+z, r.oldNS)
-	r.hint()
+	r.ask()
 	r.logged(t, 1, logHeld)
 	r.parent.holdsNS("ns1." + z)
 	if !r.conf.requestDelegationSync(r.ctx, z, "this agent was elected the zone's delegation sync leader") {

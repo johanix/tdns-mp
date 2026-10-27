@@ -507,10 +507,14 @@ func ListDistribPeers(cmd *cobra.Command, component string) {
 	}
 
 	// Get peers list
+	notEnforced, _ := resp["dnssec_validation_not_enforced"].(bool)
 	if peersRaw, ok := resp["peers"].([]interface{}); ok && len(peersRaw) > 0 {
-		displayPeers(peersRaw, verbose)
+		displayPeers(peersRaw, verbose, notEnforced)
 	} else {
 		fmt.Println("No peers found")
+		if notEnforced {
+			printDnssecNotes([]string{"this node"}, false)
+		}
 	}
 
 	// Show leader election status
@@ -550,9 +554,24 @@ func ListDistribPeers(cmd *cobra.Command, component string) {
 	}
 }
 
-func displayPeers(peers []interface{}, verbose bool) {
+// displayPeers prints the peers, a state with its DNSSEC mark (chainMark).
+// After them it warns when notEnforced (this node's resolver takes data it
+// could not validate), and explains the marks when a state carries one.
+func displayPeers(peers []interface{}, verbose bool, notEnforced bool) {
 	// Sort peers: combiners first, then by state priority (OPERATIONAL > INTRODUCED > KNOWN > NEEDED)
 	sortedPeers := sortPeersForDisplay(peers)
+
+	marked := false
+	for _, pRaw := range sortedPeers {
+		if p, ok := pRaw.(map[string]interface{}); ok && chainMark(getStringValue(p, "dnssec")) != "" {
+			marked = true
+		}
+	}
+	var off []string
+	if notEnforced {
+		off = []string{"this node"}
+	}
+	defer printDnssecNotes(off, marked)
 
 	if verbose {
 		// Verbose mode: show detailed information for each peer
@@ -567,8 +586,10 @@ func displayPeers(peers []interface{}, verbose bool) {
 		return
 	}
 
-	// Compact mode: use tabular format
-	var rows []string
+	// Compact mode: use tabular format. State stays the last column, as
+	// scripts read it; what is wrong with a peer's DNS data goes in notes
+	// under the table, one line per row that has something to say.
+	var rows, reasons []string
 	rows = append(rows, "Identity | Type | Transport | Address | Crypto | State")
 
 	for _, pRaw := range sortedPeers {
@@ -602,14 +623,27 @@ func displayPeers(peers []interface{}, verbose bool) {
 			if state == "" {
 				state = "-"
 			}
+			state += chainMark(getStringValue(p, "dnssec"))
 
 			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state))
+			if reason := getStringValue(p, "discovery_reason"); reason != "" {
+				// The mechanism first: a script matches a row by its first
+				// field, the identity, and a note must not look like one.
+				reasons = append(reasons, fmt.Sprintf("  %s to %s: %s", transport, peerID, reason))
+			}
 		}
 	}
 
 	if len(rows) > 1 {
 		output := columnize.SimpleFormat(rows)
 		fmt.Println(output)
+	}
+	if len(reasons) > 0 {
+		fmt.Println()
+		fmt.Println("Discovery:")
+		for _, r := range reasons {
+			fmt.Println(r)
+		}
 	}
 }
 
@@ -764,10 +798,19 @@ func displayPeerVerbose(p map[string]interface{}) {
 
 	// State information
 	if state := getStringValue(p, "state"); state != "" {
-		fmt.Printf("  State:          %s\n", state)
+		fmt.Printf("  State:          %s%s\n", state, chainMark(getStringValue(p, "dnssec")))
 	}
 	if contactInfo := getStringValue(p, "contact_info"); contactInfo != "" {
 		fmt.Printf("  Contact Info:   %s\n", contactInfo)
+	}
+	if chain := getStringValue(p, "dnssec"); chain != "" {
+		fmt.Printf("  DNSSEC:         %s\n", chain)
+	}
+	if reason := getStringValue(p, "discovery_reason"); reason != "" {
+		fmt.Printf("  Discovery:      %s\n", reason)
+	}
+	if expires := getStringValue(p, "discovery_expires"); expires != "" {
+		fmt.Printf("  DNS data until: %s\n", expires)
 	}
 
 	// Partial discovery warning

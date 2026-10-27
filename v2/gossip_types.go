@@ -57,6 +57,13 @@ type GossipStateTable struct {
 	// propagationDelay: this provider's propagation delay, announced in our
 	// own row of every group (SetPropagationDelay). Zero: nothing announced.
 	propagationDelay time.Duration
+	// dnssecValidationNotEnforced: our resolver takes data it could not validate,
+	// announced in our own row of every group (SetDnssecValidationNotEnforced).
+	dnssecValidationNotEnforced bool
+	// peerChains: the DNSSEC verdict on each peer's discovery data, when it
+	// is not secure; our own rows carry the entries for their members
+	// (RefreshLocalStates).
+	peerChains map[string]string
 }
 
 // --- From provider_groups.go ---

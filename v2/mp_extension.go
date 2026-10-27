@@ -94,6 +94,10 @@ type MPState struct {
 	// of followParentSyncParam. An option that comes on because a refresh
 	// names this agent where the last one did not is no give-back.
 	ParentSyncNamed bool
+	// SigningChanged: a refresh changed the zone's signing set
+	// (advanceSigningSet). Set by the pre-refresh callback, taken by the
+	// post-refresh one, which asks the leader's sync (afterSigningSetChange).
+	SigningChanged bool
 
 	// absentForeign: the signer's foreign rows whose keys the last incoming
 	// zone lacked, kept because foreignKeyWithdrawn did not let them go
@@ -146,6 +150,21 @@ func (mpzd *MPZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
 	mpzd.MP.LastKeyInventory = inv
+}
+
+// setLastKeyInventoryUnlessOlder records inv unless the recorded inventory
+// came later (both counted, the recorded one's seq higher), in one step.
+// Reports the inventory recorded before, and whether inv was recorded.
+func (mpzd *MPZoneData) setLastKeyInventoryUnlessOlder(inv *KeyInventorySnapshot) (prev *KeyInventorySnapshot, ok bool) {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	mpzd.EnsureMP()
+	prev = mpzd.MP.LastKeyInventory
+	if prev != nil && inv.seq != 0 && prev.seq > inv.seq {
+		return prev, false
+	}
+	mpzd.MP.LastKeyInventory = inv
+	return prev, true
 }
 
 func (mpzd *MPZoneData) GetKeystateOK() bool {

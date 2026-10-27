@@ -92,6 +92,10 @@ func (e *HsyncDataEngine) runAgentOnly(ctx context.Context, msgQs *MsgQs) {
 			e.handleStatusUpdate(ctx, statusMsg)
 		case inventoryMsg := <-msgQs.KeystateInventory:
 			e.handleKeystateInventory(ctx, ourID, inventoryMsg, synchedDataUpdateQ, msgQs)
+			// the inventories that found the queue full, once it is empty
+			for _, waited := range msgQs.takeWaitingInventories() {
+				e.handleKeystateInventory(ctx, ourID, waited, synchedDataUpdateQ, msgQs)
+			}
 		}
 	}
 }
@@ -101,12 +105,19 @@ func (e *HsyncDataEngine) handleStatusUpdate(ctx context.Context, statusMsg *Sta
 		return
 	}
 	switch statusMsg.SubType {
-	case "ns-changed", "ksk-changed":
+	case "ksk-changed":
 		// the combiner's hint that the delegation's data changed: the same
 		// request, through the same gate (parentsync=agent, and this agent
 		// leads), without waiting for room on the syncher's queue and
 		// tried again if there was none
 		e.conf.requestDelegationSync(ctx, statusMsg.Zone, "the combiner's "+statusMsg.SubType+" hint")
+	case "ns-changed":
+		// Asks for nothing (#248). The hint can come before this agent's
+		// own copy of the zone has the new NS, and a sync then compares
+		// the parent with the old set and finds nothing to do. The refresh
+		// that brings the change to the copy asks for the sync itself
+		// (SYNC-DELEGATION), and asks again if it fails (#247).
+		lgEngine.Debug("the combiner's ns-changed hint: the refresh that brings the change asks for the sync", "zone", statusMsg.Zone)
 	}
 }
 
@@ -119,7 +130,9 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	if !exists {
 		return
 	}
-	e.conf.noteKeyInventory(ctx, zd, inventoryMsg)
+	if !e.conf.noteKeyInventory(ctx, zd, inventoryMsg) {
+		return // older than the zone's recorded inventory
+	}
 	changed, ds, err := zd.LocalDnskeysFromKeystate(ourID, nil)
 	if err != nil {
 		return

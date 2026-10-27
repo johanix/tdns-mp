@@ -29,6 +29,16 @@ type MemberState struct {
 	// of this member's nameservers. Zero: the member does not say (an agent
 	// that serves nothing, or one from before the field).
 	PropagationDelay uint32 `json:"propagation_delay,omitempty"`
+	// DnssecValidationNotEnforced is set when this member's resolver takes data it
+	// could not validate, peer discovery included
+	// (imrengine.require-dnssec-validation: false).
+	DnssecValidationNotEnforced bool `json:"dnssec_validation_not_enforced,omitempty"`
+	// PeerChains is the DNSSEC verdict on the discovery data of each peer in
+	// PeerStates whose chain is not secure: "insecure" or "bogus". A peer
+	// whose chain is secure, or not known, is not in it. The state in
+	// PeerStates says what this member did with the data: NEEDED when it
+	// refused it, OPERATIONAL when it took it with validation not enforced.
+	PeerChains map[string]string `json:"peer_chains,omitempty"`
 }
 
 // GroupElectionState carries election state for a provider group.
