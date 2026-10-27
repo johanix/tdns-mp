@@ -188,6 +188,36 @@ func TestNamedZoneSignsWithItsStoredKeysBeforeTheTake(t *testing.T) {
 	}
 }
 
+// A key-lifecycle-zones entry names its zone whatever its case, as the
+// rollout gate reads it: "A.MIXED.EXAMPLE." passes the gate for
+// a.mixed.example., so the zone is owned before the take and taken, and its
+// driver runs.
+func TestMixedCaseNamedZoneIsOwnedAndTaken(t *testing.T) {
+	kdb, conf, owner := ownsConfigRig(t, "A.MIXED.EXAMPLE.")
+	e := NewKeyLifecycleEngine(conf, owner)
+	mpzd := signerTestZone(t, "a.mixed.example.", kdb)
+	zoneSignedBy(t, mpzd, "agent.us.example.", "p2")
+	genKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateActive, "KSK", dns.ED25519)
+	genKey(t, kdb, mpzd.ZoneName, tdns.DnskeyStateActive, "ZSK", dns.ED25519)
+	if missing := unlistedMultiProviderZones([]string{mpzd.ZoneName}, conf.keyLifecycleZones()); len(missing) != 0 {
+		t.Fatalf("the rollout gate does not take the entry for the zone: missing %v", missing)
+	}
+
+	if !owner.Owns(mpzd.ZoneData) {
+		t.Error("the zone named in another case is not owned before the take")
+	}
+	e.TakeConfiguredZones()
+	if z := owner.Zones(); len(z) != 1 || z[0] != mpzd.ZoneName {
+		t.Fatalf("zones taken: %v, want %s", z, mpzd.ZoneName)
+	}
+	if !owner.taken(mpzd.ZoneName) || !owner.Owns(mpzd.ZoneData) {
+		t.Errorf("after the take: taken=%v Owns=%v, want both", owner.taken(mpzd.ZoneName), owner.Owns(mpzd.ZoneData))
+	}
+	if e.driver(mpzd.ZoneName) == nil {
+		t.Error("no driver for the zone named in another case")
+	}
+}
+
 // The engine runs a named zone's driver from the take, not from the
 // ownership: before the take a signal for it has no taker here, as before.
 func TestNamedZoneHasNoDriverBeforeTheTake(t *testing.T) {

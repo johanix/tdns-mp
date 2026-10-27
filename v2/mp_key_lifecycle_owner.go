@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -94,16 +95,16 @@ func (o *MPKeyLifecycleOwner) SetInventory(zone string, snap *KeyInventorySnapsh
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if snap == nil {
-		delete(o.inv, dns.Fqdn(zone))
+		delete(o.inv, lifecycleZoneName(zone))
 		return
 	}
-	o.inv[dns.Fqdn(zone)] = snap
+	o.inv[lifecycleZoneName(zone)] = snap
 }
 
 func (o *MPKeyLifecycleOwner) inventoryOf(zone string) *KeyInventorySnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.inv[dns.Fqdn(zone)]
+	return o.inv[lifecycleZoneName(zone)]
 }
 
 func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
@@ -114,15 +115,15 @@ func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
 func (o *MPKeyLifecycleOwner) Take(zone string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.owned[dns.Fqdn(zone)] = true
-	delete(o.released, dns.Fqdn(zone))
+	o.owned[lifecycleZoneName(zone)] = true
+	delete(o.released, lifecycleZoneName(zone))
 }
 
 func (o *MPKeyLifecycleOwner) Release(zone string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	delete(o.owned, dns.Fqdn(zone))
-	o.released[dns.Fqdn(zone)] = true
+	delete(o.owned, lifecycleZoneName(zone))
+	o.released[lifecycleZoneName(zone)] = true
 }
 
 // Zones lists the zones the owner runs.
@@ -143,7 +144,7 @@ func (o *MPKeyLifecycleOwner) Zones() []string {
 func (o *MPKeyLifecycleOwner) taken(zone string) bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.owned[dns.Fqdn(zone)]
+	return o.owned[lifecycleZoneName(zone)]
 }
 
 func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
@@ -182,7 +183,7 @@ func (o *MPKeyLifecycleOwner) runsKeys(zd *tdns.ZoneData) bool {
 	if zd == nil || !zd.Options[tdns.OptMultiProvider] {
 		return false
 	}
-	zone := dns.Fqdn(zd.ZoneName)
+	zone := lifecycleZoneName(zd.ZoneName)
 	o.mu.RLock()
 	taken, released, configured, snap := o.owned[zone], o.released[zone], o.configured, o.inv[zone]
 	o.mu.RUnlock()
@@ -195,10 +196,16 @@ func (o *MPKeyLifecycleOwner) runsKeys(zd *tdns.ZoneData) bool {
 	return o.hasSigningKeys(zone)
 }
 
-// namedZone: zone is in names, compared as the take compares them.
+// lifecycleZoneName is the key the owner, the engine and the rollout gate file a
+// zone under: the FQDN with US-ASCII A-Z lowercased, as tdns keys its
+// zones (core.CanonicalizeName; RFC 4343, every other octet as it is). A
+// key-lifecycle-zones entry names its zone whatever its case.
+func lifecycleZoneName(zone string) string { return core.CanonicalizeName(dns.Fqdn(zone)) }
+
+// namedZone: zone (a lifecycleZoneName) is in names, whatever their case.
 func namedZone(zone string, names []string) bool {
 	for _, n := range names {
-		if dns.Fqdn(n) == zone {
+		if core.EqualNames(dns.Fqdn(n), zone) {
 			return true
 		}
 	}
