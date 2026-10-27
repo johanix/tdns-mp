@@ -135,7 +135,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// before its edit is kept: also on a zone whose edits wait for
 			// manual approval, where it would otherwise wait to be refused
 			// only when approved.
-			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, msg.Operations, msg.Records); refusal != nil {
+			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil {
 				refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
 				combinerSendConfirmation(tm, deliveredBy, refusal)
 				continue

@@ -96,7 +96,8 @@ func (tm *MPTransportBridge) foreignSharesFor(zone ZoneName) map[AgentId]foreign
 // said (Amendment 2, A2.2): every SEP key among their keys whose provider
 // says ds=1, as DS records of the given digest type; a key its provider
 // says ds=0 for is left out. The signing providers are the ones the zone's
-// HSYNCPARAM marks as signers. Unknown while any of them has not spoken, or
+// HSYNCPARAM marks as signers, and those leaving it while their HSYNC3
+// records stay (the signing set, #147). Unknown while any of them has not spoken, or
 // has a SEP key whose ds is undecided, or names a ds=1 key this agent holds
 // no record of; the syncher then leaves the parent's DS alone (Q9). A
 // provider that has spoken and listed no keys has an empty share (A2.2's
@@ -156,11 +157,13 @@ func (conf *Config) computedDSSet(zone string, digest uint8) (tdns.DSIntent, []d
 	if !ok || mpzd == nil {
 		return tdns.DSIntent{}, nil, nil
 	}
-	hp := mpzd.getHSYNCPARAM()
-	if hp == nil {
+	if mpzd.getHSYNCPARAM() == nil {
 		return tdns.DSIntent{}, nil, nil
 	}
-	signers := hp.GetSigners()
+	// The signing set, not signers= alone: a provider leaving signers=
+	// signs on until the owner removes its HSYNC3 record, and its DS stays
+	// in the set while it does (#147, #200 item 4).
+	signers := mpzd.signingLabels()
 	if len(signers) == 0 {
 		lgEngine.Debug("computed DS set: the zone names no signing provider; nothing to compute", "zone", zone)
 		return tdns.DSIntent{}, nil, nil
@@ -303,8 +306,9 @@ func dsWaitsString(waits []dsWait) string {
 // relays them) and that the inventory does not hold as a SEP key with ds=1;
 // empty when there is none. One inventory without the key is not the key
 // states dropping it: the signer may have taken a copy of the zone that
-// lacked it. A provider the zone owner no longer names among the signers is
-// not asked: its DS is the leader's to remove.
+// lacked it. A provider the zone owner no longer names among the signers,
+// and that is not leaving it either (#147), is not asked: its DS is the
+// leader's to remove.
 func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
 	zone = dns.Fqdn(zone)
 	tm := conf.InternalMp.MPTransport
@@ -315,13 +319,12 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 	if !ok || mpzd == nil {
 		return ""
 	}
-	hp := mpzd.getHSYNCPARAM()
-	if hp == nil {
+	if mpzd.getHSYNCPARAM() == nil {
 		return ""
 	}
 	signing := map[string]bool{}
-	for _, s := range hp.GetSigners() {
-		signing[trimDot(s)] = true
+	for _, s := range mpzd.signingLabels() {
+		signing[s] = true
 	}
 	ourLabel := ""
 	if matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig())); err == nil && matched {
