@@ -499,7 +499,7 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 				peerArg.SetMechanismContactInfo("API", "complete")
 			}
 			if tc.dns {
-				peerArg.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+				setDNSCarrier(t, peerArg, &transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
 				peerArg.SetMechanismContactInfo("DNS", "complete")
 			}
 			env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
@@ -578,7 +578,7 @@ func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *test
 	// A peer that a concurrent discovery already established: it has a
 	// resolved address and is KNOWN.
 	peer := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(env.Bob.Identity)
-	peer.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+	setDNSCarrier(t, peer, &transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
 	peer.SetMechanismContactInfo("DNS", "complete")
 	peer.SetState(transport.PeerStateKnown, "discovered")
 
@@ -588,7 +588,7 @@ func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *test
 	if got := peer.GetState(); got == transport.PeerStateError {
 		t.Errorf("established peer regressed to ERROR by a stale discovery failure (got %v); the racing-discovery clobber is back", got)
 	}
-	if peer.CurrentAddress() == nil {
+	if peer.DNSCarrierAddress() == nil {
 		t.Errorf("established peer lost its address on discovery failure")
 	}
 

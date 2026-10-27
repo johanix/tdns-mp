@@ -270,11 +270,14 @@ func peerFromAddress(peerID string, address string) *transport.Peer {
 		return nil
 	}
 	peer := transport.NewPeer(peerID)
-	peer.SetDiscoveryAddress(&transport.Address{
+	if err := peer.SetDNSCarrierAddress(&transport.Address{
 		Host:      host,
 		Port:      uint16(port),
 		Transport: "udp",
-	})
+	}); err != nil {
+		lgApi.Warn("invalid address for static peer", "address", address, "peer", peerID, "err", err)
+		return nil
+	}
 	peer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 	return peer
 }

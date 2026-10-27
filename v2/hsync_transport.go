@@ -644,7 +644,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// ERROR sorts above KNOWN, and is no sign of an established peer:
 		// it is what this hook wrote for an earlier failure.
 		st := peer.GetState()
-		if (st >= transport.PeerStateKnown && st != transport.PeerStateError) || peer.CurrentAddress() != nil {
+		if (st >= transport.PeerStateKnown && st != transport.PeerStateError) || peer.Addressable() {
 			lgTransport.Warn("peer discovery failed but peer already established; not regressing to ERROR",
 				"peer", peer.ID, "state", st, "err", err)
 			return
@@ -1113,14 +1113,15 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	// back to the agent that actually delivered the message, not the original author.
 	deliveredBy := msg.TransportSender
 
-	// Ensure the transport sender (deliverer) has a PeerRegistry entry with an address.
+	// Ensure the transport sender (deliverer) has a PeerRegistry entry with an address
+	// to send to: a DNS carrier address or a usable API (Addressable).
 	// For forwarded messages, the deliverer may be a remote agent not pre-registered in this
 	// combiner's config. Trigger async discovery so the address is available for confirmation.
 	if deliveredBy != senderID {
 		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
 		// Inbound liveness only — do not assert OPERATIONAL on a delivery.
 		deliverPeer.SetLastBeatReceived(time.Now())
-		if deliverPeer.CurrentAddress() == nil {
+		if !deliverPeer.Addressable() {
 			lgTransport.Info("transport sender has no address, triggering async discovery", "sender", deliveredBy)
 			go func(peerID string) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1532,12 +1533,18 @@ func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage
 		peer = tm.PeerRegistry.GetOrCreate(senderID)
 	}
 
-	peer.SetOperationalAddress(&transport.Address{
+	// The DNS carrier dials the relocated address, so it must be one it can
+	// dial: udp or tcp, no path. The setter refuses any other, and the
+	// address held stays.
+	if err := peer.SetOperationalAddress(&transport.Address{
 		Host:      payload.NewAddress.Host,
 		Port:      payload.NewAddress.Port,
 		Transport: payload.NewAddress.Transport,
 		Path:      payload.NewAddress.Path,
-	})
+	}); err != nil {
+		lgTransport.Warn("relocate refused: not an address the DNS carrier dials", "peer", senderID, "err", err, "reason", payload.Reason)
+		return
+	}
 
 	lgTransport.Info("updated operational address", "peer", senderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
@@ -3036,7 +3043,10 @@ func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 	}
 	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
 	host, port := parseHostPort(tm.signerAddress, 53)
-	peer.SetDiscoveryAddress(&transport.Address{Host: host, Port: port, Transport: "udp"})
+	if err := peer.SetDNSCarrierAddress(&transport.Address{Host: host, Port: port, Transport: "udp"}); err != nil {
+		lgTransport.Warn("signer address refused", "zone", zone, "err", err)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
@@ -3071,11 +3081,14 @@ func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint1
 	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
 	// Parse address into host:port
 	host, port := parseHostPort(tm.signerAddress, 53)
-	peer.SetDiscoveryAddress(&transport.Address{
+	if err := peer.SetDNSCarrierAddress(&transport.Address{
 		Host:      host,
 		Port:      port,
 		Transport: "udp",
-	})
+	}); err != nil {
+		lgTransport.Warn("signer address refused, cannot send KEYSTATE", "zone", zone, "err", err, "signal", signal)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3126,14 +3139,14 @@ func dnsEndpointURI(host string, port int) string {
 
 // peerAddressLookup is the GetPeerAddress callback: the host:port a
 // query-mode receiver dials to fetch a sender's CHUNK records, from the
-// sender's current address in reg.
+// address the DNS carrier dials for the sender in reg.
 func peerAddressLookup(reg *transport.PeerRegistry) func(senderID string) (string, bool) {
 	return func(senderID string) (string, bool) {
 		peer, ok := reg.Get(senderID)
 		if !ok {
 			return "", false
 		}
-		addr := peer.CurrentAddress()
+		addr := peer.DNSCarrierAddress()
 		if addr == nil {
 			return "", false
 		}
@@ -3152,11 +3165,13 @@ func (tm *MPTransportBridge) sendRfiToSigner(ctx context.Context, zone string, r
 	// Get or create signer peer with address
 	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
 	host, port := parseHostPort(tm.signerAddress, 53)
-	peer.SetDiscoveryAddress(&transport.Address{
+	if err := peer.SetDNSCarrierAddress(&transport.Address{
 		Host:      host,
 		Port:      port,
 		Transport: "udp",
-	})
+	}); err != nil {
+		return err
+	}
 
 	syncReq := &PeerSyncRequest{
 		SenderID:    tm.LocalID,

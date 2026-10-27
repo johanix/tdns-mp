@@ -952,8 +952,14 @@ func runAgentDiscover(cmd *cobra.Command, agentIdentity string) {
 		if apiUri, ok := discoveryInfo["api_uri"].(string); ok && apiUri != "" {
 			fmt.Printf("  API endpoint:  %s\n", apiUri)
 		}
+		if apiAddr, ok := discoveryInfo["api_address"].(string); ok && apiAddr != "" {
+			fmt.Printf("  API address:   %s\n", apiAddr)
+		}
 		if dnsUri, ok := discoveryInfo["dns_uri"].(string); ok && dnsUri != "" {
 			fmt.Printf("  DNS endpoint:  %s\n", dnsUri)
+		}
+		if dnsAddr, ok := discoveryInfo["dns_address"].(string); ok && dnsAddr != "" {
+			fmt.Printf("  DNS address:   %s\n", dnsAddr)
 		}
 		if addrs, ok := discoveryInfo["addresses"].([]interface{}); ok && len(addrs) > 0 {
 			fmt.Printf("  IP addresses:  ")

@@ -54,7 +54,7 @@ func TestGetPeerAddress_IPv6(t *testing.T) {
 	env := newIntegEnv(t, nil)
 	const carol = "carol.agent.example."
 	p := transport.NewPeer(carol)
-	p.SetDiscoveryAddress(&transport.Address{Host: "2001:db8::53", Port: 8053, Transport: "udp"})
+	setDNSCarrier(t, p, &transport.Address{Host: "2001:db8::53", Port: 8053, Transport: "udp"})
 	if err := env.Bob.Bridge.PeerRegistry.Add(p); err != nil {
 		t.Fatal(err)
 	}
