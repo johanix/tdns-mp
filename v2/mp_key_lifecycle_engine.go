@@ -404,7 +404,9 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	zd, ok := tdns.Zones.Get(zone)
-	if !ok || zd == nil || !e.owner.Owns(zd) {
+	// a zone named in key-lifecycle-zones is owned before it is taken
+	// (#191), but its driver runs from the take (TakeConfiguredZones)
+	if !ok || zd == nil || !e.owner.Owns(zd) || !e.owner.taken(zone) {
 		delete(e.zones, zone)
 		return nil, false
 	}
