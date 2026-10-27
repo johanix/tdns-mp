@@ -297,9 +297,10 @@ long: |
   Send a message no honest daemon sends: one whose payload lies, or hellos
   at a rate no honest agent sends them. The transport, this agent's identity
   and its keys stay real; only the payload lies, or the rate. The command
-  exits 0 whether the recipient takes the message or refuses it. The agent
-  refuses the send unless its multi-provider agent-options list includes
-  allow-inject.
+  exits 0 whether the recipient takes the message or refuses it, and
+  non-zero when the send failed (for hello: when no hello reached the
+  recipient), after the line that says why. The agent refuses the send
+  unless its multi-provider agent-options list includes allow-inject.
   
     tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
     tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]

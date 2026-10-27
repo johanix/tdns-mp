@@ -7,6 +7,7 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -391,5 +392,79 @@ func TestInjectReplaceIsRefusedUnlessTheAgentAllowsIt(t *testing.T) {
 		if !resp.Error || !strings.Contains(resp.ErrorMsg, tc.want) || resp.Data != nil {
 			t.Errorf("%s: answered %+v, want an error naming %q", tc.name, resp, tc.want)
 		}
+	}
+}
+
+// A send the recipient answers REFUSED is the recipient's verdict: the
+// inject succeeds and its receipt says REFUSED. Any other error of the send
+// fails the command, with the receipt kept for the CLI to print (#277).
+func TestInjectSendErrorTellsARefusalFromAFailedSend(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		refused bool
+	}{
+		{"REFUSED", transport.NewTransportError("DNS", "sync", "agent.b.example.",
+			fmt.Errorf("NOTIFY returned rcode REFUSED"), true), true},
+		{"REFUSED, wrapped", fmt.Errorf("inject: %w", transport.NewTransportError("DNS", "keystate", "agent.b.example.",
+			fmt.Errorf("NOTIFY returned rcode REFUSED"), true)), true},
+		{"no answer", transport.NewTransportError("DNS", "sync", "agent.b.example.",
+			fmt.Errorf("NOTIFY exchange failed: i/o timeout"), true), false},
+		{"SERVFAIL", transport.NewTransportError("DNS", "sync", "agent.b.example.",
+			fmt.Errorf("NOTIFY returned rcode SERVFAIL"), true), false},
+		{"no confirmation", transport.NewTransportError("DNS", "sync", "agent.b.example.",
+			fmt.Errorf("no EDNS0 confirmation in response (DNS-level ACK only)"), true), false},
+		{"no transport", fmt.Errorf("no usable transport for peer agent.b.example."), false},
+	} {
+		resp := &AgentMgmtResponse{}
+		data := map[string]interface{}{"distribution_id": "debug-inject-named-sender-1", "transport": "DNS"}
+		injectSendError(resp, data, tc.err)
+		if tc.refused {
+			if resp.Error || data["status"] != "REFUSED" || data["error"] != nil {
+				t.Errorf("%s: resp %+v data %v, want no error and status REFUSED", tc.name, resp, data)
+			}
+			continue
+		}
+		if !resp.Error || !strings.Contains(resp.ErrorMsg, tc.err.Error()) ||
+			data["error"] != tc.err.Error() || data["status"] != nil {
+			t.Errorf("%s: resp %+v data %v, want a failed command naming %q", tc.name, resp, data, tc.err)
+		}
+		if data["distribution_id"] != "debug-inject-named-sender-1" || data["transport"] != "DNS" {
+			t.Errorf("%s: the receipt lost its distribution or transport: %v", tc.name, data)
+		}
+	}
+}
+
+// An inject hello none of whose hellos reaches the target fails, and its
+// receipt keeps the counts. Here the target has no address, so every hello
+// fails before it is sent (#277).
+func TestInjectHelloFailsWhenNoHelloReachesTheTarget(t *testing.T) {
+	env := newIntegEnv(t, nil)
+	alice := env.Alice
+	const bob = "bob.agent.example."
+	alice.Registry.S.Set(AgentId(bob), NewAgent(AgentId(bob)))
+
+	conf := &Config{}
+	mp := &MultiProviderConf{Identity: alice.Identity, AgentOptionsStrs: []string{"allow-inject"}}
+	parseMultiProviderOptions(mp)
+	conf.InternalMp.mpConfig.Store(mp)
+	conf.InternalMp.MPTransport = alice.Bridge
+	conf.InternalMp.TransportManager = alice.Bridge.TransportManager
+	conf.InternalMp.AgentRegistry = alice.Registry
+
+	resp := &AgentMgmtResponse{}
+	conf.debugInjectHello(context.Background(), AgentMgmtPost{
+		AgentId: bob,
+		Data:    map[string]interface{}{"count": "2", "interval": "100ms"},
+	}, resp)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "no hello reached") || resp.Status == "ok" {
+		t.Fatalf("a run in which no hello reached the target answered %+v", resp)
+	}
+	data, _ := resp.Data.(map[string]interface{})
+	if data["sent"] != "2" || data["accepted"] != "0" || data["refused"] != "0" || data["failed"] != "2" {
+		t.Errorf("counts %v, want 2 sent and 2 failed", data)
+	}
+	if e, _ := data["first_error"].(string); !strings.Contains(e, "no address") {
+		t.Errorf("first error %q, want the missing address", e)
 	}
 }

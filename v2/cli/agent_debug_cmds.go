@@ -524,9 +524,10 @@ func newDebugAgentInjectCmd(kind string) *cobra.Command {
 		Long: `Send a message no honest daemon sends: one whose payload lies, or hellos
 at a rate no honest agent sends them. The transport, this agent's identity
 and its keys stay real; only the payload lies, or the rate. The command
-exits 0 whether the recipient takes the message or refuses it. The agent
-refuses the send unless its multi-provider agent-options list includes
-allow-inject.
+exits 0 whether the recipient takes the message or refuses it, and
+non-zero when the send failed (for hello: when no hello reached the
+recipient), after the line that says why. The agent refuses the send
+unless its multi-provider agent-options list includes allow-inject.
 
   tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
   tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
@@ -624,14 +625,9 @@ introduced; this is for testing the bound on those beats back (#131).`,
 			count, _ := cmd.Flags().GetInt("count")
 			interval, _ := cmd.Flags().GetDuration("interval")
 			mechanism, _ := cmd.Flags().GetString("mechanism")
-			amr, err := SendAgentDebugCmd(cmd, injectHelloPost(toAgent, count, interval, mechanism), false)
-			if err != nil {
-				log.Fatalf("Error: %v", err)
-			}
-			if amr.Error {
-				log.Fatalf("Error: %s", amr.ErrorMsg)
-			}
-			fmt.Println(injectHelloReport(amr, toAgent))
+			runInject(cmd, injectHelloPost(toAgent, count, interval, mechanism), func(amr *AgentMgmtResponse) string {
+				return injectHelloReport(amr, toAgent)
+			})
 		},
 	}
 	c.Flags().String("to", "", "Target agent ID")
@@ -655,8 +651,9 @@ func injectHelloPost(to string, count int, interval time.Duration, mechanism str
 	}
 }
 
-// injectHelloReport is the one line an inject hello prints. A refused or
-// failed hello is an outcome, not a failure of the command.
+// injectHelloReport is the one line an inject hello prints. A refused hello
+// is an outcome; a failed one did not reach the target. The command fails
+// only when no hello reached it.
 func injectHelloReport(amr *AgentMgmtResponse, recipient string) string {
 	var m map[string]interface{}
 	if amr != nil {
@@ -665,9 +662,10 @@ func injectHelloReport(amr *AgentMgmtResponse, recipient string) string {
 	if r := injectMapString(m, "target"); r != "" {
 		recipient = r
 	}
-	line := fmt.Sprintf("inject hello: %s mechanism %s: sent %s of %s, accepted %s, failed %s",
+	line := fmt.Sprintf("inject hello: %s mechanism %s: sent %s of %s, accepted %s, refused %s, failed %s",
 		recipient, injectMapString(m, "mechanism"), injectMapString(m, "sent"),
-		injectMapString(m, "count"), injectMapString(m, "accepted"), injectMapString(m, "failed"))
+		injectMapString(m, "count"), injectMapString(m, "accepted"), injectMapString(m, "refused"),
+		injectMapString(m, "failed"))
 	if e := injectMapString(m, "first_error"); e != "" {
 		line += ": first error: " + e
 	}
@@ -746,18 +744,44 @@ func parsedInjectRRs(args []string) []string {
 }
 
 func finishInject(cmd *cobra.Command, req AgentMgmtPost, kind, recipient, zone string) {
-	amr, err := SendAgentDebugCmd(cmd, req, false)
-	if err != nil {
-		log.Fatalf("Error: %v", err)
+	runInject(cmd, req, func(amr *AgentMgmtResponse) string {
+		return injectReport(amr, kind, recipient, zone)
+	})
+}
+
+// runInject sends an inject, prints its line, and exits non-zero when the
+// send failed.
+func runInject(cmd *cobra.Command, req AgentMgmtPost, report func(*AgentMgmtResponse) string) {
+	amr, _ := postAgentDebug(cmd, req)
+	line, failure := injectOutcome(amr, report)
+	if line != "" {
+		fmt.Println(line)
 	}
+	if failure != "" {
+		log.Fatalf("Error: %s", failure)
+	}
+}
+
+// injectOutcome is the line an inject prints and what fails the command,
+// "" when nothing does. A refusal by the recipient is an outcome, not a
+// failure. The agent answers a send that failed with an error and the
+// receipt: the line is printed, then the command fails (#277). An error
+// with no receipt (a usage error, an injector that is off) prints no line.
+func injectOutcome(amr *AgentMgmtResponse, report func(*AgentMgmtResponse) string) (line, failure string) {
 	if amr.Error {
-		log.Fatalf("Error: %s", amr.ErrorMsg)
+		failure = amr.ErrorMsg
+		if failure == "" {
+			failure = "the agent answered with an error and no reason"
+		}
+		if amr.Data == nil {
+			return "", failure
+		}
 	}
-	fmt.Println(injectReport(amr, kind, recipient, zone))
+	return report(amr), failure
 }
 
 // injectReport is the one line an inject prints. A refusal is an outcome,
-// not a failure of the command.
+// not a failure of the command; an error is a send that failed.
 func injectReport(amr *AgentMgmtResponse, kind, recipient, zone string) string {
 	var m map[string]interface{}
 	if amr != nil {
@@ -1082,6 +1106,31 @@ func truncatePubKey(keyrr string) string {
 }
 
 func SendAgentDebugCmd(cmd *cobra.Command, req AgentMgmtPost, printJson bool) (*AgentMgmtResponse, error) {
+	amr, buf := postAgentDebug(cmd, req)
+
+	if printJson {
+		var prettyJSON bytes.Buffer
+		err := json.Indent(&prettyJSON, buf, "", "  ")
+		if err != nil {
+			log.Println("JSON parse error: ", err)
+		}
+		fmt.Printf("Agent debug response:\n%s\n", prettyJSON.String())
+		if amr.Error {
+			log.Fatalf("API error: %s", amr.ErrorMsg)
+		}
+		return amr, nil
+	}
+
+	if amr.Error {
+		log.Fatalf("API error: %s", amr.ErrorMsg)
+	}
+
+	return amr, nil
+}
+
+// postAgentDebug posts a debug command and returns the agent's answer as it
+// came, an error answer included, and its bytes.
+func postAgentDebug(cmd *cobra.Command, req AgentMgmtPost) (*AgentMgmtResponse, []byte) {
 	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
@@ -1098,25 +1147,7 @@ func SendAgentDebugCmd(cmd *cobra.Command, req AgentMgmtPost, printJson bool) (*
 	if err := json.Unmarshal(buf, &amr); err != nil {
 		log.Fatalf("Failed to parse response: %v", err)
 	}
-
-	if printJson {
-		var prettyJSON bytes.Buffer
-		err = json.Indent(&prettyJSON, buf, "", "  ")
-		if err != nil {
-			log.Println("JSON parse error: ", err)
-		}
-		fmt.Printf("Agent debug response:\n%s\n", prettyJSON.String())
-		if amr.Error {
-			log.Fatalf("API error: %s", amr.ErrorMsg)
-		}
-		return &amr, nil
-	}
-
-	if amr.Error {
-		log.Fatalf("API error: %s", amr.ErrorMsg)
-	}
-
-	return &amr, nil
+	return &amr, buf
 }
 
 // getStringValue is defined in distrib_cmds.go.

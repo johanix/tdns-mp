@@ -26,13 +26,24 @@ func TestInjectReport(t *testing.T) {
 		"target":          "agent.b.example.",
 		"zone":            "z.example.",
 		"distribution_id": "debug-inject-named-sender-1",
-		"status":          "SUCCESS",
-		"message":         "applied",
-		"error":           "peer answered REFUSED",
+		"status":          "REFUSED",
 	}}, "named-sender", "agent.b.example.", "z.example.")
-	const wantRefused = "inject named-sender: agent.b.example. zone z.example. distribution debug-inject-named-sender-1: error: peer answered REFUSED"
+	const wantRefused = "inject named-sender: agent.b.example. zone z.example. distribution debug-inject-named-sender-1: REFUSED"
 	if refused != wantRefused {
 		t.Errorf("refused line %q, want %q", refused, wantRefused)
+	}
+
+	failed := injectReport(&AgentMgmtResponse{Error: true, ErrorMsg: "the send failed", Data: map[string]interface{}{
+		"target":          "agent.b.example.",
+		"zone":            "z.example.",
+		"distribution_id": "debug-inject-named-sender-1",
+		"status":          "SUCCESS",
+		"message":         "applied",
+		"error":           "DNS sync to agent.b.example.: NOTIFY exchange failed: i/o timeout",
+	}}, "named-sender", "agent.b.example.", "z.example.")
+	const wantFailed = "inject named-sender: agent.b.example. zone z.example. distribution debug-inject-named-sender-1: error: DNS sync to agent.b.example.: NOTIFY exchange failed: i/o timeout"
+	if failed != wantFailed {
+		t.Errorf("failed line %q, want %q", failed, wantFailed)
 	}
 
 	enqueued := injectReport(&AgentMgmtResponse{Data: map[string]interface{}{
@@ -105,12 +116,54 @@ func TestInjectHelloPostAndReport(t *testing.T) {
 
 	line := injectHelloReport(&AgentMgmtResponse{Data: map[string]interface{}{
 		"target": "agent.b.example.", "mechanism": "DNS",
-		"count": "40", "sent": "40", "accepted": "39", "failed": "1",
+		"count": "40", "sent": "40", "accepted": "38", "refused": "1", "failed": "1",
 		"first_error": "NOTIFY returned rcode REFUSED",
 	}}, "")
-	const want = "inject hello: agent.b.example. mechanism DNS: sent 40 of 40, accepted 39, failed 1: first error: NOTIFY returned rcode REFUSED"
+	const want = "inject hello: agent.b.example. mechanism DNS: sent 40 of 40, accepted 38, refused 1, failed 1: first error: NOTIFY returned rcode REFUSED"
 	if line != want {
 		t.Errorf("line %q, want %q", line, want)
+	}
+}
+
+// A refusal is an outcome: the line, and no failure. A send that failed
+// prints its line and then fails the command; an error with no receipt
+// (usage, an injector that is off) fails it with no line (#277).
+func TestInjectOutcome(t *testing.T) {
+	report := func(amr *AgentMgmtResponse) string {
+		return injectReport(amr, "replace", "agent.b.example.", "z.example.")
+	}
+	receipt := map[string]interface{}{"distribution_id": "debug-inject-replace-1", "transport": "DNS"}
+
+	line, failure := injectOutcome(&AgentMgmtResponse{Status: "ok", Data: map[string]interface{}{
+		"distribution_id": "debug-inject-replace-1", "status": "REFUSED"}}, report)
+	if line != "inject replace: agent.b.example. zone z.example. distribution debug-inject-replace-1: REFUSED" || failure != "" {
+		t.Errorf("refused: line %q failure %q, want the line and no failure", line, failure)
+	}
+
+	failedReceipt := map[string]interface{}{"distribution_id": "debug-inject-replace-1", "transport": "DNS",
+		"error": "DNS sync to agent.b.example.: NOTIFY exchange failed: i/o timeout"}
+	line, failure = injectOutcome(&AgentMgmtResponse{Error: true, ErrorMsg: "the send failed: i/o timeout", Data: failedReceipt}, report)
+	if !strings.Contains(line, "distribution debug-inject-replace-1: error: ") || failure != "the send failed: i/o timeout" {
+		t.Errorf("failed send: line %q failure %q, want the line with its distribution and the failure", line, failure)
+	}
+
+	line, failure = injectOutcome(&AgentMgmtResponse{Error: true, ErrorMsg: "zone is required"}, report)
+	if line != "" || failure != "zone is required" {
+		t.Errorf("usage error: line %q failure %q, want no line and the error", line, failure)
+	}
+
+	line, failure = injectOutcome(&AgentMgmtResponse{Error: true, Data: receipt}, report)
+	if line == "" || failure == "" {
+		t.Errorf("an error with no message: line %q failure %q, want the line and a failure", line, failure)
+	}
+
+	line, failure = injectOutcome(&AgentMgmtResponse{Error: true, ErrorMsg: "no hello reached agent.b.example.: 2 of 2 sent, 2 failed",
+		Data: map[string]interface{}{"target": "agent.b.example.", "mechanism": "DNS", "count": "2", "sent": "2",
+			"accepted": "0", "refused": "0", "failed": "2", "first_error": "no address available"}},
+		func(amr *AgentMgmtResponse) string { return injectHelloReport(amr, "agent.b.example.") })
+	if !strings.HasPrefix(line, "inject hello: agent.b.example. mechanism DNS: sent 2 of 2, accepted 0, refused 0, failed 2") ||
+		!strings.HasPrefix(failure, "no hello reached") {
+		t.Errorf("no hello reached: line %q failure %q", line, failure)
 	}
 }
 

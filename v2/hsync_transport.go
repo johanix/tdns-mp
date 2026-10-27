@@ -1881,7 +1881,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
 			// A peer that keeps answering REFUSED may be one whose key we
 			// hold wrong: it is looked up again (#145).
-			if helloRefused(dnsErr) {
+			if answeredRefused(dnsErr) {
 				tm.noteHelloRefused(peer.ID)
 			}
 		} else if dnsResp != nil && !dnsResp.Accepted {
@@ -2011,7 +2011,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
 			// A peer that keeps answering our beats with REFUSED may be
 			// one whose key we hold wrong, as a refused hello may (#145).
-			if helloRefused(dnsErr) {
+			if answeredRefused(dnsErr) {
 				tm.noteBeatRefused(peer.ID)
 			}
 		} else if dnsResp != nil && !dnsResp.Ack {
