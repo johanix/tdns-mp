@@ -28,6 +28,13 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	if err := conf.keyLifecycleRolloutGate(); err != nil {
 		return err
 	}
+	// The zones key-lifecycle-zones names are the machine's from here on,
+	// taken or not, once they have keys to sign with (#191): before any
+	// engine runs, so neither a zone's first load nor tdns's KeyStateWorker
+	// sees one with keys as tdns's.
+	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
+		o.SetConfiguredZones(conf.keyLifecycleZones)
+	}
 
 	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones, and
 	// install the reload hook: a zone added by a SIGHUP reload gets them
@@ -95,8 +102,9 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// tdns KeyStateWorker: the key lifecycle of every signing zone tdns-mp
 	// does not own. tdns-mp's own key state machine runs the zones the
 	// config names (every multi-provider zone, the gate above); tdns's
-	// worker skips those (an owned zone), and runs the rest. Taken before
-	// the worker starts, so its first sweep never sees them unowned.
+	// worker skips those (an owned zone, from the start: SetConfiguredZones
+	// above), and runs the rest. The zones are seldom loaded yet here, so
+	// the take is mostly the engine's, on a later tick.
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		e.TakeConfiguredZones()
 	}
@@ -136,6 +144,14 @@ func ensureDSEngineQueue(kdb *tdns.KeyDB) {
 	if kdb != nil && kdb.DSEngineQ == nil {
 		kdb.DSEngineQ = make(chan tdns.DSEngineRequest, 100)
 	}
+}
+
+// keyLifecycleZones is key-lifecycle-zones as the config says it now.
+func (conf *Config) keyLifecycleZones() []string {
+	if mp := conf.MpConfig(); mp != nil {
+		return mp.KeyLifecycleZones
+	}
+	return nil
 }
 
 // signerResolverWanted says whether this signer starts a resolver: it does
