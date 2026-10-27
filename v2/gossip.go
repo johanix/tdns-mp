@@ -22,15 +22,22 @@ func shortHash(h string) string {
 // deepCopyMemberState returns an independent copy of a MemberState.
 func deepCopyMemberState(src *MemberState) *MemberState {
 	dst := &MemberState{
-		Identity:         src.Identity,
-		Timestamp:        src.Timestamp,
-		BeatInterval:     src.BeatInterval,
-		PropagationDelay: src.PropagationDelay,
+		Identity:                    src.Identity,
+		Timestamp:                   src.Timestamp,
+		BeatInterval:                src.BeatInterval,
+		PropagationDelay:            src.PropagationDelay,
+		DnssecValidationNotEnforced: src.DnssecValidationNotEnforced,
 	}
 	if src.PeerStates != nil {
 		dst.PeerStates = make(map[string]string, len(src.PeerStates))
 		for k, v := range src.PeerStates {
 			dst.PeerStates[k] = v
+		}
+	}
+	if src.PeerChains != nil {
+		dst.PeerChains = make(map[string]string, len(src.PeerChains))
+		for k, v := range src.PeerChains {
+			dst.PeerChains[k] = v
 		}
 	}
 	if src.Zones != nil {
@@ -114,6 +121,15 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		gst.States[groupHash] = make(map[string]*MemberState)
 	}
 
+	var chains map[string]string
+	for peer := range peerStates {
+		if c, ok := gst.peerChains[peer]; ok {
+			if chains == nil {
+				chains = make(map[string]string)
+			}
+			chains[peer] = c
+		}
+	}
 	gst.States[groupHash][gst.LocalID] = &MemberState{
 		Identity:     gst.LocalID,
 		PeerStates:   peerStates,
@@ -122,7 +138,9 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		BeatInterval: beatInterval,
 		// whole seconds on the wire, rounded up: a delay below a second is
 		// not announced as none
-		PropagationDelay: uint32((gst.propagationDelay + time.Second - 1) / time.Second),
+		PropagationDelay:            uint32((gst.propagationDelay + time.Second - 1) / time.Second),
+		DnssecValidationNotEnforced: gst.dnssecValidationNotEnforced,
+		PeerChains:                  chains,
 	}
 	if gst.localWritten == nil {
 		gst.localWritten = make(map[string]bool)
@@ -140,6 +158,24 @@ func (gst *GossipStateTable) SetPropagationDelay(d time.Duration) {
 	gst.mu.Lock()
 	defer gst.mu.Unlock()
 	gst.propagationDelay = max(d, 0)
+}
+
+// SetDnssecValidationNotEnforced sets whether our resolver takes data it could not
+// validate (imrengine.require-dnssec-validation: false). It rides in gossip,
+// in our own row of every group, so that the gossip matrix of every member
+// shows where validation is not enforced (#260).
+func (gst *GossipStateTable) SetDnssecValidationNotEnforced(off bool) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.dnssecValidationNotEnforced = off
+}
+
+// setPeerChains sets the DNSSEC verdicts our own rows carry: for each peer
+// whose discovery data is not secure, "insecure" or "bogus".
+func (gst *GossipStateTable) setPeerChains(chains map[string]string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.peerChains = chains
 }
 
 // PropagationDelay is this provider's own propagation delay, as set.
@@ -410,6 +446,12 @@ func (gst *GossipStateTable) GetGroupState(groupHash string) (map[string]*Member
 				cp.PeerStates[pk] = pv
 			}
 			cp.Zones = append([]string(nil), ms.Zones...)
+			if ms.PeerChains != nil {
+				cp.PeerChains = make(map[string]string, len(ms.PeerChains))
+				for pk, pv := range ms.PeerChains {
+					cp.PeerChains[pk] = pv
+				}
+			}
 			statesCopy[k] = &cp
 		}
 	}
@@ -531,7 +573,24 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 	// must not wait for any of them with the manager's readers behind it
 	// (tdns-mp #180).
 	now := time.Now()
-	for _, pg := range pgm.GetGroups() {
+	groups := pgm.GetGroups()
+
+	// The DNSSEC verdict on each member's discovery data, for the rows: the
+	// matrix shows a peer whose chain is not secure (#260).
+	chains := make(map[string]string)
+	for _, pg := range groups {
+		for _, member := range pg.Members {
+			if member == gst.LocalID {
+				continue
+			}
+			if c := ar.peerChain(AgentId(member)); c != "" {
+				chains[member] = c
+			}
+		}
+	}
+	gst.setPeerChains(chains)
+
+	for _, pg := range groups {
 		hash := pg.GroupHash
 		// Build our peer states for this group
 		peerStates := make(map[string]string)

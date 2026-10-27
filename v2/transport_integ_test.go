@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -596,6 +597,16 @@ func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *test
 	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(fresh, errors.New("no contact endpoints found"))
 	if got := fresh.GetState(); got != transport.PeerStateError {
 		t.Errorf("unestablished peer: got %v, want ERROR (a genuine first-time discovery failure must still register)", got)
+	}
+
+	// A refusal for want of DNSSEC validation leaves it NEEDED, ERROR from
+	// before included (#260: the matrix reads NEEDED(-), as peer list does).
+	refused := fmt.Errorf("discover peer: %w", &transport.DiscoveryError{Identity: "never-seen.example.",
+		Lookup: transport.DiscoveryLookup{Type: "URI", Owner: "_https._tcp.never-seen.example.", Failure: transport.FailureNotValidated,
+			Detail: "answer insecure, DNSSEC validation required"}})
+	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(fresh, refused)
+	if got := fresh.GetState(); got != transport.PeerStateNeeded {
+		t.Errorf("refused for want of validation: got %v, want NEEDED", got)
 	}
 }
 
