@@ -242,9 +242,17 @@ land?":
 
 ```
 $ tdns-mpcli agent zone mplist
-Zone          Servers              Signers  Auditors  NSmgmt  ParentSync  Suffix  Options
-example.com.  alpha,bravo,charlie  alpha              agent   agent               [multi-provider on-conflict-db-wins]
+Zone          Serial  Digest            Servers              Signers  Auditors  NSmgmt  ParentSync  Suffix  Options
+example.com.  1       5f3a19c2e07b4d11  alpha,bravo,charlie  alpha              agent   agent               [multi-provider on-conflict-db-wins]
 ```
+
+Serial and Digest name the owner's instructions: the
+`serial` in HSYNCPARAM, and a digest of the zone's
+HSYNC3 and HSYNCPARAM records as the code reads them.
+Every agent, combiner, signer and auditor should show
+the same pair for the zone. `ERR` is an owner error in
+the records (two HSYNCPARAM records, or two HSYNC3
+records with one label), listed below the table.
 
 The Options column carries the dynamic options. A
 provider that is listed in HSYNCPARAM but is not a

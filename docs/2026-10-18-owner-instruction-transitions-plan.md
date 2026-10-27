@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: implementation plan
 
-**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
+**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 is built (2026-10-27, its pull request carries this line); S2–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
 
 This is the plan for the design in `2026-10-18-owner-instruction-transitions-design.md`, revision 6 ("the design" below; its sections are named "design N"). The design describes how a change of the zone owner's HSYNC3 or HSYNCPARAM records is numbered, agreed and carried out, as it is meant to stand. This document holds what is dated: what exists, what is wrong today, where each rule lands in the code, the steps, and the decisions the design rests on.
 
@@ -180,7 +180,7 @@ Each step is one pull request. Each is safe to merge once what its "Needs first"
 
 The sizes are estimates from reading the code, tests apart: files touched, and lines new and changed. They are an order of magnitude, not a count. They are de-duplicated: where two readings proposed the same change, it is counted once, in the step that makes it.
 
-**Status column (2026-10-27).** Checked against tdns-mp `main` @ `d2cc1d8` and the pins in §7.1. Membership steps 1–8 and 7b are on main and are no longer listed under "Needs first". P1’s key (#928) and #926 are in the pin; the draft’s assignment of key 8 is still open. Nothing of S1–S22 is implemented. Since 2026-10-24 the mop-up of tdns-mp #267 has merged #269, #271, #272, #274, #275 and #263, and has tdns-mp #270, #278 and #279 and tdns-transport #41, #42 (a design) and #43 open. What touches a step is in its row and in 7.1.
+**Status column (2026-10-27).** Checked against tdns-mp `main` @ `d2cc1d8` and the pins in §7.1. Membership steps 1–8 and 7b are on main and are no longer listed under "Needs first". P1’s key (#928) and #926 are in the pin; the draft’s assignment of key 8 is still open. Of S1–S22, S1 is built (2026-10-27); nothing else is implemented. Since 2026-10-24 the mop-up of tdns-mp #267 has merged #269, #271, #272, #274, #275 and #263, and has tdns-mp #270, #278 and #279 and tdns-transport #41, #42 (a design) and #43 open. What touches a step is in its row and in 7.1.
 
 | Step | What | Needs first | Files | New | Changed | Status |
 |---|---|---|---|---|---|---|
@@ -190,7 +190,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | P4 | The owner's tools raise the serial | P1 at the owner's primary (key available) | Outside the repositories | - | - | Not started |
 | P5 | tdns: keys published before a signer serves its signatures (#160); a policy bound when signing starts (#146) | Nothing | tdns: not established | - | - | Not started (#160, #146 open) |
 | P6 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy of a multi-provider zone; on them before S7 | Nothing | tdns: 2 | 30 | 10 | Not started |
-| S1 | The canonical reading and its digest | P1's key on the pin (#209 done) | 8 | 240 | 30 | Not started (unblocked) |
+| S1 | The canonical reading and its digest | P1's key on the pin (#209 done) | 8 | 240 | 30 | **Built** (2026-10-27): its pull request carries this cell. Golden digest `d7294061a3f8f5af` |
 | S2 | Serials per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | Not started |
 | S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | Not started. Also moves #275's signing-set reader (S3) |
 | S4 | Owner errors and refused transitions | S3 | 9 | 245 | 60 | Not started |
@@ -288,7 +288,7 @@ Then a new pseudo-version of the core module. tdns-mp re-pins only the core modu
 
 ### P4. The owner's tools
 
-**Status (2026-10-24):** Not started (configure templates still have no `serial=`).
+**Status (2026-10-27):** Not started outside this repository. In it, S1 writes `serial="1"` in the configure example zone and the policy matrix generator.
 
 Every zone that is to change its providers carries `serial`. The owner's zone generators raise it at every edit of HSYNC3 or HSYNCPARAM, and never by 2^31 or more at once (RFC 1982's undefined half is never adopted; an agent left behind by such a jump needs S2's forget command). A primary that does not know HSYNCPARAM gets the RFC 3597 form with key 8. The owner keeps the order of records and roles, does not revoke a leaving provider's access to the zone before "done", and waits for "done" before the next edit (an edit made earlier waits at the agents anyway, design 3.3). Under `nsmgmt=owner` it drops a leaving provider's NS records from its own NS RRset in the edit that takes the provider's server role away (design 3.7, 5.2). After a change of `parentsync` from agent to owner it writes to the parent only after "done"; on an interim build that refuses the change it does not write to the parent at all (design 3.7). In tdns-mp itself, S1 changes the two files an owner's tool reads (the configure example zone, the policy matrix generator), and S4, S17b and S20 the guide. Not sized.
 
@@ -319,7 +319,12 @@ The provider's nameservers are a reader of the owner's instructions (design 1, r
 
 ### S1. The canonical reading and its digest
 
-**Status (2026-10-24):** Not started. Unblocked: P1’s key and #209 are on main.
+**Status (2026-10-27):** Built, against main `1c28505`; no go.mod change. Where the text left a choice:
+
+- `ReadInstructions` returns no reading and no error for an apex with neither record. Any HSYNC3 state but OFF reads as ON, as `zoneParticipants` has it.
+- `CompareSerial` returns 0 for equal serials and for RFC 1982's undefined half alike; `CompareSerials` tells them apart by testing equality first. It returns the order and the ON records added and removed, matched by label and identity (for S4's judge).
+- `mplist` and the auditor's views keep the lists of the first HSYNCPARAM record, which is what the code acts on until S3; only the serial, the digest and the owner error come from the reading. A zone with an owner error shows `ERR`, with the error below the table.
+- The `strings.TrimSuffix(h3.Label, ".")` calls in the readers stay (`1c28505:v2/hsync_utils.go:1072`, `v2/provider_groups.go:140, 265`): S3 replaces those readers. The configure generator refuses an agent identity whose label is not a Label.
 
 **Before it:** P1, pinned. PR #209, which moves the `PostRefresh` block that S3 moves again (`6eeb002`). No membership step is needed; it lands after them to keep conflicts out of `mplist`.
 
@@ -1316,7 +1321,7 @@ Refreshed 2026-10-27 against tdns-mp `main` @ `d2cc1d8` (pins every tdns module 
 | What | State, 2026-10-24 | Needed by |
 |---|---|---|
 | The membership plan's steps 1 to 8, step 7b included (membership decision 46) | **Done** on main: PRs #222–#228, #250–#252 (step 8 merge `30c28c3`). Ground for this plan. | Every step from S2; S14, S17a and S20 build on step 7b's key set-up |
-| tdns: the HSYNCPARAM `serial` key (P1) | **Done** in tdns: #928 merged (`219121ae`); in the pinned core (`HSYNCPARAM_SERIAL`, `GetSerial`). tdns-mp does not call it yet: that is S1. No new core key work. | S1 (consume `GetSerial`; re-pin only if the pin has moved) |
+| tdns: the HSYNCPARAM `serial` key (P1) | **Done** in tdns: #928 merged (`219121ae`); in the pinned core (`HSYNCPARAM_SERIAL`, `GetSerial`). S1 calls it (2026-10-27). No new core key work. | S1 (consume `GetSerial`; re-pin only if the pin has moved) |
 | The draft: the key's number (8 proposed) and its rules: raised at every edit, RFC 1982, absent is 0, one HSYNCPARAM, one record per label in any state | **Still open:** [draft PR #3](https://github.com/johanix/draft-leon-dnsop-signaling-zone-owner-intent/pull/3) (not merged). tdns already ships key 8. | P1 / interop docs |
 | tdns: `parentsync` asked of the application (P3), and the re-pin of tdns/v2 | **Still missing.** No PR. tdns still reads `GetParentSync` from the zone copy (`parentsync_bootstrap.go`). | S3 |
 | tdns #926 (the key poll checks `parentsync` before every step) | **Done.** Merged (`9febcafd`); present in the current pin. | P3, S20 |
@@ -1326,7 +1331,7 @@ Refreshed 2026-10-27 against tdns-mp `main` @ `d2cc1d8` (pins every tdns module 
 | tdns: #160's mode and #146's policy binding (P5) | **Still not established.** tdns-mp issues #160 and #146 remain open; no implementing PR. | S18b |
 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy (P6) | **Still missing.** No PR. `use-hsyncparam` / `signal_republish.go` still act on the nameserver's own copy. | S7 (on the nameservers before it), S21 |
 | tdns-transport: an application field on confirmations, with the message (P2) | **Still missing.** No PR. `IncomingConfirmation` has no application stamp field. | S5b, S8 |
-| The owner's tools (P4): the serial in every zone, raised at every edit | **Still missing.** Configure example zone and templates have no `serial=` on HSYNCPARAM. | Before S7 reaches a fleet |
+| The owner's tools (P4): the serial in every zone, raised at every edit | **Still missing** outside this repository. S1 writes `serial="1"` in the configure example zone and the policy matrix generator; raising it at every edit is the owner's. | Before S7 reaches a fleet |
 | tdns-mp #209 (#200 item 1) | **Done.** Merged 2026-10-19; `followParentSyncParam` on main. | S1, S3, S20 |
 | tdns-mp #167 (`contributionsLoaded`; the combiner's `lacksPubkeyConsent`) | **Done.** Merged 2026-10-19; both helpers on main (`combiner_chunk.go`). | S21 |
 | tdns-mp #208 (#207) | **Done.** Merged 2026-10-18 (`1d49624` on main). | S3, S10, S13 |
