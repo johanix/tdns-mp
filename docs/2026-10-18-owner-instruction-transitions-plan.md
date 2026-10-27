@@ -189,7 +189,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | P3 | tdns: `parentsync` asked of the application; tdns #926 | Nothing (#926 done) | tdns: 2 | 20 | 10 | **#926 done.** The hook is built (2026-10-28, tdns branch `claude/211-p3-parentsync-hook`); its pull request follows. tdns-mp sets it in S3 |
 | P4 | The owner's tools raise the serial | P1 at the owner's primary (key available) | Outside the repositories | - | - | Not started |
 | P5 | tdns: keys published before a signer serves its signatures (#160); a policy bound when signing starts (#146) | Nothing | tdns: not established | - | - | Not started (#160, #146 open) |
-| P6 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy of a multi-provider zone; on them before S7 | Nothing | tdns: 2 | 30 | 10 | Not started. Its open questions are answered (2026-10-28, below); the project owner decides three points; built by another session |
+| P6 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy of a multi-provider zone; on them before S7 | Nothing | tdns: 2 | 30 | 10 | **Implemented** (tdns `2ad30457`, not yet a pull request): the use-hsyncparam reconciler skips a zone whose copy carries HSYNC3 and withdraws what it published for it; the at-ns half stays. Waits on the project owner: withdraw rather than freeze, the scope, shipping on |
 | S1 | The canonical reading and its digest | P1's key on the pin (#209 done) | 8 | 240 | 30 | **Done**: merged as #280 (main `3c9f6d7`, 2026-10-27). Golden digest `d7294061a3f8f5af` |
 | S2 | Serials per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | **Built** (2026-10-27): #281, which carries this cell. Active follows the copy, "not enforced" |
 | S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | Not started. Also moves #275's signing-set reader (S3) |
@@ -305,7 +305,7 @@ Needed by S18b only. Until then S4 refuses a move into `signers=`.
 
 ### P6. tdns: the provider's nameservers and `pubkey`, `pubcds`
 
-**Status (2026-10-24):** Not started.
+**Status (2026-10-28):** Implemented (tdns `2ad30457`, branch `feat/signal-reconciler-skips-mp-zones`, not yet a pull request), on the answers below: the use-hsyncparam reconciler skips a zone whose copy carries HSYNC3, logging that once, and withdraws what it published for it; the at-ns half stays. Tests: the two below, a withdrawal test, and one that keeps a zone's own bootstrap. Its pull request waits on the project owner's three decisions.
 
 **Before it:** nothing. Needed on the providers' nameservers before S7 (section 4), and by S21.
 
@@ -1345,7 +1345,7 @@ Refreshed 2026-10-27 against tdns-mp `main` @ `d2cc1d8` (pins every tdns module 
 | tdns #916 (KeyState answered by the parent side when the server hosts the child too) | **Done.** Merged; on main since tdns-mp #219 (and later pins). | S3 / correct on the wire |
 | tdns #917, both sides | **Child done:** tdns #933 merged and in the pin. **Parent side still open:** issue #917, no PR. | Parent side for the recovery of a lost key (7.4) |
 | tdns: #160's mode and #146's policy binding (P5) | **Still not established.** tdns-mp issues #160 and #146 remain open; no implementing PR. | S18b |
-| tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy (P6) | **Still missing.** No PR. Its open questions are answered (2026-10-28, P6); the project owner decides three points. | S7 (on the nameservers before it), S21 |
+| tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy (P6) | **Implemented** (tdns `2ad30457`, not yet a PR); waits on the project owner's three decisions (P6). | S7 (on the nameservers before it), S21 |
 | tdns-transport: an application field on confirmations, with the message (P2) | **Still missing.** No PR. `IncomingConfirmation` has no application stamp field. | S5b, S8 |
 | The owner's tools (P4): the serial in every zone, raised at every edit | **Still missing** outside this repository. S1 writes `serial="1"` in the configure example zone and the policy matrix generator; raising it at every edit is the owner's. | Before S7 reaches a fleet |
 | tdns-mp #209 (#200 item 1) | **Done.** Merged 2026-10-19; `followParentSyncParam` on main. | S1, S3, S20 |
