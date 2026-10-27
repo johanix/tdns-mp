@@ -70,12 +70,11 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 		return nil, errTwoHsyncparams
 	}
 
+	// Empty lists are nil, with HSYNCPARAM and without, as sortedUnique
+	// leaves them.
 	in := &Instructions{
 		NSmgmt:     core.HsyncNSmgmtOWNER,
 		ParentSync: core.HsyncParentSyncOwner,
-		Servers:    []string{},
-		Signers:    []string{},
-		Auditors:   []string{},
 	}
 	seen := make(map[string]bool, len(h3s))
 	for _, rr := range h3s {

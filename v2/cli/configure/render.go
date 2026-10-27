@@ -256,6 +256,18 @@ func renderAll(cv CoordinatedValues) (map[string]string, error) {
 
 // renderAllIn is renderAll for an explicit layout.
 func renderAllIn(cv CoordinatedValues, l fsLayout) (map[string]string, error) {
+	// The example zone is written only when absent, with the label the agent
+	// identity gives. Refuse a label tdns would refuse here, before the
+	// preview and before any key or certificate is made.
+	existing, err := ReadFileIfExists(l.exampleZoneFile())
+	if err != nil {
+		return nil, err
+	}
+	if existing == "" {
+		if err := checkProviderLabel(cv.Agent.Identity); err != nil {
+			return nil, err
+		}
+	}
 	ctx := makeRenderCtx(cv, l)
 
 	pairs := []struct {

@@ -109,3 +109,25 @@ func TestTheExampleZoneRefusesAProviderLabelThatIsNotALabel(t *testing.T) {
 		})
 	}
 }
+
+// The label is checked when the configs are rendered, before the preview
+// and before any key or certificate is made, and only when the example zone
+// will be written: an operator's own zone file is left to the operator.
+func TestABadProviderLabelIsRefusedBeforeAnyKeyIsMade(t *testing.T) {
+	root := t.TempDir()
+	l := testLayout(root)
+	cv := testValues(root, "10.0.0.1", "192.0.2.1", false)
+	cv.Agent.Identity = "agent.under_score.example."
+	if _, err := renderAllIn(cv, l); err == nil || !strings.Contains(err.Error(), "not a Label") {
+		t.Fatalf("rendering with no example zone: %v; want refused", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(l.exampleZoneFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.exampleZoneFile(), []byte("; the operator's own\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := renderAllIn(cv, l); err != nil {
+		t.Errorf("rendering with the operator's zone file: %v", err)
+	}
+}
