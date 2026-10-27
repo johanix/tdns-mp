@@ -10,6 +10,7 @@ package tdnsmp
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -136,6 +137,37 @@ func TestAnswerJudgedRefusalStays(t *testing.T) {
 	}
 	if n := me.aliceAtBob.MechanismConsecutiveFails(transport.MechanismAPI); n != 0 {
 		t.Errorf("HTTPS has %d failures counted, want 0", n)
+	}
+}
+
+// An answer that DNS fails to deliver goes over HTTPS, where alice's /msg
+// refuses it: it comes back not accepted, naming HTTPS, not as a failure to
+// send. Only DNS's failure is counted.
+func TestAnswerRefusedOnTheFallback(t *testing.T) {
+	me := newMechanismEnv(t, "answer-judged-fallback.example.", httpsJudges)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
+	ln.Close() // nothing listens there: every NOTIFY is refused
+	me.aliceAtBob.SetDiscoveryAddress(dead)
+	me.aliceAtBob.SetMechanismAddress("DNS", dead)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := me.Bob.Bridge.sendConfig(ctx, me.aliceAtBob, transport.MechanismDNS, &PeerConfigRequest{
+		SenderID: me.bob, Zone: me.zone, Subtype: "upstream",
+		ConfigData: map[string]string{"xfr_srcs": "127.0.0.1"}, Timestamp: time.Now(),
+	})
+	if err != nil || resp.Accepted || resp.Mechanism != transport.MechanismAPI || resp.Message != "not authorized" {
+		t.Fatalf("DNS failing, HTTPS judging: resp %+v err %v, want it not accepted over HTTPS", resp, err)
+	}
+	if n := me.posts.Load(); n != 1 {
+		t.Errorf("%d POSTs, want 1", n)
+	}
+	if d, a := me.aliceAtBob.MechanismConsecutiveFails(transport.MechanismDNS), me.aliceAtBob.MechanismConsecutiveFails(transport.MechanismAPI); d != 1 || a != 0 {
+		t.Errorf("counts: DNS %d, HTTPS %d; want 1 and 0", d, a)
 	}
 }
 

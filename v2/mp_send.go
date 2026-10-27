@@ -278,14 +278,15 @@ func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer
 // failure to deliver, or a /msg that does not take the verb, goes on the
 // other mechanism, and a refusal the asker judged stops there. That refusal
 // comes back as the asker's response, not accepted, as a refusal over DNS
-// always has. It returns the mechanism that carried the answer, or the one
-// that was refused.
+// always has, also when it came on the other mechanism after the first failed
+// to deliver. It returns the mechanism that carried the answer, or the one on
+// which it was refused.
 func (tm *MPTransportBridge) sendAnswer(ctx context.Context, mechanism string, peer *transport.Peer, msg *transport.AppMessage) (*transport.AppResponse, string, error) {
 	resp, out, err := tm.TransportManager.SendOn(ctx, peer, mechanism, msg)
 	appResp, _ := resp.(*transport.AppResponse)
 	if err != nil {
-		if transportErrorAnswered(err) && appResp != nil {
-			return appResp, out.First, nil
+		if out.Refuser != "" && appResp != nil {
+			return appResp, out.Refuser, nil
 		}
 		return nil, "", err
 	}
