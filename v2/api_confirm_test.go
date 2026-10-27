@@ -15,11 +15,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,14 +57,22 @@ func queueSync(t *testing.T, env *integEnv, zone string) string {
 	return id
 }
 
-// alice's /msg: it serves, refuses every message, or hangs.
+// alice's /msg: it serves; takes only the verbs a /msg took before
+// confirmations and RFI answers went over HTTPS, and answers the rest that
+// they are not accepted there; refuses every message, as a judgment; drops
+// the connection without an answer; or hangs.
 type httpsMode int
 
 const (
 	httpsServes httpsMode = iota
-	httpsRefuses
+	httpsOlder
+	httpsJudges
+	httpsDrops
 	httpsHangs
 )
+
+// olderMsgVerbs are the verbs alice's /msg takes in httpsOlder.
+var olderMsgVerbs = []string{"sync", "update", "rfi"}
 
 // mechanismEnv is alice and bob sharing zone, alice reachable at bob over
 // both mechanisms: her sync API endpoints over HTTPS and her receive
@@ -96,9 +106,31 @@ func newMechanismEnv(t *testing.T, zone string, mode httpsMode) *mechanismEnv {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		me.posts.Add(1)
 		switch mode {
-		case httpsRefuses:
+		case httpsOlder:
+			body, _ := io.ReadAll(r.Body)
+			im, _ := parseAppPayload("", body, r.RemoteAddr)
+			if im == nil || !slices.Contains(olderMsgVerbs, im.Token()) {
+				verb := ""
+				if im != nil {
+					verb = im.Token()
+				}
+				sink := &apiReplySink{kind: apiEndpointMsg, w: w, local: AgentId(me.alice)}
+				_ = sink.fail(fmt.Sprintf("message type %q is not accepted on %s", verb, r.URL.Path))
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			msg(w, r)
+		case httpsJudges:
 			sink := &apiReplySink{kind: apiEndpointMsg, w: w, local: AgentId(me.alice)}
-			_ = sink.fail("refused")
+			_ = sink.fail("not authorized")
+		case httpsDrops:
+			// The body read, the connection goes without an answer.
+			_, _ = io.Copy(io.Discard, r.Body)
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
 		case httpsHangs:
 			// The body read, the server sees the client go.
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -258,7 +290,7 @@ func TestConfirm_HTTPSSyncIsConfirmedOverHTTPS(t *testing.T) {
 // before confirmations went over HTTPS, refuses both of bob's, and both
 // reach her by NOTIFY and close her entry.
 func TestConfirm_RefusedHTTPSConfirmGoesOverDNS(t *testing.T) {
-	me := newMechanismEnv(t, "confirm-refused.example.", httpsRefuses)
+	me := newMechanismEnv(t, "confirm-refused.example.", httpsOlder)
 	id := queueSync(t, me.integEnv, me.zone)
 	in := makeSyncIncomingMessage(t, me.alice, me.bob, me.zone, id,
 		map[string][]string{me.zone: {me.zone + " 3600 IN TXT \"refused\""}})
@@ -276,6 +308,9 @@ func TestConfirm_RefusedHTTPSConfirmGoesOverDNS(t *testing.T) {
 	}
 	if p, n := me.posts.Load(), me.notifies.Load(); p != 2 || n != 2 {
 		t.Errorf("%d POSTs and %d NOTIFYs, want each confirmation refused over HTTPS and sent by NOTIFY", p, n)
+	}
+	if n := me.aliceAtBob.MechanismConsecutiveFails(transport.MechanismAPI); n != 0 {
+		t.Errorf("HTTPS has %d failures counted, want 0: it delivered both, and the endpoint does not take them", n)
 	}
 }
 
@@ -333,16 +368,52 @@ func TestConfirm_FailedDNSConfirmGoesOverHTTPS(t *testing.T) {
 
 // A confirmation that fails over DNS falls back to HTTPS only when the
 // peer's API is usable: an endpoint alone, with no TLSA to check its
-// certificate against, is no fallback, and the NOTIFY keeps all the time.
+// certificate against, is no fallback. HTTPS is not tried, and the failure
+// counts against DNS.
 func TestConfirm_NoHTTPSFallbackWithoutATLSA(t *testing.T) {
 	me := newMechanismEnv(t, "confirm-no-tlsa.example.", httpsServes)
-	b := me.Bob.Bridge
-	if got := b.otherConfirmTransport(b.DNSTransport, me.aliceAtBob); got != b.APITransport {
-		t.Fatalf("alice with an endpoint and a TLSA: the fallback from DNS is %v, want HTTPS", got)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	dead := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
+	ln.Close() // nothing listens there: every NOTIFY is refused
+	me.aliceAtBob.SetDiscoveryAddress(dead)
+	me.aliceAtBob.SetMechanismAddress("DNS", dead)
 	me.aliceAtBob.SetMechanismTLSA("API", transport.TLSASet{})
-	if got := b.otherConfirmTransport(b.DNSTransport, me.aliceAtBob); got != nil {
-		t.Errorf("alice with an endpoint and no TLSA: the fallback from DNS is %s, want none", got.Name())
+
+	ctx, cancel := context.WithTimeout(context.Background(), confirmWait)
+	defer cancel()
+	err = me.Bob.Bridge.confirmOn(ctx, transport.MechanismDNS, me.aliceAtBob, &transport.ConfirmRequest{
+		SenderID: me.bob, Zone: me.zone, DistributionID: nextDistributionID(), Status: transport.ConfirmSuccess, Timestamp: time.Now()})
+	if err == nil {
+		t.Fatal("a confirmation DNS cannot carry, to a peer with no TLSA, was sent")
+	}
+	if n := me.posts.Load(); n != 0 {
+		t.Errorf("alice got %d POSTs, want none: HTTPS with no TLSA is no fallback", n)
+	}
+	if n := me.aliceAtBob.MechanismConsecutiveFails(transport.MechanismDNS); n != 1 {
+		t.Errorf("DNS has %d failures counted, want 1", n)
+	}
+}
+
+// A confirmation alice's /msg takes and refuses has been judged: it is not
+// sent again by NOTIFY, and nothing is counted against HTTPS
+// (tdns-transport #36).
+func TestConfirm_JudgedHTTPSConfirmIsNotSentAgain(t *testing.T) {
+	me := newMechanismEnv(t, "confirm-judged.example.", httpsJudges)
+	ctx, cancel := context.WithTimeout(context.Background(), confirmWait)
+	defer cancel()
+	err := me.Bob.Bridge.confirmOn(ctx, transport.MechanismAPI, me.aliceAtBob, &transport.ConfirmRequest{
+		SenderID: me.bob, Zone: me.zone, DistributionID: nextDistributionID(), Status: transport.ConfirmSuccess, Timestamp: time.Now()})
+	if !transportErrorAnswered(err) {
+		t.Fatalf("a judged confirmation: %v, want the Answered refusal", err)
+	}
+	if p, n := me.posts.Load(), me.notifies.Load(); p != 1 || n != 0 {
+		t.Errorf("%d POSTs and %d NOTIFYs, want the one POST and no NOTIFY", p, n)
+	}
+	if n := me.aliceAtBob.MechanismConsecutiveFails(transport.MechanismAPI); n != 0 {
+		t.Errorf("HTTPS has %d failures counted, want 0", n)
 	}
 }
 
