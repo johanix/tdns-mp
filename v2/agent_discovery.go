@@ -170,11 +170,11 @@ func (tm *MPTransportBridge) freshLookupDue(peerID string) bool {
 	return true
 }
 
-// helloRefused reports whether a DNS hello, or a DNS beat, failed because the
-// peer answered REFUSED, as opposed to not answering or failing in another
-// way. The transport reports the answer's rcode in the text of its error and
-// nowhere else.
-func helloRefused(err error) bool {
+// answeredRefused reports whether a DNS message (a hello, a beat, an
+// inject's SYNC or KEYSTATE) failed because the peer answered REFUSED, as
+// opposed to not answering or failing in another way. The transport reports
+// the answer's rcode in the text of its error and nowhere else.
+func answeredRefused(err error) bool {
 	var te *transport.TransportError
 	if !errors.As(err, &te) || te.Err == nil {
 		return false

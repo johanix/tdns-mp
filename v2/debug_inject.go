@@ -193,6 +193,23 @@ func (tm *MPTransportBridge) sendSyncOnce(ctx context.Context, peer *transport.P
 	return syncResponseFromApp(req, resp), primary.Name(), nil
 }
 
+// injectSendError puts the error of an inject's send in its receipt. An
+// answer of REFUSED is the recipient's verdict, an outcome of the inject as
+// much as a SYNC it takes: the receipt says REFUSED and the command
+// succeeds. Any other error is a send that did not happen, or that no
+// verdict came back for, and the command fails (#277). The receipt goes
+// with the failure, so the CLI still prints the distribution and the
+// transport before it exits non-zero.
+func injectSendError(resp *AgentMgmtResponse, data map[string]interface{}, err error) {
+	if answeredRefused(err) {
+		data["status"] = "REFUSED"
+		return
+	}
+	data["error"] = err.Error()
+	resp.Error = true
+	resp.ErrorMsg = "the send failed: " + err.Error()
+}
+
 func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtResponse) {
 	if conf.injectRefused(resp) {
 		return
@@ -252,14 +269,16 @@ func (conf *Config) debugInjectNamedSender(amp AgentMgmtPost, resp *AgentMgmtRes
 		"transport":       via,
 	}
 	if err != nil {
-		data["error"] = err.Error()
+		injectSendError(resp, data, err)
 	} else if syncResp != nil {
 		data["status"] = syncResp.Status.String()
 		data["message"] = syncResp.Message
 	}
 	resp.Data = data
 	resp.Msg = fmt.Sprintf("inject named-sender to %s for zone %s", amp.AgentId, amp.Zone)
-	resp.Status = "ok"
+	if !resp.Error {
+		resp.Status = "ok"
+	}
 }
 
 // debugInjectReplace sends the target one REPLACE from this agent that
@@ -333,14 +352,16 @@ func (conf *Config) debugInjectReplace(parent context.Context, mp *MultiProvider
 		"transport":       via,
 	}
 	if err != nil {
-		data["error"] = err.Error()
+		injectSendError(resp, data, err)
 	} else if syncResp != nil {
 		data["status"] = syncResp.Status.String()
 		data["message"] = syncResp.Message
 	}
 	resp.Data = data
 	resp.Msg = fmt.Sprintf("inject replace of %s to %s for zone %s", rrtype, amp.AgentId, amp.Zone)
-	resp.Status = "ok"
+	if !resp.Error {
+		resp.Status = "ok"
+	}
 }
 
 func (conf *Config) debugInjectCombinerOrigin(amp AgentMgmtPost, resp *AgentMgmtResponse) {
@@ -385,12 +406,18 @@ func (conf *Config) debugInjectCombinerOrigin(amp AgentMgmtPost, resp *AgentMgmt
 		"zone":            string(amp.Zone),
 		"origin":          origin,
 	}
+	// The combiner's verdict comes later, off the queue; an update that is
+	// not queued is never sent, and the command fails (#277).
 	if _, err := conf.InternalMp.MPTransport.EnqueueForCombiner(amp.Zone, update, distID); err != nil {
 		data["error"] = err.Error()
+		resp.Error = true
+		resp.ErrorMsg = "the update was not queued for the combiner: " + err.Error()
 	}
 	resp.Data = data
 	resp.Msg = fmt.Sprintf("inject combiner-origin %s for zone %s", origin, amp.Zone)
-	resp.Status = "ok"
+	if !resp.Error {
+		resp.Status = "ok"
+	}
 }
 
 func (conf *Config) debugInjectPeerKeystate(mp *MultiProviderConf, amp AgentMgmtPost, resp *AgentMgmtResponse) {
@@ -432,7 +459,7 @@ func (conf *Config) debugInjectPeerKeystate(mp *MultiProviderConf, amp AgentMgmt
 		"zone":   string(amp.Zone),
 	}
 	if err != nil {
-		data["error"] = err.Error()
+		injectSendError(resp, data, err)
 	} else if ksResp != nil {
 		data["accepted"] = ksResp.Accepted
 		data["status"] = "NOT ACCEPTED"
@@ -443,7 +470,9 @@ func (conf *Config) debugInjectPeerKeystate(mp *MultiProviderConf, amp AgentMgmt
 	}
 	resp.Data = data
 	resp.Msg = fmt.Sprintf("inject peer-keystate to %s for zone %s", amp.AgentId, amp.Zone)
-	resp.Status = "ok"
+	if !resp.Error {
+		resp.Status = "ok"
+	}
 }
 
 // The bounds of an inject hello: enough hellos to show the bound on the beats
@@ -510,7 +539,9 @@ func injectHelloRequest(sender string, shared []ZoneName) *transport.HelloReques
 // target beats back on each hello from a peer it has introduced, and #131
 // bounds those beats back. The injector changes nothing in this agent's view
 // of the target: no mechanism state, no note of an accepted or refused hello.
-// A failed or refused hello is an outcome, not an error of the command.
+// A hello the target refuses is an outcome; one that fails (no answer, or
+// another error than REFUSED) did not reach it. The command fails only when
+// no hello reached the target (#277), with the counts in its receipt.
 // The loop runs under the API request's context: a request that is given up
 // stops it.
 func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, resp *AgentMgmtResponse) {
@@ -565,7 +596,12 @@ func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, 
 	lgApi.Warn("inject: hello", "target", amp.AgentId, "mechanism", mech, "count", count, "interval", interval)
 	ctx, cancel := context.WithTimeout(parent, time.Duration(count)*(interval+5*time.Second))
 	defer cancel()
-	sent, accepted, failed, firstErr := 0, 0, 0, ""
+	sent, accepted, refused, failed, firstErr := 0, 0, 0, 0, ""
+	noteErr := func(e string) {
+		if firstErr == "" {
+			firstErr = e
+		}
+	}
 	for i := 0; i < count && ctx.Err() == nil; i++ {
 		if i > 0 {
 			select {
@@ -580,18 +616,21 @@ func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, 
 		sent++
 		r, err := helloResult(results[mech])
 		switch {
+		case answeredRefused(err):
+			refused++
+			noteErr(err.Error())
 		case err != nil:
 			failed++
-			if firstErr == "" {
-				firstErr = err.Error()
-			}
-		case r == nil || !r.Accepted:
+			noteErr(err.Error())
+		case r == nil:
 			failed++
-			if firstErr == "" {
-				firstErr = "not accepted"
-				if r != nil && r.RejectReason != "" {
-					firstErr = "not accepted: " + r.RejectReason
-				}
+			noteErr("no answer")
+		case !r.Accepted:
+			refused++
+			if r.RejectReason != "" {
+				noteErr("not accepted: " + r.RejectReason)
+			} else {
+				noteErr("not accepted")
 			}
 		default:
 			accepted++
@@ -603,9 +642,15 @@ func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, 
 		"count":       strconv.Itoa(count),
 		"sent":        strconv.Itoa(sent),
 		"accepted":    strconv.Itoa(accepted),
+		"refused":     strconv.Itoa(refused),
 		"failed":      strconv.Itoa(failed),
 		"first_error": firstErr,
 	}
 	resp.Msg = fmt.Sprintf("inject hello to %s: %d sent", amp.AgentId, sent)
+	if accepted+refused == 0 {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("no hello reached %s: %d of %d sent, %d failed", amp.AgentId, sent, count, failed)
+		return
+	}
 	resp.Status = "ok"
 }
