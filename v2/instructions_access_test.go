@@ -237,6 +237,34 @@ func TestAnAuditorIsFoundByItsIdentityInAnyCase(t *testing.T) {
 	}
 }
 
+// A copy without HSYNC3 and HSYNCPARAM, the end of multi-provider service,
+// is a good reading of none: a broken copy after it reads as none too, not
+// as the instructions from before.
+func TestABrokenCopyAfterTheEndOfServiceKeepsNoInstructions(t *testing.T) {
+	mpzd := instrTestZone(t, "lastgood.access.example.", acRecords("", `serial="7" servers="alpha,beta"`)...)
+	t.Cleanup(func() { lastGood.Delete(mpzd.ZoneName); noReading.Delete(mpzd.ZoneName) })
+	apex := func() *tdns.OwnerData {
+		t.Helper()
+		a, err := mpzd.GetOwner(mpzd.ZoneName)
+		if err != nil || a == nil {
+			t.Fatalf("apex: %v", err)
+		}
+		return a
+	}
+	if readingOf(apex()) == nil {
+		t.Fatal("the copy with instructions does not read")
+	}
+	setApex(t, mpzd, core.TypeHSYNC3)
+	setApex(t, mpzd, core.TypeHSYNCPARAM)
+	if in := readingOf(apex()); in != nil {
+		t.Fatalf("the copy without HSYNC3 and HSYNCPARAM reads as %+v", in)
+	}
+	setApex(t, mpzd, core.TypeHSYNCPARAM, `3600 IN HSYNCPARAM servers="alpha"`, `3600 IN HSYNCPARAM servers="beta"`)
+	if in := readingOf(apex()); in != nil {
+		t.Errorf("a broken copy after the end of service reads as the instructions from before: %+v", in)
+	}
+}
+
 // One identity under a signer's label and an auditor's that sorts first (an
 // owner error): its DNSKEYs are taken, and its label is the signer's.
 func TestAnIdentityUnderTwoLabelsIsTakenByItsRole(t *testing.T) {
