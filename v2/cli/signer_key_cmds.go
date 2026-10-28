@@ -108,7 +108,7 @@ the new algorithm signs.`,
 			}
 			changed := false
 			for _, role := range []string{"KSK", "ZSK"} {
-				if alg := mustFlag(cmd, strings.ToLower(role)+"-algorithm"); alg != "" {
+				if alg := mustFlag(cmd, strings.ToLower(role)+"-algorithm"); alg != "" { // not-a-name: a key role
 					resp := signerKeyPost(cmd, tdnsmp.SignerKeyPost{Command: "policy-algorithm", Zone: signerKeyZone(cmd), Role: role, Algorithm: alg})
 					fmt.Println(resp.Msg)
 					changed = true

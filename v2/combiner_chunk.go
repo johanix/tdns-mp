@@ -1258,9 +1258,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 				continue
 			}
 			if isProvider {
-				lowerOwner := strings.ToLower(rr.Header().Name)
-				lowerZone := strings.ToLower(zonename)
-				if lowerOwner != lowerZone && !strings.HasSuffix(lowerOwner, "."+lowerZone) {
+				if !dns.IsSubDomain(zonename, rr.Header().Name) {
 					rejectedItems = append(rejectedItems, RejectedItem{
 						Record: rrStr,
 						Reason: fmt.Sprintf("owner %q is not within zone %q", rr.Header().Name, zonename),
@@ -1268,7 +1266,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					parseOk = false
 					continue
 				}
-			} else if !strings.EqualFold(rr.Header().Name, zonename) {
+			} else if !sameName(rr.Header().Name, zonename) {
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("owner %q is not at zone apex %q", rr.Header().Name, zonename),
@@ -1834,10 +1832,8 @@ func checkNSNamespacePolicy(rr dns.RR, protectedNamespaces []string) string {
 		return ""
 	}
 
-	target := strings.ToLower(nsRR.Ns)
 	for _, ns := range protectedNamespaces {
-		ns = strings.ToLower(ns)
-		if strings.HasSuffix(target, "."+ns) || target == ns {
+		if dns.IsSubDomain(ns, nsRR.Ns) {
 			return fmt.Sprintf("NS target %s intrudes on protected namespace %s",
 				nsRR.Ns, ns)
 		}

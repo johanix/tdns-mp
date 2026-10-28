@@ -130,14 +130,14 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				resp.ErrorMsg = "op and to are required (e.g. op=ping, to=combiner)"
 				return
 			}
-			toIdentity := strings.TrimSpace(strings.ToLower(req.To))
-			opName := strings.TrimSpace(strings.ToLower(req.Op))
+			toIdentity := strings.TrimSpace(strings.ToLower(req.To)) // not-a-name: only compared with the keyword "combiner"
+			opName := strings.TrimSpace(strings.ToLower(req.Op))     // not-a-name: an operation name
 
 			switch opName {
 			case "ping":
 				// The transport the operator named, and that one only: --api
 				// or --dns (the default).
-				useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
+				useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api" // not-a-name: a transport name
 				if toIdentity == "combiner" {
 					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
 					resp.Error = pingResp.Error

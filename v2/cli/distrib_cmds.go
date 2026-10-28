@@ -432,7 +432,7 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 		"op":      operation,
 		"to":      strings.TrimSpace(to),
 	}
-	if strings.TrimSpace(strings.ToLower(operation)) == "ping" {
+	if strings.TrimSpace(strings.ToLower(operation)) == "ping" { // not-a-name: an operation name
 		dnsFlag, _ := cmd.Flags().GetBool("dns")
 		apiFlag, _ := cmd.Flags().GetBool("api")
 		if dnsFlag && apiFlag {

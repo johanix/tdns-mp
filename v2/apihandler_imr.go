@@ -147,11 +147,9 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			identity = dns.Fqdn(identity)
 			var entries []map[string]any
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]any{

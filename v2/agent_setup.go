@@ -24,6 +24,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -397,7 +398,7 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	mp.Identity = dns.Fqdn(mp.Identity)
 
 	// Determine if agent identity zone is an auto zone or a config-defined zone
-	isAutoZone := !slices.Contains(all_zones, mp.Identity)
+	isAutoZone := !core.EqualNamesContains(all_zones, mp.Identity)
 	var autoZd *tdns.ZoneData
 	var autoTx tdns.TxID
 
@@ -536,7 +537,7 @@ func AgentSig0KeyPrep(zd *tdns.ZoneData, ps tdns.ParentSyncConf, hdb *HsyncDB) e
 // may reach its parent through the UPDATE scheme, and so needs its SIG(0) key.
 func identityZoneUsesUpdate(zd *tdns.ZoneData, schemes []string) bool {
 	return zd.Options[tdns.OptParentSync] && slices.ContainsFunc(schemes, func(s string) bool {
-		return strings.EqualFold(s, "update")
+		return strings.EqualFold(s, "update") // not-a-name: a mode keyword
 	})
 }
 

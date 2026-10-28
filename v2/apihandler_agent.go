@@ -753,11 +753,9 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 
 			// Collect all cache entries related to this identity's discovery names
 			var entries []map[string]interface{}
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]interface{}{

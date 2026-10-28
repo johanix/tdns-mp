@@ -28,6 +28,12 @@ func canonicalName(name string) string {
 	return core.CanonicalizeName(dns.Fqdn(name))
 }
 
+// sameName compares two names as DNS names (RFC 4343: US-ASCII case only),
+// each taken with its trailing dot.
+func sameName(a, b string) bool {
+	return core.EqualNames(dns.Fqdn(a), dns.Fqdn(b))
+}
+
 // refuseNamedSender is the router middleware of the agent and the auditor:
 // a message whose payload names another sender than the one the transport
 // established (the context's peer: the name in the query name over DNS,
