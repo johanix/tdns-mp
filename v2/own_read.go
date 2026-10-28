@@ -50,6 +50,11 @@ type setNote struct {
 	changed   time.Time
 	distID    string
 	confirmed time.Time
+	// ignored: the combiner's word on the set was IGNORED. It holds none
+	// of the set by its policy, which is no failed hand-over: a stale
+	// replace of the set names the records the repo holds as ignored, as
+	// the combiner's word on the newer set did (setsIgnoredByCombiner).
+	ignored bool
 }
 
 // noteCombinerSend notes that the engine stored a change of agent's sets of
@@ -88,18 +93,33 @@ func (zdr *ZoneDataRepo) noteCombinerConfirmed(zone ZoneName, distID string, at 
 
 // noteCombinerFailed notes that the combiner's word on distID was not a
 // success: the sets it carried are not held by the combiner, as after a
-// failed hand-over (setsNotHandedOver).
-func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string) {
+// failed hand-over (setsNotHandedOver). With ignored, the word was IGNORED.
+func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string, ignored bool) {
 	if distID == "" {
 		return
 	}
 	for _, byType := range zdr.notes[zone] {
 		for _, n := range byType {
 			if n.distID == distID {
-				n.distID, n.confirmed = "", time.Time{}
+				n.distID, n.confirmed, n.ignored = "", time.Time{}, ignored
 			}
 		}
 	}
+}
+
+// setsIgnoredByCombiner are those of types whose last change here, of
+// agent's set, this agent's combiner answered IGNORED.
+func (zdr *ZoneDataRepo) setsIgnoredByCombiner(zone ZoneName, agent AgentId, types map[uint16]bool) map[uint16]bool {
+	var out map[uint16]bool
+	for t := range types {
+		if n := zdr.notes[zone][agent][t]; n != nil && n.ignored {
+			if out == nil {
+				out = map[uint16]bool{}
+			}
+			out[t] = true
+		}
+	}
+	return out
 }
 
 // setsNotHandedOver are those of types whose last change here, of agent's
@@ -134,6 +154,17 @@ func recordsNotOfTypes(records []string, types map[uint16]bool) []string {
 			continue
 		}
 		out = append(out, s)
+	}
+	return out
+}
+
+// recordsOfTypes are those of records whose type is among types.
+func recordsOfTypes(records []string, types map[uint16]bool) []string {
+	var out []string
+	for _, s := range records {
+		if rr, err := dns.NewRR(s); err == nil && types[rr.Header().Rrtype] {
+			out = append(out, s)
+		}
 	}
 	return out
 }
@@ -560,7 +591,8 @@ func (zdr *ZoneDataRepo) dnskeyRecordsNotHeld(zone ZoneName, agent AgentId, ops 
 // confirmation is made as the no-op path makes it, from what is held now.
 // The records the combiner rejected, keys an answer's forward brought that
 // its combiner has not confirmed, and a set whose hand-over failed are not
-// named, and make it PARTIAL. An IGNORED is passed on as IGNORED. Any other
+// named, and make it PARTIAL; a set the combiner ignored is named as
+// ignored. An IGNORED is passed on as IGNORED. Any other
 // word names only what the combiner said it applied, and is PARTIAL. A set
 // changed again since, whose newer hand-over the combiner has not
 // confirmed, is waited for in turn.
@@ -624,9 +656,11 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 			status, message = "PARTIAL", message+"; records its combiner rejected are not held"
 		}
 		if failed := zdr.setsNotHandedOver(w.zone, w.sender, updateRRtypes(&ZoneUpdate{Operations: w.ops}), true); len(failed) > 0 {
+			// a set the combiner ignored is named as ignored (#288)
+			ignoredSets := zdr.setsIgnoredByCombiner(w.zone, w.sender, failed)
+			ignored = append(recordsNotOfTypes(ignored, failed), recordsOfTypes(applied, ignoredSets)...)
 			applied = recordsNotOfTypes(applied, failed)
 			removed = recordsNotOfTypes(removed, failed)
-			ignored = recordsNotOfTypes(ignored, failed)
 			status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
 		}
 		lgEngine.Info("the combiner answered the set that overtook a stale DNSKEY replace; confirming the replace",

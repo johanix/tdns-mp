@@ -195,6 +195,10 @@ type PendingRemoteConfirmation struct {
 	// holds. They did not go to the combiner; the confirmation to the
 	// sender names them beside what the combiner applied.
 	StaleHeld []string
+	// StaleIgnored: the records of the update's stale replaces that the
+	// repo holds, of sets this agent's combiner ignored. Their types are in
+	// NotHeldTypes; the confirmation to the sender names them as ignored.
+	StaleIgnored []string
 	// StaleWaiting: DNSKEY records of the update's stale replaces that an
 	// answer's forward, not confirmed yet, put in the repo
 	// (dnskeyAwaitingAnswer). Not named; a success becomes PARTIAL.
