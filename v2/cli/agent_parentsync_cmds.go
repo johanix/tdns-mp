@@ -425,7 +425,7 @@ func memberNotes(m tdnsmp.MemberInstructions) string {
 		notes = append(notes, fmt.Sprintf("refuses %d: %s", m.Newest.Serial, termSafe(m.Refused)))
 	}
 	if m.Error != "" {
-		notes = append(notes, "owner error")
+		notes = append(notes, "owner error: "+termSafe(m.Error))
 	}
 	if !m.Crypto {
 		notes = append(notes, "payload encryption off")

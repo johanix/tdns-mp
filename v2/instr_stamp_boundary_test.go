@@ -9,6 +9,7 @@ package tdnsmp
 import (
 	"encoding/json"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -48,7 +49,10 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 				p.Registry.GossipStateTable.RefreshLocalStates(p.Registry, pgm)
 			}
 			fetched := 0
-			tables[env.Alice.Identity].fetch = func(string) { fetched++ }
+			tables[env.Alice.Identity].fetch = func(zone string) (string, bool) {
+				fetched++
+				return zone, true
+			}
 
 			// bob's answer carries a stamp that tells serial 9 under another
 			// digest than alice holds for her serial
@@ -92,8 +96,17 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 				agent.ApiMethod = true
 			}
 			resp, err := env.Alice.Bridge.SendBeatWithFallback(env.ctx, agent, 1)
-			if err != nil || resp == nil || !strings.Contains(string(resp.Gossip), `"group_hash":""`) {
-				t.Fatalf("the answer, with bob's stamp: %+v %v", resp, err)
+			if err != nil || resp == nil {
+				t.Fatalf("the beat: %+v %v", resp, err)
+			}
+			// the answer carries bob's stamp of the zone, which alice must not note
+			var inAnswer []GossipMessage
+			if err := json.Unmarshal(resp.Gossip, &inAnswer); err != nil {
+				t.Fatalf("the answer's gossip: %v", err)
+			}
+			i := slices.IndexFunc(inAnswer, func(g GossipMessage) bool { return g.GroupHash == stampGroupHash })
+			if i < 0 || inAnswer[i].Members[bob] == nil || !reflect.DeepEqual(inAnswer[i].Members[bob].Instr[zone], answer) {
+				t.Fatalf("the answer does not carry bob's stamp of the zone: %s", resp.Gossip)
 			}
 			if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
 				t.Fatal("the beat did not reach bob's MsgQs.Beat")
