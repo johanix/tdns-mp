@@ -224,6 +224,9 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 					}
 				}
 			}
+			// The changes owed while the zone is frozen are laid over the
+			// data: a second edit sees the first (plan S6).
+			currentByType = overOwed(currentByType, conf.InternalMp.Kept.entries(string(amp.Zone), listOwed))
 
 			affectedRRtypes := make(map[uint16]bool)
 			for _, rr := range parsedRRs {
@@ -327,6 +330,11 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 					resp.ErrorMsg = r.ErrorMsg
 					resp.Msg = fmt.Sprintf("%s RR(s) failed: %s", amp.Command, r.ErrorMsg)
 					resp.Status = "fail"
+				} else if r.Kept != "" {
+					// the zone is frozen: the operator is told that the edit
+					// is kept, and why (plan S6)
+					resp.Msg = fmt.Sprintf("%s %d RR(s) for zone %q: kept until the transition is done (%s)", action, len(parsedRRs), amp.Zone, r.Kept)
+					resp.Status = "ok"
 				} else {
 					resp.Msg = fmt.Sprintf("%s %d RR(s) for zone %q", action, len(parsedRRs), amp.Zone)
 					if r.Msg != "" {
@@ -523,6 +531,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
 			status.DSSet = conf.dsSetLine(zd.ZoneData)
 			status.Instructions = conf.InternalMp.Instructions.Status(string(amp.Zone))
+			status.Frozen, status.Kept = conf.freezeLines(string(amp.Zone))
 			if tm := conf.InternalMp.MPTransport; tm != nil {
 				status.InstructionMembers = tm.stamps.members(string(amp.Zone))
 			}

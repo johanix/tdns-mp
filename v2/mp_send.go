@@ -100,6 +100,7 @@ type keystateWirePayload struct {
 	*core.AgentKeystatePost
 	ForeignSpoken []string `json:"ForeignSpoken,omitempty"`
 	Resend        []uint16 `json:"Resend,omitempty"`
+	Hold          bool     `json:"Hold,omitempty"` // S6
 }
 
 // keystateAppMessage mirrors DNSTransport.Keystate (core.AgentKeystatePost).
@@ -134,6 +135,7 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 		},
 		ForeignSpoken: req.ForeignSpoken,
 		Resend:        req.Resend,
+		Hold:          req.Hold,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

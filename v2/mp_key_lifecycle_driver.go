@@ -163,6 +163,9 @@ type ZoneKeyLifecycle struct {
 	// it replaces is retired (T10's guard).
 	algorithms map[string]uint8
 	successor  uint8
+	// hold: the signer's agent holds the zone (KEYSTATE "hold", plan S6):
+	// the tick starts nothing new (Tick)
+	hold bool
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -932,6 +935,14 @@ func (l *ZoneKeyLifecycle) Mint(role string) (uint16, error) {
 	return pkc.KeyId, nil
 }
 
+// SetHold holds the machine, or lets it go: under a hold a tick starts no
+// new rollover (plan S6).
+func (l *ZoneKeyLifecycle) SetHold(on bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.hold = on
+}
+
 // RequestRollover asks for the next standby key of the role to be promoted
 // on the next tick; CancelRollover withdraws the request.
 func (l *ZoneKeyLifecycle) RequestRollover(role string) {
@@ -997,7 +1008,12 @@ func (l *ZoneKeyLifecycle) withdrawnActive(all map[uint16]tdns.DnssecKeyWithTime
 // published keys that have propagated, probe the parent for retired KSKs
 // and remove after the margin; then mint what the standby counts want and
 // promote for a rollover due or requested, or for a role with no active
-// key.
+// key. Under a hold (plan S6) it starts nothing new: no rollover for a
+// key's lifetime, no standby key, no algorithm rollover that has no key of
+// its algorithm yet. Every phase of a rollover under way runs, an
+// algorithm rollover's included, and so does a rollover the operator asks
+// for (the emergency rollover, RequestRollover), and a role with no active
+// key gets one.
 func (l *ZoneKeyLifecycle) Tick() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1200,6 +1216,13 @@ func (l *ZoneKeyLifecycle) Tick() error {
 			want, lifetime = l.Policy.StandbyKSK, l.Policy.KSKLifetime
 		}
 		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
+		// under a hold nothing new starts (plan S6): no lifetime rollover,
+		// no standby key, no algorithm rollover not yet begun
+		algStart := algPending && policyKeys == 0
+		if l.hold {
+			due, algStart = false, false
+			want = 0
+		}
 		// T9: promote for a rollover requested or due, a role without an
 		// active key, or an algorithm rollover whose algorithm does not sign
 		// yet: the roll promotes once. The standby the count mints after
@@ -1229,7 +1252,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		// count of 0, the default for KSKs) mints the key it will promote; an
 		// algorithm rollover mints the policy's algorithm when no key of it
 		// is on its way or signing (O4)
-		if pipeline < want || (active == 0 && pipeline == 0) || (due && pipeline == 0) || (l.rolls[role] && pipeline == 0) || (algPending && policyKeys == 0) {
+		if pipeline < want || (active == 0 && pipeline == 0) || (due && pipeline == 0) || (l.rolls[role] && pipeline == 0) || algStart {
 			keyid, err := l.Mint(role)
 			if err != nil {
 				return err

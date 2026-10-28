@@ -370,6 +370,9 @@ type AgentMsgResponse struct {
 	RfiResponse map[AgentId]*RfiData
 	Error       bool
 	ErrorMsg    string
+	// Kept: the change is kept until the zone's transition is done, and
+	// why (plan S6)
+	Kept string
 }
 
 type RfiData struct {

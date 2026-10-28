@@ -224,6 +224,7 @@ type KeyInventorySnapshot struct {
 	Zone      string
 	Inventory []KeyInventoryItem
 	Owned     bool // the signer's own state machine runs the zone's keys (S3): the DS set's source (S5)
+	Hold      bool // the signer holds the zone's key machine (plan S6)
 	Received  time.Time
 	seq       uint64 // the inventory's KeystateInventoryMsg.seq
 }

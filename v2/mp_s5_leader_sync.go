@@ -622,6 +622,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
 		caughtUp, waiting := conf.InternalMp.CatchUp.CaughtUp(ZoneName(zone))
+		frozen := conf.zoneFrozen(zone)
 		c.mu.Lock()
 		ch := c.zones[zone]
 		if ch == nil || ch.ask != ask || ch.hold == nil || ch.hold.awaiting {
@@ -647,11 +648,31 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 			return
 		}
 		hold := ch.hold
+		// While the zone is frozen only a NOTIFY(CDS) leaves, the DS sync of
+		// a rollover; any other is dropped, and the sync is owed until the
+		// transition is done (plan S6)
+		leave := hold.notifies
+		if len(frozen) > 0 {
+			leave = slices.DeleteFunc(slices.Clone(leave), func(req tdns.NotifyRequest) bool { return req.RRtype != dns.TypeCDS })
+		}
+		if len(leave) == 0 {
+			ch.hold, ch.waiting, ch.notified, ch.rechecks = nil, false, "", 0
+			c.mu.Unlock()
+			conf.syncHeld(zone, syncOther)
+			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
+				"notify", notifyTypes(hold.notifies))
+			return
+		}
 		ch.hold, ch.waiting = nil, false
-		types := notifyTypes(hold.notifies)
+		types := notifyTypes(leave)
 		check := c.notifyLeft(zone, ch, types, hold.retimed, delays)
 		c.mu.Unlock()
-		forwardNotifies(ctx, sent.out, hold.notifies)
+		if len(leave) < len(hold.notifies) {
+			conf.syncHeld(zone, syncOther)
+			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
+				"notify", notifyTypes(hold.notifies))
+		}
+		forwardNotifies(ctx, sent.out, leave)
 		lgEngine.Info("the held NOTIFY has left for the parent", "zone", zone, "notify", types, "held", sent.wait)
 		conf.delegationSyncCheckAfter(ctx, zone, types, check)
 	})
@@ -1272,6 +1293,7 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		Zone:      msg.Zone,
 		Inventory: msg.Inventory,
 		Owned:     msg.Owned,
+		Hold:      msg.Hold,
 		Received:  time.Now(),
 		seq:       msg.seq,
 	}
@@ -1294,6 +1316,8 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
+	// the signer's word on the zone's hold, against the freeze (plan S6)
+	conf.reconcileHold(zd.ZoneName, snap)
 	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
 		return true

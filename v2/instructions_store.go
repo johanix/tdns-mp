@@ -179,6 +179,9 @@ type InstructionStore struct {
 	zones         map[string]*zoneSerials
 	warnedOld     map[string]time.Time // the last "not adopted" warning per zone
 	refusedLogged map[zoneSerial]bool  // the refusals logged, once each
+	// onFreeze is told when a zone is frozen and when it no longer is
+	// (instr_freeze.go), after the change is written and the lock let go.
+	onFreeze func(zone string, frozen bool)
 }
 
 type zoneSerial struct {
@@ -292,8 +295,16 @@ func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
 // update applies f to zone's serials, creating them if needed, and writes
 // the result; f returning an error changes nothing, and so does a result
 // equal to what was kept (a refresh that brings the same copy). f returning
-// errEndOfService drops the zone's serials, under the same lock.
+// errEndOfService drops the zone's serials, under the same lock. A change
+// that freezes the zone, or ends its freeze, is told to onFreeze once the
+// lock is let go.
 func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
+	var froze *bool
+	defer func() {
+		if froze != nil && s.onFreeze != nil {
+			s.onFreeze(zone, *froze)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.zones[zone]
@@ -301,10 +312,14 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 	if old != nil {
 		z = old.clone()
 	}
+	wasFrozen := old != nil && len(old.freezeReasons()) > 0
 	if err := f(z); err != nil {
 		if errors.Is(err, errEndOfService) {
 			if ferr := s.forgetLocked(zone); ferr != nil {
 				return fmt.Errorf("dropping the zone's serials: %w", ferr)
+			}
+			if wasFrozen {
+				froze = new(bool)
 			}
 		}
 		return err
@@ -320,6 +335,9 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 		return err
 	}
 	s.zones[zone] = z
+	if frozen := len(z.freezeReasons()) > 0; frozen != wasFrozen {
+		froze = &frozen
+	}
 	return nil
 }
 

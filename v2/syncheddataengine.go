@@ -181,6 +181,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// this goroutine: the test reads the keystore and asks the
 			// resolver
 			conf.retestKeyHoldsInBackground(ctx)
+			// what a zone kept, released when its freeze ended and the
+			// engine's queue had no room, or a restart came between
+			conf.releaseUnfrozen(ctx, zdr)
 
 		case <-owedRoomTicker.C:
 			if conf.InternalMp.CatchUp.roomWaits() {
@@ -191,122 +194,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			var change bool
 			switch synchedDataUpdate.UpdateType {
 			case "local":
-				lgEngine.Info("received local update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
-
-				// 1. Evaluate the update for applicability (valid zone, etc)
-				// 2. Evaluate the update according to policy.
-
-				// Prepare a response in case there is a response channel.
-				resp := AgentMsgResponse{
-					Zone:    synchedDataUpdate.Zone,
-					AgentId: synchedDataUpdate.AgentId,
-				}
-
-				// agent_policy.go: EvaluateUpdate()
-				ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
-				if err != nil {
-					lgEngine.Error("failed to evaluate update", "err", err)
-					continue
-				}
-
-				if !ok {
-					lgEngine.Info("update not applicable, skipping", "zone", synchedDataUpdate.Zone)
-					resp.Error = true
-					resp.ErrorMsg = msg
-				} else {
-					resp.Msg = msg
-					// 3. Add the update to the agent data repo.
-					// agent_policy.go: ProcessUpdate()
-					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
-					stored := time.Now()
-					if err != nil {
-						lgEngine.Error("failed to add update to agent data repo", "err", err)
-						resp.Error = true
-						resp.ErrorMsg = err.Error()
-						resp.Msg = msg
-					}
-					// a resend (#256) goes to the peers even when the repo
-					// held the set already
-					if change || synchedDataUpdate.KeyStatesChanged || synchedDataUpdate.Resend {
-						tm := conf.InternalMp.MPTransport
-						if tm != nil && synchedDataUpdate.Update != nil {
-							// Generate a single shared distID for combiner + all agents
-							distID := transport.GenerateDistributionID()
-
-							// Build the expected recipients list for confirmation tracking
-							recipients := tm.GetDistributionRecipients(synchedDataUpdate.Zone, synchedDataUpdate.SkipCombiner)
-
-							// Mark all RRs in this update as pending with the distribution ID
-							zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
-
-							skipCombiner := synchedDataUpdate.SkipCombiner
-							if skipCombiner {
-								lgEngine.Info("update applied, enqueuing for remote agents only", "zone", synchedDataUpdate.Zone)
-							} else {
-								lgEngine.Info("update applied, enqueuing for combiner and remote agents", "zone", synchedDataUpdate.Zone)
-								// Enqueue for combiner (reliable delivery with retry)
-								_, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID)
-								sentAs := distID
-								if err != nil {
-									lgEngine.Error("failed to enqueue for combiner", "zone", synchedDataUpdate.Zone, "err", err)
-									resp.Error = true
-									resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
-									sentAs = ""
-								}
-								zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, sentAs)
-							}
-
-							// Enqueue for all remote agents in this zone (same distID)
-							if err := tm.EnqueueForZoneAgents(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID); err != nil {
-								lgEngine.Error("failed to enqueue for zone agents", "zone", synchedDataUpdate.Zone, "err", err)
-								if resp.ErrorMsg != "" {
-									resp.ErrorMsg += "; " + fmt.Sprintf("Agent enqueue error: %v", err)
-								} else {
-									resp.Error = true
-									resp.ErrorMsg = fmt.Sprintf("Agent enqueue error: %v", err)
-								}
-							}
-
-							// Register DNSKEY propagation tracking so that when all
-							// remote agents confirm, the agent sends KEYSTATE "propagated"
-							// back to the signer (mpdist → published transition).
-							if len(synchedDataUpdate.DnskeyKeyTags) > 0 {
-								agents, err := tm.getAllAgentsForZone(synchedDataUpdate.Zone)
-								if err != nil {
-									lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
-								} else if len(agents) > 0 {
-									tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
-									if synchedDataUpdate.Resend {
-										tm.foldIntoResend(synchedDataUpdate.Zone, distID)
-									}
-								}
-							}
-
-							if !resp.Error {
-								if skipCombiner {
-									resp.Msg = "Local update applied, sync enqueued for remote agents"
-								} else {
-									resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
-								}
-							}
-							// the leader's CSYNC is one of these: who must
-							// confirm it is known now
-							conf.delegationCsyncProgress(ctx, zdr, synchedDataUpdate.Zone, nil)
-						} else if tm == nil {
-							lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
-							resp.Error = true
-							resp.ErrorMsg = "TransportManager not available"
-						}
-					}
-				}
-
-				if synchedDataUpdate.Response != nil {
-					select {
-					case synchedDataUpdate.Response <- &resp:
-					default:
-						lgEngine.Warn("response channel blocked, skipping response")
-					}
-				}
+				conf.applyLocalUpdate(ctx, zdr, synchedDataUpdate)
 			case "remote":
 				lgEngine.Info("received remote update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 
@@ -843,6 +731,13 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
 					continue
 				}
+				// Nothing of this provider's own goes out while the zone is
+				// frozen (plan S6, 7.3 item 15)
+				if why := conf.zoneFrozen(string(sdcmd.Zone)); len(why) > 0 {
+					sdcmd.Response <- &SynchedDataCmdResponse{Error: true,
+						ErrorMsg: fmt.Sprintf("zone %s: resync --push is refused during the transition (%s)", sdcmd.Zone, strings.Join(why, "; "))}
+					continue
+				}
 				// 0. Pull contributions from combiner (RFI EDITS).
 				// This brings back all agents contributions, including our own,
 				// ensuring the SDE is in sync with the combiner state.
@@ -1028,6 +923,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				sdcmd.Response <- &SynchedDataCmdResponse{
 					Msg: note + fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
 				}
+
+			case "instr-done":
+				// the zone's freeze has ended: what it kept goes out, and a
+				// zone this agent leads is taken up (plan S6)
+				conf.instrDone(ctx, zdr, sdcmd.Zone)
+				go conf.takeUp(ctx, sdcmd.Zone)
 
 			case "own-read":
 				// A re-read's answer (ownReader), applied here because the
@@ -1985,4 +1886,138 @@ func (zdr *ZoneDataRepo) deleteRRFromRepo(zone ZoneName, agent AgentId, rrtype u
 	}
 	curRRset.Delete(rr)
 	nod.RRtypes.Set(rrtype, curRRset) // mp-private: SDE node record, not zone data
+}
+
+// applyLocalUpdate is the data engine's handling of a change of this
+// provider's own: evaluated, kept on the owed list while the zone is
+// frozen (plan S6), else applied to the data and sent to the combiner and
+// the zone's other agents. The release of the owed list runs it again.
+func (conf *Config) applyLocalUpdate(ctx context.Context, zdr *ZoneDataRepo, synchedDataUpdate *SynchedDataUpdate) {
+	var change bool
+	lgEngine.Info("received local update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
+
+	// 1. Evaluate the update for applicability (valid zone, etc)
+	// 2. Evaluate the update according to policy.
+
+	// Prepare a response in case there is a response channel.
+	resp := AgentMsgResponse{
+		Zone:    synchedDataUpdate.Zone,
+		AgentId: synchedDataUpdate.AgentId,
+	}
+
+	// agent_policy.go: EvaluateUpdate()
+	ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
+	if err != nil {
+		lgEngine.Error("failed to evaluate update", "err", err)
+		return
+	}
+
+	if !ok {
+		lgEngine.Info("update not applicable, skipping", "zone", synchedDataUpdate.Zone)
+		resp.Error = true
+		resp.ErrorMsg = msg
+	} else if why, kerr := conf.oweIfFrozen(synchedDataUpdate); kerr != nil || why != "" {
+		// The zone is frozen: the change is owed, apart from the data,
+		// until the transition is done (plan S6)
+		if kerr != nil {
+			lgEngine.Error("a change made during the transition could not be kept", "zone", synchedDataUpdate.Zone, "err", kerr)
+			resp.Error, resp.ErrorMsg = true, fmt.Sprintf("the zone is frozen (%s), and the change could not be kept: %v", why, kerr)
+		} else {
+			resp.Kept = why
+			resp.Msg = "kept until the transition is done: " + why
+		}
+	} else {
+		resp.Msg = msg
+		// 3. Add the update to the agent data repo.
+		// agent_policy.go: ProcessUpdate()
+		change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
+		stored := time.Now()
+		if err != nil {
+			lgEngine.Error("failed to add update to agent data repo", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			resp.Msg = msg
+		}
+		// a resend (#256) goes to the peers even when the repo
+		// held the set already
+		if change || synchedDataUpdate.KeyStatesChanged || synchedDataUpdate.Resend {
+			tm := conf.InternalMp.MPTransport
+			if tm != nil && synchedDataUpdate.Update != nil {
+				// Generate a single shared distID for combiner + all agents
+				distID := transport.GenerateDistributionID()
+
+				// Build the expected recipients list for confirmation tracking
+				recipients := tm.GetDistributionRecipients(synchedDataUpdate.Zone, synchedDataUpdate.SkipCombiner)
+
+				// Mark all RRs in this update as pending with the distribution ID
+				zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
+
+				skipCombiner := synchedDataUpdate.SkipCombiner
+				if skipCombiner {
+					lgEngine.Info("update applied, enqueuing for remote agents only", "zone", synchedDataUpdate.Zone)
+				} else {
+					lgEngine.Info("update applied, enqueuing for combiner and remote agents", "zone", synchedDataUpdate.Zone)
+					// Enqueue for combiner (reliable delivery with retry)
+					_, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID)
+					sentAs := distID
+					if err != nil {
+						lgEngine.Error("failed to enqueue for combiner", "zone", synchedDataUpdate.Zone, "err", err)
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
+						sentAs = ""
+					}
+					zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, sentAs)
+				}
+
+				// Enqueue for all remote agents in this zone (same distID)
+				if err := tm.EnqueueForZoneAgents(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID); err != nil {
+					lgEngine.Error("failed to enqueue for zone agents", "zone", synchedDataUpdate.Zone, "err", err)
+					if resp.ErrorMsg != "" {
+						resp.ErrorMsg += "; " + fmt.Sprintf("Agent enqueue error: %v", err)
+					} else {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Agent enqueue error: %v", err)
+					}
+				}
+
+				// Register DNSKEY propagation tracking so that when all
+				// remote agents confirm, the agent sends KEYSTATE "propagated"
+				// back to the signer (mpdist → published transition).
+				if len(synchedDataUpdate.DnskeyKeyTags) > 0 {
+					agents, err := tm.getAllAgentsForZone(synchedDataUpdate.Zone)
+					if err != nil {
+						lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
+					} else if len(agents) > 0 {
+						tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
+						if synchedDataUpdate.Resend {
+							tm.foldIntoResend(synchedDataUpdate.Zone, distID)
+						}
+					}
+				}
+
+				if !resp.Error {
+					if skipCombiner {
+						resp.Msg = "Local update applied, sync enqueued for remote agents"
+					} else {
+						resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
+					}
+				}
+				// the leader's CSYNC is one of these: who must
+				// confirm it is known now
+				conf.delegationCsyncProgress(ctx, zdr, synchedDataUpdate.Zone, nil)
+			} else if tm == nil {
+				lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available"
+			}
+		}
+	}
+
+	if synchedDataUpdate.Response != nil {
+		select {
+		case synchedDataUpdate.Response <- &resp:
+		default:
+			lgEngine.Warn("response channel blocked, skipping response")
+		}
+	}
 }

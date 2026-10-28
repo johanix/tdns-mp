@@ -52,6 +52,10 @@ type SynchedDataUpdate struct {
 	// (#256). The update goes to the peers, tracked, even when the repo
 	// already held it.
 	Resend bool
+	// Inventory: the signer's inventory brought this DNSKEY distribution.
+	// It passes a freeze (plan S6): a rollover under way, or an emergency
+	// one, as the signer starts no other.
+	Inventory bool
 	// CatchUp: the update is the answer to a request for the zone's state
 	// (the membership design, 5.4).
 	CatchUp  *CatchUp `json:"catch_up,omitempty"`

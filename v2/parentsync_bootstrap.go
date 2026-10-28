@@ -56,6 +56,12 @@ func (conf *Config) keyPollOnce(ctx, runCtx context.Context, zone ZoneName, keyN
 		lgElect.Info("the key poll is not started: this agent takes no part in the zone", "zone", zone)
 		return false
 	}
+	// Nor while the zone is frozen (plan S6): the take-up when the
+	// transition is done starts it (takeUp)
+	if held, why := conf.syncHeld(string(zone), syncOther); held {
+		lgElect.Info("the key poll is not started during the transition", "zone", zone, "phase", why)
+		return false
+	}
 	// The option says whether this agent may sync the zone at all: the
 	// zone's records name it, and HSYNCPARAM says parentsync=agent
 	// (followParentSyncParam).

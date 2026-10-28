@@ -232,6 +232,19 @@ func (zdr *ZoneDataRepo) markOwnState(zone ZoneName, read bool, why string) {
 	}
 }
 
+// rereadOwnState has the zone's own state read again at the own reader's
+// next tick, and says why until then.
+func (zdr *ZoneDataRepo) rereadOwnState(zone ZoneName, why string) {
+	zdr.mu.Lock()
+	defer zdr.mu.Unlock()
+	if zdr.ownState == nil {
+		zdr.ownState = map[ZoneName]time.Time{}
+		zdr.ownStateNote = map[ZoneName]string{}
+	}
+	delete(zdr.ownState, zone)
+	zdr.ownStateNote[zone] = why
+}
+
 // ownReadAnswer is what a re-read brought: when the combiner was asked
 // (asked), its answer and when the request was sent (sentAt), or why there
 // is none.

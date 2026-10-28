@@ -48,10 +48,11 @@ type fakeParent struct {
 	ns      []string
 	ds      []dns.RR
 	updates int
-	refuse  bool // answer an UPDATE REFUSED, as a parent that will not take it yet
-	fail    int  // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
-	queries int  // the questions it was asked
-	silent  bool // answer every question SERVFAIL, as a parent that does not answer
+	last    *dns.Msg // the last UPDATE taken
+	refuse  bool     // answer an UPDATE REFUSED, as a parent that will not take it yet
+	fail    int      // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
+	queries int      // the questions it was asked
+	silent  bool     // answer every question SERVFAIL, as a parent that does not answer
 }
 
 func newFakeParent(t *testing.T, child string) *fakeParent {
@@ -96,6 +97,7 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 	defer p.mu.Unlock()
 	if r.Opcode == dns.OpcodeUpdate {
 		p.updates++
+		p.last = r.Copy()
 		switch {
 		case p.refuse:
 			m.Rcode = dns.RcodeRefused
@@ -165,6 +167,13 @@ func (p *fakeParent) queriesSeen() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.queries
+}
+
+// lastUpdate is the last UPDATE the parent took; nil with none.
+func (p *fakeParent) lastUpdate() *dns.Msg {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.last
 }
 
 func (p *fakeParent) updatesSeen() int {

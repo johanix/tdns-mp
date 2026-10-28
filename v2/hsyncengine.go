@@ -109,6 +109,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			DnskeyRemovedKeyTags: removedTags,
 			KeyStatesChanged:     ds.StatesChanged,
 			Resend:               ds.Resend,
+			Inventory:            true,
 		}
 
 	default:

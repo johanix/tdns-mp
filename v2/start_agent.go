@@ -331,8 +331,8 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
 		err := leaderKeySetup(zone, true)
 		conf.requestDelegationSync(ctx, string(zone), "this agent was elected the zone's delegation sync leader")
-		if errors.Is(err, errLeadMoved) {
-			return nil // the lead moved on during the setup: nothing failed
+		if errors.Is(err, errLeadMoved) || errors.Is(err, errHeldDuringTransition) {
+			return nil // the lead moved on during the setup, or the zone is frozen: nothing failed
 		}
 		return err
 	})
@@ -368,7 +368,7 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		if errors.Is(err, errLeadMoved) {
 			return nil // a sync asked for now would go out from nobody
 		}
-		if err != nil && !errors.Is(err, errZoneKeyNotHeld) {
+		if err != nil && !errors.Is(err, errZoneKeyNotHeld) && !errors.Is(err, errHeldDuringTransition) {
 			lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; the sync waits for the key", "zone", zone, "err", err)
 		}
 		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
