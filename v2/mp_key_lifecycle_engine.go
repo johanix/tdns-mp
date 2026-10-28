@@ -113,15 +113,33 @@ func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 
 // signerSets are the sets the signer acts by for the zone, and this
 // provider's label in them (plan S11): the sets its agent handed it (actsBy)
-// and the label its identity has there (S3); handed nothing, its signing set
-// (signers= and those leaving it, #147) for every set, as before the
-// hand-over, and the label its identity has in the zone's HSYNC3 records.
-// The label is "" when nothing gives one.
+// and the label its identity has there (S3). Waiting for its agent's
+// hand-over (signerWaits), the signing set it last signed by for every set,
+// and the label its identity has there: its copy changes none of its roles
+// (rule 5), not even when the copy drops this provider. Otherwise its
+// signing set (signers= and those leaving it, #147) for every set, as
+// before the hand-over, and the label its identity has in the zone's HSYNC3
+// records. The label is "" when nothing gives one.
 func signerSets(mpzd *MPZoneData, mp *MultiProviderConf) (self string, r Roles) {
 	ours := ourHsyncIdentities(mp)
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, apex); ok {
 		return labelOfIdentity(handed, ours), handed
+	}
+	if signerWaits(mpzd.ZoneName, apex) {
+		if set, ok := mpzd.lastSigningSet(mpzd.KeyDB); ok {
+			labels := make([]string, 0, len(set))
+			for label := range set {
+				labels = append(labels, label)
+			}
+			sort.Strings(labels)
+			var signing []Provider
+			for _, label := range labels {
+				signing = append(signing, Provider{Label: label, Identity: set[label]})
+			}
+			r = Roles{KeySigners: signing, DSSigners: signing, KeyConfirmers: signing, Signing: signing}
+			return labelOfIdentity(r, ours), r
+		}
 	}
 	if _, label, err := mpzd.matchHsyncIdentity(ours); err == nil {
 		self = trimDot(label)

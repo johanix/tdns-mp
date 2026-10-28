@@ -1,8 +1,12 @@
 package tdnsmp
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -331,6 +335,14 @@ func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 	st, err := e.Status(mpzd.ZoneName)
 	if err != nil || !st.Idle {
 		t.Errorf("the status of the idle zone: %+v, err %v; want idle", st, err)
+	}
+	conf.InternalMp.KeyLifecycle = e
+	body, _ := json.Marshal(SignerKeyPost{Command: "zones"})
+	w := httptest.NewRecorder()
+	conf.APIsignerKey()(w, httptest.NewRequest(http.MethodPost, "/signer/key", bytes.NewReader(body)))
+	var resp SignerKeyResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || !slices.Equal(resp.Idle, []string{mpzd.ZoneName}) {
+		t.Errorf("signer key zones does not mark the idle zone: %+v, err %v", resp, err)
 	}
 }
 

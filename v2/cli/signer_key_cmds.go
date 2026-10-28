@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -134,6 +135,10 @@ the new algorithm signs.`,
 				return
 			}
 			for _, z := range resp.Zones {
+				if slices.Contains(resp.Idle, z) {
+					fmt.Printf("%s  owned and idle: this provider does not sign it\n", z)
+					continue
+				}
 				fmt.Println(z)
 			}
 		},

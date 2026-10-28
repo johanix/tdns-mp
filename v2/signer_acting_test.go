@@ -456,6 +456,20 @@ func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 	}
 }
 
+// A signer handed nothing whose copy drops it altogether, its HSYNC3
+// record included, still waits: its key machine runs by the signing set it
+// last signed by, with the label its identity has there (rule 5).
+func TestASignerThatWaitsKeepsItsRolesWhenItsCopyDropsIt(t *testing.T) {
+	const zone = "dropped.waiting.signer.example."
+	r := newSignerRig(t, zone, `3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="6" servers="p2" signers="p2"`)
+	if err := saveSigningSet(r.kdb, zone, signingSet{"us": sigUs, "p2": "agent.p2.example."}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.e.wire.IsSigner(zone) || !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
+		t.Errorf("waiting, the signer took its copy's roles: signs %v, expects confirmations from %v", r.e.wire.IsSigner(zone), r.e.wire.OtherSigners(zone))
+	}
+}
+
 // The signer takes a hand-over only from its own agent.
 func TestAKeystateActingFromAnotherSenderIsRefused(t *testing.T) {
 	const zone = "sender.signer.example."

@@ -38,8 +38,9 @@ type MPZoneInfo struct {
 	// refused: ...", which the CLI lists below the table.
 	Refused string `json:"refused,omitempty"`
 	// Acting is, on a combiner or a signer, what it acts by (plan S10,
-	// S11): the serial its agent handed it, provisional, or that it waits
-	// for its agent's hand-over. Empty on every other role.
+	// S11): the serial its agent handed it, its own copy where that is
+	// newer (until S7), provisional, or that it waits for its agent's
+	// hand-over. Empty on every other role.
 	Acting string `json:"acting,omitempty"`
 }
 
