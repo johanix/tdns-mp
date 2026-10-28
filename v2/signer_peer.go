@@ -74,11 +74,13 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	// never discovered via DNS, so this is their only address source.
 	if ar.TransportManager != nil {
 		speer := ar.TransportManager.PeerRegistry.GetOrCreate(string(signerID))
-		speer.SetDiscoveryAddress(&transport.Address{
+		if err := speer.SetDNSCarrierAddress(&transport.Address{
 			Host:      host,
 			Port:      uint16(port),
 			Transport: "udp",
-		})
+		}); err != nil {
+			return fmt.Errorf("signer address: %w", err)
+		}
 		speer.SetDNSEndpoint(dnsEndpointURI(host, port))
 		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
 		// agent beat interval — match the decay thresholds to it (see
@@ -154,11 +156,13 @@ func performSignerConnectivityCheck(conf *Config) error {
 		signerID = dns.Fqdn(mp.Signer.Identity)
 	}
 	peer := transport.NewPeer(signerID)
-	peer.SetDiscoveryAddress(&transport.Address{
+	if err := peer.SetDNSCarrierAddress(&transport.Address{
 		Host:      host,
 		Port:      uint16(port),
 		Transport: "udp",
-	})
+	}); err != nil {
+		return fmt.Errorf("signer address: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

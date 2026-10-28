@@ -96,7 +96,7 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// which encrypts to the signer. Without the signer's JOSE key registered
 	// in PayloadCrypto first, that send fails (no encryption key for peer ...);
 	// tm.Send then falls back to API which constructs a nonsense URL from the
-	// signer's DNS DiscoveryAddress (udp://host:53/sync) and fails with
+	// signer's DNS carrier address (udp://host:53/sync) and fails with
 	// "unsupported protocol scheme". The combiner has the same shape of race
 	// for the same reason. Registering both peers (which loads their public
 	// keys) before any engine that could initiate outbound traffic eliminates

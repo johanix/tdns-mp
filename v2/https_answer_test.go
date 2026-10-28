@@ -151,7 +151,7 @@ func TestAnswerRefusedOnTheFallback(t *testing.T) {
 	}
 	dead := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
 	ln.Close() // nothing listens there: every NOTIFY is refused
-	me.aliceAtBob.SetDiscoveryAddress(dead)
+	setDNSCarrier(t, me.aliceAtBob, dead)
 	me.aliceAtBob.SetMechanismAddress("DNS", dead)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

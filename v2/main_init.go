@@ -302,11 +302,13 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 			if err != nil {
 				return fmt.Errorf("invalid port in %q for %s: %w", agentConf.Address, peerID, err)
 			}
-			agentPeer.SetDiscoveryAddress(&transport.Address{
+			if err := agentPeer.SetDNSCarrierAddress(&transport.Address{
 				Host:      host,
 				Port:      uint16(port),
 				Transport: "udp",
-			})
+			}); err != nil {
+				return fmt.Errorf("address %q for %s: %w", agentConf.Address, peerID, err)
+			}
 			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
 		warnConfiguredAPIEndpoint("signer", peerID, agentConf.ApiBaseUrl)
@@ -425,11 +427,13 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			if err != nil {
 				return fmt.Errorf("invalid port in %q for %s: %w", agentConf.Address, peerID, err)
 			}
-			agentPeer.SetDiscoveryAddress(&transport.Address{
+			if err := agentPeer.SetDNSCarrierAddress(&transport.Address{
 				Host:      host,
 				Port:      uint16(port),
 				Transport: "udp",
-			})
+			}); err != nil {
+				return fmt.Errorf("address %q for %s: %w", agentConf.Address, peerID, err)
+			}
 			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
 		warnConfiguredAPIEndpoint("combiner", peerID, agentConf.ApiBaseUrl)

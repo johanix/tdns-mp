@@ -310,7 +310,7 @@ func dispatchCases() []dispatchCase {
 				if !ok {
 					t.Fatal("relocate: sender not in PeerRegistry")
 				}
-				addr := peer.CurrentAddress()
+				addr := peer.DNSCarrierAddress()
 				if addr == nil || addr.Host != "192.0.2.3" || addr.Port != 5353 {
 					t.Errorf("relocate: operational address not applied: %+v", addr)
 				}
