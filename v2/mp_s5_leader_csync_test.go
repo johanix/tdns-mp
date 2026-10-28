@@ -116,14 +116,14 @@ func (r *notifyRig) queuedFor(distID string) []string {
 // confirms is a recipient's final confirmation of a distribution arriving
 // at the agent's transport: the record is held there.
 func (r *notifyRig) confirms(from, distID, record string) {
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(distID, from, transport.ConfirmSuccess, r.mpzd.ZoneName,
-		[]string{record}, nil, nil, nil, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(distID, from, transport.ConfirmSuccess, r.mpzd.ZoneName,
+		[]string{record}, nil, nil, nil, false, ""))
 }
 
 // rejects is a recipient's final confirmation that refuses the record.
 func (r *notifyRig) rejects(from, distID, record, reason string) {
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(distID, from, transport.ConfirmRejected, r.mpzd.ZoneName,
-		nil, nil, []transport.RejectedItemDTO{{Record: record, Reason: reason}}, nil, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(distID, from, transport.ConfirmRejected, r.mpzd.ZoneName,
+		nil, nil, []transport.RejectedItemDTO{{Record: record, Reason: reason}}, nil, false, ""))
 }
 
 // logs waits for the engine's log to have the text.
@@ -238,7 +238,7 @@ func TestANotifyDoesNotLeaveWhileAProviderHasNotConfirmedTheCsync(t *testing.T) 
 	r.confirms(rigCombiner, info.DistributionID, info.RR)
 	// the other provider's agent says it has the SYNC and is working on it:
 	// that is not its final word
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(info.DistributionID, peer, transport.ConfirmPending, z, nil, nil, nil, nil, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(info.DistributionID, peer, transport.ConfirmPending, z, nil, nil, nil, nil, false, ""))
 	still := logCsyncStill + " zone=" + z + " notify=CSYNC" + fmt.Sprintf(" serial=%d", csync.Serial) + " awaited=[" + peer + "]"
 	r.logs(t, still)
 	r.quiet(t, 3*every, "while a provider had not confirmed the CSYNC")
@@ -278,7 +278,7 @@ func TestARejectedCsyncIsAFailedSyncAndTheNextAskDistributesAgain(t *testing.T) 
 // a failed sync as well, not a confirmation to wait for.
 func TestAProviderThatFailsWithoutNamingTheCsyncFailsTheSync(t *testing.T) {
 	rejectedCsync(t, "failed.csync.example.", func(r *notifyRig, distID, record string) {
-		r.us.Bridge.ChunkHandler.OnConfirmationReceived(distID, r.peer.Identity, transport.ConfirmFailed, r.mpzd.ZoneName, nil, nil, nil, nil, false, "")
+		r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(distID, r.peer.Identity, transport.ConfirmFailed, r.mpzd.ZoneName, nil, nil, nil, nil, false, ""))
 	})
 }
 

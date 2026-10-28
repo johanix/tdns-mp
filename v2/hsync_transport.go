@@ -442,9 +442,10 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	}
 
 	// Wire confirmation callback for reliable message queue and per-RR tracking
-	tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
+	tm.ChunkHandler.OnConfirmationReceived = func(c *transport.IncomingConfirmation) {
+		distributionID, senderID, status, zone := c.DistributionID, c.PeerID, c.Status, c.Zone
+		applied, removed, rejected, ignored := c.AppliedRecords, c.RemovedRecords, c.RejectedItems, c.IgnoredRecords
+		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", c.Nonce)
 
 		if tm.ReliableQueue != nil {
 			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
@@ -468,7 +469,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 				RemovedRecords: removed,
 				RejectedItems:  rejItems,
 				IgnoredRecords: ignored,
-				Truncated:      truncated,
+				Truncated:      c.Truncated,
 				Timestamp:      time.Now(),
 			}
 			select {
