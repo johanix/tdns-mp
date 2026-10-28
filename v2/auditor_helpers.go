@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -67,24 +68,30 @@ func (mpzd *MPZoneData) hsync3IdentitiesByLabel() map[string]string {
 	return out
 }
 
-// hsync3LabelForIdentity returns the label of identity's ON record in the
-// zone's active instructions, compared as a DNS name, or "" if none lists it.
-func (mpzd *MPZoneData) hsync3LabelForIdentity(identity string) string {
-	if mpzd == nil || identity == "" {
-		return ""
-	}
-	label, _ := mpzd.instructions().labelOf(identity)
-	return label
-}
-
-// IsAuditorIdentity reports whether identity is declared in auditors=
-// for this zone (label resolved via apex HSYNC3).
+// IsAuditorIdentity reports whether identity is declared in auditors= for
+// this zone: one of its ON records in the active instructions, its identity
+// compared as a DNS name, has a label in auditors=. An identity that is also
+// under a label in servers= or signers= (an owner error, shown in the
+// auditor's config errors) is a provider, not an auditor.
 func (mpzd *MPZoneData) IsAuditorIdentity(identity string) bool {
 	if mpzd == nil || identity == "" {
 		return false
 	}
-	label := mpzd.hsync3LabelForIdentity(identity)
-	return label != "" && mpzd.IsAuditorLabel(label)
+	in := mpzd.instructions()
+	if in == nil {
+		return false
+	}
+	auditor := false
+	for _, r := range in.Records {
+		if !core.EqualNames(dns.Fqdn(identity), r.Identity) {
+			continue
+		}
+		if slices.Contains(in.Servers, r.Label) || slices.Contains(in.Signers, r.Label) {
+			return false
+		}
+		auditor = auditor || mpzd.IsAuditorLabel(r.Label)
+	}
+	return auditor
 }
 
 // IsAuditorIdentity reports whether identity is declared as an auditor
