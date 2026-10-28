@@ -371,8 +371,8 @@ type AgentMsgResponse struct {
 	Error       bool
 	ErrorMsg    string
 	// Kept: the change is kept until the zone's transition is done, and
-	// why (plan S6)
-	Kept string
+	// why (plan S6); absent from the body when it is not
+	Kept string `json:"Kept,omitempty"`
 }
 
 type RfiData struct {
