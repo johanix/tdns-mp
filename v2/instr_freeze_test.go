@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -530,15 +531,36 @@ func TestCatchUpRequestsAndAnswersAreNotHeld(t *testing.T) {
 	if after := r.sent(); after[roleB]-before[roleB] != 1 {
 		t.Errorf("the answer reached b %d times, want once", after[roleB]-before[roleB])
 	}
-	// b's answer to this agent's request is applied
-	resp := make(chan *AgentMsgResponse, 1)
+
+	// b's answer to this agent's request, through the data engine: applied
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.conf.SynchedDataEngine(ctx, r.conf.InternalMp.MsgQs) }()
+	t.Cleanup(func() { cancel(); <-done })
 	theirs := r.ns("ns1.b.example.")
 	complete := true
-	ok, msg, err := r.zdr.EvaluateUpdate(&SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleB, UpdateType: "remote", DeliveredBy: roleB,
-		CatchUp: &CatchUp{Request: "q1", Complete: &complete},
-		Update:  &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleB, Operations: []core.RROperation{{Operation: "replace", RRtype: "NS", Records: []string{theirs}}}}, Response: resp})
-	if !ok || err != nil {
-		t.Errorf("a catch-up answer during the freeze: %v %q %v", ok, msg, err)
+	answer := make(chan *AgentMsgResponse, 1)
+	r.conf.InternalMp.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleB, UpdateType: "remote", DeliveredBy: roleB,
+		OriginatingDistID: "b-1", OriginatingTime: time.Now(), CatchUp: &CatchUp{Request: "q1", Complete: &complete},
+		Update: &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleB, CatchUp: &CatchUp{Request: "q1", Complete: &complete},
+			Operations: []core.RROperation{{Operation: "replace", RRtype: "NS", Records: []string{theirs}}}}, Response: answer}
+	if a, ok := recvWithin(answer, 10*time.Second); !ok || a.Error {
+		t.Fatalf("b's answer during the freeze: %+v", a)
+	}
+	dump := make(chan *SynchedDataCmdResponse, 1)
+	r.conf.InternalMp.MsgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "dump-zonedatarepo", Zone: ZoneName(r.zone), Response: dump}
+	d, ok := recvWithin(dump, 10*time.Second)
+	if !ok {
+		t.Fatal("the data engine did not answer the dump")
+	}
+	var names []string
+	for _, info := range d.ZDR[ZoneName(r.zone)][roleB][dns.TypeNS] {
+		if rr, err := dns.NewRR(info.RR); err == nil {
+			names = append(names, rr.(*dns.NS).Ns)
+		}
+	}
+	if !slices.Equal(names, []string{"ns1.b.example."}) {
+		t.Errorf("b's NS in the data after its answer during the freeze: %v", names)
 	}
 }
 
@@ -793,5 +815,147 @@ func TestTheHoldIsConfirmedForTheSerialAgreedOn(t *testing.T) {
 	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
 	if !r.conf.holdConfirmed(r.zone) {
 		t.Error("an inventory after the new serial agreed on does not confirm the hold")
+	}
+}
+
+// An edit made after the thaw, but before the release has run, goes after
+// the owed edits: it was made over them, and the release does not undo it
+// (CodeRabbit's review of ff9348d).
+func TestAnEditAfterTheThawGoesAfterTheOwedEdits(t *testing.T) {
+	r := newFreezeRig(t, "after.freeze.example.")
+	r.agree()
+	r.edit("ns1.a.example.")
+	// the thaw and "done", with the release not run yet (its command waits
+	// in the engine's queue)
+	if err := r.store.Activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.store.Done(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	// the operator's next edit, made over the owed one
+	if a := r.edit("ns1.a.example.", "ns2.a.example."); a.Error || a.Kept != "" {
+		t.Fatalf("the edit after the thaw: %+v", a)
+	}
+	if owed := r.conf.InternalMp.Kept.entries(r.zone, listOwed); len(owed) != 0 {
+		t.Errorf("%d entries still owed after an edit of the thawed zone", len(owed))
+	}
+	r.conf.instrDone(context.Background(), r.zdr, ZoneName(r.zone))
+	if got := r.ownNS(); !slices.Equal(got, []string{"ns1.a.example.", "ns2.a.example."}) {
+		t.Errorf("the data after the release: %v, want the later edit's set", got)
+	}
+}
+
+// A delete of a record an owed edit added is this agent's to make: it is
+// kept too, not refused as not owned (cubic's review of ff9348d).
+func TestADeleteOfAnOwedAddIsKept(t *testing.T) {
+	r := newFreezeRig(t, "delete.freeze.example.")
+	local := func(ops []core.RROperation, rrs ...dns.RR) *AgentMsgResponse {
+		t.Helper()
+		answer := make(chan *AgentMsgResponse, 1)
+		r.conf.applyLocalUpdate(context.Background(), r.zdr, &SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleA, UpdateType: "local",
+			Update: &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleA, RRs: rrs, Operations: ops}, Response: answer})
+		return <-answer
+	}
+	rr := func(name string, class uint16) dns.RR {
+		x, _ := dns.NewRR(r.ns(name))
+		x.Header().Class = class
+		return x
+	}
+	replace := func(names ...string) []core.RROperation {
+		var recs []string
+		for _, n := range names {
+			recs = append(recs, r.ns(n))
+		}
+		return []core.RROperation{{Operation: "replace", RRtype: "NS", Records: recs}}
+	}
+	// ns1 in the data before the freeze, ns2 added during it
+	if a := local(replace("ns1.a.example."), rr("ns1.a.example.", dns.ClassINET)); a.Error {
+		t.Fatalf("the edit before the freeze: %+v", a)
+	}
+	r.agree()
+	if a := local(replace("ns1.a.example.", "ns2.a.example."), rr("ns2.a.example.", dns.ClassINET)); a.Error || a.Kept == "" {
+		t.Fatalf("the add during the freeze: %+v", a)
+	}
+	if a := local(replace("ns1.a.example."), rr("ns2.a.example.", dns.ClassNONE)); a.Error || a.Kept == "" {
+		t.Errorf("the delete of the owed add: %+v", a)
+	}
+	// a record neither the data nor the owed list holds is refused, as before
+	if a := local(replace("ns1.a.example."), rr("ns9.a.example.", dns.ClassNONE)); !a.Error || !strings.Contains(a.ErrorMsg, "not owned") {
+		t.Errorf("a delete of a record nobody holds: %+v", a)
+	}
+}
+
+// A frozen zone that leaves the configuration ends its freeze: the signer
+// lets the hold go, and what the zone owed is dropped, not released into a
+// zone that is gone (cubic's review of ff9348d).
+func TestAFrozenZoneThatLeavesTheConfigurationLetsTheHoldGo(t *testing.T) {
+	r := newFreezeRig(t, "prune.freeze.example.")
+	r.agree()
+	r.edit("ns1.a.example.")
+	r.store.Prune(func(string) bool { return false })
+	b := &r.conf.InternalMp.holds
+	b.mu.Lock()
+	word := b.told[canonicalName(r.zone)]
+	b.mu.Unlock()
+	if word.on {
+		t.Error("the hold stayed on after the frozen zone left the configuration")
+	}
+	before := r.sent()
+	r.conf.instrDone(context.Background(), r.zdr, ZoneName(r.zone))
+	if owed := r.conf.InternalMp.Kept.entries(r.zone, listOwed); len(owed) != 0 {
+		t.Errorf("%d entries owed after the zone left", len(owed))
+	}
+	if after := r.sent(); !maps.Equal(before, after) {
+		t.Errorf("a kept edit of a zone that left was sent: %v, before %v", after, before)
+	}
+}
+
+// The zone's hold words reach the signer in the order they were told, the
+// latest last: one sender per zone (cubic's review of ff9348d).
+func TestTheLatestHoldWordIsTheLastSent(t *testing.T) {
+	r := newFreezeRig(t, "order.hold.freeze.example.")
+	var mu sync.Mutex
+	var sent []bool
+	gate := make(chan struct{})
+	r.conf.InternalMp.holdSend = func(_ ZoneName, on bool) {
+		<-gate
+		mu.Lock()
+		sent = append(sent, on)
+		mu.Unlock()
+	}
+	r.conf.tellHold(r.zone, true, 0)
+	r.conf.tellHold(r.zone, false, 0)
+	r.conf.tellHold(r.zone, true, 0)
+	r.conf.tellHold(r.zone, false, 0)
+	close(gate)
+	waitUntil(t, "the sender did not end", func() bool {
+		b := &r.conf.InternalMp.holds
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.sending[canonicalName(r.zone)]
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) == 0 || len(sent) > 2 || sent[len(sent)-1] {
+		t.Errorf("the words sent: %v, want the first and then the latest (off)", sent)
+	}
+}
+
+// An inventory that carries the hold confirms it only after the agent last
+// told it: one from an earlier freeze does not (cubic's review of ff9348d).
+func TestAnInventoryBeforeTheHoldWasToldDoesNotConfirmIt(t *testing.T) {
+	r := newFreezeRig(t, "stale.hold.freeze.example.")
+	mpzd, _ := Zones.Get(r.zone)
+	r.agree()
+	time.Sleep(5 * time.Millisecond)
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	if !r.conf.holdConfirmed(r.zone) {
+		t.Fatal("an inventory after the hold was told does not confirm it")
+	}
+	time.Sleep(5 * time.Millisecond)
+	r.conf.tellHold(r.zone, true, 0)
+	if r.conf.holdConfirmed(r.zone) {
+		t.Error("an inventory from before the hold was told again confirms it")
 	}
 }

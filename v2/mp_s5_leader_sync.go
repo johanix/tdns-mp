@@ -660,7 +660,8 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		if len(leave) == 0 {
 			ch.hold, ch.waiting, ch.notified, ch.rechecks = nil, false, "", 0
 			c.mu.Unlock()
-			conf.syncHeld(zone, syncOther)
+			// owed whatever the freeze is by now: the release tick asks it
+			conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
 			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
 				"notify", notifyTypes(hold.notifies))
 			return
@@ -670,7 +671,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		check := c.notifyLeft(zone, ch, types, hold.retimed, delays)
 		c.mu.Unlock()
 		if len(leave) < len(hold.notifies) {
-			conf.syncHeld(zone, syncOther)
+			conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
 			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
 				"notify", notifyTypes(hold.notifies))
 		}

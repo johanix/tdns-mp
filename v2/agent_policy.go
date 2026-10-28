@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -317,8 +318,9 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 					synchedDataUpdate.Zone, rr.String()), nil
 			}
 
-			// For local deletes, verify the RR belongs to this agent
-			if rr.Header().Class == dns.ClassNONE {
+			// For local deletes, verify the RR belongs to this agent: in its
+			// data, or added by one of its owed changes (plan S6)
+			if rr.Header().Class == dns.ClassNONE && !zdr.owedHolds(synchedDataUpdate, rr) {
 				agentRepo, ok := zdr.Get(synchedDataUpdate.Zone)
 				if ok {
 					nod, ok := agentRepo.Get(synchedDataUpdate.AgentId)
@@ -696,4 +698,25 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 	}
 
 	return changed, msg
+}
+
+// owedHolds: this agent's data with its owed changes laid over it holds rr
+// (plan S6): a record an owed edit added is the agent's to delete. False
+// with nothing owed.
+func (zdr *ZoneDataRepo) owedHolds(u *SynchedDataUpdate, rr dns.RR) bool {
+	if len(u.owed) == 0 {
+		return false
+	}
+	t := rr.Header().Rrtype
+	base := map[uint16][]dns.RR{}
+	if ar, ok := zdr.Get(u.Zone); ok {
+		if nod, ok := ar.Get(u.AgentId); ok {
+			if rrset, ok := nod.RRtypes.Get(t); ok {
+				base[t] = rrset.RRs
+			}
+		}
+	}
+	check := dns.Copy(rr)
+	check.Header().Class = dns.ClassINET
+	return slices.ContainsFunc(overOwed(base, u.owed)[t], func(o dns.RR) bool { return dns.IsDuplicate(o, check) })
 }

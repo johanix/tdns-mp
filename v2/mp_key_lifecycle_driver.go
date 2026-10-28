@@ -1217,9 +1217,13 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		}
 		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
 		// under a hold nothing new starts (plan S6): no lifetime rollover,
-		// no standby key, no algorithm rollover not yet begun
+		// no standby key, no algorithm rollover not yet begun. A standby of
+		// a role the policy keeps none of was minted for a rollover that
+		// began before the hold: its promotion is that rollover's next phase.
 		algStart := algPending && policyKeys == 0
+		promoteDue := due
 		if l.hold {
+			promoteDue = due && want == 0
 			due, algStart = false, false
 			want = 0
 		}
@@ -1231,7 +1235,7 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		// old key's account rolled the new algorithm's key once per standby
 		// (seen on the testbed). Due is the policy algorithm's own key past
 		// its lifetime, for the same reason.
-		if len(standbys) > 0 && (active == 0 || l.rolls[role] || due || (algPending && activeOfAlg == 0)) {
+		if len(standbys) > 0 && (active == 0 || l.rolls[role] || promoteDue || (algPending && activeOfAlg == 0)) {
 			sort.Slice(standbys, func(i, j int) bool { return standbys[i].KeyTag < standbys[j].KeyTag })
 			l.rolling = role
 			_, to, err := l.applyLocked(standbys[0].KeyTag, EvPromote)
