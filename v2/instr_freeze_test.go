@@ -242,19 +242,26 @@ func TestAZoneIsFrozenWhileItAgreesReconcilesOrHoldsAnOwnerError(t *testing.T) {
 	}
 }
 
-// Until the thaw enforces the active serial (S7), nothing is frozen: the
-// active serial follows the copy, and an owner error is shown and not
-// enforced.
+// A record kept before S7, whose active serial is not enforced, freezes
+// nothing: it followed the copy, and its owner error is shown and not
+// enforced. From S7 the next copy noted enforces it, and the owner error
+// holds the zone.
 func TestNothingIsFrozenUntilTheActiveSerialIsEnforced(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha"), nil)
-	s.Note(storeZone, at(t, 8, "beta"), nil)
-	s.Note(storeZone, at(t, 8, "alpha,beta"), nil)
-	if st := s.Status(storeZone); st.OwnerError == "" {
-		t.Fatal("no owner error at an edit without a raised serial")
+	eight := at(t, 8, "beta")
+	if err := s.update(storeZone, func(z *zoneSerials) error {
+		z.Active = &heldSerial{SerialDigest: sd(eight), Reading: eight, Since: time.Now()}
+		z.ownerError(storeZone, "serial 8 with two digests")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if why := s.frozen(storeZone); len(why) != 0 {
 		t.Errorf("a zone whose active serial is not enforced is frozen: %v", why)
+	}
+	s.Note(storeZone, eight, nil)
+	if why := s.frozen(storeZone); len(why) == 0 {
+		t.Error("the owner error holds nothing once the record is enforced")
 	}
 }
 

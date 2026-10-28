@@ -49,7 +49,37 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateSyncengineIntervals(mp); err != nil {
 		return err
 	}
+	if err := ValidateTransitions(mp); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ValidateTransitions rejects a negative
+// multi-provider.transitions.leaving-timeout, and one that is not above the
+// beat interval: a telling heard longer ago than it does not count for the
+// thaw (plan S7), and with beats further apart none would ever count.
+func ValidateTransitions(mp *MultiProviderConf) error {
+	if t := mp.Transitions.LeavingTimeout; t < 0 {
+		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %d is negative", t)
+	}
+	if beat := hsyncConfigFromMp(mp).BeatInterval; leavingTimeoutFor(mp) <= beat {
+		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %s is not above the beat interval (%s)", leavingTimeoutFor(mp), beat)
+	}
+	return nil
+}
+
+// leavingTimeoutDefault is multi-provider.transitions.leaving-timeout's
+// default.
+const leavingTimeoutDefault = time.Hour
+
+// leavingTimeoutFor is multi-provider.transitions.leaving-timeout, or its
+// default.
+func leavingTimeoutFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Transitions.LeavingTimeout > 0 {
+		return time.Duration(mp.Transitions.LeavingTimeout) * time.Second
+	}
+	return leavingTimeoutDefault
 }
 
 // ValidateCombinerAgents refuses an empty entry in multi-provider.agents,

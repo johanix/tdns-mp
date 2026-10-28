@@ -589,7 +589,8 @@ func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	wantLines(t, "status", out, fmt.Sprintf("  instructions:   active 7 (%s), copy 7; not enforced", seven.Digest()))
+	// from S7 the first copy noted is the active serial, enforced
+	wantLines(t, "status", out, fmt.Sprintf("  instructions:   active 7 (%s), copy 7", seven.Digest()))
 
 	if out, err := forget("-z", zone); err != nil || !strings.Contains(out, "Forgot the stored serials of zone "+zone) {
 		t.Fatalf("forget: %v, %q", err, out)

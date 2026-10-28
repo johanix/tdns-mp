@@ -375,4 +375,7 @@ type InternalMpConf struct {
 	// SignerHolds are the zones whose key machine the signer holds at its
 	// agent's word (instr_freeze.go); nil on every other role.
 	SignerHolds *signerHolds
+	// thaws: what the agent and the auditor keep of their zones' thaws
+	// (instr_thaw.go).
+	thaws thawBook
 }

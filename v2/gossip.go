@@ -483,6 +483,15 @@ func (gst *GossipStateTable) SetOnGroupDegraded(fn func(groupHash string)) {
 	gst.onGroupDegraded = fn
 }
 
+// SetGateExcused sets what the gate of a group leaves out of its voting
+// members: a leaving voting member excused from the thaw, while it is not
+// heard (design 3.2, plan S7).
+func (gst *GossipStateTable) SetGateExcused(fn func(groupHash string) []string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.gateExcused = fn
+}
+
 func (gst *GossipStateTable) SetOnElectionUpdate(fn func(groupHash string, state GroupElectionState)) {
 	gst.mu.Lock()
 	defer gst.mu.Unlock()
@@ -507,8 +516,15 @@ func (gst *GossipStateTable) forgetGroup(groupHash string) {
 // OPERATIONAL. Its callers pass the group's voting members (step 8, design
 // 4.3): an auditor that is down holds no election back, and does not take a
 // leader's group out of mutual OPERATIONAL. With one voting member, its own
-// row opens the gate.
+// row opens the gate. A leaving voting member excused from the thaw is left
+// out while it is not heard (design 3.2, plan S7).
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
+	gst.mu.RLock()
+	excused := gst.gateExcused
+	gst.mu.RUnlock()
+	if excused != nil {
+		expectedMembers = withoutExcused(expectedMembers, excused(groupHash))
+	}
 	gst.mu.Lock()
 
 	groupStates := gst.States[groupHash]

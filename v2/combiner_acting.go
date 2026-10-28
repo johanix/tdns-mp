@@ -461,10 +461,10 @@ func combinerActingLine(mpzd *MPZoneData) string {
 // reportCombinerStart is the combiner's start report: a STATUS-UPDATE
 // "combiner-start" to its agent once its router is up, naming no zone of its
 // own ("."), on which the agent hands every zone over. Every minute after,
-// for each zone whose copy carries a serial and that it holds nothing for
-// (waitsForHandover), it sends "combiner-waits" for that zone, rule 5's
-// request, since the agent may not have been up; the agent hands that zone
-// over, and what the combiner holds for the others stands.
+// for each zone that it holds nothing for (zonesWaitingForHandover), it
+// sends "combiner-waits" for that zone, rule 5's request, since the agent
+// may not have been up; the agent hands that zone over, and what the
+// combiner holds for the others stands.
 func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBridge) {
 	mp := conf.MpConfig()
 	if tm == nil || mp == nil {
@@ -492,12 +492,18 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 	}
 }
 
-// zonesWaitingForHandover are the zones loaded here that wait for their
-// agent's hand-over (waitsForHandover).
+// zonesWaitingForHandover are the multi-provider zones loaded here that the
+// combiner holds no hand-over for, whether or not their copy carries a
+// serial: one whose copy carries none acts by its copy meanwhile (rule 5),
+// and from S7 that copy can hold a serial its agent refuses (tdns-mp #302).
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
 	for _, zone := range conf.InternalMp.MPZoneNames {
-		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
+		mpzd, ok := Zones.Get(zone)
+		if !ok || !mpzd.Ready || !mpzd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		if _, held := actingHeld.Load().get(zone); !held {
 			out = append(out, zone)
 		}
 	}

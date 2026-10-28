@@ -138,6 +138,15 @@ type MultiProviderConf struct {
 			PeerHold int `yaml:"peer_hold" mapstructure:"peer_hold"`
 		} `yaml:"intervals" mapstructure:"intervals"`
 	} `yaml:"syncengine" mapstructure:"syncengine"`
+	// Transitions: the times of a change of the owner's instructions, in
+	// seconds (YAML: multi-provider.transitions; plan S7). LeavingTimeout:
+	// a telling heard longer ago does not count for the thaw, and a leaving
+	// voting member whose telling has not met the thaw's conditions for this
+	// long, counted from when this agent first holds the serial agreed on,
+	// is excused. Zero or absent: 3600.
+	Transitions struct {
+		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
+	} `yaml:"transitions" mapstructure:"transitions"`
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
