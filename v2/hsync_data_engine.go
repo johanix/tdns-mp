@@ -128,6 +128,15 @@ func (e *HsyncDataEngine) handleStatusUpdate(ctx context.Context, statusMsg *Sta
 		}
 		lgEngine.Info("the combiner reports a start: handing it every zone again", "combiner", statusMsg.SenderID)
 		e.conf.InternalMp.Handover.combinerStarted()
+	case "combiner-waits":
+		// The start report's repeat (plan S10): the combiner holds no
+		// hand-over for this zone. It is handed over again, alone.
+		if !e.conf.fromCombiner(statusMsg.SenderID) {
+			lgEngine.Warn("a combiner-waits report from another than this agent's combiner, ignored", "sender", statusMsg.SenderID, "zone", statusMsg.Zone)
+			return
+		}
+		lgEngine.Info("the combiner waits for the zone's hand-over: handing it again", "combiner", statusMsg.SenderID, "zone", statusMsg.Zone)
+		e.conf.InternalMp.Handover.combinerWaits(statusMsg.Zone)
 	}
 }
 

@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -21,8 +22,9 @@ import (
 
 // handedQueue is what a tracker put on the queue to the combiner, in order.
 type handedQueue struct {
-	mu   sync.Mutex
-	msgs []handedMsg
+	mu     sync.Mutex
+	msgs   []handedMsg
+	refuse bool // the queue refuses every update but a hand-over
 }
 
 type handedMsg struct {
@@ -33,6 +35,9 @@ type handedMsg struct {
 func (q *handedQueue) enqueue(_ ZoneName, u *ZoneUpdate, distID string) (string, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.refuse && u.Acting == nil {
+		return "", errors.New("the queue is full")
+	}
 	q.msgs = append(q.msgs, handedMsg{distID: distID, update: u})
 	return distID, nil
 }
@@ -179,8 +184,16 @@ func TestTheAgentLearnsWhatItsCombinerHoldsFromTheOwnRead(t *testing.T) {
 		t.Errorf("the own read says the combiner holds the serial: released %+v, want u2", got)
 	}
 	tr.confirmation(first.distID, transport.ConfirmSuccess)
+	// an answer from before the confirmation, older than it, is not taken:
+	// nothing is handed again and nothing waits
 	tr.learned(behind, wantOf(behind, 7, "alpha"))
-	handoverIn(t, q.take())
+	tr.learned(behind, nil)
+	if msgs := q.take(); len(msgs) != 0 {
+		t.Errorf("an answer older than the confirmation made the agent send %d messages", len(msgs))
+	}
+	if waiting, _ := tr.gate(ZoneName(behind), update(behind), "u3"); waiting {
+		t.Error("an answer older than the confirmation holds updates back")
+	}
 }
 
 // A refusal or an "ignored" of an update sent while the combiner held
@@ -232,6 +245,67 @@ func TestTheCombinersStartHandsEveryZoneAgain(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("%d zones handed over after the combiner's start, want 2", n)
+	}
+}
+
+// The repeat of the combiner's start report names a zone it waits for: that
+// zone is handed over again, and the others' updates are not held up.
+func TestACombinerWaitsReportHandsThatZoneAlone(t *testing.T) {
+	tr, q := newTestTracker()
+	for _, z := range []string{"one.acting.example.", "two.acting.example."} {
+		tr.handOver(wantOf(z, 3, "alpha"))
+		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+	}
+	tr.combinerWaits("one.acting.example.")
+	if h := handoverIn(t, q.take()).update.Acting; h.Zone != "one.acting.example." {
+		t.Errorf("handed over %s, want the zone the combiner waits for", h.Zone)
+	}
+	if waiting, _ := tr.gate("two.acting.example.", update("two.acting.example."), "u1"); waiting {
+		t.Error("another zone's update waits for the hand-over of the zone the combiner waits for")
+	}
+}
+
+// An update that waited and that the queue refuses is not lost: it stays
+// first, what comes after it waits behind it, and the ticker sends them in
+// order once the queue takes them.
+func TestAnUpdateTheQueueRefusesOnReleaseIsSentByTheTicker(t *testing.T) {
+	const zone = "refused.acting.example."
+	tr, q := newTestTracker()
+	tr.handOver(wantOf(zone, 4, "alpha"))
+	hand := handoverIn(t, q.take())
+	tr.gate(ZoneName(zone), update(zone), "u1")
+	q.refuse = true
+	tr.confirmation(hand.distID, transport.ConfirmSuccess)
+	if msgs := q.take(); len(msgs) != 0 {
+		t.Fatalf("the queue refuses, yet %d messages were queued", len(msgs))
+	}
+	if waiting, _ := tr.gate(ZoneName(zone), update(zone), "u2"); !waiting {
+		t.Error("a new update overtakes one that still waits")
+	}
+	q.refuse = false
+	tr.tick()
+	got := q.take()
+	if len(got) != 2 || got[0].distID != "u1" || got[1].distID != "u2" {
+		t.Errorf("the ticker sent %+v, want u1 then u2", got)
+	}
+}
+
+// A forget while the same hand-over is in flight is not lost with its
+// confirmation: the next hand-over says it.
+func TestAForgetDuringAFlightIsToldByTheNextHandOver(t *testing.T) {
+	const zone = "forgetflight.acting.example."
+	tr, q := newTestTracker()
+	tr.handOver(wantOf(zone, 9, "alpha"))
+	flight := handoverIn(t, q.take())
+	tr.forgot(zone)
+	tr.handOver(wantOf(zone, 9, "alpha"))
+	if msgs := q.take(); len(msgs) != 0 {
+		t.Fatalf("the same hand-over was sent again while in flight: %d", len(msgs))
+	}
+	tr.confirmation(flight.distID, transport.ConfirmSuccess)
+	tr.handOver(wantOf(zone, 2, "alpha"))
+	if h := handoverIn(t, q.take()).update.Acting; !h.Reset || h.Serial != 2 {
+		t.Errorf("after the forget the agent hands %+v, want serial 2 marked reset", h)
 	}
 }
 

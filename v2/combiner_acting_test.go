@@ -374,6 +374,36 @@ func TestACopyNewerThanTheHandOverIsActedBy(t *testing.T) {
 	}
 }
 
+// A CDS the filter leaves out gives the zone back the upstream's CDS at the
+// next combine, as a type the policy does not apply would: the cleanup does
+// not delete the owner's RRset.
+func TestAFilteredCDSGivesBackTheUpstreamCDS(t *testing.T) {
+	const zone = "cds.acting.example."
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	upstream := zone + "\t3600\tIN\tCDS\t1111 15 2 " + strings.ToUpper(hex)
+	param := `serial="5" servers="alpha,beta" signers="alpha,beta" parentsync="agent"`
+	conf, mpzd := actingCombiner(t, zone, append(actRecords(param), "3600 IN CDS 1111 15 2 "+hex)...)
+	withActing(t, nil)
+	contributed := zone + "\t3600\tIN\tCDS\t2222 15 2 " + strings.ToUpper(hex)
+	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
+		actOther: {zone: {dns.TypeCDS: {Name: zone, RRtype: dns.TypeCDS, RRs: []dns.RR{mustRR(t, contributed)}}}},
+	}
+	if resp := handTo(conf, handoverFor(t, zone, actRecords(param)...), actUs); resp.Status != "ok" {
+		t.Fatalf("refused: %s", resp.Message)
+	}
+	if got := servedTypes(t, mpzd, dns.TypeCDS); !slices.Equal(got, []string{contributed}) {
+		t.Fatalf("with beta among the DS signers the zone serves CDS %v, want beta's", got)
+	}
+	h := handoverFor(t, zone, actRecords(`serial="6" servers="alpha,beta" signers="alpha,beta" parentsync="agent"`)...)
+	h.Sets.DSSigners = h.Sets.DSSigners[:1] // alpha
+	if resp := handTo(conf, h, actUs); resp.Status != "ok" {
+		t.Fatalf("refused: %s", resp.Message)
+	}
+	if got := servedTypes(t, mpzd, dns.TypeCDS); !slices.Equal(got, []string{upstream}) {
+		t.Errorf("with beta's CDS left out the zone serves CDS %v, want the upstream's", got)
+	}
+}
+
 func mustRR(t *testing.T, s string) dns.RR {
 	t.Helper()
 	rr, err := dns.NewRR(s)
@@ -435,10 +465,23 @@ func TestADNSKEYAddedByAnOriginOutsideKeySignersIsRefused(t *testing.T) {
 	if len(resp.RejectedItems) != 1 || !strings.Contains(resp.RejectedItems[0].Reason, "is not a signer") {
 		t.Errorf("a DNSKEY added by an origin the serial handed does not name: %s %+v", resp.Status, resp.RejectedItems)
 	}
+	// a DNSKEY it stored before, as under an earlier hand-over: its removal
+	// is not judged, and removes it
+	mpzd.Lock()
+	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
+		actOther: {zone: {dns.TypeDNSKEY: dnskeyContribution(t, zone, key)}},
+	}
+	mpzd.Unlock()
 	del := &CombinerSyncRequest{SenderID: actOther, Zone: zone, DistributionID: nextDistributionID(),
 		Operations: []core.RROperation{{Operation: "delete", RRtype: "DNSKEY", Records: []string{key.String()}}}}
 	if resp := mpzd.combinerProcessOperations(del, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy()); len(resp.RejectedItems) > 0 {
 		t.Errorf("an origin's removal of its own DNSKEY is judged: %+v", resp.RejectedItems)
+	}
+	mpzd.Lock()
+	left := len(mpzd.MP.AgentContributions[actOther][zone][dns.TypeDNSKEY].RRs)
+	mpzd.Unlock()
+	if left != 0 {
+		t.Errorf("the origin's DNSKEY is still stored after its removal: %d", left)
 	}
 }
 

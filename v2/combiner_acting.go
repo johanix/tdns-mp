@@ -34,6 +34,7 @@ type actingStore struct {
 	mu    sync.Mutex
 	hdb   *HsyncDB // nil: in memory only
 	zones map[string]*heldHandover
+	owed  map[string]bool // zones whose combine by the hand-over held failed
 }
 
 type heldHandover struct {
@@ -165,6 +166,33 @@ func (s *actingStore) roles(zone string, apex *tdns.OwnerData) (Roles, bool) {
 	return held.handover.Sets, true
 }
 
+// owes: the combine by the hand-over held for the zone failed, and is tried
+// again at its next hand-over, the same one included.
+func (s *actingStore) owes(zone string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.owed[handoverKey(zone)]
+}
+
+func (s *actingStore) owe(zone string, owed bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owed == nil {
+		s.owed = map[string]bool{}
+	}
+	if owed {
+		s.owed[handoverKey(zone)] = true
+	} else {
+		delete(s.owed, handoverKey(zone))
+	}
+}
+
 // signingSet is the handed set of who signs, as the signing set
 // populateMPdata reads (#275), and whether the combiner acts by it.
 func (s *actingStore) signingSet(zone string, apex *tdns.OwnerData) (signingSet, bool) {
@@ -279,6 +307,8 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 	if store == nil {
 		return refuse("this combiner keeps no hand-overs")
 	}
+	// what the combiner acted by before, its copy included (actsBy)
+	pubkeyBefore := mpzd.hasPubkey()
 	prev, changed, err := store.take(h, sender)
 	switch {
 	case errors.Is(err, errHandoverOlder):
@@ -286,16 +316,23 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 	case err != nil:
 		return refuse(err.Error())
 	}
-	if changed {
-		lgCombiner.Info("acting by the serial the agent handed", "zone", zone, "serial", h.Serial, "step", h.Step, "before", prev.String())
-		var pubkeyBefore bool
-		if prev != nil {
-			pubkeyBefore = prev.Sets.Pubkey
+	var actErr error
+	if changed || store.owes(zone) {
+		if changed {
+			lgCombiner.Info("acting by the serial the agent handed", "zone", zone, "serial", h.Serial, "step", h.Step, "before", prev.String())
 		}
-		mpzd.actByHandover(conf.MpConfig(), pubkeyBefore)
+		actErr = mpzd.actByHandover(conf.MpConfig(), pubkeyBefore)
+		store.owe(zone, actErr != nil)
 	}
 	if h.Refresh {
 		conf.refreshFromUpstream(mpzd)
+	}
+	if actErr != nil {
+		// Held and judged by, not served: said so, as a contribution's
+		// confirmation says it. The agent hands it again, and the combine is
+		// tried again then.
+		resp.Status, resp.Message = "partial", fmt.Sprintf("acting by %s; publishing the combined zone failed: %v", h, actErr)
+		return resp
 	}
 	resp.Status, resp.Message = "ok", "acting by "+h.String()
 	return resp
@@ -305,10 +342,10 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 // multi-provider data and edit rights, the merge of the stored
 // contributions, which judges every origin by the sets handed (design
 // 3.5), and the zone's content. Not before the zone's first load, which
-// reads what is held.
-func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) {
+// reads what is held. The error is the combine's.
+func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) error {
 	if !mpzd.Ready {
-		return
+		return nil
 	}
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName, apex)
@@ -334,9 +371,10 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	mpzd.RebuildCombinerData()
 	allow := mpzd.MPOptions[tdns.OptAllowEdits]
 	mpzd.Unlock()
+	var combineErr error
 	if allow {
-		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
-			lgCombiner.Error("combining by the hand-over failed", "zone", mpzd.ZoneName, "err", err)
+		if _, combineErr = mpzd.CombineWithLocalChanges(); combineErr != nil {
+			lgCombiner.Error("combining by the hand-over failed", "zone", mpzd.ZoneName, "err", combineErr)
 		}
 	}
 	if mpzd.hasPubkey() != pubkeyBefore {
@@ -344,6 +382,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
+	return combineErr
 }
 
 // handedOrigin: by the sets the combiner was handed (design 3.5), the zone
@@ -420,24 +459,25 @@ func combinerActingLine(mpzd *MPZoneData) string {
 }
 
 // reportCombinerStart is the combiner's start report: a STATUS-UPDATE
-// "combiner-start" to its agent once its router is up, on which the agent
-// hands every zone over. It is also rule 5's request for a zone whose copy
-// carries a serial and that it holds nothing for (waitsForHandover): sent
-// again every minute while such a zone waits, since the agent may not have
-// been up. It names no zone of its own (".").
+// "combiner-start" to its agent once its router is up, naming no zone of its
+// own ("."), on which the agent hands every zone over. Every minute after,
+// for each zone whose copy carries a serial and that it holds nothing for
+// (waitsForHandover), it sends "combiner-waits" for that zone, rule 5's
+// request, since the agent may not have been up; the agent hands that zone
+// over, and what the combiner holds for the others stands.
 func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBridge) {
 	mp := conf.MpConfig()
 	if tm == nil || mp == nil {
 		return
 	}
-	report := func() {
+	report := func(zone, subtype string) {
 		for _, a := range mp.Agents {
 			if a != nil && a.Identity != "" {
-				sendDelegationStatusUpdate(tm, dns.Fqdn(a.Identity), ".", "combiner-start", nil, nil)
+				sendDelegationStatusUpdate(tm, dns.Fqdn(a.Identity), zone, subtype, nil, nil)
 			}
 		}
 	}
-	report()
+	report(".", "combiner-start")
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -445,18 +485,21 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if conf.anyZoneWaitsForHandover() {
-				report()
+			for _, zone := range conf.zonesWaitingForHandover() {
+				report(zone, "combiner-waits")
 			}
 		}
 	}
 }
 
-func (conf *Config) anyZoneWaitsForHandover() bool {
+// zonesWaitingForHandover are the zones loaded here that wait for their
+// agent's hand-over (waitsForHandover).
+func (conf *Config) zonesWaitingForHandover() []string {
+	var out []string
 	for _, zone := range conf.InternalMp.MPZoneNames {
 		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
-			return true
+			out = append(out, zone)
 		}
 	}
-	return false
+	return out
 }

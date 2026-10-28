@@ -419,9 +419,10 @@ func servedAsUpstream(s tdns.Stager, in *combineInput, rrtype uint16) bool {
 }
 
 // cleanupInto handles the (owner, rrtype) pairs a contribution change may
-// have emptied: nothing if some agent still contributes there; the upstream
-// NS restored at the apex; otherwise the RRset deleted, and the owner with
-// it when that was its last RRset.
+// have emptied: nothing if some agent still contributes there; at the apex,
+// the upstream's RRset restored where it has one (the NS always kept);
+// otherwise the RRset deleted, and the owner with it when that was its last
+// RRset.
 func cleanupInto(s tdns.Stager, in *combineInput) bool {
 	changed := false
 	for _, c := range in.cleanups {
@@ -430,19 +431,24 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 				continue
 			}
 		}
-		if c.rrtype == dns.TypeNS && c.owner == in.zone {
-			up, ok := in.upstreamApex[dns.TypeNS]
-			if !ok {
+		if c.owner == in.zone {
+			// what the upstream has at the apex is served again, as
+			// servedAsUpstream serves a type the policy does not apply: a
+			// filtered origin's CDS takes no owner's CDS with it (plan S10)
+			up, ok := in.upstreamApex[c.rrtype]
+			if !ok && c.rrtype == dns.TypeNS {
 				lgCombiner.Warn("cleanup: no upstream NS to restore", "zone", in.zone)
 				continue
 			}
-			if cur := s.RRset(c.owner, dns.TypeNS); cur != nil && rrsetEqual(*cur, up) {
+			if ok {
+				if cur := s.RRset(c.owner, c.rrtype); cur != nil && rrsetEqual(*cur, up) {
+					continue
+				}
+				s.SetRRset(c.owner, up)
+				changed = true
+				lgCombiner.Info("cleanup: restored the upstream RRset", "zone", in.zone, "rrtype", dns.TypeToString[c.rrtype], "records", len(up.RRs))
 				continue
 			}
-			s.SetRRset(c.owner, up)
-			changed = true
-			lgCombiner.Info("cleanup: restored the upstream NS RRset", "zone", in.zone, "records", len(up.RRs))
-			continue
 		}
 		if s.RRset(c.owner, c.rrtype) == nil {
 			continue

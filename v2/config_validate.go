@@ -37,6 +37,9 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateAgentSupportedMechanisms(mp); err != nil {
 		return err
 	}
+	if err := ValidateCombinerAgents(mp); err != nil {
+		return err
+	}
 	if err := ValidateCryptoFiles(mp); err != nil {
 		return err
 	}
@@ -46,27 +49,22 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateSyncengineIntervals(mp); err != nil {
 		return err
 	}
-	if err := ValidateCombinerAgents(mp); err != nil {
-		return err
-	}
 	return nil
 }
 
-// ValidateCombinerAgents refuses a multi-provider combiner with more than one
-// agent: the combiner acts by what its agent hands it (plan S10, 7.3 item
-// 5), so it must be clear whose hand-over counts.
+// ValidateCombinerAgents refuses an empty entry in multi-provider.agents,
+// which the checks after it and the role's start would read, and a
+// multi-provider combiner with more than one agent: the combiner acts by
+// what its agent hands it (plan S10, 7.3 item 5), so it must be clear whose
+// hand-over counts. It runs before the checks that read the entries.
 func ValidateCombinerAgents(mp *MultiProviderConf) error {
-	if mp.Role != "combiner" {
-		return nil
-	}
-	n := 0
-	for _, a := range mp.Agents {
-		if a != nil {
-			n++
+	for i, a := range mp.Agents {
+		if a == nil {
+			return fmt.Errorf("multi-provider.agents[%d] is empty", i)
 		}
 	}
-	if n > 1 {
-		return fmt.Errorf("a multi-provider combiner has more than one agent (multi-provider.agents lists %d)", n)
+	if mp.Role == "combiner" && len(mp.Agents) > 1 {
+		return fmt.Errorf("a multi-provider combiner has more than one agent (multi-provider.agents lists %d)", len(mp.Agents))
 	}
 	return nil
 }

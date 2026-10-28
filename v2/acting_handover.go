@@ -199,7 +199,8 @@ type zoneHandover struct {
 	flightAt time.Time
 	heldAt   time.Time // when the combiner was last known to hold want
 	waiting  []waitingUpdate
-	reset    bool // the zone's serials were forgotten: the next hand-over says so
+	draining bool // an update that waited is being queued (drain)
+	reset    bool // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
 }
 
 type waitingUpdate struct {
@@ -300,10 +301,11 @@ func (t *handoverTracker) zone(zone string) *zoneHandover {
 // gate is EnqueueForCombiner's check: nothing goes to the combiner under a
 // serial and step it has not confirmed holding (plan S10). An update for a
 // zone whose combiner does not hold what this agent wants waits, in order,
-// and goes out when it does (waiting true). One that goes out now is noted,
-// with what the combiner holds, for the rule on its final word
-// (confirmation). A zone this agent has handed nothing yet, such as one not
-// loaded, is not held up.
+// and goes out when it does (waiting true); so does one that would overtake
+// updates still waiting. One that goes out now is noted, with what the
+// combiner holds, for the rule on its final word (confirmation). A zone
+// this agent has handed nothing yet, such as one not loaded, is not held
+// up.
 func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string) (waiting bool, err error) {
 	if t == nil || update == nil || update.Acting != nil {
 		return false, nil
@@ -314,7 +316,7 @@ func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string)
 	if z == nil || z.want == nil {
 		return false, nil
 	}
-	if !z.want.sameAs(z.held) {
+	if !z.want.sameAs(z.held) || z.draining || len(z.waiting) > 0 {
 		if len(z.waiting) >= handoverMaxWaiting {
 			return false, fmt.Errorf("%d updates for zone %s wait for the combiner to hold serial %d", len(z.waiting), zone, z.want.Serial)
 		}
@@ -351,21 +353,15 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 			lgEngine.Warn("the combiner refused the hand-over; its own read says what it holds", "zone", zone, "handover", h.String(), "status", status.String())
 			return true
 		}
-		z.held, z.heldAt, z.reset = h, time.Now(), false
-		var release []waitingUpdate
-		if z.want.sameAs(h) {
-			release, z.waiting = z.waiting, nil
-		}
+		// a forget is told until a hand-over that tells it is confirmed
+		z.held, z.heldAt, z.reset = h, time.Now(), z.reset && !h.Reset
+		waiting := len(z.waiting)
 		// the agent may want something else by now, and not have sent it
 		// while this was in flight
 		send := t.dueLocked(z, false)
 		t.mu.Unlock()
-		lgEngine.Info("the combiner acts by the serial handed", "zone", zone, "handover", h.String(), "released", len(release))
-		for _, w := range release {
-			if _, err := t.enqueueThrough(w.zone, w.update, w.distID); err != nil {
-				lgEngine.Error("an update that waited for the combiner's hand-over could not be queued", "zone", zone, "distrib", w.distID, "err", err)
-			}
-		}
+		lgEngine.Info("the combiner acts by the serial handed", "zone", zone, "handover", h.String(), "waiting", waiting)
+		t.drain(zone)
 		t.send(send)
 		return true
 	}
@@ -387,19 +383,49 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 		return false
 	}
 	lgEngine.Info("the combiner's word on an update sent under another serial is not final: sending it again", "zone", s.zone, "distrib", distID, "status", status.String(), "sentUnder", s.under.String())
-	if _, err := t.enqueueThrough(s.zone, s.update, distID); err != nil {
-		lgEngine.Error("an update the combiner judged under another serial could not be sent again", "zone", s.zone, "distrib", distID, "err", err)
-		return false
-	}
+	// it waits behind what waits already, and goes out as they do
+	key := handoverKey(string(s.zone))
+	t.mu.Lock()
+	z = t.zone(key)
+	z.waiting = append(z.waiting, waitingUpdate{zone: s.zone, update: s.update, distID: distID})
+	t.mu.Unlock()
+	t.drain(key)
 	return true
 }
 
-// enqueueThrough sends an update through the gate, as EnqueueForCombiner.
-func (t *handoverTracker) enqueueThrough(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
-	if waiting, err := t.gate(zone, update, distID); waiting || err != nil {
-		return distID, err
+// drain queues the updates that wait for the zone, in order, once the
+// combiner holds what this agent wants. Each is noted as sent before it is
+// queued, under what the combiner holds; while one is being queued every
+// new update waits behind it (gate). One the queue refuses stays first, and
+// the ticker drains again.
+func (t *handoverTracker) drain(zone string) {
+	if t == nil {
+		return
 	}
-	return t.enqueue(zone, update, distID)
+	key := handoverKey(zone)
+	for {
+		t.mu.Lock()
+		z := t.zones[key]
+		if z == nil || z.draining || len(z.waiting) == 0 || z.want == nil || !z.want.sameAs(z.held) {
+			t.mu.Unlock()
+			return
+		}
+		w := z.waiting[0]
+		z.draining = true
+		t.sent[w.distID] = &sentUpdate{zone: w.zone, update: w.update, under: z.held, at: time.Now()}
+		t.mu.Unlock()
+		_, err := t.enqueue(w.zone, w.update, w.distID)
+		t.mu.Lock()
+		z.draining = false
+		if err != nil {
+			delete(t.sent, w.distID)
+			t.mu.Unlock()
+			lgEngine.Warn("an update that waited for the combiner's hand-over could not be queued; tried again on the ticker", "zone", zone, "distrib", w.distID, "err", err)
+			return
+		}
+		z.waiting = z.waiting[1:]
+		t.mu.Unlock()
+	}
 }
 
 func (t *handoverTracker) isHandover(distID string) bool {
@@ -414,27 +440,28 @@ func (t *handoverTracker) isHandover(distID string) bool {
 }
 
 // learned is what the combiner holds for the zone by its answer to an own
-// read (EDITS): nothing, or what it was handed. A combiner that holds what
-// this agent wants gets nothing again, and what waited goes out.
+// read (EDITS): nothing, or what it was handed. An answer older than what
+// a confirmation said since is kept out: the combiner's hand-overs only go
+// forward, and its start report says when it lost them. A combiner that
+// holds what this agent wants gets nothing again, and what waited goes out.
 func (t *handoverTracker) learned(zone string, held *ActingHandover) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	z := t.zone(zone)
+	if z.held != nil && (held == nil || held.olderThan(z.held)) {
+		t.mu.Unlock()
+		lgEngine.Debug("an answer older than the combiner's confirmation, not taken", "zone", zone, "answer", held.String(), "held", z.held.String())
+		return
+	}
 	z.held = held
-	var release []waitingUpdate
 	if z.want != nil && z.want.sameAs(held) {
 		z.heldAt = time.Now()
-		release, z.waiting = z.waiting, nil
 	}
 	send := t.dueLocked(z, false)
 	t.mu.Unlock()
-	for _, w := range release {
-		if _, err := t.enqueueThrough(w.zone, w.update, w.distID); err != nil {
-			lgEngine.Error("an update that waited for the combiner's hand-over could not be queued", "zone", zone, "distrib", w.distID, "err", err)
-		}
-	}
+	t.drain(zone)
 	t.send(send)
 }
 
@@ -456,6 +483,21 @@ func (t *handoverTracker) combinerStarted() {
 	}
 }
 
+// combinerWaits: the combiner holds no hand-over for the zone, and says so
+// every minute until it does (its start report's repeat). The zone is
+// handed over again; what it holds for the others stands.
+func (t *handoverTracker) combinerWaits(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zone(zone)
+	z.held = nil
+	send := t.dueLocked(z, true)
+	t.mu.Unlock()
+	t.send(send)
+}
+
 // forgot: the operator forgot the zone's serials here (rule 3). The next
 // hand-over says so, and the combiner takes it whatever serial it holds.
 func (t *handoverTracker) forgot(zone string) {
@@ -469,17 +511,22 @@ func (t *handoverTracker) forgot(zone string) {
 }
 
 // tick hands over again where the combiner does not hold what is wanted and
-// nothing has been in flight for handoverResend, and forgets what was sent a
-// day ago and never answered: the queue has given it up by then.
+// nothing has been in flight for handoverResend, drains what still waits,
+// and forgets what was sent a day ago and never answered: the queue has
+// given it up by then.
 func (t *handoverTracker) tick() {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	var sends []*handoverSend
-	for _, z := range t.zones {
+	var drains []string
+	for key, z := range t.zones {
 		if z.flight == nil || time.Since(z.flightAt) > handoverResend {
 			sends = append(sends, t.dueLocked(z, true))
+		}
+		if len(z.waiting) > 0 {
+			drains = append(drains, key)
 		}
 	}
 	for id, s := range t.sent {
@@ -490,6 +537,9 @@ func (t *handoverTracker) tick() {
 	t.mu.Unlock()
 	for _, hs := range sends {
 		t.send(hs)
+	}
+	for _, key := range drains {
+		t.drain(key)
 	}
 }
 
