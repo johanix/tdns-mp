@@ -76,6 +76,9 @@ type EditsResponseMsg struct {
 	// Message is the combiner's word on its answer: editsLoaded or
 	// editsNotLoaded, or anything else from a combiner that has neither.
 	Message string
+	// Acting is the hand-over the combiner holds for the zone, nil for
+	// none (S10).
+	Acting *ActingHandover
 }
 
 // The combiner's word on its answer to RFI EDITS. An agent takes the answer

@@ -127,6 +127,14 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				continue
 			}
 
+			// A hand-over (plan S10) is taken at once, from this combiner's
+			// own agent only: never kept for manual approval or as a pending
+			// edit, and judged by no origin's vote.
+			if msg.Acting != nil {
+				combinerSendConfirmation(tm, deliveredBy, conf.combinerTakeHandover(msg, localAgents))
+				continue
+			}
+
 			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
 			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
@@ -468,6 +476,12 @@ func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest 
 	if !loaded {
 		word = editsNotLoaded
 	}
+	// what the combiner acts by, so that its agent learns it at its own read
+	// (S10)
+	var acting *ActingHandover
+	if held, ok := actingHeld.Load().get(zone); ok {
+		acting = held.handover
+	}
 	return &PeerEditsRequest{
 		SenderID:     self,
 		Zone:         zone,
@@ -475,6 +489,7 @@ func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest 
 		Message:      word,
 		Nonce:        nonce,
 		Timestamp:    time.Now(),
+		Acting:       acting,
 	}
 }
 

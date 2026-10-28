@@ -1231,8 +1231,10 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 
 		// DNSKEY policy: only signers may contribute DNSKEYs.
 		// This is an editing policy — only enforce when we would apply.
-		// Non-signer combiners persist DNSKEYs without this check.
-		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) {
+		// Non-signer combiners persist DNSKEYs without this check. Only
+		// what an origin adds is judged: its removal of its own keys is
+		// not (S10).
+		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
 			reject, reason := mpzd.checkDNSKEYPolicy(req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
@@ -1731,8 +1733,9 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 
 // --- Policy check functions ---
 
-// checkDNSKEYPolicy checks whether a sender is allowed to contribute DNSKEYs.
-// Returns (reject bool, reason string). Rejects if:
+// checkDNSKEYPolicy checks whether a sender is allowed to contribute DNSKEYs,
+// by the sets its agent handed the combiner (KeySigners; S10), or by its
+// copy where it holds none. Returns (reject bool, reason string). Rejects if:
 // - the zone has no HSYNCPARAM (no signer information)
 // - the zone has no signers listed
 // - the sender is not listed as a signer

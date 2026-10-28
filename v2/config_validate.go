@@ -46,6 +46,28 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateSyncengineIntervals(mp); err != nil {
 		return err
 	}
+	if err := ValidateCombinerAgents(mp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateCombinerAgents refuses a multi-provider combiner with more than one
+// agent: the combiner acts by what its agent hands it (plan S10, 7.3 item
+// 5), so it must be clear whose hand-over counts.
+func ValidateCombinerAgents(mp *MultiProviderConf) error {
+	if mp.Role != "combiner" {
+		return nil
+	}
+	n := 0
+	for _, a := range mp.Agents {
+		if a != nil {
+			n++
+		}
+	}
+	if n > 1 {
+		return fmt.Errorf("a multi-provider combiner has more than one agent (multi-provider.agents lists %d)", n)
+	}
 	return nil
 }
 

@@ -46,6 +46,7 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 			}
 		}
 	}
+	info.Acting = combinerActingLine(mpzd)
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return info

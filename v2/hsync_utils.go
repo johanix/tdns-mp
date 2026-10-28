@@ -473,6 +473,11 @@ func (conf *Config) RequestAndWaitForEdits(zd *tdns.ZoneData, ctx context.Contex
 	if !ok {
 		return
 	}
+	// The answer says what the combiner acts by (S10), loaded contributions
+	// or not; a combiner older than its agent says neither word.
+	if err == nil && resp != nil && (resp.Message == editsLoaded || resp.Message == editsNotLoaded) {
+		conf.InternalMp.Handover.learned(zd.ZoneName, resp.Acting)
+	}
 	applyOwnRead(mpzd, &ownReadAnswer{zone: ZoneName(zd.ZoneName), asked: true, resp: resp, sentAt: sentAt, err: err}, zdr, self)
 }
 
@@ -964,8 +969,14 @@ func ourHsyncIdentities(mp *MultiProviderConf) []string {
 
 // instructions are the instructions mpzd's decisions read: for the zone as
 // served here, its active instructions (instructionsFor); for a copy wrapped
-// for analysis, the incoming copy at a refresh, the reading of that copy.
+// for analysis, the incoming copy at a refresh, the reading of that copy. On
+// a combiner that holds a hand-over, what it was handed, for both.
 func (mpzd *MPZoneData) instructions() *Instructions {
+	// A combiner acts by what its agent handed it, for the zone as served
+	// and for a copy being analysed alike (S10).
+	if in := actingHeld.Load().reading(mpzd.ZoneName); in != nil {
+		return in
+	}
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if mpzd.served() {
 		return activeOr(mpzd.ZoneName, apex)
@@ -976,6 +987,9 @@ func (mpzd *MPZoneData) instructions() *Instructions {
 // roles are the sets mpzd's decisions read: the zone's current step's for
 // the zone as served here, its copy's for one wrapped for analysis.
 func (mpzd *MPZoneData) roles() Roles {
+	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
+		return handed // a combiner's, as instructions
+	}
 	var r Roles
 	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); mpzd.served() && to != nil {
 		r = rolesFor(from, to, step)
@@ -1333,9 +1347,14 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			kdb = mpzd.KeyDB
 		}
 		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
-		signing, changed := mpzd.advanceSigningSet(newApex, kdb)
-		if changed {
-			mpzd.MP.SigningChanged = true
+		// A combiner that holds a hand-over signs by the set handed, not by
+		// the incoming copy (S10).
+		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName)
+		if !handed {
+			var changed bool
+			if signing, changed = mpzd.advanceSigningSet(newApex, kdb); changed {
+				mpzd.MP.SigningChanged = true
+			}
 		}
 		newMpzd := &MPZoneData{
 			ZoneData:  new_zd,
