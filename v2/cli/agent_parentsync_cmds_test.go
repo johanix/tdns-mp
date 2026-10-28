@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,13 @@ import (
 // cmd/mpcli builds it. The function returns what the command printed and the
 // error it ended with.
 func parentSyncCLI(t *testing.T, agent http.HandlerFunc) func(args ...string) (string, error) {
+	t.Helper()
+	return agentCLI(t, agent, "agent", "parentsync")
+}
+
+// agentCLI is parentSyncCLI for any of the agent's commands: each run's
+// arguments follow prefix.
+func agentCLI(t *testing.T, agent http.HandlerFunc, prefix ...string) func(args ...string) (string, error) {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent", agent)
@@ -58,7 +66,7 @@ func parentSyncCLI(t *testing.T, agent http.HandlerFunc) func(args ...string) (s
 		var out bytes.Buffer
 		root.SetOut(&out)
 		root.SetErr(&out)
-		root.SetArgs(append([]string{"agent", "parentsync"}, args...))
+		root.SetArgs(append(slices.Clone(prefix), args...))
 		err := root.Execute()
 		return out.String(), err
 	}
@@ -555,4 +563,44 @@ func TestParentSyncStatusShowsTheCatchUp(t *testing.T) {
 	wantLines(t, "status, several KEYs", out,
 		"  KEY at apex:    several (2); an operator has to leave one",
 		"  parent sync:    held until the zone's SIG(0) key is held and bootstrapped (not held)")
+}
+
+// The zone's instructions, through the agent's real handler: `parentsync
+// status` shows what the agent keeps, `zone instructions forget` clears a
+// steady zone's serials, and is refused for a zone with an owner error.
+func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
+	const id, zone = "agent.alpha.example.", "instructions.parentsync.example."
+	conf, hdb, _ := parentSyncTestConf(t, id, zone)
+	if err := hdb.InitInstructionTables(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := tdnsmp.LoadInstructionStore(hdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf.InternalMp.Instructions = store
+	agent := conf.APIagent(t.Context(), nil, hdb)
+	status := parentSyncCLI(t, agent)
+	forget := agentCLI(t, agent, "agent", "zone", "instructions", "forget")
+
+	seven := &tdnsmp.Instructions{Serial: 7, HasParam: true, Servers: []string{"alpha", "bravo"}}
+	store.Note(zone, seven, nil)
+	out, err := status("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status", out, fmt.Sprintf("  instructions:   active 7 (%s), copy 7; not enforced", seven.Digest()))
+
+	if out, err := forget("-z", zone); err != nil || !strings.Contains(out, "Forgot the stored serials of zone "+zone) {
+		t.Fatalf("forget: %v, %q", err, out)
+	}
+	if out, _ := status("status", "-z", zone); !strings.Contains(out, "  instructions:   none kept\n") {
+		t.Errorf("status after forget:\n%s", out)
+	}
+
+	store.Note(zone, seven, nil)
+	store.Note(zone, &tdnsmp.Instructions{Serial: 7, HasParam: true, Servers: []string{"alpha"}}, nil)
+	if out, err := forget("-z", zone); err == nil || !strings.Contains(err.Error(), "not steady") {
+		t.Errorf("forget with an owner error: %v, %q; want refused", err, out)
+	}
 }

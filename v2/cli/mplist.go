@@ -46,8 +46,8 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		return
 	}
 
-	var out []string
-	out = append(out, "Zone|Servers|Signers|Auditors|NSmgmt|ParentSync|Suffix|Options")
+	var out, ownerErrors []string
+	out = append(out, "Zone|Serial|Digest|Servers|Signers|Auditors|NSmgmt|ParentSync|Suffix|Options")
 
 	var znames []string
 	for zname := range resp.MPZones {
@@ -81,9 +81,30 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		if info.ZoneError != "" {
 			optStr = "ERROR"
 		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
-			zname, servers, signers, auditors, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
+		// The zone's instructions: the active serial and its digest where
+		// the daemon keeps serials, "7->8" when a newer one is held, and
+		// otherwise the copy's; or ERR, with the owner error listed below
+		// the table.
+		serial, digest := fmt.Sprint(info.Serial), info.Digest
+		switch {
+		case info.OwnerError != "":
+			serial, digest = "ERR", "-"
+			ownerErrors = append(ownerErrors, fmt.Sprintf("  %s: %s", zname, info.OwnerError))
+		case info.Active != nil:
+			serial, digest = fmt.Sprint(info.Active.Serial), info.Active.Digest
+			if n := info.Newest; n != nil && *n != *info.Active {
+				serial += fmt.Sprintf("->%d", n.Serial)
+			}
+		case digest == "":
+			serial, digest = "-", "-"
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+			zname, serial, digest, servers, signers, auditors, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
 	}
 
 	fmt.Println(columnize.SimpleFormat(out))
+	if len(ownerErrors) > 0 {
+		fmt.Println("Owner errors in the zone's instructions:")
+		fmt.Println(strings.Join(ownerErrors, "\n"))
+	}
 }

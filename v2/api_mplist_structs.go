@@ -22,6 +22,18 @@ type MPZoneInfo struct {
 	// transfer), empty when healthy. The CLI renders the Options cell as
 	// "ERROR" when set; the full message is in `zone list`.
 	ZoneError string `json:"zone_error,omitempty"`
+	// Serial and Digest are the copy's instructions (design rules 1 and 2):
+	// the owner's serial, 0 when absent, and the digest of the canonical
+	// reading. Digest is empty when the copy has no reading: no HSYNC3 and no
+	// HSYNCPARAM, or an owner error, which OwnerError then names.
+	Serial     uint32 `json:"serial"`
+	Digest     string `json:"digest,omitempty"`
+	OwnerError string `json:"owner_error,omitempty"`
+	// Active and Newest are the serials the agent or the auditor keeps for
+	// the zone (instructions_store.go): the active one and the newest held.
+	// Nil where none are kept, as on the combiner and the signer.
+	Active *SerialDigest `json:"active,omitempty"`
+	Newest *SerialDigest `json:"newest,omitempty"`
 }
 
 // MPListResponse is returned by /zone/mplist.

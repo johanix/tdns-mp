@@ -50,16 +50,18 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 	if err != nil || apex == nil {
 		return info
 	}
-	hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !exists || len(hsyncparamRRset.RRs) == 0 {
-		return info
+	// The serial and the digest come from the canonical reading; a legacy
+	// zone (HSYNC3, no HSYNCPARAM) has serial 0 and a digest. The lists below
+	// stay those of the first HSYNCPARAM record, which is what the code acts
+	// on until it reads the instructions through one accessor (plan S3).
+	if in, err := ReadInstructions(apex); err != nil {
+		info.OwnerError = err.Error()
+	} else if in != nil {
+		info.Serial = in.Serial
+		info.Digest = in.Digest()
 	}
-	prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return info
-	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
+	hp := apexHSYNCPARAM(apex)
+	if hp == nil {
 		return info
 	}
 	switch hp.GetNSmgmt() {
@@ -109,6 +111,9 @@ type ZoneMPViewDTO struct {
 	Auditors   []string            `json:"auditors"`
 	Options    []string            `json:"options,omitempty"`
 	Members    []ZoneMemberRoleDTO `json:"members"`
+	// Instructions is what the auditor keeps of the zone's instructions,
+	// in the line `agent parentsync status` prints.
+	Instructions string `json:"instructions,omitempty"`
 }
 
 func labelInRoleList(list []string, label string) bool {

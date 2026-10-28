@@ -517,6 +517,12 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 			return fmt.Errorf("InitHsyncTables: %w", err)
 		}
 	}
+	// The zones' serials, read before any zone's first load.
+	store, err := LoadInstructionStore(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the zones' serials: %w", err)
+	}
+	conf.InternalMp.Instructions = store
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
@@ -650,6 +656,21 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	// The auditor sets its identity up through SetupAgent as the agent does,
 	// so its first hello waits for the same gate; SetupAgent opens it.
 	conf.InternalMp.IdentityReady = newIdentityReadiness()
+
+	// The zones' serials, kept as an agent keeps them and read before any
+	// zone's first load: of the HSYNC tables, only theirs.
+	var instrDB *HsyncDB
+	if kdb := conf.Config.Internal.KeyDB; kdb != nil {
+		instrDB = NewHsyncDB(kdb)
+		if err := instrDB.InitInstructionTables(); err != nil {
+			return fmt.Errorf("InitInstructionTables: %w", err)
+		}
+	}
+	store, err := LoadInstructionStore(instrDB)
+	if err != nil {
+		return fmt.Errorf("the zones' serials: %w", err)
+	}
+	conf.InternalMp.Instructions = store
 
 	// MsgQs: auditor consumes Beat/Hello/Ping/Msg/Confirmation/StatusUpdate.
 	conf.InternalMp.MsgQs = NewMsgQs()
