@@ -194,7 +194,7 @@ func recordsNotOfTypes(records []string, types map[uint16]bool) []string {
 func recordsOfTypes(records []string, types map[uint16]bool) []string {
 	var out []string
 	for _, s := range records {
-		if rr, err := dns.NewRR(s); err == nil && types[rr.Header().Rrtype] {
+		if rr, err := dns.NewRR(s); err == nil && rr != nil && types[rr.Header().Rrtype] {
 			out = append(out, s)
 		}
 	}
@@ -643,6 +643,7 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 		applied, removed := zdr.heldRecords(w.zone, w.sender, w.ops)
 		waiting := zdr.dnskeyAwaitingAnswer(w.zone, w.sender, applied)
 		applied = withoutRecords(applied, waiting)
+		held := slices.Clone(applied) // a set the combiner ignored is named from these, below
 		status, message := "ok", "desired state present at remote agent, confirmed by its combiner"
 		var ignored []string
 		switch cf.Status {
@@ -688,9 +689,10 @@ func (zdr *ZoneDataRepo) releaseStaleWaits(cf *ConfirmationDetail, msgQs *MsgQs)
 			status, message = "PARTIAL", message+"; records its combiner rejected are not held"
 		}
 		if failed := zdr.setsNotHandedOver(w.zone, w.sender, updateRRtypes(&ZoneUpdate{Operations: w.ops}), true); len(failed) > 0 {
-			// a set the combiner ignored is named as ignored (#288)
+			// a set the combiner ignored is named as ignored (#288), from
+			// what is held: a PARTIAL that ignored it left it out of applied
 			ignoredSets := zdr.setsIgnoredByCombiner(w.zone, w.sender, failed)
-			ignored = append(recordsNotOfTypes(ignored, failed), recordsOfTypes(applied, ignoredSets)...)
+			ignored = append(recordsNotOfTypes(ignored, failed), recordsOfTypes(held, ignoredSets)...)
 			applied = recordsNotOfTypes(applied, failed)
 			removed = recordsNotOfTypes(removed, failed)
 			status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"

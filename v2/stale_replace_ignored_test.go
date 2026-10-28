@@ -174,6 +174,74 @@ func TestASetIgnoredBesideOneAppliedIsNotedAsIgnored(t *testing.T) {
 	r.settledAt(t, snd, dns.TypeNS, ns, "ignored")
 }
 
+// A stale DNSKEY replace waits for the combiner's word on the set that
+// overtook it, which carries a CSYNC too. The combiner answers PARTIAL: it
+// applies the CSYNC and ignores the keys. The stale replace names the keys
+// it holds as ignored, though the combiner's word left them out of what it
+// applied.
+func TestAStaleKeySetWaitingOnAPartialThatIgnoredItIsNamedAsIgnored(t *testing.T) {
+	r := receivingRig(t, "partial.waited.overtaken.example.")
+	z := r.mpzd.ZoneName
+	signer := AgentId(r.peer.Identity)
+	r.leader(signer)
+	k1, k2 := testDnskey(t, z, 256), testDnskey(t, z, 256)
+	keys := []string{k1.String(), k2.String()}
+	slices.Sort(keys)
+	keyOp := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: keys}
+	csync, rec := csyncOp(z, 1000)
+
+	sent := time.Now().Add(-time.Minute)
+	before := r.combinerDists()
+	r.receivesAt(t, string(signer), nextDistributionID(), sent.Add(20*time.Second), nil, keyOp, csync)
+	fwd := r.newCombinerDist(before, 10*time.Second)
+	if fwd == "" {
+		t.Fatalf("the newer sets did not go to the combiner\n%s", r.log)
+	}
+	waits := r.logCount(staleWaitLine)
+	d := nextDistributionID()
+	r.receivesAt(t, string(signer), d, sent.Add(10*time.Second), nil, keyOp)
+	r.waitLog(t, staleWaitLine, waits+1)
+
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(fwd, rigCombiner, transport.ConfirmPartial, z,
+		[]string{rec}, nil, nil, keys, false, "")
+	c := r.answered(t, d)
+	got := slices.Clone(c.IgnoredRecords)
+	slices.Sort(got)
+	if c.Status != "PARTIAL" || !slices.Equal(got, keys) || len(c.AppliedRecords) > 0 {
+		t.Fatalf("the sender got the final confirmation %+v of the stale key set, want PARTIAL naming both keys as ignored", *c)
+	}
+}
+
+// The sender's DNSKEY propagation takes a key that a peer's PARTIAL names as
+// ignored as that peer's answer on the key, as it takes an overall IGNORED:
+// the peer applied another set of the distribution and ignored the keys.
+// Without it, the key had no answer from the peer, and the propagation
+// waited for the signer's resend.
+func TestAKeyAPartialNamesAsIgnoredIsAnswered(t *testing.T) {
+	r := receivingRig(t, "partial.ignored.keys.example.")
+	z := r.mpzd.ZoneName
+	peer := AgentId(r.peer.Identity)
+	key := testDnskey(t, z, 256)
+	_, rec := csyncOp(z, 1000)
+	tm := r.us.Bridge
+	tm.dnskeyPropMu.Lock()
+	if tm.pendingDnskeyPropagations == nil {
+		tm.pendingDnskeyPropagations = map[string]*PendingDnskeyPropagation{}
+	}
+	tm.dnskeyPropMu.Unlock()
+	d := nextDistributionID()
+	tm.TrackDnskeyPropagation(ZoneName(z), d, []uint16{key.KeyTag()}, nil, []AgentId{peer})
+
+	tm.ChunkHandler.OnConfirmationReceived(d, string(peer), transport.ConfirmPartial, z,
+		[]string{rec}, nil, nil, []string{key.String()}, false, "")
+	tm.dnskeyPropMu.Lock()
+	_, waiting := tm.pendingDnskeyPropagations[d]
+	tm.dnskeyPropMu.Unlock()
+	if waiting {
+		t.Errorf("the propagation still waits for the peer whose PARTIAL named the key as ignored\n%s", r.log)
+	}
+}
+
 // A combiner that fails the newer set is not one that ignores it: the stale
 // replace still names none of the set and is PARTIAL.
 func TestAStaleSetTheCombinerFailedIsStillNotNamed(t *testing.T) {
