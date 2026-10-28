@@ -269,7 +269,7 @@ func TestParentSyncStatusNamesEachPeersState(t *testing.T) {
 		zone+" 3600 IN HSYNC3 ON bravo agent.bravo.example. .",
 		zone+" 3600 IN HSYNC3 ON charlie agent.charlie.example. .",
 		zone+" 3600 IN HSYNC3 ON delta agent.delta.example. .",
-		zone+` 3600 IN HSYNCPARAM servers="alpha,bravo,charlie,delta" signers="alpha" nsmgmt="agent" parentsync="agent"`)
+		zone+` 3600 IN HSYNCPARAM servers="alpha,bravo,charlie,delta" signers="alpha" nsmgmt="agent" parentsync="agent" serial="1"`)
 
 	ar := conf.NewAgentRegistry()
 	peers := transport.NewPeerRegistry()

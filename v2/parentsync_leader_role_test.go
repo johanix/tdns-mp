@@ -65,7 +65,7 @@ func setRoles(t *testing.T, zd *tdns.ZoneData, servers, auditors []string) {
 	}
 	prr := &dns.PrivateRR{
 		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: kv},
+		Data: numbered(&core.HSYNCPARAM{Value: kv}),
 	}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
 	zd.Data.Set(zd.ZoneName, *apex)
@@ -551,10 +551,10 @@ func servedMembers(t *testing.T, mpzd *MPZoneData, recs []h3rec, servers []strin
 	for i, s := range servers {
 		labels[i] = memberLabel(s)
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
 		&core.HSYNCPARAMServers{Servers: labels},
 		&core.HSYNCPARAMParentSync{Value: core.HsyncParentSyncAgent},
-	}}
+	}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{
 		Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
 	mpzd.Data.Set(zone, apex)

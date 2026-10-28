@@ -1753,8 +1753,7 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
 	}
 	// A signer by the set, which names each provider by label and identity:
-	// the sender is one when its identity is a signer's, whatever other
-	// label the same identity is under.
+	// the sender is one when its identity is a signer's.
 	if slices.ContainsFunc(signers, func(p Provider) bool { return core.EqualNames(p.Identity, dns.Fqdn(senderID)) }) {
 		return false, ""
 	}

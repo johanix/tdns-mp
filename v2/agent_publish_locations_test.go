@@ -18,7 +18,7 @@ func TestTheKeyGoesToTheSignalNamesOnlyWhenTheCustomerSaysPubkey(t *testing.T) {
 		if err != nil || apex == nil {
 			t.Fatalf("apex: %v", err)
 		}
-		rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN HSYNCPARAM %s", mpzd.ZoneName, params))
+		rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN HSYNCPARAM %s", mpzd.ZoneName, numberedText(params)))
 		if err != nil {
 			t.Fatalf("HSYNCPARAM %q: %v", params, err)
 		}

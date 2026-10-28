@@ -21,7 +21,7 @@ import (
 func handoverZone(t *testing.T, zone string) *tdns.ZoneData {
 	t.Helper()
 	zd := seedZoneWithHSYNC3(t, zone, "alice.agent.example.", "bob.agent.example.", "carol.agent.example.", "dave.agent.example.")
-	rr, err := dns.NewRR(zone + ` 3600 IN HSYNCPARAM servers="alice" signers="bob" auditors="carol"`)
+	rr, err := dns.NewRR(zone + ` 3600 IN HSYNCPARAM servers="alice" signers="bob" auditors="carol" serial="1"`)
 	if err != nil {
 		t.Fatalf("HSYNCPARAM: %v", err)
 	}

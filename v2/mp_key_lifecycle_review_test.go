@@ -24,7 +24,7 @@ func zoneSignedBy(t *testing.T, mpzd *MPZoneData, identity string, others ...str
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: append([]string{"us"}, others...)}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: append([]string{"us"}, others...)}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	h3 := &core.HSYNC3{State: 1, Label: "us", Identity: dns.Fqdn(identity), Upstream: "."}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: h3}}})
@@ -305,7 +305,7 @@ func TestEngineReleasesAZoneThisProviderDoesNotSign(t *testing.T) {
 	e := NewKeyLifecycleEngine(conf, owner)
 	mpzd := signerTestZone(t, "notours.owned.example.", kdb)
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2"}}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2"}}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
 	mpzd.Data.Set(mpzd.ZoneName, *apex)
 	mpzd.InstallInitialSnapshot()
@@ -517,7 +517,7 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	}
 	// the zone's signers change: this provider is no longer one
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
 	mpzd.Data.Set(mpzd.ZoneName, *apex)
 	mpzd.InstallInitialSnapshot()

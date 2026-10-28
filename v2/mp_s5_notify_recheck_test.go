@@ -287,7 +287,7 @@ func newNotifyRigWith(t *testing.T, zone, scheme string, signed bool, setup func
 		roles = append(roles, &core.HSYNCPARAMSigners{Signers: labels})
 	}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM),
-		Data: &core.HSYNCPARAM{Value: roles}}}})
+		Data: numbered(&core.HSYNCPARAM{Value: roles})}}})
 	r.mpzd.Data.Set(zone, *apex)
 	zd.InstallInitialSnapshot() // the analysis reads the zone as it is served
 	zd.Ready = true
@@ -1120,11 +1120,11 @@ func TestTheWaitIsTheLargestPropagationDelayAmongTheServingProviders(t *testing.
 		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: "agent." + label + ".example.", Upstream: "."}})
 	}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3s})
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
 		&core.HSYNCPARAMServers{Servers: []string{"us", "p2", "p4"}},
 		&core.HSYNCPARAMSigners{Signers: []string{"us", "p3"}},
 		&core.HSYNCPARAMAuditors{Auditors: []string{"aud"}},
-	}}}}})
+	}})}}})
 	mpzd.Data.Set(z, *apex)
 	mpzd.InstallInitialSnapshot()
 	mpzd.Ready = true

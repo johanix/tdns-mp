@@ -15,8 +15,9 @@ import (
 )
 
 // gossipRolesZone is a Ready zone whose HSYNC3 labels are aud (the
-// auditor), p1 and p2, and p3 and p4 held by one agent. Its identities do
-// not sort as its labels do: the auditor's sorts last.
+// auditor), p1, p2, p3 and p4, each its own agent's: one identity under two
+// labels is an owner error (#306). Its identities do not sort as its labels
+// do: the auditor's sorts last.
 func gossipRolesZone(t *testing.T, name string) string {
 	t.Helper()
 	mpzd := signerTestZone(t, name, newMPTestKeyDB(t))
@@ -27,16 +28,16 @@ func gossipRolesZone(t *testing.T, name string) string {
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
 		&core.HSYNCPARAMServers{Servers: []string{"p1", "p2", "p3", "p4"}},
 		&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2"}},
 		&core.HSYNCPARAMAuditors{Auditors: []string{"aud"}},
-	}}
+	}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	var h3s []dns.RR
 	for label, id := range map[string]string{
 		"aud": "zz-auditor.example.", "p1": "agent.p1.example.", "p2": "agent.p2.example.",
-		"p3": "agent.p3.example.", "p4": "agent.p3.example.",
+		"p3": "agent.p3.example.", "p4": "agent.p4.example.",
 	} {
 		h3s = append(h3s, &dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: &core.HSYNC3{State: 1, Label: label, Identity: id, Upstream: "."}})
 	}
@@ -75,7 +76,7 @@ func TestTheZoneGossipMatrixRowsAreTheColumnsLabels(t *testing.T) {
 	for _, r := range dto.Rows {
 		got = append(got, r.Reporter+"="+r.Label)
 	}
-	want := []string{"zz-auditor.example.=aud", "agent.p1.example.=p1", "agent.p2.example.=p2", "agent.p3.example.=p3, p4", "agent.stranger.example.="}
+	want := []string{"zz-auditor.example.=aud", "agent.p1.example.=p1", "agent.p2.example.=p2", "agent.p3.example.=p3", "agent.stranger.example.="}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("rows = %v\nwant   %v (the columns are %v)", got, want, dto.ColumnLabels)
 	}
@@ -103,7 +104,7 @@ func TestTheZoneGossipMatrixRowsAreTheColumnsLabels(t *testing.T) {
 	for _, m := range regexp.MustCompile(`<strong title="[^"]*">([^<]*)</strong>`).FindAllStringSubmatch(buf.String(), -1) {
 		names = append(names, m[1])
 	}
-	if strings.Join(names, " ") != "aud p1 p2 p3, p4 stranger" {
+	if strings.Join(names, " ") != "aud p1 p2 p3 stranger" {
 		t.Errorf("row names on the page = %q, want the labels in column order, the unlabelled reporter last", names)
 	}
 }

@@ -386,15 +386,9 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		}
 		cp := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
 		z.Copy, z.CopyError = cp, ""
-		if !in.HasParam && (z.Active != nil && z.Active.Reading.HasParam ||
-			slices.ContainsFunc(z.Held, func(h heldSerial) bool { return h.Reading.HasParam })) {
-			z.ownerError(zone, fmt.Sprintf("HSYNCPARAM dropped at serial %d while HSYNC3 stays", in.Serial))
-			return nil
-		}
 		if h := z.held(in.Serial); h != nil {
 			if h.Digest != cp.Digest {
-				// an edit without a raised serial; at serial 0, a change of a
-				// zone that has no serial key
+				// an edit without a raised serial
 				if z.ErrorAt == nil || *z.ErrorAt != in.Serial {
 					z.Conflict = []string{h.Digest}
 				}
@@ -564,9 +558,8 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 // activeReading is the zone's active instructions as the readers act by
 // them, or nil when the store keeps none for it or does not enforce them
 // yet. Until the thaw enforces the active serial (S7) the readers act by the
-// copy, whatever Note made of it (plan S2): an edit at the same serial, at
-// serial 0 or at a lower one is acted on, as before, and its owner error is
-// only shown.
+// copy, whatever Note made of it (plan S2): an edit at the same serial or at
+// a lower one is acted on, as before, and its owner error is only shown.
 func (s *InstructionStore) activeReading(zone string) *Instructions {
 	if s == nil {
 		return nil
