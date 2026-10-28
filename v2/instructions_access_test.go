@@ -237,6 +237,16 @@ func TestAnAuditorIsFoundByItsIdentityInAnyCase(t *testing.T) {
 	}
 }
 
+// An identity under an auditor's label and a server's label alike (an owner
+// error) is a provider, whichever label sorts first.
+func TestAnIdentityThatAlsoServesIsNoAuditor(t *testing.T) {
+	records := append(acRecords("", `serial="7" servers="alpha,beta" auditors="aaa"`), `3600 IN HSYNC3 ON aaa `+acBeta+` .`)
+	mpzd := instrTestZone(t, "auditorserves.access.example.", records...)
+	if mpzd.IsAuditorIdentity(acBeta) {
+		t.Errorf("%s serves as beta and is found as the auditor aaa", acBeta)
+	}
+}
+
 func TestARestartWithAStoredSerialHasGroupsAndPeersAfterTheFirstLoad(t *testing.T) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor
