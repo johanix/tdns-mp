@@ -157,24 +157,32 @@ type holdTold struct {
 // signer is told to hold its key machine, or to let it go, and at the end
 // of a freeze the data engine releases what the zone kept.
 func (conf *Config) onFreeze(zone string, frozen bool) {
-	go conf.tellHold(zone, frozen)
+	conf.tellHold(zone, frozen, 0)
 	if !frozen {
 		conf.askRelease(ZoneName(zone))
 	}
 }
 
 // tellHold tells this agent's signer to hold the zone's key machine, or to
-// let it go (KEYSTATE "hold"). The signer confirms in its next inventory.
-func (conf *Config) tellHold(zone string, on bool) {
+// let it go (KEYSTATE "hold"), unless that word was told less than within
+// ago. The word is noted at once, so that two callers do not both tell it,
+// and sent on a goroutine of its own. The signer confirms in its next
+// inventory.
+func (conf *Config) tellHold(zone string, on bool, within time.Duration) {
 	b := &conf.InternalMp.holds
 	b.mu.Lock()
 	if b.told == nil {
 		b.told = map[string]holdTold{}
 	}
-	b.told[canonicalName(zone)] = holdTold{on: on, at: time.Now()}
+	key := canonicalName(zone)
+	if last, told := b.told[key]; told && last.on == on && time.Since(last.at) < within {
+		b.mu.Unlock()
+		return
+	}
+	b.told[key] = holdTold{on: on, at: time.Now()}
 	b.mu.Unlock()
 	if tm := conf.InternalMp.MPTransport; tm != nil {
-		tm.sendHoldToSigner(ZoneName(zone), on)
+		go tm.sendHoldToSigner(ZoneName(zone), on)
 	}
 }
 
@@ -187,14 +195,7 @@ func (conf *Config) reconcileHold(zone string, snap *KeyInventorySnapshot) {
 	if snap == nil || snap.Hold == frozen {
 		return
 	}
-	b := &conf.InternalMp.holds
-	b.mu.Lock()
-	last, told := b.told[canonicalName(zone)]
-	b.mu.Unlock()
-	if told && last.on == frozen && time.Since(last.at) < holdRetell {
-		return
-	}
-	go conf.tellHold(zone, frozen)
+	conf.tellHold(zone, frozen, holdRetell)
 }
 
 // holdConfirmed: the signer's latest inventory of the zone carries the hold,

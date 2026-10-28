@@ -696,29 +696,39 @@ func TestTheStampSaysHoldOnlyAfterTheConfirmation(t *testing.T) {
 	}
 }
 
-// The agent tells its signer the hold again when its inventory says
-// otherwise than the freeze, at most once a minute.
+// The agent tells its signer the hold when the zone is frozen, and again
+// when its inventory says otherwise than the freeze, at most once per
+// holdRetell.
 func TestTheHoldIsToldAgainWhenTheInventorySaysOtherwise(t *testing.T) {
+	saved := holdRetell
+	holdRetell = 100 * time.Millisecond
+	t.Cleanup(func() { holdRetell = saved })
 	r := newFreezeRig(t, "retell.freeze.example.")
-	r.agree()
-	snap := &KeyInventorySnapshot{Zone: r.zone, Received: time.Now()}
-	r.conf.reconcileHold(r.zone, snap)
-	waitUntil(t, "the hold was not told", func() bool {
+	told := func() holdTold {
 		b := &r.conf.InternalMp.holds
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		return b.told[canonicalName(r.zone)].on
-	})
-	b := &r.conf.InternalMp.holds
-	b.mu.Lock()
-	first := b.told[canonicalName(r.zone)].at
-	b.mu.Unlock()
+		return b.told[canonicalName(r.zone)]
+	}
+	r.agree()
+	first := told()
+	if !first.on {
+		t.Fatal("the hold was not told when the zone froze")
+	}
+	snap := &KeyInventorySnapshot{Zone: r.zone, Received: time.Now()}
 	r.conf.reconcileHold(r.zone, snap)
-	time.Sleep(20 * time.Millisecond)
-	b.mu.Lock()
-	again := b.told[canonicalName(r.zone)].at
-	b.mu.Unlock()
-	if !again.Equal(first) {
-		t.Error("the hold was told again within a minute")
+	if again := told(); !again.at.Equal(first.at) {
+		t.Error("an inventory without the hold had it told again at once")
+	}
+	time.Sleep(holdRetell + 10*time.Millisecond)
+	r.conf.reconcileHold(r.zone, snap)
+	if again := told(); !again.on || !again.at.After(first.at) {
+		t.Error("an inventory without the hold, after the retell time, did not have it told again")
+	}
+	// an inventory that agrees has nothing told
+	before := told()
+	r.conf.reconcileHold(r.zone, &KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	if after := told(); !after.at.Equal(before.at) {
+		t.Error("an inventory with the hold had it told again")
 	}
 }
