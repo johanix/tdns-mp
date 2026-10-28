@@ -20,13 +20,9 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
-	"strings"
+	"slices"
 	"sync"
 	"time"
-
-	"github.com/miekg/dns"
-
-	core "github.com/johanix/tdns/v2/core"
 )
 
 // detectorRunState remembers which (zone, provider) pairs are
@@ -168,42 +164,25 @@ func detectMissingProviders(zs *AuditZoneState, state *detectorRunState) {
 	}
 }
 
-// expectedHSYNC3Identities returns the set of FQDN identities listed
-// in the apex HSYNC3 RRset for zone, excluding any auditor entries
-// (the auditor doesn't audit itself or other auditors).
+// expectedHSYNC3Identities returns the identities of the ON HSYNC3 records
+// of the zone's active instructions, excluding any auditor entries (the
+// auditor doesn't audit itself or other auditors). An OFF record is no
+// member, and is not expected.
 func expectedHSYNC3Identities(zone string) []string {
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil {
 		return nil
 	}
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil || apex == nil {
+	in := mpzd.instructions()
+	if in == nil {
 		return nil
-	}
-	rrset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !exists {
-		return nil
-	}
-	auditorLabels := mpzd.GetAuditors()
-	auditorSet := make(map[string]bool, len(auditorLabels))
-	for _, lbl := range auditorLabels {
-		auditorSet[strings.ToLower(normalizeHSYNC3Label(lbl))] = true
 	}
 	var out []string
-	for _, rr := range rrset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
+	for _, r := range in.Records {
+		if slices.Contains(in.Auditors, r.Label) {
 			continue
 		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok {
-			continue
-		}
-		if auditorSet[strings.ToLower(normalizeHSYNC3Label(h3.Label))] {
-			continue
-		}
-		identity := dns.Fqdn(h3.Identity)
-		out = append(out, identity)
+		out = append(out, r.Identity)
 	}
 	return out
 }

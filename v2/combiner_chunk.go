@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -173,27 +174,12 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
 		p.Leaving = zd.MP.MPdata.Leaving
 	}
-	// Extract NSmgmt and ParentSync from HSYNCPARAM. The analysis reader,
-	// because this runs on the incoming zone during the pre-refresh combine
-	// as well as on a live zone.
-	apex, err := zd.OwnerForAnalysis(zd.ZoneName)
-	if err != nil || apex == nil {
-		return p
-	}
-	hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !exists || len(hpRRset.RRs) == 0 {
-		return p
-	}
-	privRR, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok || privRR.Data == nil {
-		return p
-	}
-	hp, ok := privRR.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return p
-	}
-	p.NSmgmt = hp.GetNSmgmt()
-	p.ParentSync = hp.GetParentSync()
+	// NSmgmt and ParentSync change only at a step (design 3.3): the sets.
+	// For the incoming zone during the pre-refresh combine, the reading of
+	// that copy; for a live zone, the zone's (mpzd.roles).
+	r := zd.roles()
+	p.NSmgmt = r.NSmgmt
+	p.ParentSync = r.ParentSync
 	return p
 }
 
@@ -335,15 +321,7 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 	if mpzd.MP == nil || mpzd.MP.MPdata == nil {
 		// MPdata is nil despite OptMultiProvider — guards 1-3 failed in
 		// populateMPdata (no HSYNC records or not a recognized provider).
-		apex, err := mpzd.GetOwner(mpzd.ZoneName)
-		if err != nil {
-			return fmt.Errorf("zone %q: contributions rejected — cannot inspect zone apex: %v", mpzd.ZoneName, err)
-		}
-		_, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
-		_, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-		_, h1exists := apex.RRtypes.Get(core.TypeHSYNC)
-		_, h2exists := apex.RRtypes.Get(core.TypeHSYNC2)
-		if !((h3exists && hpExists) || h1exists || h2exists) {
+		if in := mpzd.instructions(); in == nil || !in.HasParam || !hasHSYNC3(in) {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", mpzd.ZoneName)
 		}
 		var mpConf *MultiProviderConf
@@ -1759,57 +1737,29 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 // - the zone has no signers listed
 // - the sender is not listed as a signer
 func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil || apex == nil {
-		return true, "DNSKEY rejected: cannot inspect zone apex"
-	}
-
-	// Get HSYNCPARAM to check signers
-	hpRRset, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !hpExists || len(hpRRset.RRs) == 0 {
+	in := mpzd.instructions()
+	if in == nil || !in.HasParam {
 		return true, "DNSKEY rejected: no HSYNCPARAM in zone (cannot determine signers)"
 	}
-	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return true, "DNSKEY rejected: HSYNCPARAM parse error"
-	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return true, "DNSKEY rejected: HSYNCPARAM type error"
-	}
-	signers := hp.GetSigners()
+	signers := mpzd.roles().KeySigners
 	if len(signers) == 0 {
 		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
 	}
-
-	// Resolve sender FQDN to HSYNC3 label
-	h3RRset, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !h3exists || len(h3RRset.RRs) == 0 {
-		return true, "DNSKEY rejected: no HSYNC3 records (cannot resolve sender to label)"
-	}
-	senderLabel := ""
-	for _, rr := range h3RRset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok {
-				if h3.Identity == senderID {
-					senderLabel = h3.Label
-					break
-				}
-			}
-		}
-	}
-	if senderLabel == "" {
+	// The sender's label, from its ON record: an OFF record gives none.
+	senderLabel, listed := mpzd.labelOf(senderID)
+	if !listed {
 		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
 	}
-
-	// Normalize: HSYNC3.Label may have trailing dot, HSYNCPARAM signers do not
-	senderLabel = strings.TrimSuffix(senderLabel, ".")
-
-	// Check if sender's label is in the signers list
-	if !hp.IsSignerLabel(senderLabel) {
-		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, signers)
+	// A signer by the set, which names each provider by label and identity.
+	if !slices.ContainsFunc(signers, func(p Provider) bool {
+		return p.Label == senderLabel && core.EqualNames(p.Identity, senderID)
+	}) {
+		var labels []string
+		for _, p := range signers {
+			labels = append(labels, p.Label)
+		}
+		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, labels)
 	}
-
 	return false, ""
 }
 

@@ -257,14 +257,15 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 		return "", false, false
 	}
 	// Resolve the labels the way the zone view does (hsync3IdentitiesByLabel):
-	// inactive members included, identities compared as FQDNs. An identity
-	// may hold several labels, one agent serving as two providers: it signs
-	// if any of them is a signer, and the label recorded is the first in
-	// sorted order, not whichever a walk over the map meets first.
+	// ON records of the active instructions, identities compared as names.
+	// An identity may hold several labels, one agent serving as two
+	// providers: it signs if any of them is a signer, and the label recorded
+	// is the first in sorted order, not whichever a walk over the map meets
+	// first.
 	want := dns.Fqdn(identity)
 	var labels []string
 	for lbl, id := range zd.hsync3IdentitiesByLabel() {
-		if id == want {
+		if core.EqualNames(id, want) {
 			labels = append(labels, lbl)
 		}
 	}
@@ -276,28 +277,11 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 	// A member is a signer only when listed under signers=; a servers=
 	// member serves the zone without signing it. Without an HSYNCPARAM the
 	// zone declares no roles at all.
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
+	in := zd.instructions()
+	if in == nil || !in.HasParam {
 		return label, false, false
 	}
-	hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !ok || len(hpRRset.RRs) == 0 {
-		return label, false, false
-	}
-	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return label, false, false
-	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return label, false, false
-	}
-	for _, l := range hp.GetSigners() {
-		if slices.Contains(labels, normalizeHSYNC3Label(l)) {
-			isSigner = true
-			break
-		}
-	}
+	isSigner = slices.ContainsFunc(in.Signers, func(l string) bool { return slices.Contains(labels, l) })
 	return label, isSigner, true
 }
 

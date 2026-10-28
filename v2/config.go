@@ -90,9 +90,11 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
 			func(zd *tdns.ZoneData) {
 				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
-					givenBack := conf.followParentSyncParam(mpzd)
-					mpzd.PostRefresh(tm, msgQs)
+					// The copy is noted first: every reader after it acts
+					// by the active instructions (plan S3).
 					conf.noteInstructions(mpzd)
+					givenBack := conf.onSetsChanged(mpzd, false)
+					mpzd.PostRefresh(tm, msgQs)
 					conf.afterSigningSetChange(mpzd)
 					if givenBack {
 						// after PostRefresh, which applies this refresh's

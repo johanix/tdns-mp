@@ -121,7 +121,7 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 	if err != nil || apex == nil {
 		return false, fmt.Sprintf("zone %q apex unavailable", zone)
 	}
-	members := participantFQDNSetForApex(apex)
+	members := participantFQDNSet(activeOr(zd.ZoneName, apex))
 	if !members[dns.Fqdn(tm.LocalID)] {
 		return false, fmt.Sprintf("our identity %q is not a participant in zone %s", tm.LocalID, zone)
 	}
@@ -154,7 +154,7 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		if err != nil || apex == nil {
 			continue
 		}
-		members := participantFQDNSetForApex(apex)
+		members := participantFQDNSet(activeOr(zd.ZoneName, apex))
 		// Both our identity and the sender must be participants in this zone.
 		if members[localFQDN] && members[senderFQDN] {
 			lgAgent.Debug("both identities are participants (any-zone check)",
@@ -195,7 +195,7 @@ func (tm *MPTransportBridge) keyHandOverAdmits(senderID, zone string) bool {
 	if !zoneListsAgent(z, AgentId(tm.LocalID)) || !mayHoldZoneSig0Key(z, AgentId(senderID)) {
 		return false
 	}
-	participants, _ := zoneParticipants(zoneApex(z))
+	participants, _ := participantsOf(instructionsFor(z))
 	return !isAmong(participants, AgentId(tm.LocalID))
 }
 

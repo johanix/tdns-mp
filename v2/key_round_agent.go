@@ -104,8 +104,8 @@ func (conf *Config) logSeveralKeys(zone ZoneName, zk *zoneKey) {
 // every other active key for the zone is retired. Reads the keystore and
 // asks the resolver: run by the round loop, never under the tracker's lock.
 func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
-	apex := zoneApex(zone)
-	if apex == nil || !hasHSYNC3(apex) || !votesInApex(apex, conf.localAgentID()) {
+	in := instructionsFor(zone)
+	if !hasHSYNC3(in) || !votesIn(in, conf.localAgentID()) {
 		return false
 	}
 	// a parent that takes no UPDATE needs no key; one whose DSYNC records

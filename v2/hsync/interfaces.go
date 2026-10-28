@@ -7,13 +7,11 @@ import (
 	"context"
 
 	"github.com/johanix/tdns-transport/v2/transport"
-	"github.com/miekg/dns"
 )
 
 // ZoneView exposes one MP zone to the engine.
 type ZoneView interface {
 	ZoneName() string
-	HSYNC3() []dns.RR
 	IsMultiProvider() bool
 	// Participants returns the identities that hold a membership-conferring
 	// HSYNCPARAM role in this zone (resolved via the zone's ON HSYNC3

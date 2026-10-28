@@ -18,6 +18,8 @@ import (
 	"hash"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -280,4 +282,223 @@ func recordsNotIn(a, b []InstrRecord) []InstrRecord {
 		}
 	}
 	return out
+}
+
+// --- The one accessor (design rule 5, plan S3) ---
+//
+// Nothing decides from a zone's HSYNC3 or HSYNCPARAM records but through
+// these: instructionsFor for the active instructions (groups, admission,
+// discovery, and what is shown), rolesForZone for the sets the parts act by,
+// and readingOf for a copy being analysed before it is served.
+
+// instrStore is the store of the zones' serials that the agent's or the
+// auditor's initialisation sets (instructions_store.go); nil on the combiner
+// and the signer, and in a test that sets none.
+var instrStore atomic.Pointer[InstructionStore]
+
+// instructionsFor is the zone's instructions as this daemon acts on them:
+// on the agent and the auditor, the store's active reading; on the combiner
+// and the signer, until S10 and S11, the reading of their own copy. A zone
+// the store does not have yet is read from its copy. Nil for a zone with no
+// instructions, or not loaded here.
+func instructionsFor(zone ZoneName) *Instructions {
+	return activeOr(string(zone), zoneApex(zone))
+}
+
+// activeOr is instructionsFor for a caller that holds the served apex of
+// the zone already: the store's active reading, or the reading of apex.
+func activeOr(zone string, apex *tdns.OwnerData) *Instructions {
+	if in := instrStore.Load().activeReading(dns.Fqdn(zone)); in != nil {
+		return in
+	}
+	return readingOf(apex)
+}
+
+// hsync3Strings are the instructions' HSYNC3 records as text, for display:
+// each ON record with its identity and upstream ("." for none), and each OFF
+// label, whose other fields nothing acts on.
+func (in *Instructions) hsync3Strings(zone string) []string {
+	if in == nil {
+		return nil
+	}
+	var out []string
+	for _, r := range in.Records {
+		up := r.Upstream
+		if up == "" {
+			up = "."
+		}
+		out = append(out, fmt.Sprintf("%s IN HSYNC3 ON %s %s %s", dns.Fqdn(zone), r.Label, r.Identity, up))
+	}
+	for _, l := range in.Off {
+		out = append(out, fmt.Sprintf("%s IN HSYNC3 OFF %s . .", dns.Fqdn(zone), l))
+	}
+	return out
+}
+
+// lastGood is each zone's last copy that read; noReading the zones whose
+// copy now does not, once logged.
+var lastGood, noReading sync.Map
+
+// readingOf reads the instructions of a copy's apex. A copy that has no
+// reading (an owner error) keeps the zone's last good reading, with one log
+// line, rather than taking its first record (plan S3).
+func readingOf(apex *tdns.OwnerData) *Instructions {
+	if apex == nil {
+		return nil
+	}
+	zone := dns.Fqdn(apex.Name)
+	in, err := ReadInstructions(apex)
+	if err != nil {
+		if _, logged := noReading.LoadOrStore(zone, true); !logged {
+			lg.Warn("the zone's copy has no reading of its instructions, keeping the last", "zone", zone, "error", err)
+		}
+		if prev, ok := lastGood.Load(zone); ok {
+			return prev.(*Instructions)
+		}
+		return nil
+	}
+	noReading.Delete(zone)
+	if in != nil {
+		lastGood.Store(zone, in)
+	}
+	return in
+}
+
+// Provider is a provider as a set names it: its HSYNC3 label and its
+// identity, fixed when the step that made the set was taken (design 3.3).
+// Identity is "" for a label that no ON record carries.
+type Provider struct{ Label, Identity string }
+
+// Roles is what the parts act by for a zone: a set of providers per purpose
+// (design 3.5), and the settings that change only at a step (design 3.3).
+type Roles struct {
+	Servers       []Provider // whose NS records are served
+	KeySigners    []Provider // whose DNSKEYs are published, whose foreign rows are kept
+	DSSigners     []Provider // whose KSKs have a DS, whose CDS records are published
+	KeyConfirmers []Provider // whose confirmations a key's distribution expects
+	Signing       []Provider // who signs
+
+	Pubkey, Pubcds     bool  // the zone's KEY and CDS at the providers' _signal names
+	NSmgmt, ParentSync uint8 // owner or agent
+	Hold               bool  // nothing new starts (S6's freeze); false until then
+}
+
+// rolesFor is the sets for a step of the transition from `from` to `to`; at
+// rest both are the active serial. Until the reconciliation has steps (S12,
+// S13), every set is that of the serial the parts hold: from's during a
+// transition (design 3.3), the active serial's at rest. In the legacy reading
+// (HSYNC3 without HSYNCPARAM) every ON record serves, and so votes, and
+// nobody signs, as today.
+func rolesFor(from, to *Instructions, step int) Roles {
+	in := from
+	if in == nil {
+		in = to
+	}
+	r := Roles{NSmgmt: core.HsyncNSmgmtOWNER, ParentSync: core.HsyncParentSyncOwner}
+	if in == nil {
+		return r
+	}
+	if !in.HasParam {
+		for _, rec := range in.Records {
+			r.Servers = append(r.Servers, Provider{rec.Label, rec.Identity})
+		}
+		return r
+	}
+	signers := in.providers(in.Signers)
+	r.Servers = in.providers(in.Servers)
+	r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = signers, signers, signers, signers
+	r.Pubkey, r.Pubcds = in.Pubkey, in.Pubcds
+	r.NSmgmt, r.ParentSync = in.NSmgmt, in.ParentSync
+	return r
+}
+
+// rolesForZone is rolesFor for the zone's current step, as the store has it;
+// for a zone the store does not have, the active reading's sets.
+func rolesForZone(zone ZoneName) Roles {
+	from, to, step := instrStore.Load().transition(string(zone))
+	if to == nil {
+		in := instructionsFor(zone)
+		return rolesFor(in, in, 0)
+	}
+	return rolesFor(from, to, step)
+}
+
+// providers resolves labels through the ON records, in the order given.
+func (in *Instructions) providers(labels []string) []Provider {
+	out := make([]Provider, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, Provider{Label: l, Identity: in.identityOf(l)})
+	}
+	return out
+}
+
+// identityOf is the identity of the ON record with the label; "" when none
+// carries it. An OFF record gives no label (plan S3).
+func (in *Instructions) identityOf(label string) string {
+	label = strings.TrimSuffix(label, ".")
+	for _, r := range in.Records {
+		if r.Label == label {
+			return r.Identity
+		}
+	}
+	return ""
+}
+
+// labelOf is the label of the ON record of one of the identities, and
+// whether there is one. An OFF record gives no label.
+func (in *Instructions) labelOf(identities ...string) (string, bool) {
+	if in == nil {
+		return "", false
+	}
+	for _, r := range in.Records {
+		for _, id := range identities {
+			if core.EqualNames(dns.Fqdn(id), r.Identity) {
+				return r.Label, true
+			}
+		}
+	}
+	return "", false
+}
+
+// has reports whether label is among the providers.
+func has(set []Provider, label string) bool {
+	label = strings.TrimSuffix(label, ".")
+	return slices.ContainsFunc(set, func(p Provider) bool { return p.Label == label })
+}
+
+// identities are the providers' identities, those with an ON record only.
+func identities(set []Provider) []string {
+	var out []string
+	for _, p := range set {
+		if p.Identity != "" {
+			out = append(out, p.Identity)
+		}
+	}
+	return out
+}
+
+// participantsOf is the zone's members that hold a role (servers, signers,
+// auditors), by identity, and the voting subset (servers and signers), each
+// sorted and de-duplicated. A label with no ON record names nobody. In the
+// legacy reading every ON record is a voting participant.
+func participantsOf(in *Instructions) (participants, voting []string) {
+	if in == nil {
+		return nil, nil
+	}
+	if !in.HasParam {
+		for _, r := range in.Records {
+			voting = append(voting, r.Identity)
+		}
+		voting = sortedUnique(voting)
+		return voting, voting
+	}
+	voting = sortedUnique(append(identities(in.providers(in.Servers)), identities(in.providers(in.Signers))...))
+	participants = sortedUnique(append(slices.Clone(voting), identities(in.providers(in.Auditors))...))
+	if len(voting) == 0 {
+		voting = nil
+	}
+	if len(participants) == 0 {
+		participants = nil
+	}
+	return participants, voting
 }

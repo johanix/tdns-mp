@@ -11,7 +11,6 @@ import (
 	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -209,24 +208,8 @@ func (v mpZoneView) ZoneName() string { return v.MPZoneData.ZoneName }
 func (v mpZoneView) IsMultiProvider() bool {
 	return v.MPZoneData.Options[tdns.OptMultiProvider]
 }
-func (v mpZoneView) HSYNC3() []dns.RR {
-	apex, err := v.MPZoneData.GetOwner(v.MPZoneData.ZoneName)
-	if err != nil || apex == nil {
-		return nil
-	}
-	rrset, ok := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !ok {
-		return nil
-	}
-	return rrset.RRs
-}
-
 func (v mpZoneView) Participants() []hsync.PeerID {
-	apex, err := v.MPZoneData.GetOwner(v.MPZoneData.ZoneName)
-	if err != nil || apex == nil {
-		return nil
-	}
-	participants, _ := zoneParticipants(apex)
+	participants, _ := participantsOf(instructionsFor(ZoneName(v.MPZoneData.ZoneName)))
 	out := make([]hsync.PeerID, 0, len(participants))
 	for _, id := range participants {
 		out = append(out, hsync.PeerID(id))

@@ -91,7 +91,7 @@ func (conf *Config) delegationCsyncStep(ctx context.Context, zone string, syncst
 	}
 	// The zone is signed if a provider signs it: what the combiner asked
 	// when it made the CSYNC. An unsigned zone has none.
-	if hp := mpzd.getHSYNCPARAM(); hp == nil || len(hp.GetSigners()) == 0 {
+	if len(mpzd.roles().Signing) == 0 {
 		return nil
 	}
 	c := &conf.InternalMp.delegationSyncChains

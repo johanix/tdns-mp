@@ -46,24 +46,20 @@ type signingSet map[string]string
 // a server that does not sign, never starts. A copy with no HSYNCPARAM
 // names no signer.
 func nextSigningSet(apex *tdns.OwnerData, prev signingSet) signingSet {
+	return nextSigningSetOf(readingOf(apex), prev)
+}
+
+// nextSigningSetOf is nextSigningSet by a reading of the instructions.
+func nextSigningSetOf(in *Instructions, prev signingSet) signingSet {
 	out := signingSet{}
-	hp := apexHSYNCPARAM(apex)
-	if hp == nil {
+	if in == nil || !in.HasParam {
 		return out
 	}
-	listed := map[string]string{}
-	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 {
-				listed[trimDot(h3.Label)] = dns.CanonicalName(h3.Identity)
-			}
-		}
-	}
-	for _, s := range hp.GetSigners() {
-		out[trimDot(s)] = listed[trimDot(s)]
+	for _, s := range in.Signers {
+		out[s] = in.identityOf(s)
 	}
 	for label, id := range prev {
-		if _, named := out[label]; !named && id != "" && listed[label] == id {
+		if _, named := out[label]; !named && id != "" && core.EqualNames(in.identityOf(label), id) {
 			out[label] = id
 		}
 	}
@@ -82,12 +78,12 @@ func (s signingSet) others(self string) []string {
 	return out
 }
 
-// leaving are the labels of the set that the zone's signers= does not name,
-// sorted.
-func (s signingSet) leaving(hp *core.HSYNCPARAM) []string {
+// leaving are the labels of the set that the instructions' signers= does
+// not name, sorted.
+func (s signingSet) leaving(in *Instructions) []string {
 	var out []string
 	for label := range s {
-		if hp == nil || !hp.IsSignerLabel(label) {
+		if in == nil || !slices.Contains(in.Signers, label) {
 			out = append(out, label)
 		}
 	}
@@ -95,11 +91,11 @@ func (s signingSet) leaving(hp *core.HSYNCPARAM) []string {
 	return out
 }
 
-// leavers are the providers of the set that the zone's signers= does not
-// name, by identity (by label where the set has none), sorted.
-func (s signingSet) leavers(hp *core.HSYNCPARAM) []string {
+// leavers are the providers of the set that the instructions' signers=
+// does not name, by identity (by label where the set has none), sorted.
+func (s signingSet) leavers(in *Instructions) []string {
 	var out []string
-	for _, label := range s.leaving(hp) {
+	for _, label := range s.leaving(in) {
 		if id := s[label]; id != "" {
 			out = append(out, id)
 		} else {
@@ -112,14 +108,13 @@ func (s signingSet) leavers(hp *core.HSYNCPARAM) []string {
 
 // signingSet is the zone's signing set as its last refresh left it. Before
 // the zone's first copy here, and for a ZoneData that is not the one in
-// Zones (an incoming copy wrapped for analysis), it is the zone's signers=
-// alone.
+// Zones (an incoming copy wrapped for analysis), it is the signers= alone of
+// the instructions mpzd reads: the active ones, or that copy's.
 func (mpzd *MPZoneData) signingSet() signingSet {
 	if mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Signing != nil {
 		return mpzd.MP.MPdata.Signing
 	}
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	return nextSigningSet(apex, nil)
+	return nextSigningSetOf(mpzd.instructions(), nil)
 }
 
 // signs: the provider with this HSYNC3 label signs the zone, named in
@@ -130,20 +125,21 @@ func (mpzd *MPZoneData) signs(label string) bool {
 }
 
 // signingLabels are the labels of the zone's signing set: those signers=
-// names, in its order, then those leaving it, sorted.
+// names, then those leaving it, each sorted.
 func (mpzd *MPZoneData) signingLabels() []string {
 	set := mpzd.signingSet()
-	hp := mpzd.getHSYNCPARAM()
-	if hp == nil {
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	in := activeOr(mpzd.ZoneName, apex)
+	if in == nil || !in.HasParam {
 		return slices.Sorted(maps.Keys(set))
 	}
 	var out []string
-	for _, s := range hp.GetSigners() {
-		if _, in := set[trimDot(s)]; in && !slices.Contains(out, trimDot(s)) {
-			out = append(out, trimDot(s))
+	for _, s := range in.Signers {
+		if _, ok := set[s]; ok {
+			out = append(out, s)
 		}
 	}
-	return append(out, set.leaving(hp)...)
+	return append(out, set.leaving(in)...)
 }
 
 // leavingSigner: this provider signs the zone though its signers= no longer
@@ -176,7 +172,7 @@ func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB)
 	}
 	lg.Info("the providers that sign the zone changed; one out of signers= signs on until the owner removes its HSYNC3 record (#147)",
 		"zone", mpzd.ZoneName, "signing", strings.Join(slices.Sorted(maps.Keys(next)), " "),
-		"leaving", strings.Join(next.leaving(apexHSYNCPARAM(apex)), " "))
+		"leaving", strings.Join(next.leaving(readingOf(apex)), " "))
 	if kdb != nil {
 		if err := saveSigningSet(kdb, mpzd.ZoneName, next); err != nil {
 			lg.Error("the zone's signing providers could not be kept in the keystore; a restart starts from signers=", "zone", mpzd.ZoneName, "err", err)

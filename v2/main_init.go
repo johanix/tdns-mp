@@ -16,6 +16,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -519,6 +520,13 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		return fmt.Errorf("the zones' serials: %w", err)
 	}
 	conf.InternalMp.Instructions = store
+	instrStore.Store(store)
+	// tdns asks the agent whether the agents sync a zone's delegation (P3),
+	// rather than reading its own copy: by the step's sets, since parentsync
+	// changes only at a step (design 3.3).
+	tdns.RegisterParentSyncAgentFunc(func(zone tdns.ZoneName) bool {
+		return rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent
+	})
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
@@ -667,6 +675,7 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		return fmt.Errorf("the zones' serials: %w", err)
 	}
 	conf.InternalMp.Instructions = store
+	instrStore.Store(store)
 
 	// MsgQs: auditor consumes Beat/Hello/Ping/Msg/Confirmation/StatusUpdate.
 	conf.InternalMp.MsgQs = NewMsgQs()

@@ -162,7 +162,7 @@ func TestTheZoneLeavesItsGroupWhenThisAgentsRecordTurnsOFF(t *testing.T) {
 	z.rrs[0].(*dns.PrivateRR).Data.(*core.HSYNC3).State = 0
 	hare := mustHSYNC3RR(t, "hare", "hare.agent.example.")
 	z.rrs = append(z.rrs, hare)
-	_ = e.ApplyHsyncDiff(zone, HsyncDiff{Adds: []dns.RR{hare}})
+	_ = e.ApplyHsyncDiff(zone, HsyncDiff{Entered: idsOf(hare)})
 	if _, ok := e.registry.S.Get("hare.agent.example."); ok {
 		t.Error("a diff registered a peer in a zone where this agent's record is OFF")
 	}
@@ -186,7 +186,7 @@ func TestTheZoneLeavesItsGroupWhenThisAgentLosesItsRole(t *testing.T) {
 	}
 
 	z.hsyncparam.Value = []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{"fox", "hare"}}}
-	_ = e.ApplyHsyncDiff(zone, HsyncDiff{Adds: []dns.RR{z.rrs[2]}})
+	_ = e.ApplyHsyncDiff(zone, HsyncDiff{Entered: idsOf(z.rrs[2])})
 	if _, ok := e.registry.S.Get("hare.agent.example."); ok {
 		t.Error("a diff registered a peer in a zone where this agent has no role")
 	}

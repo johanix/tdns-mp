@@ -327,7 +327,7 @@ func TestPreRefreshReadersSeeTheIncomingZone(t *testing.T) {
 	live := &tdns.ZoneData{ZoneName: zone, ZoneStore: tdns.MapZone, Logger: log.New(io.Discard, "", 0),
 		Data: core.NewNameMap[tdns.OwnerData]()}
 	changed, hss, err := HsyncChanged(live, incoming)
-	if err != nil || !changed || hss == nil || len(hss.HsyncAdds) != 1 {
+	if err != nil || !changed || hss == nil || !hss.ParamChanged {
 		t.Fatalf("HsyncChanged on the first load: changed=%v hss=%+v err=%v", changed, hss, err)
 	}
 
@@ -340,14 +340,14 @@ func TestPreRefreshReadersSeeTheIncomingZone(t *testing.T) {
 	if newMpzd.MP.MPdata.OurLabel != "alice" || !newMpzd.MP.MPdata.WeAreProvider {
 		t.Fatalf("MPdata from the incoming zone: %+v", newMpzd.MP.MPdata)
 	}
-	if hp := newMpzd.getHSYNCPARAM(); hp == nil {
-		t.Fatal("getHSYNCPARAM read nothing from the incoming zone")
+	if in := newMpzd.instructions(); in == nil || !in.HasParam {
+		t.Fatal("the instructions read nothing from the incoming zone")
 	}
 	// And the same readers on a zone with no apex at all answer nil, not a
 	// panic.
 	empty := &MPZoneData{ZoneData: live, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
-	if hp := empty.getHSYNCPARAM(); hp != nil {
-		t.Fatal("getHSYNCPARAM on an empty zone returned something")
+	if in := empty.instructions(); in != nil {
+		t.Fatal("the instructions of an empty zone are something")
 	}
 	if matched, _, err := empty.matchHsyncIdentity([]string{identity}); matched || err != nil {
 		t.Fatalf("matchHsyncIdentity on an empty zone: matched=%v err=%v", matched, err)

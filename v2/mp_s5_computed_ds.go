@@ -157,7 +157,7 @@ func (conf *Config) computedDSSet(zone string, digest uint8) (tdns.DSIntent, []d
 	if !ok || mpzd == nil {
 		return tdns.DSIntent{}, nil, nil
 	}
-	if mpzd.getHSYNCPARAM() == nil {
+	if in := mpzd.instructions(); in == nil || !in.HasParam {
 		return tdns.DSIntent{}, nil, nil
 	}
 	// The signing set, not signers= alone: a provider leaving signers=
@@ -319,7 +319,7 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 	if !ok || mpzd == nil {
 		return ""
 	}
-	if mpzd.getHSYNCPARAM() == nil {
+	if in := mpzd.instructions(); in == nil || !in.HasParam {
 		return ""
 	}
 	signing := map[string]bool{}
@@ -457,7 +457,7 @@ func (conf *Config) dsSetUnknown(ds tdns.DelegationSyncRequest) (waitingFor stri
 	if !ok || mpzd == nil {
 		return "", false
 	}
-	if hp := mpzd.getHSYNCPARAM(); hp == nil || len(hp.GetSigners()) == 0 {
+	if len(mpzd.roles().DSSigners) == 0 {
 		return "", false
 	}
 	if snap := o.inventoryOf(ds.ZoneName); snap != nil && snap.Owned {
@@ -562,7 +562,7 @@ func (conf *Config) dsSetLine(zd *tdns.ZoneData) string {
 	if !ok || mpzd == nil {
 		return ""
 	}
-	if hp := mpzd.getHSYNCPARAM(); hp == nil || len(hp.GetSigners()) == 0 {
+	if len(mpzd.roles().DSSigners) == 0 {
 		return ""
 	}
 	if waiting, unknown := conf.dsSetUnknown(tdns.DelegationSyncRequest{ZoneName: zd.ZoneName, ZoneData: zd}); unknown {
@@ -571,20 +571,23 @@ func (conf *Config) dsSetLine(zd *tdns.ZoneData) string {
 	return "known"
 }
 
-// identitiesByLabel maps the zone's HSYNC3 labels to their identities, read
-// as the DS set reads the zone (OwnerForAnalysis), so that a provider the
-// set names by its label is named by its identity.
+// identitiesByLabel maps the labels of the zone's providers to their
+// identities through the step's sets, and through the signing set for a
+// provider leaving it, which keeps the identity it had (#147), so that a
+// provider the DS set names by its label is named by its identity.
 func (mpzd *MPZoneData) identitiesByLabel() map[string]string {
 	out := map[string]string{}
-	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	if err != nil || apex == nil {
-		return out
-	}
-	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.Identity != "" {
-				out[normalizeHSYNC3Label(h3.Label)] = dns.Fqdn(h3.Identity)
+	r := mpzd.roles()
+	for _, set := range [][]Provider{r.Servers, r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing} {
+		for _, p := range set {
+			if p.Identity != "" {
+				out[p.Label] = p.Identity
 			}
+		}
+	}
+	for label, id := range mpzd.signingSet() {
+		if _, named := out[label]; !named && id != "" {
+			out[label] = id
 		}
 	}
 	return out

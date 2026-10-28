@@ -297,11 +297,10 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 				if !matched {
 					return
 				}
-				hp := w.getHSYNCPARAM()
-				if hp == nil {
+				if in := w.instructions(); in == nil || !in.HasParam {
 					return
 				}
-				if hp.GetParentSync() == core.HsyncParentSyncAgent {
+				if w.roles().ParentSync == core.HsyncParentSyncAgent {
 					lgAgent.Info("HSYNCPARAM parentsync=agent, enabling delegation sync", "zone", zd.ZoneName)
 					zd.SetRuntimeOption(tdns.OptParentSync, true)
 					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
