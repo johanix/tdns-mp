@@ -69,10 +69,12 @@ type zoneSerials struct {
 	LastThaw  *Thaw        `json:"last_thaw,omitempty"`
 	// OwnerError holds the zone (design 3.6) until a copy above ErrorAt is
 	// noted; ErrorAt nil: nothing was held when it was noted. Conflict is
-	// the digests seen at ErrorAt for "one serial, two digests".
-	OwnerError string   `json:"owner_error,omitempty"`
-	ErrorAt    *uint32  `json:"error_at,omitempty"`
-	Conflict   []string `json:"conflict,omitempty"`
+	// the digests seen at ErrorAt for "one serial, two digests": the last
+	// maxConflictDigests of them, and ConflictMore counts those dropped.
+	OwnerError   string   `json:"owner_error,omitempty"`
+	ErrorAt      *uint32  `json:"error_at,omitempty"`
+	Conflict     []string `json:"conflict,omitempty"`
+	ConflictMore int      `json:"conflict_more,omitempty"`
 	// Step and Sets are the reconciliation's step and the sets the parts
 	// hold, each provider by label and identity (S3 and S12 fill them).
 	Step int             `json:"step,omitempty"`
@@ -355,6 +357,43 @@ func (z *zoneSerials) ownerError(zone, msg string) {
 	}
 }
 
+// maxConflictDigests is how many digests a conflict mark keeps for its
+// serial: the last ones seen. The owner error needs two. An owner who edits
+// in place at one serial again and again would otherwise grow the list, on
+// disk and in the status, without end (#307).
+const maxConflictDigests = 4
+
+// addConflictDigest adds d to a conflict mark, its digests and the count of
+// those dropped, unless the mark holds it; beyond maxConflictDigests the
+// oldest is dropped and counted. A digest dropped and seen again counts
+// again.
+func addConflictDigest(conflict []string, dropped int, d string) ([]string, int) {
+	if slices.Contains(conflict, d) {
+		return conflict, dropped
+	}
+	conflict = append(conflict, d)
+	if over := len(conflict) - maxConflictDigests; over > 0 {
+		conflict = slices.Clone(conflict[over:])
+		dropped += over
+	}
+	return conflict, dropped
+}
+
+// conflictText is a conflict mark as the owner error says it: how many
+// digests, and the ones kept, with "… and N more" for those dropped.
+func conflictText(conflict []string, dropped int) string {
+	n := len(conflict) + dropped
+	count := fmt.Sprintf("%d digests", n)
+	if n == 2 {
+		count = "two digests"
+	}
+	list := strings.Join(conflict, ", ")
+	if dropped > 0 {
+		list += fmt.Sprintf(", … and %d more", dropped)
+	}
+	return fmt.Sprintf("%s (%s)", count, list)
+}
+
 // Note classifies a copy of the zone's instructions, at its first load and
 // at every refresh (plan S2): its reading, or the error that it has none
 // (readErr), or neither for a copy with neither record.
@@ -390,18 +429,12 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 			if h.Digest != cp.Digest {
 				// an edit without a raised serial
 				if z.ErrorAt == nil || *z.ErrorAt != in.Serial {
-					z.Conflict = []string{h.Digest}
+					z.Conflict, z.ConflictMore = []string{h.Digest}, 0
 				}
-				if !slices.Contains(z.Conflict, cp.Digest) {
-					z.Conflict = append(z.Conflict, cp.Digest)
-				}
+				z.Conflict, z.ConflictMore = addConflictDigest(z.Conflict, z.ConflictMore, cp.Digest)
 				at := in.Serial
 				z.ErrorAt = &at
-				digests := fmt.Sprintf("%d digests", len(z.Conflict))
-				if len(z.Conflict) == 2 {
-					digests = "two digests"
-				}
-				z.ownerError(zone, fmt.Sprintf("serial %d with %s (%s)", in.Serial, digests, strings.Join(z.Conflict, ", ")))
+				z.ownerError(zone, fmt.Sprintf("serial %d with %s", in.Serial, conflictText(z.Conflict, z.ConflictMore)))
 			}
 			return nil
 		}
@@ -415,7 +448,7 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		// A newer serial. An owner error ends at a serial above the one it
 		// was noted at.
 		if z.OwnerError != "" && (z.ErrorAt == nil || CompareSerial(in.Serial, *z.ErrorAt) > 0) {
-			z.OwnerError, z.ErrorAt, z.Conflict = "", nil, nil
+			z.OwnerError, z.ErrorAt, z.Conflict, z.ConflictMore = "", nil, nil, 0
 		}
 		h := heldSerial{SerialDigest: cp, Reading: in, Since: time.Now()}
 		if z.Active != nil {
