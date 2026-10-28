@@ -24,7 +24,6 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -397,8 +396,15 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	// Ensure identity is FQDN
 	mp.Identity = dns.Fqdn(mp.Identity)
 
-	// Determine if agent identity zone is an auto zone or a config-defined zone
-	isAutoZone := !core.EqualNamesContains(all_zones, mp.Identity)
+	// Determine if agent identity zone is an auto zone or a config-defined zone.
+	// The identity is folded at config load (#287); a config-defined zone is
+	// named as the config writes it, and Zones has it under that name.
+	identityZone := mp.Identity
+	i := slices.IndexFunc(all_zones, func(z string) bool { return sameName(z, mp.Identity) })
+	isAutoZone := i < 0
+	if !isAutoZone {
+		identityZone = all_zones[i]
+	}
 	var autoZd *tdns.ZoneData
 	var autoTx tdns.TxID
 
@@ -486,9 +492,9 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		// hello gate opens from the last of its first-load callbacks, below:
 		// after the zone is served and its records are queued, which is the
 		// best this path knows; whether they are published yet it cannot tell.
-		zdp, ok := Zones.Get(mp.Identity)
+		zdp, ok := Zones.Get(identityZone)
 		if !ok {
-			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", mp.Identity)
+			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", identityZone)
 		}
 		if wantApi {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {

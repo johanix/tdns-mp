@@ -23,10 +23,10 @@ import (
 
 // distribOpTarget is the peer "distrib op --to" names, as the peer registry
 // keys it: trimmed, folded and with its trailing dot (#287). combiner is true
-// for the keyword "combiner", in any case.
+// for the bare keyword "combiner", in any case; "combiner." is a peer's name.
 func distribOpTarget(to string) (fqdn string, combiner bool) {
-	fqdn = canonicalName(strings.TrimSpace(to))
-	return fqdn, fqdn == "combiner."
+	to = strings.TrimSpace(to)
+	return canonicalName(to), strings.EqualFold(to, "combiner") // not-a-name: the keyword
 }
 
 func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.ResponseWriter, r *http.Request) {

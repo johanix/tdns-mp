@@ -88,7 +88,8 @@ func TestAProtectedNamespaceIsMatchedByLabelInAnyCase(t *testing.T) {
 }
 
 // "distrib op --to" takes the operator's name as the peer registry keys it,
-// padded or in capitals, and "combiner" as the keyword in any case.
+// padded or in capitals, and the bare "combiner" as the keyword in any case;
+// "combiner." is a peer's name.
 func TestADistribOpTargetIsTrimmedAndFolded(t *testing.T) {
 	for _, c := range []struct {
 		to, fqdn string
@@ -96,6 +97,7 @@ func TestADistribOpTargetIsTrimmedAndFolded(t *testing.T) {
 	}{
 		{" COMBINER ", "combiner.", true},
 		{"combiner", "combiner.", true},
+		{"combiner.", "combiner.", false},
 		{" Agent.Bob.Example. ", "agent.bob.example.", false},
 		{"agent.bob.example", "agent.bob.example.", false},
 		{"   ", "", false},
