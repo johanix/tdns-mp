@@ -2638,7 +2638,7 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 	}
 	if !exists {
 		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
-			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems)
 		}
 		return false // Not a DNSKEY propagation confirmation
 	}
@@ -2809,8 +2809,9 @@ func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, ask
 // that combiner's. A success says the asker's combiner holds the answer's
 // set: a key added that is in it is applied, and a key removed that is not
 // in it is removed. A rejection names its keys; an "ignored" covers the
-// answer's keys as a direct answer does. Under dnskeyPropMu.
-func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, rejectedItems []RejectedItemInfo) {
+// answer's keys as a direct answer does, and so does a key named as
+// ignored (#288). Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, ignoredRecords []string, rejectedItems []RejectedItemInfo) {
 	var rejectedRecords []string
 	for _, ri := range rejectedItems {
 		rejectedRecords = append(rejectedRecords, ri.Record)
@@ -2818,6 +2819,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 	rejectedTags := dnskeyKeyTagsOf(rejectedRecords)
 	success := status == transport.ConfirmSuccess.String()
 	ignored := status == transport.ConfirmIgnored.String() && len(rejectedItems) == 0
+	ignoredTags := dnskeyKeyTagsOf(ignoredRecords)
 	for distID, prop := range tm.pendingDnskeyPropagations {
 		if prop.Zone != ans.zone || prop.CreatedAt.After(ans.at) {
 			continue
@@ -2847,7 +2849,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 				}
 			case success && covered:
 				results[kt] = "applied"
-			case ignored && covered:
+			case (ignored || ignoredTags[kt]) && covered:
 				results[kt] = "ignored"
 			}
 		}

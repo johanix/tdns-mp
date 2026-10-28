@@ -242,6 +242,28 @@ func TestAKeyAPartialNamesAsIgnoredIsAnswered(t *testing.T) {
 	}
 }
 
+// The same for a key credited from the asker's confirmation of an answer: a
+// PARTIAL that names the answer's key as ignored ends the propagation made
+// before the answer that waits for the asker.
+func TestAnAnswersPartialThatNamesTheKeyAsIgnoredIsAnswered(t *testing.T) {
+	const zone = "answer.partial.ignored.keys.example."
+	asker := AgentId("bob.agent.example.")
+	key := testDnskey(t, zone, 256)
+	_, rec := csyncOp(zone, 1000)
+	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	d, an := nextDistributionID(), nextDistributionID()
+	snd.TrackDnskeyPropagation(ZoneName(zone), d, []uint16{key.KeyTag()}, nil, []AgentId{asker})
+	snd.noteCatchUpAnswer(an, ZoneName(zone), asker, map[uint16]bool{key.KeyTag(): true})
+
+	snd.processDnskeyConfirmation(an, string(asker), transport.ConfirmPartial.String(), []string{rec}, []string{key.String()}, nil)
+	snd.dnskeyPropMu.Lock()
+	_, waiting := snd.pendingDnskeyPropagations[d]
+	snd.dnskeyPropMu.Unlock()
+	if waiting {
+		t.Errorf("the propagation still waits for the asker whose PARTIAL of the answer named the key as ignored")
+	}
+}
+
 // A combiner that fails the newer set is not one that ignores it: the stale
 // replace still names none of the set and is PARTIAL.
 func TestAStaleSetTheCombinerFailedIsStillNotNamed(t *testing.T) {

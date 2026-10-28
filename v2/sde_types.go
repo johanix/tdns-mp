@@ -204,9 +204,11 @@ type PendingRemoteConfirmation struct {
 	// (dnskeyAwaitingAnswer). Not named; a success becomes PARTIAL.
 	StaleWaiting []string
 	// NotHeldTypes: the types of the update's stale replaces whose set's last
-	// hand-over to this agent's combiner failed. Their records are left out
-	// of StaleHeld and of whatever the final confirmation names, also when
-	// it is made from the repo, and the confirmation is PARTIAL.
+	// hand-over to this agent's combiner failed, or which the combiner
+	// ignored. Their records are left out of StaleHeld and of whatever the
+	// final confirmation names, also when it is made from the repo, and the
+	// confirmation is PARTIAL. Those of an ignored set are then named as
+	// ignored, from StaleIgnored.
 	NotHeldTypes map[uint16]bool
 	// FromAnswer: the forward is of an answer to a request for the zone's
 	// state.
