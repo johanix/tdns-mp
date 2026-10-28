@@ -192,3 +192,35 @@ func TestTheEngineHoldsTheDriverOfAHeldZone(t *testing.T) {
 		t.Error("the hold stayed after the agent let it go")
 	}
 }
+
+// A lifetime rollover that began before the hold, its key minted, runs to
+// its end under the hold: the minted key's promotion is that rollover's
+// next phase (cubic's review of ff9348d). With no standby kept, a standby
+// key is always one a rollover minted.
+func TestALifetimeRolloverBegunBeforeTheHoldEndsUnderIt(t *testing.T) {
+	pol := driverPolicy
+	pol.ZSKLifetime = 30 * 24 * time.Hour
+	r := newDriverRig(t, "lifetime.hold.owned.example.", pol, "p2")
+	_, z := bootstrapKSK(t, r)
+	r.clock.Advance(31 * 24 * time.Hour)
+	r.tick("due")
+	minted := r.keysIn(KeyStateMpdist, "ZSK")
+	if len(minted) != 1 {
+		t.Fatalf("the lifetime rollover minted %v, want one ZSK", minted)
+	}
+	y := minted[0]
+	r.l.SetHold(true)
+	for i := 0; i < 6 && r.state(y) != KeyStateActive; i++ {
+		if r.state(y) == KeyStateMpdist {
+			r.confirmAll("applied", y)
+		}
+		r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+		r.tick("held")
+	}
+	if st := r.state(y); st != KeyStateActive {
+		t.Fatalf("the ZSK minted for the rollover, under the hold: %s, want active", st)
+	}
+	if st := r.state(z); st != KeyStateRetired {
+		t.Errorf("the old ZSK: %s, want retired", st)
+	}
+}

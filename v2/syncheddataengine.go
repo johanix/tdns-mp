@@ -1896,6 +1896,16 @@ func (conf *Config) applyLocalUpdate(ctx context.Context, zdr *ZoneDataRepo, syn
 	var change bool
 	lgEngine.Info("received local update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 
+	// A zone whose freeze has ended releases what it owes before a new
+	// change: the operator's next edit was made over it (plan S6). While
+	// the zone is frozen a delete is checked against the owed changes too.
+	if !synchedDataUpdate.replay {
+		if len(conf.zoneFrozen(string(synchedDataUpdate.Zone))) == 0 {
+			conf.instrDone(ctx, zdr, synchedDataUpdate.Zone)
+		}
+		synchedDataUpdate.owed = conf.InternalMp.Kept.entries(string(synchedDataUpdate.Zone), listOwed)
+	}
+
 	// 1. Evaluate the update for applicability (valid zone, etc)
 	// 2. Evaluate the update according to policy.
 

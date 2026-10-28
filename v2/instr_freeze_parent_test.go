@@ -3,6 +3,7 @@ package tdnsmp
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,12 +92,22 @@ func TestTheLeaderSendsNothingNewToTheParentDuringATransition(t *testing.T) {
 	})
 	t.Run("the key's bootstrap", func(t *testing.T) {
 		r := newNotifyRig(t, "bootstrap.frozen.example.", "UPDATE")
-		polled := 0
-		r.conf.InternalMp.keyPoll = func(context.Context, ZoneName, string, uint16, uint8) { polled++ }
+		var polled atomic.Int32
+		r.conf.InternalMp.keyPoll = func(context.Context, ZoneName, string, uint16, uint8) { polled.Add(1) }
 		freezeServed(t, r.conf, r.mpzd)
-		r.conf.ParentSyncAfterKeyPublication(r.ctx, ZoneName(r.mpzd.ZoneName), r.mpzd.ZoneName, 4711, dns.ED25519)
-		if polled != 0 {
-			t.Errorf("the key's poll ran %d times during the freeze", polled)
+		z := ZoneName(r.mpzd.ZoneName)
+		if held := r.conf.ParentSyncAfterKeyPublication(r.ctx, z, r.mpzd.ZoneName, 4711, dns.ED25519); !held {
+			t.Error("the poll did not say the freeze held it")
+		}
+		// as the operator's parentsync-bootstrap launches it: the poll the
+		// freeze held is not booked as run, so the take-up's set-up polls
+		r.conf.launchKeyPoll(r.ctx, nil, z, r.mpzd.ZoneName, 4711, dns.ED25519)
+		waitUntil(t, "the held poll did not end", func() bool { running, _, _ := r.conf.InternalMp.keyPolls.state(z); return running == 0 })
+		if n := polled.Load(); n != 0 {
+			t.Errorf("the key's poll ran %d times during the freeze", n)
+		}
+		if _, _, ended := r.conf.InternalMp.keyPolls.state(z); ended.keyid != 0 {
+			t.Errorf("a poll the freeze held is booked as run (key %d): the take-up's renewal would not poll", ended.keyid)
 		}
 	})
 	t.Run("the KEY's publication", func(t *testing.T) {
@@ -161,17 +172,21 @@ func TestARolloversSyncDuringAFreezeCarriesTheSetsThePartsHold(t *testing.T) {
 	if u == nil {
 		t.Fatal("the parent got no UPDATE")
 	}
-	var dsAdded, oldNSRemoved bool
+	var dsAdded, oldNSRemoved, servedNSRemoved bool
 	for _, rr := range u.Ns {
 		switch x := rr.(type) {
 		case *dns.DS:
 			dsAdded = dsAdded || x.Hdr.Class == dns.ClassINET && x.KeyTag == r.ds.(*dns.DS).KeyTag
 		case *dns.NS:
 			oldNSRemoved = oldNSRemoved || x.Hdr.Class == dns.ClassNONE && x.Ns == r.oldNS
+			servedNSRemoved = servedNSRemoved || x.Hdr.Class == dns.ClassNONE && x.Ns == "ns1."+z
+		case *dns.ANY:
+			servedNSRemoved = servedNSRemoved || x.Hdr.Rrtype == dns.TypeNS
 		}
 	}
-	if !dsAdded || !oldNSRemoved {
-		t.Errorf("the UPDATE: DS added %v, the old NS removed %v\n%s", dsAdded, oldNSRemoved, u)
+	// the parent holds the NS the zone serves already: the UPDATE keeps it
+	if !dsAdded || !oldNSRemoved || servedNSRemoved {
+		t.Errorf("the UPDATE: DS added %v, the old NS removed %v, the served NS removed %v\n%s", dsAdded, oldNSRemoved, servedNSRemoved, u)
 	}
 	c := &r.conf.InternalMp.delegationSyncChains
 	c.mu.Lock()
@@ -198,7 +213,7 @@ func TestTransportBoundary_AnEditDuringATransitionReachesNoPeer(t *testing.T) {
 	edit := string(n.zone) + " 3600 IN NS ns1.alice.example."
 	answer := make(chan *AgentMsgResponse, 1)
 	n.conf.InternalMp.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{Zone: n.zone, AgentId: AgentId(n.alice), UpdateType: "local",
-		Update: &ZoneUpdate{Zone: n.zone, AgentId: AgentId(n.alice), Operations: []core.RROperation{{Operation: "replace", RRtype: "NS", Records: []string{edit}}}},
+		Update:   &ZoneUpdate{Zone: n.zone, AgentId: AgentId(n.alice), Operations: []core.RROperation{{Operation: "replace", RRtype: "NS", Records: []string{edit}}}},
 		Response: answer}
 	a, ok := recvWithin(answer, 10*time.Second)
 	if !ok || a.Kept == "" {
@@ -221,6 +236,9 @@ func TestTransportBoundary_AnEditDuringATransitionReachesNoPeer(t *testing.T) {
 		t.Fatal("bob did not hear the kept edit after the transition was done")
 	}
 	if len(m.Operations) != 1 || m.Operations[0].RRtype != "NS" || len(m.Operations[0].Records) != 1 {
-		t.Errorf("bob heard %+v", m.Operations)
+		t.Fatalf("bob heard %+v", m.Operations)
+	}
+	if rr, err := dns.NewRR(m.Operations[0].Records[0]); err != nil || rr.(*dns.NS).Ns != "ns1.alice.example." {
+		t.Errorf("bob heard the NS %q, want the kept edit's", m.Operations[0].Records[0])
 	}
 }

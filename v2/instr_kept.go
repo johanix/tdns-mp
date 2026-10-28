@@ -233,7 +233,8 @@ func (k keptUpdate) zoneUpdate(zone ZoneName, agent AgentId) (*ZoneUpdate, error
 // owed changes laid over it in order: what the operator's next edit and its
 // view see (plan S6). A replace sets the type's records, an add or an RR of
 // class IN adds one, and a delete or an RR of class NONE takes one away.
-// base is not changed.
+// (No owed change has class ANY: dns.NewRR, which reads the operator's
+// records and the list's, refuses it.) base is not changed.
 func overOwed(base map[uint16][]dns.RR, owed []keptEntry) map[uint16][]dns.RR {
 	out := make(map[uint16][]dns.RR, len(base))
 	for t, rrs := range base {

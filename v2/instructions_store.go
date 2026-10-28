@@ -573,15 +573,30 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 	if s == nil {
 		return
 	}
+	// a frozen zone that leaves ends its freeze: its signer lets the hold go
+	// (onFreeze), told once the lock is let go
+	var thawed []string
+	defer func() {
+		for _, zone := range thawed {
+			if s.onFreeze != nil {
+				s.onFreeze(zone, false)
+			}
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for zone := range s.zones {
+	for zone, z := range s.zones {
 		if keep(zone) {
 			continue
 		}
 		lg.Info("the zone left the configuration; its serials go with it", "zone", zone)
+		frozen := len(z.freezeReasons()) > 0
 		if err := s.forgetLocked(zone); err != nil {
 			lg.Error("the serials of a zone that left the configuration could not be dropped", "zone", zone, "err", err)
+			continue
+		}
+		if frozen {
+			thawed = append(thawed, zone)
 		}
 	}
 }

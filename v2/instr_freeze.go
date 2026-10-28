@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -88,6 +89,17 @@ func (s *InstructionStore) agreedSince(zone string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// keeps: the store keeps serials for zone, named in any case.
+func (s *InstructionStore) keeps(zone string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	return z != nil
+}
+
 // activeVoters are the zone's voting members under its active serial.
 func (s *InstructionStore) activeVoters(zone string) []string {
 	if s == nil {
@@ -149,10 +161,11 @@ func syncCauseOf(st tdns.DelegationSyncStatus) syncCause {
 var holdRetell = time.Minute
 
 // holdBook is what the agent last told its signer of each zone's hold, and
-// when (KEYSTATE "hold", plan S6).
+// when (KEYSTATE "hold", plan S6), and the zones whose word is being sent.
 type holdBook struct {
-	mu   sync.Mutex
-	told map[string]holdTold // by zone, folded
+	mu      sync.Mutex
+	told    map[string]holdTold // by zone, folded
+	sending map[string]bool     // by zone, folded: a sender runs (sendHolds)
 }
 
 type holdTold struct {
@@ -175,13 +188,13 @@ func (conf *Config) onFreeze(zone string, frozen bool) {
 // tellHold tells this agent's signer to hold the zone's key machine, or to
 // let it go (KEYSTATE "hold"), unless that word was told less than within
 // ago. The word is noted at once, so that two callers do not both tell it,
-// and sent on a goroutine of its own. The signer confirms in its next
-// inventory.
+// and sent by the zone's one sender (sendHolds). The signer confirms in its
+// next inventory.
 func (conf *Config) tellHold(zone string, on bool, within time.Duration) {
 	b := &conf.InternalMp.holds
 	b.mu.Lock()
 	if b.told == nil {
-		b.told = map[string]holdTold{}
+		b.told, b.sending = map[string]holdTold{}, map[string]bool{}
 	}
 	key := canonicalName(zone)
 	if last, told := b.told[key]; told && last.on == on && time.Since(last.at) < within {
@@ -189,9 +202,36 @@ func (conf *Config) tellHold(zone string, on bool, within time.Duration) {
 		return
 	}
 	b.told[key] = holdTold{on: on, at: time.Now()}
+	start := !b.sending[key]
+	b.sending[key] = true
 	b.mu.Unlock()
-	if tm := conf.InternalMp.MPTransport; tm != nil {
-		go tm.sendHoldToSigner(ZoneName(zone), on)
+	if start {
+		go conf.sendHolds(zone, key)
+	}
+}
+
+// sendHolds sends the zone's latest hold word, and again for as long as a
+// newer word was told while it sent: one sender per zone, so that words
+// sent one after the other never arrive in another order, and the signer is
+// left with the latest.
+func (conf *Config) sendHolds(zone, key string) {
+	b := &conf.InternalMp.holds
+	for {
+		b.mu.Lock()
+		word := b.told[key]
+		b.mu.Unlock()
+		if send := conf.InternalMp.holdSend; send != nil {
+			send(ZoneName(zone), word.on)
+		} else if tm := conf.InternalMp.MPTransport; tm != nil {
+			tm.sendHoldToSigner(ZoneName(zone), word.on)
+		}
+		b.mu.Lock()
+		if b.told[key] == word {
+			delete(b.sending, key)
+			b.mu.Unlock()
+			return
+		}
+		b.mu.Unlock()
 	}
 }
 
@@ -209,13 +249,20 @@ func (conf *Config) reconcileHold(zone string, snap *KeyInventorySnapshot) {
 
 // holdConfirmed: the signer's latest inventory of the zone carries the hold,
 // and arrived after this agent came to hold the serial it agrees on (plan
-// S6; with none agreed on, its newest).
+// S6; with none agreed on, its newest) and after it last told the hold.
 // The stamp tells it as Hold; S7 counts a telling only with it (design
 // 3.1, 3.7).
 func (conf *Config) holdConfirmed(zone string) bool {
 	since, ok := conf.InternalMp.Instructions.agreedSince(zone)
 	if !ok {
 		return false
+	}
+	b := &conf.InternalMp.holds
+	b.mu.Lock()
+	last, told := b.told[canonicalName(zone)]
+	b.mu.Unlock()
+	if told && last.on && last.at.After(since) {
+		since = last.at
 	}
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil {
@@ -254,10 +301,16 @@ func (tm *MPTransportBridge) sendHoldToSigner(zone ZoneName, on bool) {
 	lgTransport.Info("KEYSTATE hold sent to signer", "zone", zone, "hold", on, "accepted", resp.Accepted)
 }
 
+// releaseBook is the zones whose release the data engine's queue had no
+// room for: the engine's tick releases them, and takes them up.
+type releaseBook struct {
+	mu    sync.Mutex
+	zones map[string]ZoneName // by zone, folded
+}
+
 // askRelease asks the data engine to release what the zone kept (instrDone),
-// with the take-up of a zone this agent leads. A full queue leaves it to the
-// engine's next own-read tick (releaseUnfrozen), without the take-up: a
-// lead that comes later takes the zone up then.
+// with the take-up of a zone this agent leads. A full queue leaves both to
+// the engine's next own-read tick (releaseUnfrozen).
 func (conf *Config) askRelease(zone ZoneName) {
 	msgQs := conf.InternalMp.MsgQs
 	if msgQs == nil || msgQs.SynchedDataCmd == nil {
@@ -266,22 +319,43 @@ func (conf *Config) askRelease(zone ZoneName) {
 	select {
 	case msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "instr-done", Zone: zone}:
 	default:
+		r := &conf.InternalMp.releases
+		r.mu.Lock()
+		if r.zones == nil {
+			r.zones = map[string]ZoneName{}
+		}
+		r.zones[canonicalName(string(zone))] = zone
+		r.mu.Unlock()
 		lgEngine.Warn("the data engine's queue is full; what the zone kept is released at its next tick", "zone", zone)
 	}
 }
 
 // releaseUnfrozen is the data engine's tick for the lists: every zone that
 // owes something and is no longer frozen releases it. It catches a release
-// the engine's queue had no room for, and one a restart came between.
+// the engine's queue had no room for, which it also takes up, and one a
+// restart came between.
 func (conf *Config) releaseUnfrozen(ctx context.Context, zdr *ZoneDataRepo) {
-	zones := conf.InternalMp.Kept.zones(listOwed)
-	for _, z := range conf.InternalMp.CatchUp.freezeOwedZones() {
-		zones = append(zones, canonicalName(string(z)))
+	zones := map[string]ZoneName{}
+	for _, z := range conf.InternalMp.Kept.zones(listOwed) {
+		zones[z] = ZoneName(z)
 	}
-	slices.Sort(zones)
-	for _, zone := range slices.Compact(zones) {
-		if len(conf.zoneFrozen(zone)) == 0 {
-			conf.instrDone(ctx, zdr, ZoneName(zone))
+	for _, z := range conf.InternalMp.CatchUp.freezeOwedZones() {
+		zones[canonicalName(string(z))] = z
+	}
+	r := &conf.InternalMp.releases
+	r.mu.Lock()
+	asked := r.zones
+	r.zones = nil
+	r.mu.Unlock()
+	maps.Copy(zones, asked)
+	for _, key := range slices.Sorted(maps.Keys(zones)) {
+		zone := zones[key]
+		if len(conf.zoneFrozen(string(zone))) > 0 {
+			continue
+		}
+		conf.instrDone(ctx, zdr, zone)
+		if _, ok := asked[key]; ok {
+			go conf.takeUp(ctx, zone)
 		}
 	}
 }
@@ -305,6 +379,17 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 	if len(owed) == 0 && !syncOwed {
 		return
 	}
+	if !conf.InternalMp.Instructions.keeps(string(zone)) {
+		// the zone left this agent's configuration, or its multi-provider
+		// service ended, while it was frozen: nothing is released into it
+		lgEngine.Info("the zone's serials are gone: what it kept is dropped", "zone", zone, "owed", len(owed))
+		for _, e := range owed {
+			if err := k.remove(string(zone), listOwed, e.Seq); err != nil {
+				lgEngine.Error("a kept change could not be dropped", "zone", zone, "err", err)
+			}
+		}
+		return
+	}
 	lgEngine.Info("the transition is done, handling what was kept", "zone", zone, "owed", len(owed))
 	self := AgentId(conf.MpConfig().Identity)
 	if len(owed) > 0 {
@@ -322,7 +407,16 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 				if err != nil {
 					lgEngine.Error("a kept change cannot be read; it is dropped", "zone", zone, "err", err)
 				} else {
-					conf.applyLocalUpdate(ctx, zdr, &SynchedDataUpdate{Zone: zone, AgentId: self, UpdateType: "local", Update: zu, Force: e.Update.Force})
+					answer := make(chan *AgentMsgResponse, 1)
+					conf.applyLocalUpdate(ctx, zdr, &SynchedDataUpdate{Zone: zone, AgentId: self, UpdateType: "local", Update: zu, Force: e.Update.Force,
+						replay: true, Response: answer})
+					select {
+					case a := <-answer:
+						if a.Error {
+							lgEngine.Warn("a kept change was released and did not go out in full; `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
+						}
+					default:
+					}
 				}
 				if err := k.remove(string(zone), listOwed, e.Seq); err != nil {
 					lgEngine.Error("a kept change could not be taken off its list", "zone", zone, "err", err)
