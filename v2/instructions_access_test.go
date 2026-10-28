@@ -6,7 +6,6 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"io"
 	"log"
 	"log/slog"
@@ -86,12 +85,13 @@ func zoneCopy(t *testing.T, name string, records ...string) *tdns.ZoneData {
 	return zd
 }
 
-// captureZonesLog collects what the zones logger says during the test.
-func captureZonesLog(t *testing.T) *bytes.Buffer {
+// captureZonesLog collects what the zones logger says during the test. The
+// buffer is locked: a goroutine an earlier test left may write to it (#276).
+func captureZonesLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
-	logTo(t, lg, slog.NewJSONHandler(&buf, nil))
-	return &buf
+	buf := &lockedBuffer{}
+	logTo(t, lg, slog.NewJSONHandler(buf, nil))
+	return buf
 }
 
 func changedBetween(t *testing.T, name string, before, after []string) bool {

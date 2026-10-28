@@ -198,6 +198,19 @@ func (b *lockedBuffer) Reset() {
 	b.buf.Reset()
 }
 
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+// Bytes returns a copy of what the buffer holds.
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.buf.Bytes())
+}
+
 // notifyRig is the leader's side of a delegation sync as the agent runs it,
 // with its surroundings: the leaderSyncRig's zone and election; the real
 // DelegationSyncher on the zone's queue, with tdns's own analysis and sync;

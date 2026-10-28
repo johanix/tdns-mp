@@ -584,7 +584,7 @@ func TestMPKeystoreMigrationRefusesTakenKeyIDs(t *testing.T) {
 // signer's, in two zones. Every unrelated row moves with its state, the
 // copies are skipped, and the log's counts add up to the rows read.
 func TestMPKeystoreMigrationMixedTable(t *testing.T) {
-	var logbuf bytes.Buffer
+	var logbuf lockedBuffer
 	logTo(t, lgSigner, slog.NewJSONHandler(&logbuf, nil))
 
 	kdb := newMPTestKeyDB(t)

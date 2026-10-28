@@ -37,7 +37,7 @@ func TestUnlistedMultiProviderZones(t *testing.T) {
 // The gate as the signer's start calls it: every multi-provider zone the
 // signer serves (what ParseZones collected) against key-lifecycle-zones.
 func TestSignerRefusesToStartOverAMultiProviderZoneNotInKeyLifecycleZones(t *testing.T) {
-	var logbuf strings.Builder
+	var logbuf lockedBuffer
 	logTo(t, lgSigner, slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// served: the multi-provider zones this signer signs (a zone config with
@@ -146,7 +146,7 @@ func TestSignerRefusesToStartOverAMultiProviderZoneNotInKeyLifecycleZones(t *tes
 // signer naming the zone, as a start would refuse; the rollout knob turns
 // the stop into the warning.
 func TestAZoneReloadPassesTheGateOrStopsTheSigner(t *testing.T) {
-	var logbuf strings.Builder
+	var logbuf lockedBuffer
 	logTo(t, lgSigner, slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	var stopped []string
 	savedStop := signerStop
