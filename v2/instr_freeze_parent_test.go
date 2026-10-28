@@ -250,3 +250,32 @@ func TestTransportBoundary_AnEditDuringATransitionReachesNoPeer(t *testing.T) {
 		t.Errorf("bob heard the NS %q, want the kept edit's", m.Operations[0].Records[0])
 	}
 }
+
+// The take-up runs the key's set-up under the zone's key-setup lock, as an
+// election's does: it waits while another set-up of the zone runs
+// (CodeRabbit's review of eee6363).
+func TestTheTakeUpRunsUnderTheZonesKeySetupLock(t *testing.T) {
+	r := newLeaderSyncRig(t, "takeup.lock.example.")
+	r.leader(r.lem.localID)
+	zone := ZoneName(r.mpzd.ZoneName)
+	entered, release := make(chan struct{}), make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- r.lem.inKeySetup(zone, func() error { close(entered); <-release; return nil })
+	}()
+	<-entered
+	done := make(chan struct{})
+	go func() { r.conf.takeUp(r.ctx, zone); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("the take-up ran while another key set-up of the zone held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the take-up did not run once the lock was let go")
+	}
+	<-held
+}
