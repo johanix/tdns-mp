@@ -542,9 +542,13 @@ func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtyp
 	defer cancel()
 
 	err := tm.sendStatusUpdate(ctx, peer, post)
-	if err != nil {
+	switch {
+	case err != nil && subtype == "combiner-start":
+		// the agent is not up yet at a bring-up: nothing is lost (plan S10)
+		lgCombiner.Warn("combiner-start not delivered; the agent hands every zone over at its own start", "agent", agentID, "err", err)
+	case err != nil:
 		lgCombiner.Error("sendDelegationStatusUpdate: failed to send", "zone", zonename, "subtype", subtype, "agent", agentID, "err", err)
-	} else {
+	default:
 		lgCombiner.Info("sendDelegationStatusUpdate: sent", "zone", zonename, "subtype", subtype, "agent", agentID)
 	}
 }

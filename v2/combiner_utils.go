@@ -441,6 +441,7 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 		if c.owner == in.zone && !in.isProvider && in.upstreamApex == nil {
 			// what the upstream has here is not known: nothing is taken
 			// for absent, as servedAsUpstream takes nothing
+			lgCombiner.Debug("cleanup: the upstream's apex is not known yet; waiting for a later combine", "zone", in.zone, "rrtype", dns.TypeToString[c.rrtype])
 			in.deferred = append(in.deferred, c)
 			continue
 		}
