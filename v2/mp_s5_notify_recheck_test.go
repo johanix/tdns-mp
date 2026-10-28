@@ -192,6 +192,12 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 // notifyRig is the leader's side of a delegation sync as the agent runs it,
 // with its surroundings: the leaderSyncRig's zone and election; the real
 // DelegationSyncher on the zone's queue, with tdns's own analysis and sync;
@@ -234,13 +240,13 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 // engines start: what they read from the config is in place by then.
 func newNotifyRigWith(t *testing.T, zone, scheme string, signed bool, setup func(r *notifyRig), delays ...time.Duration) *notifyRig {
 	t.Helper()
-	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
+	savedDelays := delegationSyncNotifyDelays
 	logsink := &lockedBuffer{}
 	delegationSyncNotifyDelays = delays
-	lgEngine = slog.New(slog.NewTextHandler(logsink, nil))
 	// registered first, so run last: after the syncher has stopped and what
 	// it scheduled has ended (waitDelegationSyncTimers)
-	t.Cleanup(func() { delegationSyncNotifyDelays, lgEngine = savedDelays, savedLog })
+	logTo(t, lgEngine, slog.NewTextHandler(logsink, nil))
+	t.Cleanup(func() { delegationSyncNotifyDelays = savedDelays })
 	installParentSync(t, fmt.Sprintf(parentSyncConfig, "ED25519"))
 
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})

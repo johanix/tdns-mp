@@ -90,9 +90,7 @@ func zoneCopy(t *testing.T, name string, records ...string) *tdns.ZoneData {
 func captureZonesLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	saved := lg
-	lg = slog.New(slog.NewJSONHandler(&buf, nil))
-	t.Cleanup(func() { lg = saved })
+	logTo(t, lg, slog.NewJSONHandler(&buf, nil))
 	return &buf
 }
 

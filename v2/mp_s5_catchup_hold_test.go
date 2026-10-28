@@ -342,9 +342,7 @@ func TestAZoneWithOneVotingMemberWaitsForItsOwnReadOnly(t *testing.T) {
 	conf := &Config{Config: &tdns.Config{}}
 	conf.InternalMp.CatchUp = r.t
 	var buf lockedBuffer
-	saved := lg
-	lg = slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { lg = saved })
+	logTo(t, lg, slog.NewTextHandler(&buf, nil))
 	ds := tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: zone, ZoneData: mpzd.ZoneData}
 	if held, waiting := conf.holdLeaderSync(ds); !held || !strings.Contains(waiting, "this agent's own state") || strings.Contains(waiting, ".role.example.") {
 		t.Fatalf("before the own read: held=%v, waiting for %q", held, waiting)
@@ -364,9 +362,7 @@ func TestAnOwedSyncWaitsForRoomInAFullQueue(t *testing.T) {
 	r, tr := owedRig(t, "full.queue.example.", true)
 	z := ZoneName(r.mpzd.ZoneName)
 	var buf lockedBuffer
-	saved := lg
-	lg = slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { lg = saved })
+	logTo(t, lg, slog.NewTextHandler(&buf, nil))
 	for range cap(r.q) {
 		r.q <- tdns.DelegationSyncRequest{Command: "SYNC-DNSKEY-RRSET", ZoneName: string(z)}
 	}
@@ -407,9 +403,7 @@ func TestAPassStopsAtTheFirstFullQueue(t *testing.T) {
 	r.lem.mu.Unlock()
 	tr.zdr.markOwnState(z2, true, "")
 	var buf lockedBuffer
-	saved := lg
-	lg = slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { lg = saved })
+	logTo(t, lg, slog.NewTextHandler(&buf, nil))
 	for range cap(r.q) {
 		r.q <- tdns.DelegationSyncRequest{Command: "SYNC-DNSKEY-RRSET", ZoneName: string(z1)}
 	}
