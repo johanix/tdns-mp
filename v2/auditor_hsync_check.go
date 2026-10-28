@@ -24,12 +24,17 @@ func CheckZoneHSYNCConfig(zone string) []string {
 	return checkMPZoneHSYNCConfig(mpzd)
 }
 
-// checkMPZoneHSYNCConfig lists the owner error of the zone's copy first, if
-// it has one: hsync3IdentitiesByLabel keeps one record per label, so the
-// checks below cannot see two records with one label.
+// checkMPZoneHSYNCConfig lists an owner error first, if there is one: the
+// copy's own (S1), or else the store's (S2), since hsync3IdentitiesByLabel
+// keeps one record per label and the checks below cannot see two records
+// with one label. Then the store's refusal of its newest serial (S4).
 func checkMPZoneHSYNCConfig(mpzd *MPZoneData) []string {
 	info := MPZoneInfoFromMPZoneData(mpzd)
+	instrStore.Load().fillMPZoneInfo(mpzd.ZoneName, &info)
 	errs := checkHSYNCConfig(info, mpzd.hsync3IdentitiesByLabel())
+	if info.Refused != "" {
+		errs = append([]string{info.Refused}, errs...)
+	}
 	if info.OwnerError != "" {
 		errs = append([]string{info.OwnerError}, errs...)
 	}

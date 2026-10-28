@@ -7,7 +7,8 @@
  * the step and its sets, and the removals under way. Kept on the agent and on
  * the auditor. Until the thaw enforces it (S7), the active serial follows the
  * copy, because the readers still read the copy: the store classifies each
- * copy and shows it, "not enforced".
+ * copy and shows it, "not enforced". The judge's refusals (S4) are shown and
+ * not enforced either.
  */
 package tdnsmp
 
@@ -43,11 +44,12 @@ type Thaw struct {
 }
 
 // heldSerial is a serial the agent holds, with its instructions, and the
-// judge's refusal of it (S4), if any.
+// judge's refusal of it against the active serial (S4), if any; until S7,
+// the active serial's own refusal against the serial it followed.
 type heldSerial struct {
 	SerialDigest
 	Reading *Instructions `json:"reading"`
-	Refused string        `json:"refused,omitempty"`
+	Refused []Refusal     `json:"refused,omitempty"`
 	Since   time.Time     `json:"since"`
 }
 
@@ -88,9 +90,11 @@ type zoneSerials struct {
 	Since    time.Time `json:"since"`
 }
 
-// The phases of a zone (design 3).
+// The phases of a zone (design 3). Refused is steady at the active serial
+// with the newest serial refused (design 3.6): not frozen.
 const (
 	PhaseSteady      = "steady"
+	PhaseRefused     = "refused"
 	PhaseAgreeing    = "agreeing"
 	PhaseReconciling = "reconciling"
 	PhaseOwnerError  = "owner error"
@@ -102,10 +106,49 @@ func (z *zoneSerials) phase() string {
 		return PhaseOwnerError
 	case z.From != nil || len(z.Removals) > 0:
 		return PhaseReconciling
-	case slices.ContainsFunc(z.Held, func(h heldSerial) bool { return h.Refused == "" }):
+	case z.agreeing() != nil:
 		return PhaseAgreeing
+	case z.highest() != nil && len(z.highest().Refused) > 0:
+		return PhaseRefused
 	}
 	return PhaseSteady
+}
+
+// agreeing is the serial agreed on: the highest serial held above the active
+// one that the judge accepts against it (design 3.1, decision 94); nil with
+// none.
+func (z *zoneSerials) agreeing() *heldSerial {
+	for i := len(z.Held) - 1; i >= 0; i-- {
+		if len(z.Held[i].Refused) == 0 {
+			return &z.Held[i]
+		}
+	}
+	return nil
+}
+
+// judged judges every serial held above the active one against it, as the
+// judge is asked again whenever the active serial changes (plan S4). Called
+// inside update.
+func (s *InstructionStore) judged(zone string, z *zoneSerials) {
+	for i := range z.Held {
+		s.judge(zone, z.Active, &z.Held[i])
+	}
+}
+
+// judge judges h against the serial against, and logs a refusal once per
+// zone and serial. Called inside update.
+func (s *InstructionStore) judge(zone string, against, h *heldSerial) {
+	h.Refused = judgeTransition(against.Reading, h.Reading)
+	key := zoneSerial{zone, h.Serial}
+	if len(h.Refused) == 0 || s.refusedLogged[key] {
+		return
+	}
+	s.refusedLogged[key] = true
+	reasons := make([]string, len(h.Refused))
+	for i, r := range h.Refused {
+		reasons[i] = r.Reason
+	}
+	lg.Warn("a change of the zone's instructions is refused", "zone", zone, "from", against.Serial, "to", h.Serial, "reason", strings.Join(reasons, "; "))
 }
 
 // held returns the serial held at serial, the active one or a newer one.
@@ -137,16 +180,22 @@ func (z *zoneSerials) dropAtOrBelow(serial uint32) {
 // InstructionStore keeps every zone's serials, in memory and in HsyncDB.
 // Every change is written before it returns, so before it can be told.
 type InstructionStore struct {
-	mu        sync.Mutex
-	hdb       *HsyncDB // nil: in memory only
-	zones     map[string]*zoneSerials
-	warnedOld map[string]time.Time // the last "not adopted" warning per zone
+	mu            sync.Mutex
+	hdb           *HsyncDB // nil: in memory only
+	zones         map[string]*zoneSerials
+	warnedOld     map[string]time.Time // the last "not adopted" warning per zone
+	refusedLogged map[zoneSerial]bool  // the refusals logged, once each
+}
+
+type zoneSerial struct {
+	zone   string
+	serial uint32
 }
 
 // LoadInstructionStore reads every zone's stored serials, before the zones'
 // first load.
 func LoadInstructionStore(hdb *HsyncDB) (*InstructionStore, error) {
-	s := &InstructionStore{hdb: hdb, zones: map[string]*zoneSerials{}, warnedOld: map[string]time.Time{}}
+	s := &InstructionStore{hdb: hdb, zones: map[string]*zoneSerials{}, warnedOld: map[string]time.Time{}, refusedLogged: map[zoneSerial]bool{}}
 	if hdb == nil {
 		return s, nil
 	}
@@ -381,8 +430,12 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 			z.OwnerError, z.ErrorAt, z.Conflict = "", nil, nil
 		}
 		h := heldSerial{SerialDigest: cp, Reading: in, Since: time.Now()}
+		if z.Active != nil {
+			s.judge(zone, z.Active, &h)
+		}
 		if z.Active == nil || !z.Enforced {
-			// Not enforced: the active serial follows the copy.
+			// Not enforced: the active serial follows the copy, refused or
+			// not; its refusal is shown.
 			z.Active = &h
 			z.dropAtOrBelow(in.Serial)
 			return nil
@@ -405,8 +458,10 @@ var errEndOfService = errors.New("the zone's instructions are gone")
 // Activate makes the thaw's target the zone's active serial (S7). It
 // succeeds only when the target is held, above the active serial and not
 // refused, and the thaw's from-serial is held: the active one, or for a
-// member behind it, a newer one (design 3.2). The from-serial is kept until
-// "done"; serials at or below the target are dropped. The step's sets stay
+// member behind it, a newer one (design 3.2). Such a member judges the
+// thaw's own pair, never its active serial against the target (S4). The
+// from-serial is kept until "done"; serials at or below the target are
+// dropped, and those above it are judged against it. The step's sets stay
 // as they are, step 0 of the new transition (design 3.3), and what the
 // transition before it left (an agent that missed its end) is dropped.
 func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
@@ -420,17 +475,23 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 			return fmt.Errorf("zone %s: serial %s is not held", zone, thaw.To)
 		case CompareSerial(to.Serial, z.Active.Serial) <= 0:
 			return fmt.Errorf("zone %s: serial %d is not above the active serial %d", zone, to.Serial, z.Active.Serial)
-		case to.Refused != "":
-			return fmt.Errorf("zone %s: serial %d is refused: %s", zone, to.Serial, to.Refused)
 		}
 		from := z.held(thaw.From.Serial)
 		if from == nil || from.SerialDigest != thaw.From || CompareSerial(from.Serial, to.Serial) >= 0 {
 			return fmt.Errorf("zone %s: the thaw's from-serial %s is not held below its target", zone, thaw.From)
 		}
+		refused := to.Refused
+		if from != z.Active {
+			refused = judgeTransition(from.Reading, to.Reading)
+		}
+		if len(refused) > 0 {
+			return fmt.Errorf("zone %s: serial %d is refused: %s", zone, to.Serial, refusalText(refused))
+		}
 		f, t := *from, *to
-		t.Since = time.Now()
+		t.Since, t.Refused = time.Now(), nil
 		z.From, z.Active = &f, &t
 		z.dropAtOrBelow(t.Serial)
+		s.judged(zone, z)
 		z.Step, z.Removals = 0, nil
 		z.LastThaw = &thaw
 		z.Enforced = true
@@ -451,10 +512,10 @@ func (s *InstructionStore) Done(zone string) error {
 var errNotSteady = errors.New("the zone is not steady at this agent")
 
 // Forget clears a zone's stored serials (design rule 3, the one exception to
-// never giving a serial up). It is for a steady zone only: it refuses one
-// that agrees, reconciles, holds a removal or an owner error. The check and
-// the drop are one step under the store's lock, so no copy noted between
-// them is lost.
+// never giving a serial up). It is for a steady zone only, a refused newest
+// serial included: it refuses one that agrees, reconciles, holds a removal or
+// an owner error. The check and the drop are one step under the store's
+// lock, so no copy noted between them is lost.
 func (s *InstructionStore) Forget(zone string) error {
 	if s == nil {
 		return fmt.Errorf("this daemon keeps no serials")
@@ -465,7 +526,7 @@ func (s *InstructionStore) Forget(zone string) error {
 	if z == nil {
 		return fmt.Errorf("zone %s: no serials kept", zone)
 	}
-	if p := z.phase(); p != PhaseSteady {
+	if p := z.phase(); p != PhaseSteady && p != PhaseRefused {
 		return fmt.Errorf("zone %s: %w (%s)", zone, errNotSteady, p)
 	}
 	return s.forgetLocked(zone)
@@ -479,6 +540,11 @@ func (s *InstructionStore) forgetLocked(zone string) error {
 	}
 	delete(s.zones, zone)
 	delete(s.warnedOld, zone)
+	for k := range s.refusedLogged {
+		if k.zone == zone {
+			delete(s.refusedLogged, k)
+		}
+	}
 	return nil
 }
 
@@ -557,10 +623,13 @@ func (s *InstructionStore) removal(zone, label, identity string) (Removal, bool)
 // InstructionsStatus is what the agent keeps of a zone's instructions, as
 // `agent parentsync status`, `zone mplist` and the auditor show it.
 type InstructionsStatus struct {
-	Phase      string        `json:"phase"`
-	Active     *SerialDigest `json:"active,omitempty"`
-	Newest     *SerialDigest `json:"newest,omitempty"`
-	Refused    string        `json:"refused,omitempty"` // the newest serial's refusal
+	Phase    string        `json:"phase"`
+	Active   *SerialDigest `json:"active,omitempty"`
+	Newest   *SerialDigest `json:"newest,omitempty"`
+	Agreeing *SerialDigest `json:"agreeing,omitempty"` // the serial agreed on
+	// Refused is the newest serial's refusal, against the active serial;
+	// until S7, against the serial it followed.
+	Refused    []Refusal     `json:"refused,omitempty"`
 	Copy       SerialDigest  `json:"copy"`
 	CopyError  string        `json:"copy_error,omitempty"`
 	From       *SerialDigest `json:"from,omitempty"`
@@ -597,7 +666,11 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 	if h := z.highest(); h != nil {
 		n := h.SerialDigest
 		st.Newest = &n
-		st.Refused = h.Refused
+		st.Refused = slices.Clone(h.Refused)
+	}
+	if a := z.agreeing(); a != nil {
+		ag := a.SerialDigest
+		st.Agreeing = &ag
 	}
 	if z.From != nil {
 		f := z.From.SerialDigest
@@ -606,13 +679,19 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 	return st
 }
 
-// Line is the status in one line, as `agent parentsync status` prints it.
+// Line is the status in one line, as `agent parentsync status` prints it: a
+// refusal or an owner error first. Until S7 neither is enforced: the readers
+// act by the copy (activeReading).
 func (st *InstructionsStatus) Line() string {
 	if st == nil {
 		return "none kept"
 	}
 	if st.OwnerError != "" {
-		return "owner error: " + st.OwnerError
+		line := "held: owner error: " + st.OwnerError
+		if !st.Enforced {
+			line += "; not enforced"
+		}
+		return line
 	}
 	var parts []string
 	if st.Active != nil {
@@ -621,22 +700,32 @@ func (st *InstructionsStatus) Line() string {
 	if st.From != nil {
 		parts = append(parts, fmt.Sprintf("thawed from %d", st.From.Serial))
 	}
+	if a := st.Agreeing; a != nil && (st.Newest == nil || *a != *st.Newest) {
+		parts = append(parts, "agreeing on "+a.String())
+	}
 	if st.Newest != nil && (st.Active == nil || *st.Newest != *st.Active) {
-		n := "newest " + st.Newest.String()
-		if st.Refused != "" {
-			n += ", refused: " + st.Refused
-		}
-		parts = append(parts, n)
+		parts = append(parts, "newest "+st.Newest.String())
 	}
 	parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
 	line := strings.Join(parts, ", ")
-	if st.Phase != PhaseSteady {
+	if r := st.refusedLine(); r != "" {
+		line = r + "; " + line
+	}
+	if st.Phase != PhaseSteady && st.Phase != PhaseRefused {
 		line += "; " + st.Phase
 	}
 	if !st.Enforced {
 		line += "; not enforced"
 	}
 	return line
+}
+
+// refusedLine is the newest serial's refusal, "42 refused: ...", or "".
+func (st *InstructionsStatus) refusedLine() string {
+	if len(st.Refused) == 0 || st.Newest == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d refused: %s", st.Newest.Serial, refusalText(st.Refused))
 }
 
 // fillMPZoneInfo adds the zone's kept serials to its mplist row.
@@ -646,6 +735,7 @@ func (s *InstructionStore) fillMPZoneInfo(zone string, info *MPZoneInfo) {
 		return
 	}
 	info.Active, info.Newest = st.Active, st.Newest
+	info.Refused = st.refusedLine()
 	if info.OwnerError == "" {
 		info.OwnerError = st.OwnerError
 	}

@@ -59,11 +59,12 @@ func newStore(t *testing.T) *InstructionStore {
 	return loadStore(t, hdb)
 }
 
-// at is a reading of instrBase's instructions at serial, with servers as
-// its servers= list.
-func at(t *testing.T, serial uint32, servers string) *Instructions {
+// at is a reading of instrBase's instructions at serial, with auditors as
+// its auditors= list: a change of auditors= has nothing to carry out, so the
+// judge (S4) accepts every change between them.
+func at(t *testing.T, serial uint32, auditors string) *Instructions {
 	t.Helper()
-	return readOf(t, withParam(fmt.Sprintf(`serial="%d" servers="%s" signers="alpha" auditors="beta"`, serial, servers))...)
+	return readOf(t, withParam(fmt.Sprintf(`serial="%d" servers="alpha,beta" signers="alpha" auditors="%s"`, serial, auditors))...)
 }
 
 func sd(in *Instructions) SerialDigest { return SerialDigest{Serial: in.Serial, Digest: in.Digest()} }
@@ -213,8 +214,8 @@ func heldStore(t *testing.T) (*InstructionStore, []*Instructions) {
 	t.Helper()
 	s := newStore(t)
 	var ins []*Instructions
-	for i, servers := range []string{"alpha,beta", "alpha", "beta", "alpha,beta,gamma"} {
-		in := at(t, uint32(7+i), servers)
+	for i, auditors := range []string{"alpha,beta", "alpha", "beta", "alpha,beta,gamma"} {
+		in := at(t, uint32(7+i), auditors)
 		ins = append(ins, in)
 		s.Note(storeZone, in, nil)
 		if i == 0 {
@@ -244,7 +245,7 @@ func TestActivateNeedsAHeldSerialAboveTheActive(t *testing.T) {
 func TestActivateRefusesARefusedSerial(t *testing.T) {
 	s, ins := heldStore(t)
 	if err := s.update(storeZone, func(z *zoneSerials) error {
-		z.held(8).Refused = "removes the ON record of a provider with a role"
+		z.held(8).Refused = []Refusal{{Code: RefusedRecordWithRoleRemoved, Reason: "removes the record of agent.beta.example., which has a role under 7"}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -591,7 +592,7 @@ func TestStatusShowsActiveNewestCopyAndOwnerError(t *testing.T) {
 	}
 	other := at(t, 8, "beta")
 	s.Note(storeZone, other, nil)
-	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("owner error: serial 8 with two digests (%s, %s)", eight.Digest(), other.Digest()); got != want {
+	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("held: owner error: serial 8 with two digests (%s, %s)", eight.Digest(), other.Digest()); got != want {
 		t.Errorf("an owner error:\n got %q\nwant %q", got, want)
 	}
 

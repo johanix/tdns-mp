@@ -34,6 +34,9 @@ type MPZoneInfo struct {
 	// Nil where none are kept, as on the combiner and the signer.
 	Active *SerialDigest `json:"active,omitempty"`
 	Newest *SerialDigest `json:"newest,omitempty"`
+	// Refused is the newest serial's refusal by the judge (S4), "42
+	// refused: ...", which the CLI lists below the table.
+	Refused string `json:"refused,omitempty"`
 }
 
 // MPListResponse is returned by /zone/mplist.
