@@ -391,9 +391,9 @@ func TestHearingANewerSerialFetchesOncePerSerialAndMinute(t *testing.T) {
 	}
 }
 
-// A refresh the full queue dropped is asked again at the next telling, not
-// a minute later; and a zone this agent holds no active serial for is
-// fetched too (design 3.4).
+// A refresh the full queue dropped, or one for a zone that is not here yet,
+// is asked again at the next telling, not a minute later; and a zone this
+// agent holds no active serial for is fetched too (design 3.4).
 func TestAFetchTheQueueDroppedIsAskedAgain(t *testing.T) {
 	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
 	bob := stampTableAt(t, stampBeta, seven)
@@ -409,6 +409,26 @@ func TestAFetchTheQueueDroppedIsAskedAgain(t *testing.T) {
 	bob.note(told(stampAlpha, 1, 3, tells(seven, eight)), stampAlpha, "DNS")
 	if asked != 2 {
 		t.Errorf("asked %d times, want 2: once dropped, once queued, then paced", asked)
+	}
+
+	// a zone that is not here yet is asked for again at the next telling,
+	// and fetched once it is
+	later := stampTableAt(t, stampBeta, seven)
+	here := false
+	var fetchedLater []string
+	later.fetch = func(zone string) (string, bool) {
+		fetchedLater = append(fetchedLater, zone)
+		if !here {
+			return "", false
+		}
+		return zone, true
+	}
+	later.note(told(stampAlpha, 1, 1, tells(seven, eight)), stampAlpha, "DNS")
+	here = true
+	later.note(told(stampAlpha, 1, 2, tells(seven, eight)), stampAlpha, "DNS")
+	later.note(told(stampAlpha, 1, 3, tells(seven, eight)), stampAlpha, "DNS")
+	if len(fetchedLater) != 2 {
+		t.Errorf("a zone not here yet: asked %d times, want 2: once not here, once queued, then paced", len(fetchedLater))
 	}
 
 	// a store that holds nothing for the zone: a newcomer whose copy has no
