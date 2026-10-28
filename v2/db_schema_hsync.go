@@ -203,6 +203,20 @@ var HsyncTables = map[string]string{
 		UNIQUE(zone, sender_id)
 	)`,
 
+	// MPActingSerial is what a combiner was handed for a zone by its agent
+	// (combiner_acting.go, plan S10): the serial it acts by, its digest, and
+	// the hand-over itself as JSON (the instructions as records, the step and
+	// its sets). Read before the zones' first load.
+	"MPActingSerial": `CREATE TABLE IF NOT EXISTS 'MPActingSerial' (
+		zonename  TEXT NOT NULL,
+		serial    INTEGER,
+		digest    TEXT DEFAULT '',
+		handover  TEXT NOT NULL DEFAULT '',
+		handed_by TEXT DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
@@ -728,6 +742,7 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
+		"MPActingSerial",
 	}
 
 	for _, name := range combinerTables {

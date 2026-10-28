@@ -319,6 +319,7 @@ type InternalMpConf struct {
 	KeyLifecycleOwner     *MPKeyLifecycleOwner
 	HsyncDB               *HsyncDB
 	Instructions          *InstructionStore // the zones' serials, on the agent and the auditor
+	Handover              *handoverTracker  // the hand-over to the agent's combiner (S10); nil elsewhere
 	SyncQ                 chan SyncRequest
 	MsgQs                 *MsgQs
 	SyncStatusQ           chan SyncStatus

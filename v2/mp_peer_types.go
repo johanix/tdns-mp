@@ -64,6 +64,7 @@ type PeerSyncRequest struct {
 	ZoneClass      string                   // "mp" (default) or "provider"
 	Publish        *core.PublishInstruction // KEY/CDS publication instruction for combiner
 	CatchUp        *CatchUp                 `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
+	Acting         *ActingHandover          `json:"acting,omitempty"`   // a hand-over, on an update to the agent's combiner (S10)
 	Instr          *MsgStamp                // the sender's stamp, set at every send (S5b)
 }
 
@@ -127,7 +128,8 @@ type PeerEditsRequest struct {
 	Message      string                         // Optional status
 	Nonce        string                         // The RFI's nonce, echoed so the requester can match the answer
 	Timestamp    time.Time
-	Instr        *MsgStamp // the sender's stamp, set at every send (S5b)
+	Acting       *ActingHandover // the hand-over the combiner holds for the zone, nil for none (S10)
+	Instr        *MsgStamp       // the sender's stamp, set at every send (S5b)
 }
 
 type PeerEditsResponse struct {

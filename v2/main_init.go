@@ -342,6 +342,13 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
 	}
+	// What the agent handed (plan S10), read before the zones' first load,
+	// which reads it, as the stored contributions are.
+	acting, err := loadActingStore(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the hand-overs held: %w", err)
+	}
+	actingHeld.Store(acting)
 
 	// Register provider zone RR types from config
 	for i := range mp.ProviderZones {

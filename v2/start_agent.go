@@ -108,6 +108,10 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 		lgAgent.Warn("failed to initialize signer as peer, continuing without signer peer registration", "err", err)
 	}
 
+	// The hand-over to the combiner (plan S10) is in place before the first
+	// zone load, which hands the combiner what this agent acts by.
+	conf.startHandovers(ctx, conf.InternalMp.MPTransport)
+
 	// The hsync engine is constructed before RefreshEngine starts (its Run
 	// starts further down, with the other agent engines): the first zone
 	// load reports every HSYNC3 record as an addition, and PostRefresh

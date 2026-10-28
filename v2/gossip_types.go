@@ -289,4 +289,7 @@ type ParentSyncStatus struct {
 	// (instr_freeze.go). Empty when it is not frozen and keeps nothing.
 	Frozen string `json:"frozen,omitempty"`
 	Kept   string `json:"kept,omitempty"`
+	// Combiner is what the agent knows its combiner acts by for the zone
+	// (the hand-over, plan S10); empty when it hands it nothing.
+	Combiner string `json:"combiner,omitempty"`
 }
