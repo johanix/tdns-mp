@@ -186,6 +186,43 @@ func TestTheHookRunsAtEveryFirstLoad(t *testing.T) {
 	}
 }
 
+// Until S7 the readers act by the copy, whatever the store makes of it
+// (plan S2): an edit at serial 0, one at the same serial and a lower serial
+// are each acted on, as before S3, and an owner error is only shown.
+func TestUntilEnforcedEveryCopyIsActedOn(t *testing.T) {
+	asMPAgent(t)
+	for _, c := range []struct{ name, before, after, ownerError string }{
+		{"serial0", `servers="alpha,beta"`, `servers="alpha,beta" parentsync="agent"`, "serial 0 with two digests"},
+		{"conflict", `serial="7" servers="alpha,beta"`, `serial="7" servers="alpha,beta" parentsync="agent"`, "serial 7 with two digests"},
+		{"lower", `serial="7" servers="alpha,beta"`, `serial="6" servers="alpha,beta" parentsync="agent"`, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logs := captureZonesLog(t)
+			mpzd := instrTestZone(t, c.name+".follow.access.example.", acRecords("", c.before)...)
+			s := newStore(t)
+			withStore(t, s)
+			before := mpzd.instructions()
+			s.Note(mpzd.ZoneName, before, nil)
+			setApex(t, mpzd, core.TypeHSYNCPARAM, `3600 IN HSYNCPARAM `+c.after)
+			after := readOf(t, acRecords("", c.after)...)
+			s.Note(mpzd.ZoneName, after, nil)
+			postRefresh(t, mpzd, before, false)
+			if got := instructionsFor(ZoneName(mpzd.ZoneName)); got == nil || got.Digest() != after.Digest() {
+				t.Errorf("the readers act by %+v, want the copy", got)
+			}
+			if r := rolesForZone(ZoneName(mpzd.ZoneName)); r.ParentSync != core.HsyncParentSyncAgent {
+				t.Errorf("parentsync %d, want the copy's agent", r.ParentSync)
+			}
+			if !strings.Contains(logs.String(), "the zone's active instructions changed") {
+				t.Errorf("the hook did not run for the edit:\n%s", logs)
+			}
+			if st := s.Status(mpzd.ZoneName); !strings.HasPrefix(st.OwnerError, c.ownerError) || (c.ownerError == "") != (st.OwnerError == "") {
+				t.Errorf("owner error %q, want %q", st.OwnerError, c.ownerError)
+			}
+		})
+	}
+}
+
 func TestARestartWithAStoredSerialHasGroupsAndPeersAfterTheFirstLoad(t *testing.T) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor
@@ -438,8 +475,8 @@ func TestEveryLabelResolverReadsTheSetsNotTheRecords(t *testing.T) {
 			sa := signingAgents(zone, []AgentId{acBeta, acGamma})
 			return sa[acGamma] && !sa[acBeta]
 		}(),
-		"signingPeers names gamma":         slices.Equal(signingPeers(zone, acAlpha), []AgentId{acGamma}),
-		"identitiesByLabel resolves gamma": mpzd.identitiesByLabel()["gamma"] == acGamma,
+		"signingPeers names gamma":            slices.Equal(signingPeers(zone, acAlpha), []AgentId{acGamma}),
+		"identitiesByLabel resolves gamma":    mpzd.identitiesByLabel()["gamma"] == acGamma,
 		"the signing labels are alpha, gamma": slices.Equal(mpzd.signingLabels(), []string{"alpha", "gamma"}),
 	} {
 		if !ok {

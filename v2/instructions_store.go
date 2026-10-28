@@ -501,15 +501,19 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 	}
 }
 
-// activeReading is the zone's active instructions, or nil when the store
-// keeps none for it.
+// activeReading is the zone's active instructions as the readers act by
+// them, or nil when the store keeps none for it or does not enforce them
+// yet. Until the thaw enforces the active serial (S7) the readers act by the
+// copy, whatever Note made of it (plan S2): an edit at the same serial, at
+// serial 0 or at a lower one is acted on, as before, and its owner error is
+// only shown.
 func (s *InstructionStore) activeReading(zone string) *Instructions {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if z := s.zones[zone]; z != nil && z.Active != nil {
+	if z := s.zones[zone]; z != nil && z.Active != nil && z.Enforced {
 		return z.Active.Reading
 	}
 	return nil
@@ -517,7 +521,8 @@ func (s *InstructionStore) activeReading(zone string) *Instructions {
 
 // transition is the zone's transition as the store holds it: the
 // from-serial's instructions (nil at rest), the active ones, and the step;
-// to is nil when the store keeps none for the zone.
+// to is nil when the store keeps none for the zone or does not enforce it
+// yet (activeReading).
 func (s *InstructionStore) transition(zone string) (from, to *Instructions, step int) {
 	if s == nil {
 		return nil, nil, 0
@@ -525,7 +530,7 @@ func (s *InstructionStore) transition(zone string) (from, to *Instructions, step
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	z := s.zones[zone]
-	if z == nil || z.Active == nil {
+	if z == nil || z.Active == nil || !z.Enforced {
 		return nil, nil, 0
 	}
 	if z.From != nil {

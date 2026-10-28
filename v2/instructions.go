@@ -297,10 +297,11 @@ func recordsNotIn(a, b []InstrRecord) []InstrRecord {
 var instrStore atomic.Pointer[InstructionStore]
 
 // instructionsFor is the zone's instructions as this daemon acts on them:
-// on the agent and the auditor, the store's active reading; on the combiner
-// and the signer, until S10 and S11, the reading of their own copy. A zone
-// the store does not have yet is read from its copy. Nil for a zone with no
-// instructions, or not loaded here.
+// on the agent and the auditor, the store's active reading once the store
+// enforces it (S7); on the combiner and the signer, until S10 and S11, the
+// reading of their own copy. A zone the store does not have, or does not
+// enforce yet, is read from its copy. Nil for a zone with no instructions,
+// or not loaded here.
 func instructionsFor(zone ZoneName) *Instructions {
 	return activeOr(string(zone), zoneApex(zone))
 }
