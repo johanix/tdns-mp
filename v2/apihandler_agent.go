@@ -523,6 +523,9 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
 			status.DSSet = conf.dsSetLine(zd.ZoneData)
 			status.Instructions = conf.InternalMp.Instructions.Status(string(amp.Zone))
+			if tm := conf.InternalMp.MPTransport; tm != nil {
+				status.InstructionMembers = tm.stamps.members(string(amp.Zone))
+			}
 			// the leader's sync held for the zone's SIG(0) key (step 7b),
 			// beside the catch-up's hold: its own line
 			if lem.IsLeader(amp.Zone) {

@@ -1,0 +1,74 @@
+[
+  {
+    "group_hash": "0123456789abcdef",
+    "group_name": {
+      "group_hash": "",
+      "name": "",
+      "proposer": "",
+      "proposed_at": "0001-01-01T00:00:00Z"
+    },
+    "members": {
+      "agent.alpha.example.": {
+        "identity": "agent.alpha.example.",
+        "peer_states": {
+          "agent.beta.example.": "OPERATIONAL"
+        },
+        "zones": [
+          "stamp.example."
+        ],
+        "timestamp": "2026-01-02T03:04:05Z"
+      }
+    },
+    "election": {
+      "leader_expiry": "0001-01-01T00:00:00Z"
+    }
+  },
+  {
+    "group_hash": "",
+    "group_name": {
+      "group_hash": "",
+      "name": "",
+      "proposer": "",
+      "proposed_at": "0001-01-01T00:00:00Z"
+    },
+    "members": {
+      "agent.alpha.example.": {
+        "identity": "agent.alpha.example.",
+        "peer_states": null,
+        "zones": null,
+        "timestamp": "2026-01-02T03:04:05Z",
+        "instr": {
+          "stamp.example.": {
+            "active": 41,
+            "active_digest": "5f3a19c2e07b4d11",
+            "newest": 42,
+            "newest_digest": "9c01aa47b2e3f650",
+            "agreeing": 42,
+            "agreeing_digest": "9c01aa47b2e3f650",
+            "known": true,
+            "rollover": true,
+            "thaw": {
+              "from": {
+                "serial": 40,
+                "digest": "0aa1"
+              },
+              "to": {
+                "serial": 41,
+                "digest": "5f3a19c2e07b4d11"
+              }
+            }
+          }
+        },
+        "epoch": 1767323045,
+        "seq": 42,
+        "nameservers": [
+          "ns1.alpha.example."
+        ],
+        "crypto": true
+      }
+    },
+    "election": {
+      "leader_expiry": "0001-01-01T00:00:00Z"
+    }
+  }
+]
