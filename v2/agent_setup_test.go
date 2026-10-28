@@ -549,7 +549,7 @@ func configListedIdentityZone(t *testing.T, zone string) (*Config, *tdns.ZoneDat
 
 // notSyncedWarnings is the warnings in a captured agent log that tell the
 // operator a config-listed identity zone is not synced with its parent.
-func notSyncedWarnings(t *testing.T, logs *bytes.Buffer, zone string) int {
+func notSyncedWarnings(t *testing.T, logs fmt.Stringer, zone string) int {
 	t.Helper()
 	n := 0
 	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
@@ -579,8 +579,8 @@ func notSyncedWarnings(t *testing.T, logs *bytes.Buffer, zone string) int {
 // child. One listed in the config does not, and with a parentsync: block
 // configured that used to pass in silence: no CDS, no DS at the parent, and a
 // TLSA no validating peer trusts. Now the set-up says so, once, in the log
-// and on the zone, under the condition that makes a daemon-built zone a
-// parentsync child, and under no other. The daemon starts all the same.
+// only, under the condition that makes a daemon-built zone a parentsync
+// child, and under no other. The daemon starts all the same.
 func TestAConfigListedIdentityZoneIsWarnedAbout(t *testing.T) {
 	off := false
 	for _, tc := range []struct {
