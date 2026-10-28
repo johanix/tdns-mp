@@ -10,14 +10,13 @@ import (
 
 	"github.com/johanix/tdns-mp/v2/hsync"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	members := participantFQDNSet(instructionsFor(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		if members[dns.Fqdn(string(agent.ID))] {
+		if members.has(string(agent.ID)) {
 			agents = append(agents, agent)
 		}
 	}

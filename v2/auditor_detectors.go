@@ -130,9 +130,11 @@ func detectMissingProviders(zs *AuditZoneState, state *detectorRunState) {
 		return
 	}
 	zs.mu.RLock()
+	// The identities seen in traffic, folded as DNS names: the expected ones
+	// come from the reading, folded too.
 	seen := make(map[string]bool, len(zs.Providers))
 	for id := range zs.Providers {
-		seen[id] = true
+		seen[canonicalName(id)] = true
 	}
 	zs.mu.RUnlock()
 
@@ -140,7 +142,7 @@ func detectMissingProviders(zs *AuditZoneState, state *detectorRunState) {
 		key := zs.Zone + "|" + identity
 		state.mu.Lock()
 		wasMissing := state.missing[key]
-		if !seen[identity] {
+		if !seen[canonicalName(identity)] {
 			if !wasMissing {
 				state.missing[key] = true
 				state.mu.Unlock()

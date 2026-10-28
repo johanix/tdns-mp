@@ -983,17 +983,7 @@ func (mpzd *MPZoneData) roles() Roles {
 		in := mpzd.instructions()
 		r = rolesFor(in, in, 0)
 	}
-	// A provider the sets name with no ON record, whose removal is under
-	// way, is resolved through the removal's stored identity (design 3.3).
-	for _, set := range [][]Provider{r.Servers, r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing} {
-		for i := range set {
-			if set[i].Identity == "" {
-				if rm, ok := instrStore.Load().removal(mpzd.ZoneName, set[i].Label, ""); ok {
-					set[i].Identity = rm.Identity
-				}
-			}
-		}
-	}
+	resolveRemovals(mpzd.ZoneName, &r)
 	return r
 }
 

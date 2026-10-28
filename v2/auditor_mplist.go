@@ -276,7 +276,7 @@ func markLocalMembers(localIdentity string, members []ZoneMemberRoleDTO) {
 	}
 	localIdentity = dns.Fqdn(localIdentity)
 	for i := range members {
-		if members[i].Identity != "" && strings.EqualFold(dns.Fqdn(members[i].Identity), localIdentity) {
+		if members[i].Identity != "" && core.EqualNames(dns.Fqdn(members[i].Identity), localIdentity) {
 			members[i].Local = true
 		}
 	}
