@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +79,7 @@ func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address str
 type editPolicy struct {
 	ZoneSigned  bool
 	WeAreSigner bool
+	Leaving     bool  // a signer out of signers= that signs on (#147): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
 }
@@ -139,6 +141,9 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 //   - DNSKEY: only signers may submit
 //   - CDS/CSYNC: only signers AND parentsync == agent
 //
+// A signer leaving signers= (#147) signs on and its combiner applies as
+// before, but it starts nothing: it submits no DNSKEY, CDS or CSYNC.
+//
 // Whether the local combiner applies the contribution is a separate
 // question (canApply). A submission may be persisted-but-not-applied
 // (IGNORED) by the local combiner while still being applied by a
@@ -151,9 +156,9 @@ func (p *editPolicy) canSubmit(rrtype uint16) bool {
 	case dns.TypeKEY:
 		return p.ParentSync == core.HsyncParentSyncAgent
 	case dns.TypeDNSKEY:
-		return p.WeAreSigner
+		return p.WeAreSigner && !p.Leaving
 	case dns.TypeCDS, dns.TypeCSYNC:
-		return p.WeAreSigner && p.ParentSync == core.HsyncParentSyncAgent
+		return p.WeAreSigner && !p.Leaving && p.ParentSync == core.HsyncParentSyncAgent
 	}
 	return true
 }
@@ -167,28 +172,14 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 	if zd.MP != nil && zd.MP.MPdata != nil {
 		p.ZoneSigned = zd.MP.MPdata.ZoneSigned
 		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
+		p.Leaving = zd.MP.MPdata.Leaving
 	}
-	// Extract NSmgmt and ParentSync from HSYNCPARAM. The analysis reader,
-	// because this runs on the incoming zone during the pre-refresh combine
-	// as well as on a live zone.
-	apex, err := zd.OwnerForAnalysis(zd.ZoneName)
-	if err != nil || apex == nil {
-		return p
-	}
-	hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !exists || len(hpRRset.RRs) == 0 {
-		return p
-	}
-	privRR, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok || privRR.Data == nil {
-		return p
-	}
-	hp, ok := privRR.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return p
-	}
-	p.NSmgmt = hp.GetNSmgmt()
-	p.ParentSync = hp.GetParentSync()
+	// NSmgmt and ParentSync change only at a step (design 3.3): the sets.
+	// For the incoming zone during the pre-refresh combine, the reading of
+	// that copy; for a live zone, the zone's (mpzd.roles).
+	r := zd.roles()
+	p.NSmgmt = r.NSmgmt
+	p.ParentSync = r.ParentSync
 	return p
 }
 
@@ -330,15 +321,7 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 	if mpzd.MP == nil || mpzd.MP.MPdata == nil {
 		// MPdata is nil despite OptMultiProvider — guards 1-3 failed in
 		// populateMPdata (no HSYNC records or not a recognized provider).
-		apex, err := mpzd.GetOwner(mpzd.ZoneName)
-		if err != nil {
-			return fmt.Errorf("zone %q: contributions rejected — cannot inspect zone apex: %v", mpzd.ZoneName, err)
-		}
-		_, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
-		_, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-		_, h1exists := apex.RRtypes.Get(core.TypeHSYNC)
-		_, h2exists := apex.RRtypes.Get(core.TypeHSYNC2)
-		if !((h3exists && hpExists) || h1exists || h2exists) {
+		if in := mpzd.instructions(); in == nil || !in.HasParam || !hasHSYNC3(in) {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", mpzd.ZoneName)
 		}
 		var mpConf *MultiProviderConf
@@ -353,6 +336,40 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 		return fmt.Errorf("zone %q: contributions rejected — MP checks failed (unknown reason, guards 1-3 passed but MPdata still nil)", mpzd.ZoneName)
 	}
 	return nil
+}
+
+// originVoteRefusal: the origin of a zone's operations is a voting member of
+// the zone (design 3.3), compared as canonical names; otherwise every
+// record is refused with the reason. The zone is judged by its HSYNC3 RRset
+// as loaded here, whatever class the payload gives it: that is the
+// sender's word. A provider zone has no HSYNC3, and a zone the combiner
+// takes by HSYNC or HSYNC2 records alone has no standings; both are left as
+// they are (votesInZone). What the combiner already stores of an origin
+// that stops voting stays (decision 37). One exception: while its provider
+// is out of signers= and signs on (#147), the combiner takes its own
+// agent's operations (local, one of its configured agents), so that what
+// it serves does not go stale. Nil when the origin may contribute.
+func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+	if votesInZone(ZoneName(zone), AgentId(origin)) {
+		return nil
+	}
+	if mpzd, ok := Zones.Get(zone); local && ok && mpzd.leavingSigner() {
+		return nil
+	}
+	reason := fmt.Sprintf("origin %s is not a voting member of zone %s", origin, zone)
+	lgCombiner.Warn("rejecting contribution", "zone", zone, "sender", origin, "reason", reason)
+	resp := &CombinerSyncResponse{Zone: zone, Status: "error", Message: reason, Timestamp: time.Now()}
+	for _, op := range ops {
+		for _, rr := range op.Records {
+			resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: rr, Reason: reason})
+		}
+	}
+	for _, rrs := range records {
+		for _, rr := range rrs {
+			resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: rr, Reason: reason})
+		}
+	}
+	return resp
 }
 
 func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
@@ -393,7 +410,10 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		return resp
 	}
 
-	if req.ZoneClass != "provider" {
+	// A provider zone, one this combiner is configured with as such, has no
+	// HSYNC records to authorize by. The payload's zone class, the sender's
+	// word, does not decide that.
+	if GetProviderZoneRRtypes(zonename) == nil {
 		if err := mpzd.checkMPauthorization(); err != nil {
 			lgCombiner.Warn("rejecting contribution", "zone", req.Zone, "sender", req.SenderID, "reason", err)
 			resp.Status = "error"
@@ -414,6 +434,11 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			}
 			return resp
 		}
+	}
+
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
+		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
+		return refusal
 	}
 
 	policy := mpzd.getEditPolicy()
@@ -448,57 +473,25 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	return resp
 }
 
-// combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
-// STATUS-UPDATE notification to the local agent that delivered the update.
+// combinerNotifyDelegationChange tells the local agent that delivered the
+// update that the delegation's data changed: a STATUS-UPDATE "ns-changed" or
+// "ksk-changed". It publishes nothing.
+//
+// The combiner used to make a CSYNC here on an NS change, one of its own per
+// signing provider, with its own zone serial in it. Nothing made two
+// providers' CSYNC records the same, and nothing told the leader when the
+// providers served one (tdns-mp #175). The zone's CSYNC is now made once, by
+// the delegation sync leader, and reaches every combiner as a contribution
+// (csyncVerdict in combiner_utils.go is what a combiner does with it).
 func (mpzd *MPZoneData) combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, nsChanged, kskChanged bool) {
-	zoneSigned := false
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err == nil && apex != nil {
-		if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
-			hsyncparam := hpRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
-			if len(hsyncparam.GetSigners()) > 0 {
-				zoneSigned = true
-			}
-		}
-	}
+	apex, _ := mpzd.GetOwner(mpzd.ZoneName)
 
-	lgCombiner.Info("combinerNotifyDelegationChange: delegation change detected", "zone", zonename, "nsChanged", nsChanged, "kskChanged", kskChanged, "zoneSigned", zoneSigned)
+	lgCombiner.Info("combinerNotifyDelegationChange: delegation change detected", "zone", zonename, "nsChanged", nsChanged, "kskChanged", kskChanged)
 
-	changed := false
-
-	if nsChanged {
-		if !zoneSigned {
-			lgCombiner.Debug("combinerNotifyDelegationChange: NS changed but zone is not signed, skipping CSYNC", "zone", zonename)
-		} else {
-			csync := &dns.CSYNC{
-				Serial:     mpzd.CurrentSerial,
-				Flags:      0,
-				TypeBitMap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA},
-			}
-			csync.Hdr = dns.RR_Header{
-				Name:   mpzd.ZoneName,
-				Rrtype: dns.TypeCSYNC,
-				Class:  dns.ClassINET,
-				Ttl:    120,
-			}
-			_, _, csyncChanged, err := mpzd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
-			if err != nil {
-				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
-			} else {
-				lgCombiner.Info("combinerNotifyDelegationChange: CSYNC published", "zone", zonename, "changed", csyncChanged)
-				changed = changed || csyncChanged
-			}
-		}
-	}
-	// The combiner synthesizes no CDS: the signer serves the CDS of the
-	// zone's DS set from its key rows (key lifecycle ownership design §4.1,
-	// arrow 1; S5), and a CDS of every served SEP key would put mpdist and
-	// foreign keys in front of the parent.
-	if changed {
-		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
-			lgCombiner.Error("combinerNotifyDelegationChange: publishing the combiner state failed", "zone", zonename, "err", err)
-		}
-	}
+	// The combiner synthesizes no CDS either: the signer serves the CDS of
+	// the zone's DS set from its key rows (key lifecycle ownership design
+	// §4.1, arrow 1; S5), and a CDS of every served SEP key would put mpdist
+	// and foreign keys in front of the parent.
 
 	var nsRecords []string
 	if apex != nil {
@@ -549,9 +542,13 @@ func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtyp
 	defer cancel()
 
 	err := tm.sendStatusUpdate(ctx, peer, post)
-	if err != nil {
+	switch {
+	case err != nil && subtype == "combiner-start":
+		// the agent is not up yet at a bring-up: nothing is lost (plan S10)
+		lgCombiner.Warn("combiner-start not delivered; the agent hands every zone over at its own start", "agent", agentID, "err", err)
+	case err != nil:
 		lgCombiner.Error("sendDelegationStatusUpdate: failed to send", "zone", zonename, "subtype", subtype, "agent", agentID, "err", err)
-	} else {
+	default:
 		lgCombiner.Info("sendDelegationStatusUpdate: sent", "zone", zonename, "subtype", subtype, "agent", agentID)
 	}
 }
@@ -655,6 +652,11 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 	if !containsString(storedInstr.Locations, "at-ns") {
 		return
 	}
+	// A stored instruction is acted on only while the customer consents.
+	if mpzd.lacksPubkeyConsent() {
+		withdrawSignalKeys(storedInstr, hdb)
+		return
+	}
 
 	currentNS := mpzd.signalNSTargets(senderID, zone)
 	prevSet := stringSet(storedInstr.PublishedNS)
@@ -681,6 +683,223 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 		}
 		lgCombiner.Info("signal keys resynced after NS change", "zone", zone, "sender", senderID, "publishedNS", currentNS)
 	}
+}
+
+// --- The customer's consent to a stored at-ns publication (tdns-mp #115) ---
+//
+// A publish instruction is stored, and acted on later: on an NS change
+// (combinerResyncSignalKeys), when the combiner starts or re-applies
+// (ApplyPendingSignalKeys, CombinerReapplyContributions), and when a
+// provider zone refreshes (MPPreRefresh). The customer zone's own refresh
+// asks too, when its HSYNCPARAM has changed (PostRefresh). The agent asks
+// for at-ns only when the customer's HSYNCPARAM says pubkey
+// (publishLocations), but a stored instruction can say at-ns for a zone that
+// does not: an agent from before that rule sent it, or the customer has
+// taken the flag away since. So every use of a stored instruction asks the
+// zone first.
+
+// lacksPubkeyConsent: the customer's zone is loaded and its HSYNCPARAM does
+// not say pubkey. A zone that has not loaded yet says nothing either way,
+// and its stored instructions are left as they are until it has.
+func (mpzd *MPZoneData) lacksPubkeyConsent() bool {
+	return mpzd.HasPublishedData() && !mpzd.hasPubkey()
+}
+
+// contributionsLoaded: the zone has loaded, its persisted contributions are
+// in memory, and a change to them is persisted from now on. The
+// contributions are restored before the zone's first load
+// (restoreContributions), so that alone does not say the zone has data: a
+// retraction from a provider zone that has not loaded finds nothing to take
+// out, and the zone's file then brings the signal name back. Until the zone
+// has loaded, its names wait for its startup re-apply (ApplyPendingSignalKeys).
+func (mpzd *MPZoneData) contributionsLoaded() bool {
+	if !mpzd.HasPublishedData() {
+		return false
+	}
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	return mpzd.MP != nil && mpzd.MP.PersistContributions != nil
+}
+
+// withdrawSignalKeys makes a stored instruction apex-only, for a zone that
+// lacks the customer's consent: the signal names it published are retracted,
+// and at-ns is taken out of the stored Locations so that nothing acts on it
+// later. The KEY and the other locations stay as they are. Should the
+// customer say pubkey again, the agent's next instruction asks for at-ns
+// again.
+//
+// A name in a provider zone whose contributions are not loaded yet cannot be
+// retracted now: the retraction would find nothing there, and the zone's
+// first load would put the persisted KEY back. Such a name stays in the
+// stored instruction, and at-ns with it, until that zone's startup re-apply
+// retracts it (ApplyPendingSignalKeys).
+//
+// So does a name whose retraction failed: the provider zone may still serve
+// its KEY, and an instruction that no longer named it would leave nothing to
+// try again. The next use of the instruction does.
+func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
+	if !containsString(stored.Locations, "at-ns") {
+		return
+	}
+	var retracted, waiting, failed []string
+	for _, ns := range stored.PublishedNS {
+		if pz := findProviderZoneForOwner(Sig0KeyOwnerName(stored.Zone, ns)); pz != "" {
+			if z, ok := Zones.Get(pz); ok && !z.contributionsLoaded() {
+				waiting = append(waiting, ns)
+				continue
+			}
+		}
+		if err := retractSignalKey(stored.Zone, ns, stored.SenderID); err != nil {
+			lgCombiner.Error("failed to retract a _signal KEY; it stays in the stored instruction and is tried again",
+				"zone", stored.Zone, "sender", stored.SenderID, "ns", ns, "err", err)
+			failed = append(failed, ns)
+			continue
+		}
+		retracted = append(retracted, ns)
+	}
+	kept := append(append([]string(nil), waiting...), failed...)
+	if len(kept) > 0 && len(retracted) == 0 {
+		if len(waiting) > 0 {
+			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey",
+				"zone", stored.Zone, "sender", stored.SenderID, "waiting", waiting)
+		}
+		return
+	}
+	instr := stored.ToPublishInstruction()
+	if len(kept) == 0 {
+		var locs []string
+		for _, loc := range stored.Locations {
+			if loc != "at-ns" {
+				locs = append(locs, loc)
+			}
+		}
+		instr.Locations = locs
+	}
+	if err := SavePublishInstruction(hdb, stored.Zone, stored.SenderID, instr, kept); err != nil {
+		lgCombiner.Error("failed to save the publish instruction after withdrawing at-ns", "zone", stored.Zone, "sender", stored.SenderID, "err", err)
+	}
+	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey",
+		"zone", stored.Zone, "sender", stored.SenderID, "retracted", retracted, "waiting", waiting, "failed", failed, "locations", instr.Locations)
+}
+
+// retractSignalKey takes a sender's _signal KEY for childZone out of the
+// provider zone that holds nsTarget, and says whether that worked: the
+// contribution is gone and the zone is published without it. With no provider
+// zone for the name there was nothing published and nothing to do.
+//
+// The publish is asked for whether or not the contribution changed. A
+// retraction whose publish failed is tried again, and by then the
+// contribution is already gone and the publish is all that is owed: the
+// combine has kept the cleanup it could not make.
+func retractSignalKey(childZone, nsTarget, senderID string) error {
+	ownerName := Sig0KeyOwnerName(childZone, nsTarget)
+	providerZone := findProviderZoneForOwner(ownerName)
+	if providerZone == "" {
+		return nil
+	}
+	mpzd, ok := Zones.Get(providerZone)
+	if !ok {
+		return fmt.Errorf("provider zone %s is not loaded", providerZone)
+	}
+	_, _, changed, err := mpzd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, nil)
+	if err != nil {
+		return fmt.Errorf("provider zone %s: retracting %s: %w", providerZone, ownerName, err)
+	}
+	// A retraction whose save failed is tried again with the KEY already gone
+	// from memory, and the replace then saves nothing. The saved
+	// contributions are what a restart loads, so the retry saves them all
+	// the same: otherwise the instruction would be booked as withdrawn while
+	// the saved KEY comes back at the next start, with nothing left to
+	// withdraw it.
+	if !changed {
+		if err := mpzd.persistContributionsOf(senderID); err != nil {
+			return fmt.Errorf("provider zone %s: saving the contributions without %s: %w", providerZone, ownerName, err)
+		}
+	}
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		return fmt.Errorf("provider zone %s: publishing without %s: %w", providerZone, ownerName, err)
+	}
+	return nil
+}
+
+// persistContributionsOf saves one sender's contributions to the snapshot a
+// restart loads, as they are held now. With no snapshot to save to there is
+// nothing to do.
+func (mpzd *MPZoneData) persistContributionsOf(senderID string) error {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP == nil || mpzd.MP.PersistContributions == nil {
+		return nil
+	}
+	return mpzd.MP.PersistContributions(mpzd.ZoneName, senderID, mpzd.MP.AgentContributions[senderID])
+}
+
+// withdrawSignalKeysWithoutConsent is the startup's question about one
+// stored instruction: does its zone lack the customer's consent? If it does,
+// the instruction is made apex-only, and the caller applies nothing from it.
+func (mpzd *MPZoneData) withdrawSignalKeysWithoutConsent(senderID, zone string, hdb *HsyncDB) bool {
+	if hdb == nil || !mpzd.lacksPubkeyConsent() {
+		return false
+	}
+	stored, err := GetPublishInstruction(hdb, zone, senderID)
+	if err != nil {
+		lgCombiner.Error("failed to read the stored publish instruction", "zone", zone, "sender", senderID, "err", err)
+		return true
+	}
+	if stored != nil {
+		withdrawSignalKeys(stored, hdb)
+	}
+	return true
+}
+
+// withdrawAllSignalKeysWithoutConsent goes through every stored instruction
+// and withdraws the at-ns publication of each zone that is loaded and does
+// not say pubkey (withdrawSignalKeys). A re-apply and a refresh of a provider
+// zone do this before they put the held _signal KEYs into the zone, so that
+// neither brings back a name the customer no longer consents to.
+//
+// It returns the zones it found without consent. A retraction that failed
+// keeps its name in the instruction for the next use to try again, so a
+// caller that then reads the instructions to put signal names back skips
+// these zones (the re-apply's step 2). A refresh puts back only the held
+// contributions, which the retraction has already left.
+func withdrawAllSignalKeysWithoutConsent(hdb *HsyncDB) (map[string]bool, error) {
+	allInstr, err := LoadAllPublishInstructions(hdb)
+	if err != nil {
+		return nil, err
+	}
+	withoutConsent := map[string]bool{}
+	for childZone, senders := range allInstr {
+		child, ok := Zones.Get(childZone)
+		if !ok || !child.lacksPubkeyConsent() {
+			continue
+		}
+		withoutConsent[childZone] = true
+		for _, stored := range senders {
+			withdrawSignalKeys(stored, hdb)
+		}
+	}
+	return withoutConsent, nil
+}
+
+// withdrawZoneSignalKeysWithoutConsent is a customer zone's own question,
+// asked when a refresh has changed its HSYNCPARAM (PostRefresh): if the zone
+// no longer says pubkey, the at-ns publication of each of its stored
+// instructions is withdrawn (withdrawSignalKeys). Without it a customer that
+// took pubkey away kept its signal names served until something else used
+// the instruction: an NS change, a refresh of the provider zone, a restart.
+func (mpzd *MPZoneData) withdrawZoneSignalKeysWithoutConsent(hdb *HsyncDB) error {
+	if hdb == nil || !mpzd.lacksPubkeyConsent() {
+		return nil
+	}
+	allInstr, err := LoadAllPublishInstructions(hdb)
+	if err != nil {
+		return err
+	}
+	for _, stored := range allInstr[mpzd.ZoneName] {
+		withdrawSignalKeys(stored, hdb)
+	}
+	return nil
 }
 
 // publishSignalKeyToProvider directly applies a _signal KEY record to the
@@ -796,6 +1015,7 @@ func (mpzd *MPZoneData) getAgentNSTargets(senderID, zone string) []string {
 
 // signalKeyEntry represents a _signal KEY that should be published in a provider zone.
 type signalKeyEntry struct {
+	ChildZone string
 	OwnerName string
 	SenderID  string
 	KEYRRs    []string
@@ -838,6 +1058,7 @@ func buildPendingSignalKeys(hdb *HsyncDB) {
 					continue
 				}
 				entries[providerZone] = append(entries[providerZone], signalKeyEntry{
+					ChildZone: zone,
 					OwnerName: ownerName,
 					SenderID:  senderID,
 					KEYRRs:    stored.KEYRRs,
@@ -849,7 +1070,21 @@ func buildPendingSignalKeys(hdb *HsyncDB) {
 	lgCombiner.Info("built pending signal key map", "providerZones", len(entries))
 }
 
-// ApplyPendingSignalKeys is called by each provider zone's OnFirstLoad.
+// ApplyPendingSignalKeys is called by each provider zone's OnFirstLoad. It
+// puts the _signal KEYs of the stored instructions into the zone's
+// contributions and publishes the zone with them.
+//
+// The publish does not depend on a contribution having changed. At a start
+// none has: the zone's first load has just read the same KEYs from the
+// persisted contributions, while the zone itself came back from its source
+// without them. The combiner's writes reach neither the zone's file nor its
+// upstream, so until the publish was made unconditional the names were held
+// and not served (tdns-mp #171).
+//
+// A customer zone that has not loaded yet says nothing of its consent, and
+// its names are served as its instruction has them, as they were before the
+// restart. That zone's own first load asks again and retracts them if the
+// flag is gone (RegisterCombinerOnFirstLoad).
 func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 	pendingSignalKeys.mu.Lock()
 	if !pendingSignalKeys.built {
@@ -864,8 +1099,13 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 		return
 	}
 
-	anyChanged := false
 	for _, entry := range myEntries {
+		// Asked here and not when the map was built: the customer's zone may
+		// have loaded since. Without its consent the stored names are
+		// retracted, this zone's among them, and nothing is applied.
+		if child, ok := Zones.Get(entry.ChildZone); ok && child.withdrawSignalKeysWithoutConsent(entry.SenderID, entry.ChildZone, hdb) {
+			continue
+		}
 		var parsedRRs []dns.RR
 		for _, rrStr := range entry.KEYRRs {
 			rr, err := dns.NewRR(rrStr)
@@ -881,15 +1121,15 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 			continue
 		}
 		if changed {
-			anyChanged = true
 			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", mpzd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
 		}
 	}
-	// One publish for the whole re-apply.
-	if anyChanged {
-		if _, err := mpzd.CombineWithLocalChanges(); err != nil {
-			lgCombiner.Error("startup re-apply: publishing the combiner state failed", "zone", mpzd.ZoneName, "err", err)
-		}
+	// One publish for the whole re-apply, after the loop: a name whose zone
+	// lacks consent has been retracted by then and is not put back here. The
+	// combine leaves an RRset alone that already reads as the contributions
+	// have it, so a zone that has the names publishes nothing.
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		lgCombiner.Error("startup re-apply: publishing the combiner state failed", "zone", mpzd.ZoneName, "err", err)
 	}
 }
 
@@ -995,8 +1235,10 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 
 		// DNSKEY policy: only signers may contribute DNSKEYs.
 		// This is an editing policy — only enforce when we would apply.
-		// Non-signer combiners persist DNSKEYs without this check.
-		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) {
+		// Non-signer combiners persist DNSKEYs without this check. Only
+		// what an origin adds is judged: its removal of its own keys is
+		// not (S10).
+		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
 			reject, reason := mpzd.checkDNSKEYPolicy(req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
@@ -1099,6 +1341,22 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 				}
 			}
 
+			// One CSYNC per zone: the newest among those the agents have
+			// contributed (combiner_utils.go). An older one that arrives
+			// late is refused, and the sender is told why; a newer one
+			// takes the place of those held for other senders.
+			var supersededCsyncs []string
+			if rrtype == dns.TypeCSYNC && len(parsedRRs) > 0 {
+				reason, drop := mpzd.csyncVerdict(req.SenderID, zonename, parsedRRs)
+				if reason != "" {
+					for _, rr := range parsedRRs {
+						rejectedItems = append(rejectedItems, RejectedItem{Record: rr.String(), Reason: reason})
+					}
+					continue
+				}
+				supersededCsyncs = drop
+			}
+
 			applied, removed, changed, err := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
@@ -1107,6 +1365,18 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					Reason: fmt.Sprintf("replace failed: %v", err),
 				})
 				continue
+			}
+			for _, older := range supersededCsyncs {
+				_, gone, dropped, derr := mpzd.ReplaceCombinerDataByRRtype(older, zonename, rrtype, nil)
+				if derr != nil {
+					lgCombiner.Error("removing a superseded CSYNC failed", "zone", zonename, "sender", older, "err", derr)
+					continue
+				}
+				if dropped {
+					lgCombiner.Info("removed a CSYNC that a newer one supersedes", "zone", zonename, "sender", older, "by", req.SenderID, "records", gone)
+					removed = append(removed, gone...)
+					changed = true
+				}
 			}
 			if policy.canApply(rrtype) {
 				if len(applied) > 0 {
@@ -1467,64 +1737,36 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 
 // --- Policy check functions ---
 
-// checkDNSKEYPolicy checks whether a sender is allowed to contribute DNSKEYs.
-// Returns (reject bool, reason string). Rejects if:
+// checkDNSKEYPolicy checks whether a sender is allowed to contribute DNSKEYs,
+// by the sets its agent handed the combiner (KeySigners; S10), or by its
+// copy where it holds none. Returns (reject bool, reason string). Rejects if:
 // - the zone has no HSYNCPARAM (no signer information)
 // - the zone has no signers listed
 // - the sender is not listed as a signer
 func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil || apex == nil {
-		return true, "DNSKEY rejected: cannot inspect zone apex"
-	}
-
-	// Get HSYNCPARAM to check signers
-	hpRRset, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !hpExists || len(hpRRset.RRs) == 0 {
+	in := mpzd.instructions()
+	if in == nil || !in.HasParam {
 		return true, "DNSKEY rejected: no HSYNCPARAM in zone (cannot determine signers)"
 	}
-	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return true, "DNSKEY rejected: HSYNCPARAM parse error"
-	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return true, "DNSKEY rejected: HSYNCPARAM type error"
-	}
-	signers := hp.GetSigners()
+	signers := mpzd.roles().KeySigners
 	if len(signers) == 0 {
 		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
 	}
-
-	// Resolve sender FQDN to HSYNC3 label
-	h3RRset, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !h3exists || len(h3RRset.RRs) == 0 {
-		return true, "DNSKEY rejected: no HSYNC3 records (cannot resolve sender to label)"
+	// A signer by the set, which names each provider by label and identity:
+	// the sender is one when its identity is a signer's, whatever other
+	// label the same identity is under.
+	if slices.ContainsFunc(signers, func(p Provider) bool { return core.EqualNames(p.Identity, dns.Fqdn(senderID)) }) {
+		return false, ""
 	}
-	senderLabel := ""
-	for _, rr := range h3RRset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok {
-				if h3.Identity == senderID {
-					senderLabel = h3.Label
-					break
-				}
-			}
-		}
-	}
-	if senderLabel == "" {
+	// An OFF record gives no label.
+	if _, listed := mpzd.labelOf(senderID); !listed {
 		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
 	}
-
-	// Normalize: HSYNC3.Label may have trailing dot, HSYNCPARAM signers do not
-	senderLabel = strings.TrimSuffix(senderLabel, ".")
-
-	// Check if sender's label is in the signers list
-	if !hp.IsSignerLabel(senderLabel) {
-		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, signers)
+	var labels []string
+	for _, p := range signers {
+		labels = append(labels, p.Label)
 	}
-
-	return false, ""
+	return true, fmt.Sprintf("DNSKEY rejected: sender %s is not a signer (signers: %v)", senderID, labels)
 }
 
 // combinerReplaceOrigins records, per (zone, sender, rrtype), where the

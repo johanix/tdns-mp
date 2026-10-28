@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 var lgGossip *slog.Logger = tdns.Logger("gossip")
@@ -21,14 +22,22 @@ func shortHash(h string) string {
 // deepCopyMemberState returns an independent copy of a MemberState.
 func deepCopyMemberState(src *MemberState) *MemberState {
 	dst := &MemberState{
-		Identity:     src.Identity,
-		Timestamp:    src.Timestamp,
-		BeatInterval: src.BeatInterval,
+		Identity:                    src.Identity,
+		Timestamp:                   src.Timestamp,
+		BeatInterval:                src.BeatInterval,
+		PropagationDelay:            src.PropagationDelay,
+		DnssecValidationNotEnforced: src.DnssecValidationNotEnforced,
 	}
 	if src.PeerStates != nil {
 		dst.PeerStates = make(map[string]string, len(src.PeerStates))
 		for k, v := range src.PeerStates {
 			dst.PeerStates[k] = v
+		}
+	}
+	if src.PeerChains != nil {
+		dst.PeerChains = make(map[string]string, len(src.PeerChains))
+		for k, v := range src.PeerChains {
+			dst.PeerChains[k] = v
 		}
 	}
 	if src.Zones != nil {
@@ -112,12 +121,26 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 		gst.States[groupHash] = make(map[string]*MemberState)
 	}
 
+	var chains map[string]string
+	for peer := range peerStates {
+		if c, ok := gst.peerChains[peer]; ok {
+			if chains == nil {
+				chains = make(map[string]string)
+			}
+			chains[peer] = c
+		}
+	}
 	gst.States[groupHash][gst.LocalID] = &MemberState{
 		Identity:     gst.LocalID,
 		PeerStates:   peerStates,
 		Zones:        zones,
 		Timestamp:    time.Now(),
 		BeatInterval: beatInterval,
+		// whole seconds on the wire, rounded up: a delay below a second is
+		// not announced as none
+		PropagationDelay:            uint32((gst.propagationDelay + time.Second - 1) / time.Second),
+		DnssecValidationNotEnforced: gst.dnssecValidationNotEnforced,
+		PeerChains:                  chains,
 	}
 	if gst.localWritten == nil {
 		gst.localWritten = make(map[string]bool)
@@ -125,9 +148,132 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 	gst.localWritten[groupHash] = true
 }
 
-// MergeGossip merges received gossip into the local state table.
-// For each member's state entry, keep the one with the latest timestamp.
-func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
+// SetPropagationDelay sets this provider's propagation delay: how long a
+// change needs to reach all of its nameservers
+// (dnssec.kasp.propagation-delay). It rides in gossip, in our own row of
+// every group, so that the leader of a zone knows how long the slowest of
+// the zone's serving providers needs before a NOTIFY to the parent is worth
+// sending (delegationNotifyWait).
+func (gst *GossipStateTable) SetPropagationDelay(d time.Duration) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.propagationDelay = max(d, 0)
+}
+
+// SetDnssecValidationNotEnforced sets whether our resolver takes data it could not
+// validate (imrengine.require-dnssec-validation: false). It rides in gossip,
+// in our own row of every group, so that the gossip matrix of every member
+// shows where validation is not enforced (#260).
+func (gst *GossipStateTable) SetDnssecValidationNotEnforced(off bool) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.dnssecValidationNotEnforced = off
+}
+
+// setPeerChains sets the DNSSEC verdicts our own rows carry: for each peer
+// whose discovery data is not secure, "insecure" or "bogus".
+func (gst *GossipStateTable) setPeerChains(chains map[string]string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.peerChains = chains
+}
+
+// PropagationDelay is this provider's own propagation delay, as set.
+func (gst *GossipStateTable) PropagationDelay() time.Duration {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	return gst.propagationDelay
+}
+
+// AnnouncedPropagationDelay is the propagation delay a member announces in
+// its own row: the newest row of the member over all groups, since the value
+// is the provider's and not a group's. Not known: the member has no row
+// here, or announces none.
+func (gst *GossipStateTable) AnnouncedPropagationDelay(identity string) (time.Duration, bool) {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	var newest *MemberState
+	for _, members := range gst.States {
+		for id, ms := range members {
+			if ms != nil && dns.Fqdn(id) == dns.Fqdn(identity) && (newest == nil || ms.Timestamp.After(newest.Timestamp)) {
+				newest = ms
+			}
+		}
+	}
+	if newest == nil || newest.PropagationDelay == 0 {
+		return 0, false
+	}
+	return time.Duration(newest.PropagationDelay) * time.Second, true
+}
+
+// MergeGossip merges gossip that from sent, about group, into the local
+// state table, by the sender rule (the plan's 3.2, decision 10 and 35). It
+// takes nothing for a group this agent does not have (group nil), or of
+// which from is not a member. From a member that does not vote it takes
+// that member's own row and nothing else. From the answer to a beat
+// (fromAnswer, from the peer that was beaten, which nothing authenticates)
+// it takes the rows only: no election record and no term, whoever the
+// answer names. Election records come in every peer's own beats.
+func (gst *GossipStateTable) MergeGossip(msg *GossipMessage, from string, group *ProviderGroup, fromAnswer bool) {
+	if msg == nil || group == nil || group.GroupHash != msg.GroupHash || !isAmong(group.Members, AgentId(from)) {
+		lgGossip.Debug("gossip not taken: the group is not known here, or the sender is not its member", "group", msgGroup(msg), "from", from)
+		return
+	}
+	taken := *msg
+	switch {
+	case !isAmong(group.VotingMembers, AgentId(from)):
+		// its own row only
+		taken.Members = map[string]*MemberState{}
+		for id, ms := range msg.Members {
+			if isAmong([]string{id}, AgentId(from)) {
+				taken.Members[id] = ms
+			}
+		}
+		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
+	case fromAnswer:
+		taken.Election, taken.GroupName = GroupElectionState{}, GroupNameProposal{}
+	}
+	// An agent that does not vote in the group is an observer (design 4.7)
+	gst.mergeGossipAs(&taken, !isAmong(group.VotingMembers, AgentId(gst.LocalID)))
+}
+
+// observerTakes: an observer of a group, an agent that does not vote in it,
+// takes an election record with a term at or below the one it holds once
+// the lease it holds has run out (step 8, design 4.7): voting members that
+// have all restarted elect at term 1 again. The same term is news when it
+// names another leader or a later end of the lease. A voting member never
+// takes a lower term. The lease's end is the telling agent's clock: a clock
+// that is off moves the moment by as much.
+func observerTakes(observer bool, rec GroupElectionState, heldTerm uint64, heldLeader string, heldExpiry time.Time, now time.Time) bool {
+	if !observer || !now.After(heldExpiry) {
+		return false
+	}
+	switch {
+	case uint64(rec.Term) < heldTerm:
+		return true
+	case uint64(rec.Term) == heldTerm:
+		return rec.Leader != heldLeader || rec.LeaderExpiry.After(heldExpiry)
+	}
+	return false
+}
+
+func msgGroup(msg *GossipMessage) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.GroupHash
+}
+
+// mergeGossip merges gossip into the local state table as it is, with no
+// rule of its own, as a voting member does. For each member's state entry,
+// keep the one with the latest timestamp.
+func (gst *GossipStateTable) mergeGossip(msg *GossipMessage) {
+	gst.mergeGossipAs(msg, false)
+}
+
+// mergeGossipAs is mergeGossip for an agent that is, or is not, an observer
+// of the group (observerTakes).
+func (gst *GossipStateTable) mergeGossipAs(msg *GossipMessage, observer bool) {
 	var electionCallback func(string, GroupElectionState)
 	var electionHash string
 	var electionState GroupElectionState
@@ -151,12 +297,15 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 		}
 	}
 
-	// Merge election state (higher term wins). A record without a leader is
-	// no election's result. Stored, it would stand for its term and keep out
-	// the result that follows it, which is of the same term (#154).
+	// Merge election state (higher term wins; an observer also takes a
+	// lower or the same term once the lease it holds has run out). A record
+	// without a leader is no election's result. Stored, it would stand for
+	// its term and keep out the result that follows it, which is of the same
+	// term (#154).
 	if msg.Election.Term > 0 && msg.Election.Leader != "" {
 		existing := gst.Elections[groupHash]
-		if existing == nil || msg.Election.Term > existing.Term {
+		if existing == nil || msg.Election.Term > existing.Term ||
+			observerTakes(observer, msg.Election, uint64(existing.Term), existing.Leader, existing.LeaderExpiry, time.Now()) {
 			elCopy := msg.Election
 			gst.Elections[groupHash] = &elCopy
 			if gst.onElectionUpdate != nil {
@@ -185,8 +334,8 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 }
 
 // BuildGossipForPeer builds gossip messages for all groups shared with a peer.
-// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu
-// to avoid deadlock with RefreshLocalStates (which takes pgm.mu then gst.mu).
+// Acquires pgm.mu first, copies needed data, releases it, then takes gst.mu:
+// the two are never held together, here or in RefreshLocalStates.
 func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager, lem ...*LeaderElectionManager) []GossipMessage {
 	if pgm == nil {
 		return nil
@@ -297,6 +446,12 @@ func (gst *GossipStateTable) GetGroupState(groupHash string) (map[string]*Member
 				cp.PeerStates[pk] = pv
 			}
 			cp.Zones = append([]string(nil), ms.Zones...)
+			if ms.PeerChains != nil {
+				cp.PeerChains = make(map[string]string, len(ms.PeerChains))
+				for pk, pv := range ms.PeerChains {
+					cp.PeerChains[pk] = pv
+				}
+			}
 			statesCopy[k] = &cp
 		}
 	}
@@ -334,7 +489,25 @@ func (gst *GossipStateTable) SetOnElectionUpdate(fn func(groupHash string, state
 	gst.onElectionUpdate = fn
 }
 
-// CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
+// forgetGroup is the word that a provider group is gone: its last zone has
+// left it. The table forgets what would stand in the way of the group if it
+// comes back. That it was mutually OPERATIONAL: a group's election is called
+// when it becomes so, and a group still marked would come back without one.
+// And the election record: a group that comes back starts its terms again,
+// and the record of a higher term would keep its results out. The members'
+// rows stay: beats bring newer ones.
+func (gst *GossipStateTable) forgetGroup(groupHash string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	delete(gst.operationalGroups, groupHash)
+	delete(gst.Elections, groupHash)
+}
+
+// CheckGroupState checks if all cells in the NxN matrix for a group are
+// OPERATIONAL. Its callers pass the group's voting members (step 8, design
+// 4.3): an auditor that is down holds no election back, and does not take a
+// leader's group out of mutual OPERATIONAL. With one voting member, its own
+// row opens the gate.
 func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
 	gst.mu.Lock()
 
@@ -394,11 +567,31 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 		return
 	}
 
-	pgm.mu.RLock()
-	defer pgm.mu.RUnlock()
-
+	// The groups are copied out and the manager's lock is free while the rows
+	// are built and written: what is called from here takes the locks of the
+	// peers, of the zones and of this table, and a recompute of the groups
+	// must not wait for any of them with the manager's readers behind it
+	// (tdns-mp #180).
 	now := time.Now()
-	for hash, pg := range pgm.Groups {
+	groups := pgm.GetGroups()
+
+	// The DNSSEC verdict on each member's discovery data, for the rows: the
+	// matrix shows a peer whose chain is not secure (#260).
+	chains := make(map[string]string)
+	for _, pg := range groups {
+		for _, member := range pg.Members {
+			if member == gst.LocalID {
+				continue
+			}
+			if c := ar.peerChain(AgentId(member)); c != "" {
+				chains[member] = c
+			}
+		}
+	}
+	gst.setPeerChains(chains)
+
+	for _, pg := range groups {
+		hash := pg.GroupHash
 		// Build our peer states for this group
 		peerStates := make(map[string]string)
 		var zones []string

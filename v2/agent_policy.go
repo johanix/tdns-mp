@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -22,22 +23,72 @@ const (
 // noteReplaceOrigin answers whether a remote REPLACE is older than the one
 // last applied for the same (zone, agent, rrtype), and records it as the
 // newest when it is not. Older = an earlier originating time, or the same
-// second (the wire carries seconds) and a lower distribution id, which the
-// sender hands out in increasing order.
+// time and a lower distribution id, which the sender hands out in
+// increasing order. The time is compared whole: the wire carries it to the
+// nanosecond (RFC 3339 with a fraction). When the map is updated, the origin
+// is persisted to HsyncDB (best-effort) so a restart still rejects older
+// replaces (tdns-mp #249).
 func (zdr *ZoneDataRepo) noteReplaceOrigin(u *SynchedDataUpdate, rrtype uint16) (bool, replaceOrigin) {
 	key := string(u.Zone) + "|" + string(u.AgentId) + "|" + dns.TypeToString[rrtype]
 	zdr.mu.Lock()
-	defer zdr.mu.Unlock()
 	if cur, ok := zdr.lastReplace[key]; ok {
 		if cur.Time.After(u.OriginatingTime) || (cur.Time.Equal(u.OriginatingTime) && cur.DistID > u.OriginatingDistID) {
+			zdr.mu.Unlock()
 			return true, cur
 		}
 	}
 	if zdr.lastReplace == nil {
 		zdr.lastReplace = make(map[string]replaceOrigin)
 	}
-	zdr.lastReplace[key] = replaceOrigin{Time: u.OriginatingTime, DistID: u.OriginatingDistID}
+	origin := replaceOrigin{Time: u.OriginatingTime, DistID: u.OriginatingDistID}
+	zdr.lastReplace[key] = origin
+	hdb := zdr.hdb
+	zdr.mu.Unlock()
+
+	if hdb != nil {
+		if err := SaveReplaceOrigin(hdb, string(u.Zone), string(u.AgentId), rrtype, origin); err != nil {
+			lgAgent.Error("failed to persist replace origin",
+				"zone", u.Zone, "agent", u.AgentId, "rrtype", dns.TypeToString[rrtype], "err", err)
+		}
+	}
 	return false, replaceOrigin{}
+}
+
+// loadReplaceOrigins hydrates lastReplace from HsyncDB. Called once at
+// SynchedDataEngine start after attachHsyncDB.
+func (zdr *ZoneDataRepo) loadReplaceOrigins(hdb *HsyncDB) error {
+	origins, err := LoadAllReplaceOrigins(hdb)
+	if err != nil {
+		return err
+	}
+	zdr.mu.Lock()
+	defer zdr.mu.Unlock()
+	if zdr.lastReplace == nil {
+		zdr.lastReplace = make(map[string]replaceOrigin, len(origins))
+	}
+	for k, v := range origins {
+		zdr.lastReplace[k] = v
+	}
+	return nil
+}
+
+// attachHsyncDB sets the store used to persist lastReplace and loads any
+// rows already there. hdb may be nil (tests without a KeyDB).
+func (zdr *ZoneDataRepo) attachHsyncDB(hdb *HsyncDB) {
+	zdr.hdb = hdb
+	if hdb == nil {
+		return
+	}
+	if err := zdr.loadReplaceOrigins(hdb); err != nil {
+		lgEngine.Error("failed to load replace origins", "err", err)
+		return
+	}
+	zdr.mu.Lock()
+	n := len(zdr.lastReplace)
+	zdr.mu.Unlock()
+	if n > 0 {
+		lgEngine.Info("loaded replace origins", "count", n)
+	}
 }
 
 // --- AgentRepo and ZoneDataRepo helper methods ---
@@ -84,6 +135,68 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 			return
 		}
 	}
+}
+
+// errNoRoleInZone: this provider has no role in the zone, so nothing of its
+// own leaves its agent for it (the membership design, 2.3; issue 137, item 2).
+var errNoRoleInZone = errors.New("this provider has no role in the zone (it is listed under neither servers= nor signers=)")
+
+// forgetRefusedDnskeys: a local update with this provider's DNSKEYs that is
+// refused for want of a role was derived while the provider had one, and
+// LocalDnskeysFromKeystate has recorded its keys and key states as
+// distributed. They were not. They are forgotten, so that the next
+// derivation, once the role is back (the signer's resend, or its next
+// inventory), finds the whole set new and distributes it.
+func forgetRefusedDnskeys(u *SynchedDataUpdate) {
+	if u.Update == nil || !updateCarriesDnskey(u.Update) {
+		return
+	}
+	mpzd, ok := Zones.Get(string(u.Zone))
+	if !ok {
+		return
+	}
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP != nil {
+		mpzd.MP.LocalDNSKEYs, mpzd.MP.LocalKeyStates = nil, nil
+	}
+}
+
+// updateCarriesDnskey: the update has a DNSKEY operation or record.
+func updateCarriesDnskey(u *ZoneUpdate) bool {
+	for _, op := range u.Operations {
+		if op.RRtype == "DNSKEY" {
+			return true
+		}
+	}
+	for _, rr := range u.RRs {
+		if rr.Header().Rrtype == dns.TypeDNSKEY {
+			return true
+		}
+	}
+	for t := range u.RRsets {
+		if t == dns.TypeDNSKEY {
+			return true
+		}
+	}
+	return false
+}
+
+// noRoleEditRefusal is the answer to an edit of the zone by the operator of
+// a provider that has no role in it.
+func noRoleEditRefusal(zone ZoneName) string {
+	return fmt.Sprintf("zone %s: this provider has no role in the zone (it is listed under neither servers= nor signers=); nothing is stored and nothing is sent", zone)
+}
+
+// noRoleLeadRefusal is the answer to the operator who asks a provider with
+// no role in the zone to lead it.
+func noRoleLeadRefusal(zone ZoneName) string {
+	return fmt.Sprintf("this provider cannot lead zone %s: it has no role in it", zone)
+}
+
+// noRolePushNote says that a resync sends none of this provider's own data.
+func noRolePushNote(zone ZoneName) string {
+	return fmt.Sprintf("zone %s: none of this provider's data is sent, to the other agents or to its combiner: it has no role in the zone", zone)
 }
 
 // --- Policy evaluation and update processing ---
@@ -156,6 +269,15 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		}
 
 	case "local":
+		// First, so that no path gets past: an agent whose provider has no
+		// role in the zone sends nothing of its own for it, an operator's
+		// edit, the DNSKEYs of an inventory or a CSYNC (the membership
+		// design, 2.3). A refusal, not an error: the data engine answers
+		// nothing for an evaluation error.
+		if !votesInZone(synchedDataUpdate.Zone, synchedDataUpdate.AgentId) {
+			forgetRefusedDnskeys(synchedDataUpdate)
+			return false, noRoleEditRefusal(synchedDataUpdate.Zone), nil
+		}
 		rrs := append([]dns.RR{}, synchedDataUpdate.Update.RRs...)
 
 		// Check HSYNC nsmgmt policy for NS record operations
@@ -171,26 +293,14 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 			if !exists {
 				return false, "", fmt.Errorf("local update for zone %q: zone not found (system error)", synchedDataUpdate.Zone)
 			}
-			apex, err := zd.GetOwner(zd.ZoneName)
-			if err != nil {
-				return false, "", fmt.Errorf("local update for zone %q: cannot get apex: %w", synchedDataUpdate.Zone, err)
-			}
-			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-			if !exists || len(hsyncparamRRset.RRs) == 0 {
+			if in := zd.instructions(); in == nil || !in.HasParam {
 				return false, fmt.Sprintf("Local update for zone %q: no HSYNCPARAM record (NS management not configured)",
 					synchedDataUpdate.Zone), nil
 			}
-			privRR, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR)
-			if !ok || privRR.Data == nil {
-				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record has unexpected type", synchedDataUpdate.Zone), nil
-			}
-			hsyncparam, ok := privRR.Data.(*core.HSYNCPARAM)
-			if !ok {
-				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record data has unexpected type", synchedDataUpdate.Zone), nil
-			}
-			if hsyncparam.GetNSmgmt() != core.HsyncNSmgmtAGENT {
+			// nsmgmt changes only at a step (design 3.3): the step's sets
+			if nsmgmt := zd.roles().NSmgmt; nsmgmt != core.HsyncNSmgmtAGENT {
 				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM nsmgmt=%s, NS management not delegated to agents",
-					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsyncparam.GetNSmgmt()]), nil
+					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[nsmgmt]), nil
 			}
 		}
 
@@ -351,6 +461,9 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 							} else if synchedDataUpdate.Force {
 								lgAgent.Debug("RR already present but --force set, marking changed", "rr", rr.String())
 								changed = true
+							} else if zdr.rejectedByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String()) {
+								lgAgent.Info("RR present but rejected by the combiner, sending it again", "rr", rr.String())
+								changed = true
 							} else {
 								lgAgent.Debug("RR already present, skipping", "rr", rr.String())
 							}
@@ -391,7 +504,14 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 
 		switch op.Operation {
 		case "replace":
-			changed, msg = zdr.processReplaceOp(synchedDataUpdate, nod, rrtype, op)
+			// every replace of the update counts: one whose set is
+			// already there must not hide one before it that changed
+			// something
+			c, m := zdr.processReplaceOp(synchedDataUpdate, nod, rrtype, op)
+			changed = changed || c
+			if m != "" {
+				msg = m
+			}
 
 		case "add":
 			curRRset, _ := nod.RRtypes.Get(rrtype)
@@ -409,6 +529,9 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 					changed = true
 				} else if synchedDataUpdate.Force {
 					lgAgent.Debug("RR already present but --force set, marking changed", "rr", rr.String())
+					changed = true
+				} else if zdr.rejectedByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String()) {
+					lgAgent.Info("RR present but rejected by the combiner, sending it again", "rr", rr.String())
 					changed = true
 				}
 			}
@@ -467,10 +590,14 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 	// every other signer's DNSKEY RRset). The newest origin wins.
 	if synchedDataUpdate.UpdateType == "remote" && !synchedDataUpdate.OriginatingTime.IsZero() {
 		if stale, applied := zdr.noteReplaceOrigin(synchedDataUpdate, rrtype); stale {
+			if synchedDataUpdate.staleTypes == nil {
+				synchedDataUpdate.staleTypes = map[uint16]bool{}
+			}
+			synchedDataUpdate.staleTypes[rrtype] = true
 			msg = fmt.Sprintf("Ignored a stale REPLACE of %s %s from agent %q: originated %s (%s), one from %s (%s) is already applied",
 				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId,
-				synchedDataUpdate.OriginatingTime.UTC().Format(time.RFC3339), synchedDataUpdate.OriginatingDistID,
-				applied.Time.UTC().Format(time.RFC3339), applied.DistID)
+				synchedDataUpdate.OriginatingTime.UTC().Format(time.RFC3339Nano), synchedDataUpdate.OriginatingDistID,
+				applied.Time.UTC().Format(time.RFC3339Nano), applied.DistID)
 			lgAgent.Warn(msg)
 			return false, msg
 		}
@@ -527,6 +654,20 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 		}
 	} else {
 		changed = len(newRRs) > 0
+	}
+	// The same set again is still a change while this agent's combiner has
+	// rejected one of its records: the repo holds it, the combiner does not,
+	// and only a send gets it there (a combiner that had not loaded the
+	// owner's edit that made the sender a signer).
+	if !changed {
+		for _, rr := range newRRs {
+			if zdr.rejectedByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String()) {
+				lgAgent.Info("replace of a set whose record the combiner rejected, sending it again",
+					"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId, "rrtype", dns.TypeToString[rrtype], "rr", rr.String())
+				changed = true
+				break
+			}
+		}
 	}
 
 	if changed {

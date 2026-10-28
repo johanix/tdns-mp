@@ -32,6 +32,32 @@ type DnsSyncPayload struct {
 	DistributionID string                   `json:"distribution_id"`
 	ZoneClass      string                   `json:"zone_class,omitempty"`
 	Publish        *core.PublishInstruction `json:"publish,omitempty"`
+	CatchUp        *CatchUp                 `json:"catch_up,omitempty"`
+	Acting         *ActingHandover          `json:"acting,omitempty"` // a hand-over, on an update to the combiner (S10)
+	Instr          *MsgStamp                `json:"instr,omitempty"`  // the sender's stamp (S5b)
+}
+
+// CatchUp travels on an RFI SYNC, a request for the zone's state, and on
+// the SYNC that answers it (the membership design, 5.3 and 5.4).
+type CatchUp struct {
+	// Request is the request's name, chosen by the asker: 128 random bits,
+	// unique across the asker's restarts, since an answer can be sent
+	// again for up to a day.
+	Request string `json:"request"`
+	// Reason, on the request: start, join, role, peer-role, peer-start,
+	// outage or manual.
+	Reason string `json:"reason,omitempty"`
+	// Complete, on the answer: the answer is the answering agent's whole
+	// state for the zone. Absent reads as not complete.
+	Complete *bool `json:"complete,omitempty"`
+	// Why, on an answer that is not complete: no-inventory,
+	// own-state-not-read or zone-not-loaded.
+	Why string `json:"why,omitempty"`
+}
+
+// IsComplete: the answer says it is complete.
+func (c *CatchUp) IsComplete() bool {
+	return c != nil && c.Complete != nil && *c.Complete
 }
 
 // GetPublish returns the publish instruction (may be nil).
@@ -87,9 +113,17 @@ type DnsKeystatePayload struct {
 	Message      string                 `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry    `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
 	ForeignKeys  []core.ForeignKeyState `json:"ForeignKeys,omitempty"`  // Signal "foreign": the other providers' key states
-	Owned        bool                   `json:"Owned,omitempty"`        // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
-	Time         string                 `json:"Time,omitempty"`         // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
-	Timestamp    int64                  `json:"timestamp"`              // Unix timestamp
+	// ForeignSpoken: with Signal "foreign", the providers (HSYNC3 labels)
+	// whose word the agent holds, one whose latest word listed no keys
+	// included (S7). An older agent does not send it, and an older signer
+	// ignores it.
+	ForeignSpoken []string `json:"ForeignSpoken,omitempty"`
+	// Resend: with Signal "inventory", the keys the signer's key lifecycle
+	// sends again (#256). An older agent ignores it.
+	Resend    []uint16 `json:"Resend,omitempty"`
+	Owned     bool     `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time      string   `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
+	Timestamp int64    `json:"timestamp"`       // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"
@@ -129,6 +163,9 @@ type DnsEditsPayload struct {
 	Zone         string                         `json:"Zone"`                   // Zone (FQDN)
 	AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"` // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         `json:"Message,omitempty"`      // Optional status message
+	Nonce        string                         `json:"nonce,omitempty"`        // the nonce of the RFI EDITS this answers
+	Acting       *ActingHandover                `json:"acting,omitempty"`       // the hand-over the combiner holds for the zone (S10)
+	Instr        *MsgStamp                      `json:"instr,omitempty"`        // the sender's stamp (S5b)
 
 	Timestamp int64 `json:"timestamp"` // Unix timestamp
 
@@ -155,6 +192,8 @@ type DnsConfigPayload struct {
 	Subtype      string            `json:"Subtype"`
 	ConfigData   map[string]string `json:"ConfigData,omitempty"`
 	Message      string            `json:"Message,omitempty"`
+	Nonce        string            `json:"nonce,omitempty"` // the nonce of the RFI CONFIG this answers
+	Instr        *MsgStamp         `json:"instr,omitempty"` // the sender's stamp (S5b)
 	Timestamp    int64             `json:"timestamp"`
 	Type         string            `json:"type"`
 	SenderID     string            `json:"sender_id"`
@@ -177,6 +216,8 @@ type DnsAuditPayload struct {
 	Zone         string      `json:"Zone"`
 	AuditData    interface{} `json:"AuditData,omitempty"`
 	Message      string      `json:"Message,omitempty"`
+	Nonce        string      `json:"nonce,omitempty"` // the nonce of the RFI AUDIT this answers
+	Instr        *MsgStamp   `json:"instr,omitempty"` // the sender's stamp (S5b)
 	Timestamp    int64       `json:"timestamp"`
 	Type         string      `json:"type"`
 	SenderID     string      `json:"sender_id"`

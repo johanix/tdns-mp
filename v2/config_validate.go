@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -36,6 +37,9 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateAgentSupportedMechanisms(mp); err != nil {
 		return err
 	}
+	if err := ValidateCombinerAgents(mp); err != nil {
+		return err
+	}
 	if err := ValidateCryptoFiles(mp); err != nil {
 		return err
 	}
@@ -44,6 +48,23 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	}
 	if err := ValidateSyncengineIntervals(mp); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateCombinerAgents refuses an empty entry in multi-provider.agents,
+// which the checks after it and the role's start would read, and a
+// multi-provider combiner with more than one agent: the combiner acts by
+// what its agent hands it (plan S10, 7.3 item 5), so it must be clear whose
+// hand-over counts. It runs before the checks that read the entries.
+func ValidateCombinerAgents(mp *MultiProviderConf) error {
+	for i, a := range mp.Agents {
+		if a == nil {
+			return fmt.Errorf("multi-provider.agents[%d] is empty", i)
+		}
+	}
+	if mp.Role == "combiner" && len(mp.Agents) > 1 {
+		return fmt.Errorf("a multi-provider combiner has more than one agent (multi-provider.agents lists %d)", len(mp.Agents))
 	}
 	return nil
 }
@@ -65,12 +86,28 @@ func ValidateSyncengineIntervals(mp *MultiProviderConf) error {
 		{"reconcile", iv.Reconcile},
 		{"hello_fast_attempts", iv.HelloFastAttempts},
 		{"hello_fast_interval", iv.HelloFastInterval},
+		{"catchup_outage", iv.CatchupOutage},
+		{"peer_hold", iv.PeerHold},
 	} {
 		if k.v < 0 {
 			return fmt.Errorf("multi-provider.syncengine.intervals.%s: %d is negative", k.name, k.v)
 		}
 	}
+	// An outage shorter than the beat interval would be every gap between
+	// two beats.
+	if beat := hsyncConfigFromMp(mp).BeatInterval; catchUpOutageFor(mp) <= beat {
+		return fmt.Errorf("multi-provider.syncengine.intervals.catchup_outage: %s is not above the beat interval (%s)", catchUpOutageFor(mp), beat)
+	}
 	return nil
+}
+
+// catchUpOutageFor is multi-provider.syncengine.intervals.catchup_outage,
+// or its default.
+func catchUpOutageFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Syncengine.Intervals.CatchupOutage > 0 {
+		return time.Duration(mp.Syncengine.Intervals.CatchupOutage) * time.Second
+	}
+	return catchUpOutageDefault
 }
 
 // ValidateAgentNameservers ensures agent.local.nameservers are

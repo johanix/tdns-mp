@@ -203,6 +203,20 @@ var HsyncTables = map[string]string{
 		UNIQUE(zone, sender_id)
 	)`,
 
+	// MPActingSerial is what a combiner was handed for a zone by its agent
+	// (combiner_acting.go, plan S10): the serial it acts by, its digest, and
+	// the hand-over itself as JSON (the instructions as records, the step and
+	// its sets). Read before the zones' first load.
+	"MPActingSerial": `CREATE TABLE IF NOT EXISTS 'MPActingSerial' (
+		zonename  TEXT NOT NULL,
+		serial    INTEGER,
+		digest    TEXT DEFAULT '',
+		handover  TEXT NOT NULL DEFAULT '',
+		handed_by TEXT DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
@@ -214,6 +228,20 @@ var HsyncTables = map[string]string{
 		rr          TEXT NOT NULL,
 		updated_at  INTEGER NOT NULL,
 		UNIQUE(zone, sender_id, owner, rrtype, rr)
+	)`,
+
+	// ZoneDataReplaceOrigin keeps the replace-order guard across restarts
+	// (tdns-mp #249): per (zone, agent, rrtype) the origin time and DistID
+	// of the last REPLACE ZoneDataRepo applied. Without it, a queued older
+	// distribution can roll the set back after a restart.
+	"ZoneDataReplaceOrigin": `CREATE TABLE IF NOT EXISTS 'ZoneDataReplaceOrigin' (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		zone        TEXT NOT NULL,
+		agent_id    TEXT NOT NULL,
+		rrtype      INTEGER NOT NULL,
+		origin_time INTEGER NOT NULL, -- unix nanoseconds; the wire Time is RFC3339Nano
+		dist_id     TEXT NOT NULL,
+		UNIQUE(zone, agent_id, rrtype)
 	)`,
 
 	// MPKeyDistribution is a key's distribution in flight, kept by the key
@@ -243,6 +271,25 @@ var HsyncTables = map[string]string{
 		ttl_seconds INTEGER DEFAULT 0,
 		UNIQUE (zonename, keyid)
 	)`,
+	// MPOwnerAlgorithm is the key lifecycle owner's algorithm per role of
+	// an owned zone, set through tdns-mpcli signer key policy (design Q1:
+	// the algorithm is the owner's field). A change starts an algorithm
+	// rollover (table §6 O4); the row keeps it over a restart (T15).
+	"MPOwnerAlgorithm": `CREATE TABLE IF NOT EXISTS 'MPOwnerAlgorithm' (
+		zonename  TEXT NOT NULL,
+		role      TEXT NOT NULL,
+		algorithm INTEGER NOT NULL,
+		UNIQUE (zonename, role)
+	)`,
+	// MPSigningProviders is a zone's signing set (leaving_signer.go): the
+	// providers in signers= and those leaving it, which sign on until the
+	// owner removes their HSYNC3 records (#147). The row keeps a leaving
+	// provider over a restart. Every role keeps its own.
+	"MPSigningProviders": `CREATE TABLE IF NOT EXISTS 'MPSigningProviders' (
+		zonename  TEXT NOT NULL,
+		providers TEXT NOT NULL DEFAULT '',
+		UNIQUE (zonename)
+	)`,
 	"MPKeyDistribution": `CREATE TABLE IF NOT EXISTS 'MPKeyDistribution' (
 		zonename  TEXT NOT NULL,
 		keyid     INTEGER NOT NULL,
@@ -266,6 +313,42 @@ var HsyncTables = map[string]string{
 		confirmed     INTEGER DEFAULT 0,
 		confirmed_at  TEXT DEFAULT '',
 		UNIQUE (zonename, keyid)
+	)`,
+	// MPZoneInstructions is what the agent (and the auditor) keeps of a
+	// zone's instructions (instructions_store.go, design rule 3): the
+	// active serial and its digest, the phase and whether the active serial
+	// is enforced, in columns of their own; and all of it, the newer
+	// serials held, the from-serial, the last thaw, an owner error, the
+	// step and its sets among them, as JSON in state. Read at the start,
+	// before the first load; written before a change is told.
+	"MPZoneInstructions": `CREATE TABLE IF NOT EXISTS 'MPZoneInstructions' (
+		zonename  TEXT NOT NULL,
+		active    INTEGER,
+		digest    TEXT DEFAULT '',
+		phase     TEXT DEFAULT '',
+		enforced  INTEGER DEFAULT 0,
+		state     TEXT NOT NULL DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+	// MPZoneRemovals are the removals under way that the agent holds, one
+	// row per leaving provider: as the leader's first step names it, the
+	// step this agent holds, and its nameserver names as JSON (S12, S17b).
+	"MPZoneRemovals": `CREATE TABLE IF NOT EXISTS 'MPZoneRemovals' (
+		zonename  TEXT NOT NULL,
+		label     TEXT NOT NULL,
+		identity  TEXT NOT NULL,
+		step      INTEGER DEFAULT 0,
+		ns_names  TEXT DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename, label, identity)
+	)`,
+	// MPStampEpoch is the epoch of this agent's stamps (plan S5a), one row,
+	// raised at every start: its peers count its tellings only from its
+	// last start (design 3.4).
+	"MPStampEpoch": `CREATE TABLE IF NOT EXISTS 'MPStampEpoch' (
+		id     INTEGER PRIMARY KEY CHECK (id = 1),
+		epoch  INTEGER NOT NULL
 	)`,
 }
 
@@ -307,6 +390,9 @@ var HsyncIndexes = []string{
 	// CombinerContributions indexes
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
+
+	// ZoneDataReplaceOrigin indexes
+	`CREATE INDEX IF NOT EXISTS idx_replace_origin_zone ON ZoneDataReplaceOrigin(zone)`,
 }
 
 // validTableName checks that a table name contains only safe characters.
@@ -635,6 +721,7 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
+		"MPActingSerial",
 	}
 
 	for _, name := range combinerTables {
@@ -662,6 +749,21 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		}
 	}
 
+	return nil
+}
+
+// InitInstructionTables creates only the tables of the zones' serials
+// (instructions_store.go) and of the stamps' epoch (instr_stamp.go). Called
+// on the auditor's start, which keeps serials and tells stamps as an agent
+// does and creates none of the agent's other tables.
+func (hdb *HsyncDB) InitInstructionTables() error {
+	hdb.Lock()
+	defer hdb.Unlock()
+	for _, name := range []string{"MPZoneInstructions", "MPZoneRemovals", "MPStampEpoch"} {
+		if _, err := hdb.DB.Exec(HsyncTables[name]); err != nil {
+			return fmt.Errorf("failed to create table %s: %w", name, err)
+		}
+	}
 	return nil
 }
 

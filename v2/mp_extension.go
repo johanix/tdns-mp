@@ -80,6 +80,29 @@ type MPState struct {
 	KeystateError        string
 	KeystateTime         time.Time
 	RefreshAnalysis      *ZoneRefreshAnalysis
+	// ParentSyncFollowed: followParentSyncParam has run for the zone. Its
+	// first run is the zone's first load, which has no leader yet and is no
+	// give-back. Read and written only by the zone's post-refresh callback.
+	ParentSyncFollowed bool
+	// ContributionsRead: a combiner has read the zone's stored contributions
+	// without an error, also when it found none (restoreContributions,
+	// CombinerReapplyContributions). Until then its answer to RFI EDITS is
+	// that they are not loaded, not an empty map that an agent would take
+	// as its own state. Guarded by the zone's lock.
+	ContributionsRead bool
+	// ParentSyncNamed: the zone's records named this agent at the last run
+	// of followParentSyncParam. An option that comes on because a refresh
+	// names this agent where the last one did not is no give-back.
+	ParentSyncNamed bool
+	// SigningChanged: a refresh changed the zone's signing set
+	// (advanceSigningSet). Set by the pre-refresh callback, taken by the
+	// post-refresh one, which asks the leader's sync (afterSigningSetChange).
+	SigningChanged bool
+
+	// absentForeign: the signer's foreign rows whose keys the last incoming
+	// zone lacked, kept because foreignKeyWithdrawn did not let them go
+	// (syncForeignDNSKEYs, #207)
+	absentForeign []uint16
 
 	// pendingCleanups are the (owner, rrtype) pairs a contribution change may
 	// have emptied: the next CombineWithLocalChanges restores or deletes what
@@ -127,6 +150,21 @@ func (mpzd *MPZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
 	mpzd.MP.LastKeyInventory = inv
+}
+
+// setLastKeyInventoryUnlessOlder records inv unless the recorded inventory
+// came later (both counted, the recorded one's seq higher), in one step.
+// Reports the inventory recorded before, and whether inv was recorded.
+func (mpzd *MPZoneData) setLastKeyInventoryUnlessOlder(inv *KeyInventorySnapshot) (prev *KeyInventorySnapshot, ok bool) {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	mpzd.EnsureMP()
+	prev = mpzd.MP.LastKeyInventory
+	if prev != nil && inv.seq != 0 && prev.seq > inv.seq {
+		return prev, false
+	}
+	mpzd.MP.LastKeyInventory = inv
+	return prev, true
 }
 
 func (mpzd *MPZoneData) GetKeystateOK() bool {
@@ -191,4 +229,20 @@ func (mpzd *MPZoneData) SetRemoteDNSKEYs(keys []dns.RR) {
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
 	mpzd.MP.RemoteDNSKEYs = keys
+}
+
+func (mpzd *MPZoneData) absentForeignKeys() []uint16 {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP == nil {
+		return nil
+	}
+	return append([]uint16(nil), mpzd.MP.absentForeign...)
+}
+
+func (mpzd *MPZoneData) setAbsentForeign(keytags []uint16) {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	mpzd.EnsureMP()
+	mpzd.MP.absentForeign = keytags
 }

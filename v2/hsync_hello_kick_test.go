@@ -59,8 +59,11 @@ func TestAnInboundHelloKicksTheBeatRoundsOnlyWhenItMovesThePeer(t *testing.T) {
 		TransportManager: &transport.TransportManager{PeerRegistry: transport.NewPeerRegistry()},
 		agentRegistry:    ar,
 	}
-	// The sender is an agent we know, so the hello starts no discovery.
+	// The sender is an agent we know and have an address for, so the hello
+	// introduces its mechanism and starts no discovery.
 	ar.S.Set(AgentId(remote), newAgentView(hsync.NewPeer(remote)))
+	tm.PeerRegistry.GetOrCreate(remote).SetMechanismAddress(transport.MechanismDNS,
+		&transport.Address{Host: "192.0.2.1", Port: 53, Transport: "udp"})
 
 	rounds := &roundTimes{}
 	cfg := hsync.DefaultConfig()

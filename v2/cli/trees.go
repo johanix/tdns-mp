@@ -64,7 +64,8 @@ func NewAgentTree(use, role string) *cobra.Command {
 		newAgentLocalCmd(kind),
 		newAgentDiscoverCmd(kind),
 		newAgentPeerCmd(kind),
-		newAgentImrCmd(kind),
+		newImrCmd(kind),
+		newAgentParentSyncCmd(kind),
 		newHsyncCmd(kind),
 		newRouterCmd(kind),
 		NewGossipCmd(kind),
@@ -177,7 +178,8 @@ func signerKeystoreCmd(role string) *cobra.Command {
 
 // NewAuditorTree builds a tdns-mpauditor command tree targeting one
 // instance. The auditor gets gossip and peer subtrees because it
-// participates in the HSYNC3 protocol the same way agents do.
+// participates in the HSYNC3 protocol the same way agents do, and the
+// imr subtree because it runs the same embedded IMR for discovery.
 func NewAuditorTree(use, role string) *cobra.Command {
 	const kind = "auditor"
 	c := treeRoot(use, role, kind, "tdns-mpauditor")
@@ -200,6 +202,7 @@ func NewAuditorTree(use, role string) *cobra.Command {
 		newAuditorZonesCmd(kind),
 		newAuditorObservationsCmd(kind),
 		newAuditorWebCmd(kind),
+		newImrCmd(kind),
 	)
 	c.AddCommand(
 		tdnscli.NewKeystoreCmd(role),

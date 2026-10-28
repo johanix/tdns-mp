@@ -1,0 +1,50 @@
+{
+  "MessageType": "rfi",
+  "OriginatorID": "me.example.",
+  "YourIdentity": "you.example.",
+  "tlsa": {
+    "Hdr": {
+      "Name": "",
+      "Rrtype": 0,
+      "Class": 0,
+      "Ttl": 0,
+      "Rdlength": 0
+    },
+    "Usage": 0,
+    "Selector": 0,
+    "MatchingType": 0,
+    "Certificate": ""
+  },
+  "Zone": "zone1.example.",
+  "records": {
+    "a.zone1.example.": [
+      "a.zone1.example. 3600 IN A 192.0.2.1"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "add",
+      "rrtype": "A",
+      "records": [
+        "b.zone1.example. 3600 IN A 192.0.2.2"
+      ]
+    }
+  ],
+  "Time": "2026-01-02T03:04:05Z",
+  "RfiType": "downstream",
+  "rfi_subtype": "ns",
+  "nonce": "sync-nonce",
+  "zone_class": "IN",
+  "publish": {
+    "key_rrs": [
+      "zone1.example. 3600 IN KEY 512 3 15 dGVzdA=="
+    ],
+    "cds_rrs": [
+      "zone1.example. 3600 IN CDS 12345 15 2 abcd"
+    ],
+    "locations": [
+      "at-apex",
+      "at-ns"
+    ]
+  }
+}

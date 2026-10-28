@@ -24,6 +24,10 @@ the issue that tracks it.
 One rule stands above the rest: an operation may stall,
 but the zone must never go bogus or lame.
 
+Every edit of HSYNC3 or HSYNCPARAM raises HSYNCPARAM's
+`serial=`, and every agent judges it before it acts on it:
+see section 6 for the owner's rules and what is refused.
+
 ## 1. The Ordering Rule
 
 **Adds start at the edge and end at the parent. Deletes
@@ -78,10 +82,7 @@ record and no role.
 
 **Today:** the group is built from the roles, so a
 provider with no role is left out of it
-([issue 158](https://github.com/johanix/tdns-mp/issues/158)),
-and an agent with no role may elect itself leader of a
-zone when it sees no peers
-([issue 172](https://github.com/johanix/tdns-mp/issues/172)).
+([issue 158](https://github.com/johanix/tdns-mp/issues/158)).
 
 ## 3. Adding a Provider
 
@@ -102,18 +103,19 @@ start. Charlie's agent asks the others for the current
 state of the zone: what each has contributed, and the
 DNSKEYs with their key states.
 
-**Today:** nothing sends that request. Run it by hand on
-charlie once it is a member:
+**Today:** charlie's agent does not ask while charlie has
+no role: the others would refuse the request
+([issue 158](https://github.com/johanix/tdns-mp/issues/158)).
+It asks by itself once charlie has its role (step 3.4),
+and each answer carries the DNSKEYs with their key states.
+To ask again by hand:
 
 ```sh
 tdns-mpcli agent peer resync -z example.com. --pull
 ```
 
-Its answer carries the DNSKEYs and not their key states
-([issue 157](https://github.com/johanix/tdns-mp/issues/157)).
-While charlie has no role the others refuse the request
-([issue 158](https://github.com/johanix/tdns-mp/issues/158)),
-so today it only works after step 3.4.
+`tdns-mpcli agent parentsync status` shows, per voting
+member, whether its answer is complete.
 
 ### 3.3 Charlie serves the zone correctly
 
@@ -247,12 +249,22 @@ safety period of its own, and notes any query that still
 arrives. A signer goes on signing until the leader
 removes its DNSKEYs (4.4, 4.5).
 
-**Today:** a provider taken out of `signers=` stops
-signing at its next zone refresh and serves an unsigned
-copy
+**Today:** a provider taken out of `signers=` goes on
+signing for as long as its HSYNC3 record stays
 ([issue 147](https://github.com/johanix/tdns-mp/issues/147)).
-Removing a signing provider is not safe until that is
-fixed.
+Its combiner applies what it is sent, and the other
+providers treat it as a signer. It starts nothing of its
+own: no keys, no rollover. Section 4.6 gives the order
+of the owner's edits.
+
+Charlie takes no key distribution from the others, so
+while it leaves, **no signer of the zone rolls a key**.
+Every signer's key machine pauses, an emergency rollover
+included, and `tdns-mpcli signer key status` says
+"key rollovers paused: agent.charlie.example. is leaving
+the signing set". The rollovers resume when the owner
+removes charlie's HSYNC3 record. To end the pause early,
+finish the leave.
 
 ### 4.4 For a signer: NS first, DS second
 
@@ -267,10 +279,13 @@ fixed.
 Charlie's DS has to outlive its NS because every signer
 signs its DNSKEY RRset with its own KSK.
 
-**Today:** the remaining signers drop charlie's keys with
-the owner's edit, and nothing removes its DS in this
-order
-([issue 138](https://github.com/johanix/tdns-mp/issues/138)).
+**Today:** while charlie's HSYNC3 record stays, the other
+signers keep its DNSKEYs and its DS stays in the zone's
+DS set. Both go at once when the owner removes the
+record (4.6). The steps above, each at its own time, are
+not built yet
+([issue 138](https://github.com/johanix/tdns-mp/issues/138),
+[issue 211](https://github.com/johanix/tdns-mp/pull/211)).
 
 ### 4.5 "Safe to remove"
 
@@ -289,6 +304,29 @@ Count the waits by hand.
 
 Last, after every cache has expired.
 
+**Today**, the owner's order for a signer:
+
+1. Take charlie out of `signers=` and `servers=`. Under
+   `nsmgmt=owner`, drop charlie's NS records from the
+   owner's NS RRset in the same edit.
+2. Wait until the parent no longer lists charlie's NS
+   records. Then wait the NS TTL, then the DS TTL.
+3. Only then remove charlie's HSYNC3 record.
+
+Removing the record ends everything at once. Charlie's DS
+leaves the DS set, and the leader removes it at the
+parent. The other signers drop charlie's DNSKEYs.
+Charlie's combiner refuses its own agent's operations,
+and charlie is no longer a provider of the zone. Its
+operator then takes the zone out of service (4.5).
+
+For a few seconds the parent may still hold charlie's DS
+after the other signers have dropped its keys. The other
+DS records keep the chain. That holds when the remaining
+signers use charlie's algorithm. A validator that guards
+against algorithm downgrade can fail on a DS of an
+algorithm no DNSKEY has.
+
 ## 5. Changing a Provider's Role
 
 The role is the zone owner's decision, made in
@@ -304,7 +342,9 @@ The role is the zone owner's decision, made in
   its upstream signer. It is already in the NS RRset, so
   this wait is its own to keep.
 
-**Today:** it needs a restart of its signer
+**Today:** the agents refuse the edit until a signer role
+can be carried out (section 6). It needs a restart of its
+signer
 ([issue 146](https://github.com/johanix/tdns-mp/issues/146)),
 and it serves its own signatures before its DS is at the
 parent
@@ -321,8 +361,12 @@ and its operator is told. To get there, the owner removes
 the provider completely (section 4) and adds it back as a
 server (section 3).
 
-**Today:** the provider stops signing
-([issue 147](https://github.com/johanix/tdns-mp/issues/147)).
+**Today:** every agent refuses the edit
+(`signer-to-server`, section 6) and shows it, but does
+not enforce the refusal yet. The provider keeps signing
+for as long as its HSYNC3 record stays, as a leaving
+signer does (4.3,
+[issue 147](https://github.com/johanix/tdns-mp/issues/147)).
 
 ### 5.3 A provider becomes an auditor: not allowed
 
@@ -337,7 +381,67 @@ Nothing looks for that edit. An owner who makes it
 anyway gets what the code does with it, which nothing
 tests.
 
-## 6. Open Points
+## 6. The Owner's Edits
+
+Every agent of the zone keeps the owner's instructions by
+their serial, and judges each edit against the serial it
+acts by. The owner:
+
+- **Raises `serial=` at every edit** of HSYNC3 or
+  HSYNCPARAM, never by 2^31 or more at once. An edit at
+  the same serial is an owner error: the agents hold the
+  zone until a copy with a higher serial arrives, and
+  putting the old contents back at the same serial does
+  not end it. A zone without `serial=` is at serial 0,
+  and its first change is an owner error.
+- **Keeps the order** of records and roles: the HSYNC3
+  record first and a role later, each its own edit; the
+  roles away first and the record later.
+- **Waits for "done"** before the next edit. An edit made
+  earlier waits at the agents.
+- **Does not revoke a leaving provider's access** to the
+  zone before "done".
+- **Upgrades every agent of the zone** before an edit. A
+  mix of versions only stalls.
+
+Every agent refuses, with the same reason:
+
+| The edit                                                                 | Refused as                |
+|--------------------------------------------------------------------------|---------------------------|
+| Removes, or turns OFF, the HSYNC3 record of a provider with a role       | `record-with-role-removed`|
+| Gives a role to a label with no HSYNC3 record, or removes its record      | `role-without-record`     |
+| Changes the identity under a label with a role                           | `identity-changed`        |
+| Moves a signer to `servers=` only (5.2)                                  | `signer-to-server`        |
+| Empties `signers=`                                                       | `signers-emptied`         |
+| Leaves an upstream that is not in `signers=`, or has no HSYNC3 record    | `upstream-dangling`       |
+| Takes out of `signers=` the upstream of a server that stays: move the server's upstream first, as its own edit | `upstream-signer-removed` |
+
+On this build the agents also refuse every edit whose
+steps tdns-mp does not carry out yet (`step-missing`,
+`not-built`): a role taken away (section 4), a server role
+(3.4), a move into `signers=` (3.4, 5.1), and a change of
+an upstream, of `nsmgmt`, `parentsync`, `pubkey` or
+`pubcds`. So:
+
+- a removal is refused. The owner keeps the provider's NS
+  records in its own NS RRset and at the parent;
+- a change of `parentsync` is refused. The owner does not
+  write to the parent.
+
+A change of `auditors=` or `suffix`, and an HSYNC3 record
+added or removed for a provider with no role, are agreed.
+
+The refusal shows in `tdns-mpcli agent parentsync status`
+(`instructions: 42 refused: ...`), in `zone mplist` and in
+the auditor's configuration errors, and once in each
+agent's log.
+
+**Today:** the refusal is shown, not enforced. Until the
+agents agree on a serial before they act on it, they act
+by the zone's own copy, refused or not
+([issue 211](https://github.com/johanix/tdns-mp/issues/211)).
+
+## 7. Open Points
 
 - Whether `servers=` before `signers=` is refused for a
   provider that is to sign. The owner's later intent
@@ -345,7 +449,7 @@ tests.
 - Whether the zone's NS RRset or the parent's delegation
   changes first when a provider leaves.
 
-## 7. See Also
+## 8. See Also
 
 - [Customer Zone Setup](customer-zone-setup.md) — the
   records, and how the owner's edits reach the combiners.

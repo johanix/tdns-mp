@@ -5,8 +5,11 @@ package tdnsmp
 
 import (
 	"context"
+	"slices"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
+	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // HsyncDataEngine is the agent-only shell around hsync.Engine (SDE feeding,
@@ -89,6 +92,10 @@ func (e *HsyncDataEngine) runAgentOnly(ctx context.Context, msgQs *MsgQs) {
 			e.handleStatusUpdate(ctx, statusMsg)
 		case inventoryMsg := <-msgQs.KeystateInventory:
 			e.handleKeystateInventory(ctx, ourID, inventoryMsg, synchedDataUpdateQ, msgQs)
+			// the inventories that found the queue full, once it is empty
+			for _, waited := range msgQs.takeWaitingInventories() {
+				e.handleKeystateInventory(ctx, ourID, waited, synchedDataUpdateQ, msgQs)
+			}
 		}
 	}
 }
@@ -98,12 +105,38 @@ func (e *HsyncDataEngine) handleStatusUpdate(ctx context.Context, statusMsg *Sta
 		return
 	}
 	switch statusMsg.SubType {
-	case "ns-changed", "ksk-changed":
+	case "ksk-changed":
 		// the combiner's hint that the delegation's data changed: the same
 		// request, through the same gate (parentsync=agent, and this agent
 		// leads), without waiting for room on the syncher's queue and
 		// tried again if there was none
 		e.conf.requestDelegationSync(ctx, statusMsg.Zone, "the combiner's "+statusMsg.SubType+" hint")
+	case "ns-changed":
+		// Asks for nothing (#248). The hint can come before this agent's
+		// own copy of the zone has the new NS, and a sync then compares
+		// the parent with the old set and finds nothing to do. The refresh
+		// that brings the change to the copy asks for the sync itself
+		// (SYNC-DELEGATION), and asks again if it fails (#247).
+		lgEngine.Debug("the combiner's ns-changed hint: the refresh that brings the change asks for the sync", "zone", statusMsg.Zone)
+	case "combiner-start":
+		// The combiner's start report (plan S10): what it held before is
+		// not known now, and for a zone whose copy carries a serial it waits
+		// for its agent's hand-over. Every zone is handed over again.
+		if !e.conf.fromCombiner(statusMsg.SenderID) {
+			lgEngine.Warn("a combiner-start report from another than this agent's combiner, ignored", "sender", statusMsg.SenderID)
+			return
+		}
+		lgEngine.Info("the combiner reports a start: handing it every zone again", "combiner", statusMsg.SenderID)
+		e.conf.InternalMp.Handover.combinerStarted()
+	case "combiner-waits":
+		// The start report's repeat (plan S10): the combiner holds no
+		// hand-over for this zone. It is handed over again, alone.
+		if !e.conf.fromCombiner(statusMsg.SenderID) {
+			lgEngine.Warn("a combiner-waits report from another than this agent's combiner, ignored", "sender", statusMsg.SenderID, "zone", statusMsg.Zone)
+			return
+		}
+		lgEngine.Info("the combiner waits for the zone's hand-over: handing it again", "combiner", statusMsg.SenderID, "zone", statusMsg.Zone)
+		e.conf.InternalMp.Handover.combinerWaits(statusMsg.Zone)
 	}
 }
 
@@ -116,9 +149,22 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 	if !exists {
 		return
 	}
-	e.conf.noteKeyInventory(ctx, zd, inventoryMsg)
-	changed, ds, err := zd.LocalDnskeysFromKeystate()
-	if err != nil || !changed {
+	if !e.conf.noteKeyInventory(ctx, zd, inventoryMsg) {
+		return // older than the zone's recorded inventory
+	}
+	changed, ds, err := zd.LocalDnskeysFromKeystate(ourID, nil)
+	if err != nil {
+		return
+	}
+	// The keys the signer sends again go to the peers again, tracked for
+	// them, whether or not the key set changed: unmarked, an unchanged
+	// inventory distributes nothing, and the key lifecycle's resend never
+	// left this agent (#256).
+	if resendKeys(ds, inventoryMsg.Resend, inventoryMsg.Inventory) {
+		lgEngine.Info("the signer sends keys again: distributing them to the peers again", "zone", inventoryMsg.Zone, "keys", inventoryMsg.Resend)
+		changed = true
+	}
+	if !changed {
 		return
 	}
 	e.conf.InternalMp.AgentRegistry.SyncRequestHandler(ourID, SyncRequest{
@@ -132,6 +178,54 @@ func (e *HsyncDataEngine) handleKeystateInventory(ctx context.Context, ourID Age
 			CurrentLocalKeys: ds.CurrentLocalKeys,
 			CurrentKeyStates: ds.CurrentKeyStates,
 			StatesChanged:    ds.StatesChanged,
+			Resend:           ds.Resend,
+
+			ResendRemovedTags: ds.ResendRemovedTags,
 		},
 	}, synchedDataUpdateQ, msgQs)
+}
+
+// resendKeys adds to ds the keys whose distribution the signer's key
+// lifecycle sends again (tags): a key this provider serves as an add, and
+// one of its own it has withdrawn (mpremove, removed) as a removal, by its
+// tag alone (ResendRemovedTags). Each is then a key the distribution is
+// tracked for (DnskeyKeyTags), and ds is marked as a resend, which the data
+// engine distributes even when its repo already holds the set. A tag that is
+// neither, another provider's key among them, is not named. False when no
+// key of tags is named.
+func resendKeys(ds *DnskeyStatus, tags []uint16, inv []KeyInventoryItem) bool {
+	if ds == nil || len(tags) == 0 {
+		return false
+	}
+	find := func(rrs []dns.RR, tag uint16) dns.RR {
+		for _, rr := range rrs {
+			if k, ok := rr.(*dns.DNSKEY); ok && k.KeyTag() == tag {
+				return rr
+			}
+		}
+		return nil
+	}
+	named := false
+	for _, tag := range tags {
+		if find(ds.LocalAdds, tag) != nil || find(ds.LocalRemoves, tag) != nil || slices.Contains(ds.ResendRemovedTags, tag) {
+			named = true // in this distribution already
+			continue
+		}
+		if rr := find(ds.CurrentLocalKeys, tag); rr != nil {
+			ds.LocalAdds = append(ds.LocalAdds, rr)
+			named = true
+			continue
+		}
+		withdrawn := slices.ContainsFunc(inv, func(it KeyInventoryItem) bool {
+			return it.KeyTag == tag && (it.State == DnskeyStateMpremove || it.State == tdns.DnskeyStateRemoved)
+		})
+		if withdrawn {
+			ds.ResendRemovedTags = append(ds.ResendRemovedTags, tag)
+			named = true
+		}
+	}
+	if named {
+		ds.Resend = true
+	}
+	return named
 }

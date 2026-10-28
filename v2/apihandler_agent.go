@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -77,6 +78,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 
 		case "update-local-zonedata":
 			lgApi.Debug("update-local-zonedata", "addedRRs", amp.AddedRRs, "removedRRs", amp.RemovedRRs)
+			// Refused here: the command reaches the update queue through
+			// CommandHandler before EvaluateUpdate runs.
+			if !votesInZone(amp.Zone, AgentId(mp.Identity)) {
+				resp.Error = true
+				resp.ErrorMsg = noRoleEditRefusal(amp.Zone)
+				return
+			}
 
 			conf.InternalMp.MsgQs.Command <- &AgentMgmtPostPlus{
 				amp,
@@ -97,6 +105,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			if len(amp.RRs) == 0 {
 				resp.Error = true
 				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+			// An agent whose provider has no role in the zone stores and
+			// sends nothing of its own for it (the membership design, 2.3).
+			if !votesInZone(amp.Zone, AgentId(mp.Identity)) {
+				resp.Error = true
+				resp.ErrorMsg = noRoleEditRefusal(amp.Zone)
 				return
 			}
 			// Per-RRtype submission policy: allow NS (if nsmgmt=agent),
@@ -446,48 +461,13 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
 			} else {
-				inv := zd.GetLastKeyInventory()
-				if inv == nil {
+				msg, err := zd.distributeRefreshedKeys(r.Context(), AgentId(mp.Identity))
+				if err != nil {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange returned no inventory for zone %s", amp.Zone)
+					resp.ErrorMsg = err.Error()
 					return
 				}
-				nForeign := 0
-				for _, entry := range inv.Inventory {
-					if entry.State == DnskeyStateForeign {
-						nForeign++
-					}
-				}
-				// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
-				changed, dskeyStatus, err := zd.LocalDnskeysFromKeystate()
-				if err != nil {
-					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
-				}
-				if changed && dskeyStatus != nil {
-					select {
-					case zd.SyncQ <- SyncRequest{
-						Command:      "SYNC-DNSKEY-RRSET",
-						ZoneName:     ZoneName(zd.ZoneName),
-						ZoneData:     zd.ZoneData,
-						DnskeyStatus: dskeyStatus,
-					}:
-					case <-r.Context().Done():
-						resp.Error = true
-						resp.ErrorMsg = "request cancelled while enqueuing SYNC-DNSKEY-RRSET"
-						return
-					case <-time.After(2 * time.Second):
-						resp.Error = true
-						resp.ErrorMsg = "SyncQ full, SYNC-DNSKEY-RRSET not enqueued"
-						return
-					}
-				}
-				resp.Msg = fmt.Sprintf("Key inventory refreshed for zone %s: %d keys (%d local, %d foreign)",
-					amp.Zone, len(inv.Inventory),
-					len(inv.Inventory)-nForeign, nForeign)
-				if changed {
-					resp.Msg += fmt.Sprintf(", SDE updated (%d adds, %d removes)",
-						len(dskeyStatus.LocalAdds), len(dskeyStatus.LocalRemoves))
-				}
+				resp.Msg = msg
 			}
 
 		case "resync":
@@ -541,10 +521,41 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				return
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
+			status.DSSet = conf.dsSetLine(zd.ZoneData)
+			status.Instructions = conf.InternalMp.Instructions.Status(string(amp.Zone))
+			status.Combiner = conf.InternalMp.Handover.statusLine(string(amp.Zone))
+			if tm := conf.InternalMp.MPTransport; tm != nil {
+				status.InstructionMembers = tm.stamps.members(string(amp.Zone))
+			}
+			// the leader's sync held for the zone's SIG(0) key (step 7b),
+			// beside the catch-up's hold: its own line
+			if lem.IsLeader(amp.Zone) {
+				if why := conf.keyHoldReason(ctx, amp.Zone); why != "" {
+					status.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (" + why + ")"
+				}
+			}
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
+		case "instructions-forget":
+			// The one exception to never giving a serial up (design rule
+			// 3), refused unless the zone is steady here.
+			if err := conf.InternalMp.Instructions.Forget(string(amp.Zone)); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			// the combiner forgets what it held too, at the next hand-over
+			conf.InternalMp.Handover.forgot(string(amp.Zone))
+			conf.handOverToCombiner(string(amp.Zone))
+			resp.Msg = fmt.Sprintf("Forgot the stored serials of zone %s; the next copy of the zone loaded (zone reload) is noted afresh", amp.Zone)
+
 		case "parentsync-election":
+			if !votesInZone(amp.Zone, AgentId(mp.Identity)) {
+				resp.Error = true
+				resp.ErrorMsg = noRoleLeadRefusal(amp.Zone)
+				return
+			}
 			lem := conf.InternalMp.LeaderElectionManager
 			if lem == nil {
 				resp.Error = true
@@ -562,15 +573,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 							amp.Zone, pg.GroupHash[:8])
 						return
 					}
-					localID := mp.Identity
-					weVote := false
-					for _, m := range pg.VotingMembers {
-						if m == localID {
-							weVote = true
-							break
-						}
-					}
-					if !weVote {
+					if !isAmong(pg.VotingMembers, AgentId(mp.Identity)) {
 						resp.Msg = fmt.Sprintf("group election observed only for zone %s (this node is not a voting member of group %s)",
 							amp.Zone, pg.GroupHash[:8])
 						return
@@ -607,29 +610,35 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = "IMR cache not available"
 				return
 			}
-			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
-			if err != nil || len(sak.Keys) == 0 {
+			key, err := firstActiveSig0Key(hdb.KeyDB, string(amp.Zone))
+			if err != nil || key == nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
 				return
 			}
-			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, err := queryParentKeyStateDetailed(hdb, imr, string(amp.Zone), keyid)
+			keyid := key.key.KeyTag()
+			keyState, extra, authenticated, err := queryParentKeyStateDetailed(r.Context(), hdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
 				return
 			}
 			resp.Data = map[string]interface{}{
-				"zone":       string(amp.Zone),
-				"keyid":      keyid,
-				"state":      keyState,
-				"state_name": edns0.KeyStateToString(keyState),
-				"extra_text": extra,
+				"zone":          string(amp.Zone),
+				"keyid":         keyid,
+				"state":         keyState,
+				"state_name":    edns0.KeyStateToString(keyState),
+				"extra_text":    extra,
+				"authenticated": authenticated,
 			}
-			resp.Msg = fmt.Sprintf("Parent says: %s", edns0.KeyStateToString(keyState))
+			resp.Msg = parentKeyStateLine(keyState, authenticated)
 
 		case "parentsync-bootstrap":
+			if !votesInZone(amp.Zone, AgentId(mp.Identity)) {
+				resp.Error = true
+				resp.ErrorMsg = noRoleLeadRefusal(amp.Zone)
+				return
+			}
 			lem := conf.InternalMp.LeaderElectionManager
 			if lem == nil {
 				resp.Error = true
@@ -641,18 +650,18 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
 				return
 			}
-			sak, err := hdb.GetSig0Keys(string(amp.Zone), tdns.Sig0StateActive)
-			if err != nil || len(sak.Keys) == 0 {
+			key, refusal := bootstrapKey(hdb.KeyDB, amp.Zone)
+			if refusal != "" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				resp.ErrorMsg = refusal
 				return
 			}
-			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			algorithm := sak.Keys[0].KeyRR.Algorithm
+			keyid := key.key.KeyTag()
+			algorithm := key.key.Algorithm
 			// The bootstrap runs async, past the end of this request, so not
 			// r.Context(); the lifecycle ctx stops its IMR wait and retries
 			// at shutdown.
-			go conf.ParentSyncAfterKeyPublication(ctx, amp.Zone, string(amp.Zone), keyid, algorithm)
+			conf.launchKeyPoll(ctx, nil, amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
@@ -1109,13 +1118,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			peer := conf.InternalMp.MPTransport.GetOrCreatePeer(agent)
 
 			// Create sync request
-			syncReq := &PeerSyncRequest{
-				SenderID:       mp.Identity,
-				Zone:           string(amp.Zone),
-				SyncType:       PeerSyncTypeNS, // Default to NS, could be detected from RRs
-				Records:        groupRRStringsByOwner(amp.RRs),
-				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
-				MessageType:    "sync",
+			syncReq, err := debugSyncRequest(mp.Identity, string(amp.Zone), amp.RRs,
+				fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()))
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
 			}
 
 			lgApi.Info("sending sync to agent", "target", amp.AgentId, "zone", amp.Zone, "rrs", len(amp.RRs))
@@ -1158,9 +1166,70 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				stats.TotalPending, stats.TotalDelivered, stats.TotalFailed, stats.TotalExpired)
 			resp.Status = "ok"
 
+		case "inject-named-sender":
+			conf.debugInjectNamedSender(amp, &resp)
+
+		case "inject-combiner-origin":
+			conf.debugInjectCombinerOrigin(amp, &resp)
+
+		case "inject-peer-keystate":
+			conf.debugInjectPeerKeystate(mp, amp, &resp)
+
+		case "inject-hello":
+			conf.debugInjectHello(r.Context(), amp, &resp)
+
+		case "inject-replace":
+			conf.debugInjectReplace(r.Context(), mp, amp, &resp)
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)
 		}
 	}
+}
+
+// distributeRefreshedKeys is the rest of the operator's refresh-keys, once
+// the signer's inventory is in: it derives this provider's DNSKEYs from the
+// inventory, hands a change to the zone's SyncQ, and says what it did. An
+// agent whose provider self has no role in the zone distributes no keys of
+// its own, and says so in place of "Key inventory refreshed".
+func (mpzd *MPZoneData) distributeRefreshedKeys(ctx context.Context, self AgentId) (string, error) {
+	inv := mpzd.GetLastKeyInventory()
+	if inv == nil {
+		return "", fmt.Errorf("KEYSTATE exchange returned no inventory for zone %s", mpzd.ZoneName)
+	}
+	nForeign := 0
+	for _, entry := range inv.Inventory {
+		if entry.State == DnskeyStateForeign {
+			nForeign++
+		}
+	}
+	// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
+	changed, dskeyStatus, err := mpzd.LocalDnskeysFromKeystate(self, nil)
+	if errors.Is(err, errNoRoleInZone) {
+		return "", fmt.Errorf("zone %s: %w; its keys are not distributed", mpzd.ZoneName, err)
+	}
+	if err != nil {
+		lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
+	}
+	if changed && dskeyStatus != nil {
+		select {
+		case mpzd.SyncQ <- SyncRequest{
+			Command:      "SYNC-DNSKEY-RRSET",
+			ZoneName:     ZoneName(mpzd.ZoneName),
+			ZoneData:     mpzd.ZoneData,
+			DnskeyStatus: dskeyStatus,
+		}:
+		case <-ctx.Done():
+			return "", errors.New("request cancelled while enqueuing SYNC-DNSKEY-RRSET")
+		case <-time.After(2 * time.Second):
+			return "", errors.New("SyncQ full, SYNC-DNSKEY-RRSET not enqueued")
+		}
+	}
+	msg := fmt.Sprintf("Key inventory refreshed for zone %s: %d keys (%d local, %d foreign)",
+		mpzd.ZoneName, len(inv.Inventory), len(inv.Inventory)-nForeign, nForeign)
+	if changed {
+		msg += fmt.Sprintf(", SDE updated (%d adds, %d removes)", len(dskeyStatus.LocalAdds), len(dskeyStatus.LocalRemoves))
+	}
+	return msg, nil
 }

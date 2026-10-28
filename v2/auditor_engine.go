@@ -257,14 +257,15 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 		return "", false, false
 	}
 	// Resolve the labels the way the zone view does (hsync3IdentitiesByLabel):
-	// inactive members included, identities compared as FQDNs. An identity
-	// may hold several labels, one agent serving as two providers: it signs
-	// if any of them is a signer, and the label recorded is the first in
-	// sorted order, not whichever a walk over the map meets first.
+	// ON records of the active instructions, identities compared as names.
+	// An identity may hold several labels, one agent serving as two
+	// providers: it signs if any of them is a signer, and the label recorded
+	// is the first in sorted order, not whichever a walk over the map meets
+	// first.
 	want := dns.Fqdn(identity)
 	var labels []string
 	for lbl, id := range zd.hsync3IdentitiesByLabel() {
-		if id == want {
+		if core.EqualNames(id, want) {
 			labels = append(labels, lbl)
 		}
 	}
@@ -276,29 +277,39 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 	// A member is a signer only when listed under signers=; a servers=
 	// member serves the zone without signing it. Without an HSYNCPARAM the
 	// zone declares no roles at all.
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
+	in := zd.instructions()
+	if in == nil || !in.HasParam {
 		return label, false, false
 	}
-	hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !ok || len(hpRRset.RRs) == 0 {
-		return label, false, false
+	isSigner = slices.ContainsFunc(in.Signers, func(l string) bool { return slices.Contains(labels, l) })
+	return label, isSigner, true
+}
+
+// bookedBeatZones is the zones the auditor books a beat for: every zone the
+// beat names (tdns-mp #153). A beat names all the zones its sender shares
+// with us, in an order the sender leaves to chance, and the transport
+// authorizes it for the first. Booked for that one alone, a zone saw a beat
+// only when it happened to come first: a healthy provider read as silent, or
+// as never seen, and one that had stopped was not told from it. The other
+// zones meet the transport's check here, so a sender is booked only where its
+// beat would have been accepted had that zone come first.
+func bookedBeatZones(ar *AgentRegistry, report *AgentMsgReport) []ZoneName {
+	if report.Zone == "" {
+		return nil
 	}
-	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return label, false, false
+	zones := []ZoneName{report.Zone}
+	if ar == nil || ar.MPTransport == nil {
+		return zones
 	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return label, false, false
-	}
-	for _, l := range hp.GetSigners() {
-		if slices.Contains(labels, normalizeHSYNC3Label(l)) {
-			isSigner = true
-			break
+	for _, z := range report.Zones {
+		if z == "" || z == report.Zone {
+			continue
+		}
+		if ok, _ := ar.MPTransport.IsPeerAuthorized(string(report.Identity), string(z)); ok {
+			zones = append(zones, z)
 		}
 	}
-	return label, isSigner, true
+	return zones
 }
 
 func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
@@ -320,22 +331,28 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 				if ar != nil {
 					ar.HeartbeatHandler(report)
 				}
-				if sm != nil && report.Zone != "" {
-					zone := string(report.Zone)
+				if sm != nil {
 					identity := string(report.Identity)
-					label, gossipState, isSigner := providerBeatMeta(ar, report.Zone, identity)
-					zs := sm.GetOrCreateZone(zone)
-					if IsAuditorIdentity(zone, identity) {
-						zs.UpdateAuditorBeat(identity, label, gossipState)
-					} else if IsProviderIdentity(zone, identity) {
-						zs.UpdateProviderBeat(identity, label, gossipState, isSigner)
+					for _, z := range bookedBeatZones(ar, report) {
+						zone := string(z)
+						label, gossipState, isSigner := providerBeatMeta(ar, z, identity)
+						zs := sm.GetOrCreateZone(zone)
+						if IsAuditorIdentity(zone, identity) {
+							zs.UpdateAuditorBeat(identity, label, gossipState)
+						} else if IsProviderIdentity(zone, identity) {
+							zs.UpdateProviderBeat(identity, label, gossipState, isSigner)
+						}
 					}
 				}
 				var msg interface{}
 				if abp, ok := report.Msg.(*AgentBeatPost); ok {
-					gossip := make([]hsync.GossipMessage, len(abp.Gossip))
+					// the stamp entry is noted where the beat arrives
+					// (routeBeatMessage), never merged as a group
+					gossip := make([]hsync.GossipMessage, 0, len(abp.Gossip))
 					for i := range abp.Gossip {
-						gossip[i] = abp.Gossip[i]
+						if abp.Gossip[i].GroupHash != hsync.StampGroupHash {
+							gossip = append(gossip, abp.Gossip[i])
+						}
 					}
 					msg = &hsync.BeatPost{
 						MessageType: hsync.MsgBeat,

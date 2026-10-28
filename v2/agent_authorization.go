@@ -8,8 +8,12 @@
 package tdnsmp
 
 import (
+	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
@@ -40,18 +44,15 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 		return true, "authorized via configured peer"
 	}
 
-	// Check 2: LEGACY state agents (established relationship, zero zones)
-	// These agents were previously in HSYNC3 but all shared zones have been removed
-	// We still allow beat messages to maintain the relationship. LEGACY is now a
-	// derived overlay (END.0): an established peer with zero participations,
-	// computed by effectiveAgentState from the canonical transport.Peer store.
-	if tm.agentRegistry != nil {
-		id := AgentId(dns.Fqdn(senderID))
-		if _, exists := tm.agentRegistry.S.Get(id); exists {
-			if tm.agentRegistry.effectiveAgentState(id) == AgentStateLegacy {
-				return true, "authorized via LEGACY state (established relationship, zero shared zones)"
-			}
-		}
+	// Check 2: a peer this agent holds that shares no zone with it, whatever
+	// its state. Such a peer is kept for the hold time and then removed (the
+	// end of comms, design 3.1, decision 11); until then its hellos and beats
+	// are taken, also once its beats have failed for a while and it reads
+	// DEGRADED, a hello after its restart included. Every rule that asks for
+	// a member refuses it. A removed peer is not in the registry, and is
+	// refused here.
+	if tm.agentRegistry.isKnownLegacy(senderID) {
+		return true, "authorized via LEGACY state (a held peer with zero shared zones, whatever its state)"
 	}
 
 	// Check 3: Implicit authorization via HSYNC3 membership
@@ -62,6 +63,9 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 			return true, fmt.Sprintf("authorized via HSYNC3 membership for zone %s", zone)
 		}
 		lgAgent.Debug("sender not in HSYNC3", "sender", senderID, "zone", zone, "reason", reason)
+		if tm.keyHandOverAdmits(senderID, zone) {
+			return true, fmt.Sprintf("authorized for the hand-over of zone %s's SIG(0) key only", zone)
+		}
 	} else {
 		// No specific zone - check if sender is in HSYNC3 for ANY zone we share
 		// This is used for zone-agnostic operations like heartbeats
@@ -117,11 +121,11 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 	if err != nil || apex == nil {
 		return false, fmt.Sprintf("zone %q apex unavailable", zone)
 	}
-	members := participantFQDNSetForApex(apex)
-	if !members[dns.Fqdn(tm.LocalID)] {
+	members := participantFQDNSet(activeOr(zd.ZoneName, apex))
+	if !members.has(tm.LocalID) {
 		return false, fmt.Sprintf("our identity %q is not a participant in zone %s", tm.LocalID, zone)
 	}
-	if !members[dns.Fqdn(senderID)] {
+	if !members.has(senderID) {
 		return false, fmt.Sprintf("sender %q is not a participant in zone %s", senderID, zone)
 	}
 
@@ -137,9 +141,6 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		return false, ""
 	}
 
-	localFQDN := dns.Fqdn(tm.LocalID)
-	senderFQDN := dns.Fqdn(senderID)
-
 	// Iterate through all zones we know about
 	for _, zoneName := range tm.getZoneNames() {
 		zd, exists := tm.getZone(zoneName)
@@ -150,9 +151,9 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		if err != nil || apex == nil {
 			continue
 		}
-		members := participantFQDNSetForApex(apex)
+		members := participantFQDNSet(activeOr(zd.ZoneName, apex))
 		// Both our identity and the sender must be participants in this zone.
-		if members[localFQDN] && members[senderFQDN] {
+		if members.has(tm.LocalID) && members.has(senderID) {
 			lgAgent.Debug("both identities are participants (any-zone check)",
 				"local", tm.LocalID, "sender", senderID, "zone", zoneName)
 			return true, zoneName
@@ -161,4 +162,189 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 
 	// Not a shared participant in any zone
 	return false, ""
+}
+
+// --- The hand-over of a zone's SIG(0) key by a provider without a role ---
+//
+// The owner takes the role of the provider that leads a zone's group and
+// keeps its HSYNC3 record for now. That provider holds the zone's SIG(0) key,
+// and the leader that takes the zone up next asks it for the key
+// (roleLessKeyHolders). isInHSYNC admits a message about a zone only between
+// two of its role holders, so the request was refused at the holder, which
+// has no role now, and the answer at the asker, from a sender with no role.
+// The key never moved, and the zone's delegation sync waited for good.
+//
+// keyHandOverAdmits lets those two messages in, and keyHandOverOnly lets
+// nothing else through that came in that way. Membership for a provider
+// without a role, in general, is the owner-instruction transitions design's
+// (its switch); this is the key's hand-over alone.
+
+// keyHandOverAdmits: a message about zone from senderID that isInHSYNC
+// refuses is let in for the zone's SIG(0) key alone. Either this agent is
+// still listed in the zone's HSYNC3 without a role, and the sender is a
+// voting member, who may ask for the key (mayHoldZoneSig0Key). Or this agent
+// has asked the sender for the zone's key, and the answer is due (keyAsks).
+func (tm *MPTransportBridge) keyHandOverAdmits(senderID, zone string) bool {
+	z := ZoneName(dns.Fqdn(zone))
+	if tm.keyAsks.open(senderID, string(z)) {
+		return true
+	}
+	if !zoneListsAgent(z, AgentId(tm.LocalID)) || !mayHoldZoneSig0Key(z, AgentId(senderID)) {
+		return false
+	}
+	participants, _ := participantsOf(instructionsFor(z))
+	return !isAmong(participants, AgentId(tm.LocalID))
+}
+
+// admittedForKeyOnly: the message came in through keyHandOverAdmits alone.
+// The checks that admit a message in full are asked again, and only when
+// they refuse it.
+func (tm *MPTransportBridge) admittedForKeyOnly(senderID, zone string) bool {
+	if zone == "" || tm.isAuthorizedPeer(senderID) {
+		return false
+	}
+	if tm.agentRegistry.isKnownLegacy(senderID) {
+		return false
+	}
+	ok, _ := tm.isInHSYNC(senderID, zone)
+	return !ok
+}
+
+// keyHandOverGate is the router middleware that applies keyHandOverOnly
+// before the verb handlers run: a message let in for the zone's SIG(0) key
+// alone that is not about the key is refused, and no handler takes it or
+// acknowledges it as taken. As in refuseNamedSender, the refusal is the
+// rcode the outermost reply middleware answers with, and keyHandOverOnly's
+// warning is its log line: nothing goes on to the next middleware, so no
+// handler error is logged.
+func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
+	if msg, ok := ctx.Incoming(); ok && !tm.keyHandOverOnly(msg) {
+		ctx.SetResponseRcode(dns.RcodeRefused)
+		return nil
+	}
+	return next(ctx)
+}
+
+// keyHandOverOnly: a message that came in for the zone's SIG(0) key alone
+// (admittedForKeyOnly) is the request for the key, its answer, or the
+// delivery confirmation of either. Anything else that came in that way is
+// not acted on.
+func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
+	// The sender is the one admission judged: the transport's, never the
+	// author the payload names.
+	sender := msg.TransportSender
+	if !tm.admittedForKeyOnly(sender, msg.Zone) {
+		return true
+	}
+	switch msg.Token() {
+	case "confirm":
+		// The delivery confirmation of the key's request or of its answer,
+		// and of no other message: its distribution id is one this agent
+		// sent the key exchange with, to this sender (expectConfirm).
+		var p transport.DnsConfirmPayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil && tm.keyAsks.confirmExpected(sender, p.DistributionID) {
+			return true
+		}
+	case "rfi":
+		// Routed by the payload's MessageType, which defaults to a sync
+		// (routeSyncMessage): the payload must say rfi itself, and carry
+		// nothing an update would apply.
+		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.MessageType == string(AgentMsgRfi) &&
+			p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" && len(p.GetRecords()) == 0 && len(p.GetOperations()) == 0 {
+			return true
+		}
+	case "config":
+		var p DnsConfigPayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil && p.Subtype == "sig0key" {
+			return true
+		}
+	}
+	lgAgent.Warn("a message let in for the zone's SIG(0) key alone is not about the key, refusing",
+		"sender", sender, "zone", msg.Zone, "type", msg.Token())
+	return false
+}
+
+// keyAskTable is the requests for a zone's SIG(0) key this agent has out,
+// by peer and zone: an answer from that peer about that zone is due. And the
+// distribution ids of the key exchange's own messages, by the peer they went
+// to, whose delivery confirmations are due (expectConfirm).
+type keyAskTable struct {
+	mu       sync.Mutex
+	asks     map[string]int
+	confirms map[string]keyConfirm
+}
+
+// keyConfirm is a delivery confirmation due from peer until expires.
+type keyConfirm struct {
+	peer    string
+	expires time.Time
+}
+
+// keyConfirmWait is how long a key exchange message's delivery confirmation
+// is let in: well past the transport's retries.
+const keyConfirmWait = 5 * time.Minute
+
+// expectConfirm notes a key exchange message sent to peer under id.
+func (t *keyAskTable) expectConfirm(peer, id string) {
+	if id == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.confirms == nil {
+		t.confirms = map[string]keyConfirm{}
+	}
+	now := time.Now()
+	for k, c := range t.confirms {
+		if now.After(c.expires) {
+			delete(t.confirms, k)
+		}
+	}
+	t.confirms[id] = keyConfirm{peer: dns.CanonicalName(peer), expires: now.Add(keyConfirmWait)}
+}
+
+// confirmExpected: a delivery confirmation from peer for id is due.
+func (t *keyAskTable) confirmExpected(peer, id string) bool {
+	if id == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	c, ok := t.confirms[id]
+	return ok && c.peer == dns.CanonicalName(peer) && time.Now().Before(c.expires)
+}
+
+// keyAskKey: identities and zone names compare as canonical names, so a
+// peer configured in another case is the same peer.
+func keyAskKey(peer, zone string) string {
+	return dns.CanonicalName(peer) + " " + dns.CanonicalName(zone)
+}
+
+// start notes a request out, and returns the call that ends it. The call
+// ends that request once, however often it is made: a second call never
+// ends another request to the same peer for the same zone.
+func (t *keyAskTable) start(peer, zone string) func() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.asks == nil {
+		t.asks = map[string]int{}
+	}
+	k := keyAskKey(peer, zone)
+	t.asks[k]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.asks[k]--; t.asks[k] <= 0 {
+				delete(t.asks, k)
+			}
+		})
+	}
+}
+
+func (t *keyAskTable) open(peer, zone string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.asks[keyAskKey(peer, zone)] > 0
 }

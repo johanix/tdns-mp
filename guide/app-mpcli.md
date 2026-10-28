@@ -142,6 +142,13 @@ Role-specific commands include:
 - **`agent zone edits list`** — inspect the SDE.
 - **`agent peer resync`** — push/pull resync against
   peers and combiner.
+- **`agent parentsync status / election / inquire /
+  bootstrap`** — a zone's delegation sync towards the
+  parent, as this agent sees it: show the leader and the
+  SIG(0) key, start a leader election, ask the parent for
+  the state of the key, bootstrap the key with the parent
+  (leader only). `election` and `bootstrap` change state;
+  `-h` on each says what it refuses.
 - **`combiner zone edits list / approve / reject /
   clear / reapply / purge`** — combiner contribution
   inspection and lifecycle.

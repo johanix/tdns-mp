@@ -81,6 +81,19 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 		}
 
 		switch req.Command {
+		case "stamps":
+			// Each distribution's stamps per recipient (plan S5b): this
+			// agent's at its latest send, the recipient's at its latest
+			// confirmation; over both mechanisms
+			var rows []DistributionStamps
+			if tm := conf.InternalMp.MPTransport; tm != nil {
+				rows = tm.stamps.distributionStamps(req.Zone)
+			}
+			for _, r := range rows {
+				resp.Data = append(resp.Data, r)
+			}
+			resp.Msg = fmt.Sprintf("%d distribution(s) with stamps", len(rows))
+
 		case "list":
 			// List all distributions from this agent
 			senderID := string(conf.MpConfig().Identity)
@@ -135,14 +148,17 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			switch opName {
 			case "ping":
+				// The transport the operator named, and that one only: --api
+				// or --dns (the default).
+				useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
 				if toIdentity == "combiner" {
-					useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
 					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
 					resp.Error = pingResp.Error
 					resp.ErrorMsg = pingResp.ErrorMsg
 					resp.Msg = pingResp.Msg
 				} else {
-					// Ping to peer agent: same mechanism as combiner (SendPing); lookup peer by FQDN identity
+					// Ping to a peer agent, looked up by FQDN identity (discovered if
+					// unknown), over the transport named, as to the combiner (pingOn).
 					if conf.InternalMp.TransportManager == nil {
 						resp.Error = true
 						resp.ErrorMsg = "TransportManager not configured"
@@ -182,25 +198,15 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						}
 						lgApi.Info("discovered and registered agent", "agent", toFqdn)
 					}
-					if peer.CurrentAddress() == nil {
-						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("peer %q has no address configured", req.To)
-						return
-					}
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
-					pingResp, err := conf.InternalMp.TransportManager.SendPing(ctx, peer)
+					msg, err := pingOn(ctx, conf.InternalMp.TransportManager, peer, useAPI)
 					if err != nil {
 						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("ping failed: %v", err)
+						resp.ErrorMsg = fmt.Sprintf("ping to %s: %v", toFqdn, err)
 						return
 					}
-					if !pingResp.OK {
-						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("peer did not acknowledge (responder: %s)", pingResp.ResponderID)
-						return
-					}
-					resp.Msg = fmt.Sprintf("dnsping ok: %s echoed nonce", pingResp.ResponderID)
+					resp.Msg = msg
 				}
 			default:
 				resp.Error = true
@@ -257,16 +263,22 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			discoveryInfo := map[string]interface{}{
 				"identity": peer.ID,
 			}
-			if peer.APIEndpoint != "" {
-				discoveryInfo["api_uri"] = peer.APIEndpoint
+			if apiURI := peer.GetAPIEndpoint(); apiURI != "" {
+				discoveryInfo["api_uri"] = apiURI
 			}
-			if addr := peer.CurrentAddress(); addr != nil {
-				discoveryInfo["host"] = addr.Host
-				discoveryInfo["port"] = addr.Port
-				discoveryInfo["transport"] = addr.Transport
+			// The API's address and the DNS carrier's, each on its own: a
+			// peer that offers only the API has no DNS address.
+			if addr := peer.MechanismAddress("API"); addr != nil {
+				discoveryInfo["api_address"] = addr.HostPort()
+			}
+			if dnsURI := peer.GetDNSEndpoint(); dnsURI != "" {
+				discoveryInfo["dns_uri"] = dnsURI
+			}
+			if addr := peer.DNSCarrierAddress(); addr != nil {
+				discoveryInfo["dns_address"] = addr.HostPort()
 			}
 			discoveryInfo["state"] = peer.GetState().String()
-			discoveryInfo["preferred_transport"] = peer.PreferredTransport
+			discoveryInfo["preferred_transport"] = peer.GetPreferredTransport()
 
 			// Return result through handledManually
 			respMap := tdns.SanitizeForJSON(resp).(AgentDistribResponse)
@@ -381,8 +393,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					var apiPort uint16
 					var apiAddrs []string
 					if apiPeer != nil {
-						apiURI = apiPeer.APIEndpoint
-						if a := apiPeer.CurrentAddress(); a != nil {
+						apiURI = apiPeer.GetAPIEndpoint()
+						if a := apiPeer.MechanismAddress("API"); a != nil {
 							apiPort = a.Port
 							apiAddrs = []string{a.Host}
 						} else {
@@ -394,7 +406,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						apiAddr = "-"
 					}
 					// Phase 2.5: crypto presence from transport.Peer's slots.
-					hasTLSA := apiPeer != nil && apiPeer.MechanismTLSA("API") != nil
+					hasTLSA := apiPeer != nil && apiPeer.HasMechanismTLSA("API")
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
@@ -410,6 +422,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					}
 					if apiPeer != nil {
 						peerInfo.ContactInfo = apiPeer.MechanismContactInfo("API")
+						peerInfo.setDiscovery(apiPeer, "API")
 						s := apiPeer.Stats.GetDetailedStats()
 						peerInfo.HelloSent = s.HelloSent
 						peerInfo.HelloReceived = s.HelloReceived
@@ -459,15 +472,15 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					}
 
 					// S2: address fields from the canonical transport.Peer.
-					// dnsURI = display URL (DNSEndpoint); dnsPort/dnsAddrs = resolved
-					// DNS-mechanism address. AgentDetails fallback only when the peer
+					// dnsURI = display URL (DNSEndpoint); dnsPort/dnsAddrs = the address
+					// the DNS carrier dials. AgentDetails fallback only when the peer
 					// is not yet in the PeerRegistry.
 					var dnsURI string
 					var dnsPort uint16
 					var dnsAddrs []string
 					if dnsPeer != nil {
-						dnsURI = dnsPeer.DNSEndpoint
-						if a := dnsPeer.CurrentAddress(); a != nil {
+						dnsURI = dnsPeer.GetDNSEndpoint()
+						if a := dnsPeer.DNSCarrierAddress(); a != nil {
 							dnsPort = a.Port
 							dnsAddrs = []string{a.Host}
 						} else {
@@ -503,6 +516,7 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					}
 					if dnsPeer != nil {
 						peerInfo.ContactInfo = dnsPeer.MechanismContactInfo("DNS")
+						peerInfo.setDiscovery(dnsPeer, "DNS")
 						s := dnsPeer.Stats.GetDetailedStats()
 						peerInfo.HelloSent = s.HelloSent
 						peerInfo.HelloReceived = s.HelloReceived
@@ -705,7 +719,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		return agents
 	}
 
-	members := participantFQDNSetForApex(zoneApex(ZoneName(zoneName)))
+	members := participantFQDNSet(instructionsFor(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		identity := agent.ID
 
@@ -720,7 +734,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 			}
 		}
 
-		if members[dns.Fqdn(string(identity))] {
+		if members.has(string(identity)) {
 			agents = append(agents, string(identity))
 		}
 	})

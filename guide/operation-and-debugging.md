@@ -77,6 +77,21 @@ back yet.
 `-v` adds full per-peer detail: published address, JWK
 KeyID, last successful round-trip, error counters.
 
+A state with a mark after it is about the peer's DNSSEC
+chain: `(-)` means the peer's DNS data (its URI, SVCB,
+TLSA and JWK records) is not validated, `(!)` that it
+fails validation. `NEEDED(-)` is a peer this agent
+refuses because its chain is broken and
+`imrengine.require-dnssec-validation` is on;
+`OPERATIONAL(-)` is a peer in use on data nobody
+validated, because `imrengine.require-dnssec-validation`
+is false. Under the table,
+"Discovery:" lists, for each peer that has one, the
+record and what is wrong with it, for example
+`URI at _https._tcp.agent.bravo.example.: answer
+insecure, DNSSEC validation required`. With validation
+off, the list ends with a warning that says so.
+
 ### 2.2 Ping a specific peer
 
 ```sh
@@ -107,6 +122,22 @@ for its discovery names, and restarts the
   rotated, etc.).
 - The agent is caching a stale resolution for the
   peer's identity.
+
+An agent does part of this by itself. When a peer
+refuses its hello three times in a row, the agent
+flushes the IMR cache entries for the peer's discovery
+names and looks the peer up again, and repeats that at
+most once a minute for as long as the peer refuses. A
+JWK record that changed after the peer was discovered
+is picked up that way without a reset. The log says
+"peer keeps refusing our hello" when it happens.
+
+The agent does the same when a peer says hello and the
+agent has not found an address for it: an earlier
+lookup may have been answered before the peer's records
+were published, and the IMR caches that answer. Both
+together flush and look one peer up at most once a
+minute.
 
 `peer reset` is an agent/auditor command only. Signer
 and combiner use static peer configuration and respond
@@ -185,6 +216,15 @@ cell with low AGE values. Common failure patterns:
 - **Asymmetric — alpha sees bravo OPERATIONAL but bravo
   sees alpha NEEDED**: one direction of the transport
   works, the other does not. Often firewall.
+- **A cell marked `(-)` or `(!)`**: the reporter cannot
+  validate that peer's DNS data (`(!)`: it fails
+  validation). `NEEDED(-)` means the reporter refuses the
+  peer for it; `OPERATIONAL(-)` that the reporter runs
+  with DNSSEC validation not enforced, and the warning under the
+  matrix names every member where validation is not
+  enforced. Fix the
+  peer's chain (usually a missing DS at its parent), and
+  turn validation back on.
 
 `Leader: ... expires in ...` shows the current leader
 election state. `no election held` means the group has
@@ -249,6 +289,70 @@ combiner's contributions are documented in
 
 These are the bread-and-butter commands when something
 is wrong with what is being published.
+
+### 4.4 The SOA serial a signer serves
+
+Which serial a signer serves for a multi-provider zone
+depends on who signs the zone:
+
+- **A zone this provider signs** (its label is in
+  `signers=`) has a serial of the signer's own. It starts
+  at the combiner's serial and moves on by itself at
+  every publish, so it is normally ahead of the
+  combiner's.
+- **A zone this provider only serves**, signed by another
+  provider, is relayed as it was received: the upstream
+  signer's SOA, with its serial and its RRSIG. The two
+  signers answer with the same SOA:
+
+  ```sh
+  dog @<upstream-signer> +dnssec example.com. SOA
+  dog @<this-signer>     +dnssec example.com. SOA
+  ```
+
+  Nothing at this provider changes such a zone. A
+  `signer zone bump` of it is refused, and a server-wide
+  `outbound-soa-serial` setting does not apply to it.
+  A zone that no provider signs is relayed the same way,
+  from the provider's own combiner.
+
+**When the role changes.** A provider that starts to
+sign a zone it relayed goes on from one past the serial
+it was serving, also when its signer is restarted in
+between; the servers downstream of the signer keep
+transferring. A provider that stops signing a zone and
+relays it instead drops to the upstream signer's serial,
+which is normally lower than its own count. The servers
+downstream of it then hold the higher serial and need a
+forced retransfer, as after an upgrade (below).
+
+**Upgrading a signer that relays zones.** Earlier
+versions counted a serial of their own for a relayed
+zone as well, so a signer's copy could be a few serials
+ahead of its upstream's, or behind it, and its SOA then
+failed validation. A signer with this fix takes the
+upstream's serial at its first load. Where the old
+version was ahead, that serial is lower than the one it
+served, and the signer's log does not say so. The
+servers that transfer the zone from this signer (the
+provider's public nameservers, and its agent if it is
+not restarted after the signer) still hold the higher
+serial. They do not transfer a lower one, and go on
+serving their old copy until the upstream signer's
+serial has passed the one they hold. So after the
+upgrade, force a retransfer of each relayed zone on each
+of them: with
+`tdns-mpcli agent zone reload -z <zone> --force` for the
+agent, and with the server's own command for a
+nameserver that is not tdns. Then compare the SOA at the
+upstream signer, at this signer and at each of those
+servers.
+
+A signer logs `secondary SOA serial steps BACKWARDS to
+mirror upstream` when the serial of a zone drops while it
+runs. The same remedy applies. The command the message
+names is tdns-auth's; for a tdns-mp daemon it is the
+`zone reload ... --force` above.
 
 ## 5. Transactions and Queues
 

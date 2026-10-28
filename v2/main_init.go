@@ -16,6 +16,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -24,11 +25,13 @@ import (
 // (TransportManager, crypto, CHUNK handler, peer registration).
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// The key lifecycle owner, before tdns's MainInit so it is in place
-	// before any zone's first refresh: it owns nothing until the signer
-	// takes the zones its config names (key-lifecycle-zones), and tdns's
-	// own machine runs a zone it does not own. tdns-mp registers no key
-	// lifecycle hook with tdns any more (design S4a); the signer's start
-	// refuses a multi-provider zone left off the list instead.
+	// before any zone's first refresh: it owns nothing until the signer's
+	// start names the zones its config hands to the machine
+	// (key-lifecycle-zones; owned from then on once they have keys, #191)
+	// and the engine takes them, and tdns's own machine runs a zone it does
+	// not own. tdns-mp registers no key lifecycle hook with tdns any more
+	// (design S4a); the signer's start refuses a multi-provider zone left
+	// off the list instead.
 	conf.InternalMp.KeyLifecycleOwner = RegisterMPKeyLifecycleOwner(conf)
 	conf.InternalMp.KeyLifecycle = NewKeyLifecycleEngine(conf, conf.InternalMp.KeyLifecycleOwner)
 
@@ -300,16 +303,16 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 			if err != nil {
 				return fmt.Errorf("invalid port in %q for %s: %w", agentConf.Address, peerID, err)
 			}
-			agentPeer.SetDiscoveryAddress(&transport.Address{
+			if err := agentPeer.SetDNSCarrierAddress(&transport.Address{
 				Host:      host,
 				Port:      uint16(port),
 				Transport: "udp",
-			})
-			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+			}); err != nil {
+				return fmt.Errorf("address %q for %s: %w", agentConf.Address, peerID, err)
+			}
+			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
-		if agentConf.ApiBaseUrl != "" {
-			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
-		}
+		warnConfiguredAPIEndpoint("signer", peerID, agentConf.ApiBaseUrl)
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
 		}
@@ -332,6 +335,13 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
 	}
+	// What the agent handed (plan S10), read before the zones' first load,
+	// which reads it, as the stored contributions are.
+	acting, err := loadActingStore(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the hand-overs held: %w", err)
+	}
+	actingHeld.Store(acting)
 
 	// Register provider zone RR types from config
 	for i := range mp.ProviderZones {
@@ -425,19 +435,17 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			if err != nil {
 				return fmt.Errorf("invalid port in %q for %s: %w", agentConf.Address, peerID, err)
 			}
-			agentPeer.SetDiscoveryAddress(&transport.Address{
+			if err := agentPeer.SetDNSCarrierAddress(&transport.Address{
 				Host:      host,
 				Port:      uint16(port),
 				Transport: "udp",
-			})
-			agentPeer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+			}); err != nil {
+				return fmt.Errorf("address %q for %s: %w", agentConf.Address, peerID, err)
+			}
+			agentPeer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 		}
-		if agentConf.ApiBaseUrl != "" {
-			agentPeer.APIEndpoint = agentConf.ApiBaseUrl
-			agentPeer.PreferredTransport = "API"
-		} else {
-			agentPeer.PreferredTransport = "DNS"
-		}
+		warnConfiguredAPIEndpoint("combiner", peerID, agentConf.ApiBaseUrl)
+		agentPeer.SetPreferredTransport("DNS")
 		if err := tm.PeerRegistry.Add(agentPeer); err != nil {
 			return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, err)
 		}
@@ -483,6 +491,16 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	// Initialize AgentRegistry
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
 
+	// This provider's propagation delay goes out in the agent's gossip: it is
+	// its share of the wait before a NOTIFY to a zone's parent
+	// (delegationNotifyWait).
+	if ar := conf.InternalMp.AgentRegistry; ar != nil {
+		ar.GossipStateTable.SetPropagationDelay(conf.Config.KaspPropagationDelay())
+		// Whether our resolver takes discovery data it could not validate
+		// goes out too, so every member's matrix shows it (#260).
+		ar.GossipStateTable.SetDnssecValidationNotEnforced(conf.Config.DnssecValidationNotEnforced())
+	}
+
 	// The first hello waits for the identity zone; SetupAgent opens this.
 	conf.InternalMp.IdentityReady = newIdentityReadiness()
 
@@ -507,6 +525,19 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 			return fmt.Errorf("InitHsyncTables: %w", err)
 		}
 	}
+	// The zones' serials, read before any zone's first load.
+	store, err := LoadInstructionStore(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the zones' serials: %w", err)
+	}
+	conf.InternalMp.Instructions = store
+	instrStore.Store(store)
+	// tdns asks the agent whether the agents sync a zone's delegation (P3),
+	// rather than reading its own copy: by the step's sets, since parentsync
+	// changes only at a step (design 3.3).
+	tdns.RegisterParentSyncAgentFunc(func(zone tdns.ZoneName) bool {
+		return rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent
+	})
 
 	// Create MsgQs locally
 	conf.InternalMp.MsgQs = NewMsgQs()
@@ -603,10 +634,20 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		return fmt.Errorf("transport bridge (agent): %w", err)
 	}
 	tm.onKeyInventory = conf.noteKeyInventory
+	if err := conf.wireStamps(tm, mp, payloadCrypto != nil, true); err != nil {
+		return fmt.Errorf("the stamps (agent): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
-	// the DS set of a zone our own signer does not own (Amendment 2)
+	// The catch-up tracker, before the refresh engine starts: a zone's
+	// first load asks through it.
+	catchUp := newCatchUpTracker(AgentId(mp.Identity), conf.InternalMp.MPZoneNames, catchUpOutageFor(mp))
+	catchUp.wire(conf, tm, conf.InternalMp.AgentRegistry)
+	conf.InternalMp.CatchUp, tm.catchUp = catchUp, catchUp
+	// the DS set of a zone our own signer does not own (Amendment 2), and
+	// the other providers' word on the one it owns (#207)
 	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
 		o.SetComputedDSSource(conf.computedDSIntent)
+		o.SetForeignDSCheck(conf.foreignDSWithheld)
 	}
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
@@ -626,10 +667,29 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	}
 
 	conf.InternalMp.AgentRegistry = conf.NewAgentRegistry()
+	// Its gossip rows say whether its resolver takes discovery data it could
+	// not validate, as an agent's do (#260).
+	conf.InternalMp.AgentRegistry.GossipStateTable.SetDnssecValidationNotEnforced(conf.Config.DnssecValidationNotEnforced())
 
 	// The auditor sets its identity up through SetupAgent as the agent does,
 	// so its first hello waits for the same gate; SetupAgent opens it.
 	conf.InternalMp.IdentityReady = newIdentityReadiness()
+
+	// The zones' serials, kept as an agent keeps them and read before any
+	// zone's first load: of the HSYNC tables, only theirs.
+	var instrDB *HsyncDB
+	if kdb := conf.Config.Internal.KeyDB; kdb != nil {
+		instrDB = NewHsyncDB(kdb)
+		if err := instrDB.InitInstructionTables(); err != nil {
+			return fmt.Errorf("InitInstructionTables: %w", err)
+		}
+	}
+	store, err := LoadInstructionStore(instrDB)
+	if err != nil {
+		return fmt.Errorf("the zones' serials: %w", err)
+	}
+	conf.InternalMp.Instructions = store
+	instrStore.Store(store)
 
 	// MsgQs: auditor consumes Beat/Hello/Ping/Msg/Confirmation/StatusUpdate.
 	conf.InternalMp.MsgQs = NewMsgQs()
@@ -708,6 +768,9 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	if err != nil {
 		return fmt.Errorf("transport bridge (auditor): %w", err)
 	}
+	if err := conf.wireStamps(tm, mp, payloadCrypto != nil, false); err != nil {
+		return fmt.Errorf("the stamps (auditor): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
@@ -740,4 +803,16 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 		return host
 	}
 	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+}
+
+// warnConfiguredAPIEndpoint says that a configured agent's api_base_url is
+// not used. A configured agent has no discovered TLSA, so its certificate
+// cannot be checked and HTTPS to it cannot be authenticated: the combiner
+// and the signer talk to it over DNS.
+func warnConfiguredAPIEndpoint(role, peerID, apiBaseURL string) {
+	if apiBaseURL == "" {
+		return
+	}
+	lgTransport.Warn("api_base_url ignored: a configured agent has no TLSA, so HTTPS to it cannot be authenticated; DNS is used",
+		"role", role, "agent", peerID, "api_base_url", apiBaseURL)
 }

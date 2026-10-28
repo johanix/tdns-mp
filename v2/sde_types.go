@@ -23,14 +23,23 @@ type SynchedDataUpdate struct {
 	UpdateType        string // "local" or "remote"
 	Update            *ZoneUpdate
 	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
+	// OriginatingInstr is the originating agent's stamp of the zone, as its
+	// message carried it (S5b); S8 judges a remote update by it.
+	OriginatingInstr *MsgStamp
+	Mechanism        string // The mechanism a remote update arrived on: its final confirmation's first choice of path
 	// OriginatingTime is when the originating agent enqueued a remote
 	// update: the wire timestamp, stable across the sender's retries. With
 	// OriginatingDistID it orders REPLACEs from one agent (see
 	// ZoneDataRepo.lastReplace).
 	OriginatingTime time.Time
-	Force           bool     // Bypass dedup check (always send even if RR already present)
-	SkipCombiner    bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
-	DnskeyKeyTags   []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
+	// DeliveredBy is the sender of a remote update as the transport
+	// established it, which the update's own word on where it comes from
+	// (AgentId) is not. A CSYNC is taken from the zone's leader only, and
+	// that is asked of this sender.
+	DeliveredBy   AgentId
+	Force         bool     // Bypass dedup check (always send even if RR already present)
+	SkipCombiner  bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
+	DnskeyKeyTags []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
 	// DnskeyRemovedKeyTags are those of DnskeyKeyTags the distribution
 	// removes: their confirmation goes to the signer as "removed", the
 	// others' as "propagated", so the signer knows which kind it answers.
@@ -39,7 +48,70 @@ type SynchedDataUpdate struct {
 	// (a state, a ds) with the DNSKEY set as it was; the REPLACE goes to
 	// the other providers all the same, for the key states it carries.
 	KeyStatesChanged bool
-	Response         chan *AgentMsgResponse
+	// Resend: a distribution the signer's key lifecycle sends again
+	// (#256). The update goes to the peers, tracked, even when the repo
+	// already held it.
+	Resend bool
+	// CatchUp: the update is the answer to a request for the zone's state
+	// (the membership design, 5.4).
+	CatchUp  *CatchUp `json:"catch_up,omitempty"`
+	Response chan *AgentMsgResponse
+	// staleTypes: the types whose replace the repo found older than the
+	// one it has applied (noteReplaceOrigin). What those replaces say about
+	// keys is not noted either (freshOperations). An add or a delete of the
+	// same type in the same update is not stale: the repo applied it.
+	staleTypes map[uint16]bool
+}
+
+// dropStaleOperations takes the operations the repo found stale out of the
+// update, so that they go no further: not to the key states, and not to the
+// combiner, which would put an older set back in the zone it publishes.
+func (u *SynchedDataUpdate) dropStaleOperations() {
+	if u.Update != nil && len(u.staleTypes) > 0 {
+		u.Update.Operations = u.freshOperations()
+	}
+}
+
+// staleOperations are the update's operations whose type the repo found
+// stale. What the repo holds of them goes in the update's confirmation all
+// the same: a newer message put it there, and the sender tracks its
+// distribution by the records it lists.
+func (u *SynchedDataUpdate) staleOperations() []core.RROperation {
+	if u.Update == nil || len(u.staleTypes) == 0 {
+		return nil
+	}
+	var out []core.RROperation
+	for _, op := range u.Update.Operations {
+		if u.isStale(op) {
+			out = append(out, op)
+		}
+	}
+	return out
+}
+
+// isStale: the operation is a replace whose type the repo found stale.
+func (u *SynchedDataUpdate) isStale(op core.RROperation) bool {
+	t, ok := dns.StringToType[op.RRtype]
+	return ok && op.Operation == "replace" && u.staleTypes[t]
+}
+
+// freshOperations are the update's operations other than its stale
+// replaces.
+func (u *SynchedDataUpdate) freshOperations() []core.RROperation {
+	if u.Update == nil {
+		return nil
+	}
+	if len(u.staleTypes) == 0 {
+		return u.Update.Operations
+	}
+	var out []core.RROperation
+	for _, op := range u.Update.Operations {
+		if u.isStale(op) {
+			continue
+		}
+		out = append(out, op)
+	}
+	return out
 }
 
 type SynchedDataResponse struct {
@@ -56,7 +128,13 @@ type SynchedDataCmd struct {
 	Cmd         string
 	Zone        ZoneName
 	TargetAgent AgentId // For "resync-targeted": send only to this agent
-	Response    chan *SynchedDataCmdResponse
+	// CatchUp: the request for the zone's state that a "resync-targeted"
+	// answers (the membership design, 5.3).
+	CatchUp  *CatchUp `json:"catch_up,omitempty"`
+	Response chan *SynchedDataCmdResponse
+	// ownRead: for "own-read", what a re-read of the zone brought
+	// (own_read.go)
+	ownRead *ownReadAnswer
 }
 
 type SynchedDataCmdResponse struct {
@@ -78,9 +156,31 @@ type ZoneDataRepo struct {
 	// distribution id. A REPLACE carries the sender's whole set, so one
 	// that was sent earlier but arrives later -- the retry of a message
 	// the peer had rejected while it did not yet hold the zone -- must not
-	// roll the set back to what it was. Keyed under mu; in memory only:
-	// after a restart the peers re-announce.
+	// roll the set back to what it was. Keyed under mu; persisted in
+	// ZoneDataReplaceOrigin so a restart still rejects an older replace
+	// (tdns-mp #249). hdb is the store used by noteReplaceOrigin / load.
 	lastReplace map[string]replaceOrigin
+	hdb         *HsyncDB
+	// ownState: when this agent last read its own state of each zone from
+	// its combiner, with the combiner's word that its stored contributions
+	// were loaded; ownStateNote: why not, when it has not. Under mu: the
+	// syncher and the status read them (own_read.go).
+	ownState     map[ZoneName]time.Time
+	ownStateNote map[ZoneName]string
+	// olderApplied: the zones for which an answer of a combiner older than
+	// this agent has been applied (applyOwnRead). Engine only.
+	olderApplied map[ZoneName]bool
+	// catchUpAnswers: per zone and asker, the distribution ID of the last
+	// answer to a request for the zone's state. A newer answer takes the
+	// older one out of the queue (catchUpAnswer). Engine only.
+	catchUpAnswers map[ZoneName]map[AgentId]string
+	// notes: per zone, agent and type, the last change the engine stored
+	// and passed to its combiner (setNote). Engine only.
+	notes map[ZoneName]map[AgentId]map[uint16]*setNote
+	// staleWaits: per distribution to this agent's combiner, the stale
+	// DNSKEY replaces whose final confirmation waits for the combiner's word
+	// on that distribution's set (waitForCombiner). Engine only.
+	staleWaits map[string][]*staleWait
 }
 
 type replaceOrigin struct {
@@ -91,13 +191,35 @@ type replaceOrigin struct {
 type PendingRemoteConfirmation struct {
 	OriginatingDistID string
 	OriginatingSender string
+	Mechanism         string
 	Zone              ZoneName
 	CreatedAt         time.Time
+	// StaleHeld: the records of the update's stale replaces that the repo
+	// holds. They did not go to the combiner; the confirmation to the
+	// sender names them beside what the combiner applied.
+	StaleHeld []string
+	// StaleWaiting: DNSKEY records of the update's stale replaces that an
+	// answer's forward, not confirmed yet, put in the repo
+	// (dnskeyAwaitingAnswer). Not named; a success becomes PARTIAL.
+	StaleWaiting []string
+	// NotHeldTypes: the types of the update's stale replaces whose set's last
+	// hand-over to this agent's combiner failed. Their records are left out
+	// of StaleHeld and of whatever the final confirmation names, also when
+	// it is made from the repo, and the confirmation is PARTIAL.
+	NotHeldTypes map[uint16]bool
+	// FromAnswer: the forward is of an answer to a request for the zone's
+	// state.
+	FromAnswer bool
+	// DnskeyOps: the update's DNSKEY add and replace operations. The
+	// combiner's success is checked against what the repo holds when it
+	// comes (heldSuccess): a newer set may have dropped a key since.
+	DnskeyOps []core.RROperation
 }
 
 type RemoteConfirmationDetail struct {
 	OriginatingDistID string
 	OriginatingSender string
+	Mechanism         string // The mechanism the SYNC arrived on: the confirmation's first choice of path
 	Zone              ZoneName
 	Status            string
 	Message           string
@@ -174,6 +296,7 @@ type ConfirmationDetail struct {
 	RejectedItems  []RejectedItemInfo
 	IgnoredRecords []string // RR strings persisted but not applied (role-based filter)
 	Truncated      bool
+	Instr          *MsgStamp // the confirmer's stamp (S5b); nil from a confirmer that sends none
 	Timestamp      time.Time
 }
 
@@ -248,23 +371,15 @@ type ZoneAgentInfo struct {
 // --- From zone_utils.go ---
 
 type HsyncStatus struct {
-	Time         time.Time
-	ZoneName     string
-	Command      string
-	Status       bool
-	Error        bool
-	ErrorMsg     string
-	Msg          string
-	HsyncAdds    []dns.RR
-	HsyncRemoves []dns.RR
-	// ParamChanged is true when HSYNCPARAM differed between the old
-	// and new zone apex, regardless of whether HSYNC3 also changed.
-	// Consumers that recompute provider-group state from HSYNCPARAM
-	// (e.g. RecomputeGroups, which derives VotingMembers from
-	// HSYNCPARAM.signers/servers) must trigger that work when either
-	// HSYNC3 *or* HSYNCPARAM changed — a pure HSYNCPARAM edit (e.g.
-	// re-pointing signers= or servers=) produces no HsyncAdds/Removes
-	// but still requires a recompute.
+	Time     time.Time
+	ZoneName string
+	Command  string
+	Status   bool
+	Error    bool
+	ErrorMsg string
+	Msg      string
+	// ParamChanged is true when the zone's instructions differ between
+	// the old and the new copy, by serial or digest (HsyncChanged).
 	ParamChanged bool
 }
 
@@ -282,4 +397,13 @@ type DnskeyStatus struct {
 	// differ from what was last sent, though the key set may not.
 	CurrentKeyStates []core.KeyState
 	StatesChanged    bool
+	// Resend: the signer sends keys of LocalAdds, or the removals of
+	// ResendRemovedTags, again (#256); the set is distributed even when
+	// nothing changed.
+	Resend bool
+	// ResendRemovedTags: this provider's withdrawn keys whose removal the
+	// signer sends again. The removal travels in the REPLACE of the current
+	// set, without a delete record: the repo no longer holds the key, and a
+	// local delete of a record this agent does not own is refused.
+	ResendRemovedTags []uint16
 }

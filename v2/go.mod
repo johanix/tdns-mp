@@ -6,12 +6,12 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261001045532-b15bedb76c2e
-	github.com/johanix/tdns/v2 v2.0.0-20261012094729-81ce1fda1a18
-	github.com/johanix/tdns/v2/cache v0.0.0-20261012094729-81ce1fda1a18
-	github.com/johanix/tdns/v2/cli v0.0.0-20261012094729-81ce1fda1a18
-	github.com/johanix/tdns/v2/core v0.0.0-20261012094729-81ce1fda1a18
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261012094729-81ce1fda1a18
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261028125605-cf466dc82168
+	github.com/johanix/tdns/v2 v2.0.0-20261028082711-1217f95d13ba
+	github.com/johanix/tdns/v2/cache v0.0.0-20261028082711-1217f95d13ba
+	github.com/johanix/tdns/v2/cli v0.0.0-20261028082711-1217f95d13ba
+	github.com/johanix/tdns/v2/core v0.0.0-20261028082711-1217f95d13ba
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261028082711-1217f95d13ba
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -40,7 +40,7 @@ require (
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
@@ -65,5 +65,5 @@ require (
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-// Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+// Pinned at johanix/dns v1.1.72-johanix.4, the fork version tdns/v2 uses.
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4

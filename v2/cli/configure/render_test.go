@@ -336,7 +336,7 @@ func checkExampleZone(t *testing.T, cv CoordinatedValues, l fsLayout) {
 	if provider == "" {
 		t.Fatalf("example zone: no HSYNC3 record names agent %s", cv.Agent.Identity)
 	}
-	want := []string{`servers="` + provider + `"`, `signers="` + provider + `"`}
+	want := []string{`serial="1"`, `servers="` + provider + `"`, `signers="` + provider + `"`}
 	if cv.Auditor.Identity != "" {
 		aud := labels[cv.Auditor.Identity]
 		if aud == "" {

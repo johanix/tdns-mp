@@ -7,7 +7,8 @@
 ;
 ; HSYNC3 names the parties to the zone, one record each; HSYNCPARAM gives
 ; them their roles by label. This provider ("{{.ProviderLabel}}") is the only
-; server and the only signer.
+; server and the only signer. HSYNCPARAM's serial numbers these instructions:
+; raise it at every edit of the HSYNC3 or HSYNCPARAM records.
 $TTL 300
 {{.ExampleZone}}      IN SOA  ns1.{{.ExampleZone}} hostmaster.{{.ExampleZone}} 1 3600 600 604800 300
 {{.ExampleZone}}      IN NS   ns1.{{.ExampleZone}}
@@ -17,7 +18,7 @@ ns1.{{.ExampleZone}}  IN {{.PublicIPRRType}} {{.Global.PublicIP}}
 {{- if .Auditor.Identity}}
 {{.ExampleZone}}      IN HSYNC3  ON {{.AuditorLabel}} {{.Auditor.Identity}} .
 {{- end}}
-{{.ExampleZone}}      IN HSYNCPARAM servers="{{.ProviderLabel}}" signers="{{.ProviderLabel}}" nsmgmt="owner" parentsync="owner"{{if .Auditor.Identity}} auditors="{{.AuditorLabel}}"{{end}}
+{{.ExampleZone}}      IN HSYNCPARAM serial="1" servers="{{.ProviderLabel}}" signers="{{.ProviderLabel}}" nsmgmt="owner" parentsync="owner"{{if .Auditor.Identity}} auditors="{{.AuditorLabel}}"{{end}}
 
 www.{{.ExampleZone}}  IN {{.PublicIPRRType}} {{.Global.PublicIP}}
 {{.ExampleZone}}      IN TXT  "tdns-mp example zone"

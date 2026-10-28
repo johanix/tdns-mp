@@ -46,38 +46,34 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 			}
 		}
 	}
+	info.Acting = combinerActingLine(mpzd)
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return info
 	}
-	hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !exists || len(hsyncparamRRset.RRs) == 0 {
+	// The serial, the digest and the owner error are the copy's (S1); a
+	// legacy zone (HSYNC3, no HSYNCPARAM) has serial 0 and a digest. The
+	// lists are the active instructions', which the code acts on (S3).
+	if in, err := ReadInstructions(apex); err != nil {
+		info.OwnerError = err.Error()
+	} else if in != nil {
+		info.Serial = in.Serial
+		info.Digest = in.Digest()
+	}
+	in := activeOr(mpzd.ZoneName, apex)
+	if in == nil || !in.HasParam {
 		return info
 	}
-	prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return info
-	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return info
-	}
-	switch hp.GetNSmgmt() {
-	case core.HsyncNSmgmtAGENT:
+	if in.NSmgmt == core.HsyncNSmgmtAGENT {
 		info.NSmgmt = "agent"
-	default:
-		info.NSmgmt = "owner"
 	}
-	switch hp.GetParentSync() {
-	case core.HsyncParentSyncAgent:
+	if in.ParentSync == core.HsyncParentSyncAgent {
 		info.ParentSync = "agent"
-	default:
-		info.ParentSync = "owner"
 	}
-	info.Servers = hp.GetServers()
-	info.Signers = hp.GetSigners()
-	info.Auditors = hp.GetAuditors()
-	info.Suffix = hp.GetSuffix()
+	info.Servers = slices.Clone(in.Servers)
+	info.Signers = slices.Clone(in.Signers)
+	info.Auditors = slices.Clone(in.Auditors)
+	info.Suffix = in.Suffix
 	return info
 }
 
@@ -109,6 +105,12 @@ type ZoneMPViewDTO struct {
 	Auditors   []string            `json:"auditors"`
 	Options    []string            `json:"options,omitempty"`
 	Members    []ZoneMemberRoleDTO `json:"members"`
+	// Instructions is what the auditor keeps of the zone's instructions,
+	// in the line `agent parentsync status` prints.
+	Instructions string `json:"instructions,omitempty"`
+	// InstructionMembers is what each member tells of them, first hand,
+	// the auditor first (instr_stamp.go).
+	InstructionMembers []MemberInstructions `json:"instruction_members,omitempty"`
 }
 
 func labelInRoleList(list []string, label string) bool {
@@ -121,29 +123,27 @@ func labelInRoleList(list []string, label string) bool {
 	return false
 }
 
+// hsync3RecordsByLabel is the HSYNC3 records of the zone's active
+// instructions by label, for display: each ON record, and each OFF label,
+// whose other fields nothing acts on.
 func (mpzd *MPZoneData) hsync3RecordsByLabel() map[string]core.HSYNC3 {
 	out := make(map[string]core.HSYNC3)
 	if mpzd == nil {
 		return out
 	}
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil || apex == nil {
+	in := mpzd.instructions()
+	if in == nil {
 		return out
 	}
-	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !exists {
-		return out
+	for _, r := range in.Records {
+		up := r.Upstream
+		if up == "" {
+			up = "."
+		}
+		out[r.Label] = core.HSYNC3{State: core.HsyncStateON, Label: r.Label, Identity: r.Identity, Upstream: up}
 	}
-	for _, rr := range hsync3RRset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
-			continue
-		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok {
-			continue
-		}
-		out[normalizeHSYNC3Label(h3.Label)] = *h3
+	for _, l := range in.Off {
+		out[l] = core.HSYNC3{State: core.HsyncStateOFF, Label: l}
 	}
 	return out
 }
@@ -280,7 +280,7 @@ func markLocalMembers(localIdentity string, members []ZoneMemberRoleDTO) {
 	}
 	localIdentity = dns.Fqdn(localIdentity)
 	for i := range members {
-		if members[i].Identity != "" && strings.EqualFold(dns.Fqdn(members[i].Identity), localIdentity) {
+		if members[i].Identity != "" && core.EqualNames(dns.Fqdn(members[i].Identity), localIdentity) {
 			members[i].Local = true
 		}
 	}

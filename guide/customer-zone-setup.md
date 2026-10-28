@@ -92,6 +92,7 @@ The keys that matter here:
 
 | Key          | Meaning                                                            |
 |--------------|--------------------------------------------------------------------|
+| `serial=`    | The number of these instructions: raised at every edit of HSYNC3 or HSYNCPARAM ([Changing the Set of Providers §6](provider-changes.md#6-the-owners-edits)). |
 | `servers=`   | Comma-separated labels of providers that serve the zone.           |
 | `signers=`   | Labels of providers that sign the zone.                            |
 | `nsmgmt=`    | Who manages the NS RRset: `agent` (coordinated) or a single label. |
@@ -102,7 +103,7 @@ For example.com. with alpha signing+serving and
 bravo/charlie serving only:
 
 ```
-example.com.   HSYNCPARAM   servers="alpha,bravo,charlie" signers="alpha" nsmgmt="agent" parentsync="agent"
+example.com.   HSYNCPARAM   serial="1" servers="alpha,bravo,charlie" signers="alpha" nsmgmt="agent" parentsync="agent"
 ```
 
 This says:
@@ -135,9 +136,12 @@ from alpha's signer.
 
 To add a second signer (true RFC 8901 multi-signer
 setup), change `signers="alpha"` to e.g.
-`signers="alpha,bravo"`. That flips `OptMultiSigner` to
-true everywhere and enables the KEYSTATE DNSKEY exchange
-between alpha and bravo.
+`signers="alpha,bravo"`, and raise `serial=`. That flips
+`OptMultiSigner` to true everywhere and enables the
+KEYSTATE DNSKEY exchange between alpha and bravo. On this
+build the agents refuse the edit until a signer role can
+be carried out
+([Changing the Set of Providers §6](provider-changes.md#6-the-owners-edits)).
 
 ### 2.3 A complete example.com. zone file
 
@@ -164,7 +168,7 @@ example.com.   3600  IN  NS   ns1.charlie.example.
 example.com.   3600  IN  HSYNC3      ON  alpha    agent.alpha.example.    .
 example.com.   3600  IN  HSYNC3      ON  bravo    agent.bravo.example.    .
 example.com.   3600  IN  HSYNC3      ON  charlie  agent.charlie.example.  .
-example.com.   3600  IN  HSYNCPARAM  servers="alpha,bravo,charlie" signers="alpha" nsmgmt="agent" parentsync="agent"
+example.com.   3600  IN  HSYNCPARAM  serial="1" servers="alpha,bravo,charlie" signers="alpha" nsmgmt="agent" parentsync="agent"
 
 ; Actual zone content
 www.example.com.    3600  IN  A     192.0.2.10
@@ -254,7 +258,9 @@ transfers are authenticated.
 After changing HSYNC3, HSYNCPARAM, or anything else in
 the customer zone, you want every combiner to pull a
 fresh copy without waiting for the SOA refresh interval.
-Bump the serial and re-send NOTIFY:
+(An edit of HSYNC3 or HSYNCPARAM raises HSYNCPARAM's
+`serial=` as well: the SOA serial alone is not enough.)
+Bump the SOA serial and re-send NOTIFY:
 
 ```sh
 tdns-cli auth zone bump -z example.com.
