@@ -1260,6 +1260,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 				ForeignKeys:   payload.ForeignKeys,
 				ForeignSpoken: payload.ForeignSpoken,
 				Hold:          payload.Hold,
+				Acting:        payload.Acting,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
@@ -1285,13 +1286,17 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 
 	inventoryMsg := &KeystateInventoryMsg{
-		SenderID:  senderID,
-		Zone:      payload.Zone,
-		Inventory: inventoryItemsOf(payload.KeyInventory),
-		Owned:     payload.Owned,
-		Resend:    payload.Resend,
-		Hold:      payload.Hold,
-		seq:       keystateInventorySeq.Add(1),
+		SenderID:   senderID,
+		Zone:       payload.Zone,
+		Inventory:  inventoryItemsOf(payload.KeyInventory),
+		Owned:      payload.Owned,
+		Resend:     payload.Resend,
+		Hold:       payload.Hold,
+		Acting:     payload.Acting,
+		NotSigning: payload.NotSigning,
+		Rollover:   payload.Rollover,
+		WaitsOn:    payload.WaitsOn,
+		seq:        keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -3162,6 +3167,37 @@ func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 		return
 	}
 	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "spoken", spoken, "accepted", resp.Accepted, "msg", resp.Message)
+}
+
+// sendActingToSigner hands the local signer the hand-over the update
+// carries, as a KEYSTATE signal "acting" (plan S11): the signer tracker's
+// send. The signer's answer says only that it arrived; what it then holds
+// comes in its inventory.
+func (tm *MPTransportBridge) sendActingToSigner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+	if tm.signerID == "" || tm.signerAddress == "" || tm.DNSTransport == nil {
+		return "", fmt.Errorf("no signer to hand the zone over to")
+	}
+	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
+	host, port := parseHostPort(tm.signerAddress, 53)
+	if err := peer.SetDNSCarrierAddress(&transport.Address{Host: host, Port: port, Transport: "udp"}); err != nil {
+		return "", fmt.Errorf("signer address refused: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
+		SenderID:  tm.LocalID,
+		Zone:      string(zone),
+		Signal:    "acting",
+		Acting:    update.Acting,
+		Timestamp: time.Now(),
+	})
+	if err != nil {
+		return "", err
+	}
+	if !resp.Accepted {
+		return "", fmt.Errorf("the signer did not take it: %s", resp.Message)
+	}
+	return distID, nil
 }
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.

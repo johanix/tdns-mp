@@ -106,8 +106,16 @@ type PeerKeystateRequest struct {
 	// Hold: with Signal "hold", the agent's word to hold the zone's key
 	// machine (true) or to let it go; with Signal "inventory", the signer's
 	// word that it holds it (plan S6)
-	Hold      bool
-	Timestamp time.Time // Request timestamp
+	Hold bool
+	// Acting: with Signal "acting", the hand-over to the signer; with Signal
+	// "inventory", the one the signer holds, nil for none (plan S11).
+	Acting *ActingHandover
+	// NotSigning, Rollover and WaitsOn: the signer's marks on its
+	// inventory (plan S11; DnsKeystatePayload).
+	NotSigning bool
+	Rollover   bool
+	WaitsOn    map[uint16][]string
+	Timestamp  time.Time // Request timestamp
 }
 
 type PeerKeystateResponse struct {

@@ -661,7 +661,7 @@ func TestTheSignerConfirmsTheHoldInItsInventory(t *testing.T) {
 	if !holds.held(zone) {
 		t.Fatal("the signer did not keep the hold")
 	}
-	req := inventoryRequest("signer.a.example.", zone, nil, true, nil, holds.held(zone))
+	req := inventoryRequest("signer.a.example.", zone, nil, true, nil, inventoryMarks{hold: holds.held(zone)})
 	msg, err := keystateAppMessage(req, roleA)
 	if err != nil {
 		t.Fatal(err)

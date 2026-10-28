@@ -530,7 +530,9 @@ func TestTheRolloverPredicateCoversEveryPhase(t *testing.T) {
 	}
 }
 
-// The agent's rollover flag follows its signer's last inventory and its pending distributions.
+// The agent's rollover flag follows what its signer's last inventory says,
+// the signer judging on its own state (plan S11), and its pending
+// distributions.
 func TestTheRolloverFlagFollowsTheInventory(t *testing.T) {
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	zd := &tdns.ZoneData{ZoneName: "rollover.stamp.example."}
@@ -543,17 +545,58 @@ func TestTheRolloverFlagFollowsTheInventory(t *testing.T) {
 	if tm.rolloverAt(zd.ZoneName) {
 		t.Fatal("a rollover with no inventory")
 	}
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Inventory: []KeyInventoryItem{{KeyTag: 1, State: KeyStateActive, Flags: 257}, {KeyTag: 2, State: KeyStatePublished, Flags: 256}}})
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Inventory: []KeyInventoryItem{{KeyTag: 1, State: KeyStateActive, Flags: 257}, {KeyTag: 2, State: KeyStatePublished, Flags: 256}}, Rollover: true})
 	if !tm.rolloverAt(zd.ZoneName) {
-		t.Error("no rollover with a published key in the inventory")
+		t.Error("no rollover where the signer says one is under way")
 	}
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Inventory: []KeyInventoryItem{{KeyTag: 1, State: KeyStateActive, Flags: 257}}})
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Inventory: []KeyInventoryItem{{KeyTag: 1, State: KeyStateActive, Flags: 257}, {KeyTag: 2, State: KeyStatePublished, Flags: 256}}})
 	if tm.rolloverAt(zd.ZoneName) {
-		t.Error("a rollover with a steady inventory")
+		t.Error("a rollover where the signer says none is under way")
 	}
 	tm.pendingDnskeyPropagations["d1"] = &PendingDnskeyPropagation{Zone: "Rollover.Stamp.Example."}
 	if !tm.rolloverAt(zd.ZoneName) {
 		t.Error("no rollover with a DNSKEY distribution pending")
+	}
+}
+
+// The stamp names whom a rollover under way waits on: the other signers
+// whose "applied" the keys in flight miss, by the signer's inventory (plan
+// S11), in a beat and in a message (S5b), whose stamp replaces the beat's.
+// A provider with no rollover under way names nobody.
+func TestTheStampNamesWhomTheRolloverWaitsOn(t *testing.T) {
+	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
+	rollover := false
+	st.rollover = func(string) bool { return rollover }
+	st.waitsOn = func(string) []string { return []string{"p2", "p3"} }
+	told := func() InstrStamp {
+		t.Helper()
+		e := st.entryFor(stampBeta)
+		if e == nil {
+			t.Fatal("no stamp entry for beta")
+		}
+		return e.Members[stampAlpha].Instr[stampZone]
+	}
+	if got := told(); got.Rollover || got.WaitsOn != nil {
+		t.Errorf("no rollover under way, and the stamp tells %v waiting on %v", got.Rollover, got.WaitsOn)
+	}
+	rollover = true
+	if got := told(); !got.Rollover || !slices.Equal(got.WaitsOn, []string{"p2", "p3"}) {
+		t.Errorf("a rollover under way: the stamp tells %v waiting on %v, want p2 and p3", got.Rollover, got.WaitsOn)
+	}
+	if ms := st.messageStamp(stampZone); ms == nil || !ms.Rollover || !slices.Equal(ms.WaitsOn, []string{"p2", "p3"}) {
+		t.Errorf("a rollover under way: a message's stamp tells %+v, want it waiting on p2 and p3", ms)
+	}
+
+	zd := &tdns.ZoneData{ZoneName: "waits.stamp.example."}
+	tdns.Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() {
+		tdns.Zones.Remove(zd.ZoneName)
+		Zones.Invalidate(zd.ZoneName)
+	})
+	mpzd, _ := Zones.Get(zd.ZoneName)
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Rollover: true, WaitsOn: map[uint16][]string{1: {"p3"}, 2: {"p2", "p3"}}})
+	if got := waitsOnAt(zd.ZoneName); !slices.Equal(got, []string{"p2", "p3"}) {
+		t.Errorf("the inventory's keys wait on %v, want p2 and p3", got)
 	}
 }
 

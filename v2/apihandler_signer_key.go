@@ -28,6 +28,7 @@ type SignerKeyResponse struct {
 	ErrorMsg string              `json:"error_msg,omitempty"`
 	Msg      string              `json:"msg,omitempty"`
 	Zones    []string            `json:"zones,omitempty"`
+	Idle     []string            `json:"idle,omitempty"` // those of Zones owned and idle (plan S11)
 	Status   *KeyLifecycleStatus `json:"status,omitempty"`
 }
 
@@ -58,6 +59,11 @@ func (conf *Config) APIsignerKey() func(w http.ResponseWriter, r *http.Request) 
 		switch req.Command {
 		case "zones":
 			resp.Zones = e.Zones()
+			for _, z := range resp.Zones {
+				if e.isIdle(z) {
+					resp.Idle = append(resp.Idle, z)
+				}
+			}
 		case "status", "policy":
 			resp.Status, err = e.Status(req.Zone)
 		case "rollover":
