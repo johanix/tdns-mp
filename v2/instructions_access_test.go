@@ -541,7 +541,14 @@ func TestNsmgmtAndParentsyncDoNotChangeAtTheActivation(t *testing.T) {
 	from, to := readOf(t, fromRecords...), readOf(t, acRecords("", `serial="8" servers="alpha,beta" nsmgmt="agent" parentsync="agent"`)...)
 	s.Note(mpzd.ZoneName, from, nil)
 	enforced(t, s, mpzd.ZoneName)
-	s.Note(mpzd.ZoneName, to, nil)
+	// held as S19 and S20 will let it be: the judge refuses both kinds until
+	// their steps are built (S4)
+	if err := s.update(mpzd.ZoneName, func(z *zoneSerials) error {
+		z.Held = append(z.Held, heldSerial{SerialDigest: sd(to), Reading: to})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Activate(mpzd.ZoneName, Thaw{From: sd(from), To: sd(to)}); err != nil {
 		t.Fatal(err)
 	}

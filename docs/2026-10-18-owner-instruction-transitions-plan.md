@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: implementation plan
 
-**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 is merged (tdns-mp #280, main `3c9f6d7`, 2026-10-27); S2 is merged (tdns-mp #281, main `47dd883`, 2026-10-28); P3 is built (2026-10-28, tdns #959); P6 is built (2026-10-28, tdns #962, on the project owner's decisions 103 to 105); S3 is built (2026-10-28, tdns-mp #285, on main); S4–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
+**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 is merged (tdns-mp #280, main `3c9f6d7`, 2026-10-27); S2 is merged (tdns-mp #281, main `47dd883`, 2026-10-28); P3 is built (2026-10-28, tdns #959); P6 is built (2026-10-28, tdns #962, on the project owner's decisions 103 to 105); S3 is merged (tdns-mp #285, main `5e76ca0`, 2026-10-28); S4 is built (2026-10-28, tdns-mp #286, on main); S5a–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
 
 This is the plan for the design in `2026-10-18-owner-instruction-transitions-design.md`, revision 6 ("the design" below; its sections are named "design N"). The design describes how a change of the zone owner's HSYNC3 or HSYNCPARAM records is numbered, agreed and carried out, as it is meant to stand. This document holds what is dated: what exists, what is wrong today, where each rule lands in the code, the steps, and the decisions the design rests on.
 
@@ -192,8 +192,8 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | P6 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy of a multi-provider zone; on them before S7 | Nothing | tdns: 2 | 30 | 10 | **Built** (tdns #962, `2ad30457`), on decisions 103 to 105 (2026-10-28): for a zone whose copy carries HSYNC3 the use-hsyncparam reconciler stops the owner's signalling and withdraws what it published; a server's own signalling to the parent is unchanged; always on |
 | S1 | The canonical reading and its digest | P1's key on the pin (#209 done) | 8 | 240 | 30 | **Done**: merged as #280 (main `3c9f6d7`, 2026-10-27). Golden digest `d7294061a3f8f5af` |
 | S2 | Serials per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | **Merged** (tdns-mp #281, main `47dd883`, 2026-10-28). Active follows the copy, "not enforced" |
-| S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | **Built** (2026-10-28), tdns-mp #285, on main since #281 merged: its pull request carries this cell. Moves #275's signing-set reader; tdns/v2 pinned to P3's head |
-| S4 | Owner errors and refused transitions | S3 | 9 | 245 | 60 | Not started |
+| S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | **Merged** (tdns-mp #285, main `5e76ca0`, 2026-10-28). Moves #275's signing-set reader; tdns/v2 pinned to P3's merge (`1217f95d`) |
+| S4 | Owner errors and refused transitions | S3 | 9 | 245 | 60 | **Built** (2026-10-28), tdns-mp #286, on main since #285 merged: its pull request carries this cell. 10 files; the judge 244 lines, its tests 442 |
 | S5a | Stamps in beats; each member's serial; the fetch; nothing taken from an answer | S2, S4 (membership step 6 done) | 15 | 530 | 140 | Not started |
 | S5b | Stamps on messages and confirmations | S5a; P2 (membership step 3 done) | 8 | 190 | 85 | Not started |
 | S6 | The freeze | S4, S5b (membership steps 3 and 5 done) | 17 | 605 | 140 | Not started |
@@ -451,7 +451,7 @@ Log, warn, logger `zones`: "a copy of the zone's instructions below the highest 
 
 ### S3. One accessor; the hooks at activation and at a first load; the gate test
 
-**Status (2026-10-28):** Built, stacked on S2 (#281). Where the text left a choice:
+**Status (2026-10-28):** Merged (tdns-mp #285, main `5e76ca0`). Where the text left a choice:
 
 - The accessor's handle on the store is package-level, set by the agent's and the auditor's initialisation, as `wiredMpConfig` mirrors `conf.MpConfig()`. Without a store (the combiner, the signer, a test that sets none) every reader reads the zone's copy, as the plan has it for S10 and S11.
 - `mpzd.instructions()` and `mpzd.roles()`: for the zone as served (the `ZoneData` tdns registers), the active instructions and the current step's sets; for a copy wrapped for analysis (the incoming zone at a refresh), the reading of that copy. So the pre-refresh readers (`populateMPdata`, the signer switch, the combiner's allow-edits) read the apex being analysed without a new parameter. `nextSigningSet` and `advanceSigningSet` keep their apex parameter for the same reason.
@@ -525,6 +525,22 @@ Nothing changes for a zone at rest, except that an OFF record gives no label.
 **Size.** 30 files, about 345 new and 450 changed lines.
 
 ### S4. Owner errors and refused transitions
+
+**Status (2026-10-28):** Built, on main since S3 merged (#285). Two choices the text left open, agreed with the project's coordinator for the review:
+
+1. A label is "with a role" when it is in `servers=` or `signers=`; `auditors=` is no role. That matches membership decision 45 (no move into `auditors=`) and design 5.6, under which a change of `auditors=` has nothing to carry out: it is agreed.
+2. One code per change for rules 8 and 9: a move into `signers=` and a change of an upstream are refused as `step-missing`, not also as `not-built`, since the same steps lift both (S18b with P5; S21). The other kinds are `not-built`. The judge reads two constants, `builtKinds` and `carriedKinds`; each step that builds a kind adds it.
+
+Where the code had to choose besides:
+
+- Without HSYNCPARAM the judge reads the roles as the parts act by them (`rolesFor`): every ON record serves, none signs. So HSYNCPARAM with a `signers=` added to a legacy zone is a move into `signers=`.
+- Rule 2 also refuses a role given in the edit that removes the label's record (`role-without-record`, "whose record it removes"). Rule 3 covers a label with a role under either serial.
+- The judge reports every rule that applies, in the rules' order, so every agent lists the same; the status, mplist and the auditor show the first and how many more.
+- The store: a held serial carries its refusals against the active serial; until S7 the active serial follows the copy and carries its own refusal against the one it followed. The phase `refused` is steady at the active serial with the newest refused: not frozen, and `forget` takes it. The status shows the serial agreed on (`agreeing`). `Activate` judges the thaw's own pair for a member that moves straight, and judges the serials held above the new active serial again.
+- The status line puts a refusal or an owner error first, as in Names: `42 refused: ...`, `held: owner error: ...`.
+- N3 is done: the auditor's config errors take the store's owner error and refusal through the accessor's handle on the store (S3).
+- S2's store tests changed serials by changing `servers=`, which the judge now refuses: they change `auditors=` instead. S3's test of the step's sets at the activation holds its serial as S19 and S20 will let it through.
+- The guide: `guide/provider-changes.md` section 6 (new) and `guide/customer-zone-setup.md` (`serial=`). The refusal is shown and not enforced, and the guide says so.
 
 **Before it:** S3.
 
