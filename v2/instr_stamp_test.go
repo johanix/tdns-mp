@@ -610,3 +610,47 @@ func TestGossipRowsInABeatAnswerTakeNoElection(t *testing.T) {
 		t.Error("the answer's election record was taken")
 	}
 }
+
+// A member's telling fetches only a zone tdns holds, multi-provider and with
+// its type set: not one that left the configuration, whose wrapper Zones
+// keeps, nor one the refresh engine would make a zone of type 0 of.
+func TestAFetchAsksOnlyForAZoneTdnsHolds(t *testing.T) {
+	const zone = "fetched.stamp.example."
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 4)
+	set := func(typ tdns.ZoneType, mp bool) {
+		tdns.Zones.Set(zone, &tdns.ZoneData{ZoneName: zone, ZoneType: typ,
+			Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: mp}})
+	}
+	t.Cleanup(func() {
+		tdns.Zones.Remove(zone)
+		Zones.Invalidate(zone)
+	})
+
+	set(tdns.Primary, true)
+	if name, queued := conf.fetchZone("FETCHED.stamp.example."); !queued || name != zone {
+		t.Fatalf("a zone tdns holds: fetchZone = %q, %v, want %q, queued", name, queued, zone)
+	}
+	<-conf.Config.Internal.RefreshZoneCh
+
+	if _, ok := Zones.Get(zone); !ok {
+		t.Fatal("the zone's wrapper is not kept")
+	}
+	tdns.Zones.Remove(zone) // as a reload takes it out: the wrapper Zones keeps stays
+	for _, c := range []struct {
+		what string
+		set  func()
+	}{
+		{"a zone that left the configuration", func() {}},
+		{"a zone with no type", func() { set(0, true) }},
+		{"a zone that is not multi-provider", func() { set(tdns.Secondary, false) }},
+	} {
+		c.set()
+		if name, queued := conf.fetchZone(zone); queued || name != "" {
+			t.Errorf("%s: fetchZone = %q, %v, want nothing fetched", c.what, name, queued)
+		}
+	}
+	if n := len(conf.Config.Internal.RefreshZoneCh); n != 0 {
+		t.Errorf("%d refreshes queued, want none", n)
+	}
+}
