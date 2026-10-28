@@ -17,9 +17,9 @@ import (
 // records but through the one accessor. Every Go file of the repository but
 // the tests is parsed, and a read of the records outside the canonical
 // reading fails the test: the RR types as a selector on tdns's core package,
-// a type assertion to their data, or getHSYNCPARAM. Building a record from a
-// reading for display is no read. This scans source, so it holds for code no
-// test exercises.
+// a type assertion or a type switch to their data, or getHSYNCPARAM.
+// Building a record from a reading for display is no read. This scans
+// source, so it holds for code no test exercises.
 func TestNoDecisionReadsTheZonesOwnHSYNCRecords(t *testing.T) {
 	const corePath = "github.com/johanix/tdns/v2/core"
 	rrtypes := map[string]bool{"TypeHSYNC3": true, "TypeHSYNCPARAM": true, "TypeHSYNC": true, "TypeHSYNC2": true}
@@ -86,6 +86,16 @@ func TestNoDecisionReadsTheZonesOwnHSYNCRecords(t *testing.T) {
 				if star, ok := x.Type.(*ast.StarExpr); ok && alias != "" {
 					if name, ok := isCore(star.X, data); ok {
 						t.Errorf("%s: .(*%s.%s): the zone's records are read outside the accessor (rule 5)", fset.Position(x.Pos()), alias, name)
+					}
+				}
+			case *ast.CaseClause:
+				// a type switch's cases; in an expression switch they
+				// are values, never *core.HSYNC3
+				for _, e := range x.List {
+					if star, ok := e.(*ast.StarExpr); ok && alias != "" {
+						if name, ok := isCore(star.X, data); ok {
+							t.Errorf("%s: case *%s.%s: the zone's records are read outside the accessor (rule 5)", fset.Position(e.Pos()), alias, name)
+						}
 					}
 				}
 			}
