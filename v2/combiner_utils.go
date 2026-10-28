@@ -304,6 +304,7 @@ type combineInput struct {
 	contributions   map[string]map[uint16]core.RRset // CombinerData, RRsets cloned
 	upstreamApex    map[uint16]core.RRset            // UpstreamData at the apex, cloned
 	cleanups        []ownerRRtype
+	deferred        []ownerRRtype // cleanups put off until the upstream's apex is known
 	signatureOwner  string
 	signature       dns.RR // the signature TXT to serve, nil when the option is off
 }
@@ -414,13 +415,19 @@ func servedAsUpstream(s tdns.Stager, in *combineInput, rrtype uint16) bool {
 	if cur == nil {
 		return false
 	}
+	if rrtype == dns.TypeNS {
+		// as the cleanup: the apex NS is never deleted
+		lgCombiner.Warn("combine: no upstream NS to serve; the served NS is kept", "zone", in.zone)
+		return false
+	}
 	s.Delete(in.zone, rrtype)
 	return true
 }
 
 // cleanupInto handles the (owner, rrtype) pairs a contribution change may
 // have emptied: nothing if some agent still contributes there; at the apex,
-// the upstream's RRset restored where it has one (the NS always kept);
+// the upstream's RRset restored where it has one (the NS always kept), and
+// put off to a later combine while the upstream's apex is not known yet;
 // otherwise the RRset deleted, and the owner with it when that was its last
 // RRset.
 func cleanupInto(s tdns.Stager, in *combineInput) bool {
@@ -430,6 +437,12 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 			if _, still := m[c.rrtype]; still {
 				continue
 			}
+		}
+		if c.owner == in.zone && !in.isProvider && in.upstreamApex == nil {
+			// what the upstream has here is not known: nothing is taken
+			// for absent, as servedAsUpstream takes nothing
+			in.deferred = append(in.deferred, c)
+			continue
 		}
 		if c.owner == in.zone {
 			// what the upstream has at the apex is served again, as
@@ -535,6 +548,7 @@ func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.B
 		mpzd.MP.requeueCleanups(in.cleanups)
 		return false, resp, err
 	}
+	mpzd.MP.requeueCleanups(in.deferred)
 	if changed && resp.NewSerial != resp.OldSerial {
 		lgCombiner.Info("combiner state published", "zone", mpzd.ZoneName, "old", resp.OldSerial, "new", resp.NewSerial)
 	} else if changed {

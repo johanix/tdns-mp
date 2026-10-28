@@ -374,6 +374,33 @@ func TestACopyNewerThanTheHandOverIsActedBy(t *testing.T) {
 	}
 }
 
+// A hand-over that takes NS out of the combiner's hands serves the
+// upstream's NS; where the upstream's apex as snapshotted has none, the
+// served NS is kept, as the cleanup keeps it: never a zone with no apex NS.
+func TestAHandOverKeepsTheApexNSWhenTheUpstreamHasNone(t *testing.T) {
+	const zone = "nsguard.acting.example."
+	conf, mpzd := actingCombiner(t, zone, actRecords(`serial="5" servers="alpha,beta" signers="alpha" nsmgmt="agent"`)...)
+	withActing(t, nil)
+	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
+		actOther: {zone: {dns.TypeNS: {Name: zone, RRtype: dns.TypeNS, RRs: []dns.RR{mustRR(t, zone+" 3600 IN NS ns.beta.example.")}}}},
+	}
+	if resp := handTo(conf, handoverFor(t, zone, actRecords(`serial="5" servers="alpha,beta" signers="alpha" nsmgmt="agent"`)...), actUs); resp.Status != "ok" {
+		t.Fatalf("refused: %s", resp.Message)
+	}
+	if len(servedTypes(t, mpzd, dns.TypeNS)) == 0 {
+		t.Fatal("under nsmgmt=agent the zone serves no NS")
+	}
+	if od, ok := mpzd.MP.UpstreamData.Get(zone); ok {
+		od.RRtypes.Delete(dns.TypeNS)
+	}
+	if resp := handTo(conf, handoverFor(t, zone, actRecords(`serial="6" servers="alpha,beta" signers="alpha" nsmgmt="owner"`)...), actUs); resp.Status != "ok" {
+		t.Fatalf("refused: %s", resp.Message)
+	}
+	if len(servedTypes(t, mpzd, dns.TypeNS)) == 0 {
+		t.Error("handed nsmgmt=owner with no upstream NS known, the zone serves no apex NS")
+	}
+}
+
 // A CDS the filter leaves out gives the zone back the upstream's CDS at the
 // next combine, as a type the policy does not apply would: the cleanup does
 // not delete the owner's RRset.
@@ -401,6 +428,34 @@ func TestAFilteredCDSGivesBackTheUpstreamCDS(t *testing.T) {
 	}
 	if got := servedTypes(t, mpzd, dns.TypeCDS); !slices.Equal(got, []string{upstream}) {
 		t.Errorf("with beta's CDS left out the zone serves CDS %v, want the upstream's", got)
+	}
+}
+
+// A cleanup at the apex before the upstream's apex is known takes nothing
+// for absent: the RRset stays, and the cleanup waits for a later combine.
+func TestAnApexCleanupWaitsForTheUpstreamApex(t *testing.T) {
+	const zone = "cleanupwait.acting.example."
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	param := `serial="5" servers="alpha,beta" signers="alpha,beta" parentsync="agent"`
+	conf, mpzd := actingCombiner(t, zone, append(actRecords(param), "3600 IN CDS 1111 15 2 "+hex)...)
+	withActing(t, nil)
+	if resp := handTo(conf, handoverFor(t, zone, actRecords(param)...), actUs); resp.Status != "ok" {
+		t.Fatalf("refused: %s", resp.Message)
+	}
+	before := servedTypes(t, mpzd, dns.TypeCDS)
+	if len(before) == 0 {
+		t.Fatal("the zone serves no CDS to begin with")
+	}
+	mpzd.MP.UpstreamData = nil
+	mpzd.MP.noteCleanup(zone, dns.TypeCDS)
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		t.Fatalf("combine: %v", err)
+	}
+	if got := servedTypes(t, mpzd, dns.TypeCDS); !slices.Equal(got, before) {
+		t.Errorf("with the upstream's apex unknown the cleanup changed the CDS to %v", got)
+	}
+	if pending := mpzd.MP.takeCleanups(); len(pending) != 1 || pending[0].rrtype != dns.TypeCDS {
+		t.Errorf("the cleanup does not wait for a later combine: %+v", pending)
 	}
 }
 

@@ -237,14 +237,34 @@ func TestTheCombinersStartHandsEveryZoneAgain(t *testing.T) {
 		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
 	}
 	tr.combinerStarted()
-	n := 0
+	var zones []string
 	for _, m := range q.take() {
 		if m.update.Acting != nil {
-			n++
+			zones = append(zones, m.update.Acting.Zone)
 		}
 	}
-	if n != 2 {
-		t.Errorf("%d zones handed over after the combiner's start, want 2", n)
+	slices.Sort(zones)
+	if !slices.Equal(zones, []string{"one.acting.example.", "two.acting.example."}) {
+		t.Errorf("handed over %v after the combiner's start, want both zones once", zones)
+	}
+}
+
+// An update the gate let through and the queue then refused is forgotten:
+// no word on it comes, and none is waited for.
+func TestAnUpdateTheQueueRefusesIsNotKeptAsSent(t *testing.T) {
+	const zone = "unsent.acting.example."
+	tr, q := newTestTracker()
+	tr.handOver(wantOf(zone, 4, "alpha"))
+	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+	if waiting, _ := tr.gate(ZoneName(zone), update(zone), "u1"); waiting {
+		t.Fatal("the update waits though the combiner holds what is wanted")
+	}
+	tr.unsent("u1")
+	tr.mu.Lock()
+	_, kept := tr.sent["u1"]
+	tr.mu.Unlock()
+	if kept {
+		t.Error("an update the queue refused is kept as sent")
 	}
 }
 
