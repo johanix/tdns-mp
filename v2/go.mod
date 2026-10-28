@@ -7,11 +7,11 @@ require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/tdns-transport/v2 v2.0.0-20261027114550-4147d2d04899
-	github.com/johanix/tdns/v2 v2.0.0-20261026162903-c3c2a48d4e2f
-	github.com/johanix/tdns/v2/cache v0.0.0-20261026162903-c3c2a48d4e2f
-	github.com/johanix/tdns/v2/cli v0.0.0-20261026162903-c3c2a48d4e2f
-	github.com/johanix/tdns/v2/core v0.0.0-20261026162903-c3c2a48d4e2f
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261026162903-c3c2a48d4e2f
+	github.com/johanix/tdns/v2 v2.0.0-20261027235008-e025e8b51e10
+	github.com/johanix/tdns/v2/cache v0.0.0-20261027235008-e025e8b51e10
+	github.com/johanix/tdns/v2/cli v0.0.0-20261027235008-e025e8b51e10
+	github.com/johanix/tdns/v2/core v0.0.0-20261027235008-e025e8b51e10
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261027235008-e025e8b51e10
 	github.com/miekg/dns v1.1.72
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/ryanuber/columnize v2.1.2+incompatible
