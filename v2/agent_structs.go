@@ -349,7 +349,8 @@ type AgentMsgPost struct {
 	Nonce          string
 	ZoneClass      string
 	Publish        *core.PublishInstruction
-	CatchUp        *CatchUp `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
+	CatchUp        *CatchUp        `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
+	Acting         *ActingHandover `json:"acting,omitempty"`   // a hand-over from the combiner's agent (S10)
 }
 
 type AgentMsgPostPlus struct {

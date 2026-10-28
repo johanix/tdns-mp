@@ -523,6 +523,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
 			status.DSSet = conf.dsSetLine(zd.ZoneData)
 			status.Instructions = conf.InternalMp.Instructions.Status(string(amp.Zone))
+			status.Combiner = conf.InternalMp.Handover.statusLine(string(amp.Zone))
 			if tm := conf.InternalMp.MPTransport; tm != nil {
 				status.InstructionMembers = tm.stamps.members(string(amp.Zone))
 			}
@@ -544,6 +545,9 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				resp.ErrorMsg = err.Error()
 				return
 			}
+			// the combiner forgets what it held too, at the next hand-over
+			conf.InternalMp.Handover.forgot(string(amp.Zone))
+			conf.handOverToCombiner(string(amp.Zone))
 			resp.Msg = fmt.Sprintf("Forgot the stored serials of zone %s; the next copy of the zone loaded (zone reload) is noted afresh", amp.Zone)
 
 		case "parentsync-election":

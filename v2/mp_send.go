@@ -49,6 +49,7 @@ func syncAppMessage(req *PeerSyncRequest, peerID string) (*transport.AppMessage,
 		},
 		DistributionID: req.DistributionID,
 		CatchUp:        req.CatchUp,
+		Acting:         req.Acting,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -86,8 +87,9 @@ func syncResponseFromApp(req *PeerSyncRequest, resp *transport.AppResponse) *Pee
 // sent without an ID (most RFIs) carries none.
 type syncWirePayload struct {
 	*core.AgentMsgPost
-	DistributionID string   `json:"distribution_id,omitempty"`
-	CatchUp        *CatchUp `json:"catch_up,omitempty"`
+	DistributionID string          `json:"distribution_id,omitempty"`
+	CatchUp        *CatchUp        `json:"catch_up,omitempty"`
+	Acting         *ActingHandover `json:"acting,omitempty"`
 }
 
 // keystateWirePayload is the KEYSTATE message as it goes on the wire:
@@ -142,10 +144,12 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 
 // editsAppMessage mirrors DNSTransport.Edits (core.AgentEditsPost).
 func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessage, error) {
-	// core.AgentEditsPost has no nonce; the answer carries the RFI's.
+	// core.AgentEditsPost has no nonce; the answer carries the RFI's. Nor
+	// the hand-over the combiner holds (S10).
 	payload := &struct {
 		core.AgentEditsPost
-		Nonce string `json:"nonce,omitempty"`
+		Nonce  string          `json:"nonce,omitempty"`
+		Acting *ActingHandover `json:"acting,omitempty"`
 	}{
 		AgentEditsPost: core.AgentEditsPost{
 			MessageType:  core.AgentMsgEdits,
@@ -156,7 +160,8 @@ func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessag
 			Message:      req.Message,
 			Time:         req.Timestamp,
 		},
-		Nonce: req.Nonce,
+		Nonce:  req.Nonce,
+		Acting: req.Acting,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

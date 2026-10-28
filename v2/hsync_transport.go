@@ -131,6 +131,11 @@ type MPTransportBridge struct {
 	// loudly (noteConfirmFallback).
 	confirmFallbackMu     sync.Mutex
 	confirmFallbackLogged map[string]time.Time
+
+	// handover is the agent's side of the hand-over to its combiner
+	// (acting_handover.go, plan S10), which EnqueueForCombiner's gate asks;
+	// nil on every other role and on an agent with no combiner.
+	handover *handoverTracker
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -448,6 +453,13 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 
 		if tm.ReliableQueue != nil {
 			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
+		}
+
+		// The combiner's word on a hand-over is the hand-over's alone, and
+		// its refusal of an update sent under another serial is not final:
+		// the update goes again (plan S10).
+		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) && tm.handover.confirmation(distributionID, status) {
+			return
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -1174,6 +1186,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			ZoneClass:      payload.ZoneClass,
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
+			Acting:         payload.Acting,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -1319,6 +1332,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		Zone:         payload.Zone,
 		AgentRecords: payload.AgentRecords,
 		Message:      payload.Message,
+		Acting:       payload.Acting,
 	}
 
 	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
@@ -2178,13 +2192,15 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 			if update.Publish != nil {
 				syncReq.Publish = update.Publish
 			}
+			syncReq.Acting = update.Acting
 		}
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
-	// Forward per-RR detail from inline confirmation to SynchedDataEngine (combiner only)
-	if isCombiner && syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
+	// Forward per-RR detail from inline confirmation to SynchedDataEngine
+	// (combiner only; a hand-over has none, and is the tracker's)
+	if isCombiner && syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil && (update == nil || update.Acting == nil) {
 		var rejItems []RejectedItemInfo
 		for _, ri := range syncResp.RejectedItems {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
@@ -2215,7 +2231,31 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 // Called by SynchedDataEngine when a zone update needs to reach the combiner.
 // If distID is non-empty, it is used as the distribution ID; otherwise a new one is generated.
 // Returns the distributionID for tracking and any error.
+//
+// Nothing goes to the combiner under a serial and step it has not confirmed
+// holding (plan S10): an update for a zone whose combiner does not hold what
+// this agent hands it waits, in order, and goes out once it does
+// (handoverTracker.gate).
 func (tm *MPTransportBridge) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+	if _, err := tm.getCombinerID(); err != nil {
+		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
+	}
+	if distID == "" {
+		distID = transport.GenerateDistributionID()
+	}
+	if waiting, err := tm.handover.gate(zone, update, distID); waiting || err != nil {
+		return distID, err
+	}
+	id, err := tm.enqueueToCombiner(zone, update, distID)
+	if err != nil {
+		tm.handover.unsent(distID) // not sent: no final word will come
+	}
+	return id, err
+}
+
+// enqueueToCombiner puts a message on the queue to the combiner, past the
+// hand-over's gate: the hand-over itself, and what the gate lets through.
+func (tm *MPTransportBridge) enqueueToCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
 		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
