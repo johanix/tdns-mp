@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
+# cubic Configuration
+version: 1
+
+reviews:
+  enabled: true
+  sensitivity: medium  # matches the "chill" CodeRabbit profile
+  incremental_commits: true
+  check_drafts: false
+
+  ignore:
+    files:
+      - "docs/**"
+      - "**/*.md"
+      - "**/testdata/**"
+      - "**/fixtures/**"
+      - "**/vendor/**"
+    pr_labels:
+      - "skip-review"
+
+# Keep the PR descriptions we write
+pr_descriptions:
+  generate: false
+
+# Commits on PR branches come from us, signed; cubic only comments
+issues:
+  auto_fix: "off"  # quoted: a bare off is YAML for false
+  pr_comment_fixes: false
+  fix_with_cubic_buttons: false
