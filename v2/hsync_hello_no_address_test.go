@@ -271,6 +271,30 @@ func waitForLookups(t *testing.T, what string, count func() int, n int) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+// discoveredAt is when env's last discovery of the peer ended: the peer's
+// discovery status is written once its lookups are done, and what they read
+// is in the resolver's cache. Zero when env holds no such peer.
+func discoveredAt(env *peerEnv, peer string) time.Time {
+	p, ok := env.Bridge.PeerRegistry.Get(peer)
+	if !ok {
+		return time.Time{}
+	}
+	return p.DiscoveryStatus().At
+}
+
+// waitForDiscovery waits until a discovery of the peer by env has ended
+// after since.
+func waitForDiscovery(t *testing.T, env *peerEnv, peer string, since time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !discoveredAt(env, peer).After(since) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's discovery of %s did not end", env.Identity, peer)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // bobAddressLookups is how many times Bob's SVCB record has been asked for
 // at the authoritative server: the lookups Alice's resolver did not answer
 // from its cache. Bob's own resolver never asks for it.
@@ -368,15 +392,21 @@ func TestALookupPastTheCacheForAHelloCountsForRefusedHellosToo(t *testing.T) {
 	s.bob.Bridge.authorizedPeers = func() []string { return nil }
 	jwkLookups := func() int { return s.zone.asked("dns."+s.bob.Identity, core.TypeJWK) }
 	// Alice's retries wait, and the one running ends, while the lookups
-	// up to the one for Bob's hello are counted.
+	// up to the one for Bob's hello are counted. They wait until the
+	// discovery for his hello has ended, so that what it read is in the
+	// resolver's cache when they run.
 	func() {
 		s.discoveries.Lock()
 		defer s.discoveries.Unlock()
 		if got := jwkLookups(); got != 1 {
 			t.Fatalf("precondition: Bob's JWK record was asked for %d times, want once: when Alice discovered him", got)
 		}
+		before := discoveredAt(s.alice, s.bob.Identity)
 		sayHello(t, s.bob, s.alice)
-		waitForLookups(t, "Bob's JWK record", jwkLookups, 2)
+		waitForDiscovery(t, s.alice, s.bob.Identity, before)
+		if got := jwkLookups(); got != 2 {
+			t.Fatalf("Bob's JWK record was asked for %d times when the discovery for his hello ended, want 2", got)
+		}
 	}()
 	// Bob holds no peer: his hello gave him a view of Alice, and a peer he
 	// holds is admitted whatever its state (#178 step 7).
