@@ -86,6 +86,8 @@ type harnessWire struct {
 	fakeWire
 }
 
+func (w *harnessWire) DSSigners(zone string) []string { return w.OtherSigners(zone) }
+
 func (w *harnessWire) OtherSigners(zone string) []string {
 	w.h.mu.Lock()
 	defer w.h.mu.Unlock()

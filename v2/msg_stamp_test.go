@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestEverySyncFamilyMessageCarriesTheSendersStamp(t *testing.T) {
 		if err := json.Unmarshal(msg.Payload, &p); err != nil {
 			t.Fatal(err)
 		}
-		if p.Instr == nil || *p.Instr != *ms || p.Instr.Active != 7 {
+		if p.Instr == nil || !reflect.DeepEqual(*p.Instr, *ms) || p.Instr.Active != 7 {
 			t.Errorf("%s: the stamp on the wire: %+v, want %+v", verb, p.Instr, ms)
 		}
 	}
@@ -63,7 +64,7 @@ func TestConfigEditsAndAuditCarryTheStamp(t *testing.T) {
 		if err := json.Unmarshal(d.raw, d.v); err != nil {
 			t.Fatal(err)
 		}
-		if got := d.got(); got == nil || *got != *ms {
+		if got := d.got(); got == nil || !reflect.DeepEqual(*got, *ms) {
 			t.Errorf("%T: the stamp on the wire: %+v", d.v, got)
 		}
 	}

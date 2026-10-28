@@ -296,4 +296,6 @@ type ParentSyncStatus struct {
 	// Combiner is what the agent knows its combiner acts by for the zone
 	// (the hand-over, plan S10); empty when it hands it nothing.
 	Combiner string `json:"combiner,omitempty"`
+	// Signer is the same of its signer (plan S11).
+	Signer string `json:"signer,omitempty"`
 }

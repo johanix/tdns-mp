@@ -418,7 +418,7 @@ func TestEveryKeyMachineOfTheZonePausesWhileAProviderLeaves(t *testing.T) {
 			paused := map[string]keyPause{}
 			e.tickOwned(paused)
 			if !owner.Owns(mpzd.ZoneData) {
-				t.Fatal("the zone was released to tdns's key machine")
+				t.Fatal("the zone was given back to tdns's key machine")
 			}
 			st, err := e.Status(mpzd.ZoneName)
 			if err != nil {

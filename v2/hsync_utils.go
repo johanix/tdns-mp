@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"time"
@@ -184,6 +185,14 @@ func (mpzd *MPZoneData) LocalDnskeysFromKeystate(self AgentId, apex *tdns.OwnerD
 		mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: no KEYSTATE inventory available", mpzd.ZoneName)
 		return false, nil, nil
 	}
+	// A signer that does not sign the zone sends its real inventory, marked
+	// so (plan S11): nothing is withdrawn from it, and nothing distributed.
+	// Its keys leave the zone by the leader's steps, not because the signer
+	// stopped signing (#147).
+	if inv.NotSigning {
+		mpzd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: the signer does not sign the zone; its keys are neither distributed nor withdrawn", mpzd.ZoneName)
+		return false, nil, nil
+	}
 
 	if time.Since(inv.Received) > 1*time.Hour {
 		lgEngine.Warn("using stale KEYSTATE inventory", "zone", mpzd.ZoneName, "age", time.Since(inv.Received))
@@ -317,12 +326,15 @@ func (mpzd *MPZoneData) recordRequestedInventory(ctx context.Context, tm *MPTran
 		return
 	}
 	mpzd.setLastKeyInventoryUnlessOlder(&KeyInventorySnapshot{
-		SenderID:  inv.SenderID,
-		Zone:      inv.Zone,
-		Inventory: inv.Inventory,
-		Owned:     inv.Owned,
-		Received:  time.Now(),
-		seq:       inv.seq,
+		SenderID:   inv.SenderID,
+		Zone:       inv.Zone,
+		Inventory:  inv.Inventory,
+		Owned:      inv.Owned,
+		NotSigning: inv.NotSigning,
+		Rollover:   inv.Rollover,
+		WaitsOn:    inv.WaitsOn,
+		Received:   time.Now(),
+		seq:        inv.seq,
 	})
 }
 
@@ -1349,11 +1361,17 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			MP:        &MPState{},
 			MPOptions: make(map[tdns.ZoneOption]bool),
 		}
-		// A combiner that holds a hand-over signs by the set handed, not by
-		// the incoming copy, unless that copy is newer (S10). Every other
-		// role advances its signing set by the instructions it acts by: the
-		// active ones, from the thaw (S7), not a newer copy.
+		// A combiner or signer that holds a hand-over signs by the set
+		// handed, not by the incoming copy, unless that copy is newer (S10,
+		// S11). A signer that waits for its agent's hand-over signs by the
+		// set it last signed by, unchanged by its copy, where it has one
+		// (rule 5). Every other role advances its signing set by the
+		// instructions it acts by: the active ones, from the thaw (S7), not
+		// a newer copy.
 		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName, newApex)
+		if !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) {
+			signing, handed = mpzd.lastSigningSet(kdb)
+		}
 		if !handed {
 			var changed bool
 			if signing, changed = mpzd.advanceSigningSet(newMpzd.instructions(), kdb); changed {
@@ -1365,58 +1383,17 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		mpzd.MPOptions = newMpzd.MPOptions
 	}
 
-	// Signer: dynamically enable/disable inline-signing based on HSYNC analysis.
-	if mpzd.MP.MPdata != nil {
-		switch tdns.Globals.App.Type {
-		case AppTypeMPSigner:
-			shouldSign := mpzd.MP.MPdata.WeAreSigner
-			otherSigners := mpzd.MP.MPdata.OtherSigners
-			if shouldSign && !new_zd.Options[tdns.OptInlineSigning] {
-				lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
-			} else if !shouldSign && new_zd.Options[tdns.OptInlineSigning] {
-				lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", mpzd.ZoneName)
-			}
-			// The switch is ours, not the configuration's: recorded on the
-			// served zone as a run-time option, at every refresh, so that a
-			// config update (config reload-zones, a zone reload) does not
-			// take it away until the next transfer (tdns-mp #144). On the
-			// incoming zone too: its options are the served zone's as they
-			// were when the fetch began. That map is the one the served
-			// zone had, which is read without a lock, so the incoming zone
-			// gets a map of its own and the old one is not written.
-			mpzd.ZoneData.SetRuntimeOption(tdns.OptInlineSigning, shouldSign)
-			if new_zd.Options[tdns.OptInlineSigning] != shouldSign {
-				opts := make(map[tdns.ZoneOption]bool, len(new_zd.Options)+1)
-				for o, on := range new_zd.Options {
-					opts[o] = on
-				}
-				opts[tdns.OptInlineSigning] = shouldSign
-				new_zd.Options = opts
-			}
-			isMS := shouldSign && otherSigners > 0
-			if isMS && !mpzd.MPOptions[tdns.OptMultiSigner] {
-				lg.Info("multi-signer mode detected", "zone", mpzd.ZoneName, "otherSigners", otherSigners)
-				mpzd.MPOptions[tdns.OptMultiSigner] = true
-			} else if !isMS && mpzd.MPOptions[tdns.OptMultiSigner] {
-				lg.Info("no longer multi-signer", "zone", mpzd.ZoneName)
-				mpzd.MPOptions[tdns.OptMultiSigner] = false
-			}
-			// The other signers' DNSKEYs are found where they arrive, in the
-			// incoming zone, and kept as foreign rows in the keystore: served
-			// from the next publish, never signing. A refresh collects its
-			// DNSKEY RRset before this callback, so a change here is served
-			// by the re-sign requested below rather than by this refresh.
-			// The other signers are the incoming zone's signing set: the
-			// ones its signers= names, and those leaving it (#147).
-			if shouldSign {
-				others := mpzd.MP.MPdata.Signing.others(mpzd.MP.MPdata.OurLabel)
-				if changed, err := mpzd.syncForeignDNSKEYs(new_zd, isMS, others); err != nil {
-					lg.Error("syncing foreign DNSKEYs failed", "zone", mpzd.ZoneName, "err", err)
-				} else if changed {
-					sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
-				}
-			}
+	// Signer: dynamically enable/disable inline-signing based on HSYNC
+	// analysis. The other signers whose DNSKEYs are kept as foreign rows are
+	// the ones handed (KeySigners, plan S11), or the incoming zone's signing
+	// set: the ones its signers= names, and those leaving it (#147).
+	if mpzd.MP.MPdata != nil && tdns.Globals.App.Type == AppTypeMPSigner {
+		others := mpzd.MP.MPdata.Signing.others(mpzd.MP.MPdata.OurLabel)
+		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
+		if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, newApex); ok {
+			others = othersIn(handed.KeySigners, labelOfIdentity(handed, ourHsyncIdentities(mp)))
 		}
+		mpzd.signerSwitch(new_zd, others, mp)
 	}
 
 	// Combiner: HSYNC match check and combine with local changes on new_zd.
@@ -1491,6 +1468,86 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 
 	// Store analysis for post-refresh callbacks
 	mpzd.MP.RefreshAnalysis = analysis
+}
+
+// signerSwitch is the signer's inline-signing switch and multi-signer mode,
+// by its multi-provider data, and the other signers' DNSKEYs kept as
+// foreign rows: at a refresh (MPPreRefresh) from the incoming zone, others
+// being the providers whose rows are kept; at a hand-over (incoming nil,
+// plan S11) over the zone it serves, whose DNSKEY RRset the keystore gives:
+// out of multi-signer mode every foreign row goes, and in it the rows the
+// last incoming zone lacked are judged again by the providers handed. A
+// change of the foreign rows asks for a re-sign. switched says the
+// inline-signing switch moved.
+func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, mp *MultiProviderConf) (switched bool) {
+	shouldSign := mpzd.MP.MPdata.WeAreSigner
+	otherSigners := mpzd.MP.MPdata.OtherSigners
+	was := mpzd.ZoneData
+	if incoming != nil {
+		was = incoming
+	}
+	if shouldSign && !was.Options[tdns.OptInlineSigning] {
+		lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
+	} else if !shouldSign && was.Options[tdns.OptInlineSigning] {
+		lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", mpzd.ZoneName)
+	}
+	switched = was.Options[tdns.OptInlineSigning] != shouldSign
+	// The switch is ours, not the configuration's: recorded on the served
+	// zone as a run-time option, at every refresh, so that a config update
+	// (config reload-zones, a zone reload) does not take it away until the
+	// next transfer (tdns-mp #144). On the incoming zone too: its options
+	// are the served zone's as they were when the fetch began. That map is
+	// the one the served zone had, which is read without a lock, so the
+	// incoming zone gets a map of its own and the old one is not written.
+	mpzd.ZoneData.SetRuntimeOption(tdns.OptInlineSigning, shouldSign)
+	if incoming != nil && incoming.Options[tdns.OptInlineSigning] != shouldSign {
+		opts := make(map[tdns.ZoneOption]bool, len(incoming.Options)+1)
+		for o, on := range incoming.Options {
+			opts[o] = on
+		}
+		opts[tdns.OptInlineSigning] = shouldSign
+		incoming.Options = opts
+	}
+	// Multi-signer mode on a copy of the options: a hand-over and a refresh
+	// may each set it, and neither writes the map the other reads.
+	isMS := shouldSign && otherSigners > 0
+	if isMS != mpzd.MPOptions[tdns.OptMultiSigner] {
+		if isMS {
+			lg.Info("multi-signer mode detected", "zone", mpzd.ZoneName, "otherSigners", otherSigners)
+		} else {
+			lg.Info("no longer multi-signer", "zone", mpzd.ZoneName)
+		}
+		opts := maps.Clone(mpzd.MPOptions)
+		if opts == nil {
+			opts = map[tdns.ZoneOption]bool{}
+		}
+		opts[tdns.OptMultiSigner] = isMS
+		mpzd.MPOptions = opts
+	}
+	if !shouldSign {
+		return switched
+	}
+	// The other signers' DNSKEYs are found where they arrive, in the
+	// incoming zone, and kept as foreign rows in the keystore: served from
+	// the next publish, never signing. A refresh collects its DNSKEY RRset
+	// before this callback, so a change here is served by the re-sign
+	// requested below rather than by this refresh.
+	var changed bool
+	var err error
+	switch {
+	case incoming != nil:
+		changed, err = mpzd.syncForeignDNSKEYs(incoming, isMS, others)
+	case !isMS:
+		changed, err = mpzd.syncForeignDNSKEYs(nil, false, nil)
+	default:
+		changed = mpzd.dropWithdrawnForeignDNSKEYs(mp)
+	}
+	if err != nil {
+		lg.Error("syncing foreign DNSKEYs failed", "zone", mpzd.ZoneName, "err", err)
+	} else if changed {
+		sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
+	}
+	return switched
 }
 
 // implicitDelegationChange is the refresh's implicit delegation-change
@@ -1656,7 +1713,8 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 
 	// The hook at activation (plan S3), from the zone's active instructions
 	// before the refresh and after it: the post-refresh callback has noted
-	// the copy first, and until S7 the active serial follows it. It runs at
+	// the copy first, which from S7 moves the active serial only at a
+	// zone's first record (the thaw moves it after that). It runs at
 	// every first load, whatever the store holds, and at every change of the
 	// active instructions; a refresh that changes nothing else of them (a
 	// TTL, an order, an OFF record's fields) runs nothing.

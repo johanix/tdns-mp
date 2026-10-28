@@ -181,6 +181,25 @@ func (mpzd *MPZoneData) advanceSigningSet(in *Instructions, kdb *tdns.KeyDB) (ne
 	return next, live
 }
 
+// lastSigningSet is the signing set the zone's last refresh left, or, at
+// its first copy here, the one the keystore keeps; false when there is
+// neither. A signer that waits for its agent's hand-over signs by it (rule
+// 5, plan S11).
+func (mpzd *MPZoneData) lastSigningSet(kdb *tdns.KeyDB) (signingSet, bool) {
+	if mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Signing != nil {
+		return mpzd.MP.MPdata.Signing, true
+	}
+	if kdb == nil {
+		return nil, false
+	}
+	set, err := loadSigningSet(kdb, mpzd.ZoneName)
+	if err != nil {
+		lg.Error("the zone's signing providers could not be read from the keystore; the zone is signed by its copy", "zone", mpzd.ZoneName, "err", err)
+		return nil, false
+	}
+	return set, set != nil
+}
+
 // afterSigningSetChange runs after a refresh (the post-refresh callback): when
 // the refresh changed the zone's signing set (MPState.SigningChanged, which
 // it clears), it asks the leader's delegation sync. The DS set follows the
