@@ -470,7 +470,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		for _, ri := range rejected {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
 		}
-		tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), rejItems)
+		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems)
 
 		// Forward per-RR detail to SynchedDataEngine
 		if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
@@ -2700,14 +2700,21 @@ func dnskeyKeyTagsOf(records []string) map[uint16]bool {
 // answer does not apply. A plain success naming no record (a relay's
 // summary) applies every key. An "ignored" answer (a provider that does not
 // sign the zone applies no DNSKEY of ours) is final too, neither applied
-// nor rejected. Pending, and a partial that says nothing about a key,
-// leave that key waiting; the signer's resend timer sends again. An agent
-// has answered once every key has a result from it. Once every expected
-// agent answered, each key's result goes to the signer: "rejected" when
-// any agent rejected it, else "propagated" (or "removed" for a key the
-// distribution removed), with the distribution's send time.
+// nor rejected, and so is a key a partial names as ignored. Pending, and a
+// partial that says nothing about a key, leave that key waiting; the
+// signer's resend timer sends again. An agent has answered once every key
+// has a result from it. Once every expected agent answered, each key's
+// result goes to the signer: "rejected" when any agent rejected it, else
+// "propagated" (or "removed" for a key the distribution removed), with the
+// distribution's send time.
 // Returns true if the confirmation was for a DNSKEY propagation.
 func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo) bool {
+	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems)
+}
+
+// processDnskeyConfirmation is ProcessDnskeyConfirmation with the records
+// the confirmation names as ignored (#288).
+func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo) bool {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2726,7 +2733,7 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	}
 	if !exists {
 		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
-			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems)
 		}
 		return false // Not a DNSKEY propagation confirmation
 	}
@@ -2756,7 +2763,7 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 	for _, ri := range rejectedItems {
 		rejectedRecords = append(rejectedRecords, ri.Record)
 	}
-	rejectedTags, doneTags := dnskeyKeyTagsOf(rejectedRecords), dnskeyKeyTagsOf(done)
+	rejectedTags, doneTags, ignoredTags := dnskeyKeyTagsOf(rejectedRecords), dnskeyKeyTagsOf(done), dnskeyKeyTagsOf(ignoredRecords)
 	wholeRejection := status == transport.ConfirmRejected.String() || (status == transport.ConfirmFailed.String() && len(rejectedItems) > 0)
 	// a success covers every key of the distribution: the peer lists in
 	// done what it changed, and a key it did not list was already there
@@ -2792,7 +2799,7 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 		case doneTags[kt] || success:
 			results[kt] = "applied"
 			lgTransport.Info("DNSKEY confirmation applied a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "listed", doneTags[kt])
-		case ignored:
+		case ignored || ignoredTags[kt]:
 			results[kt] = "ignored"
 			if prop.Signing[agentID] {
 				lgTransport.Warn("DNSKEY confirmation: a signing provider ignored our key; its combiner does not take it for a signer of the zone", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt)
@@ -2897,8 +2904,9 @@ func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, ask
 // that combiner's. A success says the asker's combiner holds the answer's
 // set: a key added that is in it is applied, and a key removed that is not
 // in it is removed. A rejection names its keys; an "ignored" covers the
-// answer's keys as a direct answer does. Under dnskeyPropMu.
-func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, rejectedItems []RejectedItemInfo) {
+// answer's keys as a direct answer does, and so does a key named as
+// ignored (#288). Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, ignoredRecords []string, rejectedItems []RejectedItemInfo) {
 	var rejectedRecords []string
 	for _, ri := range rejectedItems {
 		rejectedRecords = append(rejectedRecords, ri.Record)
@@ -2906,6 +2914,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 	rejectedTags := dnskeyKeyTagsOf(rejectedRecords)
 	success := status == transport.ConfirmSuccess.String()
 	ignored := status == transport.ConfirmIgnored.String() && len(rejectedItems) == 0
+	ignoredTags := dnskeyKeyTagsOf(ignoredRecords)
 	for distID, prop := range tm.pendingDnskeyPropagations {
 		if prop.Zone != ans.zone || prop.CreatedAt.After(ans.at) {
 			continue
@@ -2935,7 +2944,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 				}
 			case success && covered:
 				results[kt] = "applied"
-			case ignored && covered:
+			case (ignored || ignoredTags[kt]) && covered:
 				results[kt] = "ignored"
 			}
 		}
