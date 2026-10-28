@@ -300,6 +300,35 @@ var HsyncTables = map[string]string{
 		confirmed_at  TEXT DEFAULT '',
 		UNIQUE (zonename, keyid)
 	)`,
+	// MPZoneInstructions is what the agent (and the auditor) keeps of a
+	// zone's instructions (instructions_store.go, design rule 3): the
+	// active serial and its digest, the phase and whether the active serial
+	// is enforced, in columns of their own; and all of it, the newer
+	// serials held, the from-serial, the last thaw, an owner error, the
+	// step and its sets among them, as JSON in state. Read at the start,
+	// before the first load; written before a change is told.
+	"MPZoneInstructions": `CREATE TABLE IF NOT EXISTS 'MPZoneInstructions' (
+		zonename  TEXT NOT NULL,
+		active    INTEGER,
+		digest    TEXT DEFAULT '',
+		phase     TEXT DEFAULT '',
+		enforced  INTEGER DEFAULT 0,
+		state     TEXT NOT NULL DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+	// MPZoneRemovals are the removals under way that the agent holds, one
+	// row per leaving provider: as the leader's first step names it, the
+	// step this agent holds, and its nameserver names as JSON (S12, S17b).
+	"MPZoneRemovals": `CREATE TABLE IF NOT EXISTS 'MPZoneRemovals' (
+		zonename  TEXT NOT NULL,
+		label     TEXT NOT NULL,
+		identity  TEXT NOT NULL,
+		step      INTEGER DEFAULT 0,
+		ns_names  TEXT DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename, label, identity)
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.
@@ -698,6 +727,20 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		}
 	}
 
+	return nil
+}
+
+// InitInstructionTables creates only the tables of the zones' serials
+// (instructions_store.go). Called on the auditor's start, which keeps
+// serials as an agent does and creates none of the agent's other tables.
+func (hdb *HsyncDB) InitInstructionTables() error {
+	hdb.Lock()
+	defer hdb.Unlock()
+	for _, name := range []string{"MPZoneInstructions", "MPZoneRemovals"} {
+		if _, err := hdb.DB.Exec(HsyncTables[name]); err != nil {
+			return fmt.Errorf("failed to create table %s: %w", name, err)
+		}
+	}
 	return nil
 }
 

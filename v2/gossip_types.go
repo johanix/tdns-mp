@@ -277,4 +277,7 @@ type ParentSyncStatus struct {
 	// DSSet is "known", or "unknown, waiting for" whom, for a zone that
 	// names a signer. Empty for one that names none.
 	DSSet string `json:"ds_set,omitempty"`
+	// Instructions is what the agent keeps of the zone's instructions
+	// (instructions_store.go); nil when it keeps none.
+	Instructions *InstructionsStatus `json:"instructions,omitempty"`
 }

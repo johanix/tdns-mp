@@ -522,6 +522,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			}
 			status := lem.GetParentSyncStatus(amp.Zone, zd.ZoneData, hdb, &Imr{conf.Config.Internal.ImrEngine}, conf.InternalMp.AgentRegistry, conf.Config.ParentSync.Schemes)
 			status.DSSet = conf.dsSetLine(zd.ZoneData)
+			status.Instructions = conf.InternalMp.Instructions.Status(string(amp.Zone))
 			// the leader's sync held for the zone's SIG(0) key (step 7b),
 			// beside the catch-up's hold: its own line
 			if lem.IsLeader(amp.Zone) {
@@ -531,6 +532,16 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			}
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
+
+		case "instructions-forget":
+			// The one exception to never giving a serial up (design rule
+			// 3), refused unless the zone is steady here.
+			if err := conf.InternalMp.Instructions.Forget(string(amp.Zone)); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = fmt.Sprintf("Forgot the stored serials of zone %s; the next copy of the zone loaded (zone reload) is noted afresh", amp.Zone)
 
 		case "parentsync-election":
 			if !votesInZone(amp.Zone, AgentId(mp.Identity)) {

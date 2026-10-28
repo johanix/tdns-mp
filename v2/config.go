@@ -57,6 +57,13 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 	if conf.InternalMp.refreshRegistered == nil {
 		conf.InternalMp.refreshRegistered = make(map[string]bool)
 	}
+	// A zone that leaves the configuration takes its serials with it
+	// (design rule 3): at the start, and after every zone reload, which
+	// has removed it from tdns's zones by now.
+	conf.InternalMp.Instructions.Prune(func(zone string) bool {
+		zd, ok := tdns.Zones.Get(zone)
+		return ok && zd.Options[tdns.OptMultiProvider]
+	})
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		if conf.InternalMp.refreshRegistered[zoneName] {
 			continue
@@ -85,6 +92,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
 					givenBack := conf.followParentSyncParam(mpzd)
 					mpzd.PostRefresh(tm, msgQs)
+					conf.noteInstructions(mpzd)
 					conf.afterSigningSetChange(mpzd)
 					if givenBack {
 						// after PostRefresh, which applies this refresh's
@@ -308,6 +316,7 @@ type InternalMpConf struct {
 	KeyLifecycle          *KeyLifecycleEngine
 	KeyLifecycleOwner     *MPKeyLifecycleOwner
 	HsyncDB               *HsyncDB
+	Instructions          *InstructionStore // the zones' serials, on the agent and the auditor
 	SyncQ                 chan SyncRequest
 	MsgQs                 *MsgQs
 	SyncStatusQ           chan SyncStatus

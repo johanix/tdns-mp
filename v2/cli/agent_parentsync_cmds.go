@@ -198,9 +198,9 @@ Example:
 	}
 }
 
-// sendAgentParentSyncCmd posts one of the agent's parentsync-* commands for
-// the zone given with --zone. An answer that reports an error is returned as
-// an error, so a leaf has one way to fail.
+// sendAgentParentSyncCmd posts one of the agent's parentsync-* commands, or
+// instructions-forget, for the zone given with --zone. An answer that
+// reports an error is returned as an error, so a leaf has one way to fail.
 func sendAgentParentSyncCmd(cmd *cobra.Command, command string) (*AgentMgmtResponse, error) {
 	tdnscli.PrepArgs("zonename")
 
@@ -277,6 +277,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	if s.DSSet != "" {
 		fmt.Fprintf(w, "  DS set:         %s\n", termSafe(s.DSSet))
 	}
+	fmt.Fprintf(w, "  instructions:   %s\n", termSafe(s.Instructions.Line()))
 
 	if s.KeyAlgorithm == "" {
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")

@@ -81,13 +81,20 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		if info.ZoneError != "" {
 			optStr = "ERROR"
 		}
-		// The copy's instructions: its serial and digest, or ERR with the
-		// owner error listed below the table.
+		// The zone's instructions: the active serial and its digest where
+		// the daemon keeps serials, "7->8" when a newer one is held, and
+		// otherwise the copy's; or ERR, with the owner error listed below
+		// the table.
 		serial, digest := fmt.Sprint(info.Serial), info.Digest
 		switch {
 		case info.OwnerError != "":
 			serial, digest = "ERR", "-"
 			ownerErrors = append(ownerErrors, fmt.Sprintf("  %s: %s", zname, info.OwnerError))
+		case info.Active != nil:
+			serial, digest = fmt.Sprint(info.Active.Serial), info.Active.Digest
+			if n := info.Newest; n != nil && *n != *info.Active {
+				serial += fmt.Sprintf("->%d", n.Serial)
+			}
 		case digest == "":
 			serial, digest = "-", "-"
 		}
