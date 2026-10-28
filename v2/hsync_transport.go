@@ -740,21 +740,35 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// On an agent and an auditor a payload that names another sender than
 	// the one the transport established is refused first, before anything
 	// judges the message by that name (refuseNamedSender).
-	if tm.role == roleAgent || tm.role == roleAuditor {
-		tm.Router.Use(tm.refuseNamedSender)
-		tm.Router.Use(tm.noteMessageStamp)
+	for _, mw := range tm.routerMiddleware() {
+		tm.Router.Use(mw)
 	}
-	// On an agent a KEYSTATE is taken only from its own signer, and on a
-	// signer only from its own agents (refuseForeignKeystate).
-	if tm.role == roleAgent || tm.role == roleSigner {
-		tm.Router.Use(tm.refuseForeignKeystate)
-	}
-	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))
 
 	lgTransport.Info("incoming message router registered via RouteToCallback")
+}
+
+// routerMiddleware is this role's middleware before the verb handlers, in
+// the order the router runs it: the refusals first, and what a message's
+// stamp tells noted only once every one of them has let it through
+// (noteMessageStamp): a refused message changes nothing.
+func (tm *MPTransportBridge) routerMiddleware() []transport.MiddlewareFunc {
+	var mws []transport.MiddlewareFunc
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		mws = append(mws, tm.refuseNamedSender)
+	}
+	// On an agent a KEYSTATE is taken only from its own signer, and on a
+	// signer only from its own agents (refuseForeignKeystate).
+	if tm.role == roleAgent || tm.role == roleSigner {
+		mws = append(mws, tm.refuseForeignKeystate)
+	}
+	mws = append(mws, tm.keyHandOverGate)
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		mws = append(mws, tm.noteMessageStamp)
+	}
+	return mws
 }
 
 // messageMechanism is the mechanism a message arrived on, as the pipeline

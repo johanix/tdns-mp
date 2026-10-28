@@ -113,8 +113,9 @@ func (t *stampTable) noteMessage(sender, zone string, ms *MsgStamp) {
 var stampedVerbs = map[string]bool{"sync": true, "update": true, "rfi": true, "edits": true, "config": true, "audit": true}
 
 // noteMessageStamp is the router middleware of the agent and the auditor,
-// after refuseNamedSender: the stamp a message carries is noted as its
-// sender's telling, the sender being the one the transport established.
+// after every refusal (routerMiddleware): the stamp a message carries is
+// noted as its sender's telling, the sender being the one the transport
+// established and refuseNamedSender held the payload to.
 func (tm *MPTransportBridge) noteMessageStamp(ctx *transport.MessageContext, next transport.MessageHandlerFunc) error {
 	if msg, ok := ctx.Incoming(); ok && tm.stamps != nil && stampedVerbs[msg.Token()] {
 		sender := ctx.PeerID
@@ -174,7 +175,7 @@ func (t *stampTable) sent(distID, recipient, zone string, ms *MsgStamp) {
 
 // confirmed records the confirmer's stamp of distribution distID, and its
 // status. A confirmation of a distribution this agent sent no recorded
-// send of starts a row of its own.
+// send of starts a row of its own; the rows are bounded as sent's are.
 func (t *stampTable) confirmed(distID, confirmer, zone string, ms *MsgStamp, status string) {
 	if t == nil || distID == "" || confirmer == "" {
 		return
@@ -191,6 +192,9 @@ func (t *stampTable) confirmed(distID, confirmer, zone string, ms *MsgStamp, sta
 		t.dists[key] = d
 	}
 	d.Confirmed, d.Status, d.ConfirmedAt = ms, status, time.Now()
+	if len(t.dists) > distStampsKept {
+		t.pruneDistsLocked()
+	}
 }
 
 // pruneDistsLocked drops the rows of the oldest sends, down to three

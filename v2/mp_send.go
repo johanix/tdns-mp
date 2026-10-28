@@ -313,6 +313,11 @@ func (tm *MPTransportBridge) sendAnswer(ctx context.Context, mechanism string, p
 // CONFIG arrived on (sendAnswer).
 func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerConfigRequest) (*PeerConfigResponse, error) {
 	req.Instr = tm.stamps.messageStamp(req.Zone) // stamped when sent (rule 6)
+	if req.DistributionID == "" {
+		// named here rather than by the transport, so that the send's stamp
+		// is recorded under it
+		req.DistributionID = transport.GenerateDistributionID()
+	}
 	tm.stamps.sent(req.DistributionID, peer.ID, req.Zone, req.Instr)
 	msg, err := configAppMessage(req, peer.ID)
 	if err != nil {

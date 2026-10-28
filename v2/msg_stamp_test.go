@@ -7,6 +7,7 @@ package tdnsmp
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"slices"
 	"testing"
@@ -252,5 +253,76 @@ func TestTransportBoundary_ConfirmationCarriesTheReceiversStamp(t *testing.T) {
 	i := slices.IndexFunc(rows, func(r DistributionStamps) bool { return r.DistributionID == distID })
 	if i < 0 || rows[i].Sent == nil || rows[i].Confirmed == nil || rows[i].Status != "PENDING" {
 		t.Errorf("the distribution's row: %+v", rows)
+	}
+}
+
+// A message a refusal stops notes nothing: the stamp is noted after every
+// refusal of the router's middleware, in the order the router runs it. A
+// peer let in for the zone's SIG(0) key alone tells nothing by another
+// request; by its request for the key it does.
+func TestARefusedMessagesStampIsNotNoted(t *testing.T) {
+	moved, _ := handoverZones(t)
+	c := handoverBridge(arrivalC)
+	c.role = roleAgent
+	zd, _ := Zones.Get(string(moved))
+	apex, err := zd.GetOwner(string(moved))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := ReadInstructions(apex)
+	if err != nil || in == nil {
+		t.Fatalf("the zone's reading: %v %v", in, err)
+	}
+	s := newStore(t)
+	s.Note(string(moved), in, nil)
+	c.stamps = newStampTable(arrivalC, s, 1, false, nil)
+	route := func(subtype string, seq uint64) {
+		t.Helper()
+		payload, err := json.Marshal(&DnsSyncPayload{MessageType: "rfi", OriginatorID: arrivalA, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: subtype,
+			Instr: &MsgStamp{Epoch: 1, Seq: seq, InstrStamp: InstrStamp{Known: true, Active: in.Serial, ActiveDigest: in.Digest(), Newest: in.Serial, NewestDigest: in.Digest()}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := &transport.MessageContext{Data: map[string]interface{}{}}
+		ctx.SetIncoming(&transport.IncomingMessage{TypeToken: "rfi", SenderID: arrivalA, TransportSender: arrivalA, Zone: string(moved), Payload: payload})
+		next := func(*transport.MessageContext) error { return nil }
+		mws := c.routerMiddleware()
+		for i := len(mws) - 1; i >= 0; i-- {
+			mw, inner := mws[i], next
+			next = func(ctx *transport.MessageContext) error { return mw(ctx, inner) }
+		}
+		_ = next(ctx)
+	}
+	route("upstream", 1)
+	if m := c.stamps.heard(arrivalA); m != nil {
+		t.Fatalf("the stamp of a request the gate refused was noted: %+v", m)
+	}
+	route("sig0key", 2)
+	if m := c.stamps.heard(arrivalA); m == nil || m.ZoneSeq[canonicalName(string(moved))] != 2 {
+		t.Errorf("the request for the key: %+v", m)
+	}
+}
+
+// The rows of confirmations with no recorded send are bounded too.
+func TestTheDistributionRowsAreBounded(t *testing.T) {
+	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
+	for i := 0; i <= distStampsKept; i++ {
+		st.confirmed(fmt.Sprintf("d%d", i), stampBeta, stampZone, nil, "SUCCESS")
+	}
+	if n := len(st.distributionStamps("")); n > distStampsKept {
+		t.Errorf("%d rows kept, the bound is %d", n, distStampsKept)
+	}
+}
+
+// A CONFIG answer that names no distribution is given one before it is sent,
+// so its stamp is recorded under it.
+func TestACONFIGAnswerIsRecordedUnderItsDistribution(t *testing.T) {
+	c := handoverBridge(stampAlpha)
+	c.stamps = stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
+	req := &PeerConfigRequest{SenderID: stampAlpha, Zone: stampZone, Subtype: "upstream"}
+	_, _ = c.sendConfig(t.Context(), transport.NewPeer(stampBeta), "DNS", req) // no transport: the send fails
+	rows := c.stamps.distributionStamps(stampZone)
+	if req.DistributionID == "" || len(rows) != 1 || rows[0].DistributionID != req.DistributionID || rows[0].Sent == nil {
+		t.Errorf("distribution %q, rows %+v", req.DistributionID, rows)
 	}
 }
