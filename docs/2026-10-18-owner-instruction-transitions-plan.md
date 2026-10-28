@@ -200,7 +200,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S7 | The thaw | S6; S10 and S11 on the fleet first; P6 at the providers' nameservers; out with S8 and S9 | 19 | 815 | 145 | Not started |
 | S8 | Messages between serials | S7; PR #169's copy to the auditors (still draft) | 10 | 440 | 105 | Not started |
 | S9 | The restart rule | S8 (membership step 4 done) | 9 | 325 | 65 | Not started |
-| S10 | One reader at the combiner | S3 (#208 and membership step 3 done) | 18 | 580 | 180 | **Built** (2026-10-28), tdns-mp #294, on main `11b8e1c`: its pull request carries this cell. 32 files; about 1,370 new lines with their comments and 30 changed, tests 1,130. Until S13 the hand-over's key, DS and signing sets are the signing set of #275; until S7 a combiner whose copy is newer than the hand-over acts by its copy (status note). #235 stays open |
+| S10 | One reader at the combiner | S3 (#208 and membership step 3 done) | 18 | 580 | 180 | **Built** (2026-10-28), tdns-mp #294, on main `11b8e1c`: its pull request carries this cell. 32 files; about 1,490 new lines with their comments and 40 changed, tests 1,250. Until S13 the hand-over's key, DS and signing sets are the signing set of #275; until S7 a combiner whose copy is newer than the hand-over acts by its copy (status note). #235 stays open |
 | S11 | One reader at the signer | S10, S6 | 16 | 430 | 150 | Not started. With S13, replaces #275's pause |
 | S12 | The reconciliation core | S9, S10, S11 | 13 | 545 | 105 | Not started |
 | S13 | Steps reach the parts; the DS set follows the step | S12 (#208 done) | 11 | 305 | 130 | Not started. With S11, replaces #275 (the interim for #147) |
