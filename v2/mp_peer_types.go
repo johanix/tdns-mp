@@ -101,8 +101,16 @@ type PeerKeystateRequest struct {
 	// signer's key lifecycle sends again (E12, T6', or after a restart).
 	// The agent distributes those keys to the peers again, as a tracked
 	// distribution, even when its key set has not changed (#256).
-	Resend    []uint16
-	Timestamp time.Time // Request timestamp
+	Resend []uint16
+	// Acting: with Signal "acting", the hand-over to the signer; with Signal
+	// "inventory", the one the signer holds, nil for none (plan S11).
+	Acting *ActingHandover
+	// NotSigning, Rollover and WaitsOn: the signer's marks on its
+	// inventory (plan S11; DnsKeystatePayload).
+	NotSigning bool
+	Rollover   bool
+	WaitsOn    map[uint16][]string
+	Timestamp  time.Time // Request timestamp
 }
 
 type PeerKeystateResponse struct {

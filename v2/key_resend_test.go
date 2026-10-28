@@ -291,10 +291,10 @@ func TestTheSignerMarksTheKeyItSendsAgain(t *testing.T) {
 	if r, ok := recvWithin(got, time.Second); !ok || !slices.Equal(r, []uint16{4711}) {
 		t.Errorf("the resend pushed %v (%v), want [4711]", r, ok)
 	}
-	if req := inventoryRequest("signer.example.", "z.example.", nil, true, []uint16{4711}); !slices.Equal(req.Resend, []uint16{4711}) || req.Signal != "inventory" {
+	if req := inventoryRequest("signer.example.", "z.example.", nil, true, []uint16{4711}, inventoryMarks{}); !slices.Equal(req.Resend, []uint16{4711}) || req.Signal != "inventory" {
 		t.Errorf("the inventory request: %+v", req)
 	}
-	if req := inventoryRequest("signer.example.", "z.example.", nil, true, nil); len(req.Resend) != 0 {
+	if req := inventoryRequest("signer.example.", "z.example.", nil, true, nil, inventoryMarks{}); len(req.Resend) != 0 {
 		t.Errorf("a plain inventory carries a mark: %v", req.Resend)
 	}
 }
@@ -309,7 +309,7 @@ func TestAMarkedPushIsNotTakenByAnRFIWaiter(t *testing.T) {
 	waiter := make(chan *KeystateInventoryMsg, 1)
 	agent.setKeystateRfi(zone, waiter)
 	route := func(resend []uint16) {
-		msg, err := keystateAppMessage(inventoryRequest("signer.us.example.", zone, inventoryEntriesOf([]KeyInventoryItem{k}), true, resend), "agent.us.example.")
+		msg, err := keystateAppMessage(inventoryRequest("signer.us.example.", zone, inventoryEntriesOf([]KeyInventoryItem{k}), true, resend, inventoryMarks{}), "agent.us.example.")
 		if err != nil {
 			t.Fatal(err)
 		}

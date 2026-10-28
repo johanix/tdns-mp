@@ -3,6 +3,7 @@ package tdnsmp
 import (
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -294,9 +295,11 @@ func TestDriverResendKeepsTheFirstSendTime(t *testing.T) {
 	}
 }
 
-// N9: a zone taken by configuration that this provider does not sign is
-// released, so tdns's own machine runs its keys rather than nobody.
-func TestEngineReleasesAZoneThisProviderDoesNotSign(t *testing.T) {
+// N9, and plan S11: a zone taken by configuration that this provider does
+// not sign stays owned and idle: no driver runs it, tdns's own machine does
+// not take it, and it is not taken and released again at every tick.
+// Signals for it are taken.
+func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	conf := &Config{Config: &tdns.Config{}}
 	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}})
@@ -313,11 +316,21 @@ func TestEngineReleasesAZoneThisProviderDoesNotSign(t *testing.T) {
 	if !owner.Owns(mpzd.ZoneData) {
 		t.Fatal("not owned after Take")
 	}
-	if e.driver(mpzd.ZoneName) != nil {
-		t.Error("a driver for a zone this provider does not sign")
+	for range 2 {
+		e.tickOwned(map[string]keyPause{})
+		if e.driver(mpzd.ZoneName) != nil {
+			t.Fatal("a driver for a zone this provider does not sign")
+		}
+		if !owner.Owns(mpzd.ZoneData) || !owner.taken(mpzd.ZoneName) {
+			t.Fatal("the zone was given back to tdns's machine")
+		}
 	}
-	if owner.Owns(mpzd.ZoneData) {
-		t.Error("still owned after the engine found this provider is not a signer; tdns's machine would not run it either")
+	if !e.Signal(mpzd.ZoneName, 1, "propagated", "", time.Time{}) {
+		t.Error("a signal for the idle zone was not taken: tdns's path would act on it")
+	}
+	st, err := e.Status(mpzd.ZoneName)
+	if err != nil || !st.Idle {
+		t.Errorf("the status of the idle zone: %+v, err %v; want idle", st, err)
 	}
 }
 
@@ -488,9 +501,9 @@ func TestDriverRefusesWhatItCannotDo(t *testing.T) {
 }
 
 // CodeRabbit on #76: the engine checks a cached driver's zone again each
-// time: a zone released drops out; one this provider stopped signing is
-// released; a driver that could not restore is not cached but the zone
-// stays claimed for signals.
+// time: one this provider stopped signing drops out and stays owned and
+// idle (plan S11); a driver that could not restore is not cached but the
+// zone stays claimed for signals.
 func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	conf := &Config{Config: &tdns.Config{}}
@@ -504,17 +517,6 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	if e.driver(mpzd.ZoneName) == nil {
 		t.Fatal("no driver for the owned zone")
 	}
-	owner.Release(mpzd.ZoneName)
-	if e.driver(mpzd.ZoneName) != nil {
-		t.Error("a released zone still has its cached driver")
-	}
-	if e.Signal(mpzd.ZoneName, 1, "propagated", "", time.Time{}) {
-		t.Error("a signal for a released zone was claimed")
-	}
-	owner.Take(mpzd.ZoneName)
-	if e.driver(mpzd.ZoneName) == nil {
-		t.Fatal("no driver after taking the zone again")
-	}
 	// the zone's signers change: this provider is no longer one
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}}}}
@@ -524,8 +526,8 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	if e.driver(mpzd.ZoneName) != nil {
 		t.Error("a zone this provider stopped signing still has its cached driver")
 	}
-	if owner.Owns(mpzd.ZoneData) {
-		t.Error("a zone this provider stopped signing is still owned")
+	if !owner.Owns(mpzd.ZoneData) {
+		t.Error("a zone this provider stopped signing is given back to tdns's machine")
 	}
 
 	// configured zones: a zone not loaded, one with no policy, one that is
@@ -538,8 +540,9 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	conf.MpConfig().KeyLifecycleZones = []string{"missing.config.example.", plain.ZoneName, nopol.ZoneName, good.ZoneName}
 	e.TakeConfiguredZones()
 	zones := owner.Zones()
-	if len(zones) != 1 || zones[0] != good.ZoneName {
-		t.Errorf("zones taken from the configuration: %v, want only %s", zones, good.ZoneName)
+	slices.Sort(zones)
+	if want := []string{mpzd.ZoneName, good.ZoneName}; !slices.Equal(zones, want) {
+		t.Errorf("zones owned after the take from the configuration: %v, want %v (the idle one and the one taken)", zones, want)
 	}
 }
 

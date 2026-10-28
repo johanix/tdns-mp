@@ -1268,12 +1268,15 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		return false
 	}
 	snap := &KeyInventorySnapshot{
-		SenderID:  msg.SenderID,
-		Zone:      msg.Zone,
-		Inventory: msg.Inventory,
-		Owned:     msg.Owned,
-		Received:  time.Now(),
-		seq:       msg.seq,
+		SenderID:   msg.SenderID,
+		Zone:       msg.Zone,
+		Inventory:  msg.Inventory,
+		Owned:      msg.Owned,
+		NotSigning: msg.NotSigning,
+		Rollover:   msg.Rollover,
+		WaitsOn:    msg.WaitsOn,
+		Received:   time.Now(),
+		seq:        msg.seq,
 	}
 	// One inventory of the zone at a time, from the check to the owner's
 	// copy: the engine and a refresh-keys RFI record from goroutines of
@@ -1292,6 +1295,9 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	if inventoryRecordedHook != nil {
 		inventoryRecordedHook(msg)
 	}
+	// what the signer holds of the agent's hand-over (plan S11): handed
+	// again until it holds what this agent wants
+	conf.InternalMp.SignerHandover.learned(zd.ZoneName, msg.Acting)
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
 	o := conf.InternalMp.KeyLifecycleOwner

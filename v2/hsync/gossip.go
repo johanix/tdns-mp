@@ -89,7 +89,10 @@ type InstrStamp struct {
 	Refused        string `json:"refused,omitempty"` // the judge's first code
 	Error          string `json:"error,omitempty"`   // the owner error
 	Rollover       bool   `json:"rollover,omitempty"`
-	Thaw           *Thaw  `json:"thaw,omitempty"`
+	// WaitsOn: the other signers whose confirmations the provider's
+	// rollover under way misses, by its signer's inventory (plan S11).
+	WaitsOn []string `json:"waits_on,omitempty"`
+	Thaw    *Thaw    `json:"thaw,omitempty"`
 }
 
 // GroupElectionState carries election state for a provider group.

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -42,22 +43,32 @@ func (w *signerWire) mpzd(zone string) *MPZoneData {
 	return mpzd
 }
 
-// OtherSigners: the zone's signing set (HSYNCPARAM signers, and those
-// leaving it) minus this provider's label. Nothing when this provider is
-// not one of the signers: the machine must not run there (IsSigner), and
-// never waits on itself.
+// OtherSigners: the providers other than this one whose confirmations a
+// key's distribution expects (KeyConfirmers, plan S11). Nothing when this
+// provider does not sign the zone: the machine must not run there
+// (IsSigner), and never waits on itself.
 func (w *signerWire) OtherSigners(zone string) []string {
-	others, ok := w.signers(zone)
-	if !ok {
+	self, r, signs := w.sets(zone)
+	if !signs {
 		return nil
 	}
-	return others
+	return othersIn(r.KeyConfirmers, self)
 }
 
-// IsSigner reports whether this provider is one of the zone's signers.
+// DSSigners: the providers other than this one whose KSKs have a DS
+// (plan S11); nothing when this provider does not sign the zone.
+func (w *signerWire) DSSigners(zone string) []string {
+	self, r, signs := w.sets(zone)
+	if !signs {
+		return nil
+	}
+	return othersIn(r.DSSigners, self)
+}
+
+// IsSigner reports whether this provider signs the zone (Signing).
 func (w *signerWire) IsSigner(zone string) bool {
-	_, ok := w.signers(zone)
-	return ok
+	_, _, signs := w.sets(zone)
+	return signs
 }
 
 // leavers are the providers leaving the zone's signing set (#147), this
@@ -85,37 +96,79 @@ func pauseLine(leavers []string) string {
 	return fmt.Sprintf("key rollovers paused: %s are leaving the signing set", strings.Join(leavers, " and "))
 }
 
-func (w *signerWire) signers(zone string) ([]string, bool) {
+// sets are this provider's label in the zone, the zone's sets
+// (signerSets), and whether this provider signs it.
+func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 	mpzd := w.mpzd(zone)
 	if mpzd == nil {
-		return nil, false
+		return "", Roles{}, false
 	}
 	mp := w.conf.MpConfig()
 	if mp == nil {
 		mp = &MultiProviderConf{}
 	}
-	return otherSignerLabels(mpzd, mp)
+	self, r = signerSets(mpzd, mp)
+	return self, r, self != "" && has(r.Signing, self)
 }
 
-// otherSignerLabels: the other signers, and whether this provider is a
-// signer at all (its HSYNC identity matched, and its label is in the zone's
-// signing set). The signing set is signers= and the providers leaving it,
-// which sign on until the owner removes their HSYNC3 records (#147).
-func otherSignerLabels(mpzd *MPZoneData, mp *MultiProviderConf) ([]string, bool) {
-	ourLabel := ""
-	if mp != nil {
-		if _, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(mp)); err == nil {
-			ourLabel = trimDot(label)
+// signerSets are the sets the signer acts by for the zone, and this
+// provider's label in them (plan S11): the sets its agent handed it (actsBy)
+// and the label its identity has there (S3); handed nothing, its signing set
+// (signers= and those leaving it, #147) for every set, as before the
+// hand-over, and the label its identity has in the zone's HSYNC3 records.
+// The label is "" when nothing gives one.
+func signerSets(mpzd *MPZoneData, mp *MultiProviderConf) (self string, r Roles) {
+	ours := ourHsyncIdentities(mp)
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, apex); ok {
+		return labelOfIdentity(handed, ours), handed
+	}
+	if _, label, err := mpzd.matchHsyncIdentity(ours); err == nil {
+		self = trimDot(label)
+	}
+	signing := mpzd.signingProviders()
+	return self, Roles{KeySigners: signing, DSSigners: signing, KeyConfirmers: signing, Signing: signing}
+}
+
+// labelOfIdentity is the label the sets give a provider with one of the
+// identities; "" when none does.
+func labelOfIdentity(r Roles, identities []string) string {
+	for _, set := range [][]Provider{r.Signing, r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Servers} {
+		for _, p := range set {
+			if p.Identity == "" {
+				continue
+			}
+			for _, id := range identities {
+				if core.EqualNames(p.Identity, id) {
+					return trimDot(p.Label)
+				}
+			}
 		}
 	}
-	if ourLabel == "" {
+	return ""
+}
+
+// othersIn are the labels of set other than self, sorted.
+func othersIn(set []Provider, self string) []string {
+	var out []string
+	for _, p := range set {
+		if l := trimDot(p.Label); l != self {
+			out = append(out, l)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// otherSignerLabels: the providers other than this one whose DNSKEYs are
+// published and whose foreign rows are kept (KeySigners, plan S11), and
+// whether this provider signs the zone at all.
+func otherSignerLabels(mpzd *MPZoneData, mp *MultiProviderConf) ([]string, bool) {
+	self, r := signerSets(mpzd, mp)
+	if self == "" || !has(r.Signing, self) {
 		return nil, false
 	}
-	signing := mpzd.signingSet()
-	if _, in := signing[ourLabel]; !in {
-		return nil, false
-	}
-	return signing.others(ourLabel), true
+	return othersIn(r.KeySigners, self), true
 }
 
 func trimDot(s string) string {
@@ -352,6 +405,7 @@ type KeyLifecycleEngine struct {
 	zones   map[string]*ZoneKeyLifecycle
 	waiting map[string]string // configured zones not ready to take, with why (logged once per reason)
 	refused map[string]bool   // configured zones that are not multi-provider: never taken
+	idle    map[string]bool   // owned zones this provider does not sign: not run (plan S11)
 
 	// kept is what arrived for a zone while its rollovers pause (#147,
 	// signerWire.leavers): the agents' confirmations, in order, and the
@@ -388,12 +442,12 @@ func NewKeyLifecycleEngine(conf *Config, owner *MPKeyLifecycleOwner) *KeyLifecyc
 // driver returns the zone's driver, made on first use once the zone is
 // loaded with a policy; nil while it is not.
 // driver returns the zone's driver, or nil when the zone is not one the
-// machine runs. A cached driver is checked again each time: a zone
-// released, or a zone this provider no longer signs (its HSYNCPARAM
-// changed), drops out of the cache, the latter released too. A driver
-// that could not restore its persisted state is not cached: the next call
-// tries again (owned returns whether the zone is owned even then, so a
-// signal for it is not handed to tdns's path).
+// machine runs. A cached driver is checked again each time: a zone no
+// longer owned, or a zone this provider does not sign by what it acts by,
+// drops out of the cache; the latter stays owned and idle. A driver that
+// could not restore its persisted state is not cached: the next call tries
+// again (owned returns whether the zone is owned even then, so a signal
+// for it is not handed to tdns's path).
 func (e *KeyLifecycleEngine) driver(zone string) *ZoneKeyLifecycle {
 	l, _ := e.driverState(zone)
 	return l
@@ -411,15 +465,22 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 		return nil, false
 	}
 	if !e.wire.IsSigner(zone) {
-		// taken but not a signer of the zone (no HSYNC identity of ours
-		// among its HSYNCPARAM signers): the machine would mint keys the
-		// zone never carries. Released, so nobody's keys go unmanaged:
-		// tdns's own machine runs them again.
-		lgSigner.Error("key lifecycle: this provider is not one of the zone's signers; the zone is released to tdns's key machine", "zone", zone)
+		// taken, and this provider does not sign the zone by what it acts
+		// by: the machine would mint keys the zone never carries. The zone
+		// stays owned and is not run (plan S11): tdns's own machine does
+		// not take it either, and nothing is taken and released again at
+		// every tick. Said when it starts.
+		if !e.idle[zone] {
+			lgSigner.Info("the zone stays owned and idle: this provider does not sign it", "zone", zone)
+			if e.idle == nil {
+				e.idle = map[string]bool{}
+			}
+			e.idle[zone] = true
+		}
 		delete(e.zones, zone)
-		e.owner.Release(zone)
-		return nil, false
+		return nil, true
 	}
+	delete(e.idle, zone)
 	if l := e.zones[zone]; l != nil {
 		return l, true
 	}
@@ -459,9 +520,14 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 		return false
 	}
 	if l == nil {
-		// owned, but the driver is not running yet: the signal is claimed
+		// owned, but the driver is not running: the signal is claimed
 		// (tdns's path must not act on an owned zone) and dropped; the
-		// signer's resend timer brings the answer again
+		// signer's resend timer brings the answer again. A zone this
+		// provider does not sign has nothing to apply it to.
+		if e.isIdle(zone) {
+			lgSigner.Info("key lifecycle: a signal for a zone this provider does not sign; taken, nothing to apply it to", "zone", zone, "keytag", keytag, "signal", signal)
+			return true
+		}
 		lgSigner.Warn("key lifecycle: signal dropped, the zone's driver is not running", "zone", zone, "keytag", keytag, "signal", signal)
 		return true
 	}
@@ -475,6 +541,14 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	}
 	e.applySignal(l, zone, keytag, signal, message, at)
 	return true
+}
+
+// isIdle: the zone is owned and not run, since this provider does not sign
+// it (driverState).
+func (e *KeyLifecycleEngine) isIdle(zone string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.idle[lifecycleZoneName(zone)]
 }
 
 // applySignal feeds one signal to the zone's driver.
@@ -620,6 +694,13 @@ func (e *KeyLifecycleEngine) tickOwned(paused map[string]keyPause) {
 		if _, was := paused[zone]; was {
 			delete(paused, zone)
 			lgSigner.Info("key lifecycle: key rollovers resumed: nobody is leaving the signing set", "zone", zone)
+			// a hand-over during the pause may have changed the providers
+			// expected (handedOver): the distributions in flight follow now
+			if others := e.wire.OtherSigners(zone); !l.Expects(others) {
+				if err := l.SignersChanged(); err != nil {
+					lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed", "zone", zone, "err", err)
+				}
+			}
 		}
 		e.applyKept(l, zone)
 		if err := l.Tick(); err != nil {
@@ -724,6 +805,12 @@ type KeyLifecycleStatus struct {
 	// Paused says why the machine starts nothing now: a provider leaving
 	// the signing set (#147). Empty while it runs.
 	Paused string `json:"paused,omitempty"`
+	// Acting is what the signer acts by for the zone: the serial its agent
+	// handed, provisional, or waiting for its agent (plan S11).
+	Acting string `json:"acting,omitempty"`
+	// Idle: the zone is owned and its machine does not run, since this
+	// provider does not sign it by what it acts by (plan S11).
+	Idle bool `json:"idle,omitempty"`
 	// AlgorithmRollovers are the algorithm rollovers under way, by role
 	// (table §6 O4): the old algorithm, the policy's, and the step.
 	AlgorithmRollovers []AlgRolloverStatus `json:"algorithm_rollovers,omitempty"`
@@ -740,14 +827,18 @@ func (e *KeyLifecycleEngine) driverOf(zone string) (*ZoneKeyLifecycle, error) {
 	return l, nil
 }
 
-// Status is the zone as the operator sees it.
+// Status is the zone as the operator sees it. A zone owned and idle has
+// what the signer acts by and nothing else.
 func (e *KeyLifecycleEngine) Status(zone string) (*KeyLifecycleStatus, error) {
+	if l, owned := e.driverState(zone); l == nil && owned && e.isIdle(zone) {
+		return &KeyLifecycleStatus{Zone: dns.Fqdn(zone), Acting: signerActingLine(zone), Idle: true}, nil
+	}
 	l, err := e.driverOf(zone)
 	if err != nil {
 		return nil, err
 	}
 	zd, _ := tdns.Zones.Get(l.Zone)
-	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests()}
+	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests(), Acting: signerActingLine(l.Zone)}
 	if zd != nil {
 		st.PolicyName = zd.DnssecPolicyName
 	}

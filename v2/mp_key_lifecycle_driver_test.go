@@ -56,6 +56,7 @@ func (w *fakeWire) OtherSigners(zone string) []string {
 	defer w.mu.Unlock()
 	return append([]string(nil), w.signers...)
 }
+func (w *fakeWire) DSSigners(zone string) []string { return w.OtherSigners(zone) }
 func (w *fakeWire) Distribute(zone string, keyid uint16) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

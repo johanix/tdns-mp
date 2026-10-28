@@ -218,11 +218,21 @@ func printSignerKeyStatus(st *tdnsmp.KeyLifecycleStatus) {
 		fmt.Println("no status")
 		return
 	}
+	if st.Idle {
+		fmt.Printf("Zone %s: owned and idle: this provider does not sign it\n", st.Zone)
+		if st.Acting != "" {
+			fmt.Printf("%s\n", st.Acting)
+		}
+		return
+	}
 	others := strings.Join(st.OtherSigners, ", ")
 	if others == "" {
 		others = "none (alone: no confirmations awaited)"
 	}
 	fmt.Printf("Zone %s: policy %q; other signing providers: %s\n", st.Zone, st.PolicyName, others)
+	if st.Acting != "" {
+		fmt.Printf("%s\n", st.Acting)
+	}
 	if st.Paused != "" {
 		fmt.Printf("%s; they resume when the owner removes its HSYNC3 record\n", st.Paused)
 	}
@@ -275,6 +285,10 @@ func lifetimeOf(d time.Duration) string {
 func printSignerKeyPolicy(st *tdnsmp.KeyLifecycleStatus) {
 	if st == nil {
 		fmt.Println("no policy")
+		return
+	}
+	if st.Idle {
+		fmt.Printf("Zone %s: owned and idle: this provider does not sign it, and no policy is applied\n", st.Zone)
 		return
 	}
 	p := st.Policy
