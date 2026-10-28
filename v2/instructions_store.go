@@ -442,9 +442,11 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 					digests = "two digests"
 				}
 				z.ownerError(zone, fmt.Sprintf("serial %d with %s (%s)", in.Serial, digests, strings.Join(z.Conflict, ", ")))
-			} else if !z.Enforced {
-				z.Enforced = true // the record kept before the thaw is the copy's (plan S7)
 			}
+			// a record kept before the thaw is enforced at its serial, an
+			// edit at that serial or not: the readers act by it, not by a
+			// copy the owner changed without raising the serial (plan S7)
+			z.Enforced = true
 			return nil
 		}
 		if top := z.highest(); top != nil && CompareSerial(in.Serial, top.Serial) <= 0 {

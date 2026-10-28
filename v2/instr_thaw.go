@@ -468,7 +468,7 @@ func (conf *Config) thawWanted(zone string) bool {
 	if !ok || !in.enforced {
 		return false
 	}
-	if in.agreed != nil {
+	if in.agreed != nil || in.reconciling {
 		return true
 	}
 	var t *stampTable
@@ -535,6 +535,15 @@ func (conf *Config) thawTurn(zone string) {
 	b := &conf.InternalMp.thaws
 	b.turn.Lock()
 	defer b.turn.Unlock()
+	// Until S12 a transition is done at the thaw: one whose "done" could
+	// not be written is done at the next turn, or it would hold the zone
+	s := conf.InternalMp.Instructions
+	if in, ok := s.thawInputs(zone); ok && in.enforced && in.reconciling {
+		if err := s.Done(in.name); err != nil {
+			lg.Error("the transition could not be marked done", "zone", in.name, "serial", in.active.Serial, "err", err)
+			return
+		}
+	}
 	if v, ok := conf.thawView(zone, time.Now()); ok && v.leads {
 		switch {
 		case v.ready():
@@ -616,7 +625,12 @@ func (conf *Config) activateOnTellings(zone string) {
 		to := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
 		reading := s.readingAt(in.name, to)
 		if reading == nil {
-			conf.fetchInstructions(in.name, to, id, "a member tells it active")
+			// asked only of the leader or a voting member under the active
+			// serial: a member with no vote is not trusted with the
+			// owner's instructions
+			if core.EqualNames(id, string(leader)) || votesIn(in.active.Reading, AgentId(id)) {
+				conf.fetchInstructions(in.name, to, id, "a member tells it active")
+			}
 			continue
 		}
 		if !core.EqualNames(id, string(leader)) && !votesIn(reading, AgentId(id)) {
@@ -845,10 +859,15 @@ func (conf *Config) gateExcused(groupHash string) []string {
 }
 
 // withoutExcused is voters without the members excused, compared as
-// canonical names.
+// canonical names. An excusal never leaves no voter: a gate with nobody to
+// wait for would open by itself, and stay open when a voter came back.
 func withoutExcused(voters, excused []string) []string {
 	if len(excused) == 0 {
 		return voters
 	}
-	return slices.DeleteFunc(slices.Clone(voters), func(v string) bool { return isAmong(excused, AgentId(v)) })
+	kept := slices.DeleteFunc(slices.Clone(voters), func(v string) bool { return isAmong(excused, AgentId(v)) })
+	if len(kept) == 0 {
+		return voters
+	}
+	return kept
 }

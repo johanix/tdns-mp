@@ -578,8 +578,24 @@ func TestARecordKeptBeforeTheThawCountsAsNone(t *testing.T) {
 	if e, _ := column(); e != 1 {
 		t.Errorf("the same copy noted again: enforced %d, want 1", e)
 	}
-	// a newer copy over a record kept before S7 is the active serial
+	// an edit at the same serial over a record kept before S7 is an owner
+	// error, and the record is enforced: the readers act by it, not by the
+	// edited copy
 	if err := s.update(storeZone, func(z *zoneSerials) error { z.Enforced = false; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s.Note(storeZone, at(t, 7, "alpha"), nil)
+	if st := status(t, s, storeZone); st.OwnerError == "" || !st.Enforced || *st.Active != sd(seven) {
+		t.Errorf("an edit at serial 7 over a record from before S7: owner error %q, enforced %v, active %s", st.OwnerError, st.Enforced, st.Active)
+	}
+	if in := s.activeReading(storeZone); in == nil || in.Digest() != seven.Digest() {
+		t.Errorf("the readers act by %v, want the record's 7", in)
+	}
+	// a newer copy over a record kept before S7 is the active serial
+	if err := s.update(storeZone, func(z *zoneSerials) error {
+		z.Enforced, z.OwnerError, z.ErrorAt, z.Conflict = false, "", nil, nil
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	s.Note(storeZone, at(t, 8, "alpha"), nil)

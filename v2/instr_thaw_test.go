@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -887,10 +888,15 @@ func TestCombinerWaitsIsAskedForEveryZoneWithoutAHandOver(t *testing.T) {
 		mpzd.Ready = true
 		mpzd.Options[tdns.OptMultiProvider] = true
 	}
-	conf.InternalMp.MPZoneNames = []string{plain.ZoneName, serial.ZoneName}
+	// a multi-provider zone whose copy has no instructions is handed
+	// none, and does not wait
+	_, none := actingCombiner(t, "none.waits.example.")
+	none.Ready = true
+	none.Options[tdns.OptMultiProvider] = true
+	conf.InternalMp.MPZoneNames = []string{plain.ZoneName, serial.ZoneName, none.ZoneName}
 	withActing(t, nil)
-	if got := conf.zonesWaitingForHandover(); len(got) != 2 {
-		t.Errorf("waiting: %q, want both zones", got)
+	if got := conf.zonesWaitingForHandover(); len(got) != 2 || slices.Contains(got, none.ZoneName) {
+		t.Errorf("waiting: %q, want the two zones with instructions", got)
 	}
 }
 
@@ -929,5 +935,58 @@ func TestAPausedRolloverDoesNotHoldTheThaw(t *testing.T) {
 	r.stamps.waitsOn = func(string) []string { return nil }
 	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleA+" (rollover under way)" {
 		t.Fatalf("this provider's rollover waits on nobody named: waits %q", vw.waits)
+	}
+}
+
+// A serial a member tells active and this agent lacks is asked only of the
+// zone's leader or a voting member under the active serial: a member with
+// no vote is not trusted with the owner's instructions.
+func TestASerialToldActiveIsAskedOnlyOfAVotingMember(t *testing.T) {
+	r := newThawRig(t, "askvoter.thaw.example.", "")
+	st := tells(r.v, r.v)
+	st.Thaw = &Thaw{From: sd(r.n), To: sd(r.v)}
+	r.hear(roleN, st, true)
+	r.conf.thawTurn(r.zone)
+	if r.fetchAsked(42, roleN) {
+		t.Error("n, with no vote, was asked for the serial")
+	}
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if !r.fetchAsked(42, roleB) {
+		t.Error("b, a voting member, was not asked for the serial")
+	}
+}
+
+// Until S12 a transition is done at the thaw; one whose "done" was not
+// written is done at the zone's next turn, so it does not hold the zone.
+func TestATransitionLeftUndoneIsDoneAtTheNextTurn(t *testing.T) {
+	r := newThawRig(t, "undone.thaw.example.", roleA)
+	r.agree()
+	if err := r.store.Activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.conf.thawWanted(r.zone) {
+		t.Fatal("the zone's turn is not asked")
+	}
+	r.conf.thawTurn(r.zone)
+	if st := status(t, r.store, r.zone); st.From != nil || len(r.conf.zoneFrozen(r.zone)) > 0 {
+		t.Errorf("after the turn: from %s, frozen %v", serialOf(st.From), r.conf.zoneFrozen(r.zone))
+	}
+}
+
+// An excusal never leaves a gate with no voter: one that would have
+// nobody to wait for opens by itself, and stays open when a voter comes
+// back.
+func TestAnExcusalNeverEmptiesTheGate(t *testing.T) {
+	if got := withoutExcused([]string{roleB}, []string{roleB}); len(got) != 1 || got[0] != roleB {
+		t.Fatalf("every voter excused: %q", got)
+	}
+	gst := NewGossipStateTable(roleN)
+	gst.SetGateExcused(func(string) []string { return []string{roleA, roleB} })
+	ops := 0
+	gst.SetOnGroupOperational(func(string) { ops++ })
+	gst.CheckGroupState("g", []string{roleA, roleB})
+	if ops != 0 {
+		t.Error("a gate whose voters are all excused opened by itself")
 	}
 }

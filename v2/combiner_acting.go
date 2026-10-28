@@ -469,10 +469,12 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 	}
 }
 
-// zonesWaitingForHandover are the multi-provider zones loaded here that the
-// combiner holds no hand-over for, whether or not their copy carries a
-// serial: one whose copy carries none acts by its copy meanwhile (rule 5),
-// and from S7 that copy can hold a serial its agent refuses (tdns-mp #302).
+// zonesWaitingForHandover are the multi-provider zones loaded here whose
+// copy carries instructions and that the combiner holds no hand-over for,
+// whether or not the copy carries a serial: one that carries none acts by
+// its copy meanwhile (rule 5), and from S7 that copy can hold a serial its
+// agent refuses (tdns-mp #302). A copy with no instructions is handed none,
+// and nothing is held for it.
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
 	for _, zone := range conf.InternalMp.MPZoneNames {
@@ -480,7 +482,10 @@ func (conf *Config) zonesWaitingForHandover() []string {
 		if !ok || !mpzd.Ready || !mpzd.Options[tdns.OptMultiProvider] {
 			continue
 		}
-		if _, held := actingHeld.Load().get(zone); !held {
+		if _, held := actingHeld.Load().get(zone); held {
+			continue
+		}
+		if apex, err := mpzd.GetOwner(mpzd.ZoneName); err == nil && readingOf(apex) != nil {
 			out = append(out, zone)
 		}
 	}
