@@ -2464,8 +2464,9 @@ type PendingDnskeyPropagation struct {
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
-	// Stamps is each of ExpectedAgents' stamp in its latest confirmation
-	// (S5b); S8 judges an answer by it.
+	// Stamps is each of ExpectedAgents' stamp in its latest confirmation,
+	// latest by the stamps (keepStampLocked), or with the answer a resend
+	// carried over (S5b); S8 judges an answer by it.
 	Stamps map[AgentId]*MsgStamp
 }
 
@@ -2497,10 +2498,17 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 			continue
 		}
 		for agent, results := range prop.Results {
+			carried := false
 			for kt, r := range results {
 				if r == "applied" || r == "ignored" {
 					resend.setResultLocked(agent, kt, r)
+					carried = true
 				}
+			}
+			// an answer carried goes with the stamp it was given under (S8
+			// judges it by that)
+			if _, expected := resend.ExpectedAgents[agent]; carried && expected {
+				resend.keepStampLocked(agent, prop.Stamps[agent])
 			}
 		}
 		delete(tm.pendingDnskeyPropagations, distID)

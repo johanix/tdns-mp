@@ -173,9 +173,30 @@ func (t *stampTable) sent(distID, recipient, zone string, ms *MsgStamp) {
 	}
 }
 
+// laterStamp reports whether a member stamped a after b: in a later start,
+// or later in the same one.
+func laterStamp(a, b *MsgStamp) bool {
+	return a.Epoch > b.Epoch || (a.Epoch == b.Epoch && a.Seq > b.Seq)
+}
+
+// replacesConfirmation reports whether a confirmation, with its stamp and
+// status, takes the place of the one kept: the later by their stamps when
+// both carry one, and otherwise anything but a PENDING after a final word.
+// A confirmer sends its PENDING and its final word apart
+// (sendImmediateConfirmation, sendRemoteConfirmation), so the PENDING can
+// arrive last.
+func replacesConfirmation(kept *MsgStamp, keptStatus string, ms *MsgStamp, status string) bool {
+	if kept != nil && ms != nil {
+		return laterStamp(ms, kept)
+	}
+	pending := transport.ConfirmPending.String()
+	return status != pending || keptStatus == "" || keptStatus == pending
+}
+
 // confirmed records the confirmer's stamp of distribution distID, and its
-// status. A confirmation of a distribution this agent sent no recorded
-// send of starts a row of its own; the rows are bounded as sent's are.
+// status, unless the confirmation kept is the later (replacesConfirmation).
+// A confirmation of a distribution this agent sent no recorded send of
+// starts a row of its own; the rows are bounded as sent's are.
 func (t *stampTable) confirmed(distID, confirmer, zone string, ms *MsgStamp, status string) {
 	if t == nil || distID == "" || confirmer == "" {
 		return
@@ -190,6 +211,9 @@ func (t *stampTable) confirmed(distID, confirmer, zone string, ms *MsgStamp, sta
 	if d == nil {
 		d = &distStamp{Distribution: distID, Recipient: dns.Fqdn(confirmer), Zone: zone}
 		t.dists[key] = d
+	}
+	if !replacesConfirmation(d.Confirmed, d.Status, ms, status) {
+		return
 	}
 	d.Confirmed, d.Status, d.ConfirmedAt = ms, status, time.Now()
 	if len(t.dists) > distStampsKept {
@@ -297,12 +321,24 @@ func (tm *MPTransportBridge) noteConfirmation(c *transport.IncomingConfirmation,
 	if !ok {
 		return
 	}
+	for agent := range prop.ExpectedAgents {
+		if canonicalName(string(agent)) == canonicalName(c.PeerID) {
+			prop.keepStampLocked(agent, ms)
+		}
+	}
+}
+
+// keepStampLocked keeps ms as agent's stamp in the propagation, unless the
+// one kept is the later: a PENDING that arrives after the final word was
+// stamped before it. Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) keepStampLocked(agent AgentId, ms *MsgStamp) {
+	if ms == nil {
+		return
+	}
 	if prop.Stamps == nil {
 		prop.Stamps = map[AgentId]*MsgStamp{}
 	}
-	for agent := range prop.ExpectedAgents {
-		if canonicalName(string(agent)) == canonicalName(c.PeerID) {
-			prop.Stamps[agent] = ms
-		}
+	if kept := prop.Stamps[agent]; kept == nil || laterStamp(ms, kept) {
+		prop.Stamps[agent] = ms
 	}
 }

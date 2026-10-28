@@ -451,3 +451,33 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 		t.Errorf("a late answer to a superseded distribution, through a young alias: %q, want applied", applied)
 	}
 }
+
+// A resend that carries an agent's answer carries the stamp it was given
+// under, so that S8 can judge it (cubic's review of 347fe5b).
+func TestAResendCarriesTheStampOfTheAnswersItCarries(t *testing.T) {
+	const zone ZoneName = "stamped.superseded.example."
+	const fast, slow = "agent.fast.example.", "agent.slow.example."
+	const k uint16 = 4243
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
+	stamp := &MsgStamp{Epoch: 2, Seq: 5}
+	tm.dnskeyPropMu.Lock()
+	tm.pendingDnskeyPropagations["first"].keepStampLocked(fast, stamp)
+	tm.dnskeyPropMu.Unlock()
+
+	tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.foldIntoResend(zone, "resend")
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	r := tm.pendingDnskeyPropagations["resend"]
+	if r == nil {
+		t.Fatal("the resend is not tracked")
+	}
+	if r.Results[fast][k] != "applied" || r.Stamps[fast] != stamp {
+		t.Errorf("the answer carried: %q with stamp %+v, want applied with its stamp", r.Results[fast][k], r.Stamps[fast])
+	}
+	if r.Stamps[slow] != nil {
+		t.Errorf("an agent with no answer carried has a stamp: %+v", r.Stamps[slow])
+	}
+}
