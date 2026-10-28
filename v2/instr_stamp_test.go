@@ -612,8 +612,8 @@ func TestGossipRowsInABeatAnswerTakeNoElection(t *testing.T) {
 }
 
 // A member's telling fetches only a zone tdns holds, multi-provider and with
-// its type set: not one that left the configuration, whose wrapper Zones
-// keeps, nor one the refresh engine would make a zone of type 0 of.
+// its type set: not one that left the configuration, nor one the refresh
+// engine would make a zone of type 0 of.
 func TestAFetchAsksOnlyForAZoneTdnsHolds(t *testing.T) {
 	const zone = "fetched.stamp.example."
 	conf := &Config{Config: &tdns.Config{}}
@@ -636,7 +636,7 @@ func TestAFetchAsksOnlyForAZoneTdnsHolds(t *testing.T) {
 	if _, ok := Zones.Get(zone); !ok {
 		t.Fatal("the zone's wrapper is not kept")
 	}
-	tdns.Zones.Remove(zone) // as a reload takes it out: the wrapper Zones keeps stays
+	tdns.Zones.Remove(zone) // as a reload takes it out
 	for _, c := range []struct {
 		what string
 		set  func()
