@@ -278,6 +278,9 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		fmt.Fprintf(w, "  DS set:         %s\n", termSafe(s.DSSet))
 	}
 	fmt.Fprintf(w, "  instructions:   %s\n", termSafe(s.Instructions.Line()))
+	if s.Combiner != "" {
+		fmt.Fprintf(w, "  combiner:       %s\n", termSafe(s.Combiner))
+	}
 
 	if s.KeyAlgorithm == "" {
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")

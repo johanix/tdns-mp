@@ -46,7 +46,7 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		return
 	}
 
-	var out, ownerErrors, refusals []string
+	var out, ownerErrors, refusals, acting []string
 	out = append(out, "Zone|Serial|Digest|Servers|Signers|Auditors|NSmgmt|ParentSync|Suffix|Options")
 
 	var znames []string
@@ -103,6 +103,9 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		case digest == "":
 			serial, digest = "-", "-"
 		}
+		if info.Acting != "" {
+			acting = append(acting, fmt.Sprintf("  %s: %s", zname, info.Acting))
+		}
 		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 			zname, serial, digest, servers, signers, auditors, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
 	}
@@ -115,5 +118,9 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 	if len(refusals) > 0 {
 		fmt.Println("Refused changes of the zone's instructions:")
 		fmt.Println(strings.Join(refusals, "\n"))
+	}
+	if len(acting) > 0 {
+		fmt.Println("What the combiner acts by:")
+		fmt.Println(strings.Join(acting, "\n"))
 	}
 }
