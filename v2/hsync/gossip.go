@@ -92,6 +92,15 @@ type InstrStamp struct {
 	Thaw           *Thaw  `json:"thaw,omitempty"`
 }
 
+// MsgStamp is the stamp a message or a confirmation carries (plan S5b): its
+// sender's telling of the message's zone, with the epoch and the sequence
+// that order it among all of the sender's stamps, its beats' included.
+type MsgStamp struct {
+	Epoch uint64 `json:"epoch"`
+	Seq   uint64 `json:"seq"`
+	InstrStamp
+}
+
 // GroupElectionState carries election state for a provider group.
 type GroupElectionState struct {
 	Leader       string    `json:"leader,omitempty"`

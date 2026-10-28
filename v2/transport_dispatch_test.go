@@ -53,12 +53,8 @@ func buildDispatchContext(t *testing.T, tm *MPTransportBridge, senderHint, distI
 	ctx.Data["response_peer_id"] = senderHint
 	if tm.ChunkHandler != nil {
 		if cb := tm.ChunkHandler.OnConfirmationReceived; cb != nil {
-			// Same repackaging as buildConfirmMessageContext: HandleConfirmation
-			// type-asserts the unnamed func type.
-			ctx.Data["on_confirmation_received"] = func(distributionID string, senderID string, status transport.ConfirmStatus,
-				zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-				cb(distributionID, senderID, status, zone, applied, removed, rejected, ignored, truncated, nonce)
-			}
+			// HandleConfirmation type-asserts transport.ConfirmationCallback
+			ctx.Data["on_confirmation_received"] = transport.ConfirmationCallback(cb)
 		}
 		if tm.ChunkHandler.GossipForPeer != nil {
 			ctx.Data["gossip_for_peer"] = tm.ChunkHandler.GossipForPeer
