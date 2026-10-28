@@ -56,6 +56,10 @@ type stampTable struct {
 	// auditor, which runs no key machine). waitsOn is whom it waits on.
 	rollover func(zone string) bool
 	waitsOn  func(zone string) []string
+	// hold: this agent's signer has confirmed the zone's hold since this
+	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
+	// the auditor, which has no signer.
+	hold func(zone string) bool
 	// fetch asks a refresh of the zone's own copy, the zone named in any
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
@@ -117,17 +121,9 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 	}
 	instr := make(map[string]InstrStamp, len(zones))
 	for _, zone := range zones {
-		st, ok := t.store.stampOf(zone)
-		if !ok {
-			continue
+		if st, ok := t.ownStamp(zone); ok {
+			instr[zone] = st
 		}
-		if t.rollover != nil {
-			st.Rollover = t.rollover(zone)
-		}
-		if st.Rollover && t.waitsOn != nil {
-			st.WaitsOn = t.waitsOn(zone)
-		}
-		instr[zone] = st
 	}
 	row := &MemberState{
 		Identity:    t.localID,
@@ -139,6 +135,26 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		Crypto:      t.crypto,
 	}
 	return &GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{t.localID: row}}
+}
+
+// ownStamp is what this agent tells of zone: the serials its store keeps,
+// with its provider's rollover flag, whom a rollover under way waits on, and
+// its signer's hold.
+func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
+	st, ok := t.store.stampOf(zone)
+	if !ok {
+		return st, false
+	}
+	if t.rollover != nil {
+		st.Rollover = t.rollover(zone)
+	}
+	if st.Rollover && t.waitsOn != nil {
+		st.WaitsOn = t.waitsOn(zone)
+	}
+	if t.hold != nil {
+		st.Hold = t.hold(zone)
+	}
+	return st, true
 }
 
 // note keeps the stamp entry of a beat that sender sent, first hand: its row
@@ -429,6 +445,7 @@ type MemberInstructions struct {
 	Refused   string        `json:"refused,omitempty"`
 	Error     string        `json:"error,omitempty"`
 	Rollover  bool          `json:"rollover,omitempty"`
+	Hold      bool          `json:"hold,omitempty"` // its signer has confirmed the hold (plan S6)
 	Crypto    bool          `json:"crypto"`
 	Mechanism string        `json:"mechanism,omitempty"`
 	Enveloped bool          `json:"enveloped,omitempty"`
@@ -449,12 +466,9 @@ func (t *stampTable) members(zone string) []MemberInstructions {
 	if t == nil {
 		return nil
 	}
-	own, ok := t.store.stampOf(zone)
+	own, ok := t.ownStamp(zone)
 	if !ok {
 		return nil
-	}
-	if t.rollover != nil {
-		own.Rollover = t.rollover(zone)
 	}
 	rows := []MemberInstructions{memberRow(t.localID, own)}
 	rows[0].Self, rows[0].Crypto = true, t.crypto
@@ -499,7 +513,7 @@ func (t *stampTable) members(zone string) []MemberInstructions {
 
 // memberRow is the status row of what identity tells in st.
 func memberRow(identity string, st InstrStamp) MemberInstructions {
-	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover}
+	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover, Hold: st.Hold}
 	if st.Known && st.ActiveDigest != "" {
 		r.Active = &SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
 	}
@@ -737,6 +751,7 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	t := newStampTable(tm.LocalID, conf.InternalMp.Instructions, epoch, crypto, mp.Local.Nameservers)
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
+		t.hold = conf.holdConfirmed
 		t.fetch = conf.fetchZone
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")

@@ -76,8 +76,9 @@ type Thaw struct {
 // InstrStamp is what an agent tells of one zone's instructions (design rule
 // 4, plan S5a): its active serial, its newest and the serial it agrees on,
 // each with its digest, whether it refuses its newest and why, an owner
-// error, whether its provider has a key rollover under way, and the last
-// thaw it heard. Known is false while it knows no active serial.
+// error, whether its provider has a key rollover under way, whether its
+// signer has confirmed the hold (plan S6), and the last thaw it heard. Known
+// is false while it knows no active serial.
 type InstrStamp struct {
 	Active         uint32 `json:"active"`
 	ActiveDigest   string `json:"active_digest"`
@@ -92,6 +93,7 @@ type InstrStamp struct {
 	// WaitsOn: the other signers whose confirmations the provider's
 	// rollover under way misses, by its signer's inventory (plan S11).
 	WaitsOn []string `json:"waits_on,omitempty"`
+	Hold    bool     `json:"hold,omitempty"` // its signer has confirmed the hold since it held the serial agreed on
 	Thaw    *Thaw    `json:"thaw,omitempty"`
 }
 

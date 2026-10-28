@@ -350,6 +350,27 @@ var HsyncTables = map[string]string{
 		id     INTEGER PRIMARY KEY CHECK (id = 1),
 		epoch  INTEGER NOT NULL
 	)`,
+	// MPKept are the agent's lists of a frozen zone (instr_kept.go, plan
+	// S6), in order by seq: the owed list, this provider's own changes; and
+	// the kept list, other agents' distributions (S8). Each entry's update
+	// is JSON, its records as text.
+	"MPKept": `CREATE TABLE IF NOT EXISTS 'MPKept' (
+		seq           INTEGER PRIMARY KEY,
+		zonename      TEXT NOT NULL,
+		list          TEXT NOT NULL,
+		distribution  TEXT DEFAULT '',
+		update_json   TEXT NOT NULL,
+		since         TEXT DEFAULT ''
+	)`,
+	// MPKeyHold are the zones whose key machine the signer holds, at its
+	// agent's word (KEYSTATE "hold", plan S6): nothing new starts. Kept over
+	// a restart, so that a restarted signer starts no rollover its agent has
+	// told the others it will not start (design 3.7).
+	"MPKeyHold": `CREATE TABLE IF NOT EXISTS 'MPKeyHold' (
+		zonename  TEXT NOT NULL,
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.

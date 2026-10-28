@@ -209,6 +209,13 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		return fmt.Errorf("the hand-overs held: %w", err)
 	}
 	actingHeld.Store(acting)
+	// The zones whose key machine the agent holds (plan S6), kept over a
+	// restart.
+	holds, err := loadSignerHolds(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the key machine's holds: %w", err)
+	}
+	conf.InternalMp.SignerHolds = holds
 
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var signerPayloadCrypto *transport.PayloadCrypto
@@ -540,6 +547,14 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 	conf.InternalMp.Instructions = store
 	instrStore.Store(store)
+	// The lists of the frozen zones (plan S6); a zone that is frozen, or
+	// stops being so, tells its signer and the data engine.
+	kept, err := loadKeptLists(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the kept lists: %w", err)
+	}
+	conf.InternalMp.Kept = kept
+	store.onFreeze = conf.onFreeze
 	// tdns asks the agent whether the agents sync a zone's delegation (P3),
 	// rather than reading its own copy: by the step's sets, since parentsync
 	// changes only at a step (design 3.3).

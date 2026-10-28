@@ -230,6 +230,7 @@ type KeyInventorySnapshot struct {
 	NotSigning bool
 	Rollover   bool
 	WaitsOn    map[uint16][]string
+	Hold       bool // the signer holds the zone's key machine (plan S6)
 	Received   time.Time
 	seq        uint64 // the inventory's KeystateInventoryMsg.seq
 }

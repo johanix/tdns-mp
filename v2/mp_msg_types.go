@@ -54,6 +54,7 @@ type KeystateInventoryMsg struct {
 	NotSigning bool
 	Rollover   bool
 	WaitsOn    map[uint16][]string
+	Hold       bool // the signer holds the zone's key machine (plan S6)
 	// seq: the order the agent's transport received it in; 0 for one that
 	// was not counted. An inventory older than the zone's recorded one is
 	// not recorded (noteKeyInventory): an RFI's answer can reach the engine
@@ -76,6 +77,9 @@ type KeystateSignalMsg struct {
 	ForeignSpoken []string
 	// Acting: Signal "acting", the hand-over (plan S11)
 	Acting *ActingHandover
+	// Hold: Signal "hold", whether the agent's word holds the zone's key
+	// machine or lets it go (plan S6)
+	Hold bool
 }
 
 type EditsResponseMsg struct {

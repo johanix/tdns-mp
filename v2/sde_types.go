@@ -52,6 +52,15 @@ type SynchedDataUpdate struct {
 	// (#256). The update goes to the peers, tracked, even when the repo
 	// already held it.
 	Resend bool
+	// Inventory: the signer's inventory brought this DNSKEY distribution.
+	// It passes a freeze (plan S6): a rollover under way, or an emergency
+	// one, as the signer starts no other.
+	Inventory bool
+	// replay: an owed change the release hands the engine again (plan S6);
+	// owed: this agent's owed changes, which a delete is checked against
+	// with the data (EvaluateUpdate).
+	replay bool
+	owed   []keptEntry
 	// CatchUp: the update is the answer to a request for the zone's state
 	// (the membership design, 5.4).
 	CatchUp  *CatchUp `json:"catch_up,omitempty"`
@@ -198,14 +207,20 @@ type PendingRemoteConfirmation struct {
 	// holds. They did not go to the combiner; the confirmation to the
 	// sender names them beside what the combiner applied.
 	StaleHeld []string
+	// StaleIgnored: the records of the update's stale replaces that the
+	// repo holds, of sets this agent's combiner ignored. Their types are in
+	// NotHeldTypes; the confirmation to the sender names them as ignored.
+	StaleIgnored []string
 	// StaleWaiting: DNSKEY records of the update's stale replaces that an
 	// answer's forward, not confirmed yet, put in the repo
 	// (dnskeyAwaitingAnswer). Not named; a success becomes PARTIAL.
 	StaleWaiting []string
 	// NotHeldTypes: the types of the update's stale replaces whose set's last
-	// hand-over to this agent's combiner failed. Their records are left out
-	// of StaleHeld and of whatever the final confirmation names, also when
-	// it is made from the repo, and the confirmation is PARTIAL.
+	// hand-over to this agent's combiner failed, or which the combiner
+	// ignored. Their records are left out of StaleHeld and of whatever the
+	// final confirmation names, also when it is made from the repo, and the
+	// confirmation is PARTIAL. Those of an ignored set are then named as
+	// ignored, from StaleIgnored.
 	NotHeldTypes map[uint16]bool
 	// FromAnswer: the forward is of an answer to a request for the zone's
 	// state.

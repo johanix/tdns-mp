@@ -133,9 +133,13 @@ type DnsKeystatePayload struct {
 	NotSigning bool                `json:"NotSigning,omitempty"`
 	Rollover   bool                `json:"Rollover,omitempty"`
 	WaitsOn    map[uint16][]string `json:"WaitsOn,omitempty"`
-	Owned      bool                `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
-	Time       string              `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
-	Timestamp  int64               `json:"timestamp"`       // Unix timestamp
+	// Hold: with Signal "hold", the agent's word to hold the zone's key
+	// machine, or to let it go; with Signal "inventory", the signer's word
+	// that it holds it (plan S6).
+	Hold      bool   `json:"Hold,omitempty"`
+	Owned     bool   `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time      string `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
+	Timestamp int64  `json:"timestamp"`       // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"

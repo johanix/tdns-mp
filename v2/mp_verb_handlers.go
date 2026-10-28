@@ -184,6 +184,8 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		if keystate.Acting == nil {
 			return fmt.Errorf("keystate acting without a hand-over")
 		}
+	case "hold":
+		// the agent's word on the zone's key machine (plan S6) — Hold carries it
 	default:
 		return fmt.Errorf("unknown keystate signal: %q", keystate.Signal)
 	}
@@ -191,7 +193,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 	if keystate.Zone == "" {
 		return fmt.Errorf("keystate message missing zone")
 	}
-	if keystate.Signal == "inventory" || keystate.Signal == "foreign" || keystate.Signal == "acting" {
+	if keystate.Signal == "inventory" || keystate.Signal == "foreign" || keystate.Signal == "acting" || keystate.Signal == "hold" {
 		// Empty inventory is valid (signer has no keys for this zone).
 		// The recipient decides what to do with it. So is an empty set of
 		// foreign key states (nobody has said anything).
