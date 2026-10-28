@@ -67,19 +67,14 @@ func (mpzd *MPZoneData) hsync3IdentitiesByLabel() map[string]string {
 	return out
 }
 
-// hsync3LabelForIdentity returns the HSYNC3 label for identity at the
-// zone apex, or "" if not listed.
+// hsync3LabelForIdentity returns the label of identity's ON record in the
+// zone's active instructions, compared as a DNS name, or "" if none lists it.
 func (mpzd *MPZoneData) hsync3LabelForIdentity(identity string) string {
 	if mpzd == nil || identity == "" {
 		return ""
 	}
-	identity = dns.Fqdn(identity)
-	for label, id := range mpzd.hsync3IdentitiesByLabel() {
-		if id == identity {
-			return label
-		}
-	}
-	return ""
+	label, _ := mpzd.instructions().labelOf(identity)
+	return label
 }
 
 // IsAuditorIdentity reports whether identity is declared in auditors=

@@ -223,6 +223,20 @@ func TestUntilEnforcedEveryCopyIsActedOn(t *testing.T) {
 	}
 }
 
+// The auditor's identity check finds an ON record's label whatever the
+// case of the identity asked for.
+func TestAnAuditorIsFoundByItsIdentityInAnyCase(t *testing.T) {
+	mpzd := instrTestZone(t, "auditorcase.access.example.", acRecords("ON", `serial="7" servers="alpha,beta" auditors="gamma"`)...)
+	for _, id := range []string{acGamma, "Agent.GAMMA.example", "agent.gamma.example."} {
+		if !mpzd.IsAuditorIdentity(id) {
+			t.Errorf("%s is not found as the auditor gamma", id)
+		}
+	}
+	if mpzd.IsAuditorIdentity(acBeta) {
+		t.Errorf("%s, a server, is found as an auditor", acBeta)
+	}
+}
+
 func TestARestartWithAStoredSerialHasGroupsAndPeersAfterTheFirstLoad(t *testing.T) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor
