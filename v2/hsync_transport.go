@@ -2246,7 +2246,11 @@ func (tm *MPTransportBridge) EnqueueForCombiner(zone ZoneName, update *ZoneUpdat
 	if waiting, err := tm.handover.gate(zone, update, distID); waiting || err != nil {
 		return distID, err
 	}
-	return tm.enqueueToCombiner(zone, update, distID)
+	id, err := tm.enqueueToCombiner(zone, update, distID)
+	if err != nil {
+		tm.handover.unsent(distID) // not sent: no final word will come
+	}
+	return id, err
 }
 
 // enqueueToCombiner puts a message on the queue to the combiner, past the

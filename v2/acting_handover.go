@@ -393,6 +393,17 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 	return true
 }
 
+// unsent forgets an update the gate let through and the queue then
+// refused: no final word on it will come.
+func (t *handoverTracker) unsent(distID string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	delete(t.sent, distID)
+	t.mu.Unlock()
+}
+
 // drain queues the updates that wait for the zone, in order, once the
 // combiner holds what this agent wants. Each is noted as sent before it is
 // queued, under what the combiner holds; while one is being queued every
