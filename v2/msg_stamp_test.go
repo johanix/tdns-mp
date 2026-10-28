@@ -353,6 +353,18 @@ func TestALatePendingDoesNotReplaceTheFinalWord(t *testing.T) {
 		t.Errorf("a later PENDING, of a resend, did not replace it: %+v", r)
 	}
 
+	// a later start comes after any sequence of an earlier one, and not the
+	// other way round
+	st.confirmed("d3", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 99, InstrStamp: tells(seven, seven)}, "SUCCESS")
+	st.confirmed("d3", stampBeta, stampZone, &MsgStamp{Epoch: 4, Seq: 1, InstrStamp: tells(eight, eight)}, "PENDING")
+	if r := row("d3"); r.Status != "PENDING" || r.Confirmed == nil || r.Confirmed.Serial != 8 {
+		t.Errorf("a later start's confirmation did not replace an earlier start's: %+v", r)
+	}
+	st.confirmed("d3", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 100, InstrStamp: tells(seven, seven)}, "SUCCESS")
+	if r := row("d3"); r.Status != "PENDING" || r.Confirmed.Serial != 8 {
+		t.Errorf("an earlier start's confirmation replaced a later start's: %+v", r)
+	}
+
 	// with no stamps to order them by, a PENDING never replaces a final word
 	st.confirmed("d2", stampBeta, stampZone, nil, "SUCCESS")
 	st.confirmed("d2", stampBeta, stampZone, nil, "PENDING")
@@ -370,5 +382,10 @@ func TestALatePendingDoesNotReplaceTheFinalWord(t *testing.T) {
 	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 3, Seq: 9, InstrStamp: tells(seven, seven)})
 	if got := prop.Stamps[stampBeta]; got == nil || got.Seq != 10 {
 		t.Errorf("a propagation kept the earlier stamp: %+v", got)
+	}
+	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 4, Seq: 1, InstrStamp: tells(eight, eight)})
+	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 3, Seq: 99, InstrStamp: tells(seven, seven)})
+	if got := prop.Stamps[stampBeta]; got == nil || got.Epoch != 4 || got.Seq != 1 {
+		t.Errorf("a propagation did not keep the later start's stamp: %+v", got)
 	}
 }
