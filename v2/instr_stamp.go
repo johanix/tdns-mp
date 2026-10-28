@@ -388,8 +388,9 @@ func (t *stampTable) sayOnce(key string) bool {
 // a newest serial above the highest this agent holds, or when it holds no
 // active serial for the zone (design 3.1, 3.4): at once for a serial above
 // the last one fetched, and again once a minute while this agent lags. Only
-// a refresh that was queued counts: one the full queue dropped is asked
-// again at the next telling. S10 and S11 add the provider's chain.
+// a refresh that was queued counts: one the full queue dropped, or one for a
+// zone that is not here yet, is asked again at the next telling. S10 and S11
+// add the provider's chain.
 func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 	st := m.Instr[zone]
 	if st.NewestDigest == "" || t.fetch == nil {
@@ -413,8 +414,9 @@ func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 	switch {
 	case queued:
 		lgGossip.Info("a member tells newer instructions, fetching the zone", "zone", name, "member", m.Identity, "serial", st.Newest)
-	case name != "":
-		// the queue was full: not fetched, so the next telling asks again
+	default:
+		// not fetched (the queue was full, or the zone is not here yet), so
+		// the next telling asks again
 		t.mu.Lock()
 		if t.fetched[zone] == (fetchMark{serial: st.Newest, at: now}) {
 			if seen {
