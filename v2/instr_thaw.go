@@ -314,7 +314,7 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		if !conf.holdConfirmed(in.name) {
 			v.waits = append(v.waits, local+" (no hold yet)")
 		}
-		if t != nil && t.rollover != nil && t.rollover(in.name) && !pausedOn(ownWaitsOn(in.name), in.active.Reading, excused) {
+		if t != nil && t.rollover != nil && t.rollover(in.name) && !pausedOn(t.waitsOnOf(in.name), in.active.Reading, excused) {
 			v.waits = append(v.waits, local+" (rollover under way)")
 		}
 		if !t.encrypts() {
@@ -325,7 +325,7 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		switch {
 		case m.tells != "":
 			v.waits = append(v.waits, m.id+" ("+m.tells+")")
-		case m.rolling && !pausedOn(waitsOnOf(m.st.InstrStamp), in.active.Reading, excused):
+		case m.rolling && !pausedOn(m.st.WaitsOn, in.active.Reading, excused):
 			v.waits = append(v.waits, m.id+" (rollover under way)")
 		case !m.st.encrypted:
 			v.waits = append(v.waits, m.id+" (payload encryption off)")
@@ -405,10 +405,14 @@ func pausedOn(waitsOn []string, in *Instructions, excused map[string]bool) bool 
 	return true
 }
 
-// ownWaitsOn and waitsOnOf are whom this provider's rollover, and a
-// member's, waits on (S11's WaitsOn): none until S11 is merged here.
-func ownWaitsOn(string) []string    { return nil }
-func waitsOnOf(InstrStamp) []string { return nil }
+// waitsOnOf is whom this provider's rollover waits on (S11's WaitsOn); none
+// where the agent knows none.
+func (t *stampTable) waitsOnOf(zone string) []string {
+	if t == nil || t.waitsOn == nil {
+		return nil
+	}
+	return t.waitsOn(zone)
+}
 
 // lostLeader names the zone's last leader seen here when it is not heard
 // and not leaving, with when it was last heard: the group stays without a

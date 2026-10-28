@@ -112,8 +112,8 @@ func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 }
 
 // signerSets are the sets the signer acts by for the zone, and this
-// provider's label in them (plan S11): the sets its agent handed it (actsBy)
-// and the label its identity has there (S3). Waiting for its agent's
+// provider's label in them (plan S11): the sets its agent handed it and the
+// label its identity has there (S3). Waiting for its agent's
 // hand-over (signerWaits), the signing set it last signed by for every set,
 // and the label its identity has there: its copy changes none of its roles
 // (rule 5), not even when the copy drops this provider. Otherwise its
@@ -123,7 +123,7 @@ func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 func signerSets(mpzd *MPZoneData, mp *MultiProviderConf) (self string, r Roles) {
 	ours := ourHsyncIdentities(mp)
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, apex); ok {
+	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return labelOfIdentity(handed, ours), handed
 	}
 	if signerWaits(mpzd.ZoneName, apex) {

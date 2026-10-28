@@ -210,17 +210,16 @@ func TestTheSignerSignsByTheHandedSerialNotItsCopy(t *testing.T) {
 	}
 }
 
-// Until S7 a copy newer than the hand-over is acted by: the agent takes the
-// zone from its signer, so at every edit the signer holds the new serial a
-// transfer before its agent hands it over.
-func TestASignersCopyNewerThanTheHandOverIsActedBy(t *testing.T) {
+// From S7 a copy newer than the hand-over is not acted by: its agent may
+// refuse that serial. The signer signs by the serial handed.
+func TestASignersCopyNewerThanTheHandOverIsNotActedBy(t *testing.T) {
 	const zone = "newer.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...)
 	r.hand(handoverFor(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us"`)...), sigUs)
-	if !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
-		t.Errorf("the other signers %v, want p2 by the newer copy", r.e.wire.OtherSigners(zone))
+	if others := r.e.wire.OtherSigners(zone); len(others) != 0 {
+		t.Errorf("the other signers %v, want none by the serial handed", others)
 	}
-	if line := signerActingLine(zone); !strings.HasPrefix(line, "by its own copy, serial 6, newer than the 5 its agent handed at ") {
+	if line := signerActingLine(zone); !strings.HasPrefix(line, "acting by 5, handed at ") {
 		t.Errorf("the status says %q", line)
 	}
 }

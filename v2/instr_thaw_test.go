@@ -893,3 +893,41 @@ func TestCombinerWaitsIsAskedForEveryZoneWithoutAHandOver(t *testing.T) {
 		t.Errorf("waiting: %q, want both zones", got)
 	}
 }
+
+// A rollover whose only missing confirmations are those of excused members
+// (WaitsOn, plan S11) counts as paused, not under way: it holds the thaw no
+// more, at a member and at this agent's own provider. One that waits on a
+// member that is not excused holds it.
+func TestAPausedRolloverDoesNotHoldTheThaw(t *testing.T) {
+	r := newThawRig(t, "paused.thaw.example.", roleA)
+	n, v := freezeAt(t, 41, "n", "a,b,n", ""), freezeAt(t, 42, "v", "a,n", "") // b leaves
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	r.store.Note(r.zone, n, nil)
+	r.n, r.v = n, v
+	r.holdUnjudged(v, time.Now().Add(-leavingTimeoutDefault-time.Minute))
+	r.hold()
+	st := r.agreeing()
+	st.Rollover, st.WaitsOn = true, []string{"b"}
+	r.hear(roleN, st, true)
+	if vw := r.view(); !vw.ready() || len(vw.excused) != 1 {
+		t.Fatalf("n's rollover waits only on b, excused: waits %q, excused %q", vw.waits, vw.excused)
+	}
+	st.WaitsOn = []string{"a", "b"}
+	r.hear(roleN, st, true)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (rollover under way)" {
+		t.Fatalf("n's rollover waits on a too: waits %q", vw.waits)
+	}
+	st.WaitsOn = []string{"b"}
+	r.hear(roleN, st, true)
+	r.conf.InternalMp.MPTransport.pendingDnskeyPropagations["k"] = &PendingDnskeyPropagation{Zone: ZoneName(r.zone)}
+	r.stamps.waitsOn = func(string) []string { return []string{"b"} }
+	if vw := r.view(); !vw.ready() {
+		t.Fatalf("this provider's rollover waits only on b: waits %q", vw.waits)
+	}
+	r.stamps.waitsOn = func(string) []string { return nil }
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleA+" (rollover under way)" {
+		t.Fatalf("this provider's rollover waits on nobody named: waits %q", vw.waits)
+	}
+}

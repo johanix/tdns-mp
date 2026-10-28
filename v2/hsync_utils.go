@@ -991,8 +991,7 @@ func ourHsyncIdentities(mp *MultiProviderConf) []string {
 // refresh) alike: the store's active instructions (instructionsFor), since
 // from the thaw a newer copy is held, not acted on (plan S7). Where the
 // store keeps none, or a record from before S7, the reading of the copy. On
-// a combiner that holds a hand-over, what it was handed, unless the copy is
-// newer (actsBy).
+// a combiner or a signer that holds a hand-over, what it was handed.
 func (mpzd *MPZoneData) instructions() *Instructions {
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	return activeOr(mpzd.ZoneName, apex)
@@ -1002,9 +1001,8 @@ func (mpzd *MPZoneData) instructions() *Instructions {
 // the zone as served here and for a copy wrapped for analysis alike; where
 // the store keeps no enforced record, the copy's.
 func (mpzd *MPZoneData) roles() Roles {
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, apex); ok {
-		return handed // a combiner's, as instructions
+	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
+		return handed // a combiner's or a signer's, as instructions
 	}
 	var r Roles
 	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
@@ -1362,13 +1360,12 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			MPOptions: make(map[tdns.ZoneOption]bool),
 		}
 		// A combiner or signer that holds a hand-over signs by the set
-		// handed, not by the incoming copy, unless that copy is newer (S10,
-		// S11). A signer that waits for its agent's hand-over signs by the
+		// handed, not by the incoming copy (S10, S11). A signer that waits for its agent's hand-over signs by the
 		// set it last signed by, unchanged by its copy, where it has one
 		// (rule 5). Every other role advances its signing set by the
 		// instructions it acts by: the active ones, from the thaw (S7), not
 		// a newer copy.
-		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName, newApex)
+		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName)
 		if !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) {
 			signing, handed = mpzd.lastSigningSet(kdb)
 		}
@@ -1389,8 +1386,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// set: the ones its signers= names, and those leaving it (#147).
 	if mpzd.MP.MPdata != nil && tdns.Globals.App.Type == AppTypeMPSigner {
 		others := mpzd.MP.MPdata.Signing.others(mpzd.MP.MPdata.OurLabel)
-		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
-		if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, newApex); ok {
+		if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 			others = othersIn(handed.KeySigners, labelOfIdentity(handed, ourHsyncIdentities(mp)))
 		}
 		mpzd.signerSwitch(new_zd, others, mp)
