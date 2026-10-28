@@ -50,6 +50,10 @@ type MPTransportBridge struct {
 	// catchUp is the agent's catch-up tracker (catchup.go), as
 	// conf.InternalMp.CatchUp; nil on every other role.
 	catchUp *catchUpTracker
+	// stamps is what the agent or the auditor tells of its zones'
+	// instructions in its beats, and what its members tell (instr_stamp.go);
+	// nil on the combiner and the signer.
+	stamps *stampTable
 
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
@@ -948,7 +952,16 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	if len(payload.Gossip) > 0 && tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
 		var gossipMsgs []GossipMessage
 		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
+			// the sender's stamps, first hand, before the groups' rows
 			for i := range gossipMsgs {
+				if gossipMsgs[i].GroupHash == stampGroupHash {
+					tm.stamps.note(&gossipMsgs[i], senderID, mech)
+				}
+			}
+			for i := range gossipMsgs {
+				if gossipMsgs[i].GroupHash == stampGroupHash {
+					continue
+				}
 				var group *ProviderGroup
 				if pgm := tm.agentRegistry.ProviderGroupManager; pgm != nil {
 					group = pgm.GetGroup(gossipMsgs[i].GroupHash)
@@ -1910,14 +1923,19 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
 	agent.Mu.RUnlock()
 
-	// Build gossip for this peer
+	// Build gossip for this peer, and this agent's stamps, which ride in its
+	// beats only: an answer's would count for nothing (design rule 4)
 	var gossipData json.RawMessage
+	var beatGossip []GossipMessage
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
-		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+		beatGossip = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
 			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
-		if len(gossipMsgs) > 0 {
-			gossipData, _ = json.Marshal(gossipMsgs)
-		}
+	}
+	if e := tm.stamps.entryFor(string(agent.ID)); e != nil {
+		beatGossip = append(beatGossip, *e)
+	}
+	if len(beatGossip) > 0 {
+		gossipData, _ = json.Marshal(beatGossip)
 	}
 
 	// The state we report in the beat is what the transport's per-mechanism
@@ -2011,6 +2029,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			var gossipMsgs []GossipMessage
 			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
 				for i := range gossipMsgs {
+					if gossipMsgs[i].GroupHash == stampGroupHash {
+						// an answer's stamps count for nothing (rule 4)
+						lgGossip.Debug("a stamp in the answer to a beat is not noted", "peer", peer.ID)
+						continue
+					}
 					// the answer of the peer that was beaten: rows only
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
 					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], string(agent.ID), pg, true)
