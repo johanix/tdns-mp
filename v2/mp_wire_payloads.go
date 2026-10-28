@@ -33,7 +33,8 @@ type DnsSyncPayload struct {
 	ZoneClass      string                   `json:"zone_class,omitempty"`
 	Publish        *core.PublishInstruction `json:"publish,omitempty"`
 	CatchUp        *CatchUp                 `json:"catch_up,omitempty"`
-	Instr          *MsgStamp                `json:"instr,omitempty"` // the sender's stamp (S5b)
+	Acting         *ActingHandover          `json:"acting,omitempty"` // a hand-over, on an update to the combiner (S10)
+	Instr          *MsgStamp                `json:"instr,omitempty"`  // the sender's stamp (S5b)
 }
 
 // CatchUp travels on an RFI SYNC, a request for the zone's state, and on
@@ -163,6 +164,7 @@ type DnsEditsPayload struct {
 	AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"` // All agents' contributions (agentID → owner → []RR strings)
 	Message      string                         `json:"Message,omitempty"`      // Optional status message
 	Nonce        string                         `json:"nonce,omitempty"`        // the nonce of the RFI EDITS this answers
+	Acting       *ActingHandover                `json:"acting,omitempty"`       // the hand-over the combiner holds for the zone (S10)
 	Instr        *MsgStamp                      `json:"instr,omitempty"`        // the sender's stamp (S5b)
 
 	Timestamp int64 `json:"timestamp"` // Unix timestamp

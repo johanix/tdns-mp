@@ -767,5 +767,7 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
 		mpzd.populateMPdata(conf.MpConfig(), nextSigningSetOf(mpzd.instructions(), mpzd.signingSet()))
 	}
-	return conf.followParentSyncParam(mpzd)
+	givenBack = conf.followParentSyncParam(mpzd)
+	conf.handOverToCombiner(mpzd.ZoneName) // the agent's combiner acts by the sets too (S10)
+	return givenBack
 }

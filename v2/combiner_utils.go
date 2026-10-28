@@ -304,6 +304,7 @@ type combineInput struct {
 	contributions   map[string]map[uint16]core.RRset // CombinerData, RRsets cloned
 	upstreamApex    map[uint16]core.RRset            // UpstreamData at the apex, cloned
 	cleanups        []ownerRRtype
+	deferred        []ownerRRtype // cleanups put off until the upstream's apex is known
 	signatureOwner  string
 	signature       dns.RR // the signature TXT to serve, nil when the option is off
 }
@@ -372,6 +373,9 @@ func combineInto(s tdns.Stager, in *combineInput) bool {
 					continue
 				}
 			} else if !in.policy.canApply(rrtype) {
+				if ownerName == in.zone && servedAsUpstream(s, in, rrtype) {
+					changed = true
+				}
 				continue
 			}
 			next := newRRset
@@ -392,10 +396,40 @@ func combineInto(s tdns.Stager, in *combineInput) bool {
 	return changed
 }
 
+// servedAsUpstream serves at the apex, as the upstream has it, an RRset the
+// edit policy does not let the combiner apply: what an earlier policy applied
+// goes now, not at the next transfer, since a hand-over changes the policy
+// without one (plan S10). Not before the upstream's apex is known.
+func servedAsUpstream(s tdns.Stager, in *combineInput, rrtype uint16) bool {
+	if in.upstreamApex == nil {
+		return false
+	}
+	cur := s.RRset(in.zone, rrtype)
+	if up, ok := in.upstreamApex[rrtype]; ok {
+		if cur != nil && rrsetEqual(*cur, up) {
+			return false
+		}
+		s.SetRRset(in.zone, up)
+		return true
+	}
+	if cur == nil {
+		return false
+	}
+	if rrtype == dns.TypeNS {
+		// as the cleanup: the apex NS is never deleted
+		lgCombiner.Warn("combine: no upstream NS to serve; the served NS is kept", "zone", in.zone)
+		return false
+	}
+	s.Delete(in.zone, rrtype)
+	return true
+}
+
 // cleanupInto handles the (owner, rrtype) pairs a contribution change may
-// have emptied: nothing if some agent still contributes there; the upstream
-// NS restored at the apex; otherwise the RRset deleted, and the owner with
-// it when that was its last RRset.
+// have emptied: nothing if some agent still contributes there; at the apex,
+// the upstream's RRset restored where it has one (the NS always kept), and
+// put off to a later combine while the upstream's apex is not known yet;
+// otherwise the RRset deleted, and the owner with it when that was its last
+// RRset.
 func cleanupInto(s tdns.Stager, in *combineInput) bool {
 	changed := false
 	for _, c := range in.cleanups {
@@ -404,19 +438,31 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 				continue
 			}
 		}
-		if c.rrtype == dns.TypeNS && c.owner == in.zone {
-			up, ok := in.upstreamApex[dns.TypeNS]
-			if !ok {
+		if c.owner == in.zone && !in.isProvider && in.upstreamApex == nil {
+			// what the upstream has here is not known: nothing is taken
+			// for absent, as servedAsUpstream takes nothing
+			lgCombiner.Debug("cleanup: the upstream's apex is not known yet; waiting for a later combine", "zone", in.zone, "rrtype", dns.TypeToString[c.rrtype])
+			in.deferred = append(in.deferred, c)
+			continue
+		}
+		if c.owner == in.zone {
+			// what the upstream has at the apex is served again, as
+			// servedAsUpstream serves a type the policy does not apply: a
+			// filtered origin's CDS takes no owner's CDS with it (plan S10)
+			up, ok := in.upstreamApex[c.rrtype]
+			if !ok && c.rrtype == dns.TypeNS {
 				lgCombiner.Warn("cleanup: no upstream NS to restore", "zone", in.zone)
 				continue
 			}
-			if cur := s.RRset(c.owner, dns.TypeNS); cur != nil && rrsetEqual(*cur, up) {
+			if ok {
+				if cur := s.RRset(c.owner, c.rrtype); cur != nil && rrsetEqual(*cur, up) {
+					continue
+				}
+				s.SetRRset(c.owner, up)
+				changed = true
+				lgCombiner.Info("cleanup: restored the upstream RRset", "zone", in.zone, "rrtype", dns.TypeToString[c.rrtype], "records", len(up.RRs))
 				continue
 			}
-			s.SetRRset(c.owner, up)
-			changed = true
-			lgCombiner.Info("cleanup: restored the upstream NS RRset", "zone", in.zone, "records", len(up.RRs))
-			continue
 		}
 		if s.RRset(c.owner, c.rrtype) == nil {
 			continue
@@ -503,6 +549,7 @@ func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.B
 		mpzd.MP.requeueCleanups(in.cleanups)
 		return false, resp, err
 	}
+	mpzd.MP.requeueCleanups(in.deferred)
 	if changed && resp.NewSerial != resp.OldSerial {
 		lgCombiner.Info("combiner state published", "zone", mpzd.ZoneName, "old", resp.OldSerial, "new", resp.NewSerial)
 	} else if changed {
@@ -1173,12 +1220,34 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 	type ownerRRtypes map[uint16][]dns.RR
 	merged := make(map[string]ownerRRtypes)
 
+	// A combiner that holds a hand-over judges every stored contribution by
+	// its origin, by the sets handed (design 3.5, plan S10): a DNSKEY only
+	// from a provider in KeySigners, a CDS only from one in DSSigners. What
+	// it leaves out stays stored, and the next combine takes it out of the
+	// zone. While its copy is newer than the hand-over, by the sets its copy
+	// gives, as a hand-over of it would carry them (actsBy). Handed nothing,
+	// the combiner judges nothing again, so that it removes nothing it
+	// served (rule 5).
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	handed, filter := actingHeld.Load().roles(mpzd.ZoneName, apex)
+	if _, held := actingHeld.Load().get(mpzd.ZoneName); held && !filter {
+		handed, filter = mpzd.actingSets(), true
+	}
+
 	for agentID, ownerMap := range mpzd.MP.AgentContributions {
 		for owner, rrtypeMap := range ownerMap {
 			if merged[owner] == nil {
 				merged[owner] = make(ownerRRtypes)
 			}
 			for rrtype, rrset := range rrtypeMap {
+				if filter && !handedOrigin(handed, agentID, rrtype) {
+					mpzd.MP.noteCleanup(owner, rrtype)
+					if mpzd.Debug {
+						mpzd.Logger.Printf("rebuildCombinerData: Zone %s: agent %s's %s is left out: not among the providers handed for it",
+							mpzd.ZoneName, agentID, dns.TypeToString[rrtype])
+					}
+					continue
+				}
 				if rrtype == dns.TypeCSYNC {
 					// one CSYNC per owner, whoever sent the others: also
 					// for what an earlier build left in the store
