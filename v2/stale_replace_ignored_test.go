@@ -23,8 +23,8 @@ import (
 // combinerIgnores is the combiner's final confirmation of distID: it applies
 // none of the records.
 func (r *notifyRig) combinerIgnores(distID string) {
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(distID, rigCombiner, transport.ConfirmIgnored, r.mpzd.ZoneName,
-		nil, nil, nil, nil, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(distID, rigCombiner, transport.ConfirmIgnored, r.mpzd.ZoneName,
+		nil, nil, nil, nil, false, ""))
 }
 
 // sendersTracking is the sender's tracking of distribution distID of ops,
@@ -161,8 +161,8 @@ func TestASetIgnoredBesideOneAppliedIsNotedAsIgnored(t *testing.T) {
 	if fwd == "" {
 		t.Fatalf("the newer sets did not go to the combiner\n%s", r.log)
 	}
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(fwd, rigCombiner, transport.ConfirmPartial, r.mpzd.ZoneName,
-		[]string{rec}, nil, nil, []string{ns}, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(fwd, rigCombiner, transport.ConfirmPartial, r.mpzd.ZoneName,
+		[]string{rec}, nil, nil, []string{ns}, false, ""))
 	r.answered(t, newer)
 
 	r.receivesAt(t, string(leader), d, sent, nil, nsOp)
@@ -202,8 +202,8 @@ func TestAStaleKeySetWaitingOnAPartialThatIgnoredItIsNamedAsIgnored(t *testing.T
 	r.receivesAt(t, string(signer), d, sent.Add(10*time.Second), nil, keyOp)
 	r.waitLog(t, staleWaitLine, waits+1)
 
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(fwd, rigCombiner, transport.ConfirmPartial, z,
-		[]string{rec}, nil, nil, keys, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(fwd, rigCombiner, transport.ConfirmPartial, z,
+		[]string{rec}, nil, nil, keys, false, ""))
 	c := r.answered(t, d)
 	got := slices.Clone(c.IgnoredRecords)
 	slices.Sort(got)
@@ -232,8 +232,8 @@ func TestAKeyAPartialNamesAsIgnoredIsAnswered(t *testing.T) {
 	d := nextDistributionID()
 	tm.TrackDnskeyPropagation(ZoneName(z), d, []uint16{key.KeyTag()}, nil, []AgentId{peer})
 
-	tm.ChunkHandler.OnConfirmationReceived(d, string(peer), transport.ConfirmPartial, z,
-		[]string{rec}, nil, nil, []string{key.String()}, false, "")
+	tm.ChunkHandler.OnConfirmationReceived(confirmIn(d, string(peer), transport.ConfirmPartial, z,
+		[]string{rec}, nil, nil, []string{key.String()}, false, ""))
 	tm.dnskeyPropMu.Lock()
 	_, waiting := tm.pendingDnskeyPropagations[d]
 	tm.dnskeyPropMu.Unlock()
@@ -280,8 +280,8 @@ func TestAStaleSetTheCombinerFailedIsStillNotNamed(t *testing.T) {
 	if fwd == "" {
 		t.Fatalf("the newer set did not go to the combiner\n%s", r.log)
 	}
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(fwd, rigCombiner, transport.ConfirmFailed, r.mpzd.ZoneName,
-		nil, nil, nil, nil, false, "zone not found on this combiner")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(fwd, rigCombiner, transport.ConfirmFailed, r.mpzd.ZoneName,
+		nil, nil, nil, nil, false, "zone not found on this combiner"))
 	r.answered(t, newer)
 
 	d := nextDistributionID()
