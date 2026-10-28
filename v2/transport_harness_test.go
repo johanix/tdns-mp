@@ -554,12 +554,17 @@ func buildConfirmMessageContext(t *testing.T, tm *MPTransportBridge, senderID, z
 		ctx.Data["transport"] = tm.DNSTransport
 	}
 	if tm.ChunkHandler != nil && tm.ChunkHandler.OnConfirmationReceived != nil {
-		// Repackage as the type alias HandleConfirmation expects.
+		// HandleConfirmation type-asserts transport.ConfirmationCallback
 		cb := tm.ChunkHandler.OnConfirmationReceived
-		ctx.Data["on_confirmation_received"] = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-			cb(distributionID, senderID, status, zone, applied, removed, rejected, ignored, truncated, nonce)
-		}
+		ctx.Data["on_confirmation_received"] = transport.ConfirmationCallback(cb)
 	}
 	return ctx
+}
+
+// confirmIn is a confirmation as HandleConfirmation hands it to the
+// bridge's OnConfirmationReceived (tdns-transport P2).
+func confirmIn(distributionID, senderID string, status transport.ConfirmStatus, zone string, applied, removed []string,
+	rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) *transport.IncomingConfirmation {
+	return &transport.IncomingConfirmation{DistributionID: distributionID, PeerID: senderID, Status: status, Zone: zone,
+		AppliedRecords: applied, RemovedRecords: removed, RejectedItems: rejected, IgnoredRecords: ignored, Truncated: truncated, Nonce: nonce}
 }

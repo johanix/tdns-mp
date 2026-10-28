@@ -447,9 +447,12 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	}
 
 	// Wire confirmation callback for reliable message queue and per-RR tracking
-	tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
+	tm.ChunkHandler.OnConfirmationReceived = func(c *transport.IncomingConfirmation) {
+		distributionID, senderID, status, zone := c.DistributionID, c.PeerID, c.Status, c.Zone
+		applied, removed, rejected, ignored := c.AppliedRecords, c.RemovedRecords, c.RejectedItems, c.IgnoredRecords
+		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", c.Nonce)
+		instr := confirmStamp(c.App) // the confirmer's stamp (S5b)
+		tm.noteConfirmation(c, instr)
 
 		if tm.ReliableQueue != nil {
 			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
@@ -480,7 +483,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 				RemovedRecords: removed,
 				RejectedItems:  rejItems,
 				IgnoredRecords: ignored,
-				Truncated:      truncated,
+				Truncated:      c.Truncated,
+				Instr:          instr,
 				Timestamp:      time.Now(),
 			}
 			select {
@@ -748,20 +752,35 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// On an agent and an auditor a payload that names another sender than
 	// the one the transport established is refused first, before anything
 	// judges the message by that name (refuseNamedSender).
-	if tm.role == roleAgent || tm.role == roleAuditor {
-		tm.Router.Use(tm.refuseNamedSender)
+	for _, mw := range tm.routerMiddleware() {
+		tm.Router.Use(mw)
 	}
-	// On an agent a KEYSTATE is taken only from its own signer, and on a
-	// signer only from its own agents (refuseForeignKeystate).
-	if tm.role == roleAgent || tm.role == roleSigner {
-		tm.Router.Use(tm.refuseForeignKeystate)
-	}
-	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))
 
 	lgTransport.Info("incoming message router registered via RouteToCallback")
+}
+
+// routerMiddleware is this role's middleware before the verb handlers, in
+// the order the router runs it: the refusals first, and what a message's
+// stamp tells noted only once every one of them has let it through
+// (noteMessageStamp): a refused message changes nothing.
+func (tm *MPTransportBridge) routerMiddleware() []transport.MiddlewareFunc {
+	var mws []transport.MiddlewareFunc
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		mws = append(mws, tm.refuseNamedSender)
+	}
+	// On an agent a KEYSTATE is taken only from its own signer, and on a
+	// signer only from its own agents (refuseForeignKeystate).
+	if tm.role == roleAgent || tm.role == roleSigner {
+		mws = append(mws, tm.refuseForeignKeystate)
+	}
+	mws = append(mws, tm.keyHandOverGate)
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		mws = append(mws, tm.noteMessageStamp)
+	}
+	return mws
 }
 
 // messageMechanism is the mechanism a message arrived on, as the pipeline
@@ -1183,6 +1202,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			RfiSubtype:     payload.RfiSubtype,     // Include RfiSubtype for CONFIG RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
+			Instr:          payload.Instr,
 			ZoneClass:      payload.ZoneClass,
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
@@ -1728,6 +1748,9 @@ func logConfirmationReceived(ctx *transport.MessageContext, next transport.Messa
 // cleared (#236). A confirmation sent is logged with the mechanism that
 // carried it.
 func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
+	if req.App == nil {
+		req.App = tm.stamps.confirmAppFor(req.Zone) // the confirmer's stamp, when sent (S5b)
+	}
 	_, out, err := tm.TransportManager.SendOn(ctx, peer, mechanism, req)
 	if out.First != "" && out.First != mechanism {
 		lgTransport.Debug("the sync's mechanism is not known or does not reach the peer; the confirmation goes by what the peer offers",
@@ -1790,6 +1813,10 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	// C2: the wire payload is built here (syncAppMessage, the same
 	// core.AgentMsgPost the typed DNSTransport.Sync marshalled) and
 	// travels as one opaque AppMessage; the manager picks the mechanism.
+	// The stamp is set here, at every send: a resend carries its own
+	// (rule 6).
+	req.Instr = tm.stamps.messageStamp(req.Zone)
+	tm.stamps.sent(req.DistributionID, peer.ID, req.Zone, req.Instr)
 	msg, err := syncAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
@@ -2437,6 +2464,9 @@ type PendingDnskeyPropagation struct {
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
+	// Stamps is each of ExpectedAgents' stamp in its latest confirmation
+	// (S5b); S8 judges an answer by it.
+	Stamps map[AgentId]*MsgStamp
 }
 
 // foldIntoResend lets the resend of keys (#256), tracked as resendID, take

@@ -41,5 +41,16 @@
     "reason": "start",
     "complete": false,
     "why": "own-state-not-read"
+  },
+  "instr": {
+    "epoch": 1767323045000,
+    "seq": 42,
+    "active": 41,
+    "active_digest": "5f3a19c2e07b4d11",
+    "newest": 42,
+    "newest_digest": "9c01aa47b2e3f650",
+    "agreeing": 42,
+    "agreeing_digest": "9c01aa47b2e3f650",
+    "known": true
   }
 }

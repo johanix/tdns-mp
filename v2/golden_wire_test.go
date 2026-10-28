@@ -88,6 +88,7 @@ func goldenWirePayloads() []struct {
 				Locations: []string{"at-apex", "at-ns"},
 			},
 			CatchUp: &CatchUp{Request: "req-001", Reason: "start", Complete: new(bool), Why: "own-state-not-read"},
+			Instr:   goldenMsgStamp(),
 		}},
 		{"DnsRelocatePayload", &DnsRelocatePayload{
 			Type: "relocate", SenderID: "me.example.",

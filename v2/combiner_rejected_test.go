@@ -314,8 +314,8 @@ func (r *notifyRig) newCombinerDist(before map[string]bool, within time.Duration
 // combinerTakes is the combiner's final confirmation of distID, the records
 // applied.
 func (r *notifyRig) combinerTakes(distID string, records ...string) {
-	r.us.Bridge.ChunkHandler.OnConfirmationReceived(distID, rigCombiner, transport.ConfirmSuccess, r.mpzd.ZoneName,
-		records, nil, nil, nil, false, "")
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(distID, rigCombiner, transport.ConfirmSuccess, r.mpzd.ZoneName,
+		records, nil, nil, nil, false, ""))
 }
 
 // A DNSKEY removal is a key left out of a replace. The combiner holds both
@@ -546,8 +546,8 @@ func staleSetBesideAFreshOne(t *testing.T, answer string) {
 	case "names nothing":
 		r.combinerTakes(c)
 	case "ignores it":
-		r.us.Bridge.ChunkHandler.OnConfirmationReceived(c, rigCombiner, transport.ConfirmIgnored, r.mpzd.ZoneName,
-			nil, nil, nil, nil, false, "")
+		r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(c, rigCombiner, transport.ConfirmIgnored, r.mpzd.ZoneName,
+			nil, nil, nil, nil, false, ""))
 	}
 	cf := r.answered(t, d)
 	if answer == "ignores it" {
@@ -861,8 +861,8 @@ func TestAStaleKeySetIsNotCreditedOnTheCombinersFailure(t *testing.T) {
 			if word == transport.ConfirmPartial {
 				said = []string{k1.String()}
 			}
-			r.us.Bridge.ChunkHandler.OnConfirmationReceived(c2, rigCombiner, word, r.mpzd.ZoneName,
-				said, nil, nil, nil, false, "zone not found on this combiner")
+			r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(c2, rigCombiner, word, r.mpzd.ZoneName,
+				said, nil, nil, nil, false, "zone not found on this combiner"))
 			var cf *ConfirmationDetail
 			for end := time.Now().Add(10 * time.Second); time.Now().Before(end) && cf == nil; {
 				got, ok := recvWithin(r.peer.MsgQs.Confirmation, time.Until(end))
@@ -988,8 +988,8 @@ func TestAResendAfterTheCombinersPartialWordGoesToItAgain(t *testing.T) {
 			if word == transport.ConfirmPartial {
 				said = []string{k1.String()}
 			}
-			r.us.Bridge.ChunkHandler.OnConfirmationReceived(c1, rigCombiner, word, r.mpzd.ZoneName,
-				said, nil, nil, nil, false, "")
+			r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(c1, rigCombiner, word, r.mpzd.ZoneName,
+				said, nil, nil, nil, false, ""))
 			if cf := r.answered(t, d1); cf.Status == "SUCCESS" || cf.Status == "ok" {
 				t.Fatalf("the combiner's %s was relayed as %+v", word, *cf)
 			}

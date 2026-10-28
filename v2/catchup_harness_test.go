@@ -217,7 +217,7 @@ func TestTransportBoundary_CatchUpRequestAndAnswer(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("alice's queue holds %v for bob, want the answer", ids)
 	}
-	n.env.Alice.Bridge.ChunkHandler.OnConfirmationReceived(ids[0], n.bob, transport.ConfirmSuccess, string(n.zone), nil, nil, nil, nil, false, "")
+	n.env.Alice.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(ids[0], n.bob, transport.ConfirmSuccess, string(n.zone), nil, nil, nil, nil, false, ""))
 	waitUntil(t, "bob's confirmation did not close the answer's entry in alice's queue", func() bool {
 		return len(queued(n.env.Alice, n.bob)) == 0
 	})

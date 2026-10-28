@@ -89,6 +89,19 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 		}
 
 		switch req.Command {
+		case "stamps":
+			// Each distribution's stamps per recipient (plan S5b): this
+			// agent's at its latest send, the recipient's at its latest
+			// confirmation; over both mechanisms
+			var rows []DistributionStamps
+			if tm := conf.InternalMp.MPTransport; tm != nil {
+				rows = tm.stamps.distributionStamps(req.Zone)
+			}
+			for _, r := range rows {
+				resp.Data = append(resp.Data, r)
+			}
+			resp.Msg = fmt.Sprintf("%d distribution(s) with stamps", len(rows))
+
 		case "list":
 			// List all distributions from this agent
 			senderID := string(conf.MpConfig().Identity)

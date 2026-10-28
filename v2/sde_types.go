@@ -23,7 +23,10 @@ type SynchedDataUpdate struct {
 	UpdateType        string // "local" or "remote"
 	Update            *ZoneUpdate
 	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
-	Mechanism         string // The mechanism a remote update arrived on: its final confirmation's first choice of path
+	// OriginatingInstr is the originating agent's stamp of the zone, as its
+	// message carried it (S5b); S8 judges a remote update by it.
+	OriginatingInstr *MsgStamp
+	Mechanism        string // The mechanism a remote update arrived on: its final confirmation's first choice of path
 	// OriginatingTime is when the originating agent enqueued a remote
 	// update: the wire timestamp, stable across the sender's retries. With
 	// OriginatingDistID it orders REPLACEs from one agent (see
@@ -293,6 +296,7 @@ type ConfirmationDetail struct {
 	RejectedItems  []RejectedItemInfo
 	IgnoredRecords []string // RR strings persisted but not applied (role-based filter)
 	Truncated      bool
+	Instr          *MsgStamp // the confirmer's stamp (S5b); nil from a confirmer that sends none
 	Timestamp      time.Time
 }
 
