@@ -10,14 +10,13 @@ import (
 
 	"github.com/johanix/tdns-mp/v2/hsync"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
-	members := participantFQDNSetForApex(zoneApex(zone))
+	members := participantFQDNSet(instructionsFor(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		if members[dns.Fqdn(string(agent.ID))] {
+		if members.has(string(agent.ID)) {
 			agents = append(agents, agent)
 		}
 	}
@@ -169,71 +168,40 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		return nil, fmt.Errorf("error getting apex for zone %q: %v", zonename, err)
 	}
 
-	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-	if len(hsyncRRset.RRs) == 0 {
+	in := activeOr(zd.ZoneName, apex)
+	if !hasHSYNC3(in) {
 		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", zonename)
 		return nil, fmt.Errorf("zone %q has no HSYNC3 RRset", zonename)
 	}
 
-	// Convert the RRs to strings for transmission
-	hsyncStrs := make([]string, len(hsyncRRset.RRs))
-	for i, rr := range hsyncRRset.RRs {
-		hsyncStrs[i] = rr.String()
-	}
-
-	// Build label->Identity map so we can resolve Upstream labels to FQDNs.
-	// ON records only: an OFF record is nobody's upstream or downstream.
-	labelToIdentity := map[string]string{}
-	for _, rr := range hsyncRRset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 {
-				labelToIdentity[h3.Label] = h3.Identity
-			}
+	// Membership is role-derived: only identities with a role are zone
+	// members / distribution recipients. An identity with an ON record but
+	// no role is not included. Upstreams resolve through the ON records: an
+	// OFF record is nobody's upstream or downstream.
+	participantList, _ := participantsOf(in)
+	self := AgentId(ar.LocalAgent.Identity)
+	for _, r := range in.Records {
+		if isAmong([]string{r.Identity}, self) {
+			zad.MyUpstream = AgentId(in.identityOf(r.Upstream))
+			continue // don't add ourselves to the list of agents
+		} else if isAmong([]string{in.identityOf(r.Upstream)}, self) {
+			zad.MyDownstreams = append(zad.MyDownstreams, AgentId(r.Identity))
 		}
-	}
-
-	// Membership is HSYNCPARAM-derived: only identities with a HSYNCPARAM
-	// role are zone members / distribution recipients. An identity present
-	// in HSYNC3 but granted no role is not included.
-	participantList, _ := zoneParticipants(apex)
-	participantSet := make(map[string]struct{}, len(participantList))
-	for _, id := range participantList {
-		participantSet[id] = struct{}{}
-	}
-
-	for _, rr := range hsyncRRset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				on := hsync3.State != 0
-				// Skip if this is our own identity
-				if isAmong([]string{hsync3.Identity}, AgentId(ar.LocalAgent.Identity)) {
-					if on {
-						zad.MyUpstream = AgentId(labelToIdentity[hsync3.Upstream])
-					}
-					continue // don't add ourselves to the list of agents
-				} else if on && isAmong([]string{labelToIdentity[hsync3.Upstream]}, AgentId(ar.LocalAgent.Identity)) {
-					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync3.Identity))
-				}
-				// Skip identities with no HSYNCPARAM role — they have an
-				// HSYNC3 mapping but are not members of this zone.
-				if _, isParticipant := participantSet[hsync3.Identity]; !isParticipant {
-					continue
-				}
-				// Found an HSYNC3 record, try to locate the agent
-				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
-				if err != nil {
-					// A placeholder for an agent the registry does not have;
-					// never stored in ar.S, so the throwaway hsync.Peer
-					// allocation is fine (E1.b). agentInfo reports it as ERROR.
-					agent = &Agent{
-						Peer:     hsync.NewPeer(AgentId(hsync3.Identity)),
-						ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
-					}
-					agent.LastState = time.Now()
-				}
-				agents = append(agents, agent)
-			}
+		if !isAmong(participantList, AgentId(r.Identity)) {
+			continue
 		}
+		agent, err := ar.GetAgentInfo(AgentId(r.Identity))
+		if err != nil {
+			// A placeholder for an agent the registry does not have;
+			// never stored in ar.S, so the throwaway hsync.Peer
+			// allocation is fine (E1.b). agentInfo reports it as ERROR.
+			agent = &Agent{
+				Peer:     hsync.NewPeer(AgentId(r.Identity)),
+				ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
+			}
+			agent.LastState = time.Now()
+		}
+		agents = append(agents, agent)
 	}
 
 	zad.Agents = agents

@@ -2513,17 +2513,22 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string
 	lgTransport.Info("tracking DNSKEY propagation", "zone", zone, "distributionID", distID, "agents", len(agents), "keyTags", len(keyTags))
 }
 
-// signingAgents: those of a zone's agents whose provider signs the zone.
-// nil when the zone or its HSYNC data is not here to ask; the tracker then
-// takes every answer as it comes.
+// signingAgents: those of a zone's agents whose provider signs the zone, by
+// the identities of the step's signing set. nil when the zone or its
+// HSYNCPARAM is not here to ask; the tracker then takes every answer as it
+// comes.
 func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 	mpzd, ok := Zones.Get(dns.Fqdn(string(zone)))
-	if !ok || mpzd == nil || mpzd.getHSYNCPARAM() == nil {
+	if !ok || mpzd == nil {
 		return nil
 	}
+	if in := mpzd.instructions(); in == nil || !in.HasParam {
+		return nil
+	}
+	signing := identities(mpzd.roles().Signing)
 	out := map[AgentId]bool{}
 	for _, a := range agents {
-		if matched, label, err := mpzd.matchHsyncIdentity([]string{dns.Fqdn(string(a))}); err == nil && matched && mpzd.isSigner(label) {
+		if isAmong(signing, a) {
 			out[a] = true
 		}
 	}

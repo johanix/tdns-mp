@@ -164,8 +164,8 @@ func (c *consentCombiner) ownerSays(mpzd *MPZoneData, pubkey bool) {
 	}); err != nil {
 		c.t.Fatalf("publishing the owner's HSYNCPARAM: %v", err)
 	}
-	if hp := mpzd.getHSYNCPARAM(); hp == nil || hp.HasPubkey() != pubkey {
-		c.t.Fatalf("zone %s: HSYNCPARAM after the owner's edit is %v, want pubkey=%v", mpzd.ZoneName, hp, pubkey)
+	if in := mpzd.instructions(); in == nil || in.Pubkey != pubkey {
+		c.t.Fatalf("zone %s: the instructions after the owner's edit are %+v, want pubkey=%v", mpzd.ZoneName, in, pubkey)
 	}
 }
 

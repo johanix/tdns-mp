@@ -367,23 +367,15 @@ type ZoneAgentInfo struct {
 // --- From zone_utils.go ---
 
 type HsyncStatus struct {
-	Time         time.Time
-	ZoneName     string
-	Command      string
-	Status       bool
-	Error        bool
-	ErrorMsg     string
-	Msg          string
-	HsyncAdds    []dns.RR
-	HsyncRemoves []dns.RR
-	// ParamChanged is true when HSYNCPARAM differed between the old
-	// and new zone apex, regardless of whether HSYNC3 also changed.
-	// Consumers that recompute provider-group state from HSYNCPARAM
-	// (e.g. RecomputeGroups, which derives VotingMembers from
-	// HSYNCPARAM.signers/servers) must trigger that work when either
-	// HSYNC3 *or* HSYNCPARAM changed — a pure HSYNCPARAM edit (e.g.
-	// re-pointing signers= or servers=) produces no HsyncAdds/Removes
-	// but still requires a recompute.
+	Time     time.Time
+	ZoneName string
+	Command  string
+	Status   bool
+	Error    bool
+	ErrorMsg string
+	Msg      string
+	// ParamChanged is true when the zone's instructions differ between
+	// the old and the new copy, by serial or digest (HsyncChanged).
 	ParamChanged bool
 }
 

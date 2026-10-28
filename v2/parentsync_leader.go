@@ -321,7 +321,7 @@ func (lem *LeaderElectionManager) groupVoters(groupHash string, members []string
 // an agent whose configured identity lacked the dot was counted by its peers
 // and took itself for an observer.
 func isAmong(members []string, id AgentId) bool {
-	return slices.ContainsFunc(members, func(m string) bool { return strings.EqualFold(dns.Fqdn(m), dns.Fqdn(string(id))) })
+	return slices.ContainsFunc(members, func(m string) bool { return core.EqualNames(dns.Fqdn(m), dns.Fqdn(string(id))) })
 }
 
 // HandleGroupMessage dispatches an election message that carries a _group record.
@@ -1171,7 +1171,7 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 	// can turn it on (followParentSyncParam could not read the zone's
 	// HSYNCPARAM), so the check is made here again. It changes nothing for
 	// a zone already led, or that a group covers.
-	if hasHSYNC3(zoneApex(zone)) {
+	if hasHSYNC3(instructionsFor(zone)) {
 		lem.zoneChanged(zone)
 		return
 	}
@@ -2219,13 +2219,13 @@ func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, rec
 // electRecipients are the agents an election message goes to: the zone's
 // voting members and its auditors, other than self.
 func electRecipients(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
-	apex := zoneApex(zone)
+	in := instructionsFor(zone)
 	var out []*Agent
 	for _, agent := range agents {
 		if isAmong([]string{string(agent.ID)}, self) {
 			continue
 		}
-		if st := zoneStanding(apex, string(agent.ID)); st == standingVoting || st == standingAuditor {
+		if st := zoneStanding(in, string(agent.ID)); st == standingVoting || st == standingAuditor {
 			out = append(out, agent)
 		}
 	}
@@ -2449,19 +2449,6 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	}
 
 	return status
-}
-
-// PublishKeyToCombiner sends a KEY RR to the combiner as a REPLACE operation.
-func PublishKeyToCombiner(zone ZoneName, keyRR dns.RR, tm *MPTransportBridge) (string, error) {
-	update := &ZoneUpdate{
-		Zone: zone,
-		Operations: []core.RROperation{{
-			Operation: "replace",
-			RRtype:    "KEY",
-			Records:   []string{keyRR.String()},
-		}},
-	}
-	return tm.EnqueueForCombiner(zone, update, "")
 }
 
 // pickActiveSyncScheme returns the first configured child scheme, in

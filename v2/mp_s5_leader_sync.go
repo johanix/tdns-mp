@@ -23,6 +23,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -961,11 +962,11 @@ func (c *delegationSyncChains) endChainLocked(zone string) *delegationNotifyHold
 // or its only role taken, as votesInZone has it.
 func (conf *Config) stillParticipates(zone string) bool {
 	ids := ourHsyncIdentities(conf.MpConfig())
-	apex := zoneApex(ZoneName(zone))
-	if len(ids) == 0 || !hasHSYNC3(apex) {
+	in := instructionsFor(ZoneName(zone))
+	if len(ids) == 0 || !hasHSYNC3(in) {
 		return true
 	}
-	participants, _ := zoneParticipants(apex)
+	participants, _ := participantsOf(in)
 	for _, p := range participants {
 		if isAmong(ids, AgentId(p)) {
 			return true
@@ -1124,15 +1125,13 @@ func (conf *Config) delegationNotifyWaitAnnounced(zone string) (wait time.Durati
 	if !ok || mpzd == nil {
 		return wait, largest
 	}
-	hp := mpzd.getHSYNCPARAM()
-	if hp == nil {
+	if in := mpzd.instructions(); in == nil || !in.HasParam {
 		return wait, largest
 	}
-	byLabel := mpzd.hsync3IdentitiesByLabel()
 	var unknown []string
-	for _, label := range hp.GetServers() {
-		id := byLabel[normalizeHSYNC3Label(label)]
-		if id == "" || id == us {
+	for _, p := range mpzd.roles().Servers {
+		id := p.Identity
+		if id == "" || core.EqualNames(id, us) {
 			continue
 		}
 		d, known := gst.AnnouncedPropagationDelay(id)

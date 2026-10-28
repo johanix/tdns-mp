@@ -21,6 +21,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // SerialDigest names a set of the owner's instructions: its serial, checked
@@ -497,6 +501,64 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 	}
 }
 
+// activeReading is the zone's active instructions as the readers act by
+// them, or nil when the store keeps none for it or does not enforce them
+// yet. Until the thaw enforces the active serial (S7) the readers act by the
+// copy, whatever Note made of it (plan S2): an edit at the same serial, at
+// serial 0 or at a lower one is acted on, as before, and its owner error is
+// only shown.
+func (s *InstructionStore) activeReading(zone string) *Instructions {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if z := s.zones[zone]; z != nil && z.Active != nil && z.Enforced {
+		return z.Active.Reading
+	}
+	return nil
+}
+
+// transition is the zone's transition as the store holds it: the
+// from-serial's instructions (nil at rest), the active ones, and the step;
+// to is nil when the store keeps none for the zone or does not enforce it
+// yet (activeReading).
+func (s *InstructionStore) transition(zone string) (from, to *Instructions, step int) {
+	if s == nil {
+		return nil, nil, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	z := s.zones[zone]
+	if z == nil || z.Active == nil || !z.Enforced {
+		return nil, nil, 0
+	}
+	if z.From != nil {
+		from = z.From.Reading
+	}
+	return from, z.Active.Reading, z.Step
+}
+
+// removal is the zone's removal under way of the provider with the label or
+// the identity, if the store holds one (S12, S17b fill them): a provider
+// whose removal is under way is resolved through its stored identity
+// (design 3.3).
+func (s *InstructionStore) removal(zone, label, identity string) (Removal, bool) {
+	if s == nil {
+		return Removal{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if z := s.zones[zone]; z != nil {
+		for _, r := range z.Removals {
+			if (label != "" && r.Label == label) || (identity != "" && core.EqualNames(r.Identity, dns.Fqdn(identity))) {
+				return r, true
+			}
+		}
+	}
+	return Removal{}, false
+}
+
 // InstructionsStatus is what the agent keeps of a zone's instructions, as
 // `agent parentsync status`, `zone mplist` and the auditor show it.
 type InstructionsStatus struct {
@@ -607,4 +669,19 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 	}
 	in, err := ReadInstructions(apex)
 	s.Note(mpzd.ZoneName, in, err)
+}
+
+// onSetsChanged applies the step's sets where they act beyond the readers
+// (plan S3): the parentsync option, both ways, which tdns's parentsync hook
+// (P3) reads through the sets too; and with recompute, the multi-provider
+// data, MPOptions and the combiner's allow-edits, so that a change of the
+// sets takes effect without a transfer. A refresh calls it without
+// recompute: its pre-refresh analysis has computed them from the incoming
+// copy, whose reading is the active one until S7. S12 calls it with
+// recompute at every step.
+func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
+	if recompute && mpzd.Options[tdns.OptMultiProvider] {
+		mpzd.populateMPdata(conf.MpConfig(), nextSigningSetOf(mpzd.instructions(), mpzd.signingSet()))
+	}
+	return conf.followParentSyncParam(mpzd)
 }

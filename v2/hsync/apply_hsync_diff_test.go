@@ -39,7 +39,7 @@ func TestApplyHsyncDiff_guardSkipsWhenLocalAbsent(t *testing.T) {
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{remote}}}
 	e, h := newDiffEngine("local.example.", true, zones)
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{remote}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Entered: idsOf(remote)})
 
 	if _, ok := e.registry.S.Get("rem.example."); ok {
 		t.Fatal("guard should skip the remote add when local is absent from HSYNC3")
@@ -56,7 +56,7 @@ func TestApplyHsyncDiff_guardFiresLocalRemoved(t *testing.T) {
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{}}}
 	e, h := newDiffEngine("local.example.", true, zones)
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Removes: []dns.RR{localRR}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Left: idsOf(localRR)})
 
 	if h.localRemoved != 1 {
 		t.Fatalf("OnLocalRemoved should fire once for a local-remove RR, fired %d", h.localRemoved)
@@ -75,7 +75,7 @@ func TestApplyHsyncDiff_guardRecomputesGroupsWhenLocalIsRemoved(t *testing.T) {
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{remote}}}
 	e, h := newDiffEngine("local.example.", true, zones)
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Removes: []dns.RR{localRR}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Left: idsOf(localRR)})
 
 	if h.localRemoved != 1 {
 		t.Fatalf("OnLocalRemoved should fire once for a local-remove RR, fired %d", h.localRemoved)
@@ -94,7 +94,7 @@ func TestApplyHsyncDiff_failsClosedWhenZoneViewMissing(t *testing.T) {
 	remote := mustHSYNC3RR(t, "rem", "rem.example.")
 	e, _ := newDiffEngine("local.example.", false, mapZoneLookup{})
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{remote}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Entered: idsOf(remote)})
 
 	if _, ok := e.registry.S.Get("rem.example."); ok {
 		t.Fatal("add must fail closed when the zone view is unavailable")
@@ -112,7 +112,7 @@ func TestApplyHsyncDiff_roleLessAddExcluded(t *testing.T) {
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local, member, off}}}
 	e, h := newDiffEngine("local.example.", true, zones)
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{member, off}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Entered: idsOf(member, off)})
 
 	if _, ok := e.registry.S.Get("mem.example."); !ok {
 		t.Fatal("member add should be registered")
@@ -133,7 +133,7 @@ func TestApplyHsyncDiff_localAddRecomputesAndRegistersNothing(t *testing.T) {
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local}}}
 	e, h := newDiffEngine("local.example.", true, zones)
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{local}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Entered: idsOf(local)})
 
 	if h.hsync3Changed != 1 {
 		t.Fatalf("the groups are recomputed once after the local add, fired %d", h.hsync3Changed)
@@ -151,7 +151,7 @@ func TestApplyHsyncDiff_localIdentityComparedCanonically(t *testing.T) {
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local}}}
 	e, h := newDiffEngine("local.example", true, zones)
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Adds: []dns.RR{local}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Entered: idsOf(local)})
 	for _, id := range []PeerID{"Local.Example.", "local.example.", "local.example"} {
 		if _, ok := e.registry.S.Get(id); ok {
 			t.Errorf("the local identity was registered as peer %q", id)
@@ -162,7 +162,7 @@ func TestApplyHsyncDiff_localIdentityComparedCanonically(t *testing.T) {
 		t.Errorf("MarkNeeded stored %d peer(s) for the local identity", n)
 	}
 
-	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Removes: []dns.RR{local}})
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Left: idsOf(local)})
 	if h.localRemoved != 1 {
 		t.Errorf("the local identity's removal ran the teardown %d times, want once", h.localRemoved)
 	}

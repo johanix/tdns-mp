@@ -706,7 +706,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		return agents
 	}
 
-	members := participantFQDNSetForApex(zoneApex(ZoneName(zoneName)))
+	members := participantFQDNSet(instructionsFor(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		identity := agent.ID
 
@@ -721,7 +721,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 			}
 		}
 
-		if members[dns.Fqdn(string(identity))] {
+		if members.has(string(identity)) {
 			agents = append(agents, string(identity))
 		}
 	})

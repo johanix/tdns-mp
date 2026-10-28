@@ -13,7 +13,6 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -57,24 +56,13 @@ func (conf *Config) APIagentHsync(hdb *HsyncDB) func(w http.ResponseWriter, r *h
 				return
 			}
 
-			owner, err := zd.GetOwner(zd.ZoneName)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %s error: %v", amp.Zone, err)
-				return
-			}
-
-			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-			if len(hsyncRRset.RRs) == 0 {
+			// The zone's active instructions, as its decisions read them.
+			in := zd.instructions()
+			if !hasHSYNC3(in) {
 				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC3 RRset", amp.Zone)
 				return
 			}
-
-			hsyncStrs := make([]string, len(hsyncRRset.RRs))
-			for i, rr := range hsyncRRset.RRs {
-				hsyncStrs[i] = rr.String()
-			}
-			resp.HsyncRRs = hsyncStrs
+			resp.HsyncRRs = in.hsync3Strings(zd.ZoneName)
 
 			zad, err := conf.InternalMp.AgentRegistry.GetZoneAgentData(amp.Zone)
 			if err != nil {

@@ -12,10 +12,10 @@ package tdnsmp
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -25,7 +25,7 @@ func canonicalName(name string) string {
 	if name == "" {
 		return ""
 	}
-	return strings.ToLower(dns.Fqdn(name))
+	return core.CanonicalizeName(dns.Fqdn(name))
 }
 
 // refuseNamedSender is the router middleware of the agent and the auditor:
@@ -159,7 +159,7 @@ func syncSenderRefusal(zone ZoneName, sender string) string {
 // with no role lets in for the key alone (keyHandOverGate).
 func (tm *MPTransportBridge) rfiSenderRefusal(zone ZoneName, sender, rfiType, subtype string) string {
 	member := func() string {
-		participants, _ := zoneParticipants(zoneApex(zone))
+		participants, _ := participantsOf(instructionsFor(zone))
 		if !isAmong(participants, AgentId(tm.LocalID)) {
 			return fmt.Sprintf("rfi %s refused: this agent is not a member of zone %s", rfiType, zone)
 		}
@@ -178,7 +178,7 @@ func (tm *MPTransportBridge) rfiSenderRefusal(zone ZoneName, sender, rfiType, su
 		if why := member(); why != "" {
 			return why
 		}
-		if zoneStanding(zoneApex(zone), sender) == standingAuditor {
+		if zoneStanding(instructionsFor(zone), sender) == standingAuditor {
 			return fmt.Sprintf("rfi CONFIG %s refused: %s is an auditor only in zone %s", subtype, sender, zone)
 		}
 		ar := tm.agentRegistry

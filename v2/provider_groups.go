@@ -12,7 +12,6 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -63,10 +62,10 @@ type groupMakeUp struct {
 	voting, auditors, noRole []string
 }
 
-// zoneMakeUp reads the zone's make-up from its apex, each list sorted and
+// zoneMakeUp is the zone's make-up by its instructions, each list sorted and
 // deduplicated.
-func zoneMakeUp(apex *tdns.OwnerData) groupMakeUp {
-	participants, voting := zoneParticipants(apex)
+func zoneMakeUp(in *Instructions) groupMakeUp {
+	participants, voting := participantsOf(in)
 	var auditors []string
 	for _, id := range participants {
 		if !slices.Contains(voting, id) {
@@ -84,100 +83,6 @@ func (m groupMakeUp) key() string {
 // members is every member, whatever its role: the gossip membership.
 func (m groupMakeUp) members() []string {
 	return sortedUnique(append(append(append([]string(nil), m.voting...), m.auditors...), m.noRole...))
-}
-
-// apexHSYNCPARAM returns the zone apex's HSYNCPARAM, or nil if absent.
-func apexHSYNCPARAM(apex *tdns.OwnerData) *core.HSYNCPARAM {
-	if apex == nil || apex.RRtypes == nil {
-		return nil
-	}
-	hpRRset, ok := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-	if !ok || len(hpRRset.RRs) == 0 {
-		return nil
-	}
-	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
-	if !ok {
-		return nil
-	}
-	hp, ok := prr.Data.(*core.HSYNCPARAM)
-	if !ok {
-		return nil
-	}
-	return hp
-}
-
-// zoneParticipants returns the identities that hold a membership-conferring
-// HSYNCPARAM role in the zone (servers, signers, auditors), each label
-// resolved through the zone's ON HSYNC3 label→identity map. HSYNC3 is only an
-// identity↔label declaration and confers no membership on its own, so an
-// identity present in HSYNC3 but granted no HSYNCPARAM role is excluded.
-// Returned slices are sorted and de-duplicated. voting is the election-voting
-// subset (servers ∪ signers); auditors are non-voting members.
-//
-// Legacy fallback: a zone with HSYNC3 but no HSYNCPARAM (mid-migration) treats
-// every ON HSYNC3 identity as a participant, with a warning.
-func zoneParticipants(apex *tdns.OwnerData) (participants, voting []string) {
-	if apex == nil || apex.RRtypes == nil {
-		return nil, nil
-	}
-	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-	if len(hsyncRRset.RRs) == 0 {
-		return nil, nil
-	}
-
-	// Build label→identity from ON (non-decommissioned) HSYNC3 records only.
-	labelToIdentity := map[string]string{}
-	var allIdentities []string
-	for _, rr := range hsyncRRset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
-			continue
-		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok || h3.State == 0 { // skip OFF (decommissioned)
-			continue
-		}
-		labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
-		allIdentities = append(allIdentities, h3.Identity)
-	}
-
-	hp := apexHSYNCPARAM(apex)
-	if hp == nil {
-		lgProviderGroup.Warn("zone has HSYNC3 but no HSYNCPARAM; treating all HSYNC3 identities as participants (legacy fallback)",
-			"zone", apex.Name)
-		slices.Sort(allIdentities)
-		allIdentities = slices.Compact(allIdentities)
-		return allIdentities, allIdentities
-	}
-
-	seen := map[string]bool{}
-	addRole := func(labels []string, isVoting bool) {
-		for _, label := range labels {
-			id, ok := labelToIdentity[strings.TrimSuffix(label, ".")]
-			if !ok {
-				continue
-			}
-			if !seen[id] {
-				participants = append(participants, id)
-				seen[id] = true
-			}
-			if isVoting {
-				voting = append(voting, id)
-			}
-		}
-	}
-	// Membership-conferring HSYNCPARAM keys. Extend this list as HSYNCPARAM
-	// (an open-ended, SVCB-like param set) gains new membership-conferring
-	// roles.
-	addRole(hp.GetServers(), true)
-	addRole(hp.GetSigners(), true)
-	addRole(hp.GetAuditors(), false)
-
-	slices.Sort(participants)
-	participants = slices.Compact(participants)
-	slices.Sort(voting)
-	voting = slices.Compact(voting)
-	return participants, voting
 }
 
 // zoneApex resolves a zone's apex OwnerData via the MP zone map, or nil.
@@ -203,73 +108,59 @@ const (
 	standingVoting                  // in servers= or signers=; with no HSYNCPARAM, every ON record
 )
 
-// zoneStanding reads the identity's standing from the zone's records. Who
-// votes is zoneParticipants' voting set, as VotingMembersForZone and
+// zoneStanding is the identity's standing by the zone's instructions. Who
+// votes is participantsOf's voting set, as VotingMembersForZone and
 // isVotingMember have it. A zone with HSYNC3 records and no HSYNCPARAM is the
 // legacy case: every ON record votes.
-func zoneStanding(apex *tdns.OwnerData, identity string) standing {
-	participants, voting := zoneParticipants(apex)
-	return standingIn(apex, participants, voting, identity)
+func zoneStanding(in *Instructions, identity string) standing {
+	participants, voting := participantsOf(in)
+	return standingIn(in, participants, voting, identity)
 }
 
 // standingIn is zoneStanding for a caller that has read the zone's
 // participants already.
-func standingIn(apex *tdns.OwnerData, participants, voting []string, identity string) standing {
+func standingIn(in *Instructions, participants, voting []string, identity string) standing {
 	switch {
 	case isAmong(voting, AgentId(identity)):
 		return standingVoting
 	case isAmong(participants, AgentId(identity)):
 		return standingAuditor
-	case apexListsAgent(apex, AgentId(identity)):
+	case listsAgent(in, AgentId(identity)):
 		return standingNoRole
 	}
 	return standingNone
 }
 
-// hasHSYNC3 reports whether the apex has an HSYNC3 RRset: only such a zone
-// is a multi-provider zone, whose standings decide who votes. A zone with
-// none, or one not loaded here, elects as it always has.
-func hasHSYNC3(apex *tdns.OwnerData) bool {
-	return apex != nil && apex.RRtypes != nil && len(apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs) > 0
+// hasHSYNC3 reports whether the instructions have HSYNC3 records: only such
+// a zone is a multi-provider zone, whose standings decide who votes. A zone
+// with none, or one not loaded here, elects as it always has.
+func hasHSYNC3(in *Instructions) bool {
+	return in != nil && len(in.Records)+len(in.Off) > 0
 }
 
-// votesInZone: the identity may vote in the zone's own election. True for a
-// zone that is not known here or has no HSYNC3 RRset: that zone has no
-// standings, and elects as before.
+// votesInZone: the identity may vote in the zone's own election, by its
+// active instructions. True for a zone that is not known here or has no
+// HSYNC3 records: that zone has no standings, and elects as before.
 func votesInZone(zone ZoneName, id AgentId) bool {
-	return votesInApex(zoneApex(zone), id)
+	return votesIn(instructionsFor(zone), id)
 }
 
-// votesInApex is votesInZone for a caller that holds the apex of the copy
-// of the zone it judges by.
-func votesInApex(apex *tdns.OwnerData, id AgentId) bool {
-	if !hasHSYNC3(apex) {
+// votesIn is votesInZone for a caller that holds the instructions it judges
+// by.
+func votesIn(in *Instructions, id AgentId) bool {
+	if !hasHSYNC3(in) {
 		return true
 	}
-	return zoneStanding(apex, string(id)) == standingVoting
+	return zoneStanding(in, string(id)) == standingVoting
 }
 
-// signingPeers are the zone's providers in signers= other than self,
-// resolved through its ON HSYNC3 records. None for a zone without an
-// HSYNCPARAM, which names no signer.
+// signingPeers are the zone's providers that sign, other than self, by the
+// zone's current sets. None for a zone without an HSYNCPARAM, which names no
+// signer.
 func signingPeers(zone ZoneName, self AgentId) []AgentId {
-	apex := zoneApex(zone)
-	hp := apexHSYNCPARAM(apex)
-	if hp == nil {
-		return nil
-	}
-	labelToIdentity := map[string]string{}
-	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 {
-				labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
-			}
-		}
-	}
 	var out []AgentId
-	for _, label := range hp.GetSigners() {
-		id, ok := labelToIdentity[strings.TrimSuffix(label, ".")]
-		if !ok || isAmong([]string{string(self)}, AgentId(id)) || slices.Contains(out, AgentId(id)) {
+	for _, id := range identities(rolesForZone(zone).Signing) {
+		if isAmong([]string{string(self)}, AgentId(id)) || slices.Contains(out, AgentId(id)) {
 			continue
 		}
 		out = append(out, AgentId(id))
@@ -316,7 +207,7 @@ func (ar *AgentRegistry) operationalVotingPeers(zone ZoneName, self AgentId) int
 // (isAmong): the zone's records carry the trailing dot, and an agent's
 // configured identity need not.
 func mayHoldZoneSig0Key(zone ZoneName, agent AgentId) bool {
-	_, voting := zoneParticipants(zoneApex(zone))
+	_, voting := participantsOf(instructionsFor(zone))
 	return isAmong(voting, agent)
 }
 
@@ -367,25 +258,16 @@ func zoneTakesKey(zone ZoneName, key *dns.KEY) bool {
 	}
 }
 
-// zoneListsAgent: the zone's HSYNC3 RRset has an ON record for the agent,
-// with a role in HSYNCPARAM or without.
+// zoneListsAgent: the zone's active instructions have an ON record for the
+// agent, with a role or without.
 func zoneListsAgent(zone ZoneName, id AgentId) bool {
-	return apexListsAgent(zoneApex(zone), id)
+	return listsAgent(instructionsFor(zone), id)
 }
 
-// apexListsAgent is zoneListsAgent for a caller that holds the apex.
-func apexListsAgent(apex *tdns.OwnerData, id AgentId) bool {
-	if apex == nil || apex.RRtypes == nil {
-		return false
-	}
-	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok && h3.State != 0 && isAmong([]string{h3.Identity}, id) {
-				return true
-			}
-		}
-	}
-	return false
+// listsAgent is zoneListsAgent for a caller that holds the instructions.
+func listsAgent(in *Instructions, id AgentId) bool {
+	_, ok := in.labelOf(string(id))
+	return ok
 }
 
 // roleLessKeyHolders are the agents the zone's HSYNC3 lists ON with no role
@@ -401,23 +283,18 @@ func apexListsAgent(apex *tdns.OwnerData, id AgentId) bool {
 // that was never in the group the zone left asks as well. Outside such an
 // edit the zone lists no agent without a role, and nobody more is asked.
 func (ar *AgentRegistry) roleLessKeyHolders(zone ZoneName) []*Agent {
-	apex := zoneApex(zone)
-	if apex == nil {
+	in := instructionsFor(zone)
+	if in == nil {
 		return nil
 	}
-	participants, _ := zoneParticipants(apex)
+	participants, _ := participantsOf(in)
 	var out []*Agent
-	for _, rr := range apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3).RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
+	for _, r := range in.Records {
+		if isAmong(participants, AgentId(r.Identity)) ||
+			(ar.LocalAgent != nil && isAmong([]string{ar.LocalAgent.Identity}, AgentId(r.Identity))) {
 			continue
 		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok || h3.State == 0 || isAmong(participants, AgentId(h3.Identity)) ||
-			(ar.LocalAgent != nil && isAmong([]string{ar.LocalAgent.Identity}, AgentId(h3.Identity))) {
-			continue
-		}
-		if agent, err := ar.GetAgentInfo(AgentId(h3.Identity)); err == nil {
+		if agent, err := ar.GetAgentInfo(AgentId(r.Identity)); err == nil {
 			out = append(out, agent)
 		}
 	}
@@ -431,7 +308,7 @@ func (ar *AgentRegistry) roleLessKeyHolders(zone ZoneName) []*Agent {
 // variants below) so there is one derivation — zoneParticipants — and no
 // raw-HSYNC3 co-presence path survives.
 func ParticipantsForZone(zone ZoneName) []AgentId {
-	participants, _ := zoneParticipants(zoneApex(zone))
+	participants, _ := participantsOf(instructionsFor(zone))
 	out := make([]AgentId, len(participants))
 	for i, id := range participants {
 		out[i] = AgentId(id)
@@ -446,7 +323,7 @@ func ParticipantsForZone(zone ZoneName) []AgentId {
 // Nil for an unknown zone, and for a zone without HSYNCPARAM, which declares
 // no auditors.
 func AuditorsForZone(zone ZoneName) []AgentId {
-	participants, voting := zoneParticipants(zoneApex(zone))
+	participants, voting := participantsOf(instructionsFor(zone))
 	var out []AgentId
 	for _, id := range participants {
 		if !slices.Contains(voting, id) {
@@ -460,7 +337,7 @@ func AuditorsForZone(zone ZoneName) []AgentId {
 // with a servers= or signers= role (zoneParticipants). Nil for an unknown
 // zone.
 func VotingMembersForZone(zone ZoneName) []AgentId {
-	_, voting := zoneParticipants(zoneApex(zone))
+	_, voting := participantsOf(instructionsFor(zone))
 	out := make([]AgentId, len(voting))
 	for i, id := range voting {
 		out[i] = AgentId(id)
@@ -481,36 +358,38 @@ func isVotingMember(zone ZoneName, identity string) bool {
 	return false
 }
 
-// participantFQDNSetForApex returns the FQDN-keyed participant set for a zone
-// apex. Used by the wire boundary (auth/HELLO), which already holds the zone
-// data, so it never re-looks-up through a second accessor.
-func participantFQDNSetForApex(apex *tdns.OwnerData) map[string]bool {
-	participants, _ := zoneParticipants(apex)
-	set := make(map[string]bool, len(participants))
+// participantFQDNSet returns the FQDN-keyed participant set of a zone's
+// instructions. Used by the wire boundary (auth/HELLO).
+func participantFQDNSet(in *Instructions) memberSet {
+	participants, _ := participantsOf(in)
+	set := make(memberSet, len(participants))
 	for _, id := range participants {
-		set[dns.Fqdn(id)] = true
+		set[canonicalName(id)] = true
 	}
 	return set
 }
+
+// memberSet is a zone's participants, each identity folded as a DNS name
+// (canonicalName): the reading's identities are folded, and an identity
+// asked about from elsewhere, a registry entry or a sender, is folded the
+// same way before it is looked up.
+type memberSet map[string]bool
+
+// has reports whether id, compared as a DNS name, is a participant.
+func (s memberSet) has(id string) bool { return s[canonicalName(id)] }
 
 // sharedParticipantZones returns the zones in which both the local identity and
 // the given identity hold a membership role — the derived shared-zone set that
 // replaces the stored agent.Zones for outbound beats, HELLO, and the
 // OPERATIONAL/LEGACY transition (LEGACY == derived participations == 0).
 func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
-	localFQDN := dns.Fqdn(string(ar.LocalAgent.Identity))
-	idFQDN := dns.Fqdn(string(identity))
 	var out []ZoneName
 	for zoneName, zd := range Zones.Items() {
 		if zd == nil {
 			continue
 		}
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil || apex == nil {
-			continue
-		}
-		set := participantFQDNSetForApex(apex)
-		if set[localFQDN] && set[idFQDN] {
+		set := participantFQDNSet(instructionsFor(ZoneName(zoneName)))
+		if set.has(string(ar.LocalAgent.Identity)) && set.has(string(identity)) {
 			out = append(out, ZoneName(zoneName))
 		}
 	}
@@ -667,20 +546,14 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 		if !zd.Ready {
 			continue
 		}
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil || apex == nil {
-			lgProviderGroup.Warn("skipping zone due to apex lookup failure", "zone", zd.ZoneName, "err", err)
-			continue
-		}
-
-		// Membership is defined by HSYNCPARAM roles (resolved through the
-		// zone's ON HSYNC3 label→identity map), NOT by the raw HSYNC3
-		// identity set. An identity with an HSYNC3 record but no HSYNCPARAM
+		// Membership is defined by the roles of the zone's active
+		// instructions (resolved through its ON HSYNC3 records), NOT by the
+		// raw HSYNC3 identity set. An identity with an HSYNC3 record but no
 		// role is not a member. participants/voting are sorted+deduped.
 		// The group is the make-up (step 8): zones with the same providers
 		// and another split of who votes and who audits are two groups,
 		// and every zone of a group agrees on who votes.
-		makeUp := zoneMakeUp(apex)
+		makeUp := zoneMakeUp(instructionsFor(ZoneName(zname)))
 		if len(makeUp.members()) < 2 {
 			continue
 		}

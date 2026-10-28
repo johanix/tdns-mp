@@ -45,8 +45,9 @@ func TestEveryUnknownDSSetNamesWhatItWaitsFor(t *testing.T) {
 			r.owner.SetInventory(r.mpzd.ZoneName, &KeyInventorySnapshot{Zone: r.mpzd.ZoneName,
 				Inventory: []KeyInventoryItem{invItem(t, r.mpzd.ZoneName, 257, KeyStateActive, nil)}})
 		}, []string{"agent.us.example. (ds undecided, key "}, false},
+		// signers= is a set (design rule 2): the waits come in label order
 		{"two providers, both named", []string{"us", "p2"}, func(*testing.T, *computedDSRig) {},
-			[]string{"agent.us.example. (no inventory)", "agent.p2.example. (not spoken)"}, false},
+			[]string{"agent.p2.example. (not spoken)", "agent.us.example. (no inventory)"}, false},
 		{"every signer spoke, none holds a SEP key", []string{"p2"}, func(t *testing.T, r *computedDSRig) {
 			r.answer(t, "agent.p2.example.", true, true) // complete, and no key
 		}, nil, true},

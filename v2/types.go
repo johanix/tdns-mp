@@ -271,6 +271,9 @@ type ZoneRefreshAnalysis struct {
 	NewVoters      []AgentId
 	// KeyChanged: the apex KEY RRset changed (step 7b's key check).
 	KeyChanged bool
+	// ActiveBefore: the zone's active instructions before the refresh, for
+	// the hook at activation (onActiveChanged).
+	ActiveBefore *Instructions
 }
 
 // Transaction API types

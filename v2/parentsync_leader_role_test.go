@@ -701,8 +701,10 @@ func (r *keyPollRig) chains() int {
 
 // A refresh after which this agent no longer takes part in the zone, its
 // record OFF or its roles taken, ends the zone's chain and its key poll,
-// while the poll waits. The option stays on. Also when this agent is the
-// zone's only provider: then nobody takes part after the refresh.
+// while the poll waits. Also when this agent is the zone's only provider:
+// then nobody takes part after the refresh. With its roles taken the option
+// stays on; with its record OFF the records no longer name this agent (an
+// OFF record gives no label, plan S3), and the option goes off.
 func TestAKeyPollEndsWhenThisAgentNoLongerTakesPart(t *testing.T) {
 	asMPAgent(t)
 	both, two := []h3rec{{usAgent, true}, {otherAgent, true}}, []string{usAgent, otherAgent}
@@ -713,11 +715,12 @@ func TestAKeyPollEndsWhenThisAgentNoLongerTakesPart(t *testing.T) {
 		startServers []string
 		recs         []h3rec
 		servers      []string
+		optionStays  bool
 	}{
-		{"its record turns OFF", both, two, []h3rec{{usAgent, false}, {otherAgent, true}}, two},
-		{"its roles are taken", both, two, both, []string{otherAgent}},
-		{"the only provider's record turns OFF", alone, one, []h3rec{{usAgent, false}}, one},
-		{"the only provider's role is taken", alone, one, alone, nil},
+		{"its record turns OFF", both, two, []h3rec{{usAgent, false}, {otherAgent, true}}, two, false},
+		{"its roles are taken", both, two, both, []string{otherAgent}, true},
+		{"the only provider's record turns OFF", alone, one, []h3rec{{usAgent, false}}, one, false},
+		{"the only provider's role is taken", alone, one, alone, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newKeyPollRig(t, "takespart.parentsync.example.")
@@ -732,8 +735,8 @@ func TestAKeyPollEndsWhenThisAgentNoLongerTakesPart(t *testing.T) {
 			if r.chains() != 0 {
 				t.Error("the zone's chain was left")
 			}
-			if !r.mpzd.Options[tdns.OptParentSync] {
-				t.Error("the option went off for a zone that names this agent")
+			if got := r.mpzd.Options[tdns.OptParentSync]; got != tc.optionStays {
+				t.Errorf("the option is %v after the refresh, want %v", got, tc.optionStays)
 			}
 			time.Sleep(100 * time.Millisecond)
 			if n := r.starts.Load(); n != 1 {

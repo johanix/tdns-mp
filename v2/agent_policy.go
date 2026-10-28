@@ -293,26 +293,14 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 			if !exists {
 				return false, "", fmt.Errorf("local update for zone %q: zone not found (system error)", synchedDataUpdate.Zone)
 			}
-			apex, err := zd.GetOwner(zd.ZoneName)
-			if err != nil {
-				return false, "", fmt.Errorf("local update for zone %q: cannot get apex: %w", synchedDataUpdate.Zone, err)
-			}
-			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-			if !exists || len(hsyncparamRRset.RRs) == 0 {
+			if in := zd.instructions(); in == nil || !in.HasParam {
 				return false, fmt.Sprintf("Local update for zone %q: no HSYNCPARAM record (NS management not configured)",
 					synchedDataUpdate.Zone), nil
 			}
-			privRR, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR)
-			if !ok || privRR.Data == nil {
-				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record has unexpected type", synchedDataUpdate.Zone), nil
-			}
-			hsyncparam, ok := privRR.Data.(*core.HSYNCPARAM)
-			if !ok {
-				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record data has unexpected type", synchedDataUpdate.Zone), nil
-			}
-			if hsyncparam.GetNSmgmt() != core.HsyncNSmgmtAGENT {
+			// nsmgmt changes only at a step (design 3.3): the step's sets
+			if nsmgmt := zd.roles().NSmgmt; nsmgmt != core.HsyncNSmgmtAGENT {
 				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM nsmgmt=%s, NS management not delegated to agents",
-					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsyncparam.GetNSmgmt()]), nil
+					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[nsmgmt]), nil
 			}
 		}
 

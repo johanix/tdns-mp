@@ -208,7 +208,7 @@ func TestAnAuditorsHsyncDiffRegistersNothingInAZoneWithoutItsRecord(t *testing.T
 	if !ok {
 		t.Fatal("setup: the zone is not there")
 	}
-	_ = engine.ApplyHsyncDiff(zone, hsync.HsyncDiff{Adds: mpZoneView{mpzd}.HSYNC3()})
+	_ = engine.ApplyHsyncDiff(zone, hsync.HsyncDiff{Entered: recordsEntering(nil, mpzd.instructions())})
 	if added, _, _ := engine.ReconcileZone(zone); added != 0 {
 		t.Errorf("a pass added %d provider(s) in a zone without the auditor's record", added)
 	}
