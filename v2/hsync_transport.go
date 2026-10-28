@@ -1926,16 +1926,16 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	// Build gossip for this peer, and this agent's stamps, which ride in its
 	// beats only: an answer's would count for nothing (design rule 4)
 	var gossipData json.RawMessage
-	var gossipMsgs []GossipMessage
+	var beatGossip []GossipMessage
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
-		gossipMsgs = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+		beatGossip = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
 			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 	}
 	if e := tm.stamps.entryFor(string(agent.ID)); e != nil {
-		gossipMsgs = append(gossipMsgs, *e)
+		beatGossip = append(beatGossip, *e)
 	}
-	if len(gossipMsgs) > 0 {
-		gossipData, _ = json.Marshal(gossipMsgs)
+	if len(beatGossip) > 0 {
+		gossipData, _ = json.Marshal(beatGossip)
 	}
 
 	// The state we report in the beat is what the transport's per-mechanism

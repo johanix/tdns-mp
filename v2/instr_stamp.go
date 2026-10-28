@@ -83,6 +83,8 @@ type fetchMark struct {
 	at     time.Time
 }
 
+// newStampTable is the stamp table of localID, whose serials store keeps,
+// for the start that epoch numbers.
 func newStampTable(localID string, store *InstructionStore, epoch uint64, crypto bool, nameservers []string) *stampTable {
 	return &stampTable{
 		localID:     dns.Fqdn(localID),
@@ -299,6 +301,8 @@ func (t *stampTable) judgeTold(zone string) {
 	}
 }
 
+// sayOnce reports whether the line keyed by key is logged for the first
+// time.
 func (t *stampTable) sayOnce(key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -351,7 +355,7 @@ type MemberInstructions struct {
 	Crypto    bool          `json:"crypto"`
 	Mechanism string        `json:"mechanism,omitempty"`
 	Enveloped bool          `json:"enveloped,omitempty"`
-	Heard     time.Time     `json:"heard,omitempty"`
+	Heard     time.Time     `json:"heard,omitzero"`
 	// Lags: its active or newest serial is below one another member tells.
 	Lags bool `json:"lags,omitempty"`
 	// Alone: no other member holds its newest serial (design 3.1).
@@ -416,6 +420,7 @@ func (t *stampTable) members(zone string) []MemberInstructions {
 	return rows
 }
 
+// memberRow is the status row of what identity tells in st.
 func memberRow(identity string, st InstrStamp) MemberInstructions {
 	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover}
 	if st.Known && st.ActiveDigest != "" {
@@ -430,6 +435,7 @@ func memberRow(identity string, st InstrStamp) MemberInstructions {
 	return r
 }
 
+// rowTellings are the serials a status row tells, as tellings has them.
 func rowTellings(r MemberInstructions) []SerialDigest {
 	var out []SerialDigest
 	for _, p := range []*SerialDigest{r.Active, r.Newest, r.Agreeing} {
@@ -475,6 +481,8 @@ func (s *InstructionStore) zoneLocked(zone string) (string, *zoneSerials) {
 	return "", nil
 }
 
+// ownView is what this agent holds of zone, the zone named in any case;
+// false when it holds no active serial for it.
 func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 	if s == nil {
 		return ownView{}, false
@@ -519,6 +527,8 @@ func (s *InstructionStore) sharedWith(local, peer string) []string {
 	return out
 }
 
+// shares: local and peer both have a role under the active or the newest
+// serial, or peer's removal is under way.
 func (z *zoneSerials) shares(local, peer string) bool {
 	for _, h := range []*heldSerial{z.Active, z.highest()} {
 		if h == nil {

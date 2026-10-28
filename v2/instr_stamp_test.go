@@ -62,6 +62,7 @@ func tells(active, newest *Instructions) InstrStamp {
 	return InstrStamp{Known: true, Active: active.Serial, ActiveDigest: active.Digest(), Newest: newest.Serial, NewestDigest: newest.Digest()}
 }
 
+// rowFor is the status row of id.
 func rowFor(t *testing.T, rows []MemberInstructions, id string) MemberInstructions {
 	t.Helper()
 	for _, r := range rows {
@@ -73,6 +74,7 @@ func rowFor(t *testing.T, rows []MemberInstructions, id string) MemberInstructio
 	return MemberInstructions{}
 }
 
+// A beat to a peer tells every zone the two share, and only those.
 func TestAStampIsToldForEveryZoneTheTwoShare(t *testing.T) {
 	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
 	other := stampAt(t, 3, "a")
@@ -98,6 +100,7 @@ func TestAStampIsToldForEveryZoneTheTwoShare(t *testing.T) {
 	}
 }
 
+// A zone is shared when both are listed under the active or the newest serial.
 func TestAStampIsToldUnderEitherSerial(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	st := stampTableAt(t, stampAlpha, seven)
@@ -116,6 +119,7 @@ func TestAStampIsToldUnderEitherSerial(t *testing.T) {
 	}
 }
 
+// The stamp entry has the reserved hash and one row, the sender's, whose sequence rises.
 func TestTheStampEntryCarriesOnlyTheSendersRow(t *testing.T) {
 	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
 	e := st.entryFor(stampBeta)
@@ -144,6 +148,7 @@ func TestTheStampEntryIsNotMergedAsAGroup(t *testing.T) {
 	}
 }
 
+// A stamp from a beat is noted as its sender's, with the beat's mechanism.
 func TestAStampFromABeatIsFirstHand(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	bob := stampTableAt(t, stampBeta, seven)
@@ -154,6 +159,7 @@ func TestAStampFromABeatIsFirstHand(t *testing.T) {
 	}
 }
 
+// Only the row of the transport's sender is noted, its name in any case.
 func TestARowWhoseIdentityIsNotTheSenderIsNotNoted(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	bob := stampTableAt(t, stampBeta, seven)
@@ -176,6 +182,7 @@ func TestARowWhoseIdentityIsNotTheSenderIsNotNoted(t *testing.T) {
 	}
 }
 
+// Within an epoch only a higher sequence replaces a stamp; an earlier epoch never does.
 func TestAnOlderSeqDoesNotReplaceANewerStamp(t *testing.T) {
 	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
 	bob := stampTableAt(t, stampBeta, seven)
@@ -191,6 +198,7 @@ func TestAnOlderSeqDoesNotReplaceANewerStamp(t *testing.T) {
 	}
 }
 
+// A higher epoch, a later start, replaces everything kept of the member.
 func TestANewEpochReplacesAPeersStamps(t *testing.T) {
 	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
 	bob := stampTableAt(t, stampBeta, seven)
@@ -205,6 +213,7 @@ func TestANewEpochReplacesAPeersStamps(t *testing.T) {
 	}
 }
 
+// The epoch rises at every start, whatever the clock does, and starts at the clock after a wipe.
 func TestTheEpochIsACounterThatSurvivesARestart(t *testing.T) {
 	path, hdb := storeDB(t)
 	at := time.Unix(1_000_000, 0)
@@ -226,6 +235,7 @@ func TestTheEpochIsACounterThatSurvivesARestart(t *testing.T) {
 	}
 }
 
+// A voting member's other digest for this agent's serial is an owner error, ended by a higher serial.
 func TestAVotingPeersOtherDigestAtTheSameSerialIsAnOwnerError(t *testing.T) {
 	sevenA, sevenB := stampAt(t, 7, "a"), stampAt(t, 7, "b")
 	bob := stampTableAt(t, stampBeta, sevenA)
@@ -262,6 +272,7 @@ func TestTwoVotingPeersTellingOneSerialWithTwoDigestsIsAnOwnerError(t *testing.T
 	}
 }
 
+// An auditor's other digest is shown, and holds nothing.
 func TestADigestConflictFromAMemberThatDoesNotVoteHoldsNothing(t *testing.T) {
 	sevenA, sevenB := stampAt(t, 7, "a"), stampAt(t, 7, "b")
 	bob := stampTableAt(t, stampBeta, sevenA)
@@ -275,6 +286,7 @@ func TestADigestConflictFromAMemberThatDoesNotVoteHoldsNothing(t *testing.T) {
 	}
 }
 
+// The stamp tells the judge's refusal of the newest serial, and the serial agreed on.
 func TestTheStampCarriesARefusal(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	st := stampTableAt(t, stampAlpha, seven)
@@ -294,6 +306,7 @@ func TestTheStampCarriesARefusal(t *testing.T) {
 	}
 }
 
+// The status marks the member behind the others.
 func TestTheStatusSaysWhichPeerLags(t *testing.T) {
 	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
 	alpha := stampTableAt(t, stampAlpha, eight)
@@ -311,6 +324,7 @@ func TestTheStatusSaysWhichPeerLags(t *testing.T) {
 	}
 }
 
+// The status names a member whose newest serial no other member holds.
 func TestAMemberTellingASerialNobodyHoldsIsNamed(t *testing.T) {
 	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
 	alpha := stampTableAt(t, stampAlpha, seven)
@@ -325,6 +339,7 @@ func TestAMemberTellingASerialNobodyHoldsIsNamed(t *testing.T) {
 	}
 }
 
+// A newer serial told is fetched at once, then once a minute while behind.
 func TestHearingANewerSerialFetchesOncePerSerialAndMinute(t *testing.T) {
 	seven, eight, nine := stampAt(t, 7, "a"), stampAt(t, 8, "a"), stampAt(t, 9, "a")
 	bob := stampTableAt(t, stampBeta, seven)
@@ -372,6 +387,7 @@ func TestHearingANewerSerialFetchesOncePerSerialAndMinute(t *testing.T) {
 	}
 }
 
+// The stamp row tells whether payload encryption is on.
 func TestTheStampTellsPayloadEncryption(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	off := newStampTable(stampAlpha, stampTableAt(t, stampAlpha, seven).store, 1, false, nil)
@@ -388,6 +404,7 @@ func TestTheStampTellsPayloadEncryption(t *testing.T) {
 	}
 }
 
+// The stamp row carries the provider's own nameserver names.
 func TestTheStampRowCarriesTheProvidersNameservers(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	row := stampTableAt(t, stampAlpha, seven).entryFor(stampBeta).Members[stampAlpha]
@@ -396,6 +413,7 @@ func TestTheStampRowCarriesTheProvidersNameservers(t *testing.T) {
 	}
 }
 
+// rolloverUnderWay over each key state and each flag.
 func TestTheRolloverPredicateCoversEveryPhase(t *testing.T) {
 	yes, no := true, false
 	key := func(state string, flags uint16, ds *bool) []tdns.KeyInventoryItem {
@@ -428,6 +446,7 @@ func TestTheRolloverPredicateCoversEveryPhase(t *testing.T) {
 	}
 }
 
+// The agent's rollover flag follows its signer's last inventory and its pending distributions.
 func TestTheRolloverFlagFollowsTheInventory(t *testing.T) {
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	zd := &tdns.ZoneData{ZoneName: "rollover.stamp.example."}
