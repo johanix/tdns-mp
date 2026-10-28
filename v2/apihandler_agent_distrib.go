@@ -721,7 +721,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 			}
 		}
 
-		if members[dns.Fqdn(string(identity))] {
+		if members.has(string(identity)) {
 			agents = append(agents, string(identity))
 		}
 	})

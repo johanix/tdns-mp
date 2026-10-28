@@ -419,14 +419,33 @@ func rolesFor(from, to *Instructions, step int) Roles {
 }
 
 // rolesForZone is rolesFor for the zone's current step, as the store has it;
-// for a zone the store does not have, the active reading's sets.
+// for a zone the store does not have, the active reading's sets. A provider
+// whose removal is under way is resolved as roles() resolves it.
 func rolesForZone(zone ZoneName) Roles {
-	from, to, step := instrStore.Load().transition(string(zone))
-	if to == nil {
+	name := dns.Fqdn(string(zone))
+	var r Roles
+	if from, to, step := instrStore.Load().transition(name); to != nil {
+		r = rolesFor(from, to, step)
+	} else {
 		in := instructionsFor(zone)
-		return rolesFor(in, in, 0)
+		r = rolesFor(in, in, 0)
 	}
-	return rolesFor(from, to, step)
+	resolveRemovals(name, &r)
+	return r
+}
+
+// resolveRemovals gives a provider the sets name with no ON record, whose
+// removal is under way, the removal's stored identity (design 3.3).
+func resolveRemovals(zone string, r *Roles) {
+	for _, set := range [][]Provider{r.Servers, r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing} {
+		for i := range set {
+			if set[i].Identity == "" {
+				if rm, ok := instrStore.Load().removal(zone, set[i].Label, ""); ok {
+					set[i].Identity = rm.Identity
+				}
+			}
+		}
+	}
 }
 
 // providers resolves labels through the ON records, in the order given.

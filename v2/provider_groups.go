@@ -360,29 +360,36 @@ func isVotingMember(zone ZoneName, identity string) bool {
 
 // participantFQDNSet returns the FQDN-keyed participant set of a zone's
 // instructions. Used by the wire boundary (auth/HELLO).
-func participantFQDNSet(in *Instructions) map[string]bool {
+func participantFQDNSet(in *Instructions) memberSet {
 	participants, _ := participantsOf(in)
-	set := make(map[string]bool, len(participants))
+	set := make(memberSet, len(participants))
 	for _, id := range participants {
-		set[dns.Fqdn(id)] = true
+		set[canonicalName(id)] = true
 	}
 	return set
 }
+
+// memberSet is a zone's participants, each identity folded as a DNS name
+// (canonicalName): the reading's identities are folded, and an identity
+// asked about from elsewhere, a registry entry or a sender, is folded the
+// same way before it is looked up.
+type memberSet map[string]bool
+
+// has reports whether id, compared as a DNS name, is a participant.
+func (s memberSet) has(id string) bool { return s[canonicalName(id)] }
 
 // sharedParticipantZones returns the zones in which both the local identity and
 // the given identity hold a membership role — the derived shared-zone set that
 // replaces the stored agent.Zones for outbound beats, HELLO, and the
 // OPERATIONAL/LEGACY transition (LEGACY == derived participations == 0).
 func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
-	localFQDN := dns.Fqdn(string(ar.LocalAgent.Identity))
-	idFQDN := dns.Fqdn(string(identity))
 	var out []ZoneName
 	for zoneName, zd := range Zones.Items() {
 		if zd == nil {
 			continue
 		}
 		set := participantFQDNSet(instructionsFor(ZoneName(zoneName)))
-		if set[localFQDN] && set[idFQDN] {
+		if set.has(string(ar.LocalAgent.Identity)) && set.has(string(identity)) {
 			out = append(out, ZoneName(zoneName))
 		}
 	}

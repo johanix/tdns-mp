@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -234,6 +235,66 @@ func TestAnAuditorIsFoundByItsIdentityInAnyCase(t *testing.T) {
 	}
 	if mpzd.IsAuditorIdentity(acBeta) {
 		t.Errorf("%s, a server, is found as an auditor", acBeta)
+	}
+}
+
+// The reading's identities are folded; an identity that comes from
+// elsewhere, a registry entry, a sender or this agent's own, is a member
+// whatever its case, wherever it is looked up.
+func TestAMixedCaseIdentityIsAMemberWhereverItIsLookedUp(t *testing.T) {
+	mpzd := instrTestZone(t, "mixedcase.access.example.", acRecords("", `serial="7" servers="alpha,beta"`)...)
+	zone := ZoneName(mpzd.ZoneName)
+	const mixed, self = "Agent.BETA.example", "AGENT.Alpha.Example."
+	if !participantFQDNSet(instructionsFor(zone)).has(mixed) {
+		t.Errorf("the member set does not have %s", mixed)
+	}
+	// admission: this agent's and the sender's identities
+	tm := &MPTransportBridge{TransportManager: &transport.TransportManager{LocalID: self}, getZone: tdns.Zones.Get,
+		getZoneNames: func() []string { return []string{mpzd.ZoneName} }}
+	if ok, why := tm.isInHSYNC(mixed, mpzd.ZoneName); !ok {
+		t.Errorf("isInHSYNC refused %s: %s", mixed, why)
+	}
+	if ok, _ := tm.isInHSYNCAnyZone(mixed); !ok {
+		t.Errorf("isInHSYNCAnyZone refused %s", mixed)
+	}
+	// the registry's entries
+	ar := &AgentRegistry{S: core.NewStringer[AgentId, *Agent](), LocalAgent: &MultiProviderConf{Identity: self}}
+	ar.S.Set(AgentId(mixed), &Agent{Peer: hsync.NewPeer(AgentId(mixed))})
+	if got := ar.GetAgentsForZone(zone); len(got) != 1 {
+		t.Errorf("GetAgentsForZone found %d agents, want the one registered as %s", len(got), mixed)
+	}
+	if !slices.Contains(ar.sharedParticipantZones(AgentId(mixed)), zone) {
+		t.Errorf("sharedParticipantZones(%s) does not hold the zone", mixed)
+	}
+	// the auditor: a provider seen in traffic as the mixed-case name
+	zs := &AuditZoneState{Zone: mpzd.ZoneName, Providers: map[string]*AuditProviderState{mixed: {}, self: {}}}
+	detectMissingProviders(zs, &detectorRunState{missing: map[string]bool{}})
+	for _, o := range zs.Observations {
+		if strings.Contains(o.Message, "never seen") {
+			t.Errorf("the auditor reports a provider seen as never seen: %s", o.Message)
+		}
+	}
+}
+
+// rolesForZone resolves a provider whose removal is under way through its
+// stored identity, as the zone's roles() do; the zone's name may lack its
+// trailing dot.
+func TestRolesForZoneResolvesARemovalUnderWay(t *testing.T) {
+	const name = "removal.access.example."
+	s := newStore(t)
+	withStore(t, s)
+	// gamma has left the ON records; its removal is under way
+	activeAs(t, s, name, readOf(t, acRecords("", `serial="8" servers="alpha,beta,gamma" signers="alpha,gamma"`)...))
+	if err := s.update(name, func(z *zoneSerials) error {
+		z.Removals = []Removal{{Label: "gamma", Identity: acGamma, Step: 2}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, zone := range []ZoneName{name, "removal.access.example"} {
+		if !slices.Contains(rolesForZone(zone).Signing, Provider{Label: "gamma", Identity: acGamma}) {
+			t.Errorf("rolesForZone(%q).Signing = %v, want gamma by its stored identity", zone, rolesForZone(zone).Signing)
+		}
 	}
 }
 
