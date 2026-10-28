@@ -55,8 +55,10 @@ type stampTable struct {
 	// rollover is rolloverUnderWay at this provider; nil: none known (the
 	// auditor, which runs no key machine).
 	rollover func(zone string) bool
-	// fetch asks a refresh of the zone's own copy; nil: none.
-	fetch func(zone string)
+	// fetch asks a refresh of the zone's own copy, the zone named in any
+	// case: the zone's name here ("" when this agent has no such zone), and
+	// whether the refresh was queued. Nil: none.
+	fetch func(zone string) (name string, queued bool)
 	seq   atomic.Uint64
 
 	mu      sync.Mutex
@@ -234,20 +236,30 @@ func tellings(st InstrStamp) []SerialDigest {
 	return out
 }
 
-// judgeTold looks for an owner error between agents in what the members
-// tell of zone (rule 2): voting members that tell one serial with two
+// toldConflict is an owner error between agents at one serial: its
+// digests, and the voting members named for it.
+type toldConflict struct {
+	serial  uint32
+	digests []string
+	members []string
+}
+
+// toldConflicts are the owner errors between agents in what the members
+// tell of zone (rule 2): two voting members that tell one serial with two
 // digests, this agent among them when it votes; or a voting member whose
 // digest for this agent's active serial is another than this agent's own.
-// Who votes is read from this agent's active and newest serials. A serial
-// below the highest this agent holds is not looked at: the owner has passed
-// it. A member that does not vote and tells another digest is shown, and
-// holds nothing.
-func (t *stampTable) judgeTold(zone string) {
+// One member telling one serial with two digests is no conflict between
+// members. Who votes is read from this agent's active and newest serials,
+// and an agent that does not vote is not named among them. A serial below
+// the highest this agent holds is not looked at: the owner has passed it.
+// The serials told with another digest by members that do not vote come
+// back apart, by member: they are shown and hold nothing.
+func (t *stampTable) toldConflicts(zone string) (name string, conflicts []toldConflict, others map[string][]uint32) {
 	own, ok := t.store.ownView(zone)
 	if !ok {
-		return
+		return "", nil, nil
 	}
-	digests := map[uint32]map[string][]string{} // serial -> digest -> voting tellers
+	digests := map[uint32]map[string][]string{} // serial -> digest -> tellers; "" is this agent when it does not vote
 	add := func(sd SerialDigest, who string) {
 		if CompareSerial(sd.Serial, own.highest) < 0 {
 			return
@@ -257,45 +269,67 @@ func (t *stampTable) judgeTold(zone string) {
 		}
 		digests[sd.Serial][sd.Digest] = append(digests[sd.Serial][sd.Digest], who)
 	}
+	localVotes := own.voting.has(t.localID)
 	for _, sd := range own.held {
-		if own.voting.has(t.localID) || sd == own.active {
+		switch {
+		case localVotes:
 			add(sd, t.localID)
+		case sd == own.active:
+			add(sd, "")
 		}
 	}
 	told := t.told(zone)
-	var others []string
+	var notVoting []string
 	for _, id := range slices.Sorted(maps.Keys(told)) {
 		if own.voting.has(id) {
 			for _, sd := range tellings(told[id]) {
 				add(sd, id)
 			}
 		} else {
-			others = append(others, id)
+			notVoting = append(notVoting, id)
 		}
 	}
 	for _, serial := range slices.Sorted(maps.Keys(digests)) {
 		byDigest := digests[serial]
-		if len(byDigest) < 2 {
+		var tellers []string
+		for _, who := range byDigest {
+			tellers = append(tellers, who...)
+		}
+		tellers = sortedUnique(tellers)
+		// with two digests and two tellers, two of the tellers differ
+		if len(byDigest) < 2 || len(tellers) < 2 {
 			continue
 		}
-		ds := slices.Sorted(maps.Keys(byDigest))
-		var members []string
-		for _, d := range ds {
-			members = append(members, byDigest[d]...)
-		}
-		if t.store.noteToldConflict(own.name, serial, ds) {
-			lgGossip.Warn("owner error: two voting members tell one serial with two digests", "zone", own.name, "serial", serial, "members", strings.Join(sortedUnique(members), ", "))
+		members := slices.DeleteFunc(tellers, func(who string) bool { return who == "" })
+		conflicts = append(conflicts, toldConflict{serial: serial, digests: slices.Sorted(maps.Keys(byDigest)), members: members})
+	}
+	for _, id := range notVoting {
+		for _, sd := range tellings(told[id]) {
+			if byDigest := digests[sd.Serial]; len(byDigest) > 0 && byDigest[sd.Digest] == nil {
+				if others == nil {
+					others = map[string][]uint32{}
+				}
+				others[id] = append(others[id], sd.Serial)
+			}
 		}
 	}
-	// what a member that does not vote tells is shown only
-	for _, id := range others {
-		for _, sd := range tellings(told[id]) {
-			byDigest := digests[sd.Serial]
-			if len(byDigest) == 0 || byDigest[sd.Digest] != nil {
-				continue
-			}
-			if t.sayOnce(fmt.Sprintf("%s %d %s", zone, sd.Serial, canonicalName(id))) {
-				lgGossip.Info("a member that does not vote tells another digest", "zone", own.name, "serial", sd.Serial, "member", id)
+	return own.name, conflicts, others
+}
+
+// judgeTold marks the owner errors between agents in what the members tell
+// of zone (toldConflicts), and logs what a member that does not vote tells
+// with another digest once.
+func (t *stampTable) judgeTold(zone string) {
+	name, conflicts, others := t.toldConflicts(zone)
+	for _, c := range conflicts {
+		if t.store.noteToldConflict(name, c.serial, c.digests) {
+			lgGossip.Warn("owner error: two voting members tell one serial with two digests", "zone", name, "serial", c.serial, "members", strings.Join(c.members, ", "))
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(others)) {
+		for _, serial := range others[id] {
+			if t.sayOnce(fmt.Sprintf("%s %d %s", zone, serial, canonicalName(id))) {
+				lgGossip.Info("a member that does not vote tells another digest", "zone", name, "serial", serial, "member", id)
 			}
 		}
 	}
@@ -314,16 +348,17 @@ func (t *stampTable) sayOnce(key string) bool {
 }
 
 // fetchIfNewer asks a refresh of this agent's own copy of zone when m tells
-// a newest serial above the highest this agent holds (design 3.1): at once
-// for a serial above the last one fetched, and again once a minute while
-// this agent lags. S10 and S11 add the provider's chain.
+// a newest serial above the highest this agent holds, or when it holds no
+// active serial for the zone (design 3.1, 3.4): at once for a serial above
+// the last one fetched, and again once a minute while this agent lags. Only
+// a refresh that was queued counts: one the full queue dropped is asked
+// again at the next telling. S10 and S11 add the provider's chain.
 func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 	st := m.Instr[zone]
-	if st.NewestDigest == "" {
+	if st.NewestDigest == "" || t.fetch == nil {
 		return
 	}
-	own, ok := t.store.ownView(zone)
-	if !ok || CompareSerial(st.Newest, own.highest) <= 0 {
+	if own, ok := t.store.ownView(zone); ok && CompareSerial(st.Newest, own.highest) <= 0 {
 		return
 	}
 	now := time.Now()
@@ -334,11 +369,25 @@ func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 		t.fetched[zone] = fetchMark{serial: st.Newest, at: now}
 	}
 	t.mu.Unlock()
-	if !due || t.fetch == nil {
+	if !due {
 		return
 	}
-	lgGossip.Info("a member tells newer instructions, fetching the zone", "zone", own.name, "member", m.Identity, "serial", st.Newest)
-	t.fetch(own.name)
+	name, queued := t.fetch(zone)
+	switch {
+	case queued:
+		lgGossip.Info("a member tells newer instructions, fetching the zone", "zone", name, "member", m.Identity, "serial", st.Newest)
+	case name != "":
+		// the queue was full: not fetched, so the next telling asks again
+		t.mu.Lock()
+		if t.fetched[zone] == (fetchMark{serial: st.Newest, at: now}) {
+			if seen {
+				t.fetched[zone] = f
+			} else {
+				delete(t.fetched, zone)
+			}
+		}
+		t.mu.Unlock()
+	}
 }
 
 // MemberInstructions is a member's latest stamp of a zone, as the agent's
@@ -621,12 +670,13 @@ func (s *InstructionStore) noteToldConflict(zone string, serial uint32, digests 
 }
 
 // RaiseEpoch raises the epoch of this agent's stamps at its start, on disk,
-// and returns it. It is a counter, raised to the clock's seconds when they
-// are ahead: a clock that runs backwards across a restart still raises it,
-// and a database that is wiped still starts above the epochs its peers
-// hold. Without a database it is the clock's.
+// and returns it. It is a counter, raised to the clock's milliseconds when
+// they are ahead: a clock that runs backwards across a restart still raises
+// it, and a database that is wiped still starts above the epochs its peers
+// hold, since no two starts come within a millisecond. Without a database
+// it is the clock's.
 func (s *InstructionStore) RaiseEpoch(now time.Time) (uint64, error) {
-	clock := uint64(max(now.Unix(), 1))
+	clock := uint64(max(now.UnixMilli(), 1))
 	if s == nil || s.hdb == nil {
 		return clock, nil
 	}
@@ -669,17 +719,27 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 }
 
 // fetchZone asks a refresh of the zone's own copy, as a NOTIFY does: the
-// fetch of a serial a member tells (design 3.1). A full refresh queue drops
-// it; the next telling asks again.
-func (conf *Config) fetchZone(zone string) {
+// fetch of a serial a member tells (design 3.1). The zone is named in any
+// case. A full refresh queue drops it, and the next telling asks again.
+func (conf *Config) fetchZone(zone string) (string, bool) {
 	mpzd, ok := Zones.Get(zone)
+	if !ok {
+		for _, name := range Zones.Keys() {
+			if core.EqualNames(name, zone) {
+				mpzd, ok = Zones.Get(name)
+				break
+			}
+		}
+	}
 	if !ok || mpzd == nil || mpzd.ZoneData == nil {
-		return
+		return "", false
 	}
 	select {
 	case conf.Config.Internal.RefreshZoneCh <- tdns.ZoneRefresher{Name: mpzd.ZoneName, ZoneStore: mpzd.ZoneStore}:
+		return mpzd.ZoneName, true
 	default:
-		lgGossip.Warn("the refresh queue is full; the zone is fetched at a later telling", "zone", zone)
+		lgGossip.Warn("the refresh queue is full; the zone is fetched at a later telling", "zone", mpzd.ZoneName)
+		return mpzd.ZoneName, false
 	}
 }
 

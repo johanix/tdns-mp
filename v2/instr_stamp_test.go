@@ -218,19 +218,20 @@ func TestTheEpochIsACounterThatSurvivesARestart(t *testing.T) {
 	path, hdb := storeDB(t)
 	at := time.Unix(1_000_000, 0)
 	first, err := loadStore(t, hdb).RaiseEpoch(at)
-	if err != nil || first != 1_000_000 {
-		t.Fatalf("the first epoch: %d %v", first, err)
+	if err != nil || first != 1_000_000_000 {
+		t.Fatalf("the first epoch: %d %v, want the clock's milliseconds", first, err)
 	}
-	// a restart within the second, then one whose clock ran backwards
+	// a restart within the millisecond, then one whose clock ran backwards
 	for i, now := range []time.Time{at, at.Add(-time.Hour)} {
 		e, err := loadStore(t, openStoreDB(t, path)).RaiseEpoch(now)
 		if err != nil || e != first+uint64(i)+1 {
 			t.Errorf("restart %d: epoch %d %v, want %d", i+1, e, err, first+uint64(i)+1)
 		}
 	}
-	// a wiped database starts at the clock, above what its peers hold
+	// a wiped database starts at the clock, above what its peers hold, even
+	// a second after those restarts
 	_, wiped := storeDB(t)
-	if e, err := loadStore(t, wiped).RaiseEpoch(at.Add(time.Hour)); err != nil || e <= first+2 {
+	if e, err := loadStore(t, wiped).RaiseEpoch(at.Add(time.Second)); err != nil || e <= first+2 {
 		t.Errorf("after a wipe: epoch %d %v", e, err)
 	}
 }
@@ -344,7 +345,10 @@ func TestHearingANewerSerialFetchesOncePerSerialAndMinute(t *testing.T) {
 	seven, eight, nine := stampAt(t, 7, "a"), stampAt(t, 8, "a"), stampAt(t, 9, "a")
 	bob := stampTableAt(t, stampBeta, seven)
 	var fetched []string
-	bob.fetch = func(zone string) { fetched = append(fetched, zone) }
+	bob.fetch = func(zone string) (string, bool) {
+		fetched = append(fetched, zone)
+		return zone, true
+	}
 	seq := uint64(0)
 	hear := func(from string, in *Instructions) {
 		seq++
@@ -384,6 +388,66 @@ func TestHearingANewerSerialFetchesOncePerSerialAndMinute(t *testing.T) {
 	hear(stampAlpha, nine)
 	if len(fetched) != 3 {
 		t.Errorf("caught up: fetched %d times, want 3", len(fetched))
+	}
+}
+
+// A refresh the full queue dropped is asked again at the next telling, not
+// a minute later; and a zone this agent holds no active serial for is
+// fetched too (design 3.4).
+func TestAFetchTheQueueDroppedIsAskedAgain(t *testing.T) {
+	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
+	bob := stampTableAt(t, stampBeta, seven)
+	full := true
+	asked := 0
+	bob.fetch = func(zone string) (string, bool) {
+		asked++
+		return zone, !full
+	}
+	bob.note(told(stampAlpha, 1, 1, tells(seven, eight)), stampAlpha, "DNS")
+	full = false
+	bob.note(told(stampAlpha, 1, 2, tells(seven, eight)), stampAlpha, "DNS")
+	bob.note(told(stampAlpha, 1, 3, tells(seven, eight)), stampAlpha, "DNS")
+	if asked != 2 {
+		t.Errorf("asked %d times, want 2: once dropped, once queued, then paced", asked)
+	}
+
+	// a store that holds nothing for the zone: a newcomer whose copy has no
+	// reading of the instructions yet
+	none := newStampTable(stampBeta, newStore(t), 1, true, nil)
+	var names []string
+	none.fetch = func(zone string) (string, bool) {
+		names = append(names, zone)
+		return zone, true
+	}
+	none.note(told(stampAlpha, 1, 1, tells(eight, eight)), stampAlpha, "DNS")
+	if !slices.Equal(names, []string{stampZone}) {
+		t.Errorf("a zone with no active serial here: fetched %v", names)
+	}
+}
+
+// One member telling one serial with two digests is no conflict between
+// members: rule 2 asks for two.
+func TestOneMemberTellingOneSerialWithTwoDigestsIsNoOwnerError(t *testing.T) {
+	seven, eightA, eightB := stampAt(t, 7, "a"), stampAt(t, 8, "a"), stampAt(t, 8, "b")
+	bob := stampTableAt(t, stampBeta, seven)
+	bob.note(told(stampAlpha, 1, 1, tells(eightA, eightB)), stampAlpha, "DNS")
+	if st := status(t, bob.store, stampZone); st.OwnerError != "" {
+		t.Errorf("one member's two digests: %q", st.OwnerError)
+	}
+}
+
+// An agent that does not vote compares its active copy (rule 2), and is not
+// named among the voting members of the conflict.
+func TestAnAuditorIsNotNamedAmongTheVotingMembers(t *testing.T) {
+	sevenA, sevenB := stampAt(t, 7, "a"), stampAt(t, 7, "b")
+	delta := stampTableAt(t, stampDelta, sevenA)
+	delta.note(told(stampAlpha, 1, 1, tells(sevenB, sevenB)), stampAlpha, "DNS")
+	if st := status(t, delta.store, stampZone); st.Phase != PhaseOwnerError {
+		t.Fatalf("a voting member's other digest for the auditor's active serial: phase %s", st.Phase)
+	}
+	_, conflicts, _ := delta.toldConflicts(stampZone)
+	if len(conflicts) != 1 || !slices.Equal(conflicts[0].members, []string{stampAlpha}) {
+		t.Errorf("the conflicts: %+v, want alpha named alone", conflicts)
 	}
 }
 
