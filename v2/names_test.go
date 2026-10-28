@@ -13,30 +13,30 @@ import (
 func TestAnIdentityInCapitalsIsFoldedAtConfigLoad(t *testing.T) {
 	block := map[string]interface{}{
 		"role":             "agent",
-		"identity":         "Agent.Hotel.Example",
-		"combiner":         map[string]interface{}{"identity": "Combiner.Hotel.Example."},
-		"signer":           map[string]interface{}{"identity": "SIGNER.hotel.example."},
-		"agents":           []interface{}{map[string]interface{}{"identity": "Agent.India.Example"}},
-		"authorized_peers": []interface{}{"Agent.Juliet.Example."},
-		"dns":              map[string]interface{}{"control_zone": "Control.Hotel.Example"},
+		"identity":         "Agent.Alice.Example",
+		"combiner":         map[string]interface{}{"identity": "Combiner.Alice.Example."},
+		"signer":           map[string]interface{}{"identity": "SIGNER.alice.example."},
+		"agents":           []interface{}{map[string]interface{}{"identity": "Agent.Bob.Example"}},
+		"authorized_peers": []interface{}{"Agent.Carol.Example."},
+		"dns":              map[string]interface{}{"control_zone": "Control.Alice.Example"},
 	}
 	mp, err := parseMultiProvider(map[string]interface{}{"multi-provider": block})
 	if err != nil {
 		t.Fatalf("parseMultiProvider: %v", err)
 	}
 	for _, c := range []struct{ what, got, want string }{
-		{"identity", mp.Identity, "agent.hotel.example."},
-		{"combiner", mp.Combiner.Identity, "combiner.hotel.example."},
-		{"signer", mp.Signer.Identity, "signer.hotel.example."},
-		{"agents[0]", mp.Agents[0].Identity, "agent.india.example."},
-		{"authorized_peers[0]", mp.AuthorizedPeers[0], "agent.juliet.example."},
-		{"dns.control_zone", mp.Dns.ControlZone, "Control.Hotel.Example."},
+		{"identity", mp.Identity, "agent.alice.example."},
+		{"combiner", mp.Combiner.Identity, "combiner.alice.example."},
+		{"signer", mp.Signer.Identity, "signer.alice.example."},
+		{"agents[0]", mp.Agents[0].Identity, "agent.bob.example."},
+		{"authorized_peers[0]", mp.AuthorizedPeers[0], "agent.carol.example."},
+		{"dns.control_zone", mp.Dns.ControlZone, "Control.Alice.Example."},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %q, want %q", c.what, c.got, c.want)
 		}
 	}
-	if a := mp.FindAgent("AGENT.india.example."); a == nil {
+	if a := mp.FindAgent("AGENT.bob.example."); a == nil {
 		t.Errorf("FindAgent in another case found nothing")
 	}
 }
