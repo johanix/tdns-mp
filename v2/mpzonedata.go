@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
 )
 
 // MPZoneData embeds *tdns.ZoneData. All core ZoneData fields and
@@ -52,6 +53,9 @@ type MPZoneTuple struct {
 // *MPZoneData, creating and caching the wrapper on first access.
 // tdns.Zones remains the authoritative source of zones; MPZones
 // never creates or deletes zones, only wraps them.
+//
+// The cache is keyed by the canonical name, as tdns.Zones is, so every
+// spelling of a zone's name reaches the one wrapper (#314).
 type MPZones struct {
 	mu    sync.RWMutex
 	cache map[string]*MPZoneData
@@ -75,6 +79,7 @@ var Zones = &MPZones{
 // with a new *tdns.ZoneData (a modify, or a removal and a re-add)
 // gets a new wrapper.
 func (mz *MPZones) Get(name string) (*MPZoneData, bool) {
+	name = core.CanonicalizeName(name)
 	zd, ok := tdns.Zones.Get(name)
 	if !ok {
 		mz.drop(name)
@@ -153,7 +158,7 @@ func (mz *MPZones) IterCb(fn func(key string, v *MPZoneData)) {
 func (mz *MPZones) Set(name string, mpzd *MPZoneData) {
 	mz.mu.Lock()
 	defer mz.mu.Unlock()
-	mz.cache[name] = mpzd
+	mz.cache[core.CanonicalizeName(name)] = mpzd
 }
 
 // Invalidate removes a cached entry. Get drops the wrapper of a zone
@@ -161,7 +166,7 @@ func (mz *MPZones) Set(name string, mpzd *MPZoneData) {
 func (mz *MPZones) Invalidate(name string) {
 	mz.mu.Lock()
 	defer mz.mu.Unlock()
-	delete(mz.cache, name)
+	delete(mz.cache, core.CanonicalizeName(name))
 }
 
 // getOrCreate returns the cached *MPZoneData of the given
@@ -169,7 +174,8 @@ func (mz *MPZones) Invalidate(name string) {
 // *tdns.ZoneData is of a zone tdns has replaced, and is replaced in
 // turn. Only the live zone's wrapper is cached: a caller that read zd
 // from tdns.Zones just before tdns replaced it gets a wrapper of its
-// own, and the live zone's wrapper stays.
+// own, and the live zone's wrapper stays. name is canonical: Get folds
+// it, and the names tdns.Zones iterates over are canonical already.
 func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 	mz.mu.RLock()
 	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == zd {

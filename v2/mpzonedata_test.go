@@ -103,3 +103,33 @@ func TestADropAfterTheZoneIsBackKeepsItsWrapper(t *testing.T) {
 		t.Error("the wrapper of a zone tdns holds was dropped")
 	}
 }
+
+// Every spelling of a zone's name reaches the one wrapper, as it reaches
+// the one zone in tdns.Zones; Set and Invalidate in any spelling act on
+// that wrapper (#314).
+func TestEverySpellingOfAZonesNameGetsTheOneWrapper(t *testing.T) {
+	const name = "spelled.mpzones.example."
+	zd := mpZone(t, name)
+
+	w, ok := Zones.Get("Spelled.MPZones.Example.")
+	if !ok {
+		t.Fatal("the zone is not returned for its name in capitals")
+	}
+	if again, _ := Zones.Get(name); again != w {
+		t.Error("two spellings of the zone's name got two wrappers")
+	}
+	if Zones.Items()[name] != w {
+		t.Error("Items does not return the wrapper Get gave")
+	}
+
+	Zones.Invalidate("SPELLED.mpzones.example.")
+	if cachedWrapper(name) != nil {
+		t.Error("Invalidate in another spelling left the wrapper")
+	}
+
+	set := &MPZoneData{ZoneData: zd, MP: &MPState{}}
+	Zones.Set("Spelled.Mpzones.Example.", set)
+	if got, _ := Zones.Get(name); got != set {
+		t.Error("Get does not return the wrapper Set stored under another spelling")
+	}
+}
