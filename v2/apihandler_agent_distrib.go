@@ -21,6 +21,14 @@ import (
 // Type aliases: AgentDistribPost, DistributionSummary, AgentDistribResponse, PeerInfo
 // are defined as aliases in types.go
 
+// distribOpTarget is the peer "distrib op --to" names, as the peer registry
+// keys it: trimmed, folded and with its trailing dot (#287). combiner is true
+// for the keyword "combiner", in any case.
+func distribOpTarget(to string) (fqdn string, combiner bool) {
+	fqdn = canonicalName(strings.TrimSpace(to))
+	return fqdn, fqdn == "combiner."
+}
+
 func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
@@ -125,21 +133,21 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 		case "op":
 			// Run operation toward a peer: distrib op {operation} --to {identity}
-			if req.Op == "" || req.To == "" {
+			toFqdn, toCombiner := distribOpTarget(req.To)
+			if req.Op == "" || toFqdn == "" {
 				resp.Error = true
 				resp.ErrorMsg = "op and to are required (e.g. op=ping, to=combiner)"
 				return
 			}
-			toIdentity := strings.TrimSpace(strings.ToLower(req.To)) // not-a-name: only compared with the keyword "combiner"
-			opName := strings.TrimSpace(strings.ToLower(req.Op))     // not-a-name: an operation name
+			opName := strings.TrimSpace(strings.ToLower(req.Op)) // not-a-name: an operation name
 
 			switch opName {
 			case "ping":
 				// The transport the operator named, and that one only: --api
 				// or --dns (the default).
 				useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api" // not-a-name: a transport name
-				if toIdentity == "combiner" {
-					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
+				if toCombiner {
+					pingResp := doPeerPing(conf, toFqdn, useAPI)
 					resp.Error = pingResp.Error
 					resp.ErrorMsg = pingResp.ErrorMsg
 					resp.Msg = pingResp.Msg
@@ -151,7 +159,6 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						resp.ErrorMsg = "TransportManager not configured"
 						return
 					}
-					toFqdn := dns.Fqdn(req.To)
 					peer, ok := conf.InternalMp.TransportManager.PeerRegistry.Get(toFqdn)
 					if !ok {
 						// DNS-42: Authorization check BEFORE discovery

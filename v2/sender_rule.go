@@ -29,8 +29,12 @@ func canonicalName(name string) string {
 }
 
 // sameName compares two names as DNS names (RFC 4343: US-ASCII case only),
-// each taken with its trailing dot.
+// each taken with its trailing dot. An empty string is no name: it matches
+// nothing, not the root that dns.Fqdn would make of it.
 func sameName(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
 	return core.EqualNames(dns.Fqdn(a), dns.Fqdn(b))
 }
 

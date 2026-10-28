@@ -43,7 +43,8 @@ func TestAnIdentityInCapitalsIsFoldedAtConfigLoad(t *testing.T) {
 
 // sameName is the DNS rule: US-ASCII case only, each name with its trailing
 // dot. strings.EqualFold folds by Unicode, so it takes U+212A KELVIN SIGN
-// for "k"; sameName does not.
+// for "k"; sameName does not. An absent name matches nothing, not even the
+// root.
 func TestSameNameFoldsUSASCIIOnly(t *testing.T) {
 	for _, c := range []struct {
 		a, b string
@@ -53,6 +54,9 @@ func TestSameNameFoldsUSASCIIOnly(t *testing.T) {
 		{"agent.example", "AGENT.EXAMPLE.", true},
 		{"agent.example.", "agent.example.org.", false},
 		{"Key.example.", "key.example.", false},
+		{"", ".", false},
+		{".", "", false},
+		{"", "", false},
 	} {
 		if got := sameName(c.a, c.b); got != c.want {
 			t.Errorf("sameName(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
@@ -79,6 +83,26 @@ func TestAProtectedNamespaceIsMatchedByLabelInAnyCase(t *testing.T) {
 		got := checkNSNamespacePolicy(ns(c.target), protected) != ""
 		if got != c.intrudes {
 			t.Errorf("NS %s: intrudes = %v, want %v", c.target, got, c.intrudes)
+		}
+	}
+}
+
+// "distrib op --to" takes the operator's name as the peer registry keys it,
+// padded or in capitals, and "combiner" as the keyword in any case.
+func TestADistribOpTargetIsTrimmedAndFolded(t *testing.T) {
+	for _, c := range []struct {
+		to, fqdn string
+		combiner bool
+	}{
+		{" COMBINER ", "combiner.", true},
+		{"combiner", "combiner.", true},
+		{" Agent.Bob.Example. ", "agent.bob.example.", false},
+		{"agent.bob.example", "agent.bob.example.", false},
+		{"   ", "", false},
+	} {
+		fqdn, combiner := distribOpTarget(c.to)
+		if fqdn != c.fqdn || combiner != c.combiner {
+			t.Errorf("distribOpTarget(%q) = %q, %v, want %q, %v", c.to, fqdn, combiner, c.fqdn, c.combiner)
 		}
 	}
 }
