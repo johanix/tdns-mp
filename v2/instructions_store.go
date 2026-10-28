@@ -179,7 +179,8 @@ type InstructionStore struct {
 	zones         map[string]*zoneSerials
 	warnedOld     map[string]time.Time // the last "not adopted" warning per zone
 	refusedLogged map[zoneSerial]bool  // the refusals logged, once each
-	// onFreeze is told when a zone is frozen and when it no longer is
+	// onFreeze is told when a zone is frozen, when it no longer is, and
+	// when the serial it agrees on moves while it stays frozen
 	// (instr_freeze.go), after the change is written and the lock let go.
 	onFreeze func(zone string, frozen bool)
 }
@@ -296,8 +297,8 @@ func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
 // the result; f returning an error changes nothing, and so does a result
 // equal to what was kept (a refresh that brings the same copy). f returning
 // errEndOfService drops the zone's serials, under the same lock. A change
-// that freezes the zone, or ends its freeze, is told to onFreeze once the
-// lock is let go.
+// that freezes the zone, ends its freeze, or moves the serial a frozen
+// zone agrees on, is told to onFreeze once the lock is let go.
 func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
 	var froze *bool
 	defer func() {
@@ -313,6 +314,10 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 		z = old.clone()
 	}
 	wasFrozen := old != nil && len(old.freezeReasons()) > 0
+	var wasAgreed SerialDigest
+	if old != nil && old.agreeing() != nil {
+		wasAgreed = old.agreeing().SerialDigest
+	}
 	if err := f(z); err != nil {
 		if errors.Is(err, errEndOfService) {
 			if ferr := s.forgetLocked(zone); ferr != nil {
@@ -335,7 +340,9 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 		return err
 	}
 	s.zones[zone] = z
-	if frozen := len(z.freezeReasons()) > 0; frozen != wasFrozen {
+	frozen := len(z.freezeReasons()) > 0
+	moved := frozen && z.agreeing() != nil && z.agreeing().SerialDigest != wasAgreed
+	if frozen != wasFrozen || moved {
 		froze = &frozen
 	}
 	return nil

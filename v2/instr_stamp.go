@@ -56,7 +56,7 @@ type stampTable struct {
 	// auditor, which runs no key machine).
 	rollover func(zone string) bool
 	// hold: this agent's signer has confirmed the zone's hold since this
-	// agent came to hold its newest serial (holdConfirmed, plan S6); nil on
+	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
 	// the auditor, which has no signer.
 	hold func(zone string) bool
 	// fetch asks a refresh of the zone's own copy, the zone named in any

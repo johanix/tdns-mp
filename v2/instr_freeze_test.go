@@ -732,3 +732,59 @@ func TestTheHoldIsToldAgainWhenTheInventorySaysOtherwise(t *testing.T) {
 		t.Error("an inventory with the hold had it told again")
 	}
 }
+
+// The hold is confirmed for the serial agreed on (the external review of
+// #301): a refused serial above it leaves a confirmed hold confirmed; a
+// newer serial that becomes the one agreed on has the hold told again, and
+// counts only an inventory that arrives after it.
+func TestTheHoldIsConfirmedForTheSerialAgreedOn(t *testing.T) {
+	r := newFreezeRig(t, "agreed.freeze.example.")
+	mpzd, ok := Zones.Get(r.zone)
+	if !ok {
+		t.Fatal("no zone")
+	}
+	told := func() holdTold {
+		b := &r.conf.InternalMp.holds
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.told[canonicalName(r.zone)]
+	}
+	r.agree()
+	time.Sleep(5 * time.Millisecond)
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	if !r.conf.holdConfirmed(r.zone) {
+		t.Fatal("the hold is not confirmed by an inventory after the serial agreed on")
+	}
+	first := told()
+
+	// a refused 43: b's record removed while b has a role
+	time.Sleep(5 * time.Millisecond)
+	r.store.Note(r.zone, jAt(t, 43, `servers="a,b" nsmgmt="agent"`, freezeRecords[0], freezeRecords[2]), nil)
+	if st := r.store.Status(r.zone); st.Newest.Serial != 43 || st.Agreeing.Serial != 42 {
+		t.Fatalf("after the refused 43: newest %v, agreeing %v", st.Newest, st.Agreeing)
+	}
+	if !r.conf.holdConfirmed(r.zone) {
+		t.Error("a refused serial above the one agreed on made the confirmed hold stale")
+	}
+	if again := told(); !again.at.Equal(first.at) {
+		t.Error("a refused serial had the hold told again")
+	}
+
+	// an accepted 44 becomes the serial agreed on
+	time.Sleep(5 * time.Millisecond)
+	r.store.Note(r.zone, freezeAt(t, 44, "w", "a,b", ""), nil)
+	if st := r.store.Status(r.zone); st.Agreeing.Serial != 44 {
+		t.Fatalf("after the accepted 44: agreeing %v", st.Agreeing)
+	}
+	if r.conf.holdConfirmed(r.zone) {
+		t.Error("an inventory from before the new serial agreed on confirms the hold")
+	}
+	if again := told(); !again.on || !again.at.After(first.at) {
+		t.Error("the hold was not told again when the serial agreed on moved")
+	}
+	time.Sleep(5 * time.Millisecond)
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	if !r.conf.holdConfirmed(r.zone) {
+		t.Error("an inventory after the new serial agreed on does not confirm the hold")
+	}
+}

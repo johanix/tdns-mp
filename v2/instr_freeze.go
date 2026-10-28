@@ -67,15 +67,22 @@ func (s *InstructionStore) frozen(zone string) []string {
 	return nil
 }
 
-// newestSince is when this agent came to hold its newest serial of zone;
-// false when it holds none.
-func (s *InstructionStore) newestSince(zone string) (time.Time, bool) {
+// agreedSince is when this agent came to hold the serial it agrees on for
+// zone, or with none agreed on its newest; false when it holds none. A
+// refused serial above the one agreed on does not move it.
+func (s *InstructionStore) agreedSince(zone string) (time.Time, bool) {
 	if s == nil {
 		return time.Time{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, z := s.zoneLocked(zone); z != nil && z.highest() != nil {
+	_, z := s.zoneLocked(zone)
+	switch {
+	case z == nil:
+		return time.Time{}, false
+	case z.agreeing() != nil:
+		return z.agreeing().Since, true
+	case z.highest() != nil:
 		return z.highest().Since, true
 	}
 	return time.Time{}, false
@@ -153,9 +160,11 @@ type holdTold struct {
 	at time.Time
 }
 
-// onFreeze is the store's word that a zone is frozen, or no longer is: the
-// signer is told to hold its key machine, or to let it go, and at the end
-// of a freeze the data engine releases what the zone kept.
+// onFreeze is the store's word that a zone is frozen, or no longer is, or
+// that the serial it agrees on moved while it stays frozen: the signer is
+// told to hold its key machine, or to let it go, and confirms the hold
+// again for the serial agreed on now. At the end of a freeze the data
+// engine releases what the zone kept.
 func (conf *Config) onFreeze(zone string, frozen bool) {
 	conf.tellHold(zone, frozen, 0)
 	if !frozen {
@@ -199,11 +208,12 @@ func (conf *Config) reconcileHold(zone string, snap *KeyInventorySnapshot) {
 }
 
 // holdConfirmed: the signer's latest inventory of the zone carries the hold,
-// and arrived after this agent came to hold its newest serial (plan S6).
+// and arrived after this agent came to hold the serial it agrees on (plan
+// S6; with none agreed on, its newest).
 // The stamp tells it as Hold; S7 counts a telling only with it (design
 // 3.1, 3.7).
 func (conf *Config) holdConfirmed(zone string) bool {
-	since, ok := conf.InternalMp.Instructions.newestSince(zone)
+	since, ok := conf.InternalMp.Instructions.agreedSince(zone)
 	if !ok {
 		return false
 	}
