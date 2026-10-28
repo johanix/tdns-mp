@@ -365,6 +365,20 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		}
 	}
 
+	if len(s.InstructionMembers) > 0 {
+		// what each member tells, first hand (plan S5a); Hold comes with S6
+		fmt.Fprintln(w, "\nInstructions, per member:")
+		fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s\n", "Active", "Newest", "Rollover", "Hold", "Heard", "Identity")
+		for _, m := range s.InstructionMembers {
+			rollover := "no"
+			if m.Rollover {
+				rollover = "yes"
+			}
+			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, "-",
+				clockOrDash(m.Heard), termSafe(m.Identity), memberNotes(m))
+		}
+	}
+
 	if len(s.Peers) > 0 {
 		// Transport is the one that is live towards the peer, "-" for none.
 		fmt.Fprintln(w, "\nPeers:")
@@ -378,6 +392,46 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 				termSafe(p.State), termSafe(p.Transport), operational, termSafe(string(p.Identity)))
 		}
 	}
+}
+
+// serialOrDash is a serial told, "-" for none.
+func serialOrDash(sd *tdnsmp.SerialDigest) string {
+	if sd == nil {
+		return "-"
+	}
+	return fmt.Sprint(sd.Serial)
+}
+
+// memberNotes are a member's notes in the per-member table, each in its own
+// parentheses.
+func memberNotes(m tdnsmp.MemberInstructions) string {
+	var notes []string
+	if m.Self {
+		notes = append(notes, "this agent")
+	}
+	if m.Lags {
+		notes = append(notes, "lags")
+	}
+	if m.Alone {
+		notes = append(notes, fmt.Sprintf("tells %d, which no other member holds", m.Newest.Serial))
+	}
+	if m.OtherDigest != nil {
+		notes = append(notes, fmt.Sprintf("another digest at %d", *m.OtherDigest))
+	}
+	if m.Refused != "" && m.Newest != nil {
+		notes = append(notes, fmt.Sprintf("refuses %d: %s", m.Newest.Serial, termSafe(m.Refused)))
+	}
+	if m.Error != "" {
+		notes = append(notes, "owner error")
+	}
+	if !m.Crypto {
+		notes = append(notes, "payload encryption off")
+	}
+	var b strings.Builder
+	for _, n := range notes {
+		b.WriteString(" (" + n + ")")
+	}
+	return b.String()
 }
 
 // clockOrDash is the time of day the agent gave, "-" for none.

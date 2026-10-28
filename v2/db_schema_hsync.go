@@ -343,6 +343,13 @@ var HsyncTables = map[string]string{
 		since     TEXT DEFAULT '',
 		UNIQUE (zonename, label, identity)
 	)`,
+	// MPStampEpoch is the epoch of this agent's stamps (plan S5a), one row,
+	// raised at every start: its peers count its tellings only from its
+	// last start (design 3.4).
+	"MPStampEpoch": `CREATE TABLE IF NOT EXISTS 'MPStampEpoch' (
+		id     INTEGER PRIMARY KEY CHECK (id = 1),
+		epoch  INTEGER NOT NULL
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.
@@ -746,12 +753,13 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 }
 
 // InitInstructionTables creates only the tables of the zones' serials
-// (instructions_store.go). Called on the auditor's start, which keeps
-// serials as an agent does and creates none of the agent's other tables.
+// (instructions_store.go) and of the stamps' epoch (instr_stamp.go). Called
+// on the auditor's start, which keeps serials and tells stamps as an agent
+// does and creates none of the agent's other tables.
 func (hdb *HsyncDB) InitInstructionTables() error {
 	hdb.Lock()
 	defer hdb.Unlock()
-	for _, name := range []string{"MPZoneInstructions", "MPZoneRemovals"} {
+	for _, name := range []string{"MPZoneInstructions", "MPZoneRemovals", "MPStampEpoch"} {
 		if _, err := hdb.DB.Exec(HsyncTables[name]); err != nil {
 			return fmt.Errorf("failed to create table %s: %w", name, err)
 		}
