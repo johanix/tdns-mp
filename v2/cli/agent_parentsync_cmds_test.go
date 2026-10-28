@@ -604,3 +604,26 @@ func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
 		t.Errorf("forget with an owner error: %v, %q; want refused", err, out)
 	}
 }
+
+// The status prints what each member tells of the zone's instructions (plan
+// S5a), this agent first, with the notes the rigs read: (lags), and the
+// Hold column empty until S6.
+func TestThePerMemberInstructionsArePrinted(t *testing.T) {
+	heard := time.Date(2026, 10, 28, 15, 4, 2, 0, time.UTC)
+	sd := func(serial uint32) *tdnsmp.SerialDigest { return &tdnsmp.SerialDigest{Serial: serial, Digest: "d"} }
+	fortyTwo := uint32(42)
+	var b bytes.Buffer
+	printParentSyncStatus(&b, tdnsmp.ParentSyncStatus{Zone: "z.example.", InstructionMembers: []tdnsmp.MemberInstructions{
+		{Identity: "agent.alpha.example.", Self: true, Active: sd(41), Newest: sd(42), Crypto: true},
+		{Identity: "agent.bravo.example.", Active: sd(41), Newest: sd(41), Rollover: true, Lags: true, Crypto: true, Heard: heard},
+		{Identity: "agent.delta.example.", Newest: sd(43), Alone: true, OtherDigest: &fortyTwo, Heard: heard},
+	}})
+	out := b.String()
+	wantLines(t, "status", out,
+		"Instructions, per member:",
+		"  Active  Newest  Rollover  Hold  Heard     Identity",
+		"  41      42      no        -     -         agent.alpha.example. (this agent)",
+		"  41      41      yes       -     15:04:02  agent.bravo.example. (lags)",
+		"  -       43      no        -     15:04:02  agent.delta.example. (tells 43, which no other member holds) (another digest at 42) (payload encryption off)")
+	wantNoControls(t, "status", out)
+}

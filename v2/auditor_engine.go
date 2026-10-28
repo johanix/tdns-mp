@@ -346,9 +346,13 @@ func adaptBeatReports(ctx context.Context, in <-chan *AgentMsgReport,
 				}
 				var msg interface{}
 				if abp, ok := report.Msg.(*AgentBeatPost); ok {
-					gossip := make([]hsync.GossipMessage, len(abp.Gossip))
+					// the stamp entry is noted where the beat arrives
+					// (routeBeatMessage), never merged as a group
+					gossip := make([]hsync.GossipMessage, 0, len(abp.Gossip))
 					for i := range abp.Gossip {
-						gossip[i] = abp.Gossip[i]
+						if abp.Gossip[i].GroupHash != hsync.StampGroupHash {
+							gossip = append(gossip, abp.Gossip[i])
+						}
 					}
 					msg = &hsync.BeatPost{
 						MessageType: hsync.MsgBeat,

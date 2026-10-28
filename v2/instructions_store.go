@@ -23,25 +23,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-mp/v2/hsync"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
 // SerialDigest names a set of the owner's instructions: its serial, checked
-// by its digest (design rule 2).
-type SerialDigest struct {
-	Serial uint32 `json:"serial"`
-	Digest string `json:"digest"`
-}
-
-func (sd SerialDigest) String() string { return fmt.Sprintf("%d (%s)", sd.Serial, sd.Digest) }
+// by its digest (design rule 2). Defined in package hsync with the stamp
+// that carries it (plan S5a).
+type SerialDigest = hsync.SerialDigest
 
 // Thaw is a thaw's pair of serials, from N to V (design 3.2).
-type Thaw struct {
-	From SerialDigest `json:"from"`
-	To   SerialDigest `json:"to"`
-}
+type Thaw = hsync.Thaw
 
 // heldSerial is a serial the agent holds, with its instructions, and the
 // judge's refusal of it against the active serial (S4), if any; until S7,
