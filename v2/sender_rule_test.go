@@ -173,7 +173,7 @@ func TestARouteFunctionTakesTheCheckedSender(t *testing.T) {
 	relocate := `{"type":"relocate","MyIdentity":"` + alice + `","new_address":{"host":"192.0.2.7","port":5353,"transport":"udp"},"valid_until":` +
 		jsonInt(time.Now().Add(time.Hour).Unix()) + `}`
 	routeAs(t, env, alice, []byte(relocate))
-	if p, ok := env.Bob.Bridge.PeerRegistry.Get(alice); !ok || p.CurrentAddress() == nil || p.CurrentAddress().Host != "192.0.2.7" {
+	if p, ok := env.Bob.Bridge.PeerRegistry.Get(alice); !ok || p.DNSCarrierAddress() == nil || p.DNSCarrierAddress().Host != "192.0.2.7" {
 		t.Errorf("the relocate did not move the sender's address: %+v", p)
 	}
 	if _, ok := env.Bob.Bridge.PeerRegistry.Get(""); ok {

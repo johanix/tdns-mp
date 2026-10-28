@@ -42,8 +42,9 @@ func (b *mpHsyncBridge) DiscoverPeer(ctx context.Context, identity string) (*tra
 // published when it is first looked up, that made discovery wait for the
 // peer to call first.
 //
-// Only a peer that really is unresolved is re-armed: one with no address
-// and no mechanism past NEEDED. OnDiscoveryFailed writes ERROR again if the
+// Only a peer that really is unresolved is re-armed: one that is not
+// Addressable (no DNS carrier address, no usable API) and has no mechanism
+// past NEEDED. OnDiscoveryFailed writes ERROR again if the
 // retry fails too.
 //
 // A mechanism past NEEDED that has no address does not count: it is not
@@ -54,7 +55,7 @@ func rearmFailedDiscovery(reg *transport.PeerRegistry, identity string) {
 		return
 	}
 	p, ok := reg.Get(identity)
-	if !ok || p == nil || p.GetState() != transport.PeerStateError || p.CurrentAddress() != nil {
+	if !ok || p == nil || p.GetState() != transport.PeerStateError || p.Addressable() {
 		return
 	}
 	for _, mech := range []string{"API", "DNS"} {

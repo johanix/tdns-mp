@@ -54,7 +54,7 @@ func TestGetPeerAddress_IPv6(t *testing.T) {
 	env := newIntegEnv(t, nil)
 	const carol = "carol.agent.example."
 	p := transport.NewPeer(carol)
-	p.SetDiscoveryAddress(&transport.Address{Host: "2001:db8::53", Port: 8053, Transport: "udp"})
+	setDNSCarrier(t, p, &transport.Address{Host: "2001:db8::53", Port: 8053, Transport: "udp"})
 	if err := env.Bob.Bridge.PeerRegistry.Add(p); err != nil {
 		t.Fatal(err)
 	}
@@ -102,10 +102,9 @@ func TestPeerPing_IPv6StaticPeer(t *testing.T) {
 	}
 }
 
-// When DNS cannot deliver a ping and the peer has no API endpoint, the
-// error names both mechanisms. Before tdns-transport #20 it carried only
-// the API miss, which hid why DNS failed.
-func TestPeerPing_BothTransportsFailNamesBoth(t *testing.T) {
+// peer ping goes over DNS, and DNS only: when DNS cannot deliver, the
+// error is DNS's, and the API is not tried in its place.
+func TestPeerPing_DNSFailureIsNotRetriedOverAPI(t *testing.T) {
 	ln, err := net.Listen("tcp", "[::1]:0")
 	if err != nil {
 		t.Skipf("no IPv6 loopback: %v", err)
@@ -123,9 +122,12 @@ func TestPeerPing_BothTransportsFailNamesBoth(t *testing.T) {
 	if !resp.Error {
 		t.Fatalf("ping to %s with nothing listening succeeded: %s", address, resp.Msg)
 	}
-	for _, want := range []string{"all transports failed", "DNS", "API", "no API endpoint configured"} {
-		if !strings.Contains(resp.ErrorMsg, want) {
-			t.Errorf("error lacks %q: %s", want, resp.ErrorMsg)
+	if !strings.Contains(resp.ErrorMsg, "ping over dns failed") {
+		t.Errorf("error does not say the DNS ping failed: %s", resp.ErrorMsg)
+	}
+	for _, unwanted := range []string{"all transports failed", "API"} {
+		if strings.Contains(resp.ErrorMsg, unwanted) {
+			t.Errorf("error has %q, as if the API was tried: %s", unwanted, resp.ErrorMsg)
 		}
 	}
 }

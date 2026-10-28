@@ -173,7 +173,7 @@ func newMechanismEnv(t *testing.T, zone string, mode httpsMode) *mechanismEnv {
 	me.aliceAtBob.APIEndpoint = srv.URL + "/api/v1"
 	setTLSA(me.aliceAtBob, srv.Certificate())
 	addr := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
-	me.aliceAtBob.SetDiscoveryAddress(addr)
+	setDNSCarrier(t, me.aliceAtBob, addr)
 	me.aliceAtBob.SetMechanismAddress("DNS", addr)
 	if err := me.Bob.Bridge.PeerRegistry.Add(me.aliceAtBob); err != nil {
 		t.Fatalf("alice at bob: %v", err)
@@ -215,7 +215,7 @@ func TestConfirm_DNSSyncIsConfirmedByDNS(t *testing.T) {
 	serveDNS(t, me.ctx, ln, me.Bob)
 	bobAtAlice := transport.NewPeer(me.bob)
 	addr := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
-	bobAtAlice.SetDiscoveryAddress(addr)
+	setDNSCarrier(t, bobAtAlice, addr)
 	bobAtAlice.SetMechanismAddress("DNS", addr)
 
 	id := queueSync(t, me.integEnv, me.zone)
@@ -343,7 +343,7 @@ func TestConfirm_FailedDNSConfirmGoesOverHTTPS(t *testing.T) {
 	}
 	dead := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
 	ln.Close() // nothing listens there: every NOTIFY is refused
-	me.aliceAtBob.SetDiscoveryAddress(dead)
+	setDNSCarrier(t, me.aliceAtBob, dead)
 	me.aliceAtBob.SetMechanismAddress("DNS", dead)
 
 	id := queueSync(t, me.integEnv, me.zone)
@@ -378,7 +378,7 @@ func TestConfirm_NoHTTPSFallbackWithoutATLSA(t *testing.T) {
 	}
 	dead := &transport.Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
 	ln.Close() // nothing listens there: every NOTIFY is refused
-	me.aliceAtBob.SetDiscoveryAddress(dead)
+	setDNSCarrier(t, me.aliceAtBob, dead)
 	me.aliceAtBob.SetMechanismAddress("DNS", dead)
 	me.aliceAtBob.SetMechanismTLSA("API", transport.TLSASet{})
 
