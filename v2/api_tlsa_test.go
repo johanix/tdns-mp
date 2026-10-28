@@ -221,7 +221,7 @@ func TestTLSA_NoTLSANoDial(t *testing.T) {
 	te := newTLSAEnv(t, "tlsa-none.example.")
 	peer, _ := te.Alice.Bridge.PeerRegistry.Get(te.Bob.Identity)
 	peer.SetMechanismTLSA("API", transport.TLSASet{Owner: "_443._tcp.api." + peer.ID, Validated: true})
-	peer.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 53, Transport: "udp"})
+	setDNSCarrier(t, peer, &transport.Address{Host: "127.0.0.1", Port: 53, Transport: "udp"})
 	before := te.opened[te.Bob.Identity].Load()
 	if _, err := te.beat(t, te.Alice, te.Bob); !errors.Is(err, transport.ErrNoTLSA) {
 		t.Fatalf("a beat to a peer with no TLSA: %v, want ErrNoTLSA", err)
