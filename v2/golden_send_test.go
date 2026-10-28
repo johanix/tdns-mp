@@ -59,6 +59,9 @@ func goldenSendMessages(t *testing.T) []struct {
 		{"send-update", must(syncAppMessage(syncReq("update"), you))},
 		{"send-rfi", must(syncAppMessage(syncReq("rfi"), you))},
 		{"send-rfi-noid", must(syncAppMessage(func() *PeerSyncRequest { r := syncReq("rfi"); r.DistributionID = ""; return r }(), you))},
+		// a message with its sender's stamp (S5b); the others carry none
+		{"send-sync-instr", must(syncAppMessage(func() *PeerSyncRequest { r := syncReq("sync"); r.Instr = goldenMsgStamp(); return r }(), you))},
+		{"send-rfi-instr", must(syncAppMessage(func() *PeerSyncRequest { r := syncReq("rfi"); r.Instr = goldenMsgStamp(); return r }(), you))},
 		{"send-rfi-catchup", must(syncAppMessage(func() *PeerSyncRequest {
 			r := syncReq("rfi")
 			r.RfiType, r.RfiSubtype = "SYNC", ""
@@ -111,6 +114,8 @@ func TestGoldenWireSendPayloads(t *testing.T) {
 		"send-update":             {"update", "zone1.example.", "dist-001", false},
 		"send-rfi":                {"rfi", "zone1.example.", "dist-001", false},
 		"send-rfi-noid":           {"rfi", "zone1.example.", "", false},
+		"send-sync-instr":         {"sync", "zone1.example.", "dist-001", false},
+		"send-rfi-instr":          {"rfi", "zone1.example.", "dist-001", false},
 		"send-rfi-catchup":        {"rfi", "zone1.example.", "dist-001", false},
 		"send-sync-catchup":       {"sync", "zone1.example.", "dist-001", false},
 		"send-keystate-inventory": {"keystate", "zone1.example.", "", false},
@@ -153,4 +158,11 @@ func TestGoldenWireSendPayloads(t *testing.T) {
 			}
 		})
 	}
+}
+
+// goldenMsgStamp is the stamp of the goldens that carry one (S5b).
+func goldenMsgStamp() *MsgStamp {
+	return &MsgStamp{Epoch: 1767323045000, Seq: 42, InstrStamp: InstrStamp{
+		Active: 41, ActiveDigest: "5f3a19c2e07b4d11", Newest: 42, NewestDigest: "9c01aa47b2e3f650",
+		Agreeing: 42, AgreeingDigest: "9c01aa47b2e3f650", Known: true}}
 }

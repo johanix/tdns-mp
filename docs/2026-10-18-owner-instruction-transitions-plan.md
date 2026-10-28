@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: implementation plan
 
-**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 is merged (tdns-mp #280, main `3c9f6d7`, 2026-10-27); S2 is merged (tdns-mp #281, main `47dd883`, 2026-10-28); P3 is built (2026-10-28, tdns #959); P6 is built (2026-10-28, tdns #962, on the project owner's decisions 103 to 105); S3 is merged (tdns-mp #285, main `5e76ca0`, 2026-10-28); S4 is built (2026-10-28, tdns-mp #286, on main); S5a is built (2026-10-28, on its pull request); S6–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
+**Status:** PLAN, 2026-10-18, for revision 6 of the design (2026-10-26). Section 5 holds the status of each step (refreshed 2026-10-27, against tdns-mp main `d2cc1d8`): P1’s key and membership’s ground are done on main; S1 is merged (tdns-mp #280, main `3c9f6d7`, 2026-10-27); S2 is merged (tdns-mp #281, main `47dd883`, 2026-10-28); P3 is built (2026-10-28, tdns #959); P6 is built (2026-10-28, tdns #962, on the project owner's decisions 103 to 105); S3 is merged (tdns-mp #285, main `5e76ca0`, 2026-10-28); S4 is built (2026-10-28, tdns-mp #286, on main); S5a is merged (tdns-mp #293, main `2c54c78`, 2026-10-28); S5b is built (2026-10-28, on its pull request, with tdns-transport pinned at its main `cf466dc`, which has P2); S6–S22 and the remaining P steps are not started. Revised 2026-10-26 for revision 6: an external review of revision 5 (2026-10-24) and the project owner's answers to it (decisions 94 to 102). An external re-review of revision 6 (2026-10-27) found it ready to merge and S1 and S2 ready to build; its notes for them are in S1, S2, S3 and P2. From 2026-10-27, at the project owner's word, it says "serial" where it said "version", as the design does; proposed names follow (`MPActingSerial`, `CompareSerials`).
 
 This is the plan for the design in `2026-10-18-owner-instruction-transitions-design.md`, revision 6 ("the design" below; its sections are named "design N"). The design describes how a change of the zone owner's HSYNC3 or HSYNCPARAM records is numbered, agreed and carried out, as it is meant to stand. This document holds what is dated: what exists, what is wrong today, where each rule lands in the code, the steps, and the decisions the design rests on.
 
@@ -185,7 +185,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | Step | What | Needs first | Files | New | Changed | Status |
 |---|---|---|---|---|---|---|
 | P1 | tdns: the HSYNCPARAM `serial` key; the draft's number | The draft's number (key shipped as 8) | tdns: 1 | 60 | 10 | **Done in tdns** (#928, #929 in pin). Draft PR #3 still open. |
-| P2 | tdns-transport: an application field on confirmations | Nothing | tdns-transport: 5 | 45 | 25 | Not started. After tdns-transport #41 and #43, which change the queue and the confirmation path |
+| P2 | tdns-transport: an application field on confirmations | Nothing | tdns-transport: 5 | 45 | 25 | **Done** (tdns-transport #46, `a4427ea`); pinned in S5b at transport main `cf466dc` |
 | P3 | tdns: `parentsync` asked of the application; tdns #926 | Nothing (#926 done) | tdns: 2 | 20 | 10 | **#926 done.** The hook is tdns #959 (head `e025e8b5`, CodeRabbit clean); tdns-mp pins it and sets the hook in S3 |
 | P4 | The owner's tools raise the serial | P1 at the owner's primary (key available) | Outside the repositories | - | - | Not started |
 | P5 | tdns: keys published before a signer serves its signatures (#160); a policy bound when signing starts (#146) | Nothing | tdns: not established | - | - | Not started (#160, #146 open) |
@@ -194,8 +194,8 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S2 | Serials per zone on disk, shown | S1 (membership 1–8 done) | 16 | 365 | 85 | **Merged** (tdns-mp #281, main `47dd883`, 2026-10-28). Active follows the copy, "not enforced" |
 | S3 | One accessor; the hooks at activation and at a first load; the gate test; tdns/v2 re-pinned | S2; P3 (#185, #186, #208, #916/#933 done) | 30 | 345 | 450 | **Merged** (tdns-mp #285, main `5e76ca0`, 2026-10-28). Moves #275's signing-set reader; tdns/v2 pinned to P3's merge (`1217f95d`) |
 | S4 | Owner errors and refused transitions | S3 | 9 | 245 | 60 | **Built** (2026-10-28), tdns-mp #286, on main since #285 merged: its pull request carries this cell. 10 files; the judge 244 lines, its tests 442 |
-| S5a | Stamps in beats; each member's serial; the fetch; nothing taken from an answer | S2, S4 (membership step 6 done) | 15 | 530 | 140 | **Built** (2026-10-28), against main `11b8e1c`: its pull request carries this cell. 15 files, about 930 new and 20 changed lines; tests about 660 |
-| S5b | Stamps on messages and confirmations | S5a; P2 (membership step 3 done) | 8 | 190 | 85 | Not started |
+| S5a | Stamps in beats; each member's serial; the fetch; nothing taken from an answer | S2, S4 (membership step 6 done) | 15 | 530 | 140 | **Merged** (tdns-mp #293, main `2c54c78`, 2026-10-28). cubic's six findings on it and the auditor's name in the conflict warning are fixed in S5b's pull request |
+| S5b | Stamps on messages and confirmations | S5a; P2 (membership step 3 done) | 8 | 190 | 85 | **Built** (2026-10-28), against main `2c54c78`, transport pinned at `cf466dc`: its pull request carries this cell. 17 files, about 450 new and 40 changed lines; tests about 330 |
 | S6 | The freeze | S4, S5b (membership steps 3 and 5 done) | 17 | 605 | 140 | Not started |
 | S7 | The thaw | S6; S10 and S11 on the fleet first; P6 at the providers' nameservers; out with S8 and S9 | 19 | 815 | 145 | Not started |
 | S8 | Messages between serials | S7; PR #169's copy to the auditors (still draft) | 10 | 440 | 105 | Not started |
@@ -262,7 +262,7 @@ Then a new pseudo-version of the core module. tdns-mp re-pins only the core modu
 
 ### P2. tdns-transport: an application field on confirmations
 
-**Status (2026-10-24):** Not started.
+**Status (2026-10-28):** Done in tdns-transport (#46, `a4427ea`): `App` on `ConfirmRequest`, `DnsConfirmPayload` and `IncomingConfirmation`, and the application's callback takes the whole confirmation. tdns-mp pins it in S5b.
 
 **Before it:** nothing.
 
@@ -659,6 +659,15 @@ Log, info, logger `gossip`: "a member tells newer instructions, fetching the zon
 **Size.** 15 files, about 530 new and 140 changed lines.
 
 ### S5b. Stamps on messages and confirmations
+
+**Status (2026-10-28):** Built, against main `2c54c78`. Its first commit is S5a's fixes after #293's reviews (the six findings of the cubic reviewer, and the auditor no longer named among the voting members of a conflict; S5a's status note says what they changed). Where the text left a choice:
+
+- The stamp of a message is a `MsgStamp`: the stamp of S5a for the message's zone, with the sender's epoch and a sequence from the one counter its beats use, so that a receiver orders a message's telling of a zone with its beats'. A beat tells every zone the two share and a message one: a receiver keeps, per member, each zone's stamp with the sequence it was told at (`ZoneSeq`). A beat older than a message keeps the message's stamp of that zone; a newer beat that no longer tells a zone drops it.
+- Stamped at the send, centrally: `SendSyncWithFallback` for the sync family (sync, update, rfi; `deliverGenericMessage` calls it at every attempt, so a resend carries the stamp of the resend), and `sendEdits`, `sendConfig` and `sendAudit`. Every confirmation of the agent and the auditor goes through `confirmOn`, which sets P2's `App` to `{"instr": <the confirmer's stamp>}`. The combiner has none before S10; S10 moves its own stamp onto `App` (whichever of S5b and S10 merges second does that).
+- Noted first hand by a router middleware of the agent and the auditor, after `refuseNamedSender`, so the sender is the one the transport established; a confirmation's in `OnConfirmationReceived`, where its sender has passed the same middleware. The transport's inline acknowledgement carries no stamp.
+- The trackers: `ConfirmationDetail.Instr`, `PendingDnskeyPropagation.Stamps` (per expected agent), `SynchedDataUpdate.OriginatingInstr` (the originating agent's stamp of a remote update), and per distribution and recipient the stamp of the latest send and of the latest confirmation, with its status, at the bridge (2000 kept). The reliable queue's own entry is tdns-transport's and holds no stamp: its send function stamps every attempt.
+- `agent distrib stamps [--zone Z]` shows those rows, over both mechanisms: `agent distrib list` reads the DNS transport's cache, which never sees a send over HTTPS.
+- Tests as named below, but `TestAStampFromAMessageCountsAsFirstHand`, `TestTheInlineAcknowledgementIsNotATelling` and `TestAConfirmationStampReachesTheTrackers` are parts of the harness `TestTransportBoundary_ConfirmationCarriesTheReceiversStamp`, over DNS: bob notes alice's stamp from her SYNC; before alice listens, the inline acknowledgement tells her nothing of bob; then bob's PENDING carries his stamp to her confirmation detail, her distribution's row and her note of him. New: `TestAStampFromAMessageIsOrderedWithTheBeats`, `TestTheDistributionStampsArePrinted`.
 
 **Before it:** S5a. P2 and a new pin of tdns-transport. Membership step 3, for the sync wrapper, and the pull request of membership decision 41, without which no confirmation of a SYNC sent over HTTPS reaches its sender.
 
@@ -1400,7 +1409,7 @@ Refreshed 2026-10-27 against tdns-mp `main` @ `d2cc1d8` (pins every tdns module 
 | tdns #917, both sides | **Child done:** tdns #933 merged and in the pin. **Parent side still open:** issue #917, no PR. | Parent side for the recovery of a lost key (7.4) |
 | tdns: #160's mode and #146's policy binding (P5) | **Still not established.** tdns-mp issues #160 and #146 remain open; no implementing PR. | S18b |
 | tdns: the provider's nameservers stop reading `pubkey` and `pubcds` from their copy (P6) | **Built** (tdns #962, `2ad30457`), on decisions 103 to 105 (2026-10-28). | S7 (on the nameservers before it), S21 |
-| tdns-transport: an application field on confirmations, with the message (P2) | **Still missing.** No PR. `IncomingConfirmation` has no application stamp field. | S5b, S8 |
+| tdns-transport: an application field on confirmations, with the message (P2) | **Done** (tdns-transport #46, `a4427ea`), pinned in S5b (2026-10-28). | S5b, S8 |
 | The owner's tools (P4): the serial in every zone, raised at every edit | **Still missing** outside this repository. S1 writes `serial="1"` in the configure example zone and the policy matrix generator; raising it at every edit is the owner's. | Before S7 reaches a fleet |
 | tdns-mp #209 (#200 item 1) | **Done.** Merged 2026-10-19; `followParentSyncParam` on main. | S1, S3, S20 |
 | tdns-mp #167 (`contributionsLoaded`; the combiner's `lacksPubkeyConsent`) | **Done.** Merged 2026-10-19; both helpers on main (`combiner_chunk.go`). | S21 |

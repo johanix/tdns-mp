@@ -228,7 +228,7 @@ type AgentDistribPost struct {
 	To            string `json:"to,omitempty"`             // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
 	PingTransport string `json:"ping_transport,omitempty"` // for op ping: "dns" (default) or "api"
 	AgentId       string `json:"agent_id,omitempty"`       // for discover: agent identity to discover
-	Zone          string `json:"zone,omitempty"`           // for zone-agents: zone name to list agents for
+	Zone          string `json:"zone,omitempty"`           // for zone-agents: zone name to list agents for; for stamps: the zone shown
 }
 
 // AgentDistribResponse represents a response from the agent distrib API

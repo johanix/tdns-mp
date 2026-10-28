@@ -65,19 +65,23 @@ type stampTable struct {
 	kept    map[string]*memberStamp // by identity, folded (canonicalName)
 	fetched map[string]fetchMark    // by zone, folded
 	said    map[string]bool         // the lines logged once
+	dists   map[string]*distStamp   // by distribution and recipient (msg_stamp.go)
 }
 
 // memberStamp is a member's latest stamp, as it was heard. Instr is keyed
-// by the zone's name, folded.
+// by the zone's name, folded, and ZoneSeq is the sequence each zone's stamp
+// was told at: a message tells one zone, a beat every zone the two share.
+// Seq is the latest beat's.
 type memberStamp struct {
 	Identity    string
 	Epoch, Seq  uint64
-	Heard       time.Time
-	Mechanism   string // the beat's
-	Enveloped   bool   // the beat came in the payload envelope
-	Crypto      bool   // the member tells payload encryption on
+	Heard       time.Time // the latest telling, a beat's or a message's
+	Mechanism   string    // the latest beat's
+	Enveloped   bool      // the latest beat came in the payload envelope
+	Crypto      bool      // the member tells payload encryption on
 	Nameservers []string
 	Instr       map[string]InstrStamp
+	ZoneSeq     map[string]uint64
 }
 
 type fetchMark struct {
@@ -178,17 +182,35 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 	}
 }
 
-// keep keeps m as its member's latest stamp, unless the one kept is newer.
-// Epochs and sequences are compared only within one member's own: a higher
-// epoch is a later start of the member, whose stamp replaces all that was
-// kept of it (design 3.4); a lower one is from before that start; within
-// one epoch a higher sequence is newer.
+// keep keeps m, a beat's stamp, as its member's latest, unless the one kept
+// is newer. Epochs and sequences are compared only within one member's own:
+// a higher epoch is a later start of the member, whose stamp replaces all
+// that was kept of it (design 3.4); a lower one is from before that start;
+// within one epoch a higher sequence is newer. A beat tells every zone the
+// two share: of a newer one each zone is taken unless a message told it
+// later (noteMessage), and a zone it no longer tells goes.
 func (t *stampTable) keep(m *memberStamp) bool {
 	key := canonicalName(m.Identity)
+	m.ZoneSeq = make(map[string]uint64, len(m.Instr))
+	for zone := range m.Instr {
+		m.ZoneSeq[zone] = m.Seq
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if old := t.kept[key]; old != nil && (m.Epoch < old.Epoch || m.Epoch == old.Epoch && m.Seq <= old.Seq) {
+	old := t.kept[key]
+	switch {
+	case old == nil || m.Epoch > old.Epoch:
+		t.kept[key] = m
+		return true
+	case m.Epoch < old.Epoch || m.Seq <= old.Seq:
 		return false
+	}
+	for zone, seq := range old.ZoneSeq {
+		if _, told := m.Instr[zone]; seq > m.Seq {
+			m.Instr[zone], m.ZoneSeq[zone] = old.Instr[zone], seq
+		} else if !told {
+			delete(m.Instr, zone)
+		}
 	}
 	t.kept[key] = m
 	return true
@@ -206,7 +228,7 @@ func (t *stampTable) heard(identity string) *memberStamp {
 		return nil
 	}
 	c := *m
-	c.Instr = maps.Clone(m.Instr)
+	c.Instr, c.ZoneSeq = maps.Clone(m.Instr), maps.Clone(m.ZoneSeq)
 	return &c
 }
 
