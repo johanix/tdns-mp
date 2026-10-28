@@ -93,18 +93,50 @@ func (zdr *ZoneDataRepo) noteCombinerConfirmed(zone ZoneName, distID string, at 
 
 // noteCombinerFailed notes that the combiner's word on distID was not a
 // success: the sets it carried are not held by the combiner, as after a
-// failed hand-over (setsNotHandedOver). With ignored, the word was IGNORED.
-func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string, ignored bool) {
+// failed hand-over (setsNotHandedOver). The combiner ignored every set it
+// carried (all), or those of the types in ignored (combinerIgnoredTypes).
+func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string, all bool, ignored map[uint16]bool) {
 	if distID == "" {
 		return
 	}
 	for _, byType := range zdr.notes[zone] {
-		for _, n := range byType {
+		for t, n := range byType {
 			if n.distID == distID {
-				n.distID, n.confirmed, n.ignored = "", time.Time{}, ignored
+				n.distID, n.confirmed, n.ignored = "", time.Time{}, all || ignored[t]
 			}
 		}
 	}
+}
+
+// combinerIgnoredTypes are the sets the combiner's word on a distribution
+// says it ignored: every set, for an IGNORED that names no record (all);
+// else those whose records it names as ignored and none as applied or
+// removed. A word that applies part of a set and ignores the rest leaves
+// the set failed.
+func combinerIgnoredTypes(detail *ConfirmationDetail) (all bool, ignored map[uint16]bool) {
+	if (detail.Status == "IGNORED" || detail.Status == "ignored") && len(detail.IgnoredRecords) == 0 {
+		return true, nil
+	}
+	typeOf := func(records []string) map[uint16]bool {
+		out := map[uint16]bool{}
+		for _, s := range records {
+			if rr, err := dns.NewRR(s); err == nil {
+				out[rr.Header().Rrtype] = true
+			}
+		}
+		return out
+	}
+	done := typeOf(append(slices.Clone(detail.AppliedRecords), detail.RemovedRecords...))
+	for t := range typeOf(detail.IgnoredRecords) {
+		if done[t] {
+			continue
+		}
+		if ignored == nil {
+			ignored = map[uint16]bool{}
+		}
+		ignored[t] = true
+	}
+	return false, ignored
 }
 
 // setsIgnoredByCombiner are those of types whose last change here, of

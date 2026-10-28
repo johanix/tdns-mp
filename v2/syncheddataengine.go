@@ -1172,12 +1172,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// again when they come again, and a stale replace of one
 				// names none of it: a later delivery of the same set, matching
 				// the repo, would otherwise be confirmed "ok", which covers
-				// every key. An IGNORED is noted as such: a stale replace of
-				// the set names its records as ignored (#288).
+				// every key. A set the combiner ignored is noted as such, from
+				// the records it names as ignored: a stale replace of the set
+				// names its records as ignored (#288).
 				if detail.Status == "SUCCESS" || detail.Status == "ok" {
 					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
 				} else {
-					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID, detail.Status == "IGNORED" || detail.Status == "ignored")
+					all, ignored := combinerIgnoredTypes(detail)
+					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID, all, ignored)
 				}
 			}
 			zdr.ProcessConfirmation(detail, msgQs)

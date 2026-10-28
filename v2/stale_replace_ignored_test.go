@@ -138,6 +138,42 @@ func TestAStaleSetTheCombinerIgnoresIsNamedBesideAFreshOne(t *testing.T) {
 	r.settledAt(t, snd, dns.TypeNS, ns, "ignored")
 }
 
+// A combiner that applies one set of a distribution and ignores another
+// answers PARTIAL. The set it ignored is noted as ignored all the same, from
+// the records it names as ignored: a stale replace of that set alone is
+// IGNORED, naming them, and the sender's add settles.
+func TestASetIgnoredBesideOneAppliedIsNotedAsIgnored(t *testing.T) {
+	r := receivingRig(t, "partly.ignored.overtaken.example.")
+	leader := AgentId(r.peer.Identity)
+	r.leader(leader)
+	csync, rec := csyncOp(r.mpzd.ZoneName, 1000)
+	ns := fmt.Sprintf("%s\t3600\tIN\tNS\tns9.provider.example.", r.mpzd.ZoneName)
+	nsOp := core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{ns}}
+
+	d := nextDistributionID()
+	snd := r.sendersTracking(t, d, nsOp)
+
+	sent := time.Now().Add(-time.Minute)
+	before := r.combinerDists()
+	newer := nextDistributionID()
+	r.receivesAt(t, string(leader), newer, sent.Add(30*time.Second), nil, csync, nsOp)
+	fwd := r.newCombinerDist(before, 10*time.Second)
+	if fwd == "" {
+		t.Fatalf("the newer sets did not go to the combiner\n%s", r.log)
+	}
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(fwd, rigCombiner, transport.ConfirmPartial, r.mpzd.ZoneName,
+		[]string{rec}, nil, nil, []string{ns}, false, "")
+	r.answered(t, newer)
+
+	r.receivesAt(t, string(leader), d, sent, nil, nsOp)
+	c := r.answered(t, d)
+	if c.Status != "IGNORED" || !slices.Equal(c.IgnoredRecords, []string{ns}) || len(c.AppliedRecords) > 0 {
+		t.Fatalf("the sender got the final confirmation %+v of its add, want IGNORED naming the NS as ignored", *c)
+	}
+	snd.ProcessConfirmation(c, nil)
+	r.settledAt(t, snd, dns.TypeNS, ns, "ignored")
+}
+
 // A combiner that fails the newer set is not one that ignores it: the stale
 // replace still names none of the set and is PARTIAL.
 func TestAStaleSetTheCombinerFailedIsStillNotNamed(t *testing.T) {
