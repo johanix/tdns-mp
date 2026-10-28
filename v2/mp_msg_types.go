@@ -26,10 +26,17 @@ type MsgQs struct {
 	Confirmation      chan *ConfirmationDetail
 	KeystateInventory chan *KeystateInventoryMsg
 	KeystateSignal    chan *KeystateSignalMsg
-	EditsResponse     chan *EditsResponseMsg
-	ConfigResponse    chan *ConfigResponseMsg
-	AuditResponse     chan *AuditResponseMsg
 	StatusUpdate      chan *StatusUpdateMsg
+
+	// Answers to RFI EDITS, CONFIG and AUDIT, each handed to the request
+	// that asked for it (see rfiWaiters).
+	editsWaiters  rfiWaiters[*EditsResponseMsg]
+	configWaiters rfiWaiters[*ConfigResponseMsg]
+	auditWaiters  rfiWaiters[*AuditResponseMsg]
+
+	// The KEYSTATE inventories that found KeystateInventory full, the
+	// newest of each zone (#210).
+	keystateOverflow inventoryOverflow
 
 	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
 }
@@ -38,7 +45,13 @@ type KeystateInventoryMsg struct {
 	SenderID  string
 	Zone      string
 	Inventory []KeyInventoryItem
-	Owned     bool // the signer's own state machine runs the zone's keys (S3)
+	Owned     bool     // the signer's own state machine runs the zone's keys (S3)
+	Resend    []uint16 // keys the signer sends again: distributed even unchanged (#256)
+	// seq: the order the agent's transport received it in; 0 for one that
+	// was not counted. An inventory older than the zone's recorded one is
+	// not recorded (noteKeyInventory): an RFI's answer can reach the engine
+	// after a newer push that found the requester answered.
+	seq uint64
 }
 
 type KeystateSignalMsg struct {
@@ -51,19 +64,53 @@ type KeystateSignalMsg struct {
 	// ForeignKeys: Signal "foreign", what the other providers said about
 	// their keys in the zone (the complete latest set)
 	ForeignKeys []core.ForeignKeyState
+	// ForeignSpoken: Signal "foreign", the providers whose word the agent
+	// holds, one that listed no keys included; nil from an older agent
+	ForeignSpoken []string
 }
 
 type EditsResponseMsg struct {
 	SenderID     string
 	Zone         string
 	AgentRecords map[string]map[string][]string
+	// Message is the combiner's word on its answer: editsLoaded or
+	// editsNotLoaded, or anything else from a combiner that has neither.
+	Message string
+	// Acting is the hand-over the combiner holds for the zone, nil for
+	// none (S10).
+	Acting *ActingHandover
 }
+
+// The combiner's word on its answer to RFI EDITS. An agent takes the answer
+// as its own state only on editsLoaded. editsNotLoaded is applied to
+// nothing. Any other word, from a combiner older than its agent, is applied
+// as it always was, and does not count as the agent's own read: an agent
+// whose combiner has failed to read its store would otherwise answer a
+// request for the zone's state with empty sets, and remove its records at
+// every peer.
+const (
+	editsLoaded    = "contributions-loaded"
+	editsNotLoaded = "contributions-not-loaded"
+)
 
 type ConfigResponseMsg struct {
 	SenderID   string
 	Zone       string
 	Subtype    string
 	ConfigData map[string]string
+}
+
+// configRefusedKey is the ConfigData key of the answer to a CONFIG request
+// the peer refused: its value is the peer's reason.
+const configRefusedKey = "refused"
+
+// Refused is the peer's reason for refusing the CONFIG request, or "" when
+// it answered it.
+func (m *ConfigResponseMsg) Refused() string {
+	if m == nil {
+		return ""
+	}
+	return m.ConfigData[configRefusedKey]
 }
 
 type AuditResponseMsg struct {

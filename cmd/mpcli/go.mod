@@ -6,9 +6,9 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20261012094729-81ce1fda1a18
-	github.com/johanix/tdns/v2/cli v0.0.0-20261012094729-81ce1fda1a18
-	github.com/johanix/tdns/v2/core v0.0.0-20261012094729-81ce1fda1a18
+	github.com/johanix/tdns/v2 v2.0.0-20261028082711-1217f95d13ba
+	github.com/johanix/tdns/v2/cli v0.0.0-20261028082711-1217f95d13ba
+	github.com/johanix/tdns/v2/core v0.0.0-20261028082711-1217f95d13ba
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.16.0
 )
@@ -29,15 +29,15 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261001045532-b15bedb76c2e // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20261012094729-81ce1fda1a18 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261012094729-81ce1fda1a18 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261028125605-cf466dc82168 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20261028082711-1217f95d13ba // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261028082711-1217f95d13ba // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -68,5 +68,5 @@ require (
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-// Pinned at johanix/dns:algorithm-registry tip — required by tdns/v2.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+// Pinned at johanix/dns v1.1.72-johanix.4, the fork version tdns/v2 uses.
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4

@@ -19,7 +19,9 @@ package tdnsmp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -239,6 +241,7 @@ func TestTransportBoundary_SyncFallback(t *testing.T) {
 	// transport reports as non-retryable but still propagates).
 	bob := env.Alice.Bridge.PeerRegistry.GetOrCreate(env.Bob.Identity)
 	bob.APIEndpoint = srv.URL
+	setTLSA(bob, srv.Certificate())
 	bob.PreferredTransport = "API"
 
 	req := &PeerSyncRequest{
@@ -425,6 +428,29 @@ func TestTransportBoundary_LegacySyncRejection(t *testing.T) {
 	if _, leaked := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); leaked {
 		t.Errorf("rejected sync should not reach MsgQs.Msg, but it did")
 	}
+
+	// The RFI verbs: the environment authorizes every peer, and no such
+	// peer is exempt from the RFI rules (step 6), so a LEGACY peer's
+	// request for a zone's state, its audit and its config are refused
+	// too, each with its reason, and reach nothing.
+	for _, rfi := range [][2]string{{"SYNC", ""}, {"AUDIT", ""}, {"CONFIG", "upstream"}} {
+		body, err := json.Marshal(&DnsSyncPayload{MessageType: "rfi", OriginatorID: env.Alice.Identity, YourIdentity: env.Bob.Identity,
+			Zone: zone, RfiType: rfi[0], RfiSubtype: rfi[1], Timestamp: time.Now().Unix(), DistributionID: nextDistributionID()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rctx, msgType := buildDispatchContext(t, env.Bob.Bridge, env.Alice.Identity, nextDistributionID(), body)
+		rctx.Peer = alicePeer
+		if err := env.Bob.Bridge.Router.Route(rctx, msgType); err == nil {
+			t.Errorf("RFI %s %s from a LEGACY peer was not refused", rfi[0], rfi[1])
+		}
+		if r, _ := rctx.Data["response"].([]byte); !strings.Contains(string(r), "refused") {
+			t.Errorf("RFI %s %s: the refusal says %q", rfi[0], rfi[1], r)
+		}
+		if _, leaked := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); leaked {
+			t.Errorf("a refused RFI %s from a LEGACY peer reached MsgQs.Msg", rfi[0])
+		}
+	}
 }
 
 // TestTransportBoundary_DiscoveryComplete asserts that the
@@ -473,7 +499,7 @@ func TestTransportBoundary_DiscoveryComplete(t *testing.T) {
 				peerArg.SetMechanismContactInfo("API", "complete")
 			}
 			if tc.dns {
-				peerArg.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+				setDNSCarrier(t, peerArg, &transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
 				peerArg.SetMechanismContactInfo("DNS", "complete")
 			}
 			env.Alice.Bridge.TransportManager.OnPeerDiscovered(peerArg)
@@ -552,7 +578,7 @@ func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *test
 	// A peer that a concurrent discovery already established: it has a
 	// resolved address and is KNOWN.
 	peer := env.Alice.Bridge.TransportManager.PeerRegistry.GetOrCreate(env.Bob.Identity)
-	peer.SetDiscoveryAddress(&transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
+	setDNSCarrier(t, peer, &transport.Address{Host: "127.0.0.1", Port: 5300, Transport: "udp"})
 	peer.SetMechanismContactInfo("DNS", "complete")
 	peer.SetState(transport.PeerStateKnown, "discovered")
 
@@ -562,7 +588,7 @@ func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *test
 	if got := peer.GetState(); got == transport.PeerStateError {
 		t.Errorf("established peer regressed to ERROR by a stale discovery failure (got %v); the racing-discovery clobber is back", got)
 	}
-	if peer.CurrentAddress() == nil {
+	if peer.DNSCarrierAddress() == nil {
 		t.Errorf("established peer lost its address on discovery failure")
 	}
 
@@ -571,6 +597,16 @@ func TestTransportBoundary_DiscoveryFailureDoesNotRegressEstablishedPeer(t *test
 	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(fresh, errors.New("no contact endpoints found"))
 	if got := fresh.GetState(); got != transport.PeerStateError {
 		t.Errorf("unestablished peer: got %v, want ERROR (a genuine first-time discovery failure must still register)", got)
+	}
+
+	// A refusal for want of DNSSEC validation leaves it NEEDED, ERROR from
+	// before included (#260: the matrix reads NEEDED(-), as peer list does).
+	refused := fmt.Errorf("discover peer: %w", &transport.DiscoveryError{Identity: "never-seen.example.",
+		Lookup: transport.DiscoveryLookup{Type: "URI", Owner: "_https._tcp.never-seen.example.", Failure: transport.FailureNotValidated,
+			Detail: "answer insecure, DNSSEC validation required"}})
+	env.Alice.Bridge.TransportManager.OnDiscoveryFailed(fresh, refused)
+	if got := fresh.GetState(); got != transport.PeerStateNeeded {
+		t.Errorf("refused for want of validation: got %v, want NEEDED", got)
 	}
 }
 

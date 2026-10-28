@@ -202,6 +202,15 @@ func gossipMatrixRow(reporter string, ms *MemberState) map[string]interface{} {
 	if ms.BeatInterval > 0 {
 		row["beat_interval"] = ms.BeatInterval
 	}
+	if ms.PropagationDelay > 0 {
+		row["propagation_delay"] = ms.PropagationDelay
+	}
+	if ms.DnssecValidationNotEnforced {
+		row["dnssec_validation_not_enforced"] = true
+	}
+	if len(ms.PeerChains) > 0 {
+		row["peer_chains"] = ms.PeerChains
+	}
 	return row
 }
 

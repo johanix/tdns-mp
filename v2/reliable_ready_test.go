@@ -79,9 +79,14 @@ func TestRecipientTransportReady(t *testing.T) {
 		}
 	})
 
+	// API counts with an endpoint and a TLSA to check the peer against
+	// (TestTLSA_RecipientReadyOverAPINeedsATLSA has the case without).
 	t.Run("API-only mechanism ready via the OR", func(t *testing.T) {
 		peers := transport.NewPeerRegistry()
-		peers.GetOrCreate(readyTestID).SetMechanismState("API", transport.PeerStateOperational, "test")
+		peer := peers.GetOrCreate(readyTestID)
+		peer.SetMechanismState("API", transport.PeerStateOperational, "test")
+		peer.SetAPIEndpoint("https://api.example:8443/api/v1")
+		setTLSA(peer, leaf(t, otherAgentCert(t)))
 		if !recipientTransportReady(newReadyTestRegistry(), peers, readyTestID) {
 			t.Fatal("API-operational recipient must be ready")
 		}

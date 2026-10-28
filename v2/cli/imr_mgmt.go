@@ -12,7 +12,7 @@ import (
 )
 
 // SendImrMgmtCmd POSTs an AgentMgmtPost to the /imr endpoint of the
-// instance cmd's tree targets. Presently only tdns-mpagent hosts an IMR.
+// instance cmd's tree targets: a tdns-mpagent or a tdns-mpauditor.
 func SendImrMgmtCmd(cmd *cobra.Command, req *AgentMgmtPost) (*AgentMgmtResponse, error) {
 	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {

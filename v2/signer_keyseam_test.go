@@ -130,7 +130,9 @@ func rrsigTagsOf(t *testing.T, zd *tdns.ZoneData, owner string, rrtype uint16) [
 
 // Mode 4. The other signers' DNSKEYs arrive in the incoming zone; they are
 // kept as foreign rows, served in the DNSKEY RRset, never signing; a key
-// that leaves the incoming zone leaves the store; mode 2 keeps none.
+// that leaves the incoming zone stays in the store until the key states
+// relayed for its provider, or the zone owner, let it go (#207); mode 2
+// keeps none.
 func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	if err := NewHsyncDB(kdb).InitHsyncTables(); err != nil {
@@ -163,8 +165,9 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 		incoming.Data.Set(mpzd.ZoneName, apex)
 	}
 	setIncomingDnskeys(foreign[0], foreign[1])
+	others := []string{"alpha"}
 
-	changed, err := mpzd.syncForeignDNSKEYs(incoming, true)
+	changed, err := mpzd.syncForeignDNSKEYs(incoming, true, others)
 	if err != nil || !changed {
 		t.Fatalf("syncForeignDNSKEYs: changed=%v err=%v", changed, err)
 	}
@@ -176,7 +179,7 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 	if len(mpzd.GetRemoteDNSKEYs()) != 2 {
 		t.Fatalf("RemoteDNSKEYs = %d, want 2", len(mpzd.GetRemoteDNSKEYs()))
 	}
-	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true); err != nil || changed {
+	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true, others); err != nil || changed {
 		t.Fatalf("a second sync of the same set: changed=%v err=%v", changed, err)
 	}
 
@@ -200,16 +203,17 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 		}
 	}
 
-	// One foreign key gone from the incoming zone: its row goes.
+	// One foreign key gone from the incoming zone, and no relayed key states
+	// for its provider: its row stays.
 	setIncomingDnskeys(foreign[0])
-	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true); err != nil || !changed {
-		t.Fatalf("sync after a foreign key left: changed=%v err=%v", changed, err)
+	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true, others); err != nil || changed {
+		t.Fatalf("sync after a foreign key left the incoming zone: changed=%v err=%v", changed, err)
 	}
-	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "foreign"); n != 1 {
-		t.Fatalf("%d foreign rows after one key left, want 1", n)
+	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "foreign"); n != 2 {
+		t.Fatalf("%d foreign rows after one key left the incoming zone, want both kept", n)
 	}
 	// Mode 2: none.
-	if changed, err := mpzd.syncForeignDNSKEYs(incoming, false); err != nil || !changed {
+	if changed, err := mpzd.syncForeignDNSKEYs(incoming, false, nil); err != nil || !changed {
 		t.Fatalf("sync in single-signer mode: changed=%v err=%v", changed, err)
 	}
 	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "foreign"); n != 0 {

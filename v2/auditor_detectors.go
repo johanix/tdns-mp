@@ -20,13 +20,9 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
-	"strings"
+	"slices"
 	"sync"
 	"time"
-
-	"github.com/miekg/dns"
-
-	core "github.com/johanix/tdns/v2/core"
 )
 
 // detectorRunState remembers which (zone, provider) pairs are
@@ -62,15 +58,16 @@ func StartAuditDetectors(ctx context.Context, sm *AuditStateManager,
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runDetectorsOnce(sm, state, silenceThreshold)
+				runDetectorsOnce(sm, state, time.Now(), silenceThreshold)
 			}
 		}
 	}()
 }
 
+// runDetectorsOnce is one detector round over every tracked zone, judged
+// at now.
 func runDetectorsOnce(sm *AuditStateManager, state *detectorRunState,
-	silenceThreshold time.Duration) {
-	now := time.Now()
+	now time.Time, silenceThreshold time.Duration) {
 	zones := sm.SnapshotAllZones()
 	for _, zsum := range zones {
 		zs := sm.GetZone(zsum.Zone)
@@ -133,9 +130,11 @@ func detectMissingProviders(zs *AuditZoneState, state *detectorRunState) {
 		return
 	}
 	zs.mu.RLock()
+	// The identities seen in traffic, folded as DNS names: the expected ones
+	// come from the reading, folded too.
 	seen := make(map[string]bool, len(zs.Providers))
 	for id := range zs.Providers {
-		seen[id] = true
+		seen[canonicalName(id)] = true
 	}
 	zs.mu.RUnlock()
 
@@ -143,7 +142,7 @@ func detectMissingProviders(zs *AuditZoneState, state *detectorRunState) {
 		key := zs.Zone + "|" + identity
 		state.mu.Lock()
 		wasMissing := state.missing[key]
-		if !seen[identity] {
+		if !seen[canonicalName(identity)] {
 			if !wasMissing {
 				state.missing[key] = true
 				state.mu.Unlock()
@@ -167,42 +166,25 @@ func detectMissingProviders(zs *AuditZoneState, state *detectorRunState) {
 	}
 }
 
-// expectedHSYNC3Identities returns the set of FQDN identities listed
-// in the apex HSYNC3 RRset for zone, excluding any auditor entries
-// (the auditor doesn't audit itself or other auditors).
+// expectedHSYNC3Identities returns the identities of the ON HSYNC3 records
+// of the zone's active instructions, excluding any auditor entries (the
+// auditor doesn't audit itself or other auditors). An OFF record is no
+// member, and is not expected.
 func expectedHSYNC3Identities(zone string) []string {
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil {
 		return nil
 	}
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil || apex == nil {
+	in := mpzd.instructions()
+	if in == nil {
 		return nil
-	}
-	rrset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !exists {
-		return nil
-	}
-	auditorLabels := mpzd.GetAuditors()
-	auditorSet := make(map[string]bool, len(auditorLabels))
-	for _, lbl := range auditorLabels {
-		auditorSet[strings.ToLower(normalizeHSYNC3Label(lbl))] = true
 	}
 	var out []string
-	for _, rr := range rrset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
+	for _, r := range in.Records {
+		if slices.Contains(in.Auditors, r.Label) {
 			continue
 		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok {
-			continue
-		}
-		if auditorSet[strings.ToLower(normalizeHSYNC3Label(h3.Label))] {
-			continue
-		}
-		identity := dns.Fqdn(h3.Identity)
-		out = append(out, identity)
+		out = append(out, r.Identity)
 	}
 	return out
 }

@@ -70,8 +70,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// OPERATIONAL means). State is set on the outbound beat path.
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
-				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+				peer.SetMechanismLastBeatRecv("DNS", time.Now())
 			}
 
 		case report := <-msgQs.Hello:
@@ -85,7 +84,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// OPERATIONAL (that requires an outbound beat round-trip).
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
+				peer.SetLastBeatReceived(time.Now())
 			}
 
 		case report := <-msgQs.Ping:
@@ -121,16 +120,34 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
 				switch msg.RfiType {
 				case "EDITS":
-					go sendEditsToAgent(ctx, conf, tm, senderID, zone)
+					go sendEditsToAgent(ctx, conf, tm, senderID, zone, msg.Nonce)
 				default:
 					lgCombiner.Warn("unknown RFI type, ignoring", "type", msg.RfiType, "sender", senderID)
 				}
 				continue
 			}
 
+			// A hand-over (plan S10) is taken at once, from this combiner's
+			// own agent only: never kept for manual approval or as a pending
+			// edit, and judged by no origin's vote.
+			if msg.Acting != nil {
+				combinerSendConfirmation(tm, deliveredBy, conf.combinerTakeHandover(msg, localAgents))
+				continue
+			}
+
 			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
 			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
+
+			// An origin that does not vote in the zone is refused at once,
+			// before its edit is kept: also on a zone whose edits wait for
+			// manual approval, where it would otherwise wait to be refused
+			// only when approved.
+			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil {
+				refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
+				combinerSendConfirmation(tm, deliveredBy, refusal)
+				continue
+			}
 
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
@@ -285,7 +302,9 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 }
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
-// Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
+// It goes over DNS, not on the mechanism its SYNC came on as an agent's confirmations do
+// (confirmOn): an agent knows no TLSA for its combiner, so it would refuse a
+// confirmation the combiner sent over HTTPS.
 func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
@@ -358,21 +377,79 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 }
 
 // sendEditsToAgent looks up the agent's current contributions for the zone and sends
-// them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
-// when an RFI EDITS is received.
-func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
+// them back via DNSTransport.Edits(), with the RFI's nonce. Called asynchronously
+// from CombinerMsgHandler when an RFI EDITS is received.
+func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string, nonce string) {
 	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
 		return
 	}
+	readContributionsAgain(conf, zd, zone)
+	req := editsAnswerFor(zd, conf.MpConfig().Identity, zone, nonce)
+	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(req.AgentRecords))
+	if req.Message == editsNotLoaded {
+		lgCombiner.Info("RFI EDITS: the zone's stored contributions are not read; answering that they are not loaded", "zone", zone, "agent", agentID)
+	}
 
-	// Copy AgentContributions under lock, then convert outside the lock
+	if tm == nil || tm.DNSTransport == nil {
+		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(agentID)
+	if !peerExists || peer == nil {
+		lgCombiner.Warn("RFI EDITS: agent not in PeerRegistry", "agent", agentID)
+		return
+	}
+
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.sendEdits(sendCtx, peer, req)
+	if err != nil {
+		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
+		return
+	}
+
+	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "agents", len(req.AgentRecords), "word", req.Message, "accepted", resp.Accepted)
+}
+
+// editsAnswerFor is the combiner's answer to an RFI EDITS for the zone:
+// every agent's contributions, and its word that they are loaded, with the
+// request's nonce. Until the zone's stored contributions are read
+// (ContributionsRead) the answer says that they are not loaded, and
+// carries none: an empty map would read as the agent's own state.
+// readContributionsAgain reads the zone's stored contributions again, as the
+// operator's reapply does (CombinerReapplyContributions), when the read at
+// the zone's start failed: nothing else reads them again, and until they
+// are read every agent's own read of the zone stays not done. Only once the
+// zone has loaded: before, the read at its first load is still to come. A
+// read that fails again is tried at the next request.
+func readContributionsAgain(conf *Config, zd *MPZoneData, zone string) {
+	hdb := conf.InternalMp.HsyncDB
+	if hdb == nil || !zd.Ready {
+		return
+	}
 	zd.Lock()
+	read := zd.MP != nil && zd.MP.ContributionsRead
+	zd.Unlock()
+	if read {
+		return
+	}
+	if _, err := CombinerReapplyContributions(dns.Fqdn(zone), hdb); err != nil {
+		lgCombiner.Warn("RFI EDITS: the zone's stored contributions could not be read again", "zone", zone, "err", err)
+		return
+	}
+	lgCombiner.Info("RFI EDITS: the zone's stored contributions, not read at its start, are read now", "zone", zone)
+}
+
+func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest {
+	// Copy AgentContributions under lock, then convert outside the lock.
+	zd.Lock()
+	loaded := zd.MP != nil && zd.MP.ContributionsRead
 	var contribsCopy map[string]map[string]map[uint16]core.RRset
-	if zd.MP == nil {
-		contribsCopy = make(map[string]map[string]map[uint16]core.RRset)
-	} else {
+	if loaded {
 		contribsCopy = make(map[string]map[string]map[uint16]core.RRset, len(zd.MP.AgentContributions))
 		for aid, ownerMap := range zd.MP.AgentContributions {
 			newOwnerMap := make(map[string]map[uint16]core.RRset, len(ownerMap))
@@ -395,37 +472,25 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 			agentRecords[aid] = recs
 		}
 	}
-
-	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(agentRecords))
-
-	if tm == nil || tm.DNSTransport == nil {
-		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
-		return
+	word := editsLoaded
+	if !loaded {
+		word = editsNotLoaded
 	}
-
-	peer, peerExists := tm.PeerRegistry.Get(agentID)
-	if !peerExists || peer == nil {
-		lgCombiner.Warn("RFI EDITS: agent not in PeerRegistry", "agent", agentID)
-		return
+	// what the combiner acts by, so that its agent learns it at its own read
+	// (S10)
+	var acting *ActingHandover
+	if held, ok := actingHeld.Load().get(zone); ok {
+		acting = held.handover
 	}
-
-	req := &PeerEditsRequest{
-		SenderID:     conf.MpConfig().Identity,
+	return &PeerEditsRequest{
+		SenderID:     self,
 		Zone:         zone,
 		AgentRecords: agentRecords,
+		Message:      word,
+		Nonce:        nonce,
 		Timestamp:    time.Now(),
+		Acting:       acting,
 	}
-
-	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	resp, err := tm.sendEdits(sendCtx, peer, req)
-	if err != nil {
-		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
-		return
-	}
-
-	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "agents", len(agentRecords), "accepted", resp.Accepted)
 }
 
 // contributionsToRecords converts an agent's contributions map to the flat

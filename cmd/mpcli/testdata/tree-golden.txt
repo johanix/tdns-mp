@@ -290,6 +290,129 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli agent debug inject
+use: inject
+short: Send a message no honest daemon sends, for the end-to-end tests
+long: |
+  Send a message no honest daemon sends: one whose payload lies, or hellos
+  at a rate no honest agent sends them. The transport, this agent's identity
+  and its keys stay real; only the payload lies, or the rate. The command
+  exits 0 whether the recipient takes the message or refuses it, and
+  non-zero when the send failed (for hello: when no hello reached the
+  recipient), after the line that says why. The agent refuses the send
+  unless its multi-provider agent-options list includes allow-inject.
+  
+    tdns-mpcli agent debug inject named-sender --to <agent> --zone <zone> --as <identity> <RR> [<RR>...]
+    tdns-mpcli agent debug inject combiner-origin --zone <zone> --origin <identity> <RR> [<RR>...]
+    tdns-mpcli agent debug inject peer-keystate --to <agent> --zone <zone>
+    tdns-mpcli agent debug inject hello --to <agent> [--count N] [--interval D] [--mechanism dns|api]
+    tdns-mpcli agent debug inject replace --to <agent> --zone <zone> --origin-time <time> <RR> [<RR>...]
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent debug inject combiner-origin
+use: combiner-origin <RR> [<RR>...]
+short: Send this agent's combiner an update from another origin
+flags: |
+      --origin string   Originator the update names
+      --zone string     Zone name
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+
+=== tdns-mpcli agent debug inject hello
+use: hello
+short: Send another agent a hello again and again, faster than an honest agent would
+long: |
+  Send the target a hello --count times, --interval apart, on one mechanism,
+  whatever this agent's reading of the target. An honest agent sends a hello
+  only on a mechanism not yet introduced, and no faster than
+  hello_fast_interval. The target beats back on each hello from a peer it has
+  introduced; this is for testing the bound on those beats back (#131).
+flags: |
+      --count int           Hellos to send, 1 to 200 (default 40)
+      --interval duration   Gap between the hellos, 100ms to 10s (default 500ms)
+      --mechanism string    Mechanism to send on: dns or api (default "dns")
+      --to string           Target agent ID
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent debug inject named-sender
+use: named-sender <RR> [<RR>...]
+short: Send a SYNC whose payload names another sender
+flags: |
+      --as string     Sender the payload names
+      --to string     Target agent ID
+      --zone string   Zone name
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+
+=== tdns-mpcli agent debug inject peer-keystate
+use: peer-keystate
+short: Send an empty KEYSTATE inventory to another provider's agent
+flags: |
+      --to string     Target agent ID
+      --zone string   Zone name
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+
+=== tdns-mpcli agent debug inject replace
+use: replace <RR> [<RR>...]
+short: Send a REPLACE of one RR type that claims the origin time given
+long: |
+  Send the target a SYNC from this agent whose one operation replaces this
+  agent's set of one RR type with the RRs given, and whose origin is
+  --origin-time (RFC 3339, with a fraction of a second if wanted), not the
+  time it is sent. The target keeps, per zone, sending agent and RR type, the
+  origin of the last REPLACE it applied, and ignores an older one (#249); this
+  sends one older, or newer, than that. The line printed is the target's
+  receipt of the SYNC, not its verdict: the target applies the REPLACE after
+  it answers, and logs "Ignored a stale REPLACE ..." when it is older than the
+  one it holds.
+flags: |
+      --origin-time string   Origin the REPLACE claims, RFC 3339 (e.g. 2026-10-26T17:00:00.5Z)
+      --to string            Target agent ID
+      --zone string          Zone name
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+
 === tdns-mpcli agent debug lav
 use: lav
 short: Lookup and validate a child RRset
@@ -354,7 +477,6 @@ use: send-notify
 short: Tell agent to send a NOTIFY message to the other agents
 flags: |
       --RR string       DNS record to send
-  -I, --id string       agent identity to claim
   -R, --rrtype string   RR type sent notify for
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
@@ -368,10 +490,15 @@ inherited: |
 
 === tdns-mpcli agent debug send-rfi
 use: send-rfi
-short: Tell agent to send an RFI message to another agent
+short: Tell agent to send an RFI message to the agents of the zone it concerns
+long: |
+  Tell agent to send an RFI message for the zone. The agent picks the recipients
+  from the zone: CONFIG upstream goes to its upstream, CONFIG downstream to its
+  downstreams. CONFIG sig0key goes to the other agents that may hold the zone's
+  SIG(0) key: the voting members. AUDIT and SYNC go to the voting members; the
+  auditor is not asked.
 flags: |
-  -I, --id string        agent identity to claim
-      --rfi string       RFI type (CONFIG|SYNC|AUDIT|EDITS)
+      --rfi string       RFI type (CONFIG|SYNC|AUDIT)
       --subtype string   RFI subtype for CONFIG (upstream|downstream|sig0key)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
@@ -1876,6 +2003,156 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli agent parentsync
+use: parentsync
+short: Delegation sync leader, election and SIG(0) key bootstrap for a zone
+long: |
+  Commands for this agent's part in a zone's delegation sync with the parent:
+  which agent leads it among the zone's providers, and where the parent stands
+  on the SIG(0) key that signs the UPDATEs. All take the zone with --zone.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync bootstrap
+use: bootstrap
+short: Bootstrap the zone's SIG(0) key with the parent (leader only)
+long: |
+  Have the agent bring the parent to trust the zone's active SIG(0) key. This
+  is what a new leader does by itself after its election; the command runs it
+  again.
+  
+  Refused unless this agent is the zone's delegation sync leader, and when it
+  has no active SIG(0) key for the zone.
+  
+  The command returns at once and the work runs in the agent:
+    - The agent asks the parent for the state of the key.
+    - A parent that already trusts the key is sent no bootstrap. The agent then
+      checks that the delegation is in sync.
+    - A parent that does not know the key is sent the bootstrap UPDATE, and is
+      asked again until it trusts the key or the attempts run out.
+    - A parent that requires a manual bootstrap is left to its operator.
+  Nothing is done, and nothing is reported here, for a zone whose HSYNCPARAM
+  does not say parentsync="agent", and while an earlier run for the same key is
+  still asking the parent.
+  
+  The outcome is in the agent's log, and in the parent state that
+  "parentsync status" shows for the key.
+  
+  Example:
+    tdns-mpcli agent parentsync bootstrap --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync election
+use: election
+short: Start a leader election for the zone's provider group
+long: |
+  Start a leader election now. The agents elect by themselves, when a provider
+  group has become operational and again before the leader's lease runs out;
+  this command is for a group that has no leader and does not get one.
+  
+  A zone in a provider group gets a group election, and its leader leads every
+  zone of the group, not only the one named here. The election is started
+  whatever the state of the group:
+    - A leader with a valid lease stays the leader until the new election is
+      decided. The winner may be another agent.
+    - An election that is running is not waited for: a new one is started.
+    - Every voting member has to answer. While one does not, the election is
+      aborted after five seconds and started again, until all have answered.
+  The agent that wins does what every new leader does, for each zone of the
+  group that syncs with its parent through the agents. For a parent that takes
+  UPDATEs it publishes the zone's SIG(0) key, generating one when no agent has
+  it, and bootstraps the key with the parent. And it brings the delegation in
+  sync.
+  
+  Refused: a zone the agent does not know, and a group with no voting members.
+  An agent that is not a voting member of the group starts nothing, and says so.
+  
+  A zone that no provider group covers gets an election of its own. That one is
+  refused unless every configured peer for the zone is operational; with no
+  peers the agent becomes the leader at once.
+  
+  The command returns when the election is started, not when it is decided.
+  "parentsync status" and "gossip state" show the outcome.
+  
+  Example:
+    tdns-mpcli agent parentsync election --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync inquire
+use: inquire
+short: Ask the parent for the state of the zone's SIG(0) key
+long: |
+  Send a KeyState inquiry about the zone's active SIG(0) key to the parent's
+  UPDATE receiver, found through the parent's DSYNC records, and print the state
+  the parent reports for the key.
+  
+  The agent need not be the leader. The inquiry is signed with the key.
+  
+  The parent's answer is authenticated before it is read, and the line printed
+  says whether it was. An answer whose signature is wrong is a failure and is
+  not printed. An answer that cannot be authenticated, because it is unsigned
+  or because the key it is signed with has no chain of trust, is a failure too,
+  unless the agent is configured with parentsync.update.allow-insecure: then it
+  is printed and marked as not authenticated.
+  
+  The answer is not recorded, so the parent state in "parentsync status" does
+  not change.
+  
+  Fails when the agent has no active SIG(0) key for the zone, when the parent
+  advertises no UPDATE scheme, and when the receiver does not answer.
+  
+  Example:
+    tdns-mpcli agent parentsync inquire --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent parentsync status
+use: status
+short: Show the leader, the SIG(0) key and the parent's sync schemes for a zone
+long: |
+  Show where this agent stands in a zone's delegation sync with the parent:
+  the leader among the zone's providers and its lease, the zone's active SIG(0)
+  key and where its KEY record is published, the sync schemes the parent
+  advertises in DSYNC, and the state of the zone's peers.
+  
+  The agent looks up the parent's DSYNC records and the published KEY records
+  through its own resolver when asked, so the answer can take a few seconds.
+  
+  The parent state of the key is the one the agent last recorded, not a new
+  inquiry (see "inquire").
+  
+  Example:
+    tdns-mpcli agent parentsync status --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli agent peer
 use: peer
 short: Peer agent commands (list, ping, zones, resync)
@@ -3021,6 +3298,85 @@ inherited: |
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+
+=== tdns-mpcli auditor imr
+use: imr
+short: IMR (Internal Recursive Resolver) cache commands
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr dump-tuning
+use: dump-tuning
+short: Show effective IMR tuning values (backoff policy, family, discovery, etc.)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr dump-zone-backoffs
+use: dump-zone-backoffs [zone]
+short: Show zone-scoped lame-delegation backoffs (per zone, per address)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr flush
+use: flush <qname>
+short: Flush IMR cache entries at and below qname
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr query
+use: query <qname> <qtype>
+short: Query the IMR cache (cache-only, no external queries)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr reset
+use: reset
+short: Flush entire IMR cache and re-prime (preserves root NS)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli auditor imr show
+use: show
+short: Show IMR cache entries related to agent discovery
+flags: |
+      --id string   Agent identity to show cache entries for (required)
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
 
 === tdns-mpcli auditor keystore
 use: keystore
@@ -9087,17 +9443,31 @@ inherited: |
 
 === tdns-mpcli signer key policy
 use: policy
-short: The policy the state machine applies; --set binds another
+short: The policy the state machine applies; --set binds another, --ksk-algorithm and --zsk-algorithm start an algorithm rollover
 long: |
-  Without --set, the owner's policy fields as the state machine applies them
+  Without flags, the owner's policy fields as the state machine applies them
   (algorithms, lifetimes, standby counts, propagation delay, withdrawal
   margin, resend interval). With --set NAME, binds tdns's DNSSEC policy NAME
   to the zone on the owner's behalf: lifetimes, standby counts and margin
   follow at once. A policy that changes the mode, an algorithm or the DS
   model is refused: that is a rollover, not a binding.
+  
+  With --ksk-algorithm or --zsk-algorithm, changes the owner's algorithm for
+  the role, which starts an algorithm rollover by the state machine: a key
+  of the new algorithm is minted, distributed to the other signing providers,
+  published and propagated, and signs beside the old one; a new KSK signs
+  only once the parent has served its DS for the DS TTL; the old KSK then goes
+  on signing with its DS withdrawn until the parent has not served that DS for
+  the DS TTL, and retires; the old ZSK keeps signing until the KSK side is done,
+  or, in a ZSK-only rollover, for a signature lifetime beside its successor.
+  The old keys then leave as any retired key. signer key status shows the
+  step; signer key rollover cancel takes the algorithm back while nothing of
+  the new algorithm signs.
 flags: |
-      --set string    Name of the DNSSEC policy to bind
-  -z, --zone string   Zone name
+      --ksk-algorithm string   The KSK algorithm, by name (ED25519, ECDSAP256SHA256, ...): a change starts an algorithm rollover
+      --set string             Name of the DNSSEC policy to bind
+  -z, --zone string            Zone name
+      --zsk-algorithm string   The ZSK algorithm, by name: a change starts an algorithm rollover
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output

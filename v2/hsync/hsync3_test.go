@@ -10,18 +10,18 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestIdentitiesFromRRset(t *testing.T) {
-	rrs := []dns.RR{
-		mustHSYNC3RR(t, "fox", "fox.example."),
-		mustHSYNC3RR(t, "hare", "hare.example."),
+// idsOf is the identities of HSYNC3 records, as the hook at activation hands
+// them to ApplyHsyncDiff.
+func idsOf(rrs ...dns.RR) []PeerID {
+	var out []PeerID
+	for _, rr := range rrs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok {
+				out = append(out, PeerID(h3.Identity))
+			}
+		}
 	}
-	got := IdentitiesFromRRset(rrs, "fox.example.")
-	if len(got) != 1 {
-		t.Fatalf("got %d identities, want 1", len(got))
-	}
-	if _, ok := got[PeerID("hare.example.")]; !ok {
-		t.Fatalf("missing hare.example., got %v", got)
-	}
+	return out
 }
 
 func TestApplyHsyncDiff_addAndRemove(t *testing.T) {
@@ -37,13 +37,13 @@ func TestApplyHsyncDiff_addAndRemove(t *testing.T) {
 	}, DefaultConfig())
 
 	addRR := mustHSYNC3RR(t, "fox", "fox.agent.example.")
-	e.ApplyHsyncDiff(zone, HsyncDiff{Adds: []dns.RR{addRR}})
+	e.ApplyHsyncDiff(zone, HsyncDiff{Entered: idsOf(addRR)})
 	if _, ok := e.registry.S.Get(PeerID("fox.agent.example.")); !ok {
 		t.Fatal("expected fox.agent.example. registered")
 	}
 
 	remRR := mustHSYNC3RR(t, "fox", "fox.agent.example.")
-	e.ApplyHsyncDiff(zone, HsyncDiff{Removes: []dns.RR{remRR}})
+	e.ApplyHsyncDiff(zone, HsyncDiff{Left: idsOf(remRR)})
 	peer, ok := e.registry.S.Get(PeerID("fox.agent.example."))
 	if !ok {
 		t.Fatal("peer entry should remain")

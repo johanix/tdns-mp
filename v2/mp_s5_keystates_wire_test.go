@@ -37,7 +37,7 @@ func TestLocalKeyStatesTravelWithTheDnskeys(t *testing.T) {
 		mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: mpzd.ZoneName, Inventory: items, Received: time.Now()})
 	}
 	inventory(ksk, zsk, next, theirs, minted)
-	changed, ds, err := mpzd.LocalDnskeysFromKeystate()
+	changed, ds, err := mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil)
 	if err != nil || !changed || ds == nil {
 		t.Fatalf("the first inventory: changed=%v err=%v", changed, err)
 	}
@@ -61,21 +61,21 @@ func TestLocalKeyStatesTravelWithTheDnskeys(t *testing.T) {
 		t.Error("another provider's key is among what we say about ours")
 	}
 	// the same inventory again: nothing to send
-	if changed, ds, _ := mpzd.LocalDnskeysFromKeystate(); changed || ds.StatesChanged {
+	if changed, ds, _ := mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil); changed || ds.StatesChanged {
 		t.Errorf("the same inventory again: changed=%v states changed=%v", changed, ds.StatesChanged)
 	}
 	// the published KSK becomes standby with its ds set: the key set is as
 	// it was, and it is a change to send all the same
 	next.State, next.DS = KeyStateStandby, &yes
 	inventory(ksk, zsk, next, theirs, minted)
-	changed, ds, _ = mpzd.LocalDnskeysFromKeystate()
+	changed, ds, _ = mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil)
 	if !changed || !ds.StatesChanged || len(ds.LocalAdds)+len(ds.LocalRemoves) != 0 {
 		t.Errorf("a state and ds change alone: changed=%v states changed=%v adds=%d removes=%d", changed, ds.StatesChanged, len(ds.LocalAdds), len(ds.LocalRemoves))
 	}
 	// a row whose ds nobody decided travels undecided
 	zsk.DS = nil
 	inventory(ksk, zsk, next, theirs, minted)
-	_, ds, _ = mpzd.LocalDnskeysFromKeystate()
+	_, ds, _ = mpzd.LocalDnskeysFromKeystate("agent.us.example.", nil)
 	for _, st := range ds.CurrentKeyStates {
 		if st.KeyTag == zsk.KeyTag && st.DS != nil {
 			t.Errorf("an undecided ds travels as %v", *st.DS)
@@ -142,22 +142,28 @@ func TestForeignKeyStatesReachTheRowThroughTheRealPath(t *testing.T) {
 	agent := &MPTransportBridge{}
 	agent.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", wire(theirs.KeyTag()))
 	agent.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p3.example.", wire(outsiders.KeyTag()))
-	// an older release's operation says nothing, and takes nothing back
-	agent.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", []core.RROperation{{Operation: "replace", RRtype: "DNSKEY"}})
-	keys := agent.foreignKeysFor(ZoneName(mpzd.ZoneName))
+	// an older release's operation, its records with no key states, says
+	// nothing, and takes nothing back (a replace by no record from a
+	// provider heard from is another matter: its empty word, S7)
+	agent.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", Records: []string{theirs.String()}}})
+	keys, spoken := agent.foreignWordFor(ZoneName(mpzd.ZoneName))
 	if len(keys) != 2 || keys[0].Provider != "p2" || keys[1].Provider != "p3" {
 		t.Fatalf("what the agent hands its signer: %+v, want p2's and p3's key with their labels", keys)
 	}
+	if len(spoken) != 2 || spoken[0] != "p2" || spoken[1] != "p3" {
+		t.Fatalf("the providers the agent names as having spoken: %v, want p2 and p3", spoken)
+	}
 	// an explicit empty list is a word ("none of my keys"): it replaces
-	// what that agent said before, where an absent field does not
+	// what that agent said before, where an absent field does not; the
+	// provider is still named among the spoken (S7)
 	probe := &MPTransportBridge{}
 	probe.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", wire(theirs.KeyTag()))
 	probe.NoteForeignKeyStates(ZoneName(mpzd.ZoneName), "agent.p2.example.", []core.RROperation{{Operation: "replace", RRtype: "DNSKEY", KeyStates: []core.KeyState{}}})
-	if left := probe.foreignKeysFor(ZoneName(mpzd.ZoneName)); len(left) != 0 {
-		t.Errorf("after an explicit empty list the agent still hands on %+v", left)
+	if left, still := probe.foreignWordFor(ZoneName(mpzd.ZoneName)); len(left) != 0 || len(still) != 1 || still[0] != "p2" {
+		t.Errorf("after an explicit empty list the agent hands on %+v and names %v, want no key and p2 among the spoken", left, still)
 	}
 	// agent -> signer, as the message travels
-	msg, err := keystateAppMessage(&PeerKeystateRequest{SenderID: "agent.us.example.", Zone: mpzd.ZoneName, Signal: "foreign", ForeignKeys: keys, Timestamp: time.Now()}, "signer.us.example.")
+	msg, err := keystateAppMessage(&PeerKeystateRequest{SenderID: "agent.us.example.", Zone: mpzd.ZoneName, Signal: "foreign", ForeignKeys: keys, ForeignSpoken: spoken, Timestamp: time.Now()}, "signer.us.example.")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +175,23 @@ func TestForeignKeyStatesReachTheRowThroughTheRealPath(t *testing.T) {
 	default:
 		t.Fatal("the signer's routing dropped the foreign key states")
 	}
-	if sig.Signal != "foreign" || len(sig.ForeignKeys) != 2 {
+	if sig.Signal != "foreign" || len(sig.ForeignKeys) != 2 || len(sig.ForeignSpoken) != 2 || sig.ForeignSpoken[0] != "p2" || sig.ForeignSpoken[1] != "p3" {
 		t.Fatalf("what reached the signer's handler: %+v", sig)
+	}
+	// an older signer decodes the message as the struct it knows, which
+	// ignores the new field; an older agent's message, the struct it knows
+	// marshalled as it was, decodes here with nobody named
+	var older core.AgentKeystatePost
+	if err := json.Unmarshal(msg.Payload, &older); err != nil || older.Signal != "foreign" || len(older.ForeignKeys) != 2 {
+		t.Errorf("an older signer's decoding of the message: %+v, %v", older, err)
+	}
+	fromOlder, err := json.Marshal(&core.AgentKeystatePost{MessageType: core.AgentMsgKeystate, MyIdentity: "agent.us.example.", Zone: mpzd.ZoneName, Signal: "foreign", ForeignKeys: keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var here DnsKeystatePayload
+	if err := json.Unmarshal(fromOlder, &here); err != nil || here.ForeignSpoken != nil || len(here.ForeignKeys) != 2 {
+		t.Errorf("an older agent's message decoded here as %+v, %v; want its keys and nobody named", here, err)
 	}
 	// the signer's engine and the zone's driver
 	conf := &Config{Config: &tdns.Config{}}
@@ -179,7 +200,7 @@ func TestForeignKeyStatesReachTheRowThroughTheRealPath(t *testing.T) {
 	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
 	e := NewKeyLifecycleEngine(conf, owner)
 	e.TakeConfiguredZones()
-	if !e.Foreign(sig.Zone, sig.ForeignKeys) {
+	if !e.ForeignWord(sig.Zone, sig.ForeignKeys, sig.ForeignSpoken) {
 		t.Fatal("the engine does not take the zone for its own")
 	}
 	cols := func(kt uint16) string {
@@ -195,8 +216,9 @@ func TestForeignKeyStatesReachTheRowThroughTheRealPath(t *testing.T) {
 	if got := cols(outsiders.KeyTag()); got != "100" {
 		t.Errorf("the key of a provider that does not sign: columns %s, want 100", got)
 	}
-	// a zone nobody here owns: the word has no reader
-	if e.Foreign("unowned.wire.example.", sig.ForeignKeys) {
+	// a zone nobody here owns: the word has no reader, from an agent of
+	// either release
+	if e.ForeignWord("unowned.wire.example.", sig.ForeignKeys, sig.ForeignSpoken) || e.Foreign("unowned.wire.example.", sig.ForeignKeys) {
 		t.Error("the engine claimed the key states of a zone it does not own")
 	}
 }

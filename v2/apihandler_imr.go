@@ -17,9 +17,10 @@ import (
 )
 
 // APIimr handles the /imr management API endpoint for tdns-mpagent
-// (and any other tdns-mp app that hosts an in-process IMR). It mirrors
-// tdns.APIimr but lives here so the handler can use tdns-mp's own
-// AgentMgmtPost / AgentMgmtResponse types and the Imr wrapper.
+// and tdns-mpauditor (and any other tdns-mp app that hosts an
+// in-process IMR). It mirrors tdns.APIimr but lives here so the
+// handler can use tdns-mp's own AgentMgmtPost / AgentMgmtResponse
+// types and the Imr wrapper.
 //
 // MP-specific commands continue to be served by APIagent at /agent.
 // Keeping the IMR commands on a separate /imr endpoint means tdns-mp

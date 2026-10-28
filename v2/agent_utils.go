@@ -10,30 +10,13 @@ import (
 
 	"github.com/johanix/tdns-mp/v2/hsync"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
-func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
-	agent, exists := ar.S.Get(identity)
-	if !exists {
-		return
-	}
-
-	agent.Mu.Lock()
-	if agent.Zones == nil {
-		agent.Zones = make(map[ZoneName]bool)
-	}
-	agent.Zones[zone] = true
-	agent.Mu.Unlock()
-
-	ar.S.Set(identity, agent)
-}
-
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
-	members := participantFQDNSetForApex(zoneApex(zone))
+	members := participantFQDNSet(instructionsFor(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		if members[dns.Fqdn(string(agent.ID))] {
+		if members.has(string(agent.ID)) {
 			agents = append(agents, agent)
 		}
 	}
@@ -185,68 +168,40 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		return nil, fmt.Errorf("error getting apex for zone %q: %v", zonename, err)
 	}
 
-	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
-	if len(hsyncRRset.RRs) == 0 {
+	in := activeOr(zd.ZoneName, apex)
+	if !hasHSYNC3(in) {
 		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", zonename)
 		return nil, fmt.Errorf("zone %q has no HSYNC3 RRset", zonename)
 	}
 
-	// Convert the RRs to strings for transmission
-	hsyncStrs := make([]string, len(hsyncRRset.RRs))
-	for i, rr := range hsyncRRset.RRs {
-		hsyncStrs[i] = rr.String()
-	}
-
-	// Build label->Identity map so we can resolve Upstream labels to FQDNs.
-	// Kept complete (all HSYNC3 records) so Upstream resolution still works.
-	labelToIdentity := map[string]string{}
-	for _, rr := range hsyncRRset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if h3, ok := prr.Data.(*core.HSYNC3); ok {
-				labelToIdentity[h3.Label] = h3.Identity
-			}
+	// Membership is role-derived: only identities with a role are zone
+	// members / distribution recipients. An identity with an ON record but
+	// no role is not included. Upstreams resolve through the ON records: an
+	// OFF record is nobody's upstream or downstream.
+	participantList, _ := participantsOf(in)
+	self := AgentId(ar.LocalAgent.Identity)
+	for _, r := range in.Records {
+		if isAmong([]string{r.Identity}, self) {
+			zad.MyUpstream = AgentId(in.identityOf(r.Upstream))
+			continue // don't add ourselves to the list of agents
+		} else if isAmong([]string{in.identityOf(r.Upstream)}, self) {
+			zad.MyDownstreams = append(zad.MyDownstreams, AgentId(r.Identity))
 		}
-	}
-
-	// Membership is HSYNCPARAM-derived: only identities with a HSYNCPARAM
-	// role are zone members / distribution recipients. An identity present
-	// in HSYNC3 but granted no role is not included.
-	participantList, _ := zoneParticipants(apex)
-	participantSet := make(map[string]struct{}, len(participantList))
-	for _, id := range participantList {
-		participantSet[id] = struct{}{}
-	}
-
-	for _, rr := range hsyncRRset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				// Skip if this is our own identity
-				if hsync3.Identity == ar.LocalAgent.Identity {
-					zad.MyUpstream = AgentId(labelToIdentity[hsync3.Upstream])
-					continue // don't add ourselves to the list of agents
-				} else if labelToIdentity[hsync3.Upstream] == ar.LocalAgent.Identity {
-					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync3.Identity))
-				}
-				// Skip identities with no HSYNCPARAM role — they have an
-				// HSYNC3 mapping but are not members of this zone.
-				if _, isParticipant := participantSet[hsync3.Identity]; !isParticipant {
-					continue
-				}
-				// Found an HSYNC3 record, try to locate the agent
-				agent, err := ar.GetAgentInfo(AgentId(hsync3.Identity))
-				if err != nil {
-					// A placeholder for an agent the registry does not have;
-					// never stored in ar.S, so the throwaway hsync.Peer
-					// allocation is fine (E1.b). agentInfo reports it as ERROR.
-					agent = &Agent{
-						Peer:     hsync.NewPeer(AgentId(hsync3.Identity)),
-						ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
-					}
-					agent.LastState = time.Now()
-				}
-				agents = append(agents, agent)
-			}
+		if !isAmong(participantList, AgentId(r.Identity)) {
+			continue
 		}
+		agent, err := ar.GetAgentInfo(AgentId(r.Identity))
+		if err != nil {
+			// A placeholder for an agent the registry does not have;
+			// never stored in ar.S, so the throwaway hsync.Peer
+			// allocation is fine (E1.b). agentInfo reports it as ERROR.
+			agent = &Agent{
+				Peer:     hsync.NewPeer(AgentId(r.Identity)),
+				ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
+			}
+			agent.LastState = time.Now()
+		}
+		agents = append(agents, agent)
 	}
 
 	zad.Agents = agents
@@ -261,8 +216,9 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 // (provider_groups.go) recomputes the participant set from HSYNCPARAM on
 // every read. So when local participation in `zonename` ends, there is no
 // stored per-zone relationship to tear down — it simply stops being
-// derived on the next read, and provider groups recompute via
-// OnHsync3Changed. There is nothing to manually clean up here.
+// derived on the next read. The provider groups are recomputed on that path
+// by ApplyHsyncDiff (OnHsync3Changed). There is nothing to manually clean up
+// here.
 //
 // Revisit only if the testbed shows orphaned per-zone state surviving a
 // local removal; that would mean some state is still stored rather than
@@ -271,120 +227,14 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	lgAgent.Info("local removal from zone; membership is derived, no teardown needed", "zone", zonename)
 }
 
-// reattachHsyncMemberAdds re-homes the per-add CONFIG RFI deferred tasks and the
-// membership-change election kick that used to live in UpdateAgents. It is driven
-// by the member-add set ApplyHsyncDiff already computed (HSYNCPARAM-gated), so a
-// role-less identity neither triggers an RFI nor kicks an election. The plain
-// "remote agent, no relationship" discovery is already handled by ApplyHsyncDiff's
-// MarkNeeded; this only attaches the upstream/downstream RFI tasks.
-func (ar *AgentRegistry) reattachHsyncMemberAdds(conf *Config, zonename ZoneName, added []hsync.PeerID, localAdded bool) {
-	if len(added) == 0 && !localAdded {
-		return
-	}
-	ourId := AgentId(ar.LocalAgent.Identity)
-
-	var synchedDataUpdateQ chan *SynchedDataUpdate
-	var msgQs *MsgQs
-	if conf.InternalMp.MsgQs != nil {
-		synchedDataUpdateQ = conf.InternalMp.MsgQs.SynchedDataUpdate
-		msgQs = conf.InternalMp.MsgQs
-	}
-
-	// Build label->Identity and Identity->record from the zone's full current
-	// HSYNC3 RRset (the delta alone would miss unchanged upstream records).
-	labelToIdentity := map[string]string{}
-	recByIdentity := map[AgentId]*core.HSYNC3{}
-	if zd, exists := Zones.Get(string(zonename)); exists {
-		if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
-			if hsync3RRset, ok := apex.RRtypes.Get(core.TypeHSYNC3); ok {
-				for _, rr := range hsync3RRset.RRs {
-					if prr, ok := rr.(*dns.PrivateRR); ok {
-						if h3, ok := prr.Data.(*core.HSYNC3); ok {
-							labelToIdentity[h3.Label] = h3.Identity
-							recByIdentity[AgentId(h3.Identity)] = h3
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// If our own record was (re)added and we have an upstream, request its config.
-	if localAdded {
-		if h3 := recByIdentity[ourId]; h3 != nil && h3.Upstream != "." {
-			upstreamIdentity := AgentId(labelToIdentity[h3.Upstream])
-			if upstreamIdentity == "" {
-				lgAgent.Warn("cannot resolve upstream label to identity, skipping", "zone", zonename, "upstream", h3.Upstream)
-			} else {
-				upstreamLabel := h3.Upstream
-				ar.MarkAgentAsNeeded(upstreamIdentity, zonename, &DeferredAgentTask{
-					Precondition: func() bool {
-						// Operational gate reads the canonical transport.Peer
-						// store (END.0); was agent.ApiDetails.State.
-						return ar.isAgentOperational(upstreamIdentity)
-					},
-					Action: func() (bool, error) {
-						lgAgent.Info("executing deferred RFI for upstream data", "upstream", upstreamLabel, "zone", zonename)
-						amp := AgentMgmtPost{
-							MessageType: AgentMsgRfi,
-							RfiType:     "CONFIG",
-							RfiSubtype:  "upstream",
-							Zone:        zonename,
-							Upstream:    upstreamIdentity,
-						}
-						ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
-						return true, nil
-					},
-					Desc: fmt.Sprintf("RFI for upstream data from %q", upstreamLabel),
-				})
-			}
-		}
-	}
-
-	// For each member add whose upstream is us, request its config (downstream).
-	for _, pid := range added {
-		id := AgentId(pid)
-		h3 := recByIdentity[id]
-		if h3 == nil {
-			continue
-		}
-		if AgentId(labelToIdentity[h3.Upstream]) != ourId {
-			continue
-		}
-		downstreamId := id
-		ar.MarkAgentAsNeeded(downstreamId, zonename, &DeferredAgentTask{
-			Precondition: func() bool {
-				// Operational gate reads the canonical transport.Peer store
-				// (END.0); was agent.State.
-				return ar.isAgentOperational(downstreamId)
-			},
-			Action: func() (bool, error) {
-				lgAgent.Info("executing deferred RFI for downstream data", "downstream", downstreamId, "zone", zonename)
-				amp := AgentMgmtPost{
-					MessageType: AgentMsgRfi,
-					RfiType:     "CONFIG",
-					RfiSubtype:  "downstream",
-					Zone:        zonename,
-					Downstream:  downstreamId,
-				}
-				ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ, msgQs)
-				return true, nil
-			},
-			Desc: fmt.Sprintf("RFI for downstream data from %q", downstreamId),
-		})
-	}
-
-	// Membership changed (HSYNC3 identity add) — kick a leader election.
-	if ar.LeaderElectionManager != nil {
-		lem := ar.LeaderElectionManager
-		if lem.configuredPeers(zonename) == 0 {
-			lem.StartElection(zonename, 0)
-		} else if ar.ProviderGroupManager != nil {
-			if pg := ar.ProviderGroupManager.GetGroupForZone(zonename); pg != nil {
-				lem.DeferGroupElection(pg.GroupHash)
-			}
-		}
-	}
+// localRemovedFromZone is the OnLocalRemoved hook. The groups are recomputed
+// right after it on the same path (ApplyHsyncDiff calls OnHsync3Changed
+// there too, tdns-mp #183), under the recompute's own lock. Without the
+// recompute the zone stayed in the group this agent was in, and a give-back
+// in the same refresh found this agent still leading the zone and ran the
+// leader's setup here.
+func (ar *AgentRegistry) localRemovedFromZone(zone ZoneName) {
+	ar.CleanupZoneRelationships(zone)
 }
 
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {

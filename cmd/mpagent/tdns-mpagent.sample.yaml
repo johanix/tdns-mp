@@ -30,7 +30,9 @@ multi-provider:
       address:                 '127.0.0.1:8053'
       long_term_jose_pub_key:  /etc/tdns/keys/signer.jose.pub.json
    # Agent identities authorized to communicate with this agent, in
-   # addition to those found through HSYNC3.
+   # addition to those found through HSYNC3. This says who may talk to
+   # the agent, not that a link to it is kept: a peer that no zone names
+   # is removed after peer_hold, as any other peer is.
    # authorized_peers:
    #    - agent.bravo.example.
    # The agent's identity zone, created and signed at startup.
@@ -76,6 +78,8 @@ multi-provider:
          reconcile:           60
          hello_fast_attempts: 3
          hello_fast_interval: 2
+         catchup_outage:      3600
+         peer_hold:           86400
 
 service:
    name:           TDNS-MPAGENT
@@ -97,9 +101,16 @@ apiserver:
    keyfile:        /etc/tdns/certs/agent.key
 
 # Leader-election lease for zones whose HSYNCPARAM says
-# parentsync="agent". 60m is the default.
+# parentsync="agent". 60m is the default. The value takes a unit
+# (60m, 3600s): a bare number is read as nanoseconds. A lease
+# below one minute is refused and the default is used.
 # delegationsync:
 #    leader-election-ttl: 60m
+#
+# The longest the leader holds a NOTIFY to a zone's parent, whatever
+# propagation delay the zone's providers announce (see
+# kasp.propagation-delay below). 10m is the default; 0 holds none.
+#    notify-wait-max: 10m
 
 # Delegation sync towards the parent of a customer zone whose
 # HSYNCPARAM makes the agents responsible for it (parentsync="agent").
@@ -116,6 +127,10 @@ imrengine:
 # The policy the agent signs its identity zone with. Testbed values:
 # a signature validity must exceed 2 x (largest served TTL +
 # kasp.propagation-delay), and tdns warns below 4 x.
+# kasp.propagation-delay is also what the agent tells the other
+# providers' agents about this provider's nameservers: the leader of a
+# zone holds a NOTIFY to the zone's parent for the largest value among
+# the providers that serve the zone. The default is 1h.
 dnssec:
    kasp:
       propagation-delay:  5m

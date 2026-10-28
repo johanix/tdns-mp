@@ -35,7 +35,7 @@ func TestAnElectionRecordWithoutALeaderIsNotStored(t *testing.T) {
 	gst.SetOnElectionUpdate(func(_ string, state GroupElectionState) { told = append(told, state) })
 
 	// a's gossip from inside its election: the term is set, the leader is not.
-	gst.MergeGossip(&GossipMessage{GroupHash: statusGroup, Election: GroupElectionState{Term: 1}})
+	gst.mergeGossip(&GossipMessage{GroupHash: statusGroup, Election: GroupElectionState{Term: 1}})
 	if _, election, _ := gst.GetGroupState(statusGroup); election != nil {
 		t.Fatalf("a record without a leader was stored: %+v", *election)
 	}
@@ -45,7 +45,7 @@ func TestAnElectionRecordWithoutALeaderIsNotStored(t *testing.T) {
 
 	// a's gossip once the election is decided, of the same term.
 	expiry := time.Now().Add(time.Hour)
-	gst.MergeGossip(&GossipMessage{GroupHash: statusGroup,
+	gst.mergeGossip(&GossipMessage{GroupHash: statusGroup,
 		Election: GroupElectionState{Leader: "a.example.", Term: 1, LeaderExpiry: expiry}})
 	_, election, _ := gst.GetGroupState(statusGroup)
 	if election == nil || election.Leader != "a.example." || election.Term != 1 {
@@ -91,7 +91,7 @@ func TestAnUndecidedTermIsNotGossiped(t *testing.T) {
 
 	// No election of its own yet: the member passes on what it heard.
 	heard := GroupElectionState{Leader: "b.example.", Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}
-	gst.MergeGossip(&GossipMessage{GroupHash: statusGroup, Election: heard})
+	gst.mergeGossip(&GossipMessage{GroupHash: statusGroup, Election: heard})
 	if got := told(); got.Term != 1 || got.Leader != "b.example." {
 		t.Fatalf("with no election of its own the member told its peer %+v, want what it heard: %+v", got, heard)
 	}
@@ -103,7 +103,7 @@ func TestAnUndecidedTermIsNotGossiped(t *testing.T) {
 	lem.mu.RUnlock()
 	t.Cleanup(func() {
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}

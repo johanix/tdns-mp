@@ -113,6 +113,123 @@ func rrsetEqual(a, b core.RRset) bool {
 	return true
 }
 
+// --- One CSYNC per zone ------------------------------------------------------
+//
+// A zone's CSYNC is made by the zone's delegation sync leader and reaches
+// every provider's combiner as a contribution (tdns-mp #175). The leadership
+// moves, so over time a combiner is sent CSYNC records by more than one
+// agent. It holds and serves one: the one with the newest serial field, in
+// the order of RFC 1982. An older one is refused when it arrives late, and
+// dropped when a newer one arrives.
+//
+// A combiner of an earlier build made a CSYNC itself, stored under its own
+// identity, with the zone's SOA serial in it. That number is not one of the
+// leaders' and is not compared with theirs: the combiner's own CSYNC is older
+// than any that an agent contributes. Until one arrives it is served as it
+// was, so a start under a new build changes nothing in the zone.
+
+// serialNewer: a is after b in the serial number arithmetic of RFC 1982.
+func serialNewer(a, b uint32) bool {
+	return a != b && a-b < 1<<31
+}
+
+// heldCsync is a CSYNC at an owner name and the sender it is stored under.
+type heldCsync struct {
+	sender string
+	rr     *dns.CSYNC
+}
+
+// supersedes: h is to be served rather than o. self is this combiner's own
+// identity.
+func (h heldCsync) supersedes(o heldCsync, self string) bool {
+	if (h.sender == self) != (o.sender == self) {
+		return o.sender == self
+	}
+	return serialNewer(h.rr.Serial, o.rr.Serial)
+}
+
+// combinerSelfID is this combiner's own identity, the sender name under
+// which an earlier build stored the CSYNC it made.
+func (mpzd *MPZoneData) combinerSelfID() string {
+	if mpzd.MP == nil || mpzd.MP.MultiProvider == nil || mpzd.MP.MultiProvider.Identity == "" {
+		return ""
+	}
+	return dns.Fqdn(mpzd.MP.MultiProvider.Identity)
+}
+
+// csyncsHeld lists the CSYNC records contributed at an owner, with their
+// senders. The caller holds the zone's lock, or is the only one at work.
+func (mpzd *MPZoneData) csyncsHeld(owner string) []heldCsync {
+	var held []heldCsync
+	if mpzd.MP == nil {
+		return held
+	}
+	for sender, owners := range mpzd.MP.AgentContributions {
+		rrset, ok := owners[owner][dns.TypeCSYNC]
+		if !ok {
+			continue
+		}
+		for _, rr := range rrset.RRs {
+			if csync, ok := rr.(*dns.CSYNC); ok {
+				held = append(held, heldCsync{sender: sender, rr: csync})
+			}
+		}
+	}
+	return held
+}
+
+// csyncToServe is the one CSYNC at an owner that the zone serves: none of
+// the others supersedes it. The caller holds the zone's lock.
+func (mpzd *MPZoneData) csyncToServe(owner string) (heldCsync, bool) {
+	held := mpzd.csyncsHeld(owner)
+	if len(held) == 0 {
+		return heldCsync{}, false
+	}
+	self := mpzd.combinerSelfID()
+	best := held[0]
+	for _, h := range held[1:] {
+		// two records neither of which supersedes the other read the same
+		// but for who sent them; the sender's name makes the choice the
+		// same on every pass
+		if h.supersedes(best, self) || (!best.supersedes(h, self) && h.sender < best.sender) {
+			best = h
+		}
+	}
+	return best, true
+}
+
+// csyncVerdict is what a combiner does with a CSYNC that a sender asks it to
+// hold in the place of what that sender had: refuse it, with the reason, if
+// another sender's CSYNC supersedes it; otherwise take it, and drop those of
+// the other senders, which it supersedes or equals. More than one CSYNC in a
+// contribution is refused: a zone has one.
+func (mpzd *MPZoneData) csyncVerdict(sender, owner string, rrs []dns.RR) (reason string, drop []string) {
+	if len(rrs) != 1 {
+		return fmt.Sprintf("%d CSYNC records in one contribution: a zone has one", len(rrs)), nil
+	}
+	csync, ok := rrs[0].(*dns.CSYNC)
+	if !ok {
+		return "not a CSYNC record", nil
+	}
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	self := mpzd.combinerSelfID()
+	arriving := heldCsync{sender: sender, rr: csync}
+	for _, h := range mpzd.csyncsHeld(owner) {
+		if h.sender == sender {
+			continue
+		}
+		if h.supersedes(arriving, self) {
+			return fmt.Sprintf("an older CSYNC than the one held for the zone: serial %d, held is %d from %s",
+				csync.Serial, h.rr.Serial, h.sender), nil
+		}
+		if !containsString(drop, h.sender) {
+			drop = append(drop, h.sender)
+		}
+	}
+	return "", drop
+}
+
 // --- The combiner's zone writes -------------------------------------------
 //
 // The combiner's state (AgentContributions, merged into CombinerData) is
@@ -187,6 +304,7 @@ type combineInput struct {
 	contributions   map[string]map[uint16]core.RRset // CombinerData, RRsets cloned
 	upstreamApex    map[uint16]core.RRset            // UpstreamData at the apex, cloned
 	cleanups        []ownerRRtype
+	deferred        []ownerRRtype // cleanups put off until the upstream's apex is known
 	signatureOwner  string
 	signature       dns.RR // the signature TXT to serve, nil when the option is off
 }
@@ -255,6 +373,9 @@ func combineInto(s tdns.Stager, in *combineInput) bool {
 					continue
 				}
 			} else if !in.policy.canApply(rrtype) {
+				if ownerName == in.zone && servedAsUpstream(s, in, rrtype) {
+					changed = true
+				}
 				continue
 			}
 			next := newRRset
@@ -275,10 +396,40 @@ func combineInto(s tdns.Stager, in *combineInput) bool {
 	return changed
 }
 
+// servedAsUpstream serves at the apex, as the upstream has it, an RRset the
+// edit policy does not let the combiner apply: what an earlier policy applied
+// goes now, not at the next transfer, since a hand-over changes the policy
+// without one (plan S10). Not before the upstream's apex is known.
+func servedAsUpstream(s tdns.Stager, in *combineInput, rrtype uint16) bool {
+	if in.upstreamApex == nil {
+		return false
+	}
+	cur := s.RRset(in.zone, rrtype)
+	if up, ok := in.upstreamApex[rrtype]; ok {
+		if cur != nil && rrsetEqual(*cur, up) {
+			return false
+		}
+		s.SetRRset(in.zone, up)
+		return true
+	}
+	if cur == nil {
+		return false
+	}
+	if rrtype == dns.TypeNS {
+		// as the cleanup: the apex NS is never deleted
+		lgCombiner.Warn("combine: no upstream NS to serve; the served NS is kept", "zone", in.zone)
+		return false
+	}
+	s.Delete(in.zone, rrtype)
+	return true
+}
+
 // cleanupInto handles the (owner, rrtype) pairs a contribution change may
-// have emptied: nothing if some agent still contributes there; the upstream
-// NS restored at the apex; otherwise the RRset deleted, and the owner with
-// it when that was its last RRset.
+// have emptied: nothing if some agent still contributes there; at the apex,
+// the upstream's RRset restored where it has one (the NS always kept), and
+// put off to a later combine while the upstream's apex is not known yet;
+// otherwise the RRset deleted, and the owner with it when that was its last
+// RRset.
 func cleanupInto(s tdns.Stager, in *combineInput) bool {
 	changed := false
 	for _, c := range in.cleanups {
@@ -287,19 +438,31 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 				continue
 			}
 		}
-		if c.rrtype == dns.TypeNS && c.owner == in.zone {
-			up, ok := in.upstreamApex[dns.TypeNS]
-			if !ok {
+		if c.owner == in.zone && !in.isProvider && in.upstreamApex == nil {
+			// what the upstream has here is not known: nothing is taken
+			// for absent, as servedAsUpstream takes nothing
+			lgCombiner.Debug("cleanup: the upstream's apex is not known yet; waiting for a later combine", "zone", in.zone, "rrtype", dns.TypeToString[c.rrtype])
+			in.deferred = append(in.deferred, c)
+			continue
+		}
+		if c.owner == in.zone {
+			// what the upstream has at the apex is served again, as
+			// servedAsUpstream serves a type the policy does not apply: a
+			// filtered origin's CDS takes no owner's CDS with it (plan S10)
+			up, ok := in.upstreamApex[c.rrtype]
+			if !ok && c.rrtype == dns.TypeNS {
 				lgCombiner.Warn("cleanup: no upstream NS to restore", "zone", in.zone)
 				continue
 			}
-			if cur := s.RRset(c.owner, dns.TypeNS); cur != nil && rrsetEqual(*cur, up) {
+			if ok {
+				if cur := s.RRset(c.owner, c.rrtype); cur != nil && rrsetEqual(*cur, up) {
+					continue
+				}
+				s.SetRRset(c.owner, up)
+				changed = true
+				lgCombiner.Info("cleanup: restored the upstream RRset", "zone", in.zone, "rrtype", dns.TypeToString[c.rrtype], "records", len(up.RRs))
 				continue
 			}
-			s.SetRRset(c.owner, up)
-			changed = true
-			lgCombiner.Info("cleanup: restored the upstream NS RRset", "zone", in.zone, "records", len(up.RRs))
-			continue
 		}
 		if s.RRset(c.owner, c.rrtype) == nil {
 			continue
@@ -386,6 +549,7 @@ func (mpzd *MPZoneData) combineAndPublish(conf *MultiProviderConf) (bool, tdns.B
 		mpzd.MP.requeueCleanups(in.cleanups)
 		return false, resp, err
 	}
+	mpzd.MP.requeueCleanups(in.deferred)
 	if changed && resp.NewSerial != resp.OldSerial {
 		lgCombiner.Info("combiner state published", "zone", mpzd.ZoneName, "old", resp.OldSerial, "new", resp.NewSerial)
 	} else if changed {
@@ -883,14 +1047,38 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 	isProvider := GetProviderZoneRRtypes(zone) != nil
 	var parts []string
 
-	// 1. Reload AgentContributions from the CombinerContributions snapshot.
-	allContribs, err := LoadAllContributions(hdb)
-	if err != nil {
-		return "", fmt.Errorf("failed to load contributions: %w", err)
+	// 0. For provider zones: a stored at-ns instruction whose zone does not
+	// carry the customer's consent is withdrawn first (withdrawSignalKeys).
+	//
+	// A retraction that failed keeps its name in the instruction, with at-ns,
+	// so that the next use tries again. If its save failed, the snapshot that
+	// step 1 reloads still holds the KEY. So step 2 does not put the names of
+	// the zones found here back: it takes them out of what step 1 reloaded.
+	// They are found before the provider zone is locked: step 2 then reads no
+	// customer zone's state under that lock.
+	var withoutConsent map[string]bool
+	if isProvider {
+		var err error
+		if withoutConsent, err = withdrawAllSignalKeysWithoutConsent(hdb); err != nil {
+			return "", fmt.Errorf("failed to load publish instructions: %w", err)
+		}
 	}
 
+	// 1. Reload AgentContributions from the CombinerContributions snapshot,
+	// read under the zone's lock. An update changes a sender's
+	// contributions and saves them under that lock, so it comes wholly
+	// before this read or wholly after the reload. Read first, a snapshot
+	// could miss an update saved before the reload replaced what it put
+	// in memory, and roll the zone back. The lock order is the one an
+	// update has: the zone, then the database.
 	mpzd.Lock()
+	allContribs, err := LoadAllContributions(hdb)
+	if err != nil {
+		mpzd.Unlock()
+		return "", fmt.Errorf("failed to load contributions: %w", err)
+	}
 	mpzd.EnsureMP()
+	mpzd.MP.ContributionsRead = true // the store is read now, if it was not at the start
 	if zoneContribs, ok := allContribs[zone]; ok {
 		mpzd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 		for senderID, ownerMap := range zoneContribs {
@@ -911,8 +1099,30 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 			mpzd.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
 		}
-		keyCount := 0
+		keyCount, keptOut := 0, 0
 		for childZone, senders := range allInstr {
+			if withoutConsent[childZone] {
+				for senderID, stored := range senders {
+					if !containsString(stored.Locations, "at-ns") {
+						continue
+					}
+					for _, ns := range stored.PublishedNS {
+						ownerName := Sig0KeyOwnerName(childZone, ns)
+						if findProviderZoneForOwner(ownerName) != zone {
+							continue
+						}
+						_, _, changed, replErr := mpzd.replaceCombinerDataByRRtypeLocked(senderID, ownerName, dns.TypeKEY, nil)
+						if replErr != nil {
+							lgCombiner.Error("reapply: failed to take out the _signal KEY of a zone without consent; it is tried again at the next use of its instruction",
+								"zone", childZone, "sender", senderID, "owner", ownerName, "err", replErr)
+						}
+						if changed {
+							keptOut++
+						}
+					}
+				}
+				continue
+			}
 			for senderID, stored := range senders {
 				if !containsString(stored.Locations, "at-ns") || len(stored.KEYRRs) == 0 {
 					continue
@@ -943,6 +1153,9 @@ func CombinerReapplyContributions(zone string, hdb *HsyncDB) (string, error) {
 		}
 		if keyCount > 0 {
 			parts = append(parts, fmt.Sprintf("applied %d _signal KEY record(s)", keyCount))
+		}
+		if keptOut > 0 {
+			parts = append(parts, fmt.Sprintf("took out %d _signal KEY(s) of zones without pubkey consent whose withdrawal had not finished", keptOut))
 		}
 	}
 
@@ -1007,12 +1220,42 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 	type ownerRRtypes map[uint16][]dns.RR
 	merged := make(map[string]ownerRRtypes)
 
+	// A combiner that holds a hand-over judges every stored contribution by
+	// its origin, by the sets handed (design 3.5, plan S10): a DNSKEY only
+	// from a provider in KeySigners, a CDS only from one in DSSigners. What
+	// it leaves out stays stored, and the next combine takes it out of the
+	// zone. While its copy is newer than the hand-over, by the sets its copy
+	// gives, as a hand-over of it would carry them (actsBy). Handed nothing,
+	// the combiner judges nothing again, so that it removes nothing it
+	// served (rule 5).
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	handed, filter := actingHeld.Load().roles(mpzd.ZoneName, apex)
+	if _, held := actingHeld.Load().get(mpzd.ZoneName); held && !filter {
+		handed, filter = mpzd.actingSets(), true
+	}
+
 	for agentID, ownerMap := range mpzd.MP.AgentContributions {
 		for owner, rrtypeMap := range ownerMap {
 			if merged[owner] == nil {
 				merged[owner] = make(ownerRRtypes)
 			}
 			for rrtype, rrset := range rrtypeMap {
+				if filter && !handedOrigin(handed, agentID, rrtype) {
+					mpzd.MP.noteCleanup(owner, rrtype)
+					if mpzd.Debug {
+						mpzd.Logger.Printf("rebuildCombinerData: Zone %s: agent %s's %s is left out: not among the providers handed for it",
+							mpzd.ZoneName, agentID, dns.TypeToString[rrtype])
+					}
+					continue
+				}
+				if rrtype == dns.TypeCSYNC {
+					// one CSYNC per owner, whoever sent the others: also
+					// for what an earlier build left in the store
+					if serve, ok := mpzd.csyncToServe(owner); ok && serve.sender == agentID {
+						merged[owner][rrtype] = []dns.RR{serve.rr}
+					}
+					continue
+				}
 				merged[owner][rrtype] = append(merged[owner][rrtype], rrset.RRs...)
 				if mpzd.Debug {
 					mpzd.Logger.Printf("rebuildCombinerData: Zone %s: agent %s contributes %d %s RRs for owner %q",

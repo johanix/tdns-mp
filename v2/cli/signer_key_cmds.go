@@ -81,17 +81,40 @@ zone tdns's own rollover and policy commands refuse and name these.`,
 	}
 	policy := &cobra.Command{
 		Use:   "policy",
-		Short: "The policy the state machine applies; --set binds another",
-		Long: `Without --set, the owner's policy fields as the state machine applies them
+		Short: "The policy the state machine applies; --set binds another, --ksk-algorithm and --zsk-algorithm start an algorithm rollover",
+		Long: `Without flags, the owner's policy fields as the state machine applies them
 (algorithms, lifetimes, standby counts, propagation delay, withdrawal
 margin, resend interval). With --set NAME, binds tdns's DNSSEC policy NAME
 to the zone on the owner's behalf: lifetimes, standby counts and margin
 follow at once. A policy that changes the mode, an algorithm or the DS
-model is refused: that is a rollover, not a binding.`,
+model is refused: that is a rollover, not a binding.
+
+With --ksk-algorithm or --zsk-algorithm, changes the owner's algorithm for
+the role, which starts an algorithm rollover by the state machine: a key
+of the new algorithm is minted, distributed to the other signing providers,
+published and propagated, and signs beside the old one; a new KSK signs
+only once the parent has served its DS for the DS TTL; the old KSK then goes
+on signing with its DS withdrawn until the parent has not served that DS for
+the DS TTL, and retires; the old ZSK keeps signing until the KSK side is done,
+or, in a ZSK-only rollover, for a signature lifetime beside its successor.
+The old keys then leave as any retired key. signer key status shows the
+step; signer key rollover cancel takes the algorithm back while nothing of
+the new algorithm signs.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			if name := mustFlag(cmd, "set"); name != "" {
 				resp := signerKeyPost(cmd, tdnsmp.SignerKeyPost{Command: "policy-set", Zone: signerKeyZone(cmd), Policy: name})
 				fmt.Println(resp.Msg)
+				return
+			}
+			changed := false
+			for _, role := range []string{"KSK", "ZSK"} {
+				if alg := mustFlag(cmd, strings.ToLower(role)+"-algorithm"); alg != "" {
+					resp := signerKeyPost(cmd, tdnsmp.SignerKeyPost{Command: "policy-algorithm", Zone: signerKeyZone(cmd), Role: role, Algorithm: alg})
+					fmt.Println(resp.Msg)
+					changed = true
+				}
+			}
+			if changed {
 				return
 			}
 			resp := signerKeyPost(cmd, tdnsmp.SignerKeyPost{Command: "policy", Zone: signerKeyZone(cmd)})
@@ -99,6 +122,8 @@ model is refused: that is a rollover, not a binding.`,
 		},
 	}
 	policy.Flags().String("set", "", "Name of the DNSSEC policy to bind")
+	policy.Flags().String("ksk-algorithm", "", "The KSK algorithm, by name (ED25519, ECDSAP256SHA256, ...): a change starts an algorithm rollover")
+	policy.Flags().String("zsk-algorithm", "", "The ZSK algorithm, by name: a change starts an algorithm rollover")
 	zones := &cobra.Command{
 		Use:   "zones",
 		Short: "The zones whose key lifecycle tdns-mp runs",
@@ -198,6 +223,9 @@ func printSignerKeyStatus(st *tdnsmp.KeyLifecycleStatus) {
 		others = "none (alone: no confirmations awaited)"
 	}
 	fmt.Printf("Zone %s: policy %q; other signing providers: %s\n", st.Zone, st.PolicyName, others)
+	if st.Paused != "" {
+		fmt.Printf("%s; they resume when the owner removes its HSYNC3 record\n", st.Paused)
+	}
 	rows := []string{"KeyID|Role|Alg|State|Pub|Sign|DS|Published|Active|Retired"}
 	for _, k := range st.Keys {
 		rows = append(rows, fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%s", k.KeyId, k.Role, dns.AlgorithmToString[k.Algorithm], k.State,
@@ -224,6 +252,9 @@ func printSignerKeyStatus(st *tdnsmp.KeyLifecycleStatus) {
 		r := append([]string(nil), st.Rollovers...)
 		sort.Strings(r)
 		fmt.Printf("\nRollover requested: %s\n", strings.Join(r, ", "))
+	}
+	for _, roll := range st.AlgorithmRollovers {
+		fmt.Printf("\nAlgorithm rollover: %s %s to %s: %s\n", roll.Role, dns.AlgorithmToString[roll.From], dns.AlgorithmToString[roll.To], roll.Step)
 	}
 }
 

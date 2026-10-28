@@ -20,6 +20,7 @@ import (
 	"github.com/miekg/dns"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // AuditZoneSummary is the JSON shape returned by /auditor "zones"
@@ -63,7 +64,7 @@ func markLocalAuditors(localIdentity string, out []AuditProviderSummary) {
 	}
 	localIdentity = dns.Fqdn(localIdentity)
 	for i := range out {
-		if out[i].Identity != "" && strings.EqualFold(dns.Fqdn(out[i].Identity), localIdentity) {
+		if out[i].Identity != "" && core.EqualNames(dns.Fqdn(out[i].Identity), localIdentity) {
 			out[i].Local = true
 		}
 	}

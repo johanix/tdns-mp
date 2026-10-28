@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -31,6 +32,27 @@ type MPKeyLifecycleOwner struct {
 	// signer does not own: the DS set computed from the signing providers'
 	// key states (design Amendment 2). nil on every other role.
 	computed func(zone string, digest uint8) (tdns.DSIntent, error)
+	// withheld is the agent's check on the DS set its own signer's
+	// inventory gives: it names a DS that the key states another signing
+	// provider's agent sent this agent put at the parent, and the inventory
+	// leaves out (tdns-mp #207). nil on every other role.
+	withheld func(zone string, inv []tdns.KeyInventoryItem) string
+	// configured is the signer's side: the zones its config hands to the
+	// machine (key-lifecycle-zones), read at every call. Such a zone is
+	// owned from the signer's start, taken or not, once it has keys to
+	// sign with (#191). nil on every other role.
+	configured func() []string
+	// released are the zones the engine gave back to tdns's own machine
+	// (this provider is not one of the zone's signers), until the next take.
+	released map[string]bool
+}
+
+// SetConfiguredZones installs the signer's key-lifecycle-zones; the
+// signer's start does this, before any engine runs, no other role.
+func (o *MPKeyLifecycleOwner) SetConfiguredZones(f func() []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.configured = f
 }
 
 // SetComputedDSSource installs the agent's computed DS set (Amendment 2);
@@ -47,10 +69,24 @@ func (o *MPKeyLifecycleOwner) computedSource() func(zone string, digest uint8) (
 	return o.computed
 }
 
+// SetForeignDSCheck installs the agent's check on the DS set from its own
+// signer's inventory; the agent's start does this, no other role.
+func (o *MPKeyLifecycleOwner) SetForeignDSCheck(f func(zone string, inv []tdns.KeyInventoryItem) string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.withheld = f
+}
+
+func (o *MPKeyLifecycleOwner) foreignDSCheck() func(zone string, inv []tdns.KeyInventoryItem) string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.withheld
+}
+
 // NewMPKeyLifecycleOwner: keyDB is looked up at call time, since the
 // keystore does not exist when the owner registers.
 func NewMPKeyLifecycleOwner(keyDB func() *tdns.KeyDB) *MPKeyLifecycleOwner {
-	return &MPKeyLifecycleOwner{owned: map[string]bool{}, keyDB: keyDB, inv: map[string]*KeyInventorySnapshot{}}
+	return &MPKeyLifecycleOwner{owned: map[string]bool{}, keyDB: keyDB, inv: map[string]*KeyInventorySnapshot{}, released: map[string]bool{}}
 }
 
 // SetInventory records the signer's latest inventory for a zone on the
@@ -59,32 +95,35 @@ func (o *MPKeyLifecycleOwner) SetInventory(zone string, snap *KeyInventorySnapsh
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if snap == nil {
-		delete(o.inv, dns.Fqdn(zone))
+		delete(o.inv, lifecycleZoneName(zone))
 		return
 	}
-	o.inv[dns.Fqdn(zone)] = snap
+	o.inv[lifecycleZoneName(zone)] = snap
 }
 
 func (o *MPKeyLifecycleOwner) inventoryOf(zone string) *KeyInventorySnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.inv[dns.Fqdn(zone)]
+	return o.inv[lifecycleZoneName(zone)]
 }
 
 func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
 
 // Take makes the owner run zone's key lifecycle from now on; Release hands
-// it back to tdns's own machine. This is the per-zone rollout of S3.
+// it back to tdns's own machine, a configured zone too, until it is taken
+// again. This is the per-zone rollout of S3.
 func (o *MPKeyLifecycleOwner) Take(zone string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.owned[dns.Fqdn(zone)] = true
+	o.owned[lifecycleZoneName(zone)] = true
+	delete(o.released, lifecycleZoneName(zone))
 }
 
 func (o *MPKeyLifecycleOwner) Release(zone string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	delete(o.owned, dns.Fqdn(zone))
+	delete(o.owned, lifecycleZoneName(zone))
+	o.released[lifecycleZoneName(zone)] = true
 }
 
 // Zones lists the zones the owner runs.
@@ -98,13 +137,14 @@ func (o *MPKeyLifecycleOwner) Zones() []string {
 	return out
 }
 
-// Owns: taken, and a multi-provider zone (tdns asks the same; a zone that
-// is not one keeps tdns's machine, whatever the configuration says).
+// Owns: a multi-provider zone (tdns asks the same; a zone that is not one
+// keeps tdns's machine, whatever the configuration says) whose keys are run
+// here (runsKeys), or, on the agent, whose DS answer is computed here.
 // taken: taken by name (the loaded zone's options are Owns's business).
 func (o *MPKeyLifecycleOwner) taken(zone string) bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.owned[dns.Fqdn(zone)]
+	return o.owned[lifecycleZoneName(zone)]
 }
 
 func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
@@ -123,21 +163,66 @@ func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
 }
 
 // runsKeys: somebody here runs the zone's key lifecycle. Taken (the
-// signer's machine), or the agent's own signer says so with its inventory.
-// This is the answer the pre-S5 CDS rule of the syncher wants
+// signer's machine); named in the signer's key-lifecycle-zones with keys
+// to sign with, taken or not; or the agent's own signer says so with its
+// inventory. This is the answer the pre-S5 CDS rule of the syncher wants
 // (syncherPublishesDNSKEYCDS): a zone whose keys are computed about, not
 // run, keeps that rule.
+//
+// A named zone is the machine's from the signer's start (#191), not from
+// the take: the take waits for the zone's first load to bind its policy,
+// and until then tdns's key worker would mint by tdns's policy and its
+// signing path would check the stored keys against it, which mid-way
+// through an algorithm rollover refuses to sign. The take only starts the
+// driver. A named zone without the keys to sign has never been signed:
+// its first keys are tdns's, minted when its policy binds (the machine
+// adopts them at the take), and it is owned from the moment they exist.
+// Owned before that, tdns's first bind would find no key to sign with,
+// undo the binding, and the zone would never be taken.
 func (o *MPKeyLifecycleOwner) runsKeys(zd *tdns.ZoneData) bool {
 	if zd == nil || !zd.Options[tdns.OptMultiProvider] {
 		return false
 	}
+	zone := lifecycleZoneName(zd.ZoneName)
 	o.mu.RLock()
-	defer o.mu.RUnlock()
-	if o.owned[dns.Fqdn(zd.ZoneName)] {
+	taken, released, configured, snap := o.owned[zone], o.released[zone], o.configured, o.inv[zone]
+	o.mu.RUnlock()
+	if taken || (snap != nil && snap.Owned) {
 		return true
 	}
-	snap := o.inv[dns.Fqdn(zd.ZoneName)]
-	return snap != nil && snap.Owned
+	if released || configured == nil || !namedZone(zone, configured()) {
+		return false
+	}
+	return o.hasSigningKeys(zone)
+}
+
+// lifecycleZoneName is the key the owner, the engine and the rollout gate file a
+// zone under: the FQDN with US-ASCII A-Z lowercased, as tdns keys its
+// zones (core.CanonicalizeName; RFC 4343, every other octet as it is). A
+// key-lifecycle-zones entry names its zone whatever its case.
+func lifecycleZoneName(zone string) string { return core.CanonicalizeName(dns.Fqdn(zone)) }
+
+// namedZone: zone (a lifecycleZoneName) is in names, whatever their case.
+func namedZone(zone string, names []string) bool {
+	for _, n := range names {
+		if core.EqualNames(dns.Fqdn(n), zone) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSigningKeys: the keystore holds an active KSK and ZSK of zone (a
+// lone KSK counts as both, as a CSK), the test tdns's signing path makes
+// before it signs an owned zone; anything less it reads as "not yet". A
+// keystore that cannot be read says no.
+func (o *MPKeyLifecycleOwner) hasSigningKeys(zone string) bool {
+	kdb := o.keyDB()
+	if kdb == nil {
+		return false
+	}
+	dak, err := kdb.GetDnssecKeys(zone, tdns.DnskeyStateActive)
+	return err == nil && dak != nil && len(dak.KSKs) > 0 && len(dak.ZSKs) > 0
 }
 
 // Command names the tdns-mpcli command that replaces a tdns lifecycle verb
@@ -173,8 +258,19 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 	var inv []tdns.KeyInventoryItem
 	snap := o.inventoryOf(zd.ZoneName)
 	if computed := o.computedSource(); snap != nil && snap.Owned {
-		// the agent: its own signer's inventory, own and foreign rows alike
+		// the agent: its own signer's inventory, own and foreign rows
+		// alike, as long as it leaves out no DS that the key states from
+		// another signing provider's agent put at the parent. Another
+		// provider's DS goes when those key states drop it, not when one
+		// inventory lacks its key (tdns-mp #207): until the two agree the
+		// set is unknown, and the parent's DS is left alone.
 		inv = snap.Inventory
+		if check := o.foreignDSCheck(); check != nil {
+			if why := check(zd.ZoneName, inv); why != "" {
+				lgEngine.Warn("the DS set from the signer's inventory is held back; the parent's DS is left as it is", "zone", zd.ZoneName, "why", why)
+				return tdns.DSIntent{}, nil
+			}
+		}
 	} else if computed != nil {
 		// the agent, for a zone its own signer does not own: what the
 		// signing providers said (Amendment 2). An inventory that is not
@@ -226,7 +322,8 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 }
 
 // RegisterMPKeyLifecycleOwner installs the owner with tdns, owning no zone
-// yet; Take moves a zone onto tdns-mp's machine. It registers the flags of
+// yet; the signer's start names its configured zones (SetConfiguredZones)
+// and Take moves a zone onto tdns-mp's machine. It registers the flags of
 // the owner's three states with tdns's flag table as well: a foreign row is
 // inserted through tdns's one insert without naming its columns, and tdns's
 // invariant check wants every state in the store known. tdns carries the
