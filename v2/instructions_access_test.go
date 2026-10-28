@@ -237,6 +237,22 @@ func TestAnAuditorIsFoundByItsIdentityInAnyCase(t *testing.T) {
 	}
 }
 
+// One identity under a signer's label and an auditor's that sorts first (an
+// owner error): its DNSKEYs are taken, and its label is the signer's.
+func TestAnIdentityUnderTwoLabelsIsTakenByItsRole(t *testing.T) {
+	records := append(acRecords("", `serial="7" servers="alpha,beta" signers="alpha" auditors="aaa"`), `3600 IN HSYNC3 ON aaa `+acAlpha+` .`)
+	mpzd := instrTestZone(t, "twolabels.access.example.", records...)
+	if refused, why := mpzd.checkDNSKEYPolicy(acAlpha); refused {
+		t.Errorf("checkDNSKEYPolicy refused alpha, a signer also under aaa: %s", why)
+	}
+	if label, ok := mpzd.labelOf(acAlpha); !ok || label != "alpha" {
+		t.Errorf("labelOf(%s) = %q, %v; want the signer's alpha", acAlpha, label, ok)
+	}
+	if refused, _ := mpzd.checkDNSKEYPolicy(acBeta); !refused {
+		t.Error("checkDNSKEYPolicy took beta's DNSKEY, a server only")
+	}
+}
+
 // An identity under an auditor's label and a server's label alike (an owner
 // error) is a provider, whichever label sorts first.
 func TestAnIdentityThatAlsoServesIsNoAuditor(t *testing.T) {
