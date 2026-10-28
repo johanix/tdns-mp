@@ -49,6 +49,8 @@ func syncAppMessage(req *PeerSyncRequest, peerID string) (*transport.AppMessage,
 		},
 		DistributionID: req.DistributionID,
 		CatchUp:        req.CatchUp,
+		Acting:         req.Acting,
+		Instr:          req.Instr,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -86,8 +88,10 @@ func syncResponseFromApp(req *PeerSyncRequest, resp *transport.AppResponse) *Pee
 // sent without an ID (most RFIs) carries none.
 type syncWirePayload struct {
 	*core.AgentMsgPost
-	DistributionID string   `json:"distribution_id,omitempty"`
-	CatchUp        *CatchUp `json:"catch_up,omitempty"`
+	DistributionID string          `json:"distribution_id,omitempty"`
+	CatchUp        *CatchUp        `json:"catch_up,omitempty"`
+	Acting         *ActingHandover `json:"acting,omitempty"`
+	Instr          *MsgStamp       `json:"instr,omitempty"` // the sender's stamp (S5b)
 }
 
 // keystateWirePayload is the KEYSTATE message as it goes on the wire:
@@ -142,10 +146,13 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 
 // editsAppMessage mirrors DNSTransport.Edits (core.AgentEditsPost).
 func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessage, error) {
-	// core.AgentEditsPost has no nonce; the answer carries the RFI's.
+	// core.AgentEditsPost has no nonce; the answer carries the RFI's. Nor
+	// the hand-over the combiner holds (S10).
 	payload := &struct {
 		core.AgentEditsPost
-		Nonce string `json:"nonce,omitempty"`
+		Nonce  string          `json:"nonce,omitempty"`
+		Acting *ActingHandover `json:"acting,omitempty"`
+		Instr  *MsgStamp       `json:"instr,omitempty"` // the sender's stamp (S5b)
 	}{
 		AgentEditsPost: core.AgentEditsPost{
 			MessageType:  core.AgentMsgEdits,
@@ -156,7 +163,9 @@ func editsAppMessage(req *PeerEditsRequest, peerID string) (*transport.AppMessag
 			Message:      req.Message,
 			Time:         req.Timestamp,
 		},
-		Nonce: req.Nonce,
+		Nonce:  req.Nonce,
+		Acting: req.Acting,
+		Instr:  req.Instr,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -170,7 +179,8 @@ func configAppMessage(req *PeerConfigRequest, peerID string) (*transport.AppMess
 	// core.AgentConfigPost has no nonce; the answer carries the RFI's.
 	payload := &struct {
 		core.AgentConfigPost
-		Nonce string `json:"nonce,omitempty"`
+		Nonce string    `json:"nonce,omitempty"`
+		Instr *MsgStamp `json:"instr,omitempty"` // the sender's stamp (S5b)
 	}{
 		AgentConfigPost: core.AgentConfigPost{
 			MessageType:  core.AgentMsgConfig,
@@ -183,6 +193,7 @@ func configAppMessage(req *PeerConfigRequest, peerID string) (*transport.AppMess
 			Time:         req.Timestamp,
 		},
 		Nonce: req.Nonce,
+		Instr: req.Instr,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -196,7 +207,8 @@ func auditAppMessage(req *PeerAuditRequest, peerID string) (*transport.AppMessag
 	// core.AgentAuditPost has no nonce; the answer carries the RFI's.
 	payload := &struct {
 		core.AgentAuditPost
-		Nonce string `json:"nonce,omitempty"`
+		Nonce string    `json:"nonce,omitempty"`
+		Instr *MsgStamp `json:"instr,omitempty"` // the sender's stamp (S5b)
 	}{
 		AgentAuditPost: core.AgentAuditPost{
 			MessageType:  core.AgentMsgAudit,
@@ -208,6 +220,7 @@ func auditAppMessage(req *PeerAuditRequest, peerID string) (*transport.AppMessag
 			Time:         req.Timestamp,
 		},
 		Nonce: req.Nonce,
+		Instr: req.Instr,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -259,6 +272,7 @@ func (tm *MPTransportBridge) sendKeystate(ctx context.Context, peer *transport.P
 }
 
 func (tm *MPTransportBridge) sendEdits(ctx context.Context, peer *transport.Peer, req *PeerEditsRequest) (*PeerEditsResponse, error) {
+	req.Instr = tm.stamps.messageStamp(req.Zone) // stamped when sent (rule 6)
 	msg, err := editsAppMessage(req, peer.ID)
 	resp, err := tm.sendAppDNS(ctx, peer, msg, err)
 	if err != nil {
@@ -303,6 +317,13 @@ func (tm *MPTransportBridge) sendAnswer(ctx context.Context, mechanism string, p
 // sendConfig sends a CONFIG answer on mechanism first, the one the RFI
 // CONFIG arrived on (sendAnswer).
 func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerConfigRequest) (*PeerConfigResponse, error) {
+	req.Instr = tm.stamps.messageStamp(req.Zone) // stamped when sent (rule 6)
+	if req.DistributionID == "" {
+		// named here rather than by the transport, so that the send's stamp
+		// is recorded under it
+		req.DistributionID = transport.GenerateDistributionID()
+	}
+	tm.stamps.sent(req.DistributionID, peer.ID, req.Zone, req.Instr)
 	msg, err := configAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
@@ -324,6 +345,7 @@ func (tm *MPTransportBridge) sendConfig(ctx context.Context, peer *transport.Pee
 // sendAudit sends an AUDIT answer on mechanism first, the one the RFI AUDIT
 // arrived on (sendAnswer).
 func (tm *MPTransportBridge) sendAudit(ctx context.Context, peer *transport.Peer, mechanism string, req *PeerAuditRequest) (*PeerAuditResponse, error) {
+	req.Instr = tm.stamps.messageStamp(req.Zone) // stamped when sent (rule 6)
 	msg, err := auditAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err

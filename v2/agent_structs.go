@@ -347,9 +347,11 @@ type AgentMsgPost struct {
 	RfiSubtype     string
 	DistributionID string
 	Nonce          string
+	Instr          *MsgStamp `json:"instr,omitempty"` // the sender's stamp of the zone, as the message carried it (S5b)
 	ZoneClass      string
 	Publish        *core.PublishInstruction
-	CatchUp        *CatchUp `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
+	CatchUp        *CatchUp        `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
+	Acting         *ActingHandover `json:"acting,omitempty"`   // a hand-over from the combiner's agent (S10)
 }
 
 type AgentMsgPostPlus struct {

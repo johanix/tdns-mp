@@ -341,6 +341,12 @@ zones:
 where transfers are authenticated; `downstreams` lists who
 may transfer the zone from this server.
 
+`agents:` lists exactly one agent, the provider's own. The
+combiner acts by the zone's instructions as that agent hands
+them to it, not by its own copy of the zone, and it refuses
+to start with more than one agent ("a multi-provider combiner
+has more than one agent").
+
 ### 4.3 Signer Configuration
 
 `/etc/tdns/tdns-mpsigner.yaml`:

@@ -277,7 +277,14 @@ type ParentSyncStatus struct {
 	// DSSet is "known", or "unknown, waiting for" whom, for a zone that
 	// names a signer. Empty for one that names none.
 	DSSet string `json:"ds_set,omitempty"`
+	// InstructionMembers is what each member tells of the zone's
+	// instructions, this agent first (instr_stamp.go); nil when it keeps
+	// none.
+	InstructionMembers []MemberInstructions `json:"instruction_members,omitempty"`
 	// Instructions is what the agent keeps of the zone's instructions
 	// (instructions_store.go); nil when it keeps none.
 	Instructions *InstructionsStatus `json:"instructions,omitempty"`
+	// Combiner is what the agent knows its combiner acts by for the zone
+	// (the hand-over, plan S10); empty when it hands it nothing.
+	Combiner string `json:"combiner,omitempty"`
 }

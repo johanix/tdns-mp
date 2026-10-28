@@ -335,6 +335,13 @@ func (conf *Config) initMPCombiner(mp *MultiProviderConf) error {
 			return fmt.Errorf("InitCombinerEditTables: %w", err)
 		}
 	}
+	// What the agent handed (plan S10), read before the zones' first load,
+	// which reads it, as the stored contributions are.
+	acting, err := loadActingStore(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the hand-overs held: %w", err)
+	}
+	actingHeld.Store(acting)
 
 	// Register provider zone RR types from config
 	for i := range mp.ProviderZones {
@@ -627,6 +634,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		return fmt.Errorf("transport bridge (agent): %w", err)
 	}
 	tm.onKeyInventory = conf.noteKeyInventory
+	if err := conf.wireStamps(tm, mp, payloadCrypto != nil, true); err != nil {
+		return fmt.Errorf("the stamps (agent): %w", err)
+	}
 	conf.InternalMp.MPTransport = tm
 	// The catch-up tracker, before the refresh engine starts: a zone's
 	// first load asks through it.
@@ -757,6 +767,9 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	})
 	if err != nil {
 		return fmt.Errorf("transport bridge (auditor): %w", err)
+	}
+	if err := conf.wireStamps(tm, mp, payloadCrypto != nil, false); err != nil {
+		return fmt.Errorf("the stamps (auditor): %w", err)
 	}
 	conf.InternalMp.MPTransport = tm
 	conf.InternalMp.TransportManager = tm.TransportManager

@@ -307,12 +307,100 @@ func instructionsFor(zone ZoneName) *Instructions {
 }
 
 // activeOr is instructionsFor for a caller that holds the served apex of
-// the zone already: the store's active reading, or the reading of apex.
+// the zone already: the store's active reading; on the combiner, what its
+// agent handed it unless apex is newer (plan S10); or the reading of apex.
 func activeOr(zone string, apex *tdns.OwnerData) *Instructions {
 	if in := instrStore.Load().activeReading(dns.Fqdn(zone)); in != nil {
 		return in
 	}
+	if in := actingHeld.Load().reading(dns.Fqdn(zone), apex); in != nil {
+		return in
+	}
 	return readingOf(apex)
+}
+
+// instructionRecords are the instructions as HSYNC3 and HSYNCPARAM records
+// in presentation form, as a hand-over carries them (plan S10): every ON
+// record, every OFF label (whose other fields nothing reads), and the
+// HSYNCPARAM record when the reading has one. ReadInstructions of these
+// records gives the same digest.
+func (in *Instructions) instructionRecords(zone string) []string {
+	if in == nil {
+		return nil
+	}
+	zone = dns.Fqdn(zone)
+	out := in.hsync3Strings(zone)
+	if !in.HasParam {
+		return out
+	}
+	var keys []string
+	for _, l := range []struct {
+		key   string
+		items []string
+	}{{"servers", in.Servers}, {"signers", in.Signers}, {"auditors", in.Auditors}} {
+		if len(l.items) > 0 {
+			keys = append(keys, fmt.Sprintf("%s=%q", l.key, strings.Join(l.items, ",")))
+		}
+	}
+	// A value that is neither owner nor agent is kept as the octet it is
+	// (tdns reads any octet), in the key's generic form.
+	if s, ok := map[uint8]string{core.HsyncNSmgmtOWNER: "owner", core.HsyncNSmgmtAGENT: "agent"}[in.NSmgmt]; ok {
+		keys = append(keys, fmt.Sprintf("nsmgmt=%q", s))
+	} else {
+		keys = append(keys, fmt.Sprintf(`key3="\%03d"`, in.NSmgmt))
+	}
+	if s, ok := core.HsyncParentSyncToString[in.ParentSync]; ok {
+		keys = append(keys, fmt.Sprintf("parentsync=%q", s))
+	} else {
+		keys = append(keys, fmt.Sprintf(`key4="\%03d"`, in.ParentSync))
+	}
+	if in.Suffix != "" {
+		keys = append(keys, fmt.Sprintf("suffix=%q", in.Suffix))
+	}
+	if in.Pubkey {
+		keys = append(keys, "pubkey")
+	}
+	if in.Pubcds {
+		keys = append(keys, "pubcds")
+	}
+	if in.Serial != 0 {
+		keys = append(keys, fmt.Sprintf(`serial="%d"`, in.Serial))
+	}
+	return append(out, fmt.Sprintf("%s IN HSYNCPARAM %s", zone, strings.Join(keys, " ")))
+}
+
+// readInstructionRecords is the reading of a zone's HSYNC3 and HSYNCPARAM
+// records given in presentation form (instructionRecords). A record of
+// another type, or of another owner, is an error: a hand-over names nothing
+// else.
+func readInstructionRecords(zone string, records []string) (*Instructions, error) {
+	zone = dns.Fqdn(zone)
+	apex := &tdns.OwnerData{Name: zone, RRtypes: tdns.NewRRTypeStore()}
+	sets := map[uint16]*core.RRset{}
+	for _, s := range records {
+		rr, err := dns.NewRR(s)
+		if err != nil {
+			return nil, fmt.Errorf("record %q: %w", s, err)
+		}
+		if rr == nil {
+			continue
+		}
+		t := rr.Header().Rrtype
+		if t != core.TypeHSYNC3 && t != core.TypeHSYNCPARAM {
+			return nil, fmt.Errorf("record %q is neither HSYNC3 nor HSYNCPARAM", s)
+		}
+		if !core.EqualNames(rr.Header().Name, zone) {
+			return nil, fmt.Errorf("record %q is not at the zone's apex %s", s, zone)
+		}
+		if sets[t] == nil {
+			sets[t] = &core.RRset{Name: zone, RRtype: t, Class: dns.ClassINET}
+		}
+		sets[t].RRs = append(sets[t].RRs, rr)
+	}
+	for t, set := range sets {
+		apex.RRtypes.Set(t, *set) // mp-private: a hand-over's records read, not zone data
+	}
+	return ReadInstructions(apex)
 }
 
 // hsync3Strings are the instructions' HSYNC3 records as text, for display:
@@ -373,20 +461,26 @@ func readingOf(apex *tdns.OwnerData) *Instructions {
 // Provider is a provider as a set names it: its HSYNC3 label and its
 // identity, fixed when the step that made the set was taken (design 3.3).
 // Identity is "" for a label that no ON record carries.
-type Provider struct{ Label, Identity string }
+type Provider struct {
+	Label    string `json:"label"`
+	Identity string `json:"identity,omitempty"`
+}
 
 // Roles is what the parts act by for a zone: a set of providers per purpose
 // (design 3.5), and the settings that change only at a step (design 3.3).
+// An agent hands it to its combiner as it is (ActingHandover).
 type Roles struct {
-	Servers       []Provider // whose NS records are served
-	KeySigners    []Provider // whose DNSKEYs are published, whose foreign rows are kept
-	DSSigners     []Provider // whose KSKs have a DS, whose CDS records are published
-	KeyConfirmers []Provider // whose confirmations a key's distribution expects
-	Signing       []Provider // who signs
+	Servers       []Provider `json:"servers,omitempty"`        // whose NS records are served
+	KeySigners    []Provider `json:"key_signers,omitempty"`    // whose DNSKEYs are published, whose foreign rows are kept
+	DSSigners     []Provider `json:"ds_signers,omitempty"`     // whose KSKs have a DS, whose CDS records are published
+	KeyConfirmers []Provider `json:"key_confirmers,omitempty"` // whose confirmations a key's distribution expects
+	Signing       []Provider `json:"signing,omitempty"`        // who signs
 
-	Pubkey, Pubcds     bool  // the zone's KEY and CDS at the providers' _signal names
-	NSmgmt, ParentSync uint8 // owner or agent
-	Hold               bool  // nothing new starts (S6's freeze); false until then
+	Pubkey     bool  `json:"pubkey,omitempty"` // the zone's KEY and CDS at the providers' _signal names
+	Pubcds     bool  `json:"pubcds,omitempty"`
+	NSmgmt     uint8 `json:"nsmgmt"` // owner or agent
+	ParentSync uint8 `json:"parentsync"`
+	Hold       bool  `json:"hold,omitempty"` // nothing new starts (S6's freeze); false until then
 }
 
 // rolesFor is the sets for a step of the transition from `from` to `to`; at
@@ -426,6 +520,8 @@ func rolesForZone(zone ZoneName) Roles {
 	var r Roles
 	if from, to, step := instrStore.Load().transition(name); to != nil {
 		r = rolesFor(from, to, step)
+	} else if handed, ok := actingHeld.Load().roles(name, zoneApex(zone)); ok {
+		return handed
 	} else {
 		in := instructionsFor(zone)
 		r = rolesFor(in, in, 0)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // Clock is the machine's clock, injectable for the tests (test plan T3.0).
@@ -353,4 +354,36 @@ func Next(k KeyView, ev KeyEvent, z ZoneView) (string, *Transition) {
 		return t.To, t
 	}
 	return k.State, nil
+}
+
+// rolloverFlags are what the machine knows of a zone beside its key rows: a
+// rollover the operator asked for (RolloverRequested), an algorithm rollover
+// in flight (AlgRollInFlight), and a DNSKEY distribution of this provider's
+// that still waits for the other agents' confirmations.
+type rolloverFlags struct {
+	Requested, AlgRoll, PropagationPending bool
+}
+
+// rolloverUnderWay is the one predicate for "this provider has a key
+// rollover under way in the zone" (plan decision 62), read by the stamp
+// (S5a), and by the freeze, the thaw and the signer later (S6, S7, S11): an
+// own key in mpdist, published, retired or mpremove; an active KSK whose DS
+// withdrawal has started (an algorithm rollover, T10a, until T10b retires
+// it); or one of the flags. A key with no ds column (a sender from before
+// it) says nothing of its DS. Foreign keys are other providers'.
+func rolloverUnderWay(keys []tdns.KeyInventoryItem, f rolloverFlags) bool {
+	if f.Requested || f.AlgRoll || f.PropagationPending {
+		return true
+	}
+	for _, k := range keys {
+		switch k.State {
+		case KeyStateMpdist, KeyStatePublished, KeyStateRetired, KeyStateMpremove:
+			return true
+		case KeyStateActive:
+			if k.Flags&dns.SEP != 0 && k.DS != nil && !*k.DS {
+				return true
+			}
+		}
+	}
+	return false
 }

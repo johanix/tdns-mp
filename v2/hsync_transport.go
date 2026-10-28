@@ -50,6 +50,10 @@ type MPTransportBridge struct {
 	// catchUp is the agent's catch-up tracker (catchup.go), as
 	// conf.InternalMp.CatchUp; nil on every other role.
 	catchUp *catchUpTracker
+	// stamps is what the agent or the auditor tells of its zones'
+	// instructions in its beats, and what its members tell (instr_stamp.go);
+	// nil on the combiner and the signer.
+	stamps *stampTable
 
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
@@ -127,6 +131,11 @@ type MPTransportBridge struct {
 	// loudly (noteConfirmFallback).
 	confirmFallbackMu     sync.Mutex
 	confirmFallbackLogged map[string]time.Time
+
+	// handover is the agent's side of the hand-over to its combiner
+	// (acting_handover.go, plan S10), which EnqueueForCombiner's gate asks;
+	// nil on every other role and on an agent with no combiner.
+	handover *handoverTracker
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -438,12 +447,22 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	}
 
 	// Wire confirmation callback for reliable message queue and per-RR tracking
-	tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
+	tm.ChunkHandler.OnConfirmationReceived = func(c *transport.IncomingConfirmation) {
+		distributionID, senderID, status, zone := c.DistributionID, c.PeerID, c.Status, c.Zone
+		applied, removed, rejected, ignored := c.AppliedRecords, c.RemovedRecords, c.RejectedItems, c.IgnoredRecords
+		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", c.Nonce)
+		instr := confirmStamp(c.App) // the confirmer's stamp (S5b)
+		tm.noteConfirmation(c, instr)
 
 		if tm.ReliableQueue != nil {
 			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
+		}
+
+		// The combiner's word on a hand-over is the hand-over's alone, and
+		// its refusal of an update sent under another serial is not final:
+		// the update goes again (plan S10).
+		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) && tm.handover.confirmation(distributionID, status) {
+			return
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -464,7 +483,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 				RemovedRecords: removed,
 				RejectedItems:  rejItems,
 				IgnoredRecords: ignored,
-				Truncated:      truncated,
+				Truncated:      c.Truncated,
+				Instr:          instr,
 				Timestamp:      time.Now(),
 			}
 			select {
@@ -732,20 +752,35 @@ func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	// On an agent and an auditor a payload that names another sender than
 	// the one the transport established is refused first, before anything
 	// judges the message by that name (refuseNamedSender).
-	if tm.role == roleAgent || tm.role == roleAuditor {
-		tm.Router.Use(tm.refuseNamedSender)
+	for _, mw := range tm.routerMiddleware() {
+		tm.Router.Use(mw)
 	}
-	// On an agent a KEYSTATE is taken only from its own signer, and on a
-	// signer only from its own agents (refuseForeignKeystate).
-	if tm.role == roleAgent || tm.role == roleSigner {
-		tm.Router.Use(tm.refuseForeignKeystate)
-	}
-	tm.Router.Use(tm.keyHandOverGate)
 	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
 		tm.routeIncomingMessage(msg)
 	}))
 
 	lgTransport.Info("incoming message router registered via RouteToCallback")
+}
+
+// routerMiddleware is this role's middleware before the verb handlers, in
+// the order the router runs it: the refusals first, and what a message's
+// stamp tells noted only once every one of them has let it through
+// (noteMessageStamp): a refused message changes nothing.
+func (tm *MPTransportBridge) routerMiddleware() []transport.MiddlewareFunc {
+	var mws []transport.MiddlewareFunc
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		mws = append(mws, tm.refuseNamedSender)
+	}
+	// On an agent a KEYSTATE is taken only from its own signer, and on a
+	// signer only from its own agents (refuseForeignKeystate).
+	if tm.role == roleAgent || tm.role == roleSigner {
+		mws = append(mws, tm.refuseForeignKeystate)
+	}
+	mws = append(mws, tm.keyHandOverGate)
+	if tm.role == roleAgent || tm.role == roleAuditor {
+		mws = append(mws, tm.noteMessageStamp)
+	}
+	return mws
 }
 
 // messageMechanism is the mechanism a message arrived on, as the pipeline
@@ -948,7 +983,16 @@ func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	if len(payload.Gossip) > 0 && tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
 		var gossipMsgs []GossipMessage
 		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
+			// the sender's stamps, first hand, before the groups' rows
 			for i := range gossipMsgs {
+				if gossipMsgs[i].GroupHash == stampGroupHash {
+					tm.stamps.note(&gossipMsgs[i], senderID, mech)
+				}
+			}
+			for i := range gossipMsgs {
+				if gossipMsgs[i].GroupHash == stampGroupHash {
+					continue
+				}
 				var group *ProviderGroup
 				if pgm := tm.agentRegistry.ProviderGroupManager; pgm != nil {
 					group = pgm.GetGroup(gossipMsgs[i].GroupHash)
@@ -1158,9 +1202,11 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			RfiSubtype:     payload.RfiSubtype,     // Include RfiSubtype for CONFIG RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
+			Instr:          payload.Instr,
 			ZoneClass:      payload.ZoneClass,
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
+			Acting:         payload.Acting,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -1306,6 +1352,7 @@ func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 		Zone:         payload.Zone,
 		AgentRecords: payload.AgentRecords,
 		Message:      payload.Message,
+		Acting:       payload.Acting,
 	}
 
 	if tm.msgQs.editsWaiters.deliver(rfiWaitKey(senderID, payload.Zone, "", payload.Nonce), editsMsg) {
@@ -1701,6 +1748,9 @@ func logConfirmationReceived(ctx *transport.MessageContext, next transport.Messa
 // cleared (#236). A confirmation sent is logged with the mechanism that
 // carried it.
 func (tm *MPTransportBridge) confirmOn(ctx context.Context, mechanism string, peer *transport.Peer, req *transport.ConfirmRequest) error {
+	if req.App == nil {
+		req.App = tm.stamps.confirmAppFor(req.Zone) // the confirmer's stamp, when sent (S5b)
+	}
 	_, out, err := tm.TransportManager.SendOn(ctx, peer, mechanism, req)
 	if out.First != "" && out.First != mechanism {
 		lgTransport.Debug("the sync's mechanism is not known or does not reach the peer; the confirmation goes by what the peer offers",
@@ -1763,6 +1813,10 @@ func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *tra
 	// C2: the wire payload is built here (syncAppMessage, the same
 	// core.AgentMsgPost the typed DNSTransport.Sync marshalled) and
 	// travels as one opaque AppMessage; the manager picks the mechanism.
+	// The stamp is set here, at every send: a resend carries its own
+	// (rule 6).
+	req.Instr = tm.stamps.messageStamp(req.Zone)
+	tm.stamps.sent(req.DistributionID, peer.ID, req.Zone, req.Instr)
 	msg, err := syncAppMessage(req, peer.ID)
 	if err != nil {
 		return nil, err
@@ -1910,14 +1964,19 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	apiMethod, dnsMethod := agent.ApiMethod, agent.DnsMethod
 	agent.Mu.RUnlock()
 
-	// Build gossip for this peer
+	// Build gossip for this peer, and this agent's stamps, which ride in its
+	// beats only: an answer's would count for nothing (design rule 4)
 	var gossipData json.RawMessage
+	var beatGossip []GossipMessage
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
-		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+		beatGossip = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
 			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
-		if len(gossipMsgs) > 0 {
-			gossipData, _ = json.Marshal(gossipMsgs)
-		}
+	}
+	if e := tm.stamps.entryFor(string(agent.ID)); e != nil {
+		beatGossip = append(beatGossip, *e)
+	}
+	if len(beatGossip) > 0 {
+		gossipData, _ = json.Marshal(beatGossip)
 	}
 
 	// The state we report in the beat is what the transport's per-mechanism
@@ -2011,6 +2070,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 			var gossipMsgs []GossipMessage
 			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
 				for i := range gossipMsgs {
+					if gossipMsgs[i].GroupHash == stampGroupHash {
+						// an answer's stamps count for nothing (rule 4)
+						lgGossip.Debug("a stamp in the answer to a beat is not noted", "peer", peer.ID)
+						continue
+					}
 					// the answer of the peer that was beaten: rows only
 					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
 					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i], string(agent.ID), pg, true)
@@ -2155,13 +2219,15 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 			if update.Publish != nil {
 				syncReq.Publish = update.Publish
 			}
+			syncReq.Acting = update.Acting
 		}
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
-	// Forward per-RR detail from inline confirmation to SynchedDataEngine (combiner only)
-	if isCombiner && syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
+	// Forward per-RR detail from inline confirmation to SynchedDataEngine
+	// (combiner only; a hand-over has none, and is the tracker's)
+	if isCombiner && syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil && (update == nil || update.Acting == nil) {
 		var rejItems []RejectedItemInfo
 		for _, ri := range syncResp.RejectedItems {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
@@ -2192,7 +2258,31 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 // Called by SynchedDataEngine when a zone update needs to reach the combiner.
 // If distID is non-empty, it is used as the distribution ID; otherwise a new one is generated.
 // Returns the distributionID for tracking and any error.
+//
+// Nothing goes to the combiner under a serial and step it has not confirmed
+// holding (plan S10): an update for a zone whose combiner does not hold what
+// this agent hands it waits, in order, and goes out once it does
+// (handoverTracker.gate).
 func (tm *MPTransportBridge) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+	if _, err := tm.getCombinerID(); err != nil {
+		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
+	}
+	if distID == "" {
+		distID = transport.GenerateDistributionID()
+	}
+	if waiting, err := tm.handover.gate(zone, update, distID); waiting || err != nil {
+		return distID, err
+	}
+	id, err := tm.enqueueToCombiner(zone, update, distID)
+	if err != nil {
+		tm.handover.unsent(distID) // not sent: no final word will come
+	}
+	return id, err
+}
+
+// enqueueToCombiner puts a message on the queue to the combiner, past the
+// hand-over's gate: the hand-over itself, and what the gate lets through.
+func (tm *MPTransportBridge) enqueueToCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
 		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
@@ -2374,6 +2464,9 @@ type PendingDnskeyPropagation struct {
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
+	// Stamps is each of ExpectedAgents' stamp in its latest confirmation
+	// (S5b); S8 judges an answer by it.
+	Stamps map[AgentId]*MsgStamp
 }
 
 // foldIntoResend lets the resend of keys (#256), tracked as resendID, take

@@ -211,6 +211,10 @@ func (e *Engine) mergeGossipFromBeat(report *InboundReport) {
 		return
 	}
 	for i := range abp.Gossip {
+		if abp.Gossip[i].GroupHash == StampGroupHash {
+			// the stamp entry is noted where the beat arrives, never merged
+			continue
+		}
 		var group *ProviderGroupInfo
 		if e.deps.ProviderGroups != nil {
 			group = e.deps.ProviderGroups.GetGroup(abp.Gossip[i].GroupHash)

@@ -46,6 +46,7 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 			}
 		}
 	}
+	info.Acting = combinerActingLine(mpzd)
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return info
@@ -107,6 +108,9 @@ type ZoneMPViewDTO struct {
 	// Instructions is what the auditor keeps of the zone's instructions,
 	// in the line `agent parentsync status` prints.
 	Instructions string `json:"instructions,omitempty"`
+	// InstructionMembers is what each member tells of them, first hand,
+	// the auditor first (instr_stamp.go).
+	InstructionMembers []MemberInstructions `json:"instruction_members,omitempty"`
 }
 
 func labelInRoleList(list []string, label string) bool {

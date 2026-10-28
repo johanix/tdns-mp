@@ -8,6 +8,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 
+	tdnsmp "github.com/johanix/tdns-mp/v2"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -26,7 +28,8 @@ func newAgentDistribCmd(kind string) *cobra.Command {
 		Short: "Manage distributions",
 		Long:  `Commands for managing distributions created by this agent, including listing distributions and purging completed distributions.`,
 	}
-	c.AddCommand(newAgentDistribListCmd(kind), newAgentDistribPurgeCmd(kind), newAgentDistribPeersCmd(kind), newAgentDistribOpCmd(kind), newAgentDistribDiscoverCmd(kind))
+	c.AddCommand(newAgentDistribListCmd(kind), newAgentDistribPurgeCmd(kind), newAgentDistribPeersCmd(kind), newAgentDistribOpCmd(kind), newAgentDistribDiscoverCmd(kind),
+		newAgentDistribStampsCmd(kind))
 	return c
 }
 
@@ -50,6 +53,69 @@ func newAgentDistribListCmd(kind string) *cobra.Command {
 	}
 	c.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 	return c
+}
+
+// newAgentDistribStampsCmd shows each distribution's stamps per recipient
+// (plan S5b): the agent's own at its latest send, the recipient's at its
+// latest confirmation.
+func newAgentDistribStampsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "stamps [--zone Z]",
+		Short: "Show each distribution's stamps per recipient: at its latest send, and in its latest confirmation",
+		Run: func(cmd *cobra.Command, args []string) {
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
+			zone, _ := cmd.Flags().GetString("zone")
+			_, buf, err := api.RequestNG("POST", "/agent/distrib", map[string]interface{}{"command": "stamps", "zone": zone}, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			var resp struct {
+				Error    bool                        `json:"error"`
+				ErrorMsg string                      `json:"error_msg"`
+				Data     []tdnsmp.DistributionStamps `json:"data"`
+			}
+			if err := json.Unmarshal(buf, &resp); err != nil {
+				log.Fatalf("Failed to parse response: %v", err)
+			}
+			if resp.Error {
+				log.Fatalf("Error: %s", resp.ErrorMsg)
+			}
+			printDistributionStamps(os.Stdout, resp.Data)
+		},
+	}
+	c.Flags().StringP("zone", "z", "", "Only the distributions of this zone")
+	return c
+}
+
+// printDistributionStamps prints the rows of `agent distrib stamps`: each
+// stamp as active/newest, "-" for none.
+func printDistributionStamps(w io.Writer, rows []tdnsmp.DistributionStamps) {
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "No distribution with stamps")
+		return
+	}
+	fmt.Fprintf(w, "%-12s  %-28s  %-9s  %-8s  %-9s  %-8s  %s\n", "Distribution", "Receiver", "Sent", "Sent at", "Confirmed", "Status", "Confirmed at")
+	for _, r := range rows {
+		status := r.Status
+		if status == "" {
+			status = "-"
+		}
+		fmt.Fprintf(w, "%-12s  %-28s  %-9s  %-8s  %-9s  %-8s  %s\n", termSafe(r.DistributionID), termSafe(r.Recipient),
+			activeNewest(r.Sent, r.SentNewest), clockOrDash(r.SentAt), activeNewest(r.Confirmed, r.ConfirmedNew),
+			termSafe(status), clockOrDash(r.ConfirmedAt))
+	}
+}
+
+// activeNewest is a stamp's active and newest serials, "41/42", "-" for no
+// stamp.
+func activeNewest(active, newest *tdnsmp.SerialDigest) string {
+	if active == nil && newest == nil {
+		return "-"
+	}
+	return serialOrDash(active) + "/" + serialOrDash(newest)
 }
 
 func newCombinerDistribListCmd(kind string) *cobra.Command {

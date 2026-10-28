@@ -203,6 +203,20 @@ var HsyncTables = map[string]string{
 		UNIQUE(zone, sender_id)
 	)`,
 
+	// MPActingSerial is what a combiner was handed for a zone by its agent
+	// (combiner_acting.go, plan S10): the serial it acts by, its digest, and
+	// the hand-over itself as JSON (the instructions as records, the step and
+	// its sets). Read before the zones' first load.
+	"MPActingSerial": `CREATE TABLE IF NOT EXISTS 'MPActingSerial' (
+		zonename  TEXT NOT NULL,
+		serial    INTEGER,
+		digest    TEXT DEFAULT '',
+		handover  TEXT NOT NULL DEFAULT '',
+		handed_by TEXT DEFAULT '',
+		since     TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
@@ -328,6 +342,13 @@ var HsyncTables = map[string]string{
 		ns_names  TEXT DEFAULT '',
 		since     TEXT DEFAULT '',
 		UNIQUE (zonename, label, identity)
+	)`,
+	// MPStampEpoch is the epoch of this agent's stamps (plan S5a), one row,
+	// raised at every start: its peers count its tellings only from its
+	// last start (design 3.4).
+	"MPStampEpoch": `CREATE TABLE IF NOT EXISTS 'MPStampEpoch' (
+		id     INTEGER PRIMARY KEY CHECK (id = 1),
+		epoch  INTEGER NOT NULL
 	)`,
 }
 
@@ -700,6 +721,7 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
+		"MPActingSerial",
 	}
 
 	for _, name := range combinerTables {
@@ -731,12 +753,13 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 }
 
 // InitInstructionTables creates only the tables of the zones' serials
-// (instructions_store.go). Called on the auditor's start, which keeps
-// serials as an agent does and creates none of the agent's other tables.
+// (instructions_store.go) and of the stamps' epoch (instr_stamp.go). Called
+// on the auditor's start, which keeps serials and tells stamps as an agent
+// does and creates none of the agent's other tables.
 func (hdb *HsyncDB) InitInstructionTables() error {
 	hdb.Lock()
 	defer hdb.Unlock()
-	for _, name := range []string{"MPZoneInstructions", "MPZoneRemovals"} {
+	for _, name := range []string{"MPZoneInstructions", "MPZoneRemovals", "MPStampEpoch"} {
 		if _, err := hdb.DB.Exec(HsyncTables[name]); err != nil {
 			return fmt.Errorf("failed to create table %s: %w", name, err)
 		}
