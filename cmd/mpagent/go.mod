@@ -23,7 +23,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
-	github.com/johanix/tdns-transport/v2 v2.0.0-20261028073109-8d6065382e74 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-20261028084232-850bb6b190af // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20261028082711-1217f95d13ba // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20261028082711-1217f95d13ba // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-20261028082711-1217f95d13ba // indirect
