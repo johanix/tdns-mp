@@ -445,20 +445,33 @@ func (in *Instructions) identityOf(label string) string {
 	return ""
 }
 
-// labelOf is the label of the ON record of one of the identities, and
-// whether there is one. An OFF record gives no label.
+// labelOf is the label of the ON record of one of the identities, compared
+// as DNS names, and whether there is one. An OFF record gives no label. When
+// the identities are under more than one label (one identity under two
+// labels is an owner error the auditor shows), a label in signers= wins,
+// then one in servers=, then the first in label order: every caller that
+// takes the label for a role then finds the role.
 func (in *Instructions) labelOf(identities ...string) (string, bool) {
 	if in == nil {
 		return "", false
 	}
+	best, rank := "", 0
 	for _, r := range in.Records {
-		for _, id := range identities {
-			if core.EqualNames(dns.Fqdn(id), r.Identity) {
-				return r.Label, true
-			}
+		if !slices.ContainsFunc(identities, func(id string) bool { return core.EqualNames(dns.Fqdn(id), r.Identity) }) {
+			continue
+		}
+		k := 1
+		switch {
+		case slices.Contains(in.Signers, r.Label):
+			k = 3
+		case slices.Contains(in.Servers, r.Label):
+			k = 2
+		}
+		if k > rank {
+			best, rank = r.Label, k
 		}
 	}
-	return "", false
+	return best, rank > 0
 }
 
 // has reports whether label is among the providers.

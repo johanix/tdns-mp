@@ -1745,22 +1745,21 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 	if len(signers) == 0 {
 		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
 	}
-	// The sender's label, from its ON record: an OFF record gives none.
-	senderLabel, listed := mpzd.labelOf(senderID)
-	if !listed {
+	// A signer by the set, which names each provider by label and identity:
+	// the sender is one when its identity is a signer's, whatever other
+	// label the same identity is under.
+	if slices.ContainsFunc(signers, func(p Provider) bool { return core.EqualNames(p.Identity, dns.Fqdn(senderID)) }) {
+		return false, ""
+	}
+	// An OFF record gives no label.
+	if _, listed := mpzd.labelOf(senderID); !listed {
 		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
 	}
-	// A signer by the set, which names each provider by label and identity.
-	if !slices.ContainsFunc(signers, func(p Provider) bool {
-		return p.Label == senderLabel && core.EqualNames(p.Identity, senderID)
-	}) {
-		var labels []string
-		for _, p := range signers {
-			labels = append(labels, p.Label)
-		}
-		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, labels)
+	var labels []string
+	for _, p := range signers {
+		labels = append(labels, p.Label)
 	}
-	return false, ""
+	return true, fmt.Sprintf("DNSKEY rejected: sender %s is not a signer (signers: %v)", senderID, labels)
 }
 
 // combinerReplaceOrigins records, per (zone, sender, rrtype), where the
