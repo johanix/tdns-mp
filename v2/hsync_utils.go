@@ -1731,14 +1731,26 @@ func catchUpReasons(a *ZoneRefreshAnalysis, from, to *Instructions, self AgentId
 	a.StandingAfter = standingIn(to, pAfter, after, string(self))
 	a.HsyncChanged = changed
 	a.NewVoters = nil
+	newVoter := func(id string) {
+		if !slices.Contains(a.NewVoters, AgentId(id)) {
+			a.NewVoters = append(a.NewVoters, AgentId(id))
+		}
+	}
+	// The identities newly among the voting members, as before S3: without
+	// HSYNCPARAM every ON record votes.
+	for _, id := range after {
+		if !isAmong(before, AgentId(id)) {
+			newVoter(id)
+		}
+	}
 	if from == nil || to == nil || !to.HasParam {
 		return
 	}
 	for _, list := range [][2][]string{{from.Servers, to.Servers}, {from.Signers, to.Signers}} {
 		was := identities(from.providers(list[0]))
 		for _, id := range identities(to.providers(list[1])) {
-			if !isAmong(was, AgentId(id)) && !slices.Contains(a.NewVoters, AgentId(id)) {
-				a.NewVoters = append(a.NewVoters, AgentId(id))
+			if !isAmong(was, AgentId(id)) {
+				newVoter(id)
 			}
 		}
 	}

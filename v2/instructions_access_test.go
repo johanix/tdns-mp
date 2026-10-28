@@ -419,6 +419,18 @@ func TestPeerRoleFiresForAProviderThatEntersAList(t *testing.T) {
 	}
 }
 
+// Without HSYNCPARAM every ON record votes: a provider whose record enters
+// is a new voter, and is asked as peer-role, as before S3.
+func TestPeerRoleFiresForANewRecordWithoutHSYNCPARAM(t *testing.T) {
+	from := readOf(t, acRecords("", "")...)
+	to := readOf(t, acRecords("ON", "")...)
+	a := &ZoneRefreshAnalysis{}
+	catchUpReasons(a, from, to, acAlpha, true)
+	if !slices.Equal(a.NewVoters, []AgentId{acGamma}) {
+		t.Errorf("new voters %v, want gamma, whose ON record entered a zone without HSYNCPARAM", a.NewVoters)
+	}
+}
+
 func TestZoneChangedRunsAtAnActiveChange(t *testing.T) {
 	asMPAgent(t)
 	logs := captureZonesLog(t)
