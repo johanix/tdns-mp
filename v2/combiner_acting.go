@@ -9,7 +9,8 @@
  * served and for a copy being analysed alike, so a refresh no longer moves
  * what the combiner acts by. A combiner handed nothing for a zone acts by
  * its own copy (rule 5): provisional for a copy that carries no serial, and
- * waiting for its agent for one that does.
+ * waiting for its agent for one that does. Until S7 a copy with a newer
+ * serial than the one handed is acted by (actsBy).
  */
 package tdnsmp
 
@@ -124,10 +125,30 @@ func (s *actingStore) get(zone string) (heldHandover, bool) {
 	return heldHandover{}, false
 }
 
-// reading is the instructions the combiner was handed for the zone; nil
-// when it holds none.
-func (s *actingStore) reading(zone string) *Instructions {
+// actsBy is the hand-over the combiner acts by for the zone, given the apex
+// of its own copy (the zone as served, or a copy being analysed): the one it
+// holds, unless that copy carries a newer serial (RFC 1982; a copy with no
+// serial is not newer). Until S7 the
+// agent's serial follows its own copy, which it takes from its signer, and
+// the signer from this combiner: at every edit the hand-over trails this
+// combiner's copy by two transfers, and in that gap the combiner acts by its
+// copy, as before S10. A combiner whose copy lags its agent's acts by the
+// agent's. S7, which gives the agent serials it refuses, removes the rule.
+func (s *actingStore) actsBy(zone string, apex *tdns.OwnerData) (heldHandover, bool) {
 	held, ok := s.get(zone)
+	if !ok {
+		return heldHandover{}, false
+	}
+	if own := readingOf(apex); own != nil && own.Serial != 0 && CompareSerial(own.Serial, held.handover.Serial) == 1 {
+		return heldHandover{}, false
+	}
+	return held, true
+}
+
+// reading is the instructions the combiner was handed for the zone and acts
+// by (actsBy); nil when it acts by the copy at apex.
+func (s *actingStore) reading(zone string, apex *tdns.OwnerData) *Instructions {
+	held, ok := s.actsBy(zone, apex)
 	if !ok {
 		return nil
 	}
@@ -135,9 +156,9 @@ func (s *actingStore) reading(zone string) *Instructions {
 }
 
 // roles are the sets the combiner was handed for the zone, and whether it
-// holds a hand-over.
-func (s *actingStore) roles(zone string) (Roles, bool) {
-	held, ok := s.get(zone)
+// acts by them (actsBy).
+func (s *actingStore) roles(zone string, apex *tdns.OwnerData) (Roles, bool) {
+	held, ok := s.actsBy(zone, apex)
 	if !ok {
 		return Roles{}, false
 	}
@@ -145,9 +166,9 @@ func (s *actingStore) roles(zone string) (Roles, bool) {
 }
 
 // signingSet is the handed set of who signs, as the signing set
-// populateMPdata reads (#275).
-func (s *actingStore) signingSet(zone string) (signingSet, bool) {
-	r, ok := s.roles(zone)
+// populateMPdata reads (#275), and whether the combiner acts by it.
+func (s *actingStore) signingSet(zone string, apex *tdns.OwnerData) (signingSet, bool) {
+	r, ok := s.roles(zone, apex)
 	if !ok {
 		return nil, false
 	}
@@ -289,7 +310,8 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	if !mpzd.Ready {
 		return
 	}
-	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName)
+	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName, apex)
 	if !ok {
 		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
 	}
@@ -379,6 +401,10 @@ func combinerActingLine(mpzd *MPZoneData) string {
 		return ""
 	}
 	if held, ok := s.get(mpzd.ZoneName); ok {
+		apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+		if _, acts := s.actsBy(mpzd.ZoneName, apex); !acts {
+			return fmt.Sprintf("by its own copy, serial %d, newer than the %s its agent handed at %s", readingOf(apex).Serial, held.handover, held.since.Format(time.TimeOnly))
+		}
 		return fmt.Sprintf("acting by %s, handed by its agent at %s", held.handover, held.since.Format(time.TimeOnly))
 	}
 	if !mpzd.waitsForHandover() {

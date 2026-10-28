@@ -132,6 +132,15 @@ func (mpzd *MPZoneData) signingProviders() []Provider {
 	return out
 }
 
+// actingSets are the sets a hand-over carries for the zone as mpzd reads
+// it: its roles, with the key, DS and signing sets its signing set (#275).
+func (mpzd *MPZoneData) actingSets() Roles {
+	r := mpzd.roles()
+	signing := mpzd.signingProviders()
+	r.KeySigners, r.DSSigners, r.Signing = signing, slices.Clone(signing), slices.Clone(signing)
+	return r
+}
+
 // wantedHandover is what this agent wants its combiner to act by for the
 // zone: the instructions it acts by (until S7 its copy's, S3's rule), the
 // store's newest serial, phase and step, and the step's sets. Until S13 the
@@ -153,9 +162,7 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 		return h
 	}
 	h.Serial, h.Digest, h.Records, h.Newest = in.Serial, in.Digest(), in.instructionRecords(zone), in.Serial
-	h.Sets = mpzd.roles()
-	signing := mpzd.signingProviders()
-	h.Sets.KeySigners, h.Sets.DSSigners, h.Sets.Signing = signing, slices.Clone(signing), slices.Clone(signing)
+	h.Sets = mpzd.actingSets()
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil {
 		h.Phase = st.Phase
 		if st.Newest != nil && CompareSerial(st.Newest.Serial, h.Newest) == 1 {
