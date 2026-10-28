@@ -400,8 +400,8 @@ func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 	case queued:
 		lgGossip.Info("a member tells newer instructions, fetching the zone", "zone", name, "member", m.Identity, "serial", st.Newest)
 	default:
-		// not fetched (the queue was full, or the zone is not here yet), so
-		// the next telling asks again
+		// not fetched (the queue was full, or the zone is not here, yet or
+		// any more), so the next telling asks again
 		t.mu.Lock()
 		if t.fetched[zone] == (fetchMark{serial: st.Newest, at: now}) {
 			if seen {
@@ -744,26 +744,30 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 
 // fetchZone asks a refresh of the zone's own copy, as a NOTIFY does: the
 // fetch of a serial a member tells (design 3.1). The zone is named in any
-// case. A full refresh queue drops it, and the next telling asks again.
+// case. Only a multi-provider zone tdns holds, with its type set, is
+// fetched: tdns's zones, not the wrappers Zones keeps, which outlive a zone
+// that left the configuration; and the refresh engine makes a zone of a
+// refresh for a name it does not hold. A full refresh queue drops it, and
+// the next telling asks again.
 func (conf *Config) fetchZone(zone string) (string, bool) {
-	mpzd, ok := Zones.Get(zone)
+	zd, ok := tdns.Zones.Get(zone)
 	if !ok {
-		for _, name := range Zones.Keys() {
+		for _, name := range tdns.Zones.Keys() {
 			if core.EqualNames(name, zone) {
-				mpzd, ok = Zones.Get(name)
+				zd, ok = tdns.Zones.Get(name)
 				break
 			}
 		}
 	}
-	if !ok || mpzd == nil || mpzd.ZoneData == nil {
+	if !ok || zd == nil || zd.ZoneType == 0 || !zd.Options[tdns.OptMultiProvider] {
 		return "", false
 	}
 	select {
-	case conf.Config.Internal.RefreshZoneCh <- tdns.ZoneRefresher{Name: mpzd.ZoneName, ZoneStore: mpzd.ZoneStore}:
-		return mpzd.ZoneName, true
+	case conf.Config.Internal.RefreshZoneCh <- tdns.ZoneRefresher{Name: zd.ZoneName, ZoneStore: zd.ZoneStore}:
+		return zd.ZoneName, true
 	default:
-		lgGossip.Warn("the refresh queue is full; the zone is fetched at a later telling", "zone", mpzd.ZoneName)
-		return mpzd.ZoneName, false
+		lgGossip.Warn("the refresh queue is full; the zone is fetched at a later telling", "zone", zd.ZoneName)
+		return zd.ZoneName, false
 	}
 }
 
