@@ -111,9 +111,9 @@ type PeerKeystateRequest struct {
 	NotSigning bool
 	Rollover   bool
 	WaitsOn    map[uint16][]string
-	// Hold: with Signal "hold", the agent's word to hold the zone's key
-	// machine (true) or to let it go; with Signal "inventory", the signer's
-	// word that it holds it (plan S6)
+	// Hold: with Signal "inventory", the signer's word that it holds the
+	// zone's key machine (plan S6); the agent's word is the hand-over's
+	// (Acting.Sets.Hold, S11)
 	Hold      bool
 	Timestamp time.Time // Request timestamp
 }

@@ -75,11 +75,8 @@ type KeystateSignalMsg struct {
 	// ForeignSpoken: Signal "foreign", the providers whose word the agent
 	// holds, one that listed no keys included; nil from an older agent
 	ForeignSpoken []string
-	// Acting: Signal "acting", the hand-over (plan S11)
+	// Acting: Signal "acting", the hand-over (plan S11), with the hold (S6)
 	Acting *ActingHandover
-	// Hold: Signal "hold", whether the agent's word holds the zone's key
-	// machine or lets it go (plan S6)
-	Hold bool
 }
 
 type EditsResponseMsg struct {

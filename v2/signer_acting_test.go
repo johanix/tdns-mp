@@ -68,6 +68,15 @@ func newSignerRig(t *testing.T, zone string, records ...string) *signerRig {
 	conf.InternalMp.KeyLifecycle = r.e
 	r.owner.Take(zone)
 	r.store = withActing(t, NewHsyncDB(kdb))
+	hdb := NewHsyncDB(kdb)
+	if _, err := hdb.DB.Exec(HsyncTables["MPKeyHold"]); err != nil {
+		t.Fatal(err)
+	}
+	holds, err := loadSignerHolds(hdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf.InternalMp.SignerHolds = holds
 	prev := pushSignerInventory
 	pushSignerInventory = func(*Config, string) {
 		r.mu.Lock()
@@ -467,6 +476,41 @@ func TestASignerThatWaitsKeepsItsRolesWhenItsCopyDropsIt(t *testing.T) {
 	}
 	if !r.e.wire.IsSigner(zone) || !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
 		t.Errorf("waiting, the signer took its copy's roles: signs %v, expects confirmations from %v", r.e.wire.IsSigner(zone), r.e.wire.OtherSigners(zone))
+	}
+}
+
+// The hold is a field of the hand-over (S6, folded in by S11). The agent
+// hands it while the zone is frozen. The signer, handed it, holds the
+// zone's key machine and its inventory says so; a later hand-over without
+// it lets it go, and the earlier one arriving after that is refused as
+// older, so the latest word stands whatever the order of arrival.
+func TestTheHoldIsAFieldOfTheHandOver(t *testing.T) {
+	fr := newFreezeRig(t, "field.hold.freeze.example.")
+	q := fr.withSigner()
+	fr.agree()
+	if h := lastHanded(t, signerSent(t, q, 2)); !h.Sets.Hold {
+		t.Error("the agent's hand-over of a frozen zone carries no hold")
+	}
+
+	const zone = "hold.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	on := handoverFor(t, zone, records...)
+	on.Sets.Hold = true
+	off := handoverFor(t, zone, records...)
+	off.Made = on.Made.Add(time.Second)
+	r.hand(on, sigUs)
+	if !r.conf.InternalMp.SignerHolds.held(zone) || !r.conf.inventoryMarksOf(zone, nil).hold {
+		t.Fatal("handed the hold, the signer does not hold the zone's key machine by its inventory")
+	}
+	r.hand(off, sigUs)
+	if r.conf.InternalMp.SignerHolds.held(zone) {
+		t.Fatal("handed the zone without the hold, the signer still holds its key machine")
+	}
+	late := *on
+	r.hand(&late, sigUs)
+	if r.conf.InternalMp.SignerHolds.held(zone) {
+		t.Error("an earlier hand-over with the hold, arriving last, put the hold back")
 	}
 }
 

@@ -1260,7 +1260,6 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 				ForeignKeys:   payload.ForeignKeys,
 				ForeignSpoken: payload.ForeignSpoken,
 				Acting:        payload.Acting,
-				Hold:          payload.Hold,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
