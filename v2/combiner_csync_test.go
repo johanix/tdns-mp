@@ -53,7 +53,7 @@ func csyncCombinerZone(t *testing.T, name string, signed, signer bool) (*MPZoneD
 	}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core_RRset(&dns.PrivateRR{
 		Hdr:  dns.RR_Header{Name: name, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: values}}))
+		Data: numbered(&core.HSYNCPARAM{Value: values})}))
 	mpzd.Data.Set(name, *apex)
 	mpzd.ZoneData.InstallInitialSnapshot()
 	t.Cleanup(mpzd.ZoneData.StopPublisher)

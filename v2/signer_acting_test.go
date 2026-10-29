@@ -595,16 +595,23 @@ func TestTheSignersHandedSerialSurvivesARestart(t *testing.T) {
 	}
 }
 
-// A signer handed nothing, whose copy carries no serial (the first start
-// after the upgrade), acts by its copy, provisional.
-func TestASignersFirstLoadWithNothingHandedAndNoSerialIsProvisional(t *testing.T) {
+// A signer handed nothing whose copy has no reading (no serial=, an owner
+// error since #308) is provisional, and starts no multi-provider work for
+// the zone: it signs nothing by that copy. A copy at serial="0" reads, and
+// its signer waits for its agent (decision 107).
+func TestASignersFirstLoadWithNothingHandedAndNoReadingIsProvisional(t *testing.T) {
 	const zone = "provisional.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`servers="us,p2" signers="us,p2"`)...)
 	if line := signerActingLine(zone); line != "provisional" {
 		t.Errorf("the status says %q, want provisional", line)
 	}
-	if !r.e.wire.IsSigner(zone) || !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
-		t.Error("a provisional signer does not act by its copy")
+	if r.e.wire.IsSigner(zone) || r.e.wire.OtherSigners(zone) != nil {
+		t.Error("a signer whose copy has no reading signs by it")
+	}
+	const zero = "zero.signer.example."
+	newSignerRig(t, zero, sigRecords(`serial="0" servers="us,p2" signers="us,p2"`)...)
+	if line := signerActingLine(zero); line != "waiting for its agent's hand-over" {
+		t.Errorf("at serial 0 the status says %q, want it waiting for its agent's hand-over", line)
 	}
 }
 

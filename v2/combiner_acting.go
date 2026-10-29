@@ -403,7 +403,7 @@ func (conf *Config) refreshFromUpstream(mpzd *MPZoneData, lg *slog.Logger) {
 }
 
 // waitsForHandover: the combiner holds no hand-over for the zone, and the
-// zone's copy carries a serial. Its agent hands it one at the combiner's
+// zone's copy has a reading, which carries a serial (#308). Its agent hands it one at the combiner's
 // start report; meanwhile the combiner serves what it served (rule 5).
 func (mpzd *MPZoneData) waitsForHandover() bool {
 	if _, held := actingHeld.Load().get(mpzd.ZoneName); held {
@@ -414,7 +414,7 @@ func (mpzd *MPZoneData) waitsForHandover() bool {
 		return false
 	}
 	in, err := ReadInstructions(apex)
-	return err == nil && in != nil && in.Serial != 0
+	return err == nil && in != nil
 }
 
 // combinerActingLine is what the combiner acts by for the zone, as `zone

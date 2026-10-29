@@ -73,7 +73,7 @@ func (u *mpUpstream) zoneText(t *testing.T, serial uint32) string {
 	if u.without != "beta" {
 		fmt.Fprintf(&b, "%s 300 IN HSYNC3 ON beta %s .\n", z, relayUs)
 	}
-	fmt.Fprintf(&b, "%s 300 IN HSYNCPARAM servers=\"alpha,beta\" signers=\"%s\"\n", z, u.signers)
+	fmt.Fprintf(&b, "%s 300 IN HSYNCPARAM servers=\"alpha,beta\" signers=\"%s\" serial=\"1\"\n", z, u.signers)
 	for _, rr := range u.extra {
 		fmt.Fprintln(&b, rr)
 	}
