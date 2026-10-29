@@ -423,7 +423,7 @@ type KeyLifecycleEngine struct {
 	zones   map[string]*ZoneKeyLifecycle
 	waiting map[string]string // configured zones not ready to take, with why (logged once per reason)
 	refused map[string]bool   // configured zones that are not multi-provider: never taken
-	idle    map[string]bool   // owned zones this provider does not sign: not run (plan S11)
+	idle    map[string]bool   // owned zones driverState found this provider does not sign, said once (plan S11; isIdle judges now)
 
 	// kept is what arrived for a zone while its rollovers pause (#147,
 	// signerWire.leavers): the agents' confirmations, in order, and the
@@ -561,12 +561,13 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 	return true
 }
 
-// isIdle: the zone is owned and not run, since this provider does not sign
-// it (driverState).
+// isIdle: the zone is owned and taken and not run, since this provider does
+// not sign it (driverState), judged now: a zone taken since the last tick
+// is idle before driverState first says so.
 func (e *KeyLifecycleEngine) isIdle(zone string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.idle[lifecycleZoneName(zone)]
+	zone = lifecycleZoneName(zone)
+	zd, ok := tdns.Zones.Get(zone)
+	return ok && zd != nil && e.owner.Owns(zd) && e.owner.taken(zone) && !e.wire.IsSigner(zone)
 }
 
 // applySignal feeds one signal to the zone's driver.
@@ -710,15 +711,17 @@ func (e *KeyLifecycleEngine) tickOwned(paused map[string]keyPause) {
 			continue
 		}
 		if _, was := paused[zone]; was {
-			delete(paused, zone)
-			lgSigner.Info("key lifecycle: key rollovers resumed: nobody is leaving the signing set", "zone", zone)
 			// a hand-over during the pause may have changed the providers
-			// expected (handedOver): the distributions in flight follow now
+			// expected (handedOver): the distributions in flight follow
+			// now, and the pause holds until they do
 			if others := e.wire.OtherSigners(zone); !l.Expects(others) {
 				if err := l.SignersChanged(); err != nil {
-					lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed", "zone", zone, "err", err)
+					lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed; the rollovers stay paused", "zone", zone, "err", err)
+					continue
 				}
 			}
+			delete(paused, zone)
+			lgSigner.Info("key lifecycle: key rollovers resumed: nobody is leaving the signing set", "zone", zone)
 		}
 		e.applyKept(l, zone)
 		l.SetHold(e.conf.InternalMp.SignerHolds.held(zone))
