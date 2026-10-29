@@ -857,3 +857,34 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 		t.Error("the distribution went on without b")
 	}
 }
+
+// A member with no record that takes the leader's word while the leader
+// reconciles holds no step's sets: it hands its parts nothing new, and
+// takes the step from the leader's stamp. One that takes it from a leader
+// at rest is at rest too (plan S9, S12).
+func TestAMemberWithNoRecordFollowsTheLeadersReconciliation(t *testing.T) {
+	r := newReconcileRig(t, "norecordstep.reconcile.example.", roleB)
+	r.noRecord(r.n)
+	r.leadGroup(r.n, roleB)
+	st := r.leaderStep(1, rolesFor(r.n, r.n, 0), []string{lastStepKey})
+	st.Active, st.ActiveDigest, st.Newest, st.NewestDigest = r.n.Serial, r.n.Digest(), r.n.Serial, r.n.Digest()
+	st.Thaw = &Thaw{From: SerialDigest{Serial: 40, Digest: "x"}, To: sd(r.n)}
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 41 {
+		t.Fatalf("not known on the leader's word: %+v", status(t, r.store, r.zone))
+	}
+	if s := status(t, r.store, r.zone); s.Phase != PhaseReconciling {
+		t.Fatalf("known from a leader that reconciles, and at rest: %+v", s)
+	}
+	r.conf.thawTurn(r.zone)
+	if got, ok := r.step(); !ok || got.Number != 1 {
+		t.Fatalf("the leader's step was not taken: %+v", got)
+	}
+	st.Reconciling, st.Step = false, nil
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if s := status(t, r.store, r.zone); s.Phase != PhaseSteady {
+		t.Errorf("not done on the leader's word: %+v", s)
+	}
+}

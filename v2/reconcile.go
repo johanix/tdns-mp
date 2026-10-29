@@ -301,12 +301,10 @@ type reconcileInputs struct {
 	newer       *heldSerial // the highest serial held above the active one
 	step        heldStep
 	hasStep     bool
-	pending     bool
 	removals    []Removal
 	excused     []string
 	enforced    bool
 	reconciling bool
-	doneAt      time.Time
 }
 
 // reconcileInputs is what the store holds of zone, the zone named in any
@@ -321,8 +319,8 @@ func (s *InstructionStore) reconcileInputs(zone string) (reconcileInputs, bool) 
 	if z == nil || z.Active == nil {
 		return reconcileInputs{}, false
 	}
-	in := reconcileInputs{name: name, active: *z.Active, pending: z.Pending, removals: slices.Clone(z.Removals),
-		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling(), doneAt: z.DoneAt}
+	in := reconcileInputs{name: name, active: *z.Active, removals: slices.Clone(z.Removals),
+		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling()}
 	if z.From != nil {
 		f := *z.From
 		in.from = &f
@@ -532,7 +530,6 @@ type reconcileView struct {
 	of       int          // the steps planned, taken ones included
 	rollover string       // the voting member whose emergency rollover holds the next step, a DS or DNSKEY one
 	done     bool         // the last step is held
-	cur      string       // what the step held does
 }
 
 // reconcileView is what the leader's turn sees of the zone at now: a
@@ -611,12 +608,9 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 			cur = &plan[i]
 		}
 	}
-	if cur != nil {
-		v.cur = cur.what
-		if cur.wait != nil {
-			if w := cur.wait(conf, in.name, in.step.at); w != "" {
-				v.waits = append(v.waits, w)
-			}
+	if cur != nil && cur.wait != nil {
+		if w := cur.wait(conf, in.name, in.step.at); w != "" {
+			v.waits = append(v.waits, w)
 		}
 	}
 	untaken := slices.DeleteFunc(slices.Clone(plan), func(st plannedStep) bool { return slices.Contains(in.step.Taken, st.key) })
