@@ -312,7 +312,11 @@ type ConfirmationDetail struct {
 	IgnoredRecords []string // RR strings persisted but not applied (role-based filter)
 	Truncated      bool
 	Instr          *MsgStamp // the confirmer's stamp (S5b); nil from a confirmer that sends none
-	Timestamp      time.Time
+	// NotYet: the confirmer's stamp tells another active serial than this
+	// agent's send it answers; what it rejected or ignored is no decision
+	// yet (rule 6, plan S8).
+	NotYet    bool
+	Timestamp time.Time
 }
 
 type RejectedItemInfo struct {

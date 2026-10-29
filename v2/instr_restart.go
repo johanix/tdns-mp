@@ -33,18 +33,6 @@ const (
 	knownFromNewest  = "common newest"
 )
 
-// activeUnknown: the store keeps serials of the zone, named in any case,
-// and knows no active serial for it.
-func (s *InstructionStore) activeUnknown(zone string) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, z := s.zoneLocked(zone)
-	return z != nil && z.Active == nil
-}
-
 // reading is the zone's instructions as the readers act by them: the active
 // serial's, or, with none known, the newest serial's, for talking (design
 // 3.4); nil when the store keeps none.
