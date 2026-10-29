@@ -271,14 +271,14 @@ func (r *notifyRig) receivesPublish(t *testing.T, originator, transportSender st
 	return distID
 }
 
-// toCombiner records the publish instruction of every KEY update the agent
-// hands its combiner.
+// toCombiner records the publish instruction of every update the agent
+// hands its combiner with a KEY or an instruction.
 func toCombiner(t *testing.T) chan *core.PublishInstruction {
 	t.Helper()
 	got := make(chan *core.PublishInstruction, 8)
 	saved := enqueueForCombiner
 	enqueueForCombiner = func(tm *MPTransportBridge, zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
-		if _, ok := opOf(update, "KEY"); ok {
+		if _, ok := opOf(update, "KEY"); ok || update.Publish != nil {
 			got <- update.Publish
 		}
 		return saved(tm, zone, update, distID)
@@ -498,5 +498,41 @@ func TestAKeyIsNotLostWhileAVoterUnderTheOtherSerialWasNotAsked(t *testing.T) {
 	}
 	if _, lost := r.conf.InternalMp.keyPolls.lostKey(r.zone); lost {
 		t.Error("the round marked the KEY lost")
+	}
+}
+
+// A KEY's publish instruction goes with its KEY: a replace of the KEY that
+// the repo finds older than the one it applied goes no further, and its
+// instruction, which names the older KEY, does not reach the combiner.
+func TestAStaleKEYsPublishInstructionDoesNotReachTheCombiner(t *testing.T) {
+	const zone = "stale.publish.example."
+	r := newEngineRigWith(t, zone, func(conf *Config) {
+		lem := NewLeaderElectionManager(roleA, time.Hour, func(ZoneName, string, map[string][]string) error { return nil })
+		t.Cleanup(func() { stopElectionTimers(lem) })
+		lem.elections[ZoneName(zone)] = &LeaderElection{Zone: ZoneName(zone), Leader: roleB, LeaderExpiry: time.Now().Add(time.Hour)}
+		conf.InternalMp.LeaderElectionManager = lem
+	})
+	combiner := toCombiner(t)
+	send := func(k sig0Row, sentAt time.Time, distID string) {
+		t.Helper()
+		done := make(chan *AgentMsgResponse, 1)
+		r.msgQs.SynchedDataUpdate <- &SynchedDataUpdate{Zone: r.zone, AgentId: roleB, UpdateType: "remote", DeliveredBy: roleB,
+			OriginatingDistID: distID, OriginatingTime: sentAt,
+			Update: &ZoneUpdate{Zone: r.zone, AgentId: roleB, Publish: &core.PublishInstruction{KEYRRs: []string{k.key.String()}, Locations: []string{"at-apex"}},
+				Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{k.key.String()}}}},
+			Response: done}
+		if _, ok := recvWithin(done, 5*time.Second); !ok {
+			t.Fatal("the engine did not answer")
+		}
+	}
+	older, newer := testSig0Key(t, newMPTestKeyDB(t), zone), testSig0Key(t, newMPTestKeyDB(t), zone)
+	now := time.Now()
+	send(newer, now, "d-newer")
+	if got, ok := recvWithin(combiner, 5*time.Second); !ok || got == nil || !slices.Equal(got.KEYRRs, []string{newer.key.String()}) {
+		t.Fatalf("the newer KEY went to the combiner with %+v (handed over %v)", got, ok)
+	}
+	send(older, now.Add(-time.Minute), "d-older")
+	if got, ok := recvWithin(combiner, 300*time.Millisecond); ok {
+		t.Errorf("a stale KEY replace handed the combiner the instruction %+v", got)
 	}
 }
