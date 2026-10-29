@@ -115,8 +115,7 @@ func newFreezeRig(t *testing.T, zone string) *freezeRig {
 	r.load()
 	r.n = freezeAt(t, 41, "n", "a,b", "")
 	r.v = freezeAt(t, 42, "v", "a,b", "")
-	r.store.Note(zone, r.n, nil)
-	enforced(t, r.store, zone)
+	knownAs(t, r.store, zone, r.n) // the zone steady at 41, with no freeze on the way
 	return r
 }
 
