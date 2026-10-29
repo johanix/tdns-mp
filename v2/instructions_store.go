@@ -173,6 +173,42 @@ func (z *zoneSerials) dropAtOrBelow(serial uint32) {
 	z.Held = slices.DeleteFunc(z.Held, func(h heldSerial) bool { return CompareSerial(h.Serial, serial) <= 0 })
 }
 
+// dropUnread drops the readings an older build stored that their records no
+// longer give (#306, #308): HSYNC3 without HSYNCPARAM, or one identity under
+// two labels. With the active one go the serials held above it, which were
+// judged against it: the zone's next copy is read as at a first load
+// (decision 107).
+func (z *zoneSerials) dropUnread(zone string) {
+	var dropped []uint32
+	unread := func(h *heldSerial) bool {
+		if h.reads(zone) {
+			return false
+		}
+		dropped = append(dropped, h.Serial)
+		return true
+	}
+	if z.Active != nil && unread(z.Active) {
+		z.Active, z.Held = nil, nil
+	}
+	if z.From != nil && unread(z.From) {
+		z.From = nil
+	}
+	z.Held = slices.DeleteFunc(z.Held, func(h heldSerial) bool { return unread(&h) })
+	if len(dropped) > 0 {
+		lg.Warn("stored readings that no longer read are dropped; the zone's next copy is read anew", "zone", zone, "serials", dropped)
+	}
+}
+
+// reads is whether h's reading is still one: its records read, and give its
+// serial and digest, as a combiner checks a stored hand-over.
+func (h *heldSerial) reads(zone string) bool {
+	if h.Reading == nil {
+		return false
+	}
+	in, err := readInstructionRecords(zone, h.Reading.instructionRecords(zone))
+	return err == nil && in != nil && in.Serial == h.Serial && in.Digest() == h.Digest
+}
+
 // InstructionStore keeps every zone's serials, in memory and in HsyncDB.
 // Every change is written before it returns, so before it can be told.
 type InstructionStore struct {
@@ -189,7 +225,7 @@ type zoneSerial struct {
 }
 
 // LoadInstructionStore reads every zone's stored serials, before the zones'
-// first load.
+// first load. A stored reading that no longer reads is dropped (dropUnread).
 func LoadInstructionStore(hdb *HsyncDB) (*InstructionStore, error) {
 	s := &InstructionStore{hdb: hdb, zones: map[string]*zoneSerials{}, warnedOld: map[string]time.Time{}, refusedLogged: map[zoneSerial]bool{}}
 	if hdb == nil {
@@ -211,6 +247,7 @@ func LoadInstructionStore(hdb *HsyncDB) (*InstructionStore, error) {
 		if err := json.Unmarshal([]byte(state), z); err != nil {
 			return nil, fmt.Errorf("the stored serials of %s: %w", zone, err)
 		}
+		z.dropUnread(zone)
 		s.zones[zone] = z
 	}
 	if err := rows.Err(); err != nil {

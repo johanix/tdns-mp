@@ -97,4 +97,3 @@ func TestADNSKEYSyncIsNotJudgedWithoutTheZonesRoles(t *testing.T) {
 		}
 	}
 }
-
