@@ -36,9 +36,7 @@ func chainFailures(conf *Config, zone string) int {
 // the delay that a count grown during the outage would give.
 func TestAFailedAnalysisIsOwedAndGrowsNoBackoff(t *testing.T) {
 	zlog := &lockedBuffer{}
-	saved := lg
-	lg = slog.New(slog.NewTextHandler(zlog, nil))
-	t.Cleanup(func() { lg = saved })
+	logTo(t, lg, slog.NewTextHandler(zlog, nil))
 	h := newHoldRig(t, "down.parent.example.", "UPDATE", false, repeat(time.Hour, 4)...)
 	z := h.mpzd.ZoneName
 	// the zone's SIG(0) key, so that nothing but the parent holds the sync

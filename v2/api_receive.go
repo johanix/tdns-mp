@@ -121,7 +121,7 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 		// The rest of /msg is not held to this: an agent forwards a peer's
 		// update to its combiner under that peer's name.
 		if kind == apiEndpointHello || kind == apiEndpointBeat || kind == apiEndpointPing || im.Token() == transport.VerbConfirm {
-			if cn, ok := clientIdentity(r); ok && dns.CanonicalName(cn) != dns.CanonicalName(im.SenderID) {
+			if cn, ok := clientIdentity(r); ok && !sameName(cn, im.SenderID) {
 				lgApi.Warn("sync API request refused: the sender is not the client certificate's identity",
 					"path", r.URL.Path, "from", r.RemoteAddr, "sender", im.SenderID, "certificate", cn)
 				_ = sink.fail(fmt.Sprintf("sender %q is not the client certificate's identity", im.SenderID))
@@ -137,7 +137,7 @@ func (conf *Config) apiSyncEndpoint(kind apiEndpointKind) http.HandlerFunc {
 			if cn, ok := clientIdentity(r); ok {
 				var hello struct{ MyIdentity string }
 				_ = json.Unmarshal(body, &hello)
-				if hello.MyIdentity == "" || dns.CanonicalName(cn) != dns.CanonicalName(hello.MyIdentity) {
+				if hello.MyIdentity == "" || !sameName(cn, hello.MyIdentity) {
 					lgApi.Warn("sync API hello refused: it does not introduce the client certificate's agent",
 						"path", r.URL.Path, "from", r.RemoteAddr, "introduces", hello.MyIdentity, "certificate", cn)
 					_ = sink.fail(fmt.Sprintf("hello introduces %q, not the client certificate's identity", hello.MyIdentity))

@@ -450,7 +450,7 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
 		leader, known = lem.ZoneLeader(u.Zone)
 	}
-	same := func(a, b AgentId) bool { return dns.CanonicalName(string(a)) == dns.CanonicalName(string(b)) }
+	same := func(a, b AgentId) bool { return sameName(string(a), string(b)) }
 	if known && same(sender, leader) && same(u.AgentId, leader) {
 		return ""
 	}

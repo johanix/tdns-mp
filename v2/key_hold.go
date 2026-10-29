@@ -84,7 +84,7 @@ func (b *keyPollBook) init() {
 	}
 }
 
-func canonZone(zone ZoneName) ZoneName { return ZoneName(dns.CanonicalName(string(zone))) }
+func canonZone(zone ZoneName) ZoneName { return ZoneName(canonicalName(string(zone))) }
 
 // keyPollToken is one count of a zone in running: taken before a key is made
 // or taken, and handed to the poll that the set-up starts, or given back.

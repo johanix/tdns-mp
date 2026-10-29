@@ -21,6 +21,7 @@ func TestParseAppPayload(t *testing.T) {
 		{"beat naming another in MyIdentity", `{"MessageType":"beat","OriginatorID":"carol.","MyIdentity":"alice.","Zones":["z."]}`, "", "", "", "", "conflicting sender"},
 		{"legacy and modern sender differ", `{"MessageType":"ping","MyIdentity":"a.","sender_id":"b."}`, "", "", "", "", "conflicting sender"},
 		{"both type tags equal", `{"MessageType":"ping","type":"ping","MyIdentity":"a."}`, "ping", "a.", "", "", ""},
+		{"a sender in capitals is folded", `{"MessageType":"sync","OriginatorID":"Agent.Bob.Example","Zone":"z."}`, "sync", "agent.bob.example.", "z.", "", ""},
 		{"conflicting type tags", `{"MessageType":"sync","type":"update","OriginatorID":"a."}`, "", "", "", "", "conflicting message type"},
 		{"conflicting zone tags", `{"MessageType":"sync","OriginatorID":"a.","Zone":"x.","zone":"y."}`, "", "", "", "", "conflicting zone"},
 		{"no type", `{"OriginatorID":"a."}`, "", "", "", "", "no message type"},

@@ -181,7 +181,7 @@ func ValidateAgentSupportedMechanisms(mp *MultiProviderConf) error {
 	seen := make(map[string]bool)
 
 	for i, m := range mechanisms {
-		m = strings.ToLower(strings.TrimSpace(m))
+		m = strings.ToLower(strings.TrimSpace(m)) // not-a-name: a transport mechanism
 		if m == "" {
 			return fmt.Errorf("agent.supported_mechanisms: empty entry at index %d", i)
 		}

@@ -36,9 +36,7 @@ func newKeyRoundRig(t *testing.T, zone, scheme string) *keyRoundRig {
 	t.Helper()
 	// the agent's logger first, so that it is put back after the rig stops
 	alog := &lockedBuffer{}
-	saved := lgAgent
-	lgAgent = slog.New(slog.NewTextHandler(alog, nil))
-	t.Cleanup(func() { lgAgent = saved })
+	logTo(t, lgAgent, slog.NewTextHandler(alog, nil))
 	h := newHoldRig(t, zone, scheme, false, repeat(time.Hour, 4)...)
 	r := &keyRoundRig{holdRig: h, zone: ZoneName(h.mpzd.ZoneName), them: AgentId(h.peer.Identity), us: AgentId(h.notifyRig.us.Identity),
 		alog: alog, polls: make(chan uint16, 8)}

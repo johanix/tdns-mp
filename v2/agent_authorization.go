@@ -300,7 +300,7 @@ func (t *keyAskTable) expectConfirm(peer, id string) {
 			delete(t.confirms, k)
 		}
 	}
-	t.confirms[id] = keyConfirm{peer: dns.CanonicalName(peer), expires: now.Add(keyConfirmWait)}
+	t.confirms[id] = keyConfirm{peer: canonicalName(peer), expires: now.Add(keyConfirmWait)}
 }
 
 // confirmExpected: a delivery confirmation from peer for id is due.
@@ -311,13 +311,13 @@ func (t *keyAskTable) confirmExpected(peer, id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c, ok := t.confirms[id]
-	return ok && c.peer == dns.CanonicalName(peer) && time.Now().Before(c.expires)
+	return ok && c.peer == canonicalName(peer) && time.Now().Before(c.expires)
 }
 
 // keyAskKey: identities and zone names compare as canonical names, so a
 // peer configured in another case is the same peer.
 func keyAskKey(peer, zone string) string {
-	return dns.CanonicalName(peer) + " " + dns.CanonicalName(zone)
+	return canonicalName(peer) + " " + canonicalName(zone)
 }
 
 // start notes a request out, and returns the call that ends it. The call

@@ -15,7 +15,6 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -189,8 +188,7 @@ func (conf *Config) zoneKeyPeerIDs(zone ZoneName) []AgentId {
 		ids = append(ids, a.ID)
 	}
 	for _, id := range conf.InternalMp.Instructions.transitionVoters(string(zone)) {
-		if core.EqualNames(dns.Fqdn(id), dns.Fqdn(string(self))) ||
-			slices.ContainsFunc(ids, func(p AgentId) bool { return core.EqualNames(dns.Fqdn(string(p)), dns.Fqdn(id)) }) {
+		if sameName(id, string(self)) || slices.ContainsFunc(ids, func(p AgentId) bool { return sameName(string(p), id) }) {
 			continue
 		}
 		if agent, err := ar.GetAgentInfo(AgentId(id)); err == nil {

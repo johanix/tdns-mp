@@ -506,7 +506,7 @@ func injectHelloParams(data map[string]interface{}) (count int, interval time.Du
 	if interval < injectHelloMinInterval || interval > injectHelloMaxInterval {
 		return 0, 0, "", fmt.Errorf("interval %s: must be %s to %s", interval, injectHelloMinInterval, injectHelloMaxInterval)
 	}
-	switch m := strings.ToLower(debugPostString(data, "mechanism")); m {
+	switch m := strings.ToLower(debugPostString(data, "mechanism")); m { // not-a-name: a transport mechanism
 	case "", "dns":
 		mech = "DNS"
 	case "api":
@@ -563,9 +563,9 @@ func (conf *Config) debugInjectHello(parent context.Context, amp AgentMgmtPost, 
 	// The mechanisms this agent is configured to use (supported_mechanisms)
 	// bound the injector too: the API client exists whatever the
 	// configuration says. Only the rate lies, not the mechanism.
-	if tm != nil && !tm.isTransportSupported(strings.ToLower(mech)) {
+	if tm != nil && !tm.isTransportSupported(strings.ToLower(mech)) { // not-a-name: a transport mechanism
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("this agent does not use the %s mechanism (supported_mechanisms)", strings.ToLower(mech))
+		resp.ErrorMsg = fmt.Sprintf("this agent does not use the %s mechanism (supported_mechanisms)", strings.ToLower(mech)) // not-a-name: a transport mechanism
 		return
 	}
 	if conf.InternalMp.TransportManager == nil || tm == nil || tm.TransportManager == nil {
