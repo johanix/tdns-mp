@@ -210,7 +210,8 @@ func TestAChangeAtSerialZeroIsAConflict(t *testing.T) {
 
 // A copy with no reading (#306, #308) is an owner error the store notes:
 // after a held serial the zone holds at it; at a first load nothing is
-// held, and no instructions are acted on, until a copy that reads.
+// held, and no instructions are acted on, until a copy that reads; that
+// copy is held, and its zone's active serial is not known (S9).
 func TestACopyWithNoReadingIsAnOwnerError(t *testing.T) {
 	noParam := apexOf(t, instrBase[:3]...)
 	noSerial := apexOf(t, append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM servers="alpha,beta"`)...)
@@ -234,10 +235,10 @@ func TestACopyWithNoReadingIsAnOwnerError(t *testing.T) {
 		if st := status(t, first, storeZone); st.Phase != PhaseOwnerError || st.Active != nil || st.OwnerError != c.want {
 			t.Errorf("%s at a first load: phase %s active %s error %q", c.name, st.Phase, serialOf(st.Active), st.OwnerError)
 		}
-		// The first copy that reads ends it.
-		noteKnown(t, first, storeZone, at(t, 1, "beta"))
-		if st := status(t, first, storeZone); st.Phase != PhaseSteady || st.Active == nil || st.Active.Serial != 1 {
-			t.Errorf("%s, then serial 1: phase %s active %s error %q", c.name, st.Phase, serialOf(st.Active), st.OwnerError)
+		// The first copy that reads ends it, and is held.
+		first.Note(storeZone, at(t, 1, "beta"), nil)
+		if st := status(t, first, storeZone); st.Phase != PhaseNotKnown || st.Active != nil || st.Newest == nil || st.Newest.Serial != 1 || st.OwnerError != "" {
+			t.Errorf("%s, then serial 1: phase %s active %s newest %s error %q", c.name, st.Phase, serialOf(st.Active), serialOf(st.Newest), st.OwnerError)
 		}
 	}
 }

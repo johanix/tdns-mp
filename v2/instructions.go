@@ -508,9 +508,7 @@ type Roles struct {
 // active serial's at rest (both are then the active serial). A step's sets
 // are not computed here: the leader's planner makes them, its stamp carries
 // them, and every agent keeps them (reconcile.go, plan S12), so rolesFor
-// gives step 0 at a thaw and the last step's sets. In the legacy reading
-// (HSYNC3 without HSYNCPARAM) every ON record serves, and so votes, and
-// nobody signs, as today.
+// gives step 0 at a thaw and the last step's sets.
 func rolesFor(from, to *Instructions, step int) Roles {
 	in := from
 	if in == nil {
