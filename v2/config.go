@@ -370,16 +370,12 @@ type InternalMpConf struct {
 	// Kept are the agent's lists of its frozen zones (instr_kept.go); nil
 	// on every other role.
 	Kept *keptLists
-	// holds: what the agent last told its signer of each zone's hold
-	// (instr_freeze.go).
-	holds holdBook
 	// releases: the frozen zones' releases the data engine's queue had no
 	// room for (instr_freeze.go).
 	releases releaseBook
-	// holdSend stands in for sendHoldToSigner in a test. Nil sends.
-	holdSend func(zone ZoneName, on bool)
 	// SignerHolds are the zones whose key machine the signer holds at its
-	// agent's word (instr_freeze.go); nil on every other role.
+	// agent's word, the hand-over's hold (instr_freeze.go); nil on every
+	// other role.
 	SignerHolds *signerHolds
 	// thaws: what the agent and the auditor keep of their zones' thaws
 	// (instr_thaw.go).
