@@ -470,3 +470,33 @@ func TestNoKeyAnswerCountsWhileTheActiveSerialIsNotKnown(t *testing.T) {
 		t.Errorf("a \"no key here\" while the active serial is not known counts as %+v", a)
 	}
 }
+
+// A voting member under the other serial of a transition that was not asked
+// (it is not known here yet) has not said it holds none: the leader's round
+// does not find the published KEY lost.
+func TestAKeyIsNotLostWhileAVoterUnderTheOtherSerialWasNotAsked(t *testing.T) {
+	r := newKeyRoundRig(t, "other.voter.key.example.", "UPDATE")
+	keepServed(t, r.conf, r.mpzd)
+	k := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, k)
+	r.caughtUp()
+	s := r.conf.InternalMp.Instructions
+	n := s.activeReading(r.mpzd.ZoneName)
+	v := *n
+	v.Serial = n.Serial + 1
+	v.Records = append(slices.Clone(n.Records), InstrRecord{Label: "charlie", Identity: "agent.charlie.example."})
+	v.Servers = append(slices.Clone(n.Servers), "charlie")
+	if err := s.update(r.mpzd.ZoneName, func(z *zoneSerials) error {
+		z.Held = append(z.Held, heldSerial{SerialDigest: sd(&v), Reading: &v, Since: time.Now()})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.decide(map[AgentId]keyReply{r.them: {outcome: keyNone}})
+	if got := r.conf.zoneKeyLine(r.ctx, r.zone); got == "LOST" {
+		t.Error("the KEY is LOST though a voting member under the serial agreed on was not asked")
+	}
+	if _, lost := r.conf.InternalMp.keyPolls.lostKey(r.zone); lost {
+		t.Error("the round marked the KEY lost")
+	}
+}

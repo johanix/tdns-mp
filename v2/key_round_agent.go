@@ -360,14 +360,23 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 	if !leads {
 		return false, false
 	}
-	allNone := len(answers) > 0 || len(votingPeers(zone, conf.localAgentID())) == 0
+	// every voting member, during a transition under both its serials
+	// (S14), has said it holds none
+	self := conf.localAgentID()
+	voters := votingPeers(zone, self)
+	for _, id := range conf.InternalMp.Instructions.transitionVoters(string(zone)) {
+		if !sameName(id, string(self)) && !slices.ContainsFunc(voters, func(v AgentId) bool { return sameName(string(v), id) }) {
+			voters = append(voters, AgentId(id))
+		}
+	}
+	allNone := len(answers) > 0 || len(voters) == 0
 	for _, a := range answers {
 		if a.outcome != keyNone {
 			allNone = false
 		}
 	}
-	for _, id := range votingPeers(zone, conf.localAgentID()) {
-		if !slices.ContainsFunc(sortedPeers(answers), func(p AgentId) bool { return isAmong([]string{string(p)}, id) }) {
+	for _, id := range voters {
+		if !slices.ContainsFunc(sortedPeers(answers), func(p AgentId) bool { return sameName(string(p), string(id)) }) {
 			allNone = false // a voting member not asked has not said it holds none
 		}
 	}
