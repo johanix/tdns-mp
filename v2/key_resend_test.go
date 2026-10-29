@@ -451,3 +451,85 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 		t.Errorf("a late answer to a superseded distribution, through a young alias: %q, want applied", applied)
 	}
 }
+
+// A key's result keeps the stamp of the answer that gave it, so that S8 can
+// judge it: an agent's keys answered apart keep each its own answer's, a
+// later confirmation (a PENDING arriving last, a final word sent again)
+// moves none, and a resend carries each with its result (cubic's review of
+// 347fe5b, CodeRabbit's of 07fdae9).
+func TestAResultKeepsTheStampOfItsAnswer(t *testing.T) {
+	const zone ZoneName = "stamped.superseded.example."
+	const fast, slow = "agent.fast.example.", "agent.slow.example."
+	a, b := testDnskeyRR(t, string(zone), 257), testDnskeyRR(t, string(zone), 256)
+	keys := []uint16{a.KeyTag(), b.KeyTag()}
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation(zone, "first", keys, nil, []AgentId{fast, slow})
+	confirm := func(status transport.ConfirmStatus, applied []string, ms *MsgStamp) {
+		// as the confirmation callback does
+		tm.noteConfirmation(confirmIn("first", fast, status, string(zone), applied, nil, nil, nil, false, ""), ms)
+		tm.processDnskeyConfirmation("first", fast, status.String(), applied, nil, nil, ms)
+	}
+	partial, final := &MsgStamp{Epoch: 2, Seq: 5}, &MsgStamp{Epoch: 2, Seq: 6}
+	confirm(transport.ConfirmPartial, []string{a.String()}, partial)
+	confirm(transport.ConfirmSuccess, nil, final)
+	confirm(transport.ConfirmPending, nil, &MsgStamp{Epoch: 2, Seq: 7})
+	confirm(transport.ConfirmSuccess, nil, &MsgStamp{Epoch: 3, Seq: 1})
+
+	stamped := func(prop *PendingDnskeyPropagation, which string) {
+		t.Helper()
+		if prop == nil {
+			t.Fatalf("%s: not tracked", which)
+		}
+		for kt, want := range map[uint16]*MsgStamp{a.KeyTag(): partial, b.KeyTag(): final} {
+			if prop.Results[fast][kt] != "applied" || prop.Stamps[fast][kt] != want {
+				t.Errorf("%s, key %d: %q with stamp %+v, want applied with %+v", which, kt, prop.Results[fast][kt], prop.Stamps[fast][kt], want)
+			}
+		}
+		if prop.Stamps[slow] != nil {
+			t.Errorf("%s: an agent with no answer has stamps: %+v", which, prop.Stamps[slow])
+		}
+	}
+	tm.dnskeyPropMu.Lock()
+	stamped(tm.pendingDnskeyPropagations["first"], "the first")
+	tm.dnskeyPropMu.Unlock()
+
+	tm.TrackDnskeyPropagation(zone, "resend", keys, nil, []AgentId{fast, slow})
+	tm.foldIntoResend(zone, "resend")
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	stamped(tm.pendingDnskeyPropagations["resend"], "the resend")
+}
+
+// A result credited by the asker's confirmation of a catch-up answer keeps
+// that confirmation's stamp, as a direct answer's result does, and a
+// resend carries it (CodeRabbit's review of d6bcf2c).
+func TestAResultCreditedByAnAnswerKeepsItsStamp(t *testing.T) {
+	const zone ZoneName = "stamped.answer.example."
+	const asker, other = "agent.asker.example.", "agent.other.example."
+	k := testDnskeyRR(t, string(zone), 257).KeyTag()
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{asker, other})
+	tm.noteCatchUpAnswer("answer", zone, asker, map[uint16]bool{k: true})
+	ms := &MsgStamp{Epoch: 2, Seq: 5}
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, ms)
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, &MsgStamp{Epoch: 2, Seq: 6})
+
+	stamped := func(prop *PendingDnskeyPropagation, which string) {
+		t.Helper()
+		if prop == nil {
+			t.Fatalf("%s: not tracked", which)
+		}
+		if prop.Results[asker][k] != "applied" || prop.Stamps[asker][k] != ms {
+			t.Errorf("%s: %q with stamp %+v, want applied with %+v", which, prop.Results[asker][k], prop.Stamps[asker][k], ms)
+		}
+	}
+	tm.dnskeyPropMu.Lock()
+	stamped(tm.pendingDnskeyPropagations["first"], "the credited propagation")
+	tm.dnskeyPropMu.Unlock()
+
+	tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{asker, other})
+	tm.foldIntoResend(zone, "resend")
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	stamped(tm.pendingDnskeyPropagations["resend"], "the resend")
+}

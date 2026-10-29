@@ -470,7 +470,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		for _, ri := range rejected {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
 		}
-		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems)
+		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems, instr)
 
 		// Forward per-RR detail to SynchedDataEngine
 		if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
@@ -2470,9 +2470,12 @@ type PendingDnskeyPropagation struct {
 	Rejected     bool   // True if any agent rejected
 	RejectionMsg string // First rejection reason
 	CreatedAt    time.Time
-	// Stamps is each of ExpectedAgents' stamp in its latest confirmation
-	// (S5b); S8 judges an answer by it.
-	Stamps map[AgentId]*MsgStamp
+	// Stamps is each of ExpectedAgents' stamp per key: that of the answer
+	// that gave the key its result (Results), carried with the result by a
+	// resend (S5b). A later confirmation moves none: an agent's keys may
+	// have their results from different answers, and S8 judges each result
+	// by its own answer's stamp.
+	Stamps map[AgentId]map[uint16]*MsgStamp
 }
 
 // foldIntoResend lets the resend of keys (#256), tracked as resendID, take
@@ -2504,8 +2507,10 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 		}
 		for agent, results := range prop.Results {
 			for kt, r := range results {
+				// a result carried goes with the stamp of the answer that
+				// gave it (S8 judges it by that)
 				if r == "applied" || r == "ignored" {
-					resend.setResultLocked(agent, kt, r)
+					resend.setResultLocked(agent, kt, r, prop.Stamps[agent][kt])
 				}
 			}
 		}
@@ -2564,9 +2569,9 @@ func sameDistribution(a, b *PendingDnskeyPropagation) bool {
 }
 
 // setResultLocked records an agent's answer for a key of the propagation,
-// unless it has one, and marks the agent answered once every key has one.
-// Under dnskeyPropMu.
-func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, result string) {
+// with the answer's stamp, unless it has one, and marks the agent answered
+// once every key has one. Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, result string, ms *MsgStamp) {
 	if _, expected := prop.ExpectedAgents[agent]; !expected || !slices.Contains(prop.KeyTags, kt) {
 		return
 	}
@@ -2578,6 +2583,7 @@ func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, 
 	}
 	if prop.Results[agent][kt] == "" {
 		prop.Results[agent][kt] = result
+		prop.stampResultLocked(agent, kt, ms)
 	}
 	if len(prop.Results[agent]) == len(prop.KeyTags) {
 		prop.ExpectedAgents[agent] = true
@@ -2710,15 +2716,16 @@ func dnskeyKeyTagsOf(records []string) map[uint16]bool {
 // has a result from it. Once every expected agent answered, each key's
 // result goes to the signer: "rejected" when any agent rejected it, else
 // "propagated" (or "removed" for a key the distribution removed), with the
-// distribution's send time.
+// distribution's send time. Each result keeps the stamp of the answer
+// that gave it (S5b).
 // Returns true if the confirmation was for a DNSKEY propagation.
 func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo) bool {
-	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems)
+	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems, nil)
 }
 
 // processDnskeyConfirmation is ProcessDnskeyConfirmation with the records
-// the confirmation names as ignored (#288).
-func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo) bool {
+// the confirmation names as ignored (#288) and its stamp, ms (S5b).
+func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo, ms *MsgStamp) bool {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2737,7 +2744,7 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 	}
 	if !exists {
 		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
-			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems)
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems, ms)
 		}
 		return false // Not a DNSKEY propagation confirmation
 	}
@@ -2810,6 +2817,9 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 			} else {
 				lgTransport.Info("DNSKEY confirmation: the peer does not apply our keys (not a signer); answered", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt)
 			}
+		}
+		if results[kt] != "" {
+			prop.stampResultLocked(agentID, kt, ms)
 		}
 	}
 	if len(results) == len(prop.KeyTags) && len(prop.KeyTags) > 0 {
@@ -2909,8 +2919,9 @@ func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, ask
 // set: a key added that is in it is applied, and a key removed that is not
 // in it is removed. A rejection names its keys; an "ignored" covers the
 // answer's keys as a direct answer does, and so does a key named as
-// ignored (#288). Under dnskeyPropMu.
-func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, ignoredRecords []string, rejectedItems []RejectedItemInfo) {
+// ignored (#288). Each result keeps ms, the confirmation's stamp, as a
+// direct answer's does (S5b). Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, ignoredRecords []string, rejectedItems []RejectedItemInfo, ms *MsgStamp) {
 	var rejectedRecords []string
 	for _, ri := range rejectedItems {
 		rejectedRecords = append(rejectedRecords, ri.Record)
@@ -2950,6 +2961,9 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 				results[kt] = "applied"
 			case (ignored || ignoredTags[kt]) && covered:
 				results[kt] = "ignored"
+			}
+			if results[kt] != "" {
+				prop.stampResultLocked(agent, kt, ms)
 			}
 		}
 		lgTransport.Info("DNSKEY propagation answered by the asker's confirmation of an answer it overtook", "zone", prop.Zone, "distributionID", distID, "agent", agent, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
