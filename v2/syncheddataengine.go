@@ -2067,7 +2067,7 @@ func (conf *Config) applyLocalUpdate(ctx context.Context, zdr *ZoneDataRepo, syn
 					if err != nil {
 						lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
 					} else if len(agents) > 0 {
-						tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
+						tm.TrackDnskeyPropagation(ctx, synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
 						if synchedDataUpdate.Resend {
 							tm.foldIntoResend(synchedDataUpdate.Zone, distID)
 						}

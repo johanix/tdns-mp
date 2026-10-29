@@ -2607,8 +2607,9 @@ func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, 
 }
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
-// Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
-func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags, removedTags []uint16, agents []AgentId) {
+// Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents,
+// with its ctx, which ends the wait for members with no role.
+func (tm *MPTransportBridge) TrackDnskeyPropagation(ctx context.Context, zone ZoneName, distID string, keyTags, removedTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2635,7 +2636,21 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string
 	// A member with no role is waited for up to the time-out (design 4). A
 	// voting member may come to have none while the distribution waits (a
 	// thaw), so the look is always made, and made again while it waits.
-	time.AfterFunc(tm.noRoleWait(), func() { tm.dnskeyNoRoleTimedOut(distID) })
+	tm.noRoleAfter(ctx, distID)
+}
+
+// noRoleAfter has dnskeyNoRoleTimedOut look at the distribution after the
+// time-out, unless ctx ends first.
+func (tm *MPTransportBridge) noRoleAfter(ctx context.Context, distID string) {
+	go func() {
+		timer := time.NewTimer(tm.noRoleWait())
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			tm.dnskeyNoRoleTimedOut(ctx, distID)
+		case <-ctx.Done():
+		}
+	}()
 }
 
 // noRoleWait is how long a DNSKEY distribution waits for a member with no
@@ -2653,7 +2668,7 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 // with one log line, and the distribution goes on without it. A voting
 // member is waited for as before, and looked at again after another
 // time-out, in case it has no role by then.
-func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(distID string) {
+func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID string) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 	prop, ok := tm.pendingDnskeyPropagations[distID]
@@ -2671,7 +2686,7 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(distID string) {
 	}
 	tm.finishDnskeyPropagationLocked(distID, prop)
 	if _, waits := tm.pendingDnskeyPropagations[distID]; waits {
-		time.AfterFunc(tm.noRoleWait(), func() { tm.dnskeyNoRoleTimedOut(distID) })
+		tm.noRoleAfter(ctx, distID)
 	}
 }
 
