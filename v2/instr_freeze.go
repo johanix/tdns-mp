@@ -411,7 +411,7 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 					select {
 					case a := <-answer:
 						if a.Error {
-							lgEngine.Warn("a kept change was released and did not go out in full; `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
+							lgEngine.Warn("a kept change was released and was refused, or did not go out in full; if it was applied, `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
 						}
 					default:
 					}
