@@ -41,12 +41,9 @@ func (t *stampTable) messageStamp(zone string) *MsgStamp {
 	if t == nil {
 		return nil
 	}
-	st, ok := t.store.stampOf(zone)
+	st, ok := t.ownStamp(zone)
 	if !ok {
 		return nil
-	}
-	if t.rollover != nil {
-		st.Rollover = t.rollover(zone)
 	}
 	return &MsgStamp{Epoch: t.epoch, Seq: t.seq.Add(1), InstrStamp: st}
 }

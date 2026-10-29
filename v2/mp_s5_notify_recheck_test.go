@@ -48,10 +48,11 @@ type fakeParent struct {
 	ns      []string
 	ds      []dns.RR
 	updates int
-	refuse  bool // answer an UPDATE REFUSED, as a parent that will not take it yet
-	fail    int  // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
-	queries int  // the questions it was asked
-	silent  bool // answer every question SERVFAIL, as a parent that does not answer
+	last    *dns.Msg // the last UPDATE taken, not refused
+	refuse  bool     // answer an UPDATE REFUSED, as a parent that will not take it yet
+	fail    int      // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
+	queries int      // the questions it was asked
+	silent  bool     // answer every question SERVFAIL, as a parent that does not answer
 }
 
 func newFakeParent(t *testing.T, child string) *fakeParent {
@@ -101,6 +102,8 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 			m.Rcode = dns.RcodeRefused
 		case p.fail != 0:
 			m.Rcode = p.fail
+		default:
+			p.last = r.Copy()
 		}
 		_ = w.WriteMsg(m)
 		return
@@ -167,6 +170,13 @@ func (p *fakeParent) queriesSeen() int {
 	return p.queries
 }
 
+// lastUpdate is the last UPDATE the parent took; nil with none.
+func (p *fakeParent) lastUpdate() *dns.Msg {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.last
+}
+
 func (p *fakeParent) updatesSeen() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -190,6 +200,25 @@ func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+// Bytes returns a copy of what the buffer holds.
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.buf.Bytes())
 }
 
 // notifyRig is the leader's side of a delegation sync as the agent runs it,
@@ -234,13 +263,13 @@ func newNotifyRigFor(t *testing.T, zone, scheme string, signed bool, delays ...t
 // engines start: what they read from the config is in place by then.
 func newNotifyRigWith(t *testing.T, zone, scheme string, signed bool, setup func(r *notifyRig), delays ...time.Duration) *notifyRig {
 	t.Helper()
-	savedDelays, savedLog := delegationSyncNotifyDelays, lgEngine
+	savedDelays := delegationSyncNotifyDelays
 	logsink := &lockedBuffer{}
 	delegationSyncNotifyDelays = delays
-	lgEngine = slog.New(slog.NewTextHandler(logsink, nil))
 	// registered first, so run last: after the syncher has stopped and what
 	// it scheduled has ended (waitDelegationSyncTimers)
-	t.Cleanup(func() { delegationSyncNotifyDelays, lgEngine = savedDelays, savedLog })
+	logTo(t, lgEngine, slog.NewTextHandler(logsink, nil))
+	t.Cleanup(func() { delegationSyncNotifyDelays = savedDelays })
 	installParentSync(t, fmt.Sprintf(parentSyncConfig, "ED25519"))
 
 	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})

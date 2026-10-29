@@ -14,6 +14,7 @@ package tdnsmp
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,27 @@ type noAddressScenario struct {
 	// bobAddress is the record that is missing: publishing it completes
 	// what Alice can find about Bob.
 	bobAddress dns.RR
+	// discoveries is held by each discovery of Alice's engine
+	// (serialDiscovery), and by a test while the lookups it counts run.
+	discoveries sync.Mutex
+}
+
+// serialDiscovery is an engine's transport with the engine's discoveries
+// made one at a time, under mu. The engine's retry starts one every
+// RetryInterval (50 ms in the harness), also while one is running. A lookup
+// that runs while the peer's records are not in the cache, flushed for a
+// lookup past it or not yet cached by the first one, asks the server too,
+// and a test that counts the lookups at the server holds mu while those it
+// counts run (#290).
+type serialDiscovery struct {
+	hsync.TransportBridge
+	mu *sync.Mutex
+}
+
+func (d serialDiscovery) DiscoverPeer(ctx context.Context, identity string) (*transport.Peer, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.TransportBridge.DiscoverPeer(ctx, identity)
 }
 
 // newNoAddressScenario builds the scenario and starts Alice's engine with
@@ -68,7 +90,9 @@ func newNoAddressScenarioCached(t *testing.T, cfg hsync.Config, denialTTL uint32
 		zone.set(rr)
 	}
 
-	startHarnessEngine(t, env, s.alice, cfg).MarkNeeded(hsync.PeerID(s.bob.Identity), "", nil)
+	startHarnessEngine(t, env, s.alice, cfg, func(d *hsync.Deps) {
+		d.Transport = serialDiscovery{TransportBridge: d.Transport, mu: &s.discoveries}
+	}).MarkNeeded(hsync.PeerID(s.bob.Identity), "", nil)
 	deadline := time.Now().Add(integTestTimeout)
 	for {
 		if p, ok := s.alice.Bridge.PeerRegistry.Get(s.bob.Identity); ok && p.MechanismContactInfo(transport.MechanismDNS) == "partial" {
@@ -247,6 +271,30 @@ func waitForLookups(t *testing.T, what string, count func() int, n int) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+// discoveredAt is when env's last discovery of the peer ended: the peer's
+// discovery status is written once its lookups are done, and what they read
+// is in the resolver's cache. Zero when env holds no such peer.
+func discoveredAt(env *peerEnv, peer string) time.Time {
+	p, ok := env.Bridge.PeerRegistry.Get(peer)
+	if !ok {
+		return time.Time{}
+	}
+	return p.DiscoveryStatus().At
+}
+
+// waitForDiscovery waits until a discovery of the peer by env has ended
+// after since.
+func waitForDiscovery(t *testing.T, env *peerEnv, peer string, since time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !discoveredAt(env, peer).After(since) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's discovery of %s did not end", env.Identity, peer)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // bobAddressLookups is how many times Bob's SVCB record has been asked for
 // at the authoritative server: the lookups Alice's resolver did not answer
 // from its cache. Bob's own resolver never asks for it.
@@ -343,12 +391,23 @@ func TestALookupPastTheCacheForAHelloCountsForRefusedHellosToo(t *testing.T) {
 	s := newNoAddressScenarioCached(t, harnessIntervals(), 1)
 	s.bob.Bridge.authorizedPeers = func() []string { return nil }
 	jwkLookups := func() int { return s.zone.asked("dns."+s.bob.Identity, core.TypeJWK) }
-	if got := jwkLookups(); got != 1 {
-		t.Fatalf("precondition: Bob's JWK record was asked for %d times, want once: when Alice discovered him", got)
-	}
-
-	sayHello(t, s.bob, s.alice)
-	waitForLookups(t, "Bob's JWK record", jwkLookups, 2)
+	// Alice's retries wait, and the one running ends, while the lookups
+	// up to the one for Bob's hello are counted. They wait until the
+	// discovery for his hello has ended, so that what it read is in the
+	// resolver's cache when they run.
+	func() {
+		s.discoveries.Lock()
+		defer s.discoveries.Unlock()
+		if got := jwkLookups(); got != 1 {
+			t.Fatalf("precondition: Bob's JWK record was asked for %d times, want once: when Alice discovered him", got)
+		}
+		before := discoveredAt(s.alice, s.bob.Identity)
+		sayHello(t, s.bob, s.alice)
+		waitForDiscovery(t, s.alice, s.bob.Identity, before)
+		if got := jwkLookups(); got != 2 {
+			t.Fatalf("Bob's JWK record was asked for %d times when the discovery for his hello ended, want 2", got)
+		}
+	}()
 	// Bob holds no peer: his hello gave him a view of Alice, and a peer he
 	// holds is admitted whatever its state (#178 step 7).
 	s.bob.Registry.S.Remove(AgentId(s.alice.Identity))
