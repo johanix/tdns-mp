@@ -6,7 +6,6 @@ package tdnsmp
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -244,7 +243,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 						return false, fmt.Sprintf("Update for zone %q from %q: invalid RR in operation: %s",
 							synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrStr), nil
 					}
-					if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
+					if !sameName(rr.Header().Name, string(synchedDataUpdate.Zone)) {
 						return false, fmt.Sprintf("Update for zone %q from %q: RR outside apex in operation: %s",
 							synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrStr), nil
 					}
@@ -260,7 +259,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR type: %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
 				}
-				if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
+				if !sameName(rr.Header().Name, string(synchedDataUpdate.Zone)) {
 					lgAgent.Warn("invalid RR name (outside apex)", "rr", rr.String())
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR name (outside apex): %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
@@ -311,7 +310,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR type: %s",
 					synchedDataUpdate.Zone, rr.String()), nil
 			}
-			if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
+			if !sameName(rr.Header().Name, string(synchedDataUpdate.Zone)) {
 				lgAgent.Warn("invalid RR name (outside apex)", "rr", rr.String())
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR name (outside apex): %s",
 					synchedDataUpdate.Zone, rr.String()), nil
