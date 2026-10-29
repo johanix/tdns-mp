@@ -100,7 +100,8 @@ type zoneSerials struct {
 	// reconciliation, by identity (design 3.2): planned as excused from
 	// then on.
 	Excused []string `json:"excused,omitempty"`
-	// DoneAt is when the last transition was done here (S12).
+	// DoneAt is when the transition to the active serial was done here
+	// (S12); zero from the thaw that starts the next until it is done.
 	DoneAt time.Time `json:"done_at,omitzero"`
 	// Enforced: the active serial moves only by Activate (S7). A record
 	// kept before that followed the copy, and is read as none (S9): from
@@ -878,7 +879,7 @@ type InstructionsStatus struct {
 	Enforced   bool          `json:"enforced"`
 	Removals   []Removal     `json:"removals,omitempty"`
 	// The reconciliation's step held here, the steps planned and what it
-	// does (S12); and when the last transition was done.
+	// does (S12); and when the transition to the active serial was done.
 	Step     int       `json:"step,omitempty"`
 	StepOf   int       `json:"step_of,omitempty"`
 	StepWhat string    `json:"step_what,omitempty"`

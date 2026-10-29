@@ -140,7 +140,7 @@ func planSteps(p planView) []plannedStep {
 			}
 		}
 	}
-	steps = excusedNSFirst(steps, p.excused)
+	steps = excusedNSFirst(steps, p.excused, p.taken)
 	to := p.to
 	return append(steps, plannedStep{
 		key:  lastStepKey,
@@ -152,8 +152,10 @@ func planSteps(p planView) []plannedStep {
 // excusedNSFirst moves the NS step of each excused leaving provider before
 // the first addition's DNSKEY or DS step not taken: a new signer's DNSKEY
 // must not wait for a member that cannot confirm (design 5).
-func excusedNSFirst(steps []plannedStep, excused map[string]bool) []plannedStep {
-	first := slices.IndexFunc(steps, func(st plannedStep) bool { return st.kind == stepAddition && st.keys })
+func excusedNSFirst(steps []plannedStep, excused map[string]bool, taken []string) []plannedStep {
+	first := slices.IndexFunc(steps, func(st plannedStep) bool {
+		return st.kind == stepAddition && st.keys && !slices.Contains(taken, st.key)
+	})
 	if first < 0 {
 		return steps
 	}
