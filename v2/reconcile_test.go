@@ -93,10 +93,13 @@ func (r *reconcileRig) step() (InstrStep, bool) {
 func (r *reconcileRig) turn(now time.Time) { r.conf.reconcileTurn(r.zone, now) }
 
 // wanted is what this agent hands its combiner now.
-func (r *reconcileRig) wanted() *ActingHandover {
-	r.combiner.mu.Lock()
-	defer r.combiner.mu.Unlock()
-	if z := r.combiner.zones[handoverKey(r.zone)]; z != nil {
+func (r *reconcileRig) wanted() *ActingHandover { return r.wantedBy(r.combiner) }
+
+// wantedBy is what this agent hands the part tr tracks now.
+func (r *reconcileRig) wantedBy(tr *handoverTracker) *ActingHandover {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if z := tr.zones[handoverKey(r.zone)]; z != nil {
 		return z.want
 	}
 	return nil
@@ -730,23 +733,18 @@ func TestTheStepSurvivesARestart(t *testing.T) {
 }
 
 // TestDoneReleasesTheOwedList, with TestNoRolloverStartsBeforeDone: the
-// zone is frozen until done, its signer holds, and at done the data
-// engine is asked to release what the zone kept.
+// zone is frozen until done, and the hand-over holds its signer's key
+// machine; at done the hold is let go and the data engine is asked to
+// release what the zone kept.
 func TestDoneReleasesTheOwedList(t *testing.T) {
 	r := newReconcileRig(t, "release.reconcile.example.", roleA)
-	// the rig's own hold words are sent before the test's sender is set
-	waitUntil(t, "the rig's hold sender did not end", func() bool {
-		b := &r.conf.InternalMp.holds
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		return !b.sending[canonicalName(r.zone)]
-	})
-	told := make(chan bool, 16)
-	r.conf.InternalMp.holdSend = func(_ ZoneName, on bool) { told <- on }
 	r.agree()
 	r.thawNow()
 	if len(r.conf.zoneFrozen(r.zone)) == 0 {
 		t.Fatal("not frozen during the reconciliation")
+	}
+	if h := r.wantedBy(r.signer); h == nil || !h.Sets.Hold {
+		t.Errorf("the signer is not held during the reconciliation: %v", h)
 	}
 	for len(r.conf.InternalMp.MsgQs.SynchedDataCmd) > 0 {
 		<-r.conf.InternalMp.MsgQs.SynchedDataCmd
@@ -764,15 +762,8 @@ func TestDoneReleasesTheOwedList(t *testing.T) {
 	default:
 		t.Error("the release was not asked at done")
 	}
-	for {
-		select {
-		case on := <-told:
-			if !on {
-				return
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("the hold was not let go")
-		}
+	if h := r.wantedBy(r.signer); h == nil || h.Sets.Hold {
+		t.Errorf("the hold is not let go at done: %v", h)
 	}
 }
 

@@ -1158,13 +1158,13 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet
 		mpzd.MPOptions[tdns.OptAllowEdits] = true
 	}
 
-	// Preserve any existing MPdata.Options (set at parse time),
-	// create the map if needed.
-	var mpOpts map[tdns.ZoneOption]bool
-	if mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Options != nil {
-		mpOpts = mpzd.MP.MPdata.Options
-	} else {
-		mpOpts = make(map[tdns.ZoneOption]bool)
+	// Preserve any existing MPdata.Options (set at parse time), in a map
+	// of its own: a hand-over runs this on a wrapper that shares the
+	// zone's MPdata, outside the zone's lock, and the zone's map is read
+	// without one.
+	mpOpts := make(map[tdns.ZoneOption]bool)
+	if mpzd.MP.MPdata != nil {
+		maps.Copy(mpOpts, mpzd.MP.MPdata.Options)
 	}
 	mpOpts[tdns.OptMultiProvider] = true
 	mpOpts[OptMPDisallowEdits] = mpzd.MPOptions[OptMPDisallowEdits]

@@ -703,7 +703,7 @@ func (conf *Config) fetchAgreed(zone string) {
 // gets it from a member, as no transfer brings it any more.
 func (conf *Config) fetchInstructions(zone string, sd SerialDigest, member, why string) {
 	ar, msgQs := conf.InternalMp.AgentRegistry, conf.InternalMp.MsgQs
-	if app := tdns.Globals.App.Type; app != AppTypeMPAgent && app != AppTypeMPAuditor || ar == nil || ar.LocalAgent == nil || msgQs == nil {
+	if app := tdns.Globals.App.Type; (app != AppTypeMPAgent && app != AppTypeMPAuditor) || ar == nil || ar.LocalAgent == nil || msgQs == nil {
 		return
 	}
 	key := fmt.Sprintf("%s %d %s %s", canonicalName(zone), sd.Serial, sd.Digest, canonicalName(member))

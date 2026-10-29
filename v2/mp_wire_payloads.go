@@ -121,10 +121,6 @@ type DnsKeystatePayload struct {
 	// Resend: with Signal "inventory", the keys the signer's key lifecycle
 	// sends again (#256). An older agent ignores it.
 	Resend []uint16 `json:"Resend,omitempty"`
-	// Hold: with Signal "hold", the agent's word to hold the zone's key
-	// machine, or to let it go; with Signal "inventory", the signer's word
-	// that it holds it (plan S6).
-	Hold bool `json:"Hold,omitempty"`
 	// Acting: with Signal "acting", the hand-over an agent gives its
 	// signer; with Signal "inventory", the one the signer holds, none when
 	// it holds nothing (plan S11).
@@ -137,9 +133,13 @@ type DnsKeystatePayload struct {
 	NotSigning bool                `json:"NotSigning,omitempty"`
 	Rollover   bool                `json:"Rollover,omitempty"`
 	WaitsOn    map[uint16][]string `json:"WaitsOn,omitempty"`
-	Owned      bool                `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
-	Time       string              `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
-	Timestamp  int64               `json:"timestamp"`       // Unix timestamp
+	// Hold: with Signal "inventory", the signer's word that it holds the
+	// zone's key machine (plan S6); the agent's word is the hand-over's
+	// (Acting.Sets.Hold, S11).
+	Hold      bool   `json:"Hold,omitempty"`
+	Owned     bool   `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
+	Time      string `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
+	Timestamp int64  `json:"timestamp"`       // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"

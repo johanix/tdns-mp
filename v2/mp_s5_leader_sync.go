@@ -1300,10 +1300,10 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		Zone:       msg.Zone,
 		Inventory:  msg.Inventory,
 		Owned:      msg.Owned,
-		Hold:       msg.Hold,
 		NotSigning: msg.NotSigning,
 		Rollover:   msg.Rollover,
 		WaitsOn:    msg.WaitsOn,
+		Hold:       msg.Hold,
 		Received:   time.Now(),
 		seq:        msg.seq,
 	}
@@ -1324,13 +1324,11 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	if inventoryRecordedHook != nil {
 		inventoryRecordedHook(msg)
 	}
-	// what the signer holds of the agent's hand-over (plan S11): handed
-	// again until it holds what this agent wants
+	// what the signer holds of the agent's hand-over (plan S11), its hold
+	// included (S6): handed again until it holds what this agent wants
 	conf.InternalMp.SignerHandover.learned(zd.ZoneName, msg.Acting)
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
-	// the signer's word on the zone's hold, against the freeze (plan S6)
-	conf.reconcileHold(zd.ZoneName, snap)
 	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
 		return true
