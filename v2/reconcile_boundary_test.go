@@ -159,7 +159,7 @@ func TestTransportBoundary_AStepIsHandedAndConfirmed(t *testing.T) {
 	mu.Lock()
 	last := handed[len(handed)-1]
 	mu.Unlock()
-	combiner.confirmation(last, transport.ConfirmSuccess, nil)
+	combiner.confirmation(last, transport.ConfirmSuccess, nil, nil)
 	beat(env.Alice, env.Bob)
 	if st := heldAtBob(); st.StepHeld {
 		t.Fatal("alice's stamp tells the step held with her signer not holding it")

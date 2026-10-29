@@ -543,6 +543,63 @@ func TestArrivedStopsTheAnswerTime(t *testing.T) {
 	}
 }
 
+// A request whose answer came and is kept waits for nothing more from the
+// peer: it leaves its place among the eight in flight, while the zone's
+// active serial is not known as after.
+func TestAKeptAnswerLeavesItsPlaceAmongTheRequestsInFlight(t *testing.T) {
+	var zones []ZoneName
+	for i := range catchUpInFlight + 1 {
+		zone := "z" + string(rune('a'+i)) + ".inflight.restart.example."
+		catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+		zones = append(zones, ZoneName(zone))
+	}
+	r := newTrackerRig(t, roleA) // not run: the test drives the sender's steps
+	r.setUp(roleB, true)
+	r.t.activeUnknown = func(ZoneName) bool { return true }
+	for _, zone := range zones {
+		r.t.Ask(zone, roleB, catchUpStart)
+	}
+	now := time.Now()
+	asked := map[ZoneName]*CatchUp{}
+	for range catchUpInFlight {
+		zone, cu, _ := r.t.step(roleB, now)
+		if cu == nil {
+			t.Fatalf("%d requests in flight; want %d", len(asked), catchUpInFlight)
+		}
+		r.t.sent(zone, roleB, cu.Request, nil)
+		asked[zone] = cu
+	}
+	if zone, cu, _ := r.t.step(roleB, now); cu != nil {
+		t.Fatalf("a ninth request in flight, for %s", zone)
+	}
+	r.t.Arrived(zones[0], roleB, asked[zones[0]])
+	if zone, cu, _ := r.t.step(roleB, now); cu == nil || zone != zones[catchUpInFlight] {
+		t.Errorf("after a kept answer the next request is %q; want %s", zone, zones[catchUpInFlight])
+	}
+}
+
+// An acknowledgement that comes after the answer, kept, and after the
+// active serial became known leaves the answer time that activeChanged gave
+// the request.
+func TestALateAcknowledgementLeavesTheAnswerTime(t *testing.T) {
+	const zone = "lateack.restart.example."
+	catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+	r := newTrackerRig(t, roleA) // not run: the test drives the sender's steps
+	r.setUp(roleB, true)
+	unknown := true
+	r.t.activeUnknown = func(ZoneName) bool { return unknown }
+	r.t.beat = time.Minute
+	r.t.Ask(zone, roleB, catchUpStart)
+	_, cu, _ := r.t.step(roleB, time.Now())
+	r.t.Arrived(zone, roleB, cu)
+	unknown = false
+	r.t.activeChanged(zone)
+	r.t.sent(zone, roleB, cu.Request, nil)
+	if e := r.entry(zone, roleB); time.Until(e.deadline) < 110*time.Second {
+		t.Errorf("the acknowledgement cut the answer time to %s: %+v", time.Until(e.deadline).Round(time.Second), e)
+	}
+}
+
 // While the active serial is not known a catch-up answer is kept, whatever
 // its sender's stamp, and its request's answer time stands still
 // (Arrived); once the serial is known the answer is released and handled,
