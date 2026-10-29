@@ -42,7 +42,8 @@ func seedRoles(t *testing.T, zone string, servers, auditors, noRole []string) *t
 }
 
 // setRoles replaces the zone's HSYNCPARAM with one that has servers= and
-// auditors= as given, as the owner's edit of the roles does.
+// auditors= as given, at the next serial, as the owner's edit of the roles
+// does.
 func setRoles(t *testing.T, zd *tdns.ZoneData, servers, auditors []string) {
 	t.Helper()
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -63,11 +64,7 @@ func setRoles(t *testing.T, zd *tdns.ZoneData, servers, auditors []string) {
 	if len(auditors) > 0 {
 		kv = append(kv, &core.HSYNCPARAMAuditors{Auditors: labels(auditors)})
 	}
-	prr := &dns.PrivateRR{
-		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: kv},
-	}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	setHSYNCPARAM(apex, zd.ZoneName, kv...)
 	zd.Data.Set(zd.ZoneName, *apex)
 	zd.InstallInitialSnapshot()
 	Zones.Invalidate(zd.ZoneName)
@@ -530,7 +527,8 @@ func memberLabel(id string) string {
 }
 
 // servedMembers puts the zone's HSYNC3 records and its HSYNCPARAM in place as
-// a refresh brings them: servers= as given, and parentsync=agent.
+// a refresh brings them: servers= as given, and parentsync=agent, at the next
+// serial.
 func servedMembers(t *testing.T, mpzd *MPZoneData, recs []h3rec, servers []string) {
 	t.Helper()
 	zone := mpzd.ZoneName
@@ -551,12 +549,9 @@ func servedMembers(t *testing.T, mpzd *MPZoneData, recs []h3rec, servers []strin
 	for i, s := range servers {
 		labels[i] = memberLabel(s)
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+	setHSYNCPARAM(&apex, zone,
 		&core.HSYNCPARAMServers{Servers: labels},
-		&core.HSYNCPARAMParentSync{Value: core.HsyncParentSyncAgent},
-	}}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{
-		Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
+		&core.HSYNCPARAMParentSync{Value: core.HsyncParentSyncAgent})
 	mpzd.Data.Set(zone, apex)
 	mpzd.InstallInitialSnapshot()
 }

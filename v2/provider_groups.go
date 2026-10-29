@@ -105,13 +105,12 @@ const (
 	standingNone    standing = iota // no HSYNC3 record in state ON
 	standingNoRole                  // an ON record, in none of servers=, signers=, auditors=
 	standingAuditor                 // in auditors= only
-	standingVoting                  // in servers= or signers=; with no HSYNCPARAM, every ON record
+	standingVoting                  // in servers= or signers=
 )
 
 // zoneStanding is the identity's standing by the zone's instructions. Who
 // votes is participantsOf's voting set, as VotingMembersForZone and
-// isVotingMember have it. A zone with HSYNC3 records and no HSYNCPARAM is the
-// legacy case: every ON record votes.
+// isVotingMember have it.
 func zoneStanding(in *Instructions, identity string) standing {
 	participants, voting := participantsOf(in)
 	return standingIn(in, participants, voting, identity)

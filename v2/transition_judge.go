@@ -207,16 +207,9 @@ func (j *judgement) name(label string) string {
 }
 
 // judgedRoles are the labels with a server role and with a signer role, as
-// the parts act by them (rolesFor): without HSYNCPARAM, every ON record
-// serves and none signs.
+// the parts act by them (rolesFor).
 func judgedRoles(in *Instructions) (servers, signers []string) {
-	if in.HasParam {
-		return in.Servers, in.Signers
-	}
-	for _, r := range in.Records {
-		servers = append(servers, r.Label)
-	}
-	return servers, nil
+	return in.Servers, in.Signers
 }
 
 // record is the ON record under label.

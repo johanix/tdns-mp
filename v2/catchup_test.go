@@ -1070,17 +1070,19 @@ func TestAPeerThatStartsAgainWhileAskedBackIsAskedAnew(t *testing.T) {
 	}
 }
 
-// A zone with HSYNC3 records and no HSYNCPARAM, in which every ON record
-// votes, is not a multi-provider zone here: the load gives it no provider
-// data, and no agent can answer for it complete. It is asked about neither
-// at its load nor at a beat, first or after an outage; a zone with
-// HSYNCPARAM beside it is.
+// A zone with HSYNC3 records and no HSYNCPARAM has no reading (#308) and is
+// not a multi-provider zone here: the load gives it no provider data, and no
+// agent can answer for it complete. It is asked about neither at its load
+// nor at a beat, first or after an outage; a zone with HSYNCPARAM beside it
+// is.
 func TestAZoneWithoutHSYNCPARAMIsNotAskedAtALoadOrABeat(t *testing.T) {
 	const zone, mp = "legacy.beat.example.", "withparam.beat.example."
 	asMPAgent(t)
 	zd := seedZoneWithHSYNC3(t, zone, roleA, roleB)
 	zd.Options[tdns.OptMultiProvider] = true
 	mpzd, _ := Zones.Get(zone)
+	setApex(t, mpzd, core.TypeHSYNCPARAM)
+	t.Cleanup(func() { lastGood.Delete(zone); noReading.Delete(zone) })
 	mpzd.EnsureMP()
 	mpzd.MP.MPdata = nil // populateMPdata takes it as no multi-provider zone
 	catchUpZone(t, mp, []string{roleA, roleB}, nil, nil)
