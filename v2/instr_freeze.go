@@ -409,7 +409,7 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 					select {
 					case a := <-answer:
 						if a.Error {
-							lgEngine.Warn("a kept change was released and did not go out in full; `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
+							lgEngine.Warn("a kept change was released and was refused, or did not go out in full; if it was applied, `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
 						}
 					default:
 					}
@@ -427,13 +427,16 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 
 // takeUp is, for a zone this agent leads, what onLeaderElected runs, once
 // the zone's freeze has ended: the key's set-up and the sync with the
-// parent, which the freeze held (syncHeld).
+// parent, which the freeze held (syncHeld). The set-up runs under the
+// zone's key-setup lock, as an election's does, so the two never run at
+// once.
 func (conf *Config) takeUp(ctx context.Context, zone ZoneName) {
 	lem := conf.InternalMp.LeaderElectionManager
 	if lem == nil || !lem.IsLeader(zone) {
 		return
 	}
-	if err := conf.leaderKeySetup(ctx, zone, true); err != nil && !errors.Is(err, errLeadMoved) && !errors.Is(err, errZoneKeyNotHeld) && !errors.Is(err, errHeldDuringTransition) {
+	err := conf.keySetupLocked(zone, func() error { return conf.leaderKeySetup(ctx, zone, true) })
+	if err != nil && !errors.Is(err, errLeadMoved) && !errors.Is(err, errZoneKeyNotHeld) && !errors.Is(err, errHeldDuringTransition) {
 		lgAgent.Warn("the key set-up after the transition failed; the sync waits for the key", "zone", zone, "err", err)
 	}
 	conf.requestDelegationSync(ctx, string(zone), "the transition is done")

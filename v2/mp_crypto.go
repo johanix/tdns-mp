@@ -41,7 +41,7 @@ const DefaultCryptoBackend = "jose"
 func cryptoBackend(mp *MultiProviderConf) (crypto.Backend, error) {
 	name := DefaultCryptoBackend
 	if mp != nil && strings.TrimSpace(mp.CryptoBackend) != "" {
-		name = strings.ToLower(strings.TrimSpace(mp.CryptoBackend))
+		name = strings.ToLower(strings.TrimSpace(mp.CryptoBackend)) // not-a-name: a crypto backend name
 	}
 	backend, err := crypto.GetBackend(name)
 	if err != nil {

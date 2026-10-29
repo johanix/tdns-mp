@@ -646,7 +646,7 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 // no label in the zone keeps only its identity and comes after the
 // labelled rows.
 func labelZoneGossipRows(dto *GossipMatrixDTO) {
-	canon := func(id string) string { return strings.ToLower(dns.Fqdn(id)) }
+	canon := canonicalName
 	labels := make(map[string][]string, len(dto.ColumnLabels))
 	first := make(map[string]int, len(dto.ColumnLabels))
 	for i, lbl := range dto.ColumnLabels {

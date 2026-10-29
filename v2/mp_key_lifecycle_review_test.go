@@ -675,10 +675,8 @@ func TestSignalAboutAKeyNotDistributedHereIsNotAWarning(t *testing.T) {
 	if z := owner.Zones(); len(z) != 1 {
 		t.Fatalf("zone not taken: %v", z)
 	}
-	var logbuf strings.Builder
-	saved := lgSigner
-	lgSigner = slog.New(slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	t.Cleanup(func() { lgSigner = saved })
+	var logbuf lockedBuffer
+	logTo(t, lgSigner, slog.NewJSONHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	if !e.Signal("quiet.owned.example.", 4711, "propagated", "", time.Now()) {
 		t.Fatal("the signal was not taken as the owned zone's")
 	}
