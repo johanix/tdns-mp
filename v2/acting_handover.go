@@ -144,7 +144,8 @@ func (mpzd *MPZoneData) actingSets() Roles {
 
 // wantedHandover is what this agent wants its combiner to act by for the
 // zone: the instructions it acts by (its active ones, S3's rule), the
-// store's newest serial, phase and step, and the step's sets. Until S13 the
+// store's newest serial, phase and step, and the step's sets, with the hold
+// while the zone is frozen (S6, folded in by S11). Until S13 the
 // sets of whose DNSKEYs and DS are published, and of who signs, are the
 // zone's signing set, signers= with the providers leaving it (#275): so the
 // other providers' combiners keep a leaving signer's DNSKEYs and CDS while
@@ -171,6 +172,7 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	}
 	h.Serial, h.Digest, h.Records, h.Newest = in.Serial, in.Digest(), in.instructionRecords(zone), in.Serial
 	h.Sets = mpzd.actingSets()
+	h.Sets.Hold = len(conf.zoneFrozen(zone)) > 0
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil {
 		h.Phase = st.Phase
 		if st.Newest != nil && CompareSerial(st.Newest.Serial, h.Newest) == 1 {
@@ -371,9 +373,11 @@ func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string)
 // goes out, in order; anything else is a refusal, and the combiner's own
 // read says what it holds. A refusal or an "ignored" of an update sent
 // while the combiner held another serial than this agent now wants is not
-// final: the update is sent again, under the serial wanted. handled says
-// the word goes no further.
-func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus) (handled bool) {
+// final, and nor is one from a combiner that says it acts by another
+// serial than the one the update was sent under (acting, plan S8): the
+// update is sent again, under the serial wanted. handled says the word
+// goes no further.
+func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus, acting *ActingStamp) (handled bool) {
 	if t == nil || status == transport.ConfirmPending {
 		return t != nil && t.isHandover(distID)
 	}
@@ -410,7 +414,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 	}
 	delete(t.sent, distID)
 	z := t.zones[handoverKey(string(s.zone))]
-	stale := z != nil && z.want != nil && !z.want.sameAs(s.under)
+	stale := z != nil && z.want != nil && (!z.want.sameAs(s.under) || acting != nil && !acting.names(s.under))
 	t.mu.Unlock()
 	switch status {
 	case transport.ConfirmFailed, transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmPartial:
@@ -551,10 +555,12 @@ func (t *handoverTracker) combinerStarted() {
 	}
 }
 
-// combinerWaits: the combiner holds no hand-over for the zone, and says so
-// every minute until it does (its start report's repeat). The zone is
-// handed over again; what it holds for the others stands.
-func (t *handoverTracker) combinerWaits(zone string) {
+// again: the part is to say again what it holds for the zone. The combiner
+// holds no hand-over for it, and says so every minute until it does (its
+// start report's repeat); or the signer is to confirm its hold for the
+// serial the zone agrees on now (onFreeze, plan S6). The zone is handed over
+// again; what the part holds for the others stands.
+func (t *handoverTracker) again(zone string) {
 	if t == nil {
 		return
 	}
@@ -564,6 +570,73 @@ func (t *handoverTracker) combinerWaits(zone string) {
 	send := t.dueLocked(z, true)
 	t.mu.Unlock()
 	t.send(send)
+}
+
+// letHoldGo: the zone's freeze has ended. A zone this agent hands nothing
+// any more, as one that left the configuration, is handed what was wanted
+// last without the hold, so that its signer's key machine is not held for
+// ever (plan S6).
+func (t *handoverTracker) letHoldGo(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zones[handoverKey(zone)]
+	if z == nil || z.want == nil || !z.want.Sets.Hold {
+		t.mu.Unlock()
+		return
+	}
+	h := *z.want
+	h.Sets.Hold = false
+	z.want = &h
+	send := t.dueLocked(z, false)
+	t.mu.Unlock()
+	t.send(send)
+}
+
+// holdLast: this agent knows no active serial for the zone, so it hands
+// its parts nothing new (design 3.3, 3.4), and nothing new starts at its
+// signer either (the project owner, 2026-10-29): the signer is handed what
+// it holds, or failing that what this agent last wanted it to hold, with
+// the hold set and its sets as they are. Nothing when neither carries
+// instructions: a signer that holds nothing acts by nothing (rule 5), and
+// its inventory says what it holds when it has something (learned).
+func (t *handoverTracker) holdLast(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zone(zone)
+	base := z.held
+	if base == nil {
+		base = z.want
+	}
+	if base == nil || len(base.Records) == 0 {
+		t.mu.Unlock()
+		return
+	}
+	h := *base
+	h.Sets.Hold = true
+	if h.sameAs(z.want) {
+		t.mu.Unlock()
+		return
+	}
+	z.want = &h
+	send := t.dueLocked(z, false)
+	t.mu.Unlock()
+	t.send(send)
+}
+
+// holdHeld: the part holds what is wanted for the zone, and that carries
+// the hold.
+func (t *handoverTracker) holdHeld(zone string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	z := t.zones[handoverKey(zone)]
+	return z != nil && z.want != nil && z.want.Sets.Hold && z.want.sameAs(z.held)
 }
 
 // forgot: the operator forgot the zone's serials here (rule 3). The next
@@ -649,6 +722,12 @@ func (conf *Config) handOverToParts(zone string) {
 	}
 	h := conf.wantedHandover(zone)
 	t.handOver(h)
+	// frozen and handed nothing new: the active serial is not known (S9),
+	// or no step's sets are held yet (S12)
+	if s := conf.InternalMp.Instructions; h == nil && (s.activeUnknown(zone) || s.pending(zone)) {
+		ts.holdLast(zone)
+		return
+	}
 	ts.handOver(h)
 }
 

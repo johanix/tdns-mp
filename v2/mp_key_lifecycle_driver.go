@@ -168,7 +168,7 @@ type ZoneKeyLifecycle struct {
 	// it replaces is retired (T10's guard).
 	algorithms map[string]uint8
 	successor  uint8
-	// hold: the signer's agent holds the zone (KEYSTATE "hold", plan S6):
+	// hold: the signer's agent holds the zone (the hand-over's hold, plan S6):
 	// the tick starts nothing new (Tick)
 	hold bool
 }

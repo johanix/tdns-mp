@@ -33,18 +33,6 @@ const (
 	knownFromNewest  = "common newest"
 )
 
-// activeUnknown: the store keeps serials of the zone, named in any case,
-// and knows no active serial for it.
-func (s *InstructionStore) activeUnknown(zone string) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, z := s.zoneLocked(zone)
-	return z != nil && z.Active == nil
-}
-
 // reading is the zone's instructions as the readers act by them: the active
 // serial's, or, with none known, the newest serial's, for talking (design
 // 3.4); nil when the store keeps none.
@@ -243,7 +231,10 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 		if !conf.leadsUnder(reading, id) {
 			continue
 		}
-		v.take, v.thaw, v.by, v.from, v.reconciling = &sd, st.Thaw, id, knownFromLeader, st.Reconciling
+		v.take, v.by, v.from, v.reconciling = &sd, id, knownFromLeader, st.Reconciling
+		if st.Thaw != nil && st.Thaw.To == sd {
+			v.thaw = st.Thaw // the thaw to the serial taken, as the leader's own rule keeps it
+		}
 		v.fetch = nil
 		return
 	}

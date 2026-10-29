@@ -353,6 +353,7 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 		IgnoredRecords: resp.IgnoredRecords,
 		Truncated:      false, // No truncation needed when sending as separate CONFIRM NOTIFY
 		Timestamp:      time.Now(),
+		App:            actingAppFor(resp.Zone), // the serial it acts by (plan S8)
 	})
 
 	if err != nil {

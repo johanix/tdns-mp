@@ -1,12 +1,15 @@
 package tdnsmp
 
 import (
+	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // The restart rule (plan S9), on the thaw rig: agent a, in a zone that a and
@@ -228,18 +231,23 @@ func TestRecordsThatDifferNameTheForgetRemedy(t *testing.T) {
 }
 
 // The auditor runs the rule of a member: its own record, or the leader's
-// word, never another member's.
+// word, never another member's. It has no election manager: the leader is
+// the one the gossip table's election records name.
 func TestTheAuditorTakesItsRecordOrTheLeadersWord(t *testing.T) {
 	r := newThawRig(t, "auditor.restart.example.", roleA)
 	old := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor
 	t.Cleanup(func() { tdns.Globals.App.Type = old })
+	r.conf.InternalMp.LeaderElectionManager = nil
 	r.restart()
 	if r.known() != 41 {
 		t.Fatal("the auditor did not take its own record")
 	}
 	r.noRecord(r.n)
-	r.leadGroup(r.n, roleB)
+	gst := NewGossipStateTable(roleN)
+	m := zoneMakeUp(r.n)
+	gst.Elections[ComputeGroupHash(m.voting, m.auditors, m.noRole)] = &GroupElectionState{Leader: roleB, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}
+	r.conf.InternalMp.AgentRegistry.GossipStateTable = gst
 	r.hear(roleN, tells(r.n, r.n), true)
 	r.conf.thawTurn(r.zone)
 	if r.known() != 0 {
@@ -533,4 +541,152 @@ func TestArrivedStopsTheAnswerTime(t *testing.T) {
 	if e := r.entry(zone, roleB); e.State != catchUpRetry {
 		t.Errorf("a kept answer not handled in time did not fail its request: %+v", e)
 	}
+}
+
+// While the active serial is not known a catch-up answer is kept, whatever
+// its sender's stamp, and its request's answer time stands still
+// (Arrived); once the serial is known the answer is released and handled,
+// and the request is answered.
+func TestACatchUpAnswerIsKeptWhileTheActiveSerialIsUnknown(t *testing.T) {
+	r := newReceiveRig(t, "catchup.restart.example.")
+	tr := newCatchUpTracker(roleA, nil, time.Hour)
+	tr.operational = func(AgentId) bool { return true }
+	tr.activeUnknown = func(zone ZoneName) bool { return r.store.activeUnknown(string(zone)) }
+	r.conf.InternalMp.CatchUp = tr
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	r.store.Note(r.zone, r.n, nil)
+	tr.Ask(ZoneName(r.zone), roleB, catchUpStart)
+	_, cu, _ := tr.step(roleB, time.Now())
+	if cu == nil {
+		t.Fatal("no request to send")
+	}
+	tr.sent(ZoneName(r.zone), roleB, cu.Request, nil)
+	answer := completeAnswer(cu.Request)
+	resp := make(chan *AgentMsgResponse, 1)
+	r.conf.applyRemoteUpdate(context.Background(), r.zdr, &SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleB, UpdateType: "remote",
+		Update:            &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleB, Operations: []core.RROperation{r.bNS("ns1.b.example.")}},
+		OriginatingDistID: "a1", OriginatingInstr: &MsgStamp{Epoch: 1, Seq: stampSeq.Add(1), InstrStamp: unknownStamp(r.n)},
+		Mechanism: "DNS", OriginatingTime: time.Now(), DeliveredBy: roleB, CatchUp: answer, Response: resp}, r.conf.InternalMp.MsgQs)
+	if got := r.answered("a1"); len(got) != 1 || got[0].Status != "PENDING" || got[0].Message != "kept: this agent does not know its active serial yet, nor did the sender tell one" {
+		t.Errorf("the answer to b: %+v", got)
+	}
+	if len(r.kept()) != 1 || len(r.nsOf(roleB)) != 0 {
+		t.Fatalf("not kept: the kept list %+v, b's NS %v", r.kept(), r.nsOf(roleB))
+	}
+	if e := tr.peers[ZoneName(r.zone)][roleB]; e == nil || !e.arrived || e.Complete {
+		t.Fatalf("the request: %+v, want its answer arrived and not handled", e)
+	}
+	r.cmds()
+	r.conf.know(r.zone, sd(r.n), nil, false, roleB, knownFromLeader)
+	if got := r.cmds(); !slices.Contains(got, "instr-activated") {
+		t.Fatalf("knowing the serial asked the data engine for %v, want instr-activated", got)
+	}
+	r.activated()
+	if got := r.nsOf(roleB); !slices.Equal(got, []string{"ns1.b.example."}) || len(r.kept()) != 0 {
+		t.Errorf("after the release: b's NS %v, the kept list %+v", got, r.kept())
+	}
+	if e := tr.peers[ZoneName(r.zone)][roleB]; e == nil || !e.Complete || e.outstanding() {
+		t.Errorf("the request after the release: %+v, want answered", e)
+	}
+}
+
+// The leader's word keeps the thaw it tells only when the thaw ends at the
+// serial taken, as the leader's own rule does: an older last thaw is not
+// this serial's.
+func TestALeadersOlderThawIsNotKeptWithTheSerialTaken(t *testing.T) {
+	r := newThawRig(t, "olderthaw.restart.example.", roleB)
+	r.noRecord(r.n)
+	r.leadGroup(r.n, roleB)
+	st := tells(r.n, r.n)
+	st.Thaw = &Thaw{From: SerialDigest{Serial: 39, Digest: "x"}, To: SerialDigest{Serial: 40, Digest: "y"}}
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if got := status(t, r.store, r.zone); r.known() != 41 || got.LastThaw != nil {
+		t.Fatalf("after the leader's word with an older thaw: %+v", got)
+	}
+}
+
+// A request whose kept answer fails it, when released and found not
+// complete, waits for its next answer in that answer's own time: the mark
+// of the kept answer goes with the failure.
+func TestARequestWhoseKeptAnswerFailsWaitsForItsNextAnswer(t *testing.T) {
+	const zone = "keptfail.restart.example."
+	catchUpZone(t, zone, []string{roleA, roleB}, nil, nil)
+	r := newTrackerRig(t, roleA) // not run: the test drives the sender's steps
+	r.setUp(roleB, true)
+	r.t.Ask(zone, roleB, catchUpStart)
+	now := time.Now()
+	_, cu, _ := r.t.step(roleB, now)
+	r.t.sent(zone, roleB, cu.Request, nil)
+	r.t.Arrived(zone, roleB, cu)
+	r.t.Answered(zone, roleB, &CatchUp{Request: cu.Request, Why: "no-inventory"}) // released, not complete
+	if e := r.entry(zone, roleB); e.State != catchUpRetry || e.arrived {
+		t.Fatalf("after the kept answer failed the request: %+v", e)
+	}
+	_, again, _ := r.t.step(roleB, now.Add(time.Hour))
+	if again == nil {
+		t.Fatal("the request was not asked again")
+	}
+	r.t.sent(zone, roleB, again.Request, nil)
+	r.t.step(roleB, now.Add(3*time.Hour))
+	if e := r.entry(zone, roleB); e.State != catchUpRetry {
+		t.Errorf("the request asked again never timed out: %+v", e)
+	}
+}
+
+// A zone placed in its group before its first load names its members by
+// the stored serials: a group election that calls through it before the
+// zone is loaded reaches them, rather than failing on the zone's data.
+func TestAGroupElectionReachesAZoneNotLoadedYet(t *testing.T) {
+	r := newThawRig(t, "notloaded.restart.example.", roleA)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Ready = false
+	t.Cleanup(func() { mpzd.Ready = true })
+	zad, err := r.conf.InternalMp.AgentRegistry.GetZoneAgentData(ZoneName(r.zone))
+	if err != nil {
+		t.Fatalf("the zone's agents before its first load: %v", err)
+	}
+	if len(zad.Agents) != 1 || zad.Agents[0].ID != AgentId(roleB) {
+		t.Errorf("the zone's agents: %v", zad.Agents)
+	}
+}
+
+// While the active serial is not known the agent hands its signer nothing
+// new, but what the signer holds again with the hold set, so that no new
+// rollover starts there (the project owner, 2026-10-29; the signer's side is
+// S6's TestNoRolloverStartsUnderAHold). Once the serial is known the hold
+// goes with the freeze.
+func TestTheSignerIsHeldOnWhatItHoldsWhileTheActiveSerialIsNotKnown(t *testing.T) {
+	r := newThawRig(t, "signerhold.restart.example.", roleA)
+	q := r.withSigner()
+	var msgs []handedMsg
+	newest := func() *ActingHandover {
+		msgs = append(msgs, q.take()...)
+		return newestHanded(msgs)
+	}
+	r.conf.handOverToParts(r.zone)
+	waitUntil(t, "the hand-over at 41", func() bool { h := newest(); return h != nil && h.Serial == 41 && !h.Sets.Hold })
+	held := newest()
+	r.conf.InternalMp.SignerHandover.learned(r.zone, held) // the signer holds it
+	sets := held.Sets
+
+	r.noRecord(r.n) // the record lost: the zone is frozen, no active serial known
+	waitUntil(t, "the hold on what the signer holds", func() bool { h := newest(); return h != nil && h.Sets.Hold })
+	h := newest()
+	r.conf.InternalMp.SignerHandover.learned(r.zone, h) // the signer holds it, with the hold
+	c := *h
+	h = &c
+	h.Sets.Hold = false
+	if h.Serial != 41 || !h.sameAs(&ActingHandover{Zone: h.Zone, Serial: 41, Digest: held.Digest, Newest: held.Newest, Phase: held.Phase, Step: held.Step, Records: held.Records, Sets: sets}) {
+		t.Errorf("the hold carries other than what the signer held: %+v", h)
+	}
+
+	r.hear(roleB, unknownStamp(r.n), true)
+	r.conf.thawTurn(r.zone) // the common newest
+	if r.known() != 41 {
+		t.Fatal("not known")
+	}
+	waitUntil(t, "the hold let go once the serial is known", func() bool { h := newest(); return h != nil && !h.Sets.Hold })
 }
