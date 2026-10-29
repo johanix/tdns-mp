@@ -4,7 +4,6 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -250,15 +249,15 @@ type identitySyncRig struct {
 	q      chan tdns.DelegationSyncRequest
 	done   chan struct{}
 	cancel context.CancelFunc
-	log    bytes.Buffer // read once done is closed
+	log    lockedBuffer // read once done is closed; a goroutine an earlier test left may write to it too (#276)
 	asks   int
 }
 
 func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *identitySyncRig {
 	t.Helper()
 	r := &identitySyncRig{q: make(chan tdns.DelegationSyncRequest), done: make(chan struct{})}
-	savedLog, savedPace := lgAgent, identitySync
-	lgAgent = slog.New(slog.NewJSONHandler(&r.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	savedPace := identitySync
+	logTo(t, lgAgent, slog.NewJSONHandler(&r.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	identitySync = pace
 	conf := &Config{Config: &tdns.Config{}}
 	conf.Config.Internal.DelegationSyncQ = r.q
@@ -272,8 +271,9 @@ func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *ident
 		conf.syncIdentityDelegation(ctx, zd)
 		close(r.done)
 	}()
-	// The goroutine reads the logger and the pace: they are put back once
-	// it has ended.
+	// The goroutine reads the logger and the pace: the pace is put back once
+	// it has ended, and the logger's handler after that (logTo's cleanup,
+	// registered first, runs last).
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -281,7 +281,7 @@ func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *ident
 		case <-time.After(5 * time.Second):
 			t.Error("syncIdentityDelegation is still running after its context ended")
 		}
-		lgAgent, identitySync = savedLog, savedPace
+		identitySync = savedPace
 	})
 	return r
 }
@@ -575,14 +575,13 @@ func installParentSync(t *testing.T, config string) tdns.ParentSyncConf {
 	return conf.ParentSync
 }
 
-// captureAgentLog points lgAgent at a buffer for the rest of the test.
-func captureAgentLog(t *testing.T) *bytes.Buffer {
+// captureAgentLog points lgAgent at a buffer for the rest of the test. The
+// buffer is locked: a goroutine an earlier test left may write to it (#276).
+func captureAgentLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
-	saved := lgAgent
-	lgAgent = slog.New(slog.NewJSONHandler(&buf, nil))
-	t.Cleanup(func() { lgAgent = saved })
-	return &buf
+	buf := &lockedBuffer{}
+	logTo(t, lgAgent, slog.NewJSONHandler(buf, nil))
+	return buf
 }
 
 // An absent algorithm is the default and not a problem; only a name that is

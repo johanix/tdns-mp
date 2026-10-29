@@ -315,6 +315,9 @@ func startHarnessEngine(t *testing.T, env *integEnv, pe *peerEnv, cfg hsync.Conf
 		PeerHooks: hsync.PeerHooks{
 			OnPeerStored:  func(peer *hsync.Peer) { ar.materializeAgentView(peer) },
 			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer) },
+			// As the agent has it: a discovery that outlived the peer's
+			// removal leaves nothing behind (#304).
+			OnRemovedPeerDiscovered: func(peer *hsync.Peer) { ar.removePeerView(peer) },
 		},
 	}
 	for _, adjust := range with {
