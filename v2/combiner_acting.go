@@ -333,7 +333,10 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
 	}
 	// Computed on a wrapper of the zone as served, with a map of its own:
-	// the zone's options map is read without a lock.
+	// the zone's options map is read without a lock. One refresh or
+	// hand-over at a time (mpDataLock).
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
 	mpzd.Lock()
 	mpzd.EnsureMP()
 	opts := make(map[tdns.ZoneOption]bool, len(mpzd.MPOptions))
@@ -351,6 +354,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	mpzd.RebuildCombinerData()
 	allow := mpzd.MPOptions[tdns.OptAllowEdits]
 	mpzd.Unlock()
+	mpMu.Unlock()
 	var combineErr error
 	if allow {
 		if _, combineErr = mpzd.CombineWithLocalChanges(); combineErr != nil {

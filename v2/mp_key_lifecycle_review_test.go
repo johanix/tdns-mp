@@ -320,6 +320,22 @@ func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 	if !owner.Owns(mpzd.ZoneData) {
 		t.Fatal("not owned after Take")
 	}
+	conf.InternalMp.KeyLifecycle = e
+	zonesIdle := func() []string {
+		t.Helper()
+		body, _ := json.Marshal(SignerKeyPost{Command: "zones"})
+		w := httptest.NewRecorder()
+		conf.APIsignerKey()(w, httptest.NewRequest(http.MethodPost, "/signer/key", bytes.NewReader(body)))
+		var resp SignerKeyResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp.Idle
+	}
+	// idle from the take, before a tick has said so (cubic on tdns-mp #299)
+	if got := zonesIdle(); !slices.Equal(got, []string{mpzd.ZoneName}) {
+		t.Errorf("signer key zones before a tick marks %v idle, want the zone", got)
+	}
 	for range 2 {
 		e.tickOwned(map[string]keyPause{})
 		if e.driver(mpzd.ZoneName) != nil {
@@ -336,13 +352,8 @@ func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 	if err != nil || !st.Idle {
 		t.Errorf("the status of the idle zone: %+v, err %v; want idle", st, err)
 	}
-	conf.InternalMp.KeyLifecycle = e
-	body, _ := json.Marshal(SignerKeyPost{Command: "zones"})
-	w := httptest.NewRecorder()
-	conf.APIsignerKey()(w, httptest.NewRequest(http.MethodPost, "/signer/key", bytes.NewReader(body)))
-	var resp SignerKeyResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || !slices.Equal(resp.Idle, []string{mpzd.ZoneName}) {
-		t.Errorf("signer key zones does not mark the idle zone: %+v, err %v", resp, err)
+	if got := zonesIdle(); !slices.Equal(got, []string{mpzd.ZoneName}) {
+		t.Errorf("signer key zones marks %v idle, want the zone", got)
 	}
 }
 

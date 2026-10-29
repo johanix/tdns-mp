@@ -94,6 +94,7 @@ func parentSyncTestConf(t *testing.T, id, zone string, records ...string) (*tdns
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	t.Cleanup(func() { kdb.DB.Close() })
 	hdb := tdnsmp.NewHsyncDB(kdb)
 	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{
 		Command:    "sig0-mgmt",

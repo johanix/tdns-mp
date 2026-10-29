@@ -68,6 +68,7 @@ func TestSignerKeyPolicyShowsForever(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	t.Cleanup(func() { kdb.DB.Close() })
 	zd := &tdns.ZoneData{
 		ZoneName:         zone,
 		ZoneStore:        tdns.MapZone,

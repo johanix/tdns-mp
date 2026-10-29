@@ -11,6 +11,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
@@ -1073,6 +1074,18 @@ func (mpzd *MPZoneData) hasPubkey() bool {
 	return mpzd.roles().Pubkey
 }
 
+// mpDataLocks is a lock per zone (canonicalName), held while the zone's
+// multi-provider data is computed and set and acted on: by a refresh
+// (MPPreRefresh) and by a hand-over (actBySignerHandover, actByHandover),
+// so that neither sets what it computed over what the other set meanwhile.
+// Taken before the zone's lock, never under it.
+var mpDataLocks sync.Map
+
+func mpDataLock(zone string) *sync.Mutex {
+	m, _ := mpDataLocks.LoadOrStore(canonicalName(zone), &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
 // populateMPdata evaluates the multi-provider guards for a zone and
 // populates zd.MP.MPdata accordingly. Called after every zone refresh/transfer.
 //
@@ -1347,7 +1360,10 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 
 	// Recompute multi-provider membership and signing state on the new zone data.
 	// Use a temporary wrapper around new_zd to run populateMPdata, then
-	// copy computed state to the persistent mpzd.
+	// copy computed state to the persistent mpzd. One refresh or hand-over
+	// at a time (mpDataLock), through the signer's switch.
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
 	if new_zd.Options[tdns.OptMultiProvider] {
 		kdb := new_zd.KeyDB
 		if kdb == nil {
@@ -1376,8 +1392,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			}
 		}
 		newMpzd.populateMPdata(mp, signing)
+		// under the zone's lock, as a hand-over sets the two
+		mpzd.Lock()
 		mpzd.MP.MPdata = newMpzd.MP.MPdata
 		mpzd.MPOptions = newMpzd.MPOptions
+		mpzd.Unlock()
 	}
 
 	// Signer: dynamically enable/disable inline-signing based on HSYNC
@@ -1391,6 +1410,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 		mpzd.signerSwitch(new_zd, others, mp)
 	}
+	mpMu.Unlock()
 
 	// Combiner: HSYNC match check and combine with local changes on new_zd.
 	switch tdns.Globals.App.Type {
@@ -1476,8 +1496,13 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 // change of the foreign rows asks for a re-sign. switched says the
 // inline-signing switch moved.
 func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, mp *MultiProviderConf) (switched bool) {
+	// The multi-provider data and MPOptions under the zone's lock, which a
+	// refresh and a hand-over set them under; not held across
+	// SetRuntimeOption, which takes it.
+	mpzd.Lock()
 	shouldSign := mpzd.MP.MPdata.WeAreSigner
 	otherSigners := mpzd.MP.MPdata.OtherSigners
+	mpzd.Unlock()
 	was := mpzd.ZoneData
 	if incoming != nil {
 		was = incoming
@@ -1507,6 +1532,7 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 	// Multi-signer mode on a copy of the options: a hand-over and a refresh
 	// may each set it, and neither writes the map the other reads.
 	isMS := shouldSign && otherSigners > 0
+	mpzd.Lock()
 	if isMS != mpzd.MPOptions[tdns.OptMultiSigner] {
 		if isMS {
 			lg.Info("multi-signer mode detected", "zone", mpzd.ZoneName, "otherSigners", otherSigners)
@@ -1520,6 +1546,7 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 		opts[tdns.OptMultiSigner] = isMS
 		mpzd.MPOptions = opts
 	}
+	mpzd.Unlock()
 	if !shouldSign {
 		return switched
 	}
