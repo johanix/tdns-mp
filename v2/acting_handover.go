@@ -373,9 +373,11 @@ func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string)
 // goes out, in order; anything else is a refusal, and the combiner's own
 // read says what it holds. A refusal or an "ignored" of an update sent
 // while the combiner held another serial than this agent now wants is not
-// final: the update is sent again, under the serial wanted. handled says
-// the word goes no further.
-func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus) (handled bool) {
+// final, and nor is one from a combiner that says it acts by another
+// serial than the one the update was sent under (acting, plan S8): the
+// update is sent again, under the serial wanted. handled says the word
+// goes no further.
+func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus, acting *ActingStamp) (handled bool) {
 	if t == nil || status == transport.ConfirmPending {
 		return t != nil && t.isHandover(distID)
 	}
@@ -412,7 +414,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 	}
 	delete(t.sent, distID)
 	z := t.zones[handoverKey(string(s.zone))]
-	stale := z != nil && z.want != nil && !z.want.sameAs(s.under)
+	stale := z != nil && z.want != nil && (!z.want.sameAs(s.under) || acting != nil && !acting.names(s.under))
 	t.mu.Unlock()
 	switch status {
 	case transport.ConfirmFailed, transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmPartial:
@@ -592,6 +594,39 @@ func (t *handoverTracker) letHoldGo(zone string) {
 	t.send(send)
 }
 
+// holdLast: this agent knows no active serial for the zone, so it hands
+// its parts nothing new (design 3.3, 3.4), and nothing new starts at its
+// signer either (the project owner, 2026-10-29): the signer is handed what
+// it holds, or failing that what this agent last wanted it to hold, with
+// the hold set and its sets as they are. Nothing when neither carries
+// instructions: a signer that holds nothing acts by nothing (rule 5), and
+// its inventory says what it holds when it has something (learned).
+func (t *handoverTracker) holdLast(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zone(zone)
+	base := z.held
+	if base == nil {
+		base = z.want
+	}
+	if base == nil || len(base.Records) == 0 {
+		t.mu.Unlock()
+		return
+	}
+	h := *base
+	h.Sets.Hold = true
+	if h.sameAs(z.want) {
+		t.mu.Unlock()
+		return
+	}
+	z.want = &h
+	send := t.dueLocked(z, false)
+	t.mu.Unlock()
+	t.send(send)
+}
+
 // holdHeld: the part holds what is wanted for the zone, and that carries
 // the hold.
 func (t *handoverTracker) holdHeld(zone string) bool {
@@ -687,6 +722,12 @@ func (conf *Config) handOverToParts(zone string) {
 	}
 	h := conf.wantedHandover(zone)
 	t.handOver(h)
+	// frozen and handed nothing new: the active serial is not known (S9),
+	// or no step's sets are held yet (S12)
+	if s := conf.InternalMp.Instructions; h == nil && (s.activeUnknown(zone) || s.pending(zone)) {
+		ts.holdLast(zone)
+		return
+	}
 	ts.handOver(h)
 }
 

@@ -916,3 +916,25 @@ func TestARunnersOwnPartHoldsTheStep(t *testing.T) {
 		t.Errorf("the leader did not go on: %+v", st)
 	}
 }
+
+// An agent that holds no step's sets hands its parts nothing new, and its
+// signer keeps what it holds, held: the zone is frozen (S9's holdLast).
+func TestAPendingAgentHoldsItsSignerOnWhatItHolds(t *testing.T) {
+	r := newReconcileRig(t, "pendinghold.reconcile.example.", roleB)
+	r.conf.handOverToParts(r.zone)
+	r.partsTake()
+	if h := r.wantedBy(r.signer); h == nil || h.Sets.Hold {
+		t.Fatalf("the signer at rest: %v", h)
+	}
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Sets, z.Pending = nil, true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.handOverToParts(r.zone)
+	h := r.wantedBy(r.signer)
+	if h == nil || !h.Sets.Hold || h.Serial != r.n.Serial {
+		t.Errorf("the signer while no step's sets are held: %v", h)
+	}
+}

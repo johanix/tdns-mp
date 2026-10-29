@@ -1325,8 +1325,12 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		inventoryRecordedHook(msg)
 	}
 	// what the signer holds of the agent's hand-over (plan S11), its hold
-	// included (S6): handed again until it holds what this agent wants
+	// included (S6): handed again until it holds what this agent wants;
+	// with no active serial known, what it holds with the hold (S9)
 	conf.InternalMp.SignerHandover.learned(zd.ZoneName, msg.Acting)
+	if conf.InternalMp.Instructions.activeUnknown(zd.ZoneName) {
+		conf.InternalMp.SignerHandover.holdLast(zd.ZoneName)
+	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
 	o := conf.InternalMp.KeyLifecycleOwner

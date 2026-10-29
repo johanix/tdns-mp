@@ -172,6 +172,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case <-ownReadTicker.C:
 			owner.tick(ctx)
+			// what waits for a zone's active serial, when a full queue or
+			// a restart came between (plan S8)
+			conf.releaseActivated(ctx, zdr)
 			// A zone can become caught up with no answer: a refresh that
 			// drops the member waited for, a forgotten peer, an inventory
 			// that arrives outside this engine. Its owed sync is asked for
@@ -191,390 +194,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			}
 
 		case synchedDataUpdate = <-SDupdateQ:
-			var change bool
 			switch synchedDataUpdate.UpdateType {
 			case "local":
 				conf.applyLocalUpdate(ctx, zdr, synchedDataUpdate)
 			case "remote":
-				lgEngine.Info("received remote update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
-
-				// A CSYNC is taken from the zone's delegation sync leader
-				// only; the sender of any other has been told. What else
-				// the update carries goes on.
-				if reason := conf.refuseCsyncNotFromLeader(synchedDataUpdate, msgQs); reason != "" && len(synchedDataUpdate.Update.Operations) == 0 {
-					if synchedDataUpdate.Response != nil {
-						select {
-						case synchedDataUpdate.Response <- &AgentMsgResponse{Zone: synchedDataUpdate.Zone, AgentId: synchedDataUpdate.AgentId, Error: true, ErrorMsg: reason}:
-						default:
-							lgEngine.Warn("response channel blocked, skipping response")
-						}
-					}
-					continue
-				}
-
-				// 1. Evaluate the update for applicability (valid zone, etc)
-				// 2. Evaluate the update according to policy.
-
-				// Prepare a response in case there is a response channel.
-				resp := AgentMsgResponse{
-					Zone:    synchedDataUpdate.Zone,
-					AgentId: synchedDataUpdate.AgentId,
-				}
-
-				// agent_policy.go: EvaluateUpdate()
-				ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
-				if err != nil {
-					lgEngine.Error("failed to evaluate remote update", "err", err)
-					continue
-				}
-
-				if !ok {
-					lgEngine.Info("remote update not applicable, skipping", "zone", synchedDataUpdate.Zone)
-					resp.Error = true
-					resp.ErrorMsg = msg
-				} else {
-					resp.Msg = msg
-
-					// 3. Add the update to the agent data repo.
-					// agent_policy.go: ProcessUpdate()
-					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
-					stored := time.Now()
-					// A remote KEY operation that changed this agent's data is
-					// the first sign of a new zone key: the leader's replace
-					// reaches every member. The key is checked (step 7b); the
-					// rounds run on the tracker's goroutine.
-					if err == nil && change && synchedDataUpdate.Update != nil &&
-						slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
-						conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
-					}
-					// The operations as they arrived, stale replaces too:
-					// the confirmation to the sender names what the repo
-					// holds of each. A stale replace's records are there
-					// when a newer message, an answer to a request for the
-					// zone's state or a later distribution, put them there.
-					var received []core.RROperation
-					if synchedDataUpdate.Update != nil {
-						received = synchedDataUpdate.Update.Operations
-					}
-					staleHeld, _ := zdr.heldRecords(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.staleOperations())
-					staleWaiting := zdr.dnskeyAwaitingAnswer(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, staleHeld)
-					staleHeld = withoutRecords(staleHeld, staleWaiting)
-					// A set whose last hand-over to the combiner failed is not
-					// with the combiner, whatever the repo holds, and a removal
-					// (a key left out of a replace, an empty replace) leaves
-					// no record to mark. A stale replace of such a set is not
-					// handed over (it would roll the set back), names none of
-					// its records, and is PARTIAL. A fresh one that matches
-					// the repo is handed over again, below; so is one whose
-					// last hand-over the combiner has not confirmed yet, as
-					// that forward may carry an older set. A stale replace of
-					// a set in flight is confirmed with what the repo holds,
-					// as before: the leader's CSYNC waits on that.
-					var failedSets map[uint16]bool
-					if err == nil && synchedDataUpdate.Update != nil {
-						failedSets = zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
-							updateRRtypes(&ZoneUpdate{Operations: received, RRsets: synchedDataUpdate.Update.RRsets}), true)
-					}
-					// A stale replace of the DNSKEY set while the set that
-					// overtook it is on its way to the combiner is no word on
-					// the keys either: the combiner may not have that set yet,
-					// and a sender takes a success, or a key named, as its key
-					// published here. Alone it waits for the combiner's word
-					// (waitForCombiner, below); beside a fresh part it is left
-					// out of the relayed confirmation, as a failed set is.
-					// A set in flight that an answer's forward brought is left
-					// out at once, with no wait: the sender credits its keys,
-					// a removal too, from the asker's confirmation of the
-					// answer (creditFromAnswerLocked).
-					var staleNotHeld map[uint16]bool
-					staleKeysWaitOn, staleKeysOfAnswer := "", false
-					for _, t := range updateRRtypes(&ZoneUpdate{Operations: synchedDataUpdate.staleOperations()}) {
-						if t == dns.TypeDNSKEY && !failedSets[t] {
-							if x := zdr.setInFlight(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, t); x != "" {
-								if zdr.forwardOfAnswer(x) {
-									staleKeysOfAnswer = true
-								} else {
-									staleKeysWaitOn = x
-								}
-							}
-						}
-						if failedSets[t] || (t == dns.TypeDNSKEY && (staleKeysWaitOn != "" || staleKeysOfAnswer)) {
-							if staleNotHeld == nil {
-								staleNotHeld = map[uint16]bool{}
-							}
-							staleNotHeld[t] = true
-						}
-					}
-					// A set this agent's combiner answered IGNORED is not held
-					// either, but by the combiner's policy, and its word on the
-					// set that overtook a stale replace named the records as
-					// ignored. The stale replace names those the repo holds as
-					// ignored too: named nowhere, they left the sender's add
-					// PENDING for good (#288).
-					ignoredSets := zdr.setsIgnoredByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, failedSets)
-					staleIgnored := recordsOfTypes(staleHeld, ignoredSets)
-					staleHeld = recordsNotOfTypes(staleHeld, failedSets)
-					synchedDataUpdate.dropStaleOperations()
-					if err == nil && !change && synchedDataUpdate.Update != nil {
-						fresh := updateRRtypes(synchedDataUpdate.Update)
-						inFlight := zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, fresh, false)
-						for _, t := range fresh {
-							if inFlight[t] {
-								lgEngine.Info("remote update matches the repo, but the combiner may not have the set: handing it over again",
-									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId, "rrtype", dns.TypeToString[t])
-								change = true
-								break
-							}
-						}
-					}
-					if err != nil {
-						lgEngine.Error("failed to add remote update to agent data repo", "err", err)
-						resp.Error = true
-						resp.ErrorMsg = err.Error()
-					}
-					resp.Msg = msg
-					// what the sending provider says about its keys (#58) goes
-					// to our signer whether or not the DNSKEY set changed, and
-					// for a zone our own signer does not own it is the DS set
-					// (Amendment 2); only from an update the repo took
-					if cu := synchedDataUpdate.CatchUp; cu != nil && err == nil {
-						lgEngine.Info("a peer answered a request for the zone's state", "zone", synchedDataUpdate.Zone,
-							"peer", synchedDataUpdate.AgentId, "request", cu.Request, "complete", cu.IsComplete(), "why", cu.Why)
-						conf.InternalMp.CatchUp.Answered(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, cu)
-					}
-					// What a replace the repo found stale says about keys is
-					// stale too (it is out of the update by now): an older
-					// message must not overwrite the key states of a newer
-					// one, an answer or a distribution.
-					if err == nil && synchedDataUpdate.Update != nil {
-						conf.noteForeignAnswer(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations, synchedDataUpdate.CatchUp.IsComplete())
-					}
-					// The answer that completes the catch-up asks for an owed
-					// sync, once what it says about keys is noted: the sync
-					// computes the DS set from it.
-					if synchedDataUpdate.CatchUp != nil && err == nil {
-						conf.InternalMp.CatchUp.askOwed(ctx, synchedDataUpdate.Zone)
-					}
-					if change {
-						// Always forward remote updates to the local combiner for persistence.
-						// The combiner applies or ignores based on its edit policy.
-						lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
-
-						tm := conf.InternalMp.MPTransport
-						if tm != nil && synchedDataUpdate.Update != nil {
-							// Remote update: only enqueue for combiner (not back to agents).
-							// The combiner deduplicates KEY/CDS contributions: local agent
-							// contributions take precedence over remote-forwarded ones.
-							distID, err := enqueueForCombiner(tm, synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
-							if err != nil {
-								distID = ""
-							}
-							zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, distID)
-							if err != nil {
-								// The repo has the records, the combiner does not: they
-								// are not held, so the same records sent again go to
-								// the combiner, and no confirmation names them as applied.
-								zdr.markNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update,
-									"not handed to the combiner: "+err.Error())
-								lgEngine.Error("failed to enqueue remote update for combiner", "zone", synchedDataUpdate.Zone, "err", err)
-								resp.Error = true
-								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
-							} else {
-								// Remote update: only the combiner is the expected recipient
-								var remoteRecipients []string
-								if tm.combinerID != "" {
-									remoteRecipients = []string{string(tm.combinerID)}
-								}
-								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, remoteRecipients)
-								resp.Msg = "Remote update applied, sync enqueued for combiner"
-
-								// Track mapping from our combiner distID to the originating agent's distID
-								// so we can send the final confirmation back when our combiner confirms.
-								if synchedDataUpdate.OriginatingDistID != "" {
-									zdr.mu.Lock()
-									if zdr.PendingRemoteConfirms == nil {
-										zdr.PendingRemoteConfirms = make(map[string]*PendingRemoteConfirmation)
-									}
-									zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
-										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-										OriginatingSender: string(synchedDataUpdate.AgentId),
-										Mechanism:         synchedDataUpdate.Mechanism,
-										Zone:              synchedDataUpdate.Zone,
-										CreatedAt:         time.Now(),
-										StaleHeld:         staleHeld,
-										StaleIgnored:      staleIgnored,
-										StaleWaiting:      staleWaiting,
-										NotHeldTypes:      staleNotHeld,
-										FromAnswer:        synchedDataUpdate.CatchUp != nil,
-										DnskeyOps:         dnskeySetOps(synchedDataUpdate.Update.Operations),
-									}
-									zdr.mu.Unlock()
-									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
-								}
-							}
-						} else if tm == nil {
-							lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
-							resp.Error = true
-							resp.ErrorMsg = "TransportManager not available"
-						}
-					} else if !resp.Error && synchedDataUpdate.OriginatingDistID != "" {
-						// No-op: the update's desired post-state already holds
-						// (adds already present, deletes already absent). Send a
-						// positive confirmation so the originating agent can
-						// transition PENDING->ACCEPTED (adds) and
-						// PendingRemoval->Removed (deletes). Without this an
-						// idempotent re-send strands the sender in PENDING.
-						//
-						// Every such update is confirmed, also when it lists no
-						// record and this agent holds nothing of the sender's
-						// (decision 42): an empty replace of a set already
-						// absent, a stale replace, an answer of empty sets.
-						// Unconfirmed, it was sent again for a day, and a stale
-						// one sent again after a restart, when the order guard
-						// is gone, rolled the set back.
-						zone := synchedDataUpdate.Zone
-						agentId := synchedDataUpdate.AgentId
-						var appliedRecords, removedRecords []string
-						inRepo := zdr.inRepo(zone, agentId)
-						// A no-op confirmation reports the desired post-state:
-						// add/replace records already present -> Applied;
-						// delete records already absent -> Removed (the sender
-						// tracks removals in ClassINET form). The modern edit
-						// path is Operations (apihandler_agent.go emits a
-						// "replace"), which takes precedence in ProcessUpdate;
-						// the legacy class-overloaded RRsets/RRs form is only a
-						// fallback. The operations are the ones that arrived:
-						// a stale replace confirmed with no record left the
-						// sender waiting for this agent for good (the leader's
-						// CSYNC, overtaken by its answer to a request).
-						var combinerRejected []string
-						if upd := synchedDataUpdate.Update; upd != nil && len(received) > 0 {
-							appliedRecords, removedRecords = zdr.heldRecords(zone, agentId, received)
-							appliedRecords = withoutRecords(appliedRecords, staleWaiting)
-							combinerRejected = zdr.rejectedRecords(zone, agentId, received)
-						} else if upd != nil {
-							// Legacy class-overloaded form (no Operations).
-							confirm := func(rr dns.RR) {
-								switch rr.Header().Class {
-								case dns.ClassINET:
-									s := rr.String()
-									if inRepo(s, rr.Header().Rrtype) {
-										appliedRecords = append(appliedRecords, s)
-									} else if zdr.rejectedByCombiner(zone, agentId, rr.Header().Rrtype, s) {
-										combinerRejected = append(combinerRejected, s)
-									}
-								case dns.ClassNONE:
-									m := dns.Copy(rr)
-									m.Header().Class = dns.ClassINET
-									s := m.String()
-									if !inRepo(s, rr.Header().Rrtype) {
-										removedRecords = append(removedRecords, s)
-									}
-								}
-							}
-							for _, rrset := range upd.RRsets {
-								for _, rr := range rrset.RRs {
-									confirm(rr)
-								}
-							}
-							for _, rr := range upd.RRs {
-								confirm(rr)
-							}
-						}
-						// DNSKEY records that only an answer's forward, not
-						// confirmed by this agent's combiner yet, put in the
-						// repo are left out, and the confirmation is PARTIAL:
-						// it closes the sender's queue entry, and is no word
-						// that the keys have propagated (dnskeyAwaitingAnswer).
-						status, message := "ok", "desired state already present at remote agent"
-						// A success covers every key of a DNSKEY replace: one
-						// whose records are not all held (a newer set dropped
-						// a key this one added) is confirmed PARTIAL, naming
-						// the keys that are held.
-						status, message, appliedRecords = zdr.heldSuccess(zone, agentId, received, status, message, appliedRecords)
-						if len(staleWaiting) > 0 {
-							status, message = "PARTIAL", "desired state already present at remote agent; DNSKEY records from an answer not yet confirmed by its combiner"
-						}
-						// A record this agent's combiner rejected is not held
-						// either, and a plain success would cover it: a DNSKEY
-						// sender takes "ok" as every key of the distribution
-						// propagated.
-						if len(combinerRejected) > 0 {
-							status, message = "PARTIAL", message+"; records its combiner rejected are not held"
-						}
-						// So is a set whose last hand-over to the combiner
-						// failed (only a stale replace of one gets here: a
-						// fresh one is handed over again). A set the combiner
-						// ignored is named as ignored; with nothing else
-						// named, the word is the combiner's, IGNORED.
-						var ignoredRecords []string
-						if len(failedSets) > 0 {
-							ignoredRecords = recordsOfTypes(appliedRecords, ignoredSets)
-							appliedRecords = recordsNotOfTypes(appliedRecords, failedSets)
-							removedRecords = recordsNotOfTypes(removedRecords, failedSets)
-							if len(ignoredSets) < len(failedSets) {
-								status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
-							}
-						}
-						if len(ignoredSets) > 0 {
-							if status == "ok" && len(appliedRecords) == 0 && len(removedRecords) == 0 {
-								status, message = "IGNORED", "its combiner applies none of the sender's records of these sets"
-							} else {
-								status, message = "PARTIAL", message+"; sets its combiner ignores are not held"
-							}
-						}
-						// A DNSKEY set an answer's forward brought, which the
-						// combiner has not confirmed, is no word on the keys:
-						// none is named, removals included.
-						if staleKeysOfAnswer {
-							keys := map[uint16]bool{dns.TypeDNSKEY: true}
-							appliedRecords = recordsNotOfTypes(appliedRecords, keys)
-							removedRecords = recordsNotOfTypes(removedRecords, keys)
-							status, message = "PARTIAL", message+"; a DNSKEY set from an answer its combiner has not confirmed is not held"
-						}
-						if staleKeysWaitOn != "" {
-							// The sender has this agent's PENDING; the final
-							// word follows the combiner's on the set that
-							// overtook this one. Closing the sender's entry
-							// now with a PARTIAL would leave its propagation
-							// of these keys waiting for good.
-							zdr.waitForCombiner(staleKeysWaitOn, &staleWait{
-								origDistID: synchedDataUpdate.OriginatingDistID,
-								sender:     agentId,
-								zone:       zone,
-								ops:        received,
-								mechanism:  synchedDataUpdate.Mechanism,
-								at:         time.Now(),
-							})
-							lgEngine.Info("a stale DNSKEY replace waits for this agent's combiner to confirm the set that overtook it",
-								"zone", zone, "agent", agentId, "originDistID", synchedDataUpdate.OriginatingDistID, "combinerDistID", staleKeysWaitOn)
-						} else if msgQs.OnRemoteConfirmationReady != nil {
-							lgEngine.Info("remote update already in desired state, sending immediate confirmation",
-								"zone", zone, "agent", agentId,
-								"applied", len(appliedRecords), "removed", len(removedRecords), "ignored", len(ignoredRecords),
-								"awaiting_combiner", len(staleWaiting), "combiner_rejected", len(combinerRejected),
-								"originDistID", synchedDataUpdate.OriginatingDistID)
-							msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
-								OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-								OriginatingSender: string(agentId),
-								Mechanism:         synchedDataUpdate.Mechanism,
-								Zone:              zone,
-								Status:            status,
-								Message:           message,
-								AppliedRecords:    appliedRecords,
-								RemovedRecords:    removedRecords,
-								IgnoredRecords:    ignoredRecords,
-							})
-						}
-					}
-				}
-				if synchedDataUpdate.Response != nil {
-					select {
-					case synchedDataUpdate.Response <- &resp:
-					default:
-						lgEngine.Warn("response channel blocked, skipping response")
-					}
-				}
+				conf.applyRemoteUpdate(ctx, zdr, synchedDataUpdate, msgQs)
 			}
 
 		case sdcmd := <-SDcmdQ:
@@ -946,6 +570,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				sdcmd.Response <- &SynchedDataCmdResponse{
 					Msg: note + fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
 				}
+
+			case "instr-activated":
+				// the zone's active serial changed, became known or went:
+				// what it kept of others goes on, and what waits for the
+				// two sides to be in step is sent again (plan S8)
+				conf.instrActivated(ctx, zdr, sdcmd.Zone)
 
 			case "instr-done":
 				// the zone's freeze has ended: what it kept goes out, and a
@@ -1441,6 +1071,9 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	// not come again: the operation stayed pending at its origin for good.
 	if detail.Status == "PENDING" {
 		lgEngine.Debug("pending confirmation (delivery confirmed, awaiting final response)", "source", source, "distID", detail.DistributionID, "zone", detail.Zone)
+		if strings.HasPrefix(detail.Message, keptPrefix) {
+			lgEngine.Info("a peer keeps the distribution until its active serial is the one it was made under", "zone", detail.Zone, "peer", source, "distrib", detail.DistributionID, "why", detail.Message)
+		}
 		zoneTracking := zdr.Tracking[detail.Zone]
 		for _, agentTracking := range zoneTracking {
 			for _, trackedRRset := range agentTracking {
@@ -1482,6 +1115,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	ignoredSet := make(map[string]bool, len(detail.IgnoredRecords))
 	for _, rr := range detail.IgnoredRecords {
 		ignoredSet[rr] = true
+	}
+
+	// A peer at other instructions than the send has decided nothing yet
+	// (rule 6, plan S8): what it applied or removed is a fact and is taken,
+	// what it rejected or ignored leaves the record waiting for it, and
+	// the distribution goes to it again once the two are in step.
+	if detail.NotYet {
+		rejectedMap, ignoredSet = nil, nil
 	}
 
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
@@ -1921,6 +1562,399 @@ func (zdr *ZoneDataRepo) deleteRRFromRepo(zone ZoneName, agent AgentId, rrtype u
 	}
 	curRRset.Delete(rr)
 	nod.RRtypes.Set(rrtype, curRRset) // mp-private: SDE node record, not zone data
+}
+
+// applyRemoteUpdate is the data engine's handling of another agent's
+// update: judged by the active serial it was made under (instrReceive),
+// then evaluated, put in the repo, handed to the combiner and confirmed to
+// its sender. A kept update comes back here at its release (instrActivated).
+func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, synchedDataUpdate *SynchedDataUpdate, msgQs *MsgQs) {
+	var change bool
+	lgEngine.Info("received remote update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
+
+	// Made under another active serial than this agent's: kept, or refused
+	// as stale (rule 6).
+	if !conf.instrReceive(synchedDataUpdate, msgQs) {
+		return
+	}
+
+	// A CSYNC is taken from the zone's delegation sync leader
+	// only; the sender of any other has been told. What else
+	// the update carries goes on.
+	if reason := conf.refuseCsyncNotFromLeader(synchedDataUpdate, msgQs); reason != "" && len(synchedDataUpdate.Update.Operations) == 0 {
+		if synchedDataUpdate.Response != nil {
+			select {
+			case synchedDataUpdate.Response <- &AgentMsgResponse{Zone: synchedDataUpdate.Zone, AgentId: synchedDataUpdate.AgentId, Error: true, ErrorMsg: reason}:
+			default:
+				lgEngine.Warn("response channel blocked, skipping response")
+			}
+		}
+		return
+	}
+
+	// 1. Evaluate the update for applicability (valid zone, etc)
+	// 2. Evaluate the update according to policy.
+
+	// Prepare a response in case there is a response channel.
+	resp := AgentMsgResponse{
+		Zone:    synchedDataUpdate.Zone,
+		AgentId: synchedDataUpdate.AgentId,
+	}
+
+	// agent_policy.go: EvaluateUpdate()
+	ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
+	if err != nil {
+		lgEngine.Error("failed to evaluate remote update", "err", err)
+		return
+	}
+
+	if !ok {
+		lgEngine.Info("remote update not applicable, skipping", "zone", synchedDataUpdate.Zone)
+		resp.Error = true
+		resp.ErrorMsg = msg
+	} else {
+		resp.Msg = msg
+
+		// 3. Add the update to the agent data repo.
+		// agent_policy.go: ProcessUpdate()
+		change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
+		stored := time.Now()
+		// A remote KEY operation that changed this agent's data is
+		// the first sign of a new zone key: the leader's replace
+		// reaches every member. The key is checked (step 7b); the
+		// rounds run on the tracker's goroutine.
+		if err == nil && change && synchedDataUpdate.Update != nil &&
+			slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
+			conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+		}
+		// The operations as they arrived, stale replaces too:
+		// the confirmation to the sender names what the repo
+		// holds of each. A stale replace's records are there
+		// when a newer message, an answer to a request for the
+		// zone's state or a later distribution, put them there.
+		var received []core.RROperation
+		if synchedDataUpdate.Update != nil {
+			received = synchedDataUpdate.Update.Operations
+		}
+		staleHeld, _ := zdr.heldRecords(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.staleOperations())
+		staleWaiting := zdr.dnskeyAwaitingAnswer(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, staleHeld)
+		staleHeld = withoutRecords(staleHeld, staleWaiting)
+		// A set whose last hand-over to the combiner failed is not
+		// with the combiner, whatever the repo holds, and a removal
+		// (a key left out of a replace, an empty replace) leaves
+		// no record to mark. A stale replace of such a set is not
+		// handed over (it would roll the set back), names none of
+		// its records, and is PARTIAL. A fresh one that matches
+		// the repo is handed over again, below; so is one whose
+		// last hand-over the combiner has not confirmed yet, as
+		// that forward may carry an older set. A stale replace of
+		// a set in flight is confirmed with what the repo holds,
+		// as before: the leader's CSYNC waits on that.
+		var failedSets map[uint16]bool
+		if err == nil && synchedDataUpdate.Update != nil {
+			failedSets = zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
+				updateRRtypes(&ZoneUpdate{Operations: received, RRsets: synchedDataUpdate.Update.RRsets}), true)
+		}
+		// A stale replace of the DNSKEY set while the set that
+		// overtook it is on its way to the combiner is no word on
+		// the keys either: the combiner may not have that set yet,
+		// and a sender takes a success, or a key named, as its key
+		// published here. Alone it waits for the combiner's word
+		// (waitForCombiner, below); beside a fresh part it is left
+		// out of the relayed confirmation, as a failed set is.
+		// A set in flight that an answer's forward brought is left
+		// out at once, with no wait: the sender credits its keys,
+		// a removal too, from the asker's confirmation of the
+		// answer (creditFromAnswerLocked).
+		var staleNotHeld map[uint16]bool
+		staleKeysWaitOn, staleKeysOfAnswer := "", false
+		for _, t := range updateRRtypes(&ZoneUpdate{Operations: synchedDataUpdate.staleOperations()}) {
+			if t == dns.TypeDNSKEY && !failedSets[t] {
+				if x := zdr.setInFlight(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, t); x != "" {
+					if zdr.forwardOfAnswer(x) {
+						staleKeysOfAnswer = true
+					} else {
+						staleKeysWaitOn = x
+					}
+				}
+			}
+			if failedSets[t] || (t == dns.TypeDNSKEY && (staleKeysWaitOn != "" || staleKeysOfAnswer)) {
+				if staleNotHeld == nil {
+					staleNotHeld = map[uint16]bool{}
+				}
+				staleNotHeld[t] = true
+			}
+		}
+		// A set this agent's combiner answered IGNORED is not held
+		// either, but by the combiner's policy, and its word on the
+		// set that overtook a stale replace named the records as
+		// ignored. The stale replace names those the repo holds as
+		// ignored too: named nowhere, they left the sender's add
+		// PENDING for good (#288).
+		ignoredSets := zdr.setsIgnoredByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, failedSets)
+		staleIgnored := recordsOfTypes(staleHeld, ignoredSets)
+		staleHeld = recordsNotOfTypes(staleHeld, failedSets)
+		synchedDataUpdate.dropStaleOperations()
+		if err == nil && !change && synchedDataUpdate.Update != nil {
+			fresh := updateRRtypes(synchedDataUpdate.Update)
+			inFlight := zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, fresh, false)
+			for _, t := range fresh {
+				if inFlight[t] {
+					lgEngine.Info("remote update matches the repo, but the combiner may not have the set: handing it over again",
+						"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId, "rrtype", dns.TypeToString[t])
+					change = true
+					break
+				}
+			}
+		}
+		if err != nil {
+			lgEngine.Error("failed to add remote update to agent data repo", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		}
+		resp.Msg = msg
+		// what the sending provider says about its keys (#58) goes
+		// to our signer whether or not the DNSKEY set changed, and
+		// for a zone our own signer does not own it is the DS set
+		// (Amendment 2); only from an update the repo took
+		if cu := synchedDataUpdate.CatchUp; cu != nil && err == nil {
+			lgEngine.Info("a peer answered a request for the zone's state", "zone", synchedDataUpdate.Zone,
+				"peer", synchedDataUpdate.AgentId, "request", cu.Request, "complete", cu.IsComplete(), "why", cu.Why)
+			conf.InternalMp.CatchUp.Answered(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, cu)
+		}
+		// What a replace the repo found stale says about keys is
+		// stale too (it is out of the update by now): an older
+		// message must not overwrite the key states of a newer
+		// one, an answer or a distribution.
+		if err == nil && synchedDataUpdate.Update != nil {
+			conf.noteForeignAnswer(ctx, synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update.Operations, synchedDataUpdate.CatchUp.IsComplete())
+		}
+		// The answer that completes the catch-up asks for an owed
+		// sync, once what it says about keys is noted: the sync
+		// computes the DS set from it.
+		if synchedDataUpdate.CatchUp != nil && err == nil {
+			conf.InternalMp.CatchUp.askOwed(ctx, synchedDataUpdate.Zone)
+		}
+		if change {
+			// Always forward remote updates to the local combiner for persistence.
+			// The combiner applies or ignores based on its edit policy.
+			lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
+
+			tm := conf.InternalMp.MPTransport
+			if tm != nil && synchedDataUpdate.Update != nil {
+				// Remote update: only enqueue for combiner (not back to agents).
+				// The combiner deduplicates KEY/CDS contributions: local agent
+				// contributions take precedence over remote-forwarded ones.
+				distID, err := enqueueForCombiner(tm, synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
+				if err != nil {
+					distID = ""
+				}
+				zdr.noteCombinerSend(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, updateRRtypes(synchedDataUpdate.Update), stored, distID)
+				if err != nil {
+					// The repo has the records, the combiner does not: they
+					// are not held, so the same records sent again go to
+					// the combiner, and no confirmation names them as applied.
+					zdr.markNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update,
+						"not handed to the combiner: "+err.Error())
+					lgEngine.Error("failed to enqueue remote update for combiner", "zone", synchedDataUpdate.Zone, "err", err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
+				} else {
+					// Remote update: only the combiner is the expected recipient
+					var remoteRecipients []string
+					if tm.combinerID != "" {
+						remoteRecipients = []string{string(tm.combinerID)}
+					}
+					zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, remoteRecipients)
+					resp.Msg = "Remote update applied, sync enqueued for combiner"
+
+					// Track mapping from our combiner distID to the originating agent's distID
+					// so we can send the final confirmation back when our combiner confirms.
+					if synchedDataUpdate.OriginatingDistID != "" {
+						zdr.mu.Lock()
+						if zdr.PendingRemoteConfirms == nil {
+							zdr.PendingRemoteConfirms = make(map[string]*PendingRemoteConfirmation)
+						}
+						zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
+							OriginatingDistID: synchedDataUpdate.OriginatingDistID,
+							OriginatingSender: string(synchedDataUpdate.AgentId),
+							Mechanism:         synchedDataUpdate.Mechanism,
+							Zone:              synchedDataUpdate.Zone,
+							CreatedAt:         time.Now(),
+							StaleHeld:         staleHeld,
+							StaleIgnored:      staleIgnored,
+							StaleWaiting:      staleWaiting,
+							NotHeldTypes:      staleNotHeld,
+							FromAnswer:        synchedDataUpdate.CatchUp != nil,
+							DnskeyOps:         dnskeySetOps(synchedDataUpdate.Update.Operations),
+						}
+						zdr.mu.Unlock()
+						lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
+					}
+				}
+			} else if tm == nil {
+				lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available"
+			}
+		} else if !resp.Error && synchedDataUpdate.OriginatingDistID != "" {
+			// No-op: the update's desired post-state already holds
+			// (adds already present, deletes already absent). Send a
+			// positive confirmation so the originating agent can
+			// transition PENDING->ACCEPTED (adds) and
+			// PendingRemoval->Removed (deletes). Without this an
+			// idempotent re-send strands the sender in PENDING.
+			//
+			// Every such update is confirmed, also when it lists no
+			// record and this agent holds nothing of the sender's
+			// (decision 42): an empty replace of a set already
+			// absent, a stale replace, an answer of empty sets.
+			// Unconfirmed, it was sent again for a day, and a stale
+			// one sent again after a restart, when the order guard
+			// is gone, rolled the set back.
+			zone := synchedDataUpdate.Zone
+			agentId := synchedDataUpdate.AgentId
+			var appliedRecords, removedRecords []string
+			inRepo := zdr.inRepo(zone, agentId)
+			// A no-op confirmation reports the desired post-state:
+			// add/replace records already present -> Applied;
+			// delete records already absent -> Removed (the sender
+			// tracks removals in ClassINET form). The modern edit
+			// path is Operations (apihandler_agent.go emits a
+			// "replace"), which takes precedence in ProcessUpdate;
+			// the legacy class-overloaded RRsets/RRs form is only a
+			// fallback. The operations are the ones that arrived:
+			// a stale replace confirmed with no record left the
+			// sender waiting for this agent for good (the leader's
+			// CSYNC, overtaken by its answer to a request).
+			var combinerRejected []string
+			if upd := synchedDataUpdate.Update; upd != nil && len(received) > 0 {
+				appliedRecords, removedRecords = zdr.heldRecords(zone, agentId, received)
+				appliedRecords = withoutRecords(appliedRecords, staleWaiting)
+				combinerRejected = zdr.rejectedRecords(zone, agentId, received)
+			} else if upd != nil {
+				// Legacy class-overloaded form (no Operations).
+				confirm := func(rr dns.RR) {
+					switch rr.Header().Class {
+					case dns.ClassINET:
+						s := rr.String()
+						if inRepo(s, rr.Header().Rrtype) {
+							appliedRecords = append(appliedRecords, s)
+						} else if zdr.rejectedByCombiner(zone, agentId, rr.Header().Rrtype, s) {
+							combinerRejected = append(combinerRejected, s)
+						}
+					case dns.ClassNONE:
+						m := dns.Copy(rr)
+						m.Header().Class = dns.ClassINET
+						s := m.String()
+						if !inRepo(s, rr.Header().Rrtype) {
+							removedRecords = append(removedRecords, s)
+						}
+					}
+				}
+				for _, rrset := range upd.RRsets {
+					for _, rr := range rrset.RRs {
+						confirm(rr)
+					}
+				}
+				for _, rr := range upd.RRs {
+					confirm(rr)
+				}
+			}
+			// DNSKEY records that only an answer's forward, not
+			// confirmed by this agent's combiner yet, put in the
+			// repo are left out, and the confirmation is PARTIAL:
+			// it closes the sender's queue entry, and is no word
+			// that the keys have propagated (dnskeyAwaitingAnswer).
+			status, message := "ok", "desired state already present at remote agent"
+			// A success covers every key of a DNSKEY replace: one
+			// whose records are not all held (a newer set dropped
+			// a key this one added) is confirmed PARTIAL, naming
+			// the keys that are held.
+			status, message, appliedRecords = zdr.heldSuccess(zone, agentId, received, status, message, appliedRecords)
+			if len(staleWaiting) > 0 {
+				status, message = "PARTIAL", "desired state already present at remote agent; DNSKEY records from an answer not yet confirmed by its combiner"
+			}
+			// A record this agent's combiner rejected is not held
+			// either, and a plain success would cover it: a DNSKEY
+			// sender takes "ok" as every key of the distribution
+			// propagated.
+			if len(combinerRejected) > 0 {
+				status, message = "PARTIAL", message+"; records its combiner rejected are not held"
+			}
+			// So is a set whose last hand-over to the combiner
+			// failed (only a stale replace of one gets here: a
+			// fresh one is handed over again). A set the combiner
+			// ignored is named as ignored; with nothing else
+			// named, the word is the combiner's, IGNORED.
+			var ignoredRecords []string
+			if len(failedSets) > 0 {
+				ignoredRecords = recordsOfTypes(appliedRecords, ignoredSets)
+				appliedRecords = recordsNotOfTypes(appliedRecords, failedSets)
+				removedRecords = recordsNotOfTypes(removedRecords, failedSets)
+				if len(ignoredSets) < len(failedSets) {
+					status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
+				}
+			}
+			if len(ignoredSets) > 0 {
+				if status == "ok" && len(appliedRecords) == 0 && len(removedRecords) == 0 {
+					status, message = "IGNORED", "its combiner applies none of the sender's records of these sets"
+				} else {
+					status, message = "PARTIAL", message+"; sets its combiner ignores are not held"
+				}
+			}
+			// A DNSKEY set an answer's forward brought, which the
+			// combiner has not confirmed, is no word on the keys:
+			// none is named, removals included.
+			if staleKeysOfAnswer {
+				keys := map[uint16]bool{dns.TypeDNSKEY: true}
+				appliedRecords = recordsNotOfTypes(appliedRecords, keys)
+				removedRecords = recordsNotOfTypes(removedRecords, keys)
+				status, message = "PARTIAL", message+"; a DNSKEY set from an answer its combiner has not confirmed is not held"
+			}
+			if staleKeysWaitOn != "" {
+				// The sender has this agent's PENDING; the final
+				// word follows the combiner's on the set that
+				// overtook this one. Closing the sender's entry
+				// now with a PARTIAL would leave its propagation
+				// of these keys waiting for good.
+				zdr.waitForCombiner(staleKeysWaitOn, &staleWait{
+					origDistID: synchedDataUpdate.OriginatingDistID,
+					sender:     agentId,
+					zone:       zone,
+					ops:        received,
+					mechanism:  synchedDataUpdate.Mechanism,
+					at:         time.Now(),
+				})
+				lgEngine.Info("a stale DNSKEY replace waits for this agent's combiner to confirm the set that overtook it",
+					"zone", zone, "agent", agentId, "originDistID", synchedDataUpdate.OriginatingDistID, "combinerDistID", staleKeysWaitOn)
+			} else if msgQs.OnRemoteConfirmationReady != nil {
+				lgEngine.Info("remote update already in desired state, sending immediate confirmation",
+					"zone", zone, "agent", agentId,
+					"applied", len(appliedRecords), "removed", len(removedRecords), "ignored", len(ignoredRecords),
+					"awaiting_combiner", len(staleWaiting), "combiner_rejected", len(combinerRejected),
+					"originDistID", synchedDataUpdate.OriginatingDistID)
+				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+					OriginatingDistID: synchedDataUpdate.OriginatingDistID,
+					OriginatingSender: string(agentId),
+					Mechanism:         synchedDataUpdate.Mechanism,
+					Zone:              zone,
+					Status:            status,
+					Message:           message,
+					AppliedRecords:    appliedRecords,
+					RemovedRecords:    removedRecords,
+					IgnoredRecords:    ignoredRecords,
+				})
+			}
+		}
+	}
+	if synchedDataUpdate.Response != nil {
+		select {
+		case synchedDataUpdate.Response <- &resp:
+		default:
+			lgEngine.Warn("response channel blocked, skipping response")
+		}
+	}
 }
 
 // applyLocalUpdate is the data engine's handling of a change of this

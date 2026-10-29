@@ -359,8 +359,8 @@ func (conf *Config) oweIfFrozen(u *SynchedDataUpdate) (string, error) {
 
 // freezeLines are the zone's freeze as `agent parentsync status` shows it
 // (plan S6): why it is frozen, with whom the agreement waits for; and what
-// this agent keeps of its own. Both empty for a zone that is not frozen
-// and keeps nothing.
+// this agent keeps, of its own and of others' (S8). Both empty for a zone
+// that is not frozen and keeps nothing.
 func (conf *Config) freezeLines(zone string) (frozen, kept string) {
 	reasons := conf.zoneFrozen(zone)
 	if len(reasons) > 0 {
@@ -379,6 +379,14 @@ func (conf *Config) freezeLines(zone string) (frozen, kept string) {
 	}
 	if conf.InternalMp.CatchUp.freezeOwed(ZoneName(zone)) {
 		parts = append(parts, "the sync with the parent")
+	}
+	// other agents' distributions made under another serial (plan S8)
+	switch n := len(conf.InternalMp.Kept.entries(zone, listKept)); n {
+	case 0:
+	case 1:
+		parts = append(parts, "1 distribution of another agent's")
+	default:
+		parts = append(parts, fmt.Sprintf("%d distributions of other agents", n))
 	}
 	return frozen, strings.Join(parts, ", ")
 }
