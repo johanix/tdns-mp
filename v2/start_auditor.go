@@ -86,6 +86,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	conf.InternalMp.AuditStateManager = stateManager
 	ar.AuditState = stateManager
 	auditorEngine := NewAuditorEngine(conf, stateManager)
+	// The zones are in their groups before their first load, by the serials
+	// stored (plan S9).
+	conf.placeGroupsAtStart()
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)

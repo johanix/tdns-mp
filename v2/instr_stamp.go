@@ -440,7 +440,7 @@ func (t *stampTable) sayOnce(key string) bool {
 
 // fetchIfNewer asks a refresh of this agent's own copy of zone when m tells
 // a newest serial above the highest this agent holds, or when it holds no
-// active serial for the zone (design 3.1, 3.4): at once for a serial above
+// serial for the zone (design 3.1, 3.4): at once for a serial above
 // the last one fetched, and again once a minute while this agent lags. Only
 // a refresh that was queued counts: one the full queue dropped, or one for a
 // zone that is not here yet, is asked again at the next telling. S10 and S11
@@ -622,7 +622,8 @@ func (s *InstructionStore) zoneLocked(zone string) (string, *zoneSerials) {
 }
 
 // ownView is what this agent holds of zone, the zone named in any case;
-// false when it holds no active serial for it.
+// false when it holds no serial for it. With no active serial known (S9)
+// active is zero and the voting members are the newest serial's.
 func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 	if s == nil {
 		return ownView{}, false
@@ -630,15 +631,21 @@ func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name, z := s.zoneLocked(zone)
-	if z == nil || z.Active == nil {
+	if z == nil || z.highest() == nil {
 		return ownView{}, false
 	}
-	v := ownView{name: name, active: z.Active.SerialDigest, highest: z.highest().Serial, voting: memberSet{}}
-	v.held = append(v.held, z.Active.SerialDigest)
+	v := ownView{name: name, highest: z.highest().Serial, voting: memberSet{}}
+	if z.Active != nil {
+		v.active = z.Active.SerialDigest
+		v.held = append(v.held, z.Active.SerialDigest)
+	}
 	for _, h := range z.Held {
 		v.held = append(v.held, h.SerialDigest)
 	}
 	for _, h := range []*heldSerial{z.Active, z.highest()} {
+		if h == nil {
+			continue
+		}
 		_, voting := participantsOf(h.Reading)
 		for _, id := range voting {
 			v.voting[canonicalName(id)] = true

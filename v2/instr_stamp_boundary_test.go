@@ -41,7 +41,7 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 			tables := map[string]*stampTable{}
 			for _, p := range []*peerEnv{env.Alice, env.Bob} {
 				s := newStore(t)
-				s.Note(zone, in, nil)
+				noteKnown(t, s, zone, in)
 				p.Bridge.stamps = newStampTable(p.Identity, s, 1, false, []string{"ns1." + p.Identity})
 				tables[p.Identity] = p.Bridge.stamps
 				pgm := p.Registry.ProviderGroupManager
