@@ -10,8 +10,8 @@
  * parent. Its stamp then tells the thaw, and every other member makes V
  * active on the first first-hand telling of it from the leader or from a
  * voting member under V. A leaving voting member whose telling has not
- * counted for multi-provider.transitions.leaving-timeout is excused. Until
- * S12 a transition is done at the thaw.
+ * counted for multi-provider.transitions.leaving-timeout is excused. The
+ * reconciliation that follows, until "done", is reconcile.go's (S12).
  */
 package tdnsmp
 
@@ -114,7 +114,7 @@ func (s *InstructionStore) thawInputs(zone string) (thawInputs, bool) {
 		return thawInputs{}, false
 	}
 	in := thawInputs{name: name, active: *z.Active, ownerError: z.OwnerError,
-		reconciling: z.From != nil || len(z.Removals) > 0, enforced: z.Enforced}
+		reconciling: z.reconciling(), enforced: z.Enforced}
 	if a := z.agreeing(); a != nil {
 		c := *a
 		in.agreed = &c
@@ -526,24 +526,17 @@ func (conf *Config) runThaws(ctx context.Context) {
 	}
 }
 
-// thawTurn is the zone's turn: the leader thaws it when it is ready, and
-// cancels its parent work when that is all the thaw waits for (design 3.2:
-// at the thaw's turn); every agent makes active a serial a member tells
-// first hand (activateOnTellings), and fetches a serial agreed on that it
-// lacks.
+// thawTurn is the zone's turn: a transition under way goes on (the
+// reconciliation's turn, plan S12); the leader thaws it when it is ready,
+// and cancels its parent work when that is all the thaw waits for (design
+// 3.2: at the thaw's turn); every agent makes active a serial a member
+// tells first hand (activateOnTellings), and fetches a serial agreed on
+// that it lacks.
 func (conf *Config) thawTurn(zone string) {
 	b := &conf.InternalMp.thaws
 	b.turn.Lock()
 	defer b.turn.Unlock()
-	// Until S12 a transition is done at the thaw: one whose "done" could
-	// not be written is done at the next turn, or it would hold the zone
-	s := conf.InternalMp.Instructions
-	if in, ok := s.thawInputs(zone); ok && in.enforced && in.reconciling {
-		if err := s.Done(in.name); err != nil {
-			lg.Error("the transition could not be marked done", "zone", in.name, "serial", in.active.Serial, "err", err)
-			return
-		}
-	}
+	conf.reconcileTurn(zone, time.Now())
 	if v, ok := conf.thawView(zone, time.Now()); ok && v.leads {
 		switch {
 		case v.ready():
@@ -569,10 +562,9 @@ func (conf *Config) thaw(v thawView) {
 
 // activate makes the thaw's target the zone's active serial, written before
 // it is told (Activate), and runs what follows from it: the zone moves to
-// its group under the new serial (onActiveChanged), and its sets are handed
-// on (onSetsChanged; until S12 V's, which are the sets the parts hold:
-// every transition the judge lets through changes none of them). Until S12
-// the transition is done at once.
+// its group under the new serial (onActiveChanged), and the parts are
+// handed V with the sets they hold, step 0 (onSetsChanged). The
+// reconciliation follows (reconcileTurn).
 func (conf *Config) activate(zone string, th Thaw, by string) error {
 	s := conf.InternalMp.Instructions
 	before := s.activeReading(zone)
@@ -588,9 +580,7 @@ func (conf *Config) activate(zone string, th Thaw, by string) error {
 		mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, s.activeReading(zone))
 		conf.onSetsChanged(mpzd, true)
 	}
-	if err := s.Done(zone); err != nil {
-		lg.Error("the transition could not be marked done", "zone", zone, "serial", th.To.Serial, "err", err)
-	}
+	conf.askThaw(zone)
 	return nil
 }
 
@@ -795,11 +785,20 @@ func instructionsAnswered(zone string, sd SerialDigest, data map[string]string) 
 	return in, nil
 }
 
-// thawLine is the zone's thaw as the status shows it: what the agreement
-// waits for, or the last thaw made active here; "" with neither.
+// thawLine is the zone's transition as the status shows it: its
+// reconciliation's step and what it waits for (plan S12), what the
+// agreement waits for, when the last transition was done here, or the
+// last thaw made active here; "" with none.
 func (conf *Config) thawLine(zone string) string {
-	if v, ok := conf.thawView(zone, time.Now()); ok {
+	now := time.Now()
+	if line := conf.reconcileLine(zone, now); line != "" {
+		return line
+	}
+	if v, ok := conf.thawView(zone, now); ok {
 		return v.line()
+	}
+	if st := conf.InternalMp.Instructions.Status(zone); st != nil && st.Active != nil && !st.DoneAt.IsZero() {
+		return fmt.Sprintf("at %d, done since %s", st.Active.Serial, st.DoneAt.Format(time.TimeOnly))
 	}
 	b := &conf.InternalMp.thaws
 	b.mu.Lock()

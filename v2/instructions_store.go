@@ -79,9 +79,29 @@ type zoneSerials struct {
 	ErrorAt    *uint32  `json:"error_at,omitempty"`
 	Conflict   []string `json:"conflict,omitempty"`
 	// Step and Sets are the reconciliation's step and the sets the parts
-	// hold, each provider by label and identity (S3 and S12 fill them).
-	Step int             `json:"step,omitempty"`
-	Sets json.RawMessage `json:"sets,omitempty"`
+	// hold at it, each provider by label and identity, as Roles in JSON
+	// (S12): nil at rest, and while this agent holds no step's sets
+	// (Pending). StepOf, StepWhat and Taken are the leader's plan as the
+	// step names it: how many steps, what this one does, and the keys of
+	// the steps taken. StepAt is when this agent took or first heard the
+	// step.
+	Step     int             `json:"step,omitempty"`
+	Sets     json.RawMessage `json:"sets,omitempty"`
+	StepOf   int             `json:"step_of,omitempty"`
+	StepWhat string          `json:"step_what,omitempty"`
+	Taken    []string        `json:"taken,omitempty"`
+	StepAt   time.Time       `json:"step_at,omitzero"`
+	// Pending: a transition to the active serial may be under way, and this
+	// agent holds no step's sets. It moved straight to the active serial
+	// (S7) or knew it by another's word (S9): it hands its parts nothing
+	// new until the leader's stamp gives it the step (design 3.3).
+	Pending bool `json:"pending,omitempty"`
+	// Excused are the leaving members the leader excused during the
+	// reconciliation, by identity (design 3.2): planned as excused from
+	// then on.
+	Excused []string `json:"excused,omitempty"`
+	// DoneAt is when the last transition was done here (S12).
+	DoneAt time.Time `json:"done_at,omitzero"`
 	// Enforced: the active serial moves only by Activate (S7). A record
 	// kept before that followed the copy.
 	Enforced bool      `json:"enforced"`
@@ -103,7 +123,7 @@ func (z *zoneSerials) phase() string {
 	switch {
 	case z.OwnerError != "":
 		return PhaseOwnerError
-	case z.From != nil || len(z.Removals) > 0:
+	case z.reconciling():
 		return PhaseReconciling
 	case z.agreeing() != nil:
 		return PhaseAgreeing
@@ -111,6 +131,13 @@ func (z *zoneSerials) phase() string {
 		return PhaseRefused
 	}
 	return PhaseSteady
+}
+
+// reconciling: a transition to the active serial is under way here (design
+// 3.3): it holds the serial it was thawed from, a step's sets, or a removal,
+// or holds no step's sets yet (Pending).
+func (z *zoneSerials) reconciling() bool {
+	return z.From != nil || len(z.Removals) > 0 || z.Sets != nil || z.Pending
 }
 
 // agreeing is the serial agreed on: the highest serial held above the active
@@ -371,6 +398,8 @@ func (z *zoneSerials) clone() *zoneSerials {
 	c.Held = slices.Clone(z.Held)
 	c.Conflict = slices.Clone(z.Conflict)
 	c.Removals = slices.Clone(z.Removals)
+	c.Taken = slices.Clone(z.Taken)
+	c.Excused = slices.Clone(z.Excused)
 	return &c
 }
 
@@ -495,8 +524,11 @@ var errEndOfService = errors.New("the zone's instructions are gone")
 // member behind it, a newer one (design 3.2). Such a member judges the
 // thaw's own pair, never its active serial against the target (S4). The
 // from-serial is kept until "done"; serials at or below the target are
-// dropped, and those above it are judged against it. The step's sets stay
-// as they are, step 0 of the new transition (design 3.3), and what the
+// dropped, and those above it are judged against it. The parts keep the
+// sets they hold: step 0 of the new transition is the sets of the step this
+// agent held, or with none the from-serial's lists (design 3.3). A member
+// that moves straight holds no step's sets: its parts hold an older
+// serial's, and it waits for the leader's step (Pending). What the
 // transition before it left (an agent that missed its end) is dropped.
 func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 	return s.update(zone, func(z *zoneSerials) error {
@@ -521,6 +553,7 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 		if len(refused) > 0 {
 			return fmt.Errorf("zone %s: serial %d is refused: %s", zone, to.Serial, refusalText(refused))
 		}
+		straight := from != z.Active
 		f, t := *from, *to
 		t.Since, t.Refused = time.Now(), nil
 		z.From, z.Active = &f, &t
@@ -528,7 +561,18 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 		z.LastFrom = &lf
 		z.dropAtOrBelow(t.Serial)
 		s.judged(zone, z)
-		z.Step, z.Removals = 0, nil
+		sets := z.Sets
+		if sets == nil {
+			var err error
+			if sets, err = json.Marshal(rolesFor(f.Reading, f.Reading, 0)); err != nil {
+				return fmt.Errorf("zone %s: the sets held: %w", zone, err)
+			}
+		}
+		z.Step, z.Removals, z.Taken, z.StepOf, z.StepWhat, z.Excused = 0, nil, nil, 0, "", nil
+		z.Sets, z.StepAt, z.Pending, z.DoneAt = sets, time.Now(), false, time.Time{}
+		if straight {
+			z.Sets, z.Pending = nil, true
+		}
 		z.LastThaw = &thaw
 		z.Enforced = true
 		return nil
@@ -604,12 +648,18 @@ func (s *InstructionStore) readingAt(zone string, sd SerialDigest) *Instructions
 	return nil
 }
 
-// Done ends the zone's transition, on the leader's first-hand stamp that
-// shows it done (S12): the from-serial, the step and every removal still
-// held go.
+// Done ends the zone's transition (S12): at the leader once every part
+// holds its last step, at a member on the leader's first-hand stamp that
+// shows it done. The from-serial, the step and its sets, and every removal
+// still held go.
 func (s *InstructionStore) Done(zone string) error {
 	return s.update(zone, func(z *zoneSerials) error {
-		z.From, z.Step, z.Removals = nil, 0, nil
+		if !z.reconciling() {
+			return nil
+		}
+		z.From, z.Removals = nil, nil
+		z.Step, z.Sets, z.StepOf, z.StepWhat, z.Taken, z.StepAt, z.Pending = 0, nil, 0, "", nil, time.Time{}, false
+		z.Excused, z.DoneAt = nil, time.Now()
 		return nil
 	})
 }
@@ -760,8 +810,15 @@ type InstructionsStatus struct {
 	OwnerError string        `json:"owner_error,omitempty"`
 	Enforced   bool          `json:"enforced"`
 	Removals   []Removal     `json:"removals,omitempty"`
-	// Thaw is what the agreement waits for, or the last thaw made active
-	// here (instr_thaw.go, plan S7); the agent's to fill.
+	// The reconciliation's step held here, the steps planned and what it
+	// does (S12); and when the last transition was done.
+	Step     int       `json:"step,omitempty"`
+	StepOf   int       `json:"step_of,omitempty"`
+	StepWhat string    `json:"step_what,omitempty"`
+	DoneAt   time.Time `json:"done_at,omitzero"`
+	// Thaw is what the agreement waits for, the reconciliation's step and
+	// what it waits for, or the last transition done here (instr_thaw.go,
+	// reconcile.go, plans S7 and S12); the agent's to fill.
 	Thaw string `json:"thaw,omitempty"`
 }
 
@@ -784,6 +841,10 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 		OwnerError: z.OwnerError,
 		Enforced:   z.Enforced,
 		Removals:   slices.Clone(z.Removals),
+		Step:       z.Step,
+		StepOf:     z.StepOf,
+		StepWhat:   z.StepWhat,
+		DoneAt:     z.DoneAt,
 	}
 	if z.Active != nil {
 		a := z.Active.SerialDigest

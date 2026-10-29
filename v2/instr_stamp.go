@@ -60,6 +60,9 @@ type stampTable struct {
 	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
 	// the auditor, which has no signer.
 	hold func(zone string) bool
+	// partsHold: this agent's combiner and signer hold the zone's step at
+	// its active serial (plan S12); nil on the auditor, which has no parts.
+	partsHold func(zone string, sd SerialDigest, step int) bool
 	// fetch asks a refresh of the zone's own copy, the zone named in any
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
@@ -151,12 +154,15 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 }
 
 // ownStamp is what this agent tells of zone: the serials its store keeps,
-// with its provider's rollover flag, whom the rollover waits on, and its
-// signer's hold.
+// with its provider's rollover flag, whom the rollover waits on, its
+// signer's hold, and whether its parts hold the step it holds.
 func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
 	st, ok := t.store.stampOf(zone)
 	if !ok {
 		return st, false
+	}
+	if st.Step != nil && t.partsHold != nil {
+		st.StepHeld = t.partsHold(zone, SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}, st.Step.Number)
 	}
 	if t.rollover != nil {
 		st.Rollover = t.rollover(zone)
@@ -682,7 +688,8 @@ func (z *zoneSerials) shares(local, peer string) bool {
 }
 
 // stampOf is what this agent tells of zone (rule 4), from the serials it
-// keeps; the rollover flag is the caller's.
+// keeps, its reconciliation's step and removals included (plan S12); the
+// rollover flag and whether its parts hold the step are the caller's.
 func (s *InstructionStore) stampOf(zone string) (InstrStamp, bool) {
 	if s == nil {
 		return InstrStamp{}, false
@@ -711,6 +718,7 @@ func (s *InstructionStore) stampOf(zone string) (InstrStamp, bool) {
 		th := *z.LastThaw
 		st.Thaw = &th
 	}
+	z.stampStepLocked(&st)
 	return st, true
 }
 
@@ -791,7 +799,9 @@ func (s *InstructionStore) RaiseEpoch(now time.Time) (uint64, error) {
 
 // wireStamps gives the agent's or the auditor's bridge its stamp table: the
 // epoch raised for this start, the provider's nameserver names, whether
-// payload encryption is on; on the agent its key rollovers and the fetch.
+// payload encryption is on; on the agent its key rollovers, its parts'
+// hold of a step and the fetch. The bridge takes the time-out for members
+// with no role too (plan S12).
 func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, crypto, agent bool) error {
 	epoch, err := conf.InternalMp.Instructions.RaiseEpoch(time.Now())
 	if err != nil {
@@ -802,12 +812,14 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
 		t.hold = conf.holdConfirmed
+		t.partsHold = conf.partsHold
 		t.fetch = conf.fetchZone
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")
 		}
 	}
 	tm.stamps = t
+	tm.noRoleTimeout = noRoleTimeoutFor(mp)
 	return nil
 }
 

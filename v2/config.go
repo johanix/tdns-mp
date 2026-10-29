@@ -384,4 +384,7 @@ type InternalMpConf struct {
 	// thaws: what the agent and the auditor keep of their zones' thaws
 	// (instr_thaw.go).
 	thaws thawBook
+	// reconciles: what the agent and the auditor keep of their zones'
+	// reconciliations in memory (reconcile.go).
+	reconciles reconcileBook
 }

@@ -56,12 +56,16 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 }
 
 // ValidateTransitions rejects a negative
-// multi-provider.transitions.leaving-timeout, and one that is not above the
-// beat interval: a telling heard longer ago than it does not count for the
-// thaw (plan S7), and with beats further apart none would ever count.
+// multi-provider.transitions.leaving-timeout or no-role-timeout, and a
+// leaving-timeout that is not above the beat interval: a telling heard
+// longer ago than it does not count for the thaw (plan S7), and with beats
+// further apart none would ever count.
 func ValidateTransitions(mp *MultiProviderConf) error {
 	if t := mp.Transitions.LeavingTimeout; t < 0 {
 		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %d is negative", t)
+	}
+	if t := mp.Transitions.NoRoleTimeout; t < 0 {
+		return fmt.Errorf("multi-provider.transitions.no-role-timeout: %d is negative", t)
 	}
 	if beat := hsyncConfigFromMp(mp).BeatInterval; leavingTimeoutFor(mp) <= beat {
 		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %s is not above the beat interval (%s)", leavingTimeoutFor(mp), beat)
@@ -80,6 +84,19 @@ func leavingTimeoutFor(mp *MultiProviderConf) time.Duration {
 		return time.Duration(mp.Transitions.LeavingTimeout) * time.Second
 	}
 	return leavingTimeoutDefault
+}
+
+// noRoleTimeoutDefault is multi-provider.transitions.no-role-timeout's
+// default.
+const noRoleTimeoutDefault = 15 * time.Minute
+
+// noRoleTimeoutFor is multi-provider.transitions.no-role-timeout, or its
+// default.
+func noRoleTimeoutFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Transitions.NoRoleTimeout > 0 {
+		return time.Duration(mp.Transitions.NoRoleTimeout) * time.Second
+	}
+	return noRoleTimeoutDefault
 }
 
 // ValidatePartAgents refuses an empty entry in multi-provider.agents, which
