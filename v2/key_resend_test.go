@@ -460,7 +460,8 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 func TestAResultKeepsTheStampOfItsAnswer(t *testing.T) {
 	const zone ZoneName = "stamped.superseded.example."
 	const fast, slow = "agent.fast.example.", "agent.slow.example."
-	a, b := testDnskeyRR(t, string(zone), 257), testDnskeyRR(t, string(zone), 256)
+	k := distinctDnskeys(t, string(zone), 257, 256)
+	a, b := k[0], k[1]
 	keys := []uint16{a.KeyTag(), b.KeyTag()}
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	tm.TrackDnskeyPropagation(zone, "first", keys, nil, []AgentId{fast, slow})
@@ -543,7 +544,8 @@ func TestTheCallbackKeepsAConfirmationsStampWithItsResult(t *testing.T) {
 	r := receivingRig(t, "stamped.callback.example.")
 	z := r.mpzd.ZoneName
 	peer, other := AgentId(r.peer.Identity), AgentId("agent.other.example.")
-	direct, credited := testDnskeyRR(t, z, 257), testDnskeyRR(t, z, 256)
+	k := distinctDnskeys(t, z, 257, 256)
+	direct, credited := k[0], k[1]
 	keys := []uint16{direct.KeyTag(), credited.KeyTag()}
 	tm := r.us.Bridge
 	tm.dnskeyPropMu.Lock()
