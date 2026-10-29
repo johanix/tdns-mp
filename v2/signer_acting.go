@@ -11,10 +11,10 @@
  * confirmations by KeyConfirmers and the foreign rows' ds by DSSigners.
  * Then its inventory says what it holds. Every reader at the signer reads
  * the hand-over through the accessor S10 made (actingHeld), whatever its
- * copy says (from S7). A signer handed nothing acts by its own copy (rule 5):
- * provisional for a copy with no reading (no serial=, #308), which starts no
- * multi-provider work; for one that reads, it waits for its agent, and signs
- * meanwhile by the signing set it last signed by.
+ * copy says (from S7). A signer handed nothing acts by its own copy (rule
+ * 5): provisional for a copy with no reading (no serial=, #308), which
+ * starts no multi-provider work; for one that reads, it waits for its
+ * agent, and signs meanwhile by the signing set it last signed by.
  */
 package tdnsmp
 
