@@ -622,6 +622,7 @@ func (e *KeyLifecycleEngine) tickOwned(paused map[string]keyPause) {
 			lgSigner.Info("key lifecycle: key rollovers resumed: nobody is leaving the signing set", "zone", zone)
 		}
 		e.applyKept(l, zone)
+		l.SetHold(e.conf.InternalMp.SignerHolds.held(zone))
 		if err := l.Tick(); err != nil {
 			lgSigner.Error("key lifecycle: tick failed", "zone", zone, "err", err)
 		}
@@ -802,7 +803,12 @@ func lifecycleRole(role string) (string, error) {
 }
 
 // RequestRollover asks for the role's next standby key to be promoted on
-// the next tick (tdns-mpcli signer key rollover).
+// the next tick (tdns-mpcli signer key rollover). It is the emergency
+// rollover, which starts under the agent's hold too (design 3.1, plan S6),
+// but at a provider that does not sign the zone: one with no role, or one
+// the serial being agreed takes away, makes none, since its keys go with
+// its removal. Until the signer acts by what its agent hands it (S11), it
+// reads that from its own copy, which is never older than its agent's.
 func (e *KeyLifecycleEngine) RequestRollover(zone, role string) (string, error) {
 	l, err := e.driverOf(zone)
 	if err != nil {
@@ -811,6 +817,11 @@ func (e *KeyLifecycleEngine) RequestRollover(zone, role string) (string, error) 
 	r, err := lifecycleRole(role)
 	if err != nil {
 		return "", err
+	}
+	if e.conf.InternalMp.SignerHolds.held(zone) {
+		if mpzd, ok := Zones.Get(l.Zone); ok && mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.WeAreSigner {
+			return "", fmt.Errorf("zone %s: a transition is under way and this provider does not sign the zone; it starts no rollover, its keys go with its removal", l.Zone)
+		}
 	}
 	l.RequestRollover(r)
 	return fmt.Sprintf("Zone %s: %s rollover requested; the next standby %s is promoted on the next tick (a standby is minted first if none is ready)", l.Zone, r, r), nil

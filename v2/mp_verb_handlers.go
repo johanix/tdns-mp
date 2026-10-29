@@ -179,6 +179,8 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		// full inventory signal — KeyInventory carries the data, KeyTag not required
 	case "foreign":
 		// the other providers' key states — ForeignKeys carries the data
+	case "hold":
+		// the agent's word on the zone's key machine (plan S6) — Hold carries it
 	default:
 		return fmt.Errorf("unknown keystate signal: %q", keystate.Signal)
 	}
@@ -186,7 +188,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 	if keystate.Zone == "" {
 		return fmt.Errorf("keystate message missing zone")
 	}
-	if keystate.Signal == "inventory" || keystate.Signal == "foreign" {
+	if keystate.Signal == "inventory" || keystate.Signal == "foreign" || keystate.Signal == "hold" {
 		// Empty inventory is valid (signer has no keys for this zone).
 		// The recipient decides what to do with it. So is an empty set of
 		// foreign key states (nobody has said anything).
