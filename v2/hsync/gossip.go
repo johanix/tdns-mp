@@ -90,8 +90,11 @@ type InstrStamp struct {
 	Refused        string `json:"refused,omitempty"` // the judge's first code
 	Error          string `json:"error,omitempty"`   // the owner error
 	Rollover       bool   `json:"rollover,omitempty"`
-	Hold           bool   `json:"hold,omitempty"` // its signer has confirmed the hold since it held the serial agreed on
-	Thaw           *Thaw  `json:"thaw,omitempty"`
+	// WaitsOn: the other signers whose confirmations the provider's
+	// rollover under way misses, by its signer's inventory (plan S11).
+	WaitsOn []string `json:"waits_on,omitempty"`
+	Hold    bool     `json:"hold,omitempty"` // its signer has confirmed the hold since it held the serial agreed on
+	Thaw    *Thaw    `json:"thaw,omitempty"`
 }
 
 // MsgStamp is the stamp a message or a confirmation carries (plan S5b): its

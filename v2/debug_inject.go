@@ -145,7 +145,7 @@ func injectAddOperations(rrs []string) ([]core.RROperation, error) {
 // injectKeystateRequest is an empty KEYSTATE inventory from sender. An
 // honest agent never sends one to another provider's agent.
 func injectKeystateRequest(sender, zone string) *PeerKeystateRequest {
-	return inventoryRequest(sender, zone, nil, false, nil, false)
+	return inventoryRequest(sender, zone, nil, false, nil, inventoryMarks{})
 }
 
 func debugPostString(data map[string]interface{}, key string) string {

@@ -89,6 +89,8 @@ type harnessWire struct {
 	fakeWire
 }
 
+func (w *harnessWire) DSSigners(zone string) []string { return w.OtherSigners(zone) }
+
 // the column tdns stamps as a row enters each state
 var harnessStampCols = map[string]string{KeyStatePublished: "published_at", KeyStateActive: "active_at", KeyStateRetired: "retired_at"}
 

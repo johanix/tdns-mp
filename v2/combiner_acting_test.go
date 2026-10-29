@@ -777,13 +777,13 @@ func TestACombinerWithTwoAgentsIsAConfigError(t *testing.T) {
 	one := &MultiProviderConf{Role: "combiner", Agents: []*PeerConf{{Identity: actUs}}}
 	two := &MultiProviderConf{Role: "combiner", Agents: []*PeerConf{{Identity: actUs}, {Identity: actOther}}}
 	agent := &MultiProviderConf{Role: "agent", Agents: []*PeerConf{{Identity: actUs}, {Identity: actOther}}}
-	if err := ValidateCombinerAgents(one); err != nil {
+	if err := ValidatePartAgents(one); err != nil {
 		t.Errorf("one agent: %v", err)
 	}
-	if err := ValidateCombinerAgents(two); err == nil || !strings.Contains(err.Error(), "a multi-provider combiner has more than one agent") {
+	if err := ValidatePartAgents(two); err == nil || !strings.Contains(err.Error(), "a multi-provider combiner has more than one agent") {
 		t.Errorf("two agents: %v", err)
 	}
-	if err := ValidateCombinerAgents(agent); err != nil {
+	if err := ValidatePartAgents(agent); err != nil {
 		t.Errorf("not a combiner: %v", err)
 	}
 }
