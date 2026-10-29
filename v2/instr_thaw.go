@@ -218,6 +218,8 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 			switch {
 			case !ok || now.Sub(st.heard) > timeout:
 				v.waits = append(v.waits, id+" (not heard)")
+			case st.Error != "":
+				v.waits = append(v.waits, id+" (owner error)")
 			case !(st.Known && st.Active == v.to.Serial && st.ActiveDigest == v.to.Digest) && !(st.Agreeing == v.to.Serial && st.AgreeingDigest == v.to.Digest):
 				v.waits = append(v.waits, fmt.Sprintf("%s (agrees on %d)", id, st.Agreeing))
 			case !st.encrypted:
