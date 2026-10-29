@@ -457,11 +457,48 @@ func TestAZoneWithNoVotingMemberUnderNThawsWhenTheNewVotersAgree(t *testing.T) {
 	}
 	st := tells(n, v)
 	st.Agreeing, st.AgreeingDigest = 62, v.Digest()
+	// a telling with an owner error does not count, as under N (cubic on
+	// tdns-mp #311)
+	bad := st
+	bad.Error = "two HSYNCPARAM records"
+	r.hear(roleB, bad, true)
+	r.conf.thawTurn(r.zone)
+	if vw := r.view(); r.active() != 61 || len(vw.waits) != 1 || vw.waits[0] != roleB+" (owner error)" {
+		t.Fatalf("with b's owner error: active %d, %q", r.active(), vw.waits)
+	}
 	r.hear(roleB, st, true)
 	r.conf.thawTurn(r.zone)
 	if r.active() != 62 {
 		t.Fatalf("no thaw: %q", r.view().waits)
 	}
+}
+
+// The election asks its gate for the excused before it takes the
+// election's lock: the gate takes the manager's lock, which allLeases holds
+// while it takes the election's (cubic on tdns-mp #311).
+func TestTheElectionAsksItsGateOutsideItsLock(t *testing.T) {
+	const zone = "gatelock.election.example."
+	lem, group, calls := arrivalLEM(t, zone)
+	le := &LeaderElection{Active: true, Term: 5, startZones: []ZoneName{zone},
+		Confirms: map[AgentId]AgentId{arrivalA: arrivalA, arrivalB: arrivalA}}
+	lem.mu.Lock()
+	lem.groupElections[group] = le
+	lem.mu.Unlock()
+	var asked, underLock bool
+	lem.SetGateExcused(func(string) []string {
+		asked = true
+		if le.mu.TryLock() {
+			le.mu.Unlock()
+		} else {
+			underLock = true
+		}
+		return nil
+	})
+	lem.finalizeGroupElection(group, 5, []string{arrivalA, arrivalB}, []ZoneName{zone})
+	if !asked || underLock {
+		t.Errorf("the gate asked %v, under the election's lock %v", asked, underLock)
+	}
+	waitUntil(t, "the winner's callback ran", func() bool { e, _ := calls.lists(); return len(e) == 1 })
 }
 
 // A leaving voting member (b votes under 41 and not under 42) that has told

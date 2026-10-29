@@ -649,6 +649,9 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	if le == nil {
 		return
 	}
+	// The group's voters before le.mu: the gate takes lem.mu, which
+	// allLeases holds while it takes le.mu.
+	voters, known := lem.groupVoters(groupHash, members)
 
 	le.mu.Lock()
 	// Once per term: the last confirm, the own confirm that completes the set
@@ -673,7 +676,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	// the election counts as having found no consensus (the membership
 	// design, 4.4).
 	if consensus && agreedWinner != "" {
-		if voters, known := lem.groupVoters(groupHash, members); known && !isAmong(voters, agreedWinner) {
+		if known && !isAmong(voters, agreedWinner) {
 			lgElect.Warn("election: the winner is not a voting member, not taken",
 				"group", shortHash(groupHash), "winner", agreedWinner, "term", term)
 			consensus = false
