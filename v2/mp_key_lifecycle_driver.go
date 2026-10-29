@@ -869,7 +869,6 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 			joiners[p] = true
 		}
 	}
-	l.known = now
 	if len(joiners) > 0 {
 		all, err := l.rows()
 		if err != nil {
@@ -937,7 +936,12 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 	}
 	// a provider that stopped signing: its keys' DS no longer belongs at
 	// the parent (E10); one that started: what it said counts now
-	return l.applyForeignLocked()
+	if err := l.applyForeignLocked(); err != nil {
+		return err
+	}
+	// known only now: Expects says the distributions follow the set
+	l.known = now
+	return nil
 }
 
 // Mint generates a key of the role in created, with its columns.

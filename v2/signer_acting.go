@@ -11,10 +11,10 @@
  * confirmations by KeyConfirmers and the foreign rows' ds by DSSigners.
  * Then its inventory says what it holds. Every reader at the signer reads
  * the hand-over through the accessor S10 made (actingHeld), whatever its
- * copy says (from S7). A signer handed nothing acts
- * by its own copy (rule 5): provisional for a copy that carries no serial;
- * for one that does, it waits for its agent, and signs meanwhile by the
- * signing set it last signed by.
+ * copy says (from S7). A signer handed nothing acts by its own copy (rule 5):
+ * provisional for a copy with no reading (no serial=, #308), which starts no
+ * multi-provider work; for one that reads, it waits for its agent, and signs
+ * meanwhile by the signing set it last signed by.
  */
 package tdnsmp
 
@@ -124,7 +124,11 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 		return
 	}
 	// Computed on a wrapper of the zone as served, with a map of its own:
-	// the zone's options map is read without a lock.
+	// the zone's options map is read without a lock. One refresh or
+	// hand-over at a time (mpDataLock), through the switch, not the re-sign
+	// request.
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
 	mpzd.Lock()
 	mpzd.EnsureMP()
 	opts := make(map[tdns.ZoneOption]bool, len(mpzd.MPOptions))
@@ -138,7 +142,13 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 	mpzd.MP.MPdata, mpzd.MPOptions = w.MP.MPdata, w.MPOptions
 	mpdata := mpzd.MP.MPdata
 	mpzd.Unlock()
-	if mpdata != nil && mpzd.signerSwitch(nil, nil, mp) {
+	var switched, resign bool
+	if mpdata != nil {
+		switched, resign = mpzd.signerSwitch(nil, nil, mp)
+	}
+	mpMu.Unlock()
+	// after the lock: the request can wait on a full ResignQ
+	if switched || resign {
 		sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
 	}
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
@@ -168,7 +178,8 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 }
 
 // signerWaits: the signer holds no hand-over for the zone and the copy at
-// apex carries a serial, so it waits for its agent's (rule 5).
+// apex has a reading, which carries a serial (#308), so it waits for its
+// agent's (rule 5).
 func signerWaits(zone string, apex *tdns.OwnerData) bool {
 	s := actingHeld.Load()
 	if s == nil {
@@ -177,8 +188,7 @@ func signerWaits(zone string, apex *tdns.OwnerData) bool {
 	if _, held := s.get(zone); held {
 		return false
 	}
-	in := readingOf(apex)
-	return in != nil && in.Serial != 0
+	return readingOf(apex) != nil
 }
 
 // signerActingLine is what the signer acts by for the zone, for `signer
