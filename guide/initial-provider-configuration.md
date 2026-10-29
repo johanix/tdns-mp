@@ -533,6 +533,17 @@ binds. The `api` block's listener always starts; with
 is not advertised. The `dnssec:` policy signs the agent's
 identity zone.
 
+With the `parentsync:` block (and `imrengine` active) the
+agent also publishes the CDS of the identity zone it
+builds and sends its DS to the parent; the auditor does
+the same. An identity zone listed under `zones:` gets
+none of that (no CDS, no DS sent, no delegation sync),
+which the daemon says in a warning in its log at start:
+a validating peer does not trust that
+zone's TLSA without a DS, so leave the zone out of
+`zones:` and let the daemon build it, or install its DS
+at the parent by hand.
+
 `kasp.propagation-delay` has a second use on the agent. It
 is this provider's word on how long a change needs to
 reach all of its nameservers. The agent announces it to
