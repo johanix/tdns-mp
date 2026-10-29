@@ -681,6 +681,38 @@ func TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn(t *testing.T) {
 	}
 }
 
+// An auditor whose transfer skipped the thaw's from-serial (active 40, the
+// copy at 42, told the thaw 41 to 42) asks the member for 41, as an agent
+// does, and then moves straight to 42.
+func TestAnAuditorFetchesTheThawsFromSerial(t *testing.T) {
+	r := newThawRig(t, "auditorfrom.thaw.example.", "")
+	tdns.Globals.App.Type = AppTypeMPAuditor
+	t.Cleanup(func() { tdns.Globals.App.Type = AppTypeMPAgent })
+	r.conf.SetMpConfig(&MultiProviderConf{Role: "auditor", Identity: roleN})
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	r.store.Note(r.zone, freezeAt(t, 40, "o", "a,b", ""), nil)
+	r.store.Note(r.zone, r.v, nil)
+	st := tells(r.v, r.v)
+	st.Thaw = &Thaw{From: sd(r.n), To: sd(r.v)}
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if r.active() != 40 {
+		t.Fatal("moved without the from-serial")
+	}
+	if !r.fetchAsked(41, roleB) {
+		t.Fatal("the auditor did not ask for the from-serial")
+	}
+	if err := r.store.Hold(r.zone, r.n); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.thawTurn(r.zone)
+	if got := status(t, r.store, r.zone); got.Active.Serial != 42 || got.LastThaw == nil || got.LastThaw.From != sd(r.n) {
+		t.Fatalf("after the fetch: %+v", got)
+	}
+}
+
 // fetchAsked: the instructions RFI for serial was asked of member.
 func (r *thawRig) fetchAsked(serial uint32, member string) bool {
 	b := &r.conf.InternalMp.thaws
