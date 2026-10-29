@@ -323,11 +323,11 @@ func TestAHandOverAndARefreshSetTheMultiProviderDataOneAtATime(t *testing.T) {
 	if weAreSigner() {
 		t.Error("the hand-over that leaves us out of the signers did not set it once the lock was free")
 	}
-	// a copy newer than the hand-over, which it acts by until S7
+	// a copy newer than the hand-over: the signer acts by the hand-over (S7)
 	incoming := incomingCopy(t, zone, sigRecords(`serial="7" servers="us,p2" signers="us,p2"`)...)
 	held("a refresh", func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
-	if !weAreSigner() {
-		t.Error("the refresh by a serial that names us a signer did not set it once the lock was free")
+	if weAreSigner() {
+		t.Error("the refresh by a newer copy that names us a signer set it over the hand-over")
 	}
 }
 

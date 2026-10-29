@@ -1378,11 +1378,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			MPOptions: make(map[tdns.ZoneOption]bool),
 		}
 		// A combiner or signer that holds a hand-over signs by the set
-		// handed, not by the incoming copy (S10, S11). A signer that waits for its agent's hand-over signs by the
-		// set it last signed by, unchanged by its copy, where it has one
-		// (rule 5). Every other role advances its signing set by the
-		// instructions it acts by: the active ones, from the thaw (S7), not
-		// a newer copy.
+		// handed, not by the incoming copy (S10, S11). A signer that waits
+		// for its agent's hand-over signs by the set it last signed by,
+		// unchanged by its copy, where it has one (rule 5). Every other role
+		// advances its signing set by the instructions it acts by: the
+		// active ones, from the thaw (S7), not a newer copy.
 		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName)
 		if !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) {
 			signing, handed = mpzd.lastSigningSet(kdb)
