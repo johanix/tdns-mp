@@ -167,6 +167,7 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		theirs = m.Instr
 	}
 	instr := map[string]InstrStamp{}
+	toldOnce := 0
 	for _, zone := range zones {
 		st, ok := t.ownStamp(zone)
 		if !ok {
@@ -176,8 +177,12 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		their, heard := theirs[key]
 		if !atRest(st) || work[key] || once[key] || heard && (!atRest(their) || !sameSerials(st, their)) {
 			instr[zone] = st
+			if once[key] {
+				toldOnce++
+			}
 		}
 	}
+	lgGossip.Debug("the stamp entry of a beat", "peer", peer, "zones", len(instr), "once", toldOnce, "shared", len(zones))
 	row := &MemberState{
 		Identity:    t.localID,
 		Timestamp:   time.Now(),
@@ -339,6 +344,7 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 	if !t.keep(m) {
 		return
 	}
+	lgGossip.Debug("a member's stamp noted from its beat", "member", m.Identity, "zones", len(row.Instr))
 	for _, zone := range slices.Sorted(maps.Keys(m.Instr)) {
 		t.judgeTold(zone)
 		t.fetchIfNewer(zone, m)
