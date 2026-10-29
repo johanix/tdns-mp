@@ -469,6 +469,12 @@ func TestStepsAreOrderedAdditionsRoleChangesRemovals(t *testing.T) {
 	if want := []string{"d record", "c ns", "d dnskey", "b role", "c ds", lastStepKey}; !slices.Equal(got, want) {
 		t.Errorf("with c excused:\n got %v\nwant %v", got, want)
 	}
+	// d's DNSKEY step taken before c was excused: no DNSKEY or DS step of an
+	// addition is left, and c's NS step stays after b's role change
+	got = keys(planSteps(planView{to: n, excused: map[string]bool{canonicalName(roleN): true}, taken: []string{"d record", "d dnskey"}}))
+	if want := []string{"d record", "d dnskey", "b role", "c ns", "c ds", lastStepKey}; !slices.Equal(got, want) {
+		t.Errorf("with c excused after d's DNSKEY step:\n got %v\nwant %v", got, want)
+	}
 }
 
 // TestEveryDSAndDNSKEYStepWaitsForAnEmergencyRollover, with
@@ -853,6 +859,44 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 	tm.dnskeyPropMu.Unlock()
 	if !waiting {
 		t.Error("the distribution went on without b")
+	}
+}
+
+// A member that votes when a DNSKEY distribution starts and has no role
+// after a thaw while the distribution waits is not waited for past a
+// time-out: the look at the time-out is made, and made again.
+func TestADNSKEYDistributionGoesOnWithoutAMemberThatLostItsRoleWhileItWaited(t *testing.T) {
+	r := newReconcileRig(t, "dnskeylost.reconcile.example.", roleA)
+	r.n = freezeAt(t, 41, "n", "a,b,n", "")
+	r.v = freezeAt(t, 42, "v", "a,b", "")
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Active.Reading, z.Active.SerialDigest = r.n, sd(r.n)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.holdUnjudged(r.v, time.Now())
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = 10 * time.Millisecond
+	waiting := func() bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations["d1"]
+		return ok
+	}
+	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	time.Sleep(50 * time.Millisecond) // time-outs pass while n votes
+	if !waiting() {
+		t.Fatal("the distribution went on without n while n votes")
+	}
+	if err := r.conf.activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}, roleA); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(2 * time.Second); waiting(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the distribution still waits for n, which has no role since the thaw")
+		}
 	}
 }
 

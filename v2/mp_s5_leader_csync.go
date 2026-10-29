@@ -313,7 +313,8 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 	// them once the time-out has passed since the CSYNC was made, and the
 	// engine looks again then (design 4).
 	noRoleLeft, wait := noRoleOnly(zonename, awaited, made, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
-	if noRoleLeft && wait <= 0 {
+	timedOut := noRoleLeft && wait <= 0
+	if timedOut {
 		for _, r := range awaited {
 			lgEngine.Warn("a member with no role did not confirm in time, going on", "zone", zone, "member", r, "what", "the zone's CSYNC")
 		}
@@ -369,7 +370,11 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 			ask = c.schedule(ch)
 		}
 		c.mu.Unlock()
-		lgEngine.Info("every provider has confirmed the zone's CSYNC", "zone", zone, "serial", cur.serial, "took", took)
+		if timedOut {
+			lgEngine.Info("every provider with a role has confirmed the zone's CSYNC", "zone", zone, "serial", cur.serial, "took", took)
+		} else {
+			lgEngine.Info("every provider has confirmed the zone's CSYNC", "zone", zone, "serial", cur.serial, "took", took)
+		}
 		if hold != nil {
 			// the zone's wait, counted from the last confirmation
 			sent := delegationNotifies{out: hold.out}
@@ -400,13 +405,15 @@ func noRoleOnly(zone ZoneName, awaited []string, since, now time.Time, timeout t
 
 // askCsyncProgress has the data engine look again at how far the zone's
 // CSYNC has come, from its own goroutine, which owns the tracking. A full
-// queue drops the look: the next confirmation looks again.
+// queue asks again a second later: with only members with no role left, no
+// confirmation may come to look again.
 func (conf *Config) askCsyncProgress(zone ZoneName) {
 	if msgQs := conf.InternalMp.MsgQs; msgQs != nil && msgQs.SynchedDataCmd != nil {
 		select {
 		case msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "csync-progress", Zone: zone}:
 		default:
-			lgEngine.Warn("the data engine's queue is full; the CSYNC's time-out for members with no role is looked at with the next confirmation", "zone", zone)
+			lgEngine.Warn("the data engine's queue is full; the CSYNC's time-out for members with no role is looked at again in a second", "zone", zone)
+			time.AfterFunc(time.Second, func() { conf.askCsyncProgress(zone) })
 		}
 	}
 }
