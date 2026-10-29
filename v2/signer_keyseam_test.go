@@ -37,6 +37,7 @@ func newMPTestKeyDB(t *testing.T) *tdns.KeyDB {
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	t.Cleanup(func() { kdb.DB.Close() })
 	return kdb
 }
 
