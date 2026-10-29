@@ -338,9 +338,9 @@ func testAnAuditorNeverAsks(t *testing.T) {
 	zd := a.mpzd.ZoneData
 	apex, _ := zd.Data.Get(zd.ZoneName)
 	hp := &dns.PrivateRR{Hdr: dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+		Data: numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
 			&core.HSYNCPARAMServers{Servers: []string{shortLabel(string(a.them))}},
-			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(string(a.us))}}}}}
+			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(string(a.us))}}}})}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
 	zd.Data.Set(zd.ZoneName, apex)
 	zd.InstallInitialSnapshot()

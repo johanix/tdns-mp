@@ -233,9 +233,15 @@ func (conf *Config) inventoryMarksOf(zone string, items []KeyInventoryItem) inve
 	if held, ok := actingHeld.Load().get(zone); ok {
 		m.acting = held.handover
 	}
-	if mpzd, ok := Zones.Get(zone); ok && mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.WeAreSigner {
-		m.notSigning = true
-		return m
+	if mpzd, ok := Zones.Get(zone); ok {
+		// under the zone's lock: a hand-over replaces MPdata under it
+		mpzd.Lock()
+		notSigning := mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.WeAreSigner
+		mpzd.Unlock()
+		if notSigning {
+			m.notSigning = true
+			return m
+		}
 	}
 	var f rolloverFlags
 	if e := conf.InternalMp.KeyLifecycle; e != nil {

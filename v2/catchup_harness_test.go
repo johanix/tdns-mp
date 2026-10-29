@@ -42,10 +42,10 @@ func newCatchUpNet(t *testing.T, zone string) *catchUpNet {
 	zd.Logger = log.New(io.Discard, "", 0)
 	zd.Options[tdns.OptMultiProvider] = true
 	apex, _ := zd.GetOwner(zd.ZoneName)
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
 		&core.HSYNCPARAMServers{Servers: []string{shortLabel(n.alice), shortLabel(n.bob)}},
 		&core.HSYNCPARAMSigners{Signers: []string{shortLabel(n.bob)}},
-	}}
+	}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{
 		Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
 	zd.Data.Set(zone, *apex)

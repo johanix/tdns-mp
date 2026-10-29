@@ -94,6 +94,7 @@ func parentSyncTestConf(t *testing.T, id, zone string, records ...string) (*tdns
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	t.Cleanup(func() { kdb.DB.Close() })
 	hdb := tdnsmp.NewHsyncDB(kdb)
 	if _, err := hdb.Sig0KeyMgmt(nil, tdns.KeystorePost{
 		Command:    "sig0-mgmt",
@@ -269,7 +270,7 @@ func TestParentSyncStatusNamesEachPeersState(t *testing.T) {
 		zone+" 3600 IN HSYNC3 ON bravo agent.bravo.example. .",
 		zone+" 3600 IN HSYNC3 ON charlie agent.charlie.example. .",
 		zone+" 3600 IN HSYNC3 ON delta agent.delta.example. .",
-		zone+` 3600 IN HSYNCPARAM servers="alpha,bravo,charlie,delta" signers="alpha" nsmgmt="agent" parentsync="agent"`)
+		zone+` 3600 IN HSYNCPARAM servers="alpha,bravo,charlie,delta" signers="alpha" nsmgmt="agent" parentsync="agent" serial="1"`)
 
 	ar := conf.NewAgentRegistry()
 	peers := transport.NewPeerRegistry()

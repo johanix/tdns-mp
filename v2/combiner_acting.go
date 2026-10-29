@@ -333,7 +333,10 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
 	}
 	// Computed on a wrapper of the zone as served, with a map of its own:
-	// the zone's options map is read without a lock.
+	// the zone's options map is read without a lock. One refresh or
+	// hand-over at a time (mpDataLock).
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
 	mpzd.Lock()
 	mpzd.EnsureMP()
 	opts := make(map[tdns.ZoneOption]bool, len(mpzd.MPOptions))
@@ -351,6 +354,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	mpzd.RebuildCombinerData()
 	allow := mpzd.MPOptions[tdns.OptAllowEdits]
 	mpzd.Unlock()
+	mpMu.Unlock()
 	var combineErr error
 	if allow {
 		if _, combineErr = mpzd.CombineWithLocalChanges(); combineErr != nil {
@@ -399,7 +403,7 @@ func (conf *Config) refreshFromUpstream(mpzd *MPZoneData, lg *slog.Logger) {
 }
 
 // waitsForHandover: the combiner holds no hand-over for the zone, and the
-// zone's copy carries a serial. Its agent hands it one at the combiner's
+// zone's copy has a reading, which carries a serial (#308). Its agent hands it one at the combiner's
 // start report; meanwhile the combiner serves what it served (rule 5).
 func (mpzd *MPZoneData) waitsForHandover() bool {
 	if _, held := actingHeld.Load().get(mpzd.ZoneName); held {
@@ -410,7 +414,7 @@ func (mpzd *MPZoneData) waitsForHandover() bool {
 		return false
 	}
 	in, err := ReadInstructions(apex)
-	return err == nil && in != nil && in.Serial != 0
+	return err == nil && in != nil
 }
 
 // combinerActingLine is what the combiner acts by for the zone, as `zone
@@ -438,10 +442,10 @@ func combinerActingLine(mpzd *MPZoneData) string {
 // reportCombinerStart is the combiner's start report: a STATUS-UPDATE
 // "combiner-start" to its agent once its router is up, naming no zone of its
 // own ("."), on which the agent hands every zone over. Every minute after,
-// for each zone that it holds nothing for (zonesWaitingForHandover), it
-// sends "combiner-waits" for that zone, rule 5's request, since the agent
-// may not have been up; the agent hands that zone over, and what the
-// combiner holds for the others stands.
+// for each zone whose copy carries a serial and that it holds nothing for
+// (waitsForHandover), it sends "combiner-waits" for that zone, rule 5's
+// request, since the agent may not have been up; the agent hands that zone
+// over, and what the combiner holds for the others stands.
 func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBridge) {
 	mp := conf.MpConfig()
 	if tm == nil || mp == nil {
@@ -469,23 +473,12 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 	}
 }
 
-// zonesWaitingForHandover are the multi-provider zones loaded here whose
-// copy carries instructions and that the combiner holds no hand-over for,
-// whether or not the copy carries a serial: one that carries none acts by
-// its copy meanwhile (rule 5), and from S7 that copy can hold a serial its
-// agent refuses (tdns-mp #302). A copy with no instructions is handed none,
-// and nothing is held for it.
+// zonesWaitingForHandover are the zones loaded here that wait for their
+// agent's hand-over (waitsForHandover).
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
 	for _, zone := range conf.InternalMp.MPZoneNames {
-		mpzd, ok := Zones.Get(zone)
-		if !ok || !mpzd.Ready || !mpzd.Options[tdns.OptMultiProvider] {
-			continue
-		}
-		if _, held := actingHeld.Load().get(zone); held {
-			continue
-		}
-		if apex, err := mpzd.GetOwner(mpzd.ZoneName); err == nil && readingOf(apex) != nil {
+		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
 			out = append(out, zone)
 		}
 	}

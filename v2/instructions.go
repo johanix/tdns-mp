@@ -27,18 +27,26 @@ import (
 )
 
 // The owner errors of a single copy (design rule 2): the draft allows one
-// HSYNCPARAM record per zone and one HSYNC3 record per label.
+// HSYNCPARAM record per zone and one HSYNC3 record per label; one identity
+// is under one label (#306); and the instructions carry the owner's serial,
+// so HSYNC3 comes with HSYNCPARAM and HSYNCPARAM with serial= (#308).
 var (
-	errTwoHsyncparams = errors.New("two HSYNCPARAM records")
-	errDuplicateLabel = errors.New("two HSYNC3 records with the label")
+	errTwoHsyncparams    = errors.New("two HSYNCPARAM records")
+	errDuplicateLabel    = errors.New("two HSYNC3 records with the label")
+	errIdentityTwoLabels = errors.New("one identity under two HSYNC3 labels")
+	errNoHsyncparam      = errors.New("HSYNC3 without HSYNCPARAM")
+	errNoSerial          = errors.New("HSYNCPARAM without serial=")
 )
 
 // Instructions is the canonical reading of a zone's HSYNC3 and HSYNCPARAM
 // records (design rule 2): what the code acts on, and nothing else. Unknown
 // and private-use keys, TTLs and signatures are not in it.
 type Instructions struct {
-	Serial   uint32        // 0 when the key is absent; not in the digest
-	HasParam bool          // false: HSYNC3 without HSYNCPARAM, the legacy case
+	Serial uint32 // the owner's serial= (every reading has one); not in the digest
+	// HasParam is true in every reading: HSYNC3 without HSYNCPARAM is an
+	// owner error (#308). The digest still writes it, so that no digest
+	// changed when the legacy case ended.
+	HasParam bool
 	Records  []InstrRecord // ON records, sorted by label
 	Off      []string      // labels of OFF records, sorted
 
@@ -57,8 +65,9 @@ type InstrRecord struct{ Label, Identity, Upstream string }
 
 // ReadInstructions reads the instructions from a zone's apex. It returns nil
 // and no error when the apex holds neither HSYNC3 nor HSYNCPARAM, and an owner
-// error when it holds two HSYNCPARAM records or two HSYNC3 records with one
-// label, in any state.
+// error when it holds two HSYNCPARAM records, HSYNC3 without HSYNCPARAM, two
+// HSYNC3 records with one label (in any state), two ON records with one
+// identity, or HSYNCPARAM without serial=.
 func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 	if apex == nil || apex.RRtypes == nil {
 		return nil, nil
@@ -70,6 +79,9 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 	}
 	if len(hps) > 1 {
 		return nil, errTwoHsyncparams
+	}
+	if len(hps) == 0 {
+		return nil, errNoHsyncparam
 	}
 
 	// Empty lists are nil, with HSYNCPARAM and without, as sortedUnique
@@ -110,10 +122,16 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 	}
 	slices.SortFunc(in.Records, func(a, b InstrRecord) int { return strings.Compare(a.Label, b.Label) })
 	slices.Sort(in.Off)
-
-	if len(hps) == 0 {
-		return in, nil
+	// The converse of two records with one label: the identity names the
+	// provider, and a provider has one label. An OFF record names no one.
+	labelOf := make(map[string]string, len(in.Records))
+	for _, r := range in.Records {
+		if first, dup := labelOf[r.Identity]; dup {
+			return nil, fmt.Errorf("%w: %s under %s and %s", errIdentityTwoLabels, r.Identity, first, r.Label)
+		}
+		labelOf[r.Identity] = r.Label
 	}
+
 	prr, ok := hps[0].(*dns.PrivateRR)
 	if !ok {
 		return nil, fmt.Errorf("HSYNCPARAM record of type %T", hps[0])
@@ -123,7 +141,10 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 		return nil, fmt.Errorf("HSYNCPARAM record with data of type %T", prr.Data)
 	}
 	in.HasParam = true
-	in.Serial, _ = hp.GetSerial()
+	var hasSerial bool
+	if in.Serial, hasSerial = hp.GetSerial(); !hasSerial {
+		return nil, errNoSerial
+	}
 	in.Servers = sortedUnique(hp.GetServers())
 	in.Signers = sortedUnique(hp.GetSigners())
 	in.Auditors = sortedUnique(hp.GetAuditors())
@@ -365,9 +386,7 @@ func (in *Instructions) instructionRecords(zone string) []string {
 	if in.Pubcds {
 		keys = append(keys, "pubcds")
 	}
-	if in.Serial != 0 {
-		keys = append(keys, fmt.Sprintf(`serial="%d"`, in.Serial))
-	}
+	keys = append(keys, fmt.Sprintf(`serial="%d"`, in.Serial))
 	return append(out, fmt.Sprintf("%s IN HSYNCPARAM %s", zone, strings.Join(keys, " ")))
 }
 
@@ -488,9 +507,7 @@ type Roles struct {
 // rolesFor is the sets for a step of the transition from `from` to `to`; at
 // rest both are the active serial. Until the reconciliation has steps (S12,
 // S13), every set is that of the serial the parts hold: from's during a
-// transition (design 3.3), the active serial's at rest. In the legacy reading
-// (HSYNC3 without HSYNCPARAM) every ON record serves, and so votes, and
-// nobody signs, as today.
+// transition (design 3.3), the active serial's at rest.
 func rolesFor(from, to *Instructions, step int) Roles {
 	in := from
 	if in == nil {
@@ -498,12 +515,6 @@ func rolesFor(from, to *Instructions, step int) Roles {
 	}
 	r := Roles{NSmgmt: core.HsyncNSmgmtOWNER, ParentSync: core.HsyncParentSyncOwner}
 	if in == nil {
-		return r
-	}
-	if !in.HasParam {
-		for _, rec := range in.Records {
-			r.Servers = append(r.Servers, Provider{rec.Label, rec.Identity})
-		}
 		return r
 	}
 	signers := in.providers(in.Signers)
@@ -568,9 +579,10 @@ func (in *Instructions) identityOf(label string) string {
 }
 
 // labelOf is the label of the ON record of one of the identities, compared
-// as DNS names, and whether there is one. An OFF record gives no label. When
-// the identities are under more than one label (one identity under two
-// labels is an owner error the auditor shows), a label in signers= wins,
+// as DNS names, and whether there is one. An OFF record gives no label. One
+// identity is under one label at most: under two, the copy has no reading
+// (#306). Several identities can be under several labels (a combiner or a
+// signer asks for every agent it serves); then a label in signers= wins,
 // then one in servers=, then the first in label order: every caller that
 // takes the label for a role then finds the role.
 func (in *Instructions) labelOf(identities ...string) (string, bool) {
@@ -615,18 +627,10 @@ func identities(set []Provider) []string {
 
 // participantsOf is the zone's members that hold a role (servers, signers,
 // auditors), by identity, and the voting subset (servers and signers), each
-// sorted and de-duplicated. A label with no ON record names nobody. In the
-// legacy reading every ON record is a voting participant.
+// sorted and de-duplicated. A label with no ON record names nobody.
 func participantsOf(in *Instructions) (participants, voting []string) {
 	if in == nil {
 		return nil, nil
-	}
-	if !in.HasParam {
-		for _, r := range in.Records {
-			voting = append(voting, r.Identity)
-		}
-		voting = sortedUnique(voting)
-		return voting, voting
 	}
 	voting = sortedUnique(append(identities(in.providers(in.Servers)), identities(in.providers(in.Signers))...))
 	participants = sortedUnique(append(slices.Clone(voting), identities(in.providers(in.Auditors))...))
