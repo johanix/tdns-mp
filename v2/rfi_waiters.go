@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/johanix/tdns-transport/v2/transport"
-	"github.com/miekg/dns"
 )
 
 // rfiWaiters hands the answer to a two-phase RFI (EDITS, CONFIG, AUDIT) to
@@ -30,7 +29,7 @@ type rfiWaiters[T any] struct {
 // rfiWaitKey is the key an answer and its request share. Subtype is "" for
 // RFI types that have none.
 func rfiWaitKey(sender, zone, subtype, nonce string) string {
-	return dns.CanonicalName(sender) + " " + dns.CanonicalName(zone) + " " + subtype + " " + nonce
+	return canonicalName(sender) + " " + canonicalName(zone) + " " + subtype + " " + nonce
 }
 
 // rfiAnswerSender returns the sender an EDITS, CONFIG or AUDIT answer is
@@ -42,7 +41,7 @@ func rfiAnswerSender(msg *transport.IncomingMessage, named string) (sender strin
 	if msg.TransportSender == "" {
 		return "", false
 	}
-	if named != "" && dns.CanonicalName(named) != dns.CanonicalName(msg.TransportSender) {
+	if named != "" && !sameName(named, msg.TransportSender) {
 		return msg.TransportSender, false
 	}
 	return msg.TransportSender, true

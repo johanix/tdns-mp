@@ -73,6 +73,10 @@ func parseAppPayload(distributionID string, payload []byte, sourceAddr string) (
 	if senderID == "" {
 		senderID = fields.SenderID
 	}
+	// The sender is a name from the wire, and every identity it meets here is
+	// folded at config load (#287): authorization and the registry take it
+	// folded. The payload is left as it was signed.
+	senderID = canonicalName(senderID)
 	zone := fields.Zone
 	if zone == "" {
 		zone = fields.LegacyZone

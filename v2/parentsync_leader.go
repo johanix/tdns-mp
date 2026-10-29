@@ -2082,7 +2082,7 @@ func activeSig0KeyIDs(hdb *HsyncDB, keyName string) (map[uint16]bool, error) {
 	}
 	ids := map[uint16]bool{}
 	for mapkey, k := range resp.Sig0keys {
-		if !strings.EqualFold(dns.Fqdn(k.Name), dns.Fqdn(keyName)) || k.State != tdns.Sig0StateActive {
+		if !sameName(k.Name, keyName) || k.State != tdns.Sig0StateActive {
 			continue
 		}
 		_, idstr, ok := strings.Cut(mapkey, "::")
@@ -2139,7 +2139,7 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 
 	// The keystore files the key under its KEY RR's owner, so a key for
 	// another name must not be added in keyName's place.
-	if pkc.KeyType != dns.TypeKEY || dns.CanonicalName(pkc.KeyRR.Hdr.Name) != dns.CanonicalName(keyName) {
+	if pkc.KeyType != dns.TypeKEY || !sameName(pkc.KeyRR.Hdr.Name, keyName) {
 		return fmt.Errorf("peer sent a key for %q, not a KEY for %q", pkc.KeyRR.Hdr.Name, keyName)
 	}
 	// A zone that publishes a KEY takes only that key: one the zone does not
@@ -2458,7 +2458,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 // tdns side; the parentsync status report is its remaining consumer.
 func pickActiveSyncScheme(schemes []string, rdata []*core.DSYNC) string {
 	for _, scheme := range schemes {
-		switch strings.ToLower(scheme) {
+		switch strings.ToLower(scheme) { // not-a-name: a URI scheme
 		case "update":
 			for _, drr := range rdata {
 				if drr.Scheme == core.SchemeUpdate {
