@@ -146,7 +146,9 @@ func (conf *Config) keepRemote(u *SynchedDataUpdate, active, made *SerialDigest,
 	text := keptText(active, made)
 	added, err := conf.InternalMp.Kept.keepOnce(string(u.Zone), u.OriginatingDistID, keptRemoteOf(u))
 	if err != nil {
-		// no word goes back: the sender's queue sends it again
+		// no confirmation goes back, so the sender's queue sends it again;
+		// the answer below is the engine's own, to whoever handed it the
+		// update (a message from the wire: MsgHandler, which logs it)
 		lgEngine.Error("a distribution made under other instructions could not be kept", "zone", u.Zone, "peer", u.AgentId, "distrib", u.OriginatingDistID, "err", err)
 		respond(u, &AgentMsgResponse{Zone: u.Zone, AgentId: u.AgentId, Error: true, ErrorMsg: "the distribution could not be kept: " + err.Error()})
 		return

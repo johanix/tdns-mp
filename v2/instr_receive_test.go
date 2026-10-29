@@ -412,7 +412,47 @@ func TestKeptRemoteUpdatesDoNotWaitBehindOwedLocalOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := r.cmds(); len(got) < 2 || got[0] != "instr-activated" || !slices.Contains(got[1:], "instr-done") {
-		t.Errorf("the data engine was asked for %v, want instr-activated before instr-done", got)
+		t.Fatalf("the data engine was asked for %v, want instr-activated before instr-done", got)
+	}
+	// handled in that order: b's distribution is taken while a's own
+	// change still waits, and goes out at "done"
+	r.activated()
+	if got := r.nsOf(roleB); !slices.Equal(got, []string{"ns1.b.example."}) {
+		t.Errorf("b's NS in the data at the activation: %v", got)
+	}
+	if n := len(r.conf.InternalMp.Kept.entries(r.zone, listOwed)); n != 1 {
+		t.Errorf("a's changes owed at the activation: %d, want its edit still owed", n)
+	}
+	r.conf.instrDone(context.Background(), r.zdr, ZoneName(r.zone))
+	if n := len(r.conf.InternalMp.Kept.entries(r.zone, listOwed)); n != 0 {
+		t.Errorf("a's changes owed after done: %d", n)
+	}
+	if got := r.ownNS(); !slices.Equal(got, []string{"ns1.a.example."}) {
+		t.Errorf("a's NS in the data after done: %v", got)
+	}
+}
+
+// Forgetting the zone's serials, its active one with them, drops what it
+// kept of others at once, not at the data engine's next tick.
+func TestForgettingTheSerialsDropsTheKeptDistributionsAtOnce(t *testing.T) {
+	r := newReceiveRig(t, "forget.receive.example.")
+	r.fromB("d1", r.v, r.bNS("ns1.b.example."))
+	if len(r.kept()) != 1 {
+		t.Fatalf("the kept list: %+v", r.kept())
+	}
+	r.cmds()
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.cmds(); !slices.Contains(got, "instr-activated") {
+		t.Fatalf("forgetting the serials asked the data engine for %v, want instr-activated", got)
+	}
+	r.activated()
+	if len(r.kept()) != 0 {
+		t.Errorf("the kept list after the serials are forgotten: %+v", r.kept())
+	}
+	if got := r.nsOf(roleB); len(got) != 0 {
+		t.Errorf("b's NS reached the data: %v", got)
 	}
 }
 

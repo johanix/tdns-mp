@@ -637,15 +637,23 @@ func (s *InstructionStore) Forget(zone string) error {
 		return fmt.Errorf("this daemon keeps no serials")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	z := s.zones[zone]
 	if z == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("zone %s: no serials kept", zone)
 	}
 	if p := z.phase(); p != PhaseSteady && p != PhaseRefused {
+		s.mu.Unlock()
 		return fmt.Errorf("zone %s: %w (%s)", zone, errNotSteady, p)
 	}
-	return s.forgetLocked(zone)
+	hadActive := z.Active != nil
+	err := s.forgetLocked(zone)
+	s.mu.Unlock()
+	// the active serial goes: told once the lock is let go, as update does
+	if err == nil && hadActive && s.onActive != nil {
+		s.onActive(zone)
+	}
+	return err
 }
 
 // forgetLocked drops zone's serials, on disk and in memory. Called with s.mu
