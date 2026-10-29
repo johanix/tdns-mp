@@ -60,9 +60,10 @@ type stampTable struct {
 	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
 	// the auditor, which has no signer.
 	hold func(zone string) bool
-	// partsHold: this agent's combiner and signer hold the zone's step at
-	// its active serial (plan S12); nil on the auditor, which has no parts.
-	partsHold func(zone string, sd SerialDigest, step int) bool
+	// stepHeld: this agent holds the zone's step at its active serial, its
+	// combiner and its signer included (holdsStep, plan S12); nil on the
+	// auditor, which has no parts.
+	stepHeld func(zone string, sd SerialDigest, step InstrStep) bool
 	// fetch asks a refresh of the zone's own copy, the zone named in any
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
@@ -161,8 +162,8 @@ func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
 	if !ok {
 		return st, false
 	}
-	if st.Step != nil && t.partsHold != nil {
-		st.StepHeld = t.partsHold(zone, SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}, st.Step.Number)
+	if st.Step != nil && t.stepHeld != nil {
+		st.StepHeld = t.stepHeld(zone, SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}, *st.Step)
 	}
 	if t.rollover != nil {
 		st.Rollover = t.rollover(zone)
@@ -819,7 +820,7 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
 		t.hold = conf.holdConfirmed
-		t.partsHold = conf.partsHold
+		t.stepHeld = conf.holdsStep
 		t.fetch = conf.fetchZone
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")

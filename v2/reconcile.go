@@ -66,6 +66,11 @@ type stepRunner struct {
 	name  string
 	kind  stepKind
 	steps func(p planView) []plannedStep
+	// holds is whether this agent's own part of the step it holds is done,
+	// beyond its parts holding the step's sets: S18a's newcomer, whose
+	// servers serve the zone from its upstream. It is asked at every
+	// agent, of every step; nil for nothing more.
+	holds func(conf *Config, zone string, step InstrStep) bool
 }
 
 // stepRunners are the runners registered, in the order they were.
@@ -377,6 +382,21 @@ func noRoleMember(zone ZoneName, id AgentId) bool {
 
 // --- The parts ---
 
+// holdsStep: this agent holds the zone's step at the active serial sd: both
+// its parts hold the step's sets, and every runner's own part of it is done
+// here. Its stamp tells it (StepHeld).
+func (conf *Config) holdsStep(zone string, sd SerialDigest, step InstrStep) bool {
+	if !conf.partsHold(zone, sd, step.Number) {
+		return false
+	}
+	for _, r := range stepRunners {
+		if r.holds != nil && !r.holds(conf, zone, step) {
+			return false
+		}
+	}
+	return true
+}
+
 // partsHold: this agent's combiner and signer both hold what it hands them
 // for the zone at the active serial sd and the step: its combiner by its
 // confirmation, its signer by its inventory (plan S10, S11). An agent that
@@ -644,7 +664,7 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 		return st.Known && st.Active == in.active.Serial && st.ActiveDigest == in.active.Digest && st.StepHeld &&
 			st.Step != nil && st.Step.Number == in.step.Number && st.Step.Digest == in.step.Digest
 	}
-	if !conf.partsHold(in.name, in.active.SerialDigest, in.step.Number) {
+	if !conf.holdsStep(in.name, in.active.SerialDigest, in.step.InstrStep) {
 		v.waits = append(v.waits, local+" (its combiner and signer)")
 	}
 	leaving := map[string]bool{}

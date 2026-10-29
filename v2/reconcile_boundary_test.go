@@ -94,7 +94,7 @@ func TestTransportBoundary_AStepIsHandedAndConfirmed(t *testing.T) {
 	signer.toSigner = true
 	conf.InternalMp.Handover, conf.InternalMp.SignerHandover = combiner, signer
 	aliceStamps := newStampTable(alice, sa, 1, false, nil)
-	aliceStamps.partsHold = conf.partsHold
+	aliceStamps.stepHeld = conf.holdsStep
 	env.Alice.Bridge.stamps = aliceStamps
 
 	// each listens over DNS, and knows the other

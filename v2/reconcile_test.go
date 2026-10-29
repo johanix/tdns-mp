@@ -34,7 +34,7 @@ func newReconcileRig(t *testing.T, zone, leader string) *reconcileRig {
 	r.signer = newHandoverTracker(AgentId(roleA), queued)
 	r.signer.toSigner = true
 	r.conf.InternalMp.Handover, r.conf.InternalMp.SignerHandover = r.combiner, r.signer
-	r.stamps.partsHold = r.conf.partsHold
+	r.stamps.stepHeld = r.conf.holdsStep
 	return r
 }
 
@@ -886,5 +886,35 @@ func TestAMemberWithNoRecordFollowsTheLeadersReconciliation(t *testing.T) {
 	r.conf.thawTurn(r.zone)
 	if s := status(t, r.store, r.zone); s.Phase != PhaseSteady {
 		t.Errorf("not done on the leader's word: %+v", s)
+	}
+}
+
+// A runner's own part of a step (S18a's serving check at the newcomer)
+// holds the step at this agent: its stamp tells the step held only once
+// that part is done too, and as the leader it waits for it.
+func TestARunnersOwnPartHoldsTheStep(t *testing.T) {
+	serving := false
+	defer withRunners(stepRunner{name: "test", kind: stepAddition,
+		steps: func(planView) []plannedStep { return nil },
+		holds: func(*Config, string, InstrStep) bool { return serving }})()
+	r := newReconcileRig(t, "ownpart.reconcile.example.", roleA)
+	r.agree()
+	r.thawNow()
+	r.partsTake()
+	if r.own().StepHeld {
+		t.Fatal("the step is told held before the runner's part is done")
+	}
+	r.holdsToo(roleB)
+	r.turn(time.Now())
+	if st, _ := r.step(); st.Number != 0 {
+		t.Fatal("the leader went on before its own part was done")
+	}
+	serving = true
+	if !r.own().StepHeld {
+		t.Fatal("the step is not told held once the runner's part is done")
+	}
+	r.turn(time.Now())
+	if st, _ := r.step(); st.Number != 1 {
+		t.Errorf("the leader did not go on: %+v", st)
 	}
 }
