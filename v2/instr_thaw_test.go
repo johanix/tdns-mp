@@ -31,6 +31,7 @@ type thawRig struct {
 func newThawRig(t *testing.T, zone string, leader string) *thawRig {
 	t.Helper()
 	r := &thawRig{freezeRig: newFreezeRig(t, zone)}
+	r.withSigner()
 	r.stamps = newStampTable(roleA, r.store, 1, true, nil)
 	r.stamps.rollover = r.conf.InternalMp.MPTransport.rolloverAt
 	r.conf.InternalMp.MPTransport.stamps = r.stamps
@@ -50,10 +51,10 @@ func (r *thawRig) lead(leader string, expiry time.Time) {
 	r.lem.elections[ZoneName(r.zone)] = &LeaderElection{Zone: ZoneName(r.zone), Leader: AgentId(leader), LeaderExpiry: expiry}
 }
 
-// hold has this agent's signer confirm the hold, now.
+// hold has this agent's signer confirm the hold, now: it holds the
+// hand-over with the hold (S11), and its inventory says so.
 func (r *thawRig) hold() {
-	mpzd, _ := Zones.Get(r.zone)
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	r.confirm(true)
 }
 
 // hear notes a beat of id's, over DNS, that tells st of the zone, with id's

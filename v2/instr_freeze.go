@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -154,113 +153,33 @@ func syncCauseOf(st tdns.DelegationSyncStatus) syncCause {
 	return syncOther
 }
 
-// holdRetell is how soon the hold is told the signer again while its
-// inventory says otherwise.
-var holdRetell = time.Minute
-
-// holdBook is what the agent last told its signer of each zone's hold, and
-// when (KEYSTATE "hold", plan S6), and the zones whose word is being sent.
-type holdBook struct {
-	mu      sync.Mutex
-	told    map[string]holdTold // by zone, folded
-	sending map[string]bool     // by zone, folded: a sender runs (sendHolds)
-}
-
-type holdTold struct {
-	on bool
-	at time.Time
-}
-
 // onFreeze is the store's word that a zone is frozen, or no longer is, or
-// that the serial it agrees on moved while it stays frozen: the signer is
-// told to hold its key machine, or to let it go, and confirms the hold
-// again for the serial agreed on now. At the end of a freeze the data
-// engine releases what the zone kept.
+// that the serial it agrees on moved while it stays frozen. The hold is a
+// field of the hand-over (plan S11): the parts are handed the zone again,
+// and while it is frozen the signer confirms its hold again, for the serial
+// agreed on now. At the end of a freeze the data engine releases what the
+// zone kept.
 func (conf *Config) onFreeze(zone string, frozen bool) {
-	conf.tellHold(zone, frozen, 0)
-	if !frozen {
-		conf.askRelease(ZoneName(zone))
-	}
-}
-
-// tellHold tells this agent's signer to hold the zone's key machine, or to
-// let it go (KEYSTATE "hold"), unless that word was told less than within
-// ago. The word is noted at once, so that two callers do not both tell it,
-// and sent by the zone's one sender (sendHolds). The signer confirms in its
-// next inventory.
-func (conf *Config) tellHold(zone string, on bool, within time.Duration) {
-	b := &conf.InternalMp.holds
-	b.mu.Lock()
-	if b.told == nil {
-		b.told, b.sending = map[string]holdTold{}, map[string]bool{}
-	}
-	key := canonicalName(zone)
-	if last, told := b.told[key]; told && last.on == on && time.Since(last.at) < within {
-		b.mu.Unlock()
+	conf.handOverToParts(zone)
+	if frozen {
+		conf.InternalMp.SignerHandover.again(zone)
 		return
 	}
-	b.told[key] = holdTold{on: on, at: time.Now()}
-	start := !b.sending[key]
-	b.sending[key] = true
-	b.mu.Unlock()
-	if start {
-		go conf.sendHolds(zone, key)
-	}
+	conf.InternalMp.SignerHandover.letHoldGo(zone)
+	conf.askRelease(ZoneName(zone))
 }
 
-// sendHolds sends the zone's latest hold word, and again for as long as a
-// newer word was told while it sent: one sender per zone, so that words
-// sent one after the other never arrive in another order, and the signer is
-// left with the latest.
-func (conf *Config) sendHolds(zone, key string) {
-	b := &conf.InternalMp.holds
-	for {
-		b.mu.Lock()
-		word := b.told[key]
-		b.mu.Unlock()
-		if send := conf.InternalMp.holdSend; send != nil {
-			send(ZoneName(zone), word.on)
-		} else if tm := conf.InternalMp.MPTransport; tm != nil {
-			tm.sendHoldToSigner(ZoneName(zone), word.on)
-		}
-		b.mu.Lock()
-		if b.told[key] == word {
-			delete(b.sending, key)
-			b.mu.Unlock()
-			return
-		}
-		b.mu.Unlock()
-	}
-}
-
-// reconcileHold tells the signer the zone's hold again when its inventory
-// says otherwise than the freeze: a signer that restarted without its
-// store, or a word that was lost. At most once per holdRetell, for the
-// same word.
-func (conf *Config) reconcileHold(zone string, snap *KeyInventorySnapshot) {
-	frozen := len(conf.zoneFrozen(zone)) > 0
-	if snap == nil || snap.Hold == frozen {
-		return
-	}
-	conf.tellHold(zone, frozen, holdRetell)
-}
-
-// holdConfirmed: the signer's latest inventory of the zone carries the hold,
-// and arrived after this agent came to hold the serial it agrees on (plan
-// S6; with none agreed on, its newest) and after it last told the hold.
-// The stamp tells it as Hold; S7 counts a telling only with it (design
-// 3.1, 3.7).
+// holdConfirmed: the signer holds the hand-over this agent wants it to,
+// which carries the hold, and its latest inventory says it holds the zone's
+// key machine and arrived after this agent came to hold the serial it agrees
+// on (plan S6; with none agreed on, its newest). A move of the serial agreed
+// on has the signer say again what it holds (onFreeze), so an inventory from
+// before it does not count. The stamp tells it as Hold; S7 counts a telling
+// only with it (design 3.1, 3.7).
 func (conf *Config) holdConfirmed(zone string) bool {
 	since, ok := conf.InternalMp.Instructions.agreedSince(zone)
-	if !ok {
+	if !ok || !conf.InternalMp.SignerHandover.holdHeld(zone) {
 		return false
-	}
-	b := &conf.InternalMp.holds
-	b.mu.Lock()
-	last, told := b.told[canonicalName(zone)]
-	b.mu.Unlock()
-	if told && last.on && last.at.After(since) {
-		since = last.at
 	}
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil {
@@ -268,35 +187,6 @@ func (conf *Config) holdConfirmed(zone string) bool {
 	}
 	snap := mpzd.GetLastKeyInventory()
 	return snap != nil && snap.Hold && snap.Received.After(since)
-}
-
-// sendHoldToSigner tells our signer to hold the zone's key machine, or to
-// let it go (KEYSTATE "hold", plan S6).
-func (tm *MPTransportBridge) sendHoldToSigner(zone ZoneName, on bool) {
-	if tm.signerID == "" || tm.signerAddress == "" || tm.DNSTransport == nil {
-		lgTransport.Debug("no signer to tell the hold", "zone", zone)
-		return
-	}
-	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
-	host, port := parseHostPort(tm.signerAddress, 53)
-	if err := peer.SetDNSCarrierAddress(&transport.Address{Host: host, Port: port, Transport: "udp"}); err != nil {
-		lgTransport.Warn("signer address refused", "zone", zone, "err", err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
-		SenderID:  tm.LocalID,
-		Zone:      string(zone),
-		Signal:    "hold",
-		Hold:      on,
-		Timestamp: time.Now(),
-	})
-	if err != nil {
-		lgTransport.Error("KEYSTATE hold send to signer failed", "zone", zone, "hold", on, "err", err)
-		return
-	}
-	lgTransport.Info("KEYSTATE hold sent to signer", "zone", zone, "hold", on, "accepted", resp.Accepted)
 }
 
 // releaseBook is the zones whose release the data engine's queue had no
@@ -519,8 +409,8 @@ func (conf *Config) agreementWaitsFor(zone string) []string {
 }
 
 // signerHolds are the zones whose key machine the signer holds at its
-// agent's word (KEYSTATE "hold", plan S6), on disk (MPKeyHold): under a hold
-// nothing new starts.
+// agent's word (the hand-over's hold, plan S6, S11), on disk (MPKeyHold):
+// under a hold nothing new starts.
 type signerHolds struct {
 	mu    sync.Mutex
 	hdb   *HsyncDB             // nil: in memory only
@@ -593,8 +483,9 @@ func (h *signerHolds) set(zone string, on bool) (bool, error) {
 	return true, nil
 }
 
-// signerHold is the signer's handling of its agent's KEYSTATE "hold": the
-// hold is kept, and the signer's next inventory, pushed now, confirms it.
+// signerHold is the signer's handling of its agent's hold, a field of the
+// hand-over (plan S6, S11): the hold is kept, and the inventory the
+// hand-over pushes confirms it.
 func (conf *Config) signerHold(zone string, on bool) {
 	changed, err := conf.InternalMp.SignerHolds.set(zone, on)
 	if err != nil {
@@ -606,5 +497,4 @@ func (conf *Config) signerHold(zone string, on bool) {
 	} else if changed {
 		lgSigner.Info("the key machine's hold for the zone ends", "zone", zone)
 	}
-	pushKeystateInventoryToAllAgents(conf, zone)
 }
