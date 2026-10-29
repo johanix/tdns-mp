@@ -499,3 +499,37 @@ func TestAResultKeepsTheStampOfItsAnswer(t *testing.T) {
 	defer tm.dnskeyPropMu.Unlock()
 	stamped(tm.pendingDnskeyPropagations["resend"], "the resend")
 }
+
+// A result credited by the asker's confirmation of a catch-up answer keeps
+// that confirmation's stamp, as a direct answer's result does, and a
+// resend carries it (CodeRabbit's review of d6bcf2c).
+func TestAResultCreditedByAnAnswerKeepsItsStamp(t *testing.T) {
+	const zone ZoneName = "stamped.answer.example."
+	const asker, other = "agent.asker.example.", "agent.other.example."
+	k := testDnskeyRR(t, string(zone), 257).KeyTag()
+	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
+	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{asker, other})
+	tm.noteCatchUpAnswer("answer", zone, asker, map[uint16]bool{k: true})
+	ms := &MsgStamp{Epoch: 2, Seq: 5}
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, ms)
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, &MsgStamp{Epoch: 2, Seq: 6})
+
+	stamped := func(prop *PendingDnskeyPropagation, which string) {
+		t.Helper()
+		if prop == nil {
+			t.Fatalf("%s: not tracked", which)
+		}
+		if prop.Results[asker][k] != "applied" || prop.Stamps[asker][k] != ms {
+			t.Errorf("%s: %q with stamp %+v, want applied with %+v", which, prop.Results[asker][k], prop.Stamps[asker][k], ms)
+		}
+	}
+	tm.dnskeyPropMu.Lock()
+	stamped(tm.pendingDnskeyPropagations["first"], "the credited propagation")
+	tm.dnskeyPropMu.Unlock()
+
+	tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{asker, other})
+	tm.foldIntoResend(zone, "resend")
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	stamped(tm.pendingDnskeyPropagations["resend"], "the resend")
+}

@@ -2740,7 +2740,7 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 	}
 	if !exists {
 		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
-			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems)
+			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems, ms)
 		}
 		return false // Not a DNSKEY propagation confirmation
 	}
@@ -2915,8 +2915,9 @@ func (tm *MPTransportBridge) noteCatchUpAnswer(distID string, zone ZoneName, ask
 // set: a key added that is in it is applied, and a key removed that is not
 // in it is removed. A rejection names its keys; an "ignored" covers the
 // answer's keys as a direct answer does, and so does a key named as
-// ignored (#288). Under dnskeyPropMu.
-func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, ignoredRecords []string, rejectedItems []RejectedItemInfo) {
+// ignored (#288). Each result keeps ms, the confirmation's stamp, as a
+// direct answer's does (S5b). Under dnskeyPropMu.
+func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent AgentId, status string, ignoredRecords []string, rejectedItems []RejectedItemInfo, ms *MsgStamp) {
 	var rejectedRecords []string
 	for _, ri := range rejectedItems {
 		rejectedRecords = append(rejectedRecords, ri.Record)
@@ -2956,6 +2957,9 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 				results[kt] = "applied"
 			case (ignored || ignoredTags[kt]) && covered:
 				results[kt] = "ignored"
+			}
+			if results[kt] != "" {
+				prop.stampResultLocked(agent, kt, ms)
 			}
 		}
 		lgTransport.Info("DNSKEY propagation answered by the asker's confirmation of an answer it overtook", "zone", prop.Zone, "distributionID", distID, "agent", agent, "status", status, "answered", len(results), "keys", len(prop.KeyTags))
