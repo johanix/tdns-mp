@@ -505,8 +505,9 @@ func (pgm *ProviderGroupManager) SetOnZoneLeftGroup(f func(zone ZoneName, from, 
 	pgm.onZoneLeftGroup = f
 }
 
-// RecomputeGroups scans all loaded zones, extracts HSYNC3 identity sets,
-// and rebuilds the provider group map. This is a pure function of zone data.
+// RecomputeGroups scans all loaded zones, and those not loaded yet whose
+// serials the store keeps, extracts HSYNC3 identity sets, and rebuilds the
+// provider group map. This is a pure function of zone data.
 // The zones it moves into a group are reported to the callback set with
 // SetOnZoneJoinedGroup, if there is one, and the groups it drops to the one
 // set with SetOnGroupGone.
@@ -543,7 +544,10 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 	groupMap := make(map[string]*zoneGroup)
 
 	for zname, zd := range Zones.Items() {
-		if !zd.Ready {
+		// A zone not loaded yet is placed by the serials its agent stored,
+		// at the start (design 3.4, plan S9); with none, it waits for its
+		// first load.
+		if !zd.Ready && instrStore.Load().reading(dns.Fqdn(zname)) == nil {
 			continue
 		}
 		// Membership is defined by the roles of the zone's active

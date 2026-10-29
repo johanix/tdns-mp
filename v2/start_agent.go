@@ -131,6 +131,9 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// (zoneChanged), the first-load election and the parentsync detection
 	// (step 8; the hsync engine moved for the same reason, #39).
 	conf.setUpLeaderElection(ctx, mp)
+	// The zones are in their groups before their first load, by the serials
+	// stored (plan S9), with the election's callbacks in place.
+	conf.placeGroupsAtStart()
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)

@@ -432,7 +432,7 @@ func TestAZoneWithOneVotingMemberThawsItself(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	r.store.Note(r.zone, n, nil)
+	noteKnown(t, r.store, r.zone, n)
 	r.store.Note(r.zone, v, nil)
 	r.hold()
 	r.conf.thawTurn(r.zone)
@@ -449,7 +449,7 @@ func TestAZoneWithNoVotingMemberUnderNThawsWhenTheNewVotersAgree(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	r.store.Note(r.zone, n, nil)
+	noteKnown(t, r.store, r.zone, n)
 	r.holdUnjudged(v, time.Now())
 	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (not heard)" {
 		t.Fatalf("before b tells: %q", vw.waits)
@@ -646,7 +646,7 @@ func TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	r.store.Note(r.zone, old, nil)
+	noteKnown(t, r.store, r.zone, old)
 	r.store.Note(r.zone, r.v, nil)
 	if st := status(t, r.store, r.zone); len(st.Refused) == 0 {
 		t.Fatal("precondition: 40 to 42 is not refused")
@@ -942,7 +942,7 @@ func TestAPausedRolloverDoesNotHoldTheThaw(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	r.store.Note(r.zone, n, nil)
+	noteKnown(t, r.store, r.zone, n)
 	r.n, r.v = n, v
 	r.holdUnjudged(v, time.Now().Add(-leavingTimeoutDefault-time.Minute))
 	r.hold()
