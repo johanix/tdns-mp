@@ -7,7 +7,6 @@ package tdnsmp
 
 import (
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -260,7 +259,7 @@ func SnapshotZoneMPView(zone string, sm *AuditStateManager, ar *AgentRegistry, l
 				row.SecondsSinceBeat = int64(now.Sub(row.LastBeat).Seconds())
 			}
 		}
-		if localIdentity != "" && strings.EqualFold(row.Identity, localIdentity) {
+		if localIdentity != "" && sameName(row.Identity, localIdentity) {
 			row.Local = true
 			if ar != nil && row.GossipState == "" {
 				_, gossip, _ := providerBeatMeta(ar, ZoneName(zone), row.Identity)
