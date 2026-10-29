@@ -517,12 +517,31 @@ func TestAZoneThatBecomesCaughtUpIsAskedAtOnce(t *testing.T) {
 	tr.keyCheck(krZone)
 	f.answer(sentWithin(t, f, "the first round"), noKeyHere())
 	decidedWithin(t, f, "the first round")
+	roundEnded(t, tr, krZone)
 	if kr, ok := recvWithin(f.sent, 100*time.Millisecond); ok {
 		t.Fatalf("a round was asked before its time: %+v", kr)
 	}
 	tr.mu.Lock()
 	tr.keyAskNowLocked(krZone)
 	tr.mu.Unlock()
+	sentWithin(t, f, "the round at catch-up")
+}
+
+// A zone that becomes caught up while a round is out is asked again as soon
+// as that round ends without the key (#329).
+func TestAZoneCaughtUpWhileARoundIsOutIsAskedWhenItEnds(t *testing.T) {
+	shortKeyTimers(t, 5*time.Second, 5*time.Second, time.Hour)
+	f := newFakeKeyHooks(krB)
+	hold := make(chan struct{})
+	f.hold = hold
+	tr := newKeyTracker(t, f, krB)
+	tr.keyCheck(krZone)
+	f.answer(sentWithin(t, f, "the first round"), noKeyHere())
+	decidedWithin(t, f, "the first round") // its decision waits for hold
+	tr.mu.Lock()
+	tr.keyAskNowLocked(krZone)
+	tr.mu.Unlock()
+	close(hold)
 	sentWithin(t, f, "the round at catch-up")
 }
 

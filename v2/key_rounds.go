@@ -83,7 +83,7 @@ type keyRound struct {
 	next    time.Time
 	out     bool // a round is out
 	decided bool // the round's decision has started
-	recheck bool // a check came while the round was out: the next asks at once
+	recheck bool // a check or an ask came while the round was out: the next asks at once
 	asked   []AgentId
 	answers map[AgentId]keyReply
 }
@@ -160,12 +160,19 @@ func (t *catchUpTracker) keyRestart(zone ZoneName) {
 	t.keyCheckLocked(zone)
 }
 
-// keyAskNowLocked: a zone that became caught up gets its next round at once.
+// keyAskNowLocked: a zone that became caught up gets its next round at once,
+// or, while a round is out, as soon as that ends (keyRoundEnded).
 func (t *catchUpTracker) keyAskNowLocked(zone ZoneName) {
-	if r := t.keyWanted[zone]; r != nil && !r.out {
-		r.next = time.Now()
-		t.wakeKeysLocked()
+	r := t.keyWanted[zone]
+	if r == nil {
+		return
 	}
+	if r.out {
+		r.recheck = true
+		return
+	}
+	r.next = time.Now()
+	t.wakeKeysLocked()
 }
 
 func (t *catchUpTracker) wakeKeysLocked() {
