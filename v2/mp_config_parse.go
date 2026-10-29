@@ -120,35 +120,40 @@ func normalizeSyncengineIntervals(mp *MultiProviderConf) {
 	}
 }
 
-// normalizeMultiProviderIdentities FQDN-normalizes every identity
-// field in the multi-provider block.
+// normalizeMultiProviderIdentities FQDN-normalizes every name in the
+// multi-provider block, and folds every identity to its canonical form
+// (canonicalName), once, here: an identity configured in capitals is the
+// same agent as its lower-case spelling, and only the canonical one goes
+// to a peer or becomes a registry key (#287). The control zone and the
+// protected namespaces are zone names, not identities; they keep their
+// case.
 func normalizeMultiProviderIdentities(mp *MultiProviderConf) {
 	if mp.Identity != "" {
-		mp.Identity = dns.Fqdn(mp.Identity)
+		mp.Identity = canonicalName(mp.Identity)
 	}
 	if mp.Dns.ControlZone != "" {
 		mp.Dns.ControlZone = dns.Fqdn(mp.Dns.ControlZone)
 	}
 	if mp.Combiner != nil && mp.Combiner.Identity != "" {
-		mp.Combiner.Identity = dns.Fqdn(mp.Combiner.Identity)
+		mp.Combiner.Identity = canonicalName(mp.Combiner.Identity)
 	}
 	if mp.Signer != nil && mp.Signer.Identity != "" {
-		mp.Signer.Identity = dns.Fqdn(mp.Signer.Identity)
+		mp.Signer.Identity = canonicalName(mp.Signer.Identity)
 	}
 	for i, p := range mp.AuthorizedPeers {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		mp.AuthorizedPeers[i] = dns.Fqdn(p)
+		mp.AuthorizedPeers[i] = canonicalName(p)
 	}
 	for _, peer := range mp.Peers {
 		if peer != nil && peer.Identity != "" {
-			peer.Identity = dns.Fqdn(peer.Identity)
+			peer.Identity = canonicalName(peer.Identity)
 		}
 	}
 	for _, agent := range mp.Agents {
 		if agent != nil && agent.Identity != "" {
-			agent.Identity = dns.Fqdn(agent.Identity)
+			agent.Identity = canonicalName(agent.Identity)
 		}
 	}
 	if mp.Role == "combiner" {
@@ -170,7 +175,7 @@ func normalizeMultiProviderIdentities(mp *MultiProviderConf) {
 func parseMultiProviderOptions(mp *MultiProviderConf) {
 	mp.CombinerOptions = map[CombinerOption]bool{}
 	for _, raw := range mp.CombinerOptionsStrs {
-		opt := strings.ToLower(strings.TrimSpace(raw))
+		opt := strings.ToLower(strings.TrimSpace(raw)) // not-a-name: an option name
 		if opt == "" {
 			continue
 		}
@@ -186,7 +191,7 @@ func parseMultiProviderOptions(mp *MultiProviderConf) {
 
 	mp.SignerOptions = map[SignerOption]bool{}
 	for _, raw := range mp.SignerOptionsStrs {
-		opt := strings.ToLower(strings.TrimSpace(raw))
+		opt := strings.ToLower(strings.TrimSpace(raw)) // not-a-name: an option name
 		if opt == "" {
 			continue
 		}
@@ -199,7 +204,7 @@ func parseMultiProviderOptions(mp *MultiProviderConf) {
 
 	mp.AgentOptions = map[AgentOption]bool{}
 	for _, raw := range mp.AgentOptionsStrs {
-		opt := strings.ToLower(strings.TrimSpace(raw))
+		opt := strings.ToLower(strings.TrimSpace(raw)) // not-a-name: an option name
 		if opt == "" {
 			continue
 		}

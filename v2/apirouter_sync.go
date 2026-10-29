@@ -162,7 +162,7 @@ func tlsaVerdictPeer(peer *transport.Peer) string {
 	recs := peer.MechanismTLSA("API").Records
 	parts := make([]string, 0, len(recs))
 	for _, rr := range recs {
-		parts = append(parts, fmt.Sprintf("%d %d %d %s", rr.Usage, rr.Selector, rr.MatchingType, strings.ToLower(rr.Certificate)))
+		parts = append(parts, fmt.Sprintf("%d %d %d %s", rr.Usage, rr.Selector, rr.MatchingType, strings.ToLower(rr.Certificate))) // not-a-name: a certificate digest in hex
 	}
 	sort.Strings(parts)
 	return fmt.Sprintf("%s|%p|%s", peer.ID, peer, strings.Join(parts, ","))

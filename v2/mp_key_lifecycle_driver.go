@@ -1690,7 +1690,7 @@ func (l *ZoneKeyLifecycle) algRolloverOf(role string, all map[uint16]tdns.Dnssec
 			newState = k.State
 		}
 	}
-	role = strings.ToLower(role)
+	role = strings.ToLower(role) // not-a-name: a key role
 	switch {
 	case oldState == KeyStateActive && newState == KeyStateActive && role == "ksk":
 		st.Step = "both KSKs sign: the old one's DS is withdrawn from the DS set; it retires once the parent has not served that DS for the DS TTL"
