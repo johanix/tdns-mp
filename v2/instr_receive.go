@@ -442,8 +442,9 @@ func (tm *MPTransportBridge) noteNotYet(zone ZoneName, peer AgentId, distID stri
 // peer that answered "not yet", once this agent's active serial has caught
 // up with the one the peer answered under: a complete replace per type, as
 // a complete answer to a request for the zone's state has it but with no
-// catch_up, under the distribution's own ID, so that the peer's answer
-// settles what waits for it there, a key's propagation included. A peer
+// catch_up, the leader's KEY with its publish instruction (#206), under the
+// distribution's own ID, so that the peer's answer settles what waits for
+// it there, a key's propagation included. A peer
 // ahead of this agent waits for its activation; past the peer, the peer
 // keeps it until it catches up (rule 6). Nothing goes once this agent's
 // provider no longer contributes to the zone. A zone whose answer cannot be
@@ -484,7 +485,7 @@ func (conf *Config) resendInStep(zdr *ZoneDataRepo, zone ZoneName) {
 	}
 	ops := conf.catchUpOperations(zdr, zone, self)
 	for _, n := range due {
-		zu := &ZoneUpdate{Zone: zone, AgentId: self, Operations: ops}
+		zu := &ZoneUpdate{Zone: zone, AgentId: self, Operations: ops, Publish: keyPublish(zone, ops)}
 		if err := tm.EnqueueForSpecificAgent(zone, n.peer, zu, n.distID); err != nil {
 			lgEngine.Warn("sending again to a peer now in step failed; the engine's tick tries again", "zone", zone, "peer", n.peer, "distrib", n.distID, "err", err)
 			continue

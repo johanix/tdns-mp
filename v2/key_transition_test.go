@@ -536,3 +536,37 @@ func TestAStaleKEYsPublishInstructionDoesNotReachTheCombiner(t *testing.T) {
 		t.Errorf("a stale KEY replace handed the combiner the instruction %+v", got)
 	}
 }
+
+// What the leader sends again to a peer now in step names the zone's KEY
+// with its publish instruction, as the leader's every KEY goes (#206).
+func TestTheKEYSentAgainCarriesItsPublishInstruction(t *testing.T) {
+	r := newReceiveRig(t, "resend.key.example.")
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.KeyDB = newMPTestKeyDB(t)
+	k := testSig0Key(t, mpzd.KeyDB, r.zone)
+	publishKEY(t, mpzd, k)
+	r.leads(roleA)
+	distID := r.notYetFromB(r.v)
+	r.agree()
+	r.done()
+	sent := make(chan *ZoneUpdate, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.conf.InternalMp.MPTransport.TransportManager.StartReliableQueue(ctx, func(_ context.Context, m *transport.OutgoingMessage) error {
+		if u, ok := m.Payload.(*ZoneUpdate); ok && m.RecipientID == roleB && m.DistributionID == distID {
+			sent <- u
+		}
+		return nil
+	})
+	r.activated()
+	u, ok := recvWithin(sent, 5*time.Second)
+	if !ok {
+		t.Fatal("nothing was sent again to b")
+	}
+	if op, ok := opOf(u, "KEY"); !ok || !slices.Equal(op.Records, []string{k.key.String()}) {
+		t.Fatalf("what was sent again names KEY %+v (present %v)", op, ok)
+	}
+	if u.Publish == nil || !slices.Equal(u.Publish.KEYRRs, []string{k.key.String()}) {
+		t.Errorf("the KEY was sent again with the publish instruction %+v", u.Publish)
+	}
+}
