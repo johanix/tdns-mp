@@ -181,6 +181,10 @@ type InstructionStore struct {
 	zones         map[string]*zoneSerials
 	warnedOld     map[string]time.Time // the last "not adopted" warning per zone
 	refusedLogged map[zoneSerial]bool  // the refusals logged, once each
+	// onFreeze is told when a zone is frozen, when it no longer is, and
+	// when the serial it agrees on moves while it stays frozen
+	// (instr_freeze.go), after the change is written and the lock let go.
+	onFreeze func(zone string, frozen bool)
 }
 
 type zoneSerial struct {
@@ -294,8 +298,16 @@ func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
 // update applies f to zone's serials, creating them if needed, and writes
 // the result; f returning an error changes nothing, and so does a result
 // equal to what was kept (a refresh that brings the same copy). f returning
-// errEndOfService drops the zone's serials, under the same lock.
+// errEndOfService drops the zone's serials, under the same lock. A change
+// that freezes the zone, ends its freeze, or moves the serial a frozen
+// zone agrees on, is told to onFreeze once the lock is let go.
 func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
+	var froze *bool
+	defer func() {
+		if froze != nil && s.onFreeze != nil {
+			s.onFreeze(zone, *froze)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.zones[zone]
@@ -303,10 +315,18 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 	if old != nil {
 		z = old.clone()
 	}
+	wasFrozen := old != nil && len(old.freezeReasons()) > 0
+	var wasAgreed SerialDigest
+	if old != nil && old.agreeing() != nil {
+		wasAgreed = old.agreeing().SerialDigest
+	}
 	if err := f(z); err != nil {
 		if errors.Is(err, errEndOfService) {
 			if ferr := s.forgetLocked(zone); ferr != nil {
 				return fmt.Errorf("dropping the zone's serials: %w", ferr)
+			}
+			if wasFrozen {
+				froze = new(bool)
 			}
 		}
 		return err
@@ -322,6 +342,11 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 		return err
 	}
 	s.zones[zone] = z
+	frozen := len(z.freezeReasons()) > 0
+	moved := frozen && z.agreeing() != nil && z.agreeing().SerialDigest != wasAgreed
+	if frozen != wasFrozen || moved {
+		froze = &frozen
+	}
 	return nil
 }
 
@@ -575,15 +600,30 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 	if s == nil {
 		return
 	}
+	// a frozen zone that leaves ends its freeze: its signer lets the hold go
+	// (onFreeze), told once the lock is let go
+	var thawed []string
+	defer func() {
+		for _, zone := range thawed {
+			if s.onFreeze != nil {
+				s.onFreeze(zone, false)
+			}
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for zone := range s.zones {
+	for zone, z := range s.zones {
 		if keep(zone) {
 			continue
 		}
 		lg.Info("the zone left the configuration; its serials go with it", "zone", zone)
+		frozen := len(z.freezeReasons()) > 0
 		if err := s.forgetLocked(zone); err != nil {
 			lg.Error("the serials of a zone that left the configuration could not be dropped", "zone", zone, "err", err)
+			continue
+		}
+		if frozen {
+			thawed = append(thawed, zone)
 		}
 	}
 }

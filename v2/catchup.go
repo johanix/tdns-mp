@@ -175,6 +175,10 @@ type owedSync struct {
 	// askOwed leaves it, caught up or not, until the key's hold is
 	// released (releaseKeyHold).
 	key bool
+	// frozen: the sync was held while the zone was frozen (syncHeld).
+	// askOwed leaves it until the release when the transition is done
+	// (instrDone).
+	frozen bool
 }
 
 // owedResult is what one ask for an owed sync did.
@@ -982,6 +986,65 @@ func (t *catchUpTracker) releaseKeyOwed(zone ZoneName) bool {
 	return true
 }
 
+// oweForFreeze marks the zone's sync owed, held while the zone is frozen.
+func (t *catchUpTracker) oweForFreeze(zone ZoneName) {
+	if t == nil {
+		return
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.owed[zone] == nil {
+		t.owed[zone] = &owedSync{}
+	}
+	t.owed[zone].frozen = true
+}
+
+// releaseFreezeOwed takes the freeze off the zone's owed mark, and reports
+// whether it was there. What else holds the sync holds it still.
+func (t *catchUpTracker) releaseFreezeOwed(zone ZoneName) bool {
+	if t == nil {
+		return false
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	o := t.owed[zone]
+	if o == nil || !o.frozen {
+		return false
+	}
+	o.frozen = false
+	return true
+}
+
+// freezeOwed: the zone's sync is owed, held while the zone was frozen.
+func (t *catchUpTracker) freezeOwed(zone ZoneName) bool {
+	if t == nil {
+		return false
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.owed[zone] != nil && t.owed[zone].frozen
+}
+
+// freezeOwedZones are the zones whose sync is held while they are frozen.
+func (t *catchUpTracker) freezeOwedZones() []ZoneName {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ZoneName
+	for zone, o := range t.owed {
+		if o.frozen {
+			out = append(out, zone)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // keyOwedZones are the zones whose sync is held for the zone's key.
 func (t *catchUpTracker) keyOwedZones() []ZoneName {
 	if t == nil {
@@ -1142,7 +1205,7 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 			delete(t.owed, zone)
 			continue
 		}
-		if t.owed[zone].key {
+		if t.owed[zone].key || t.owed[zone].frozen {
 			continue
 		}
 		if ok, _ := t.caughtUpLocked(zone); !ok {
@@ -1166,7 +1229,7 @@ func (t *catchUpTracker) askOwed(ctx context.Context, zones ...ZoneName) {
 				z = ZoneName(dns.Fqdn(string(z)))
 				// a sync owed for the zone's key waits for the key, not
 				// for room: it is not asked until the key's hold ends
-				if o := t.owed[z]; o != nil && !o.key {
+				if o := t.owed[z]; o != nil && !o.key && !o.frozen {
 					if ok, _ := t.caughtUpLocked(z); ok {
 						o.room = true
 						waiting++

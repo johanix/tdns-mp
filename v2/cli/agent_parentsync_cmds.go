@@ -278,6 +278,12 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		fmt.Fprintf(w, "  DS set:         %s\n", termSafe(s.DSSet))
 	}
 	fmt.Fprintf(w, "  instructions:   %s\n", termSafe(s.Instructions.Line()))
+	if s.Frozen != "" {
+		fmt.Fprintf(w, "  frozen:         %s\n", termSafe(s.Frozen))
+	}
+	if s.Kept != "" {
+		fmt.Fprintf(w, "  kept here:      %s\n", termSafe(s.Kept))
+	}
 	if s.Combiner != "" {
 		fmt.Fprintf(w, "  combiner:       %s\n", termSafe(s.Combiner))
 	}
@@ -366,15 +372,19 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	}
 
 	if len(s.InstructionMembers) > 0 {
-		// what each member tells, first hand (plan S5a); Hold comes with S6
+		// what each member tells, first hand (plan S5a); Hold is its
+		// signer's confirmation of the hold (S6)
 		fmt.Fprintln(w, "\nInstructions, per member:")
 		fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s\n", "Active", "Newest", "Rollover", "Hold", "Heard", "Identity")
 		for _, m := range s.InstructionMembers {
-			rollover := "no"
+			rollover, hold := "no", "no"
 			if m.Rollover {
 				rollover = "yes"
 			}
-			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, "-",
+			if m.Hold {
+				hold = "yes"
+			}
+			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, hold,
 				clockOrDash(m.Heard), termSafe(m.Identity), memberNotes(m))
 		}
 	}

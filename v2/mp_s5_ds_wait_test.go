@@ -103,9 +103,7 @@ func TestAnOwnedZonesUnknownDSSetNamesWhatItWaitsFor(t *testing.T) {
 	// the status reads it without DSIntent, whose warning would come with
 	// every status
 	var buf lockedBuffer
-	saved := lgEngine
-	lgEngine = slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { lgEngine = saved })
+	logTo(t, lgEngine, slog.NewTextHandler(&buf, nil))
 	if line := r.conf.dsSetLine(r.mpzd.ZoneData); !strings.Contains(line, "unknown, waiting for provider agent.p2.example. holds its key") {
 		t.Errorf("the status: %q", line)
 	}
