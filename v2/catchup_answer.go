@@ -90,15 +90,22 @@ func (conf *Config) buildCatchUpAnswer(zdr *ZoneDataRepo, zone ZoneName, req *Ca
 	answer.Complete = &complete
 	if complete {
 		zu.Operations = conf.catchUpOperations(zdr, zone, self)
-		for _, op := range zu.Operations {
-			if op.RRtype == "KEY" {
-				zu.Publish = &core.PublishInstruction{KEYRRs: op.Records, Locations: publishLocations(zone)}
-			}
-		}
+		zu.Publish = keyPublish(zone, zu.Operations)
 	} else {
 		answer.Why = why
 	}
 	return zu
+}
+
+// keyPublish is the publish instruction of the zone's KEY that ops name, as
+// the leader sends it with the KEY (#206); nil when they name none.
+func keyPublish(zone ZoneName, ops []core.RROperation) *core.PublishInstruction {
+	for _, op := range ops {
+		if op.RRtype == "KEY" {
+			return &core.PublishInstruction{KEYRRs: op.Records, Locations: publishLocations(zone)}
+		}
+	}
+	return nil
 }
 
 // catchUpIncomplete says why this agent's answer for the zone cannot be
