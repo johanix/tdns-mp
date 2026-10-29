@@ -47,7 +47,7 @@ func stampAt(t *testing.T, serial uint32, suffix string) *Instructions {
 func stampTableAt(t *testing.T, local string, in *Instructions) *stampTable {
 	t.Helper()
 	s := newStore(t)
-	s.Note(stampZone, in, nil)
+	noteKnown(t, s, stampZone, in)
 	return newStampTable(local, s, 1, true, []string{"ns1." + local})
 }
 
@@ -78,9 +78,9 @@ func rowFor(t *testing.T, rows []MemberInstructions, id string) MemberInstructio
 func TestAStampIsToldForEveryZoneTheTwoShare(t *testing.T) {
 	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
 	other := stampAt(t, 3, "a")
-	st.store.Note("other.example.", other, nil)
+	noteKnown(t, st.store, "other.example.", other)
 	// a zone alpha has no role in
-	st.store.Note("elsewhere.example.", jAt(t, 4, `servers="beta"`, stampRecords[1]), nil)
+	noteKnown(t, st.store, "elsewhere.example.", jAt(t, 4, `servers="beta"`, stampRecords[1]))
 	e := st.entryFor(stampBeta)
 	if e == nil {
 		t.Fatal("no stamp entry for beta")
@@ -108,7 +108,7 @@ func TestAStampIsToldUnderEitherSerial(t *testing.T) {
 	// at 8 omega is listed with a role: alpha tells omega under its newest
 	eight := jAt(t, 8, `servers="alpha,beta,omega" signers="alpha" auditors="delta" suffix="a"`,
 		append(slices.Clone(stampRecords), `3600 IN HSYNC3 ON omega agent.omega.example. alpha`)...)
-	st.store.Note(stampZone, eight, nil)
+	noteKnown(t, st.store, stampZone, eight)
 	e := st.entryFor(stampOmega)
 	if e == nil {
 		t.Fatal("no stamp for a member under the newest serial only")
@@ -247,7 +247,7 @@ func TestAVotingPeersOtherDigestAtTheSameSerialIsAnOwnerError(t *testing.T) {
 		t.Fatalf("phase %s, owner error %q; want %q", st.Phase, st.OwnerError, want)
 	}
 	// it ends at a higher serial only
-	bob.store.Note(stampZone, stampAt(t, 8, "a"), nil)
+	noteKnown(t, bob.store, stampZone, stampAt(t, 8, "a"))
 	if st := status(t, bob.store, stampZone); st.OwnerError != "" {
 		t.Errorf("after serial 8: %q", st.OwnerError)
 	}
@@ -294,13 +294,13 @@ func TestTheStampCarriesARefusal(t *testing.T) {
 	enforced(t, st.store, stampZone)
 	// beta moved out of servers= with its record kept: taking a role away
 	eight := jAt(t, 8, `servers="alpha" signers="alpha" auditors="delta" suffix="a"`, stampRecords...)
-	st.store.Note(stampZone, eight, nil)
+	noteKnown(t, st.store, stampZone, eight)
 	got := st.entryFor(stampBeta).Members[stampAlpha].Instr[stampZone]
 	if got.Refused != "not-built" || got.Newest != 8 || got.AgreeingDigest != "" {
 		t.Errorf("the stamp of a refused newest serial: %+v", got)
 	}
 	nine := stampAt(t, 9, "z")
-	st.store.Note(stampZone, nine, nil)
+	noteKnown(t, st.store, stampZone, nine)
 	got = st.entryFor(stampBeta).Members[stampAlpha].Instr[stampZone]
 	if got.Agreeing != 9 || got.AgreeingDigest != nine.Digest() || got.Refused != "" {
 		t.Errorf("the stamp with an accepted newest serial: %+v", got)
@@ -379,7 +379,7 @@ func TestHearingANewerSerialFetchesOncePerSerialAndMinute(t *testing.T) {
 		t.Errorf("a minute later, still behind: fetched %d times, want 3", len(fetched))
 	}
 	// caught up: no more
-	bob.store.Note(stampZone, nine, nil)
+	noteKnown(t, bob.store, stampZone, nine)
 	bob.mu.Lock()
 	f = bob.fetched[stampZone]
 	f.at = f.at.Add(-fetchInterval)
