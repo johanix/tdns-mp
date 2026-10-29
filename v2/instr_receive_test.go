@@ -436,25 +436,60 @@ func TestAConfirmationIsAlwaysTaken(t *testing.T) {
 	r := newReceiveRig(t, "taken.sender.example.")
 	tm := r.conf.InternalMp.MPTransport
 	r.sentToB("d1", r.n)
-	if tm.notYetFrom("d1", roleB, transport.ConfirmSuccess, msgStampAt(r.v)) {
+	if tm.notYetFrom("d1", roleB, transport.ConfirmSuccess, "", msgStampAt(r.v)) {
 		t.Error("a success from a peer at another serial is not taken")
 	}
-	if tm.notYetFrom("d1", roleB, transport.ConfirmPending, msgStampAt(r.v)) {
+	if tm.notYetFrom("d1", roleB, transport.ConfirmPending, "", msgStampAt(r.v)) {
 		t.Error("a PENDING from a peer at another serial is not taken")
 	}
-	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, msgStampAt(r.n)) {
+	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "", msgStampAt(r.n)) {
 		t.Error("a rejection from a peer at the send's serial is not final")
 	}
-	if tm.notYetFrom("d2", roleB, transport.ConfirmRejected, msgStampAt(r.v)) {
+	if tm.notYetFrom("d2", roleB, transport.ConfirmRejected, "", msgStampAt(r.v)) {
 		t.Error("a rejection of a send with no stamp recorded is not final")
 	}
-	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, nil) {
+	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "", nil) {
 		t.Error("a rejection with no stamp is not final")
 	}
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	tm.ProcessDnskeyConfirmation("d1", roleB, "SUCCESS", nil, nil)
 	if _, open := tm.pendingDnskeyPropagations["d1"]; open {
 		t.Error("a success did not settle the key's propagation")
+	}
+}
+
+// An answer whose stamp tells no active serial, from a peer that does not
+// know its own yet, is taken as it comes, as the receiver takes a message
+// whose stamp tells none; so is one to a send made while this agent knew
+// none. Booked as "not yet", it would be sent again at once, and again.
+func TestAnAnswerThatTellsNoActiveSerialIsTaken(t *testing.T) {
+	r := newReceiveRig(t, "noactive.sender.example.")
+	tm := r.conf.InternalMp.MPTransport
+	unknown := &MsgStamp{Epoch: 1, Seq: 1, InstrStamp: InstrStamp{Known: false, Newest: 42, NewestDigest: r.v.Digest()}}
+	r.sentToB("d1", r.n)
+	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "", unknown) {
+		t.Error("a rejection from a peer that knows no active serial reads as not yet")
+	}
+	tm.stamps.sent("d2", roleB, r.zone, unknown)
+	if tm.notYetFrom("d2", roleB, transport.ConfirmRejected, "", msgStampAt(r.v)) {
+		t.Error("a rejection of a send made while this agent knew no active serial reads as not yet")
+	}
+}
+
+// A refusal that names stale-instructions is not yet, whichever send it
+// answers: here the latest send was made under the receiver's serial, and
+// the refusal answers an earlier one.
+func TestAStaleRefusalIsNotYetWhicheverSendItAnswers(t *testing.T) {
+	r := newReceiveRig(t, "earlier.sender.example.")
+	tm := r.conf.InternalMp.MPTransport
+	r.sentToB("d1", r.n)
+	r.sentToB("d1", r.v) // the queue's resend, after this agent activated 42
+	stale := staleInstructions + ": made under older instructions: this agent acts by serial 42, the message was made under 41"
+	if !tm.notYetFrom("d1", roleB, transport.ConfirmRejected, stale, msgStampAt(r.v)) {
+		t.Error("a stale refusal of an earlier send reads as final")
+	}
+	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "refused for a reason of its own", msgStampAt(r.v)) {
+		t.Error("a refusal under the latest send's serial reads as not yet")
 	}
 }
 
@@ -493,7 +528,7 @@ func TestARejectionFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	tm := r.conf.InternalMp.MPTransport
 	r.sentToB("d1", r.n)
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
-	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmRejected, msgStampAt(r.v))
+	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "", msgStampAt(r.v))
 	if !notYet {
 		t.Fatal("a rejection from a peer at another serial reads as final")
 	}
@@ -510,7 +545,7 @@ func TestAnIgnoredFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	r.sentToB("d1", r.n)
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	tm.pendingDnskeyPropagations["d1"].Signing = map[AgentId]bool{roleB: true}
-	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmIgnored, msgStampAt(r.v))
+	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmIgnored, "", msgStampAt(r.v))
 	tm.processDnskeyConfirmation("d1", roleB, "IGNORED", nil, nil, nil, notYet)
 	if prop := tm.pendingDnskeyPropagations["d1"]; prop == nil || len(prop.Results[roleB]) != 0 {
 		t.Errorf("the key's propagation after a \"not yet\": %+v, want it pending for b", prop)
@@ -555,7 +590,7 @@ func (r *receiveRig) notYetFromB(answerUnder *Instructions) string {
 	}
 	r.sentToB(distID, r.n)
 	settleQueuedMessage(r.queue, distID, roleB, transport.ConfirmRejected)
-	if !tm.notYetFrom(distID, roleB, transport.ConfirmRejected, msgStampAt(answerUnder)) {
+	if !tm.notYetFrom(distID, roleB, transport.ConfirmRejected, "", msgStampAt(answerUnder)) {
 		r.t.Fatal("b's answer under another serial reads as final")
 	}
 	tm.noteNotYet(ZoneName(r.zone), roleB, distID, msgStampAt(answerUnder))

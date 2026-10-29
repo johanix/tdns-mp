@@ -20,6 +20,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -386,29 +387,29 @@ func (b *notYetBook) zones() []ZoneName {
 	return out
 }
 
-// sameActive: both stamps tell an active serial, and the same one.
-func sameActive(a, b *MsgStamp) bool {
-	ma, mb := madeUnder(a), madeUnder(b)
-	return ma != nil && mb != nil && *ma == *mb
-}
-
 // notYetFrom is rule 6 at the sender (decision 76): a final answer other
-// than a success, from a peer whose stamp does not tell the active serial
+// than a success, from a peer whose stamp tells another active serial than
 // this agent's stamp of the send it answers told, is no decision yet. A
-// success and a PENDING report facts and are taken as they come; so is an
-// answer when either side's stamp is missing, as the combiner's is (it
-// tells what it acts by apart: confirmActing).
-func (tm *MPTransportBridge) notYetFrom(distID, peer string, status transport.ConfirmStatus, answer *MsgStamp) bool {
+// success and a PENDING report facts and are taken as they come. So is an
+// answer when either stamp tells no active serial, as the receiver takes a
+// message whose stamp tells none: the combiner's, which tells what it acts
+// by apart (confirmActing), and that of a peer that does not know its
+// active serial yet. A refusal that names stale-instructions is the
+// receiver's own word that the message was made under older instructions
+// (decision 31): never a decision, whichever send it answers, though the
+// latest send may have been made under the receiver's serial.
+func (tm *MPTransportBridge) notYetFrom(distID, peer string, status transport.ConfirmStatus, message string, answer *MsgStamp) bool {
 	switch status {
-	case transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmFailed, transport.ConfirmPartial:
+	case transport.ConfirmRejected:
+		if strings.HasPrefix(message, staleInstructions+":") {
+			return true
+		}
+	case transport.ConfirmIgnored, transport.ConfirmFailed, transport.ConfirmPartial:
 	default:
 		return false
 	}
-	sent := tm.stamps.sentStamp(distID, peer)
-	if sent == nil || answer == nil {
-		return false
-	}
-	return !sameActive(sent, answer)
+	sent, told := madeUnder(tm.stamps.sentStamp(distID, peer)), madeUnder(answer)
+	return sent != nil && told != nil && *sent != *told
 }
 
 // noteNotYet books an answer that is "not yet", and asks the data engine

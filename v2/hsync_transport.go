@@ -458,7 +458,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		instr := confirmStamp(c.App) // the confirmer's stamp (S5b)
 		// a peer at other instructions than the send has decided nothing
 		// yet (rule 6, plan S8); judged before the confirmation is noted
-		notYet := tm.notYetFrom(distributionID, senderID, status, instr)
+		notYet := tm.notYetFrom(distributionID, senderID, status, c.Message, instr)
 		tm.noteConfirmation(c, instr)
 
 		// the queue's entry is settled whatever the answer: a "not yet" is
