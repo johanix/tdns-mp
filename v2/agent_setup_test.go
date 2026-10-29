@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -515,6 +517,168 @@ func TestIdentityZoneParentSync(t *testing.T) {
 			t.Errorf("%s: identityZoneParentSync = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+}
+
+// configListedIdentityZone is an agent whose identity zone is listed in the
+// config: registered by the config parser, not loaded yet, and named among
+// the configured zones SetupAgent is handed.
+func configListedIdentityZone(t *testing.T, zone string) (*Config, *tdns.ZoneData) {
+	t.Helper()
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = kdb
+	conf.InternalMp.IdentityReady = newIdentityReadiness()
+	mp := &MultiProviderConf{Role: "agent", Identity: zone, SupportedMechanisms: []string{"dns"}}
+	mp.Dns.Addresses.Listen = []string{"127.0.0.1:5300"}
+	conf.SetMpConfig(mp)
+	zd := &tdns.ZoneData{
+		ZoneName:  zone,
+		ZoneStore: tdns.MapZone,
+		ZoneType:  tdns.Primary,
+		Logger:    log.New(io.Discard, "", 0),
+		Options:   map[tdns.ZoneOption]bool{},
+		KeyDB:     kdb,
+	}
+	tdns.Zones.Set(zone, zd)
+	t.Cleanup(func() {
+		tdns.Zones.Remove(zone)
+		Zones.Invalidate(zone)
+	})
+	return conf, zd
+}
+
+// notSyncedWarnings is the warnings in a captured agent log that tell the
+// operator a config-listed identity zone is not synced with its parent.
+func notSyncedWarnings(t *testing.T, logs fmt.Stringer, zone string) int {
+	t.Helper()
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Zone  string `json:"zone"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec.Msg != configIdentityZoneNotSynced {
+			continue
+		}
+		if rec.Level != "WARN" || rec.Zone != zone {
+			t.Errorf("the warning was logged at level %s for zone %q, want WARN for %q", rec.Level, rec.Zone, zone)
+		}
+		n++
+	}
+	return n
+}
+
+// tdns-mp #73: only the identity zone the daemon builds becomes a parentsync
+// child. One listed in the config does not, and with a parentsync: block
+// configured that used to pass in silence: no CDS, no DS at the parent, and a
+// TLSA no validating peer trusts. Now the set-up says so, once, in the log
+// only, under the condition that makes a daemon-built zone a parentsync
+// child, and under no other. The daemon starts all the same.
+func TestAConfigListedIdentityZoneIsWarnedAbout(t *testing.T) {
+	off := false
+	for _, tc := range []struct {
+		name    string
+		zone    string
+		schemes []string
+		imr     *bool
+		want    bool
+	}{
+		{"parentsync configured", "agent.listed-sync.example.", []string{"notify", "update"}, nil, true},
+		{"no parentsync", "agent.listed-plain.example.", nil, nil, false},
+		// A daemon-built zone would not be synced here either.
+		{"parentsync without the resolver", "agent.listed-noimr.example.", []string{"notify", "update"}, &off, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf, zd := configListedIdentityZone(t, tc.zone)
+			conf.Config.ParentSync.Schemes = tc.schemes
+			conf.Config.Imr.Active = tc.imr
+			logs := captureAgentLog(t)
+
+			if err := conf.SetupAgent(context.Background(), []string{tc.zone}); err != nil {
+				t.Fatalf("SetupAgent: %v", err)
+			}
+
+			want := 0
+			if tc.want {
+				want = 1
+			}
+			if n := notSyncedWarnings(t, logs, tc.zone); n != want {
+				t.Errorf("the warning was logged %d time(s), want %d; log: %s", n, want, logs)
+			}
+			var onZone []string
+			for _, e := range zd.ErrorList() {
+				if e.Type != tdns.ConfigWarning {
+					t.Errorf("the zone carries a %s: %s", tdns.ErrorTypeToString[e.Type], e.Msg)
+					continue
+				}
+				onZone = append(onZone, e.Msg)
+			}
+			// The warning is the log's alone: an entry on the zone would keep
+			// the operator from bumping its serial by hand.
+			if len(onZone) != 0 {
+				t.Errorf("the zone's warnings: %q, want none: the warning goes to the log only", onZone)
+			}
+			if tc.want {
+				// What is not done, what that costs, and what to do about it.
+				for _, part := range []string{"no CDS", "no DS is sent", "not synced", "TLSA", "daemon builds it", "by hand"} {
+					if !strings.Contains(configIdentityZoneNotSynced, part) {
+						t.Errorf("the warning does not say %q: %s", part, configIdentityZoneNotSynced)
+					}
+				}
+			}
+
+			// A warning and nothing else: the zone is still served, it has not
+			// been made a parentsync child behind the operator's back, and its
+			// first-load callbacks are in place as before.
+			if zd.HasServiceImpactingError() {
+				t.Errorf("the zone is taken out of service: %v", zd.ErrorList())
+			}
+			if zd.Options[tdns.OptParentSync] {
+				t.Error("the config-listed zone was given the parentsync option")
+			}
+			if zdp, ok := Zones.Get(tc.zone); !ok || len(zdp.OnFirstLoad) == 0 {
+				t.Error("no first-load callback registered on the config-listed identity zone")
+			}
+		})
+	}
+
+	// The zone the daemon builds is the supported path: it becomes the
+	// parentsync child, and there is nothing to warn about.
+	t.Run("built by the daemon", func(t *testing.T) {
+		kdb := newMPTestKeyDB(t)
+		conf, _ := identityTestConfig(t, kdb)
+		ctx := startIdentityUpdater(t, kdb)
+		conf.Config.ParentSync.Schemes = []string{"notify", "update"}
+		// The resolver is active and never ready: the delegation sync waits
+		// for it and stops with the test.
+		conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+		conf.Config.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 8)
+		logs := captureAgentLog(t)
+
+		if err := conf.SetupAgent(ctx, nil); err != nil {
+			t.Fatalf("SetupAgent: %v", err)
+		}
+		zd, ok := tdns.Zones.Get(identityTestZone)
+		if !ok {
+			t.Fatal("the identity zone is not registered")
+		}
+		if !zd.Options[tdns.OptParentSync] {
+			t.Error("the daemon-built identity zone is not a parentsync child")
+		}
+		if n := notSyncedWarnings(t, logs, identityTestZone); n != 0 {
+			t.Errorf("the warning was logged %d time(s) for a daemon-built zone; log: %s", n, logs)
+		}
+		if zd.HasError(tdns.ConfigWarning) {
+			t.Errorf("the daemon-built zone carries a warning: %v", zd.ErrorList())
+		}
+	})
 }
 
 const (
