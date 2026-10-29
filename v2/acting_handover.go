@@ -149,16 +149,20 @@ func (mpzd *MPZoneData) actingSets() Roles {
 // zone's signing set, signers= with the providers leaving it (#275): so the
 // other providers' combiners keep a leaving signer's DNSKEYs and CDS while
 // it signs on, until the owner removes its HSYNC3 record. Nil for a zone
-// that is not loaded here or not multi-provider; one with no records for a
-// zone whose instructions are gone (the end of multi-provider service).
-// Nil too while a transition may be under way and this agent holds no
-// step's sets: its parts get nothing new until the leader's stamp gives it
-// the step (design 3.3, plan S12).
+// that is not loaded here or not multi-provider, and for one whose active
+// serial this agent does not know (S9); one with no records for a zone
+// whose instructions are gone (the end of multi-provider service). Nil too
+// while a transition may be under way and this agent holds no step's sets:
+// its parts get nothing new until the leader's stamp gives it the step
+// (design 3.3, plan S12).
 func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready || conf.InternalMp.Instructions.pending(zone) {
 		return nil
+	}
+	if conf.InternalMp.Instructions.activeUnknown(zone) {
+		return nil // nothing new until the active serial is known (design 3.3, 3.4)
 	}
 	h := &ActingHandover{Zone: zone, Phase: PhaseSteady, Made: time.Now()}
 	in := mpzd.instructions()

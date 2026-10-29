@@ -589,7 +589,16 @@ func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	// from S7 the first copy noted is the active serial, enforced
+	// from S9 the first copy noted is held, and no active serial is known
+	// until the restart rule makes one known
+	wantLines(t, "status", out, fmt.Sprintf("  instructions:   active not known since the start; waiting for the leader's word; newest 7 (%s), copy 7", seven.Digest()))
+	if out, err := forget("-z", zone); err == nil || !strings.Contains(err.Error(), "not steady") {
+		t.Errorf("forget with no active serial known: %v, %q; want refused", err, out)
+	}
+	if err := store.Know(zone, tdnsmp.SerialDigest{Serial: 7, Digest: seven.Digest()}, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = status("status", "-z", zone)
 	wantLines(t, "status", out, fmt.Sprintf("  instructions:   active 7 (%s), copy 7", seven.Digest()))
 
 	if out, err := forget("-z", zone); err != nil || !strings.Contains(out, "Forgot the stored serials of zone "+zone) {

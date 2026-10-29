@@ -90,6 +90,7 @@ type catchUpPeer struct {
 
 	attempt  int       // the failures since the request was made
 	acked    bool      // the request's send was acknowledged
+	arrived  bool      // its answer arrived and is kept, unhandled (Arrived)
 	deadline time.Time // sent: the end of the wait for the answer; retry: when it is asked again
 	loggedAt time.Time // the last failure line
 }
@@ -135,6 +136,11 @@ type catchUpTracker struct {
 	// operational and send are the transport's; a test stands in for them.
 	operational func(AgentId) bool
 	send        func(ctx context.Context, zone ZoneName, peer AgentId, cu *CatchUp) error
+	// activeUnknown: this agent does not know the zone's active serial
+	// (plan S9). Its answers are kept, and its requests' answer time does
+	// not run. beat is the beat interval, for the answer time from then.
+	activeUnknown func(ZoneName) bool
+	beat          time.Duration
 
 	// Set when the data engine runs its main loop: nothing is sent before.
 	ctx     context.Context
@@ -208,12 +214,13 @@ func newCatchUpTracker(self AgentId, startZones []string, outage time.Duration) 
 		send: func(context.Context, ZoneName, AgentId, *CatchUp) error {
 			return fmt.Errorf("no transport")
 		},
-		senders:     map[AgentId]*catchUpSender{},
-		caught:      map[ZoneName]bool{},
-		owed:        map[ZoneName]*owedSync{},
-		parentDown:  map[ZoneName]*parentDown{},
-		askSync:     func(context.Context, ZoneName) owedResult { return owedNotAsked },
-		owedApplies: func(context.Context, ZoneName) bool { return true },
+		activeUnknown: func(ZoneName) bool { return false },
+		senders:       map[AgentId]*catchUpSender{},
+		caught:        map[ZoneName]bool{},
+		owed:          map[ZoneName]*owedSync{},
+		parentDown:    map[ZoneName]*parentDown{},
+		askSync:       func(context.Context, ZoneName) owedResult { return owedNotAsked },
+		owedApplies:   func(context.Context, ZoneName) bool { return true },
 	}
 	for _, z := range startZones {
 		t.startZones[ZoneName(dns.Fqdn(z))] = true
@@ -231,6 +238,8 @@ func (t *catchUpTracker) wire(conf *Config, tm *MPTransportBridge, ar *AgentRegi
 	}
 	t.askSync = conf.askOwedDelegationSync
 	t.owedApplies = conf.owedSyncApplies
+	t.activeUnknown = func(zone ZoneName) bool { return conf.InternalMp.Instructions.activeUnknown(string(zone)) }
+	t.beat = hsyncConfigFromMp(conf.MpConfig()).BeatInterval
 	t.hooks = conf.keyRoundHooks()
 	t.send = func(ctx context.Context, zone ZoneName, peer AgentId, cu *CatchUp) error {
 		agent, ok := ar.S.Get(peer)
@@ -467,6 +476,55 @@ func (t *catchUpTracker) Answered(zone ZoneName, peer AgentId, cu *CatchUp) {
 	e.State, e.Complete, e.Why, e.LastError, e.attempt = catchUpIdle, true, "", "", 0
 	t.kickLocked(peer)
 	t.noteCaughtUpLocked(zone)
+}
+
+// Arrived is told of an answer from peer that names the request outstanding
+// to it for the zone, and that is kept, not handled: this agent does not
+// know the zone's active serial, or the answer was made under a higher one
+// (rule 6, plan S8, S9). The request's answer time stops; it runs again,
+// for answerTime, from when the zone's active serial becomes known or
+// changes (activeChanged). Answered takes the answer once it is handled.
+func (t *catchUpTracker) Arrived(zone ZoneName, peer AgentId, cu *CatchUp) {
+	if t == nil || cu == nil {
+		return
+	}
+	zone, peer = ZoneName(dns.Fqdn(string(zone))), AgentId(dns.Fqdn(string(peer)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e := t.peers[zone][peer]; e != nil && e.State == catchUpSent && e.Request == cu.Request {
+		e.arrived = true
+	}
+}
+
+// answerTime is how long a request waits for its answer from when the
+// zone's active serial became known (plan S9): 30 s or two beat intervals,
+// the longer.
+func (t *catchUpTracker) answerTime() time.Duration {
+	return max(catchUpAnswerWait, 2*t.beat)
+}
+
+// activeChanged is told that the zone's active serial became known here, or
+// changed: the answer time of its requests sent and acknowledged, kept
+// answers' included, runs from now, for answerTime. A kept answer that the
+// release does not handle in that time (one refused as made under older
+// instructions) fails its request, which is asked again.
+func (t *catchUpTracker) activeChanged(zone ZoneName) {
+	if t == nil {
+		return
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	deadline := time.Now().Add(t.answerTime())
+	for peer, e := range t.peers[zone] {
+		if e.State == catchUpSent && (e.acked || e.arrived) {
+			e.arrived, e.acked = false, true
+			if e.deadline.Before(deadline) {
+				e.deadline = deadline
+			}
+			t.kickLocked(peer)
+		}
+	}
 }
 
 // Requested is told of each answer this agent enqueued for a peer's
@@ -755,13 +813,19 @@ func (t *catchUpTracker) step(peer AgentId, now time.Time) (ZoneName, *CatchUp, 
 	}
 	sort.Slice(zones, func(i, j int) bool { return zones[i] < zones[j] })
 	inFlight := 0
+	// the zones whose answer time stands still: their active serial is not
+	// known here, so their answers are kept (plan S9)
+	unknown := map[ZoneName]bool{}
+	for _, zone := range zones {
+		unknown[zone] = t.activeUnknown(zone)
+	}
 	for _, zone := range zones {
 		e := t.peers[zone][peer]
 		if e == nil {
 			continue
 		}
 		switch {
-		case e.State == catchUpSent && e.acked && !now.Before(e.deadline):
+		case e.State == catchUpSent && e.acked && !e.arrived && !unknown[zone] && !now.Before(e.deadline):
 			t.failLocked(zone, peer, e, fmt.Sprintf("no answer within %s", catchUpAnswerWait), now)
 		case e.State == catchUpRetry && !now.Before(e.deadline):
 			switch {
@@ -793,7 +857,8 @@ func (t *catchUpTracker) step(peer AgentId, now time.Time) (ZoneName, *CatchUp, 
 			}
 			return zone, &CatchUp{Request: e.Request, Reason: e.Reason}, time.Time{}
 		}
-		if (e.State == catchUpRetry || (e.State == catchUpSent && e.acked)) && (next.IsZero() || e.deadline.Before(next)) {
+		waits := e.State == catchUpSent && e.acked && !e.arrived && !unknown[zone]
+		if (e.State == catchUpRetry || waits) && (next.IsZero() || e.deadline.Before(next)) {
 			next = e.deadline
 		}
 	}

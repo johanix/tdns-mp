@@ -462,8 +462,12 @@ func (conf *Config) askThaw(zone string) {
 	}
 }
 
-// thawWanted: the zone's turn has something to do.
+// thawWanted: the zone's turn has something to do; for a zone whose active
+// serial this agent does not know, always: the restart rule (S9).
 func (conf *Config) thawWanted(zone string) bool {
+	if conf.InternalMp.Instructions.activeUnknown(zone) {
+		return true
+	}
 	in, ok := conf.InternalMp.Instructions.thawInputs(zone)
 	if !ok || !in.enforced {
 		return false
@@ -526,16 +530,21 @@ func (conf *Config) runThaws(ctx context.Context) {
 	}
 }
 
-// thawTurn is the zone's turn: a transition under way goes on (the
-// reconciliation's turn, plan S12); the leader thaws it when it is ready,
-// and cancels its parent work when that is all the thaw waits for (design
-// 3.2: at the thaw's turn); every agent makes active a serial a member
-// tells first hand (activateOnTellings), and fetches a serial agreed on
-// that it lacks.
+// thawTurn is the zone's turn: with no active serial known here, the
+// restart rule's (knowActive, S9); otherwise a transition under way goes on
+// (the reconciliation's turn, plan S12), the leader thaws it when it is
+// ready, and cancels its parent work when that is all the thaw waits for
+// (design 3.2: at the thaw's turn); every agent makes active a serial a
+// member tells first hand (activateOnTellings), and fetches a serial agreed
+// on that it lacks.
 func (conf *Config) thawTurn(zone string) {
 	b := &conf.InternalMp.thaws
 	b.turn.Lock()
 	defer b.turn.Unlock()
+	if conf.InternalMp.Instructions.activeUnknown(zone) {
+		conf.knowActive(zone)
+		return
+	}
 	conf.reconcileTurn(zone, time.Now())
 	if v, ok := conf.thawView(zone, time.Now()); ok && v.leads {
 		switch {
@@ -572,6 +581,7 @@ func (conf *Config) activate(zone string, th Thaw, by string) error {
 		return err
 	}
 	lg.Info("the zone's active instructions are now", "zone", zone, "serial", th.To.Serial, "by", by)
+	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
 	b := &conf.InternalMp.thaws
 	b.mu.Lock()
 	b.zone(canonicalName(zone)).thawed = &thawMark{to: th.To.Serial, by: by, at: time.Now()}
@@ -785,12 +795,16 @@ func instructionsAnswered(zone string, sd SerialDigest, data map[string]string) 
 	return in, nil
 }
 
-// thawLine is the zone's transition as the status shows it: its
+// thawLine is the zone's transition as the status shows it: what the
+// restart rule waits for while the active serial is not known (S9), its
 // reconciliation's step and what it waits for (plan S12), what the
 // agreement waits for, when the last transition was done here, or the
 // last thaw made active here; "" with none.
 func (conf *Config) thawLine(zone string) string {
 	now := time.Now()
+	if v, ok := conf.restartView(zone, now); ok {
+		return v.line()
+	}
 	if line := conf.reconcileLine(zone, now); line != "" {
 		return line
 	}

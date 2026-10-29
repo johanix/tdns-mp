@@ -71,11 +71,34 @@ func at(t *testing.T, serial uint32, auditors string) *Instructions {
 func sd(in *Instructions) SerialDigest { return SerialDigest{Serial: in.Serial, Digest: in.Digest()} }
 
 // enforced has the store keep zone's active serial as the leader's, as S7's
-// thaw does.
+// thaw does: with none known, the first serial noted is made known, as the
+// restart rule does (S9), and the others are held above it.
 func enforced(t *testing.T, s *InstructionStore, zone string) {
 	t.Helper()
-	if err := s.update(zone, func(z *zoneSerials) error { z.Enforced = true; return nil }); err != nil {
+	if err := s.update(zone, func(z *zoneSerials) error {
+		if z.Active == nil && len(z.Held) > 0 {
+			a := z.Held[0]
+			z.Active, z.Held = &a, slices.Clone(z.Held[1:])
+			s.judged(zone, z)
+		}
+		z.Enforced = true
+		return nil
+	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// noteKnown notes a copy of the zone's instructions and, when the store
+// knows no active serial for the zone, makes the copy's serial known, as the
+// restart rule would (S9): the fixture of a zone whose active serial is its
+// first copy's, as S7 had it.
+func noteKnown(t *testing.T, s *InstructionStore, zone string, in *Instructions) {
+	t.Helper()
+	s.Note(zone, in, nil)
+	if s.activeUnknown(zone) {
+		if err := s.Know(zone, sd(in), nil, false); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -97,10 +120,10 @@ func serialOf(p *SerialDigest) string {
 
 func TestANewerSerialIsHeldAndBecomesNewest(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
 	enforced(t, s, storeZone)
 	eight := at(t, 8, "alpha")
-	s.Note(storeZone, eight, nil)
+	noteKnown(t, s, storeZone, eight)
 	st := status(t, s, storeZone)
 	if st.Active.Serial != 7 || *st.Newest != sd(eight) || st.Phase != PhaseAgreeing {
 		t.Errorf("active %s newest %s phase %s; want 7, 8, agreeing", serialOf(st.Active), serialOf(st.Newest), st.Phase)
@@ -109,14 +132,14 @@ func TestANewerSerialIsHeldAndBecomesNewest(t *testing.T) {
 
 func TestALowerSerialIsNotAdopted(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 8, "alpha,beta"), nil)
-	s.Note(storeZone, at(t, 7, "alpha"), nil)
+	noteKnown(t, s, storeZone, at(t, 8, "alpha,beta"))
+	noteKnown(t, s, storeZone, at(t, 7, "alpha"))
 	st := status(t, s, storeZone)
 	if st.Active.Serial != 8 || st.Newest.Serial != 8 || st.Copy.Serial != 7 || st.Phase != PhaseSteady {
 		t.Errorf("active %s newest %s copy %d phase %s; want 8, 8, 7, steady", serialOf(st.Active), serialOf(st.Newest), st.Copy.Serial, st.Phase)
 	}
 	// 2^31 above is RFC 1982's undefined half: not newer either.
-	s.Note(storeZone, at(t, 8+1<<31, "alpha"), nil)
+	noteKnown(t, s, storeZone, at(t, 8+1<<31, "alpha"))
 	if st := status(t, s, storeZone); st.Active.Serial != 8 {
 		t.Errorf("a serial 2^31 above was adopted: active %d", st.Active.Serial)
 	}
@@ -125,8 +148,8 @@ func TestALowerSerialIsNotAdopted(t *testing.T) {
 func TestTheSameSerialWithAnotherDigestIsAConflict(t *testing.T) {
 	s := newStore(t)
 	first, second := at(t, 7, "alpha,beta"), at(t, 7, "alpha")
-	s.Note(storeZone, first, nil)
-	s.Note(storeZone, second, nil)
+	noteKnown(t, s, storeZone, first)
+	noteKnown(t, s, storeZone, second)
 	st := status(t, s, storeZone)
 	want := fmt.Sprintf("serial 7 with two digests (%s, %s)", first.Digest(), second.Digest())
 	if st.Phase != PhaseOwnerError || st.OwnerError != want || st.Active.Digest != first.Digest() {
@@ -137,13 +160,13 @@ func TestTheSameSerialWithAnotherDigestIsAConflict(t *testing.T) {
 func TestAConflictLastsUntilAHigherSerial(t *testing.T) {
 	s := newStore(t)
 	first := at(t, 7, "alpha,beta")
-	s.Note(storeZone, first, nil)
-	s.Note(storeZone, at(t, 7, "alpha"), nil)
-	s.Note(storeZone, first, nil) // reverted at the same serial
+	noteKnown(t, s, storeZone, first)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha"))
+	noteKnown(t, s, storeZone, first) // reverted at the same serial
 	if st := status(t, s, storeZone); st.Phase != PhaseOwnerError {
 		t.Fatalf("the contents reverted at the same serial ended the owner error: phase %s", st.Phase)
 	}
-	s.Note(storeZone, at(t, 8, "alpha"), nil)
+	noteKnown(t, s, storeZone, at(t, 8, "alpha"))
 	if st := status(t, s, storeZone); st.Phase != PhaseAgreeing || st.Agreeing == nil || st.Agreeing.Serial != 8 || st.OwnerError != "" {
 		t.Errorf("after serial 8: phase %s agreeing %s error %q", st.Phase, serialOf(st.Agreeing), st.OwnerError)
 	}
@@ -152,7 +175,7 @@ func TestAConflictLastsUntilAHigherSerial(t *testing.T) {
 func TestACopyWithoutAReadingChangesNothingHeld(t *testing.T) {
 	s := newStore(t)
 	seven := at(t, 7, "alpha,beta")
-	s.Note(storeZone, seven, nil)
+	noteKnown(t, s, storeZone, seven)
 	s.Note(storeZone, nil, errTwoHsyncparams)
 	st := status(t, s, storeZone)
 	if *st.Active != sd(seven) || st.CopyError != "two HSYNCPARAM records" || st.OwnerError != "two HSYNCPARAM records" {
@@ -162,8 +185,8 @@ func TestACopyWithoutAReadingChangesNothingHeld(t *testing.T) {
 
 func TestAChangeAtSerialZeroIsAConflict(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, readOf(t, withParam(`servers="alpha,beta"`)...), nil)
-	s.Note(storeZone, readOf(t, withParam(`servers="alpha"`)...), nil)
+	noteKnown(t, s, storeZone, readOf(t, withParam(`servers="alpha,beta"`)...))
+	noteKnown(t, s, storeZone, readOf(t, withParam(`servers="alpha"`)...))
 	st := status(t, s, storeZone)
 	if st.Phase != PhaseOwnerError || !strings.HasPrefix(st.OwnerError, "serial 0 with two digests") {
 		t.Errorf("phase %s error %q; want the serial-0 change an owner error", st.Phase, st.OwnerError)
@@ -172,15 +195,15 @@ func TestAChangeAtSerialZeroIsAConflict(t *testing.T) {
 
 func TestHSYNC3WithoutHSYNCPARAMAfterAHeldSerialIsAnOwnerError(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
-	s.Note(storeZone, readOf(t, instrBase[:3]...), nil)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
+	noteKnown(t, s, storeZone, readOf(t, instrBase[:3]...))
 	st := status(t, s, storeZone)
 	if st.Phase != PhaseOwnerError || st.Active.Serial != 7 || !strings.Contains(st.OwnerError, "HSYNCPARAM dropped") {
 		t.Errorf("phase %s active %s error %q", st.Phase, serialOf(st.Active), st.OwnerError)
 	}
 	// A legacy zone that never had HSYNCPARAM is no owner error.
 	legacy := newStore(t)
-	legacy.Note(storeZone, readOf(t, instrBase[:3]...), nil)
+	noteKnown(t, legacy, storeZone, readOf(t, instrBase[:3]...))
 	if st := status(t, legacy, storeZone); st.Phase != PhaseSteady {
 		t.Errorf("a legacy zone: phase %s, error %q", st.Phase, st.OwnerError)
 	}
@@ -188,8 +211,8 @@ func TestHSYNC3WithoutHSYNCPARAMAfterAHeldSerialIsAnOwnerError(t *testing.T) {
 
 func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
-	s.Note(storeZone, nil, nil)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
+	noteKnown(t, s, storeZone, nil)
 	st := status(t, s, storeZone)
 	if st.Phase != PhaseOwnerError || !strings.Contains(st.OwnerError, "lists 2 providers") || st.Active.Serial != 7 {
 		t.Errorf("phase %s error %q active %s", st.Phase, st.OwnerError, serialOf(st.Active))
@@ -199,8 +222,8 @@ func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 func TestTheEndOfMultiProviderServiceEndsTheSerials(t *testing.T) {
 	_, hdb := storeDB(t)
 	s := loadStore(t, hdb)
-	s.Note(storeZone, readOf(t, instrBase[0], `3600 IN HSYNCPARAM serial="7" servers="alpha" signers="alpha"`), nil)
-	s.Note(storeZone, nil, nil)
+	noteKnown(t, s, storeZone, readOf(t, instrBase[0], `3600 IN HSYNCPARAM serial="7" servers="alpha" signers="alpha"`))
+	noteKnown(t, s, storeZone, nil)
 	if st := s.Status(storeZone); st != nil {
 		t.Errorf("one provider, both records dropped: still kept, %s", st.Line())
 	}
@@ -218,7 +241,7 @@ func heldStore(t *testing.T) (*InstructionStore, []*Instructions) {
 	for i, auditors := range []string{"alpha,beta", "alpha", "beta", "alpha,beta,gamma"} {
 		in := at(t, uint32(7+i), auditors)
 		ins = append(ins, in)
-		s.Note(storeZone, in, nil)
+		noteKnown(t, s, storeZone, in)
 		if i == 0 {
 			enforced(t, s, storeZone)
 		}
@@ -294,13 +317,13 @@ func TestAtTheThawTheStepsSetsAreTheFromSerials(t *testing.T) {
 func TestANewerSerialDuringReconcilingIsHeldAsNewest(t *testing.T) {
 	s := newStore(t)
 	seven, eight, nine := at(t, 7, "alpha,beta"), at(t, 8, "alpha"), at(t, 9, "beta")
-	s.Note(storeZone, seven, nil)
+	noteKnown(t, s, storeZone, seven)
 	enforced(t, s, storeZone)
-	s.Note(storeZone, eight, nil)
+	noteKnown(t, s, storeZone, eight)
 	if err := s.Activate(storeZone, Thaw{From: sd(seven), To: sd(eight)}); err != nil {
 		t.Fatal(err)
 	}
-	s.Note(storeZone, nine, nil)
+	noteKnown(t, s, storeZone, nine)
 	st := status(t, s, storeZone)
 	if st.Active.Serial != 8 || *st.Newest != sd(nine) || st.Phase != PhaseReconciling {
 		t.Errorf("active %s newest %s phase %s; want 8, 9, reconciling", serialOf(st.Active), serialOf(st.Newest), st.Phase)
@@ -321,7 +344,7 @@ func withRemoval(t *testing.T, s *InstructionStore, step int) {
 func TestDoneOnTheLeadersStampDropsTheRemovalsHeld(t *testing.T) {
 	path, hdb := storeDB(t)
 	s := loadStore(t, hdb)
-	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
 	withRemoval(t, s, 2)
 	if st := status(t, loadStore(t, openStoreDB(t, path)), storeZone); len(st.Removals) != 1 || st.Removals[0].NSNames[0] != "ns1.beta.example." {
 		t.Fatalf("the removal is not on disk: %v", st.Removals)
@@ -397,9 +420,9 @@ func TestTheLastThawIsKept(t *testing.T) {
 	path, hdb := storeDB(t)
 	s := loadStore(t, hdb)
 	seven, eight := at(t, 7, "alpha,beta"), at(t, 8, "alpha")
-	s.Note(storeZone, seven, nil)
+	noteKnown(t, s, storeZone, seven)
 	enforced(t, s, storeZone)
-	s.Note(storeZone, eight, nil)
+	noteKnown(t, s, storeZone, eight)
 	thaw := Thaw{From: sd(seven), To: sd(eight)}
 	if err := s.Activate(storeZone, thaw); err != nil {
 		t.Fatal(err)
@@ -416,10 +439,10 @@ func TestTheStoreSurvivesARestart(t *testing.T) {
 	path, hdb := storeDB(t)
 	s := loadStore(t, hdb)
 	seven, eight, nine := at(t, 7, "alpha,beta"), at(t, 8, "alpha"), at(t, 9, "beta")
-	s.Note(storeZone, seven, nil)
+	noteKnown(t, s, storeZone, seven)
 	enforced(t, s, storeZone)
-	s.Note(storeZone, eight, nil)
-	s.Note(storeZone, nine, nil)
+	noteKnown(t, s, storeZone, eight)
+	noteKnown(t, s, storeZone, nine)
 	if err := s.Activate(storeZone, Thaw{From: sd(seven), To: sd(eight)}); err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +474,7 @@ func TestTheStoreIsReadBeforeTheFirstLoad(t *testing.T) {
 		t.Run(c.role, func(t *testing.T) {
 			path, hdb := storeDB(t)
 			seven := at(t, 7, "alpha,beta")
-			loadStore(t, hdb).Note(storeZone, seven, nil)
+			noteKnown(t, loadStore(t, hdb), storeZone, seven)
 
 			conf := &Config{Config: &tdns.Config{}}
 			conf.Config.Internal.KeyDB = openStoreDB(t, path).KeyDB
@@ -466,7 +489,7 @@ func TestTheStoreIsReadBeforeTheFirstLoad(t *testing.T) {
 			if *st.Active != sd(seven) {
 				t.Fatalf("before the first load: active %s, want %s", st.Active, sd(seven))
 			}
-			conf.InternalMp.Instructions.Note(storeZone, seven, nil)
+			noteKnown(t, conf.InternalMp.Instructions, storeZone, seven)
 			if again := status(t, conf.InternalMp.Instructions, storeZone); *again.Active != *st.Active || again.Phase != PhaseSteady {
 				t.Errorf("the first load of the same copy: %s", again.Line())
 			}
@@ -478,8 +501,8 @@ func TestAZoneThatLeavesTheConfigLosesItsSerials(t *testing.T) {
 	path, hdb := storeDB(t)
 	s := loadStore(t, hdb)
 	kept := instrTestZone(t, "kept.example.", instrBase...)
-	s.Note(kept.ZoneName, at(t, 7, "alpha,beta"), nil)
-	s.Note("gone.example.", at(t, 7, "alpha,beta"), nil)
+	noteKnown(t, s, kept.ZoneName, at(t, 7, "alpha,beta"))
+	noteKnown(t, s, "gone.example.", at(t, 7, "alpha,beta"))
 
 	conf := &Config{Config: &tdns.Config{}}
 	conf.InternalMp.Instructions = s
@@ -496,7 +519,7 @@ func TestAZoneThatLeavesTheConfigLosesItsSerials(t *testing.T) {
 func TestForgetClearsASteadyZonesSerials(t *testing.T) {
 	path, hdb := storeDB(t)
 	s := loadStore(t, hdb)
-	s.Note(storeZone, at(t, 9, "alpha,beta"), nil)
+	noteKnown(t, s, storeZone, at(t, 9, "alpha,beta"))
 	if err := s.Forget(storeZone); err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +527,7 @@ func TestForgetClearsASteadyZonesSerials(t *testing.T) {
 		t.Fatal("the serials are still kept")
 	}
 	// The owner re-created the zone at a lower serial: it is adopted now.
-	s.Note(storeZone, at(t, 1, "alpha"), nil)
+	noteKnown(t, s, storeZone, at(t, 1, "alpha"))
 	if st := status(t, s, storeZone); st.Active.Serial != 1 {
 		t.Errorf("after forget, a lower serial: active %s", serialOf(st.Active))
 	}
@@ -517,11 +540,11 @@ func TestForgetIsRefusedForAZoneThatIsNotSteady(t *testing.T) {
 		t.Fatal(err)
 	}
 	removal := newStore(t)
-	removal.Note(storeZone, at(t, 7, "alpha,beta"), nil)
+	noteKnown(t, removal, storeZone, at(t, 7, "alpha,beta"))
 	withRemoval(t, removal, 2)
 	ownerError := newStore(t)
-	ownerError.Note(storeZone, at(t, 7, "alpha,beta"), nil)
-	ownerError.Note(storeZone, at(t, 7, "alpha"), nil)
+	noteKnown(t, ownerError, storeZone, at(t, 7, "alpha,beta"))
+	noteKnown(t, ownerError, storeZone, at(t, 7, "alpha"))
 	for name, s := range map[string]*InstructionStore{
 		"agreeing": agreeing, "reconciling": reconciling, "a removal under way": removal, "an owner error": ownerError,
 	} {
@@ -534,77 +557,51 @@ func TestForgetIsRefusedForAZoneThatIsNotSteady(t *testing.T) {
 	}
 }
 
-// From the thaw (S7) the first copy noted is the active serial, enforced,
-// and a newer one is held, not made active. A record kept before S7
-// followed the copy and counts as none: the copy noted next is the active
-// serial (S9 replaces this with the restart rule).
-func TestTheFirstCopyIsEnforcedAndANewerOneIsHeld(t *testing.T) {
+// A zone's first copy is held, and no active serial is known until the
+// restart rule makes one known (S9): a newer copy is held too, and the
+// serials above the one made known are held above it.
+func TestAFirstCopyIsHeldWithNoActiveSerialKnown(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
-	if st := status(t, s, storeZone); st.Active.Serial != 7 || !st.Enforced {
-		t.Fatalf("the first copy: active %s enforced %v; want 7, enforced", serialOf(st.Active), st.Enforced)
+	seven, eight := at(t, 7, "alpha,beta"), at(t, 8, "alpha")
+	s.Note(storeZone, seven, nil)
+	if st := status(t, s, storeZone); st.Active != nil || st.Newest == nil || st.Newest.Serial != 7 || st.Phase != PhaseNotKnown {
+		t.Fatalf("the first copy: active %s newest %s phase %q; want none, 7, %q", serialOf(st.Active), serialOf(st.Newest), st.Phase, PhaseNotKnown)
 	}
-	s.Note(storeZone, at(t, 8, "alpha"), nil)
-	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Newest.Serial != 8 {
-		t.Errorf("a newer copy: active %s newest %s; want 7, 8", serialOf(st.Active), serialOf(st.Newest))
+	s.Note(storeZone, eight, nil)
+	if err := s.Know(storeZone, sd(seven), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Newest.Serial != 8 || !st.Enforced || st.Agreeing == nil {
+		t.Errorf("made known: active %s newest %s enforced %v agreeing %s; want 7, 8, enforced, agreeing on 8", serialOf(st.Active), serialOf(st.Newest), st.Enforced, serialOf(st.Agreeing))
+	}
+	if err := s.Know(storeZone, sd(eight), nil, false); err == nil {
+		t.Error("a second Know moved a known active serial")
 	}
 }
 
+// A record kept before S7 followed the copy, and counts as none when the
+// store loads: its serial is held, none active, and the status says so.
 func TestARecordKeptBeforeTheThawCountsAsNone(t *testing.T) {
 	_, hdb := storeDB(t)
 	s := loadStore(t, hdb)
-	seven := at(t, 7, "alpha,beta")
+	seven, eight := at(t, 7, "alpha,beta"), at(t, 8, "alpha")
 	if err := s.update(storeZone, func(z *zoneSerials) error {
 		z.Active = &heldSerial{SerialDigest: sd(seven), Reading: seven, Since: time.Now()}
+		z.Held = []heldSerial{{SerialDigest: sd(eight), Reading: eight, Since: time.Now(), Refused: []Refusal{{Code: "x"}}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	column := func() (enforced int, phase string) {
-		t.Helper()
-		if err := hdb.DB.QueryRow(`SELECT enforced, phase FROM MPZoneInstructions WHERE zonename = ?`, storeZone).Scan(&enforced, &phase); err != nil {
-			t.Fatal(err)
-		}
-		return
+	s = loadStore(t, hdb)
+	st := status(t, s, storeZone)
+	if st.Active != nil || st.Phase != PhaseNotKnown || st.Newest.Serial != 8 || len(st.Refused) != 0 {
+		t.Fatalf("after the load: active %s newest %s phase %q refused %v", serialOf(st.Active), serialOf(st.Newest), st.Phase, st.Refused)
 	}
-	if e, p := column(); e != 0 || p != PhaseSteady {
-		t.Errorf("a record kept before S7: enforced %d phase %q; want 0, steady", e, p)
+	if s.readingAt(storeZone, sd(seven)) == nil {
+		t.Error("the record's serial is not held")
 	}
-	if line := status(t, s, storeZone).Line(); !strings.HasSuffix(line, "; not enforced") {
-		t.Errorf("status %q does not say not enforced", line)
-	}
-	// the same copy noted again: the record is the copy's, enforced
-	s.Note(storeZone, seven, nil)
-	if e, _ := column(); e != 1 {
-		t.Errorf("the same copy noted again: enforced %d, want 1", e)
-	}
-	// an edit at the same serial over a record kept before S7 is an owner
-	// error, and the record is enforced: the readers act by it, not by the
-	// edited copy
-	if err := s.update(storeZone, func(z *zoneSerials) error { z.Enforced = false; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	s.Note(storeZone, at(t, 7, "alpha"), nil)
-	if st := status(t, s, storeZone); st.OwnerError == "" || !st.Enforced || *st.Active != sd(seven) {
-		t.Errorf("an edit at serial 7 over a record from before S7: owner error %q, enforced %v, active %s", st.OwnerError, st.Enforced, st.Active)
-	}
-	if in := s.activeReading(storeZone); in == nil || in.Digest() != seven.Digest() {
-		t.Errorf("the readers act by %v, want the record's 7", in)
-	}
-	// a newer copy over a record kept before S7 is the active serial
-	if err := s.update(storeZone, func(z *zoneSerials) error {
-		z.Enforced, z.OwnerError, z.ErrorAt, z.Conflict = false, "", nil, nil
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	s.Note(storeZone, at(t, 8, "alpha"), nil)
-	if st := status(t, s, storeZone); st.Active.Serial != 8 || !st.Enforced || st.Newest.Serial != 8 {
-		t.Errorf("a newer copy over a record from before S7: active %s newest %s enforced %v; want 8, enforced", serialOf(st.Active), serialOf(st.Newest), st.Enforced)
-	}
-	s.Note(storeZone, at(t, 9, "beta"), nil)
-	if st := status(t, s, storeZone); st.Active.Serial != 8 || st.Newest.Serial != 9 {
-		t.Errorf("then a newer one: active %s newest %s; want 8, 9", serialOf(st.Active), serialOf(st.Newest))
+	if line := st.Line(); !strings.HasSuffix(line, "; "+PhaseNotKnown) {
+		t.Errorf("status %q does not say the active serial is not known", line)
 	}
 }
 
@@ -615,8 +612,8 @@ func TestARecordKeptBeforeTheThawCountsAsNone(t *testing.T) {
 func TestAFetchedSerialIsHeldInOrder(t *testing.T) {
 	s := newStore(t)
 	seven, eight, nine := at(t, 7, "alpha,beta"), at(t, 8, "alpha"), at(t, 9, "beta")
-	s.Note(storeZone, seven, nil)
-	s.Note(storeZone, nine, nil)
+	noteKnown(t, s, storeZone, seven)
+	noteKnown(t, s, storeZone, nine)
 	if err := s.Hold(storeZone, eight); err != nil {
 		t.Fatal(err)
 	}
@@ -645,16 +642,16 @@ func TestStatusShowsActiveNewestCopyAndOwnerError(t *testing.T) {
 	if got := s.Status(storeZone).Line(); got != "none kept" {
 		t.Errorf("nothing kept: %q", got)
 	}
-	s.Note(storeZone, seven, nil)
+	noteKnown(t, s, storeZone, seven)
 	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("active 7 (%s), copy 7", seven.Digest()); got != want {
 		t.Errorf("steady:\n got %q\nwant %q", got, want)
 	}
-	s.Note(storeZone, eight, nil)
+	noteKnown(t, s, storeZone, eight)
 	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("active 7 (%s), newest 8 (%s), copy 8; agreeing", seven.Digest(), eight.Digest()); got != want {
 		t.Errorf("a newer serial held:\n got %q\nwant %q", got, want)
 	}
 	other := at(t, 8, "beta")
-	s.Note(storeZone, other, nil)
+	noteKnown(t, s, storeZone, other)
 	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("held: owner error: serial 8 with two digests (%s, %s)", eight.Digest(), other.Digest()); got != want {
 		t.Errorf("an owner error:\n got %q\nwant %q", got, want)
 	}
@@ -683,8 +680,8 @@ func TestTheAuditorKeepsSerialsToo(t *testing.T) {
 	mpzd := instrTestZone(t, "audited.example.", instrBase...)
 	conf.noteInstructions(mpzd)
 	st := status(t, conf.InternalMp.Instructions, mpzd.ZoneName)
-	if st.Active.Serial != 7 || st.Active.Digest != digestOf(t, instrBase...) {
-		t.Errorf("the auditor keeps %s", st.Line())
+	if st.Newest == nil || st.Newest.Serial != 7 || st.Newest.Digest != digestOf(t, instrBase...) || st.Active != nil {
+		t.Errorf("the auditor keeps %s", st.Line()) // its first copy, no active serial known yet (S9)
 	}
 	if loadStore(t, hdb).Status(mpzd.ZoneName) == nil {
 		t.Error("the auditor's serials are not on disk")
