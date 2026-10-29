@@ -38,6 +38,7 @@ type fakeKeyHooks struct {
 	block   map[AgentId]chan struct{}
 	closed  map[*keyReq]int // closeAsk calls
 	decide  bool
+	hold    chan struct{} // when set, a decision ends only once it is closed
 
 	sent    chan *keyReq
 	decided chan keyDecision
@@ -90,9 +91,12 @@ func (f *fakeKeyHooks) hooks() *keyHooks {
 		},
 		decide: func(_ context.Context, zone ZoneName, answers map[AgentId]keyReply) bool {
 			f.mu.Lock()
-			done := f.decide
+			done, hold := f.decide, f.hold
 			f.mu.Unlock()
 			f.decided <- keyDecision{zone, answers}
+			if hold != nil {
+				<-hold
+			}
 			return done
 		},
 	}
@@ -110,6 +114,26 @@ func (f *fakeKeyHooks) closes(kr *keyReq) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closed[kr]
+}
+
+// wantsCalls: how often the rounds asked whether the zone is wanted, as a
+// pass does for each check it takes.
+func (f *fakeKeyHooks) wantsCalls(zone ZoneName) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.asked[zone]
+}
+
+// roundEnded waits until the zone's round is no longer out: its decision
+// has ended and the next round is scheduled.
+func roundEnded(t *testing.T, tr *catchUpTracker, zone ZoneName) {
+	t.Helper()
+	waitUntil(t, "the round of "+string(zone)+" ended", func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		r := tr.keyWanted[zone]
+		return r != nil && !r.out
+	})
 }
 
 func noKeyHere() *ConfigResponseMsg {
@@ -604,6 +628,34 @@ func TestACheckBringsTheNextRoundForward(t *testing.T) {
 	tr.keyCheck(krZone)
 	f.answer(sentWithin(t, f, "the first round"), noKeyHere())
 	decidedWithin(t, f, "the first round")
+	// the decision is told before the round ends: the check comes after
+	roundEnded(t, tr, krZone)
 	tr.keyCheck(krZone)
 	sentWithin(t, f, "the round a check brings forward")
+}
+
+// A check that comes while a round is out is kept: the round's answers may
+// have been given before the key came, so when it ends without the key the
+// next round asks at once, not when it is due (#329).
+func TestACheckWhileARoundIsOutAsksAgainWhenItEnds(t *testing.T) {
+	shortKeyTimers(t, 5*time.Second, 5*time.Second, time.Hour)
+	f := newFakeKeyHooks(krB)
+	hold := make(chan struct{})
+	f.hold = hold
+	tr := newKeyTracker(t, f, krB)
+	tr.keyCheck(krZone)
+	f.answer(sentWithin(t, f, "the first round"), noKeyHere())
+	decidedWithin(t, f, "the first round") // its decision waits for hold
+
+	before := f.wantsCalls(krZone)
+	tr.keyCheck(krZone)
+	waitUntil(t, "a pass took the check", func() bool { return f.wantsCalls(krZone) > before })
+	// a later pass has started once a later check is taken: the pass with
+	// the check has ended, while the round was still out
+	const unwanted ZoneName = "unwanted.rounds.key.example."
+	tr.keyCheck(unwanted)
+	waitUntil(t, "a later pass", func() bool { return f.wantsCalls(unwanted) > 0 })
+
+	close(hold)
+	sentWithin(t, f, "the round the check asked for")
 }
