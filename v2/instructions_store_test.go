@@ -454,6 +454,31 @@ func TestTheStoreSurvivesARestart(t *testing.T) {
 	}
 }
 
+// A reading an older build stored that no longer reads, HSYNC3 without
+// HSYNCPARAM (#308), is dropped at the load with the serial held above it:
+// the zone's next copy is read as at a first load.
+func TestAStoredReadingThatNoLongerReadsIsDropped(t *testing.T) {
+	path, hdb := storeDB(t)
+	legacy := &Instructions{Records: []InstrRecord{{"alpha", "alpha.example.", ""}, {"beta", "beta.example.", ""}}}
+	five := at(t, 5, "alpha")
+	if err := loadStore(t, hdb).update(storeZone, func(z *zoneSerials) error {
+		z.Active = &heldSerial{SerialDigest: sd(legacy), Reading: legacy}
+		z.Held = []heldSerial{{SerialDigest: sd(five), Reading: five}}
+		z.Enforced = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := loadStore(t, openStoreDB(t, path))
+	if st := status(t, s, storeZone); st.Active != nil || st.Newest != nil {
+		t.Errorf("after the load: active %s newest %s; want none, none", serialOf(st.Active), serialOf(st.Newest))
+	}
+	s.Note(storeZone, five, nil)
+	if st := status(t, s, storeZone); st.Active == nil || *st.Active != sd(five) {
+		t.Errorf("the next copy: active %s; want 5", serialOf(st.Active))
+	}
+}
+
 // The agent's and the auditor's initialisation read the stored serials:
 // a zone's status shows them before its first load, and the first load of
 // the same copy changes nothing.

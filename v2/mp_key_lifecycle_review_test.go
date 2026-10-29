@@ -517,8 +517,7 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	}
 	// the zone's signers change: this provider is no longer one
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}}}})
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
+	setHSYNCPARAM(apex, mpzd.ZoneName, &core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}})
 	mpzd.Data.Set(mpzd.ZoneName, *apex)
 	mpzd.InstallInitialSnapshot()
 	if e.driver(mpzd.ZoneName) != nil {
