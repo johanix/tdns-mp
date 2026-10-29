@@ -234,16 +234,18 @@ type zoneHandover struct {
 }
 
 type waitingUpdate struct {
-	zone   ZoneName // as the caller named it
-	update *ZoneUpdate
-	distID string
+	zone    ZoneName // as the caller named it
+	update  *ZoneUpdate
+	distID  string
+	removed []string // what the combiner removed on a word that was not final
 }
 
 type sentUpdate struct {
-	zone   ZoneName // as the caller named it
-	update *ZoneUpdate
-	under  *ActingHandover
-	at     time.Time
+	zone    ZoneName // as the caller named it
+	update  *ZoneUpdate
+	under   *ActingHandover
+	at      time.Time
+	removed []string // as waitingUpdate's
 }
 
 // handoverMaxWaiting is how many updates may wait for a zone's hand-over:
@@ -376,11 +378,14 @@ func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string)
 // while the combiner held another serial than this agent now wants is not
 // final, and nor is one from a combiner that says it acts by another
 // serial than the one the update was sent under (acting, plan S8): the
-// update is sent again, under the serial wanted. handled says the word
-// goes no further.
-func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus, acting *ActingStamp) (handled bool) {
+// update is sent again, under the serial wanted. What the combiner removed
+// in such a word is gone whatever the serial, and its answer to the update
+// sent again cannot name it, since it no longer holds it: the removed
+// records are kept with the update and returned with the final word, which
+// names them (carried). handled says the word goes no further.
+func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus, acting *ActingStamp, removed []string) (handled bool, carried []string) {
 	if t == nil || status == transport.ConfirmPending {
-		return t != nil && t.isHandover(distID)
+		return t != nil && t.isHandover(distID), nil
 	}
 	t.mu.Lock()
 	for zone, z := range t.zones {
@@ -393,7 +398,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 			z.held = nil
 			t.mu.Unlock()
 			lgEngine.Warn("the combiner refused the hand-over; its own read says what it holds", "zone", zone, "handover", h.String(), "status", status.String())
-			return true
+			return true, nil
 		}
 		// a forget is told until a hand-over that tells it is confirmed
 		z.held, z.heldAt, z.reset = h, time.Now(), z.reset && !h.Reset
@@ -406,12 +411,12 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 		t.drain(zone)
 		t.send(send)
 		t.told(zone)
-		return true
+		return true, nil
 	}
 	s := t.sent[distID]
 	if s == nil {
 		t.mu.Unlock()
-		return false
+		return false, nil
 	}
 	delete(t.sent, distID)
 	z := t.zones[handoverKey(string(s.zone))]
@@ -420,20 +425,20 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 	switch status {
 	case transport.ConfirmFailed, transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmPartial:
 	default:
-		return false
+		return false, s.removed
 	}
 	if !stale {
-		return false
+		return false, s.removed
 	}
 	lgEngine.Info("the combiner's word on an update sent under another serial is not final: sending it again", "zone", s.zone, "distrib", distID, "status", status.String(), "sentUnder", s.under.String())
 	// it waits behind what waits already, and goes out as they do
 	key := handoverKey(string(s.zone))
 	t.mu.Lock()
 	z = t.zone(key)
-	z.waiting = append(z.waiting, waitingUpdate{zone: s.zone, update: s.update, distID: distID})
+	z.waiting = append(z.waiting, waitingUpdate{zone: s.zone, update: s.update, distID: distID, removed: append(slices.Clip(s.removed), removed...)})
 	t.mu.Unlock()
 	t.drain(key)
-	return true
+	return true, nil
 }
 
 // unsent forgets an update the gate let through and the queue then
@@ -466,7 +471,7 @@ func (t *handoverTracker) drain(zone string) {
 		}
 		w := z.waiting[0]
 		z.draining = true
-		t.sent[w.distID] = &sentUpdate{zone: w.zone, update: w.update, under: z.held, at: time.Now()}
+		t.sent[w.distID] = &sentUpdate{zone: w.zone, update: w.update, under: z.held, at: time.Now(), removed: w.removed}
 		t.mu.Unlock()
 		_, err := t.enqueue(w.zone, w.update, w.distID)
 		t.mu.Lock()
