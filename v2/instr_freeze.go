@@ -123,8 +123,12 @@ func (s *InstructionStore) transitionVoters(zone string) []string {
 	if z == nil || z.Active == nil {
 		return nil
 	}
+	other := z.agreeing()
+	if z.From != nil {
+		other = z.From
+	}
 	var out []string
-	for _, h := range []*heldSerial{z.Active, z.From, z.agreeing()} {
+	for _, h := range []*heldSerial{z.Active, other} {
 		if h == nil {
 			continue
 		}

@@ -447,6 +447,11 @@ func (conf *Config) reofferZoneKey(ctx context.Context, zone ZoneName, zk *zoneK
 	if running > 0 || time.Since(b.lastOffer(zone)) < keyOfferEvery || zk.held.key == nil {
 		return true
 	}
+	// an offer the freeze holds is not made, and counts as none: it goes
+	// at the next round that the hold lets through
+	if held, _ := conf.offerHeld(ctx, zone); held {
+		return true
+	}
 	lgAgent.Info("the parent has not taken the zone's SIG(0) key, offering it again", "zone", zone, "keyid", zk.held.keyid,
 		"parent_state", edns0.KeyStateToString(zk.held.parentState), "in", keyOfferEvery)
 	if unpublished {

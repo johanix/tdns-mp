@@ -570,3 +570,42 @@ func TestTheKEYSentAgainCarriesItsPublishInstruction(t *testing.T) {
 		t.Errorf("the KEY was sent again with the publish instruction %+v", u.Publish)
 	}
 }
+
+// While the zone reconciles, its other serial is the one it reconciles
+// from: a serial held above the active one, the next transition's, is not
+// asked for the key.
+func TestWhileReconcilingTheKeyIsNotAskedUnderANewerHeldSerial(t *testing.T) {
+	r := newFreezeRig(t, "reconciling.key.example.")
+	const roleC = "c.role.example."
+	next := jAt(t, 43, `servers="a,b,c" nsmgmt="agent" suffix="next"`, append(slices.Clone(freezeRecords), `3600 IN HSYNC3 ON c c.role.example. .`)...)
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Active = &heldSerial{SerialDigest: sd(r.v), Reading: r.v, Since: time.Now()}
+		z.From = &heldSerial{SerialDigest: sd(r.n), Reading: r.n, Since: time.Now()}
+		z.Held = []heldSerial{{SerialDigest: sd(next), Reading: next, Since: time.Now()}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.store.transitionVoters(r.zone); slices.Contains(got, roleC) || !slices.Contains(got, roleB) {
+		t.Errorf("reconciling from 41 to 42 with 43 held, the key is asked of %v: want b and not c", got)
+	}
+}
+
+// An offer again that the freeze holds is not made, and counts as none: it
+// goes at the next round once a rollover under way waits on the key, not
+// keyOfferEvery later.
+func TestAnOfferTheFreezeHoldsIsNotCountedAsMade(t *testing.T) {
+	r := newKeyRoundRig(t, "offer.held.example.", "UPDATE")
+	r.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, _ string, keyid uint16, _ uint8) { r.polls <- keyid }
+	k := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	r.publish(t, k)
+	r.caughtUp()
+	freezeServed(t, r.conf, r.mpzd)
+	r.decide(nil)
+	r.notPolled(t, "an offer again during the freeze")
+	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.mpzd.ZoneName, Rollover: true, Received: time.Now()})
+	r.decide(nil)
+	if keyid := r.polled(t, "the offer once a rollover waits on the key"); keyid != k.keyid {
+		t.Errorf("key %d offered, want %d", keyid, k.keyid)
+	}
+}
