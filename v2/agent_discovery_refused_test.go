@@ -262,32 +262,36 @@ func TestAFewRefusedHellosStartNoLookup(t *testing.T) {
 }
 
 // When the interval has passed and the peer still refuses, it is looked up
-// again. Here the older record is still served at the first lookup and
-// replaced before the second, which finds the current key.
+// again. Here Bob's JWK record still holds the older key at its second
+// lookup, the first after his refusals, and his current key from the third
+// on: the one made once the interval has passed.
 func TestAPeerThatStillRefusesIsLookedUpAgainAfterTheInterval(t *testing.T) {
 	const interval = 500 * time.Millisecond
 	s := newRefusedHelloScenario(t, true)
 	s.alice.Bridge.rediscoveryInterval = interval
 	s.publishBob(newHarnessKey(t))
+	// The first lookup after the refusals, the second of Bob's JWK record,
+	// returns the older key again; the zone serves his current key from the
+	// next one on. As it answers that lookup it notes when Alice booked it:
+	// the interval runs from there, and the booking is before the server
+	// counts the lookup. The zone does both, not this goroutine, which a
+	// loaded machine may hold until after the next lookup (#304).
+	booked := make(chan time.Time, 1)
+	s.zone.setAfter("dns."+s.bob.Identity, core.TypeJWK, 2, dnsDiscoveryRecords(s.bob.Identity, s.bobListens, s.bobKey),
+		func() { booked <- lookedUpAt(s.alice, s.bob.Identity) })
 	s.discovers(t, s.alice, s.bob)
 	s.discovers(t, s.bob, s.alice)
 	s.release()
 
-	// The first lookup after the refusals returns the older key again.
-	deadline := time.Now().Add(5 * time.Second)
-	for s.bobJWKLookups() < 2 {
-		if time.Now().After(deadline) {
-			t.Fatal("Alice did not look Bob up again after his refusals")
-		}
-		time.Sleep(5 * time.Millisecond)
+	var first time.Time
+	select {
+	case first = <-booked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Alice did not look Bob up again after his refusals")
 	}
-	// The interval runs from when Alice booked that lookup, which is before
-	// the server counted it (#304).
-	first := lookedUpAt(s.alice, s.bob.Identity)
 	if first.IsZero() {
 		t.Fatal("Alice looked Bob up again with no lookup on her books")
 	}
-	s.publishBob(s.bobKey)
 
 	waitForDNSState(t, s.alice, s.bob.Identity, transport.PeerStateOperational, 10*time.Second)
 	if waited := time.Since(first); waited < interval*9/10 {
