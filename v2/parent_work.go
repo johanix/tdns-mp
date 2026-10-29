@@ -57,7 +57,9 @@ func (conf *Config) parentWorkUnderWay(zone string) string {
 // cancelParentWork ends the leader's work towards the zone's parent: every
 // run is cancelled, with why as its cause, and the chain is dropped as
 // delegationSyncNotLeading drops it, its held NOTIFY and its scheduled asks
-// with it. Each run leaves its list when it has returned.
+// with it. Each run leaves its list when it has returned. At the thaw's
+// turn nothing it drops is lost: the end of the freeze takes the zone up
+// (takeUp), and the leader's sync is asked for again.
 func (conf *Config) cancelParentWork(zone, why string) {
 	c := &conf.InternalMp.delegationSyncChains
 	cause := parentWorkCancelled{why: why}

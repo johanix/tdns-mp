@@ -698,10 +698,12 @@ func (conf *Config) fetchAgreed(zone string) {
 // fetchInstructions asks member for the zone's instructions at sd, an RFI
 // CONFIG of subtype "instructions", at most once a minute for the same
 // serial and member, and keeps the answer when its records give sd (Hold).
-// Only the agent asks: it has the RFI's waiters.
+// The agent and the auditor ask: both keep serials (rule 3) and have the
+// RFI's waiters. An auditor whose transfer skipped a thaw's from-serial
+// gets it from a member, as no transfer brings it any more.
 func (conf *Config) fetchInstructions(zone string, sd SerialDigest, member, why string) {
 	ar, msgQs := conf.InternalMp.AgentRegistry, conf.InternalMp.MsgQs
-	if tdns.Globals.App.Type != AppTypeMPAgent || ar == nil || ar.LocalAgent == nil || msgQs == nil {
+	if app := tdns.Globals.App.Type; app != AppTypeMPAgent && app != AppTypeMPAuditor || ar == nil || ar.LocalAgent == nil || msgQs == nil {
 		return
 	}
 	key := fmt.Sprintf("%s %d %s %s", canonicalName(zone), sd.Serial, sd.Digest, canonicalName(member))

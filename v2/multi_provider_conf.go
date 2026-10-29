@@ -178,7 +178,7 @@ type MultiProviderConf struct {
 // FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.
 func (c *MultiProviderConf) FindAgent(identity string) *PeerConf {
 	for _, a := range c.Agents {
-		if a.Identity == identity {
+		if sameName(a.Identity, identity) {
 			return a
 		}
 	}

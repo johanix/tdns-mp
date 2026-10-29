@@ -15,6 +15,7 @@ package tdnsmp
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,8 +80,15 @@ func newRefusedHelloScenarioWith(t *testing.T, authorize bool, cfg hsync.Config)
 			}
 		}
 	}
+	// Each engine makes its discoveries one at a time: the harness retry
+	// starts one every 50 ms while a peer is NEEDED, also while the one
+	// MarkNeeded started is still running, and two discoveries through a
+	// cache that holds nothing yet both ask the server (#304).
 	for _, pe := range []*peerEnv{s.alice, s.bob} {
-		s.engines[pe] = startHarnessEngine(t, env, pe, cfg, held)
+		serial := func(deps *hsync.Deps) {
+			deps.Transport = serialDiscovery{TransportBridge: deps.Transport, mu: &sync.Mutex{}}
+		}
+		s.engines[pe] = startHarnessEngine(t, env, pe, cfg, held, serial)
 	}
 	return s
 }
@@ -124,6 +132,17 @@ func refusedInARow(pe *peerEnv, peer string) int {
 		return r.inARow
 	}
 	return 0
+}
+
+// lookedUpAt is when pe last booked a lookup of peer past the cache.
+func lookedUpAt(pe *peerEnv, peer string) time.Time {
+	tm := pe.Bridge
+	tm.refusedHellosMu.Lock()
+	defer tm.refusedHellosMu.Unlock()
+	if r := tm.refusedHellos[peer]; r != nil {
+		return r.rediscovered
+	}
+	return time.Time{}
 }
 
 // waitForRefusals waits until peer has refused n of pe's hellos in a row.
@@ -262,7 +281,12 @@ func TestAPeerThatStillRefusesIsLookedUpAgainAfterTheInterval(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	first := time.Now()
+	// The interval runs from when Alice booked that lookup, which is before
+	// the server counted it (#304).
+	first := lookedUpAt(s.alice, s.bob.Identity)
+	if first.IsZero() {
+		t.Fatal("Alice looked Bob up again with no lookup on her books")
+	}
 	s.publishBob(s.bobKey)
 
 	waitForDNSState(t, s.alice, s.bob.Identity, transport.PeerStateOperational, 10*time.Second)
