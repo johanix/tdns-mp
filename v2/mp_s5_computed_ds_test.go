@@ -208,7 +208,8 @@ func TestALeaderThatDoesNotSignComputesTheDSSet(t *testing.T) {
 
 // The set needs every signing provider, a record for every ds=1 key, and
 // a zone that names signers; our own provider's share, when it signs and
-// its signer does not own the zone, is that signer's inventory; and the
+// its signer does not own the zone, is that signer's inventory, empty when
+// the signer says it does not sign; and the
 // owner's inventory, when our signer owns the zone, is the answer, not the
 // computed set.
 func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
@@ -329,6 +330,16 @@ func TestTheComputedSetNeedsEverySigningProvider(t *testing.T) {
 	}
 	if n := o.requests(t); n != 1 {
 		t.Errorf("our share changing: %d sync requests, want 1", n)
+	}
+	// an inventory marked not signing is an empty share: its keys are no
+	// DS set's source (plan S11), whatever their ds
+	ours.DS = &yes
+	o.conf.noteKeyInventory(o.ctx, o.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: oz, Inventory: []KeyInventoryItem{ours}, Owned: false, NotSigning: true})
+	if known, tags := o.dsSet(t); !known || len(tags) != 1 || tags[ours.KeyTag] {
+		t.Errorf("our signer not signing: known=%v tags=%v, want p2's KSK alone", known, tags)
+	}
+	if n := o.requests(t); n != 0 {
+		t.Errorf("a share that stayed empty: %d sync requests, want 0", n)
 	}
 
 	// our signer owns the zone: its inventory is the answer (A2.3), the

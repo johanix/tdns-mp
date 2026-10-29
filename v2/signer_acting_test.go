@@ -225,6 +225,26 @@ func TestASignersCopyNewerThanTheHandOverIsActedBy(t *testing.T) {
 	}
 }
 
+// A hand-over computes the multi-provider data on a wrapper, outside the
+// zone's lock, while a status read ranges over the zone's options map
+// without one: the options the hand-over sets go in a map of their own, and
+// the one the zone held is not written (CodeRabbit on tdns-mp #299).
+func TestAHandOverWritesNoOptionsMapTheZoneHeld(t *testing.T) {
+	const zone = "options.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us"`)...)
+	before := r.mpzd.MP.MPdata.Options
+	if before[tdns.OptMultiSigner] {
+		t.Fatal("one signer, and multi-signer: the test does not tell")
+	}
+	r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+	if !r.mpzd.MP.MPdata.Options[tdns.OptMultiSigner] {
+		t.Fatal("a hand-over of two signers did not set multi-signer")
+	}
+	if before[tdns.OptMultiSigner] {
+		t.Error("the hand-over wrote the options map the zone held before it")
+	}
+}
+
 // The other signers' DNSKEYs stay, as foreign rows, while the sets handed
 // keep them, whatever the copy says; a hand-over that ends multi-signer
 // mode drops them.
