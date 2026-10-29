@@ -56,6 +56,17 @@ type discoveryZone struct {
 	// denialTTL is how long a resolver may cache the answer that a record
 	// is not there, in seconds (cacheDenials).
 	denialTTL uint32
+	// next is what the zone publishes after a given answer (setAfter).
+	next *nextRRsets
+}
+
+// nextRRsets are RRsets the zone publishes once it has answered the query
+// for key the nth time; then, when given, is called as it does.
+type nextRRsets struct {
+	key  string
+	n    int
+	rrs  []dns.RR
+	then func()
 }
 
 func rrsetKey(name string, rrtype uint16) string {
@@ -96,8 +107,16 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 		m.Authoritative = true
 		q := r.Question[0]
 		z.mu.Lock()
-		z.queries[rrsetKey(q.Name, q.Qtype)]++
-		rrs := z.rrsets[rrsetKey(q.Name, q.Qtype)]
+		key := rrsetKey(q.Name, q.Qtype)
+		z.queries[key]++
+		rrs := z.rrsets[key]
+		if nx := z.next; nx != nil && nx.key == key && z.queries[key] >= nx.n {
+			z.next = nil
+			z.setLocked(nx.rrs...) // this answer is still the RRset before
+			if nx.then != nil {
+				nx.then()
+			}
+		}
 		denialTTL := z.denialTTL
 		z.mu.Unlock()
 		// The SOA's TTL and minimum are what a denial is cached for. They
@@ -151,6 +170,23 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 func (z *discoveryZone) set(rrs ...dns.RR) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.setLocked(rrs...)
+}
+
+// setAfter publishes rrs once the server has answered the nth query for name
+// and rrtype: that answer is the RRset before, and every later one sees rrs.
+// then, when not nil, is called right then, with the zone locked. A test
+// that changes a record between two lookups has the zone change it, not its
+// own goroutine, which a loaded machine may hold until after the next lookup
+// (#304).
+func (z *discoveryZone) setAfter(name string, rrtype uint16, n int, rrs []dns.RR, then func()) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.next = &nextRRsets{key: rrsetKey(name, rrtype), n: n, rrs: rrs, then: then}
+}
+
+// setLocked is set, with z.mu held.
+func (z *discoveryZone) setLocked(rrs ...dns.RR) {
 	seen := map[string]bool{}
 	for _, rr := range rrs {
 		key := rrsetKey(rr.Header().Name, rr.Header().Rrtype)
