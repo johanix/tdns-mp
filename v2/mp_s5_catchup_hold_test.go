@@ -135,6 +135,7 @@ func TestBothSyncCommandsAreHeld(t *testing.T) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, h.mpzd.KeyDB, z)
 	h.parent.holdsNS("ns1."+z, h.oldNS) // the parent has an NS the zone no longer lists
 	h.q <- tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: z, ZoneData: h.mpzd.ZoneData,
 		SyncStatus: tdns.DelegationSyncStatus{ZoneName: z}}

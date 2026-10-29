@@ -33,7 +33,8 @@ import (
 // again: the next pass finds this agent no leader.
 //
 // held reports that the zone was frozen when the poll was to start (plan
-// S6): it did not run, and is not booked as run.
+// S6), and no rollover under way waited for the key (S14): it did not run,
+// and is not booked as run.
 func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) (held bool) {
 	for {
 		runCtx, done := conf.delegationSyncRun(ctx, string(zone))
@@ -60,9 +61,10 @@ func (conf *Config) keyPollOnce(ctx, runCtx context.Context, zone ZoneName, keyN
 		lgElect.Info("the key poll is not started: this agent takes no part in the zone", "zone", zone)
 		return false, false
 	}
-	// Nor while the zone is frozen (plan S6): the take-up when the
+	// Nor while the zone is frozen (plan S6), unless a rollover under way
+	// waits for the parent to trust the key (S14): the take-up when the
 	// transition is done starts it (takeUp)
-	if held, why := conf.syncHeld(string(zone), syncOther); held {
+	if held, why := conf.offerHeld(ctx, zone); held {
 		lgElect.Info("the key poll is not started during the transition", "zone", zone, "phase", why)
 		return false, true
 	}

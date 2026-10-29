@@ -109,6 +109,35 @@ func (s *InstructionStore) activeVoters(zone string) []string {
 	return nil
 }
 
+// transitionVoters are the zone's voting members under its active serial
+// and, during a transition, under its other serial: the from-serial while it
+// reconciles, the serial agreed on while it agrees. The zone's SIG(0) key is
+// asked of them all (design 6, plan S14).
+func (s *InstructionStore) transitionVoters(zone string) []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	if z == nil || z.Active == nil {
+		return nil
+	}
+	var out []string
+	for _, h := range []*heldSerial{z.Active, z.From, z.agreeing()} {
+		if h == nil {
+			continue
+		}
+		_, voting := participantsOf(h.Reading)
+		for _, id := range voting {
+			if !isAmong(out, AgentId(id)) {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
 // zoneFrozen is why the zone is frozen at this agent; nil when it is not.
 func (conf *Config) zoneFrozen(zone string) []string {
 	return conf.InternalMp.Instructions.frozen(zone)

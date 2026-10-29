@@ -888,7 +888,9 @@ func TestASyncStoppedBecauseThisAgentLeftIsNoFailure(t *testing.T) {
 		before, after func(us, peer string) ([]h3rec, []string)
 	}{
 		{"its role is taken", "left.update.example.",
-			func(us, peer string) ([]h3rec, []string) { return []h3rec{{us, true}, {peer, true}}, []string{us, peer} },
+			func(us, peer string) ([]h3rec, []string) {
+				return []h3rec{{us, true}, {peer, true}}, []string{us, peer}
+			},
 			func(us, peer string) ([]h3rec, []string) { return []h3rec{{us, true}, {peer, true}}, []string{peer} }},
 		{"the only provider's record turns OFF", "off.alone.update.example.",
 			func(us, _ string) ([]h3rec, []string) { return []h3rec{{us, true}}, []string{us} },
@@ -913,6 +915,7 @@ func syncStoppedBecauseThisAgentLeft(t *testing.T, zone string, before, after fu
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	r.parent.refuses()
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	r.ask()

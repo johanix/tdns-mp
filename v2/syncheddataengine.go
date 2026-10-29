@@ -1578,9 +1578,9 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		return
 	}
 
-	// A CSYNC is taken from the zone's delegation sync leader
-	// only; the sender of any other has been told. What else
-	// the update carries goes on.
+	// A CSYNC or a KEY is taken from the zone's delegation sync
+	// leader only (plan S14 for the KEY); the sender of any
+	// other has been told. What else the update carries goes on.
 	if reason := conf.refuseCsyncNotFromLeader(synchedDataUpdate, msgQs); reason != "" && len(synchedDataUpdate.Update.Operations) == 0 {
 		if synchedDataUpdate.Response != nil {
 			select {
@@ -1706,6 +1706,13 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 					break
 				}
 			}
+		}
+		// The leader's publish instruction goes to the combiner
+		// whether or not its KEY changed the repo: a member may
+		// hold the KEY from before the instruction came with it
+		// (#206)
+		if err == nil && !change && synchedDataUpdate.Update != nil && synchedDataUpdate.Update.Publish != nil {
+			change = true
 		}
 		if err != nil {
 			lgEngine.Error("failed to add remote update to agent data repo", "err", err)

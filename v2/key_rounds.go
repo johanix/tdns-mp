@@ -23,6 +23,11 @@ import (
 // round at once. A round asks every agent of zoneKeyPeers again, also one
 // that said "no key" before: it may have got the key since.
 //
+// An answer counts only when its stamp carries the active serial this agent
+// had when the round went out, and the round starts over when this agent's
+// active serial changes (plan S14, design rule 6): a "no key here" told
+// under other instructions says nothing of the voting members under these.
+//
 // A key request is an entry of its own kind on the per-peer sender: CONFIG
 // sig0key, with the round's nonce and distribution ID, sent one at a time,
 // never renamed or retried (the next round asks again), and outside the
@@ -64,6 +69,7 @@ const (
 	keyNotTaken    = "not taken"    // the request was not delivered
 	keyNoData      = "no data"      // an answer with no data: not "no key"
 	keySeveral     = "several KEYs" // its apex carries several KEYs: not "no key"
+	keyOtherSerial = "other serial" // a key or "no key" told under another active serial: counts for nothing (S14)
 )
 
 // sig0StatusSeveral is the holder's status when the apex of its copy of the
@@ -74,6 +80,7 @@ type keyReply struct {
 	outcome string
 	detail  string
 	data    map[string]string
+	instr   *MsgStamp // the answerer's stamp
 }
 
 // keyRound is a zone's entry in keyWanted.
@@ -85,6 +92,10 @@ type keyRound struct {
 	decided bool // the round's decision has started
 	asked   []AgentId
 	answers map[AgentId]keyReply
+	// serial is this agent's active serial when the round went out (known
+	// false: it knew none); only an answer stamped with it counts
+	serial SerialDigest
+	known  bool
 }
 
 // keyReq is one key request of a round.
@@ -113,6 +124,10 @@ type keyHooks struct {
 	wants func(ctx context.Context, zone ZoneName) bool
 	// peers: the agents asked (zoneKeyPeers).
 	peers func(zone ZoneName) []AgentId
+	// active: this agent's active serial for the zone, and whether it
+	// knows one (S14). Reads the store: never called under the tracker's
+	// lock.
+	active func(zone ZoneName) (SerialDigest, bool)
 	// prepare registers the request's answer and its window, before the
 	// request is queued.
 	prepare func(kr *keyReq)
@@ -244,7 +259,8 @@ func (t *catchUpTracker) keyPass(ctx context.Context) {
 			continue
 		}
 		peers := t.hooks.peers(zone)
-		decide := t.startKeyRound(ctx, zone, peers)
+		serial, known := t.hooks.active(zone)
+		decide := t.startKeyRound(ctx, zone, peers, serial, known)
 		if decide != nil {
 			decide()
 		}
@@ -253,9 +269,10 @@ func (t *catchUpTracker) keyPass(ctx context.Context) {
 
 // startKeyRound sends the zone's round to peers: under the lock, with the
 // tracker's context live, each request is registered, queued and given its
-// waiter. A peer that is not OPERATIONAL is silence at once. It returns the
-// decision, to run outside the lock, when every answer is in already.
-func (t *catchUpTracker) startKeyRound(ctx context.Context, zone ZoneName, peers []AgentId) func() {
+// waiter. A peer that is not OPERATIONAL is silence at once. serial is this
+// agent's active serial as the round goes out. It returns the decision, to
+// run outside the lock, when every answer is in already.
+func (t *catchUpTracker) startKeyRound(ctx context.Context, zone ZoneName, peers []AgentId, serial SerialDigest, known bool) func() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	r := t.keyWanted[zone]
@@ -265,6 +282,7 @@ func (t *catchUpTracker) startKeyRound(ctx context.Context, zone ZoneName, peers
 	t.keyGen++
 	r.gen, r.out, r.decided, r.next = t.keyGen, true, false, time.Time{}
 	r.asked, r.answers = append([]AgentId(nil), peers...), map[AgentId]keyReply{}
+	r.serial, r.known = serial, known
 	for _, peer := range peers {
 		if !t.operational(peer) {
 			r.answers[peer] = keyReply{outcome: keySilent, detail: "not OPERATIONAL"}
@@ -391,11 +409,30 @@ func classifyKeyAnswer(resp *ConfigResponseMsg) keyReply {
 	}
 	switch resp.ConfigData["status"] {
 	case "no sig0 key for zone":
-		return keyReply{outcome: keyNone}
+		return keyReply{outcome: keyNone, instr: resp.Instr}
 	case sig0StatusSeveral:
 		return keyReply{outcome: keySeveral}
 	}
-	return keyReply{outcome: keyGot, data: resp.ConfigData}
+	return keyReply{outcome: keyGot, data: resp.ConfigData, instr: resp.Instr}
+}
+
+// atSerial is a, as the round counts it: a key or a "no key here" stamped
+// with another active serial than the round's, or with none, counts for
+// nothing (S14).
+func (r *keyRound) atSerial(a keyReply) keyReply {
+	if a.outcome != keyGot && a.outcome != keyNone {
+		return a
+	}
+	st := a.instr
+	switch {
+	case !r.known:
+		return keyReply{outcome: keyOtherSerial, detail: "this agent knows no active serial"}
+	case st == nil || !st.Known:
+		return keyReply{outcome: keyOtherSerial, detail: "it tells no active serial"}
+	case st.Active != r.serial.Serial || st.ActiveDigest != r.serial.Digest:
+		return keyReply{outcome: keyOtherSerial, detail: fmt.Sprintf("it tells active %d, this agent %d", st.Active, r.serial.Serial)}
+	}
+	return a
 }
 
 // keyRecord records a request's outcome, if the request is of the round
@@ -414,7 +451,7 @@ func (t *catchUpTracker) keyRecord(ctx context.Context, kr *keyReq, a keyReply) 
 	if r == nil || r.gen != kr.gen {
 		return nil
 	}
-	r.answers[kr.peer] = a
+	r.answers[kr.peer] = r.atSerial(a)
 	return t.keyDecisionLocked(ctx, kr.zone, r)
 }
 
@@ -432,18 +469,26 @@ func (t *catchUpTracker) dropKeyReqLocked(kr *keyReq) {
 }
 
 // keyDecisionLocked returns the round's decision when every agent asked has
-// answered and no decision has started; only one waiter starts it.
+// answered and no decision has started; only one waiter starts it. A round
+// whose active serial is not this agent's any more decides nothing: it
+// starts over.
 func (t *catchUpTracker) keyDecisionLocked(ctx context.Context, zone ZoneName, r *keyRound) func() {
 	if r.decided || len(r.answers) < len(r.asked) {
 		return nil
 	}
 	r.decided = true
-	gen := r.gen
+	gen, serial, known := r.gen, r.serial, r.known
 	answers := make(map[AgentId]keyReply, len(r.answers))
 	for p, a := range r.answers {
 		answers[p] = a
 	}
 	return func() {
+		if now, nowKnown := t.hooks.active(zone); nowKnown != known || now != serial {
+			lgAgent.Info("the zone's active serial changed while its key round was out: the round starts over", "zone", zone,
+				"was", serial.Serial, "now", now.Serial)
+			t.keyRestart(zone)
+			return
+		}
 		done := t.hooks.decide(ctx, zone, answers)
 		t.keyRoundEnded(zone, gen, done)
 	}
