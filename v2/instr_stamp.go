@@ -151,8 +151,8 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 }
 
 // ownStamp is what this agent tells of zone: the serials its store keeps,
-// with its provider's rollover flag, whom the rollover waits on, and its
-// signer's hold.
+// with its provider's rollover flag, whom a rollover under way waits on, and
+// its signer's hold.
 func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
 	st, ok := t.store.stampOf(zone)
 	if !ok {

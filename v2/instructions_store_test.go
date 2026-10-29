@@ -102,6 +102,21 @@ func noteKnown(t *testing.T, s *InstructionStore, zone string, in *Instructions)
 	}
 }
 
+// knownAs has the store keep in as the zone's copy and its active serial,
+// known, in one write. Note and then Know would take the zone through a
+// freeze on the way ("the active serial is not known"), which tells the
+// signer a hold and lets it go again from goroutines of their own.
+func knownAs(t *testing.T, s *InstructionStore, zone string, in *Instructions) {
+	t.Helper()
+	if err := s.update(zone, func(z *zoneSerials) error {
+		z.Copy = sd(in)
+		z.Active, z.Enforced = &heldSerial{SerialDigest: sd(in), Reading: in, Since: time.Now()}, true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func status(t *testing.T, s *InstructionStore, zone string) *InstructionsStatus {
 	t.Helper()
 	st := s.Status(zone)
