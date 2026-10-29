@@ -206,8 +206,9 @@ func TestAMessageIsKeptWhileTheActiveSerialIsNotKnown(t *testing.T) {
 	}
 }
 
-// A message whose sender tells no active serial is taken as before: a kept
-// entry with no serial it was made under could never be released.
+// A message whose sender tells no active serial is taken as before, by an
+// agent that knows its own; one that knows none keeps it, and takes it at
+// the release (TestACatchUpAnswerIsKeptWhileTheActiveSerialIsUnknown, S9).
 func TestAMessageWithNoStampIsTaken(t *testing.T) {
 	r := newReceiveRig(t, "nostamp.receive.example.")
 	r.fromB("d1", nil, r.bNS("ns1.b.example."))

@@ -893,7 +893,9 @@ func (t *catchUpTracker) failLocked(zone ZoneName, peer AgentId, e *catchUpPeer,
 	if e.attempt <= len(catchUpRetryDelays) {
 		in = catchUpRetryDelays[e.attempt-1]
 	}
-	e.State, e.deadline, e.acked = catchUpRetry, now.Add(in), false
+	// a kept answer that arrived for the failed request counts for nothing
+	// now: the request asked again waits for its own answer, in its time
+	e.State, e.deadline, e.acked, e.arrived = catchUpRetry, now.Add(in), false, false
 	if e.attempt == 1 || now.Sub(e.loggedAt) >= catchUpLogEvery {
 		e.loggedAt = now
 		lgCatchUp.Warn("a request for the zone's state failed, asking again", "zone", zone, "peer", peer,

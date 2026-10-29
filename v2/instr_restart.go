@@ -225,7 +225,10 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 		if !conf.leadsUnder(reading, id) {
 			continue
 		}
-		v.take, v.thaw, v.by, v.from = &sd, st.Thaw, id, knownFromLeader
+		v.take, v.by, v.from = &sd, id, knownFromLeader
+		if st.Thaw != nil && st.Thaw.To == sd {
+			v.thaw = st.Thaw // the thaw to the serial taken, as the leader's own rule keeps it
+		}
 		v.fetch = nil
 		return
 	}
