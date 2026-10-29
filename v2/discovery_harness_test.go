@@ -59,7 +59,7 @@ type discoveryZone struct {
 }
 
 func rrsetKey(name string, rrtype uint16) string {
-	return dns.CanonicalName(name) + "/" + dns.TypeToString[rrtype]
+	return canonicalName(name) + "/" + dns.TypeToString[rrtype]
 }
 
 // newDiscoveryZone starts the server; it stops with the test.
@@ -112,9 +112,9 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 		switch {
 		case len(rrs) > 0:
 			m.Answer = append(m.Answer, rrs...)
-		case q.Qtype == dns.TypeSOA && dns.CanonicalName(q.Name) == harnessIdentitySuffix:
+		case q.Qtype == dns.TypeSOA && canonicalName(q.Name) == harnessIdentitySuffix:
 			m.Answer = append(m.Answer, soa)
-		case q.Qtype == dns.TypeNS && dns.CanonicalName(q.Name) == harnessIdentitySuffix:
+		case q.Qtype == dns.TypeNS && canonicalName(q.Name) == harnessIdentitySuffix:
 			m.Answer = append(m.Answer, &dns.NS{
 				Hdr: dns.RR_Header{Name: harnessIdentitySuffix, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
 				Ns:  "ns." + harnessIdentitySuffix,
