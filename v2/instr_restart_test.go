@@ -652,3 +652,41 @@ func TestAGroupElectionReachesAZoneNotLoadedYet(t *testing.T) {
 		t.Errorf("the zone's agents: %v", zad.Agents)
 	}
 }
+
+// While the active serial is not known the agent hands its signer nothing
+// new, but what the signer holds again with the hold set, so that no new
+// rollover starts there (the project owner, 2026-10-29; the signer's side is
+// S6's TestNoRolloverStartsUnderAHold). Once the serial is known the hold
+// goes with the freeze.
+func TestTheSignerIsHeldOnWhatItHoldsWhileTheActiveSerialIsNotKnown(t *testing.T) {
+	r := newThawRig(t, "signerhold.restart.example.", roleA)
+	q := r.withSigner()
+	var msgs []handedMsg
+	newest := func() *ActingHandover {
+		msgs = append(msgs, q.take()...)
+		return newestHanded(msgs)
+	}
+	r.conf.handOverToParts(r.zone)
+	waitUntil(t, "the hand-over at 41", func() bool { h := newest(); return h != nil && h.Serial == 41 && !h.Sets.Hold })
+	held := newest()
+	r.conf.InternalMp.SignerHandover.learned(r.zone, held) // the signer holds it
+	sets := held.Sets
+
+	r.noRecord(r.n) // the record lost: the zone is frozen, no active serial known
+	waitUntil(t, "the hold on what the signer holds", func() bool { h := newest(); return h != nil && h.Sets.Hold })
+	h := newest()
+	r.conf.InternalMp.SignerHandover.learned(r.zone, h) // the signer holds it, with the hold
+	c := *h
+	h = &c
+	h.Sets.Hold = false
+	if h.Serial != 41 || !h.sameAs(&ActingHandover{Zone: h.Zone, Serial: 41, Digest: held.Digest, Newest: held.Newest, Phase: held.Phase, Step: held.Step, Records: held.Records, Sets: sets}) {
+		t.Errorf("the hold carries other than what the signer held: %+v", h)
+	}
+
+	r.hear(roleB, unknownStamp(r.n), true)
+	r.conf.thawTurn(r.zone) // the common newest
+	if r.known() != 41 {
+		t.Fatal("not known")
+	}
+	waitUntil(t, "the hold let go once the serial is known", func() bool { h := newest(); return h != nil && !h.Sets.Hold })
+}
