@@ -840,7 +840,9 @@ func (t *catchUpTracker) step(peer AgentId, now time.Time) (ZoneName, *CatchUp, 
 		case e.State == catchUpDue && !operational:
 			e.State = catchUpNoted
 		}
-		if e.State == catchUpSent {
+		// a kept answer has come: its request waits for nothing more from
+		// the peer, and does not hold one of its eight places
+		if e.State == catchUpSent && !e.arrived {
 			inFlight++
 		}
 	}
@@ -867,7 +869,8 @@ func (t *catchUpTracker) step(peer AgentId, now time.Time) (ZoneName, *CatchUp, 
 
 // sent takes the outcome of a send: an error fails the request; an
 // acknowledgement starts the wait for its answer, unless the answer came
-// first.
+// first. A later deadline set since stands: the answer time that
+// activeChanged gave a kept answer that came before the acknowledgement.
 func (t *catchUpTracker) sent(zone ZoneName, peer AgentId, request string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -880,7 +883,10 @@ func (t *catchUpTracker) sent(zone ZoneName, peer AgentId, request string, err e
 		t.failLocked(zone, peer, e, err.Error(), now)
 		return
 	}
-	e.acked, e.deadline = true, now.Add(catchUpAnswerWait)
+	e.acked = true
+	if d := now.Add(catchUpAnswerWait); e.deadline.Before(d) {
+		e.deadline = d
+	}
 }
 
 // failLocked fails the entry's request: it is asked again after 5 s, 15 s,
