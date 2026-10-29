@@ -433,7 +433,7 @@ func TestAZoneWithOneVotingMemberThawsItself(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	noteKnown(t, r.store, r.zone, n)
+	knownAs(t, r.store, r.zone, n)
 	r.store.Note(r.zone, v, nil)
 	r.hold()
 	r.conf.thawTurn(r.zone)
@@ -450,7 +450,7 @@ func TestAZoneWithNoVotingMemberUnderNThawsWhenTheNewVotersAgree(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	noteKnown(t, r.store, r.zone, n)
+	knownAs(t, r.store, r.zone, n)
 	r.holdUnjudged(v, time.Now())
 	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (not heard)" {
 		t.Fatalf("before b tells: %q", vw.waits)
@@ -684,7 +684,7 @@ func TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	noteKnown(t, r.store, r.zone, old)
+	knownAs(t, r.store, r.zone, old)
 	r.store.Note(r.zone, r.v, nil)
 	if st := status(t, r.store, r.zone); len(st.Refused) == 0 {
 		t.Fatal("precondition: 40 to 42 is not refused")
@@ -730,7 +730,7 @@ func TestAnAuditorFetchesTheThawsFromSerial(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	noteKnown(t, r.store, r.zone, freezeAt(t, 40, "o", "a,b", ""))
+	knownAs(t, r.store, r.zone, freezeAt(t, 40, "o", "a,b", ""))
 	r.store.Note(r.zone, r.v, nil)
 	st := tells(r.v, r.v)
 	st.Thaw = &Thaw{From: sd(r.n), To: sd(r.v)}
@@ -902,6 +902,35 @@ func TestTheLeavingTimeoutIsAboveTheBeatInterval(t *testing.T) {
 	}
 }
 
+// An excusal counts only while its zone agrees on the serial it was made
+// for: the owner's newer serial, which keeps b, ends it, b unheard or not
+// (CodeRabbit on tdns-mp #311).
+func TestAnExcusalEndsWithTheSerialItWasMadeFor(t *testing.T) {
+	r := newThawRig(t, "gateend.thaw.example.", "")
+	pgm := NewProviderGroupManager(roleA)
+	pgm.RecomputeGroups()
+	pg := pgm.GetGroupForZone(ZoneName(r.zone))
+	if pg == nil {
+		t.Fatal("the zone is in no group")
+	}
+	r.conf.InternalMp.AgentRegistry.ProviderGroupManager = pgm
+	r.v = freezeAt(t, 42, "v", "a", "") // b leaves
+	r.holdUnjudged(r.v, time.Now().Add(-leavingTimeoutDefault-time.Minute))
+	if vw := r.view(); len(vw.excused) != 1 {
+		t.Fatalf("b is not excused: %q", vw.excused)
+	}
+	if got := r.conf.gateExcused(pg.GroupHash); len(got) != 1 {
+		t.Fatalf("excused from the gate: %q", got)
+	}
+	r.store.Note(r.zone, freezeAt(t, 43, "w", "a,b", ""), nil) // b stays
+	if st := status(t, r.store, r.zone); st.Agreeing == nil || st.Agreeing.Serial != 43 {
+		t.Fatalf("the zone does not agree on 43: %+v", st)
+	}
+	if got := r.conf.gateExcused(pg.GroupHash); len(got) != 0 {
+		t.Errorf("b is still excused from the gate after the owner kept it: %q", got)
+	}
+}
+
 // A leaving member excused and not heard is left out of the gate of the
 // group under N, so the group can elect without it; the excusal ends when
 // it is heard again.
@@ -980,7 +1009,7 @@ func TestAPausedRolloverDoesNotHoldTheThaw(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	noteKnown(t, r.store, r.zone, n)
+	knownAs(t, r.store, r.zone, n)
 	r.n, r.v = n, v
 	r.holdUnjudged(v, time.Now().Add(-leavingTimeoutDefault-time.Minute))
 	r.hold()

@@ -842,15 +842,26 @@ func (conf *Config) gateExcused(groupHash string) []string {
 	if pg == nil {
 		return nil
 	}
+	// An excusal counts while its zone agrees on the serial it was made
+	// for: a thaw, a refusal or the owner's newer serial ends it.
+	agreed := make(map[string]SerialDigest, len(pg.Zones))
+	for _, zone := range pg.Zones {
+		if in, ok := conf.InternalMp.Instructions.thawInputs(string(zone)); ok && in.agreed != nil {
+			agreed[canonicalName(string(zone))] = in.agreed.SerialDigest
+		}
+	}
 	b := &conf.InternalMp.thaws
 	var out []string
 	b.mu.Lock()
 	for _, zone := range pg.Zones {
-		if zt := b.zones[canonicalName(string(zone))]; zt != nil {
-			for id := range zt.excused {
-				if !slices.Contains(out, id) && !ar.isAgentOperational(AgentId(dns.Fqdn(id))) {
-					out = append(out, id)
-				}
+		key := canonicalName(string(zone))
+		zt := b.zones[key]
+		if a, ok := agreed[key]; !ok || zt == nil || zt.agreed != a {
+			continue
+		}
+		for id := range zt.excused {
+			if !slices.Contains(out, id) && !ar.isAgentOperational(AgentId(dns.Fqdn(id))) {
+				out = append(out, id)
 			}
 		}
 	}
