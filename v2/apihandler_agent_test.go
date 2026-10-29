@@ -463,7 +463,7 @@ func TestOnlySigningProvidersAreNamedSilent(t *testing.T) {
 	const zone = "silent.keys.example."
 	zd := seedZoneWithHSYNC3(t, zone, roleA, roleB, roleN, roleX)
 	apex, _ := zd.GetOwner(zd.ZoneName)
-	hp, err := dns.NewRR(zone + ` 3600 IN HSYNCPARAM servers="a,b" signers="a,n" auditors="x"`)
+	hp, err := dns.NewRR(zone + ` 3600 IN HSYNCPARAM servers="a,b" signers="a,n" auditors="x" serial="2"`)
 	if err != nil {
 		t.Fatalf("HSYNCPARAM: %v", err)
 	}
@@ -498,7 +498,7 @@ func h3RRs(zone string, recs []h3rec, servers []string) []string {
 	for i, s := range servers {
 		labels[i] = memberLabel(s)
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: labels}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: labels}}})
 	return append(out, (&dns.PrivateRR{Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}).String())
 }
 

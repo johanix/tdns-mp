@@ -53,7 +53,14 @@ type keyPollBook struct {
 	logged map[ZoneName]time.Time
 	// retesting: a backstop pass runs (retestKeyHoldsInBackground).
 	retesting atomic.Bool
+	// goroutines: the polls and the backstop passes, each to its end, the
+	// release of the hold after a poll included. Both read the keystore.
+	goroutines sync.WaitGroup
 }
+
+// wait returns when every poll and backstop pass started has ended: what
+// closes the keystore waits for them first.
+func (b *keyPollBook) wait() { b.goroutines.Wait() }
 
 type keyPollEnd struct {
 	keyid     uint16
@@ -360,7 +367,9 @@ func (conf *Config) retestKeyHoldsInBackground(ctx context.Context) {
 	if !b.retesting.CompareAndSwap(false, true) {
 		return
 	}
+	b.goroutines.Add(1)
 	go func() {
+		defer b.goroutines.Done()
 		defer b.retesting.Store(false)
 		conf.retestKeyHolds(ctx)
 	}()
@@ -381,7 +390,9 @@ func (conf *Config) launchKeyPoll(ctx context.Context, tk *keyPollToken, zone Zo
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
 		leadStart = lem.LeadStart(zone)
 	}
+	b.goroutines.Add(1)
 	go func() {
+		defer b.goroutines.Done()
 		held := false
 		defer func() {
 			// finished: this agent still leads the zone in the lead the

@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26).
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -36,6 +36,13 @@ Every corner case found in the membership work came from that. A guard per kind 
    - a copy that drops HSYNCPARAM while HSYNC3 stays, or that drops both while more than one provider is listed under the active serial.
 
    A copy whose serial is lower than the highest the agent has held is not adopted, with a warning; an owner who wants old instructions back publishes them with a new, higher serial. A zone whose HSYNCPARAM has no serial is at serial 0, and a change of its instructions at serial 0 is an edit without a raised serial: the key is required for a zone that is to change its providers.
+
+   *Amended 2026-10-28* (the project owner's decisions; plan decisions 106 to 108, tdns-mp #306 and #308). Three more owner errors, each a copy with no reading:
+   - one identity under two HSYNC3 labels, the converse of two records with one label;
+   - HSYNCPARAM without `serial=`;
+   - HSYNC3 without HSYNCPARAM.
+
+   So every reading has HSYNCPARAM and a serial. This replaces, above, the legacy case of the reading's second item, the owner error of a copy that drops HSYNCPARAM while HSYNC3 stays, and the zone at serial 0; the digest still writes the second item. At a first load, with no serial held, a copy with no reading starts no multi-provider work until one that reads arrives; with a serial held, it holds the zone (3.6). Rule 5's part with "a zone whose copy carries no serial" no longer arises. tdns parses these records as before, and a zone keeps loading and being served.
 3. **Each agent keeps serials per zone, on disk.** The **active** serial it acts by, with its instructions; the serial it was thawed from, with its instructions, until the transition is done; every newer serial it has held and told, with its instructions, until a transition passes it; the highest serial it has ever held; the last thaw it heard; and the zone's phase, its current step and that step's sets (3.5). Each agent's combiner and signer keep, on disk, the last serial and the sets their agent handed them. None of this is lost at a restart. An operator command forgets a zone's stored serials; it is for a steady zone only, run at every agent of the zone together. A zone that leaves an agent's configuration takes its serials with it. An agent changes its active serial only as 3.2 and 3.4 say: at the leader's word, a voting member's first-hand relay of it, or, for a zone with no voting member under N, the tellings of every voting member under the new serial.
 4. **What an agent tells, it tells first hand.** Every message an agent sends carries, for the zone it concerns: its active serial, its newest serial and the serial it agrees on (3.1), each with its digest; the last thaw it heard, whether it refuses its newest serial and why, and whether its provider has a key rollover under way. With it, each agent tells its own provider's nameserver names, from its configuration, and the removals under way it holds, with the step it holds. A telling counts for the thaw only while it is fresh: heard within the configured time of 3.2, since what it says of rollovers can change after it was sent (3.7). A beat carries this for each zone the sender has something to do for: every zone that is not steady at it, every zone with an owner error or a refused serial, and every zone with work owed, kept or under way (membership decision 24). A zone steady at both agents with nothing to do needs nothing told. A receiver knows at once whether the two are in step, and if not, which of them lags.
 

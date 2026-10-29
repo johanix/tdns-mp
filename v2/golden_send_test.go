@@ -79,6 +79,14 @@ func goldenSendMessages(t *testing.T) []struct {
 			KeyInventory: []KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "active",
 				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA=="}},
 		}, you))},
+		{"send-keystate-inventory-marks", must(keystateAppMessage(&PeerKeystateRequest{
+			SenderID: me, Zone: zone, Signal: "inventory", Message: "full set", Timestamp: ts,
+			KeyInventory: []KeyInventoryEntry{{KeyTag: 12345, Algorithm: 15, Flags: 257, State: "mpdist",
+				KeyRR: "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA=="}},
+			Acting: &ActingHandover{Zone: zone, Serial: 42, Digest: "9c01aa47b2e3f650", Records: []string{"x"}, Newest: 42,
+				Phase: PhaseSteady, Made: ts, Sets: Roles{Signing: []Provider{{Label: "us", Identity: me}}, Hold: true}},
+			NotSigning: true, Rollover: true, WaitsOn: map[uint16][]string{12345: {"p2"}}, Hold: true,
+		}, you))},
 		{"send-keystate-signal", must(keystateAppMessage(&PeerKeystateRequest{
 			SenderID: me, Zone: zone, KeyTag: 12345, Algorithm: 15, Signal: "propagated", Message: "ok", Timestamp: ts,
 		}, you))},
@@ -109,21 +117,22 @@ func TestGoldenWireSendPayloads(t *testing.T) {
 		token, scope, dist string
 		fireAndForget      bool
 	}{
-		"send-sync":               {"sync", "zone1.example.", "dist-001", false},
-		"send-sync-default":       {"sync", "zone1.example.", "dist-001", false},
-		"send-update":             {"update", "zone1.example.", "dist-001", false},
-		"send-rfi":                {"rfi", "zone1.example.", "dist-001", false},
-		"send-rfi-noid":           {"rfi", "zone1.example.", "", false},
-		"send-sync-instr":         {"sync", "zone1.example.", "dist-001", false},
-		"send-rfi-instr":          {"rfi", "zone1.example.", "dist-001", false},
-		"send-rfi-catchup":        {"rfi", "zone1.example.", "dist-001", false},
-		"send-sync-catchup":       {"sync", "zone1.example.", "dist-001", false},
-		"send-keystate-inventory": {"keystate", "zone1.example.", "", false},
-		"send-keystate-signal":    {"keystate", "zone1.example.", "", false},
-		"send-edits":              {"edits", "zone1.example.", "", false},
-		"send-config":             {"config", "zone1.example.", "", false},
-		"send-audit":              {"audit", "zone1.example.", "", false},
-		"send-status-update":      {"status-update", "zone1.example.", "", true},
+		"send-sync":                     {"sync", "zone1.example.", "dist-001", false},
+		"send-sync-default":             {"sync", "zone1.example.", "dist-001", false},
+		"send-update":                   {"update", "zone1.example.", "dist-001", false},
+		"send-rfi":                      {"rfi", "zone1.example.", "dist-001", false},
+		"send-rfi-noid":                 {"rfi", "zone1.example.", "", false},
+		"send-sync-instr":               {"sync", "zone1.example.", "dist-001", false},
+		"send-rfi-instr":                {"rfi", "zone1.example.", "dist-001", false},
+		"send-rfi-catchup":              {"rfi", "zone1.example.", "dist-001", false},
+		"send-sync-catchup":             {"sync", "zone1.example.", "dist-001", false},
+		"send-keystate-inventory":       {"keystate", "zone1.example.", "", false},
+		"send-keystate-inventory-marks": {"keystate", "zone1.example.", "", false},
+		"send-keystate-signal":          {"keystate", "zone1.example.", "", false},
+		"send-edits":                    {"edits", "zone1.example.", "", false},
+		"send-config":                   {"config", "zone1.example.", "", false},
+		"send-audit":                    {"audit", "zone1.example.", "", false},
+		"send-status-update":            {"status-update", "zone1.example.", "", true},
 	}
 	for _, tc := range goldenSendMessages(t) {
 		t.Run(tc.Name, func(t *testing.T) {

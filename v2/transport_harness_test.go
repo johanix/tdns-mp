@@ -264,6 +264,10 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 // Pass identities as the FQDNs that should appear in HSYNC3. The
 // harness derives a short label by stripping the first DNS label.
 //
+// With identities, the zone also gets an HSYNCPARAM that lists every
+// label in servers=, at serial 1: a reading needs HSYNCPARAM and its
+// serial (#308), and every provider seeded serves and votes.
+//
 // To create a zone with NO HSYNC3, pass identities=nil. To create a
 // zone where HSYNC3 exists but excludes some identity, just omit it
 // from identities.
@@ -314,6 +318,11 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 			rrset.RRs = append(rrset.RRs, prr)
 		}
 		apex.RRtypes.Set(core.TypeHSYNC3, rrset)
+		servers := make([]string, len(identities))
+		for i, ident := range identities {
+			servers[i] = shortLabel(dns.Fqdn(ident))
+		}
+		setHSYNCPARAM(apex, zoneName, &core.HSYNCPARAMServers{Servers: servers})
 	}
 	zd.Data.Set(zoneName, *apex)
 	// GetOwner/GetRRset read the published snapshot, not zd.Data, since
@@ -332,25 +341,17 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 	return zd
 }
 
-// addHSYNCPARAMServers adds an HSYNCPARAM RRset to a seeded zone granting the
-// "servers" role to the given HSYNC3 labels. Identities present in HSYNC3 but
-// absent from any role become non-participants — the role-less case.
+// addHSYNCPARAMServers replaces a seeded zone's HSYNCPARAM with one granting
+// the "servers" role to the given HSYNC3 labels, at the next serial.
+// Identities present in HSYNC3 but absent from any role become
+// non-participants — the role-less case.
 func addHSYNCPARAMServers(t *testing.T, zd *tdns.ZoneData, serverLabels ...string) {
 	t.Helper()
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
 		t.Fatalf("apex not found for %s: %v", zd.ZoneName, err)
 	}
-	hp := &core.HSYNCPARAM{
-		Value: []core.HSYNCPARAMKeyValue{
-			&core.HSYNCPARAMServers{Servers: serverLabels},
-		},
-	}
-	prr := &dns.PrivateRR{
-		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: hp,
-	}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	setHSYNCPARAM(apex, zd.ZoneName, &core.HSYNCPARAMServers{Servers: serverLabels})
 	zd.Data.Set(zd.ZoneName, *apex)
 	// Re-baseline the published snapshot from the updated working set.
 	zd.InstallInitialSnapshot()
@@ -372,21 +373,35 @@ func seedAuditedZone(t *testing.T, zoneName, auditor string, providers ...string
 	for i, p := range providers {
 		servers[i] = shortLabel(p)
 	}
-	hp := &core.HSYNCPARAM{
-		Value: []core.HSYNCPARAMKeyValue{
-			&core.HSYNCPARAMServers{Servers: servers},
-			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(auditor)}},
-		},
-	}
-	prr := &dns.PrivateRR{
-		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: hp,
-	}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	setHSYNCPARAM(apex, zd.ZoneName,
+		&core.HSYNCPARAMServers{Servers: servers},
+		&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(auditor)}})
 	zd.Data.Set(zd.ZoneName, *apex)
 	zd.InstallInitialSnapshot()
 	Zones.Invalidate(zd.ZoneName)
 	return zd
+}
+
+// setHSYNCPARAM sets the apex's HSYNCPARAM to the keys given and serial=,
+// one above the serial of the HSYNCPARAM it replaces (1 for the first): an
+// edit of the instructions raises the owner's serial.
+func setHSYNCPARAM(apex *tdns.OwnerData, zone string, keys ...core.HSYNCPARAMKeyValue) {
+	serial := uint32(1)
+	if rrs := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNCPARAM).RRs; len(rrs) == 1 {
+		if prr, ok := rrs[0].(*dns.PrivateRR); ok {
+			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+				if prev, ok := hp.GetSerial(); ok {
+					serial = prev + 1
+				}
+			}
+		}
+	}
+	hp := &core.HSYNCPARAM{Value: append(keys, &core.HSYNCPARAMSerial{Value: serial})}
+	prr := &dns.PrivateRR{
+		Hdr:  dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: hp,
+	}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
 }
 
 // shortLabel takes an FQDN and returns its first label, used as a
