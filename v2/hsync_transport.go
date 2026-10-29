@@ -1259,6 +1259,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 
 				ForeignKeys:   payload.ForeignKeys,
 				ForeignSpoken: payload.ForeignSpoken,
+				Hold:          payload.Hold,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
@@ -1289,6 +1290,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Inventory: inventoryItemsOf(payload.KeyInventory),
 		Owned:     payload.Owned,
 		Resend:    payload.Resend,
+		Hold:      payload.Hold,
 		seq:       keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other

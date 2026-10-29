@@ -100,6 +100,14 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			// which providers have spoken (S7): the owner of the zone's key
 			// lifecycle writes ds on their rows from it; for a zone nobody
 			// here owns it has no reader
+			// the agent's word on the zone's key machine (plan S6): kept
+			// whether or not the machine runs here, and confirmed in the
+			// inventory pushed now
+			if sigMsg.Signal == "hold" {
+				conf.signerHold(sigMsg.Zone, sigMsg.Hold)
+				continue
+			}
+
 			if sigMsg.Signal == "foreign" {
 				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.ForeignWord(sigMsg.Zone, sigMsg.ForeignKeys, sigMsg.ForeignSpoken) {
 					lgSigner.Debug("KEYSTATE foreign for a zone whose key lifecycle is not run here; dropped", "zone", sigMsg.Zone)
@@ -183,8 +191,9 @@ func pushKeystateInventory(conf *Config, zone string, resend []uint16) {
 }
 
 // inventoryRequest is the KEYSTATE inventory a signer sends its agent, with
-// the keys its key lifecycle sends again marked (resend, #256).
-func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned bool, resend []uint16) *PeerKeystateRequest {
+// the keys its key lifecycle sends again marked (resend, #256), and whether
+// it holds the zone's key machine (hold, plan S6).
+func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned bool, resend []uint16, hold bool) *PeerKeystateRequest {
 	return &PeerKeystateRequest{
 		SenderID:     sender,
 		Zone:         zone,
@@ -192,6 +201,7 @@ func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned 
 		KeyInventory: inventory,
 		Owned:        owned,
 		Resend:       resend,
+		Hold:         hold,
 		Timestamp:    time.Now(),
 	}
 }
@@ -241,7 +251,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 	}
 
 	// Build and send KEYSTATE inventory
-	req := inventoryRequest(conf.MpConfig().Identity, zone, inventory, owned, resend)
+	req := inventoryRequest(conf.MpConfig().Identity, zone, inventory, owned, resend, conf.InternalMp.SignerHolds.held(zone))
 
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
