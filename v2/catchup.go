@@ -635,6 +635,24 @@ func (t *catchUpTracker) caughtUpLocked(zone ZoneName) (bool, catchUpWait) {
 	return w.OwnRead && len(w.Peers) == 0, w
 }
 
+// openWith are the zones whose catch-up with peer is not done: asked, and
+// not answered complete or with a request outstanding (plan S22).
+func (t *catchUpTracker) openWith(peer AgentId) []ZoneName {
+	if t == nil {
+		return nil
+	}
+	peer = AgentId(dns.Fqdn(string(peer)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ZoneName
+	for zone, peers := range t.peers {
+		if e := peers[peer]; e != nil && (!e.Complete || e.outstanding()) {
+			out = append(out, zone)
+		}
+	}
+	return out
+}
+
 // noteCaughtUpLocked logs the zone's catch-up once, when it is caught up.
 func (t *catchUpTracker) noteCaughtUpLocked(zone ZoneName) {
 	if t.caught[zone] {
