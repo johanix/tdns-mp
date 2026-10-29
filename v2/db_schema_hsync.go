@@ -203,10 +203,11 @@ var HsyncTables = map[string]string{
 		UNIQUE(zone, sender_id)
 	)`,
 
-	// MPActingSerial is what a combiner was handed for a zone by its agent
-	// (combiner_acting.go, plan S10): the serial it acts by, its digest, and
-	// the hand-over itself as JSON (the instructions as records, the step and
-	// its sets). Read before the zones' first load.
+	// MPActingSerial is what a combiner and signer was handed for a zone by
+	// its agent (combiner_acting.go, signer_acting.go, plan S10, S11): the
+	// serial it acts by, its digest, and the hand-over itself as JSON (the
+	// instructions as records, the step and its sets). Read before the zones'
+	// first load.
 	"MPActingSerial": `CREATE TABLE IF NOT EXISTS 'MPActingSerial' (
 		zonename  TEXT NOT NULL,
 		serial    INTEGER,
@@ -363,7 +364,7 @@ var HsyncTables = map[string]string{
 		since         TEXT DEFAULT ''
 	)`,
 	// MPKeyHold are the zones whose key machine the signer holds, at its
-	// agent's word (KEYSTATE "hold", plan S6): nothing new starts. Kept over
+	// agent's word (the hand-over's hold, plan S6, S11): nothing new starts. Kept over
 	// a restart, so that a restarted signer starts no rollover its agent has
 	// told the others it will not start (design 3.7).
 	"MPKeyHold": `CREATE TABLE IF NOT EXISTS 'MPKeyHold' (

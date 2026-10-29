@@ -107,14 +107,6 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			// which providers have spoken (S7): the owner of the zone's key
 			// lifecycle writes ds on their rows from it; for a zone nobody
 			// here owns it has no reader
-			// the agent's word on the zone's key machine (plan S6): kept
-			// whether or not the machine runs here, and confirmed in the
-			// inventory pushed now
-			if sigMsg.Signal == "hold" {
-				conf.signerHold(sigMsg.Zone, sigMsg.Hold)
-				continue
-			}
-
 			if sigMsg.Signal == "foreign" {
 				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.ForeignWord(sigMsg.Zone, sigMsg.ForeignKeys, sigMsg.ForeignSpoken) {
 					lgSigner.Debug("KEYSTATE foreign for a zone whose key lifecycle is not run here; dropped", "zone", sigMsg.Zone)
@@ -199,7 +191,7 @@ func pushKeystateInventory(conf *Config, zone string, resend []uint16) {
 
 // inventoryRequest is the KEYSTATE inventory a signer sends its agent, with
 // the keys its key lifecycle sends again marked (resend, #256), and its
-// marks: whether it holds the zone's key machine (plan S6), and S11's.
+// marks (plan S6, S11).
 func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned bool, resend []uint16, marks inventoryMarks) *PeerKeystateRequest {
 	return &PeerKeystateRequest{
 		SenderID:     sender,
@@ -208,11 +200,11 @@ func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned 
 		KeyInventory: inventory,
 		Owned:        owned,
 		Resend:       resend,
-		Hold:         marks.hold,
 		Acting:       marks.acting,
 		NotSigning:   marks.notSigning,
 		Rollover:     marks.rollover,
 		WaitsOn:      marks.waitsOn,
+		Hold:         marks.hold,
 		Timestamp:    time.Now(),
 	}
 }
@@ -220,15 +212,16 @@ func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned 
 // inventoryMarks are what a signer's inventory says beside its keys (plan
 // S11): the hand-over it holds for the zone (nil: none), that it does not
 // sign the zone by what it acts by, whether a key rollover is under way at
-// this provider (rolloverUnderWay, on its own state), and for each key
-// waiting in mpdist or mpremove, the other signers whose "applied" is
-// missing; and whether it holds the zone's key machine (plan S6).
+// this provider (rolloverUnderWay, on its own state), for each key waiting
+// in mpdist or mpremove, the other signers whose "applied" is missing, and
+// whether it holds the zone's key machine (plan S6), which a signer that
+// does not sign the zone confirms the same way.
 type inventoryMarks struct {
-	hold       bool
 	acting     *ActingHandover
 	notSigning bool
 	rollover   bool
 	waitsOn    map[uint16][]string
+	hold       bool
 }
 
 // inventoryMarksOf are the zone's marks, given its key inventory. A zone
