@@ -136,6 +136,10 @@ type MPTransportBridge struct {
 	// (acting_handover.go, plan S10), which EnqueueForCombiner's gate asks;
 	// nil on every other role and on an agent with no combiner.
 	handover *handoverTracker
+	// notYets: this agent's distributions that a peer answered "not yet",
+	// to be sent again once the two are in step (instr_receive.go, plan
+	// S8).
+	notYets notYetBook
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -452,17 +456,26 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		applied, removed, rejected, ignored := c.AppliedRecords, c.RemovedRecords, c.RejectedItems, c.IgnoredRecords
 		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", c.Nonce)
 		instr := confirmStamp(c.App) // the confirmer's stamp (S5b)
+		// a peer at other instructions than the send has decided nothing
+		// yet (rule 6, plan S8); judged before the confirmation is noted
+		notYet := tm.notYetFrom(distributionID, senderID, status, instr)
 		tm.noteConfirmation(c, instr)
 
+		// the queue's entry is settled whatever the answer: a "not yet" is
+		// sent again when the two are in step, not as the old send
 		if tm.ReliableQueue != nil {
 			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
 		}
 
 		// The combiner's word on a hand-over is the hand-over's alone, and
 		// its refusal of an update sent under another serial is not final:
-		// the update goes again (plan S10).
-		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) && tm.handover.confirmation(distributionID, status) {
+		// the update goes again (plan S10). It tells the serial it acts by
+		// in "acting" (plan S8).
+		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) && tm.handover.confirmation(distributionID, status, confirmActing(c.App)) {
 			return
+		}
+		if notYet {
+			tm.noteNotYet(ZoneName(zone), AgentId(senderID), distributionID, instr)
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -470,7 +483,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		for _, ri := range rejected {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
 		}
-		tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), rejItems)
+		tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), rejItems, notYet)
 
 		// Forward per-RR detail to SynchedDataEngine
 		if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
@@ -479,12 +492,14 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 				Zone:           ZoneName(zone),
 				Source:         senderID,
 				Status:         status.String(),
+				Message:        c.Message,
 				AppliedRecords: applied,
 				RemovedRecords: removed,
 				RejectedItems:  rejItems,
 				IgnoredRecords: ignored,
 				Truncated:      c.Truncated,
 				Instr:          instr,
+				NotYet:         notYet,
 				Timestamp:      time.Now(),
 			}
 			select {
@@ -1682,6 +1697,8 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	// Map status string back to ConfirmStatus
 	status := transport.ConfirmFailed
 	switch detail.Status {
+	case "PENDING":
+		status = transport.ConfirmPending // a kept distribution (plan S8)
 	case "SUCCESS", "ok":
 		status = transport.ConfirmSuccess
 	case "PARTIAL":
@@ -2706,13 +2723,16 @@ func dnskeyKeyTagsOf(records []string) map[uint16]bool {
 // summary) applies every key. An "ignored" answer (a provider that does not
 // sign the zone applies no DNSKEY of ours) is final too, neither applied
 // nor rejected. Pending, and a partial that says nothing about a key,
-// leave that key waiting; the signer's resend timer sends again. An agent
-// has answered once every key has a result from it. Once every expected
-// agent answered, each key's result goes to the signer: "rejected" when
-// any agent rejected it, else "propagated" (or "removed" for a key the
-// distribution removed), with the distribution's send time.
+// leave that key waiting; the signer's resend timer sends again. So does
+// an answer that is "not yet" (notYet: a peer at other instructions than
+// the send, rule 6) for a key it does not apply: its rejection or its
+// "ignored" is no decision, and the key machine reads the key as pending.
+// An agent has answered once every key has a result from it. Once every
+// expected agent answered, each key's result goes to the signer:
+// "rejected" when any agent rejected it, else "propagated" (or "removed"
+// for a key the distribution removed), with the distribution's send time.
 // Returns true if the confirmation was for a DNSKEY propagation.
-func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo) bool {
+func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo, notYet bool) bool {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2730,7 +2750,9 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 		}
 	}
 	if !exists {
-		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
+		// an asker at other instructions than the answer decided nothing
+		// yet about the keys it overtook
+		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) && !notYet {
 			tm.creditFromAnswerLocked(ans, AgentId(source), status, rejectedItems)
 		}
 		return false // Not a DNSKEY propagation confirmation
@@ -2785,6 +2807,8 @@ func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source str
 			continue // a key's first final answer from an agent stands
 		}
 		switch {
+		case notYet && !doneTags[kt]:
+			// no decision yet: sent again when the two are in step
 		case late && (rejectedTags[kt] || (wholeRejection && !doneTags[kt])):
 			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):

@@ -66,7 +66,7 @@ func TestADnskeyItsCombinerRejectedIsSentToItAgain(t *testing.T) {
 	if c0.Status != "PARTIAL" || slices.Contains(c0.AppliedRecords, rec) {
 		t.Fatalf("the stale distribution of the rejected key got %+v, want PARTIAL without the key", *c0)
 	}
-	snd.ProcessDnskeyConfirmation(d0, c0.Source, c0.Status, c0.AppliedRecords, nil)
+	snd.ProcessDnskeyConfirmation(d0, c0.Source, c0.Status, c0.AppliedRecords, nil, false)
 	if !waiting(d0) {
 		t.Fatal("the stale distribution's confirmation ended the sender's propagation of a key the combiner rejected")
 	}
@@ -94,7 +94,7 @@ func TestADnskeyItsCombinerRejectedIsSentToItAgain(t *testing.T) {
 		if slices.Contains(c.AppliedRecords, rec) {
 			t.Fatalf("before the combiner took the key, the sender got %+v", *c)
 		}
-		snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil)
+		snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil, false)
 	}
 	if !waiting(d2) {
 		t.Fatal("the sender's propagation of the key ended before this agent's combiner took it")
@@ -106,7 +106,7 @@ func TestADnskeyItsCombinerRejectedIsSentToItAgain(t *testing.T) {
 	if !slices.Contains(c.AppliedRecords, rec) {
 		t.Fatalf("after the combiner took the key, the sender got %+v", *c)
 	}
-	snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil)
+	snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil, false)
 	if waiting(d2) {
 		t.Error("the sender's propagation of the key still waits after this agent confirmed it")
 	}
@@ -230,7 +230,7 @@ func TestADnskeyNotHandedToTheCombinerIsSentToItAgain(t *testing.T) {
 		if slices.Contains(c.AppliedRecords, rec) {
 			t.Fatalf("before the combiner took the key, the sender got %+v", *c)
 		}
-		snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil)
+		snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil, false)
 	}
 	if !waiting() {
 		t.Fatal("the sender's propagation of the key ended before this agent's combiner had it")
@@ -241,7 +241,7 @@ func TestADnskeyNotHandedToTheCombinerIsSentToItAgain(t *testing.T) {
 	if !slices.Contains(c.AppliedRecords, rec) {
 		t.Fatalf("after the combiner took the key, the sender got %+v", *c)
 	}
-	snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil)
+	snd.ProcessDnskeyConfirmation(d2, c.Source, c.Status, c.AppliedRecords, nil, false)
 	if waiting() {
 		t.Error("the sender's propagation of the key still waits after this agent confirmed it")
 	}
@@ -414,7 +414,7 @@ func TestARemovalNotHandedToTheCombinerIsNotConfirmed(t *testing.T) {
 					}
 				}
 				if cf.DistributionID == d1 {
-					snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+					snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 				}
 			}
 			if !waiting() {
@@ -423,7 +423,7 @@ func TestARemovalNotHandedToTheCombinerIsNotConfirmed(t *testing.T) {
 
 			r.combinerTakes(c1, kept...)
 			cf := r.answered(t, d1)
-			snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+			snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 			if waiting() {
 				t.Errorf("after the combiner took the removal, the sender's propagation still waits (%+v)", *cf)
 			}
@@ -741,7 +741,7 @@ func staleKeySetOvertakenInFlight(t *testing.T, kind, order string) {
 		noFinal(d1, "after the combiner's word on a set overtaken in turn", 300*time.Millisecond)
 		r.combinerTakes(c3, last...)
 		cf := final(d1, "after the combiner took the newest set")
-		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 		if waiting() {
 			t.Errorf("after the combiner took the newest set the sender's propagation still waits (%+v)", *cf)
 		}
@@ -752,7 +752,7 @@ func staleKeySetOvertakenInFlight(t *testing.T, kind, order string) {
 		// set, and is relayed; its word on the newer set adds nothing
 		r.combinerTakes(c1, first...)
 		cf := final(d1, "after the combiner took the first set")
-		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+		snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 		if waiting() {
 			t.Errorf("after the combiner took the first set the sender's propagation still waits (%+v)", *cf)
 		}
@@ -765,7 +765,7 @@ func staleKeySetOvertakenInFlight(t *testing.T, kind, order string) {
 	if cf.Status != "ok" && cf.Status != "SUCCESS" {
 		t.Errorf("after the combiner took the newer set the sender got %+v, want ok", *cf)
 	}
-	snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+	snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 	if waiting() {
 		t.Errorf("after the combiner took the newer set the sender's propagation still waits (%+v)", *cf)
 	}
@@ -884,7 +884,7 @@ func TestAStaleKeySetIsNotCreditedOnTheCombinersFailure(t *testing.T) {
 				t.Errorf("after the combiner's IGNORED the sender got %+v, want IGNORED", *cf)
 			}
 			if word != transport.ConfirmIgnored {
-				snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+				snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 				snd.dnskeyPropMu.Lock()
 				_, waiting := snd.pendingDnskeyPropagations[d1]
 				snd.dnskeyPropMu.Unlock()
@@ -949,14 +949,14 @@ func TestAStaleWithdrawalBehindAnAnswersForwardIsNotCredited(t *testing.T) {
 	if c.Status != "PARTIAL" || len(c.AppliedRecords) > 0 || len(c.RemovedRecords) > 0 {
 		t.Fatalf("the stale withdrawal got %+v, want PARTIAL naming no key", *c)
 	}
-	lead.ProcessDnskeyConfirmation(d, c.Source, c.Status, c.AppliedRecords, nil)
+	lead.ProcessDnskeyConfirmation(d, c.Source, c.Status, c.AppliedRecords, nil, false)
 	if !waiting() {
 		t.Fatal("the withdrawal was credited before the combiner had the answer's set")
 	}
 
 	r.combinerTakes(ca, k1.String())
 	cf := r.answered(t, an)
-	lead.ProcessDnskeyConfirmation(an, cf.Source, cf.Status, cf.AppliedRecords, nil)
+	lead.ProcessDnskeyConfirmation(an, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 	if waiting() {
 		t.Errorf("after the asker confirmed the answer, the withdrawal still waits (%+v)", *cf)
 	}
@@ -1074,7 +1074,7 @@ func TestAStaleSetWhoseKeyTheNewerSetDroppedIsNotASuccess(t *testing.T) {
 			if cf.Status == "SUCCESS" || cf.Status == "ok" || slices.Contains(cf.AppliedRecords, k2.String()) {
 				t.Fatalf("the stale distribution got %+v: a word that k2 is published here", *cf)
 			}
-			snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil)
+			snd.ProcessDnskeyConfirmation(d1, cf.Source, cf.Status, cf.AppliedRecords, nil, false)
 			snd.dnskeyPropMu.Lock()
 			_, waiting := snd.pendingDnskeyPropagations[d1]
 			snd.dnskeyPropMu.Unlock()
@@ -1143,7 +1143,7 @@ func TestALateCombinerSuccessOnASetWhoseKeyWasDroppedIsNotASuccess(t *testing.T)
 				}
 				if got.DistributionID == d1 && got.Status != "PENDING" {
 					words = append(words, got)
-					snd.ProcessDnskeyConfirmation(d1, got.Source, got.Status, got.AppliedRecords, nil)
+					snd.ProcessDnskeyConfirmation(d1, got.Source, got.Status, got.AppliedRecords, nil, false)
 				}
 			}
 			if len(words) == 0 {

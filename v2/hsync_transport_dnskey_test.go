@@ -41,50 +41,50 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	}
 
 	track("d1")
-	if !tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil) {
+	if !tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil, false) {
 		t.Fatal("not recognised as a DNSKEY propagation")
 	}
 	waiting("d1", "a1 pending")
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPending.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPending.String(), nil, nil, false)
 	waiting("d1", "both pending (P9)")
 	// a partial that applied someone else's key and says nothing of ours
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(theirs, "not that one"))
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(theirs, "not that one"), false)
 	waiting("d1", "a1 partial about another key")
 	if p := tm.pendingDnskeyPropagations["d1"]; p.ExpectedAgents["a1"] || p.Rejected {
 		t.Errorf("a partial about another key counted: confirmed=%v rejected=%v", p.ExpectedAgents["a1"], p.Rejected)
 	}
 	// a partial that applied ours and rejected theirs: applied
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{ours.String()}, rej(theirs, "not that one"))
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{ours.String()}, rej(theirs, "not that one"), false)
 	waiting("d1", "a1 applied ours, a2 pending")
 	if p := tm.pendingDnskeyPropagations["d1"]; !p.ExpectedAgents["a1"] || p.Rejected {
 		t.Errorf("a partial that applied ours: confirmed=%v rejected=%v, want confirmed, not rejected", p.ExpectedAgents["a1"], p.Rejected)
 	}
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil, false)
 	resolved("d1", "everyone applied")
-	if tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil) {
+	if tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil, false) {
 		t.Error("a confirmation after the propagation resolved was taken as one")
 	}
 
 	// the combiner's all-rejected answer: failed with our key rejected
 	track("d2")
-	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, rej(ours, "policy forbids"))
+	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, rej(ours, "policy forbids"), false)
 	waiting("d2", "a1 rejected, a2 not heard")
 	if p := tm.pendingDnskeyPropagations["d2"]; !p.Rejected || p.RejectionMsg != "policy forbids" || !p.ExpectedAgents["a1"] {
 		t.Errorf("rejection not recorded as a final answer: %+v", p)
 	}
-	tm.ProcessDnskeyConfirmation("d2", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d2", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil, false)
 	resolved("d2", "everyone answered, one rejected")
 
 	// a partial that rejected ours while applying theirs: rejected
 	track("d3")
-	tm.ProcessDnskeyConfirmation("d3", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(ours, "bad flags"))
+	tm.ProcessDnskeyConfirmation("d3", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(ours, "bad flags"), false)
 	if p := tm.pendingDnskeyPropagations["d3"]; !p.Rejected || p.RejectionMsg != "bad flags" {
 		t.Errorf("a partial that rejected ours: %+v, want rejected", p)
 	}
 
 	// a failure that names no rejected item (a transport error) is not an answer
 	track("d4")
-	tm.ProcessDnskeyConfirmation("d4", "a1", transport.ConfirmFailed.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d4", "a1", transport.ConfirmFailed.String(), nil, nil, false)
 	if p := tm.pendingDnskeyPropagations["d4"]; p.Rejected || p.ExpectedAgents["a1"] {
 		t.Errorf("a failure naming nothing counted: %+v", p)
 	}
@@ -95,8 +95,8 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	if p := tm.pendingDnskeyPropagations["d5"]; !p.Removed[ours.KeyTag()] {
 		t.Errorf("the removed key is not marked removed in the tracker: %+v", p)
 	}
-	tm.ProcessDnskeyConfirmation("d5", "a1", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
-	tm.ProcessDnskeyConfirmation("d5", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d5", "a1", transport.ConfirmSuccess.String(), []string{ours.String()}, nil, false)
+	tm.ProcessDnskeyConfirmation("d5", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil, false)
 	resolved("d5", "a removal applied everywhere")
 }
 
@@ -119,7 +119,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
 	// a partial that applied a and says nothing of b: a1 has not answered
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{a.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{a.String()}, nil, false)
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p == nil || p.ExpectedAgents["a1"] {
 		t.Fatalf("an answer for one key of two counted as the agent's answer: %+v", p)
@@ -128,7 +128,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 		t.Errorf("results after the partial: %v", p.Results["a1"])
 	}
 	// then a partial that rejected b: a1 has answered, a applied, b rejected
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), nil, []RejectedItemInfo{{Record: b.String(), Reason: "no ZSKs here"}})
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), nil, []RejectedItemInfo{{Record: b.String(), Reason: "no ZSKs here"}}, false)
 	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
 		t.Fatal("every key answered by every agent, the propagation is still pending")
 	}
@@ -140,7 +140,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 	}
 	// a whole rejection rejects every key it did not apply
 	tm.TrackDnskeyPropagation("z.example.", "d2", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
-	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, []RejectedItemInfo{{Record: a.String(), Reason: "policy"}})
+	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, []RejectedItemInfo{{Record: a.String(), Reason: "policy"}}, false)
 	if p := tm.pendingDnskeyPropagations["d2"]; p != nil {
 		t.Errorf("a whole rejection left the propagation pending: %+v", p.Results)
 	}
@@ -154,13 +154,13 @@ func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
 	ours := testDnskeyRR(t, "z.example.", 256)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil)
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmIgnored.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil, false)
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmIgnored.String(), nil, nil, false)
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p == nil || !p.ExpectedAgents["a1"] || p.Rejected || p.Results["a1"][ours.KeyTag()] != "ignored" {
 		t.Fatalf("an ignored answer did not count as the agent's answer: %+v", p)
 	}
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmIgnored.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmIgnored.String(), nil, nil, false)
 	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
 		t.Error("both peers answered ignored, the propagation is still pending")
 	}
@@ -180,7 +180,7 @@ func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
 	tags := []uint16{ksk.KeyTag(), zsk.KeyTag(), standby.KeyTag(), retired.KeyTag()}
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	tm.TrackDnskeyPropagation("z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
-	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), []string{standby.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), []string{standby.String()}, nil, false)
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p == nil || !p.ExpectedAgents["a1"] {
 		t.Fatalf("a success listing the one new key did not count as the agent's answer for every key: %+v", p)
@@ -191,11 +191,11 @@ func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
 		}
 	}
 	// a partial answer still says which keys it covers
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPartial.String(), []string{standby.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmPartial.String(), []string{standby.String()}, nil, false)
 	if p.ExpectedAgents["a2"] {
 		t.Error("a partial answer listing one key was taken as the answer for every key")
 	}
-	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "a2", transport.ConfirmSuccess.String(), nil, nil, false)
 	if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
 		t.Error("both peers answered success, the propagation is still pending")
 	}
@@ -219,8 +219,8 @@ func TestDnskeyPropagationOutcomeKnowsWhoSigns(t *testing.T) {
 		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
 		p := tm.pendingDnskeyPropagations["d1"]
 		p.Signing = signing
-		tm.ProcessDnskeyConfirmation("d1", "a1", a1, nil, nil)
-		tm.ProcessDnskeyConfirmation("d1", "a2", a2, nil, nil)
+		tm.ProcessDnskeyConfirmation("d1", "a1", a1, nil, nil, false)
+		tm.ProcessDnskeyConfirmation("d1", "a2", a2, nil, nil, false)
 		if _, ok := tm.pendingDnskeyPropagations["d1"]; ok {
 			t.Fatalf("answers %s and %s: the propagation is still pending", a1, a2)
 		}
@@ -309,11 +309,11 @@ func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 	}
 	trackTestZone(t, "late.track.example.")
 	ignored := transport.ConfirmIgnored.String()
-	tm.ProcessDnskeyConfirmation("d1", "agent.p3.example.", ignored, nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "agent.p3.example.", ignored, nil, nil, false)
 	if !p.Signing["agent.p2.example."] || p.Signing["agent.p3.example."] {
 		t.Fatalf("who signs after the zone came: %v, want p2's agent alone", p.Signing)
 	}
-	tm.ProcessDnskeyConfirmation("d1", "agent.p2.example.", ignored, nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "agent.p2.example.", ignored, nil, nil, false)
 	propagated, _, rejected, msg := p.outcome()
 	if len(propagated) != 0 || len(rejected) != 1 || !strings.Contains(msg, "agent.p2.example.") {
 		t.Errorf("the signing provider ignored the key: propagated %v rejected %v msg %q, want it rejected naming p2's agent", propagated, rejected, msg)
@@ -331,19 +331,19 @@ func TestAnAuditorsSuccessCompletesPropagation(t *testing.T) {
 	track := func() *MPTransportBridge {
 		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
-		tm.ProcessDnskeyConfirmation("d1", "p2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
-		tm.ProcessDnskeyConfirmation("d1", "p3", transport.ConfirmIgnored.String(), nil, nil)
+		tm.ProcessDnskeyConfirmation("d1", "p2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil, false)
+		tm.ProcessDnskeyConfirmation("d1", "p3", transport.ConfirmIgnored.String(), nil, nil, false)
 		return tm
 	}
 	// the auditor's receipt alone: still pending
 	tm := track()
-	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmPending.String(), nil, nil)
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmPending.String(), nil, nil, false)
 	if _, still := tm.pendingDnskeyPropagations["d1"]; !still {
 		t.Fatal("the auditor's PENDING completed the propagation")
 	}
 	// the auditor's final word: propagated
 	p := tm.pendingDnskeyPropagations["d1"]
-	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
+	tm.ProcessDnskeyConfirmation("d1", "aud", transport.ConfirmSuccess.String(), []string{ours.String()}, nil, false)
 	if _, still := tm.pendingDnskeyPropagations["d1"]; still {
 		t.Fatal("providers and auditor answered and the propagation is still pending")
 	}

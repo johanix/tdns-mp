@@ -188,6 +188,10 @@ type InstructionStore struct {
 	// when the serial it agrees on moves while it stays frozen
 	// (instr_freeze.go), after the change is written and the lock let go.
 	onFreeze func(zone string, frozen bool)
+	// onActive is told when a zone's active serial changes, becomes known
+	// or goes (instr_receive.go), after the change is written and the lock
+	// let go.
+	onActive func(zone string)
 }
 
 type zoneSerial struct {
@@ -303,10 +307,17 @@ func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
 // equal to what was kept (a refresh that brings the same copy). f returning
 // errEndOfService drops the zone's serials, under the same lock. A change
 // that freezes the zone, ends its freeze, or moves the serial a frozen
-// zone agrees on, is told to onFreeze once the lock is let go.
+// zone agrees on, is told to onFreeze once the lock is let go; one that
+// changes the active serial, to onActive, first: others' kept distributions
+// are released at the activation, before this agent's own owed changes
+// (design 3.3).
 func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
 	var froze *bool
+	activeMoved := false
 	defer func() {
+		if activeMoved && s.onActive != nil {
+			s.onActive(zone)
+		}
 		if froze != nil && s.onFreeze != nil {
 			s.onFreeze(zone, *froze)
 		}
@@ -323,6 +334,10 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 	if old != nil && old.agreeing() != nil {
 		wasAgreed = old.agreeing().SerialDigest
 	}
+	var wasActive *SerialDigest
+	if old != nil && old.Active != nil {
+		wasActive = &old.Active.SerialDigest
+	}
 	if err := f(z); err != nil {
 		if errors.Is(err, errEndOfService) {
 			if ferr := s.forgetLocked(zone); ferr != nil {
@@ -331,6 +346,7 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 			if wasFrozen {
 				froze = new(bool)
 			}
+			activeMoved = wasActive != nil
 		}
 		return err
 	}
@@ -350,6 +366,7 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 	if frozen != wasFrozen || moved {
 		froze = &frozen
 	}
+	activeMoved = (z.Active == nil) != (wasActive == nil) || z.Active != nil && z.Active.SerialDigest != *wasActive
 	return nil
 }
 
@@ -660,12 +677,18 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 		return
 	}
 	// a frozen zone that leaves ends its freeze: its signer lets the hold go
-	// (onFreeze), told once the lock is let go
-	var thawed []string
+	// (onFreeze); and what it kept of other agents' distributions is dropped
+	// (onActive); both told once the lock is let go
+	var thawed, gone []string
 	defer func() {
 		for _, zone := range thawed {
 			if s.onFreeze != nil {
 				s.onFreeze(zone, false)
+			}
+		}
+		for _, zone := range gone {
+			if s.onActive != nil {
+				s.onActive(zone)
 			}
 		}
 	}()
@@ -684,6 +707,7 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 		if frozen {
 			thawed = append(thawed, zone)
 		}
+		gone = append(gone, zone)
 	}
 }
 

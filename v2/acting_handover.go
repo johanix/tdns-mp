@@ -361,9 +361,11 @@ func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string)
 // goes out, in order; anything else is a refusal, and the combiner's own
 // read says what it holds. A refusal or an "ignored" of an update sent
 // while the combiner held another serial than this agent now wants is not
-// final: the update is sent again, under the serial wanted. handled says
-// the word goes no further.
-func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus) (handled bool) {
+// final, and nor is one from a combiner that says it acts by another
+// serial than the one the update was sent under (acting, plan S8): the
+// update is sent again, under the serial wanted. handled says the word
+// goes no further.
+func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus, acting *ActingStamp) (handled bool) {
 	if t == nil || status == transport.ConfirmPending {
 		return t != nil && t.isHandover(distID)
 	}
@@ -399,7 +401,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 	}
 	delete(t.sent, distID)
 	z := t.zones[handoverKey(string(s.zone))]
-	stale := z != nil && z.want != nil && !z.want.sameAs(s.under)
+	stale := z != nil && z.want != nil && (!z.want.sameAs(s.under) || acting != nil && !acting.names(s.under))
 	t.mu.Unlock()
 	switch status {
 	case transport.ConfirmFailed, transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmPartial:
