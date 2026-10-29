@@ -245,7 +245,7 @@ func TestADnskeyDistributionOvertakenByAnAnswerWaitsForTheCombiner(t *testing.T)
 	if c.Status != "PARTIAL" || slices.Contains(c.AppliedRecords, rec) {
 		t.Fatalf("the leader got the final confirmation %+v of its DNSKEY, want PARTIAL without the key", *c)
 	}
-	lead.ProcessDnskeyConfirmation(d, c.Source, c.Status, c.AppliedRecords, nil, false)
+	lead.ProcessDnskeyConfirmation(d, c.Source, c.Status, c.AppliedRecords, nil)
 	if got, waiting := result(); !waiting || got != "" {
 		t.Fatalf("before this agent's combiner confirmed, the leader's tracking has %q for the key (waiting %v)", got, waiting)
 	}
@@ -254,7 +254,7 @@ func TestADnskeyDistributionOvertakenByAnAnswerWaitsForTheCombiner(t *testing.T)
 	// the answer
 	r.confirms(rigCombiner, held.DistributionID, rec)
 	ca := r.answered(t, an)
-	lead.ProcessDnskeyConfirmation(an, ca.Source, ca.Status, ca.AppliedRecords, nil, false)
+	lead.ProcessDnskeyConfirmation(an, ca.Source, ca.Status, ca.AppliedRecords, nil)
 	if got, waiting := result(); waiting {
 		t.Errorf("after this agent confirmed the answer, the propagation still waits (%q for the key)", got)
 	}

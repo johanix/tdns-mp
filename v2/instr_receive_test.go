@@ -422,7 +422,7 @@ func TestAConfirmationIsAlwaysTaken(t *testing.T) {
 		t.Error("a rejection with no stamp is not final")
 	}
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
-	tm.ProcessDnskeyConfirmation("d1", roleB, "SUCCESS", nil, nil, false)
+	tm.ProcessDnskeyConfirmation("d1", roleB, "SUCCESS", nil, nil)
 	if _, open := tm.pendingDnskeyPropagations["d1"]; open {
 		t.Error("a success did not settle the key's propagation")
 	}
@@ -467,7 +467,7 @@ func TestARejectionFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	if !notYet {
 		t.Fatal("a rejection from a peer at another serial reads as final")
 	}
-	tm.ProcessDnskeyConfirmation("d1", roleB, "REJECTED", nil, []RejectedItemInfo{{Record: "x", Reason: staleInstructions}}, notYet)
+	tm.processDnskeyConfirmation("d1", roleB, "REJECTED", nil, nil, []RejectedItemInfo{{Record: "x", Reason: staleInstructions}}, notYet)
 	prop := tm.pendingDnskeyPropagations["d1"]
 	if prop == nil || prop.ExpectedAgents[roleB] || prop.Rejected || len(prop.Results[roleB]) != 0 {
 		t.Errorf("the key's propagation after a \"not yet\": %+v, want it pending for b", prop)
@@ -481,7 +481,7 @@ func TestAnIgnoredFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	tm.pendingDnskeyPropagations["d1"].Signing = map[AgentId]bool{roleB: true}
 	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmIgnored, msgStampAt(r.v))
-	tm.ProcessDnskeyConfirmation("d1", roleB, "IGNORED", nil, nil, notYet)
+	tm.processDnskeyConfirmation("d1", roleB, "IGNORED", nil, nil, nil, notYet)
 	if prop := tm.pendingDnskeyPropagations["d1"]; prop == nil || len(prop.Results[roleB]) != 0 {
 		t.Errorf("the key's propagation after a \"not yet\": %+v, want it pending for b", prop)
 	}
@@ -597,14 +597,14 @@ func TestAKeyDistributionMadeUnderAnOlderSerialIsResent(t *testing.T) {
 	tm := r.conf.InternalMp.MPTransport
 	distID := r.notYetFromB(r.v)
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), distID, []uint16{7}, nil, []AgentId{roleB})
-	tm.ProcessDnskeyConfirmation(distID, roleB, "REJECTED", nil, nil, true)
+	tm.processDnskeyConfirmation(distID, roleB, "REJECTED", nil, nil, nil, true)
 	r.agree()
 	r.done()
 	r.activated()
 	if !r.resent(distID) {
 		t.Fatal("not sent again")
 	}
-	tm.ProcessDnskeyConfirmation(distID, roleB, "SUCCESS", nil, nil, false)
+	tm.ProcessDnskeyConfirmation(distID, roleB, "SUCCESS", nil, nil)
 	if _, open := tm.pendingDnskeyPropagations[distID]; open {
 		t.Error("b's success of what was sent again did not settle the key's propagation")
 	}

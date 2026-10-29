@@ -703,11 +703,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// again when they come again, and a stale replace of one
 				// names none of it: a later delivery of the same set, matching
 				// the repo, would otherwise be confirmed "ok", which covers
-				// every key.
+				// every key. A set the combiner ignored is noted as such, from
+				// the records it names as ignored: a stale replace of the set
+				// names its records as ignored (#288).
 				if detail.Status == "SUCCESS" || detail.Status == "ok" {
 					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
 				} else {
-					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID)
+					all, ignored := combinerIgnoredTypes(detail)
+					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID, all, ignored)
 				}
 			}
 			zdr.ProcessConfirmation(detail, msgQs)
@@ -1261,6 +1264,10 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 				status = "PARTIAL" // a stale set the combiner may not have
 			}
 		}
+		// Of those, a set the combiner ignored is named as ignored (#288).
+		if len(prc.StaleIgnored) > 0 {
+			ignoredRecords = append(slices.Clone(ignoredRecords), prc.StaleIgnored...)
+		}
 
 		// A success covers every key of the update's DNSKEY sets. A key the
 		// repo no longer holds, because a newer set dropped it before the
@@ -1673,6 +1680,14 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 				staleNotHeld[t] = true
 			}
 		}
+		// A set this agent's combiner answered IGNORED is not held
+		// either, but by the combiner's policy, and its word on the
+		// set that overtook a stale replace named the records as
+		// ignored. The stale replace names those the repo holds as
+		// ignored too: named nowhere, they left the sender's add
+		// PENDING for good (#288).
+		ignoredSets := zdr.setsIgnoredByCombiner(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, failedSets)
+		staleIgnored := recordsOfTypes(staleHeld, ignoredSets)
 		staleHeld = recordsNotOfTypes(staleHeld, failedSets)
 		synchedDataUpdate.dropStaleOperations()
 		if err == nil && !change && synchedDataUpdate.Update != nil {
@@ -1762,6 +1777,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 							Zone:              synchedDataUpdate.Zone,
 							CreatedAt:         time.Now(),
 							StaleHeld:         staleHeld,
+							StaleIgnored:      staleIgnored,
 							StaleWaiting:      staleWaiting,
 							NotHeldTypes:      staleNotHeld,
 							FromAnswer:        synchedDataUpdate.CatchUp != nil,
@@ -1863,11 +1879,24 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 			}
 			// So is a set whose last hand-over to the combiner
 			// failed (only a stale replace of one gets here: a
-			// fresh one is handed over again).
+			// fresh one is handed over again). A set the combiner
+			// ignored is named as ignored; with nothing else
+			// named, the word is the combiner's, IGNORED.
+			var ignoredRecords []string
 			if len(failedSets) > 0 {
+				ignoredRecords = recordsOfTypes(appliedRecords, ignoredSets)
 				appliedRecords = recordsNotOfTypes(appliedRecords, failedSets)
 				removedRecords = recordsNotOfTypes(removedRecords, failedSets)
-				status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
+				if len(ignoredSets) < len(failedSets) {
+					status, message = "PARTIAL", message+"; sets whose hand-over to its combiner failed are not held"
+				}
+			}
+			if len(ignoredSets) > 0 {
+				if status == "ok" && len(appliedRecords) == 0 && len(removedRecords) == 0 {
+					status, message = "IGNORED", "its combiner applies none of the sender's records of these sets"
+				} else {
+					status, message = "PARTIAL", message+"; sets its combiner ignores are not held"
+				}
 			}
 			// A DNSKEY set an answer's forward brought, which the
 			// combiner has not confirmed, is no word on the keys:
@@ -1897,8 +1926,8 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 			} else if msgQs.OnRemoteConfirmationReady != nil {
 				lgEngine.Info("remote update already in desired state, sending immediate confirmation",
 					"zone", zone, "agent", agentId,
-					"applied", len(appliedRecords), "removed", len(removedRecords), "awaiting_combiner", len(staleWaiting),
-					"combiner_rejected", len(combinerRejected),
+					"applied", len(appliedRecords), "removed", len(removedRecords), "ignored", len(ignoredRecords),
+					"awaiting_combiner", len(staleWaiting), "combiner_rejected", len(combinerRejected),
 					"originDistID", synchedDataUpdate.OriginatingDistID)
 				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 					OriginatingDistID: synchedDataUpdate.OriginatingDistID,
@@ -1909,6 +1938,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 					Message:           message,
 					AppliedRecords:    appliedRecords,
 					RemovedRecords:    removedRecords,
+					IgnoredRecords:    ignoredRecords,
 				})
 			}
 		}

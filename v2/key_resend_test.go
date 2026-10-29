@@ -344,7 +344,7 @@ func TestALateAnswerToASupersededDistributionStillCounts(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 			tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
-			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil, false)
+			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
 			// the signer sends the key again
 			tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
 			tm.foldIntoResend(zone, "resend")
@@ -357,7 +357,7 @@ func TestALateAnswerToASupersededDistributionStillCounts(t *testing.T) {
 				t.Fatalf("after the resend: first still tracked %v, the fast agent's answer carried %v", first, carried)
 			}
 			// the slow agent answers the first distribution, late
-			tm.ProcessDnskeyConfirmation("first", slow, c.late, nil, nil, false)
+			tm.ProcessDnskeyConfirmation("first", slow, c.late, nil, nil)
 			tm.dnskeyPropMu.Lock()
 			_, open := tm.pendingDnskeyPropagations["resend"]
 			tm.dnskeyPropMu.Unlock()
@@ -388,7 +388,7 @@ func TestAResendTakesOverOnlyTheSameDistribution(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 			tm.TrackDnskeyPropagation(zone, "first", c.tags, c.removed, []AgentId{fast, slow})
-			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil, false)
+			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
 			tm.TrackDnskeyPropagation(zone, "resend", c.rtags, c.rremoved, []AgentId{fast, slow})
 			tm.foldIntoResend(zone, "resend")
 			tm.dnskeyPropMu.Lock()
@@ -400,7 +400,7 @@ func TestAResendTakesOverOnlyTheSameDistribution(t *testing.T) {
 				t.Fatalf("after the resend: first still tracked %v (want true), answers carried %v, alias %q (want none)", first, carried, alias)
 			}
 			// the slow agent answers the first distribution, late
-			tm.ProcessDnskeyConfirmation("first", slow, "SUCCESS", nil, nil, false)
+			tm.ProcessDnskeyConfirmation("first", slow, "SUCCESS", nil, nil)
 			tm.dnskeyPropMu.Lock()
 			_, first = tm.pendingDnskeyPropagations["first"]
 			_, open := tm.pendingDnskeyPropagations["resend"]
@@ -443,7 +443,7 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 		t.Fatalf("the younger alias: %+v, want it to lead to the third", young)
 	}
 	// a late answer to the second still counts at the third
-	tm.ProcessDnskeyConfirmation("second", fast, "SUCCESS", nil, nil, false)
+	tm.ProcessDnskeyConfirmation("second", fast, "SUCCESS", nil, nil)
 	tm.dnskeyPropMu.Lock()
 	applied := tm.pendingDnskeyPropagations["third"].Results[fast][k]
 	tm.dnskeyPropMu.Unlock()
