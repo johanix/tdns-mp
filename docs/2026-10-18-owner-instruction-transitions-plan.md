@@ -1076,7 +1076,7 @@ Log, info, logger `zones`: "transition step sent" (`zone`, `step`, `what`); "tra
 
 ### S14. The zone's SIG(0) key
 
-**Status (2026-10-29):** Built, tdns-mp #326, stacked on S9 (#322, head `b54a90f`, on S8 `f7a6df9`): its pull request carries this cell, and fixes tdns-mp #206. Where the code read otherwise than the text, or the text left a choice:
+**Status (2026-10-29):** Built, tdns-mp #326, stacked on S9 (#322, head `17a673a`, on S8 `82a6e3b`): its pull request carries this cell, and fixes tdns-mp #206. Where the code read otherwise than the text, or the text left a choice:
 
 1. **S6 built the set-up's holds.** The KEY's publication (`publishZoneKey`), the decision that no key exists (`decideZoneKeyLocked`) and the key's poll (`keyPollOnce`) were held by S6, and asking for the key and taking one offered go on. This step adds their one exception, `offerHeld`: the publication and the poll pass the freeze while a rollover is under way in the zone (this provider's, by its signer's inventory, or a voting member's telling heard within `leaving-timeout`) and `keyPending` holds.
 2. **`keyPending` is the key's hold, not `syncHeld`'s.** `syncHeld` is asked by the key's own publication and poll, which `keyPending` must not hold. So the key's hold (`keyHold`, which `holdForZoneKey` asks for every leader sync in both arms of the syncher, the election's included) holds while the key held has a `parent_state` other than KEY_TRUSTED: "the parent has not taken the key". The sync is owed for the key and asked for when the poll that records the trust ends (`releaseKeyHold`), as step 7b's hold has it. Step 7b's rigs now record the parent's trust when their poll ends, as tdns's poll does.
