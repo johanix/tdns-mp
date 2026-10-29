@@ -201,13 +201,6 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
 		return fmt.Errorf("InitHsyncTables: %w", err)
 	}
-	// The zones whose key machine the agent holds (plan S6), kept over a
-	// restart.
-	holds, err := loadSignerHolds(conf.InternalMp.HsyncDB)
-	if err != nil {
-		return fmt.Errorf("the key machine's holds: %w", err)
-	}
-	conf.InternalMp.SignerHolds = holds
 	// What the agent handed (plan S11), kept in the KeyDB and read before
 	// the refresh engine starts: the zones' first load and the key machine
 	// read it.
@@ -216,6 +209,13 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		return fmt.Errorf("the hand-overs held: %w", err)
 	}
 	actingHeld.Store(acting)
+	// The zones whose key machine the agent holds (plan S6), kept over a
+	// restart.
+	holds, err := loadSignerHolds(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the key machine's holds: %w", err)
+	}
+	conf.InternalMp.SignerHolds = holds
 
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
 	var signerPayloadCrypto *transport.PayloadCrypto

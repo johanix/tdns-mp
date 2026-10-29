@@ -276,7 +276,7 @@ func TestACombinerWaitsReportHandsThatZoneAlone(t *testing.T) {
 		tr.handOver(wantOf(z, 3, "alpha"))
 		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
 	}
-	tr.combinerWaits("one.acting.example.")
+	tr.again("one.acting.example.")
 	if h := handoverIn(t, q.take()).update.Acting; h.Zone != "one.acting.example." {
 		t.Errorf("handed over %s, want the zone the combiner waits for", h.Zone)
 	}

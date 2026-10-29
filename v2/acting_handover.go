@@ -144,7 +144,8 @@ func (mpzd *MPZoneData) actingSets() Roles {
 
 // wantedHandover is what this agent wants its combiner to act by for the
 // zone: the instructions it acts by (its active ones, S3's rule), the
-// store's newest serial, phase and step, and the step's sets. Until S13 the
+// store's newest serial, phase and step, and the step's sets, with the hold
+// while the zone is frozen (S6, folded in by S11). Until S13 the
 // sets of whose DNSKEYs and DS are published, and of who signs, are the
 // zone's signing set, signers= with the providers leaving it (#275): so the
 // other providers' combiners keep a leaving signer's DNSKEYs and CDS while
@@ -164,6 +165,7 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	}
 	h.Serial, h.Digest, h.Records, h.Newest = in.Serial, in.Digest(), in.instructionRecords(zone), in.Serial
 	h.Sets = mpzd.actingSets()
+	h.Sets.Hold = len(conf.zoneFrozen(zone)) > 0
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil {
 		h.Phase = st.Phase
 		if st.Newest != nil && CompareSerial(st.Newest.Serial, h.Newest) == 1 {
@@ -529,10 +531,12 @@ func (t *handoverTracker) combinerStarted() {
 	}
 }
 
-// combinerWaits: the combiner holds no hand-over for the zone, and says so
-// every minute until it does (its start report's repeat). The zone is
-// handed over again; what it holds for the others stands.
-func (t *handoverTracker) combinerWaits(zone string) {
+// again: the part is to say again what it holds for the zone. The combiner
+// holds no hand-over for it, and says so every minute until it does (its
+// start report's repeat); or the signer is to confirm its hold for the
+// serial the zone agrees on now (onFreeze, plan S6). The zone is handed over
+// again; what the part holds for the others stands.
+func (t *handoverTracker) again(zone string) {
 	if t == nil {
 		return
 	}
@@ -542,6 +546,40 @@ func (t *handoverTracker) combinerWaits(zone string) {
 	send := t.dueLocked(z, true)
 	t.mu.Unlock()
 	t.send(send)
+}
+
+// letHoldGo: the zone's freeze has ended. A zone this agent hands nothing
+// any more, as one that left the configuration, is handed what was wanted
+// last without the hold, so that its signer's key machine is not held for
+// ever (plan S6).
+func (t *handoverTracker) letHoldGo(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zones[handoverKey(zone)]
+	if z == nil || z.want == nil || !z.want.Sets.Hold {
+		t.mu.Unlock()
+		return
+	}
+	h := *z.want
+	h.Sets.Hold = false
+	z.want = &h
+	send := t.dueLocked(z, false)
+	t.mu.Unlock()
+	t.send(send)
+}
+
+// holdHeld: the part holds what is wanted for the zone, and that carries
+// the hold.
+func (t *handoverTracker) holdHeld(zone string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	z := t.zones[handoverKey(zone)]
+	return z != nil && z.want != nil && z.want.Sets.Hold && z.want.sameAs(z.held)
 }
 
 // forgot: the operator forgot the zone's serials here (rule 3). The next
