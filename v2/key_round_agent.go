@@ -59,8 +59,8 @@ func (conf *Config) keyRoundHooks() *keyHooks {
 // activeSerial is this agent's active serial for the zone, if it knows one:
 // a key answer counts only at it (S14).
 func (conf *Config) activeSerial(zone ZoneName) (SerialDigest, bool) {
-	v, ok := conf.InternalMp.Instructions.ownView(string(zone))
-	return v.active, ok
+	st, ok := conf.InternalMp.Instructions.stampOf(string(zone))
+	return SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}, ok && st.Known
 }
 
 // zoneKeyDB is the keystore that signs the zone's UPDATE: the zone's own,

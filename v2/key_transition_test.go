@@ -450,3 +450,23 @@ func TestTheKEYGoesToThePeersWithItsPublishInstruction(t *testing.T) {
 		t.Fatalf("the peer got %+v (received %v), want the KEY's publish instruction", amp, ok)
 	}
 }
+
+// While this agent does not know the zone's active serial (design 3.4), its
+// key rounds know none: no key and no "no key here" counts, though the
+// store holds a newer copy of the zone.
+func TestNoKeyAnswerCountsWhileTheActiveSerialIsNotKnown(t *testing.T) {
+	r := newThawRig(t, "unknown.key.example.", roleA)
+	z := ZoneName(r.zone)
+	if got, known := r.conf.activeSerial(z); !known || got != sd(r.n) {
+		t.Fatalf("with its record the agent's active serial is %+v (known %v), want %d", got, known, r.n.Serial)
+	}
+	r.noRecord(r.v)
+	got, known := r.conf.activeSerial(z)
+	if known {
+		t.Fatalf("with no record the agent knows the active serial %+v", got)
+	}
+	round := &keyRound{serial: got, known: known}
+	if a := round.atSerial(classifyKeyAnswer(noKeyAt(sd(r.v)))); a.outcome != keyOtherSerial {
+		t.Errorf("a \"no key here\" while the active serial is not known counts as %+v", a)
+	}
+}
