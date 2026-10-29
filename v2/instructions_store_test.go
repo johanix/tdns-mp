@@ -161,27 +161,45 @@ func TestACopyWithoutAReadingChangesNothingHeld(t *testing.T) {
 
 func TestAChangeAtSerialZeroIsAConflict(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, readOf(t, withParam(`servers="alpha,beta"`)...), nil)
-	s.Note(storeZone, readOf(t, withParam(`servers="alpha"`)...), nil)
+	s.Note(storeZone, readOf(t, withParam(`serial="0" servers="alpha,beta"`)...), nil)
+	s.Note(storeZone, readOf(t, withParam(`serial="0" servers="alpha"`)...), nil)
 	st := status(t, s, storeZone)
 	if st.Phase != PhaseOwnerError || !strings.HasPrefix(st.OwnerError, "serial 0 with two digests") {
 		t.Errorf("phase %s error %q; want the serial-0 change an owner error", st.Phase, st.OwnerError)
 	}
 }
 
-func TestHSYNC3WithoutHSYNCPARAMAfterAHeldSerialIsAnOwnerError(t *testing.T) {
-	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
-	s.Note(storeZone, readOf(t, instrBase[:3]...), nil)
-	st := status(t, s, storeZone)
-	if st.Phase != PhaseOwnerError || st.Active.Serial != 7 || !strings.Contains(st.OwnerError, "HSYNCPARAM dropped") {
-		t.Errorf("phase %s active %s error %q", st.Phase, serialOf(st.Active), st.OwnerError)
-	}
-	// A legacy zone that never had HSYNCPARAM is no owner error.
-	legacy := newStore(t)
-	legacy.Note(storeZone, readOf(t, instrBase[:3]...), nil)
-	if st := status(t, legacy, storeZone); st.Phase != PhaseSteady {
-		t.Errorf("a legacy zone: phase %s, error %q", st.Phase, st.OwnerError)
+// A copy with no reading (#306, #308) is an owner error the store notes:
+// after a held serial the zone holds at it; at a first load nothing is
+// held, and no instructions are acted on, until a copy that reads.
+func TestACopyWithNoReadingIsAnOwnerError(t *testing.T) {
+	noParam := apexOf(t, instrBase[:3]...)
+	noSerial := apexOf(t, append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM servers="alpha,beta"`)...)
+	for _, c := range []struct {
+		name string
+		apex *tdns.OwnerData
+		want string
+	}{
+		{"HSYNC3 without HSYNCPARAM", noParam, "HSYNC3 without HSYNCPARAM"},
+		{"HSYNCPARAM without serial=", noSerial, "HSYNCPARAM without serial="},
+	} {
+		in, err := ReadInstructions(c.apex)
+		s := newStore(t)
+		s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
+		s.Note(storeZone, in, err)
+		if st := status(t, s, storeZone); st.Phase != PhaseOwnerError || st.Active.Serial != 7 || st.OwnerError != c.want {
+			t.Errorf("%s after serial 7: phase %s active %s error %q", c.name, st.Phase, serialOf(st.Active), st.OwnerError)
+		}
+		first := newStore(t)
+		first.Note(storeZone, in, err)
+		if st := status(t, first, storeZone); st.Phase != PhaseOwnerError || st.Active != nil || st.OwnerError != c.want {
+			t.Errorf("%s at a first load: phase %s active %s error %q", c.name, st.Phase, serialOf(st.Active), st.OwnerError)
+		}
+		// The first copy that reads ends it.
+		first.Note(storeZone, at(t, 1, "beta"), nil)
+		if st := status(t, first, storeZone); st.Phase != PhaseSteady || st.Active == nil || st.Active.Serial != 1 {
+			t.Errorf("%s, then serial 1: phase %s active %s error %q", c.name, st.Phase, serialOf(st.Active), st.OwnerError)
+		}
 	}
 }
 
