@@ -836,7 +836,7 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 	r := newReconcileRig(t, "dnskey.reconcile.example.", roleA)
 	tm := r.conf.InternalMp.MPTransport
 	tm.noRoleTimeout = time.Hour // the test ends the wait itself
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
 	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
 	tm.dnskeyPropMu.Lock()
 	_, waiting := tm.pendingDnskeyPropagations["d1"]
@@ -844,7 +844,7 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 	if !waiting {
 		t.Fatal("the distribution did not wait for n")
 	}
-	tm.dnskeyNoRoleTimedOut("d1")
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d1")
 	tm.dnskeyPropMu.Lock()
 	_, waiting = tm.pendingDnskeyPropagations["d1"]
 	tm.dnskeyPropMu.Unlock()
@@ -852,8 +852,8 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 		t.Error("the distribution still waits for n after the time-out")
 	}
 	// b, a voting member, is waited for whatever the time
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
-	tm.dnskeyNoRoleTimedOut("d2")
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d2")
 	tm.dnskeyPropMu.Lock()
 	_, waiting = tm.pendingDnskeyPropagations["d2"]
 	tm.dnskeyPropMu.Unlock()
@@ -884,7 +884,7 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberThatLostItsRoleWhileItWaited(t *
 		_, ok := tm.pendingDnskeyPropagations["d1"]
 		return ok
 	}
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
 	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
 	time.Sleep(50 * time.Millisecond) // time-outs pass while n votes
 	if !waiting() {

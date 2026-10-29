@@ -390,7 +390,7 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 		cur.noRoleAt = cur.noRoleAt || look
 		c.mu.Unlock()
 		if look {
-			time.AfterFunc(wait, func() { conf.askCsyncProgress(zonename) })
+			conf.delegationSyncAfter(ctx, wait, func() { conf.askCsyncProgress(ctx, zonename) })
 		}
 	}
 }
@@ -405,15 +405,15 @@ func noRoleOnly(zone ZoneName, awaited []string, since, now time.Time, timeout t
 
 // askCsyncProgress has the data engine look again at how far the zone's
 // CSYNC has come, from its own goroutine, which owns the tracking. A full
-// queue asks again a second later: with only members with no role left, no
-// confirmation may come to look again.
-func (conf *Config) askCsyncProgress(zone ZoneName) {
+// queue asks again a second later, until ctx ends: with only members with
+// no role left, no confirmation may come to look again.
+func (conf *Config) askCsyncProgress(ctx context.Context, zone ZoneName) {
 	if msgQs := conf.InternalMp.MsgQs; msgQs != nil && msgQs.SynchedDataCmd != nil {
 		select {
 		case msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "csync-progress", Zone: zone}:
 		default:
 			lgEngine.Warn("the data engine's queue is full; the CSYNC's time-out for members with no role is looked at again in a second", "zone", zone)
-			time.AfterFunc(time.Second, func() { conf.askCsyncProgress(zone) })
+			conf.delegationSyncAfter(ctx, time.Second, func() { conf.askCsyncProgress(ctx, zone) })
 		}
 	}
 }

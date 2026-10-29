@@ -224,7 +224,7 @@ func TestADnskeyDistributionOvertakenByAnAnswerWaitsForTheCombiner(t *testing.T)
 	// the leader's side: D's propagation tracking, and the answer it sent
 	lead := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	d, an := nextDistributionID(), nextDistributionID()
-	lead.TrackDnskeyPropagation(ZoneName(z), d, []uint16{kt}, nil, []AgentId{us})
+	lead.TrackDnskeyPropagation(t.Context(), ZoneName(z), d, []uint16{kt}, nil, []AgentId{us})
 	lead.noteCatchUpAnswer(an, ZoneName(z), us, map[uint16]bool{kt: true})
 	result := func() (string, bool) {
 		lead.dnskeyPropMu.Lock()
