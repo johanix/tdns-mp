@@ -253,6 +253,41 @@ func TestAHandOverWritesNoOptionsMapTheZoneHeld(t *testing.T) {
 	}
 }
 
+// The inventory reads whether the signer signs the zone under the zone's
+// lock, under which a hand-over replaces the multi-provider data (cubic on
+// tdns-mp #299; go test -race tells). Every hand-over here leaves us out of
+// the signers, so the inventory stops at that read.
+func TestAnInventoryDuringAHandOverRacesNothing(t *testing.T) {
+	const zone = "race.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				r.conf.inventoryMarksOf(zone, nil)
+			}
+		}
+	}()
+	for serial := 6; serial < 10; serial++ {
+		signers := "p2,p3"
+		if serial%2 == 0 {
+			signers = "p2"
+		}
+		r.hand(handoverFor(t, zone, sigRecords(fmt.Sprintf(`serial="%d" servers="us,p2" signers="%s"`, serial, signers))...), sigUs)
+	}
+	close(done)
+	wg.Wait()
+	if m := r.conf.inventoryMarksOf(zone, nil); !m.notSigning {
+		t.Error("after hand-overs that leave us out of the signers, the inventory says signing")
+	}
+}
+
 // The other signers' DNSKEYs stay, as foreign rows, while the sets handed
 // keep them, whatever the copy says; a hand-over that ends multi-signer
 // mode drops them.
