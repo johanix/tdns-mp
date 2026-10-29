@@ -635,3 +635,20 @@ func TestARequestWhoseKeptAnswerFailsWaitsForItsNextAnswer(t *testing.T) {
 		t.Errorf("the request asked again never timed out: %+v", e)
 	}
 }
+
+// A zone placed in its group before its first load names its members by
+// the stored serials: a group election that calls through it before the
+// zone is loaded reaches them, rather than failing on the zone's data.
+func TestAGroupElectionReachesAZoneNotLoadedYet(t *testing.T) {
+	r := newThawRig(t, "notloaded.restart.example.", roleA)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Ready = false
+	t.Cleanup(func() { mpzd.Ready = true })
+	zad, err := r.conf.InternalMp.AgentRegistry.GetZoneAgentData(ZoneName(r.zone))
+	if err != nil {
+		t.Fatalf("the zone's agents before its first load: %v", err)
+	}
+	if len(zad.Agents) != 1 || zad.Agents[0].ID != AgentId(roleB) {
+		t.Errorf("the zone's agents: %v", zad.Agents)
+	}
+}
