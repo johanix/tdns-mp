@@ -15,6 +15,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -42,7 +43,11 @@ func newKeyRoundRig(t *testing.T, zone, scheme string) *keyRoundRig {
 	r := &keyRoundRig{holdRig: h, zone: ZoneName(h.mpzd.ZoneName), them: AgentId(h.peer.Identity), us: AgentId(h.notifyRig.us.Identity),
 		alog: alog, polls: make(chan uint16, 8)}
 	h.notifyRig.us.Bridge.combinerID = rigCombiner
-	h.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, _ string, keyid uint16, _ uint8) { r.polls <- keyid }
+	// the poll ends with the parent trusting the key, as tdns's records it
+	h.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, keyName string, keyid uint16, _ uint8) {
+		tdns.UpdateParentState(h.mpzd.KeyDB, keyName, keyid, edns0.KeyStateTrusted)
+		r.polls <- keyid
+	}
 	h.parent.holdsNS("ns1."+h.mpzd.ZoneName, h.oldNS) // a sync has something to send
 	return r
 }
@@ -318,6 +323,9 @@ func testAVotingMemberAsksUntilItHoldsTheKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	// the rig's agent leads: it wants the key until the parent trusts it
+	// (S14)
+	trustKey(r.mpzd.KeyDB, string(r.zone), k.keyid)
 	if r.conf.wantsZoneKey(r.ctx, r.zone) {
 		t.Error("a voting member that holds the zone's key asks for it")
 	}
@@ -378,7 +386,7 @@ func TestTheKeyRequestsWindowIsOpenUntilItsAnswer(t *testing.T) {
 	f := newFakeKeyHooks(krB)
 	hooks := conf.keyRoundHooks()
 	fh := f.hooks()
-	hooks.wants, hooks.peers, hooks.decide = fh.wants, fh.peers, fh.decide
+	hooks.wants, hooks.peers, hooks.active, hooks.decide = fh.wants, fh.peers, fh.active, fh.decide
 	sent := make(chan *keyReq, 1)
 	hooks.send = func(_ context.Context, kr *keyReq) error { sent <- kr; return nil }
 
@@ -412,6 +420,11 @@ func TestARemoteKEYOperationChecksTheKey(t *testing.T) {
 	r := newEngineRigWith(t, zone, func(conf *Config) {
 		tr = newCatchUpTracker(roleA, []string{zone}, time.Hour)
 		conf.InternalMp.CatchUp = tr
+		// b leads the zone: a KEY is taken from the leader only (S14)
+		lem := NewLeaderElectionManager(roleA, time.Hour, func(ZoneName, string, map[string][]string) error { return nil })
+		t.Cleanup(func() { stopElectionTimers(lem) })
+		lem.elections[ZoneName(zone)] = &LeaderElection{Zone: ZoneName(zone), Leader: roleB, LeaderExpiry: time.Now().Add(time.Hour)}
+		conf.InternalMp.LeaderElectionManager = lem
 	})
 	checked := func() bool {
 		tr.mu.Lock()

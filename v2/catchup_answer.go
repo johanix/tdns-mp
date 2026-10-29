@@ -26,8 +26,10 @@ import (
 //
 // A complete answer has a replace for NS and CDS, and for a provider in
 // signers= for DNSKEY, each empty where this agent holds none; and, from
-// the agent that leads the zone, for its CSYNC. It names no KEY (decision
-// 27). It is enqueued for the asker alone and not tracked: tracking it
+// the agent that leads the zone, for its CSYNC, and for the zone's KEY when
+// it holds the key the zone publishes, with the KEY's publish instruction
+// (plan S14, decision 91). A member's answer names no KEY. It is enqueued
+// for the asker alone and not tracked: tracking it
 // would put another distribution ID on the records the leader's CSYNC is
 // tracked under. The asker's confirmation closes its queue entry.
 //
@@ -88,6 +90,11 @@ func (conf *Config) buildCatchUpAnswer(zdr *ZoneDataRepo, zone ZoneName, req *Ca
 	answer.Complete = &complete
 	if complete {
 		zu.Operations = conf.catchUpOperations(zdr, zone, self)
+		for _, op := range zu.Operations {
+			if op.RRtype == "KEY" {
+				zu.Publish = &core.PublishInstruction{KEYRRs: op.Records, Locations: publishLocations(zone)}
+			}
+		}
 	} else {
 		answer.Why = why
 	}
@@ -133,7 +140,10 @@ func (conf *Config) signsZone(zd *MPZoneData) bool {
 // withdraw its keys (the membership design, 2.3).
 //
 // The zone's CSYNC is the leader's alone, and only the agent that leads
-// the zone names it.
+// the zone names it. So is the zone's KEY: the leader takes it from its
+// keystore, the active key whose KEY record the zone publishes
+// (readZoneKey), never from its data, which does not hold what the key's
+// set-up published (plan S14). A leader that holds no such key names none.
 func (conf *Config) catchUpOperations(zdr *ZoneDataRepo, zone ZoneName, self AgentId) []core.RROperation {
 	var nod *OwnerData
 	if agentRepo, ok := zdr.Repo.Get(zone); ok {
@@ -178,6 +188,12 @@ func (conf *Config) catchUpOperations(zdr *ZoneDataRepo, zone ZoneName, self Age
 
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil && lem.IsLeader(zone) {
 		ops = append(ops, own(dns.TypeCSYNC))
+		if kdb := conf.zoneKeyDB(zone); kdb != nil {
+			if zk, err := readZoneKey(kdb, zone); err == nil && zk.held != nil && zk.held.key != nil &&
+				len(zk.published) == 1 && sameKey(zk.published[0], zk.held.key) {
+				ops = append(ops, core.RROperation{Operation: "replace", RRtype: "KEY", Records: []string{zk.held.key.String()}})
+			}
+		}
 	}
 	return ops
 }

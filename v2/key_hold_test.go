@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -31,10 +32,14 @@ func newKeyHoldRig(t *testing.T, zone string) *keyHoldRig {
 	h := newHoldRig(t, zone, "UPDATE", false, repeat(time.Hour, 4)...)
 	r := &keyHoldRig{holdRig: h, zone: ZoneName(h.mpzd.ZoneName), entered: make(chan struct{}, 4), release: make(chan struct{})}
 	r.key = testSig0Key(t, h.mpzd.KeyDB, h.mpzd.ZoneName)
-	h.conf.InternalMp.keyPoll = func(ctx context.Context, _ ZoneName, _ string, _ uint16, _ uint8) {
+	trustKey(h.mpzd.KeyDB, h.mpzd.ZoneName, r.key.keyid) // the parent trusts the zone's key
+	// released, the poll ends with the parent trusting the key, as tdns's
+	// records it
+	h.conf.InternalMp.keyPoll = func(ctx context.Context, _ ZoneName, keyName string, keyid uint16, _ uint8) {
 		r.entered <- struct{}{}
 		select {
 		case <-r.release:
+			tdns.UpdateParentState(h.mpzd.KeyDB, keyName, keyid, edns0.KeyStateTrusted)
 		case <-ctx.Done():
 		}
 	}
@@ -123,6 +128,7 @@ func TestARefreshsSyncIsHeldWhileTheKeyPollRuns(t *testing.T) {
 func TestTheSyncWaitsUntilTheZonesKeyIsTheOnlyActiveOne(t *testing.T) {
 	r := newKeyHoldRig(t, "two.keys.example.")
 	testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	trustActiveKeys(t, r.mpzd.KeyDB, string(r.zone)) // whichever is the zone's key, the parent trusts it
 
 	if got := r.explicit(t); !strings.Contains(got.Msg, "(signing key differs)") {
 		t.Fatalf("with two active keys the explicit sync's answer: %q", got.Msg)

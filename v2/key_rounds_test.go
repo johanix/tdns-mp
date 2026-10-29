@@ -22,6 +22,16 @@ const (
 	krC     AgentId  = "c.agent.example."
 )
 
+// krActive is the active serial the fake hooks know for every zone, and
+// stamp every answer with (S14).
+var krActive = SerialDigest{Serial: 41, Digest: "d41"}
+
+// stampedAt stamps resp with the active serial sd, as an answerer does.
+func stampedAt(sd SerialDigest, resp *ConfigResponseMsg) *ConfigResponseMsg {
+	resp.Instr = &MsgStamp{InstrStamp: InstrStamp{Active: sd.Serial, ActiveDigest: sd.Digest, Known: true}}
+	return resp
+}
+
 type keyDecision struct {
 	zone    ZoneName
 	answers map[AgentId]keyReply
@@ -38,6 +48,7 @@ type fakeKeyHooks struct {
 	block   map[AgentId]chan struct{}
 	closed  map[*keyReq]int // closeAsk calls
 	decide  bool
+	active  SerialDigest // this agent's active serial (S14)
 
 	sent    chan *keyReq
 	decided chan keyDecision
@@ -46,7 +57,7 @@ type fakeKeyHooks struct {
 func newFakeKeyHooks(peers ...AgentId) *fakeKeyHooks {
 	return &fakeKeyHooks{wants: map[ZoneName]bool{krZone: true, krZone2: true}, asked: map[ZoneName]int{}, peers: peers,
 		answers: map[*keyReq]chan *ConfigResponseMsg{}, sendErr: map[AgentId]error{}, block: map[AgentId]chan struct{}{},
-		closed: map[*keyReq]int{}, sent: make(chan *keyReq, 64), decided: make(chan keyDecision, 64)}
+		closed: map[*keyReq]int{}, sent: make(chan *keyReq, 64), decided: make(chan keyDecision, 64), active: krActive}
 }
 
 func (f *fakeKeyHooks) hooks() *keyHooks {
@@ -61,6 +72,11 @@ func (f *fakeKeyHooks) hooks() *keyHooks {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			return append([]AgentId(nil), f.peers...)
+		},
+		active: func(ZoneName) (SerialDigest, bool) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.active, true
 		},
 		prepare: func(kr *keyReq) {
 			ch := make(chan *ConfigResponseMsg, 1)
@@ -113,7 +129,7 @@ func (f *fakeKeyHooks) closes(kr *keyReq) int {
 }
 
 func noKeyHere() *ConfigResponseMsg {
-	return &ConfigResponseMsg{ConfigData: map[string]string{"status": "no sig0 key for zone"}}
+	return stampedAt(krActive, &ConfigResponseMsg{ConfigData: map[string]string{"status": "no sig0 key for zone"}})
 }
 
 // newKeyTracker is a tracker running the rounds on f, with these peers
@@ -211,7 +227,7 @@ func TestAKeyRoundAsksEveryPeerAndDecidesOnTheirAnswers(t *testing.T) {
 	}
 	f.answer(reqs[krB], noKeyHere())
 	noDecision(t, f, 100*time.Millisecond, "with one answer of two")
-	f.answer(reqs[krC], &ConfigResponseMsg{ConfigData: map[string]string{"keyrr": "k", "privatekey": "p", "algorithm": "ED25519"}})
+	f.answer(reqs[krC], stampedAt(krActive, &ConfigResponseMsg{ConfigData: map[string]string{"keyrr": "k", "privatekey": "p", "algorithm": "ED25519"}}))
 	d := decidedWithin(t, f, "both answers in")
 	if d.zone != krZone || d.answers[krB].outcome != keyNone || d.answers[krC].outcome != keyGot {
 		t.Errorf("the decision got %+v", d)
@@ -606,4 +622,51 @@ func TestACheckBringsTheNextRoundForward(t *testing.T) {
 	decidedWithin(t, f, "the first round")
 	tr.keyCheck(krZone)
 	sentWithin(t, f, "the round a check brings forward")
+}
+
+// A key, or a "no key here", counts only when it carries the active serial
+// this agent had when the round went out (S14): one stamped with another
+// serial, or with none, counts for nothing, and is not "no key".
+func TestAKeyAnswerFromAnotherActiveSerialDoesNotCount(t *testing.T) {
+	f := newFakeKeyHooks(krB, krC)
+	tr := newKeyTracker(t, f, krB, krC)
+	tr.keyCheck(krZone)
+	reqs := map[AgentId]*keyReq{}
+	for range 2 {
+		kr := sentWithin(t, f, "the round")
+		reqs[kr.peer] = kr
+	}
+	f.answer(reqs[krB], stampedAt(SerialDigest{Serial: 42, Digest: "d42"}, &ConfigResponseMsg{ConfigData: map[string]string{"status": "no sig0 key for zone"}}))
+	f.answer(reqs[krC], &ConfigResponseMsg{ConfigData: map[string]string{"keyrr": "k", "privatekey": "p", "algorithm": "ED25519"}})
+	d := decidedWithin(t, f, "both answers in")
+	for _, peer := range []AgentId{krB, krC} {
+		if a := d.answers[peer]; a.outcome != keyOtherSerial {
+			t.Errorf("%s: %+v, want %q", peer, a, keyOtherSerial)
+		}
+	}
+	if a := d.answers[krB]; a.detail != "it tells active 42, this agent 41" {
+		t.Errorf("the answer at another serial says %q", a.detail)
+	}
+}
+
+// A round starts over when this agent's active serial changes while it is
+// out: its answers decide nothing, and the next round goes out at once,
+// at the new serial, whose answers count.
+func TestTheKeyRoundStartsOverAtAChangeOfActiveSerial(t *testing.T) {
+	shortKeyTimers(t, 5*time.Second, 5*time.Second, 50*time.Millisecond)
+	f := newFakeKeyHooks(krB)
+	tr := newKeyTracker(t, f, krB)
+	tr.keyCheck(krZone)
+	old := sentWithin(t, f, "the round at 41")
+	v := SerialDigest{Serial: 42, Digest: "d42"}
+	f.mu.Lock()
+	f.active = v
+	f.mu.Unlock()
+	f.answer(old, stampedAt(krActive, &ConfigResponseMsg{ConfigData: map[string]string{"status": "no sig0 key for zone"}}))
+	noDecision(t, f, 150*time.Millisecond, "a round whose serial is not this agent's any more")
+	fresh := sentWithin(t, f, "the round at 42")
+	f.answer(fresh, stampedAt(v, &ConfigResponseMsg{ConfigData: map[string]string{"status": "no sig0 key for zone"}}))
+	if d := decidedWithin(t, f, "the round at 42"); d.answers[krB].outcome != keyNone {
+		t.Errorf("the round at 42 decided on %+v", d.answers[krB])
+	}
 }

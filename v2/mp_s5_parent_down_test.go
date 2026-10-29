@@ -46,6 +46,7 @@ func TestAFailedAnalysisIsOwedAndGrowsNoBackoff(t *testing.T) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, h.mpzd.KeyDB, z)
 	h.parent.holdsNS("ns1."+z, h.oldNS) // a difference for the sync to send
 	h.caughtUp()
 	h.parent.quiet(true)

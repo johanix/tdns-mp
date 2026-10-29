@@ -5,12 +5,14 @@ package tdnsmp
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -27,7 +29,11 @@ import (
 //   - a poll of the zone's key with its parent runs in this process
 //     (ParentSyncAfterKeyPublication): it bootstraps the key once the key
 //     is served, and the sync signed with it waits for that; or
-//   - a key this agent made or took was not published.
+//   - a key this agent made or took was not published; or
+//   - the parent does not trust the zone's key yet, by what tdns last
+//     recorded of it (keyPending, plan S14): every sync the leader asks for,
+//     the election's included, waits until the key is usable, and tdns asks
+//     for one when the parent trusts it (ParentSyncAfterKeyPublication).
 //
 // The held sync is owed, and asked for when the hold ends: when the last
 // poll of the zone's key ends (keyPollEnded), when the key is retired to one,
@@ -49,6 +55,12 @@ type keyPollBook struct {
 	ended map[ZoneName]keyPollEnd
 	// owed: zones held with no catch-up tracker to keep the owed mark.
 	owed map[ZoneName]bool
+	// offered: when the zone's key was last offered to the parent (a poll
+	// launched), which paces the leader's offers again (plan S14).
+	offered map[ZoneName]time.Time
+	// lost: the zone publishes a KEY that no agent asked holds, by its key
+	// id, as the leader's last round found (step 7b); shown as LOST.
+	lost map[ZoneName]uint16
 	// logged: when the hold was last logged for the zone (once an hour).
 	logged map[ZoneName]time.Time
 	// retesting: a backstop pass runs (retestKeyHoldsInBackground).
@@ -67,6 +79,8 @@ func (b *keyPollBook) init() {
 		b.ended = map[ZoneName]keyPollEnd{}
 		b.owed = map[ZoneName]bool{}
 		b.logged = map[ZoneName]time.Time{}
+		b.offered = map[ZoneName]time.Time{}
+		b.lost = map[ZoneName]uint16{}
 	}
 }
 
@@ -142,6 +156,37 @@ func (b *keyPollBook) pollEnded(zone ZoneName, keyid uint16, leadStart uint64, f
 		b.ended[zone] = keyPollEnd{keyid: keyid, leadStart: leadStart}
 	}
 	return b.running[zone]
+}
+
+// lastOffer is when the zone's key was last offered to the parent.
+func (b *keyPollBook) lastOffer(zone ZoneName) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	return b.offered[canonZone(zone)]
+}
+
+// setLost notes whether the zone's published KEY keyid is lost: no agent
+// asked holds it.
+func (b *keyPollBook) setLost(zone ZoneName, lost bool, keyid uint16) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	if lost {
+		b.lost[canonZone(zone)] = keyid
+	} else {
+		delete(b.lost, canonZone(zone))
+	}
+}
+
+// lostKey is the zone's published KEY that no agent asked holds, if the
+// leader's last round found one.
+func (b *keyPollBook) lostKey(zone ZoneName) (uint16, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	keyid, ok := b.lost[canonZone(zone)]
+	return keyid, ok
 }
 
 // state is what the hold reads of the zone.
@@ -241,7 +286,103 @@ func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why 
 	if unpublished {
 		return true, "not published"
 	}
+	if zk.held.parentState != edns0.KeyStateTrusted {
+		return true, "the parent has not taken the key"
+	}
 	return true, ""
+}
+
+// keyPending: this agent leads the zone, the zone uses a key, and this agent
+// holds no key, or holds one the parent does not trust yet by what tdns last
+// recorded of it (parent_state). While it is true every sync the leader asks
+// for is held (keyHold), and the key rounds offer the key again
+// (reofferZoneKey). Nothing is pending for a parent known to take no UPDATE
+// (plan S14).
+func (conf *Config) keyPending(ctx context.Context, zone ZoneName) bool {
+	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
+		return false
+	}
+	if !conf.zoneUsesKey(ctx, zone) {
+		return false
+	}
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return true
+	}
+	zk, err := readZoneKey(kdb, zone)
+	return err != nil || zk.held == nil || zk.held.parentState != edns0.KeyStateTrusted
+}
+
+// rolloverInZone: a key rollover is under way in the zone, at this provider
+// or by the latest first-hand telling of a voting member, heard within the
+// time a telling counts (S5a's predicate, as the thaw reads it).
+func (conf *Config) rolloverInZone(zone string) bool {
+	tm := conf.InternalMp.MPTransport
+	if tm == nil {
+		return false
+	}
+	if tm.rolloverAt(zone) {
+		return true
+	}
+	voting := conf.InternalMp.Instructions.activeVoters(zone)
+	timeout := leavingTimeoutFor(conf.MpConfig())
+	for _, st := range tm.stamps.firstHand(canonicalName(zone)) {
+		if st.Rollover && isAmong(voting, AgentId(st.identity)) && time.Since(st.heard) <= timeout {
+			return true
+		}
+	}
+	return false
+}
+
+// offerHeld holds the publication of the zone's key and its offers to the
+// parent (the poll, and the bootstrap in it) while the zone is frozen, as
+// syncHeld holds every other change (plan S6), except while a key rollover
+// under way in the zone waits for the parent to trust the key (keyPending):
+// the rollover's DS sync waits for the key, so holding its offers would
+// leave the rollover and the thaw waiting for each other (design 3.1, 6;
+// plan S14).
+func (conf *Config) offerHeld(ctx context.Context, zone ZoneName) (held bool, why string) {
+	if len(conf.zoneFrozen(string(zone))) > 0 && conf.rolloverInZone(string(zone)) && conf.keyPending(ctx, zone) {
+		lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
+		return false, ""
+	}
+	return conf.syncHeld(string(zone), syncOther)
+}
+
+// zoneKeyLine is the status of the zone's SIG(0) key at the leader, for
+// `agent parentsync status`: LOST when its last round found the published
+// KEY held by no agent asked, and while the parent does not trust the key
+// held, that it was offered and not taken, or that the parent refuses it
+// (decision 99). "" otherwise.
+func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
+	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
+		return ""
+	}
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return ""
+	}
+	zk, err := readZoneKey(kdb, zone)
+	if err != nil {
+		return ""
+	}
+	if zk.held == nil {
+		if keyid, lost := conf.InternalMp.keyPolls.lostKey(zone); lost && len(zk.published) == 1 && zk.published[0].KeyTag() == keyid {
+			return "LOST"
+		}
+		return ""
+	}
+	if !conf.keyPending(ctx, zone) {
+		return ""
+	}
+	switch zk.held.parentState {
+	case edns0.KeyStateRefused, edns0.KeyStateInvalid:
+		return fmt.Sprintf("key %d: the parent refuses it (%s)", zk.held.keyid, edns0.KeyStateToString(zk.held.parentState))
+	}
+	if zk.held.creator == "leader-election" {
+		return fmt.Sprintf("new key %d made and offered; the parent has not taken it yet", zk.held.keyid)
+	}
+	return fmt.Sprintf("key %d offered; the parent has not taken it yet", zk.held.keyid)
 }
 
 // holdForZoneKey holds the leader's sync of a multi-provider zone while the
@@ -377,6 +518,10 @@ func (conf *Config) launchKeyPoll(ctx context.Context, tk *keyPollToken, zone Zo
 		tk = b.begin(zone)
 	}
 	tk.handed = true
+	b.mu.Lock()
+	b.init()
+	b.offered[canonZone(zone)] = time.Now()
+	b.mu.Unlock()
 	var leadStart uint64
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
 		leadStart = lem.LeadStart(zone)

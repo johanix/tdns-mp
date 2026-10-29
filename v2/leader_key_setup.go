@@ -69,6 +69,9 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 		conf.InternalMp.CatchUp.keyCheck(zone)
 		return errZoneKeyNotHeld
 	}
+	// The key rounds offer the key again while the parent does not trust
+	// it (keyPending, S14)
+	defer conf.InternalMp.CatchUp.keyCheck(zone)
 	// A renewal of a lead whose poll of this key has ended in this process,
 	// with the key published, changes nothing: no publication again and no
 	// poll, whatever the poll's outcome. A new lead, a new or taken key, and
@@ -147,9 +150,10 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		}
 		return errLeadMoved
 	}
-	// The KEY is not published while the zone is frozen (plan S6): the
+	// The KEY is not published while the zone is frozen (plan S6), unless a
+	// rollover under way waits for the parent to trust it (S14): the
 	// take-up when the transition is done publishes it (takeUp)
-	if held, why := conf.syncHeld(string(zone), syncOther); held {
+	if held, why := conf.offerHeld(ctx, zone); held {
 		lgAgent.Info("the zone's KEY is published when the transition is done", "zone", zone, "phase", why)
 		return errHeldDuringTransition
 	}
@@ -187,6 +191,8 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
 	conf.InternalMp.keyPolls.published(zone)
 
+	// The KEY is the group's: every provider's combiner publishes it where
+	// the instruction says, at-ns under its own nameservers too (#206)
 	agentUpdate := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{
@@ -194,6 +200,7 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 			RRtype:    "KEY",
 			Records:   []string{keyRR.String()},
 		}},
+		Publish: zu.Publish,
 	}
 	if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)

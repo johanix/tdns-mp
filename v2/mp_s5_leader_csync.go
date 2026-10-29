@@ -418,11 +418,13 @@ func (conf *Config) delegationCsyncAwaitedAfter(ctx context.Context, zone string
 	})
 }
 
-// refuseCsyncNotFromLeader takes the CSYNC operations out of an update that
-// another agent sent, unless that agent is the one this agent knows as the
-// zone's delegation sync leader. The zone has one CSYNC, the leader's; a
-// CSYNC from anybody else, or while no leader is known, is rejected, and
-// the sender is told so in a final confirmation. The rest of the update is
+// refuseCsyncNotFromLeader takes the CSYNC and KEY operations out of an
+// update that another agent sent, unless that agent is the one this agent
+// knows as the zone's delegation sync leader. The zone has one CSYNC, the
+// leader's, and one KEY, the group's, which the leader publishes (plan
+// S14); either from anybody else, or while no leader is known, is
+// rejected, and the sender is told so in a final confirmation. A publish
+// instruction from anybody else is dropped. The rest of the update is
 // processed as usual. Returned is the reason, empty if nothing was refused.
 //
 // The sender is the one the transport established, never the one the update
@@ -435,8 +437,11 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if u == nil || u.Update == nil {
 		return ""
 	}
-	csync := dns.TypeToString[dns.TypeCSYNC]
-	if !slices.ContainsFunc(u.Update.Operations, func(op core.RROperation) bool { return strings.EqualFold(op.RRtype, csync) }) {
+	isType := func(rrtype uint16) func(core.RROperation) bool {
+		return func(op core.RROperation) bool { return strings.EqualFold(op.RRtype, dns.TypeToString[rrtype]) } // not-a-name: an RR type
+	}
+	leaderOnly := func(op core.RROperation) bool { return isType(dns.TypeCSYNC)(op) || isType(dns.TypeKEY)(op) }
+	if !slices.ContainsFunc(u.Update.Operations, leaderOnly) && u.Update.Publish == nil {
 		return ""
 	}
 	sender := u.DeliveredBy
@@ -449,22 +454,33 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if known && same(sender, leader) && same(u.AgentId, leader) {
 		return ""
 	}
+	u.Update.Publish = nil
+	if !slices.ContainsFunc(u.Update.Operations, leaderOnly) {
+		return ""
+	}
 	senderName := string(sender)
 	if senderName == "" {
 		senderName = "(not established)"
 	}
-	reason := fmt.Sprintf("a CSYNC is taken only from the zone's delegation sync leader: the sender is %s, the leader is %s", senderName, leader)
+	what, is := "a CSYNC", "is"
+	switch hasCsync, hasKey := slices.ContainsFunc(u.Update.Operations, isType(dns.TypeCSYNC)), slices.ContainsFunc(u.Update.Operations, isType(dns.TypeKEY)); {
+	case hasCsync && hasKey:
+		what, is = "a CSYNC and a KEY", "are"
+	case hasKey:
+		what = "a KEY"
+	}
+	reason := fmt.Sprintf("%s %s taken only from the zone's delegation sync leader: the sender is %s, the leader is %s", what, is, senderName, leader)
 	leaderName := string(leader)
 	if !known {
-		reason = fmt.Sprintf("a CSYNC is taken only from the zone's delegation sync leader: the sender is %s, and no leader is known", senderName)
+		reason = fmt.Sprintf("%s %s taken only from the zone's delegation sync leader: the sender is %s, and no leader is known", what, is, senderName)
 		leaderName = "(none known)"
 	}
-	lgEngine.Info("a CSYNC in a SYNC is rejected: it is not from the zone's delegation sync leader", "zone", u.Zone, "sender", senderName, "originator", u.AgentId, "leader", leaderName)
+	lgEngine.Info(what+" in a SYNC "+is+" rejected: it is not from the zone's delegation sync leader", "zone", u.Zone, "sender", senderName, "originator", u.AgentId, "leader", leaderName)
 
 	var kept []core.RROperation
 	var refused []RejectedItemInfo
 	for _, op := range u.Update.Operations {
-		if !strings.EqualFold(op.RRtype, csync) {
+		if !leaderOnly(op) {
 			kept = append(kept, op)
 			continue
 		}

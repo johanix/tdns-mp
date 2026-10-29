@@ -9,6 +9,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -44,7 +45,8 @@ func freezeServed(t *testing.T, conf *Config, mpzd *MPZoneData) {
 	}
 }
 
-// updateKey gives the zone the SIG(0) key an UPDATE is signed with.
+// updateKey gives the zone the SIG(0) key an UPDATE is signed with, one the
+// parent trusts.
 func updateKey(t *testing.T, r *notifyRig) {
 	t.Helper()
 	z := r.mpzd.ZoneName
@@ -52,6 +54,11 @@ func updateKey(t *testing.T, r *notifyRig) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	rows, err := activeSig0Rows(r.mpzd.KeyDB, ZoneName(z))
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("the zone's SIG(0) key: %v %v", rows, err)
+	}
+	tdns.UpdateParentState(r.mpzd.KeyDB, z, rows[0].keyid, edns0.KeyStateTrusted)
 }
 
 func TestTheLeaderSendsNothingNewToTheParentDuringATransition(t *testing.T) {

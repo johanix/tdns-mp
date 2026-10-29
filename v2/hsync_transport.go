@@ -1395,6 +1395,7 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 		Zone:       payload.Zone,
 		Subtype:    payload.Subtype,
 		ConfigData: payload.ConfigData,
+		Instr:      payload.Instr,
 	}
 
 	if tm.msgQs.configWaiters.deliver(rfiWaitKey(senderID, payload.Zone, payload.Subtype, payload.Nonce), configMsg) {
@@ -2218,14 +2219,14 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 	}
 	if update != nil {
 		syncReq.Operations = update.Operations
+		// the leader's KEY goes to the other agents with its publish
+		// instruction too, for their combiners (#206)
+		syncReq.Publish = update.Publish
 		if !isCombiner {
 			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
 		}
 		if isCombiner {
 			syncReq.ZoneClass = update.ZoneClass
-			if update.Publish != nil {
-				syncReq.Publish = update.Publish
-			}
 			syncReq.Acting = update.Acting
 		}
 	}

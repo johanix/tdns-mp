@@ -370,6 +370,7 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	r.parent.refuses()
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	r.ask()
@@ -441,6 +442,7 @@ func TestASyncThatStartsAfterTheTakeoverSendsNothing(t *testing.T) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	changed, dss, err := implicitDelegationChange(r.mpzd, refreshedZone(t, r.mpzd, fmt.Sprintf("%s 3600 IN NS ns2.provider.example.", z)))
 	if err != nil || !changed {
@@ -627,6 +629,7 @@ func noLongerParticipates(t *testing.T, optionOn bool) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	changed, dss, err := implicitDelegationChange(r.mpzd, refreshedZone(t, r.mpzd, fmt.Sprintf("%s 3600 IN NS ns2.provider.example.", z)))
 	if err != nil || !changed {
