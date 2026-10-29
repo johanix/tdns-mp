@@ -127,21 +127,24 @@ func TestAZoneWithParentsyncAndNoHSYNC3StillElectsAtItsFirstLoad(t *testing.T) {
 	r.electedWithin(t, ZoneName(zd.ZoneName), "the plain zone's first load")
 }
 
-// A zone whose parentsync option the first load's detection turns on, after
-// the post-refresh found it off and so made no check: the first-load
-// election makes it, and the zone's one voting member leads it. A second
-// check changes nothing.
-func TestAZoneWhoseParentsyncComesOnAfterItsPostRefreshIsStillElected(t *testing.T) {
+// Every multi-provider zone elects, whatever its parentsync (design 3,
+// plan S7): a zone whose owner syncs its delegation is elected at its first
+// load, with the option off, and its one voting member leads it. A second
+// check, the option on, changes nothing.
+func TestAGroupWithParentsyncOwnerElects(t *testing.T) {
 	zd := providerZone(t, "late.option.firstload.example.", arrivalA)
 	r := newZoneChangeRig(t, zd)
 	zone := ZoneName(zd.ZoneName)
 	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA}, serving: []string{arrivalA}})
-	if r.lem.IsLeader(zone) {
-		t.Fatal("precondition: the zone has a leader before its parentsync option is on")
+	if zd.Options[tdns.OptParentSync] || !zd.Options[tdns.OptMultiProvider] {
+		t.Fatal("precondition: a multi-provider zone whose owner syncs its delegation")
+	}
+	r.lem.electAtFirstLoad(zd)
+	r.electedWithin(t, zone, "the zone whose owner syncs its delegation")
+	if !r.lem.IsLeader(zone) {
+		t.Fatal("the zone's one voting member does not lead it")
 	}
 	zd.SetRuntimeOption(tdns.OptParentSync, true) // as the first-load detection does
-	r.lem.electAtFirstLoad(zd)
-	r.electedWithin(t, zone, "the zone whose option came on after its post-refresh")
 	r.lem.electAtFirstLoad(zd)
 	select {
 	case z := <-r.elected:

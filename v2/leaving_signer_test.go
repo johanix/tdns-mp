@@ -115,19 +115,19 @@ func TestALeavingSignerIsRememberedAcrossARestart(t *testing.T) {
 	beta := `HSYNC3 ON beta agent.beta.example. .`
 
 	before := &MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: z}, MP: &MPState{}}
-	set, changed := before.advanceSigningSet(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha,beta"`), kdb)
+	set, changed := before.advanceSigningSet(readingOf(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha,beta"`)), kdb)
 	if changed {
 		t.Error("the zone's first copy here is reported as a change of its signing set: an agent would sync before its election")
 	}
 	before.MP.MPdata = &MPdata{Signing: set}
-	set, changed = before.advanceSigningSet(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha"`), kdb)
+	set, changed = before.advanceSigningSet(readingOf(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha"`)), kdb)
 	if !sameSigningSet(set, "alpha", "beta") || changed {
 		t.Fatalf("after the edit: %v (changed %v), want alpha and beta (leaving), the set unchanged", set, changed)
 	}
 
 	// The restart: nothing in memory, the main_init stub.
 	after := &MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: z}, MP: &MPState{MPdata: &MPdata{}}}
-	set, _ = after.advanceSigningSet(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha"`), kdb)
+	set, _ = after.advanceSigningSet(readingOf(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha"`)), kdb)
 	if !sameSigningSet(set, "alpha", "beta") {
 		t.Fatalf("after a restart: %v, want alpha and beta (still leaving)", set)
 	}
@@ -137,18 +137,18 @@ func TestALeavingSignerIsRememberedAcrossARestart(t *testing.T) {
 
 	// Without the keystore a restart starts from signers=: what main did.
 	cold := &MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: z}, MP: &MPState{}}
-	if set, _ := cold.advanceSigningSet(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha"`), nil); !sameSigningSet(set, "alpha") {
+	if set, _ := cold.advanceSigningSet(readingOf(hsyncApex(t, z, alpha, beta, `HSYNCPARAM signers="alpha"`)), nil); !sameSigningSet(set, "alpha") {
 		t.Errorf("with no keystore: %v, want alpha alone", set)
 	}
 
 	// The record removed: the keystore forgets beta, so a later record of
 	// beta's does not bring the leave back.
 	after.MP.MPdata = &MPdata{Signing: set}
-	if _, changed := after.advanceSigningSet(hsyncApex(t, z, alpha, `HSYNCPARAM signers="alpha"`), kdb); !changed {
+	if _, changed := after.advanceSigningSet(readingOf(hsyncApex(t, z, alpha, `HSYNCPARAM signers="alpha"`)), kdb); !changed {
 		t.Error("the leaver's record removed by a live refresh, and the signing set is not reported changed: the leader would not sync its DS away")
 	}
 	fresh := &MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: z}, MP: &MPState{}}
-	if set, _ := fresh.advanceSigningSet(hsyncApex(t, z, alpha, beta, `HSYNCPARAM servers="alpha,beta" signers="alpha"`), kdb); !sameSigningSet(set, "alpha") {
+	if set, _ := fresh.advanceSigningSet(readingOf(hsyncApex(t, z, alpha, beta, `HSYNCPARAM servers="alpha,beta" signers="alpha"`)), kdb); !sameSigningSet(set, "alpha") {
 		t.Errorf("beta re-added as a server after its removal, across a restart: %v, want alpha alone", set)
 	}
 }
@@ -418,7 +418,7 @@ func TestEveryKeyMachineOfTheZonePausesWhileAProviderLeaves(t *testing.T) {
 			paused := map[string]keyPause{}
 			e.tickOwned(paused)
 			if !owner.Owns(mpzd.ZoneData) {
-				t.Fatal("the zone was released to tdns's key machine")
+				t.Fatal("the zone was given back to tdns's key machine")
 			}
 			st, err := e.Status(mpzd.ZoneName)
 			if err != nil {

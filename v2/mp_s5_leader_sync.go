@@ -333,10 +333,12 @@ type delegationSyncChains struct {
 
 // delegationRun is a leader sync under way: its cancel, and the hold of the
 // lead it began in (LeadHold; zero when this agent did not lead the zone
-// then).
+// then). cancelFor cancels it with a cause (cancelParentWork); nil for a run
+// a test lists.
 type delegationRun struct {
-	cancel context.CancelFunc
-	hold   uint64
+	cancel    context.CancelFunc
+	cancelFor context.CancelCauseFunc
+	hold      uint64
 }
 
 type delegationSyncChain struct {
@@ -622,6 +624,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
 		caughtUp, waiting := conf.InternalMp.CatchUp.CaughtUp(ZoneName(zone))
+		frozen := conf.zoneFrozen(zone)
 		c.mu.Lock()
 		ch := c.zones[zone]
 		if ch == nil || ch.ask != ask || ch.hold == nil || ch.hold.awaiting {
@@ -647,11 +650,32 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 			return
 		}
 		hold := ch.hold
+		// While the zone is frozen only a NOTIFY(CDS) leaves, the DS sync of
+		// a rollover; any other is dropped, and the sync is owed until the
+		// transition is done (plan S6)
+		leave := hold.notifies
+		if len(frozen) > 0 {
+			leave = slices.DeleteFunc(slices.Clone(leave), func(req tdns.NotifyRequest) bool { return req.RRtype != dns.TypeCDS })
+		}
+		if len(leave) == 0 {
+			ch.hold, ch.waiting, ch.notified, ch.rechecks = nil, false, "", 0
+			c.mu.Unlock()
+			// owed whatever the freeze is by now: the release tick asks it
+			conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
+			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
+				"notify", notifyTypes(hold.notifies))
+			return
+		}
 		ch.hold, ch.waiting = nil, false
-		types := notifyTypes(hold.notifies)
+		types := notifyTypes(leave)
 		check := c.notifyLeft(zone, ch, types, hold.retimed, delays)
 		c.mu.Unlock()
-		forwardNotifies(ctx, sent.out, hold.notifies)
+		if len(leave) < len(hold.notifies) {
+			conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
+			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
+				"notify", notifyTypes(hold.notifies))
+		}
+		forwardNotifies(ctx, sent.out, leave)
 		lgEngine.Info("the held NOTIFY has left for the parent", "zone", zone, "notify", types, "held", sent.wait)
 		conf.delegationSyncCheckAfter(ctx, zone, types, check)
 	})
@@ -739,13 +763,17 @@ func (conf *Config) endDelegationSyncWorkOf(zone string) (hold *delegationNotify
 
 // delegationSyncRun gives a leader sync of the zone a context of its own,
 // which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
-// over, and stopRunsOfLostLead when another agent takes the lead it began in.
+// over, stopRunsOfLostLead when another agent takes the lead it began in,
+// and cancelParentWork at the thaw's turn and when the group's leader is
+// invalidated (plan S7): it is the zone's parent context, and every path to
+// the parent takes it.
 // A sync can sit in tdns's UPDATE retry loop for a minute or more after a
 // REFUSED, and the loop asks only its context whether to go on. done ends
 // the run.
 func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx context.Context, done func()) {
 	c := &conf.InternalMp.delegationSyncChains
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancelFor := context.WithCancelCause(ctx)
+	cancel := func() { cancelFor(nil) }
 	hold := conf.holdOf(zone)
 	c.mu.Lock()
 	if c.runs == nil {
@@ -756,7 +784,7 @@ func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx 
 	}
 	c.runID++
 	id := c.runID
-	c.runs[zone][id] = delegationRun{cancel: cancel, hold: hold}
+	c.runs[zone][id] = delegationRun{cancel: cancel, cancelFor: cancelFor, hold: hold}
 	c.mu.Unlock()
 	// A lead lost while the run was being listed was stopped without it
 	// (stopRunsOfLostLead): the run stops itself.
@@ -1268,12 +1296,16 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		return false
 	}
 	snap := &KeyInventorySnapshot{
-		SenderID:  msg.SenderID,
-		Zone:      msg.Zone,
-		Inventory: msg.Inventory,
-		Owned:     msg.Owned,
-		Received:  time.Now(),
-		seq:       msg.seq,
+		SenderID:   msg.SenderID,
+		Zone:       msg.Zone,
+		Inventory:  msg.Inventory,
+		Owned:      msg.Owned,
+		Hold:       msg.Hold,
+		NotSigning: msg.NotSigning,
+		Rollover:   msg.Rollover,
+		WaitsOn:    msg.WaitsOn,
+		Received:   time.Now(),
+		seq:        msg.seq,
 	}
 	// One inventory of the zone at a time, from the check to the owner's
 	// copy: the engine and a refresh-keys RFI record from goroutines of
@@ -1292,8 +1324,13 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	if inventoryRecordedHook != nil {
 		inventoryRecordedHook(msg)
 	}
+	// what the signer holds of the agent's hand-over (plan S11): handed
+	// again until it holds what this agent wants
+	conf.InternalMp.SignerHandover.learned(zd.ZoneName, msg.Acting)
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
+	// the signer's word on the zone's hold, against the freeze (plan S6)
+	conf.reconcileHold(zd.ZoneName, snap)
 	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
 		return true

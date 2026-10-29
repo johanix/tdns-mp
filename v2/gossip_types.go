@@ -46,6 +46,9 @@ type GossipStateTable struct {
 	onGroupOperational func(groupHash string)
 	onGroupDegraded    func(groupHash string)
 	onElectionUpdate   func(groupHash string, state GroupElectionState)
+	// gateExcused are the members a group's gate leaves out (plan S7);
+	// nil: none.
+	gateExcused func(groupHash string) []string
 	// Track which groups have fired operational callback
 	operationalGroups map[string]bool
 	// firstRowHoldUntil: until then, a group's first local row is written
@@ -202,16 +205,17 @@ type LeaderElectionManager struct {
 	localID              AgentId
 	leaderTTL            time.Duration
 	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
-	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
-	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
-	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
-	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
-	onZoneLeft           func(zone ZoneName) bool  // ends what is scheduled for the parent of a zone that left its group (step 8)
-	onZoneRegrouped      func(zone ZoneName)       // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
-	onLeaderNamed        func()                    // called when an election names a leader, this agent or another (SetOnLeaderNamed)
-	onLeadLost           func(hold uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)
-	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
-	hooks                sync.WaitGroup            // the callbacks that run in goroutines of their own (onLeadLost, onLeaderNamed), until each has returned
+	operationalPeersFunc func(zone ZoneName) int         // returns count of operational peers for a zone
+	configuredPeersFunc  func(zone ZoneName) int         // returns count of configured peers for a zone
+	onLeaderElected      func(zone ZoneName) error       // called when local agent wins election
+	onZoneJoined         func(zone ZoneName) error       // called when a zone joins a group the local agent already leads
+	onZoneLeft           func(zone ZoneName) bool        // ends what is scheduled for the parent of a zone that left its group (step 8)
+	onZoneRegrouped      func(zone ZoneName)             // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
+	onLeaderNamed        func()                          // called when an election names a leader, this agent or another (SetOnLeaderNamed)
+	onLeadLost           func(hold uint64)               // called when another agent takes a lead this agent held (SetOnLeadLost)
+	gateExcused          func(groupHash string) []string // the members a group's election leaves out (SetGateExcused, plan S7)
+	keySetups            sync.Map                        // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
+	hooks                sync.WaitGroup                  // the callbacks that run in goroutines of their own (onLeadLost, onLeaderNamed), until each has returned
 	providerGroupMgr     *ProviderGroupManager
 }
 
@@ -284,7 +288,14 @@ type ParentSyncStatus struct {
 	// Instructions is what the agent keeps of the zone's instructions
 	// (instructions_store.go); nil when it keeps none.
 	Instructions *InstructionsStatus `json:"instructions,omitempty"`
+	// Frozen is why the zone is frozen, and whom its agreement waits for;
+	// Kept is what this agent keeps of its own until the transition is done
+	// (instr_freeze.go). Empty when it is not frozen and keeps nothing.
+	Frozen string `json:"frozen,omitempty"`
+	Kept   string `json:"kept,omitempty"`
 	// Combiner is what the agent knows its combiner acts by for the zone
 	// (the hand-over, plan S10); empty when it hands it nothing.
 	Combiner string `json:"combiner,omitempty"`
+	// Signer is the same of its signer (plan S11).
+	Signer string `json:"signer,omitempty"`
 }

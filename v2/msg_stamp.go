@@ -41,12 +41,9 @@ func (t *stampTable) messageStamp(zone string) *MsgStamp {
 	if t == nil {
 		return nil
 	}
-	st, ok := t.store.stampOf(zone)
+	st, ok := t.ownStamp(zone)
 	if !ok {
 		return nil
-	}
-	if t.rollover != nil {
-		st.Rollover = t.rollover(zone)
 	}
 	return &MsgStamp{Epoch: t.epoch, Seq: t.seq.Add(1), InstrStamp: st}
 }
@@ -94,17 +91,23 @@ func (t *stampTable) noteMessage(sender, zone string, ms *MsgStamp) {
 	switch {
 	case old == nil || ms.Epoch > old.Epoch:
 		t.kept[key] = &memberStamp{Identity: dns.Fqdn(sender), Epoch: ms.Epoch, Heard: now,
-			Instr: map[string]InstrStamp{z: ms.InstrStamp}, ZoneSeq: map[string]uint64{z: ms.Seq}}
+			Instr: map[string]InstrStamp{z: ms.InstrStamp}, ZoneSeq: map[string]uint64{z: ms.Seq}, ZoneHeard: map[string]time.Time{z: now}}
 	case ms.Epoch < old.Epoch || ms.Seq <= old.ZoneSeq[z]:
 		t.mu.Unlock()
 		return
 	default:
-		old.Instr[z], old.ZoneSeq[z], old.Heard = ms.InstrStamp, ms.Seq, now
+		if old.ZoneHeard == nil {
+			old.ZoneHeard = map[string]time.Time{}
+		}
+		old.Instr[z], old.ZoneSeq[z], old.ZoneHeard[z], old.Heard = ms.InstrStamp, ms.Seq, now, now
 	}
 	t.mu.Unlock()
 	lgGossip.Debug("a member's stamp noted from its message", "zone", zone, "member", sender, "seq", ms.Seq)
 	t.judgeTold(z)
 	t.fetchIfNewer(z, &memberStamp{Identity: dns.Fqdn(sender), Instr: map[string]InstrStamp{z: ms.InstrStamp}})
+	if t.onTold != nil {
+		t.onTold(z)
+	}
 }
 
 // stampedVerbs are the messages that carry their sender's stamp in an

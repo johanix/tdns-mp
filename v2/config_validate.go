@@ -37,7 +37,7 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateAgentSupportedMechanisms(mp); err != nil {
 		return err
 	}
-	if err := ValidateCombinerAgents(mp); err != nil {
+	if err := ValidatePartAgents(mp); err != nil {
 		return err
 	}
 	if err := ValidateCryptoFiles(mp); err != nil {
@@ -49,22 +49,52 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateSyncengineIntervals(mp); err != nil {
 		return err
 	}
+	if err := ValidateTransitions(mp); err != nil {
+		return err
+	}
 	return nil
 }
 
-// ValidateCombinerAgents refuses an empty entry in multi-provider.agents,
-// which the checks after it and the role's start would read, and a
-// multi-provider combiner with more than one agent: the combiner acts by
-// what its agent hands it (plan S10, 7.3 item 5), so it must be clear whose
+// ValidateTransitions rejects a negative
+// multi-provider.transitions.leaving-timeout, and one that is not above the
+// beat interval: a telling heard longer ago than it does not count for the
+// thaw (plan S7), and with beats further apart none would ever count.
+func ValidateTransitions(mp *MultiProviderConf) error {
+	if t := mp.Transitions.LeavingTimeout; t < 0 {
+		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %d is negative", t)
+	}
+	if beat := hsyncConfigFromMp(mp).BeatInterval; leavingTimeoutFor(mp) <= beat {
+		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %s is not above the beat interval (%s)", leavingTimeoutFor(mp), beat)
+	}
+	return nil
+}
+
+// leavingTimeoutDefault is multi-provider.transitions.leaving-timeout's
+// default.
+const leavingTimeoutDefault = time.Hour
+
+// leavingTimeoutFor is multi-provider.transitions.leaving-timeout, or its
+// default.
+func leavingTimeoutFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Transitions.LeavingTimeout > 0 {
+		return time.Duration(mp.Transitions.LeavingTimeout) * time.Second
+	}
+	return leavingTimeoutDefault
+}
+
+// ValidatePartAgents refuses an empty entry in multi-provider.agents, which
+// the checks after it and the role's start would read, and a multi-provider
+// combiner or signer with more than one agent: each acts by what its agent
+// hands it (plan S10 and S11, 7.3 item 5), so it must be clear whose
 // hand-over counts. It runs before the checks that read the entries.
-func ValidateCombinerAgents(mp *MultiProviderConf) error {
+func ValidatePartAgents(mp *MultiProviderConf) error {
 	for i, a := range mp.Agents {
 		if a == nil {
 			return fmt.Errorf("multi-provider.agents[%d] is empty", i)
 		}
 	}
-	if mp.Role == "combiner" && len(mp.Agents) > 1 {
-		return fmt.Errorf("a multi-provider combiner has more than one agent (multi-provider.agents lists %d)", len(mp.Agents))
+	if (mp.Role == "combiner" || mp.Role == "signer") && len(mp.Agents) > 1 {
+		return fmt.Errorf("a multi-provider %s has more than one agent (multi-provider.agents lists %d)", mp.Role, len(mp.Agents))
 	}
 	return nil
 }

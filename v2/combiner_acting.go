@@ -9,8 +9,8 @@
  * served and for a copy being analysed alike, so a refresh no longer moves
  * what the combiner acts by. A combiner handed nothing for a zone acts by
  * its own copy (rule 5): provisional for a copy that carries no serial, and
- * waiting for its agent for one that does. Until S7 a copy with a newer
- * serial than the one handed is acted by (actsBy).
+ * waiting for its agent for one that does. From S7 a copy newer than the
+ * hand-over is not acted by either: its agent may refuse that serial.
  */
 package tdnsmp
 
@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -126,40 +127,20 @@ func (s *actingStore) get(zone string) (heldHandover, bool) {
 	return heldHandover{}, false
 }
 
-// actsBy is the hand-over the combiner acts by for the zone, given the apex
-// of its own copy (the zone as served, or a copy being analysed): the one it
-// holds, unless that copy carries a newer serial (RFC 1982; a copy with no
-// serial is not newer). Until S7 the
-// agent's serial follows its own copy, which it takes from its signer, and
-// the signer from this combiner: at every edit the hand-over trails this
-// combiner's copy by two transfers, and in that gap the combiner acts by its
-// copy, as before S10. A combiner whose copy lags its agent's acts by the
-// agent's. S7, which gives the agent serials it refuses, removes the rule.
-func (s *actingStore) actsBy(zone string, apex *tdns.OwnerData) (heldHandover, bool) {
+// reading is the instructions the part was handed for the zone and acts by,
+// whatever its own copy says (from S7); nil when it holds none.
+func (s *actingStore) reading(zone string) *Instructions {
 	held, ok := s.get(zone)
-	if !ok {
-		return heldHandover{}, false
-	}
-	if own := readingOf(apex); own != nil && own.Serial != 0 && CompareSerial(own.Serial, held.handover.Serial) == 1 {
-		return heldHandover{}, false
-	}
-	return held, true
-}
-
-// reading is the instructions the combiner was handed for the zone and acts
-// by (actsBy); nil when it acts by the copy at apex.
-func (s *actingStore) reading(zone string, apex *tdns.OwnerData) *Instructions {
-	held, ok := s.actsBy(zone, apex)
 	if !ok {
 		return nil
 	}
 	return held.reading
 }
 
-// roles are the sets the combiner was handed for the zone, and whether it
-// acts by them (actsBy).
-func (s *actingStore) roles(zone string, apex *tdns.OwnerData) (Roles, bool) {
-	held, ok := s.actsBy(zone, apex)
+// roles are the sets the part was handed for the zone, and whether it holds
+// any.
+func (s *actingStore) roles(zone string) (Roles, bool) {
+	held, ok := s.get(zone)
 	if !ok {
 		return Roles{}, false
 	}
@@ -194,9 +175,9 @@ func (s *actingStore) owe(zone string, owed bool) {
 }
 
 // signingSet is the handed set of who signs, as the signing set
-// populateMPdata reads (#275), and whether the combiner acts by it.
-func (s *actingStore) signingSet(zone string, apex *tdns.OwnerData) (signingSet, bool) {
-	r, ok := s.roles(zone, apex)
+// populateMPdata reads (#275), and whether the part holds one.
+func (s *actingStore) signingSet(zone string) (signingSet, bool) {
+	r, ok := s.roles(zone)
 	if !ok {
 		return nil, false
 	}
@@ -307,7 +288,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 	if store == nil {
 		return refuse("this combiner keeps no hand-overs")
 	}
-	// what the combiner acted by before, its copy included (actsBy)
+	// what the combiner acted by before
 	pubkeyBefore := mpzd.hasPubkey()
 	prev, changed, err := store.take(h, sender)
 	switch {
@@ -325,7 +306,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		store.owe(zone, actErr != nil)
 	}
 	if h.Refresh {
-		conf.refreshFromUpstream(mpzd)
+		conf.refreshFromUpstream(mpzd, lgCombiner)
 	}
 	if actErr != nil {
 		// Held and judged by, not served: said so, as a contribution's
@@ -347,8 +328,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	if !mpzd.Ready {
 		return nil
 	}
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName, apex)
+	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName)
 	if !ok {
 		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
 	}
@@ -404,16 +384,17 @@ func handedOrigin(r Roles, origin string, rrtype uint16) bool {
 	})
 }
 
-// refreshFromUpstream asks for a refresh of the zone from the combiner's
-// upstream (the hand-over's Refresh: the fetch down the provider's chain,
-// design 3.1). One already asked for is enough.
-func (conf *Config) refreshFromUpstream(mpzd *MPZoneData) {
+// refreshFromUpstream asks for a refresh of the zone from the combiner's or
+// the signer's upstream (the hand-over's Refresh: the fetch down the
+// provider's chain, design 3.1), logged by the part's logger. One already
+// asked for is enough.
+func (conf *Config) refreshFromUpstream(mpzd *MPZoneData, lg *slog.Logger) {
 	zr := tdns.ZoneRefresher{Name: mpzd.ZoneName, ZoneType: mpzd.ZoneType, ZoneStore: mpzd.ZoneStore}
 	select {
 	case conf.Config.Internal.RefreshZoneCh <- zr:
-		lgCombiner.Info("refreshing the zone from upstream, as the agent asks", "zone", mpzd.ZoneName)
+		lg.Info("refreshing the zone from upstream, as the agent asks", "zone", mpzd.ZoneName)
 	default:
-		lgCombiner.Warn("the refresh engine's queue is full; the agent asks again", "zone", mpzd.ZoneName)
+		lg.Warn("the refresh engine's queue is full; the agent asks again", "zone", mpzd.ZoneName)
 	}
 }
 
@@ -440,10 +421,6 @@ func combinerActingLine(mpzd *MPZoneData) string {
 		return ""
 	}
 	if held, ok := s.get(mpzd.ZoneName); ok {
-		apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-		if _, acts := s.actsBy(mpzd.ZoneName, apex); !acts {
-			return fmt.Sprintf("by its own copy, serial %d, newer than the %s its agent handed at %s", readingOf(apex).Serial, held.handover, held.since.Format(time.TimeOnly))
-		}
 		return fmt.Sprintf("acting by %s, handed by its agent at %s", held.handover, held.since.Format(time.TimeOnly))
 	}
 	if !mpzd.waitsForHandover() {
@@ -461,10 +438,10 @@ func combinerActingLine(mpzd *MPZoneData) string {
 // reportCombinerStart is the combiner's start report: a STATUS-UPDATE
 // "combiner-start" to its agent once its router is up, naming no zone of its
 // own ("."), on which the agent hands every zone over. Every minute after,
-// for each zone whose copy carries a serial and that it holds nothing for
-// (waitsForHandover), it sends "combiner-waits" for that zone, rule 5's
-// request, since the agent may not have been up; the agent hands that zone
-// over, and what the combiner holds for the others stands.
+// for each zone that it holds nothing for (zonesWaitingForHandover), it
+// sends "combiner-waits" for that zone, rule 5's request, since the agent
+// may not have been up; the agent hands that zone over, and what the
+// combiner holds for the others stands.
 func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBridge) {
 	mp := conf.MpConfig()
 	if tm == nil || mp == nil {
@@ -492,12 +469,23 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 	}
 }
 
-// zonesWaitingForHandover are the zones loaded here that wait for their
-// agent's hand-over (waitsForHandover).
+// zonesWaitingForHandover are the multi-provider zones loaded here whose
+// copy carries instructions and that the combiner holds no hand-over for,
+// whether or not the copy carries a serial: one that carries none acts by
+// its copy meanwhile (rule 5), and from S7 that copy can hold a serial its
+// agent refuses (tdns-mp #302). A copy with no instructions is handed none,
+// and nothing is held for it.
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
 	for _, zone := range conf.InternalMp.MPZoneNames {
-		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
+		mpzd, ok := Zones.Get(zone)
+		if !ok || !mpzd.Ready || !mpzd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		if _, held := actingHeld.Load().get(zone); held {
+			continue
+		}
+		if apex, err := mpzd.GetOwner(mpzd.ZoneName); err == nil && readingOf(apex) != nil {
 			out = append(out, zone)
 		}
 	}

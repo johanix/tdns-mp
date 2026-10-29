@@ -1224,15 +1224,9 @@ func (mpzd *MPZoneData) RebuildCombinerData() {
 	// its origin, by the sets handed (design 3.5, plan S10): a DNSKEY only
 	// from a provider in KeySigners, a CDS only from one in DSSigners. What
 	// it leaves out stays stored, and the next combine takes it out of the
-	// zone. While its copy is newer than the hand-over, by the sets its copy
-	// gives, as a hand-over of it would carry them (actsBy). Handed nothing,
-	// the combiner judges nothing again, so that it removes nothing it
-	// served (rule 5).
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	handed, filter := actingHeld.Load().roles(mpzd.ZoneName, apex)
-	if _, held := actingHeld.Load().get(mpzd.ZoneName); held && !filter {
-		handed, filter = mpzd.actingSets(), true
-	}
+	// zone. Handed nothing, the combiner judges nothing again, so that it
+	// removes nothing it served (rule 5).
+	handed, filter := actingHeld.Load().roles(mpzd.ZoneName)
 
 	for agentID, ownerMap := range mpzd.MP.AgentContributions {
 		for owner, rrtypeMap := range ownerMap {

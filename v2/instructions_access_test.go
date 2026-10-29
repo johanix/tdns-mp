@@ -187,10 +187,11 @@ func TestTheHookRunsAtEveryFirstLoad(t *testing.T) {
 	}
 }
 
-// Until S7 the readers act by the copy, whatever the store makes of it
-// (plan S2): an edit at serial 0, one at the same serial and a lower serial
-// are each acted on, as before S3, and an owner error is only shown.
-func TestUntilEnforcedEveryCopyIsActedOn(t *testing.T) {
+// From S7 the readers act by the active serial, not the copy: an edit at
+// serial 0, one at the same serial and a lower serial are each not acted
+// on, and the first two are owner errors. Nothing changed, the hook does not
+// run.
+func TestAnEditWithoutARaisedSerialIsNotActedOn(t *testing.T) {
 	asMPAgent(t)
 	for _, c := range []struct{ name, before, after, ownerError string }{
 		{"serial0", `servers="alpha,beta"`, `servers="alpha,beta" parentsync="agent"`, "serial 0 with two digests"},
@@ -208,14 +209,14 @@ func TestUntilEnforcedEveryCopyIsActedOn(t *testing.T) {
 			after := readOf(t, acRecords("", c.after)...)
 			s.Note(mpzd.ZoneName, after, nil)
 			postRefresh(t, mpzd, before, false)
-			if got := instructionsFor(ZoneName(mpzd.ZoneName)); got == nil || got.Digest() != after.Digest() {
-				t.Errorf("the readers act by %+v, want the copy", got)
+			if got := instructionsFor(ZoneName(mpzd.ZoneName)); got == nil || got.Digest() != before.Digest() {
+				t.Errorf("the readers act by %+v, want the active serial", got)
 			}
-			if r := rolesForZone(ZoneName(mpzd.ZoneName)); r.ParentSync != core.HsyncParentSyncAgent {
-				t.Errorf("parentsync %d, want the copy's agent", r.ParentSync)
+			if r := rolesForZone(ZoneName(mpzd.ZoneName)); r.ParentSync == core.HsyncParentSyncAgent {
+				t.Error("parentsync agent: the copy's, not the active serial's")
 			}
-			if !strings.Contains(logs.String(), "the zone's active instructions changed") {
-				t.Errorf("the hook did not run for the edit:\n%s", logs)
+			if strings.Contains(logs.String(), "the zone's active instructions changed") {
+				t.Errorf("the hook ran for an edit that is not acted on:\n%s", logs)
 			}
 			if st := s.Status(mpzd.ZoneName); !strings.HasPrefix(st.OwnerError, c.ownerError) || (c.ownerError == "") != (st.OwnerError == "") {
 				t.Errorf("owner error %q, want %q", st.OwnerError, c.ownerError)
@@ -403,19 +404,26 @@ func TestMPdataFollowsTheStepsSetsWithoutATransfer(t *testing.T) {
 	}
 }
 
-func TestThePreRefreshReadersGetAReadingOfTheApex(t *testing.T) {
+// From the thaw (S7) the incoming copy at a refresh is analysed by the
+// active instructions: a newer serial is held, not acted on. Where the store
+// keeps no record, by the copy.
+func TestThePreRefreshReadersGetTheActiveReading(t *testing.T) {
 	served := instrTestZone(t, "prerefresh.access.example.", acRecords("", `serial="7" servers="alpha,beta" signers="beta"`)...)
+	incoming := zoneCopy(t, served.ZoneName, acRecords("", `serial="8" servers="alpha,beta" signers="alpha"`)...)
+	wrapper := &MPZoneData{ZoneData: incoming, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
+	mp := &MultiProviderConf{Role: "agent", Identity: acAlpha}
+	withStore(t, nil)
+	wrapper.populateMPdata(mp, wrapper.signingSet())
+	if wrapper.MP.MPdata == nil || !wrapper.MP.MPdata.WeAreSigner {
+		t.Fatalf("with no store: the incoming copy's MPdata %+v; want alpha a signer, as the copy says", wrapper.MP.MPdata)
+	}
 	s := newStore(t)
 	withStore(t, s)
 	s.Note(served.ZoneName, served.instructions(), nil)
-	incoming := zoneCopy(t, served.ZoneName, acRecords("", `serial="8" servers="alpha,beta" signers="alpha"`)...)
-	wrapper := &MPZoneData{ZoneData: incoming, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
-	if wrapper.served() {
-		t.Fatal("the incoming copy reads as the zone served")
-	}
-	wrapper.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, wrapper.signingSet())
-	if wrapper.MP.MPdata == nil || !wrapper.MP.MPdata.WeAreSigner {
-		t.Errorf("the incoming copy's MPdata %+v; want alpha a signer, as the incoming copy says, not the store", wrapper.MP.MPdata)
+	wrapper = &MPZoneData{ZoneData: incoming, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
+	wrapper.populateMPdata(mp, wrapper.signingSet())
+	if wrapper.MP.MPdata == nil || wrapper.MP.MPdata.WeAreSigner {
+		t.Errorf("the incoming copy's MPdata %+v; want alpha no signer, as the active serial 7 says", wrapper.MP.MPdata)
 	}
 }
 

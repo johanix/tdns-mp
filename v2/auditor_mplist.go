@@ -45,7 +45,11 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 			}
 		}
 	}
-	info.Acting = combinerActingLine(mpzd)
+	if tdns.Globals.App.Type == AppTypeMPSigner {
+		info.Acting = signerActingLine(mpzd.ZoneName)
+	} else {
+		info.Acting = combinerActingLine(mpzd)
+	}
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return info

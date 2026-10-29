@@ -109,6 +109,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			DnskeyRemovedKeyTags: removedTags,
 			KeyStatesChanged:     ds.StatesChanged,
 			Resend:               ds.Resend,
+			Inventory:            true,
 		}
 
 	default:
@@ -353,6 +354,25 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 							"privatekey": zk.held.privatekey,
 							"keyrr":      zk.held.keyrr,
 						}
+					}
+				}
+
+			case "instructions":
+				// A serial of the zone's instructions that a member lacks:
+				// a thaw's from-serial, or a serial agreed on or made active
+				// (plan S7). Answered whatever the asker's stamp (rule 6),
+				// from what this agent holds; the asker checks the records
+				// against the digest.
+				sd, err := instructionsAsked(ampp.Records)
+				switch {
+				case err != nil:
+					configErr = fmt.Sprintf("%s: CONFIG instructions request: %v", ar.LocalAgent.Identity, err)
+				default:
+					if in := instrStore.Load().readingAt(string(ampp.Zone), sd); in == nil {
+						configErr = fmt.Sprintf("%s: serial %s of zone %s is not held here", ar.LocalAgent.Identity, sd, ampp.Zone)
+					} else {
+						lgEngine.Info("CONFIG instructions: returning a serial of the zone's instructions to a member", "zone", ampp.Zone, "peer", ampp.OriginatorID, "serial", sd.Serial)
+						configData = instructionsAnswer(string(ampp.Zone), in)
 					}
 				}
 

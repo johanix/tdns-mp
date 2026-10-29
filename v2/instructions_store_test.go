@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -143,8 +144,8 @@ func TestAConflictLastsUntilAHigherSerial(t *testing.T) {
 		t.Fatalf("the contents reverted at the same serial ended the owner error: phase %s", st.Phase)
 	}
 	s.Note(storeZone, at(t, 8, "alpha"), nil)
-	if st := status(t, s, storeZone); st.Phase != PhaseSteady || st.Active.Serial != 8 || st.OwnerError != "" {
-		t.Errorf("after serial 8: phase %s active %s error %q", st.Phase, serialOf(st.Active), st.OwnerError)
+	if st := status(t, s, storeZone); st.Phase != PhaseAgreeing || st.Agreeing == nil || st.Agreeing.Serial != 8 || st.OwnerError != "" {
+		t.Errorf("after serial 8: phase %s agreeing %s error %q", st.Phase, serialOf(st.Agreeing), st.OwnerError)
 	}
 }
 
@@ -533,25 +534,32 @@ func TestForgetIsRefusedForAZoneThatIsNotSteady(t *testing.T) {
 	}
 }
 
-func TestActiveFollowsTheCopyUntilEnforced(t *testing.T) {
+// From the thaw (S7) the first copy noted is the active serial, enforced,
+// and a newer one is held, not made active. A record kept before S7
+// followed the copy and counts as none: the copy noted next is the active
+// serial (S9 replaces this with the restart rule).
+func TestTheFirstCopyIsEnforcedAndANewerOneIsHeld(t *testing.T) {
 	s := newStore(t)
 	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
-	s.Note(storeZone, at(t, 8, "alpha"), nil)
-	if st := status(t, s, storeZone); st.Active.Serial != 8 || st.Newest.Serial != 8 || st.Enforced {
-		t.Fatalf("not enforced: active %s newest %s enforced %v; want the copy's 8", serialOf(st.Active), serialOf(st.Newest), st.Enforced)
+	if st := status(t, s, storeZone); st.Active.Serial != 7 || !st.Enforced {
+		t.Fatalf("the first copy: active %s enforced %v; want 7, enforced", serialOf(st.Active), st.Enforced)
 	}
-	enforced(t, s, storeZone)
-	s.Note(storeZone, at(t, 9, "beta"), nil)
-	if st := status(t, s, storeZone); st.Active.Serial != 8 || st.Newest.Serial != 9 {
-		t.Errorf("enforced: active %s newest %s; want 8, 9", serialOf(st.Active), serialOf(st.Newest))
+	s.Note(storeZone, at(t, 8, "alpha"), nil)
+	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Newest.Serial != 8 {
+		t.Errorf("a newer copy: active %s newest %s; want 7, 8", serialOf(st.Active), serialOf(st.Newest))
 	}
 }
 
-func TestRecordsWrittenBeforeEnforcementAreMarked(t *testing.T) {
+func TestARecordKeptBeforeTheThawCountsAsNone(t *testing.T) {
 	_, hdb := storeDB(t)
 	s := loadStore(t, hdb)
-	seven, eight := at(t, 7, "alpha,beta"), at(t, 8, "alpha")
-	s.Note(storeZone, seven, nil)
+	seven := at(t, 7, "alpha,beta")
+	if err := s.update(storeZone, func(z *zoneSerials) error {
+		z.Active = &heldSerial{SerialDigest: sd(seven), Reading: seven, Since: time.Now()}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	column := func() (enforced int, phase string) {
 		t.Helper()
 		if err := hdb.DB.QueryRow(`SELECT enforced, phase FROM MPZoneInstructions WHERE zonename = ?`, storeZone).Scan(&enforced, &phase); err != nil {
@@ -560,18 +568,74 @@ func TestRecordsWrittenBeforeEnforcementAreMarked(t *testing.T) {
 		return
 	}
 	if e, p := column(); e != 0 || p != PhaseSteady {
-		t.Errorf("a noted copy: enforced %d phase %q; want 0, steady", e, p)
+		t.Errorf("a record kept before S7: enforced %d phase %q; want 0, steady", e, p)
 	}
 	if line := status(t, s, storeZone).Line(); !strings.HasSuffix(line, "; not enforced") {
 		t.Errorf("status %q does not say not enforced", line)
 	}
-	enforced(t, s, storeZone)
-	s.Note(storeZone, eight, nil)
-	if err := s.Activate(storeZone, Thaw{From: sd(seven), To: sd(eight)}); err != nil {
+	// the same copy noted again: the record is the copy's, enforced
+	s.Note(storeZone, seven, nil)
+	if e, _ := column(); e != 1 {
+		t.Errorf("the same copy noted again: enforced %d, want 1", e)
+	}
+	// an edit at the same serial over a record kept before S7 is an owner
+	// error, and the record is enforced: the readers act by it, not by the
+	// edited copy
+	if err := s.update(storeZone, func(z *zoneSerials) error { z.Enforced = false; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if e, p := column(); e != 1 || p != PhaseReconciling {
-		t.Errorf("after a thaw: enforced %d phase %q; want 1, reconciling", e, p)
+	s.Note(storeZone, at(t, 7, "alpha"), nil)
+	if st := status(t, s, storeZone); st.OwnerError == "" || !st.Enforced || *st.Active != sd(seven) {
+		t.Errorf("an edit at serial 7 over a record from before S7: owner error %q, enforced %v, active %s", st.OwnerError, st.Enforced, st.Active)
+	}
+	if in := s.activeReading(storeZone); in == nil || in.Digest() != seven.Digest() {
+		t.Errorf("the readers act by %v, want the record's 7", in)
+	}
+	// a newer copy over a record kept before S7 is the active serial
+	if err := s.update(storeZone, func(z *zoneSerials) error {
+		z.Enforced, z.OwnerError, z.ErrorAt, z.Conflict = false, "", nil, nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.Note(storeZone, at(t, 8, "alpha"), nil)
+	if st := status(t, s, storeZone); st.Active.Serial != 8 || !st.Enforced || st.Newest.Serial != 8 {
+		t.Errorf("a newer copy over a record from before S7: active %s newest %s enforced %v; want 8, enforced", serialOf(st.Active), serialOf(st.Newest), st.Enforced)
+	}
+	s.Note(storeZone, at(t, 9, "beta"), nil)
+	if st := status(t, s, storeZone); st.Active.Serial != 8 || st.Newest.Serial != 9 {
+		t.Errorf("then a newer one: active %s newest %s; want 8, 9", serialOf(st.Active), serialOf(st.Newest))
+	}
+}
+
+// A serial fetched from a member is held in order among the newer serials,
+// judged against the active serial; one held already is not kept twice, one
+// held with another digest is refused, and one at or below the active
+// serial is not kept.
+func TestAFetchedSerialIsHeldInOrder(t *testing.T) {
+	s := newStore(t)
+	seven, eight, nine := at(t, 7, "alpha,beta"), at(t, 8, "alpha"), at(t, 9, "beta")
+	s.Note(storeZone, seven, nil)
+	s.Note(storeZone, nine, nil)
+	if err := s.Hold(storeZone, eight); err != nil {
+		t.Fatal(err)
+	}
+	st := status(t, s, storeZone)
+	if st.Newest.Serial != 9 || st.Agreeing == nil || st.Agreeing.Serial != 9 || s.readingAt(storeZone, sd(eight)) == nil {
+		t.Fatalf("after holding 8: %+v", st)
+	}
+	if err := s.Hold(storeZone, eight); !errors.Is(err, errHeldAlready) {
+		t.Errorf("8 again: %v", err)
+	}
+	if err := s.Hold(storeZone, at(t, 8, "beta")); err == nil {
+		t.Error("8 with another digest is kept")
+	}
+	if err := s.Hold(storeZone, at(t, 6, "alpha")); err == nil {
+		t.Error("6, below the active serial, is kept")
+	}
+	// a member at 7 that holds the thaw's pair, 8 to 9, moves straight
+	if err := s.Activate(storeZone, Thaw{From: sd(eight), To: sd(nine)}); err != nil {
+		t.Errorf("moving straight from 7 by the thaw 8 to 9: %v", err)
 	}
 }
 
@@ -582,10 +646,9 @@ func TestStatusShowsActiveNewestCopyAndOwnerError(t *testing.T) {
 		t.Errorf("nothing kept: %q", got)
 	}
 	s.Note(storeZone, seven, nil)
-	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("active 7 (%s), copy 7; not enforced", seven.Digest()); got != want {
+	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("active 7 (%s), copy 7", seven.Digest()); got != want {
 		t.Errorf("steady:\n got %q\nwant %q", got, want)
 	}
-	enforced(t, s, storeZone)
 	s.Note(storeZone, eight, nil)
 	if got, want := status(t, s, storeZone).Line(), fmt.Sprintf("active 7 (%s), newest 8 (%s), copy 8; agreeing", seven.Digest(), eight.Digest()); got != want {
 		t.Errorf("a newer serial held:\n got %q\nwant %q", got, want)

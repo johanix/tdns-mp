@@ -111,6 +111,12 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// The hand-over to the combiner (plan S10) is in place before the first
 	// zone load, which hands the combiner what this agent acts by.
 	conf.startHandovers(ctx, conf.InternalMp.MPTransport)
+	// The zones' thaws (plan S7), asked after a member's telling and at
+	// every beat round.
+	tdns.StartEngine(&tdns.Globals.App, "Thaws", func() error {
+		conf.runThaws(ctx)
+		return nil
+	})
 
 	// The hsync engine is constructed before RefreshEngine starts (its Run
 	// starts further down, with the other agent engines): the first zone
@@ -274,6 +280,9 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	if ar.ProviderGroupManager != nil {
 		lem.SetProviderGroupManager(ar.ProviderGroupManager)
 	}
+	// A group's election leaves out a leaving voting member that is excused
+	// and not heard, as its gate does (design 3.2, plan S7).
+	lem.SetGateExcused(conf.gateExcused)
 
 	// Attach OnFirstLoad callbacks to zone stubs.
 	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
@@ -335,8 +344,8 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
 		err := leaderKeySetup(zone, true)
 		conf.requestDelegationSync(ctx, string(zone), "this agent was elected the zone's delegation sync leader")
-		if errors.Is(err, errLeadMoved) {
-			return nil // the lead moved on during the setup: nothing failed
+		if errors.Is(err, errLeadMoved) || errors.Is(err, errHeldDuringTransition) {
+			return nil // the lead moved on during the setup, or the zone is frozen: nothing failed
 		}
 		return err
 	})
@@ -372,7 +381,7 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		if errors.Is(err, errLeadMoved) {
 			return nil // a sync asked for now would go out from nobody
 		}
-		if err != nil && !errors.Is(err, errZoneKeyNotHeld) {
+		if err != nil && !errors.Is(err, errZoneKeyNotHeld) && !errors.Is(err, errHeldDuringTransition) {
 			lgAgent.Warn("the key setup of a zone that joined a group this agent leads failed; the sync waits for the key", "zone", zone, "err", err)
 		}
 		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
