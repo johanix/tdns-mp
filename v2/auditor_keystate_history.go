@@ -31,13 +31,13 @@ type keyStateHistory struct {
 // it lists it as no longer sent. A message without DNSKEY operations changes
 // nothing. The maps handed out are never written again.
 func (h *keyStateHistory) next(zone, sender string, ops []core.RROperation) map[uint16]core.KeyState {
-	k := strings.ToLower(dns.Fqdn(zone)) + " " + strings.ToLower(dns.Fqdn(sender))
+	k := canonicalName(zone) + " " + canonicalName(sender)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	prev := h.last[k]
 	cur := prev
 	for _, op := range ops {
-		if !strings.EqualFold(op.RRtype, "DNSKEY") {
+		if !strings.EqualFold(op.RRtype, "DNSKEY") { // not-a-name: an RR type
 			continue
 		}
 		var next map[uint16]core.KeyState

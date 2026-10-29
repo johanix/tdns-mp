@@ -82,13 +82,9 @@ func TestTheLeaderSendsNothingNewToTheParentDuringATransition(t *testing.T) {
 		r.quiet(t, 300*time.Millisecond, "a refresh's sync during the freeze")
 	})
 	t.Run("a waiting NOTIFY", func(t *testing.T) {
-		r := newNotifyRig(t, "waiting.frozen.example.", "NOTIFY", repeat(time.Minute, 4)...)
-		r.propagation(400 * time.Millisecond)
-		r.parent.holdsNS("ns1."+r.mpzd.ZoneName, r.oldNS)
-		r.ask()
-		r.logged(t, 1, logHeld)
-		freezeServed(t, r.conf, r.mpzd)
-		r.quiet(t, 800*time.Millisecond, "a NOTIFY(CSYNC) that waited into the freeze")
+		r := heldDuringFreeze(t, "waiting.frozen.example.")
+		r.notified(t, "the waiting NOTIFY(CDS)", dns.TypeCDS)
+		r.quiet(t, 300*time.Millisecond, "the NOTIFY(CSYNC) that waited during the freeze")
 	})
 	t.Run("the key's bootstrap", func(t *testing.T) {
 		r := newNotifyRig(t, "bootstrap.frozen.example.", "UPDATE")
@@ -144,16 +140,28 @@ func TestTheDSSyncOfARolloverUnderWayPasses(t *testing.T) {
 		r.notified(t, "the rollover's DS sync during the freeze", dns.TypeCDS)
 	})
 	t.Run("a waiting NOTIFY", func(t *testing.T) {
-		r := newNotifyRig(t, "dswait.frozen.example.", "NOTIFY", repeat(time.Minute, 4)...)
-		r.propagation(400 * time.Millisecond)
-		r.parent.holdsDS()
-		r.parent.holdsNS("ns1."+r.mpzd.ZoneName, r.oldNS)
-		r.inventory(r.ksk)
-		r.logged(t, 1, logHeld+" zone="+r.mpzd.ZoneName+" notify=\"CSYNC, CDS\"")
-		freezeServed(t, r.conf, r.mpzd)
+		r := heldDuringFreeze(t, "dswait.frozen.example.")
 		r.notified(t, "the waiting NOTIFY(CDS)", dns.TypeCDS)
 		r.quiet(t, 300*time.Millisecond, "the NOTIFY(CSYNC) beside it")
 	})
+}
+
+// heldDuringFreeze is a rig whose zone is frozen first, and whose signer's
+// inventory then changes the DS set while the parent also holds a
+// nameserver the zone no longer lists. That sync passes the freeze, and its
+// NOTIFY(CSYNC) and NOTIFY(CDS) are held for the zone's wait. When the wait
+// ends the zone is frozen, whatever the timing: the release's own check
+// decides which leaves.
+func heldDuringFreeze(t *testing.T, zone string) *notifyRig {
+	t.Helper()
+	r := newNotifyRig(t, zone, "NOTIFY", repeat(time.Minute, 4)...)
+	r.propagation(400 * time.Millisecond)
+	r.parent.holdsDS()
+	r.parent.holdsNS("ns1."+r.mpzd.ZoneName, r.oldNS)
+	freezeServed(t, r.conf, r.mpzd)
+	r.inventory(r.ksk)
+	r.logged(t, 1, logHeld+" zone="+r.mpzd.ZoneName+" notify=\"CSYNC, CDS\"")
+	return r
 }
 
 // The rollover's sync during a freeze carries the whole delegation: the DS
@@ -241,4 +249,33 @@ func TestTransportBoundary_AnEditDuringATransitionReachesNoPeer(t *testing.T) {
 	if rr, err := dns.NewRR(m.Operations[0].Records[0]); err != nil || rr.(*dns.NS).Ns != "ns1.alice.example." {
 		t.Errorf("bob heard the NS %q, want the kept edit's", m.Operations[0].Records[0])
 	}
+}
+
+// The take-up runs the key's set-up under the zone's key-setup lock, as an
+// election's does: it waits while another set-up of the zone runs
+// (CodeRabbit's review of eee6363).
+func TestTheTakeUpRunsUnderTheZonesKeySetupLock(t *testing.T) {
+	r := newLeaderSyncRig(t, "takeup.lock.example.")
+	r.leader(r.lem.localID)
+	zone := ZoneName(r.mpzd.ZoneName)
+	entered, release := make(chan struct{}), make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- r.lem.inKeySetup(zone, func() error { close(entered); <-release; return nil })
+	}()
+	<-entered
+	done := make(chan struct{})
+	go func() { r.conf.takeUp(r.ctx, zone); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("the take-up ran while another key set-up of the zone held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the take-up did not run once the lock was let go")
+	}
+	<-held
 }

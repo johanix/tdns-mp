@@ -86,9 +86,8 @@ func TestAChainsAskThatFindsTheQueueFullKeepsTheChain(t *testing.T) {
 func TestAnElectionBurstLargerThanTheQueueSyncsEveryZone(t *testing.T) {
 	shortRetries(t, time.Hour, 5) // the old retry would not come within the test
 	var buf lockedBuffer
-	savedLg, savedEngine := lg, lgEngine
-	lg, lgEngine = slog.New(slog.NewTextHandler(&buf, nil)), slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { lg, lgEngine = savedLg, savedEngine })
+	logTo(t, lg, slog.NewTextHandler(&buf, nil))
+	logTo(t, lgEngine, slog.NewTextHandler(&buf, nil))
 
 	r, tr := owedRig(t, "z00.burst.example.", true)
 	zones := []string{r.mpzd.ZoneName}
