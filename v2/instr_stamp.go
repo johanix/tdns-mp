@@ -43,6 +43,11 @@ const stampGroupHash = hsync.StampGroupHash
 // upstream that keeps serving an old copy causes no fetch at every beat.
 const fetchInterval = time.Minute
 
+// tellOnceBatch bounds the zones a beat tells a peer for its new epoch
+// (plan S22): each is told once, over as many beats as that takes, so that
+// no beat grows past what one carries inline (tdns #987).
+const tellOnceBatch = 25
+
 // stampTable is what this agent tells in its beats and what its members
 // have told it. Nil on the roles that tell nothing (the combiner, the
 // signer): every method is a no-op on it.
@@ -71,13 +76,22 @@ type stampTable struct {
 	// onTold is asked of a zone after a member's first-hand stamp of it is
 	// kept: the thaw's turn (plan S7). Nil: none.
 	onTold func(zone string)
-	seq    atomic.Uint64
+	// work is the zones, folded, this agent has work owed, kept or under
+	// way for with peer (plan S22): its owed or its kept list, a catch-up
+	// with peer, a message to peer not yet confirmed. Nil: none (the
+	// auditor).
+	work func(peer string) map[string]bool
+	seq  atomic.Uint64
 
 	mu      sync.Mutex
 	kept    map[string]*memberStamp // by identity, folded (canonicalName)
 	fetched map[string]fetchMark    // by zone, folded
 	said    map[string]bool         // the lines logged once
 	dists   map[string]*distStamp   // by distribution and recipient (msg_stamp.go)
+	// once is, by peer folded, the zones, folded, still to be told once
+	// since its new epoch (plan S22); a nil set: every zone the two share,
+	// not yet counted.
+	once map[string]map[string]bool
 }
 
 // memberStamp is a member's latest stamp, as it was heard. Instr is keyed
@@ -123,11 +137,18 @@ func newStampTable(localID string, store *InstructionStore, epoch uint64, crypto
 		kept:        map[string]*memberStamp{},
 		fetched:     map[string]fetchMark{},
 		said:        map[string]bool{},
+		once:        map[string]map[string]bool{},
 	}
 }
 
 // entryFor is the stamp entry of a beat to peer: one row, this agent's own,
-// with a stamp of every zone the two share (sharedWith). Nil with none.
+// with a stamp of each zone the two share (sharedWith) that something is
+// going on in (design rule 4, plan S22): its stamp here is not at rest, or
+// this agent has work for it with peer (work), or peer's latest first-hand
+// stamp of it is not at rest or tells other serials; and, since peer's new
+// epoch, every zone once (onceFor). At rest the row tells no zone, and
+// goes all the same: a receiver drops a zone a newer beat no longer tells,
+// and reads the sender's epoch from it. Nil when the two share no zone.
 func (t *stampTable) entryFor(peer string) *GossipMessage {
 	if t == nil {
 		return nil
@@ -136,9 +157,24 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 	if len(zones) == 0 {
 		return nil
 	}
-	instr := make(map[string]InstrStamp, len(zones))
+	var work map[string]bool
+	if t.work != nil {
+		work = t.work(peer)
+	}
+	once := t.onceFor(peer, zones)
+	var theirs map[string]InstrStamp
+	if m := t.heard(peer); m != nil {
+		theirs = m.Instr
+	}
+	instr := map[string]InstrStamp{}
 	for _, zone := range zones {
-		if st, ok := t.ownStamp(zone); ok {
+		st, ok := t.ownStamp(zone)
+		if !ok {
+			continue
+		}
+		key := canonicalName(zone)
+		their, heard := theirs[key]
+		if !atRest(st) || work[key] || once[key] || heard && (!atRest(their) || !sameSerials(st, their)) {
 			instr[zone] = st
 		}
 	}
@@ -152,6 +188,93 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		Crypto:      t.crypto,
 	}
 	return &GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{t.localID: row}}
+}
+
+// atRest: nothing is going on in a zone by its stamp (plan S22). The active
+// serial is known and is the newest, with no owner error, no refusal, no
+// serial agreed on, no transition, step or removal under way, and no key
+// rollover.
+func atRest(st InstrStamp) bool {
+	return st.Known && st.Error == "" && st.Refused == "" && st.Agreeing == 0 &&
+		!st.Reconciling && st.Step == nil && len(st.Removals) == 0 && !st.Rollover &&
+		st.Newest == st.Active && st.NewestDigest == st.ActiveDigest
+}
+
+// sameSerials: two stamps tell the same active and newest serials.
+func sameSerials(a, b InstrStamp) bool {
+	return a.Active == b.Active && a.ActiveDigest == b.ActiveDigest &&
+		a.Newest == b.Newest && a.NewestDigest == b.NewestDigest
+}
+
+// onceFor is, of the zones (shared with peer) still to be told to it once
+// since its new epoch, the first tellOnceBatch, folded. A zone no longer
+// shared is no longer owed.
+func (t *stampTable) onceFor(peer string, zones []string) map[string]bool {
+	key := canonicalName(peer)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	left, ok := t.once[key]
+	if !ok {
+		return nil
+	}
+	shared := make(map[string]bool, len(zones))
+	for _, zone := range zones {
+		shared[canonicalName(zone)] = true
+	}
+	if left == nil {
+		left = shared
+	}
+	for zone := range left {
+		if !shared[zone] {
+			delete(left, zone)
+		}
+	}
+	if len(left) == 0 {
+		delete(t.once, key)
+		return nil
+	}
+	t.once[key] = left
+	out := map[string]bool{}
+	for _, zone := range slices.Sorted(maps.Keys(left)) {
+		if len(out) == tellOnceBatch {
+			break
+		}
+		out[zone] = true
+	}
+	return out
+}
+
+// tellOnceLocked has every zone shared with the member key (folded) told to
+// it once: its first stamp since this agent's start, or one of its new
+// epoch, has come. Called with t.mu held.
+func (t *stampTable) tellOnceLocked(key string) {
+	if t.once == nil {
+		t.once = map[string]map[string]bool{}
+	}
+	t.once[key] = nil
+}
+
+// toldOnce takes the zones that e, a stamp entry to peer, told off what is
+// still to be told to peer once; called when the beat that carried e is
+// acknowledged. A new epoch of peer's since e was made has put every zone
+// back, and keeps them.
+func (t *stampTable) toldOnce(peer string, e *GossipMessage) {
+	if t == nil || e == nil || e.Members[t.localID] == nil {
+		return
+	}
+	key := canonicalName(peer)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	left := t.once[key]
+	if left == nil {
+		return
+	}
+	for zone := range e.Members[t.localID].Instr {
+		delete(left, canonicalName(zone))
+	}
+	if len(left) == 0 {
+		delete(t.once, key)
+	}
 }
 
 // ownStamp is what this agent tells of zone: the serials its store keeps,
@@ -229,9 +352,12 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 // is newer. Epochs and sequences are compared only within one member's own:
 // a higher epoch is a later start of the member, whose stamp replaces all
 // that was kept of it (design 3.4); a lower one is from before that start;
-// within one epoch a higher sequence is newer. A beat tells every zone the
-// two share: of a newer one each zone is taken unless a message told it
-// later (noteMessage), and a zone it no longer tells goes.
+// within one epoch a higher sequence is newer. A beat tells the zones that
+// something is going on in (entryFor): of a newer one each zone is taken
+// unless a message told it later (noteMessage), and a zone it no longer
+// tells goes, as nothing is going on in it at the member. A member's first
+// stamp since this agent's start, or one of a new epoch, has every zone the
+// two share told to it once (plan S22).
 func (t *stampTable) keep(m *memberStamp) bool {
 	key := canonicalName(m.Identity)
 	m.ZoneSeq = make(map[string]uint64, len(m.Instr))
@@ -245,6 +371,7 @@ func (t *stampTable) keep(m *memberStamp) bool {
 	switch {
 	case old == nil || m.Epoch > old.Epoch:
 		t.kept[key] = m
+		t.tellOnceLocked(key)
 		return true
 	case m.Epoch < old.Epoch || m.Seq <= old.Seq:
 		return false
@@ -808,8 +935,8 @@ func (s *InstructionStore) RaiseEpoch(now time.Time) (uint64, error) {
 // wireStamps gives the agent's or the auditor's bridge its stamp table: the
 // epoch raised for this start, the provider's nameserver names, whether
 // payload encryption is on; on the agent its key rollovers, its parts'
-// hold of a step and the fetch. The bridge takes the time-out for members
-// with no role too (plan S12).
+// hold of a step, the fetch and its work with each peer. The bridge takes
+// the time-out for members with no role too (plan S12).
 func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, crypto, agent bool) error {
 	epoch, err := conf.InternalMp.Instructions.RaiseEpoch(time.Now())
 	if err != nil {
@@ -822,6 +949,7 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 		t.hold = conf.holdConfirmed
 		t.stepHeld = conf.holdsStep
 		t.fetch = conf.fetchZone
+		t.work = func(peer string) map[string]bool { return conf.workWith(tm, peer) }
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")
 		}
@@ -829,6 +957,30 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	tm.stamps = t
 	tm.noRoleTimeout = noRoleTimeoutFor(mp)
 	return nil
+}
+
+// workWith is the zones, folded, the agent has work owed, kept or under way
+// for with peer (plan S22): the zone's owed or kept list is not empty, its
+// catch-up with peer is not done, or the reliable queue holds a message to
+// peer for it.
+func (conf *Config) workWith(tm *MPTransportBridge, peer string) map[string]bool {
+	out := map[string]bool{}
+	for _, list := range []string{listOwed, listKept} {
+		for _, zone := range conf.InternalMp.Kept.zones(list) {
+			out[zone] = true
+		}
+	}
+	for _, zone := range conf.InternalMp.CatchUp.openWith(AgentId(peer)) {
+		out[canonicalName(string(zone))] = true
+	}
+	if tm.ReliableQueue != nil {
+		for _, m := range tm.ReliableQueue.GetPendingMessages() {
+			if m.Zone != "" && core.EqualNames(m.RecipientID, peer) {
+				out[canonicalName(m.Zone)] = true
+			}
+		}
+	}
+	return out
 }
 
 // fetchZone asks a refresh of the zone's own copy, as a NOTIFY does: the

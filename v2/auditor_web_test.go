@@ -65,12 +65,12 @@ func TestSnapshotGossipForZone_singleMatrix(t *testing.T) {
 	ar.ProviderGroupManager.mu.Unlock()
 	ar.GossipStateTable.mu.Lock()
 	ar.GossipStateTable.States[hash] = map[string]*MemberState{
-		"agent.a.example.": {Identity: "agent.a.example.", Zones: []string{string(zone)}},
+		"agent.a.example.": {Identity: "agent.a.example."},
 	}
 	// Unrelated group that shares a member identity must not appear.
 	ar.GossipStateTable.States["other"] = map[string]*MemberState{
-		"agent.a.example.": {Identity: "agent.a.example.", Zones: []string{"other.zone."}},
-		"agent.c.example.": {Identity: "agent.c.example.", Zones: []string{"other.zone."}},
+		"agent.a.example.": {Identity: "agent.a.example."},
+		"agent.c.example.": {Identity: "agent.c.example."},
 	}
 	ar.GossipStateTable.mu.Unlock()
 

@@ -131,7 +131,8 @@ func confirmStamp(app json.RawMessage) *MsgStamp {
 // noteMessage keeps the stamp of zone that sender told in a message it sent,
 // or in its confirmation: first hand, unless what is kept of sender's
 // telling of zone is newer. A later epoch replaces all that was kept of
-// sender, as a beat's does (design 3.4).
+// sender, and has every zone told to it once, as a beat's does (design
+// 3.4, plan S22).
 func (t *stampTable) noteMessage(sender, zone string, ms *MsgStamp) {
 	if t == nil || ms == nil || sender == "" || zone == "" {
 		return
@@ -144,6 +145,7 @@ func (t *stampTable) noteMessage(sender, zone string, ms *MsgStamp) {
 	case old == nil || ms.Epoch > old.Epoch:
 		t.kept[key] = &memberStamp{Identity: dns.Fqdn(sender), Epoch: ms.Epoch, Heard: now,
 			Instr: map[string]InstrStamp{z: ms.InstrStamp}, ZoneSeq: map[string]uint64{z: ms.Seq}, ZoneHeard: map[string]time.Time{z: now}}
+		t.tellOnceLocked(key)
 	case ms.Epoch < old.Epoch || ms.Seq <= old.ZoneSeq[z]:
 		t.mu.Unlock()
 		return
