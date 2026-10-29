@@ -152,13 +152,27 @@ func (r *freezeRig) confirm(hold bool) {
 	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: hold, Received: time.Now()})
 }
 
-// lastHanded is the last hand-over among msgs.
+// lastHanded is the hand-over among msgs that the signer keeps.
 func lastHanded(t *testing.T, msgs []handedMsg) *ActingHandover {
 	t.Helper()
-	if len(msgs) == 0 || msgs[len(msgs)-1].update.Acting == nil {
+	h := newestHanded(msgs)
+	if h == nil {
 		t.Fatalf("no hand-over among %d messages", len(msgs))
 	}
-	return msgs[len(msgs)-1].update.Acting
+	return h
+}
+
+// newestHanded is the hand-over among msgs that the signer keeps whatever
+// their order of arrival, since each goes out on a goroutine of its own:
+// the newest by the order key; nil for none.
+func newestHanded(msgs []handedMsg) *ActingHandover {
+	var newest *ActingHandover
+	for _, m := range msgs {
+		if h := m.update.Acting; h != nil && (newest == nil || newest.olderThan(h)) {
+			newest = h
+		}
+	}
+	return newest
 }
 
 // load reads the store and the lists from disk, as a start does.
@@ -915,13 +929,14 @@ func TestAFrozenZoneThatLeavesTheConfigurationLetsTheHoldGo(t *testing.T) {
 	// the agent hands it nothing more, but the signer lets the hold go
 	mpzd, _ := Zones.Get(r.zone)
 	mpzd.Ready = false
+	pruned := time.Now()
 	r.store.Prune(func(string) bool { return false })
 	mpzd.Ready = true
 	waitUntil(t, "the signer was not handed the zone without the hold after it left the configuration", func() bool {
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		n := len(q.msgs)
-		return n > 0 && q.msgs[n-1].update.Acting != nil && !q.msgs[n-1].update.Acting.Sets.Hold
+		h := newestHanded(q.msgs)
+		return h != nil && !h.Sets.Hold && h.Made.After(pruned)
 	})
 	before := r.sent()
 	r.conf.instrDone(context.Background(), r.zdr, ZoneName(r.zone))
