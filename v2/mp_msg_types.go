@@ -47,6 +47,7 @@ type KeystateInventoryMsg struct {
 	Inventory []KeyInventoryItem
 	Owned     bool     // the signer's own state machine runs the zone's keys (S3)
 	Resend    []uint16 // keys the signer sends again: distributed even unchanged (#256)
+	Hold      bool     // the signer holds the zone's key machine (plan S6)
 	// seq: the order the agent's transport received it in; 0 for one that
 	// was not counted. An inventory older than the zone's recorded one is
 	// not recorded (noteKeyInventory): an RFI's answer can reach the engine
@@ -67,6 +68,9 @@ type KeystateSignalMsg struct {
 	// ForeignSpoken: Signal "foreign", the providers whose word the agent
 	// holds, one that listed no keys included; nil from an older agent
 	ForeignSpoken []string
+	// Hold: Signal "hold", whether the agent's word holds the zone's key
+	// machine or lets it go (plan S6)
+	Hold bool
 }
 
 type EditsResponseMsg struct {

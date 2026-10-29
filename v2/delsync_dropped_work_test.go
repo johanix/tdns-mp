@@ -260,7 +260,7 @@ func TestTheNSChangedHintAsksNothingAndTheRefreshSyncs(t *testing.T) {
 // agent's transport.
 func keystateMsg(t *testing.T, zone string, items []KeyInventoryItem, resend []uint16) *transport.IncomingMessage {
 	t.Helper()
-	msg, err := keystateAppMessage(inventoryRequest("signer.us.example.", zone, inventoryEntriesOf(items), true, resend), "agent.us.example.")
+	msg, err := keystateAppMessage(inventoryRequest("signer.us.example.", zone, inventoryEntriesOf(items), true, resend, false), "agent.us.example.")
 	if err != nil {
 		t.Fatal(err)
 	}

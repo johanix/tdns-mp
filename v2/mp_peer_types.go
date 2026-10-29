@@ -102,7 +102,11 @@ type PeerKeystateRequest struct {
 	// signer's key lifecycle sends again (E12, T6', or after a restart).
 	// The agent distributes those keys to the peers again, as a tracked
 	// distribution, even when its key set has not changed (#256).
-	Resend    []uint16
+	Resend []uint16
+	// Hold: with Signal "hold", the agent's word to hold the zone's key
+	// machine (true) or to let it go; with Signal "inventory", the signer's
+	// word that it holds it (plan S6)
+	Hold      bool
 	Timestamp time.Time // Request timestamp
 }
 

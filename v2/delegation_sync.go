@@ -124,6 +124,13 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				if held, _ := conf.holdForZoneKey(ctx, ds); held {
 					continue
 				}
+				// Nor while the zone is frozen (plan S6), unless the DS set
+				// is what differs: owed, and asked for when the transition
+				// is done
+				if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(ds.SyncStatus)); held {
+					lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
+					continue
+				}
 
 				// The refresh's request has nobody that asks again: a leader's
 				// sync of a multi-provider zone that fails here is owed or
@@ -285,7 +292,20 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 
-				// Not in sync, let's fix that.
+				// Not in sync. While the zone is frozen the sync goes only
+				// when the DS set differs, which a rollover under way or an
+				// emergency one changes (plan S6); it carries the whole
+				// delegation by the sets the parts hold. Any other is owed
+				// until the transition is done. Asked after the analysis,
+				// which only reads, since it tells the two apart.
+				if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(syncstate)); held {
+					lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
+					syncstate.Msg = fmt.Sprintf("the sync with the parent is held during the transition (%s); it is sent when the transition is done", why)
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					continue
+				}
 				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, syncstate, imr().Imr)
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
@@ -389,7 +409,13 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	if ownerSyncsDelegation(ds.ZoneData) {
 		return "", 0, tdns.UpdateResult{}, false, errors.New("the zone's owner has taken its delegation sync over; nothing is sent")
 	}
-	csyncErr := conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
+	// No CSYNC is made while the zone is frozen (plan S6): the leader's
+	// CSYNC would be owed, and the sync that passes, a rollover's DS sync,
+	// must not wait for its confirmations
+	var csyncErr error
+	if len(conf.zoneFrozen(ds.ZoneName)) == 0 {
+		csyncErr = conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
+	}
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
