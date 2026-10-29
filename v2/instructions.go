@@ -485,10 +485,11 @@ type Roles struct {
 	Hold       bool  `json:"hold,omitempty"` // nothing new starts (S6's freeze); false until then
 }
 
-// rolesFor is the sets for a step of the transition from `from` to `to`; at
-// rest both are the active serial. Until the reconciliation has steps (S12,
-// S13), every set is that of the serial the parts hold: from's during a
-// transition (design 3.3), the active serial's at rest. In the legacy reading
+// rolesFor is the sets of a serial's lists: from's during a transition, the
+// active serial's at rest (both are then the active serial). A step's sets
+// are not computed here: the leader's planner makes them, its stamp carries
+// them, and every agent keeps them (reconcile.go, plan S12), so rolesFor
+// gives step 0 at a thaw and the last step's sets. In the legacy reading
 // (HSYNC3 without HSYNCPARAM) every ON record serves, and so votes, and
 // nobody signs, as today.
 func rolesFor(from, to *Instructions, step int) Roles {
@@ -514,13 +515,16 @@ func rolesFor(from, to *Instructions, step int) Roles {
 	return r
 }
 
-// rolesForZone is rolesFor for the zone's current step, as the store has it;
-// for a zone the store does not have, the active reading's sets. A provider
-// whose removal is under way is resolved as roles() resolves it.
+// rolesForZone is the sets at the zone's current step, as the store keeps
+// them; with no step's sets kept, rolesFor of the store's serials; for a
+// zone the store does not have, the active reading's sets. A provider whose
+// removal is under way is resolved as roles() resolves it.
 func rolesForZone(zone ZoneName) Roles {
 	name := dns.Fqdn(string(zone))
 	var r Roles
-	if from, to, step := instrStore.Load().transition(name); to != nil {
+	if sets, ok := instrStore.Load().stepSets(name); ok {
+		r = sets
+	} else if from, to, step := instrStore.Load().transition(name); to != nil {
 		r = rolesFor(from, to, step)
 	} else if handed, ok := actingHeld.Load().roles(name); ok {
 		return handed

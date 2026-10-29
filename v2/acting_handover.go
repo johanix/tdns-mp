@@ -152,11 +152,14 @@ func (mpzd *MPZoneData) actingSets() Roles {
 // it signs on, until the owner removes its HSYNC3 record. Nil for a zone
 // that is not loaded here or not multi-provider, and for one whose active
 // serial this agent does not know (S9); one with no records for a zone
-// whose instructions are gone (the end of multi-provider service).
+// whose instructions are gone (the end of multi-provider service). Nil too
+// while a transition may be under way and this agent holds no step's sets:
+// its parts get nothing new until the leader's stamp gives it the step
+// (design 3.3, plan S12).
 func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)
-	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready {
+	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready || conf.InternalMp.Instructions.pending(zone) {
 		return nil
 	}
 	if conf.InternalMp.Instructions.activeUnknown(zone) {
@@ -202,6 +205,9 @@ type handoverTracker struct {
 	enqueue  func(zone ZoneName, update *ZoneUpdate, distID string) (string, error)
 	self     AgentId
 	toSigner bool
+	// onHeld is told a zone whose part has come to hold what this agent
+	// wants it to act by: its step may be held now (plan S12). Nil: none.
+	onHeld func(zone string)
 }
 
 // part is the part the tracker hands over to, for the log.
@@ -396,6 +402,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 		lgEngine.Info("the combiner acts by the serial handed", "zone", zone, "handover", h.String(), "waiting", waiting)
 		t.drain(zone)
 		t.send(send)
+		t.told(zone)
 		return true
 	}
 	s := t.sent[distID]
@@ -508,13 +515,24 @@ func (t *handoverTracker) learned(zone string, held *ActingHandover) {
 		held = z.want
 	}
 	z.held = held
-	if z.want != nil && z.want.sameAs(held) {
+	holds := z.want != nil && z.want.sameAs(held)
+	if holds {
 		z.heldAt = time.Now()
 	}
 	send := t.dueLocked(z, false)
 	t.mu.Unlock()
 	t.drain(zone)
 	t.send(send)
+	if holds {
+		t.told(zone)
+	}
+}
+
+// told tells onHeld that the part holds what is wanted for the zone.
+func (t *handoverTracker) told(zone string) {
+	if t.onHeld != nil {
+		t.onHeld(zone)
+	}
 }
 
 // combinerStarted: the combiner reports a start. What it held before is
@@ -684,12 +702,13 @@ func (conf *Config) startHandovers(ctx context.Context, tm *MPTransportBridge) {
 	var trackers []*handoverTracker
 	if conf.namesCombiner() {
 		t := newHandoverTracker(AgentId(mp.Identity), tm.enqueueToCombiner)
+		t.onHeld = conf.askThaw
 		conf.InternalMp.Handover, tm.handover = t, t
 		trackers = append(trackers, t)
 	}
 	if tm.signerID != "" {
 		t := newHandoverTracker(AgentId(mp.Identity), tm.sendActingToSigner)
-		t.toSigner = true
+		t.toSigner, t.onHeld = true, conf.askThaw
 		conf.InternalMp.SignerHandover = t
 		trackers = append(trackers, t)
 	}

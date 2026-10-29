@@ -96,7 +96,7 @@ func noteKnown(t *testing.T, s *InstructionStore, zone string, in *Instructions)
 	t.Helper()
 	s.Note(zone, in, nil)
 	if s.activeUnknown(zone) {
-		if err := s.Know(zone, sd(in), nil); err != nil {
+		if err := s.Know(zone, sd(in), nil, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -568,13 +568,13 @@ func TestAFirstCopyIsHeldWithNoActiveSerialKnown(t *testing.T) {
 		t.Fatalf("the first copy: active %s newest %s phase %q; want none, 7, %q", serialOf(st.Active), serialOf(st.Newest), st.Phase, PhaseNotKnown)
 	}
 	s.Note(storeZone, eight, nil)
-	if err := s.Know(storeZone, sd(seven), nil); err != nil {
+	if err := s.Know(storeZone, sd(seven), nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Newest.Serial != 8 || !st.Enforced || st.Agreeing == nil {
 		t.Errorf("made known: active %s newest %s enforced %v agreeing %s; want 7, 8, enforced, agreeing on 8", serialOf(st.Active), serialOf(st.Newest), st.Enforced, serialOf(st.Agreeing))
 	}
-	if err := s.Know(storeZone, sd(eight), nil); err == nil {
+	if err := s.Know(storeZone, sd(eight), nil, false); err == nil {
 		t.Error("a second Know moved a known active serial")
 	}
 }

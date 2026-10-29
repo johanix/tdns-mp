@@ -40,8 +40,8 @@ func (z *zoneSerials) freezeReasons() []string {
 		why = append(why, "the active serial is not known")
 	case z.From != nil:
 		why = append(why, fmt.Sprintf("reconciling from %d to %d", z.From.Serial, z.Active.Serial))
-	case len(z.Removals) > 0:
-		why = append(why, "reconciling")
+	case z.reconciling():
+		why = append(why, fmt.Sprintf("reconciling to %d", z.Active.Serial))
 	default:
 		if a := z.agreeing(); a != nil {
 			why = append(why, fmt.Sprintf("agreeing on %d", a.Serial))
@@ -125,6 +125,8 @@ const (
 	// so the sync passes; it carries the whole delegation by the sets the
 	// parts hold (design 3.1).
 	syncDS
+	// syncStep: a step of the reconciliation asks it (plan S12): it passes.
+	syncStep
 )
 
 // syncHeld holds the leader's work towards the parent while the zone is
@@ -135,7 +137,7 @@ const (
 // holdForZoneKey); S14 adds keyPending. Reports why the zone is frozen.
 func (conf *Config) syncHeld(zone string, cause syncCause) (held bool, why string) {
 	reasons := conf.zoneFrozen(zone)
-	if len(reasons) == 0 || cause == syncDS {
+	if len(reasons) == 0 || cause == syncDS || cause == syncStep {
 		return false, ""
 	}
 	conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
@@ -336,10 +338,10 @@ func (conf *Config) takeUp(ctx context.Context, zone ZoneName) {
 // while the zone is frozen (design 3.1): an operator's edit, and the
 // leader's CSYNC outside a step. A DNSKEY distribution after the signer's
 // inventory passes: a rollover under way or an emergency one, as the
-// signer starts no other. Reports why the change is kept; "" when it goes
-// on now.
+// signer starts no other. So does a step's own distribution (plan S12).
+// Reports why the change is kept; "" when it goes on now.
 func (conf *Config) oweIfFrozen(u *SynchedDataUpdate) (string, error) {
-	if u.Inventory {
+	if u.Inventory || u.Step {
 		return "", nil
 	}
 	reasons := conf.zoneFrozen(string(u.Zone))

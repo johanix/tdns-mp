@@ -103,8 +103,8 @@ func (r *thawRig) holdUnjudged(in *Instructions, since time.Time) {
 
 // The leader thaws once every other voting member tells, first hand and
 // fresh, active N and agreeing V with its signer's hold, and its own signer
-// has confirmed the hold. Until S12 the transition is done at the thaw, and
-// the status tells the thaw.
+// has confirmed the hold. The reconciliation follows (S12): the zone stays
+// frozen, at step 0, until it is done.
 func TestTheLeaderThawsWhenEveryVotingMemberTellsActiveNAndAgreeingV(t *testing.T) {
 	r := newThawRig(t, "leader.thaw.example.", roleA)
 	r.agree()
@@ -116,13 +116,13 @@ func TestTheLeaderThawsWhenEveryVotingMemberTellsActiveNAndAgreeingV(t *testing.
 	r.hear(roleB, r.agreeing(), true)
 	r.conf.thawTurn(r.zone)
 	st := status(t, r.store, r.zone)
-	if st.Active.Serial != 42 || st.From != nil || st.LastThaw == nil || st.LastThaw.From != sd(r.n) || st.LastThaw.To != sd(r.v) {
+	if st.Active.Serial != 42 || st.From == nil || st.From.Serial != 41 || st.Phase != PhaseReconciling || st.LastThaw == nil || st.LastThaw.From != sd(r.n) || st.LastThaw.To != sd(r.v) {
 		t.Fatalf("after the thaw: %+v", st)
 	}
-	if len(r.conf.zoneFrozen(r.zone)) > 0 {
-		t.Errorf("still frozen after the thaw: %v", r.conf.zoneFrozen(r.zone))
+	if why := r.conf.zoneFrozen(r.zone); !slices.Equal(why, []string{"reconciling from 41 to 42"}) {
+		t.Errorf("frozen after the thaw: %v", why)
 	}
-	if line := r.conf.thawLine(r.zone); !strings.HasPrefix(line, "thawed to 42 at ") || !strings.HasSuffix(line, " by "+roleA) {
+	if line := r.conf.thawLine(r.zone); !strings.HasPrefix(line, "reconciling 41->42: step 0 (the sets held)") {
 		t.Errorf("the status: %q", line)
 	}
 }
@@ -602,13 +602,13 @@ func TestAMemberActivatesOnTheLeadersActiveStamp(t *testing.T) {
 	if r.active() != 41 {
 		t.Fatal("activated on a telling without the thaw")
 	}
-	st.Thaw = &Thaw{From: sd(r.n), To: sd(r.v)}
+	st.Thaw, st.Reconciling = &Thaw{From: sd(r.n), To: sd(r.v)}, true
 	r.hear(roleB, st, true)
 	r.conf.thawTurn(r.zone)
 	if r.active() != 42 {
 		t.Fatal("not activated on the leader's thaw")
 	}
-	if line := r.conf.thawLine(r.zone); !strings.HasSuffix(line, " by "+roleB) {
+	if line := r.conf.thawLine(r.zone); line != "reconciling 41->42: step 0 (the sets held), waiting for the leader's first step" {
 		t.Errorf("the status: %q", line)
 	}
 }
@@ -987,23 +987,6 @@ func TestASerialToldActiveIsAskedOnlyOfAVotingMember(t *testing.T) {
 	r.conf.thawTurn(r.zone)
 	if !r.fetchAsked(42, roleB) {
 		t.Error("b, a voting member, was not asked for the serial")
-	}
-}
-
-// Until S12 a transition is done at the thaw; one whose "done" was not
-// written is done at the zone's next turn, so it does not hold the zone.
-func TestATransitionLeftUndoneIsDoneAtTheNextTurn(t *testing.T) {
-	r := newThawRig(t, "undone.thaw.example.", roleA)
-	r.agree()
-	if err := r.store.Activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}); err != nil {
-		t.Fatal(err)
-	}
-	if !r.conf.thawWanted(r.zone) {
-		t.Fatal("the zone's turn is not asked")
-	}
-	r.conf.thawTurn(r.zone)
-	if st := status(t, r.store, r.zone); st.From != nil || len(r.conf.zoneFrozen(r.zone)) > 0 {
-		t.Errorf("after the turn: from %s, frozen %v", serialOf(st.From), r.conf.zoneFrozen(r.zone))
 	}
 }
 

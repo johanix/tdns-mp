@@ -56,6 +56,9 @@ type SynchedDataUpdate struct {
 	// It passes a freeze (plan S6): a rollover under way, or an emergency
 	// one, as the signer starts no other.
 	Inventory bool
+	// Step: a step of the reconciliation sends this update, as its own
+	// distribution (plan S12). It passes a freeze.
+	Step bool
 	// replay: an owed change the release hands the engine again (plan S6);
 	// owed: this agent's owed changes, which a delete is checked against
 	// with the data (EvaluateUpdate).
