@@ -458,7 +458,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		instr := confirmStamp(c.App) // the confirmer's stamp (S5b)
 		// a peer at other instructions than the send has decided nothing
 		// yet (rule 6, plan S8); judged before the confirmation is noted
-		notYet := tm.notYetFrom(distributionID, senderID, status, instr)
+		notYet := tm.notYetFrom(distributionID, senderID, status, c.Message, instr)
 		tm.noteConfirmation(c, instr)
 
 		// the queue's entry is settled whatever the answer: a "not yet" is
@@ -1274,7 +1274,6 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 
 				ForeignKeys:   payload.ForeignKeys,
 				ForeignSpoken: payload.ForeignSpoken,
-				Hold:          payload.Hold,
 				Acting:        payload.Acting,
 			}
 			if payload.Time != "" {
@@ -1306,11 +1305,11 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Inventory:  inventoryItemsOf(payload.KeyInventory),
 		Owned:      payload.Owned,
 		Resend:     payload.Resend,
-		Hold:       payload.Hold,
 		Acting:     payload.Acting,
 		NotSigning: payload.NotSigning,
 		Rollover:   payload.Rollover,
 		WaitsOn:    payload.WaitsOn,
+		Hold:       payload.Hold,
 		seq:        keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other

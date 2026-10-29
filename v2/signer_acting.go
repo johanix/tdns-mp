@@ -38,9 +38,10 @@ var pushSignerInventory = pushKeystateInventoryToAllAgents
 // "acting"): taken only from an agent of its agents: list. One whose
 // records do not give its digest, or older than the one held, is refused.
 // Taken, it is kept before it is acted by, and acted by at once, not at the
-// next refresh. Either way the signer's inventory then says what it holds,
-// which is how its agent learns it (the KEYSTATE's own confirmation says
-// only that it arrived).
+// next refresh; its hold (S6) is kept whether or not the key machine runs
+// here, and whatever the signer acts by. Either way the signer's inventory
+// then says what it holds, which is how its agent learns it (the KEYSTATE's
+// own confirmation says only that it arrived).
 func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	h := sig.Acting
 	zone := dns.Fqdn(sig.Zone)
@@ -84,6 +85,9 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	case changed:
 		lgSigner.Info("acting by the serial the agent handed", "zone", zone, "serial", h.Serial, "step", h.Step, "before", prev.String())
 		mpzd.actBySignerHandover(conf, confirmers)
+	}
+	if err == nil {
+		conf.signerHold(zone, h.Sets.Hold)
 	}
 	if err == nil && h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgSigner)

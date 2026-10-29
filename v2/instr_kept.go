@@ -32,21 +32,23 @@ const listOwed = "owed"
 const listKept = "kept"
 
 // keptUpdate is an update as a list keeps it: what the data engine needs to
-// handle it again, its records as text, each with its class. An entry of
+// handle it again, its records as text, each with its class, and the
+// instruction to publish its KEY with them (#206). An entry of
 // the kept list also keeps where the update came from: the agent it names,
 // the one the transport established, the mechanism it came on, the
 // sender's time, the stamp it was made under, and the request it answers.
 type keptUpdate struct {
-	Operations  []core.RROperation  `json:"operations,omitempty"`
-	RRsets      map[string][]string `json:"rrsets,omitempty"` // by type
-	RRs         []string            `json:"rrs,omitempty"`
-	Force       bool                `json:"force,omitempty"`
-	Sender      AgentId             `json:"sender,omitempty"`
-	DeliveredBy AgentId             `json:"delivered_by,omitempty"`
-	Mechanism   string              `json:"mechanism,omitempty"`
-	Time        time.Time           `json:"time,omitzero"`
-	Instr       *MsgStamp           `json:"instr,omitempty"`
-	CatchUp     *CatchUp            `json:"catch_up,omitempty"`
+	Operations  []core.RROperation       `json:"operations,omitempty"`
+	RRsets      map[string][]string      `json:"rrsets,omitempty"` // by type
+	RRs         []string                 `json:"rrs,omitempty"`
+	Force       bool                     `json:"force,omitempty"`
+	Publish     *core.PublishInstruction `json:"publish,omitempty"`
+	Sender      AgentId                  `json:"sender,omitempty"`
+	DeliveredBy AgentId                  `json:"delivered_by,omitempty"`
+	Mechanism   string                   `json:"mechanism,omitempty"`
+	Time        time.Time                `json:"time,omitzero"`
+	Instr       *MsgStamp                `json:"instr,omitempty"`
+	CatchUp     *CatchUp                 `json:"catch_up,omitempty"`
 }
 
 // keptEntry is one entry of a list: its place, the sender's distribution
@@ -211,7 +213,7 @@ func keptUpdateOf(u *SynchedDataUpdate) keptUpdate {
 	if u.Update == nil {
 		return k
 	}
-	k.Operations = slices.Clone(u.Update.Operations)
+	k.Operations, k.Publish = slices.Clone(u.Update.Operations), u.Update.Publish
 	for rrtype, rrset := range u.Update.RRsets {
 		if len(rrset.RRs) == 0 {
 			continue
@@ -254,7 +256,7 @@ func (e keptEntry) remoteUpdate(zone ZoneName) (*SynchedDataUpdate, error) {
 // zoneUpdate is the update k keeps, for zone and agent, its records parsed
 // again.
 func (k keptUpdate) zoneUpdate(zone ZoneName, agent AgentId) (*ZoneUpdate, error) {
-	zu := &ZoneUpdate{Zone: zone, AgentId: agent, RRsets: map[uint16]core.RRset{}, Operations: slices.Clone(k.Operations)}
+	zu := &ZoneUpdate{Zone: zone, AgentId: agent, RRsets: map[uint16]core.RRset{}, Operations: slices.Clone(k.Operations), Publish: k.Publish}
 	for typ, records := range k.RRsets {
 		rrtype, ok := dns.StringToType[typ]
 		if !ok {

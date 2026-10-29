@@ -152,7 +152,7 @@ func TestTransportBoundary_AStaleMessageIsRefusedOverTheWire(t *testing.T) {
 		t.Errorf("the refusal's stamp: %+v, want the agent's at 42", c.Instr)
 	}
 	if !(&MPTransportBridge{stamps: stampsSentAt(r.peer.Identity, zone, distID, string(r.us.Identity), in[41])}).
-		notYetFrom(distID, r.us.Identity, transport.ConfirmRejected, c.Instr) {
+		notYetFrom(distID, r.us.Identity, transport.ConfirmRejected, c.Message, c.Instr) {
 		t.Error("the sender would take the refusal as final")
 	}
 	if got := r.repo(t)[peer][dns.TypeNS]; len(got) != 0 {
