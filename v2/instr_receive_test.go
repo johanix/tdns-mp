@@ -367,6 +367,36 @@ func TestTheKeptListSurvivesARestart(t *testing.T) {
 	}
 }
 
+// A kept update keeps the instruction to publish its KEY (#206): on disk,
+// across a restart, and in the update its release hands on. So does an
+// owed one, which the same form keeps.
+func TestAKeptUpdateKeepsItsPublishInstruction(t *testing.T) {
+	r := newReceiveRig(t, "publish.receive.example.")
+	key := r.zone + " 3600 IN KEY 512 3 15 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+	publish := &core.PublishInstruction{KEYRRs: []string{key}, Locations: []string{"at-apex", "at-ns"}}
+	r.conf.applyRemoteUpdate(context.Background(), r.zdr, &SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleB, UpdateType: "remote",
+		Update: &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleB, Publish: publish,
+			Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key}}}},
+		OriginatingDistID: "d1", OriginatingInstr: msgStampAt(r.v), DeliveredBy: roleB}, r.conf.InternalMp.MsgQs)
+	r.load()
+	k := r.kept()
+	if len(k) != 1 {
+		t.Fatalf("the kept list after a restart: %+v", k)
+	}
+	u, err := k[0].remoteUpdate(ZoneName(r.zone))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Update.Publish; got == nil || !slices.Equal(got.KEYRRs, publish.KEYRRs) || !slices.Equal(got.Locations, publish.Locations) {
+		t.Errorf("the released update's publish instruction: %+v, want %+v", got, publish)
+	}
+
+	owed, err := keptUpdateOf(&SynchedDataUpdate{Update: &ZoneUpdate{Publish: publish}}).zoneUpdate(ZoneName(r.zone), roleA)
+	if err != nil || owed.Publish == nil || !slices.Equal(owed.Publish.KEYRRs, publish.KEYRRs) {
+		t.Errorf("an owed update's publish instruction: %+v (%v)", owed, err)
+	}
+}
+
 // Others' kept distributions are released at the activation, before this
 // agent's own owed changes at "done" (design 3.3).
 func TestKeptRemoteUpdatesDoNotWaitBehindOwedLocalOnes(t *testing.T) {
