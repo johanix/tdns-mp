@@ -307,7 +307,7 @@ func runRouterReset(cmd *cobra.Command, args []string) {
 	fmt.Print("This will reset all router metrics. Continue? [y/N]: ")
 	var response string
 	fmt.Scanln(&response)
-	response = strings.ToLower(strings.TrimSpace(response))
+	response = strings.ToLower(strings.TrimSpace(response)) // not-a-name: an operator's answer
 
 	if response != "y" && response != "yes" {
 		fmt.Println("Cancelled.")

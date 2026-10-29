@@ -892,7 +892,7 @@ func (t *catchUpTracker) Status(zone ZoneName) *CatchUpStatus {
 // catchUpCause is a failure's cause, shortened for the status.
 func catchUpCause(err string) string {
 	switch {
-	case strings.Contains(err, "REJECTED") || strings.Contains(strings.ToLower(err), "refused"):
+	case strings.Contains(err, "REJECTED") || strings.Contains(strings.ToLower(err), "refused"): // not-a-name: an error text
 		return "refused"
 	case strings.HasPrefix(err, "no answer within"):
 		return "no answer"
