@@ -47,6 +47,7 @@ func newLeaderSyncRigAs(t *testing.T, zone string, identity AgentId) *leaderSync
 	// they end: they are waited for before a rig puts its logger back.
 	t.Cleanup(lem.hooks.Wait)
 	waitDelegationSyncTimers(t, conf)
+	waitKeyPolls(t, conf)
 	return &leaderSyncRig{conf: conf, e: &HsyncDataEngine{conf: conf}, mpzd: mpzd, q: q, lem: lem, sdq: make(chan *SynchedDataUpdate, 8), ctx: t.Context()}
 }
 
@@ -63,6 +64,22 @@ func waitDelegationSyncTimers(t *testing.T, conf *Config) {
 		case <-stopped:
 		case <-time.After(10 * time.Second):
 			t.Error("what the delegation sync scheduled did not end with the test")
+		}
+	})
+}
+
+// waitKeyPolls: the zone's key polls, and the release of the hold after
+// each, end with the test. They read the zone's keystore, which a cleanup
+// made before this one closes after it.
+func waitKeyPolls(t *testing.T, conf *Config) {
+	t.Helper()
+	t.Cleanup(func() {
+		stopped := make(chan struct{})
+		go func() { conf.InternalMp.keyPolls.wait(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			t.Error("a poll of the zone's key did not end with the test")
 		}
 	})
 }

@@ -484,6 +484,7 @@ func (conf *Config) delegationSyncNotified(ctx context.Context, zone string, sen
 func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string, sent delegationNotifies, delays []time.Duration) (held bool, failed error) {
 	c := &conf.InternalMp.delegationSyncChains
 	every := delegationCsyncAwaitedEvery
+	frozen := conf.zoneFrozen(zone)
 	c.mu.Lock()
 	if sent.run != nil && sent.run.Err() != nil {
 		// The owner took the sync over after the sync last looked at the
@@ -564,8 +565,25 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 		return true, nil
 	}
 	ch.hold = nil
+	// what leaves at once is filtered as a hold's release is
+	all := leave
+	if leave = leavingDuringFreeze(frozen, all); len(leave) == 0 {
+		// the chain forgets its NOTIFY and its checks, as at a release
+		// that lets nothing leave: the sync the freeze owes is no check's.
+		// A check scheduled for an earlier NOTIFY asks nothing: the ask
+		// is no longer the chain's
+		c.asks++
+		ch.ask, ch.waiting, ch.notified, ch.rechecks = c.asks, false, "", 0
+		c.mu.Unlock()
+		conf.heldForFreeze(zone, frozen, all)
+		return true, nil
+	}
+	types = notifyTypes(leave)
 	check := c.notifyLeft(zone, ch, types, retimed, delays)
 	c.mu.Unlock()
+	if len(leave) < len(all) {
+		conf.heldForFreeze(zone, frozen, all)
+	}
 	fwd := ctx
 	if sent.run != nil {
 		fwd = sent.run // a takeover from here on stops what has not gone yet
@@ -573,6 +591,25 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 	forwardNotifies(fwd, sent.out, leave)
 	conf.delegationSyncCheckAfter(ctx, zone, types, check)
 	return false, nil
+}
+
+// leavingDuringFreeze is what of notifies leaves for the parent: all of
+// them, unless the zone is frozen (frozen, its reasons); then only a
+// NOTIFY(CDS), the DS sync of a rollover, and any other is dropped (plan
+// S6).
+func leavingDuringFreeze(frozen []string, notifies []tdns.NotifyRequest) []tdns.NotifyRequest {
+	if len(frozen) == 0 {
+		return notifies
+	}
+	return slices.DeleteFunc(slices.Clone(notifies), func(req tdns.NotifyRequest) bool { return req.RRtype != dns.TypeCDS })
+}
+
+// heldForFreeze owes the sync whose NOTIFYs the freeze dropped, whatever
+// the freeze is by now: the release tick asks it.
+func (conf *Config) heldForFreeze(zone string, frozen []string, notifies []tdns.NotifyRequest) {
+	conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
+	lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
+		"notify", notifyTypes(notifies))
 }
 
 // notifyLeft books a NOTIFY as on its way to the parent and decides on the
@@ -648,20 +685,13 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 			return
 		}
 		hold := ch.hold
-		// While the zone is frozen only a NOTIFY(CDS) leaves, the DS sync of
-		// a rollover; any other is dropped, and the sync is owed until the
-		// transition is done (plan S6)
-		leave := hold.notifies
-		if len(frozen) > 0 {
-			leave = slices.DeleteFunc(slices.Clone(leave), func(req tdns.NotifyRequest) bool { return req.RRtype != dns.TypeCDS })
-		}
+		// While the zone is frozen only a NOTIFY(CDS) leaves, and the sync
+		// is owed until the transition is done (plan S6)
+		leave := leavingDuringFreeze(frozen, hold.notifies)
 		if len(leave) == 0 {
 			ch.hold, ch.waiting, ch.notified, ch.rechecks = nil, false, "", 0
 			c.mu.Unlock()
-			// owed whatever the freeze is by now: the release tick asks it
-			conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
-			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
-				"notify", notifyTypes(hold.notifies))
+			conf.heldForFreeze(zone, frozen, hold.notifies)
 			return
 		}
 		ch.hold, ch.waiting = nil, false
@@ -669,9 +699,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		check := c.notifyLeft(zone, ch, types, hold.retimed, delays)
 		c.mu.Unlock()
 		if len(leave) < len(hold.notifies) {
-			conf.InternalMp.CatchUp.oweForFreeze(ZoneName(zone))
-			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", zone, "phase", strings.Join(frozen, "; "),
-				"notify", notifyTypes(hold.notifies))
+			conf.heldForFreeze(zone, frozen, hold.notifies)
 		}
 		forwardNotifies(ctx, sent.out, leave)
 		lgEngine.Info("the held NOTIFY has left for the parent", "zone", zone, "notify", types, "held", sent.wait)
