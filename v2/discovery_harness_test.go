@@ -175,10 +175,13 @@ func (z *discoveryZone) set(rrs ...dns.RR) {
 
 // setAfter publishes rrs once the server has answered the nth query for name
 // and rrtype: that answer is the RRset before, and every later one sees rrs.
-// then, when not nil, is called right then, with the zone locked. A test
-// that changes a record between two lookups has the zone change it, not its
-// own goroutine, which a loaded machine may hold until after the next lookup
-// (#304).
+// then, when not nil, is called right then, with the zone locked: it must
+// not block, and must not call the zone. A test that changes a record
+// between two lookups has the zone change it, not its own goroutine, which a
+// loaded machine may hold until after the next lookup (#304).
+//
+// The zone holds one such change at a time: a second setAfter replaces the
+// first, and set leaves it in place.
 func (z *discoveryZone) setAfter(name string, rrtype uint16, n int, rrs []dns.RR, then func()) {
 	z.mu.Lock()
 	defer z.mu.Unlock()

@@ -262,8 +262,9 @@ func TestAFewRefusedHellosStartNoLookup(t *testing.T) {
 }
 
 // When the interval has passed and the peer still refuses, it is looked up
-// again. Here the older record is still served at the first lookup and
-// replaced before the second, which finds the current key.
+// again. Here Bob's JWK record still holds the older key at its second
+// lookup, the first after his refusals, and his current key from the third
+// on: the one made once the interval has passed.
 func TestAPeerThatStillRefusesIsLookedUpAgainAfterTheInterval(t *testing.T) {
 	const interval = 500 * time.Millisecond
 	s := newRefusedHelloScenario(t, true)
