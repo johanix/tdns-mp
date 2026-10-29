@@ -734,6 +734,13 @@ func TestTheStepSurvivesARestart(t *testing.T) {
 // engine is asked to release what the zone kept.
 func TestDoneReleasesTheOwedList(t *testing.T) {
 	r := newReconcileRig(t, "release.reconcile.example.", roleA)
+	// the rig's own hold words are sent before the test's sender is set
+	waitUntil(t, "the rig's hold sender did not end", func() bool {
+		b := &r.conf.InternalMp.holds
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.sending[canonicalName(r.zone)]
+	})
 	told := make(chan bool, 16)
 	r.conf.InternalMp.holdSend = func(_ ZoneName, on bool) { told <- on }
 	r.agree()
