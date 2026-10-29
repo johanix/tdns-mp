@@ -12,9 +12,10 @@
  * Then its inventory says what it holds. Every reader at the signer reads
  * the hand-over through the accessor S10 made (actingHeld), unless the
  * signer's copy is newer (actsBy, until S7). A signer handed nothing acts
- * by its own copy (rule 5): provisional for a copy that carries no serial;
- * for one that does, it waits for its agent, and signs meanwhile by the
- * signing set it last signed by.
+ * by its own copy (rule 5): provisional for a copy with no reading (no
+ * serial=, #308), which starts no multi-provider work; for one that reads,
+ * it waits for its agent, and signs meanwhile by the signing set it last
+ * signed by.
  */
 package tdnsmp
 
@@ -180,7 +181,8 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 }
 
 // signerWaits: the signer holds no hand-over for the zone and the copy at
-// apex carries a serial, so it waits for its agent's (rule 5).
+// apex has a reading, which carries a serial (#308), so it waits for its
+// agent's (rule 5).
 func signerWaits(zone string, apex *tdns.OwnerData) bool {
 	s := actingHeld.Load()
 	if s == nil {
@@ -189,8 +191,7 @@ func signerWaits(zone string, apex *tdns.OwnerData) bool {
 	if _, held := s.get(zone); held {
 		return false
 	}
-	in := readingOf(apex)
-	return in != nil && in.Serial != 0
+	return readingOf(apex) != nil
 }
 
 // signerActingLine is what the signer acts by for the zone, for `signer
