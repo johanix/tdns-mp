@@ -295,7 +295,7 @@ func TestAnInventoryDuringAHandOverRacesNothing(t *testing.T) {
 // the lock is held, neither sets it, and each does once it is free.
 func TestAHandOverAndARefreshSetTheMultiProviderDataOneAtATime(t *testing.T) {
 	const zone = "onebyone.signer.example."
-	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
 	weAreSigner := func() bool {
 		r.mpzd.Lock()
 		defer r.mpzd.Unlock()
@@ -318,17 +318,75 @@ func TestAHandOverAndARefreshSetTheMultiProviderDataOneAtATime(t *testing.T) {
 		mu.Unlock()
 		<-done
 	}
-	h := handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...)
+	h := handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="p2"`)...)
 	held("a hand-over", func() { r.hand(h, sigUs) })
-	if !weAreSigner() {
-		t.Error("the hand-over that names us a signer did not set it once the lock was free")
-	}
-	incoming := incomingCopy(t, zone, sigRecords(`serial="7" servers="us,p2" signers="p2"`)...)
-	r.hand(handoverFor(t, zone, sigRecords(`serial="7" servers="us,p2" signers="p2"`)...), sigUs)
-	held("a refresh", func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
 	if weAreSigner() {
-		t.Error("the refresh by a serial that leaves us out of the signers did not set it once the lock was free")
+		t.Error("the hand-over that leaves us out of the signers did not set it once the lock was free")
 	}
+	// a copy newer than the hand-over, which it acts by until S7
+	incoming := incomingCopy(t, zone, sigRecords(`serial="7" servers="us,p2" signers="us,p2"`)...)
+	held("a refresh", func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
+	if !weAreSigner() {
+		t.Error("the refresh by a serial that names us a signer did not set it once the lock was free")
+	}
+}
+
+// The re-sign a hand-over or a refresh asks for is asked once mpDataLock is
+// free (cubic on tdns-mp #299): the request can wait on a full ResignQ, and
+// the zone's refreshes and hand-overs would wait behind it.
+func TestTheReSignRequestWaitsOutsideTheLock(t *testing.T) {
+	const zone = "resign.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	q := make(chan tdns.ResignRequest)
+	prev := tdns.Conf.Internal.ResignQ
+	tdns.Conf.Internal.ResignQ = q
+	t.Cleanup(func() { tdns.Conf.Internal.ResignQ = prev })
+	mu := mpDataLock(zone)
+	read := func(f func() bool) func() bool {
+		return func() bool {
+			r.mpzd.Lock()
+			defer r.mpzd.Unlock()
+			return f()
+		}
+	}
+	// act asks for a re-sign that nothing takes; once moved says it is past
+	// what it sets, the lock is to be free while it waits.
+	asks := func(what string, moved func() bool, act func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			act()
+			close(done)
+		}()
+		free := false
+		for end := time.Now().Add(5 * time.Second); !free && time.Now().Before(end); time.Sleep(time.Millisecond) {
+			if moved() && mu.TryLock() {
+				mu.Unlock()
+				free = true
+			}
+		}
+		if !free {
+			t.Errorf("%s held mpDataLock while it asked for its re-sign", what)
+		}
+		select {
+		case <-q:
+		case <-done:
+			t.Fatalf("%s asked for no re-sign: the test does not tell", what)
+		}
+		<-done
+	}
+	asks("a hand-over that switches inline-signing on",
+		read(func() bool { return r.mpzd.MP.MPdata != nil && r.mpzd.MP.MPdata.WeAreSigner }),
+		func() {
+			r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+		})
+	k := testDnskey(t, zone, 256)
+	records := append(sigRecords(`serial="6" servers="us,p2" signers="us,p2"`),
+		fmt.Sprintf("3600 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+	incoming := incomingCopy(t, zone, records...)
+	asks("a refresh that brings p2's DNSKEY",
+		func() bool { return len(r.foreignRows(t)) > 0 },
+		func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
 }
 
 // The other signers' DNSKEYs stay, as foreign rows, while the sets handed
