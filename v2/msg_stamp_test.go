@@ -375,17 +375,4 @@ func TestALatePendingDoesNotReplaceTheFinalWord(t *testing.T) {
 	if r := row("d2"); r.Status != "FAILED" {
 		t.Errorf("a final word did not replace another: %+v", r)
 	}
-
-	// and so for a DNSKEY propagation's stamps
-	prop := &PendingDnskeyPropagation{}
-	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 3, Seq: 10, InstrStamp: tells(eight, eight)})
-	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 3, Seq: 9, InstrStamp: tells(seven, seven)})
-	if got := prop.Stamps[stampBeta]; got == nil || got.Seq != 10 {
-		t.Errorf("a propagation kept the earlier stamp: %+v", got)
-	}
-	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 4, Seq: 1, InstrStamp: tells(eight, eight)})
-	prop.keepStampLocked(stampBeta, &MsgStamp{Epoch: 3, Seq: 99, InstrStamp: tells(seven, seven)})
-	if got := prop.Stamps[stampBeta]; got == nil || got.Epoch != 4 || got.Seq != 1 {
-		t.Errorf("a propagation did not keep the later start's stamp: %+v", got)
-	}
 }

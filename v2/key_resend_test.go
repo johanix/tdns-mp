@@ -452,32 +452,50 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 	}
 }
 
-// A resend that carries an agent's answer carries the stamp it was given
-// under, so that S8 can judge it (cubic's review of 347fe5b).
-func TestAResendCarriesTheStampOfTheAnswersItCarries(t *testing.T) {
+// A key's result keeps the stamp of the answer that gave it, so that S8 can
+// judge it: an agent's keys answered apart keep each its own answer's, a
+// later confirmation (a PENDING arriving last, a final word sent again)
+// moves none, and a resend carries each with its result (cubic's review of
+// 347fe5b, CodeRabbit's of 07fdae9).
+func TestAResultKeepsTheStampOfItsAnswer(t *testing.T) {
 	const zone ZoneName = "stamped.superseded.example."
 	const fast, slow = "agent.fast.example.", "agent.slow.example."
-	const k uint16 = 4243
+	a, b := testDnskeyRR(t, string(zone), 257), testDnskeyRR(t, string(zone), 256)
+	keys := []uint16{a.KeyTag(), b.KeyTag()}
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
-	tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
-	stamp := &MsgStamp{Epoch: 2, Seq: 5}
+	tm.TrackDnskeyPropagation(zone, "first", keys, nil, []AgentId{fast, slow})
+	confirm := func(status transport.ConfirmStatus, applied []string, ms *MsgStamp) {
+		// as the confirmation callback does
+		tm.noteConfirmation(confirmIn("first", fast, status, string(zone), applied, nil, nil, nil, false, ""), ms)
+		tm.processDnskeyConfirmation("first", fast, status.String(), applied, nil, nil, ms)
+	}
+	partial, final := &MsgStamp{Epoch: 2, Seq: 5}, &MsgStamp{Epoch: 2, Seq: 6}
+	confirm(transport.ConfirmPartial, []string{a.String()}, partial)
+	confirm(transport.ConfirmSuccess, nil, final)
+	confirm(transport.ConfirmPending, nil, &MsgStamp{Epoch: 2, Seq: 7})
+	confirm(transport.ConfirmSuccess, nil, &MsgStamp{Epoch: 3, Seq: 1})
+
+	stamped := func(prop *PendingDnskeyPropagation, which string) {
+		t.Helper()
+		if prop == nil {
+			t.Fatalf("%s: not tracked", which)
+		}
+		for kt, want := range map[uint16]*MsgStamp{a.KeyTag(): partial, b.KeyTag(): final} {
+			if prop.Results[fast][kt] != "applied" || prop.Stamps[fast][kt] != want {
+				t.Errorf("%s, key %d: %q with stamp %+v, want applied with %+v", which, kt, prop.Results[fast][kt], prop.Stamps[fast][kt], want)
+			}
+		}
+		if prop.Stamps[slow] != nil {
+			t.Errorf("%s: an agent with no answer has stamps: %+v", which, prop.Stamps[slow])
+		}
+	}
 	tm.dnskeyPropMu.Lock()
-	tm.pendingDnskeyPropagations["first"].keepStampLocked(fast, stamp)
+	stamped(tm.pendingDnskeyPropagations["first"], "the first")
 	tm.dnskeyPropMu.Unlock()
 
-	tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.TrackDnskeyPropagation(zone, "resend", keys, nil, []AgentId{fast, slow})
 	tm.foldIntoResend(zone, "resend")
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
-	r := tm.pendingDnskeyPropagations["resend"]
-	if r == nil {
-		t.Fatal("the resend is not tracked")
-	}
-	if r.Results[fast][k] != "applied" || r.Stamps[fast] != stamp {
-		t.Errorf("the answer carried: %q with stamp %+v, want applied with its stamp", r.Results[fast][k], r.Stamps[fast])
-	}
-	if r.Stamps[slow] != nil {
-		t.Errorf("an agent with no answer carried has a stamp: %+v", r.Stamps[slow])
-	}
+	stamped(tm.pendingDnskeyPropagations["resend"], "the resend")
 }

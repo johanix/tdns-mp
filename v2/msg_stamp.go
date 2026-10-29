@@ -299,43 +299,28 @@ func stampSerials(ms *MsgStamp) (active, newest *SerialDigest) {
 // noteConfirmation is what a confirmation's stamp does at the bridge: it is
 // the confirmer's telling, first hand (the confirmation is a message the
 // confirmer sent, its sender held to the transport's by refuseNamedSender);
-// the distribution keeps it for the confirmer; and a DNSKEY propagation
-// keeps it per agent.
+// and the distribution keeps it for the confirmer. A DNSKEY propagation
+// keeps it with each result the answer gives (processDnskeyConfirmation).
 func (tm *MPTransportBridge) noteConfirmation(c *transport.IncomingConfirmation, ms *MsgStamp) {
 	tm.stamps.confirmed(c.DistributionID, c.PeerID, c.Zone, ms, c.Status.String())
 	if ms == nil {
 		return
 	}
 	tm.stamps.noteMessage(c.PeerID, c.Zone, ms)
-	tm.dnskeyPropMu.Lock()
-	defer tm.dnskeyPropMu.Unlock()
-	prop, ok := tm.pendingDnskeyPropagations[c.DistributionID]
-	if !ok {
-		if s, sup := tm.supersededBy[c.DistributionID]; sup {
-			prop, ok = tm.pendingDnskeyPropagations[s.to]
-		}
-	}
-	if !ok {
-		return
-	}
-	for agent := range prop.ExpectedAgents {
-		if canonicalName(string(agent)) == canonicalName(c.PeerID) {
-			prop.keepStampLocked(agent, ms)
-		}
-	}
 }
 
-// keepStampLocked keeps ms as agent's stamp in the propagation, unless the
-// one kept is the later: a PENDING that arrives after the final word was
-// stamped before it. Under dnskeyPropMu.
-func (prop *PendingDnskeyPropagation) keepStampLocked(agent AgentId, ms *MsgStamp) {
+// stampResultLocked keeps ms as the stamp of agent's result for key kt: the
+// stamp of the answer that gave the result, which no later confirmation
+// replaces, as no later answer replaces the result. Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) stampResultLocked(agent AgentId, kt uint16, ms *MsgStamp) {
 	if ms == nil {
 		return
 	}
 	if prop.Stamps == nil {
-		prop.Stamps = map[AgentId]*MsgStamp{}
+		prop.Stamps = map[AgentId]map[uint16]*MsgStamp{}
 	}
-	if kept := prop.Stamps[agent]; kept == nil || laterStamp(ms, kept) {
-		prop.Stamps[agent] = ms
+	if prop.Stamps[agent] == nil {
+		prop.Stamps[agent] = map[uint16]*MsgStamp{}
 	}
+	prop.Stamps[agent][kt] = ms
 }
