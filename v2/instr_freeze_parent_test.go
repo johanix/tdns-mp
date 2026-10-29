@@ -3,6 +3,8 @@ package tdnsmp
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,6 +146,30 @@ func TestTheDSSyncOfARolloverUnderWayPasses(t *testing.T) {
 		r.notified(t, "the waiting NOTIFY(CDS)", dns.TypeCDS)
 		r.quiet(t, 300*time.Millisecond, "the NOTIFY(CSYNC) beside it")
 	})
+}
+
+// A sync's NOTIFYs that leave at once during a freeze, with no wait before
+// them, leave as held ones do: the NOTIFY(CDS) alone, and the sync is owed.
+// They leave at once when the providers announce no wait, and when the sync
+// is the chain's own: the check after a rollover's NOTIFY(CDS) that the
+// parent has not acted on yet.
+func TestANotifyThatLeavesAtOnceDuringAFreezeIsTheCDSAlone(t *testing.T) {
+	z := "atonce.frozen.example."
+	r := newNotifyRigWith(t, z, "NOTIFY", false, func(r *notifyRig) {
+		r.conf.InternalMp.CatchUp = newCatchUpTracker(AgentId(r.us.Identity), []string{z}, time.Hour)
+	}, repeat(time.Minute, 4)...)
+	freezeServed(t, r.conf, r.mpzd)
+	to := []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(int(r.parent.port)))}
+	both := delegationNotifies{requests: []tdns.NotifyRequest{{ZoneName: z, RRtype: dns.TypeCSYNC, Targets: to},
+		{ZoneName: z, RRtype: dns.TypeCDS, Targets: to}}, out: r.notifyq}
+	if held, err := r.conf.delegationSyncNotifiedWith(r.ctx, z, both, repeat(time.Minute, 4)); held || err != nil {
+		t.Fatalf("the NOTIFYs with no wait: held %v, %v", held, err)
+	}
+	r.notified(t, "the rollover's NOTIFY(CDS)", dns.TypeCDS)
+	r.quiet(t, 0, "the NOTIFY(CSYNC) during the freeze")
+	if !r.conf.InternalMp.CatchUp.freezeOwed(ZoneName(z)) {
+		t.Error("the sync the freeze kept back is not owed")
+	}
 }
 
 // heldDuringFreeze is a rig whose zone is frozen first, and whose signer's
