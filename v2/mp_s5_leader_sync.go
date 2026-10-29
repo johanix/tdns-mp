@@ -568,6 +568,9 @@ func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string,
 	// what leaves at once is filtered as a hold's release is
 	all := leave
 	if leave = leavingDuringFreeze(frozen, all); len(leave) == 0 {
+		// the chain forgets its NOTIFY and its checks, as at a release
+		// that lets nothing leave: the sync the freeze owes is no check's
+		ch.waiting, ch.notified, ch.rechecks = false, "", 0
 		c.mu.Unlock()
 		conf.heldForFreeze(zone, frozen, all)
 		return true, nil

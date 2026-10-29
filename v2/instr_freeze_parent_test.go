@@ -170,6 +170,27 @@ func TestANotifyThatLeavesAtOnceDuringAFreezeIsTheCDSAlone(t *testing.T) {
 	if !r.conf.InternalMp.CatchUp.freezeOwed(ZoneName(z)) {
 		t.Error("the sync the freeze kept back is not owed")
 	}
+
+	// A sync that brings a NOTIFY(CSYNC) alone lets nothing leave. The
+	// chain forgets the NOTIFY(CDS) and its check, as a release that lets
+	// nothing leave does: the sync after the thaw is no check's, and waits.
+	csync := delegationNotifies{requests: []tdns.NotifyRequest{{ZoneName: z, RRtype: dns.TypeCSYNC, Targets: to}}, out: r.notifyq}
+	if held, err := r.conf.delegationSyncNotifiedWith(r.ctx, z, csync, repeat(time.Minute, 4)); !held || err != nil {
+		t.Fatalf("the NOTIFY(CSYNC) alone: held %v, %v", held, err)
+	}
+	r.quiet(t, 0, "the NOTIFY(CSYNC) alone during the freeze")
+	c := &r.conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	ch := c.zones[z]
+	var got delegationSyncChain
+	if ch != nil {
+		got = *ch
+	}
+	c.mu.Unlock()
+	if got.hold != nil || got.waiting || got.notified != "" || got.rechecks != 0 {
+		t.Errorf("the chain after a sync the freeze let nothing of: hold %v, waiting %v, notified %q, rechecks %d",
+			got.hold != nil, got.waiting, got.notified, got.rechecks)
+	}
 }
 
 // heldDuringFreeze is a rig whose zone is frozen first, and whose signer's
