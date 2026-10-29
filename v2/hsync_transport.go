@@ -470,9 +470,18 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// The combiner's word on a hand-over is the hand-over's alone, and
 		// its refusal of an update sent under another serial is not final:
 		// the update goes again (plan S10). It tells the serial it acts by
-		// in "acting" (plan S8).
-		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) && tm.handover.confirmation(distributionID, status, confirmActing(c.App)) {
-			return
+		// in "acting" (plan S8). What it removed on a word that was not
+		// final is named in the final word (carried).
+		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) {
+			handled, carried := tm.handover.confirmation(distributionID, status, confirmActing(c.App), removed)
+			if handled {
+				return
+			}
+			for _, rr := range carried {
+				if !slices.Contains(removed, rr) {
+					removed = append(slices.Clip(removed), rr)
+				}
+			}
 		}
 		if notYet {
 			tm.noteNotYet(ZoneName(zone), AgentId(senderID), distributionID, instr)
