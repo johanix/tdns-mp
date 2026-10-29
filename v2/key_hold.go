@@ -382,17 +382,19 @@ func (conf *Config) launchKeyPoll(ctx context.Context, tk *keyPollToken, zone Zo
 		leadStart = lem.LeadStart(zone)
 	}
 	go func() {
+		held := false
 		defer func() {
 			// finished: this agent still leads the zone in the lead the
-			// poll started in
-			finished := true
+			// poll started in, and the poll ran: one the freeze held is
+			// polled at the take-up (plan S6)
+			finished := !held
 			if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
-				finished = leadStart != 0 && lem.LeadStart(zone) == leadStart
+				finished = finished && leadStart != 0 && lem.LeadStart(zone) == leadStart
 			}
 			if left := b.pollEnded(zone, keyid, leadStart, finished); left == 0 {
 				conf.releaseKeyHold(ctx, zone)
 			}
 		}()
-		conf.ParentSyncAfterKeyPublication(ctx, zone, keyName, keyid, algorithm)
+		held = conf.ParentSyncAfterKeyPublication(ctx, zone, keyName, keyid, algorithm)
 	}()
 }
