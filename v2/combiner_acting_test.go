@@ -30,7 +30,7 @@ func actRecords(param string) []string {
 	return []string{
 		`3600 IN HSYNC3 ON alpha agent.alpha.example. .`,
 		`3600 IN HSYNC3 ON beta agent.beta.example. .`,
-		`3600 IN HSYNCPARAM ` + param,
+		`3600 IN HSYNCPARAM ` + numberedText(param),
 	}
 }
 
@@ -102,15 +102,13 @@ func servedTypes(t *testing.T, mpzd *MPZoneData, rrtype uint16) []string {
 }
 
 // The records a hand-over carries read back to the instructions handed: the
-// same serial and digest, OFF labels, the legacy reading and every key
-// included.
+// same serial and digest, OFF labels, serial 0 and every key included.
 func TestTheHandOverRecordsReadAsTheirDigest(t *testing.T) {
 	const zone = "records.acting.example."
 	for name, records := range map[string][]string{
 		"every key":    instrBase,
-		"legacy":       instrBase[:3],
 		"no lists":     {instrBase[0], `3600 IN HSYNCPARAM serial="3"`},
-		"no serial":    withParam(`servers="alpha" signers="alpha"`),
+		"serial 0":     withParam(`serial="0" servers="alpha" signers="alpha"`),
 		"owner at all": withParam(`serial="9" servers="alpha,beta" nsmgmt="owner" parentsync="owner"`),
 	} {
 		h := handoverFor(t, zone, records...)
@@ -681,10 +679,10 @@ func TestALeaverKeepsItsDNSKEYsAndCDSAtEveryOtherCombinerUntilItsRecordGoes(t *t
 }
 
 // Handed nothing, a combiner acts by its copy: provisional for a copy with
-// no serial; for one with a serial it waits for its agent, serving what it
-// served, or with nothing restored, the copy as it comes.
+// no reading (no serial=, #308); for one that reads it waits for its agent,
+// serving what it served, or with nothing restored, the copy as it comes.
 func TestAFirstLoadWithNothingHandedIsProvisionalOrWaits(t *testing.T) {
-	_, plain := actingCombiner(t, "plain.acting.example.", actRecords(`servers="alpha,beta" signers="alpha"`)...)
+	_, plain := actingCombiner(t, "plain.acting.example.", append(actRecords(`serial="3"`)[:2], `3600 IN HSYNCPARAM servers="alpha,beta" signers="alpha"`)...)
 	_, serial := actingCombiner(t, "serial.acting.example.", actRecords(`serial="3" servers="alpha,beta" signers="alpha"`)...)
 	_, restored := actingCombiner(t, "restored.acting.example.", actRecords(`serial="3" servers="alpha,beta" signers="alpha"`)...)
 	restored.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
@@ -707,7 +705,7 @@ func TestAFirstLoadWithNothingHandedIsProvisionalOrWaits(t *testing.T) {
 		}
 	}
 	if !serial.waitsForHandover() || plain.waitsForHandover() {
-		t.Error("a zone whose copy carries a serial waits, one without does not")
+		t.Error("a zone whose copy reads waits, one whose copy has no reading does not")
 	}
 }
 

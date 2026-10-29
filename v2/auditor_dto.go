@@ -413,8 +413,7 @@ type GossipMatrixDTO struct {
 type GossipMemberRow struct {
 	Reporter string `json:"reporter"`
 	// Label is the reporter's role label in the zone of a zone view: the
-	// column the reporter is. An identity that holds several labels (one
-	// agent serving as two providers) has them all, in column order. Empty
+	// column the reporter is. An identity is under one label (#306). Empty
 	// in the group view, and for a reporter with no label in the zone.
 	Label            string            `json:"label,omitempty"`
 	Timestamp        time.Time         `json:"timestamp,omitempty"`

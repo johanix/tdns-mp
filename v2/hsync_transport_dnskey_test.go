@@ -283,7 +283,7 @@ func providersTestZone(t *testing.T, name string, labels, signers []string) *MPZ
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	var h3s []dns.RR
 	for _, label := range labels {

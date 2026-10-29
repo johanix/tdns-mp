@@ -1747,8 +1747,7 @@ func catchUpReasons(a *ZoneRefreshAnalysis, from, to *Instructions, self AgentId
 			a.NewVoters = append(a.NewVoters, AgentId(id))
 		}
 	}
-	// The identities newly among the voting members, as before S3: without
-	// HSYNCPARAM every ON record votes.
+	// The identities newly among the voting members.
 	for _, id := range after {
 		if !isAmong(before, AgentId(id)) {
 			newVoter(id)
