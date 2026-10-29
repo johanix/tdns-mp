@@ -83,7 +83,55 @@ type mpHarness struct {
 type harnessWire struct {
 	h  *mpHarness
 	me *hProvider
+	// seenIn: the state each of the provider's own keys was in at the last
+	// KeysChanged, so that a stamp is rewritten once, as the key enters
+	seenIn map[uint16]string
 	fakeWire
+}
+
+// the column tdns stamps as a row enters each state
+var harnessStampCols = map[string]string{KeyStatePublished: "published_at", KeyStateActive: "active_at", KeyStateRetired: "retired_at"}
+
+// KeysChanged follows every write of a key's row, and rewrites the stamp of
+// a key that has just entered a state with the harness's clock. tdns stamps
+// published_at, active_at and retired_at with the wall clock (#321; tdns
+// #980), while the driver times its waits by its own clock, here the
+// harness's: a step slower than the second each wait has to spare in real
+// time left the key it published short of its propagation at the next step.
+func (w *harnessWire) KeysChanged(zone string) {
+	w.fakeWire.KeysChanged(zone)
+	rows, err := w.me.kdb.DB.Query(`SELECT keyid, state FROM DnssecKeyStore WHERE zonename=?`, w.me.zone)
+	if err != nil {
+		w.h.t.Errorf("%s: stamping with the harness's clock: %v", w.me.id, err)
+		return
+	}
+	entered := map[uint16]string{}
+	for rows.Next() {
+		var keyid int
+		var state string
+		if err := rows.Scan(&keyid, &state); err != nil {
+			w.h.t.Errorf("%s: stamping with the harness's clock: %v", w.me.id, err)
+			continue
+		}
+		if w.seenIn[uint16(keyid)] != state {
+			w.seenIn[uint16(keyid)] = state
+			entered[uint16(keyid)] = state
+		}
+	}
+	if err := rows.Err(); err != nil {
+		w.h.t.Errorf("%s: stamping with the harness's clock: %v", w.me.id, err)
+	}
+	rows.Close()
+	now := w.h.clock.Now().UTC().Format(time.RFC3339)
+	for keyid, state := range entered {
+		col, ok := harnessStampCols[state]
+		if !ok {
+			continue
+		}
+		if _, err := w.me.kdb.DB.Exec(`UPDATE DnssecKeyStore SET `+col+`=? WHERE zonename=? AND keyid=? AND state=?`, now, w.me.zone, int(keyid), state); err != nil {
+			w.h.t.Errorf("%s: stamping key %d's %s with the harness's clock: %v", w.me.id, keyid, col, err)
+		}
+	}
 }
 
 func (w *harnessWire) OtherSigners(zone string) []string {
@@ -221,7 +269,7 @@ func newMPHarness(t *testing.T, seed uint64, n int, pol LifecyclePolicy) *mpHarn
 		p := &hProvider{id: id, zone: zone, kdb: kdb, zd: zd, appliedBy: map[uint16]map[string]bool{}, expectedAt: map[uint16][]string{},
 			rejected: map[uint16]bool{}, rejectedRR: map[uint16]string{}, rejectedLate: map[uint16]bool{}, minted: map[uint16]bool{}, signed: map[uint16]bool{},
 			signing: map[uint16]bool{}, keyInfo: map[uint16]hKeyInfo{}, parentServes: map[uint16]bool{}}
-		p.wire = &harnessWire{h: h, me: p, fakeWire: *newFakeWire()}
+		p.wire = &harnessWire{h: h, me: p, seenIn: map[uint16]string{}, fakeWire: *newFakeWire()}
 		p.driver = NewZoneKeyLifecycle(zone, kdb, h.clock, pol, p.wire)
 		pid := id
 		p.driver.Log = func(msg string, kv ...any) { t.Logf("%s %s %v", pid, msg, kv) }
