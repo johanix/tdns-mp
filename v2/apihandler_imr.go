@@ -146,12 +146,16 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			identity = dns.Fqdn(identity)
+			if identity == "." {
+				// every name is at or below the root (dns.IsSubDomain)
+				resp.Error = true
+				resp.ErrorMsg = "agent_id (--id) is an agent's identity, not the root"
+				return
+			}
 			var entries []map[string]any
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]any{

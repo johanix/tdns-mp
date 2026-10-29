@@ -120,7 +120,7 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 				return ""
 			}
 		},
-		"lower": strings.ToLower,
+		"lower": strings.ToLower, // not-a-name: a template helper; no template folds a name with it
 		"zonePath": func(z string) string {
 			return url.PathEscape(z)
 		},
