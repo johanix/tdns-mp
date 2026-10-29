@@ -744,7 +744,7 @@ Log, info, logger `engine`: "a change of this provider's own is kept until the t
 
 ### S7. The thaw
 
-
+**Status (2026-10-29):** Built, on main `68c4653` (S6 merged, tdns-mp #301) with S11 (#299, head `e85769d`) merged in. When it merges is the project owner's call: it reaches a fleet with S8 and S9. Where the code read otherwise than the text, or the text left a choice:
 
 1. **The parent's context is on main already.** Since the reading at `ec1c6b3` every path to the parent takes a context of the zone's own: `delegationSyncRun` gives each leader sync, the key's poll and the operator's `parentsync-bootstrap` (through `launchKeyPoll`) a run of its own, cancelled when the owner takes the sync over, when the lead is lost and when the zone leaves its group. So `v2/parent_work.go` makes no second context. It adds `parentWorkUnderWay` (a run, a key poll about to start, a NOTIFY held, an ask of the chain scheduled) and `cancelParentWork`, which cancels the runs with a cause and drops the chain as `delegationSyncNotLeading` does. It is called at the thaw's turn and when the group's leader is invalidated (the gossip table's degraded callback). A sync stopped at the thaw's turn is owed until the transition is done, not retried as a failure.
 2. **The first record.** From S7 the active serial moves only by `Activate`. A zone with no record, or with one written by S2 to S6 ("not enforced"), takes the copy noted next as its active serial, enforced: until S9's restart rule, that is how a zone first gets one. A fleet therefore starts S7 with every agent at one serial.
@@ -757,7 +757,7 @@ Log, info, logger `engine`: "a change of this provider's own is kept until the t
 9. **The turn.** A zone's turn (`thawTurn`, one at a time) is asked after a member's first-hand stamp of a zone with something to do, and of every zone at every beat round; a worker of its own takes them (`runThaws`), on the agent and the auditor.
 10. **The status.** The thaw's line follows `instructions:` ("agreeing: waiting for agent.bravo.example. (tells 41), the parent (a sync in flight)", "agreeing: every voting member agrees, waiting for the leader's thaw", "thawed to 42 at 15:04:05 by agent.alpha.example."), and S6's `frozen:` line names the same waits.
 11. **tdns-mp #302**, item 1, is taken here: a combiner sends `combiner-waits` for every zone it holds no hand-over for, whether or not its copy carries a serial.
-
+12. **On S11.** The pull request's base, `claude/211-s7-base`, is main (with S6, #301) with S11 (#299) merged in, the conflicts resolved and nothing else. On it, a rollover whose `WaitsOn` names only excused members is paused, at a member (its stamp) and at this agent's own provider (its signer's inventory); and S10's and S11's rule of the newer of the two (`actsBy`) is gone: the combiner and the signer act by what their agent handed, whatever their copy says. A signer that waits for its agent's hand-over keeps its last signing set (rule 5, S11).
 
 **Before it:** S6, S5a, S4. S10 and S11 on the fleet first (section 4): without them a refused serial keeps the agents at N while the provider's combiner and signer act by their own copy at V, and S7 needs S11's inventory to tell a paused rollover. P6 on the providers' nameservers first, for the same reason. It goes to a fleet together with S8 and S9.
 
