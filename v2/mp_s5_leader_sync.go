@@ -793,8 +793,9 @@ func (conf *Config) endDelegationSyncWorkOf(zone string) (hold *delegationNotify
 // which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
 // over, stopRunsOfLostLead when another agent takes the lead it began in,
 // and cancelParentWork at the thaw's turn and when the group's leader is
-// invalidated (plan S7): it is the zone's parent context, and every path to
-// the parent takes it.
+// invalidated (plan S7): it is the zone's parent context for its syncs, the
+// NOTIFYs a sync sends at once, and its key polls. A NOTIFY released from a
+// hold, or already on the NOTIFY queue, is not on it.
 // A sync can sit in tdns's UPDATE retry loop for a minute or more after a
 // REFUSED, and the loop asks only its context whether to go on. done ends
 // the run.

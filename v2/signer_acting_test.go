@@ -331,13 +331,14 @@ func TestAHandOverAndARefreshSetTheMultiProviderDataOneAtATime(t *testing.T) {
 	incoming := incomingCopy(t, zone, sigRecords(`serial="7" servers="us,p2" signers="us,p2"`)...)
 	held("a refresh", func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
 	r.mpzd.Lock()
-	set := r.mpzd.MP.MPdata != before
+	after := r.mpzd.MP.MPdata
 	r.mpzd.Unlock()
-	if !set {
+	if after == before {
 		t.Error("the refresh did not set the multi-provider data once the lock was free")
 	}
-	if weAreSigner() {
-		t.Error("the refresh by a newer copy that names us a signer set it over the hand-over")
+	// by the hand-over: p2 signs, we do not (cubic on tdns-mp #311)
+	if after == nil || after.WeAreSigner || after.OtherSigners != 1 {
+		t.Errorf("the refresh by a newer copy that names us a signer set %+v over the hand-over", after)
 	}
 }
 
