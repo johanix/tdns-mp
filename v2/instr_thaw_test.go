@@ -692,7 +692,7 @@ func TestAnAuditorFetchesTheThawsFromSerial(t *testing.T) {
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
-	r.store.Note(r.zone, freezeAt(t, 40, "o", "a,b", ""), nil)
+	noteKnown(t, r.store, r.zone, freezeAt(t, 40, "o", "a,b", ""))
 	r.store.Note(r.zone, r.v, nil)
 	st := tells(r.v, r.v)
 	st.Thaw = &Thaw{From: sd(r.n), To: sd(r.v)}

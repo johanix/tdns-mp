@@ -21,15 +21,6 @@ import (
 // another suffix one serial up: the zone is frozen, as S7 will have it.
 func freezeServed(t *testing.T, conf *Config, mpzd *MPZoneData) {
 	t.Helper()
-	installStore(t, conf, mpzd, frozenStore(t, mpzd))
-}
-
-// frozenStore is a store of its own that keeps the zone as freezeServed
-// has it, not yet the one conf acts by: a test of a NOTIFY held for 400 ms
-// makes it before the hold, so that the freeze lands at once, whatever the
-// keystore's set-up costs on a loaded machine.
-func frozenStore(t *testing.T, mpzd *MPZoneData) *InstructionStore {
-	t.Helper()
 	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		t.Fatalf("the apex: %v", err)
@@ -41,18 +32,13 @@ func frozenStore(t *testing.T, mpzd *MPZoneData) *InstructionStore {
 	v := *n
 	v.Serial, v.Suffix = n.Serial+1, "frozen"
 	s := newStore(t)
-	activeAs(t, s, mpzd.ZoneName, n)
-	s.Note(mpzd.ZoneName, &v, nil)
-	return s
-}
-
-// installStore makes s the store conf and the readers act by.
-func installStore(t *testing.T, conf *Config, mpzd *MPZoneData, s *InstructionStore) {
-	t.Helper()
 	prev := instrStore.Load()
 	instrStore.Store(s)
 	t.Cleanup(func() { instrStore.Store(prev) })
 	conf.InternalMp.Instructions = s
+	s.Note(mpzd.ZoneName, n, nil)
+	enforced(t, s, mpzd.ZoneName)
+	s.Note(mpzd.ZoneName, &v, nil)
 	if why := conf.zoneFrozen(mpzd.ZoneName); len(why) == 0 {
 		t.Fatal("the zone is not frozen")
 	}
@@ -96,14 +82,9 @@ func TestTheLeaderSendsNothingNewToTheParentDuringATransition(t *testing.T) {
 		r.quiet(t, 300*time.Millisecond, "a refresh's sync during the freeze")
 	})
 	t.Run("a waiting NOTIFY", func(t *testing.T) {
-		r := newNotifyRig(t, "waiting.frozen.example.", "NOTIFY", repeat(time.Minute, 4)...)
-		r.propagation(400 * time.Millisecond)
-		r.parent.holdsNS("ns1."+r.mpzd.ZoneName, r.oldNS)
-		frozen := frozenStore(t, r.mpzd)
-		r.ask()
-		r.logged(t, 1, logHeld)
-		installStore(t, r.conf, r.mpzd, frozen)
-		r.quiet(t, 800*time.Millisecond, "a NOTIFY(CSYNC) that waited into the freeze")
+		r := heldDuringFreeze(t, "waiting.frozen.example.")
+		r.notified(t, "the waiting NOTIFY(CDS)", dns.TypeCDS)
+		r.quiet(t, 300*time.Millisecond, "the NOTIFY(CSYNC) that waited during the freeze")
 	})
 	t.Run("the key's bootstrap", func(t *testing.T) {
 		r := newNotifyRig(t, "bootstrap.frozen.example.", "UPDATE")
@@ -159,14 +140,7 @@ func TestTheDSSyncOfARolloverUnderWayPasses(t *testing.T) {
 		r.notified(t, "the rollover's DS sync during the freeze", dns.TypeCDS)
 	})
 	t.Run("a waiting NOTIFY", func(t *testing.T) {
-		r := newNotifyRig(t, "dswait.frozen.example.", "NOTIFY", repeat(time.Minute, 4)...)
-		r.propagation(400 * time.Millisecond)
-		r.parent.holdsDS()
-		r.parent.holdsNS("ns1."+r.mpzd.ZoneName, r.oldNS)
-		frozen := frozenStore(t, r.mpzd)
-		r.inventory(r.ksk)
-		r.logged(t, 1, logHeld+" zone="+r.mpzd.ZoneName+" notify=\"CSYNC, CDS\"")
-		installStore(t, r.conf, r.mpzd, frozen)
+		r := heldDuringFreeze(t, "dswait.frozen.example.")
 		r.notified(t, "the waiting NOTIFY(CDS)", dns.TypeCDS)
 		r.quiet(t, 300*time.Millisecond, "the NOTIFY(CSYNC) beside it")
 	})
