@@ -48,8 +48,9 @@ type KeystateInventoryMsg struct {
 	Owned     bool     // the signer's own state machine runs the zone's keys (S3)
 	Resend    []uint16 // keys the signer sends again: distributed even unchanged (#256)
 	// The signer's marks (plan S11): the hand-over it holds (nil: none),
-	// that it does not sign the zone, rolloverUnderWay at the signer, and
-	// the signers each key waiting in mpdist or mpremove waits on.
+	// that it does not sign the zone, rolloverUnderWay at the signer, and,
+	// for each key waiting in mpdist or mpremove, the other signers whose
+	// "applied" is still missing.
 	Acting     *ActingHandover
 	NotSigning bool
 	Rollover   bool

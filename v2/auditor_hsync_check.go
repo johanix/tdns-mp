@@ -8,8 +8,6 @@ package tdnsmp
 
 import (
 	"fmt"
-	"slices"
-	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -27,7 +25,8 @@ func CheckZoneHSYNCConfig(zone string) []string {
 // checkMPZoneHSYNCConfig lists an owner error first, if there is one: the
 // copy's own (S1), or else the store's (S2), since hsync3IdentitiesByLabel
 // keeps one record per label and the checks below cannot see two records
-// with one label. Then the store's refusal of its newest serial (S4).
+// with one label, nor one identity under two (#306), nor a copy without its
+// serial (#308). Then the store's refusal of its newest serial (S4).
 func checkMPZoneHSYNCConfig(mpzd *MPZoneData) []string {
 	info := MPZoneInfoFromMPZoneData(mpzd)
 	instrStore.Load().fillMPZoneInfo(mpzd.ZoneName, &info)
@@ -45,31 +44,15 @@ func checkHSYNCConfig(info MPZoneInfo, byLabel map[string]string) []string {
 	if len(info.Servers) == 0 && len(info.Signers) == 0 && len(info.Auditors) == 0 {
 		return nil
 	}
-	identityLabels := make(map[string][]string)
-
+	// One identity under two labels is an owner error of the copy (#306),
+	// listed first by checkMPZoneHSYNCConfig; a reading has none.
 	var errs []string
 	for _, lbl := range declaredRoleLabels(info) {
-		id := byLabel[lbl]
-		if id == "" {
+		if byLabel[lbl] == "" {
 			errs = append(errs, fmt.Sprintf("HSYNCPARAM role %q has no matching HSYNC3 record", lbl))
-			continue
 		}
-		identityLabels[id] = append(identityLabels[id], lbl)
 	}
-	// The role errors above follow the declared order; the duplicate-identity
-	// errors come out of a map, so sort them for a stable listing.
-	var dups []string
-	for id, labels := range identityLabels {
-		if len(labels) <= 1 {
-			continue
-		}
-		slices.Sort(labels)
-		dups = append(dups, fmt.Sprintf(
-			"HSYNC3 labels %s map to the same identity %s",
-			strings.Join(labels, ", "), id))
-	}
-	slices.Sort(dups)
-	return append(errs, dups...)
+	return errs
 }
 
 // RefreshZoneHSYNCConfig re-runs CheckZoneHSYNCConfig and stores the

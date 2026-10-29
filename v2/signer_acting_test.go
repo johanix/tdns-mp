@@ -253,6 +253,152 @@ func TestAHandOverWritesNoOptionsMapTheZoneHeld(t *testing.T) {
 	}
 }
 
+// The inventory reads whether the signer signs the zone under the zone's
+// lock, under which a hand-over replaces the multi-provider data (cubic on
+// tdns-mp #299; go test -race tells). Every hand-over here leaves us out of
+// the signers, so the inventory stops at that read: past it, the key
+// machine reads the zone's options without a lock while a hand-over that
+// names us a signer sets them (tdns #981).
+func TestAnInventoryDuringAHandOverRacesNothing(t *testing.T) {
+	const zone = "race.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				r.conf.inventoryMarksOf(zone, nil)
+			}
+		}
+	}()
+	for serial := 6; serial < 10; serial++ {
+		signers := "p2,p3"
+		if serial%2 == 0 {
+			signers = "p2"
+		}
+		r.hand(handoverFor(t, zone, sigRecords(fmt.Sprintf(`serial="%d" servers="us,p2" signers="%s"`, serial, signers))...), sigUs)
+	}
+	close(done)
+	wg.Wait()
+	if m := r.conf.inventoryMarksOf(zone, nil); !m.notSigning {
+		t.Error("after hand-overs that leave us out of the signers, the inventory says signing")
+	}
+}
+
+// A hand-over and a refresh compute and set the zone's multi-provider data
+// one at a time (mpDataLock; cubic and CodeRabbit on tdns-mp #299): while
+// the lock is held, neither sets it, and each does once it is free.
+func TestAHandOverAndARefreshSetTheMultiProviderDataOneAtATime(t *testing.T) {
+	const zone = "onebyone.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	weAreSigner := func() bool {
+		r.mpzd.Lock()
+		defer r.mpzd.Unlock()
+		return r.mpzd.MP.MPdata != nil && r.mpzd.MP.MPdata.WeAreSigner
+	}
+	mu := mpDataLock(zone)
+	held := func(what string, act func()) {
+		t.Helper()
+		mu.Lock()
+		done := make(chan struct{})
+		go func() {
+			act()
+			close(done)
+		}()
+		select {
+		case <-done:
+			t.Errorf("%s set the multi-provider data while the lock was held", what)
+		case <-time.After(200 * time.Millisecond):
+		}
+		mu.Unlock()
+		<-done
+	}
+	h := handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="p2"`)...)
+	held("a hand-over", func() { r.hand(h, sigUs) })
+	if weAreSigner() {
+		t.Error("the hand-over that leaves us out of the signers did not set it once the lock was free")
+	}
+	// a copy newer than the hand-over: the signer acts by the hand-over (S7),
+	// and the refresh sets the data anew by it
+	r.mpzd.Lock()
+	before := r.mpzd.MP.MPdata
+	r.mpzd.Unlock()
+	incoming := incomingCopy(t, zone, sigRecords(`serial="7" servers="us,p2" signers="us,p2"`)...)
+	held("a refresh", func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
+	r.mpzd.Lock()
+	set := r.mpzd.MP.MPdata != before
+	r.mpzd.Unlock()
+	if !set {
+		t.Error("the refresh did not set the multi-provider data once the lock was free")
+	}
+	if weAreSigner() {
+		t.Error("the refresh by a newer copy that names us a signer set it over the hand-over")
+	}
+}
+
+// The re-sign a hand-over or a refresh asks for is asked once mpDataLock is
+// free (cubic on tdns-mp #299): the request can wait on a full ResignQ, and
+// the zone's refreshes and hand-overs would wait behind it.
+func TestTheReSignRequestWaitsOutsideTheLock(t *testing.T) {
+	const zone = "resign.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	q := make(chan tdns.ResignRequest)
+	prev := tdns.Conf.Internal.ResignQ
+	tdns.Conf.Internal.ResignQ = q
+	t.Cleanup(func() { tdns.Conf.Internal.ResignQ = prev })
+	mu := mpDataLock(zone)
+	read := func(f func() bool) func() bool {
+		return func() bool {
+			r.mpzd.Lock()
+			defer r.mpzd.Unlock()
+			return f()
+		}
+	}
+	// act asks for a re-sign that nothing takes; once moved says it is past
+	// what it sets, the lock is to be free while it waits.
+	asks := func(what string, moved func() bool, act func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			act()
+			close(done)
+		}()
+		free := false
+		for end := time.Now().Add(5 * time.Second); !free && time.Now().Before(end); time.Sleep(time.Millisecond) {
+			if moved() && mu.TryLock() {
+				mu.Unlock()
+				free = true
+			}
+		}
+		if !free {
+			t.Errorf("%s held mpDataLock while it asked for its re-sign", what)
+		}
+		select {
+		case <-q:
+		case <-done:
+			t.Fatalf("%s asked for no re-sign: the test does not tell", what)
+		}
+		<-done
+	}
+	asks("a hand-over that switches inline-signing on",
+		read(func() bool { return r.mpzd.MP.MPdata != nil && r.mpzd.MP.MPdata.WeAreSigner }),
+		func() {
+			r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+		})
+	k := testDnskey(t, zone, 256)
+	records := append(sigRecords(`serial="6" servers="us,p2" signers="us,p2"`),
+		fmt.Sprintf("3600 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+	incoming := incomingCopy(t, zone, records...)
+	asks("a refresh that brings p2's DNSKEY",
+		func() bool { return len(r.foreignRows(t)) > 0 },
+		func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
+}
+
 // The other signers' DNSKEYs stay, as foreign rows, while the sets handed
 // keep them, whatever the copy says; a hand-over that ends multi-signer
 // mode drops them.
@@ -449,16 +595,23 @@ func TestTheSignersHandedSerialSurvivesARestart(t *testing.T) {
 	}
 }
 
-// A signer handed nothing, whose copy carries no serial (the first start
-// after the upgrade), acts by its copy, provisional.
-func TestASignersFirstLoadWithNothingHandedAndNoSerialIsProvisional(t *testing.T) {
+// A signer handed nothing whose copy has no reading (no serial=, an owner
+// error since #308) is provisional, and starts no multi-provider work for
+// the zone: it signs nothing by that copy. A copy at serial="0" reads, and
+// its signer waits for its agent (decision 107).
+func TestASignersFirstLoadWithNothingHandedAndNoReadingIsProvisional(t *testing.T) {
 	const zone = "provisional.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`servers="us,p2" signers="us,p2"`)...)
 	if line := signerActingLine(zone); line != "provisional" {
 		t.Errorf("the status says %q, want provisional", line)
 	}
-	if !r.e.wire.IsSigner(zone) || !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
-		t.Error("a provisional signer does not act by its copy")
+	if r.e.wire.IsSigner(zone) || r.e.wire.OtherSigners(zone) != nil {
+		t.Error("a signer whose copy has no reading signs by it")
+	}
+	const zero = "zero.signer.example."
+	newSignerRig(t, zero, sigRecords(`serial="0" servers="us,p2" signers="us,p2"`)...)
+	if line := signerActingLine(zero); line != "waiting for its agent's hand-over" {
+		t.Errorf("at serial 0 the status says %q, want it waiting for its agent's hand-over", line)
 	}
 }
 
@@ -641,6 +794,28 @@ func TestTheAgentResendsUntilTheInventorySaysHeld(t *testing.T) {
 	age()
 	tr.tick()
 	signerSent(t, q, 1)
+}
+
+// A forget is told to the signer until an inventory says it holds a
+// hand-over that told it, and not after: the signer confirms nothing, and a
+// hand-over that says so is judged by when it was made alone (cubic on
+// tdns-mp #299).
+func TestASignerIsToldAForgetUntilItHoldsIt(t *testing.T) {
+	const zone = "forgot.signer.example."
+	tr, q := signerTracker(t)
+	tr.handOver(wantOf(zone, 6, "us"))
+	signerSent(t, q, 1)
+	tr.forgot(zone)
+	tr.handOver(wantOf(zone, 3, "us"))
+	m := handoverIn(t, signerSent(t, q, 1))
+	if !m.update.Acting.Reset {
+		t.Fatal("the hand-over after a forget does not say so")
+	}
+	tr.learned(zone, m.update.Acting)
+	tr.handOver(wantOf(zone, 4, "us"))
+	if m := handoverIn(t, signerSent(t, q, 1)); m.update.Acting.Reset {
+		t.Error("a hand-over after the signer held the forget says it again")
+	}
 }
 
 // An inventory marked "not signing" withdraws nothing: the agent neither

@@ -437,15 +437,9 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		}
 		cp := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
 		z.Copy, z.CopyError = cp, ""
-		if !in.HasParam && (z.Active != nil && z.Active.Reading.HasParam ||
-			slices.ContainsFunc(z.Held, func(h heldSerial) bool { return h.Reading.HasParam })) {
-			z.ownerError(zone, fmt.Sprintf("HSYNCPARAM dropped at serial %d while HSYNC3 stays", in.Serial))
-			return nil
-		}
 		if h := z.held(in.Serial); h != nil {
 			if h.Digest != cp.Digest {
-				// an edit without a raised serial; at serial 0, a change of a
-				// zone that has no serial key
+				// an edit without a raised serial
 				if z.ErrorAt == nil || *z.ErrorAt != in.Serial {
 					z.Conflict = []string{h.Digest}
 				}

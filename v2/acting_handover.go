@@ -218,8 +218,9 @@ type zoneHandover struct {
 	flightAt time.Time
 	heldAt   time.Time // when the combiner was last known to hold want
 	waiting  []waitingUpdate
-	draining bool // an update that waited is being queued (drain)
-	reset    bool // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
+	draining bool      // an update that waited is being queued (drain)
+	reset    bool      // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
+	resetAt  time.Time // when they were forgotten
 }
 
 type waitingUpdate struct {
@@ -509,6 +510,11 @@ func (t *handoverTracker) learned(zone string, held *ActingHandover) {
 	if z.want != nil && z.want.sameAs(held) {
 		z.heldAt = time.Now()
 	}
+	// the signer confirms nothing: a forget is told until an inventory
+	// says it holds a hand-over, made since, that told it
+	if t.toSigner && held != nil && held.Reset && !held.Made.Before(z.resetAt) {
+		z.reset = false
+	}
 	send := t.dueLocked(z, false)
 	t.mu.Unlock()
 	t.drain(zone)
@@ -592,7 +598,7 @@ func (t *handoverTracker) forgot(zone string) {
 	}
 	t.mu.Lock()
 	z := t.zone(zone)
-	z.reset, z.held = true, nil
+	z.reset, z.resetAt, z.held = true, time.Now(), nil
 	t.mu.Unlock()
 }
 
