@@ -29,7 +29,7 @@ func zoneSignedBy(t *testing.T, mpzd *MPZoneData, identity string, others ...str
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: append([]string{"us"}, others...)}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: append([]string{"us"}, others...)}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	h3 := &core.HSYNC3{State: 1, Label: "us", Identity: dns.Fqdn(identity), Upstream: "."}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: h3}}})
@@ -312,13 +312,29 @@ func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 	e := NewKeyLifecycleEngine(conf, owner)
 	mpzd := signerTestZone(t, "notours.owned.example.", kdb)
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2"}}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p1", "p2"}}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
 	mpzd.Data.Set(mpzd.ZoneName, *apex)
 	mpzd.InstallInitialSnapshot()
 	owner.Take(mpzd.ZoneName)
 	if !owner.Owns(mpzd.ZoneData) {
 		t.Fatal("not owned after Take")
+	}
+	conf.InternalMp.KeyLifecycle = e
+	zonesIdle := func() []string {
+		t.Helper()
+		body, _ := json.Marshal(SignerKeyPost{Command: "zones"})
+		w := httptest.NewRecorder()
+		conf.APIsignerKey()(w, httptest.NewRequest(http.MethodPost, "/signer/key", bytes.NewReader(body)))
+		var resp SignerKeyResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp.Idle
+	}
+	// idle from the take, before a tick has said so (cubic on tdns-mp #299)
+	if got := zonesIdle(); !slices.Equal(got, []string{mpzd.ZoneName}) {
+		t.Errorf("signer key zones before a tick marks %v idle, want the zone", got)
 	}
 	for range 2 {
 		e.tickOwned(map[string]keyPause{})
@@ -336,13 +352,8 @@ func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 	if err != nil || !st.Idle {
 		t.Errorf("the status of the idle zone: %+v, err %v; want idle", st, err)
 	}
-	conf.InternalMp.KeyLifecycle = e
-	body, _ := json.Marshal(SignerKeyPost{Command: "zones"})
-	w := httptest.NewRecorder()
-	conf.APIsignerKey()(w, httptest.NewRequest(http.MethodPost, "/signer/key", bytes.NewReader(body)))
-	var resp SignerKeyResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || !slices.Equal(resp.Idle, []string{mpzd.ZoneName}) {
-		t.Errorf("signer key zones does not mark the idle zone: %+v, err %v", resp, err)
+	if got := zonesIdle(); !slices.Equal(got, []string{mpzd.ZoneName}) {
+		t.Errorf("signer key zones marks %v idle, want the zone", got)
 	}
 }
 
@@ -531,8 +542,7 @@ func TestEngineRevalidatesCachedDrivers(t *testing.T) {
 	}
 	// the zone's signers change: this provider is no longer one
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}}}}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: dns.RR_Header{Name: mpzd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}, Data: hp}}})
+	setHSYNCPARAM(apex, mpzd.ZoneName, &core.HSYNCPARAMSigners{Signers: []string{"p2", "p3"}})
 	mpzd.Data.Set(mpzd.ZoneName, *apex)
 	mpzd.InstallInitialSnapshot()
 	if e.driver(mpzd.ZoneName) != nil {

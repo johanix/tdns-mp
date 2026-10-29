@@ -338,20 +338,6 @@ func TestRevertedContentsAtTheSameSerialDoNotEndTheOwnerError(t *testing.T) {
 	}
 }
 
-func TestAZoneWithoutSerialIsAnOwnerErrorAtItsFirstChange(t *testing.T) {
-	unnumbered := readOf(t, jAlpha, jBeta, `3600 IN HSYNCPARAM `+jServers2)
-	s := newStore(t)
-	noteKnown(t, s, storeZone, unnumbered)
-	noteKnown(t, s, storeZone, unnumbered)
-	if st := status(t, s, storeZone); st.Phase != PhaseSteady || st.Active.Serial != 0 {
-		t.Fatalf("an unchanged zone without serial: phase %s active %s", st.Phase, serialOf(st.Active))
-	}
-	noteKnown(t, s, storeZone, readOf(t, jAlpha, jBeta, `3600 IN HSYNCPARAM `+jServers2+` suffix="mp"`))
-	if line := status(t, s, storeZone).Line(); !strings.HasPrefix(line, "held: owner error: serial 0 with two digests") {
-		t.Errorf("its first change: %q", line)
-	}
-}
-
 func TestEveryAgentGivesTheSameReason(t *testing.T) {
 	// several reasons; the second agent's copy lists records and roles in
 	// another order

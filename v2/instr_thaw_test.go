@@ -911,13 +911,13 @@ func TestAnUnheardExcusedMemberIsLeftOutOfTheGroupsGate(t *testing.T) {
 	}
 }
 
-// Handed nothing, a combiner asks its agent for every zone it holds no
-// hand-over for, whether or not the zone's copy carries a serial: from S7
-// a copy can hold a serial its agent refuses (tdns-mp #302).
+// Handed nothing, a combiner asks its agent for every zone whose copy reads
+// and that it holds no hand-over for, at serial 0 as at any other (decision
+// 107): from S7 a copy can hold a serial its agent refuses (tdns-mp #302).
 func TestCombinerWaitsIsAskedForEveryZoneWithoutAHandOver(t *testing.T) {
-	conf, plain := actingCombiner(t, "plain.waits.example.", actRecords(`servers="alpha,beta" signers="alpha"`)...)
+	conf, zero := actingCombiner(t, "zero.waits.example.", actRecords(`serial="0" servers="alpha,beta" signers="alpha"`)...)
 	_, serial := actingCombiner(t, "serial.waits.example.", actRecords(`serial="3" servers="alpha,beta" signers="alpha"`)...)
-	for _, mpzd := range []*MPZoneData{plain, serial} {
+	for _, mpzd := range []*MPZoneData{zero, serial} {
 		mpzd.Ready = true
 		mpzd.Options[tdns.OptMultiProvider] = true
 	}
@@ -926,7 +926,7 @@ func TestCombinerWaitsIsAskedForEveryZoneWithoutAHandOver(t *testing.T) {
 	_, none := actingCombiner(t, "none.waits.example.")
 	none.Ready = true
 	none.Options[tdns.OptMultiProvider] = true
-	conf.InternalMp.MPZoneNames = []string{plain.ZoneName, serial.ZoneName, none.ZoneName}
+	conf.InternalMp.MPZoneNames = []string{zero.ZoneName, serial.ZoneName, none.ZoneName}
 	withActing(t, nil)
 	if got := conf.zonesWaitingForHandover(); len(got) != 2 || slices.Contains(got, none.ZoneName) {
 		t.Errorf("waiting: %q, want the two zones with instructions", got)
