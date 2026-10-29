@@ -134,7 +134,7 @@ func consentProviderText(extra ...string) string {
 }
 
 func consentParams(pubkey bool) string {
-	params := `servers="alpha" nsmgmt="agent" parentsync="agent"`
+	params := `servers="alpha" nsmgmt="agent" parentsync="agent" serial="1"`
 	if pubkey {
 		params += " pubkey"
 	}

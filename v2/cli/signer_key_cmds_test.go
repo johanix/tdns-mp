@@ -90,7 +90,7 @@ func TestSignerKeyPolicyShowsForever(t *testing.T) {
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: zone, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"us", "p2"}}}}
+	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: []string{"us", "p2"}}, &core.HSYNCPARAMSerial{Value: 1}}}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	h3 := &core.HSYNC3{State: 1, Label: "us", Identity: "agent.us.example.", Upstream: "."}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNC3), Data: h3}}})

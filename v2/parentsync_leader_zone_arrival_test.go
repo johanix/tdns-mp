@@ -66,7 +66,7 @@ func (e zoneEdit) apex(t *testing.T, zd *tdns.ZoneData) *tdns.OwnerData {
 	for _, id := range e.serving {
 		servers = append(servers, shortLabel(id))
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: servers}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: servers}}})
 	if e.parentsync {
 		hp.Value = append(hp.Value, &core.HSYNCPARAMParentSync{Value: core.HsyncParentSyncAgent})
 	}
