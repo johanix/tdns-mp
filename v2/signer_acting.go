@@ -127,7 +127,8 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 	}
 	// Computed on a wrapper of the zone as served, with a map of its own:
 	// the zone's options map is read without a lock. One refresh or
-	// hand-over at a time (mpDataLock), through the switch.
+	// hand-over at a time (mpDataLock), through the switch, not the re-sign
+	// request.
 	mpMu := mpDataLock(mpzd.ZoneName)
 	mpMu.Lock()
 	mpzd.Lock()
@@ -143,10 +144,15 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 	mpzd.MP.MPdata, mpzd.MPOptions = w.MP.MPdata, w.MPOptions
 	mpdata := mpzd.MP.MPdata
 	mpzd.Unlock()
-	if mpdata != nil && mpzd.signerSwitch(nil, nil, mp) {
-		sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
+	var switched, resign bool
+	if mpdata != nil {
+		switched, resign = mpzd.signerSwitch(nil, nil, mp)
 	}
 	mpMu.Unlock()
+	// after the lock: the request can wait on a full ResignQ
+	if switched || resign {
+		sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
+	}
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		e.handedOver(mpzd.ZoneName, confirmers)
 	}
