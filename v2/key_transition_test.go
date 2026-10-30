@@ -609,3 +609,34 @@ func TestAnOfferTheFreezeHoldsIsNotCountedAsMade(t *testing.T) {
 		t.Errorf("key %d offered, want %d", keyid, k.keyid)
 	}
 }
+
+// A peer's REPLACE of the zone's KEY that is the same as the local agent's
+// contribution leaves the peer none of its own: a second KEY it published
+// before does not stay beside the local one. The fleet's take-away of a
+// second KEY at a leader, at a combiner whose own agent had led the zone.
+func TestAKEYReplaceTheLocalAgentHoldsLeavesThePeerNoOlderKEY(t *testing.T) {
+	const zone = "keydedup.acting.example."
+	_, mpzd := actingCombiner(t, zone, actRecords(`serial="5" servers="alpha,beta" signers="alpha,beta" parentsync="agent"`)...)
+	if !mpzd.getEditPolicy().canApply(dns.TypeKEY) {
+		t.Fatal("the rig's combiner applies no KEY")
+	}
+	pub, second := testSig0Key(t, newMPTestKeyDB(t), zone).key, testSig0Key(t, newMPTestKeyDB(t), zone).key
+	mpzd.Lock()
+	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
+		actUs:    {zone: {dns.TypeKEY: core.RRset{Name: zone, RRtype: dns.TypeKEY, RRs: []dns.RR{pub}}}},
+		actOther: {zone: {dns.TypeKEY: core.RRset{Name: zone, RRtype: dns.TypeKEY, RRs: []dns.RR{pub, second}}}},
+	}
+	mpzd.Unlock()
+	req := &CombinerSyncRequest{SenderID: actOther, Zone: zone, DistributionID: nextDistributionID(), Timestamp: time.Now(),
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{pub.String()}}}}
+	resp := mpzd.combinerProcessOperations(req, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy())
+	if !slices.Contains(resp.RemovedRecords, second.String()) {
+		t.Errorf("the peer's second KEY is not named removed: %s %+v", resp.Message, resp.RemovedRecords)
+	}
+	mpzd.Lock()
+	left := mpzd.MP.AgentContributions[actOther][zone][dns.TypeKEY].RRs
+	mpzd.Unlock()
+	if slices.ContainsFunc(left, func(rr dns.RR) bool { return rr.String() == second.String() }) {
+		t.Errorf("the peer's second KEY is still stored: %v", left)
+	}
+}
