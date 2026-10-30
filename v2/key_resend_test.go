@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -577,7 +578,7 @@ func TestTheCallbackKeepsAConfirmationsStampWithItsResult(t *testing.T) {
 			t.Fatalf("%s: not tracked", which)
 		}
 		for kt, want := range map[uint16]*MsgStamp{direct.KeyTag(): partial, credited.KeyTag(): answer} {
-			if got := prop.Stamps[peer][kt]; prop.Results[peer][kt] != "applied" || got == nil || *got != *want {
+			if got := prop.Stamps[peer][kt]; prop.Results[peer][kt] != "applied" || got == nil || !reflect.DeepEqual(*got, *want) {
 				t.Errorf("%s, key %d: %q with stamp %+v, want applied with %+v", which, kt, prop.Results[peer][kt], got, want)
 			}
 		}
