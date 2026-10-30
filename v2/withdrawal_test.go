@@ -206,6 +206,30 @@ func TestAWithdrawalRefusedAsStaleIsSentAgainWhenInStep(t *testing.T) {
 	}
 }
 
+// A withdrawal the queue does not take leaves nothing pending removal, so
+// the plan's next call sends it again.
+func TestAWithdrawalThatCannotBeQueuedIsNotLeftPending(t *testing.T) {
+	r := newReceiveRig(t, "unqueued.send.withdraw.example.")
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	r.leads(roleA)
+	tm := r.conf.InternalMp.MPTransport
+	full := transport.NewReliableMessageQueue(&transport.ReliableMessageQueueConfig{MaxQueueSize: 1})
+	if err := full.Enqueue(&transport.OutgoingMessage{DistributionID: "x", RecipientID: roleB, Zone: r.zone, Payload: &ZoneUpdate{}}); err != nil {
+		t.Fatal(err)
+	}
+	tm.ReliableQueue = full
+	if sent, err := r.conf.withdraw(r.zdr, ZoneName(r.zone), roleN, "NS"); sent || err == nil {
+		t.Fatalf("a withdrawal the queue could not take reads as sent (%v, %v)", sent, err)
+	}
+	if st := r.zdr.Tracking[ZoneName(r.zone)][roleN][dns.TypeNS].Tracked[0].State; st == RRStatePendingRemoval {
+		t.Error("n's NS is left pending removal")
+	}
+	tm.ReliableQueue = r.queue
+	if sent, err := r.conf.withdraw(r.zdr, ZoneName(r.zone), roleN, "NS"); !sent || err != nil {
+		t.Errorf("the plan's next call did not send it (%v, %v)", sent, err)
+	}
+}
+
 // The leader's clock is not the provider's: n's last replace, made under
 // 41, is stamped later than the leader's withdrawal under 42, and the
 // withdrawal is not stale for it.
