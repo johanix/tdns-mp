@@ -10,12 +10,11 @@
  * KeySigners, and for a zone its key machine runs, the expected
  * confirmations by KeyConfirmers and the foreign rows' ds by DSSigners.
  * Then its inventory says what it holds. Every reader at the signer reads
- * the hand-over through the accessor S10 made (actingHeld), unless the
- * signer's copy is newer (actsBy, until S7). A signer handed nothing acts
- * by its own copy (rule 5): provisional for a copy with no reading (no
- * serial=, #308), which starts no multi-provider work; for one that reads,
- * it waits for its agent, and signs meanwhile by the signing set it last
- * signed by.
+ * the hand-over through the accessor S10 made (actingHeld), whatever its
+ * copy says (from S7). A signer handed nothing acts by its own copy (rule
+ * 5): provisional for a copy with no reading (no serial=, #308), which
+ * starts no multi-provider work; for one that reads, it waits for its
+ * agent, and signs meanwhile by the signing set it last signed by.
  */
 package tdnsmp
 
@@ -24,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -47,6 +47,10 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	h := sig.Acting
 	zone := dns.Fqdn(sig.Zone)
 	refuse := func(why string) {
+		if !warnRefusal(zone, why, time.Now()) {
+			lgSigner.Debug("refusing a hand-over again", "zone", zone, "sender", sig.SenderID, "reason", why)
+			return
+		}
 		lgSigner.Warn("refusing a hand-over", "zone", zone, "sender", sig.SenderID, "reason", why)
 	}
 	mp := conf.MpConfig()
@@ -88,12 +92,45 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 		mpzd.actBySignerHandover(conf, confirmers)
 	}
 	if err == nil {
+		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
 	}
 	if err == nil && h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgSigner)
 	}
 	pushSignerInventory(conf, zone)
+}
+
+// refusalLogged is the refusal last logged for each zone, and when: the
+// agent hands a zone the signer refuses again every signerHandoverResend,
+// and the same refusal is logged once per handoverResend, at Debug
+// between. A hand-over taken clears it.
+var refusalLogged sync.Map // handoverKey(zone) -> refusal
+
+type refusal struct {
+	why string
+	at  time.Time
+}
+
+// warnRefusal: the refusal is not the one last logged for the zone, or
+// that was logged handoverResend ago; it is noted as logged now. The notes
+// that old are dropped then, since they no longer quiet anything: the zone
+// a refused message names is the sender's, and they would pile up.
+func warnRefusal(zone, why string, now time.Time) bool {
+	key := handoverKey(zone)
+	if v, ok := refusalLogged.Load(key); ok {
+		if last := v.(refusal); last.why == why && now.Sub(last.at) < handoverResend {
+			return false
+		}
+	}
+	refusalLogged.Range(func(k, v any) bool {
+		if now.Sub(v.(refusal).at) >= handoverResend {
+			refusalLogged.Delete(k)
+		}
+		return true
+	})
+	refusalLogged.Store(key, refusal{why: why, at: now})
+	return true
 }
 
 // signerConfirmers are the providers the zone's key machine expects
@@ -114,15 +151,13 @@ func (conf *Config) signerConfirmers(zone string) []string {
 // is served; and, for a zone its key machine runs, the distributions in
 // flight expecting KeyConfirmers when they changed from confirmers, and the
 // foreign rows' ds by DSSigners. Not before the zone's first load, which
-// reads what is held; nor while its copy is newer than the hand-over
-// (actsBy), when the copy is what it acts by.
+// reads what is held.
 func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 	if !mpzd.Ready {
 		return
 	}
 	mp := conf.MpConfig()
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName, apex)
+	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName)
 	if !ok {
 		return
 	}
@@ -205,9 +240,6 @@ func signerActingLine(zone string) string {
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if held, ok := s.get(mpzd.ZoneName); ok {
 		h := held.handover
-		if _, acts := s.actsBy(mpzd.ZoneName, apex); !acts {
-			return fmt.Sprintf("by its own copy, serial %d, newer than the %d its agent handed at %s", readingOf(apex).Serial, h.Serial, held.since.Format(time.TimeOnly))
-		}
 		line := fmt.Sprintf("acting by %d, handed at %s", h.Serial, held.since.Format(time.TimeOnly))
 		if h.Step > 0 {
 			line = fmt.Sprintf("acting by %d, step %d, handed at %s", h.Serial, h.Step, held.since.Format(time.TimeOnly))

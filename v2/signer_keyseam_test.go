@@ -246,23 +246,33 @@ func TestMPKeystoreMigration(t *testing.T) {
 		{DnskeyStateMpremove, "ZSK", false, dns.ED25519},
 		{DnskeyStateForeign, "ZSK", false, dns.ED25519},
 	}
-	oldIDs := map[string]uint16{}
-	var renumberedOld uint16
-	for i, r := range rows {
-		pkc, err := tdns.GenerateKeyMaterial(zone, dns.TypeDNSKEY, r.alg, r.role)
+	// The rows are keyed by (zone, key tag): the keys' tags are distinct,
+	// the renumbered key's under both its numbers (#331).
+	keys := distinctTags(len(rows), func(i int) (*tdns.PrivateKeyCache, []uint16) {
+		pkc, err := tdns.GenerateKeyMaterial(zone, dns.TypeDNSKEY, rows[i].alg, rows[i].role)
 		if err != nil {
 			t.Fatalf("GenerateKeyMaterial: %v", err)
 		}
-		dnskey := pkc.DnskeyRR
-		privatekey := pkc.PrivateKey
+		if i != 2 {
+			return pkc, []uint16{pkc.DnskeyRR.KeyTag()}
+		}
+		// A key minted under the signer's old MLDSA44 number, 18. The key
+		// material is ED25519; what the migration rewrites is the number in
+		// the record, to 199, and the tag with it.
+		pkc.DnskeyRR.Algorithm = 18
+		renumbered := pkc.DnskeyRR
+		renumbered.Algorithm = 199
+		return pkc, []uint16{pkc.DnskeyRR.KeyTag(), renumbered.KeyTag()}
+	})
+	oldIDs := map[string]uint16{}
+	var renumberedOld uint16
+	for i, r := range rows {
+		dnskey := keys[i].DnskeyRR
+		privatekey := keys[i].PrivateKey
 		if r.state == DnskeyStateForeign {
 			privatekey = ""
 		}
 		if i == 2 {
-			// A key minted under the signer's old MLDSA44 number, 18. The
-			// key material is ED25519; what the migration rewrites is the
-			// number in the record, and the tag with it.
-			dnskey.Algorithm = 18
 			renumberedOld = dnskey.KeyTag()
 		}
 		confirmed := 0

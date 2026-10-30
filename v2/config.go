@@ -377,4 +377,7 @@ type InternalMpConf struct {
 	// agent's word, the hand-over's hold (instr_freeze.go); nil on every
 	// other role.
 	SignerHolds *signerHolds
+	// thaws: what the agent and the auditor keep of their zones' thaws
+	// (instr_thaw.go).
+	thaws thawBook
 }

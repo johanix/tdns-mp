@@ -74,10 +74,14 @@ func TestConfigEditsAndAuditCarryTheStamp(t *testing.T) {
 // after the active serial moved carries the newer serial and a higher
 // sequence, and the distribution records the stamp of the latest send.
 func TestAResendCarriesTheStampOfItsSend(t *testing.T) {
-	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
+	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
+	st := stampTableAt(t, stampAlpha, seven)
 	first := st.messageStamp(stampZone)
 	st.sent("d1", stampBeta, stampZone, first)
-	st.store.Note(stampZone, stampAt(t, 8, "a"), nil)
+	noteKnown(t, st.store, stampZone, eight)
+	if err := st.store.Activate(stampZone, Thaw{From: sd(seven), To: sd(eight)}); err != nil {
+		t.Fatal(err)
+	}
 	resend := st.messageStamp(stampZone)
 	st.sent("d1", stampBeta, stampZone, resend)
 	if resend.Active != 8 || resend.Seq <= first.Seq || resend.Epoch != first.Epoch {
@@ -189,7 +193,7 @@ func TestTransportBoundary_ConfirmationCarriesTheReceiversStamp(t *testing.T) {
 	}
 	for _, p := range []*peerEnv{env.Alice, env.Bob} {
 		s := newStore(t)
-		s.Note(zone, in, nil)
+		noteKnown(t, s, zone, in)
 		p.Bridge.stamps = newStampTable(p.Identity, s, 1, false, nil)
 	}
 	env.Bob.Registry.S.Set(AgentId(alice), NewAgent(AgentId(alice)))
@@ -275,7 +279,7 @@ func TestARefusedMessagesStampIsNotNoted(t *testing.T) {
 		t.Fatalf("the zone's reading: %v %v", in, err)
 	}
 	s := newStore(t)
-	s.Note(string(moved), in, nil)
+	noteKnown(t, s, string(moved), in)
 	c.stamps = newStampTable(arrivalC, s, 1, false, nil)
 	route := func(subtype string, seq uint64) {
 		t.Helper()
