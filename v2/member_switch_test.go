@@ -299,3 +299,50 @@ func TestAMemberWithNoRoleIsAnsweredTheTransferSetUp(t *testing.T) {
 		t.Error("the request for the transfer set-up from an OFF record is answered")
 	}
 }
+
+// A member with no role has loaded for the catch-up once its first load
+// gave it its label, as a provider has: the zones PeerOperational asks
+// about, and the own reader's re-reads, take it. The stub main_init puts
+// in place, with no label, has not (the external review's F1).
+func TestAZoneOfAMemberWithNoRoleIsLoadedForCatchUp(t *testing.T) {
+	const zone = "loaded.norole.s15.example."
+	catchUpZone(t, zone, []string{roleB}, nil, []string{roleA})
+	mpzd, _ := Zones.Get(zone)
+	set := func(d *MPdata) {
+		mpzd.Lock()
+		mpzd.MP.MPdata = d
+		mpzd.Unlock()
+	}
+	set(&MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}) // main_init's stub
+	if mpzd.loadedForCatchUp() {
+		t.Error("the stub has loaded for the catch-up")
+	}
+	set(&MPdata{OurLabel: shortLabel(roleA)}) // a member with no role: no provider
+	if !mpzd.loadedForCatchUp() {
+		t.Fatal("a member with no role has not loaded for the catch-up")
+	}
+	r := newTrackerRig(t, roleA)
+	if got := r.t.sharedZones(roleB); !slices.Contains(got, ZoneName(zone)) {
+		t.Errorf("the zones asked about at b's beat: %v, want the zone", got)
+	}
+}
+
+// A member with no role edits nothing, in an unsigned zone as in a signed
+// one; the server does (the external review's F2).
+func TestAMemberWithNoRoleMayNotEdit(t *testing.T) {
+	withStore(t, nil)
+	mpzd := instrTestZone(t, "noedits.s15.example.",
+		`3600 IN HSYNC3 ON alpha `+acAlpha+` .`, `3600 IN HSYNC3 ON delta `+s15Delta+` .`,
+		`3600 IN HSYNCPARAM `+numberedText(`serial="7" servers="alpha"`))
+	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: s15Delta}, signingSet{})
+	if mpzd.MP.MPdata == nil || mpzd.MP.MPdata.OurLabel != "delta" {
+		t.Fatalf("the member with no role's provider data: %+v", mpzd.MP.MPdata)
+	}
+	if !mpzd.MPOptions[OptMPDisallowEdits] || mpzd.MPOptions[tdns.OptAllowEdits] {
+		t.Errorf("a member with no role in an unsigned zone: disallow %v, allow %v", mpzd.MPOptions[OptMPDisallowEdits], mpzd.MPOptions[tdns.OptAllowEdits])
+	}
+	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, signingSet{})
+	if mpzd.MPOptions[OptMPDisallowEdits] || !mpzd.MPOptions[tdns.OptAllowEdits] {
+		t.Errorf("the server in an unsigned zone: disallow %v, allow %v", mpzd.MPOptions[OptMPDisallowEdits], mpzd.MPOptions[tdns.OptAllowEdits])
+	}
+}

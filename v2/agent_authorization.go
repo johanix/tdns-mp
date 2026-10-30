@@ -215,9 +215,10 @@ func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next
 }
 
 // keyHandOverOnly: a message that came in for the zone's SIG(0) key alone
-// (admittedForKeyOnly) is the request for the key, its answer, or the
-// delivery confirmation of either. Anything else that came in that way is
-// not acted on.
+// (admittedForKeyOnly) is the answer to this agent's request for the key, or
+// the delivery confirmation of the request or of an answer. Anything else
+// that came in that way, a request among them, is not acted on: only an
+// agent this agent asked is let in that way (plan S15).
 func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
 	// The sender is the one admission judged: the transport's, never the
 	// author the payload names.
@@ -232,14 +233,6 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 		// sent the key exchange with, to this sender (expectConfirm).
 		var p transport.DnsConfirmPayload
 		if err := json.Unmarshal(msg.Payload, &p); err == nil && tm.keyAsks.confirmExpected(sender, p.DistributionID) {
-			return true
-		}
-	case "rfi":
-		// Routed by the payload's MessageType, which defaults to a sync
-		// (routeSyncMessage): the payload must say rfi itself, and carry
-		// nothing an update would apply.
-		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.MessageType == string(AgentMsgRfi) &&
-			p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" && len(p.GetRecords()) == 0 && len(p.GetOperations()) == 0 {
 			return true
 		}
 	case "config":

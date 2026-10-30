@@ -339,8 +339,10 @@ func NewMsgQs() *MsgQs {
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		Confirmation:      make(chan *ConfirmationDetail, 100),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
-		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
-		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
+		// a message per zone in a burst, as a transition of many zones
+		// sends: one that finds these full is dropped after its ack
+		KeystateSignal: make(chan *KeystateSignalMsg, 1024),
+		StatusUpdate:   make(chan *StatusUpdateMsg, 1024),
 	}
 }
 
