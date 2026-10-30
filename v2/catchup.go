@@ -624,8 +624,7 @@ func (t *catchUpTracker) prune(zone ZoneName) {
 }
 
 // appliesLocked: an entry still applies. Whether the zone is held is asked
-// of tdns: a zone taken out at a reload leaves tdns.Zones, and the wrapper
-// Zones keeps of it, with its data, stays.
+// of tdns: a zone taken out at a reload leaves tdns.Zones.
 func (t *catchUpTracker) appliesLocked(zone ZoneName, peer AgentId) bool {
 	if _, held := tdns.Zones.Get(string(zone)); !held {
 		return false
