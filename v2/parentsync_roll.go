@@ -702,9 +702,9 @@ func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
 
 // dropOtherKEYs is a member's word on taking the leader's KEY: it keeps the
 // leader's KEY and no other (plan S17a, the third KEY item of the membership
-// plan's step 9). A KEY held under another name is dropped from its data;
-// at its combiner the drop needs S16's flagged purge (purgeKEYsAtCombiner).
-// On the engine's goroutine, which owns the repo.
+// plan's step 9). A KEY held under another name is dropped from its data
+// and at its combiner (purgeKEYsAtCombiner). On the engine's goroutine,
+// which owns the repo.
 func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader AgentId) {
 	if zdr == nil {
 		return
@@ -732,16 +732,29 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 	}
 	if len(dropped) > 0 {
 		slices.Sort(dropped)
-		purgeKEYsAtCombiner(zone, dropped)
+		purgeKEYsAtCombiner(conf.InternalMp.MPTransport, zone, dropped)
 	}
 }
 
-// purgeKEYsAtCombiner is the combiner's drop of the KEYs held under these
-// origins' names: S16's flagged purge, a removal in any origin's name that
-// the combiner takes from its own agent only. Until S16's flag is in, the
-// combiner keeps them, and an operator removes them there.
-var purgeKEYsAtCombiner = func(zone ZoneName, origins []AgentId) {
-	lgEngine.Warn("the combiner keeps the KEYs held under these names: it takes no purge from its agent yet", "zone", zone, "origins", origins)
+// keyPurge is the drop of origin's KEY at this agent's combiner: an empty
+// replace of KEY in origin's name with the withdrawal's flag, a removal the
+// combiner takes from its own agent only, whether or not origin votes
+// (combinerTakesRemoval, S16).
+func keyPurge(zone ZoneName, origin AgentId) *ZoneUpdate {
+	return (&Withdraw{Provider: string(origin), RRtype: "KEY"}).update(zone)
+}
+
+// purgeKEYsAtCombiner sends the combiner the drop of the KEYs held under
+// these origins' names; a test stands in for it.
+var purgeKEYsAtCombiner = func(tm *MPTransportBridge, zone ZoneName, origins []AgentId) {
+	if tm == nil {
+		return
+	}
+	for _, o := range origins {
+		if _, err := tm.EnqueueForCombiner(zone, keyPurge(zone, o), ""); err != nil {
+			lgEngine.Warn("the combiner could not be asked to drop a KEY held under another name", "zone", zone, "origin", o, "err", err)
+		}
+	}
 }
 
 // apiZoneParentSync is tdns's /zone/parentsync, but its roll-key for a
