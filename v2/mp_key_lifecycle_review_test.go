@@ -337,7 +337,7 @@ func TestASignerThatDoesNotSignKeepsTheZoneOwnedAndIdle(t *testing.T) {
 		t.Errorf("signer key zones before a tick marks %v idle, want the zone", got)
 	}
 	for range 2 {
-		e.tickOwned(map[string]keyPause{})
+		e.tickOwned()
 		if e.driver(mpzd.ZoneName) != nil {
 			t.Fatal("a driver for a zone this provider does not sign")
 		}

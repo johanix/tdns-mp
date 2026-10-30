@@ -180,14 +180,14 @@ func TestAProviderThatTheAgreedSerialTakesAwayStartsNoEmergencyRollover(t *testi
 func TestTheEngineHoldsTheDriverOfAHeldZone(t *testing.T) {
 	e, mpzd := heldEngine(t, "tick.hold.owned.example.")
 	l := e.driver(mpzd.ZoneName)
-	e.tickOwned(map[string]keyPause{})
+	e.tickOwned()
 	if !l.hold {
 		t.Error("a held zone's driver was ticked without the hold")
 	}
 	if _, err := e.conf.InternalMp.SignerHolds.set(mpzd.ZoneName, false); err != nil {
 		t.Fatal(err)
 	}
-	e.tickOwned(map[string]keyPause{})
+	e.tickOwned()
 	if l.hold {
 		t.Error("the hold stayed after the agent let it go")
 	}
