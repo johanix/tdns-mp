@@ -2539,8 +2539,9 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 		for agent, results := range prop.Results {
 			for kt, r := range results {
 				// a result carried goes with the stamp of the answer that
-				// gave it (S8 judges it by that)
-				if r == "applied" || r == "ignored" {
+				// gave it (S8 judges it by that); a member with no role that
+				// timed out is not waited for again (design 4)
+				if r == "applied" || r == "ignored" || r == "timed out" {
 					resend.setResultLocked(agent, kt, r, prop.Stamps[agent][kt])
 				}
 			}
@@ -2687,6 +2688,15 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 	prop, ok := tm.pendingDnskeyPropagations[distID]
+	if !ok {
+		// folded into a resend (foldIntoResend), which a signer sends sooner
+		// than the time-out: the time-out counts from the first, so the
+		// resend that took it over is looked at now
+		if s, folded := tm.supersededBy[distID]; folded {
+			distID = s.to
+			prop, ok = tm.pendingDnskeyPropagations[distID]
+		}
+	}
 	if !ok {
 		return
 	}
