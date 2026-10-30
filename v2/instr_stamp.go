@@ -764,10 +764,9 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 // fetchZone asks a refresh of the zone's own copy, as a NOTIFY does: the
 // fetch of a serial a member tells (design 3.1). The zone is named in any
 // case. Only a multi-provider zone tdns holds, with its type set, is
-// fetched: tdns's zones, not the wrappers Zones keeps, which outlive a zone
-// that left the configuration; and the refresh engine makes a zone of a
-// refresh for a name it does not hold. A full refresh queue drops it, and
-// the next telling asks again.
+// fetched, because the refresh engine makes a zone of a refresh for a name
+// it does not hold. A full refresh queue drops it, and the next telling asks
+// again.
 func (conf *Config) fetchZone(zone string) (string, bool) {
 	zd, ok := tdns.Zones.Get(zone)
 	if !ok {
