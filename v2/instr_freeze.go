@@ -6,8 +6,8 @@
  * nothing new starts for the zone: this provider's own changes are owed
  * (instr_kept.go), the leader sends nothing new to the parent, and the
  * signer starts no new rollover. Work under way finishes by the active
- * serial. The step is dormant until the thaw enforces the active serial
- * (S7): until then it follows the copy, and nothing is frozen.
+ * serial. A zone whose active serial this agent does not know yet is frozen
+ * too, until the restart rule makes it known (S9).
  */
 package tdnsmp
 
@@ -22,26 +22,22 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // freezeReasons are why the zone is frozen: an owner error holds it (design
 // 3.6); its transition is not done (3.3); or it agrees on a serial above
-// its active one (3.1, decision 94). A refused newest serial with none
-// agreed on is no reason: the zone is steady (3.6). A newer serial during
-// the reconciliation waits for "done", and is no reason of its own. None
-// while the active serial is not enforced (S7): it follows the copy. S9
-// adds that the active serial is not known.
+// its active one (3.1, decision 94); or this agent does not know its active
+// serial yet (3.4, S9). A refused newest serial with none agreed on is no
+// reason: the zone is steady (3.6). A newer serial during the
+// reconciliation waits for "done", and is no reason of its own.
 func (z *zoneSerials) freezeReasons() []string {
-	if !z.Enforced {
-		return nil
-	}
 	var why []string
 	if z.OwnerError != "" {
 		why = append(why, "owner error: "+z.OwnerError)
 	}
 	switch {
+	case z.Active == nil:
+		why = append(why, "the active serial is not known")
 	case z.From != nil:
 		why = append(why, fmt.Sprintf("reconciling from %d to %d", z.From.Serial, z.Active.Serial))
 	case len(z.Removals) > 0:
@@ -303,7 +299,7 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 					select {
 					case a := <-answer:
 						if a.Error {
-							lgEngine.Warn("a kept change was released and did not go out in full; `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
+							lgEngine.Warn("a kept change was released and was refused, or did not go out in full; if it was applied, `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
 						}
 					default:
 					}
@@ -361,8 +357,8 @@ func (conf *Config) oweIfFrozen(u *SynchedDataUpdate) (string, error) {
 
 // freezeLines are the zone's freeze as `agent parentsync status` shows it
 // (plan S6): why it is frozen, with whom the agreement waits for; and what
-// this agent keeps of its own. Both empty for a zone that is not frozen
-// and keeps nothing.
+// this agent keeps, of its own and of others' (S8). Both empty for a zone
+// that is not frozen and keeps nothing.
 func (conf *Config) freezeLines(zone string) (frozen, kept string) {
 	reasons := conf.zoneFrozen(zone)
 	if len(reasons) > 0 {
@@ -382,53 +378,30 @@ func (conf *Config) freezeLines(zone string) (frozen, kept string) {
 	if conf.InternalMp.CatchUp.freezeOwed(ZoneName(zone)) {
 		parts = append(parts, "the sync with the parent")
 	}
+	// other agents' distributions made under another serial (plan S8)
+	switch n := len(conf.InternalMp.Kept.entries(zone, listKept)); n {
+	case 0:
+	case 1:
+		parts = append(parts, "1 distribution of another agent's")
+	default:
+		parts = append(parts, fmt.Sprintf("%d distributions of other agents", n))
+	}
 	return frozen, strings.Join(parts, ", ")
 }
 
-// agreementWaitsFor names whom the agreement on the zone's serial agreed on
-// waits for, as this agent sees it: itself while its signer has not
-// confirmed the hold, and every other voting member under the active
-// serial whose latest stamp does not tell the same active serial, the same
-// serial agreed on and its signer's hold. S7 counts the same tellings for
-// the thaw, and only fresh ones.
+// agreementWaitsFor names whom and what the agreement on the zone's serial
+// agreed on waits for, as this agent sees it: the thaw's view (plan S7),
+// this agent first when its signer has not confirmed the hold, then every
+// other voting member under the active serial whose latest stamp does not
+// tell what the thaw counts, then the leader's work at the parent.
 func (conf *Config) agreementWaitsFor(zone string) []string {
-	s := conf.InternalMp.Instructions
-	own, ok := s.stampOf(zone)
-	if !ok || own.AgreeingDigest == "" {
+	v, ok := conf.thawView(zone, time.Now())
+	if !ok {
 		return nil
 	}
-	local := dns.Fqdn(conf.MpConfig().Identity)
-	var told map[string]InstrStamp
-	if tm := conf.InternalMp.MPTransport; tm != nil && tm.stamps != nil {
-		told = tm.stamps.told(canonicalName(zone))
-	}
-	var out []string
-	if !conf.holdConfirmed(zone) {
-		out = append(out, local+" (no hold yet)")
-	}
-	voters := s.activeVoters(zone)
-	slices.Sort(voters)
-	for _, id := range voters {
-		if core.EqualNames(id, local) {
-			continue
-		}
-		var st InstrStamp
-		var heard bool
-		for who, t := range told {
-			if core.EqualNames(who, id) {
-				st, heard = t, true
-			}
-		}
-		switch {
-		case !heard:
-			out = append(out, id+" (not heard)")
-		case !st.Known || st.Active != own.Active || st.ActiveDigest != own.ActiveDigest:
-			out = append(out, fmt.Sprintf("%s (tells %d)", id, st.Active))
-		case st.Agreeing != own.Agreeing || st.AgreeingDigest != own.AgreeingDigest:
-			out = append(out, fmt.Sprintf("%s (agrees on %d)", id, st.Agreeing))
-		case !st.Hold:
-			out = append(out, id+" (no hold yet)")
-		}
+	out := slices.Clone(v.waits)
+	if v.parent != "" {
+		out = append(out, "the parent ("+v.parent+")")
 	}
 	return out
 }

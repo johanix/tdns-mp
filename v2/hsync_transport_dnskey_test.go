@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -109,13 +110,60 @@ func testDnskeyRR(t *testing.T, zone string, flags uint16) *dns.DNSKEY {
 	return k
 }
 
+// distinctTags makes n keys with gen, each made again until none of its key
+// tags is an earlier key's: random 16-bit tags collide about once in 65,536
+// pairs, and two keys under one tag share a test's map entry or a key
+// store's row (#331). gen gives a key and its tags, two for a key a test
+// renumbers.
+func distinctTags[K any](n int, gen func(i int) (K, []uint16)) []K {
+	seen := map[uint16]bool{}
+	out := make([]K, 0, n)
+	for i := range n {
+		for {
+			k, tags := gen(i)
+			if !slices.ContainsFunc(tags, func(tag uint16) bool { return seen[tag] }) {
+				for _, tag := range tags {
+					seen[tag] = true
+				}
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// distinctDnskeys are test keys of zone, one per flags, under distinct tags.
+func distinctDnskeys(t *testing.T, zone string, flags ...uint16) []*dns.DNSKEY {
+	t.Helper()
+	return distinctTags(len(flags), func(i int) (*dns.DNSKEY, []uint16) {
+		k := testDnskeyRR(t, zone, flags[i])
+		return k, []uint16{k.KeyTag()}
+	})
+}
+
+// A key whose tag an earlier key has is made again, and so is one of whose
+// tags any is taken.
+func TestDistinctTagsMakesAKeyAgainWhileItsTagIsTaken(t *testing.T) {
+	made := [][]uint16{{1}, {1}, {2, 1}, {2, 3}, {4}}
+	calls := 0
+	got := distinctTags(3, func(i int) (int, []uint16) {
+		tags := made[calls]
+		calls++
+		return calls, tags
+	})
+	if !slices.Equal(got, []int{1, 4, 5}) || calls != 5 {
+		t.Errorf("the keys kept: %v after %d made, want [1 4 5] after 5", got, calls)
+	}
+}
+
 // The tracker keeps each key's result per agent: a distribution of two
 // keys where one is applied and the other rejected ends with one key
 // propagated and one rejected, not both rejected; an agent that answered
 // for one key only has not answered.
 func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
-	a := testDnskeyRR(t, "z.example.", 257)
-	b := testDnskeyRR(t, "z.example.", 256)
+	k := distinctDnskeys(t, "z.example.", 257, 256)
+	a, b := k[0], k[1]
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
 	// a partial that applied a and says nothing of b: a1 has not answered
@@ -176,7 +224,8 @@ func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
 // a no-op (nothing changed). A success covers every key of the
 // distribution: a key the peer did not list was already there.
 func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
-	ksk, zsk, standby, retired := testDnskeyRR(t, "z.example.", 257), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256)
+	k := distinctDnskeys(t, "z.example.", 257, 256, 256, 256)
+	ksk, zsk, standby, retired := k[0], k[1], k[2], k[3]
 	tags := []uint16{ksk.KeyTag(), zsk.KeyTag(), standby.KeyTag(), retired.KeyTag()}
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	tm.TrackDnskeyPropagation("z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})

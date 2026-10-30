@@ -154,6 +154,26 @@ func (lem *LeaderElectionManager) SetOnLeaderNamed(f func()) {
 	lem.onLeaderNamed = f
 }
 
+// SetGateExcused sets what a group's election leaves out of its voting
+// members: a leaving voting member excused from the thaw, while it is not
+// heard (design 3.2, plan S7).
+func (lem *LeaderElectionManager) SetGateExcused(f func(groupHash string) []string) {
+	lem.mu.Lock()
+	defer lem.mu.Unlock()
+	lem.gateExcused = f
+}
+
+// gateVoters are the group's voting members less those its gate excuses.
+func (lem *LeaderElectionManager) gateVoters(groupHash string, voters []string) []string {
+	lem.mu.RLock()
+	f := lem.gateExcused
+	lem.mu.RUnlock()
+	if f == nil {
+		return voters
+	}
+	return withoutExcused(voters, f(groupHash))
+}
+
 // SetOnZoneJoined sets the callback invoked when a zone joins a provider
 // group that the local agent already leads (zoneJoinedGroup). It is not the
 // election's callback: a zone that arrives has had a leader before, and what
@@ -311,7 +331,7 @@ func (lem *LeaderElectionManager) groupVoters(groupHash string, members []string
 	if pg == nil {
 		return nil, false
 	}
-	return pg.VotingMembers, true
+	return lem.gateVoters(groupHash, pg.VotingMembers), true
 }
 
 // isAmong: whether id is one of a group's voting members. Names are compared
@@ -334,7 +354,7 @@ func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID 
 	if lem.providerGroupMgr != nil {
 		pg := lem.providerGroupMgr.GetGroup(groupHash)
 		if pg != nil {
-			members = pg.VotingMembers
+			members = lem.gateVoters(groupHash, pg.VotingMembers)
 			zones = pg.Zones
 		}
 	}
@@ -629,6 +649,9 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	if le == nil {
 		return
 	}
+	// The group's voters before le.mu: the gate takes lem.mu, which
+	// allLeases holds while it takes le.mu.
+	voters, known := lem.groupVoters(groupHash, members)
 
 	le.mu.Lock()
 	// Once per term: the last confirm, the own confirm that completes the set
@@ -653,7 +676,7 @@ func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term u
 	// the election counts as having found no consensus (the membership
 	// design, 4.4).
 	if consensus && agreedWinner != "" {
-		if voters, known := lem.groupVoters(groupHash, members); known && !isAmong(voters, agreedWinner) {
+		if known && !isAmong(voters, agreedWinner) {
 			lgElect.Warn("election: the winner is not a voting member, not taken",
 				"group", shortHash(groupHash), "winner", agreedWinner, "term", term)
 			consensus = false
@@ -1153,26 +1176,29 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 	}()
 }
 
-// electAtFirstLoad is the zone's election at its first load, for a zone
-// whose delegation sync is the agents'. It runs after the parentsync
-// detection. With no voting peer counted it elects (startElection leaves a
-// zone that a group covers to the group); a zone in a group is the group's;
-// otherwise the election waits for the peers to become OPERATIONAL.
+// electAtFirstLoad is the zone's election at its first load, for a
+// multi-provider zone whatever its parentsync (design 3: transitions need
+// a leader), and for another zone whose delegation sync is the agents'. It
+// runs after the parentsync detection. With no voting peer counted it
+// elects (startElection leaves a zone that a group covers to the group); a
+// zone in a group is the group's; otherwise the election waits for the
+// peers to become OPERATIONAL. The leader's work at the parent stays gated
+// on parentsync=agent.
 func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
-	if !zd.Options[tdns.OptParentSync] {
+	if !zd.Options[tdns.OptParentSync] && !zd.Options[tdns.OptMultiProvider] {
 		return
 	}
 	zone := ZoneName(zd.ZoneName)
 	// A zone with an HSYNC3 RRset is checked by zoneChanged, from its first
-	// load's post-refresh, after the groups are recomputed (step 8). One
-	// with parentsync and no HSYNC3 RRset is no multi-provider zone, and
-	// elects here as before. The post-refresh asks only when the option is
-	// on, and the first load's parentsync detection, which runs after it,
-	// can turn it on (followParentSyncParam could not read the zone's
-	// HSYNCPARAM), so the check is made here again. It changes nothing for
-	// a zone already led, or that a group covers.
+	// load's post-refresh, after the groups are recomputed (step 8), and
+	// once more here. It changes nothing for a zone already led, or that a
+	// group covers. One with parentsync and no HSYNC3 RRset elects here as
+	// before; a multi-provider zone with neither has nothing to elect for.
 	if hasHSYNC3(instructionsFor(zone)) {
 		lem.zoneChanged(zone)
+		return
+	}
+	if !zd.Options[tdns.OptParentSync] {
 		return
 	}
 	configured := lem.configuredPeers(zone)
@@ -1190,9 +1216,9 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 }
 
 // zoneChanged is the one check of a zone's election (step 8, design 4.5),
-// at the zone's first load and at every change of its HSYNC3 or HSYNCPARAM
-// RRset, after the groups are recomputed. For a zone with an HSYNC3 RRset
-// and parentsync on:
+// at the zone's first load and at every change of its active instructions,
+// after the groups are recomputed. For a zone with an HSYNC3 RRset, whatever
+// its parentsync (design 3, plan S7):
 //
 //  1. this agent does not vote in the zone: nothing is started, and the
 //     zone's own election, if it holds one, is dropped;
@@ -1486,6 +1512,30 @@ func (lem *LeaderElectionManager) ZoneLeader(zone ZoneName) (AgentId, bool) {
 		}
 	}
 	return lem.GetLeader(zone)
+}
+
+// zoneLease is the zone's leader and its lease as this agent's election
+// holds them, the way ZoneLeader finds the election, whether the lease runs
+// or not; "" when the election names nobody (an invalidated group) or there
+// is none.
+func (lem *LeaderElectionManager) zoneLease(zone ZoneName) (AgentId, time.Time) {
+	var le *LeaderElection
+	lem.mu.RLock()
+	if lem.providerGroupMgr != nil {
+		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
+			le = lem.groupElections[pg.GroupHash]
+		}
+	}
+	if le == nil {
+		le = lem.elections[zone]
+	}
+	lem.mu.RUnlock()
+	if le == nil {
+		return "", time.Time{}
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	return le.Leader, le.LeaderExpiry
 }
 
 // GetAllLeaders returns the current leader status for all zones with an active leader.
