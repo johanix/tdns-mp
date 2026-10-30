@@ -56,10 +56,21 @@ type discoveryZone struct {
 	// denialTTL is how long a resolver may cache the answer that a record
 	// is not there, in seconds (cacheDenials).
 	denialTTL uint32
+	// next is what the zone publishes after a given answer (setAfter).
+	next *nextRRsets
+}
+
+// nextRRsets are RRsets the zone publishes once it has answered the query
+// for key the nth time; then, when given, is called as it does.
+type nextRRsets struct {
+	key  string
+	n    int
+	rrs  []dns.RR
+	then func()
 }
 
 func rrsetKey(name string, rrtype uint16) string {
-	return dns.CanonicalName(name) + "/" + dns.TypeToString[rrtype]
+	return canonicalName(name) + "/" + dns.TypeToString[rrtype]
 }
 
 // newDiscoveryZone starts the server; it stops with the test.
@@ -96,8 +107,16 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 		m.Authoritative = true
 		q := r.Question[0]
 		z.mu.Lock()
-		z.queries[rrsetKey(q.Name, q.Qtype)]++
-		rrs := z.rrsets[rrsetKey(q.Name, q.Qtype)]
+		key := rrsetKey(q.Name, q.Qtype)
+		z.queries[key]++
+		rrs := z.rrsets[key]
+		if nx := z.next; nx != nil && nx.key == key && z.queries[key] >= nx.n {
+			z.next = nil
+			z.setLocked(nx.rrs...) // this answer is still the RRset before
+			if nx.then != nil {
+				nx.then()
+			}
+		}
 		denialTTL := z.denialTTL
 		z.mu.Unlock()
 		// The SOA's TTL and minimum are what a denial is cached for. They
@@ -112,9 +131,9 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 		switch {
 		case len(rrs) > 0:
 			m.Answer = append(m.Answer, rrs...)
-		case q.Qtype == dns.TypeSOA && dns.CanonicalName(q.Name) == harnessIdentitySuffix:
+		case q.Qtype == dns.TypeSOA && canonicalName(q.Name) == harnessIdentitySuffix:
 			m.Answer = append(m.Answer, soa)
-		case q.Qtype == dns.TypeNS && dns.CanonicalName(q.Name) == harnessIdentitySuffix:
+		case q.Qtype == dns.TypeNS && canonicalName(q.Name) == harnessIdentitySuffix:
 			m.Answer = append(m.Answer, &dns.NS{
 				Hdr: dns.RR_Header{Name: harnessIdentitySuffix, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
 				Ns:  "ns." + harnessIdentitySuffix,
@@ -151,6 +170,26 @@ func newDiscoveryZone(t *testing.T) *discoveryZone {
 func (z *discoveryZone) set(rrs ...dns.RR) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.setLocked(rrs...)
+}
+
+// setAfter publishes rrs once the server has answered the nth query for name
+// and rrtype: that answer is the RRset before, and every later one sees rrs.
+// then, when not nil, is called right then, with the zone locked: it must
+// not block, and must not call the zone. A test that changes a record
+// between two lookups has the zone change it, not its own goroutine, which a
+// loaded machine may hold until after the next lookup (#304).
+//
+// The zone holds one such change at a time: a second setAfter replaces the
+// first, and set leaves it in place.
+func (z *discoveryZone) setAfter(name string, rrtype uint16, n int, rrs []dns.RR, then func()) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.next = &nextRRsets{key: rrsetKey(name, rrtype), n: n, rrs: rrs, then: then}
+}
+
+// setLocked is set, with z.mu held.
+func (z *discoveryZone) setLocked(rrs ...dns.RR) {
 	seen := map[string]bool{}
 	for _, rr := range rrs {
 		key := rrsetKey(rr.Header().Name, rr.Header().Rrtype)
@@ -315,6 +354,9 @@ func startHarnessEngine(t *testing.T, env *integEnv, pe *peerEnv, cfg hsync.Conf
 		PeerHooks: hsync.PeerHooks{
 			OnPeerStored:  func(peer *hsync.Peer) { ar.materializeAgentView(peer) },
 			OnPeerRemoved: func(peer *hsync.Peer) { ar.removePeerView(peer) },
+			// As the agent has it: a discovery that outlived the peer's
+			// removal leaves nothing behind (#304).
+			OnRemovedPeerDiscovered: func(peer *hsync.Peer) { ar.removePeerView(peer) },
 		},
 	}
 	for _, adjust := range with {

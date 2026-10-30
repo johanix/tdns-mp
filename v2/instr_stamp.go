@@ -53,8 +53,13 @@ type stampTable struct {
 	crypto      bool     // payload encryption is on at this agent
 	nameservers []string // this provider's own (multi-provider.local.nameservers)
 	// rollover is rolloverUnderWay at this provider; nil: none known (the
-	// auditor, which runs no key machine).
+	// auditor, which runs no key machine). waitsOn is whom it waits on.
 	rollover func(zone string) bool
+	waitsOn  func(zone string) []string
+	// hold: this agent's signer has confirmed the zone's hold since this
+	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
+	// the auditor, which has no signer.
+	hold func(zone string) bool
 	// fetch asks a refresh of the zone's own copy, the zone named in any
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
@@ -116,14 +121,9 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 	}
 	instr := make(map[string]InstrStamp, len(zones))
 	for _, zone := range zones {
-		st, ok := t.store.stampOf(zone)
-		if !ok {
-			continue
+		if st, ok := t.ownStamp(zone); ok {
+			instr[zone] = st
 		}
-		if t.rollover != nil {
-			st.Rollover = t.rollover(zone)
-		}
-		instr[zone] = st
 	}
 	row := &MemberState{
 		Identity:    t.localID,
@@ -135,6 +135,26 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		Crypto:      t.crypto,
 	}
 	return &GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{t.localID: row}}
+}
+
+// ownStamp is what this agent tells of zone: the serials its store keeps,
+// with its provider's rollover flag, whom a rollover under way waits on, and
+// its signer's hold.
+func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
+	st, ok := t.store.stampOf(zone)
+	if !ok {
+		return st, false
+	}
+	if t.rollover != nil {
+		st.Rollover = t.rollover(zone)
+	}
+	if st.Rollover && t.waitsOn != nil {
+		st.WaitsOn = t.waitsOn(zone)
+	}
+	if t.hold != nil {
+		st.Hold = t.hold(zone)
+	}
+	return st, true
 }
 
 // note keeps the stamp entry of a beat that sender sent, first hand: its row
@@ -425,6 +445,7 @@ type MemberInstructions struct {
 	Refused   string        `json:"refused,omitempty"`
 	Error     string        `json:"error,omitempty"`
 	Rollover  bool          `json:"rollover,omitempty"`
+	Hold      bool          `json:"hold,omitempty"` // its signer has confirmed the hold (plan S6)
 	Crypto    bool          `json:"crypto"`
 	Mechanism string        `json:"mechanism,omitempty"`
 	Enveloped bool          `json:"enveloped,omitempty"`
@@ -445,12 +466,9 @@ func (t *stampTable) members(zone string) []MemberInstructions {
 	if t == nil {
 		return nil
 	}
-	own, ok := t.store.stampOf(zone)
+	own, ok := t.ownStamp(zone)
 	if !ok {
 		return nil
-	}
-	if t.rollover != nil {
-		own.Rollover = t.rollover(zone)
 	}
 	rows := []MemberInstructions{memberRow(t.localID, own)}
 	rows[0].Self, rows[0].Crypto = true, t.crypto
@@ -495,7 +513,7 @@ func (t *stampTable) members(zone string) []MemberInstructions {
 
 // memberRow is the status row of what identity tells in st.
 func memberRow(identity string, st InstrStamp) MemberInstructions {
-	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover}
+	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover, Hold: st.Hold}
 	if st.Known && st.ActiveDigest != "" {
 		r.Active = &SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
 	}
@@ -732,7 +750,8 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	}
 	t := newStampTable(tm.LocalID, conf.InternalMp.Instructions, epoch, crypto, mp.Local.Nameservers)
 	if agent {
-		t.rollover = tm.rolloverAt
+		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
+		t.hold = conf.holdConfirmed
 		t.fetch = conf.fetchZone
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")
@@ -771,17 +790,42 @@ func (conf *Config) fetchZone(zone string) (string, bool) {
 	}
 }
 
-// rolloverAt is rolloverUnderWay at this provider as the agent knows it
-// until S11 has the signer report its own: the signer's last inventory, and
-// a DNSKEY distribution of this agent's that waits for the other agents.
+// rolloverAt is rolloverUnderWay at this provider as the agent knows it:
+// what its signer's last inventory says, the signer judging on its own
+// state (plan S11), or a DNSKEY distribution of this agent's that waits for
+// the other agents.
 func (tm *MPTransportBridge) rolloverAt(zone string) bool {
-	var keys []tdns.KeyInventoryItem
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
-		if inv := mpzd.GetLastKeyInventory(); inv != nil {
-			keys = inv.Inventory
+		if inv := mpzd.GetLastKeyInventory(); inv != nil && inv.Rollover {
+			return true
 		}
 	}
-	return rolloverUnderWay(keys, rolloverFlags{PropagationPending: tm.dnskeyPropagationPending(zone)})
+	return tm.dnskeyPropagationPending(zone)
+}
+
+// waitsOnAt are the other signers whose "applied" any key of this
+// provider's waiting in mpdist or mpremove misses, by its signer's last
+// inventory (plan S11), sorted; S7 counts a rollover that waits only on
+// excused members as paused.
+func waitsOnAt(zone string) []string {
+	mpzd, ok := Zones.Get(zone)
+	if !ok || mpzd == nil {
+		return nil
+	}
+	inv := mpzd.GetLastKeyInventory()
+	if inv == nil {
+		return nil
+	}
+	var out []string
+	for _, ps := range inv.WaitsOn {
+		for _, p := range ps {
+			if !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // dnskeyPropagationPending: a DNSKEY distribution of the zone waits for the

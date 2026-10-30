@@ -27,6 +27,9 @@ func hsyncApex(t *testing.T, zone string, records ...string) *tdns.OwnerData {
 	text := zone + " 3600 IN SOA ns1." + zone + " hostmaster." + zone + " 1 7200 1800 604800 7200\n" +
 		zone + " 3600 IN NS ns1." + zone + "\n"
 	for _, rr := range records {
+		if p, ok := strings.CutPrefix(rr, "HSYNCPARAM "); ok {
+			rr = "HSYNCPARAM " + numberedText(p)
+		}
 		text += zone + " 300 IN " + rr + "\n"
 	}
 	zd := &tdns.ZoneData{ZoneName: zone, ZoneStore: tdns.MapZone, ZoneType: tdns.Primary, Logger: log.New(io.Discard, "", 0)}
@@ -99,9 +102,11 @@ func TestTheSigningSetKeepsALeaverUntilItsRecordGoes(t *testing.T) {
 		}
 	}
 
-	// A zone with no HSYNCPARAM names no signer.
-	if got := nextSigningSet(hsyncApex(t, z, alpha, beta), both); len(got) != 0 {
-		t.Errorf("a copy with no HSYNCPARAM: %v, want no signer", got)
+	// A copy with no HSYNCPARAM has no reading (#308): the zone keeps its
+	// last, whose signers= is alpha alone.
+	t.Cleanup(func() { lastGood.Delete(z); noReading.Delete(z) })
+	if got := nextSigningSet(hsyncApex(t, z, alpha, beta), both); !sameSigningSet(got, "alpha") {
+		t.Errorf("a copy with no HSYNCPARAM: %v, want the last reading's alpha", got)
 	}
 }
 
@@ -168,7 +173,7 @@ func leaveTestZone(t *testing.T, name string, kdb *tdns.KeyDB, mp *MultiProvider
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	var h3s []dns.RR
 	for _, label := range []string{"us", "p2", "p3"} {
@@ -418,7 +423,7 @@ func TestEveryKeyMachineOfTheZonePausesWhileAProviderLeaves(t *testing.T) {
 			paused := map[string]keyPause{}
 			e.tickOwned(paused)
 			if !owner.Owns(mpzd.ZoneData) {
-				t.Fatal("the zone was released to tdns's key machine")
+				t.Fatal("the zone was given back to tdns's key machine")
 			}
 			st, err := e.Status(mpzd.ZoneName)
 			if err != nil {

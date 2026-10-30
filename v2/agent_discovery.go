@@ -146,7 +146,7 @@ func (tm *MPTransportBridge) lookupBook(peerID string) *refusedHellos {
 	if tm.refusedHellos == nil {
 		tm.refusedHellos = make(map[string]*refusedHellos)
 	}
-	peerID = dns.CanonicalName(peerID)
+	peerID = canonicalName(peerID)
 	r := tm.refusedHellos[peerID]
 	if r == nil {
 		r = &refusedHellos{}
@@ -240,7 +240,7 @@ func (tm *MPTransportBridge) noteRefused(peerID string, what string) bool {
 // the books: the interval holds across it.
 func (tm *MPTransportBridge) noteHelloAccepted(peerID string) {
 	tm.refusedHellosMu.Lock()
-	if r := tm.refusedHellos[dns.CanonicalName(peerID)]; r != nil {
+	if r := tm.refusedHellos[canonicalName(peerID)]; r != nil {
 		r.inARow = 0
 	}
 	tm.refusedHellosMu.Unlock()

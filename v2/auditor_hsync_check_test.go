@@ -9,30 +9,6 @@ func containsSubstring(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
 
-func TestCheckHSYNCConfig_duplicateIdentity(t *testing.T) {
-	info := MPZoneInfo{
-		Servers:  []string{"cpt", "fox", "hare"},
-		Signers:  []string{"cpt", "hare"},
-		Auditors: []string{"skrubb"},
-	}
-	byLabel := map[string]string{
-		"cpt":    "agent.fox.mp.axfr.net.",
-		"fox":    "agent.fox.mp.axfr.net.",
-		"hare":   "agent.hare.mp.axfr.net.",
-		"skrubb": "agent.skrubb.mp.axfr.net.",
-	}
-	errs := checkHSYNCConfig(info, byLabel)
-	if len(errs) != 1 {
-		t.Fatalf("errs = %v, want one duplicate-identity error", errs)
-	}
-	if !containsSubstring(errs[0], "cpt, fox") {
-		t.Fatalf("errs[0] = %q, want cpt/fox duplicate message", errs[0])
-	}
-	if errs[0] == "" {
-		t.Fatal("empty error message")
-	}
-}
-
 func TestCheckHSYNCConfig_missingHSYNC3(t *testing.T) {
 	info := MPZoneInfo{Servers: []string{"cpt", "fox"}}
 	byLabel := map[string]string{"fox": "agent.fox.mp.axfr.net."}

@@ -147,6 +147,12 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		}
 		return errLeadMoved
 	}
+	// The KEY is not published while the zone is frozen (plan S6): the
+	// take-up when the transition is done publishes it (takeUp)
+	if held, why := conf.syncHeld(string(zone), syncOther); held {
+		lgAgent.Info("the zone's KEY is published when the transition is done", "zone", zone, "phase", why)
+		return errHeldDuringTransition
+	}
 	zk, err := readZoneKey(kdb, zone)
 	if err != nil || zk.held == nil || zk.held.key == nil {
 		return fmt.Errorf("onLeaderElected: the zone's SIG(0) key is not held after the setup for zone %s (%v)", zone, err)
@@ -200,6 +206,10 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	}
 	return nil
 }
+
+// errHeldDuringTransition: the zone is frozen (plan S6); the KEY is
+// published, and polled, when the transition is done.
+var errHeldDuringTransition = errors.New("held until the zone's transition is done")
 
 // errOtherKeysActive: the zone's key is not its only active key, and could
 // not be made so; nothing is published or polled.
