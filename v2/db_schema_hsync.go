@@ -335,6 +335,21 @@ var HsyncTables = map[string]string{
 		since     TEXT DEFAULT '',
 		UNIQUE (zonename, label, identity)
 	)`,
+	// MPSig0Rolls are the rolls of a zone's SIG(0) key this agent runs as
+	// the zone's leader, one row per zone: the phase, the old key and the
+	// new one, and when a failed phase is tried again (plan S17a). A roll
+	// that is done is deleted.
+	"MPSig0Rolls": `CREATE TABLE IF NOT EXISTS 'MPSig0Rolls' (
+		zonename  TEXT NOT NULL,
+		phase     TEXT NOT NULL,
+		oldkeyid  INTEGER NOT NULL,
+		newkeyid  INTEGER NOT NULL,
+		started   INTEGER DEFAULT 0,
+		nexttry   INTEGER DEFAULT 0,
+		failures  INTEGER DEFAULT 0,
+		lasterr   TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
 	// MPStampEpoch is the epoch of this agent's stamps (plan S5a), one row,
 	// raised at every start: its peers count its tellings only from its
 	// last start (design 3.4).

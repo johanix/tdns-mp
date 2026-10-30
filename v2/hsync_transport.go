@@ -47,6 +47,9 @@ type MPTransportBridge struct {
 	// keyAsks: the zone SIG(0) key requests out, whose answers are let in
 	// (keyHandOverAdmits)
 	keyAsks keyAskTable
+	// rollKEYs: the new KEY of each roll of a zone's SIG(0) key this agent
+	// runs, and its recipients' final words (plan S17a)
+	rollKEYs rollKEYBook
 
 	// catchUp is the agent's catch-up tracker (catchup.go), as
 	// conf.InternalMp.CatchUp; nil on every other role.
@@ -465,6 +468,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// yet (rule 6, plan S8); judged before the confirmation is noted
 		notYet := tm.notYetFrom(distributionID, senderID, status, c.Message, instr)
 		tm.noteConfirmation(c, instr)
+		// a recipient's word on a roll's new KEY (plan S17a)
+		tm.rollKEYs.heard(distributionID, senderID, status.String(), c.Message, notYet)
 
 		// the queue's entry is settled whatever the answer: a "not yet" is
 		// sent again when the two are in step, not as the old send

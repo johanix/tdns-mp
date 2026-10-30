@@ -10,6 +10,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // leaderKeySetup runs when the local agent wins a zone's leader election,
@@ -58,6 +59,12 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	zk, err := readZoneKey(kdb, zone)
 	if err != nil {
 		return fmt.Errorf("onLeaderElected: reading the SIG(0) keys of %s: %v", zone, err)
+	}
+	// While this agent rolls the zone's key, the roll publishes the new
+	// key and retires the old one (plan S17a): no set-up
+	if zk.rolling {
+		lgAgent.Info("the zone's SIG(0) key is being rolled; the roll publishes the new key", "zone", zone, "keyid", zk.held.keyid)
+		return nil
 	}
 	if zk.held == nil {
 		if zk.several() {
@@ -170,7 +177,24 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
+	if _, _, err := sendZoneKEY(tm, zone, keyRR); err != nil {
+		return err
+	}
+	conf.InternalMp.keyPolls.published(zone)
 
+	// The KeyState inquiry and bootstrap with the parent (async), for the
+	// zone's key: the poll takes the set-up's count (keyPolls).
+	if zd.Options[tdns.OptParentSync] {
+		conf.launchKeyPoll(ctx, tk, zone, string(zone), held.keyid, keyRR.Algorithm)
+	}
+	return nil
+}
+
+// sendZoneKEY sends the leader's KEY, as its replace with the publish
+// instruction, to its combiner and to the zone's other agents, under one
+// distribution, and returns it with the agents it went to. The error is the
+// combiner's: an agent the KEY could not be queued for is logged.
+func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY) (distID string, agents []AgentId, err error) {
 	zu := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{
@@ -183,35 +207,25 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 			Locations: publishLocations(zone),
 		},
 	}
-	distID, err := tm.EnqueueForCombiner(zone, zu, "")
+	distID, err = tm.EnqueueForCombiner(zone, zu, "")
 	if err != nil {
 		lgAgent.Error("failed to publish KEY to combiner", "zone", zone, "err", err)
-		return err
+		return "", nil, err
 	}
 	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
-	conf.InternalMp.keyPolls.published(zone)
 
 	// The KEY is the group's: every provider's combiner publishes it where
 	// the instruction says, at-ns under its own nameservers too (#206)
 	agentUpdate := &ZoneUpdate{
-		Zone: zone,
-		Operations: []core.RROperation{{
-			Operation: "replace",
-			RRtype:    "KEY",
-			Records:   []string{keyRR.String()},
-		}},
-		Publish: zu.Publish,
+		Zone:       zone,
+		Operations: zu.Operations,
+		Publish:    zu.Publish,
 	}
+	agents, _ = tm.getAllAgentsForZone(zone)
 	if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
 	}
-
-	// The KeyState inquiry and bootstrap with the parent (async), for the
-	// zone's key: the poll takes the set-up's count (keyPolls).
-	if zd.Options[tdns.OptParentSync] {
-		conf.launchKeyPoll(ctx, tk, zone, string(zone), held.keyid, keyRR.Algorithm)
-	}
-	return nil
+	return distID, agents, nil
 }
 
 // errHeldDuringTransition: the zone is frozen (plan S6); the KEY is
