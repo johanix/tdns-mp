@@ -455,9 +455,15 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 			z.ownerError(zone, readErr.Error())
 			return nil
 		case in == nil:
-			if z.Active != nil && len(z.Active.Reading.Records) > 1 {
+			// the serial the zone acts by: the active one, or with none
+			// known the newest held (reading, S9)
+			by := z.Active
+			if by == nil {
+				by = z.highest()
+			}
+			if by != nil && len(by.Reading.Records) > 1 {
 				z.Copy, z.CopyError = SerialDigest{}, "no HSYNC3 and no HSYNCPARAM"
-				z.ownerError(zone, fmt.Sprintf("HSYNC3 and HSYNCPARAM dropped while serial %d lists %d providers", z.Active.Serial, len(z.Active.Reading.Records)))
+				z.ownerError(zone, fmt.Sprintf("HSYNC3 and HSYNCPARAM dropped while serial %d lists %d providers", by.Serial, len(by.Reading.Records)))
 				return nil
 			}
 			return errEndOfService
