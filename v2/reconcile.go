@@ -592,7 +592,7 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 	if !in.hasStep && len(unheard) > 0 {
 		v.adopt = nil
 		for _, id := range unheard {
-			v.waits = append(v.waits, id+" (not heard)")
+			v.waits = append(v.waits, id+" ("+conf.unheard(id)+")")
 		}
 		return v
 	}

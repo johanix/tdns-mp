@@ -420,7 +420,6 @@ type GossipMemberRow struct {
 	BeatInterval     uint32            `json:"beat_interval,omitempty"`
 	SecondsSinceBeat int64             `json:"seconds_since_beat,omitempty"`
 	PeerStates       map[string]string `json:"peer_states"`
-	Zones            []string          `json:"zones,omitempty"`
 }
 
 // GossipElectionDTO is the per-group election state.
@@ -543,9 +542,6 @@ func gossipMemberRow(reporter string, ms *MemberState, now time.Time) GossipMemb
 		for k, v := range ms.PeerStates {
 			row.PeerStates[k] = v
 		}
-	}
-	if len(ms.Zones) > 0 {
-		row.Zones = append([]string(nil), ms.Zones...)
 	}
 	return row
 }

@@ -15,8 +15,10 @@ package tdnsmp
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"slices"
 	"sort"
@@ -42,6 +44,18 @@ const stampGroupHash = hsync.StampGroupHash
 // fetchInterval paces the fetch of a serial a member tells (design 3.1): an
 // upstream that keeps serving an old copy causes no fetch at every beat.
 const fetchInterval = time.Minute
+
+// stampEntryBudget bounds the zones a stamp entry tells, in bytes of their
+// JSON (plan S22, amended 2026-10-30): with the rest of a beat and the
+// transport's envelope, a beat stays well under what one carries inline
+// (tdns #987), however many zones something is going on in. What does not
+// fit is told in the beats that follow, in turn (fillEntry): with K zones
+// a beat, a change of n zones is told within ceil(2n/K) beats, ceil(n/K)
+// while none is due, and a zone something is going on in at least every
+// refresh plus ceil(2n/K) beats. A zone left out is heard no more until it
+// is told again, so the leaving and the no-role time-outs, which read how
+// fresh a telling is, must be well above that.
+const stampEntryBudget = 16 << 10
 
 // stampTable is what this agent tells in its beats and what its members
 // have told it. Nil on the roles that tell nothing (the combiner, the
@@ -71,14 +85,60 @@ type stampTable struct {
 	// onTold is asked of a zone after a member's first-hand stamp of it is
 	// kept: the thaw's turn (plan S7). Nil: none.
 	onTold func(zone string)
-	seq    atomic.Uint64
+	// work is the zones, folded, this agent has work owed, kept or under
+	// way for with peer (plan S22): its owed or its kept list, a catch-up
+	// with peer, a message to peer not yet confirmed. Nil: none (the
+	// auditor).
+	work func(peer string) map[string]bool
+	seq  atomic.Uint64
 
 	mu      sync.Mutex
 	kept    map[string]*memberStamp // by identity, folded (canonicalName)
 	fetched map[string]fetchMark    // by zone, folded
 	said    map[string]bool         // the lines logged once
 	dists   map[string]*distStamp   // by distribution and recipient (msg_stamp.go)
+	// once is, by peer folded, the zones, folded, still to be told once
+	// since its new epoch (plan S22); a nil set: every zone the two share,
+	// not yet counted.
+	once map[string]map[string]bool
+	// cursor is, by peer folded, the last zone, folded, of each rank told
+	// in an acknowledged beat to it (acknowledged): the next beat goes on
+	// after it. pending is the latest beat made to it, until it is
+	// acknowledged; gen counts the peer's new epochs (tellOnceLocked), and a
+	// beat made before one counts for nothing when it is acknowledged.
+	cursor  map[string]*[4]string
+	pending map[string]*pendingBeat
+	gen     map[string]uint64
+	// acked is, by peer folded, each zone's stamp (folded) as a beat to it
+	// that was acknowledged told it: by a hash, a stamp that differs has
+	// changed since, and goes first; by when, one that something is going
+	// on in and that was told longer ago than refresh is due again.
+	acked map[string]map[string]ackMark
+	// refresh is how long a zone that something is going on in may go
+	// untold to a peer before it is due again (entryFor): a quarter of the
+	// shorter of the leaving and the no-role time-outs, which read how fresh
+	// a telling is (wireStamps). Zero: refreshDefault.
+	refresh time.Duration
 }
+
+// ackMark is a zone's stamp as an acknowledged beat told it: its hash, and
+// when. A beat made and not yet acknowledged leaves the hash unknown (0), so
+// that the zone is told again, as changed, until a beat that told it is.
+type ackMark struct {
+	hash uint64
+	at   time.Time
+}
+
+// pendingBeat is the latest beat made to a peer: its sequence, where it
+// leaves the turn of each rank, and the peer's new epochs then.
+type pendingBeat struct {
+	seq    uint64
+	cursor [4]string
+	gen    uint64
+}
+
+// refreshDefault is refresh where nothing sets it.
+const refreshDefault = time.Minute
 
 // memberStamp is a member's latest stamp, as it was heard. Instr is keyed
 // by the zone's name, folded, and ZoneSeq is the sequence each zone's stamp
@@ -95,6 +155,7 @@ type memberStamp struct {
 	Instr       map[string]InstrStamp
 	ZoneSeq     map[string]uint64
 	ZoneHeard   map[string]time.Time
+	Partial     bool // the latest beat left out zones something is going on in
 }
 
 // encrypted: the member tells payload encryption on, and its latest beat
@@ -123,11 +184,33 @@ func newStampTable(localID string, store *InstructionStore, epoch uint64, crypto
 		kept:        map[string]*memberStamp{},
 		fetched:     map[string]fetchMark{},
 		said:        map[string]bool{},
+		once:        map[string]map[string]bool{},
+		cursor:      map[string]*[4]string{},
+		pending:     map[string]*pendingBeat{},
+		gen:         map[string]uint64{},
+		acked:       map[string]map[string]ackMark{},
 	}
 }
 
 // entryFor is the stamp entry of a beat to peer: one row, this agent's own,
-// with a stamp of every zone the two share (sharedWith). Nil with none.
+// with a stamp of each zone the two share (sharedWith) that something is
+// going on in (design rule 4, plan S22): its stamp here is not at rest, or
+// this agent has work for it with peer (work), or peer's latest first-hand
+// stamp of it is not at rest or tells other serials; and, since peer's new
+// epoch, every zone once (onceFor). At rest the row tells no zone, and
+// goes all the same: a receiver reads the sender's epoch from it, and drops
+// what it holds of a zone a newer beat no longer tells, but a stamp at rest
+// (keep). Nil when the two share no zone.
+//
+// The zones told fit stampEntryBudget (fillEntry, plan S22 amended
+// 2026-10-30), in four ranks. First the zones whose stamp changed since an
+// acknowledged beat to peer told it (acked): one told for the first time,
+// one that starts or takes a step, whose parts come to hold it, that is
+// done or comes to rest. Then those something is going on in that are due:
+// told longer ago than refresh. Then the other zones something is going on
+// in. Last those of peer's new epoch alone. A beat that leaves out a zone
+// of the first three ranks says so (Partial), and its receiver keeps what
+// it holds of the zones it does not tell, as it was.
 func (t *stampTable) entryFor(peer string) *GossipMessage {
 	if t == nil {
 		return nil
@@ -136,22 +219,321 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 	if len(zones) == 0 {
 		return nil
 	}
-	instr := make(map[string]InstrStamp, len(zones))
+	// the sequence first: a message whose stamp is read after this beat's
+	// stamps carries a later one (keep)
+	seq := t.seq.Add(1)
+	var work map[string]bool
+	if t.work != nil {
+		work = t.work(peer)
+	}
+	once := t.onceFor(peer, zones)
+	var theirs map[string]InstrStamp
+	if m := t.heard(peer); m != nil {
+		theirs = m.Instr
+	}
+	acked := t.ackedFor(peer, zones)
+	refresh := t.refresh
+	if refresh <= 0 {
+		refresh = refreshDefault
+	}
+	now := time.Now()
+	var ranked [4][]toTell
 	for _, zone := range zones {
-		if st, ok := t.ownStamp(zone); ok {
-			instr[zone] = st
+		st, ok := t.ownStamp(zone)
+		if !ok {
+			continue
+		}
+		z := newToTell(zone, st)
+		z.own, z.busy = !atRest(st), work[z.key]
+		their, heard := theirs[z.key]
+		z.theirs = heard && (!atRest(their) || !sameSerials(st, their))
+		mark, told := acked[z.key]
+		going := z.own || z.busy || z.theirs
+		z.changed = told && mark.hash != z.hash || !told && going
+		switch {
+		case z.changed:
+			ranked[0] = append(ranked[0], z)
+		case going && now.Sub(mark.at) >= refresh:
+			z.due = true
+			ranked[1] = append(ranked[1], z)
+		case going:
+			ranked[2] = append(ranked[2], z)
+		case once[z.key]:
+			ranked[3] = append(ranked[3], z)
 		}
 	}
+	t.mu.Lock()
+	cursor := [4]string{}
+	if c := t.cursor[canonicalName(peer)]; c != nil {
+		cursor = *c
+	}
+	told, size, partial := fillEntry(ranked, &cursor)
+	key := canonicalName(peer)
+	if t.pending == nil {
+		t.pending = map[string]*pendingBeat{}
+	}
+	t.pending[key] = &pendingBeat{seq: seq, cursor: cursor, gen: t.gen[key]}
+	// what peer holds of the zones told is not known until the beat is
+	// acknowledged: a change it tells, if lost, is told again (S2 of the
+	// external review)
+	if len(told) > 0 {
+		if t.acked == nil {
+			t.acked = map[string]map[string]ackMark{}
+		}
+		if t.acked[key] == nil {
+			t.acked[key] = map[string]ackMark{}
+		}
+	}
+	for _, z := range told {
+		mark := t.acked[key][z.key]
+		mark.hash = 0
+		t.acked[key][z.key] = mark
+	}
+	t.mu.Unlock()
+
+	instr := make(map[string]InstrStamp, len(told))
+	// for the log: the zones told for each reason, and the first few told
+	// for something going on rather than for peer's new epoch alone
+	var onceTold, changedTold, dueTold, ownTold, workTold, theirsTold int
+	var named []string
+	for _, z := range told {
+		instr[z.zone] = z.st
+		onceTold += boolToInt(once[z.key])
+		changedTold += boolToInt(z.changed)
+		dueTold += boolToInt(z.due)
+		ownTold += boolToInt(z.own)
+		workTold += boolToInt(z.busy)
+		theirsTold += boolToInt(z.theirs)
+		if (z.changed || z.own || z.busy || z.theirs) && len(named) < 8 {
+			named = append(named, z.zone)
+		}
+	}
+	slices.Sort(named)
+	lgGossip.Debug("the stamp entry of a beat", "peer", peer, "zones", len(instr), "once", onceTold, "shared", len(zones),
+		"own", ownTold, "work", workTold, "theirs", theirsTold, "named", named, "partial", partial, "bytes", size,
+		"changed", changedTold, "due", dueTold)
 	row := &MemberState{
 		Identity:    t.localID,
 		Timestamp:   time.Now(),
 		Instr:       instr,
 		Epoch:       t.epoch,
-		Seq:         t.seq.Add(1),
+		Seq:         seq,
 		Nameservers: slices.Clone(t.nameservers),
 		Crypto:      t.crypto,
+		Partial:     partial,
 	}
 	return &GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{t.localID: row}}
+}
+
+// toTell is a zone a stamp entry may tell, folded in key, with the size its
+// stamp adds to the entry and a hash of the stamp, and why: the stamp
+// changed since it was last told to the peer (changed), it is due again
+// (due), it is not at rest (own), this agent has work for the zone with the
+// peer (busy), the peer's stamp of it is not at rest or differs (theirs).
+type toTell struct {
+	zone, key                       string
+	st                              InstrStamp
+	size                            int
+	hash                            uint64
+	changed, due, own, busy, theirs bool
+}
+
+// newToTell is zone's stamp st, sized and hashed: the size is the name, the
+// stamp's JSON, and the quotes, colon and comma around them.
+func newToTell(zone string, st InstrStamp) toTell {
+	z := toTell{zone: zone, key: canonicalName(zone), st: st, size: stampEntryBudget}
+	if b, err := json.Marshal(st); err == nil {
+		z.size, z.hash = len(zone)+len(b)+4, stampHash(b)
+	}
+	return z
+}
+
+// stampHash is a hash of a stamp's JSON.
+func stampHash(b []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(b)
+	return h.Sum64()
+}
+
+// fillEntry takes, of the zones ranked by what goes on in them, as many as
+// stampEntryBudget holds, and their size: rank by rank, each rank from the
+// zone after the last one told of it before (cursor, which it moves), so
+// that what does not fit now is told in the beats that follow. The zones
+// whose stamp changed leave room for the zones that are due, up to half the
+// budget, so that changes hold them back for no more than that; a zone of
+// peer's new epoch alone waits until all those something is going on in
+// fit. One zone is told whatever its size. partial: a zone of the first
+// three ranks was left out.
+func fillEntry(ranked [4][]toTell, cursor *[4]string) (told []toTell, size int, partial bool) {
+	due := 0
+	for _, z := range ranked[1] {
+		due += z.size
+	}
+	for r, list := range ranked {
+		if r == 3 && partial {
+			break
+		}
+		limit := stampEntryBudget
+		if r == 0 {
+			limit -= min(due, stampEntryBudget/2)
+		}
+		slices.SortFunc(list, func(a, b toTell) int { return strings.Compare(a.key, b.key) })
+		start, _ := slices.BinarySearchFunc(list, cursor[r], func(z toTell, key string) int {
+			if z.key <= key {
+				return -1
+			}
+			return 1
+		})
+		for i := range list {
+			z := list[(start+i)%len(list)]
+			if size+z.size > limit && len(told) > 0 {
+				if r > 0 {
+					return told, size, partial || r < 3
+				}
+				partial = true
+				break
+			}
+			told, size = append(told, z), size+z.size
+			cursor[r] = z.key
+		}
+	}
+	return told, size, partial
+}
+
+// ackedFor is a copy of what was told to peer in acknowledged beats, of the
+// zones (shared with peer); what is noted of a zone no longer shared is
+// dropped.
+func (t *stampTable) ackedFor(peer string, zones []string) map[string]ackMark {
+	key := canonicalName(peer)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	acked := t.acked[key]
+	if len(acked) == 0 {
+		return nil
+	}
+	shared := make(map[string]bool, len(zones))
+	for _, zone := range zones {
+		shared[canonicalName(zone)] = true
+	}
+	for zone := range acked {
+		if !shared[zone] {
+			delete(acked, zone)
+		}
+	}
+	return maps.Clone(acked)
+}
+
+// atRest: nothing is going on in a zone by its stamp (plan S22). The active
+// serial is known and is the newest, with no owner error, no refusal, no
+// serial agreed on, no transition, step or removal under way, and no key
+// rollover.
+func atRest(st InstrStamp) bool {
+	return st.Known && st.Error == "" && st.Refused == "" && st.Agreeing == 0 &&
+		!st.Reconciling && st.Step == nil && len(st.Removals) == 0 && !st.Rollover &&
+		st.Newest == st.Active && st.NewestDigest == st.ActiveDigest
+}
+
+// sameSerials: two stamps tell the same active and newest serials.
+func sameSerials(a, b InstrStamp) bool {
+	return a.Active == b.Active && a.ActiveDigest == b.ActiveDigest &&
+		a.Newest == b.Newest && a.NewestDigest == b.NewestDigest
+}
+
+// onceFor is the zones (shared with peer), folded, still to be told to it
+// once since its new epoch; the entry's budget bounds how many a beat
+// tells. A zone no longer shared is no longer owed.
+func (t *stampTable) onceFor(peer string, zones []string) map[string]bool {
+	key := canonicalName(peer)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	left, ok := t.once[key]
+	if !ok {
+		return nil
+	}
+	shared := make(map[string]bool, len(zones))
+	for _, zone := range zones {
+		shared[canonicalName(zone)] = true
+	}
+	if left == nil {
+		left = shared
+	}
+	for zone := range left {
+		if !shared[zone] {
+			delete(left, zone)
+		}
+	}
+	if len(left) == 0 {
+		delete(t.once, key)
+		return nil
+	}
+	t.once[key] = left
+	return maps.Clone(left)
+}
+
+// tellOnceLocked has every zone shared with the member key (folded) told to
+// it once: its first stamp since this agent's start, or one of its new
+// epoch, has come. Called with t.mu held.
+func (t *stampTable) tellOnceLocked(key string) {
+	if t.once == nil {
+		t.once = map[string]map[string]bool{}
+	}
+	t.once[key] = nil
+	delete(t.acked, key)
+	if t.gen == nil {
+		t.gen = map[string]uint64{}
+	}
+	t.gen[key]++
+}
+
+// acknowledged notes that the beat that carried e, a stamp entry to peer,
+// was acknowledged: the zones it told are told to peer once, each stamp is
+// the one peer was last told (acked), and the next beat goes on from where
+// e left off (cursor). Only the latest beat made to peer counts, and not
+// one made before a new epoch of peer's that has put every zone back to be
+// told once.
+func (t *stampTable) acknowledged(peer string, e *GossipMessage) {
+	if t == nil || e == nil || e.Members[t.localID] == nil {
+		return
+	}
+	key := canonicalName(peer)
+	now := time.Now()
+	marks := map[string]ackMark{}
+	for zone, st := range e.Members[t.localID].Instr {
+		if b, err := json.Marshal(st); err == nil {
+			marks[canonicalName(zone)] = ackMark{hash: stampHash(b), at: now}
+		}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// only the latest beat made to peer, and not one made before a new
+	// epoch of peer's that was heard since (S2 of the external review)
+	p := t.pending[key]
+	if p == nil || p.seq != e.Members[t.localID].Seq || p.gen != t.gen[key] {
+		return
+	}
+	delete(t.pending, key)
+	if t.cursor == nil {
+		t.cursor = map[string]*[4]string{}
+	}
+	cursor := p.cursor
+	t.cursor[key] = &cursor
+	if t.acked == nil {
+		t.acked = map[string]map[string]ackMark{}
+	}
+	if t.acked[key] == nil {
+		t.acked[key] = map[string]ackMark{}
+	}
+	maps.Copy(t.acked[key], marks)
+	left := t.once[key]
+	if left == nil {
+		return
+	}
+	for zone := range marks {
+		delete(left, zone)
+	}
+	if len(left) == 0 {
+		delete(t.once, key)
+	}
 }
 
 // ownStamp is what this agent tells of zone: the serials its store keeps,
@@ -209,14 +591,25 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 		Crypto:      row.Crypto,
 		Nameservers: slices.Clone(row.Nameservers),
 		Instr:       make(map[string]InstrStamp, len(row.Instr)),
+		Partial:     row.Partial,
 	}
 	for zone, st := range row.Instr {
 		m.Instr[canonicalName(zone)] = st
 	}
-	if !t.keep(m) {
+	var shared map[string]bool
+	if t.store != nil {
+		shared = map[string]bool{}
+		for _, zone := range t.store.sharedWith(t.localID, sender) {
+			shared[canonicalName(zone)] = true
+		}
+	}
+	if !t.keep(m, shared) {
 		return
 	}
-	for _, zone := range slices.Sorted(maps.Keys(m.Instr)) {
+	lgGossip.Debug("a member's stamp noted from its beat", "member", m.Identity, "zones", len(row.Instr), "partial", row.Partial)
+	// the zones this beat told; those kept from before were noted when told
+	for _, zone := range slices.Sorted(maps.Keys(row.Instr)) {
+		zone = canonicalName(zone)
 		t.judgeTold(zone)
 		t.fetchIfNewer(zone, m)
 		if t.onTold != nil {
@@ -229,10 +622,17 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 // is newer. Epochs and sequences are compared only within one member's own:
 // a higher epoch is a later start of the member, whose stamp replaces all
 // that was kept of it (design 3.4); a lower one is from before that start;
-// within one epoch a higher sequence is newer. A beat tells every zone the
-// two share: of a newer one each zone is taken unless a message told it
-// later (noteMessage), and a zone it no longer tells goes.
-func (t *stampTable) keep(m *memberStamp) bool {
+// within one epoch a higher sequence is newer. A beat tells the zones that
+// something is going on in (entryFor): of a newer one each zone is taken
+// unless a message told it later (noteMessage). Of a zone, still shared
+// (shared; nil: every zone), that it does not tell, what was kept stays
+// as told and heard when the beat is partial or what was kept is at rest:
+// a sender tells a stamp of its that changes, so one at rest still holds
+// (plan S22, amended 2026-10-30). Any other goes, as nothing is going on in
+// it at the member. A member's first
+// stamp since this agent's start, or one of a new epoch, has every zone the
+// two share told to it once (plan S22).
+func (t *stampTable) keep(m *memberStamp, shared map[string]bool) bool {
 	key := canonicalName(m.Identity)
 	m.ZoneSeq = make(map[string]uint64, len(m.Instr))
 	m.ZoneHeard = make(map[string]time.Time, len(m.Instr))
@@ -245,12 +645,15 @@ func (t *stampTable) keep(m *memberStamp) bool {
 	switch {
 	case old == nil || m.Epoch > old.Epoch:
 		t.kept[key] = m
+		t.tellOnceLocked(key)
 		return true
 	case m.Epoch < old.Epoch || m.Seq <= old.Seq:
 		return false
 	}
 	for zone, seq := range old.ZoneSeq {
-		if _, told := m.Instr[zone]; seq > m.Seq {
+		_, told := m.Instr[zone]
+		stays := !told && (shared == nil || shared[zone]) && (m.Partial || atRest(old.Instr[zone]))
+		if seq > m.Seq || stays {
 			m.Instr[zone], m.ZoneSeq[zone], m.ZoneHeard[zone] = old.Instr[zone], seq, old.ZoneHeard[zone]
 		} else if !told {
 			delete(m.Instr, zone)
@@ -808,8 +1211,8 @@ func (s *InstructionStore) RaiseEpoch(now time.Time) (uint64, error) {
 // wireStamps gives the agent's or the auditor's bridge its stamp table: the
 // epoch raised for this start, the provider's nameserver names, whether
 // payload encryption is on; on the agent its key rollovers, its parts'
-// hold of a step and the fetch. The bridge takes the time-out for members
-// with no role too (plan S12).
+// hold of a step, the fetch and its work with each peer. The bridge takes
+// the time-out for members with no role too (plan S12).
 func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, crypto, agent bool) error {
 	epoch, err := conf.InternalMp.Instructions.RaiseEpoch(time.Now())
 	if err != nil {
@@ -817,11 +1220,13 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	}
 	t := newStampTable(tm.LocalID, conf.InternalMp.Instructions, epoch, crypto, mp.Local.Nameservers)
 	t.onTold = conf.askThaw
+	t.refresh = min(leavingTimeoutFor(mp), noRoleTimeoutFor(mp)) / 4
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
 		t.hold = conf.holdConfirmed
 		t.stepHeld = conf.holdsStep
 		t.fetch = conf.fetchZone
+		t.work = func(peer string) map[string]bool { return conf.workWith(tm, peer) }
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")
 		}
@@ -829,6 +1234,30 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	tm.stamps = t
 	tm.noRoleTimeout = noRoleTimeoutFor(mp)
 	return nil
+}
+
+// workWith is the zones, folded, the agent has work owed, kept or under way
+// for with peer (plan S22): the zone's owed or kept list is not empty, its
+// catch-up with peer is not done, or the reliable queue holds a message to
+// peer for it.
+func (conf *Config) workWith(tm *MPTransportBridge, peer string) map[string]bool {
+	out := map[string]bool{}
+	for _, list := range []string{listOwed, listKept} {
+		for _, zone := range conf.InternalMp.Kept.zones(list) {
+			out[zone] = true
+		}
+	}
+	for _, zone := range conf.InternalMp.CatchUp.openWith(AgentId(peer)) {
+		out[canonicalName(string(zone))] = true
+	}
+	if tm.ReliableQueue != nil {
+		for _, m := range tm.ReliableQueue.GetPendingMessages() {
+			if m.Zone != "" && core.EqualNames(m.RecipientID, peer) {
+				out[canonicalName(m.Zone)] = true
+			}
+		}
+	}
+	return out
 }
 
 // fetchZone asks a refresh of the zone's own copy, as a NOTIFY does: the
