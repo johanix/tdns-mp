@@ -511,10 +511,10 @@ func (conf *Config) rollPass(ctx context.Context, zone ZoneName, cause syncCause
 			return
 		}
 		if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
-			// another agent leads: the roll ends here; with no leader
-			// known yet it waits
+			// another agent leads, by the group's election or the zone's:
+			// the roll ends here; with no leader known yet it waits
 			if lem != nil {
-				if leader, ok := lem.GetLeader(zone); ok && !sameName(string(leader), string(conf.localAgentID())) {
+				if leader, ok := lem.ZoneLeader(zone); ok && !sameName(string(leader), string(conf.localAgentID())) {
 					conf.endRollHere(kdb, r, leader)
 				}
 			}
