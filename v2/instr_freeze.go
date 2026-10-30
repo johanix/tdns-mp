@@ -112,7 +112,8 @@ func (s *InstructionStore) activeVoters(zone string) []string {
 // transitionVoters are the zone's voting members under its active serial
 // and, during a transition, under its other serial: the from-serial while it
 // reconciles, the serial agreed on while it agrees. The zone's SIG(0) key is
-// asked of them all (design 6, plan S14).
+// asked of them all (design 6, plan S14). None while the active serial is
+// not known (S9): no key answer counts then.
 func (s *InstructionStore) transitionVoters(zone string) []string {
 	if s == nil {
 		return nil
