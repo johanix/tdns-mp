@@ -230,6 +230,65 @@ func TestAWithdrawalThatCannotBeQueuedIsNotLeftPending(t *testing.T) {
 	}
 }
 
+// The final word on a withdrawal names the provider's records, not the
+// leader's, though it goes to the leader: a combiner's success with no
+// records named is filled from what the data holds of the provider.
+func TestAWithdrawalsFinalWordNamesTheProvidersRecordsOnly(t *testing.T) {
+	r := newReceiveRig(t, "origin.withdraw.example.")
+	r.leads(roleB)
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	bNS := core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{r.ns("ns1.b.example.")}}
+	if _, _, err := r.zdr.ProcessUpdate(&SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleB, UpdateType: "remote",
+		Update: &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleB, Operations: []core.RROperation{bNS}}, OriginatingTime: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	r.withdrawal(roleB, roleN, "d1", r.n, time.Now())
+	var toCombiner string
+	for d, p := range r.zdr.PendingRemoteConfirms {
+		if p.OriginatingDistID == "d1" {
+			toCombiner = d
+		}
+	}
+	if toCombiner == "" {
+		t.Fatal("the withdrawal was not handed to the combiner")
+	}
+	r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: toCombiner, Zone: ZoneName(r.zone), Source: freezeCombiner, Status: "SUCCESS"}, r.conf.InternalMp.MsgQs)
+	a := r.answered("d1")
+	if len(a) != 1 || a[0].OriginatingSender != roleB {
+		t.Fatalf("the final word on the withdrawal: %+v, want one to %s", a, roleB)
+	}
+	for _, rec := range a[0].AppliedRecords {
+		if strings.Contains(rec, "ns1.b.example.") {
+			t.Errorf("the final word names the leader's record %s as applied", rec)
+		}
+	}
+}
+
+// agent debug withdraw waits for the data engine no longer than its time,
+// for the send as for the answer.
+func TestDebugWithdrawDoesNotWaitForABusyEngine(t *testing.T) {
+	r := newReceiveRig(t, "busy.withdraw.example.")
+	r.leads(roleA)
+	r.conf.InternalMp.MsgQs.SynchedDataCmd = make(chan *SynchedDataCmd) // nobody takes it
+	saved := debugWithdrawWait
+	debugWithdrawWait = 50 * time.Millisecond
+	t.Cleanup(func() { debugWithdrawWait = saved })
+	var resp AgentMgmtResponse
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.conf.debugWithdraw(&AgentMgmtPost{Zone: ZoneName(r.zone), AgentId: roleN, RRType: dns.TypeNS}, &resp)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent debug withdraw waits on a busy data engine")
+	}
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "in time") {
+		t.Errorf("the answer: %+v", resp)
+	}
+}
+
 // The leader's clock is not the provider's: n's last replace, made under
 // 41, is stamped later than the leader's withdrawal under 42, and the
 // withdrawal is not stale for it.

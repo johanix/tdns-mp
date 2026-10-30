@@ -360,7 +360,13 @@ func (conf *Config) debugWithdraw(amp *AgentMgmtPost, resp *AgentMgmtResponse) {
 		return
 	}
 	answer := make(chan *SynchedDataCmdResponse, 1)
-	msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "withdraw", Zone: amp.Zone, Withdraw: &Withdraw{Provider: string(amp.AgentId), RRtype: rrtype}, Response: answer}
+	deadline := time.After(debugWithdrawWait) // for the send and the answer alike
+	select {
+	case msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "withdraw", Zone: amp.Zone, Withdraw: &Withdraw{Provider: string(amp.AgentId), RRtype: rrtype}, Response: answer}:
+	case <-deadline:
+		resp.Error, resp.ErrorMsg = true, "the data engine did not take the withdrawal in time"
+		return
+	}
 	select {
 	case a := <-answer:
 		if a.Error {
@@ -368,7 +374,11 @@ func (conf *Config) debugWithdraw(amp *AgentMgmtPost, resp *AgentMgmtResponse) {
 			return
 		}
 		resp.Msg = a.Msg
-	case <-time.After(10 * time.Second):
+	case <-deadline:
 		resp.Error, resp.ErrorMsg = true, "the data engine did not answer in time"
 	}
 }
+
+// debugWithdrawWait is how long agent debug withdraw waits for the data
+// engine.
+var debugWithdrawWait = 10 * time.Second
