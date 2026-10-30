@@ -1218,10 +1218,25 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			sentAt = t
 		}
 	}
+	// A withdrawal is the named provider's update, delivered by the leader
+	// that sent it (plan S16). An agent's update to its combiner, already
+	// in the provider's name, keeps the field as the combiner's flag. Any
+	// other message keeps its authenticated sender, and the field is
+	// dropped.
+	originator := senderID
+	if payload.Withdraw != nil {
+		switch messageType {
+		case AgentMsgNotify:
+			originator = payload.Withdraw.Provider
+		case AgentMsg("update"):
+		default:
+			payload.Withdraw = nil
+		}
+	}
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
-			OriginatorID:   AgentId(senderID),
+			OriginatorID:   AgentId(originator),
 			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
@@ -1236,6 +1251,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
 			Acting:         payload.Acting,
+			Withdraw:       payload.Withdraw,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -2253,6 +2269,10 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		// the leader's KEY goes to the other agents with its publish
 		// instruction too, for their combiners (#206)
 		syncReq.Publish = update.Publish
+		// to the agents from the leader, which sends it; to the combiner
+		// in the provider's name, as the flag it takes from its own agent
+		// only (S16)
+		syncReq.Withdraw = update.Withdraw
 		if !isCombiner {
 			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
 		}

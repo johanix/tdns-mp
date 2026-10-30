@@ -139,11 +139,16 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 
+			// A removal in any origin's name that this combiner's own agent
+			// delivers with the withdrawal's flag is applied whether or not
+			// the origin votes (design 3.5, plan S16).
+			removal := combinerTakesRemoval(msg, deliveredBy, localAgents)
+
 			// An origin that does not vote in the zone is refused at once,
 			// before its edit is kept: also on a zone whose edits wait for
 			// manual approval, where it would otherwise wait to be refused
 			// only when approved.
-			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil {
+			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil && !removal {
 				refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
 				combinerSendConfirmation(tm, deliveredBy, refusal)
 				continue
@@ -177,8 +182,10 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 
 			// Manual approval gate: if zone has mp-manual-approval, keep the
-			// edit pending for operator review — unless it's a no-op.
-			if mpzd, exists := Zones.Get(dns.Fqdn(zone)); exists && mpzd.Options[OptMPManualApproval] {
+			// edit pending for operator review — unless it's a no-op, or the
+			// leader's withdrawal from this combiner's own agent, which is
+			// applied at once as a hand-over is (plan S16).
+			if mpzd, exists := Zones.Get(dns.Fqdn(zone)); exists && mpzd.Options[OptMPManualApproval] && !removal {
 				// Check for no-op
 				noOp := mpzd.IsNoOpOperations(senderID, msg.Operations)
 				if noOp {
@@ -238,6 +245,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				Publish:        msg.Publish,
 				DistributionID: msg.DistributionID,
 				Timestamp:      msg.Time,
+				Instr:          msg.Instr,
+				Removal:        removal,
 			}
 
 			// Only apply protected-namespace checks to remote agents.
