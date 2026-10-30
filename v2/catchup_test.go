@@ -1150,3 +1150,56 @@ func TestTheEnginesRemovalOfAReplacedPeerKeepsItsSuccessorsRequests(t *testing.T
 		t.Error("the removal of a replaced object forgot its successor's request")
 	}
 }
+
+// A newcomer with no role whose record came with a refresh that read the
+// provider data by the instructions from before the copy was noted asked
+// nothing then: AskZone found no provider data. Once its active
+// instructions are known, with the provider data they give, it asks every
+// voting member it never asked, once (plan S15; the rig's add-record part:
+// "it did not catch up by itself before its role").
+func TestANewcomerAsksTheVotingMembersOnceItsActiveInstructionsAreKnown(t *testing.T) {
+	const zone = "newcomer.askunasked.example."
+	catchUpZone(t, zone, []string{roleB, roleX}, nil, []string{roleA})
+	mpzd, _ := Zones.Get(zone)
+	r := newTrackerRig(t, roleA)
+	r.setUp(roleB, true)
+	r.setUp(roleX, true)
+	r.run()
+
+	// the refresh: no provider data yet, so nothing is asked
+	data := mpzd.MP.MPdata
+	mpzd.Lock()
+	mpzd.MP.MPdata = nil
+	mpzd.Unlock()
+	r.t.afterRefresh(ZoneName(zone), &ZoneRefreshAnalysis{StandingBefore: standingNone, StandingAfter: standingNoRole})
+	if got := r.t.askUnasked(ZoneName(zone)); got != nil {
+		t.Fatalf("asked %v with no provider data", got)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if n := len(r.sent()); n != 0 {
+		t.Fatalf("%d requests sent with no provider data", n)
+	}
+
+	// the active instructions known, with the provider data
+	mpzd.Lock()
+	mpzd.MP.MPdata = data
+	mpzd.Unlock()
+	got := r.t.askUnasked(ZoneName(zone))
+	if len(got) != 2 || got[roleB] != askRecorded || got[roleX] != askRecorded {
+		t.Fatalf("asked %v, want both voting members", got)
+	}
+	sent := r.waitSends(t, 2)
+	for _, s := range sent {
+		if s.reason != catchUpJoin {
+			t.Errorf("asked %+v, want reason join", s)
+		}
+	}
+	// a member asked is not asked again
+	if got := r.t.askUnasked(ZoneName(zone)); got != nil {
+		t.Errorf("asked again: %v", got)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if n := len(r.sent()); n != 2 {
+		t.Errorf("%d requests sent, want 2", n)
+	}
+}

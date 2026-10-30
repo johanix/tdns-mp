@@ -394,6 +394,46 @@ func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askRe
 	return out
 }
 
+// askUnasked asks every voting member of the zone that this agent has never
+// asked, in a zone in which it asks (AskZone's tests): start for a zone the
+// agent started with, join for any other. It runs when the zone's active
+// instructions become known or change (know, activate), once the provider
+// data follows them. A standing that rose at a refresh asked nothing when
+// that refresh read the provider data by the instructions from before the
+// copy was noted: a newcomer whose own record arrives with the copy has
+// none until its active instructions are known (plan S15). A peer already
+// asked, answered or not, is left to the tracker.
+func (t *catchUpTracker) askUnasked(zone ZoneName) map[AgentId]askResult {
+	if t == nil || !asksInZone(zone, t.self) {
+		return nil
+	}
+	if zd, ok := Zones.Get(string(zone)); !ok || !zd.hasProviderData() {
+		return nil
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	peers := votingPeers(zone, t.self)
+	reason := catchUpJoin
+	var unasked []AgentId
+	t.mu.Lock()
+	if t.startZones[zone] {
+		reason = catchUpStart
+	}
+	for _, peer := range peers {
+		if _, asked := t.peers[zone][AgentId(dns.Fqdn(string(peer)))]; !asked {
+			unasked = append(unasked, peer)
+		}
+	}
+	t.mu.Unlock()
+	if len(unasked) == 0 {
+		return nil
+	}
+	out := map[AgentId]askResult{}
+	for _, peer := range unasked {
+		out[peer] = t.Ask(zone, peer, reason)
+	}
+	return out
+}
+
 // PeerOperational notes a successful beat to peer. It first sends every
 // request to it that waits for it. Then, the first time since this agent
 // started, it asks the peer with start for every zone they share that has
