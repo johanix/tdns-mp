@@ -455,6 +455,11 @@ func TestAZoneWithNoVotingMemberUnderNThawsWhenTheNewVotersAgree(t *testing.T) {
 	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (not heard)" {
 		t.Fatalf("before b tells: %q", vw.waits)
 	}
+	// heard, but telling nothing of the zone (plan S22): not "not heard"
+	r.operational(roleB)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (tells nothing of the zone)" {
+		t.Fatalf("b heard, telling nothing of the zone: %q", vw.waits)
+	}
 	st := tells(n, v)
 	st.Agreeing, st.AgreeingDigest = 62, v.Digest()
 	// a telling with an owner error does not count, as under N (cubic on
@@ -1070,5 +1075,25 @@ func TestAnExcusalNeverEmptiesTheGate(t *testing.T) {
 	gst.CheckGroupState("g", []string{roleA, roleB})
 	if ops != 0 {
 		t.Error("a gate whose voters are all excused opened by itself")
+	}
+}
+
+// A member heard that tells nothing of the zone is told apart from one not
+// heard (plan S22): at rest a member lists none of its zones, until it
+// hears the others' stamps of it.
+func TestAHeardMemberThatTellsNothingOfTheZoneIsNotNotHeard(t *testing.T) {
+	r := newThawRig(t, "nothing.thaw.example.", roleA)
+	r.agree()
+	r.hold()
+	if v := r.view(); v.ready() || len(v.waits) != 1 || v.waits[0] != roleB+" (not heard)" {
+		t.Errorf("b not heard at all: %q", v.waits)
+	}
+	r.operational(roleB)
+	if v := r.view(); v.ready() || len(v.waits) != 1 || v.waits[0] != roleB+" (tells nothing of the zone)" {
+		t.Errorf("b heard, with no stamp of the zone: %q", v.waits)
+	}
+	r.hear(roleB, r.agreeing(), true)
+	if v := r.view(); !v.ready() {
+		t.Errorf("b telling agreement: %q", v.waits)
 	}
 }
