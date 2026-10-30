@@ -1061,6 +1061,12 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
 		mpzd.populateMPdata(conf.MpConfig(), nextSigningSetOf(mpzd.instructions(), mpzd.signingSet()))
+		// a recipient the zone's CSYNC waits for may have no role since: the
+		// CSYNC's time-out for members with no role is looked at again
+		// (design 4), as no confirmation may come to look
+		if conf.csyncAwaited(mpzd.ZoneName) {
+			conf.askCsyncProgress(nil, ZoneName(mpzd.ZoneName))
+		}
 	}
 	givenBack = conf.followParentSyncParam(mpzd)
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)

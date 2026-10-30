@@ -395,6 +395,16 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 	}
 }
 
+// csyncAwaited: this agent's CSYNC for the zone waits for a recipient's
+// final confirmation.
+func (conf *Config) csyncAwaited(zone string) bool {
+	c := &conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur := c.csyncs[zone]
+	return cur != nil && !cur.confirmed && cur.failed == nil
+}
+
 // noRoleOnly: every recipient still awaited is a member of the zone with no
 // role (design 4), and wait is how long, from now, until the time-out
 // counted from since has passed (zero or less: it has).

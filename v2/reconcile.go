@@ -671,7 +671,9 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 	}
 	leaving := map[string]bool{}
 	for _, id := range votersN {
-		if !isAmong(votersV, AgentId(id)) {
+		// one that is the auditor under V is not leaving: the auditor is not
+		// waited for, and its stamps never tell a step held
+		if !isAmong(votersV, AgentId(id)) && zoneStanding(in.active.Reading, id) != standingAuditor {
 			leaving[canonicalName(id)] = true
 		}
 	}
