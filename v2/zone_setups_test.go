@@ -10,8 +10,14 @@ import (
 // *tdns.ZoneData, as a reload that brings the zone in (or back) does.
 func putMPZone(t *testing.T, name string) *tdns.ZoneData {
 	t.Helper()
+	return putZone(t, name, true)
+}
+
+// putZone is putMPZone for a zone with or without multi-provider.
+func putZone(t *testing.T, name string, mp bool) *tdns.ZoneData {
+	t.Helper()
 	zd := &tdns.ZoneData{ZoneName: name, ZoneType: tdns.Secondary,
-		Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
+		Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: mp}}
 	tdns.Zones.Set(name, zd)
 	t.Cleanup(func() {
 		tdns.Zones.Remove(name)
@@ -85,6 +91,9 @@ func TestAZoneAReloadPutsBackGetsTheCombinersSetupAgain(t *testing.T) {
 
 	tdns.Zones.Remove(name) // a reload drops the zone
 	conf.RegisterCombinerOnFirstLoad()
+	if _, ok := conf.InternalMp.onFirstLoadRegistered[name]; ok {
+		t.Error("a zone the reload dropped is still remembered as set up")
+	}
 	back := putMPZone(t, name) // a later reload brings it back
 	conf.RegisterCombinerOnFirstLoad()
 	if len(back.OnFirstLoad) != n {
@@ -92,5 +101,34 @@ func TestAZoneAReloadPutsBackGetsTheCombinersSetupAgain(t *testing.T) {
 	}
 	if w, ok := Zones.Get(name); !ok || w.MP == nil || w.MP.PersistContributions == nil {
 		t.Error("the zone put back does not persist its contributions")
+	}
+}
+
+// MPZoneNames keeps every name a reload has listed. A zone a reload drops
+// and a later one brings back without multi-provider gets none of the
+// combiner's setup.
+func TestAZoneBackWithoutMultiProviderGetsNoCombinerSetup(t *testing.T) {
+	asMPDaemon(t, AppTypeMPCombiner)
+	kdb := newMPTestKeyDB(t)
+	if err := NewHsyncDB(kdb).InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+	const name = "back.not-mp.example."
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = kdb
+	conf.InternalMp.MPZoneNames = []string{name}
+
+	putMPZone(t, name)
+	conf.RegisterCombinerOnFirstLoad()
+	tdns.Zones.Remove(name) // a reload drops the zone
+	conf.RegisterCombinerOnFirstLoad()
+
+	back := putZone(t, name, false) // a later reload brings it back, not multi-provider
+	conf.RegisterCombinerOnFirstLoad()
+	if len(back.OnFirstLoad) != 0 {
+		t.Errorf("a zone back without multi-provider got %d OnFirstLoad callbacks, want none", len(back.OnFirstLoad))
+	}
+	if w, ok := Zones.Get(name); ok && w.MP != nil && w.MP.PersistContributions != nil {
+		t.Error("a zone back without multi-provider persists contributions")
 	}
 }

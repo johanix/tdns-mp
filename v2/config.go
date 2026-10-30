@@ -202,7 +202,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		mpzd, exists := Zones.Get(zoneName)
-		if !exists || conf.InternalMp.onFirstLoadRegistered.done(zoneName, mpzd.ZoneData) {
+		// MPZoneNames keeps every name a reload has listed, so a name may now
+		// be a zone without multi-provider: as RegisterMPRefreshCallbacks.
+		if !exists || !mpzd.Options[tdns.OptMultiProvider] || conf.InternalMp.onFirstLoadRegistered.done(zoneName, mpzd.ZoneData) {
 			continue
 		}
 		conf.InternalMp.onFirstLoadRegistered[zoneName] = mpzd.ZoneData
