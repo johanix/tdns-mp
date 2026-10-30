@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -115,9 +114,64 @@ func newFreezeRig(t *testing.T, zone string) *freezeRig {
 	r.load()
 	r.n = freezeAt(t, 41, "n", "a,b", "")
 	r.v = freezeAt(t, 42, "v", "a,b", "")
-	r.store.Note(zone, r.n, nil)
-	enforced(t, r.store, zone)
+	knownAs(t, r.store, zone, r.n) // the zone steady at 41, with no freeze on the way
 	return r
+}
+
+// withSigner gives the agent a signer, whose hand-overs go to the queue
+// returned, of a zone that is multi-provider here.
+func (r *freezeRig) withSigner() *handedQueue {
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Options[tdns.OptMultiProvider] = true
+	tr, q := newTestTracker()
+	tr.toSigner = true
+	r.conf.InternalMp.SignerHandover = tr
+	return q
+}
+
+// wanted is the hand-over the agent wants its signer to hold for the zone.
+func (r *freezeRig) wanted() *ActingHandover {
+	r.t.Helper()
+	tr := r.conf.InternalMp.SignerHandover
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	z := tr.zones[handoverKey(r.zone)]
+	if z == nil || z.want == nil {
+		r.t.Fatal("the agent wants its signer to hold nothing for the zone")
+	}
+	return z.want
+}
+
+// confirm is the signer's inventory, now: it holds the hand-over the agent
+// wants it to, and holds the zone's key machine or not.
+func (r *freezeRig) confirm(hold bool) {
+	r.t.Helper()
+	r.conf.InternalMp.SignerHandover.learned(r.zone, r.wanted())
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: hold, Received: time.Now()})
+}
+
+// lastHanded is the hand-over among msgs that the signer keeps.
+func lastHanded(t *testing.T, msgs []handedMsg) *ActingHandover {
+	t.Helper()
+	h := newestHanded(msgs)
+	if h == nil {
+		t.Fatalf("no hand-over among %d messages", len(msgs))
+	}
+	return h
+}
+
+// newestHanded is the hand-over among msgs that the signer keeps whatever
+// their order of arrival, since each goes out on a goroutine of its own:
+// the newest by the order key; nil for none.
+func newestHanded(msgs []handedMsg) *ActingHandover {
+	var newest *ActingHandover
+	for _, m := range msgs {
+		if h := m.update.Acting; h != nil && (newest == nil || newest.olderThan(h)) {
+			newest = h
+		}
+	}
+	return newest
 }
 
 // load reads the store and the lists from disk, as a start does.
@@ -243,19 +297,26 @@ func TestAZoneIsFrozenWhileItAgreesReconcilesOrHoldsAnOwnerError(t *testing.T) {
 	}
 }
 
-// Until the thaw enforces the active serial (S7), nothing is frozen: the
-// active serial follows the copy, and an owner error is shown and not
-// enforced.
-func TestNothingIsFrozenUntilTheActiveSerialIsEnforced(t *testing.T) {
+// A zone whose active serial is not known is frozen, with its owner error;
+// made known, the owner error alone holds it (plan S9).
+func TestAZoneIsFrozenUntilItsActiveSerialIsKnown(t *testing.T) {
 	s := newStore(t)
-	s.Note(storeZone, at(t, 7, "alpha"), nil)
-	s.Note(storeZone, at(t, 8, "beta"), nil)
-	s.Note(storeZone, at(t, 8, "alpha,beta"), nil)
-	if st := s.Status(storeZone); st.OwnerError == "" {
-		t.Fatal("no owner error at an edit without a raised serial")
+	eight := at(t, 8, "beta")
+	s.Note(storeZone, eight, nil)
+	if why := s.frozen(storeZone); len(why) != 1 || why[0] != "the active serial is not known" {
+		t.Errorf("a zone with no active serial known: frozen %v", why)
 	}
-	if why := s.frozen(storeZone); len(why) != 0 {
-		t.Errorf("a zone whose active serial is not enforced is frozen: %v", why)
+	if err := s.update(storeZone, func(z *zoneSerials) error {
+		z.ownerError(storeZone, "serial 8 with two digests")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Know(storeZone, sd(eight), nil); err != nil {
+		t.Fatal(err)
+	}
+	if why := s.frozen(storeZone); len(why) != 1 || !strings.HasPrefix(why[0], "owner error") {
+		t.Errorf("once known: frozen %v, want the owner error alone", why)
 	}
 }
 
@@ -661,7 +722,7 @@ func TestTheSignerConfirmsTheHoldInItsInventory(t *testing.T) {
 	if !holds.held(zone) {
 		t.Fatal("the signer did not keep the hold")
 	}
-	req := inventoryRequest("signer.a.example.", zone, nil, true, nil, holds.held(zone))
+	req := inventoryRequest("signer.a.example.", zone, nil, true, nil, inventoryMarks{hold: holds.held(zone)})
 	msg, err := keystateAppMessage(req, roleA)
 	if err != nil {
 		t.Fatal(err)
@@ -670,31 +731,23 @@ func TestTheSignerConfirmsTheHoldInItsInventory(t *testing.T) {
 	if err := json.Unmarshal(msg.Payload, &p); err != nil || !p.Hold || p.Signal != "inventory" {
 		t.Fatalf("the inventory on the wire: %+v %v", p, err)
 	}
-	// the hold signal itself, on the wire
-	hold, err := keystateAppMessage(&PeerKeystateRequest{SenderID: roleA, Zone: zone, Signal: "hold", Hold: true}, "signer.a.example.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(hold.Payload, &p); err != nil || !p.Hold || p.Signal != "hold" {
-		t.Fatalf("the hold on the wire: %+v %v", p, err)
-	}
 	conf.signerHold(zone, false)
 	if holds.held(zone) {
 		t.Error("the signer kept the hold its agent let go")
 	}
 }
 
-// The stamp says Hold once an inventory with the hold has arrived after the
-// agent came to hold its newest serial; not before, and not from an older
-// inventory.
+// The stamp says Hold once the signer holds the hand-over with the hold and
+// an inventory with the hold has arrived after the agent came to hold its
+// newest serial; not before, and not from an older inventory.
 func TestTheStampSaysHoldOnlyAfterTheConfirmation(t *testing.T) {
 	r := newFreezeRig(t, "stamp.freeze.example.")
+	r.withSigner()
 	mpzd, ok := Zones.Get(r.zone)
 	if !ok {
 		t.Fatal("no zone")
 	}
-	t0 := time.Now()
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: t0})
+	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
 	time.Sleep(10 * time.Millisecond)
 	r.agree()
 	if r.conf.holdConfirmed(r.zone) {
@@ -705,11 +758,11 @@ func TestTheStampSaysHoldOnlyAfterTheConfirmation(t *testing.T) {
 	if st, _ := tbl.ownStamp(r.zone); st.Hold {
 		t.Error("the stamp says Hold before the confirmation")
 	}
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: false, Received: time.Now()})
+	r.confirm(false)
 	if r.conf.holdConfirmed(r.zone) {
 		t.Error("an inventory without the hold confirms it")
 	}
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	r.confirm(true)
 	if st, _ := tbl.ownStamp(r.zone); !st.Hold {
 		t.Error("the stamp does not say Hold after the confirmation")
 	}
@@ -718,66 +771,56 @@ func TestTheStampSaysHoldOnlyAfterTheConfirmation(t *testing.T) {
 	}
 }
 
-// The agent tells its signer the hold when the zone is frozen, and again
-// when its inventory says otherwise than the freeze, at most once per
-// holdRetell.
+// The agent hands its signer the hold when the zone is frozen, and again
+// while its inventory says it holds otherwise: the hold is a field of the
+// hand-over, which the agent hands until the signer holds it (plan S11).
 func TestTheHoldIsToldAgainWhenTheInventorySaysOtherwise(t *testing.T) {
-	saved := holdRetell
-	holdRetell = 100 * time.Millisecond
-	t.Cleanup(func() { holdRetell = saved })
 	r := newFreezeRig(t, "retell.freeze.example.")
-	told := func() holdTold {
-		b := &r.conf.InternalMp.holds
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		return b.told[canonicalName(r.zone)]
-	}
+	q := r.withSigner()
 	r.agree()
-	first := told()
-	if !first.on {
-		t.Fatal("the hold was not told when the zone froze")
+	// the hand-over that changed, and the signer asked to confirm it
+	if h := lastHanded(t, signerSent(t, q, 2)); !h.Sets.Hold {
+		t.Fatal("the hold was not handed when the zone froze")
 	}
-	snap := &KeyInventorySnapshot{Zone: r.zone, Received: time.Now()}
-	r.conf.reconcileHold(r.zone, snap)
-	if again := told(); !again.at.Equal(first.at) {
-		t.Error("an inventory without the hold had it told again at once")
+	tr := r.conf.InternalMp.SignerHandover
+	age := func() {
+		tr.mu.Lock()
+		tr.zones[handoverKey(r.zone)].flightAt = time.Now().Add(-2 * handoverResend)
+		tr.mu.Unlock()
 	}
-	time.Sleep(holdRetell + 10*time.Millisecond)
-	r.conf.reconcileHold(r.zone, snap)
-	if again := told(); !again.on || !again.at.After(first.at) {
-		t.Error("an inventory without the hold, after the retell time, did not have it told again")
+	// an inventory that says the signer holds the zone without the hold
+	without := *r.wanted()
+	without.Sets.Hold = false
+	tr.learned(r.zone, &without)
+	age()
+	tr.tick()
+	if h := lastHanded(t, signerSent(t, q, 1)); !h.Sets.Hold {
+		t.Error("an inventory without the hold did not have it handed again")
 	}
-	// an inventory that agrees has nothing told
-	before := told()
-	r.conf.reconcileHold(r.zone, &KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
-	if after := told(); !after.at.Equal(before.at) {
-		t.Error("an inventory with the hold had it told again")
+	// an inventory that agrees has nothing handed
+	r.confirm(true)
+	age()
+	tr.tick()
+	time.Sleep(50 * time.Millisecond)
+	if got := q.take(); len(got) != 0 {
+		t.Errorf("the signer holds the hold by its inventory, and %d more hand-overs went", len(got))
 	}
 }
 
 // The hold is confirmed for the serial agreed on (the external review of
 // #301): a refused serial above it leaves a confirmed hold confirmed; a
-// newer serial that becomes the one agreed on has the hold told again, and
-// counts only an inventory that arrives after it.
+// newer serial that becomes the one agreed on has the signer say again what
+// it holds, and counts only an inventory that arrives after it.
 func TestTheHoldIsConfirmedForTheSerialAgreedOn(t *testing.T) {
 	r := newFreezeRig(t, "agreed.freeze.example.")
-	mpzd, ok := Zones.Get(r.zone)
-	if !ok {
-		t.Fatal("no zone")
-	}
-	told := func() holdTold {
-		b := &r.conf.InternalMp.holds
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		return b.told[canonicalName(r.zone)]
-	}
+	q := r.withSigner()
 	r.agree()
+	signerSent(t, q, 2)
 	time.Sleep(5 * time.Millisecond)
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	r.confirm(true)
 	if !r.conf.holdConfirmed(r.zone) {
 		t.Fatal("the hold is not confirmed by an inventory after the serial agreed on")
 	}
-	first := told()
 
 	// a refused 43: b's record removed while b has a role
 	time.Sleep(5 * time.Millisecond)
@@ -788,8 +831,9 @@ func TestTheHoldIsConfirmedForTheSerialAgreedOn(t *testing.T) {
 	if !r.conf.holdConfirmed(r.zone) {
 		t.Error("a refused serial above the one agreed on made the confirmed hold stale")
 	}
-	if again := told(); !again.at.Equal(first.at) {
-		t.Error("a refused serial had the hold told again")
+	time.Sleep(50 * time.Millisecond)
+	if got := q.take(); len(got) != 0 {
+		t.Errorf("a refused serial had the hold handed again: %d hand-overs", len(got))
 	}
 
 	// an accepted 44 becomes the serial agreed on
@@ -801,11 +845,11 @@ func TestTheHoldIsConfirmedForTheSerialAgreedOn(t *testing.T) {
 	if r.conf.holdConfirmed(r.zone) {
 		t.Error("an inventory from before the new serial agreed on confirms the hold")
 	}
-	if again := told(); !again.on || !again.at.After(first.at) {
-		t.Error("the hold was not told again when the serial agreed on moved")
+	if h := lastHanded(t, signerSent(t, q, 1)); !h.Sets.Hold {
+		t.Error("the hold was not handed again when the serial agreed on moved")
 	}
 	time.Sleep(5 * time.Millisecond)
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	r.confirm(true)
 	if !r.conf.holdConfirmed(r.zone) {
 		t.Error("an inventory after the new serial agreed on does not confirm the hold")
 	}
@@ -884,16 +928,22 @@ func TestADeleteOfAnOwedAddIsKept(t *testing.T) {
 // zone that is gone (cubic's review of ff9348d).
 func TestAFrozenZoneThatLeavesTheConfigurationLetsTheHoldGo(t *testing.T) {
 	r := newFreezeRig(t, "prune.freeze.example.")
+	q := r.withSigner()
 	r.agree()
 	r.edit("ns1.a.example.")
+	// a zone leaves tdns's zones before the store prunes it (config.go):
+	// the agent hands it nothing more, but the signer lets the hold go
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Ready = false
+	pruned := time.Now()
 	r.store.Prune(func(string) bool { return false })
-	b := &r.conf.InternalMp.holds
-	b.mu.Lock()
-	word := b.told[canonicalName(r.zone)]
-	b.mu.Unlock()
-	if word.on {
-		t.Error("the hold stayed on after the frozen zone left the configuration")
-	}
+	mpzd.Ready = true
+	waitUntil(t, "the signer was not handed the zone without the hold after it left the configuration", func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		h := newestHanded(q.msgs)
+		return h != nil && !h.Sets.Hold && h.Made.After(pruned)
+	})
 	before := r.sent()
 	r.conf.instrDone(context.Background(), r.zdr, ZoneName(r.zone))
 	if owed := r.conf.InternalMp.Kept.entries(r.zone, listOwed); len(owed) != 0 {
@@ -904,51 +954,20 @@ func TestAFrozenZoneThatLeavesTheConfigurationLetsTheHoldGo(t *testing.T) {
 	}
 }
 
-// The zone's hold words reach the signer in the order they were told, the
-// latest last: one sender per zone (cubic's review of ff9348d).
-func TestTheLatestHoldWordIsTheLastSent(t *testing.T) {
-	r := newFreezeRig(t, "order.hold.freeze.example.")
-	var mu sync.Mutex
-	var sent []bool
-	gate := make(chan struct{})
-	r.conf.InternalMp.holdSend = func(_ ZoneName, on bool) {
-		<-gate
-		mu.Lock()
-		sent = append(sent, on)
-		mu.Unlock()
-	}
-	r.conf.tellHold(r.zone, true, 0)
-	r.conf.tellHold(r.zone, false, 0)
-	r.conf.tellHold(r.zone, true, 0)
-	r.conf.tellHold(r.zone, false, 0)
-	close(gate)
-	waitUntil(t, "the sender did not end", func() bool {
-		b := &r.conf.InternalMp.holds
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		return !b.sending[canonicalName(r.zone)]
-	})
-	mu.Lock()
-	defer mu.Unlock()
-	if len(sent) == 0 || len(sent) > 2 || sent[len(sent)-1] {
-		t.Errorf("the words sent: %v, want the first and then the latest (off)", sent)
-	}
-}
-
-// An inventory that carries the hold confirms it only after the agent last
-// told it: one from an earlier freeze does not (cubic's review of ff9348d).
+// An inventory that carries the hold confirms it only when it came after
+// the agent last had the signer say what it holds: one from before does
+// not (cubic's review of ff9348d).
 func TestAnInventoryBeforeTheHoldWasToldDoesNotConfirmIt(t *testing.T) {
 	r := newFreezeRig(t, "stale.hold.freeze.example.")
-	mpzd, _ := Zones.Get(r.zone)
+	r.withSigner()
 	r.agree()
 	time.Sleep(5 * time.Millisecond)
-	mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Hold: true, Received: time.Now()})
+	r.confirm(true)
 	if !r.conf.holdConfirmed(r.zone) {
-		t.Fatal("an inventory after the hold was told does not confirm it")
+		t.Fatal("an inventory after the hold was handed does not confirm it")
 	}
-	time.Sleep(5 * time.Millisecond)
-	r.conf.tellHold(r.zone, true, 0)
+	r.conf.InternalMp.SignerHandover.again(r.zone)
 	if r.conf.holdConfirmed(r.zone) {
-		t.Error("an inventory from before the hold was told again confirms it")
+		t.Error("an inventory from before the hold was handed again confirms it")
 	}
 }

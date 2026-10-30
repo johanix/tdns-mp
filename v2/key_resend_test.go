@@ -291,10 +291,10 @@ func TestTheSignerMarksTheKeyItSendsAgain(t *testing.T) {
 	if r, ok := recvWithin(got, time.Second); !ok || !slices.Equal(r, []uint16{4711}) {
 		t.Errorf("the resend pushed %v (%v), want [4711]", r, ok)
 	}
-	if req := inventoryRequest("signer.example.", "z.example.", nil, true, []uint16{4711}, false); !slices.Equal(req.Resend, []uint16{4711}) || req.Signal != "inventory" {
+	if req := inventoryRequest("signer.example.", "z.example.", nil, true, []uint16{4711}, inventoryMarks{}); !slices.Equal(req.Resend, []uint16{4711}) || req.Signal != "inventory" {
 		t.Errorf("the inventory request: %+v", req)
 	}
-	if req := inventoryRequest("signer.example.", "z.example.", nil, true, nil, false); len(req.Resend) != 0 {
+	if req := inventoryRequest("signer.example.", "z.example.", nil, true, nil, inventoryMarks{}); len(req.Resend) != 0 {
 		t.Errorf("a plain inventory carries a mark: %v", req.Resend)
 	}
 }
@@ -309,7 +309,7 @@ func TestAMarkedPushIsNotTakenByAnRFIWaiter(t *testing.T) {
 	waiter := make(chan *KeystateInventoryMsg, 1)
 	agent.setKeystateRfi(zone, waiter)
 	route := func(resend []uint16) {
-		msg, err := keystateAppMessage(inventoryRequest("signer.us.example.", zone, inventoryEntriesOf([]KeyInventoryItem{k}), true, resend, false), "agent.us.example.")
+		msg, err := keystateAppMessage(inventoryRequest("signer.us.example.", zone, inventoryEntriesOf([]KeyInventoryItem{k}), true, resend, inventoryMarks{}), "agent.us.example.")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -468,7 +468,7 @@ func TestAResultKeepsTheStampOfItsAnswer(t *testing.T) {
 	confirm := func(status transport.ConfirmStatus, applied []string, ms *MsgStamp) {
 		// as the confirmation callback does
 		tm.noteConfirmation(confirmIn("first", fast, status, string(zone), applied, nil, nil, nil, false, ""), ms)
-		tm.processDnskeyConfirmation("first", fast, status.String(), applied, nil, nil, ms)
+		tm.processDnskeyConfirmation("first", fast, status.String(), applied, nil, nil, false, ms)
 	}
 	partial, final := &MsgStamp{Epoch: 2, Seq: 5}, &MsgStamp{Epoch: 2, Seq: 6}
 	confirm(transport.ConfirmPartial, []string{a.String()}, partial)
@@ -512,8 +512,8 @@ func TestAResultCreditedByAnAnswerKeepsItsStamp(t *testing.T) {
 	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{asker, other})
 	tm.noteCatchUpAnswer("answer", zone, asker, map[uint16]bool{k: true})
 	ms := &MsgStamp{Epoch: 2, Seq: 5}
-	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, ms)
-	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, &MsgStamp{Epoch: 2, Seq: 6})
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, false, ms)
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, false, &MsgStamp{Epoch: 2, Seq: 6})
 
 	stamped := func(prop *PendingDnskeyPropagation, which string) {
 		t.Helper()

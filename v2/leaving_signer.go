@@ -148,14 +148,14 @@ func (mpzd *MPZoneData) leavingSigner() bool {
 	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Leaving
 }
 
-// advanceSigningSet is the signing set by the incoming copy (apex), from
+// advanceSigningSet is the signing set by the instructions in, from
 // the one the zone's last copy gave. At the zone's first copy here that is
 // the one the keystore keeps, so that a restart does not forget a provider
 // that is leaving; a changed set is kept again. With no keystore (kdb nil)
 // nothing is kept, and a restart starts from signers=. changed says that a
 // live refresh changed the set: not the first copy here, whose election
 // runs the leader's sync anyway (afterSigningSetChange).
-func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB) (next signingSet, changed bool) {
+func (mpzd *MPZoneData) advanceSigningSet(in *Instructions, kdb *tdns.KeyDB) (next signingSet, changed bool) {
 	var prev signingSet
 	live := mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Signing != nil
 	if live {
@@ -166,19 +166,38 @@ func (mpzd *MPZoneData) advanceSigningSet(apex *tdns.OwnerData, kdb *tdns.KeyDB)
 			lg.Error("the zone's signing providers could not be read from the keystore; starting from signers=", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
-	next = nextSigningSet(apex, prev)
+	next = nextSigningSetOf(in, prev)
 	if maps.Equal(prev, next) {
 		return next, false
 	}
 	lg.Info("the providers that sign the zone changed; one out of signers= signs on until the owner removes its HSYNC3 record (#147)",
 		"zone", mpzd.ZoneName, "signing", strings.Join(slices.Sorted(maps.Keys(next)), " "),
-		"leaving", strings.Join(next.leaving(readingOf(apex)), " "))
+		"leaving", strings.Join(next.leaving(in), " "))
 	if kdb != nil {
 		if err := saveSigningSet(kdb, mpzd.ZoneName, next); err != nil {
 			lg.Error("the zone's signing providers could not be kept in the keystore; a restart starts from signers=", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
 	return next, live
+}
+
+// lastSigningSet is the signing set the zone's last refresh left, or, at
+// its first copy here, the one the keystore keeps; false when there is
+// neither. A signer that waits for its agent's hand-over signs by it (rule
+// 5, plan S11).
+func (mpzd *MPZoneData) lastSigningSet(kdb *tdns.KeyDB) (signingSet, bool) {
+	if mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Signing != nil {
+		return mpzd.MP.MPdata.Signing, true
+	}
+	if kdb == nil {
+		return nil, false
+	}
+	set, err := loadSigningSet(kdb, mpzd.ZoneName)
+	if err != nil {
+		lg.Error("the zone's signing providers could not be read from the keystore; the zone is signed by its copy", "zone", mpzd.ZoneName, "err", err)
+		return nil, false
+	}
+	return set, set != nil
 }
 
 // afterSigningSetChange runs after a refresh (the post-refresh callback): when

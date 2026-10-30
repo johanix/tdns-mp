@@ -118,7 +118,7 @@ func TestWhatWaitedForTheCombinerGoesOutInOrderWhenItHolds(t *testing.T) {
 	if len(q.take()) != 0 {
 		t.Fatal("updates went out before the combiner confirmed the hand-over")
 	}
-	if !tr.confirmation(h.distID, transport.ConfirmSuccess) {
+	if handled, _ := tr.confirmation(h.distID, transport.ConfirmSuccess, nil, nil); !handled {
 		t.Error("the hand-over's confirmation went on past the tracker")
 	}
 	var got []string
@@ -140,7 +140,7 @@ func TestTheAgentHandsAgainUntilItsCombinerHolds(t *testing.T) {
 	tr, q := newTestTracker()
 	tr.handOver(wantOf(zone, 7, "alpha"))
 	first := handoverIn(t, q.take())
-	tr.confirmation(first.distID, transport.ConfirmFailed)
+	tr.confirmation(first.distID, transport.ConfirmFailed, nil, nil)
 	if waiting, _ := tr.gate(ZoneName(zone), update(zone), "u1"); !waiting {
 		t.Error("an update went out after the combiner refused the hand-over")
 	}
@@ -149,7 +149,7 @@ func TestTheAgentHandsAgainUntilItsCombinerHolds(t *testing.T) {
 	if second.distID == first.distID {
 		t.Error("the hand-over went again under the refused distribution")
 	}
-	tr.confirmation(second.distID, transport.ConfirmSuccess)
+	tr.confirmation(second.distID, transport.ConfirmSuccess, nil, nil)
 	q.take()
 	tr.tick()
 	for _, m := range q.take() {
@@ -183,7 +183,7 @@ func TestTheAgentLearnsWhatItsCombinerHoldsFromTheOwnRead(t *testing.T) {
 	if len(got) != 1 || got[0].distID != "u2" {
 		t.Errorf("the own read says the combiner holds the serial: released %+v, want u2", got)
 	}
-	tr.confirmation(first.distID, transport.ConfirmSuccess)
+	tr.confirmation(first.distID, transport.ConfirmSuccess, nil, nil)
 	// an answer from before the confirmation, older than it, is not taken:
 	// nothing is handed again and nothing waits
 	tr.learned(behind, wantOf(behind, 7, "alpha"))
@@ -203,28 +203,52 @@ func TestACombinerRefusalUnderAnotherSerialIsSentAgain(t *testing.T) {
 	const zone = "resend.acting.example."
 	tr, q := newTestTracker()
 	tr.handOver(wantOf(zone, 7, "alpha"))
-	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
 
 	tr.gate(ZoneName(zone), update(zone), "under7")
 	tr.gate(ZoneName(zone), update(zone), "final")
-	if tr.confirmation("final", transport.ConfirmRejected) {
+	if handled, _ := tr.confirmation("final", transport.ConfirmRejected, nil, nil); handled {
 		t.Error("a refusal under the serial wanted was not final")
 	}
 
 	tr.handOver(wantOf(zone, 8, "alpha", "beta")) // #235: the agent now has beta a signer
 	eight := handoverIn(t, q.take())
-	if !tr.confirmation("under7", transport.ConfirmRejected) {
+	if handled, _ := tr.confirmation("under7", transport.ConfirmRejected, nil, nil); !handled {
 		t.Fatal("the combiner's refusal under serial 7 was taken as final")
 	}
 	if len(q.take()) != 0 {
 		t.Error("the update went again before the combiner holds serial 8")
 	}
-	tr.confirmation(eight.distID, transport.ConfirmSuccess)
+	tr.confirmation(eight.distID, transport.ConfirmSuccess, nil, nil)
 	if got := q.take(); len(got) != 1 || got[0].distID != "under7" {
 		t.Errorf("after serial 8 is held, sent %+v, want the update again", got)
 	}
-	if tr.confirmation("under7", transport.ConfirmSuccess) {
+	if handled, _ := tr.confirmation("under7", transport.ConfirmSuccess, nil, nil); handled {
 		t.Error("the update's success under serial 8 went no further")
+	}
+}
+
+// A refusal from a combiner that says it acts by another serial than the one
+// the update was sent under is not final either (plan S8): the update goes
+// again, under the serial wanted. One that names the serial sent under is
+// final.
+func TestACombinerRefusalActingByAnotherSerialIsSentAgain(t *testing.T) {
+	const zone = "acting.resend.example."
+	tr, q := newTestTracker()
+	seven := wantOf(zone, 7, "alpha")
+	tr.handOver(seven)
+	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
+
+	tr.gate(ZoneName(zone), update(zone), "final")
+	if handled, _ := tr.confirmation("final", transport.ConfirmRejected, actingStampOf(seven), nil); handled {
+		t.Error("a refusal acting by the serial sent under was not final")
+	}
+	tr.gate(ZoneName(zone), update(zone), "other")
+	if handled, _ := tr.confirmation("other", transport.ConfirmRejected, &ActingStamp{Serial: 6, Digest: "x"}, nil); !handled {
+		t.Fatal("a refusal acting by another serial was taken as final")
+	}
+	if got := q.take(); len(got) != 1 || got[0].distID != "other" {
+		t.Errorf("sent %+v, want the update again", got)
 	}
 }
 
@@ -234,7 +258,7 @@ func TestTheCombinersStartHandsEveryZoneAgain(t *testing.T) {
 	tr, q := newTestTracker()
 	for _, z := range []string{"one.acting.example.", "two.acting.example."} {
 		tr.handOver(wantOf(z, 3, "alpha"))
-		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
 	}
 	tr.combinerStarted()
 	var zones []string
@@ -255,7 +279,7 @@ func TestAnUpdateTheQueueRefusesIsNotKeptAsSent(t *testing.T) {
 	const zone = "unsent.acting.example."
 	tr, q := newTestTracker()
 	tr.handOver(wantOf(zone, 4, "alpha"))
-	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
 	if waiting, _ := tr.gate(ZoneName(zone), update(zone), "u1"); waiting {
 		t.Fatal("the update waits though the combiner holds what is wanted")
 	}
@@ -274,9 +298,9 @@ func TestACombinerWaitsReportHandsThatZoneAlone(t *testing.T) {
 	tr, q := newTestTracker()
 	for _, z := range []string{"one.acting.example.", "two.acting.example."} {
 		tr.handOver(wantOf(z, 3, "alpha"))
-		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+		tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
 	}
-	tr.combinerWaits("one.acting.example.")
+	tr.again("one.acting.example.")
 	if h := handoverIn(t, q.take()).update.Acting; h.Zone != "one.acting.example." {
 		t.Errorf("handed over %s, want the zone the combiner waits for", h.Zone)
 	}
@@ -295,7 +319,7 @@ func TestAnUpdateTheQueueRefusesOnReleaseIsSentByTheTicker(t *testing.T) {
 	hand := handoverIn(t, q.take())
 	tr.gate(ZoneName(zone), update(zone), "u1")
 	q.refuse = true
-	tr.confirmation(hand.distID, transport.ConfirmSuccess)
+	tr.confirmation(hand.distID, transport.ConfirmSuccess, nil, nil)
 	if msgs := q.take(); len(msgs) != 0 {
 		t.Fatalf("the queue refuses, yet %d messages were queued", len(msgs))
 	}
@@ -322,7 +346,7 @@ func TestAForgetDuringAFlightIsToldByTheNextHandOver(t *testing.T) {
 	if msgs := q.take(); len(msgs) != 0 {
 		t.Fatalf("the same hand-over was sent again while in flight: %d", len(msgs))
 	}
-	tr.confirmation(flight.distID, transport.ConfirmSuccess)
+	tr.confirmation(flight.distID, transport.ConfirmSuccess, nil, nil)
 	tr.handOver(wantOf(zone, 2, "alpha"))
 	if h := handoverIn(t, q.take()).update.Acting; !h.Reset || h.Serial != 2 {
 		t.Errorf("after the forget the agent hands %+v, want serial 2 marked reset", h)
@@ -334,7 +358,7 @@ func TestAForgetHandsOverWithReset(t *testing.T) {
 	const zone = "forget.acting.example."
 	tr, q := newTestTracker()
 	tr.handOver(wantOf(zone, 9, "alpha"))
-	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
 	tr.forgot(zone)
 	tr.handOver(wantOf(zone, 2, "alpha"))
 	if h := handoverIn(t, q.take()).update.Acting; !h.Reset || h.Serial != 2 {
@@ -456,6 +480,122 @@ func TestTransportBoundary_TheCombinerConfirmsAHandOver(t *testing.T) {
 	}
 }
 
+// removalRig is the receiving rig with the agent's hand-over tracker, the
+// combiner acting by serial 7, and two NS records of the zone's.
+func removalRig(t *testing.T, zone string) (r *notifyRig, tr *handoverTracker, rec1, rec2 string) {
+	t.Helper()
+	r = receivingRig(t, zone)
+	tr = newHandoverTracker(AgentId(r.us.Identity), r.us.Bridge.enqueueToCombiner)
+	r.us.Bridge.handover, r.conf.InternalMp.Handover = tr, tr
+	t.Cleanup(func() { r.us.Bridge.handover, r.conf.InternalMp.Handover = nil, nil })
+	before := r.combinerDists()
+	tr.handOver(wantOf(zone, 7, "us"))
+	h7 := r.newCombinerDist(before, 5*time.Second)
+	if h7 == "" {
+		t.Fatal("the hand-over did not go on the queue to the combiner")
+	}
+	r.combinerTakes(h7)
+	var recs []string
+	for _, ns := range []string{"ns1", "ns2"} {
+		rr, err := dns.NewRR(zone + " 3600 IN NS " + ns + ".removal.example.")
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs = append(recs, rr.String())
+	}
+	return r, tr, recs[0], recs[1]
+}
+
+// removedUnderSeven has the update toCombiner, which deletes rec1 and adds
+// rec2, answered by the combiner at serial 7 while 8 is wanted: rec1
+// removed, rec2 refused. Once it holds 8 the update goes again, and the
+// combiner takes rec2 and names no removal: it no longer holds rec1.
+func (r *notifyRig) removedUnderSeven(t *testing.T, tr *handoverTracker, toCombiner, rec1, rec2 string) {
+	t.Helper()
+	waitUntil(t, "the update did not go to the combiner", func() bool { return r.combinerDists()[toCombiner] })
+	before := r.combinerDists()
+	tr.handOver(wantOf(r.mpzd.ZoneName, 8, "us", "peer"))
+	h8 := r.newCombinerDist(before, 5*time.Second)
+	if h8 == "" {
+		t.Fatal("the hand-over of serial 8 did not go on the queue")
+	}
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(toCombiner, rigCombiner, transport.ConfirmPartial, r.mpzd.ZoneName,
+		nil, []string{rec1}, []transport.RejectedItemDTO{{Record: rec2, Reason: "refused at serial 7"}}, nil, false, ""))
+	r.combinerTakes(h8)
+	waitUntil(t, "the update did not go again once the combiner holds serial 8", func() bool { return r.combinerDists()[toCombiner] })
+	r.confirms(rigCombiner, toCombiner, rec2)
+}
+
+// removalOf is rec1's state as the agent's data engine tracks it, once it
+// is removed or after a while: the engine takes a command before the
+// confirmations queued ahead of it.
+func (r *notifyRig) removalOf(t *testing.T, agent AgentId, rec1 string) string {
+	t.Helper()
+	state := "not tracked"
+	for end := time.Now().Add(2 * time.Second); time.Now().Before(end) && state != RRStateRemoved.String(); time.Sleep(10 * time.Millisecond) {
+		for _, info := range r.repo(t)[agent][dns.TypeNS] {
+			if info.RR == rec1 {
+				state = info.State
+			}
+		}
+	}
+	return state
+}
+
+// What the combiner removed in a word that is not final is gone whatever
+// the serial, and its answer to the update sent again cannot name it: it no
+// longer holds the record. The final word names it (plan S8; the word that
+// is not final is S10's). Here the update is the peer's, which the agent
+// forwards: the peer's final confirmation names rec1 as removed.
+func TestTransportBoundary_ACombinersRemovalUnderAnotherSerialIsNamedInTheFinalWord(t *testing.T) {
+	r, tr, rec1, rec2 := removalRig(t, "removal.acting.example.")
+	peer := AgentId(r.peer.Identity)
+	d1 := nextDistributionID()
+	r.receivesAt(t, string(peer), d1, time.Now(), nil, core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{rec1}})
+	first := r.heldBy(t, peer, dns.TypeNS, rec1).DistributionID
+	waitUntil(t, "rec1 did not go to the combiner", func() bool { return r.combinerDists()[first] })
+	r.confirms(rigCombiner, first, rec1)
+	r.answered(t, d1)
+
+	d2 := nextDistributionID()
+	r.receivesAt(t, string(peer), d2, time.Now(), nil, core.RROperation{Operation: "delete", RRtype: "NS", Records: []string{rec1}},
+		core.RROperation{Operation: "add", RRtype: "NS", Records: []string{rec2}})
+	r.removedUnderSeven(t, tr, r.heldBy(t, peer, dns.TypeNS, rec2).DistributionID, rec1, rec2)
+	if c := r.answered(t, d2); !slices.Contains(c.RemovedRecords, rec1) {
+		t.Errorf("the peer's final confirmation: %+v, want rec1 named as removed", *c)
+	}
+}
+
+// The same for the agent's own update: its removal of rec1, which the peer
+// confirms too, is confirmed, not left pending for good.
+func TestTransportBoundary_ACombinersRemovalOfAnOwnRecordUnderAnotherSerialIsConfirmed(t *testing.T) {
+	r, tr, rec1, rec2 := removalRig(t, "own.removal.acting.example.")
+	us, peer := AgentId(r.us.Identity), r.peer.Identity
+	own := func(ops ...core.RROperation) {
+		answer := make(chan *AgentMsgResponse, 1)
+		r.us.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{Zone: ZoneName(r.mpzd.ZoneName), AgentId: us, UpdateType: "local",
+			Update: &ZoneUpdate{Zone: ZoneName(r.mpzd.ZoneName), AgentId: us, Operations: ops}, Response: answer}
+		if a, ok := recvWithin(answer, 10*time.Second); !ok || a.Error {
+			t.Fatalf("the agent's own update: %+v", a)
+		}
+	}
+	own(core.RROperation{Operation: "add", RRtype: "NS", Records: []string{rec1}})
+	first := r.heldBy(t, us, dns.TypeNS, rec1).DistributionID
+	waitUntil(t, "rec1 did not go to the combiner", func() bool { return r.combinerDists()[first] })
+	r.confirms(rigCombiner, first, rec1)
+	r.confirms(peer, first, rec1)
+
+	own(core.RROperation{Operation: "delete", RRtype: "NS", Records: []string{rec1}},
+		core.RROperation{Operation: "add", RRtype: "NS", Records: []string{rec2}})
+	toCombiner := r.heldBy(t, us, dns.TypeNS, rec2).DistributionID
+	r.removedUnderSeven(t, tr, toCombiner, rec1, rec2)
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(toCombiner, peer, transport.ConfirmSuccess, r.mpzd.ZoneName,
+		[]string{rec2}, []string{rec1}, nil, nil, false, ""))
+	if st := r.removalOf(t, us, rec1); st != RRStateRemoved.String() {
+		t.Errorf("rec1's removal here: %s, want removed", st)
+	}
+}
+
 // The combiner's start report, a STATUS-UPDATE from the agent's own
 // combiner, hands every zone over again; one from anyone else does nothing.
 func TestACombinerStartReportHandsEveryZoneAgain(t *testing.T) {
@@ -466,7 +606,7 @@ func TestACombinerStartReportHandsEveryZoneAgain(t *testing.T) {
 	conf.InternalMp.MPTransport = &MPTransportBridge{combinerID: "combiner.alpha.example."}
 	e := &HsyncDataEngine{conf: conf}
 	tr.handOver(wantOf(zone, 3, "alpha"))
-	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess)
+	tr.confirmation(handoverIn(t, q.take()).distID, transport.ConfirmSuccess, nil, nil)
 
 	e.handleStatusUpdate(context.Background(), &StatusUpdateMsg{SenderID: "agent.beta.example.", Zone: ".", SubType: "combiner-start"})
 	if msgs := q.take(); len(msgs) != 0 {

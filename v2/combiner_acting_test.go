@@ -263,8 +263,7 @@ func TestTheHandedSerialSurvivesACombinerRestart(t *testing.T) {
 		t.Fatalf("after a restart the combiner holds %v (by %q), want %s by its agent", held.handover, held.by, h)
 	}
 	// its copy, at 5, is stale: it acts by the serial handed
-	apex, _ := mpzd.OwnerForAnalysis(zone)
-	if in := restarted.reading(zone, apex); in == nil || in.Digest() != h.Digest {
+	if in := restarted.reading(zone); in == nil || in.Digest() != h.Digest {
 		t.Error("the stored hand-over does not read as the one handed")
 	}
 	if in := instructionsFor(ZoneName(zone)); in == nil || in.Serial != 6 {
@@ -327,12 +326,12 @@ func TestTheCombinerActsByTheHandedSerialNotItsCopy(t *testing.T) {
 	}
 }
 
-// At an edit the combiner loads the new serial before its agent, which
-// takes the zone from its signer, hands it over: until S7 the combiner acts
-// by its copy while that is newer than the hand-over, as before S10. A new
-// signer's DNSKEY that reaches it in that gap is taken, and the merge is
-// judged by the copy's signing set; then the hand-over of the new serial.
-func TestACopyNewerThanTheHandOverIsActedBy(t *testing.T) {
+// From S7 the combiner acts by the serial handed whatever its copy says: a
+// copy newer than the hand-over, a serial its agent may refuse, is not
+// acted by. A new signer's DNSKEY is refused under the serial handed, which
+// does not name it, and the merge is judged by the sets handed; the
+// hand-over of the new serial takes it.
+func TestACopyNewerThanTheHandOverIsNotActedBy(t *testing.T) {
 	const zone = "newer.acting.example."
 	conf, mpzd := actingCombiner(t, zone, actRecords(`serial="6" servers="alpha,beta" signers="alpha,beta"`)...)
 	withActing(t, nil)
@@ -340,27 +339,17 @@ func TestACopyNewerThanTheHandOverIsActedBy(t *testing.T) {
 	if resp := handTo(conf, h, actUs); resp.Status != "ok" {
 		t.Fatalf("refused: %s", resp.Message)
 	}
-	if in := instructionsFor(ZoneName(zone)); in == nil || in.Serial != 6 {
-		t.Errorf("instructionsFor reads %v, want its copy's newer serial", in)
+	if in := instructionsFor(ZoneName(zone)); in == nil || in.Serial != 5 {
+		t.Errorf("instructionsFor reads %v, want the serial handed, 5", in)
 	}
 	key := testDnskey(t, zone, 257)
 	add := &CombinerSyncRequest{SenderID: actOther, Zone: zone, DistributionID: nextDistributionID(),
 		Operations: []core.RROperation{{Operation: "add", RRtype: "DNSKEY", Records: []string{key.String()}}}}
-	if resp := mpzd.combinerProcessOperations(add, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy()); len(resp.RejectedItems) > 0 {
-		t.Errorf("the new signer's DNSKEY is refused by the older serial handed: %+v", resp.RejectedItems)
+	if resp := mpzd.combinerProcessOperations(add, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy()); len(resp.RejectedItems) == 0 {
+		t.Error("beta's DNSKEY is taken under the serial handed, which does not name it a signer")
 	}
-	// a DNSKEY stored for an origin in no signing set stays out of the
-	// merge meanwhile
-	mpzd.Lock()
-	mpzd.MP.AgentContributions["agent.gamma.example."] = map[string]map[uint16]core.RRset{
-		zone: {dns.TypeDNSKEY: dnskeyContribution(t, zone, testDnskey(t, zone, 257))}}
-	mpzd.RebuildCombinerData()
-	mpzd.Unlock()
-	if od, ok := mpzd.MP.CombinerData.Get(zone); !ok || len(od.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) != 1 {
-		t.Error("the merge does not hold the new signer's DNSKEY alone")
-	}
-	if line := combinerActingLine(mpzd); !strings.HasPrefix(line, "by its own copy, serial 6, newer than the 5 (") {
-		t.Errorf("mplist says %q, want its own copy", line)
+	if line := combinerActingLine(mpzd); !strings.HasPrefix(line, "acting by 5 (") {
+		t.Errorf("mplist says %q, want the serial handed", line)
 	}
 
 	h6 := handoverFor(t, zone, actRecords(`serial="6" servers="alpha,beta" signers="alpha,beta"`)...)
@@ -369,6 +358,9 @@ func TestACopyNewerThanTheHandOverIsActedBy(t *testing.T) {
 	}
 	if line := combinerActingLine(mpzd); !strings.HasPrefix(line, "acting by 6 (") {
 		t.Errorf("mplist says %q, want the serial handed", line)
+	}
+	if resp := mpzd.combinerProcessOperations(add, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy()); len(resp.RejectedItems) > 0 {
+		t.Errorf("beta's DNSKEY is refused under the serial that names it a signer: %+v", resp.RejectedItems)
 	}
 }
 
@@ -777,13 +769,13 @@ func TestACombinerWithTwoAgentsIsAConfigError(t *testing.T) {
 	one := &MultiProviderConf{Role: "combiner", Agents: []*PeerConf{{Identity: actUs}}}
 	two := &MultiProviderConf{Role: "combiner", Agents: []*PeerConf{{Identity: actUs}, {Identity: actOther}}}
 	agent := &MultiProviderConf{Role: "agent", Agents: []*PeerConf{{Identity: actUs}, {Identity: actOther}}}
-	if err := ValidateCombinerAgents(one); err != nil {
+	if err := ValidatePartAgents(one); err != nil {
 		t.Errorf("one agent: %v", err)
 	}
-	if err := ValidateCombinerAgents(two); err == nil || !strings.Contains(err.Error(), "a multi-provider combiner has more than one agent") {
+	if err := ValidatePartAgents(two); err == nil || !strings.Contains(err.Error(), "a multi-provider combiner has more than one agent") {
 		t.Errorf("two agents: %v", err)
 	}
-	if err := ValidateCombinerAgents(agent); err != nil {
+	if err := ValidatePartAgents(agent); err != nil {
 		t.Errorf("not a combiner: %v", err)
 	}
 }

@@ -201,6 +201,14 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 	if err := conf.InternalMp.HsyncDB.InitHsyncTables(); err != nil {
 		return fmt.Errorf("InitHsyncTables: %w", err)
 	}
+	// What the agent handed (plan S11), kept in the KeyDB and read before
+	// the refresh engine starts: the zones' first load and the key machine
+	// read it.
+	acting, err := loadActingStore(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the hand-overs held: %w", err)
+	}
+	actingHeld.Store(acting)
 	// The zones whose key machine the agent holds (plan S6), kept over a
 	// restart.
 	holds, err := loadSignerHolds(conf.InternalMp.HsyncDB)
@@ -547,6 +555,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 	conf.InternalMp.Kept = kept
 	store.onFreeze = conf.onFreeze
+	// a zone whose active serial changes, becomes known or goes hands what
+	// it kept of other agents' distributions to the data engine (plan S8)
+	store.onActive = func(zone string) { conf.askActivated(ZoneName(zone)) }
 	// tdns asks the agent whether the agents sync a zone's delegation (P3),
 	// rather than reading its own copy: by the step's sets, since parentsync
 	// changes only at a step (design 3.3).

@@ -224,9 +224,15 @@ type KeyInventorySnapshot struct {
 	Zone      string
 	Inventory []KeyInventoryItem
 	Owned     bool // the signer's own state machine runs the zone's keys (S3): the DS set's source (S5)
-	Hold      bool // the signer holds the zone's key machine (plan S6)
-	Received  time.Time
-	seq       uint64 // the inventory's KeystateInventoryMsg.seq
+	// The signer's marks (plan S11): it does not sign the zone, a rollover
+	// is under way there, and what each of its keys in mpdist or mpremove
+	// waits on.
+	NotSigning bool
+	Rollover   bool
+	WaitsOn    map[uint16][]string
+	Hold       bool // the signer holds the zone's key machine (plan S6)
+	Received   time.Time
+	seq        uint64 // the inventory's KeystateInventoryMsg.seq
 }
 
 // END.1 (E1.a): AgentId and ZoneName are now ALIASES of the hsync types, so the
@@ -328,8 +334,10 @@ func NewMsgQs() *MsgQs {
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		Confirmation:      make(chan *ConfirmationDetail, 100),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
-		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
-		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
+		// a message per zone in a burst, as a transition of many zones
+		// sends: one that finds these full is dropped after its ack
+		KeystateSignal: make(chan *KeystateSignalMsg, 1024),
+		StatusUpdate:   make(chan *StatusUpdateMsg, 1024),
 	}
 }
 

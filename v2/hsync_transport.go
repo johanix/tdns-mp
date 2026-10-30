@@ -136,6 +136,10 @@ type MPTransportBridge struct {
 	// (acting_handover.go, plan S10), which EnqueueForCombiner's gate asks;
 	// nil on every other role and on an agent with no combiner.
 	handover *handoverTracker
+	// notYets: this agent's distributions that a peer answered "not yet",
+	// to be sent again once the two are in step (instr_receive.go, plan
+	// S8).
+	notYets notYetBook
 }
 
 func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
@@ -452,17 +456,35 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		applied, removed, rejected, ignored := c.AppliedRecords, c.RemovedRecords, c.RejectedItems, c.IgnoredRecords
 		lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", c.Nonce)
 		instr := confirmStamp(c.App) // the confirmer's stamp (S5b)
+		// a peer at other instructions than the send has decided nothing
+		// yet (rule 6, plan S8); judged before the confirmation is noted
+		notYet := tm.notYetFrom(distributionID, senderID, status, c.Message, instr)
 		tm.noteConfirmation(c, instr)
 
+		// the queue's entry is settled whatever the answer: a "not yet" is
+		// sent again when the two are in step, not as the old send
 		if tm.ReliableQueue != nil {
 			settleQueuedMessage(tm.ReliableQueue, distributionID, senderID, status)
 		}
 
 		// The combiner's word on a hand-over is the hand-over's alone, and
 		// its refusal of an update sent under another serial is not final:
-		// the update goes again (plan S10).
-		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) && tm.handover.confirmation(distributionID, status) {
-			return
+		// the update goes again (plan S10). It tells the serial it acts by
+		// in "acting" (plan S8). What it removed on a word that was not
+		// final is named in the final word (carried).
+		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) {
+			handled, carried := tm.handover.confirmation(distributionID, status, confirmActing(c.App), removed)
+			if handled {
+				return
+			}
+			for _, rr := range carried {
+				if !slices.Contains(removed, rr) {
+					removed = append(slices.Clip(removed), rr)
+				}
+			}
+		}
+		if notYet {
+			tm.noteNotYet(ZoneName(zone), AgentId(senderID), distributionID, instr)
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -470,7 +492,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		for _, ri := range rejected {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
 		}
-		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems, instr)
+		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems, notYet, instr)
 
 		// Forward per-RR detail to SynchedDataEngine
 		if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
@@ -479,12 +501,14 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 				Zone:           ZoneName(zone),
 				Source:         senderID,
 				Status:         status.String(),
+				Message:        c.Message,
 				AppliedRecords: applied,
 				RemovedRecords: removed,
 				RejectedItems:  rejItems,
 				IgnoredRecords: ignored,
 				Truncated:      c.Truncated,
 				Instr:          instr,
+				NotYet:         notYet,
 				Timestamp:      time.Now(),
 			}
 			select {
@@ -1259,7 +1283,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 
 				ForeignKeys:   payload.ForeignKeys,
 				ForeignSpoken: payload.ForeignSpoken,
-				Hold:          payload.Hold,
+				Acting:        payload.Acting,
 			}
 			if payload.Time != "" {
 				if at, err := time.Parse(time.RFC3339Nano, payload.Time); err == nil {
@@ -1270,7 +1294,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 			case tm.msgQs.KeystateSignal <- sigMsg:
 				lgTransport.Info("routed KEYSTATE signal", "signal", payload.Signal, "sender", senderID, "zone", payload.Zone, "keyTag", payload.KeyTag)
 			default:
-				lgTransport.Warn("KeystateSignal channel full, dropping", "signal", payload.Signal, "sender", senderID)
+				lgTransport.Warn("KeystateSignal channel full, dropping", "zone", payload.Zone, "signal", payload.Signal, "sender", senderID, "keyTag", payload.KeyTag, "handover", payload.Acting.String())
 			}
 		} else {
 			lgTransport.Debug("non-inventory KEYSTATE, no KeystateSignal channel, routing to Msg queue", "signal", payload.Signal, "sender", senderID)
@@ -1285,13 +1309,17 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 	}
 
 	inventoryMsg := &KeystateInventoryMsg{
-		SenderID:  senderID,
-		Zone:      payload.Zone,
-		Inventory: inventoryItemsOf(payload.KeyInventory),
-		Owned:     payload.Owned,
-		Resend:    payload.Resend,
-		Hold:      payload.Hold,
-		seq:       keystateInventorySeq.Add(1),
+		SenderID:   senderID,
+		Zone:       payload.Zone,
+		Inventory:  inventoryItemsOf(payload.KeyInventory),
+		Owned:      payload.Owned,
+		Resend:     payload.Resend,
+		Acting:     payload.Acting,
+		NotSigning: payload.NotSigning,
+		Rollover:   payload.Rollover,
+		WaitsOn:    payload.WaitsOn,
+		Hold:       payload.Hold,
+		seq:        keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other
 	// providers said about their keys again with every inventory it sends:
@@ -1516,7 +1544,7 @@ func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMes
 	case tm.msgQs.StatusUpdate <- statusMsg:
 		lgTransport.Info("routed STATUS-UPDATE to handler", "sender", senderID, "zone", payload.Zone, "subtype", payload.SubType)
 	default:
-		lgTransport.Warn("StatusUpdate channel full, dropping status-update", "sender", senderID)
+		lgTransport.Warn("StatusUpdate channel full, dropping status-update", "zone", payload.Zone, "subtype", payload.SubType, "sender", senderID)
 	}
 }
 
@@ -1677,6 +1705,8 @@ func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDe
 	// Map status string back to ConfirmStatus
 	status := transport.ConfirmFailed
 	switch detail.Status {
+	case "PENDING":
+		status = transport.ConfirmPending // a kept distribution (plan S8)
 	case "SUCCESS", "ok":
 		status = transport.ConfirmSuccess
 	case "PARTIAL":
@@ -2716,12 +2746,16 @@ func dnskeyKeyTagsOf(records []string) map[uint16]bool {
 // that gave it (S5b).
 // Returns true if the confirmation was for a DNSKEY propagation.
 func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo) bool {
-	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems, nil)
+	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems, false, nil)
 }
 
 // processDnskeyConfirmation is ProcessDnskeyConfirmation with the records
-// the confirmation names as ignored (#288) and its stamp, ms (S5b).
-func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo, ms *MsgStamp) bool {
+// the confirmation names as ignored (#288), whether the answer is "not
+// yet" (notYet: a peer at other instructions than the send, rule 6, plan
+// S8), and its stamp, ms (S5b). A key such an answer does not apply gets no
+// result: its rejection or its "ignored" is no decision, and the key
+// machine reads the key as pending.
+func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo, notYet bool, ms *MsgStamp) bool {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2739,7 +2773,9 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 		}
 	}
 	if !exists {
-		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) {
+		// an asker at other instructions than the answer decided nothing
+		// yet about the keys it overtook
+		if ans := tm.answersSent[distID]; ans != nil && ans.asker == AgentId(source) && !notYet {
 			tm.creditFromAnswerLocked(ans, AgentId(source), status, ignoredRecords, rejectedItems, ms)
 		}
 		return false // Not a DNSKEY propagation confirmation
@@ -2794,6 +2830,8 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 			continue // a key's first final answer from an agent stands
 		}
 		switch {
+		case notYet && !doneTags[kt]:
+			// no decision yet: sent again when the two are in step
 		case late && (rejectedTags[kt] || (wholeRejection && !doneTags[kt])):
 			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
@@ -3185,6 +3223,37 @@ func (tm *MPTransportBridge) sendForeignKeysToSigner(zone ZoneName) {
 		return
 	}
 	lgTransport.Info("KEYSTATE foreign sent to signer", "zone", zone, "keys", len(keys), "spoken", spoken, "accepted", resp.Accepted, "msg", resp.Message)
+}
+
+// sendActingToSigner hands the local signer the hand-over the update
+// carries, as a KEYSTATE signal "acting" (plan S11): the signer tracker's
+// send. The signer's answer says only that it arrived; what it then holds
+// comes in its inventory.
+func (tm *MPTransportBridge) sendActingToSigner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+	if tm.signerID == "" || tm.signerAddress == "" || tm.DNSTransport == nil {
+		return "", fmt.Errorf("no signer to hand the zone over to")
+	}
+	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
+	host, port := parseHostPort(tm.signerAddress, 53)
+	if err := peer.SetDNSCarrierAddress(&transport.Address{Host: host, Port: port, Transport: "udp"}); err != nil {
+		return "", fmt.Errorf("signer address refused: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := tm.sendKeystate(ctx, peer, &PeerKeystateRequest{
+		SenderID:  tm.LocalID,
+		Zone:      string(zone),
+		Signal:    "acting",
+		Acting:    update.Acting,
+		Timestamp: time.Now(),
+	})
+	if err != nil {
+		return "", err
+	}
+	if !resp.Accepted {
+		return "", fmt.Errorf("the signer did not take it: %s", resp.Message)
+	}
+	return distID, nil
 }
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.

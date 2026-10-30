@@ -9,6 +9,7 @@ package tdnsmp
 import (
 	"encoding/json"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 			tables := map[string]*stampTable{}
 			for _, p := range []*peerEnv{env.Alice, env.Bob} {
 				s := newStore(t)
-				s.Note(zone, in, nil)
+				noteKnown(t, s, zone, in)
 				p.Bridge.stamps = newStampTable(p.Identity, s, 1, false, []string{"ns1." + p.Identity})
 				tables[p.Identity] = p.Bridge.stamps
 				pgm := p.Registry.ProviderGroupManager
@@ -104,7 +105,7 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 				t.Fatalf("the answer's gossip: %v", err)
 			}
 			i := slices.IndexFunc(inAnswer, func(g GossipMessage) bool { return g.GroupHash == stampGroupHash })
-			if i < 0 || inAnswer[i].Members[bob] == nil || inAnswer[i].Members[bob].Instr[zone] != answer {
+			if i < 0 || inAnswer[i].Members[bob] == nil || !reflect.DeepEqual(inAnswer[i].Members[bob].Instr[zone], answer) {
 				t.Fatalf("the answer does not carry bob's stamp of the zone: %s", resp.Gossip)
 			}
 			if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {

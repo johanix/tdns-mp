@@ -333,10 +333,12 @@ type delegationSyncChains struct {
 
 // delegationRun is a leader sync under way: its cancel, and the hold of the
 // lead it began in (LeadHold; zero when this agent did not lead the zone
-// then).
+// then). cancelFor cancels it with a cause (cancelParentWork); nil for a run
+// a test lists.
 type delegationRun struct {
-	cancel context.CancelFunc
-	hold   uint64
+	cancel    context.CancelFunc
+	cancelFor context.CancelCauseFunc
+	hold      uint64
 }
 
 type delegationSyncChain struct {
@@ -789,13 +791,18 @@ func (conf *Config) endDelegationSyncWorkOf(zone string) (hold *delegationNotify
 
 // delegationSyncRun gives a leader sync of the zone a context of its own,
 // which delegationSyncOwnerSyncs cancels when the zone's owner takes the sync
-// over, and stopRunsOfLostLead when another agent takes the lead it began in.
+// over, stopRunsOfLostLead when another agent takes the lead it began in,
+// and cancelParentWork at the thaw's turn and when the group's leader is
+// invalidated (plan S7): it is the zone's parent context for its syncs, the
+// NOTIFYs a sync sends at once, and its key polls. A NOTIFY released from a
+// hold, or already on the NOTIFY queue, is not on it.
 // A sync can sit in tdns's UPDATE retry loop for a minute or more after a
 // REFUSED, and the loop asks only its context whether to go on. done ends
 // the run.
 func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx context.Context, done func()) {
 	c := &conf.InternalMp.delegationSyncChains
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancelFor := context.WithCancelCause(ctx)
+	cancel := func() { cancelFor(nil) }
 	hold := conf.holdOf(zone)
 	c.mu.Lock()
 	if c.runs == nil {
@@ -806,7 +813,7 @@ func (conf *Config) delegationSyncRun(ctx context.Context, zone string) (runCtx 
 	}
 	c.runID++
 	id := c.runID
-	c.runs[zone][id] = delegationRun{cancel: cancel, hold: hold}
+	c.runs[zone][id] = delegationRun{cancel: cancel, cancelFor: cancelFor, hold: hold}
 	c.mu.Unlock()
 	// A lead lost while the run was being listed was stopped without it
 	// (stopRunsOfLostLead): the run stops itself.
@@ -1318,13 +1325,16 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		return false
 	}
 	snap := &KeyInventorySnapshot{
-		SenderID:  msg.SenderID,
-		Zone:      msg.Zone,
-		Inventory: msg.Inventory,
-		Owned:     msg.Owned,
-		Hold:      msg.Hold,
-		Received:  time.Now(),
-		seq:       msg.seq,
+		SenderID:   msg.SenderID,
+		Zone:       msg.Zone,
+		Inventory:  msg.Inventory,
+		Owned:      msg.Owned,
+		NotSigning: msg.NotSigning,
+		Rollover:   msg.Rollover,
+		WaitsOn:    msg.WaitsOn,
+		Hold:       msg.Hold,
+		Received:   time.Now(),
+		seq:        msg.seq,
 	}
 	// One inventory of the zone at a time, from the check to the owner's
 	// copy: the engine and a refresh-keys RFI record from goroutines of
@@ -1343,10 +1353,15 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	if inventoryRecordedHook != nil {
 		inventoryRecordedHook(msg)
 	}
+	// what the signer holds of the agent's hand-over (plan S11), its hold
+	// included (S6): handed again until it holds what this agent wants;
+	// with no active serial known, what it holds with the hold (S9)
+	conf.InternalMp.SignerHandover.learned(zd.ZoneName, msg.Acting)
+	if conf.InternalMp.Instructions.activeUnknown(zd.ZoneName) {
+		conf.InternalMp.SignerHandover.holdLast(zd.ZoneName)
+	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
-	// the signer's word on the zone's hold, against the freeze (plan S6)
-	conf.reconcileHold(zd.ZoneName, snap)
 	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
 		return true

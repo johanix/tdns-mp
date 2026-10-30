@@ -46,8 +46,13 @@ const defaultSigLifetime = 14 * 24 * time.Hour
 
 // Wire is what the driver needs from its surroundings.
 type Wire interface {
-	// OtherSigners are the zone's signing providers other than this one.
+	// OtherSigners are the providers other than this one whose
+	// confirmations a key's distribution expects (KeyConfirmers, plan S11).
 	OtherSigners(zone string) []string
+	// DSSigners are the providers other than this one whose KSKs have a DS
+	// (plan S11): another provider's key gets ds only while its provider
+	// is among them.
+	DSSigners(zone string) []string
 	// Distribute sends the key's DNSKEY to the peers (a REPLACE of this
 	// provider's DNSKEYs); DistributeRemoval its removal. Confirmations
 	// come back through ZoneKeyLifecycle.Confirm.
@@ -163,7 +168,7 @@ type ZoneKeyLifecycle struct {
 	// it replaces is retired (T10's guard).
 	algorithms map[string]uint8
 	successor  uint8
-	// hold: the signer's agent holds the zone (KEYSTATE "hold", plan S6):
+	// hold: the signer's agent holds the zone (the hand-over's hold, plan S6):
 	// the tick starts nothing new (Tick)
 	hold bool
 }
@@ -830,6 +835,22 @@ func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason 
 	return from, to, err
 }
 
+// Expects: the driver's distributions expect these providers' confirmations,
+// as SignersChanged, NewZoneKeyLifecycle or Reload last set them.
+func (l *ZoneKeyLifecycle) Expects(signers []string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(signers) != len(l.known) {
+		return false
+	}
+	for _, p := range signers {
+		if !l.known[p] {
+			return false
+		}
+	}
+	return true
+}
+
 // SignersChanged tells the driver the zone's signing providers changed:
 // every distribution in flight expects the current set (O3).
 func (l *ZoneKeyLifecycle) SignersChanged() error {
@@ -848,7 +869,6 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 			joiners[p] = true
 		}
 	}
-	l.known = now
 	if len(joiners) > 0 {
 		all, err := l.rows()
 		if err != nil {
@@ -916,7 +936,12 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 	}
 	// a provider that stopped signing: its keys' DS no longer belongs at
 	// the parent (E10); one that started: what it said counts now
-	return l.applyForeignLocked()
+	if err := l.applyForeignLocked(); err != nil {
+		return err
+	}
+	// known only now: Expects says the distributions follow the set
+	l.known = now
+	return nil
 }
 
 // Mint generates a key of the role in created, with its columns.
@@ -1421,6 +1446,65 @@ func (l *ZoneKeyLifecycle) RolloverRequests() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return setList(l.rolls)
+}
+
+// RolloverFlags are what the driver knows of the zone beside its key rows,
+// for rolloverUnderWay (plan S11): a rollover asked for, an algorithm
+// rollover under way, and a distribution that waits for confirmations.
+func (l *ZoneKeyLifecycle) RolloverFlags() (rolloverFlags, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return rolloverFlags{}, err
+	}
+	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0}
+	for _, d := range l.dist {
+		if confirmationsOutstandingFor(d) {
+			f.PropagationPending = true
+		}
+	}
+	return f, nil
+}
+
+// WaitsOn is, for each key in mpdist or mpremove, the other signers whose
+// "applied" its distribution still misses, sorted (plan S11); a key whose
+// distribution misses nobody is not named.
+func (l *ZoneKeyLifecycle) WaitsOn() (map[uint16][]string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return nil, err
+	}
+	out := map[uint16][]string{}
+	for keyid, d := range l.dist {
+		if st := all[keyid].State; st != KeyStateMpdist && st != KeyStateMpremove {
+			continue
+		}
+		var missing []string
+		for p := range d.Expected {
+			if !d.Applied[p] {
+				missing = append(missing, p)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			out[keyid] = missing
+		}
+	}
+	return out, nil
+}
+
+// ApplyForeign writes ds on the foreign rows again (applyForeignLocked):
+// a hand-over that changes DSSigners does it at once (plan S11).
+func (l *ZoneKeyLifecycle) ApplyForeign() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.initErr != nil {
+		return l.initErr
+	}
+	return l.applyForeignLocked()
 }
 
 // SetPolicy replaces the policy the driver applies from the next tick on.
