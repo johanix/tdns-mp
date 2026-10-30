@@ -1203,3 +1203,38 @@ func TestANewcomerAsksTheVotingMembersOnceItsActiveInstructionsAreKnown(t *testi
 		t.Errorf("%d requests sent, want 2", n)
 	}
 }
+
+// The reason askUnasked asks with is the one the refresh could not ask
+// with: start for a zone the agent started with, at its first load; join
+// for a standing that rose later, also in a zone the agent started with.
+func TestAskUnaskedAsksWithTheReasonTheRefreshCouldNotAskWith(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    *ZoneRefreshAnalysis
+		want string
+	}{
+		{"the first load of a zone the agent started with", &ZoneRefreshAnalysis{FirstLoad: true}, catchUpStart},
+		{"a standing that rose later", &ZoneRefreshAnalysis{StandingBefore: standingNone, StandingAfter: standingNoRole}, catchUpJoin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zone := "reason." + strings.ReplaceAll(tc.name, " ", "-") + ".example."
+			catchUpZone(t, zone, []string{roleB}, nil, []string{roleA})
+			mpzd, _ := Zones.Get(zone)
+			r := newTrackerRig(t, roleA, zone) // a zone the agent started with
+			r.setUp(roleB, true)
+			r.run()
+			data := mpzd.MP.MPdata
+			mpzd.Lock()
+			mpzd.MP.MPdata = nil
+			mpzd.Unlock()
+			r.t.afterRefresh(ZoneName(zone), tc.a)
+			mpzd.Lock()
+			mpzd.MP.MPdata = data
+			mpzd.Unlock()
+			r.t.askUnasked(ZoneName(zone))
+			if sent := r.waitSends(t, 1); sent[0].reason != tc.want {
+				t.Errorf("asked %+v, want reason %s", sent[0], tc.want)
+			}
+		})
+	}
+}

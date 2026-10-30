@@ -131,8 +131,11 @@ type catchUpTracker struct {
 
 	self       AgentId
 	startZones map[ZoneName]bool // the multi-provider zones the agent started with
-	outage     time.Duration
-	notAPeer   func(AgentId) bool // the agent's own combiner and signer
+	// unasked: the reason AskZone could not ask with for a zone, for want
+	// of its provider data; askUnasked asks with it (plan S15).
+	unasked  map[ZoneName]string
+	outage   time.Duration
+	notAPeer func(AgentId) bool // the agent's own combiner and signer
 	// operational and send are the transport's; a test stands in for them.
 	operational func(AgentId) bool
 	send        func(ctx context.Context, zone ZoneName, peer AgentId, cu *CatchUp) error
@@ -385,6 +388,12 @@ func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askRe
 		return nil
 	}
 	if zd, ok := Zones.Get(string(zone)); !ok || !zd.hasProviderData() {
+		t.mu.Lock()
+		if t.unasked == nil {
+			t.unasked = map[ZoneName]string{}
+		}
+		t.unasked[ZoneName(dns.Fqdn(string(zone)))] = reason
+		t.mu.Unlock()
 		return nil
 	}
 	out := map[AgentId]askResult{}
@@ -395,14 +404,15 @@ func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askRe
 }
 
 // askUnasked asks every voting member of the zone that this agent has never
-// asked, in a zone in which it asks (AskZone's tests): start for a zone the
-// agent started with, join for any other. It runs when the zone's active
-// instructions become known or change (know, activate), once the provider
-// data follows them. A standing that rose at a refresh asked nothing when
-// that refresh read the provider data by the instructions from before the
-// copy was noted: a newcomer whose own record arrives with the copy has
-// none until its active instructions are known (plan S15). A peer already
-// asked, answered or not, is left to the tracker.
+// asked, in a zone in which it asks (AskZone's tests), with the reason
+// AskZone could not ask with for want of the zone's provider data, or join
+// when it noted none. It runs when the zone's active instructions become
+// known or change (know, activate), once the provider data follows them. A
+// standing that rose at a refresh asked nothing when that refresh read the
+// provider data by the instructions from before the copy was noted: a
+// newcomer whose own record arrives with the copy has none until its
+// active instructions are known (plan S15). A peer already asked, answered
+// or not, is left to the tracker.
 func (t *catchUpTracker) askUnasked(zone ZoneName) map[AgentId]askResult {
 	if t == nil || !asksInZone(zone, t.self) {
 		return nil
@@ -412,12 +422,13 @@ func (t *catchUpTracker) askUnasked(zone ZoneName) map[AgentId]askResult {
 	}
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	peers := votingPeers(zone, t.self)
-	reason := catchUpJoin
 	var unasked []AgentId
 	t.mu.Lock()
-	if t.startZones[zone] {
-		reason = catchUpStart
+	reason, noted := t.unasked[zone]
+	if !noted {
+		reason = catchUpJoin
 	}
+	delete(t.unasked, zone)
 	for _, peer := range peers {
 		if _, asked := t.peers[zone][AgentId(dns.Fqdn(string(peer)))]; !asked {
 			unasked = append(unasked, peer)
