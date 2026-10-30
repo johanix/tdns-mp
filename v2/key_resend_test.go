@@ -343,10 +343,10 @@ func TestALateAnswerToASupersededDistributionStillCounts(t *testing.T) {
 	}{{"a late success", "SUCCESS", true}, {"a late rejection", "REJECTED", false}} {
 		t.Run(c.name, func(t *testing.T) {
 			tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-			tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
+			tm.TrackDnskeyPropagation(t.Context(), zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
 			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
 			// the signer sends the key again
-			tm.TrackDnskeyPropagation(zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
+			tm.TrackDnskeyPropagation(t.Context(), zone, "resend", []uint16{k}, nil, []AgentId{fast, slow})
 			tm.foldIntoResend(zone, "resend")
 			tm.dnskeyPropMu.Lock()
 			_, first := tm.pendingDnskeyPropagations["first"]
@@ -387,9 +387,9 @@ func TestAResendTakesOverOnlyTheSameDistribution(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-			tm.TrackDnskeyPropagation(zone, "first", c.tags, c.removed, []AgentId{fast, slow})
+			tm.TrackDnskeyPropagation(t.Context(), zone, "first", c.tags, c.removed, []AgentId{fast, slow})
 			tm.ProcessDnskeyConfirmation("first", fast, "SUCCESS", nil, nil)
-			tm.TrackDnskeyPropagation(zone, "resend", c.rtags, c.rremoved, []AgentId{fast, slow})
+			tm.TrackDnskeyPropagation(t.Context(), zone, "resend", c.rtags, c.rremoved, []AgentId{fast, slow})
 			tm.foldIntoResend(zone, "resend")
 			tm.dnskeyPropMu.Lock()
 			_, first := tm.pendingDnskeyPropagations["first"]
@@ -421,8 +421,8 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 	const fast, slow = "agent.fast.example.", "agent.slow.example."
 	const k uint16 = 4242
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation(zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
-	tm.TrackDnskeyPropagation(zone, "second", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.TrackDnskeyPropagation(t.Context(), zone, "first", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.TrackDnskeyPropagation(t.Context(), zone, "second", []uint16{k}, nil, []AgentId{fast, slow})
 	tm.foldIntoResend(zone, "second")
 	tm.dnskeyPropMu.Lock()
 	s := tm.supersededBy["first"]
@@ -430,7 +430,7 @@ func TestASupersededAliasIsDroppedOnceNoAnswerCanCome(t *testing.T) {
 	tm.supersededBy["first"] = s
 	tm.dnskeyPropMu.Unlock()
 
-	tm.TrackDnskeyPropagation(zone, "third", []uint16{k}, nil, []AgentId{fast, slow})
+	tm.TrackDnskeyPropagation(t.Context(), zone, "third", []uint16{k}, nil, []AgentId{fast, slow})
 	tm.foldIntoResend(zone, "third")
 	tm.dnskeyPropMu.Lock()
 	_, old := tm.supersededBy["first"]

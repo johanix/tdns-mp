@@ -583,6 +583,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				conf.instrDone(ctx, zdr, sdcmd.Zone)
 				go conf.takeUp(ctx, sdcmd.Zone)
 
+			case "csync-progress":
+				// the time-out for the members with no role that the zone's
+				// CSYNC waits for has passed (plan S12)
+				conf.delegationCsyncProgress(ctx, zdr, sdcmd.Zone, nil)
+
 			case "own-read":
 				// A re-read's answer (ownReader), applied here because the
 				// apply writes zdr.Tracking, which has no lock.
@@ -2069,7 +2074,7 @@ func (conf *Config) applyLocalUpdate(ctx context.Context, zdr *ZoneDataRepo, syn
 					if err != nil {
 						lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
 					} else if len(agents) > 0 {
-						tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
+						tm.TrackDnskeyPropagation(ctx, synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
 						if synchedDataUpdate.Resend {
 							tm.foldIntoResend(synchedDataUpdate.Zone, distID)
 						}

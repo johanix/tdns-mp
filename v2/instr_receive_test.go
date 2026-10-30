@@ -492,7 +492,7 @@ func TestAConfirmationIsAlwaysTaken(t *testing.T) {
 	if tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "", nil) {
 		t.Error("a rejection with no stamp is not final")
 	}
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	tm.ProcessDnskeyConfirmation("d1", roleB, "SUCCESS", nil, nil)
 	if _, open := tm.pendingDnskeyPropagations["d1"]; open {
 		t.Error("a success did not settle the key's propagation")
@@ -568,7 +568,7 @@ func TestARejectionFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	r := newReceiveRig(t, "rejected.sender.example.")
 	tm := r.conf.InternalMp.MPTransport
 	r.sentToB("d1", r.n)
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmRejected, "", msgStampAt(r.v))
 	if !notYet {
 		t.Fatal("a rejection from a peer at another serial reads as final")
@@ -584,7 +584,7 @@ func TestAnIgnoredFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	r := newReceiveRig(t, "ignored.sender.example.")
 	tm := r.conf.InternalMp.MPTransport
 	r.sentToB("d1", r.n)
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	tm.pendingDnskeyPropagations["d1"].Signing = map[AgentId]bool{roleB: true}
 	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmIgnored, "", msgStampAt(r.v))
 	tm.processDnskeyConfirmation("d1", roleB, "IGNORED", nil, nil, nil, notYet)
@@ -723,7 +723,7 @@ func TestAKeyDistributionMadeUnderAnOlderSerialIsResent(t *testing.T) {
 	r := newReceiveRig(t, "key.sender.example.")
 	tm := r.conf.InternalMp.MPTransport
 	distID := r.notYetFromB(r.v)
-	tm.TrackDnskeyPropagation(ZoneName(r.zone), distID, []uint16{7}, nil, []AgentId{roleB})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), distID, []uint16{7}, nil, []AgentId{roleB})
 	tm.processDnskeyConfirmation(distID, roleB, "REJECTED", nil, nil, nil, true)
 	r.agree()
 	r.done()

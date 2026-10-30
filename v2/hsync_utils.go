@@ -998,15 +998,19 @@ func (mpzd *MPZoneData) instructions() *Instructions {
 	return activeOr(mpzd.ZoneName, apex)
 }
 
-// roles are the sets mpzd's decisions read: the zone's current step's, for
-// the zone as served here and for a copy wrapped for analysis alike; where
-// the store keeps no enforced record, the copy's.
+// roles are the sets mpzd's decisions read: the zone's current step's, as
+// the store keeps them (plan S12), for the zone as served here and for a
+// copy wrapped for analysis alike; with no step's sets kept, rolesFor of
+// the store's serials; where the store keeps no enforced record, the
+// copy's.
 func (mpzd *MPZoneData) roles() Roles {
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return handed // a combiner's or a signer's, as instructions
 	}
 	var r Roles
-	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
+	if sets, ok := instrStore.Load().stepSets(mpzd.ZoneName); ok {
+		r = sets
+	} else if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
 		r = rolesFor(from, to, step)
 	} else {
 		in := mpzd.instructions()

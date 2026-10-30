@@ -42,8 +42,8 @@ func TestADnskeyItsCombinerRejectedIsSentToItAgain(t *testing.T) {
 	// the sender's side: its propagation of the key, sent again as d2
 	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	d0, d1, d2 := nextDistributionID(), nextDistributionID(), nextDistributionID()
-	snd.TrackDnskeyPropagation(ZoneName(z), d0, []uint16{kt}, nil, []AgentId{us})
-	snd.TrackDnskeyPropagation(ZoneName(z), d2, []uint16{kt}, nil, []AgentId{us})
+	snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d0, []uint16{kt}, nil, []AgentId{us})
+	snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d2, []uint16{kt}, nil, []AgentId{us})
 	waiting := func(d string) bool {
 		snd.dnskeyPropMu.Lock()
 		defer snd.dnskeyPropMu.Unlock()
@@ -187,7 +187,7 @@ func TestADnskeyNotHandedToTheCombinerIsSentToItAgain(t *testing.T) {
 
 	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	d1, d2 := nextDistributionID(), nextDistributionID()
-	snd.TrackDnskeyPropagation(ZoneName(z), d2, []uint16{kt}, nil, []AgentId{us})
+	snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d2, []uint16{kt}, nil, []AgentId{us})
 	waiting := func() bool {
 		snd.dnskeyPropMu.Lock()
 		defer snd.dnskeyPropMu.Unlock()
@@ -371,7 +371,7 @@ func TestARemovalNotHandedToTheCombinerIsNotConfirmed(t *testing.T) {
 			// the replace that removes k2; its hand-over fails
 			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 			d1 := nextDistributionID()
-			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
+			snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d1, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
 			waiting := func() bool {
 				snd.dnskeyPropMu.Lock()
 				defer snd.dnskeyPropMu.Unlock()
@@ -697,7 +697,7 @@ func staleKeySetOvertakenInFlight(t *testing.T, kind, order string) {
 	// the sender's propagation of the first distribution
 	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	d1 := nextDistributionID()
-	snd.TrackDnskeyPropagation(ZoneName(z), d1, keyTags, removedTags, []AgentId{us})
+	snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d1, keyTags, removedTags, []AgentId{us})
 	waiting := func() bool {
 		snd.dnskeyPropMu.Lock()
 		defer snd.dnskeyPropMu.Unlock()
@@ -842,7 +842,7 @@ func TestAStaleKeySetIsNotCreditedOnTheCombinersFailure(t *testing.T) {
 
 			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 			d1 := nextDistributionID()
-			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
+			snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d1, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
 
 			// the set that overtakes the withdrawal, then the withdrawal
 			d2 := nextDistributionID()
@@ -928,7 +928,7 @@ func TestAStaleWithdrawalBehindAnAnswersForwardIsNotCredited(t *testing.T) {
 
 	lead := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	d, an := nextDistributionID(), nextDistributionID()
-	lead.TrackDnskeyPropagation(ZoneName(z), d, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
+	lead.TrackDnskeyPropagation(t.Context(), ZoneName(z), d, []uint16{k2.KeyTag()}, []uint16{k2.KeyTag()}, []AgentId{us})
 	lead.noteCatchUpAnswer(an, ZoneName(z), us, map[uint16]bool{k1.KeyTag(): true})
 	waiting := func() bool {
 		lead.dnskeyPropMu.Lock()
@@ -1039,7 +1039,7 @@ func TestAStaleSetWhoseKeyTheNewerSetDroppedIsNotASuccess(t *testing.T) {
 
 			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 			d1 := nextDistributionID()
-			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, nil, []AgentId{us})
+			snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d1, []uint16{k2.KeyTag()}, nil, []AgentId{us})
 
 			// the newer set, which drops k2 (and adds k3)
 			before = r.combinerDists()
@@ -1114,7 +1114,7 @@ func TestALateCombinerSuccessOnASetWhoseKeyWasDroppedIsNotASuccess(t *testing.T)
 			snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 			// the set that adds k2, handed over; the combiner is away
 			d1 := nextDistributionID()
-			snd.TrackDnskeyPropagation(ZoneName(z), d1, []uint16{k2.KeyTag()}, nil, []AgentId{us})
+			snd.TrackDnskeyPropagation(t.Context(), ZoneName(z), d1, []uint16{k2.KeyTag()}, nil, []AgentId{us})
 			before = r.combinerDists()
 			r.receivesAt(t, string(signer), d1, sent.Add(10*time.Second), nil, replace(k1.String(), k2.String()))
 			c1 := r.newCombinerDist(before, 10*time.Second)

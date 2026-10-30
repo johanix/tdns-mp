@@ -44,9 +44,11 @@ import (
 const csyncFlagImmediate = 0x0001
 
 // delegationCsyncAwaitedEvery is how often the leader says that a NOTIFY
-// still waits for confirmations of the zone's CSYNC. There is no time-out:
-// a provider that does not confirm does not serve the record, and a parent
-// that scans then finds the nameservers out of step.
+// still waits for confirmations of the zone's CSYNC. A voting member is
+// waited for with no time-out: a provider that does not confirm does not
+// serve the record, and a parent that scans then finds the nameservers out
+// of step. A member with no role is waited for up to
+// multi-provider.transitions.no-role-timeout (design 4, plan S12).
 var delegationCsyncAwaitedEvery = 10 * time.Minute
 
 // delegationCsyncSubmitTimeout bounds how long the syncher waits for the
@@ -64,6 +66,7 @@ type delegationCsync struct {
 	confirmed bool      // every recipient has given its final confirmation
 	failed    error     // a recipient rejected it, and no NOTIFY waited for it then
 	awaited   []string  // the recipients whose final confirmation is missing
+	noRoleAt  bool      // a look at the time-out for members with no role is set
 }
 
 // delegationCsyncStep comes before a sync of a zone this agent leads goes to
@@ -277,7 +280,7 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 		c.mu.Unlock()
 		return
 	}
-	record, distID := cur.record, cur.distID
+	record, distID, made := cur.record, cur.distID, cur.made
 	c.mu.Unlock()
 
 	tr := zdr.trackedRR(zonename, AgentId(conf.MpConfig().Identity), dns.TypeCSYNC, record)
@@ -305,6 +308,17 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 	rejected := tr.State == RRStateRejected || rejectedBy != ""
 	if rejected && rejectedBy == "" {
 		rejectedBy, reason = "a provider", tr.Reason
+	}
+	// Only members with no role left to confirm: the NOTIFY goes on without
+	// them once the time-out has passed since the CSYNC was made, and the
+	// engine looks again then (design 4).
+	noRoleLeft, wait := noRoleOnly(zonename, awaited, made, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
+	timedOut := noRoleLeft && wait <= 0
+	if timedOut {
+		for _, r := range awaited {
+			lgEngine.Warn("a member with no role did not confirm in time, going on", "zone", zone, "member", r, "what", "the zone's CSYNC")
+		}
+		awaited = nil
 	}
 	if !rejected && distID != "" && tr.DistributionID != distID {
 		// An operator's resync has sent the record again, to the combiner
@@ -356,7 +370,11 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 			ask = c.schedule(ch)
 		}
 		c.mu.Unlock()
-		lgEngine.Info("every provider has confirmed the zone's CSYNC", "zone", zone, "serial", cur.serial, "took", took)
+		if timedOut {
+			lgEngine.Info("every provider with a role has confirmed the zone's CSYNC", "zone", zone, "serial", cur.serial, "took", took)
+		} else {
+			lgEngine.Info("every provider has confirmed the zone's CSYNC", "zone", zone, "serial", cur.serial, "took", took)
+		}
 		if hold != nil {
 			// the zone's wait, counted from the last confirmation
 			sent := delegationNotifies{out: hold.out}
@@ -368,7 +386,35 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 		}
 	default:
 		cur.awaited = awaited
+		look := noRoleLeft && !cur.noRoleAt
+		cur.noRoleAt = cur.noRoleAt || look
 		c.mu.Unlock()
+		if look {
+			conf.delegationSyncAfter(ctx, wait, func() { conf.askCsyncProgress(ctx, zonename) })
+		}
+	}
+}
+
+// noRoleOnly: every recipient still awaited is a member of the zone with no
+// role (design 4), and wait is how long, from now, until the time-out
+// counted from since has passed (zero or less: it has).
+func noRoleOnly(zone ZoneName, awaited []string, since, now time.Time, timeout time.Duration) (only bool, wait time.Duration) {
+	only = len(awaited) > 0 && !slices.ContainsFunc(awaited, func(r string) bool { return !noRoleMember(zone, AgentId(r)) })
+	return only, timeout - now.Sub(since)
+}
+
+// askCsyncProgress has the data engine look again at how far the zone's
+// CSYNC has come, from its own goroutine, which owns the tracking. A full
+// queue asks again a second later, until ctx ends: with only members with
+// no role left, no confirmation may come to look again.
+func (conf *Config) askCsyncProgress(ctx context.Context, zone ZoneName) {
+	if msgQs := conf.InternalMp.MsgQs; msgQs != nil && msgQs.SynchedDataCmd != nil {
+		select {
+		case msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "csync-progress", Zone: zone}:
+		default:
+			lgEngine.Warn("the data engine's queue is full; the CSYNC's time-out for members with no role is looked at again in a second", "zone", zone)
+			conf.delegationSyncAfter(ctx, time.Second, func() { conf.askCsyncProgress(ctx, zone) })
+		}
 	}
 }
 
