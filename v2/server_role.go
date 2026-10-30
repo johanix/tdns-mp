@@ -94,7 +94,7 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 	}
 	self := core.EqualNames(id, mp.Identity)
 	switch {
-	case self && conf.InternalMp.transfers.held(zone, step.InstrStep):
+	case self && conf.InternalMp.transfers.held(zone, conf.stepName(zone, step.InstrStep)):
 		return ""
 	case !self && conf.toldStepHeld(zone, id, step.InstrStep):
 		return ""
@@ -168,9 +168,14 @@ func (conf *Config) signerKeys(zone string, ids []string) []dns.RR {
 		if !ok {
 			continue
 		}
-		if nod, ok := ar.Data.Get(AgentId(dns.Fqdn(id))); ok {
-			if rrset, ok := nod.RRtypes.Get(dns.TypeDNSKEY); ok {
-				keys = append(keys, rrset.RRs...)
+		for _, agent := range ar.Data.Keys() {
+			if !core.EqualNames(string(agent), id) {
+				continue
+			}
+			if nod, ok := ar.Data.Get(agent); ok {
+				if rrset, ok := nod.RRtypes.Get(dns.TypeDNSKEY); ok {
+					keys = append(keys, rrset.RRs...)
+				}
 			}
 		}
 	}
@@ -194,19 +199,25 @@ type transferCheck struct {
 	running bool
 }
 
-// stepName names a step for the book: its key and its digest.
-func stepName(step InstrStep) string {
+// stepName names a step for the book: the zone's active serial, the step's
+// key and its digest. A later transition that gives the role again, with
+// the same sets, is another step.
+func (conf *Config) stepName(zone string, step InstrStep) string {
 	if len(step.Taken) == 0 {
 		return ""
 	}
-	return step.Taken[len(step.Taken)-1] + " " + step.Digest
+	var serial uint32
+	if active, _ := conf.InternalMp.Instructions.activeSerial(zone); active != nil {
+		serial = active.Serial
+	}
+	return fmt.Sprintf("%d %s %s", serial, step.Taken[len(step.Taken)-1], step.Digest)
 }
 
 // confirmed is whether this agent's nameservers serve the zone as step
 // needs; a check starts when none runs and the latest is older than
 // transferRecheck. Once confirmed it stays so for the step.
 func (b *transferBook) confirmed(conf *Config, zone string, step InstrStep) bool {
-	name := stepName(step)
+	name := conf.stepName(zone, step)
 	b.mu.Lock()
 	if b.zones == nil {
 		b.zones = map[string]*transferCheck{}
@@ -230,15 +241,15 @@ func (b *transferBook) confirmed(conf *Config, zone string, step InstrStep) bool
 			start(check)
 		}
 	}
-	return b.held(zone, step)
+	return b.held(zone, name)
 }
 
-// held: the latest check for step passed.
-func (b *transferBook) held(zone string, step InstrStep) bool {
+// held: the latest check for the step named passed.
+func (b *transferBook) held(zone, name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	c := b.zones[canonicalName(zone)]
-	return c != nil && c.step == stepName(step) && c.ok
+	return c != nil && c.step == name && c.ok
 }
 
 // checkTransfer checks that this provider's nameservers serve the zone from
@@ -269,6 +280,10 @@ func (conf *Config) checkTransfer(zone, name string) {
 		return
 	}
 	lg.Info("the transfer confirmation for the step", "zone", zone, "provider", mp.Identity, "ok", true, "serial", served)
+	// the zone's turn now, not at its next tick: an agent that leads the
+	// zone counts its own step held there; every other agent's stamp
+	// tells it at its next beat
+	conf.askThaw(zone)
 }
 
 // --- A provider put back ---

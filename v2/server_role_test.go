@@ -107,6 +107,15 @@ func serving(t *testing.T, rrset *core.RRset, asked *[]string) {
 	t.Cleanup(func() { servingLookup = saved })
 }
 
+// nodata has every nameserver answer with no RRset and no error, as
+// AuthDNSQuery does for NODATA.
+func nodata(t *testing.T) {
+	t.Helper()
+	saved := servingLookup
+	servingLookup = func(context.Context, string, string) (*core.RRset, error) { return nil, nil }
+	t.Cleanup(func() { servingLookup = saved })
+}
+
 func serverRoleStep(id string) InstrStep {
 	return InstrStep{Number: 1, Of: 2, Digest: "d1", Taken: []string{serverRoleKey + id}}
 }
@@ -189,8 +198,13 @@ func TestTheServingCheckReadsTheSOAAndTheSigners(t *testing.T) {
 		{"a serial below the zone's", soa(t, zone, 9, key, priv), 10, false},
 		{"unsigned", soa(t, zone, 10, nil, nil), 10, false},
 		{"signed by another key", soa(t, zone, 10, stranger, strangerPriv), 10, false},
+		{"no RRset and no error (NODATA)", nil, 10, false},
 	} {
-		serving(t, c.rrset, nil)
+		if c.rrset == nil {
+			nodata(t)
+		} else {
+			serving(t, c.rrset, nil)
+		}
 		served, err := servingChainOK(context.Background(), zone, srNameservers, keys, c.min, time.Now())
 		if (err == nil) != c.ok {
 			t.Errorf("%s: %v, want ok %v", c.name, err, c.ok)
@@ -349,5 +363,58 @@ func TestAPutBackWinsOverTheLeadersWithdrawalBySerial(t *testing.T) {
 	}
 	if older, _ := zdr.noteReplaceOrigin(putBack, dns.TypeNS); older {
 		t.Error("the put-back under 43 is taken as older than the withdrawal under 42")
+	}
+}
+
+// A server role given again by a later transition, with the same sets, is
+// another step to the book: an earlier confirmation does not hold it.
+func TestAServerRoleGivenAgainIsCheckedAgain(t *testing.T) {
+	r := newServingRig(t, "again.serving.example.", srNewcomer)
+	s := newStore(t)
+	withStore(t, s)
+	r.conf.InternalMp.Instructions = s
+	step := serverRoleStep(srNewcomer)
+	activeAs(t, s, r.zone, jAt(t, 43, `servers="a,b,n" signers="a"`, freezeRecords...))
+	serving(t, soa(t, r.zone, 1, r.key, r.priv), nil)
+	if !serverRoleHolds(r.conf, r.zone, step) {
+		t.Fatal("not held under 43")
+	}
+	activeAs(t, s, r.zone, jAt(t, 45, `servers="a,b,n" signers="a"`, freezeRecords...))
+	serving(t, soa(t, r.zone, 0, r.key, r.priv), nil)
+	if serverRoleHolds(r.conf, r.zone, step) {
+		t.Error("held under 45 by the confirmation under 43")
+	}
+}
+
+// When the transfer confirmation passes, the zone's turn is asked at once:
+// an agent that leads the zone counts its own step held there, not at its
+// next tick.
+func TestAPassingTransferConfirmationAsksTheZonesTurn(t *testing.T) {
+	r := newReconcileRig(t, "wake.serving.example.", roleA)
+	r.v = jAt(t, 42, `servers="a,b,n" signers="a" suffix="v"`, freezeRecords...)
+	r.holdUnjudged(r.v, time.Now())
+	r.hear(roleN, tells(r.n, r.v), true)
+	r.thawNow()
+	key, priv := signingKey(t, r.zone)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.EnsureMP()
+	mpzd.Lock()
+	mpzd.MP.LocalDNSKEYs = []dns.RR{key}
+	mpzd.Unlock()
+	r.conf.MpConfig().Local.Nameservers = srNameservers
+	r.conf.InternalMp.transfers.start = func(check func()) { check() }
+	serving(t, soa(t, r.zone, 100, key, priv), nil)
+	b := &r.conf.InternalMp.thaws
+	b.mu.Lock()
+	b.pending = nil
+	b.mu.Unlock()
+	if !serverRoleHolds(r.conf, r.zone, serverRoleStep(roleA)) {
+		t.Fatal("not held")
+	}
+	b.mu.Lock()
+	asked := b.pending[canonicalName(r.zone)]
+	b.mu.Unlock()
+	if !asked {
+		t.Error("the zone's turn is not asked when the transfer confirmation passes")
 	}
 }

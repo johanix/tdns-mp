@@ -53,9 +53,13 @@ func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error)
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
 	}
-	rrset, _, _, err := imr.AuthDNSQuery(ctx, zone, dns.TypeSOA, addrs, log.Default(), false)
-	if err != nil {
+	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, dns.TypeSOA, addrs, log.Default(), false)
+	switch {
+	case err != nil:
 		return nil, err
+	case rrset == nil:
+		// NODATA, NXDOMAIN or a referral: no error, and no RRset
+		return nil, fmt.Errorf("no SOA in the answer (%s)", dns.RcodeToString[rcode])
 	}
 	return rrset, nil
 }
@@ -77,6 +81,9 @@ func servingChainOK(ctx context.Context, zone string, nameservers []string, keys
 		rrset, err := servingLookup(ctx, zone, ns)
 		if err != nil {
 			return lowest, fmt.Errorf("%s: %w", ns, err)
+		}
+		if rrset == nil {
+			return lowest, fmt.Errorf("%s serves no SOA for the zone", ns)
 		}
 		var soa *dns.SOA
 		for _, rr := range rrset.RRs {
