@@ -133,33 +133,54 @@ func TestAStampIsToldWhileWorkIsOwedKeptOrUnderWay(t *testing.T) {
 }
 
 // A beat tells a zone at rest here to a peer whose latest first-hand stamp
-// of it is not at rest, or tells other serials; and stops once the peer's
-// newer beat no longer tells it. (The same serial under another digest is
-// an owner error, which has the zone told to every member.)
+// of it is not at rest, or tells other serials. A peer's stamp at rest is
+// kept until the peer tells another (F3 of the external review): one that
+// lags, at rest at an older serial, goes on being told the newer, and
+// fetches it. One not at rest is dropped once the peer's newer beat no
+// longer tells it. (The same serial under another digest is an owner error,
+// which has the zone told to every member.)
 func TestAStampIsToldToAPeerWhoseStampDiffers(t *testing.T) {
-	seven := stampAt(t, 7, "a")
+	seven, six := stampAt(t, 7, "a"), stampAt(t, 6, "a")
 	st := stampTableAt(t, stampAlpha, seven)
 	heardAtRest(t, st, stampBeta, 1, 1, seven)
-	if got := zonesTold(st.entryFor(stampBeta), stampAlpha); len(got) != 0 {
+	toldTo := func(peer string) []string {
+		e := st.entryFor(peer)
+		st.acknowledged(peer, e)
+		return zonesTold(e, stampAlpha)
+	}
+	empty := func(seq uint64) *GossipMessage {
+		return &GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+			stampBeta: {Identity: stampBeta, Epoch: 1, Seq: seq}}}
+	}
+	if got := toldTo(stampBeta); len(got) != 0 {
 		t.Fatalf("to a peer at rest at the same serial: %v", got)
 	}
-	for i, their := range []InstrStamp{
-		tells(stampAt(t, 6, "a"), stampAt(t, 6, "a")),
-		tells(seven, stampAt(t, 8, "a")),
-	} {
-		st.note(told(stampBeta, 1, uint64(2+2*i), their), stampBeta, "DNS")
-		if got := zonesTold(st.entryFor(stampBeta), stampAlpha); !slices.Equal(got, []string{stampZone}) {
-			t.Errorf("to a peer that tells %+v: %v", their, got)
-		}
-		if got := zonesTold(st.entryFor(stampDelta), stampAlpha); len(got) != 0 {
-			t.Errorf("to another member: %v", got)
-		}
-		// the peer's next beat tells no zone: it is at rest there too
-		st.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
-			stampBeta: {Identity: stampBeta, Epoch: 1, Seq: uint64(3 + 2*i)}}}, stampBeta, "DNS")
-		if got := zonesTold(st.entryFor(stampBeta), stampAlpha); len(got) != 0 {
-			t.Errorf("after the peer's beat with no zone: %v", got)
-		}
+
+	// a peer that lags, at rest at 6
+	st.note(told(stampBeta, 1, 2, tells(six, six)), stampBeta, "DNS")
+	if got := toldTo(stampBeta); !slices.Equal(got, []string{stampZone}) {
+		t.Errorf("to a peer at rest at 6: %v", got)
+	}
+	if got := toldTo(stampDelta); len(got) != 0 {
+		t.Errorf("to another member: %v", got)
+	}
+	st.note(empty(3), stampBeta, "DNS")
+	if got := toldTo(stampBeta); !slices.Equal(got, []string{stampZone}) {
+		t.Errorf("to a peer at rest at 6, after its beat with no zone: %v", got)
+	}
+	st.note(told(stampBeta, 1, 4, tells(seven, seven)), stampBeta, "DNS")
+	if got := toldTo(stampBeta); len(got) != 0 {
+		t.Errorf("after the peer tells 7: %v", got)
+	}
+
+	// a peer not at rest, whose next beat tells no zone
+	st.note(told(stampBeta, 1, 5, tells(seven, stampAt(t, 8, "a"))), stampBeta, "DNS")
+	if got := toldTo(stampBeta); !slices.Equal(got, []string{stampZone}) {
+		t.Errorf("to a peer not at rest: %v", got)
+	}
+	st.note(empty(6), stampBeta, "DNS")
+	if got := toldTo(stampBeta); len(got) != 0 {
+		t.Errorf("after the peer's beat with no zone: %v", got)
 	}
 }
 
@@ -290,8 +311,9 @@ func massEdit(t *testing.T, local string, n int) (*stampTable, []string) {
 // A mass edit's beats always fit (plan S22, amended 2026-10-30): each
 // tells no more than the entry's budget holds, says it is partial while
 // zones are left out, and in ceil(n/K) beats, K the fewest any beat tells,
-// every zone is told. A zone told only for the peer's new epoch waits until
-// the edited zones fit.
+// every zone is told, each beat acknowledged: a zone just told does not
+// hold back those not told yet (F1 of the external review). A zone told
+// only for the peer's new epoch waits until the edited zones fit.
 func TestAMassEditsBeatsAlwaysFit(t *testing.T) {
 	for _, n := range []int{40, 1000} {
 		st, zones := massEdit(t, stampAlpha, n)
@@ -323,6 +345,7 @@ func TestAMassEditsBeatsAlwaysFit(t *testing.T) {
 					seen[z] = b
 				}
 			}
+			st.acknowledged(stampBeta, e)
 		}
 		if len(seen) != len(zones) {
 			t.Fatalf("%d zones: %d told in %d beats", n, len(seen), len(beats))
@@ -488,8 +511,7 @@ func TestTheAgentsStampsReadItsWork(t *testing.T) {
 
 // A zone whose stamp changed since an acknowledged beat to the peer told it
 // goes first, ahead of its turn: a step, a step held, a "done" each wait a
-// whole rotation otherwise. Changed zones take at most half the budget
-// while unchanged zones that something is going on in wait their turn.
+// whole rotation otherwise.
 func TestAChangedStampGoesFirst(t *testing.T) {
 	st, zones := massEdit(t, stampAlpha, 40)
 	for seen := map[string]bool{}; len(seen) < len(zones); {
@@ -512,30 +534,56 @@ func TestAChangedStampGoesFirst(t *testing.T) {
 	if got := zonesTold(st.entryFor(stampBeta), stampAlpha); !slices.Contains(got, target) {
 		t.Errorf("the changed zone %s is not in the next beat: %v", target, got)
 	}
+}
 
-	// thirty change at once: half the budget for them, the rest in turn
-	changed := map[string]bool{}
-	for _, z := range zones[:30] {
-		changed[z] = true
-	}
-	st.waitsOn = func(zone string) []string {
-		if changed[zone] {
-			return signers[:10]
+// Changed zones leave room for the zones that are due, told longer ago than
+// refresh, up to half the budget and no more than those need; while none is
+// due they take the whole budget (F1, F2 of the external review).
+func TestChangedZonesLeaveRoomForTheDueOnes(t *testing.T) {
+	split := func(nChanged int, due bool) (changedBytes, unchanged int, partial bool) {
+		t.Helper()
+		st, zones := massEdit(t, stampAlpha, 40)
+		for seen := map[string]bool{}; len(seen) < len(zones); {
+			e := st.entryFor(stampBeta)
+			for _, z := range zonesTold(e, stampAlpha) {
+				seen[z] = true
+			}
+			st.acknowledged(stampBeta, e)
 		}
-		return signers
-	}
-	e := st.entryFor(stampBeta)
-	var changedBytes, unchanged int
-	for zone, ist := range e.Members[stampAlpha].Instr {
-		if changed[zone] {
-			changedBytes += newToTell(zone, ist).size
-		} else {
-			unchanged++
+		changed := map[string]bool{}
+		for _, z := range zones[:nChanged] {
+			changed[z] = true
 		}
+		signers := st.waitsOn(zones[0])
+		st.waitsOn = func(zone string) []string {
+			if changed[zone] {
+				return signers[:10]
+			}
+			return signers
+		}
+		if due {
+			st.refresh = time.Nanosecond
+			time.Sleep(time.Millisecond)
+		}
+		e := st.entryFor(stampBeta)
+		for zone, ist := range e.Members[stampAlpha].Instr {
+			if changed[zone] {
+				changedBytes += newToTell(zone, ist).size
+			} else {
+				unchanged++
+			}
+		}
+		return changedBytes, unchanged, e.Members[stampAlpha].Partial
 	}
-	if changedBytes > stampEntryBudget/2 || unchanged == 0 || !e.Members[stampAlpha].Partial {
-		t.Errorf("with 30 changed: %d bytes of changed zones (half the budget is %d), %d unchanged told, partial %v",
-			changedBytes, stampEntryBudget/2, unchanged, e.Members[stampAlpha].Partial)
+	if b, _, partial := split(30, false); b <= stampEntryBudget*3/4 || !partial {
+		t.Errorf("with 30 changed and none due: %d bytes of changed zones, partial %v", b, partial)
+	}
+	if b, n, partial := split(30, true); b > stampEntryBudget/2 || n == 0 || !partial {
+		t.Errorf("with 30 changed and 10 due: %d bytes of changed zones (half the budget is %d), %d due told, partial %v",
+			b, stampEntryBudget/2, n, partial)
+	}
+	if b, n, _ := split(39, true); b <= stampEntryBudget*3/4 || n != 1 {
+		t.Errorf("with 39 changed and 1 due: %d bytes of changed zones, %d due told", b, n)
 	}
 }
 
@@ -563,5 +611,139 @@ func TestAZoneThatComesToRestIsToldOnce(t *testing.T) {
 	}
 	if got := zonesTold(st.entryFor(stampBeta), stampAlpha); len(got) != 0 {
 		t.Errorf("after the acknowledged beat at rest: %v", got)
+	}
+}
+
+// A peer that lags, at rest at an older serial, keeps the newer serial a
+// sender told it once at rest after the sender's full beats no longer tell
+// it, and tells it back (F3 of the external review); a zone no longer shared
+// goes, at rest or not.
+func TestALaggingPeerKeepsTheNewerSerialItWasTold(t *testing.T) {
+	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
+	bob := stampTableAt(t, stampBeta, seven)
+	bob.note(told(stampAlpha, 1, 1, tells(eight, eight)), stampAlpha, "DNS")
+	bob.acknowledged(stampAlpha, bob.entryFor(stampAlpha))
+	bob.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+		stampAlpha: {Identity: stampAlpha, Epoch: 1, Seq: 2}}}, stampAlpha, "DNS")
+	if st, kept := bob.heard(stampAlpha).Instr[stampZone]; !kept || st.Active != 8 {
+		t.Fatalf("after alice's full beat with no zone: kept %v, %+v", kept, st)
+	}
+	if got := zonesTold(bob.entryFor(stampAlpha), stampBeta); !slices.Equal(got, []string{stampZone}) {
+		t.Errorf("bob, at 7, tells alice: %v", got)
+	}
+	bob.store.mu.Lock()
+	delete(bob.store.zones, stampZone)
+	bob.store.mu.Unlock()
+	bob.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+		stampAlpha: {Identity: stampAlpha, Epoch: 1, Seq: 3}}}, stampAlpha, "DNS")
+	if _, kept := bob.heard(stampAlpha).Instr[stampZone]; kept {
+		t.Error("a zone no longer shared is kept")
+	}
+}
+
+// Zones told once, over several beats, after the receiver's start are kept
+// by it as each later beat leaves them out (F4 of the external review).
+func TestAOnceListingOverSeveralBeatsKeepsTheEarlierZones(t *testing.T) {
+	seven := stampAt(t, 7, "a")
+	alice, bob := stampTableAt(t, stampAlpha, seven), stampTableAt(t, stampBeta, seven)
+	all := []string{stampZone}
+	for i := range 299 {
+		zone := fmt.Sprintf("z%03d.example.", i)
+		noteKnown(t, alice.store, zone, seven)
+		noteKnown(t, bob.store, zone, seven)
+		all = append(all, zone)
+	}
+	slices.Sort(all)
+	tellEveryZoneOnce(alice, stampBeta)
+	beats := 0
+	for e := alice.entryFor(stampBeta); len(zonesTold(e, stampAlpha)) > 0; e = alice.entryFor(stampBeta) {
+		bob.note(e, stampAlpha, "DNS")
+		alice.acknowledged(stampBeta, e)
+		beats++
+	}
+	if got := slices.Sorted(maps.Keys(bob.heard(stampAlpha).Instr)); beats < 2 || !slices.Equal(got, all) {
+		t.Errorf("after %d beats bob holds %d of alice's %d zones", beats, len(got), len(all))
+	}
+}
+
+// The turn of the zones told goes on only when the beat that told them is
+// acknowledged: a beat lost is made again (F5 of the external review).
+func TestTheTurnMovesWhenABeatIsAcknowledged(t *testing.T) {
+	st, _ := massEdit(t, stampAlpha, 40)
+	first := zonesTold(st.entryFor(stampBeta), stampAlpha)
+	again := st.entryFor(stampBeta)
+	if got := zonesTold(again, stampAlpha); !slices.Equal(got, first) {
+		t.Fatalf("after a beat that was not acknowledged: %v, want %v again", got, first)
+	}
+	st.acknowledged(stampBeta, again)
+	if got := zonesTold(st.entryFor(stampBeta), stampAlpha); slices.ContainsFunc(got, func(z string) bool { return slices.Contains(first, z) }) {
+		t.Errorf("after the acknowledged beat: %v, want none of %v", got, first)
+	}
+}
+
+// A beat takes its sequence before it reads the stamps it tells: a message
+// whose stamp is read while the beat is made carries a later sequence, so
+// the receiver keeps the message's newer stamp (N1 of the external review).
+func TestABeatTakesItsSequenceBeforeItsStamps(t *testing.T) {
+	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
+	tellEveryZoneOnce(st, stampBeta)
+	var msg *MsgStamp
+	inside := false
+	st.rollover = func(zone string) bool {
+		if !inside && msg == nil {
+			inside = true
+			msg = st.messageStamp(zone)
+			inside = false
+		}
+		return false
+	}
+	e := st.entryFor(stampBeta)
+	if msg == nil || msg.Seq <= e.Members[stampAlpha].Seq {
+		t.Errorf("the beat's sequence %d, a message's made while it was made %+v", e.Members[stampAlpha].Seq, msg)
+	}
+}
+
+// An acknowledgement of a beat made before the peer's new epoch counts for
+// nothing: the zones it told are still owed once to the peer as it is now,
+// and an acknowledgement of a beat older than the latest made counts for
+// nothing either (S2 of the external review).
+func TestAnAcknowledgementFromBeforeThePeersNewEpochCountsForNothing(t *testing.T) {
+	seven := stampAt(t, 7, "a")
+	st := stampTableAt(t, stampAlpha, seven)
+	for i := range 299 {
+		noteKnown(t, st.store, fmt.Sprintf("z%03d.example.", i), seven)
+	}
+	owed := func() map[string]bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return maps.Clone(st.once[canonicalName(stampBeta)])
+	}
+	st.note(told(stampBeta, 1, 1, tells(seven, seven)), stampBeta, "DNS")
+	late := st.entryFor(stampBeta)
+	st.note(told(stampBeta, 2, 1, tells(seven, seven)), stampBeta, "DNS")
+	st.entryFor(stampBeta) // the new epoch's first beat, its zones counted
+	st.acknowledged(stampBeta, late)
+	left := owed()
+	for _, z := range zonesTold(late, stampAlpha) {
+		if !left[z] {
+			t.Fatalf("%s, told in a beat made before beta's new epoch, is no longer owed to it", z)
+		}
+	}
+}
+
+// A change told in a beat that was not acknowledged is told again when it
+// is undone: the peer may hold it (S2 of the external review).
+func TestAChangeInABeatNotAcknowledgedIsToldAgain(t *testing.T) {
+	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
+	heardAtRest(t, st, stampBeta, 1, 1, stampAt(t, 7, "a"))
+	rolling := true
+	st.rollover = func(string) bool { return rolling }
+	if got := zonesTold(st.entryFor(stampBeta), stampAlpha); !slices.Equal(got, []string{stampZone}) {
+		t.Fatalf("the rollover: %v", got)
+	}
+	rolling = false // the beat that told it was not acknowledged
+	e := st.entryFor(stampBeta)
+	if got := zonesTold(e, stampAlpha); !slices.Equal(got, []string{stampZone}) || e.Members[stampAlpha].Instr[stampZone].Rollover {
+		t.Errorf("after the rollover ended, its beat not acknowledged: %v", got)
 	}
 }

@@ -93,11 +93,14 @@ func (t *stampTable) messageStamp(zone string) *MsgStamp {
 	if t == nil {
 		return nil
 	}
+	// the sequence first: a beat whose stamps are read after this one is
+	// carries a later one (keep)
+	seq := t.seq.Add(1)
 	st, ok := t.ownStamp(zone)
 	if !ok {
 		return nil
 	}
-	return &MsgStamp{Epoch: t.epoch, Seq: t.seq.Add(1), InstrStamp: st}
+	return &MsgStamp{Epoch: t.epoch, Seq: seq, InstrStamp: st}
 }
 
 // confirmAppFor is a confirmation's application field with this agent's

@@ -400,6 +400,10 @@ func TestALeaderWithoutTheStateTakesItFromTheMembersStamps(t *testing.T) {
 	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "waiting for the leader's step, waiting for "+roleB+" (not heard)") {
 		t.Errorf("the status: %q", line)
 	}
+	r.operational(roleB) // heard, but telling nothing of the zone (plan S22)
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "waiting for "+roleB+" (tells nothing of the zone)") {
+		t.Errorf("the status with b heard: %q", line)
+	}
 	if r.wanted() != nil && r.conf.wantedHandover(r.zone) != nil {
 		t.Error("a leader with no step's sets hands its parts something new")
 	}

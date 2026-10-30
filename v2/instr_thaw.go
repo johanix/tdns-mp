@@ -336,12 +336,16 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		}
 	}
 	// A voting member under V that does not vote under N tells nothing the
-	// thaw waits for but its payload encryption (rule 4).
+	// thaw waits for but its payload encryption (rule 4), which its stamp
+	// row tells whether it tells the zone or not (plan S22).
 	for _, id := range votersV {
 		if core.EqualNames(id, local) || isAmong(votersN, AgentId(id)) {
 			continue
 		}
-		if st, ok := told[canonicalName(id)]; !ok || !st.encrypted {
+		switch m := t.heard(id); {
+		case m == nil:
+			v.waits = append(v.waits, id+" (not heard)")
+		case !m.encrypted():
 			v.waits = append(v.waits, id+" (payload encryption off)")
 		}
 	}
@@ -349,10 +353,20 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		v.parent = conf.parentWorkUnderWay(in.name)
 	} else if lem != nil {
 		if _, ok := lem.ZoneLeader(ZoneName(in.name)); !ok {
-			v.noLeader = lostLeader(leases, votersV, heard, told)
+			v.noLeader = lostLeader(leases, votersV, heard, t)
 		}
 	}
 	return v, true
+}
+
+// unheard is why a member with no stamp of a zone tells nothing of it: one
+// that is heard, OPERATIONAL, tells nothing of the zone, as at rest it lists
+// none (plan S22); one that is not is not heard.
+func (conf *Config) unheard(id string) string {
+	if ar := conf.InternalMp.AgentRegistry; ar != nil && ar.isAgentOperational(AgentId(id)) {
+		return "tells nothing of the zone"
+	}
+	return "not heard"
 }
 
 // tellsAgreement is why a member's latest first-hand stamp st does not
@@ -427,7 +441,7 @@ func (t *stampTable) waitsOnOf(zone string) []string {
 // and not leaving, with when it was last heard: the group stays without a
 // leader until it is heard again or the owner removes it (design 3.2,
 // membership 4.3). "" otherwise.
-func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]bool, told map[string]toldStamp) string {
+func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]bool, t *stampTable) string {
 	var last string
 	var at time.Time
 	for id, expiry := range leases {
@@ -438,9 +452,10 @@ func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]
 	if last == "" || heard[last] || !isAmong(votersV, AgentId(last)) {
 		return ""
 	}
+	// its last beat, whether it told the zone or not (plan S22)
 	since := "never"
-	if st, ok := told[last]; ok {
-		since = st.heard.Format(time.TimeOnly)
+	if m := t.heard(last); m != nil {
+		since = m.Heard.Format(time.TimeOnly)
 	}
 	return dns.Fqdn(last) + " not heard since " + since
 }
