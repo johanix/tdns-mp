@@ -108,4 +108,19 @@ func TestTransportBoundary_AWithdrawalReachesTheRecipientsCombiner(t *testing.T)
 	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second); !ok || amp.OriginatorID != AgentId(peer) || amp.Withdraw != nil {
 		t.Errorf("an RFI with the withdraw field, as routed: %+v", amp)
 	}
+
+	// an agent's update to its combiner, in the provider's name, keeps the
+	// field: it is the combiner's flag
+	upd, err := json.Marshal(DnsSyncPayload{MessageType: "update", OriginatorID: gone, YourIdentity: r.us.Identity, Zone: zone,
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}, Time: time.Now().Format(time.RFC3339Nano),
+		DistributionID: nextDistributionID(), Withdraw: &Withdraw{Provider: gone, RRtype: "NS"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the sender the transport takes from such a payload is the provider
+	r.us.Bridge.routeIncomingMessage(&transport.IncomingMessage{TypeToken: "update", SenderID: gone, TransportSender: peer,
+		Mechanism: transport.MechanismDNS, Zone: zone, Payload: upd, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second); !ok || amp.OriginatorID != gone || amp.Withdraw == nil {
+		t.Errorf("an update with the withdraw field, as routed: %+v", amp)
+	}
 }
