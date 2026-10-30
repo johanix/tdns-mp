@@ -284,6 +284,39 @@ func TestBothRecordsDroppedWithNoActiveSerialKnownIsAnOwnerError(t *testing.T) {
 	}
 }
 
+// The owner error of both records dropped while the active serial is not
+// known does not hold the restart rule up: once the active serial is known,
+// as from another agent's record, the next copy with neither record is
+// judged by it. One provider ends the service; two keep an owner error
+// (plan S9, item 12).
+func TestOnceKnownTheActiveSerialJudgesBothRecordsDropped(t *testing.T) {
+	two := at(t, 7, "alpha,beta")
+	one := readOf(t, instrBase[0], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`)
+	for _, c := range []struct {
+		name  string
+		known *Instructions
+		ends  bool
+	}{
+		{"known at one provider", one, true},
+		{"known at two providers", two, false},
+	} {
+		s := newStore(t)
+		s.Note(storeZone, two, nil)
+		s.Note(storeZone, one, nil)
+		s.Note(storeZone, nil, nil)
+		if err := s.Know(storeZone, sd(c.known), nil); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		s.Note(storeZone, nil, nil)
+		switch st := s.Status(storeZone); {
+		case c.ends && st != nil:
+			t.Errorf("%s: the service did not end: %s", c.name, st.Line())
+		case !c.ends && (st == nil || st.OwnerError != "HSYNC3 and HSYNCPARAM dropped while serial 7 lists 2 providers"):
+			t.Errorf("%s: want the owner error kept at serial 7, got %+v", c.name, st)
+		}
+	}
+}
+
 func TestTheEndOfMultiProviderServiceEndsTheSerials(t *testing.T) {
 	_, hdb := storeDB(t)
 	s := loadStore(t, hdb)
