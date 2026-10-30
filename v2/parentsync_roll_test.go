@@ -417,6 +417,11 @@ func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
 	purgeKEYsAtCombiner = func(_ *MPTransportBridge, _ ZoneName, origins []AgentId) { purged = append(purged, origins...) }
 	t.Cleanup(func() { purgeKEYsAtCombiner = saved })
 
+	// nothing is dropped before the leader's own KEY is here
+	(&Config{}).dropOtherKEYs(zdr, zone, "agent.nokey.example.")
+	if od, _ := ar.Get("agent.earlier.example."); od == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) != 1 {
+		t.Fatal("a KEY was dropped for a leader whose own KEY is not here")
+	}
 	(&Config{}).dropOtherKEYs(zdr, zone, "agent.leader.example.")
 	if od, _ := ar.Get("agent.leader.example."); od == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) != 1 {
 		t.Error("the leader's KEY is gone")
@@ -434,6 +439,24 @@ func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
 	if zu.Withdraw == nil || zu.AgentId != "agent.earlier.example." || len(zu.Operations) != 1 ||
 		zu.Operations[0].Operation != "replace" || zu.Operations[0].RRtype != "KEY" || len(zu.Operations[0].Records) != 0 {
 		t.Errorf("the combiner's drop: %+v", zu)
+	}
+}
+
+// A restart between step 5 in the keystore and its phase on disk resumes at
+// the delete, not wedged on the new key no longer kept published.
+func TestARollActivatedInTheKeystoreResumesAtTheDelete(t *testing.T) {
+	r := newRollRig(t, "roll.crash.example.")
+	k2 := r.start(t)
+	if err := activateRolledKey(r.mpzd.KeyDB, r.zone, k2, r.old.keyid); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.InternalMp.MPTransport.rollKEYs.forget(r.zone) // the restart
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro != nil {
+		t.Errorf("the roll did not end: %+v", ro)
+	}
+	if got := r.parent.trusts(); !slices.Equal(got, []uint16{k2}) {
+		t.Errorf("the parent trusts %v, want %d alone", got, k2)
 	}
 }
 
@@ -599,5 +622,78 @@ func TestTheRollCommandOnAnMPZoneTakesThisPath(t *testing.T) {
 	post(tdns.ZoneParentSyncPost{Command: "status", Zone: string(r.zone)})
 	if passed != 2 {
 		t.Errorf("tdns was asked %d times, want 2: a zone with no HSYNC3, and a status", passed)
+	}
+}
+
+// A roll whose agent another one now leads ends there as a member's keys
+// would: with the zone publishing the new KEY, the new key is active and the
+// old one retired; a new key that never left the agent is deleted.
+func TestARollWhoseLeadMovesEndsHere(t *testing.T) {
+	t.Run("published", func(t *testing.T) {
+		r := newRollRig(t, "roll.leadmoves.example.")
+		k2 := r.start(t)
+		r.publish(t, r.row(t, tdns.Sig0StatePublished, k2))
+		r.leader(r.them)
+		r.pass(t, syncOther)
+		if ro := r.roll(t); ro != nil {
+			t.Fatalf("the roll is kept at an agent that no longer leads: %+v", ro)
+		}
+		if got := r.active(t); !slices.Equal(got, []uint16{k2}) {
+			t.Errorf("active keys: %v, want %d alone", got, k2)
+		}
+		if st := r.keyState(t, r.old.keyid); st != tdns.Sig0StateRetired {
+			t.Errorf("the old key is %s, want %s", st, tdns.Sig0StateRetired)
+		}
+		if !strings.Contains(r.alog.String(), "the roll of the zone's SIG(0) key ends here") {
+			t.Errorf("no line for the end:\n%s", r.alog)
+		}
+	})
+	t.Run("made", func(t *testing.T) {
+		r := newRollRig(t, "roll.leadmoves.made.example.")
+		r.parent.refuse["add"] = dns.RcodeRefused
+		k2 := r.start(t)
+		r.leader(r.them)
+		r.due(t)
+		r.pass(t, syncOther)
+		if ro := r.roll(t); ro != nil {
+			t.Fatalf("the roll is kept: %+v", ro)
+		}
+		if k := sig0RowByID(r.mpzd.KeyDB, r.zone, tdns.Sig0StatePublished, k2); k != nil {
+			t.Errorf("the new key that never left the agent is kept")
+		}
+		if got := r.active(t); !slices.Equal(got, []uint16{r.old.keyid}) {
+			t.Errorf("active keys: %v, want %d alone", got, r.old.keyid)
+		}
+	})
+}
+
+// A leader that holds the zone's key, trusted, deletes at the parent a
+// retired key of the zone the parent still trusts, signed with the zone's
+// key, and does not ask about it again (a roll its leader left half done).
+func TestTheLeaderDeletesARetiredKeyTheParentStillTrusts(t *testing.T) {
+	r := newRollRig(t, "roll.sweep.example.")
+	k2 := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	if err := sig0KeyChange(r.mpzd.KeyDB, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate",
+		Keyname: string(r.zone), Keyid: r.old.keyid, State: tdns.Sig0StateRetired}); err != nil {
+		t.Fatal(err)
+	}
+	r.publish(t, k2)
+	trustKey(r.mpzd.KeyDB, string(r.zone), k2.keyid)
+	r.parent.trusted[k2.keyid] = true // the parent trusts both
+
+	r.conf.sweepRetiredKeys(r.ctx, r.zone)
+	u := r.parent.updates()
+	if len(u) != 1 || u[0].what != "delete" || u[0].keyid != r.old.keyid || u[0].signer != k2.keyid || u[0].rcode != dns.RcodeSuccess {
+		t.Fatalf("the parent got %+v, want the delete of %d signed with %d", u, r.old.keyid, k2.keyid)
+	}
+	if got := r.parent.trusts(); !slices.Equal(got, []uint16{k2.keyid}) {
+		t.Errorf("the parent trusts %v, want %d alone", got, k2.keyid)
+	}
+	r.conf.InternalMp.sig0Rolls.mu.Lock()
+	r.conf.InternalMp.sig0Rolls.swept = nil
+	r.conf.InternalMp.sig0Rolls.mu.Unlock()
+	r.conf.sweepRetiredKeys(r.ctx, r.zone)
+	if n := len(r.parent.updates()); n != 1 {
+		t.Errorf("a second sweep sent %d updates, want none more", n-1)
 	}
 }

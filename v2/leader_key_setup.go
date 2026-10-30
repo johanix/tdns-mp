@@ -79,6 +79,8 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	// The key rounds offer the key again while the parent does not trust
 	// it (keyPending, S14)
 	defer conf.InternalMp.CatchUp.keyCheck(zone)
+	// a retired key the parent still trusts is deleted there (S17a)
+	defer conf.sweepInBackground(ctx, zone)
 	// A renewal of a lead whose poll of this key has ended in this process,
 	// with the key published, changes nothing: no publication again and no
 	// poll, whatever the poll's outcome. A new lead, a new or taken key, and
@@ -177,7 +179,7 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
-	if _, _, err := sendZoneKEY(tm, zone, keyRR); err != nil {
+	if _, _, err := sendZoneKEY(tm, zone, keyRR, ""); err != nil {
 		return err
 	}
 	conf.InternalMp.keyPolls.published(zone)
@@ -192,9 +194,10 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 
 // sendZoneKEY sends the leader's KEY, as its replace with the publish
 // instruction, to its combiner and to the zone's other agents, under one
-// distribution, and returns it with the agents it went to. The error is the
-// combiner's: an agent the KEY could not be queued for is logged.
-func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY) (distID string, agents []AgentId, err error) {
+// distribution (distID, or a new one), and returns it with the agents it
+// went to. The error is the combiner's: an agent the KEY could not be
+// queued for is logged.
+func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY, distID string) (string, []AgentId, error) {
 	zu := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{
@@ -207,7 +210,7 @@ func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY) (distID s
 			Locations: publishLocations(zone),
 		},
 	}
-	distID, err = tm.EnqueueForCombiner(zone, zu, "")
+	distID, err := tm.EnqueueForCombiner(zone, zu, distID)
 	if err != nil {
 		lgAgent.Error("failed to publish KEY to combiner", "zone", zone, "err", err)
 		return "", nil, err
@@ -221,7 +224,7 @@ func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY) (distID s
 		Operations: zu.Operations,
 		Publish:    zu.Publish,
 	}
-	agents, _ = tm.getAllAgentsForZone(zone)
+	agents, _ := tm.getAllAgentsForZone(zone)
 	if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
 	}
