@@ -182,8 +182,10 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 
 			// Manual approval gate: if zone has mp-manual-approval, keep the
-			// edit pending for operator review — unless it's a no-op.
-			if mpzd, exists := Zones.Get(dns.Fqdn(zone)); exists && mpzd.Options[OptMPManualApproval] {
+			// edit pending for operator review — unless it's a no-op, or the
+			// leader's withdrawal from this combiner's own agent, which is
+			// applied at once as a hand-over is (plan S16).
+			if mpzd, exists := Zones.Get(dns.Fqdn(zone)); exists && mpzd.Options[OptMPManualApproval] && !removal {
 				// Check for no-op
 				noOp := mpzd.IsNoOpOperations(senderID, msg.Operations)
 				if noOp {

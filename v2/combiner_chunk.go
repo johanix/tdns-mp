@@ -1325,6 +1325,16 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 						if existingIsLocal && !senderIsLocal {
 							lgCombiner.Debug("dedup: local contribution exists, remote is no-op",
 								"rrtype", op.RRtype, "zone", zonename, "local", existingSender, "remote", req.SenderID)
+							// the sender's REPLACE leaves it none of its own:
+							// a record it held before does not stay published
+							// beside the local one (tdns-mp #211, S14's fleet)
+							_, gone, dropped, derr := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, nil)
+							if derr != nil {
+								lgCombiner.Error("removing the sender's own contribution failed", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", derr)
+							} else if dropped && policy.canApply(rrtype) {
+								removedRecords = append(removedRecords, gone...)
+								dataChanged = true
+							}
 							for _, rr := range parsedRRs {
 								appliedRecords = append(appliedRecords, rr.String())
 							}
