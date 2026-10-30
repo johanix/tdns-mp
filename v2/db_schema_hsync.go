@@ -242,6 +242,8 @@ var HsyncTables = map[string]string{
 		rrtype      INTEGER NOT NULL,
 		origin_time INTEGER NOT NULL, -- unix nanoseconds; the wire Time is RFC3339Nano
 		dist_id     TEXT NOT NULL,
+		under       INTEGER NOT NULL DEFAULT 0, -- the active serial stamped at the send (S16)
+		has_under   INTEGER NOT NULL DEFAULT 0,
 		UNIQUE(zone, agent_id, rrtype)
 	)`,
 
@@ -684,6 +686,14 @@ func (hdb *HsyncDB) migrateHsyncSchema() error {
 				log.Printf("schema migration failed: %s.%s → %s: %v", m.table, m.oldCol, m.newCol, err)
 			} else {
 				log.Printf("schema migration applied: %s.%s → %s", m.table, m.oldCol, m.newCol)
+			}
+		}
+	}
+	// a replace's origin keeps the serial stamped at its send (S16)
+	for _, col := range []string{"under", "has_under"} {
+		if !dbColumnExists(hdb.DB, "ZoneDataReplaceOrigin", col) {
+			if _, err := hdb.DB.Exec(fmt.Sprintf("ALTER TABLE ZoneDataReplaceOrigin ADD COLUMN %s INTEGER NOT NULL DEFAULT 0", col)); err != nil {
+				log.Printf("schema migration failed: ZoneDataReplaceOrigin.%s: %v", col, err)
 			}
 		}
 	}

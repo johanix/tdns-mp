@@ -139,11 +139,16 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 			hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 
+			// A removal in any origin's name that this combiner's own agent
+			// delivers with the withdrawal's flag is applied whether or not
+			// the origin votes (design 3.5, plan S16).
+			removal := combinerTakesRemoval(msg, deliveredBy, localAgents)
+
 			// An origin that does not vote in the zone is refused at once,
 			// before its edit is kept: also on a zone whose edits wait for
 			// manual approval, where it would otherwise wait to be refused
 			// only when approved.
-			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil {
+			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil && !removal {
 				refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
 				combinerSendConfirmation(tm, deliveredBy, refusal)
 				continue
@@ -238,6 +243,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				Publish:        msg.Publish,
 				DistributionID: msg.DistributionID,
 				Timestamp:      msg.Time,
+				Instr:          msg.Instr,
+				Removal:        removal,
 			}
 
 			// Only apply protected-namespace checks to remote agents.
