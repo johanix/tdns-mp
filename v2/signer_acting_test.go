@@ -633,6 +633,33 @@ func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 	}
 }
 
+// A signer's first load computes its data from its copy, though it waits
+// for its agent's hand-over: what the config parse leaves is the zone's
+// options alone (main_init.go), no data it acted by. So inline-signing is
+// on before the first publish, and the zone's DNSSEC policy binds as the
+// zone loads. Switched on only at the hand-over, the signer found no policy
+// bound and signed nothing (the smoke stage at 211-demo cacec84).
+func TestASignersFirstLoadSwitchesInlineSigningOnBeforeItsHandOver(t *testing.T) {
+	const zone = "firstload.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}} // as the parse leaves it
+	if line := signerActingLine(zone); line != "waiting for its agent's hand-over" {
+		t.Fatalf("the status says %q, want the signer waiting for its agent", line)
+	}
+	incoming := incomingCopy(t, zone, records...)
+	r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
+	if d := r.mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
+		t.Fatalf("after its first load the signer's data is %+v, want it a signer, as its copy says", d)
+	}
+	if !incoming.Options[tdns.OptInlineSigning] {
+		t.Error("inline-signing is not on in the copy the first load publishes")
+	}
+	if !r.e.wire.IsSigner(zone) {
+		t.Error("the key machine does not take the zone for one this provider signs")
+	}
+}
+
 // A signer handed nothing whose copy drops it altogether, its HSYNC3
 // record included, still waits: its key machine runs by the sets it last
 // acted by, with the label its identity has there (rule 5).
