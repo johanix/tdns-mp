@@ -45,6 +45,30 @@ provider, and the DS RRset that makes them trust its keys.
   first. It keeps answering correctly until nothing in
   any cache can still send a resolver to it.
 
+**One provider at a time.** Change the set of providers
+one provider at a time, and let each edit settle before
+the next. At every step at least one provider that serves
+or signs the zone before the edit must still do so after
+it.
+
+Do not exchange the whole set in one edit: the only
+provider replaced by another, or two providers replaced by
+a third. The providers agree on a change through the ones
+that are part of the zone both before and after it. An
+edit that leaves none gives them nobody to agree through,
+and for a while the old providers and the new ones can
+both update the parent.
+
+**Today:** tdns-mp does not yet hold a change until the
+providers agree on it. For a while after an edit that gives
+a provider a role or takes one away, two leaders can update
+the parent. Before the next edit, have each provider's
+operator check that its agent shows the zone's new roles:
+
+```sh
+tdns-mpcli agent zone mplist
+```
+
 ## 2. Who Is a Member
 
 - Every provider with an HSYNC3 record is a member of the
@@ -165,25 +189,65 @@ record stays.
 
 ### 4.2 Charlie's NS records leave the zone
 
-With `nsmgmt="agent"` the NS records charlie contributed
-are removed at this moment, not when its HSYNC3 record
-goes: by then it is too late. With the NS RRset managed
-by the owner, the owner removes them in the same edit.
+The edit of 4.1 withdraws nothing by itself. It starts
+the removal, which the leader of the zone's group runs.
+Charlie is never that leader, and the leader needs
+nothing from charlie to do it. With `parentsync="agent"`
+and a parent that takes UPDATE, the removal's first step
+is a roll of the zone's SIG(0) key, since charlie holds
+its private key. With `nsmgmt="agent"` the leader removes
+the NS records charlie contributed as a step of the
+removal, not when charlie's HSYNC3 record goes: by then
+it is too late. With the NS RRset managed by the owner,
+the owner removes them. Whether the zone's NS RRset or
+the parent's delegation changes first is open
+(section 6).
 
-**Today:** contributed NS records stay until an operator
-purges them at every remaining provider
+**Today:** nothing rolls the zone's SIG(0) key for a
+multi-provider zone. The agent's
+`zone dsync roll-sig0-key` runs the single-provider roll:
+it hands the new key to no other member, and it has not
+been tried on a multi-provider zone. So a provider that
+leaves and holds the zone's private key keeps it, and
+with it a key the parent may still trust. Today that is
+a provider that led the zone when the key was made, or a
+later leader that was handed it: a new leader asks the
+other providers in `servers=` and `signers=`, and any of
+them that holds the key hands it over. With
+[PR 217](https://github.com/johanix/tdns-mp/pull/217)
+it also asks every provider the zone lists without a
+role, which charlie is while its HSYNC3 record stays. A
+newly elected leader that no provider hands the key
+makes one of its own, and a parent that takes UPDATE may
+refuse it. So when charlie led the group and the parent
+takes UPDATE, keep charlie's agent running after 4.1
+until the new leader logs `imported SIG(0) key from peer`
+or `leader has local SIG(0) key, proceeding to publish`.
+Once every provider in `servers=` and `signers=` holds
+the key (step 7b of
+`docs/2026-10-12-membership-and-catch-up-plan.md`), the
+wait is not needed when, before charlie's agent stops,
+`tdns-mpcli agent parentsync status` at each remaining
+provider in `servers=` and `signers=` shows the zone's
+key id. No leader then makes a new key while the zone
+publishes one. From then on every provider that leaves
+keeps the key until the key is rolled.
+Contributed NS
+records stay until an operator purges them at every
+remaining provider
 ([issue 159](https://github.com/johanix/tdns-mp/issues/159)):
 
 ```sh
-tdns-mpcli combiner zone edits purge -z example.com. \
+tdns-mpcli combiner zone edits purge --zone example.com. \
     --origin agent.charlie.example.
 ```
 
 ### 4.3 Charlie keeps answering
 
-Charlie answers correctly, and keeps signing if it signs,
-for the NS RRset's TTL plus a safety period of its own.
-It notes any query that still arrives.
+Charlie answers correctly for the NS RRset's TTL plus a
+safety period of its own, and notes any query that still
+arrives. A signer goes on signing until the leader
+removes its DNSKEYs (4.4, 4.5).
 
 **Today:** a provider taken out of `signers=` goes on
 signing for as long as its HSYNC3 record stays
@@ -209,7 +273,8 @@ finish the leave.
    needs nothing from charlie for that: when it is safe
    is a matter of time and TTL only.
 3. The DS RRset's TTL passes.
-4. The other signers drop charlie's DNSKEYs.
+4. The leader removes charlie's DNSKEYs. Until then
+   every other signer keeps them in its key set.
 
 Charlie's DS has to outlive its NS because every signer
 signs its DNSKEY RRset with its own KSK.
@@ -225,8 +290,11 @@ not built yet
 ### 4.5 "Safe to remove"
 
 When the waits are over, charlie's `zone mplist` shows
-the zone as safe to remove. Charlie's operator, not the
-software, then takes the zone out of service.
+the zone as safe to remove. For a signer, the leader's
+removal of its DNSKEYs (4.4) is where charlie stops
+signing and serving the zone. For a server only, charlie's
+operator, not the software, then takes the zone out of
+service.
 
 **Today:** nothing says so
 ([issue 137](https://github.com/johanix/tdns-mp/issues/137)).
@@ -300,6 +368,19 @@ for as long as its HSYNC3 record stays, as a leaving
 signer does (4.3,
 [issue 147](https://github.com/johanix/tdns-mp/issues/147)).
 
+### 5.3 A provider becomes an auditor: not allowed
+
+A provider in `servers=` or `signers=` is not moved to
+`auditors=`. It holds contributions to the zone, and it
+may hold the zone's SIG(0) key; nothing hands those over
+when it becomes an auditor. To get there, the owner
+removes the provider completely (section 4) and adds it
+back as an auditor.
+
+Nothing looks for that edit. An owner who makes it
+anyway gets what the code does with it, which nothing
+tests.
+
 ## 6. The Owner's Edits
 
 Every agent of the zone keeps the owner's instructions by
@@ -365,9 +446,8 @@ by the zone's own copy, refused or not
 - Whether `servers=` before `signers=` is refused for a
   provider that is to sign. The owner's later intent
   cannot be known from the first edit.
-- Who removes a leaving provider's NS records: every
-  remaining provider when it sees the `servers=` change,
-  or the leaving provider's own agent.
+- Whether the zone's NS RRset or the parent's delegation
+  changes first when a provider leaves.
 
 ## 8. See Also
 
