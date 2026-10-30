@@ -157,8 +157,18 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			switch opName {
 			case "ping":
 				// The transport the operator named, and that one only: --api
-				// or --dns (the default).
-				useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api" // not-a-name: a transport name
+				// or --dns (the default). A name of neither is refused, not
+				// read as dns.
+				var useAPI bool
+				switch strings.TrimSpace(strings.ToLower(req.PingTransport)) { // not-a-name: a transport name
+				case "", "dns":
+				case "api":
+					useAPI = true
+				default:
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("unknown ping_transport %q (use dns or api)", req.PingTransport)
+					return
+				}
 				if toCombiner {
 					pingResp := doPeerPing(conf, toFqdn, useAPI)
 					resp.Error = pingResp.Error

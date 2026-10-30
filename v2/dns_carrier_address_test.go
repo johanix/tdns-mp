@@ -152,7 +152,8 @@ func TestDelivererDiscoveryAsksAddressable(t *testing.T) {
 }
 
 // The ping operation goes over the transport the operator names, and that
-// one only. Over DNS, an API-only peer has no address to ping, and its
+// one only: DNS when none is named, and a name of neither is refused before
+// any ping. Over DNS, an API-only peer has no address to ping, and its
 // HTTPS address is not dialled in its place, whatever its API's state.
 // Over the API with its TLSA withdrawn, it is not dialled either.
 func TestPingGoesOverTheNamedTransportOnly(t *testing.T) {
@@ -165,6 +166,8 @@ func TestPingGoesOverTheNamedTransportOnly(t *testing.T) {
 		{"usable API, --dns", true, "dns", "ping over dns failed"},
 		{"TLSA withdrawn, --dns", false, "dns", "ping over dns failed"},
 		{"TLSA withdrawn, --api", false, "api", "ping over api failed"},
+		{"usable API, no transport named", true, "", "ping over dns failed"},
+		{"usable API, a transport of neither kind", true, "udp", `unknown ping_transport "udp" (use dns or api)`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newIntegEnv(t, nil)
@@ -186,7 +189,7 @@ func TestPingGoesOverTheNamedTransportOnly(t *testing.T) {
 			if !resp.Error || !strings.Contains(resp.ErrorMsg, tc.want) {
 				t.Errorf("error %v %q, want one with %q", resp.Error, resp.ErrorMsg, tc.want)
 			}
-			if tc.transport == "dns" && !strings.Contains(resp.ErrorMsg, "no address available") {
+			if (tc.transport == "dns" || tc.transport == "") && !strings.Contains(resp.ErrorMsg, "no address available") {
 				t.Errorf("the DNS ping found an address to dial: %q", resp.ErrorMsg)
 			}
 		})
