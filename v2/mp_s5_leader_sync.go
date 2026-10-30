@@ -1353,6 +1353,19 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	if inventoryRecordedHook != nil {
 		inventoryRecordedHook(msg)
 	}
+	// The inventory is the owner's before what the signer holds is learned
+	// from it: a step that learning finds held (plan S12) reads the DS set
+	// of this inventory, not the one before (plan S13).
+	o := conf.InternalMp.KeyLifecycleOwner
+	var before tdns.DSIntent
+	var computedBefore tdns.DSIntent
+	if o != nil {
+		if prev != nil && prev.Owned {
+			before, _ = o.DSIntent(zd.ZoneData, dns.SHA256)
+		}
+		computedBefore = conf.computedDSIntentOr(msg.Zone)
+		o.SetInventory(msg.Zone, snap)
+	}
 	// what the signer holds of the agent's hand-over (plan S11), its hold
 	// included (S6): handed again until it holds what this agent wants;
 	// with no active serial known, what it holds with the hold (S9)
@@ -1362,16 +1375,9 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))
-	o := conf.InternalMp.KeyLifecycleOwner
 	if o == nil {
 		return true
 	}
-	var before tdns.DSIntent
-	if prev != nil && prev.Owned {
-		before, _ = o.DSIntent(zd.ZoneData, dns.SHA256)
-	}
-	computedBefore := conf.computedDSIntentOr(msg.Zone)
-	o.SetInventory(msg.Zone, snap)
 	if after, err := o.DSIntent(zd.ZoneData, dns.SHA256); msg.Owned && err == nil && after.Known && !sameDSIntent(before, after) {
 		conf.requestDelegationSync(ctx, msg.Zone, "the zone's DS set changed")
 	}

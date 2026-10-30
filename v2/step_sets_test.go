@@ -359,3 +359,57 @@ func TestTheStatusShowsTheStepsSetsPerPurpose(t *testing.T) {
 		t.Errorf("at a step the status says %q, want %q", got, want)
 	}
 }
+
+// A change of the sets computes the zone's data on a wrapper and swaps it in
+// under the zone's lock, as a refresh and a hand-over do: a reader under the
+// lock never races it (external review of #339). It tells only under -race.
+func TestAChangeOfTheSetsSwapsTheDataUnderTheZonesLock(t *testing.T) {
+	r := newComputedDSRig(t, "locked.steps.example.", []string{"us", "p2"})
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.mpzd.Lock()
+			if d := r.mpzd.MP.MPdata; d != nil {
+				_ = d.WeAreSigner
+			}
+			_ = r.mpzd.MPOptions[OptMPDisallowEdits]
+			r.mpzd.Unlock()
+		}
+	}()
+	for range 50 {
+		r.conf.onSetsChanged(r.mpzd, true)
+	}
+	close(stop)
+	<-done
+}
+
+// The signer's inventory is the owner's before what the signer holds is
+// learned from it: a step that learning finds held reads the DS set of
+// this inventory, not the one before (external review of #339).
+func TestTheInventoryIsTheOwnersBeforeTheSignersHoldIsLearned(t *testing.T) {
+	yes := true
+	r := newComputedDSRig(t, "inventoryfirst.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	h := &ActingHandover{Zone: z, Serial: 1, Digest: "x", Records: []string{"r"}, Made: time.Now()}
+	tr := newHandoverTracker(AgentId("agent.us.example."), func(ZoneName, *ZoneUpdate, string) (string, error) { return "", nil })
+	tr.toSigner = true
+	tr.zones[handoverKey(z)] = &zoneHandover{want: h}
+	var told, inventoried bool
+	tr.onHeld = func(zone string) { told, inventoried = true, r.owner.inventoryOf(zone) != nil }
+	r.conf.InternalMp.SignerHandover = tr
+	r.conf.noteKeyInventory(r.ctx, r.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z,
+		Inventory: []KeyInventoryItem{invItem(t, z, 257, KeyStateActive, &yes)}, Owned: true, Acting: h})
+	if !told {
+		t.Fatal("the signer's hold of the hand-over was not learned")
+	}
+	if !inventoried {
+		t.Error("the signer's hold was learned before its inventory was the owner's")
+	}
+}
