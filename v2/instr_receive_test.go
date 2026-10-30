@@ -680,6 +680,27 @@ func TestAfterActivationOwnContributionsGoAgainToThosePeers(t *testing.T) {
 	}
 }
 
+// The book lets a distribution go before it is queued again, so that a
+// "not yet" to what goes stays booked; one the queue does not take is
+// booked again, and goes at the engine's next try.
+func TestWhatCannotBeQueuedAgainStaysBooked(t *testing.T) {
+	r := newReceiveRig(t, "unqueued.sender.example.")
+	tm := r.conf.InternalMp.MPTransport
+	distID := r.notYetFromB(r.v)
+	r.agree()
+	r.done()
+	tm.ReliableQueue = nil
+	r.activated()
+	tm.ReliableQueue = r.queue
+	if !slices.ContainsFunc(tm.notYets.forZone(ZoneName(r.zone)), func(n *notYet) bool { return n.distID == distID }) {
+		t.Fatal("what the queue did not take is no longer booked")
+	}
+	r.activated()
+	if !r.resent(distID) {
+		t.Errorf("not sent again at the next try; queued %v", r.sent())
+	}
+}
+
 func TestANotYetThatArrivesAfterActivationIsSentAgainAtOnce(t *testing.T) {
 	r := newReceiveRig(t, "atonce.sender.example.")
 	r.agree()
