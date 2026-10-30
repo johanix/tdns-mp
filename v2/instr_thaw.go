@@ -216,6 +216,8 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 			}
 			st, ok := told[canonicalName(id)]
 			switch {
+			case !ok && heard[canonicalName(id)]:
+				v.waits = append(v.waits, id+" (tells nothing of the zone)")
 			case !ok || now.Sub(st.heard) > timeout:
 				v.waits = append(v.waits, id+" (not heard)")
 			case st.Error != "":
@@ -262,7 +264,7 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		}
 		m := member{id: id}
 		m.st, m.heard = told[canonicalName(id)]
-		m.tells = tellsAgreement(m.st, m.heard, now, timeout, v.from, v.to)
+		m.tells = tellsAgreement(m.st, m.heard, heard[canonicalName(id)], now, timeout, v.from, v.to)
 		m.rolling = m.tells == "" && m.st.Rollover
 		key := canonicalName(id)
 		if m.tells == "" && !m.rolling {
@@ -357,9 +359,14 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 // tell what the thaw needs: active from and agreeing on to, by serial and
 // digest, its active serial known, no owner error, its signer's hold, heard
 // within timeout (rule 4). "" when it does. Its rollover is read apart.
-func tellsAgreement(st toldStamp, heard bool, now time.Time, timeout time.Duration, from, to SerialDigest) string {
+// told: a stamp of the zone has been heard from it; operational: it is
+// heard at all. A member that is, but tells nothing of the zone, has
+// nothing going on in it (plan S22) until it hears the others' stamps.
+func tellsAgreement(st toldStamp, told, operational bool, now time.Time, timeout time.Duration, from, to SerialDigest) string {
 	switch {
-	case !heard:
+	case !told && operational:
+		return "tells nothing of the zone"
+	case !told:
 		return "not heard"
 	case now.Sub(st.heard) > timeout:
 		return "not heard since " + st.heard.Format(time.TimeOnly)
