@@ -1733,6 +1733,13 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		staleIgnored := recordsOfTypes(staleHeld, ignoredSets)
 		staleHeld = recordsNotOfTypes(staleHeld, failedSets)
 		synchedDataUpdate.dropStaleOperations()
+		// A withdrawal older than the provider's own replace applied here
+		// is refused, not confirmed and not passed on: the provider's
+		// records stay, and the leader's removal stays open (plan S16).
+		if err == nil && synchedDataUpdate.Withdraw != nil && synchedDataUpdate.Update != nil && len(synchedDataUpdate.Update.Operations) == 0 {
+			refuseWithdrawal(synchedDataUpdate, "older than the provider's own records applied here", msgQs)
+			return
+		}
 		if err == nil && !change && synchedDataUpdate.Update != nil {
 			fresh := updateRRtypes(synchedDataUpdate.Update)
 			inFlight := zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, fresh, false)
