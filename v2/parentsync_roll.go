@@ -484,15 +484,30 @@ func (conf *Config) rollOnce(ctx context.Context, zone ZoneName, cause syncCause
 	return true
 }
 
-// rollsDue runs a pass of every roll in the agent's keystore: the backstop,
-// from the 30 s ticker, which carries a roll waiting for its members and one
-// whose retry is due.
+// rollsDue runs a pass of every roll in the agent's keystores, its own and
+// each zone's (zoneKeyDB): the backstop, from the 30 s ticker, which carries
+// a roll waiting for its members and one whose retry is due.
 func (conf *Config) rollsDue(ctx context.Context) {
-	if conf.Config == nil || conf.Config.Internal.KeyDB == nil {
-		return
+	seen := map[*tdns.KeyDB]bool{}
+	var kdbs []*tdns.KeyDB
+	add := func(kdb *tdns.KeyDB) {
+		if kdb != nil && !seen[kdb] {
+			seen[kdb] = true
+			kdbs = append(kdbs, kdb)
+		}
 	}
-	for _, zone := range rollZones(conf.Config.Internal.KeyDB) {
-		conf.rollInBackground(ctx, zone)
+	if conf.Config != nil {
+		add(conf.Config.Internal.KeyDB)
+	}
+	for _, zd := range tdns.Zones.Items() {
+		if zd != nil {
+			add(zd.KeyDB)
+		}
+	}
+	for _, kdb := range kdbs {
+		for _, zone := range rollZones(kdb) {
+			conf.rollInBackground(ctx, zone)
+		}
 	}
 }
 

@@ -541,6 +541,23 @@ func TestAFailedRollIsRetriedOnItsOwnSchedule(t *testing.T) {
 	}
 }
 
+// The ticker's pass finds a roll kept in its zone's own keystore, not only
+// in the agent's.
+func TestTheTickerFindsARollInTheZonesOwnKeystore(t *testing.T) {
+	r := newRollRig(t, "roll.ticker.example.")
+	r.parent.refuse["add"] = dns.RcodeRefused
+	r.start(t)
+	if r.conf.Config != nil && r.conf.Config.Internal.KeyDB == r.mpzd.KeyDB {
+		t.Fatal("the rig's zone keeps its key in the agent's keystore")
+	}
+	r.due(t)
+	r.conf.rollsDue(r.ctx)
+	r.conf.InternalMp.sig0Rolls.wait()
+	if ro := r.roll(t); ro == nil || ro.phase != rollPublished {
+		t.Errorf("the roll after the ticker's pass: %+v", ro)
+	}
+}
+
 // The roll's phase is on disk: after a restart, which loses the book of
 // the new KEY, the KEY is published again and the roll goes on to done.
 func TestTheRollResumesAfterARestart(t *testing.T) {
