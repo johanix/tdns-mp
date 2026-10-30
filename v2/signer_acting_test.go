@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -855,6 +856,87 @@ func TestADroppedHandOverGoesToTheSignerAgainWithinHalfAMinute(t *testing.T) {
 	if got := qc.take(); len(got) != 0 {
 		t.Error("the combiner was handed the zone again after 31s")
 	}
+}
+
+// A hand-over the signer refuses for good comes again every 30s: the same
+// refusal is logged once per handoverResend, at Debug between, and again
+// at once for another reason or after a hand-over is taken.
+func TestARepeatedRefusalIsLoggedOnce(t *testing.T) {
+	buf := &lockedBuffer{}
+	logTo(t, lgSigner, slog.NewJSONHandler(buf, nil))
+	warned := func() int { return strings.Count(buf.String(), `"msg":"refusing a hand-over"`) }
+	const zone = "quiet.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	h := handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="p2"`)...)
+
+	r.hand(h, "agent.p2.example.")
+	r.hand(h, "agent.p2.example.")
+	if n := warned(); n != 1 {
+		t.Errorf("the same refusal twice was logged %d times, want once", n)
+	}
+	v, ok := refusalLogged.Load(handoverKey(zone))
+	if !ok {
+		t.Fatal("the refusal logged was not noted")
+	}
+	last := v.(refusal)
+	last.at = last.at.Add(-handoverResend)
+	refusalLogged.Store(handoverKey(zone), last)
+	r.hand(h, "agent.p2.example.")
+	if n := warned(); n != 2 {
+		t.Errorf("the refusal after %v was logged %d times in all, want 2", handoverResend, n)
+	}
+	r.hand(h, "agent.p3.example.")
+	if n := warned(); n != 3 {
+		t.Errorf("a refusal for another reason was logged %d times in all, want 3", n)
+	}
+	r.hand(handoverFor(t, zone, records...), sigUs)
+	r.hand(h, "agent.p3.example.")
+	if n := warned(); n != 4 {
+		t.Errorf("the refusal after a hand-over taken was logged %d times in all, want 4", n)
+	}
+}
+
+// The agent's resend to the signer, every 30s while the signer does not
+// hold the hand-over, is logged at Info once per handoverResend.
+func TestTheResendToTheSignerIsLoggedOncePerFiveMinutes(t *testing.T) {
+	buf := &lockedBuffer{}
+	logTo(t, lgEngine, slog.NewJSONHandler(buf, nil))
+	logged := func() int { return strings.Count(buf.String(), `"msg":"handing the signer the serial it acts by"`) }
+	loggedWithin := func(want int) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); logged() < want; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		if n := logged(); n != want {
+			t.Errorf("%d hand-overs to the signer logged at Info, want %d", n, want)
+		}
+	}
+	const zone = "quiet.resend.example."
+	tr, q := signerTracker(t)
+	resend := func() {
+		t.Helper()
+		tr.mu.Lock()
+		tr.zones[handoverKey(zone)].flightAt = time.Now().Add(-31 * time.Second)
+		tr.mu.Unlock()
+		tr.tick()
+		signerSent(t, q, 1)
+	}
+	tr.handOver(wantOf(zone, 6, "us"))
+	signerSent(t, q, 1)
+	loggedWithin(1)
+	resend()
+	loggedWithin(2)
+	resend()
+	loggedWithin(2)
+	tr.mu.Lock()
+	tr.zones[handoverKey(zone)].resendLogged = time.Now().Add(-handoverResend)
+	tr.mu.Unlock()
+	resend()
+	loggedWithin(3)
 }
 
 // A burst of hand-overs, one to three a zone as a transition of 40 zones

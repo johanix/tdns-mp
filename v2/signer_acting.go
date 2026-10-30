@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -47,6 +48,10 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	h := sig.Acting
 	zone := dns.Fqdn(sig.Zone)
 	refuse := func(why string) {
+		if !warnRefusal(zone, why, time.Now()) {
+			lgSigner.Debug("refusing a hand-over again", "zone", zone, "sender", sig.SenderID, "reason", why)
+			return
+		}
 		lgSigner.Warn("refusing a hand-over", "zone", zone, "sender", sig.SenderID, "reason", why)
 	}
 	mp := conf.MpConfig()
@@ -88,12 +93,37 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 		mpzd.actBySignerHandover(conf, confirmers)
 	}
 	if err == nil {
+		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
 	}
 	if err == nil && h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgSigner)
 	}
 	pushSignerInventory(conf, zone)
+}
+
+// refusalLogged is the refusal last logged for each zone, and when: the
+// agent hands a zone the signer refuses again every signerHandoverResend,
+// and the same refusal is logged once per handoverResend, at Debug
+// between. A hand-over taken clears it.
+var refusalLogged sync.Map // handoverKey(zone) -> refusal
+
+type refusal struct {
+	why string
+	at  time.Time
+}
+
+// warnRefusal: the refusal is not the one last logged for the zone, or
+// that was logged handoverResend ago; it is noted as logged now.
+func warnRefusal(zone, why string, now time.Time) bool {
+	key := handoverKey(zone)
+	if v, ok := refusalLogged.Load(key); ok {
+		if last := v.(refusal); last.why == why && now.Sub(last.at) < handoverResend {
+			return false
+		}
+	}
+	refusalLogged.Store(key, refusal{why: why, at: now})
+	return true
 }
 
 // signerConfirmers are the providers the zone's key machine expects

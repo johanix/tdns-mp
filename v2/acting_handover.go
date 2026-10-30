@@ -227,10 +227,13 @@ type zoneHandover struct {
 	flight   *ActingHandover
 	flightAt time.Time
 	heldAt   time.Time // when the combiner was last known to hold want
-	waiting  []waitingUpdate
-	draining bool      // an update that waited is being queued (drain)
-	reset    bool      // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
-	resetAt  time.Time // when they were forgotten
+	// when a resend was last logged at Info: to the signer, once per
+	// handoverResend, though it goes every signerHandoverResend
+	resendLogged time.Time
+	waiting      []waitingUpdate
+	draining     bool      // an update that waited is being queued (drain)
+	reset        bool      // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
+	resetAt      time.Time // when they were forgotten
 }
 
 type waitingUpdate struct {
@@ -280,10 +283,12 @@ func (t *handoverTracker) handOver(h *ActingHandover) {
 	t.send(send)
 }
 
-// handoverSend is a hand-over due, with the distribution it goes under.
+// handoverSend is a hand-over due, with the distribution it goes under;
+// quiet, a resend logged at Debug.
 type handoverSend struct {
 	h      *ActingHandover
 	distID string
+	quiet  bool
 }
 
 // dueLocked is the hand-over to send for z now, nil when none is due: the
@@ -331,7 +336,11 @@ func (t *handoverTracker) deliver(hs *handoverSend) {
 		t.mu.Unlock()
 		return
 	}
-	lgEngine.Info("handing the "+t.part()+" the serial it acts by", "zone", h.Zone, "handover", h.String(), "distrib", hs.distID)
+	log := lgEngine.Info
+	if hs.quiet {
+		log = lgEngine.Debug
+	}
+	log("handing the "+t.part()+" the serial it acts by", "zone", h.Zone, "handover", h.String(), "distrib", hs.distID)
 }
 
 func (t *handoverTracker) zone(zone string) *zoneHandover {
@@ -632,7 +641,13 @@ func (t *handoverTracker) tick() {
 		// as an unanswered one: its inventory at its start asks sooner
 		failed := z.flight == nil && !t.toSigner
 		if failed || time.Since(z.flightAt) > t.resendAfter() {
-			sends = append(sends, t.dueLocked(z, true))
+			if hs := t.dueLocked(z, true); hs != nil {
+				hs.quiet = t.toSigner && time.Since(z.resendLogged) < handoverResend
+				if !hs.quiet {
+					z.resendLogged = time.Now()
+				}
+				sends = append(sends, hs)
+			}
 		}
 		if len(z.waiting) > 0 {
 			drains = append(drains, key)
