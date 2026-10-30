@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -1064,12 +1065,25 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 // syncs, ask for nothing.
 func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
-		var before *MPdata
-		if mpzd.MP != nil {
-			before = mpzd.MP.MPdata
-		}
-		mpzd.populateMPdata(conf.MpConfig(), mpzd.roles())
-		if after := mpzd.MP.MPdata; before != nil && after != nil && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners) {
+		// Computed on a wrapper of the zone as served, with a map of its own,
+		// and swapped in under the zone's lock, as a refresh and a hand-over
+		// do; one of the three at a time (mpDataLock).
+		mpMu := mpDataLock(mpzd.ZoneName)
+		mpMu.Lock()
+		mpzd.Lock()
+		mpzd.EnsureMP()
+		before := mpzd.MP.MPdata
+		w := &MPZoneData{ZoneData: mpzd.ZoneData, MP: &MPState{MPdata: before}, MPOptions: maps.Clone(mpzd.MPOptions)}
+		mpzd.Unlock()
+		w.populateMPdata(conf.MpConfig(), mpzd.roles())
+		mpzd.Lock()
+		mpzd.MP.MPdata, mpzd.MPOptions = w.MP.MPdata, w.MPOptions
+		after := mpzd.MP.MPdata
+		mpzd.Unlock()
+		mpMu.Unlock()
+		// data a load or a hand-over computed on both sides: the config
+		// parse's stub names no DS signer, and is no change of them
+		if before.computed() && after.computed() && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners) {
 			conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
 		}
 		// a recipient the zone's CSYNC waits for may have no role since: the

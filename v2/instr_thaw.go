@@ -830,6 +830,16 @@ func instructionsAnswered(zone string, sd SerialDigest, data map[string]string) 
 	return in, nil
 }
 
+// instructionsLine is the zone's instructions in one line, with its
+// transition (thawLine), as the auditor's zone page shows them.
+func (conf *Config) instructionsLine(zone string) string {
+	st := conf.InternalMp.Instructions.Status(zone)
+	if st != nil {
+		st.Thaw = conf.thawLine(zone)
+	}
+	return st.Line()
+}
+
 // thawLine is the zone's transition as the status shows it: what the
 // restart rule waits for while the active serial is not known (S9), its
 // reconciliation's step and what it waits for (plan S12), what the
