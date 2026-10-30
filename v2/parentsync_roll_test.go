@@ -278,6 +278,37 @@ func TestTheNewKEYIsPublishedOnlyAfterTheParentHasTakenIt(t *testing.T) {
 	}
 }
 
+// A recipient that keeps the new KEY and applies it not by its role
+// (IGNORED) has taken it; a refusal fails the try, and the KEY goes again.
+func TestARefusedKEYIsSentAgainAndAnIgnoredOneIsTaken(t *testing.T) {
+	r := newRollRig(t, "roll.ignored.example.")
+	r.start(t)
+	tm := r.conf.InternalMp.MPTransport
+	st, _ := tm.rollKEYs.state(r.zone)
+	tm.rollKEYs.heard(st.distID, st.expected[0], "REJECTED", "not now", false)
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro == nil || ro.phase != rollPublished || ro.failures != 1 {
+		t.Fatalf("the roll after a refused KEY: %+v", ro)
+	}
+	r.due(t)
+	r.pass(t, syncOther)
+	again, ok := tm.rollKEYs.state(r.zone)
+	if !ok || again.distID == st.distID {
+		t.Fatalf("the KEY was not sent again after a refusal: %+v", again)
+	}
+	for i, rcpt := range again.expected {
+		status := "SUCCESS"
+		if i == 0 {
+			status = "IGNORED"
+		}
+		tm.rollKEYs.heard(again.distID, rcpt, status, "persisted, not applied", false)
+	}
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro != nil {
+		t.Errorf("the roll with an IGNORED word did not end: %+v", ro)
+	}
+}
+
 // After step 5 the parent is asked to delete the old key, signed with the
 // new one, and then trusts the new key alone. The roll is done.
 func TestTheOldKeyIsDeletedWithAnUpdateTheNewKeySigns(t *testing.T) {
