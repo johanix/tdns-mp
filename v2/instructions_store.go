@@ -1061,7 +1061,9 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		after := mpzd.MP.MPdata
 		mpzd.Unlock()
 		mpMu.Unlock()
-		if before != nil && after != nil && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners) {
+		// data a load or a hand-over computed on both sides: the config
+		// parse's stub names no DS signer, and is no change of them
+		if before.computed() && after.computed() && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners) {
 			conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
 		}
 		// a recipient the zone's CSYNC waits for may have no role since: the

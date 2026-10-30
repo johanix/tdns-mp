@@ -413,3 +413,21 @@ func TestTheInventoryIsTheOwnersBeforeTheSignersHoldIsLearned(t *testing.T) {
 		t.Error("the signer's hold was learned before its inventory was the owner's")
 	}
 }
+
+// The first data a change of the sets computes over the config parse's stub
+// is no change of the DS signers: the stub names none, and asks no sync
+// (external review of #339, N2).
+func TestTheFirstDataOverTheParsesStubAsksNoSync(t *testing.T) {
+	r := newComputedDSRig(t, "stub.steps.example.", []string{"us", "p2"})
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.leader("agent.us.example.")
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncAgent // the agents sync the parent
+	stepAs(t, s, r.mpzd.ZoneName, 1, withSigners(rest, "us", "p2"))
+	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}} // as the parse leaves it
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 0 {
+		t.Errorf("the first data over the parse's stub asked for %d syncs", n)
+	}
+}
