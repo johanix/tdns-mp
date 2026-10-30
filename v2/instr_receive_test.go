@@ -572,7 +572,7 @@ func TestARejectionFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	if !notYet {
 		t.Fatal("a rejection from a peer at another serial reads as final")
 	}
-	tm.processDnskeyConfirmation("d1", roleB, "REJECTED", nil, nil, []RejectedItemInfo{{Record: "x", Reason: staleInstructions}}, notYet)
+	tm.processDnskeyConfirmation("d1", roleB, "REJECTED", nil, nil, []RejectedItemInfo{{Record: "x", Reason: staleInstructions}}, notYet, nil)
 	prop := tm.pendingDnskeyPropagations["d1"]
 	if prop == nil || prop.ExpectedAgents[roleB] || prop.Rejected || len(prop.Results[roleB]) != 0 {
 		t.Errorf("the key's propagation after a \"not yet\": %+v, want it pending for b", prop)
@@ -586,7 +586,7 @@ func TestAnIgnoredFromAPeerAtAnotherSerialIsNotFinal(t *testing.T) {
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), "d1", []uint16{7}, nil, []AgentId{roleB})
 	tm.pendingDnskeyPropagations["d1"].Signing = map[AgentId]bool{roleB: true}
 	notYet := tm.notYetFrom("d1", roleB, transport.ConfirmIgnored, "", msgStampAt(r.v))
-	tm.processDnskeyConfirmation("d1", roleB, "IGNORED", nil, nil, nil, notYet)
+	tm.processDnskeyConfirmation("d1", roleB, "IGNORED", nil, nil, nil, notYet, nil)
 	if prop := tm.pendingDnskeyPropagations["d1"]; prop == nil || len(prop.Results[roleB]) != 0 {
 		t.Errorf("the key's propagation after a \"not yet\": %+v, want it pending for b", prop)
 	}
@@ -723,7 +723,7 @@ func TestAKeyDistributionMadeUnderAnOlderSerialIsResent(t *testing.T) {
 	tm := r.conf.InternalMp.MPTransport
 	distID := r.notYetFromB(r.v)
 	tm.TrackDnskeyPropagation(ZoneName(r.zone), distID, []uint16{7}, nil, []AgentId{roleB})
-	tm.processDnskeyConfirmation(distID, roleB, "REJECTED", nil, nil, nil, true)
+	tm.processDnskeyConfirmation(distID, roleB, "REJECTED", nil, nil, nil, true, nil)
 	r.agree()
 	r.done()
 	r.activated()
