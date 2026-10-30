@@ -47,16 +47,42 @@ func (conf *Config) SetMpConfig(mp *MultiProviderConf) {
 	wiredMpConfig.Store(mp)
 }
 
+// zoneSetups remembers, by zone name, the *tdns.ZoneData a per-zone
+// setup was done on: callbacks attached to the zone, state on its
+// wrapper. The name alone is not enough. A reload that drops a zone and
+// a later one that brings it back put a new *tdns.ZoneData under the
+// same name, and that zone has had none of the setup (#313).
+type zoneSetups map[string]*tdns.ZoneData
+
+// done reports whether the setup was done on zd, the zone tdns holds
+// under name.
+func (s zoneSetups) done(name string, zd *tdns.ZoneData) bool {
+	return s[name] == zd
+}
+
+// prune forgets each zone tdns no longer holds as it was set up: one
+// that has left tdns.Zones, or that tdns has put back as a new
+// *tdns.ZoneData.
+func (s zoneSetups) prune() {
+	for name, zd := range s {
+		if !isLiveZone(name, zd) {
+			delete(s, name)
+		}
+	}
+}
+
 // RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
 // closures to all MP zones that don't already have them. Called at
 // startup and after every zone reload (SIGHUP / "config reload-zones")
-// via the PostParseZonesHook.
+// via the PostParseZonesHook. A zone a reload has put back gets them
+// again.
 func (conf *Config) RegisterMPRefreshCallbacks() {
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
 	if conf.InternalMp.refreshRegistered == nil {
-		conf.InternalMp.refreshRegistered = make(map[string]bool)
+		conf.InternalMp.refreshRegistered = zoneSetups{}
 	}
+	conf.InternalMp.refreshRegistered.prune()
 	// A zone that leaves the configuration takes its serials with it
 	// (design rule 3): at the start, and after every zone reload, which
 	// has removed it from tdns's zones by now.
@@ -65,18 +91,18 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		return ok && zd.Options[tdns.OptMultiProvider]
 	})
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
-		if conf.InternalMp.refreshRegistered[zoneName] {
-			continue
-		}
 		zd, ok := Zones.Get(zoneName)
 		if !ok || !zd.Options[tdns.OptMultiProvider] {
+			continue
+		}
+		if conf.InternalMp.refreshRegistered.done(zoneName, zd.ZoneData) {
 			continue
 		}
 		// Wire SyncQ on every MP zone so PostRefresh can send without blocking
 		if zd.SyncQ == nil {
 			zd.SyncQ = conf.InternalMp.SyncQ
 		}
-		conf.InternalMp.refreshRegistered[zoneName] = true
+		conf.InternalMp.refreshRegistered[zoneName] = zd.ZoneData
 		// The closure looks up conf.MpConfig() at invocation rather than
 		// capturing the current pointer, so PostParseConfigHook can
 		// replace the parsed MultiProviderConf on reload (SIGHUP) without
@@ -134,7 +160,8 @@ func (conf *Config) ForEachMPZone(fn func(zd *MPZoneData)) {
 // MP zones that have not had them (and the PersistContributions callback),
 // and attaches their OnFirstLoad callbacks (the combine, signal keys).
 // Called at startup, before the refresh engine and the message router
-// start, and on reload via PostParseZonesHook for mpcombiner.
+// start, and on reload via PostParseZonesHook for mpcombiner. A zone a
+// reload has put back gets them again.
 //
 // The contributions are restored here, before the zone's first load, and
 // not in OnFirstLoad: the first load combines and publishes in
@@ -148,8 +175,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		return
 	}
 	if conf.InternalMp.onFirstLoadRegistered == nil {
-		conf.InternalMp.onFirstLoadRegistered = make(map[string]bool)
+		conf.InternalMp.onFirstLoadRegistered = zoneSetups{}
 	}
+	conf.InternalMp.onFirstLoadRegistered.prune()
 	for _, zone := range providerZonesWithoutOption(conf.InternalMp.MPZoneNames) {
 		lgCombiner.Warn("a provider zone lacks the multi-provider option: its _signal KEYs are not put back at a restart or a refresh, and a withdrawal from it waits for good",
 			"zone", zone)
@@ -173,14 +201,13 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	}
 
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
-		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
-			continue
-		}
 		mpzd, exists := Zones.Get(zoneName)
-		if !exists {
+		// MPZoneNames keeps every name a reload has listed, so a name may now
+		// be a zone without multi-provider: as RegisterMPRefreshCallbacks.
+		if !exists || !mpzd.Options[tdns.OptMultiProvider] || conf.InternalMp.onFirstLoadRegistered.done(zoneName, mpzd.ZoneData) {
 			continue
 		}
-		conf.InternalMp.onFirstLoadRegistered[zoneName] = true
+		conf.InternalMp.onFirstLoadRegistered[zoneName] = mpzd.ZoneData
 		mpzd.restoreContributions(hdb, allContribs[zoneName], err == nil)
 
 		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
@@ -334,8 +361,8 @@ type InternalMpConf struct {
 	DistributionCache     *DistributionCache
 	AuditStateManager     *AuditStateManager
 	AuditWebAuth          *AuditWebAuth
-	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
-	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
+	refreshRegistered     zoneSetups // the zones that have tdns-mp refresh callbacks
+	onFirstLoadRegistered zoneSetups // the zones that have combiner OnFirstLoad callbacks
 
 	// mpConfig is the tdns-mp-side parse of the multi-provider: config
 	// block, installed by SetMpConfig from the config parser hook
