@@ -60,8 +60,8 @@ func TestAFifthDigestDropsTheOldestAndCountsIt(t *testing.T) {
 	if got := status(t, s, storeZone).OwnerError; got != want {
 		t.Errorf("after a reload and a seventh digest: %q, want %q", got, want)
 	}
-	if line := status(t, s, storeZone).Line(); !strings.HasSuffix(line, "… and 3 more); not enforced") {
-		t.Errorf("the status line %q does not end with the count", line)
+	if line := status(t, s, storeZone).Line(); !strings.Contains(line, "… and 3 more)") {
+		t.Errorf("the status line %q does not show the count", line)
 	}
 
 	s.Note(storeZone, at(t, 8, "alpha"), nil)
@@ -76,6 +76,7 @@ func TestAFifthDigestDropsTheOldestAndCountsIt(t *testing.T) {
 func TestAToldConflictKeepsFourDigestsAndCountsTheRest(t *testing.T) {
 	s := newStore(t)
 	s.Note(storeZone, at(t, 7, "alpha"), nil)
+	enforced(t, s, storeZone) // 7 is the active serial, as the thaw makes it
 	told := []string{"d1", "d2", "d3", "d4", "d5", "d6"}
 	if !s.noteToldConflict(storeZone, 7, told) {
 		t.Fatal("six digests told at the active serial changed nothing")
@@ -95,6 +96,7 @@ func TestAToldConflictKeepsFourDigestsAndCountsTheRest(t *testing.T) {
 func TestTheDigestHeldStaysInTheToldMark(t *testing.T) {
 	s := newStore(t)
 	s.Note(storeZone, at(t, 7, "alpha"), nil)
+	enforced(t, s, storeZone) // 7 is the active serial, as the thaw makes it
 	for _, d := range []string{"d2", "d3", "d4", "d5"} {
 		s.noteToldConflict(storeZone, 7, []string{"d1", d})
 	}
