@@ -751,3 +751,34 @@ func TestTheSignerIsHeldOnWhatItHoldsWhileTheActiveSerialIsNotKnown(t *testing.T
 	}
 	waitUntil(t, "the hold let go once the serial is known", func() bool { h := newest(); return h != nil && !h.Sets.Hold })
 }
+
+// A newcomer with no role knows its active serial by the leader's word:
+// the provider data that serial gives is made, and the voting members it
+// never asked are asked, with join (plan S15). Its refresh had found no
+// provider data, and asked nothing.
+func TestKnowingTheActiveSerialAsksTheVotingMembersNeverAsked(t *testing.T) {
+	r := newReceiveRig(t, "newcomer.know.example.")
+	tr := newCatchUpTracker(roleA, nil, time.Hour)
+	tr.operational = func(AgentId) bool { return true }
+	r.conf.InternalMp.CatchUp = tr
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	newcomer := freezeAt(t, 41, "n", "b", "") // a's record, and no role
+	r.store.Note(r.zone, newcomer, nil)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Options[tdns.OptMultiProvider] = true
+	mpzd.Lock()
+	mpzd.MP.MPdata = nil // as the refresh left it
+	mpzd.Unlock()
+	if got := tr.AskZone(ZoneName(r.zone), catchUpJoin); got != nil {
+		t.Fatalf("asked %v with no provider data", got)
+	}
+	r.conf.know(r.zone, sd(newcomer), nil, false, roleB, knownFromLeader)
+	tr.mu.Lock()
+	e := tr.peers[ZoneName(r.zone)][roleB]
+	tr.mu.Unlock()
+	if e == nil || e.Reason != catchUpJoin || !e.outstanding() {
+		t.Errorf("b after the serial is known: %+v, want asked with join", e)
+	}
+}

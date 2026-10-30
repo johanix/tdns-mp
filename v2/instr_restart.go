@@ -342,9 +342,10 @@ func (conf *Config) knowActive(zone string) {
 
 // know makes sd the zone's active serial (Know), and runs what follows: the
 // catch-up's answer time runs again (activeChanged); the readers moved from
-// the newest serial to the active one (onActiveChanged),
-// the sets handed to the parts (onSetsChanged), and the zone's turn asked
-// again, for a newer serial it may agree on now. The end of the freeze
+// the newest serial to the active one (onActiveChanged), the sets handed to
+// the parts (onSetsChanged), every voting member this agent never asked is
+// asked (askUnasked), and the zone's turn asked again, for a newer serial
+// it may agree on now. The end of the freeze
 // releases what was owed (onFreeze), and S8 what was kept.
 func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling bool, by, from string) {
 	s := conf.InternalMp.Instructions
@@ -360,6 +361,9 @@ func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling boo
 			mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
 		}
 		conf.onSetsChanged(mpzd, true)
+		// with the provider data the known serial gives: a member never
+		// asked is asked now (plan S15)
+		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))
 	}
 	conf.askThaw(zone)
 }
