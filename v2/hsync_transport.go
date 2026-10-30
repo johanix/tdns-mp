@@ -2101,7 +2101,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	// stamp entry carried (plan S22).
 	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
 		tm.catchUp.PeerOperational(agent.ID)
-		tm.stamps.toldOnce(string(agent.ID), stampEntry)
+		tm.stamps.acknowledged(string(agent.ID), stampEntry)
 	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
