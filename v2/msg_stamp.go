@@ -32,6 +32,58 @@ type MsgStamp = hsync.MsgStamp
 // confirmApp is what tdns-mp carries in a confirmation's application field.
 type confirmApp struct {
 	Instr *MsgStamp `json:"instr,omitempty"` // the confirmer's stamp
+	// Acting is the combiner's: the serial it acts by (plan S8). It is no
+	// member's telling, so never "instr": a combiner acting by an older
+	// serial would read as an owner error.
+	Acting *ActingStamp `json:"acting,omitempty"`
+}
+
+// ActingStamp is the serial a combiner acts by, as its confirmations tell
+// it: what its agent last handed it, by serial, digest and step.
+type ActingStamp struct {
+	Serial uint32 `json:"serial"`
+	Digest string `json:"digest"`
+	Step   int    `json:"step"`
+}
+
+// actingStampOf is the stamp of a hand-over; nil for none.
+func actingStampOf(h *ActingHandover) *ActingStamp {
+	if h == nil {
+		return nil
+	}
+	return &ActingStamp{Serial: h.Serial, Digest: h.Digest, Step: h.Step}
+}
+
+// names: the stamp names the hand-over h, by serial, digest and step.
+func (a *ActingStamp) names(h *ActingHandover) bool {
+	return h != nil && a.Serial == h.Serial && a.Digest == h.Digest && a.Step == h.Step
+}
+
+// actingAppFor is the application field of a combiner's confirmation for
+// zone: the serial it acts by; nil while it was handed nothing for it.
+func actingAppFor(zone string) json.RawMessage {
+	held, ok := actingHeld.Load().get(zone)
+	if !ok {
+		return nil
+	}
+	b, err := json.Marshal(confirmApp{Acting: actingStampOf(held.handover)})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// confirmActing is the serial a combiner's confirmation says it acts by;
+// nil with none, or one that does not parse.
+func confirmActing(app json.RawMessage) *ActingStamp {
+	if len(app) == 0 {
+		return nil
+	}
+	var ca confirmApp
+	if err := json.Unmarshal(app, &ca); err != nil {
+		return nil
+	}
+	return ca.Acting
 }
 
 // messageStamp is this agent's stamp of zone for a message it sends now:
@@ -91,17 +143,23 @@ func (t *stampTable) noteMessage(sender, zone string, ms *MsgStamp) {
 	switch {
 	case old == nil || ms.Epoch > old.Epoch:
 		t.kept[key] = &memberStamp{Identity: dns.Fqdn(sender), Epoch: ms.Epoch, Heard: now,
-			Instr: map[string]InstrStamp{z: ms.InstrStamp}, ZoneSeq: map[string]uint64{z: ms.Seq}}
+			Instr: map[string]InstrStamp{z: ms.InstrStamp}, ZoneSeq: map[string]uint64{z: ms.Seq}, ZoneHeard: map[string]time.Time{z: now}}
 	case ms.Epoch < old.Epoch || ms.Seq <= old.ZoneSeq[z]:
 		t.mu.Unlock()
 		return
 	default:
-		old.Instr[z], old.ZoneSeq[z], old.Heard = ms.InstrStamp, ms.Seq, now
+		if old.ZoneHeard == nil {
+			old.ZoneHeard = map[string]time.Time{}
+		}
+		old.Instr[z], old.ZoneSeq[z], old.ZoneHeard[z], old.Heard = ms.InstrStamp, ms.Seq, now, now
 	}
 	t.mu.Unlock()
 	lgGossip.Debug("a member's stamp noted from its message", "zone", zone, "member", sender, "seq", ms.Seq)
 	t.judgeTold(z)
 	t.fetchIfNewer(z, &memberStamp{Identity: dns.Fqdn(sender), Instr: map[string]InstrStamp{z: ms.InstrStamp}})
+	if t.onTold != nil {
+		t.onTold(z)
+	}
 }
 
 // stampedVerbs are the messages that carry their sender's stamp in an
@@ -168,6 +226,20 @@ func (t *stampTable) sent(distID, recipient, zone string, ms *MsgStamp) {
 	if len(t.dists) > distStampsKept {
 		t.pruneDistsLocked()
 	}
+}
+
+// sentStamp is this agent's stamp at its latest send of distribution
+// distID to recipient; nil when none is recorded.
+func (t *stampTable) sentStamp(distID, recipient string) *MsgStamp {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dists[distKey(distID, recipient)]; d != nil {
+		return d.Sent
+	}
+	return nil
 }
 
 // laterStamp reports whether a member stamped a after b: in a later start,

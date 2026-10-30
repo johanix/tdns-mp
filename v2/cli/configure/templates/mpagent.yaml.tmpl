@@ -87,6 +87,12 @@ multi-provider:
          hello_fast_interval: 2    # between the first N HELLO attempts
          catchup_outage:      3600 # a peer back after a longer silence is asked for the zones' state
          peer_hold:           86400 # a peer no zone names any more is kept this long, then removed
+   # A change of the owner's instructions, in seconds; the default.
+   transitions:
+      # A telling heard longer ago does not count for the thaw, and a
+      # leaving voting member whose telling has not counted for this long
+      # is excused.
+      leaving-timeout:        3600
 
 service:
    name:           TDNS-MPAGENT

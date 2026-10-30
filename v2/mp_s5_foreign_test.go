@@ -17,7 +17,19 @@ import (
 
 func foreignRow(t *testing.T, r *driverRig, flags uint16) uint16 {
 	t.Helper()
+	// a key made again while its tag is one the zone's store has: random
+	// tags collide, and the store keys its rows by the tag (#331)
 	k := testDnskey(t, r.l.Zone, flags)
+	for {
+		var n int
+		if err := r.kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename = ? AND keyid = ?`, r.l.Zone, k.KeyTag()).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		k = testDnskey(t, r.l.Zone, flags)
+	}
 	if err := insertForeignKeyRow(r.kdb, r.l.Zone, k.KeyTag(), k, "ED25519"); err != nil {
 		t.Fatal(err)
 	}
