@@ -24,7 +24,7 @@ func (conf *Config) SetupMPAgentRoutes(ctx context.Context, apirouter *mux.Route
 	sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
 	sr.HandleFunc("/keystore", conf.Config.Internal.KeyDB.APIkeystore(conf.Config)).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
-	sr.HandleFunc("/zone/parentsync", tdns.APIzoneParentSync(ctx, &tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone/parentsync", conf.apiZoneParentSync(ctx, tdns.APIzoneParentSync(ctx, &tdns.Globals.App, conf.Config.Internal.RefreshZoneCh, kdb))).Methods("POST")
 	sr.HandleFunc("/zone/childsync", tdns.APIzoneChildSync(ctx, &tdns.Globals.App)).Methods("POST")
 	sr.HandleFunc("/delegation", tdns.APIdelegation(conf.Config.Internal.DelegationSyncQ)).Methods("POST")
 }

@@ -369,6 +369,10 @@ func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 	if kdb == nil {
 		return ""
 	}
+	// a roll under way says how far it has come (plan S17a)
+	if line := conf.rollLine(kdb, zone); line != "" {
+		return line
+	}
 	zk, err := readZoneKey(kdb, zone)
 	if err != nil {
 		return ""
