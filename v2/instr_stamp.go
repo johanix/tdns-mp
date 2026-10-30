@@ -167,7 +167,10 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		theirs = m.Instr
 	}
 	instr := map[string]InstrStamp{}
-	toldOnce := 0
+	// for the log: the zones told for each reason, and the first few told
+	// for something going on rather than for peer's new epoch alone
+	var toldOnce, toldOwn, toldWork, toldTheirs int
+	var named []string
 	for _, zone := range zones {
 		st, ok := t.ownStamp(zone)
 		if !ok {
@@ -175,14 +178,22 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 		}
 		key := canonicalName(zone)
 		their, heard := theirs[key]
-		if !atRest(st) || work[key] || once[key] || heard && (!atRest(their) || !sameSerials(st, their)) {
-			instr[zone] = st
-			if once[key] {
-				toldOnce++
-			}
+		own, busy := !atRest(st), work[key]
+		differs := heard && (!atRest(their) || !sameSerials(st, their))
+		if !own && !busy && !once[key] && !differs {
+			continue
+		}
+		instr[zone] = st
+		toldOnce += boolToInt(once[key])
+		toldOwn += boolToInt(own)
+		toldWork += boolToInt(busy)
+		toldTheirs += boolToInt(differs)
+		if (own || busy || differs) && len(named) < 8 {
+			named = append(named, zone)
 		}
 	}
-	lgGossip.Debug("the stamp entry of a beat", "peer", peer, "zones", len(instr), "once", toldOnce, "shared", len(zones))
+	lgGossip.Debug("the stamp entry of a beat", "peer", peer, "zones", len(instr), "once", toldOnce, "shared", len(zones),
+		"own", toldOwn, "work", toldWork, "theirs", toldTheirs, "named", named)
 	row := &MemberState{
 		Identity:    t.localID,
 		Timestamp:   time.Now(),
