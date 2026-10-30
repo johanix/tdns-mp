@@ -116,8 +116,8 @@ func TestTheJudgeIsAFunctionOfTwoSerials(t *testing.T) {
 
 func TestAMemberThatMovesStraightIsJudgedOnTheThawsPair(t *testing.T) {
 	forty := jAt(t, 40, jServers3, jAlpha, jBeta, jCharlie)
-	fortyOne := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie) // takes charlie's role
-	fortyTwo := jAt(t, 42, jServers2+` suffix="mp"`, jAlpha, jBeta, jCharlie)
+	fortyOne := jAt(t, 41, jServers2, jAlpha, jBeta) // removes charlie's record with its role
+	fortyTwo := jAt(t, 42, jServers2+` suffix="mp"`, jAlpha, jBeta)
 	s := newStore(t)
 	noteKnown(t, s, storeZone, forty)
 	enforced(t, s, storeZone)

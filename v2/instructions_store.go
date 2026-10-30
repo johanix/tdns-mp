@@ -380,6 +380,7 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 		}
 		return err
 	}
+	z.followNotBuilt()
 	if old != nil {
 		z.Since = old.Since
 		if reflect.DeepEqual(z, old) {
@@ -511,18 +512,6 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		// restart rule makes one known (S9).
 		if z.Active != nil {
 			s.judge(zone, z.Active, &h)
-			// Refused only for kinds whose steps are not built, with no owner
-			// error and no transition under way, the zone follows its copy as
-			// before S7: the serial is made active here, with nothing frozen
-			// or thawed for it. Each kind leaves this as its step lands
-			// (builtKinds).
-			if why := notBuiltOnly(h.Refused); why != "" && z.OwnerError == "" && z.From == nil && len(z.Removals) == 0 {
-				h.Refused = nil
-				z.Active, z.Follows = &h, why
-				z.dropAtOrBelow(h.Serial)
-				s.judged(zone, z)
-				return nil
-			}
 		}
 		z.Held = append(z.Held, h)
 		return nil
@@ -538,6 +527,25 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 }
 
 var errEndOfService = errors.New("the zone's instructions are gone")
+
+// followNotBuilt is the not-built fallback: a steady zone (no owner error,
+// no transition under way, no serial agreed on) whose copy, its newest
+// serial held, is refused only for kinds whose steps are not built follows
+// it as before S7. The serial is made active here, with nothing frozen or
+// thawed for it. Each kind leaves this as its step lands (builtKinds).
+func (z *zoneSerials) followNotBuilt() {
+	if z.Active == nil || z.OwnerError != "" || z.From != nil || len(z.Removals) > 0 || z.agreeing() != nil || len(z.Held) == 0 {
+		return
+	}
+	h := z.Held[len(z.Held)-1]
+	why := notBuiltOnly(h.Refused)
+	if why == "" || h.SerialDigest != z.Copy {
+		return
+	}
+	h.Refused, h.Since = nil, time.Now()
+	z.Active, z.Follows = &h, why
+	z.dropAtOrBelow(h.Serial)
+}
 
 // notBuiltOnly is the reasons of refused, joined, when every one is a kind
 // whose step is not built or cannot be carried out yet; "" otherwise.
