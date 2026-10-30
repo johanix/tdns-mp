@@ -13,9 +13,11 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -48,9 +50,13 @@ import (
 // A failed phase is tried again after multi-provider.transitions.roll-retry,
 // and the status says so. A failed add leaves the old key in use; until a
 // failed delete goes through, the parent trusts both keys. The roll is held
-// while the zone is frozen, except as a step of the reconciliation. It runs
-// only while this agent leads the zone: a roll left at an agent that lost
-// the lead goes on if it leads again.
+// while the zone is frozen, except as a step of the reconciliation.
+//
+// It is finished from what is in place, as S12 plans. A roll whose agent
+// another one now leads ends there as a member's keys would (endRollHere),
+// and any leader deletes at the parent the zone's retired keys it holds
+// that the parent still trusts (sweepRetiredKeys): step 5's delete, by
+// whichever leader holds the old key retired.
 
 const (
 	rollMade      = "made"
@@ -96,7 +102,7 @@ func loadRoll(kdb *tdns.KeyDB, zone ZoneName) (*sig0Roll, error) {
 	var started, nextTry int64
 	err := row.Scan(&r.phase, &oldKeyid, &newKeyid, &started, &nextTry, &r.failures, &r.lastErr)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, sql.ErrNoRows), err != nil && strings.Contains(err.Error(), "no such table"):
 		return nil, nil
 	case err != nil:
 		return nil, err
@@ -147,15 +153,16 @@ func rollZones(kdb *tdns.KeyDB) []ZoneName {
 	return out
 }
 
-// rollingKey is the new key of the zone's roll between its steps 3 and 5,
-// kept published at the leader. Nil otherwise. A roll in "added" counts too:
-// its KEY may have gone out before the phase was written.
-func rollingKey(kdb *tdns.KeyDB, zone ZoneName) *sig0Row {
+// rollingKey is the new key of the zone's roll, kept published at the
+// leader, while the roll is "added" or "published"; sent: its KEY has gone
+// out ("published"). In "added" the KEY may have gone out before the phase
+// was written, which the zone's copy shows.
+func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool) {
 	r, err := loadRoll(kdb, zone)
 	if err != nil || r == nil || (r.phase != rollAdded && r.phase != rollPublished) {
-		return nil
+		return nil, false
 	}
-	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid)
+	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished
 }
 
 func sig0RowByID(kdb *tdns.KeyDB, zone ZoneName, state string, keyid uint16) *sig0Row {
@@ -176,7 +183,24 @@ func sig0RowByID(kdb *tdns.KeyDB, zone ZoneName, state string, keyid uint16) *si
 type rollBook struct {
 	mu         sync.Mutex
 	running    map[ZoneName]bool
+	swept      map[ZoneName]time.Time // the last sweep of retired keys
 	goroutines sync.WaitGroup
+}
+
+// sweepDue notes a sweep of the zone's retired keys now, unless one ran
+// within every.
+func (b *rollBook) sweepDue(zone ZoneName, every time.Duration) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.swept == nil {
+		b.swept = map[ZoneName]time.Time{}
+	}
+	zone = canonZone(zone)
+	if last, ok := b.swept[zone]; ok && time.Since(last) < every {
+		return false
+	}
+	b.swept[zone] = time.Now()
+	return true
 }
 
 func (b *rollBook) claim(zone ZoneName) bool {
@@ -487,6 +511,13 @@ func (conf *Config) rollPass(ctx context.Context, zone ZoneName, cause syncCause
 			return
 		}
 		if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
+			// another agent leads: the roll ends here; with no leader
+			// known yet it waits
+			if lem != nil {
+				if leader, ok := lem.GetLeader(zone); ok && !sameName(string(leader), string(conf.localAgentID())) {
+					conf.endRollHere(kdb, r, leader)
+				}
+			}
 			return
 		}
 		if cause != syncStep && len(conf.zoneFrozen(string(zone))) > 0 {
@@ -565,6 +596,11 @@ func (conf *Config) rollStep(ctx context.Context, kdb *tdns.KeyDB, r *sig0Roll) 
 		return rollPublished, nil
 
 	case rollPublished:
+		// step 5 made in the keystore, its phase not written (a restart
+		// between the two)
+		if sig0RowByID(kdb, zone, tdns.Sig0StateActive, r.newKeyid) != nil && sig0RowByID(kdb, zone, tdns.Sig0StateRetired, r.oldKeyid) != nil {
+			return rollActivated, nil
+		}
 		return conf.rollMembers(kdb, r)
 
 	case rollActivated:
@@ -588,10 +624,8 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 	if tm == nil {
 		return fmt.Errorf("no transport to publish the KEY with")
 	}
-	distID, agents, err := sendZoneKEY(tm, zone, newKey.key)
-	if err != nil {
-		return fmt.Errorf("the new KEY could not be sent: %w", err)
-	}
+	// booked before it is sent: a confirmation can come back at once
+	agents, _ := tm.getAllAgentsForZone(zone)
 	var expected []string
 	if tm.combinerID != "" {
 		expected = append(expected, canonicalName(string(tm.combinerID)))
@@ -599,16 +633,26 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 	for _, a := range agents {
 		expected = append(expected, canonicalName(string(a)))
 	}
+	distID := transport.GenerateDistributionID()
 	tm.rollKEYs.expect(zone, distID, expected)
+	// an agent the KEY is not queued for would never answer: the try fails
+	_, _, agentsErr, err := sendZoneKEY(tm, zone, newKey.key, distID)
+	if err == nil {
+		err = agentsErr
+	}
+	if err != nil {
+		tm.rollKEYs.forget(zone)
+		return fmt.Errorf("the new KEY could not be sent: %w", err)
+	}
 	return nil
 }
 
 // rollMembers is step 4: once every recipient has confirmed the new KEY
 // (members with no role after the time-out), the new key is made active and
 // the old one retired at the leader, in one transaction. A recipient that
-// keeps the KEY and does not apply it by its role (IGNORED: a combiner that
-// signs nothing publishes no KEY) has taken it; FAILED and REJECTED have
-// not. A KEY booked in no earlier pass of this process (a restart), or
+// applied the KEY (SUCCESS), or keeps it and does not apply it by its role
+// (IGNORED: a combiner that signs nothing publishes no KEY), has taken it;
+// any other final word has not. A KEY booked in no earlier pass of this process (a restart), or
 // refused, is published again.
 func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 	zone := r.zone
@@ -630,7 +674,7 @@ func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 		switch {
 		case !heard:
 			awaited = append(awaited, rcpt)
-		case w.status == "FAILED" || w.status == "REJECTED":
+		case w.status != "SUCCESS" && w.status != "IGNORED":
 			tm.rollKEYs.forget(zone)
 			return "", fmt.Errorf("%s did not take the new KEY (%s: %s)", rcpt, w.status, w.message)
 		}
@@ -683,6 +727,109 @@ func activateRolledKey(kdb *tdns.KeyDB, zone ZoneName, newKeyid, oldKeyid uint16
 	return err
 }
 
+// endRollHere ends the roll of an agent that another one now leads, as a
+// member's keys follow the zone (plan S17a, a reading for the project
+// owner): when the zone publishes the new KEY the new key is made active and
+// the old one retired, as an import would; otherwise a new key made here
+// alone is deleted, and one the parent took is retired: the parent trusts
+// it until this agent, leading, deletes it there (sweepRetiredKeys).
+func (conf *Config) endRollHere(kdb *tdns.KeyDB, r *sig0Roll, leader AgentId) {
+	zone := r.zone
+	var err error
+	_ = conf.keySetupLocked(zone, func() error {
+		newKey := sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid)
+		pub := publishedKeys(zone)
+		switch {
+		case newKey == nil:
+		case len(pub) == 1 && sameKey(pub[0], newKey.key):
+			err = activateRolledKey(kdb, zone, r.newKeyid, r.oldKeyid)
+		case r.phase == rollMade:
+			err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: string(zone), Keyname: string(zone), Keyid: r.newKeyid})
+		default:
+			err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate", Keyname: dns.Fqdn(string(zone)), Keyid: r.newKeyid, State: tdns.Sig0StateRetired})
+		}
+		if err == nil {
+			err = deleteRoll(kdb, zone)
+		}
+		return nil
+	})
+	if err != nil {
+		lgAgent.Error("the roll of the zone's SIG(0) key could not be ended here", "zone", zone, "phase", r.phase, "err", err)
+		return
+	}
+	if tm := conf.InternalMp.MPTransport; tm != nil {
+		tm.rollKEYs.forget(zone)
+	}
+	lgAgent.Info("the roll of the zone's SIG(0) key ends here: another agent leads the zone", "zone", zone, "phase", r.phase,
+		"old", r.oldKeyid, "new", r.newKeyid, "leader", leader)
+}
+
+func sig0KeyChange(kdb *tdns.KeyDB, kp tdns.KeystorePost) error {
+	resp, err := sig0KeyMgmtRetried(kdb, kp)
+	if err == nil && resp != nil && resp.Error {
+		err = fmt.Errorf("%s", resp.ErrorMsg)
+	}
+	return err
+}
+
+// sweepInBackground runs sweepRetiredKeys on a goroutine of its own, at
+// most every roll-retry for a zone.
+func (conf *Config) sweepInBackground(ctx context.Context, zone ZoneName) {
+	b := &conf.InternalMp.sig0Rolls
+	b.goroutines.Add(1)
+	go func() {
+		defer b.goroutines.Done()
+		conf.sweepRetiredKeys(ctx, zone)
+	}()
+}
+
+// sweepRetiredKeys: at the zone's leader, which holds the zone's key and the
+// parent trusts it, and runs no roll, each retired key of the zone it holds
+// that the parent may still trust (by what was last recorded of it) is asked
+// about, and deleted at the parent, signed with the zone's key. A key the
+// parent does not trust is not asked about again. At most every roll-retry
+// while one is left to ask about.
+func (conf *Config) sweepRetiredKeys(ctx context.Context, zone ZoneName) {
+	lem := conf.InternalMp.LeaderElectionManager
+	kdb := conf.zoneKeyDB(zone)
+	if lem == nil || !lem.IsLeader(zone) || kdb == nil {
+		return
+	}
+	if r, err := loadRoll(kdb, zone); err != nil || r != nil {
+		return
+	}
+	zk, err := readZoneKey(kdb, zone)
+	if err != nil || zk.held == nil || zk.rolling || len(zk.active) != 1 || zk.held.parentState != edns0.KeyStateTrusted {
+		return
+	}
+	retired, err := sig0Rows(kdb, zone, tdns.Sig0StateRetired)
+	if err != nil {
+		return
+	}
+	retired = slices.DeleteFunc(retired, func(old sig0Row) bool {
+		return old.key == nil || old.keyid == zk.held.keyid || (old.parentState != 0 && old.parentState != edns0.KeyStateTrusted)
+	})
+	if len(retired) == 0 || !conf.InternalMp.sig0Rolls.sweepDue(zone, rollRetryFor(conf.MpConfig())) {
+		return
+	}
+	for _, old := range retired {
+		state, err := conf.rollParentOf().keyState(ctx, zone, old.keyid)
+		if err != nil {
+			lgAgent.Warn("the parent could not be asked about a retired SIG(0) key of the zone", "zone", zone, "keyid", old.keyid, "err", err)
+			continue
+		}
+		if state == edns0.KeyStateTrusted {
+			if err := conf.deleteKeyAtParent(ctx, zone, old.key, zk.held); err != nil {
+				lgAgent.Warn("the parent still trusts a retired SIG(0) key of the zone, and its delete failed", "zone", zone, "keyid", old.keyid, "err", err)
+				continue
+			}
+			lgAgent.Info("a retired SIG(0) key of the zone the parent still trusted is deleted there", "zone", zone, "keyid", old.keyid, "signer", zk.held.keyid)
+			state = edns0.KeyStateUnknown
+		}
+		tdns.UpdateParentState(kdb, string(zone), old.keyid, state)
+	}
+}
+
 // rollLine is the zone's roll for `agent parentsync status`, "" when none
 // runs.
 func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
@@ -714,6 +861,10 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 	}
 	ar, ok := zdr.Repo.Get(zone)
 	if !ok || ar == nil {
+		return
+	}
+	// only once the leader's own KEY is here
+	if od, ok := ar.Data.Get(leader); !ok || od == nil || od.RRtypes == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) == 0 {
 		return
 	}
 	var dropped []AgentId
