@@ -209,7 +209,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S16 | The leader's withdrawal | S8, S10, S15 | 12 | 265 | 125 | Not started |
 | S17a | The leader's roll of the zone's SIG(0) key | S7, S14, S16 | 8 | 270 | 70 | Not started |
 | S17b | The removal, and the sweep | S13, S15, S16, S17a | 14 | 675 | 130 | Not started |
-| S18a | A record, a server role, a provider put back | S13, S15, S16 | 6 | 190 | 40 | Not started |
+| S18a | A record, a server role, a provider put back | S13, S15, S16 | 6 | 190 | 40 | **Built** (2026-10-30), on S15 (#338, head `2b48ac4`) with S13 (#339, head `42cc7a3`) merged in: its pull request carries this cell. 18 files of Go (12 of code); about 605 new lines with their comments and 17 changed, tests about 360 new and 16 changed. The judge agrees a server role; its step waits for the newcomer's transfer confirmation; a provider put in a list is asked with peer-role at the thaw, and sends what it contributes again. S16's order of a `replace` by serial is the seam |
 | S18b | A signer added; a server becomes a signer | S18a, S11, S12; P5 | 6 | 290 | 75 | Not started |
 | S19 | NS management | S5a, S10, S12 | 5 | 130 | 40 | Not started |
 | S20 | Parent sync | S12, S14, S17a; P3 (#209 done) | 7 | 220 | 60 | Not started |
@@ -1274,6 +1274,18 @@ The membership plan's step 10 (#158), under this design.
 **Size.** 14 files, about 675 new and 130 changed lines.
 
 ### S18a. A record, a server role, a provider put back
+
+**Status (2026-10-30):** Built, on S15 (#338, head `2b48ac4`) with S13 (#339, head `42cc7a3`) merged in; S16 is not built, and the put-back's `replace` is stamped at its send (S5b), the order S16's `staleCombinerReplace` and `processReplaceOp` will read. Where the text left a choice, the most literal reading was taken, each for the project owner:
+
+1. **The server role's step changes no set.** `serverRoleSteps` plans one step per provider in V's `servers=` whose identity the sets held do not serve, keyed `server-role <identity>`; the newcomer enters `Servers` at the last step, with V's lists. Its agent tells the step held (`step_held`) only once the runner's `holds` passes: that is the transfer confirmation the step's confirmation carries. Every other agent's part of the step is its parts alone. `builtKinds` holds `kindServerRole`.
+2. **"The zone's" SOA serial** is the serial of the zone's copy at the agent that checks (`CurrentSerial`). The status names it so at every agent.
+3. **The expected signers** are the provider's record's upstream, or with none named, every provider in `signers=`; their keys are those this agent holds: its own signer's, or what the upstream's agent distributed. Every nameserver in `multi-provider.local.nameservers` is asked, its address found through the IMR, for the SOA with DNSSEC OK: the serial is no lower than the zone's by RFC 1982, there is an RRSIG, and each RRSIG is by one of those keys, in its validity period, and verifies. A check runs at most every 30 s while the step waits; once it passes it stays so for the step.
+4. **"Past a time"** is a constant, five minutes from the step (`transferHelpAfter`), not a config key: the provider's own status then adds what its operator must point where (its nameservers, at its upstream).
+5. **"Every agent's status shows whether it has" caught up** is read as the newcomer: the stamp gains `caught_up` (each agent's own catch-up), and `agent parentsync status`'s table per member a `CaughtUp` column.
+6. **`peer-role` at the activation.** S3 widened it at a refresh; S7's activation at the thaw asked nothing of it. The thaw's `activate` and `know` now ask, with `peer-role`, every other provider put in `servers=` or `signers=` (`peersEntered`), before `askUnasked`.
+7. **The put-back** runs when a thaw puts this agent's own provider in a list it was not in, whether or not its records were withdrawn (no withdrawal exists before S16; at a first role it sends what it holds). It sends, from the data engine, a complete `replace` of NS for `servers=` and of DNSKEY and CDS for `signers=` (design 5.2's lists), built as the catch-up answer is, to every other member and, but for the DNSKEYs, to its combiner. Like a catch-up answer it passes the freeze, and it is not tracked. An agent whose answer cannot be complete yet sends nothing; the members' `peer-role` requests get the same. Its NS are what its own data holds: none after a withdrawal, until its operator adds them.
+
+Names as below, and also: log, info, logger `engine`, "a provider put back sends what it contributes again" (`zone`, `types`); the transfer confirmation's log line adds `want` and `why` when it fails, and is logged when its outcome changes. Tests as named, and `TestEveryAgentsStatusShowsWhetherAMemberHasCaughtUp`. The tests that used a server role as a kind not built take another kind, or now agree it.
 
 **Before it:** S13, S15, S16 (the order of a `replace` by serial).
 

@@ -580,6 +580,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// two sides to be in step is sent again (plan S8)
 				conf.instrActivated(ctx, zdr, sdcmd.Zone)
 
+			case "put-back":
+				// a thaw put this agent's provider in a list it was not
+				// in: what it contributes goes out again (plan S18a)
+				conf.putBack(zdr, sdcmd.Zone)
+
 			case "instr-done":
 				// the zone's freeze has ended: what it kept goes out, and a
 				// zone this agent leads is taken up (plan S6)
