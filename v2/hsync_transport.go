@@ -497,7 +497,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		for _, ri := range rejected {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
 		}
-		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems, instr, notYet)
+		tm.processDnskeyConfirmation(distributionID, senderID, status.String(), append(append([]string(nil), applied...), removed...), ignored, rejItems, notYet, instr)
 
 		// Forward per-RR detail to SynchedDataEngine
 		if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
@@ -2811,16 +2811,16 @@ func dnskeyKeyTagsOf(records []string) map[uint16]bool {
 // that gave it (S5b).
 // Returns true if the confirmation was for a DNSKEY propagation.
 func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, done []string, rejectedItems []RejectedItemInfo) bool {
-	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems, nil, false)
+	return tm.processDnskeyConfirmation(distID, source, status, done, nil, rejectedItems, false, nil)
 }
 
 // processDnskeyConfirmation is ProcessDnskeyConfirmation with the records
-// the confirmation names as ignored (#288), its stamp, ms (S5b), and whether
-// the answer is "not yet" (notYet: a peer at other instructions than the
-// send, rule 6, plan S8). A key such an answer does not apply gets no result:
-// its rejection or its "ignored" is no decision, and the key machine reads
-// the key as pending.
-func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo, ms *MsgStamp, notYet bool) bool {
+// the confirmation names as ignored (#288), whether the answer is "not
+// yet" (notYet: a peer at other instructions than the send, rule 6, plan
+// S8), and its stamp, ms (S5b). A key such an answer does not apply gets no
+// result: its rejection or its "ignored" is no decision, and the key
+// machine reads the key as pending.
+func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source string, status string, done, ignoredRecords []string, rejectedItems []RejectedItemInfo, notYet bool, ms *MsgStamp) bool {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 

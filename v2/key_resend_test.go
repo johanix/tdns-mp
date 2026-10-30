@@ -467,7 +467,7 @@ func TestAResultKeepsTheStampOfItsAnswer(t *testing.T) {
 	confirm := func(status transport.ConfirmStatus, applied []string, ms *MsgStamp) {
 		// as the confirmation callback does
 		tm.noteConfirmation(confirmIn("first", fast, status, string(zone), applied, nil, nil, nil, false, ""), ms)
-		tm.processDnskeyConfirmation("first", fast, status.String(), applied, nil, nil, ms, false)
+		tm.processDnskeyConfirmation("first", fast, status.String(), applied, nil, nil, false, ms)
 	}
 	partial, final := &MsgStamp{Epoch: 2, Seq: 5}, &MsgStamp{Epoch: 2, Seq: 6}
 	confirm(transport.ConfirmPartial, []string{a.String()}, partial)
@@ -511,8 +511,8 @@ func TestAResultCreditedByAnAnswerKeepsItsStamp(t *testing.T) {
 	tm.TrackDnskeyPropagation(t.Context(), zone, "first", []uint16{k}, nil, []AgentId{asker, other})
 	tm.noteCatchUpAnswer("answer", zone, asker, map[uint16]bool{k: true})
 	ms := &MsgStamp{Epoch: 2, Seq: 5}
-	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, ms, false)
-	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, &MsgStamp{Epoch: 2, Seq: 6}, false)
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, false, ms)
+	tm.processDnskeyConfirmation("answer", asker, transport.ConfirmSuccess.String(), nil, nil, nil, false, &MsgStamp{Epoch: 2, Seq: 6})
 
 	stamped := func(prop *PendingDnskeyPropagation, which string) {
 		t.Helper()

@@ -255,7 +255,7 @@ func TestAnAnswersPartialThatNamesTheKeyAsIgnoredIsAnswered(t *testing.T) {
 	snd.TrackDnskeyPropagation(t.Context(), ZoneName(zone), d, []uint16{key.KeyTag()}, nil, []AgentId{asker})
 	snd.noteCatchUpAnswer(an, ZoneName(zone), asker, map[uint16]bool{key.KeyTag(): true})
 
-	snd.processDnskeyConfirmation(an, string(asker), transport.ConfirmPartial.String(), []string{rec}, []string{key.String()}, nil, nil, false)
+	snd.processDnskeyConfirmation(an, string(asker), transport.ConfirmPartial.String(), []string{rec}, []string{key.String()}, nil, false, nil)
 	snd.dnskeyPropMu.Lock()
 	_, waiting := snd.pendingDnskeyPropagations[d]
 	snd.dnskeyPropMu.Unlock()
